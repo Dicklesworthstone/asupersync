@@ -18,11 +18,11 @@
 //! This module focuses on the actual shutdown behavior and stream state management
 //! during graceful termination, complementing existing frame format tests.
 
-use asupersync::bytes::BytesMut;
+use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::http::h2::{
-    connection::{Connection, ConnectionState},
+    connection::{Connection, ConnectionState, ReceivedFrame},
     error::ErrorCode,
-    frame::{DataFrame, Frame, GoAwayFrame, HeadersFrame},
+    frame::{DataFrame, Frame, FrameHeader, FrameType, GoAwayFrame, HeadersFrame, parse_frame},
     hpack::{Encoder as HpackEncoder, Header},
     settings::Settings,
 };
@@ -573,6 +573,94 @@ fn test_goaway_last_stream_id_accuracy() {
     }
 }
 
+#[test]
+fn test_goaway_parser_and_connection_state_machine_real_seams() {
+    let mut goaway = GoAwayFrame::new(0x7fff_ffff, ErrorCode::EnhanceYourCalm);
+    goaway.debug_data = Bytes::from_static(b"calm down");
+
+    let mut wire = BytesMut::new();
+    Frame::GoAway(goaway.clone())
+        .encode(&mut wire)
+        .expect("encode GOAWAY");
+    let header = FrameHeader::parse(&mut wire).expect("parse GOAWAY header");
+    assert_eq!(header.frame_type, FrameType::GoAway as u8);
+
+    match parse_frame(&header, wire.freeze()).expect("parse GOAWAY frame") {
+        Frame::GoAway(parsed) => {
+            assert_eq!(parsed.last_stream_id, goaway.last_stream_id);
+            assert_eq!(parsed.error_code, goaway.error_code);
+            assert_eq!(parsed.debug_data, goaway.debug_data);
+        }
+        other => panic!("expected GOAWAY frame, got {other:?}"),
+    }
+
+    let mut client = Connection::client(Settings::client());
+    initialize_connection(&mut client);
+
+    let headers = vec![
+        Header::new(":method", "GET"),
+        Header::new(":path", "/kept"),
+        Header::new(":scheme", "https"),
+        Header::new(":authority", "example.test"),
+    ];
+    let stream1 = client.open_stream(headers.clone(), false).unwrap();
+    let stream3 = client.open_stream(headers, false).unwrap();
+    assert_eq!((stream1, stream3), (1, 3));
+
+    let mut inbound = GoAwayFrame::new(stream1, ErrorCode::NoError);
+    inbound.debug_data = Bytes::from_static(b"peer shutdown");
+    let received = client
+        .process_frame(Frame::GoAway(inbound))
+        .expect("process peer GOAWAY");
+    match received {
+        Some(ReceivedFrame::GoAway {
+            last_stream_id,
+            error_code,
+            debug_data,
+        }) => {
+            assert_eq!(last_stream_id, stream1);
+            assert_eq!(error_code, ErrorCode::NoError);
+            assert_eq!(debug_data.as_ref(), b"peer shutdown");
+        }
+        other => panic!("expected ReceivedFrame::GoAway, got {other:?}"),
+    }
+
+    assert!(client.goaway_received());
+    assert_eq!(client.state(), ConnectionState::Closing);
+    assert!(
+        !client
+            .stream(stream1)
+            .expect("stream at GOAWAY boundary")
+            .state()
+            .is_closed(),
+        "stream at GOAWAY last_stream_id should remain processable"
+    );
+    assert!(
+        client
+            .stream(stream3)
+            .expect("stream beyond GOAWAY boundary")
+            .state()
+            .is_closed(),
+        "stream above GOAWAY last_stream_id should be reset"
+    );
+
+    let widened = client
+        .process_frame(Frame::GoAway(GoAwayFrame::new(
+            stream3,
+            ErrorCode::InternalError,
+        )))
+        .expect("process widening peer GOAWAY");
+    match widened {
+        Some(ReceivedFrame::GoAway { last_stream_id, .. }) => {
+            assert_eq!(
+                last_stream_id, stream1,
+                "later GOAWAY must not widen the effective last_stream_id"
+            );
+        }
+        other => panic!("expected ReceivedFrame::GoAway, got {other:?}"),
+    }
+}
+
 #[cfg(test)]
 mod conformance_verification {
     use super::*;
@@ -593,6 +681,7 @@ mod conformance_verification {
         test_goaway_connection_cleanup();
         test_goaway_error_conditions();
         test_goaway_last_stream_id_accuracy();
+        test_goaway_parser_and_connection_state_machine_real_seams();
 
         println!("\n✅ All GOAWAY graceful shutdown conformance tests passed!");
         println!("Verified compliance with RFC 7540 Section 6.8 and RFC 9113 enhancements");

@@ -5,6 +5,14 @@
 //! Tests connection lifecycle and management requirements from RFC 7540 Section 3.
 
 use super::*;
+use asupersync::bytes::{Bytes, BytesMut};
+use asupersync::http::h2::{
+    connection::{Connection, ConnectionState, ReceivedFrame},
+    error::ErrorCode,
+    frame::{Frame, FrameHeader, FrameType, GoAwayFrame, HeadersFrame, SettingsFrame, parse_frame},
+    hpack::{Encoder as HpackEncoder, Header},
+    settings::Settings,
+};
 
 /// Run all connection management conformance tests.
 #[allow(dead_code)]
@@ -433,56 +441,207 @@ fn test_connection_termination() -> H2ConformanceResult {
 #[allow(dead_code)]
 fn test_goaway_frame_processing() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
-        // GOAWAY frame structure validation
-
-        // GOAWAY payload format:
-        // - Last Stream ID (31 bits) + Reserved bit
-        // - Error Code (32 bits)
-        // - Additional Debug Data (optional)
-
-        let goaway_test_cases = [
-            // (last_stream_id, error_code, has_debug_data)
-            (0u32, 0u32, false),       // No streams processed, graceful shutdown
-            (5u32, 0u32, false),       // Last stream 5, graceful shutdown
-            (100u32, 1u32, true),      // Last stream 100, protocol error with debug
-            (0x7FFFFFFF, 2u32, false), // Maximum stream ID, internal error
-        ];
-
-        for (last_stream_id, error_code, has_debug_data) in &goaway_test_cases {
-            // Validate stream ID is within valid range
-            if *last_stream_id > 0x7FFFFFFF {
+        fn open_connection(conn: &mut Connection) -> Result<(), String> {
+            conn.process_frame(Frame::Settings(SettingsFrame::new(vec![])))
+                .map_err(|err| err.to_string())?;
+            while conn.has_pending_frames() {
+                let _ = conn.next_frame();
+            }
+            if conn.state() != ConnectionState::Open {
                 return Err(format!(
-                    "Last stream ID {} exceeds 31-bit limit",
-                    last_stream_id
+                    "SETTINGS handshake should open connection, got {:?}",
+                    conn.state()
                 ));
             }
+            Ok(())
+        }
 
-            // Error codes should be defined values
-            let valid_error_codes = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
-            if !valid_error_codes.contains(error_code) {
-                // Unknown error codes are allowed but should be treated as internal error
-            }
+        fn encoded_headers(path: &str) -> Bytes {
+            let mut encoder = HpackEncoder::new();
+            let mut encoded = BytesMut::new();
+            encoder.encode(
+                &[
+                    Header::new(":method", "GET"),
+                    Header::new(":path", path),
+                    Header::new(":scheme", "https"),
+                    Header::new(":authority", "example.test"),
+                ],
+                &mut encoded,
+            );
+            encoded.freeze()
+        }
 
-            // Debug data is optional
-            if *has_debug_data {
-                // Debug data can contain additional context
-                // Should be UTF-8 when possible but not required
+        fn assert_received_goaway(
+            received: Option<ReceivedFrame>,
+            expected_last_stream_id: u32,
+            expected_error_code: ErrorCode,
+            expected_debug: &[u8],
+        ) -> Result<(), String> {
+            match received {
+                Some(ReceivedFrame::GoAway {
+                    last_stream_id,
+                    error_code,
+                    debug_data,
+                }) => {
+                    if last_stream_id != expected_last_stream_id {
+                        return Err(format!(
+                            "effective GOAWAY last_stream_id mismatch: got {last_stream_id}, expected {expected_last_stream_id}"
+                        ));
+                    }
+                    if error_code != expected_error_code {
+                        return Err(format!(
+                            "GOAWAY error code mismatch: got {error_code:?}, expected {expected_error_code:?}"
+                        ));
+                    }
+                    if debug_data.as_ref() != expected_debug {
+                        return Err(format!(
+                            "GOAWAY debug data mismatch: got {:?}, expected {:?}",
+                            debug_data.as_ref(),
+                            expected_debug
+                        ));
+                    }
+                    Ok(())
+                }
+                other => Err(format!("expected ReceivedFrame::GoAway, got {other:?}")),
             }
         }
 
-        // GOAWAY processing rules:
-        // - No new streams with ID > last_stream_id
-        // - Complete processing of existing streams ≤ last_stream_id
-        // - Can send additional GOAWAY frames with lower last_stream_id
+        let mut outbound = GoAwayFrame::new(0x7fff_ffff, ErrorCode::EnhanceYourCalm);
+        outbound.debug_data = Bytes::from_static(b"calm down");
+        let mut wire = BytesMut::new();
+        Frame::GoAway(outbound.clone())
+            .encode(&mut wire)
+            .map_err(|err| err.to_string())?;
+        let header = FrameHeader::parse(&mut wire).map_err(|err| err.to_string())?;
+        if header.frame_type != FrameType::GoAway as u8 {
+            return Err(format!("encoded GOAWAY frame type mismatch: {header:?}"));
+        }
+        let parsed = parse_frame(&header, wire.freeze()).map_err(|err| err.to_string())?;
+        match parsed {
+            Frame::GoAway(parsed) => {
+                if parsed.last_stream_id != outbound.last_stream_id {
+                    return Err("GOAWAY parser did not preserve last_stream_id".to_string());
+                }
+                if parsed.error_code != outbound.error_code {
+                    return Err("GOAWAY parser did not preserve error_code".to_string());
+                }
+                if parsed.debug_data != outbound.debug_data {
+                    return Err("GOAWAY parser did not preserve debug data".to_string());
+                }
+            }
+            other => return Err(format!("GOAWAY wire parser returned {other:?}")),
+        }
 
-        // Multiple GOAWAY frames are allowed
-        let goaway_sequence = [100u32, 50u32, 25u32, 0u32];
-        for i in 1..goaway_sequence.len() {
-            if goaway_sequence[i] > goaway_sequence[i - 1] {
+        let mut client = Connection::client(Settings::client());
+        open_connection(&mut client)?;
+        let stream1 = client
+            .open_stream(
+                vec![
+                    Header::new(":method", "GET"),
+                    Header::new(":path", "/kept"),
+                    Header::new(":scheme", "https"),
+                    Header::new(":authority", "example.test"),
+                ],
+                false,
+            )
+            .map_err(|err| err.to_string())?;
+        let stream3 = client
+            .open_stream(
+                vec![
+                    Header::new(":method", "GET"),
+                    Header::new(":path", "/reset"),
+                    Header::new(":scheme", "https"),
+                    Header::new(":authority", "example.test"),
+                ],
+                false,
+            )
+            .map_err(|err| err.to_string())?;
+        if (stream1, stream3) != (1, 3) {
+            return Err(format!(
+                "expected client streams 1 and 3, got {stream1} and {stream3}"
+            ));
+        }
+        let mut inbound = GoAwayFrame::new(stream1, ErrorCode::NoError);
+        inbound.debug_data = Bytes::from_static(b"peer shutdown");
+        let received = client
+            .process_frame(Frame::GoAway(inbound))
+            .map_err(|err| err.to_string())?;
+        assert_received_goaway(received, stream1, ErrorCode::NoError, b"peer shutdown")?;
+        if !client.goaway_received() || client.state() != ConnectionState::Closing {
+            return Err("received GOAWAY should mark connection closing".to_string());
+        }
+        if client
+            .stream(stream1)
+            .ok_or("stream 1 missing after GOAWAY")?
+            .state()
+            .is_closed()
+        {
+            return Err("stream at or below GOAWAY last_stream_id should remain live".to_string());
+        }
+        if !client
+            .stream(stream3)
+            .ok_or("stream 3 missing after GOAWAY")?
+            .state()
+            .is_closed()
+        {
+            return Err("stream above GOAWAY last_stream_id should be reset".to_string());
+        }
+
+        let widened = client
+            .process_frame(Frame::GoAway(GoAwayFrame::new(
+                stream3,
+                ErrorCode::InternalError,
+            )))
+            .map_err(|err| err.to_string())?;
+        assert_received_goaway(widened, stream1, ErrorCode::InternalError, b"")?;
+        let narrowed = client
+            .process_frame(Frame::GoAway(GoAwayFrame::new(0, ErrorCode::Cancel)))
+            .map_err(|err| err.to_string())?;
+        assert_received_goaway(narrowed, 0, ErrorCode::Cancel, b"")?;
+
+        let mut server = Connection::server(Settings::default());
+        open_connection(&mut server)?;
+        server
+            .process_frame(Frame::Headers(HeadersFrame::new(
+                1,
+                encoded_headers("/processed"),
+                false,
+                true,
+            )))
+            .map_err(|err| err.to_string())?;
+        server.goaway(ErrorCode::NoError, Bytes::from_static(b"graceful"));
+        match server.next_frame() {
+            Some(Frame::GoAway(frame)) => {
+                if frame.last_stream_id != 1 {
+                    return Err(format!(
+                        "sent GOAWAY should advertise processed stream 1, got {}",
+                        frame.last_stream_id
+                    ));
+                }
+                if frame.debug_data.as_ref() != b"graceful" {
+                    return Err("sent GOAWAY should preserve debug data".to_string());
+                }
+            }
+            other => return Err(format!("expected outbound GOAWAY frame, got {other:?}")),
+        }
+
+        server
+            .process_frame(Frame::Headers(HeadersFrame::new(
+                3,
+                encoded_headers("/refused"),
+                false,
+                true,
+            )))
+            .map_err(|err| err.to_string())?;
+        match server.next_frame() {
+            Some(Frame::RstStream(rst)) => {
+                if rst.stream_id != 3 || rst.error_code != ErrorCode::RefusedStream {
+                    return Err(format!("post-GOAWAY stream should be refused, got {rst:?}"));
+                }
+            }
+            other => {
                 return Err(format!(
-                    "GOAWAY last stream ID cannot increase: {} > {}",
-                    goaway_sequence[i],
-                    goaway_sequence[i - 1]
+                    "expected RST_STREAM for post-GOAWAY stream, got {other:?}"
                 ));
             }
         }
