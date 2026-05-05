@@ -290,14 +290,45 @@ fn artifact_lists_required_modes_adapters_outputs_and_fail_closed_cases() {
     assert_eq!(
         e2e_fields,
         BTreeSet::from([
+            "artifact_tail_bucket",
+            "command_class_hash",
             "correlation_id",
             "output_bundle_path",
             "pseudonymized_agent",
+            "proof_family",
+            "proof_fanout_count",
+            "proof_refusal_reason",
+            "queue_depth_bucket",
             "refusal_reason",
             "replay_command",
             "source_hash",
             "source_kind",
+            "workload_id",
             "workload_family",
+        ])
+    );
+
+    let rch_pressure = artifact
+        .get("rch_pressure_feedback")
+        .expect("rch pressure feedback");
+    assert_eq!(
+        rch_pressure.get("bead_id").and_then(Value::as_str),
+        Some("asupersync-d87ytw.11")
+    );
+    assert_eq!(
+        rch_pressure.get("runtime_linkage").and_then(Value::as_str),
+        Some("none")
+    );
+    let pressure_fields: BTreeSet<_> = string_array(rch_pressure, "fields").into_iter().collect();
+    assert_eq!(
+        pressure_fields,
+        BTreeSet::from([
+            "artifact_retrieval_tail_bucket",
+            "command_class_hash",
+            "proof_fanout_count",
+            "proof_family",
+            "proof_refusal_reason",
+            "queue_depth_bucket",
         ])
     );
 
@@ -314,6 +345,7 @@ fn artifact_lists_required_modes_adapters_outputs_and_fail_closed_cases() {
             "missing_required_identifier",
             "stale_source",
             "unknown_source_kind",
+            "unsupported_worker_data",
             "unredacted_secret",
         ])
     );
@@ -514,6 +546,13 @@ fn report_e2e_rows_cover_required_smoke_log_fields() {
             "pseudonymized_agent",
             "correlation_id",
             "workload_family",
+            "workload_id",
+            "proof_family",
+            "queue_depth_bucket",
+            "command_class_hash",
+            "artifact_tail_bucket",
+            "proof_fanout_count",
+            "proof_refusal_reason",
             "refusal_reason",
             "source_hash",
             "output_bundle_path",
@@ -525,6 +564,7 @@ fn report_e2e_rows_cover_required_smoke_log_fields() {
         assert_eq!(row["pseudonymized_agent"], event["source_agent"]);
         assert_eq!(row["correlation_id"], event["correlation_id"]);
         assert_eq!(row["workload_family"], event["workload_family"]);
+        assert_eq!(row["workload_id"], event["source_thread_or_bead"]);
         assert_eq!(row["refusal_reason"], event["refusal_reason"]);
         assert_eq!(row["source_hash"], event["source_hash"]);
         assert_eq!(row["output_bundle_path"], bundle_path);
@@ -838,4 +878,150 @@ fn explicit_source_adapters_encode_expected_event_kinds() {
         })
         .collect();
     assert_eq!(by_kind["rch_job_started"], "redacted");
+}
+
+#[test]
+fn rch_pressure_metadata_is_bucketed_hashed_and_redacted() {
+    let root = temp_root("rch-pressure");
+    let rch = root.join("rch-pressure.json");
+    fs::write(
+        &rch,
+        r#"{"proof_fanout_count":3,"jobs":[{"id":"job-queued","status":"queued","bead_id":"asupersync-d87ytw.11","command":"cargo test -p asupersync --test secret_target","queue_depth":27,"proof_fanout_count":3,"created_ts":"2026-05-05T05:00:00Z"},{"id":"job-done","status":"completed","bead_id":"asupersync-d87ytw.11","command":"cargo clippy -p asupersync","queue_depth":0,"artifact_retrieval_ms":125000,"finished_ts":"2026-05-05T05:00:01Z"},{"id":"job-timeout","status":"timeout","bead_id":"asupersync-d87ytw.11","command":"cargo test --workspace","queue_depth":65,"timeout_reason":"worker_timeout","created_ts":"2026-05-05T05:00:02Z"}]}"#,
+    )
+    .expect("write rch pressure source");
+
+    let out = run_script_owned(&[
+        "--execute".into(),
+        "--source".into(),
+        format!("rch:{}", rch.to_string_lossy()),
+        "--output-root".into(),
+        root.to_string_lossy().into_owned(),
+        "--run-id".into(),
+        "rch-pressure".into(),
+    ]);
+    assert!(
+        out.status.success(),
+        "rch pressure stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let bundle_raw = fs::read_to_string(
+        root.join("rch-pressure")
+            .join("coordination-workload-bundle.json"),
+    )
+    .expect("read rch pressure bundle");
+    for forbidden in ["secret_target", "cargo clippy", "cargo test --workspace"] {
+        assert!(
+            !bundle_raw.contains(forbidden),
+            "raw command token {forbidden} must not be retained in bundle: {bundle_raw}"
+        );
+    }
+    let bundle: Value = serde_json::from_str(&bundle_raw).expect("parse rch pressure bundle");
+    let events = bundle["events"].as_array().expect("events");
+    assert_eq!(events.len(), 3);
+
+    let by_correlation: BTreeMap<_, _> = events
+        .iter()
+        .map(|event| {
+            (
+                event["correlation_id"].as_str().expect("correlation id"),
+                event,
+            )
+        })
+        .collect();
+    let queued = by_correlation["rch:job-queued"];
+    assert_eq!(queued["event_kind"], "rch_job_queued");
+    assert_eq!(
+        queued["queue_depth_or_lock_state"]["proof_family"],
+        "rch_validation"
+    );
+    assert_eq!(
+        queued["queue_depth_or_lock_state"]["queue_depth_bucket"],
+        "16-63"
+    );
+    assert_eq!(
+        queued["queue_depth_or_lock_state"]["proof_fanout_count"].as_u64(),
+        Some(3)
+    );
+    assert!(
+        queued["queue_depth_or_lock_state"]["command_class_hash"]
+            .as_str()
+            .expect("command hash")
+            .starts_with("cmd:")
+    );
+
+    let done = by_correlation["rch:job-done"];
+    assert_eq!(
+        done["queue_depth_or_lock_state"]["artifact_retrieval_tail_bucket"],
+        "60s-5m"
+    );
+
+    let timed_out = by_correlation["rch:job-timeout"];
+    assert_eq!(timed_out["event_kind"], "rch_job_timed_out");
+    assert_eq!(
+        timed_out["queue_depth_or_lock_state"]["queue_depth_bucket"],
+        "64+"
+    );
+    assert_eq!(
+        timed_out["queue_depth_or_lock_state"]["proof_refusal_reason"],
+        "worker_timeout"
+    );
+
+    let report: Value = serde_json::from_str(
+        &fs::read_to_string(
+            root.join("rch-pressure")
+                .join("coordination-collector-report.json"),
+        )
+        .expect("read rch pressure report"),
+    )
+    .expect("parse rch pressure report");
+    let rows = report["e2e_log_rows"].as_array().expect("e2e rows");
+    let timeout_row = rows
+        .iter()
+        .find(|row| row["correlation_id"] == "rch:job-timeout")
+        .expect("timeout row");
+    assert_eq!(timeout_row["proof_family"], "rch_validation");
+    assert_eq!(timeout_row["queue_depth_bucket"], "64+");
+    assert_eq!(timeout_row["artifact_tail_bucket"], "missing");
+    assert_eq!(timeout_row["proof_refusal_reason"], "worker_timeout");
+    assert_eq!(timeout_row["workload_id"], "asupersync-d87ytw.11");
+}
+
+#[test]
+fn rch_nested_worker_data_fails_closed() {
+    let root = temp_root("rch-worker-detail");
+    let rch = root.join("rch-worker-detail.json");
+    fs::write(
+        &rch,
+        r#"{"jobs":[{"id":"job-raw-worker","status":"queued","bead_id":"asupersync-d87ytw.11","queue_depth":1,"worker":{"host":"worker-01","ip":"192.0.2.1"},"created_ts":"2026-05-05T05:00:00Z"}]}"#,
+    )
+    .expect("write rch worker detail source");
+
+    let out = run_script_owned(&[
+        "--execute".into(),
+        "--source".into(),
+        format!("rch:{}", rch.to_string_lossy()),
+        "--output-root".into(),
+        root.to_string_lossy().into_owned(),
+        "--run-id".into(),
+        "rch-worker-detail".into(),
+    ]);
+    assert!(!out.status.success(), "nested worker data must fail closed");
+
+    let report: Value = serde_json::from_str(
+        &fs::read_to_string(
+            root.join("rch-worker-detail")
+                .join("coordination-collector-report.json"),
+        )
+        .expect("read rch worker report"),
+    )
+    .expect("parse rch worker report");
+    assert_eq!(report["privacy_verdict"], "fail_closed");
+    assert_eq!(report["refused_event_count"], 1);
+    assert!(
+        report["first_failure_line"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("unsupported_worker_data")
+    );
 }

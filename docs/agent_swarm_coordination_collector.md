@@ -47,6 +47,12 @@ Supported source adapters:
 - `--execute`: reads only explicit `--source KIND:PATH` files and emits a
   bundle, JSONL event log, machine report, and human summary.
 
+The `rch` adapter models proof-queue pressure as redacted workload metadata,
+not as runtime linkage. It records deterministic queue-depth buckets,
+command-class hashes, artifact retrieval tail buckets, timeout/refusal reasons,
+and proof fanout counts so planners can replay validation pressure without raw
+commands, hostnames, or worker details.
+
 ## Output Artifacts
 
 Each execute or fixture run writes:
@@ -64,8 +70,11 @@ contract sort key.
 
 The machine report includes deterministic `e2e_log_rows` for every normalized
 event. Each row records the source kind, pseudonymized agent, correlation id,
-workload family, refusal reason, source hash, output bundle path, and replay
-command needed to feed the bundle into `scripts/run_runtime_workload_corpus.sh`.
+workload family, workload id, refusal reason, source hash, output bundle path,
+and replay command needed to feed the bundle into
+`scripts/run_runtime_workload_corpus.sh`. For `rch` proof-pressure events, rows
+also include proof family, queue bucket, command-class hash, artifact tail
+bucket, proof fanout count, and proof timeout/refusal reason.
 
 ## Redaction
 
@@ -105,9 +114,14 @@ The validation checks:
 7. Git dirty-frontier inputs retain only path hashes and counts.
 8. Report `e2e_log_rows` expose the required smoke-log fields and replay
    command for every emitted event.
-9. The collector artifact and root runtime manifest preserve the no-core-
+9. `rch` source rows expose queue-depth bucket, command-class hash, artifact
+   retrieval tail bucket, timeout/refusal reason, and proof fanout count without
+   retaining raw commands or worker details.
+10. Unsupported nested worker data in `rch` sources fails closed with
+   `unsupported_worker_data`.
+11. The collector artifact and root runtime manifest preserve the no-core-
    runtime-dependency boundary for Agent Mail, Beads, `bv`, and `rch`.
-10. Repeated fixture runs produce identical bundle hashes.
+12. Repeated fixture runs produce identical bundle hashes.
 
 ## Cross-References
 

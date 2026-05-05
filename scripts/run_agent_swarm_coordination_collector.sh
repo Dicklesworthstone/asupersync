@@ -191,6 +191,87 @@ def contains_secret(text):
     return any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns)
 
 
+def coerce_int(value, default=0):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def first_present(mapping, keys, default=None):
+    for key in keys:
+        if key in mapping and mapping[key] is not None:
+            return mapping[key]
+    return default
+
+
+def queue_depth_bucket(value):
+    depth = max(0, coerce_int(value, 0))
+    if depth == 0:
+        return "0"
+    if depth <= 3:
+        return "1-3"
+    if depth <= 15:
+        return "4-15"
+    if depth <= 63:
+        return "16-63"
+    return "64+"
+
+
+def duration_ms(value):
+    if value is None:
+        return None
+    if isinstance(value, str) and value.endswith("s"):
+        value = value[:-1]
+        try:
+            return int(float(value) * 1000)
+        except ValueError:
+            return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def tail_bucket(milliseconds):
+    if milliseconds is None:
+        return "missing"
+    ms = max(0, milliseconds)
+    if ms < 1_000:
+        return "<1s"
+    if ms < 10_000:
+        return "1s-10s"
+    if ms < 60_000:
+        return "10s-60s"
+    if ms < 300_000:
+        return "60s-5m"
+    return "5m+"
+
+
+def command_class_hash(job):
+    basis = str(
+        job.get("command_class")
+        or job.get("command")
+        or job.get("argv")
+        or job.get("program")
+        or "validation"
+    )
+    return f"cmd:{h(basis, 12)}"
+
+
+def proof_refusal_reason(job, status):
+    for key in ["refusal_reason", "timeout_reason", "failure_reason", "error_kind"]:
+        if job.get(key):
+            return str(job[key])
+    if "timeout" in status:
+        return "timeout"
+    if "refus" in status:
+        return "refused"
+    if "fail" in status or "error" in status:
+        return "failed"
+    return ""
+
+
 def event(
     *,
     source_kind,
@@ -441,16 +522,45 @@ def rch_events(raw, data):
         jobs = data.get("jobs") or data.get("builds") or []
         if not jobs:
             jobs = [data]
+        source_fanout = coerce_int(first_present(data, ["proof_fanout_count"], len(jobs)), len(jobs))
         for job in jobs:
             if not isinstance(job, dict):
+                out.append(refused("rch", "job", "missing_required_field", "not-object"))
+                continue
+            worker_detail = job.get("worker") or job.get("worker_pool") or job.get("worker_name")
+            if isinstance(worker_detail, (dict, list)) or job.get("raw_worker_data"):
+                out.append(
+                    refused(
+                        "rch",
+                        str(job.get("id") or "job"),
+                        "unsupported_worker_data",
+                        "nested-worker-data",
+                    )
+                )
                 continue
             status = str(job.get("status") or job.get("state") or "queued")
-            if "complete" in status or "finished" in status:
+            status_lower = status.lower()
+            if "timeout" in status_lower:
+                kind = "rch_job_timed_out"
+            elif "refus" in status_lower or "fail" in status_lower or "error" in status_lower:
+                kind = "rch_job_refused"
+            elif "complete" in status_lower or "finished" in status_lower:
                 kind = "rch_job_completed"
-            elif "start" in status or "running" in status:
+            elif "start" in status_lower or "running" in status_lower:
                 kind = "rch_job_started"
             else:
                 kind = "rch_job_queued"
+            tail_ms = duration_ms(
+                first_present(
+                    job,
+                    ["artifact_retrieval_ms", "artifact_tail_ms", "artifact_retrieval_seconds"],
+                )
+            )
+            queue_depth = coerce_int(job.get("queue_depth"), 0)
+            proof_fanout = coerce_int(
+                first_present(job, ["proof_fanout_count", "proof_fanout"], source_fanout),
+                source_fanout,
+            )
             out.append(
                 event(
                     source_kind="rch",
@@ -462,7 +572,14 @@ def rch_events(raw, data):
                     command_class="validation",
                     workload_family="concurrent_rch_proofs",
                     queue_depth_or_lock_state={
-                        "queue_depth": job.get("queue_depth", 0),
+                        "proof_family": "rch_validation",
+                        "queue_depth": queue_depth,
+                        "queue_depth_bucket": queue_depth_bucket(queue_depth),
+                        "command_class_hash": command_class_hash(job),
+                        "artifact_retrieval_tail_ms": tail_ms,
+                        "artifact_retrieval_tail_bucket": tail_bucket(tail_ms),
+                        "proof_fanout_count": proof_fanout,
+                        "proof_refusal_reason": proof_refusal_reason(job, status_lower),
                         "worker_pool": "redacted",
                     },
                     redaction_verdict="redacted",
@@ -479,7 +596,16 @@ def rch_events(raw, data):
                 correlation_id="rch:no-active-builds",
                 command_class="validation",
                 workload_family="concurrent_rch_proofs",
-                queue_depth_or_lock_state={"queue_depth": 0},
+                queue_depth_or_lock_state={
+                    "proof_family": "rch_validation",
+                    "queue_depth": 0,
+                    "queue_depth_bucket": "0",
+                    "command_class_hash": "cmd:no-active-builds",
+                    "artifact_retrieval_tail_ms": None,
+                    "artifact_retrieval_tail_bucket": "missing",
+                    "proof_fanout_count": 0,
+                    "proof_refusal_reason": "",
+                },
                 redaction_verdict="metadata_only",
             )
         )
@@ -604,14 +730,19 @@ def fixture_sources():
                         "id": "proof-001",
                         "status": "queued",
                         "bead_id": "asupersync-qn8i0p.2",
+                        "command": "cargo test -p asupersync --test coordination",
                         "queue_depth": 3,
+                        "proof_fanout_count": 2,
                         "created_ts": "2026-05-05T05:14:30Z",
                     },
                     {
                         "id": "proof-002",
                         "status": "completed",
                         "bead_id": "asupersync-hxi1ga",
+                        "command": "cargo test -p asupersync --lib",
                         "queue_depth": 0,
+                        "artifact_retrieval_ms": 125000,
+                        "proof_fanout_count": 2,
                         "finished_ts": "2026-05-05T05:15:00Z",
                     },
                 ]
@@ -780,6 +911,13 @@ def materialize(events, output_root, run_id, generated_at, hard_fail):
             "pseudonymized_agent": ev["source_agent"],
             "correlation_id": ev["correlation_id"],
             "workload_family": ev["workload_family"],
+            "workload_id": ev["source_thread_or_bead"],
+            "proof_family": ev["queue_depth_or_lock_state"].get("proof_family", ""),
+            "queue_depth_bucket": ev["queue_depth_or_lock_state"].get("queue_depth_bucket", ""),
+            "command_class_hash": ev["queue_depth_or_lock_state"].get("command_class_hash", ""),
+            "artifact_tail_bucket": ev["queue_depth_or_lock_state"].get("artifact_retrieval_tail_bucket", ""),
+            "proof_fanout_count": ev["queue_depth_or_lock_state"].get("proof_fanout_count", ""),
+            "proof_refusal_reason": ev["queue_depth_or_lock_state"].get("proof_refusal_reason", ""),
             "refusal_reason": ev["refusal_reason"],
             "source_hash": ev["source_hash"],
             "output_bundle_path": str(bundle_path),

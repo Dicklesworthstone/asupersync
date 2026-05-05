@@ -91,7 +91,9 @@
       "events": [
         "rch_job_queued",
         "rch_job_started",
-        "rch_job_completed"
+        "rch_job_completed",
+        "rch_job_timed_out",
+        "rch_job_refused"
       ],
       "redaction": "worker pool names are redacted"
     },
@@ -123,11 +125,46 @@
     "pseudonymized_agent",
     "correlation_id",
     "workload_family",
+    "workload_id",
+    "proof_family",
+    "queue_depth_bucket",
+    "command_class_hash",
+    "artifact_tail_bucket",
+    "proof_fanout_count",
+    "proof_refusal_reason",
     "refusal_reason",
     "source_hash",
     "output_bundle_path",
     "replay_command"
   ],
+  "rch_pressure_feedback": {
+    "bead_id": "asupersync-d87ytw.11",
+    "runtime_linkage": "none",
+    "fields": [
+      "proof_family",
+      "queue_depth_bucket",
+      "command_class_hash",
+      "artifact_retrieval_tail_bucket",
+      "proof_refusal_reason",
+      "proof_fanout_count"
+    ],
+    "queue_depth_buckets": [
+      "0",
+      "1-3",
+      "4-15",
+      "16-63",
+      "64+"
+    ],
+    "artifact_tail_buckets": [
+      "missing",
+      "<1s",
+      "1s-10s",
+      "10s-60s",
+      "60s-5m",
+      "5m+"
+    ],
+    "acceptance": "rch proof pressure influences fixture-backed workload replay through redacted explicit metadata only."
+  },
   "determinism": {
     "event_sort_key": [
       "event_ts",
@@ -164,6 +201,11 @@
     {
       "case": "stale_source",
       "refusal_reason": "stale_source",
+      "exit_code": 3
+    },
+    {
+      "case": "unsupported_worker_data",
+      "refusal_reason": "unsupported_worker_data",
       "exit_code": 3
     },
     {
