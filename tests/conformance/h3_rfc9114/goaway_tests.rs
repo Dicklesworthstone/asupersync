@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! HTTP/3 RFC 9114 Section 8 GOAWAY semantics conformance tests.
 //!
 //! Tests compliance with RFC 9114 GOAWAY frame requirements:
@@ -24,6 +22,36 @@ pub fn run_goaway_tests() -> Vec<H3ConformanceResult> {
     results.push(test_goaway_error_handling());
 
     results
+}
+
+#[test]
+fn goaway_results_match_native_support() {
+    let results = run_goaway_tests();
+
+    assert_eq!(
+        results.len(),
+        5,
+        "GOAWAY suite should keep every registered result guarded"
+    );
+    for result in results {
+        if result.test_id == "RFC9114-8.1-GOAWAY-BIDIRECTIONAL" {
+            assert_eq!(
+                result.verdict,
+                TestVerdict::ExpectedFailure,
+                "{} should remain documented until combined transport lifecycle support lands: {:?}",
+                result.test_id,
+                result.notes
+            );
+        } else {
+            assert_eq!(
+                result.verdict,
+                TestVerdict::Pass,
+                "{} should pass: {:?}",
+                result.test_id,
+                result.notes
+            );
+        }
+    }
 }
 
 /// RFC 9114 Section 8.1: GOAWAY last-stream-ID validity.

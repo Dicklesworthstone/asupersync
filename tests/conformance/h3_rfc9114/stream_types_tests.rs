@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! HTTP/3 RFC 9114 Section 6.2 stream type validation conformance tests.
 //!
 //! Tests compliance with HTTP/3 unidirectional stream type requirements:
@@ -29,6 +27,26 @@ pub fn run_stream_type_tests() -> Vec<H3ConformanceResult> {
     results.push(test_reserved_stream_types());
 
     results
+}
+
+#[test]
+fn stream_type_results_pass() {
+    let results = run_stream_type_tests();
+
+    assert_eq!(
+        results.len(),
+        5,
+        "stream type suite should keep every registered result guarded"
+    );
+    for result in results {
+        assert_eq!(
+            result.verdict,
+            TestVerdict::Pass,
+            "{} should pass: {:?}",
+            result.test_id,
+            result.notes
+        );
+    }
 }
 
 /// RFC 9114 Section 6.2: Stream type must be first varint.

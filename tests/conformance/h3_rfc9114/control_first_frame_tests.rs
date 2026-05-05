@@ -34,6 +34,7 @@ pub enum H3FrameType {
 /// Run all control stream first-frame conformance tests.
 #[allow(dead_code)]
 pub fn run_control_first_frame_tests() -> Vec<H3ConformanceResult> {
+    let _suite_guard = control_first_frame_suite_lock().lock().unwrap();
     let mut results = Vec::new();
 
     results.push(test_control_stream_settings_first());
@@ -406,9 +407,14 @@ impl TestConnectionState {
 }
 
 static TEST_CONNECTION: OnceLock<Mutex<TestConnectionState>> = OnceLock::new();
+static CONTROL_FIRST_FRAME_SUITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn get_test_connection() -> &'static Mutex<TestConnectionState> {
     TEST_CONNECTION.get_or_init(|| Mutex::new(TestConnectionState::new()))
+}
+
+fn control_first_frame_suite_lock() -> &'static Mutex<()> {
+    CONTROL_FIRST_FRAME_SUITE_LOCK.get_or_init(|| Mutex::new(()))
 }
 
 #[derive(Debug)]
