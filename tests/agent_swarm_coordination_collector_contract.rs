@@ -384,6 +384,55 @@ fn malformed_json_source_fails_closed_with_refused_event() {
 }
 
 #[test]
+fn adapter_refused_event_fails_closed_for_missing_required_field() {
+    let root = temp_root("missing-field");
+    let source = root.join("br.json");
+    fs::write(&source, r#"{"issues":[{"status":"open"}]}"#).expect("write missing id source");
+    let out = run_script_owned(&[
+        "--execute".into(),
+        "--source".into(),
+        format!("beads:{}", source.to_string_lossy()),
+        "--output-root".into(),
+        root.to_string_lossy().into_owned(),
+        "--run-id".into(),
+        "missing-field".into(),
+    ]);
+    assert!(
+        !out.status.success(),
+        "adapter refusal must fail closed instead of passing"
+    );
+
+    let report: Value = serde_json::from_str(
+        &fs::read_to_string(
+            root.join("missing-field")
+                .join("coordination-collector-report.json"),
+        )
+        .expect("read missing-field report"),
+    )
+    .expect("parse missing-field report");
+    assert_eq!(report["privacy_verdict"], "fail_closed");
+    assert_eq!(report["refused_event_count"].as_u64(), Some(1));
+    assert!(
+        report["first_failure_line"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("missing_required_field")
+    );
+
+    let bundle: Value = serde_json::from_str(
+        &fs::read_to_string(
+            root.join("missing-field")
+                .join("coordination-workload-bundle.json"),
+        )
+        .expect("read missing-field bundle"),
+    )
+    .expect("parse missing-field bundle");
+    let event = &bundle["events"][0];
+    assert_eq!(event["redaction_verdict"], "refused");
+    assert_eq!(event["refusal_reason"], "missing_required_field");
+}
+
+#[test]
 fn unredacted_secret_source_fails_closed_and_does_not_leak_token() {
     let root = temp_root("secret");
     let source = root.join("mail.json");

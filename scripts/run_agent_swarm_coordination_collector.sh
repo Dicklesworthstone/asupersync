@@ -695,6 +695,8 @@ def materialize(events, output_root, run_id, generated_at, hard_fail):
 
     deduped = sorted(deduped, key=lambda ev: tuple(ev[key] for key in SORT_KEY))
     refused_count = sum(1 for ev in deduped if ev["redaction_verdict"] == "refused")
+    if refused_count:
+        hard_fail = True
     redacted_count = sum(1 for ev in deduped if ev["redaction_verdict"] == "redacted")
     pseudonymized_count = sum(1 for ev in deduped if ev["redaction_verdict"] == "pseudonymized")
     metadata_count = sum(1 for ev in deduped if ev["redaction_verdict"] == "metadata_only")
