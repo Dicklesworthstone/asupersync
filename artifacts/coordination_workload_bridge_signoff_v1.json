@@ -1,0 +1,347 @@
+{
+  "artifact_outputs": [
+    "coordination-workload-bridge-signoff-manifest.json",
+    "coordination-workload-bridge-signoff.jsonl",
+    "coordination-workload-bridge-signoff-report.json",
+    "coordination-workload-bridge-signoff.summary.txt",
+    "child-evidence-matrix.json",
+    "fingerprint-comparison.json",
+    "field-derivation-map.json",
+    "fail-closed-diagnostics.json",
+    "dependency-boundary.json",
+    "logs/*.log"
+  ],
+  "bead_id": "asupersync-qn8i0p.8",
+  "child_evidence": [
+    {
+      "bead_id": "asupersync-qn8i0p.1",
+      "status": "closed",
+      "purpose": "coordination workload artifact schema and contract",
+      "artifacts": [
+        "artifacts/agent_swarm_coordination_workload_contract_v1.json"
+      ],
+      "tests": [
+        "tests/agent_swarm_coordination_workload_contract.rs"
+      ],
+      "signoff_requirement": "defines event schema, stale/refusal policy, redaction-required fields, deterministic sort keys, and core runtime dependency boundary"
+    },
+    {
+      "bead_id": "asupersync-qn8i0p.2",
+      "status": "closed",
+      "purpose": "redacted Agent Mail, Beads, bv, rch, artifact, and dirty-frontier collector",
+      "artifacts": [
+        "artifacts/agent_swarm_coordination_collector_contract_v1.json"
+      ],
+      "scripts": [
+        "scripts/run_agent_swarm_coordination_collector.sh"
+      ],
+      "tests": [
+        "tests/agent_swarm_coordination_collector_contract.rs"
+      ],
+      "signoff_requirement": "collects fixture coordination metadata, refuses malformed or secret-bearing sources, and writes deterministic redacted bundles"
+    },
+    {
+      "bead_id": "asupersync-qn8i0p.3",
+      "status": "closed",
+      "purpose": "runtime workload corpus expansion from coordination bundles",
+      "artifacts": [
+        "artifacts/runtime_workload_corpus_v1.json"
+      ],
+      "scripts": [
+        "scripts/run_runtime_workload_corpus.sh"
+      ],
+      "tests": [
+        "tests/runtime_workload_corpus_contract.rs"
+      ],
+      "signoff_requirement": "synthesizes seven ASWARM workloads and scheduler evidence inputs from redacted coordination bundles"
+    },
+    {
+      "bead_id": "asupersync-qn8i0p.4",
+      "status": "closed",
+      "purpose": "lab replay and minimization hooks for coordination-pressure scenarios",
+      "artifacts": [
+        "src/lab/replay.rs"
+      ],
+      "tests": [
+        "tests/runtime_workload_corpus_contract.rs",
+        "tests/coordination_workload_bridge_smoke_contract.rs"
+      ],
+      "signoff_requirement": "replays emitted coordination expansion packs through synthesize_coordination_pressure_replay and minimize_coordination_pressure_replay"
+    },
+    {
+      "bead_id": "asupersync-qn8i0p.5",
+      "status": "closed",
+      "purpose": "capacity and host-profile planner handoff",
+      "artifacts": [
+        "artifacts/massive_swarm_signoff_smoke_contract_v1.json",
+        "artifacts/runtime_workload_corpus_v1.json"
+      ],
+      "tests": [
+        "tests/capacity_envelope_planner_contract.rs",
+        "tests/host_profile_planner_contract.rs",
+        "tests/signed_profile_bundle_contract.rs",
+        "tests/massive_swarm_signoff_contract.rs"
+      ],
+      "signoff_requirement": "keeps coordination packs optional, handles used/refused/absent planner states, and fails closed to conservative planning"
+    },
+    {
+      "bead_id": "asupersync-qn8i0p.6",
+      "status": "closed",
+      "purpose": "privacy, redaction, and trust-boundary proof",
+      "artifacts": [
+        "artifacts/agent_swarm_coordination_redaction_contract_v1.json"
+      ],
+      "tests": [
+        "tests/agent_swarm_coordination_redaction_contract.rs"
+      ],
+      "signoff_requirement": "forbids raw bodies, home paths, raw worker names, and secret-like input retention"
+    },
+    {
+      "bead_id": "asupersync-qn8i0p.7",
+      "status": "closed",
+      "purpose": "one-command coordination workload bridge smoke runner and runbook",
+      "artifacts": [
+        "artifacts/coordination_workload_bridge_smoke_contract_v1.json"
+      ],
+      "scripts": [
+        "scripts/run_coordination_workload_bridge_smoke.sh"
+      ],
+      "docs": [
+        "docs/coordination_workload_bridge_smoke_runbook.md"
+      ],
+      "tests": [
+        "tests/coordination_workload_bridge_smoke_contract.rs"
+      ],
+      "signoff_requirement": "executes the collector, workload synthesis, replay hook, planner handoff, and fail-closed probes from checked fixtures"
+    }
+  ],
+  "contract_version": "coordination-workload-bridge-signoff-v1",
+  "core_runtime_dependency_boundary": {
+    "dependency_sections_checked": [
+      "Cargo.toml [dependencies]",
+      "Cargo.toml [workspace.dependencies]",
+      "Cargo.toml target dependency sections that are not dev/build dependencies"
+    ],
+    "forbidden_dependency_keys": [
+      "mcp_agent_mail",
+      "agent-mail",
+      "beads",
+      "beads_rust",
+      "br",
+      "bv",
+      "rch"
+    ],
+    "policy_source": "artifacts/agent_swarm_coordination_workload_contract_v1.json::core_runtime_dependency_policy",
+    "signoff_rule": "comments, bead ids, operator CLI command strings, and docs may mention br/bv/rch, but Cargo dependency keys for the core runtime must not"
+  },
+  "description": "Operator-grade final signoff for the real agent-swarm coordination workload bridge. This contract aggregates the qn8i0p child outputs, replays the deterministic fixture bridge twice, maps every generated ASWARM workload field back to evidence or deterministic derivation logic, proves fail-closed diagnostics, and records exact validation commands.",
+  "determinism": {
+    "fixture_timestamp": "2026-05-05T05:00:00Z",
+    "stable_fingerprint_rule": "compare qn8i0p.7 row stable_fingerprint values across two independent output roots",
+    "volatile_values_excluded": [
+      "output_root",
+      "run_dir",
+      "absolute temp path",
+      "child process wall-clock duration"
+    ]
+  },
+  "fail_closed_diagnostics": {
+    "required_refusal_reasons": [
+      "missing_scenario_dimensions",
+      "unknown_schema_version",
+      "unredacted_secret",
+      "unsupported_dirty_paths",
+      "stale_source"
+    ],
+    "required_sources": [
+      "artifacts/coordination_workload_bridge_smoke_contract_v1.json",
+      "artifacts/agent_swarm_coordination_workload_contract_v1.json",
+      "scripts/run_coordination_workload_bridge_smoke.sh --execute --fixture"
+    ],
+    "signoff_rule": "each refusal must have a non-empty first_failure_line or explicit refused event with refusal_reason"
+  },
+  "field_derivation_contract": {
+    "generated_workload_prefix": "ASWARM-WL-",
+    "required_workload_count": 7,
+    "required_workload_fields": [
+      "workload_id",
+      "family",
+      "scenario_family",
+      "scenario_id",
+      "runtime_profile",
+      "semantic_pressure",
+      "provenance_only_context",
+      "source_event_kinds",
+      "source_event_count",
+      "source_hashes",
+      "source_bundle_hash",
+      "replay_command",
+      "entry_command",
+      "expected_artifact_globs",
+      "scheduler_evidence_input_id"
+    ],
+    "source_evidence_rules": [
+      {
+        "fields": [
+          "workload_id",
+          "scenario_id",
+          "runtime_profile",
+          "semantic_pressure",
+          "provenance_only_context",
+          "replay_command",
+          "entry_command",
+          "expected_artifact_globs",
+          "scheduler_evidence_input_id"
+        ],
+        "source": "artifacts/runtime_workload_corpus_v1.json::coordination_workload_synthesis.scenario_family_mapping",
+        "derivation": "deterministic lookup by scenario_family"
+      },
+      {
+        "fields": [
+          "source_event_kinds",
+          "source_event_count",
+          "source_hashes",
+          "source_bundle_hash"
+        ],
+        "source": "redacted collector bundle emitted by scripts/run_agent_swarm_coordination_collector.sh",
+        "derivation": "accepted events grouped by workload_family after redaction, dedupe, and deterministic sort"
+      },
+      {
+        "fields": [
+          "family",
+          "scenario_family"
+        ],
+        "source": "coordination workload synthesis contract",
+        "derivation": "constant family agent-swarm-coordination plus bundle event workload_family"
+      }
+    ]
+  },
+  "graph_state_confirmation": {
+    "live_control_plane_used_by_runner": false,
+    "operator_closeout_commands": [
+      "br show asupersync-qn8i0p --json",
+      "br show asupersync-qn8i0p.8 --json",
+      "br ready --json",
+      "bv --robot-alerts"
+    ],
+    "signoff_rule": "runner records the required graph-state commands; operator closeout must include their live result and may close the parent epic only after qn8i0p.8 closes"
+  },
+  "modes": [
+    {
+      "mode": "list",
+      "purpose": "list signoff rows, output artifacts, and required commands"
+    },
+    {
+      "mode": "dry-run",
+      "purpose": "emit planned signoff rows without executing child smoke scripts"
+    },
+    {
+      "mode": "execute",
+      "purpose": "execute fixture-only signoff and write detailed artifacts"
+    },
+    {
+      "mode": "fixture",
+      "purpose": "required for execute mode; live Agent Mail, Beads, bv, rch, git, and home reads are unsupported"
+    }
+  ],
+  "privacy_policy": {
+    "live_agent_mail_allowed": false,
+    "live_beads_allowed": false,
+    "live_bv_allowed": false,
+    "live_rch_allowed": false,
+    "live_git_allowed": false,
+    "raw_message_body_retained": false,
+    "raw_home_paths_retained": false,
+    "raw_worker_names_retained": false,
+    "runner_reads_home": false
+  },
+  "runbook_doc": "docs/coordination_workload_bridge_signoff.md",
+  "runner_report_schema_version": "coordination-workload-bridge-signoff-report-v1",
+  "runner_row_schema_version": "coordination-workload-bridge-signoff-row-v1",
+  "runner_script": "scripts/run_coordination_workload_bridge_signoff.sh",
+  "signoff_rows": [
+    {
+      "row_id": "missing_prerequisite_guard",
+      "phase": "admission",
+      "expected_status": "passed",
+      "consumer": "operator",
+      "evidence": "checks required tools and project paths before any child execution"
+    },
+    {
+      "row_id": "child_evidence_matrix_complete",
+      "phase": "child-aggregation",
+      "expected_status": "passed",
+      "consumer": "operator",
+      "evidence": "verifies qn8i0p.1 through qn8i0p.7 child artifacts, scripts, docs, and tests are present and marked closed"
+    },
+    {
+      "row_id": "repeated_fixture_fingerprints_identical",
+      "phase": "determinism",
+      "expected_status": "passed",
+      "consumer": "bridge-smoke",
+      "evidence": "runs scripts/run_coordination_workload_bridge_smoke.sh twice and compares canonical row fingerprints"
+    },
+    {
+      "row_id": "field_derivation_map_covers_generated_workloads",
+      "phase": "field-derivation",
+      "expected_status": "passed",
+      "consumer": "runtime-workload",
+      "evidence": "maps every generated ASWARM workload field to source evidence, deterministic derivation logic, or explicit refusal if missing"
+    },
+    {
+      "row_id": "fail_closed_diagnostics_cover_malformed_stale_secret_unsupported",
+      "phase": "fail-closed",
+      "expected_status": "passed",
+      "consumer": "redaction",
+      "evidence": "proves malformed, stale, unredacted, unsupported, missing-dimension, and schema-mismatch cases fail closed with diagnostics"
+    },
+    {
+      "row_id": "core_runtime_dependency_boundary_enforced",
+      "phase": "dependency-boundary",
+      "expected_status": "passed",
+      "consumer": "runtime-core",
+      "evidence": "inspects Cargo dependency keys and the workload contract policy to prove Agent Mail, Beads, bv, br, and rch are not core runtime dependencies"
+    },
+    {
+      "row_id": "planner_capacity_profile_handoff_confirmed",
+      "phase": "planner-handoff",
+      "expected_status": "passed",
+      "consumer": "capacity-profile",
+      "evidence": "checks used/refused/absent coordination pack handoff row in massive swarm signoff contract"
+    },
+    {
+      "row_id": "graph_state_and_rch_validation_commands_documented",
+      "phase": "operator-closeout",
+      "expected_status": "passed",
+      "consumer": "operator",
+      "evidence": "records exact br, bv, local, and rch-backed validation commands for the final closeout"
+    }
+  ],
+  "source_contracts": [
+    "artifacts/agent_swarm_coordination_workload_contract_v1.json",
+    "artifacts/agent_swarm_coordination_collector_contract_v1.json",
+    "artifacts/agent_swarm_coordination_redaction_contract_v1.json",
+    "artifacts/runtime_workload_corpus_v1.json",
+    "artifacts/massive_swarm_signoff_smoke_contract_v1.json",
+    "artifacts/coordination_workload_bridge_smoke_contract_v1.json"
+  ],
+  "test": "tests/coordination_workload_bridge_signoff.rs",
+  "validation": {
+    "local_shell": [
+      "bash -n scripts/run_coordination_workload_bridge_signoff.sh",
+      "jq empty artifacts/coordination_workload_bridge_signoff_v1.json",
+      "bash scripts/run_coordination_workload_bridge_signoff.sh --list",
+      "bash scripts/run_coordination_workload_bridge_signoff.sh --dry-run --fixture --output-root target/coordination-workload-bridge-signoff-dry-run --generated-at 2026-05-05T05:00:00Z",
+      "bash scripts/run_coordination_workload_bridge_signoff.sh --execute --fixture --output-root target/coordination-workload-bridge-signoff --generated-at 2026-05-05T05:00:00Z"
+    ],
+    "rch_cargo": [
+      "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_coordination_workload_bridge_signoff cargo test -p asupersync --test coordination_workload_bridge_signoff --features test-internals -- --nocapture"
+    ],
+    "graph_state": [
+      "br show asupersync-qn8i0p --json",
+      "br show asupersync-qn8i0p.8 --json",
+      "br ready --json",
+      "bv --robot-alerts"
+    ]
+  }
+}
