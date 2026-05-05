@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Deterministic replay flake detector runner validation (SEM-12.15)
 //!
 //! Validates that the SEM-12.15 runner script exists and declares the
