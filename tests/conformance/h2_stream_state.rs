@@ -41,8 +41,11 @@
 //!
 //! Legend: H = HEADERS, PP = PUSH_PROMISE, ES = END_STREAM, R = RST_STREAM
 
+use super::h2_live_adapter::{H2LiveAdapter, encoded_request_headers};
 use asupersync::bytes::Bytes;
+use asupersync::http::h2::connection::ReceivedFrame;
 use asupersync::http::h2::error::{ErrorCode, H2Error};
+use asupersync::http::h2::frame::{DataFrame, Frame, HeadersFrame};
 use asupersync::http::h2::settings::DEFAULT_INITIAL_WINDOW_SIZE;
 use asupersync::http::h2::stream::{Stream, StreamState};
 
@@ -503,33 +506,33 @@ fn test_reserved_remote_rejects_recv_data() {
 
 #[test]
 #[allow(dead_code)]
-fn test_reserved_remote_to_half_closed_local_on_send_headers() {
+fn test_reserved_remote_rejects_send_headers() {
     let mut stream = new_reserved_remote_stream(TEST_STREAM_ID);
     assert_eq!(stream.state(), StreamState::ReservedRemote);
 
-    // Send HEADERS without END_STREAM (activates the promised stream)
-    stream
-        .send_headers(false)
-        .expect("activate reserved(remote) with HEADERS");
-    assert_eq!(stream.state(), StreamState::HalfClosedLocal);
+    // A stream reserved by the remote peer is activated only by receiving
+    // the peer's HEADERS; local HEADERS are not valid in reserved(remote).
+    let result = stream.send_headers(false);
+    assert!(result.is_err());
+    assert_stream_closed_error(result.unwrap_err());
+    assert_eq!(stream.state(), StreamState::ReservedRemote);
 }
 
 #[test]
 #[allow(dead_code)]
-fn test_reserved_remote_to_closed_on_send_headers_with_end_stream() {
+fn test_reserved_remote_rejects_send_headers_with_end_stream() {
     let mut stream = new_reserved_remote_stream(TEST_STREAM_ID);
     assert_eq!(stream.state(), StreamState::ReservedRemote);
 
-    // Send HEADERS with END_STREAM (activates and immediately closes)
-    stream
-        .send_headers(true)
-        .expect("activate and close reserved(remote)");
-    assert_eq!(stream.state(), StreamState::Closed);
+    let result = stream.send_headers(true);
+    assert!(result.is_err());
+    assert_stream_closed_error(result.unwrap_err());
+    assert_eq!(stream.state(), StreamState::ReservedRemote);
 }
 
 #[test]
 #[allow(dead_code)]
-fn test_reserved_remote_to_half_closed_remote_on_recv_headers() {
+fn test_reserved_remote_to_half_closed_local_on_recv_headers() {
     let mut stream = new_reserved_remote_stream(TEST_STREAM_ID);
     assert_eq!(stream.state(), StreamState::ReservedRemote);
 
@@ -537,7 +540,7 @@ fn test_reserved_remote_to_half_closed_remote_on_recv_headers() {
     stream
         .recv_headers(false, true, false)
         .expect("recv HEADERS on reserved(remote)");
-    assert_eq!(stream.state(), StreamState::HalfClosedRemote);
+    assert_eq!(stream.state(), StreamState::HalfClosedLocal);
 }
 
 #[test]
@@ -563,10 +566,10 @@ fn test_reserved_remote_can_receive_headers() {
 
 #[test]
 #[allow(dead_code)]
-fn test_reserved_remote_can_send_headers() {
+fn test_reserved_remote_cannot_send_headers() {
     let stream = new_reserved_remote_stream(TEST_STREAM_ID);
     assert_eq!(stream.state(), StreamState::ReservedRemote);
-    assert!(stream.state().can_send_headers());
+    assert!(!stream.state().can_send_headers());
 }
 
 #[test]
@@ -579,10 +582,14 @@ fn test_reserved_remote_cannot_send_data() {
 
 #[test]
 #[allow(dead_code)]
-fn test_reserved_remote_cannot_recv_data() {
-    let stream = new_reserved_remote_stream(TEST_STREAM_ID);
+fn test_reserved_remote_receive_side_is_open_but_data_is_rejected() {
+    let mut stream = new_reserved_remote_stream(TEST_STREAM_ID);
     assert_eq!(stream.state(), StreamState::ReservedRemote);
-    assert!(!stream.state().can_recv());
+    assert!(stream.state().can_recv());
+
+    let result = stream.recv_data(1, false);
+    assert!(result.is_err());
+    assert_stream_closed_error(result.unwrap_err());
 }
 
 //
@@ -676,14 +683,191 @@ fn test_data_frames_preserve_state_without_end_stream() {
 
 #[test]
 #[allow(dead_code)]
+fn test_live_data_without_end_stream_preserves_open_state_and_windows() {
+    let mut adapter = H2LiveAdapter::server().expect("server SETTINGS handshake");
+    adapter
+        .feed(Frame::Headers(HeadersFrame::new(
+            TEST_STREAM_ID,
+            encoded_request_headers("/data-open"),
+            false,
+            true,
+        )))
+        .expect("HEADERS should open stream through Connection::process_frame");
+
+    let connection_window_before = adapter.connection().recv_window();
+    let stream_window_before = adapter
+        .connection()
+        .stream(TEST_STREAM_ID)
+        .expect("stream opened by HEADERS")
+        .recv_window();
+
+    let data = Bytes::from_static(b"open-body");
+    let data_len = i32::try_from(data.len()).expect("test payload length fits i32");
+    let received = adapter
+        .feed(Frame::Data(DataFrame::new(
+            TEST_STREAM_ID,
+            data.clone(),
+            false,
+        )))
+        .expect("DATA without END_STREAM should be accepted");
+
+    match received {
+        Some(ReceivedFrame::Data {
+            stream_id,
+            data: received_data,
+            end_stream,
+        }) => {
+            assert_eq!(stream_id, TEST_STREAM_ID);
+            assert_eq!(received_data, data);
+            assert!(!end_stream);
+        }
+        other => panic!("expected received DATA frame, got {other:?}"),
+    }
+
+    let stream = adapter
+        .connection()
+        .stream(TEST_STREAM_ID)
+        .expect("stream remains tracked after DATA");
+    assert_eq!(stream.state(), StreamState::Open);
+    assert_eq!(
+        adapter.connection().recv_window(),
+        connection_window_before - data_len
+    );
+    assert_eq!(stream.recv_window(), stream_window_before - data_len);
+}
+
+#[test]
+#[allow(dead_code)]
+fn test_live_data_end_stream_transitions_and_rejects_later_frames() {
+    let mut adapter = H2LiveAdapter::server().expect("server SETTINGS handshake");
+    adapter
+        .feed(Frame::Headers(HeadersFrame::new(
+            TEST_STREAM_ID,
+            encoded_request_headers("/data-end"),
+            false,
+            true,
+        )))
+        .expect("HEADERS should open stream through Connection::process_frame");
+
+    let end_data = Bytes::from_static(b"final-body");
+    let received = adapter
+        .feed(Frame::Data(DataFrame::new(
+            TEST_STREAM_ID,
+            end_data.clone(),
+            true,
+        )))
+        .expect("DATA with END_STREAM should be accepted");
+    match received {
+        Some(ReceivedFrame::Data {
+            stream_id,
+            data,
+            end_stream,
+        }) => {
+            assert_eq!(stream_id, TEST_STREAM_ID);
+            assert_eq!(data, end_data);
+            assert!(end_stream);
+        }
+        other => panic!("expected received DATA+END_STREAM frame, got {other:?}"),
+    }
+    assert_eq!(
+        adapter
+            .connection()
+            .stream(TEST_STREAM_ID)
+            .expect("stream remains tracked after DATA+END_STREAM")
+            .state(),
+        StreamState::HalfClosedRemote
+    );
+
+    let data_error = adapter
+        .feed(Frame::Data(DataFrame::new(
+            TEST_STREAM_ID,
+            Bytes::from_static(b"too-late"),
+            false,
+        )))
+        .expect_err("DATA after remote END_STREAM must be rejected");
+    assert!(
+        data_error.contains("STREAM_CLOSED") && data_error.contains("stream 1"),
+        "expected stream-scoped STREAM_CLOSED for late DATA, got {data_error}"
+    );
+
+    let headers_error = adapter
+        .feed(Frame::Headers(HeadersFrame::new(
+            TEST_STREAM_ID,
+            Bytes::new(),
+            false,
+            true,
+        )))
+        .expect_err("HEADERS after remote END_STREAM must be rejected");
+    assert!(
+        headers_error.contains("STREAM_CLOSED") || headers_error.contains("PROTOCOL_ERROR"),
+        "expected deterministic late HEADERS rejection, got {headers_error}"
+    );
+}
+
+#[test]
+#[allow(dead_code)]
+fn test_live_zero_length_data_end_stream_closes_remote_side_without_window_delta() {
+    let mut adapter = H2LiveAdapter::server().expect("server SETTINGS handshake");
+    adapter
+        .feed(Frame::Headers(HeadersFrame::new(
+            3,
+            encoded_request_headers("/zero-end"),
+            false,
+            true,
+        )))
+        .expect("HEADERS should open stream 3");
+
+    let connection_window_before = adapter.connection().recv_window();
+    let stream_window_before = adapter
+        .connection()
+        .stream(3)
+        .expect("stream 3 opened by HEADERS")
+        .recv_window();
+
+    let received = adapter
+        .feed(Frame::Data(DataFrame::new(3, Bytes::new(), true)))
+        .expect("zero-length DATA+END_STREAM should be accepted");
+    match received {
+        Some(ReceivedFrame::Data {
+            stream_id,
+            data,
+            end_stream,
+        }) => {
+            assert_eq!(stream_id, 3);
+            assert!(data.is_empty());
+            assert!(end_stream);
+        }
+        other => panic!("expected received zero-length DATA+END_STREAM, got {other:?}"),
+    }
+
+    let stream = adapter
+        .connection()
+        .stream(3)
+        .expect("stream 3 remains tracked after zero-length DATA");
+    assert_eq!(stream.state(), StreamState::HalfClosedRemote);
+    assert_eq!(adapter.connection().recv_window(), connection_window_before);
+    assert_eq!(stream.recv_window(), stream_window_before);
+}
+
+#[test]
+#[allow(dead_code)]
+fn test_live_data_stream_zero_parser_rejects_malformed_frame() {
+    let invalid = Frame::Data(DataFrame::new(0, Bytes::from_static(b"invalid"), false));
+    let message = H2LiveAdapter::parse_encoded(&invalid)
+        .expect_err("DATA on stream 0 must be rejected by the real frame parser");
+    assert!(
+        message.contains("PROTOCOL_ERROR") || message.contains("DATA frame with stream ID 0"),
+        "expected parser-level DATA stream 0 rejection, got {message}"
+    );
+}
+
+#[test]
+#[allow(dead_code)]
 fn test_bidirectional_half_closed_transitions() {
     let mut stream = new_idle_stream(TEST_STREAM_ID);
 
     // Start with OPEN state
     stream.send_headers(false).expect("IDLE → OPEN");
-    stream
-        .recv_headers(false, true, false)
-        .expect("establish bidirectional OPEN");
     assert_eq!(stream.state(), StreamState::Open);
 
     // Local side sends END_STREAM first
