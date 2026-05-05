@@ -1,0 +1,141 @@
+{
+  "contract_version": "http3-qpack-support-matrix-v1",
+  "bead_id": "asupersync-rckh3q",
+  "summary": {
+    "default_posture": "HTTP/3 uses static-only QPACK by default.",
+    "opt_in_posture": "Dynamic QPACK field-section references are supported through H3QpackMode::DynamicTableAllowed plus QpackContext.",
+    "parity_boundary": "Full QPACK encoder/decoder instruction-stream parity and blocked-stream scheduling are not advertised as shipped production parity."
+  },
+  "source_files": [
+    "src/http/h3_native.rs",
+    "tests/quic_h3_e2e_h3.rs",
+    "tests/conformance/h3_rfc9114/mod.rs",
+    "tests/conformance/h3_rfc9114/stream_types_tests.rs"
+  ],
+  "documentation_files": [
+    "README.md",
+    "docs/integration.md"
+  ],
+  "feature_matrix": [
+    {
+      "feature_id": "h3_settings_control_stream",
+      "status": "supported",
+      "support_class": "production_live",
+      "evidence": [
+        "H3Settings encode/decode preserves QPACK capacity, blocked-stream, max-field-section, DATAGRAM, Extended CONNECT, and unknown settings.",
+        "H3ConnectionState enforces duplicate SETTINGS and control-stream frame restrictions."
+      ],
+      "source_markers": [
+        "pub struct H3Settings",
+        "fn settings_roundtrip_and_unknown_preservation",
+        "duplicate SETTINGS on remote control stream"
+      ]
+    },
+    {
+      "feature_id": "h3_datagram_extended_connect",
+      "status": "supported_protocol_surface",
+      "support_class": "production_live",
+      "evidence": [
+        "SETTINGS_H3_DATAGRAM and SETTINGS_ENABLE_CONNECT_PROTOCOL are parsed, encoded, and validated at the native HTTP/3 protocol layer.",
+        "This matrix does not claim a full QUIC DATAGRAM transport implementation beyond the native HTTP/3 frame/settings surface."
+      ],
+      "source_markers": [
+        "H3_SETTING_ENABLE_CONNECT_PROTOCOL",
+        "H3_SETTING_H3_DATAGRAM",
+        "pub enable_connect_protocol",
+        "pub h3_datagram"
+      ]
+    },
+    {
+      "feature_id": "qpack_default_static_only",
+      "status": "supported_default",
+      "support_class": "production_live",
+      "evidence": [
+        "H3ConnectionConfig::default() sets H3QpackMode::StaticOnly.",
+        "Static-only mode rejects nonzero dynamic-table capacity and blocked-stream settings."
+      ],
+      "source_markers": [
+        "qpack_mode: H3QpackMode::StaticOnly",
+        "qpack blocked streams must be zero in static-only mode",
+        "dynamic qpack table disabled by policy"
+      ]
+    },
+    {
+      "feature_id": "qpack_dynamic_field_sections_opt_in",
+      "status": "supported_opt_in",
+      "support_class": "production_live_opt_in",
+      "evidence": [
+        "Dynamic QPACK field-section encoding and decoding are available when the caller supplies QpackContext and enables H3QpackMode::DynamicTableAllowed.",
+        "Tests cover dynamic table capacity, eviction, reference protection, required-insert-count bounds, and relative-index resolution."
+      ],
+      "source_markers": [
+        "DynamicTableAllowed",
+        "pub struct QpackContext",
+        "pub struct QpackDynamicTable",
+        "qpack_dynamic_decode_resolves_relative_index_with_nonzero_ric",
+        "qpack_conformance_dynamic_table_lru_eviction"
+      ]
+    },
+    {
+      "feature_id": "qpack_huffman_strings",
+      "status": "supported",
+      "support_class": "production_live",
+      "evidence": [
+        "QPACK string literals reuse the HPACK Huffman encoder/decoder and select Huffman when it is smaller.",
+        "Tests cover decoding Huffman strings in static mode."
+      ],
+      "source_markers": [
+        "hpack_huffman_encoded_size",
+        "hpack_encode_huffman",
+        "hpack_decode_huffman",
+        "qpack_wire_decodes_huffman_strings_in_static_mode"
+      ]
+    },
+    {
+      "feature_id": "qpack_uni_stream_types",
+      "status": "recognized_fail_closed",
+      "support_class": "fail_closed_boundary",
+      "evidence": [
+        "Remote QPACK encoder and decoder unidirectional streams are recognized and duplicate stream creation is rejected.",
+        "QPACK streams currently reject HTTP/3 frame mapping because QPACK instruction processing is a separate unadvertised parity boundary."
+      ],
+      "source_markers": [
+        "H3UniStreamType::QpackEncoder",
+        "H3UniStreamType::QpackDecoder",
+        "duplicate remote qpack encoder stream",
+        "qpack streams carry instructions, not h3 frames"
+      ]
+    },
+    {
+      "feature_id": "qpack_instruction_stream_state_machine",
+      "status": "deferred_not_advertised",
+      "support_class": "not_advertised_deferred",
+      "evidence": [
+        "The native HTTP/3 layer does not advertise full QPACK encoder/decoder instruction-stream parity.",
+        "Applications must not infer h3/quinn-level dynamic instruction processing from the presence of dynamic field-section helpers."
+      ],
+      "source_markers": [
+        "qpack streams carry instructions, not h3 frames"
+      ]
+    },
+    {
+      "feature_id": "qpack_blocked_stream_scheduling",
+      "status": "deferred_not_advertised",
+      "support_class": "not_advertised_deferred",
+      "evidence": [
+        "Blocked-stream SETTINGS are parsed and policy-checked, but no production blocked-stream scheduler is advertised in this support matrix.",
+        "Dynamic field-section decoding fails closed when Required Insert Count exceeds the current dynamic table state."
+      ],
+      "source_markers": [
+        "qpack_blocked_streams",
+        "required insert count exceeds dynamic table state"
+      ]
+    }
+  ],
+  "validation_commands": [
+    "python3 -m json.tool artifacts/http3_qpack_support_matrix_v1.json",
+    "rch exec -- rustfmt --edition 2024 --check tests/http3_qpack_support_matrix_contract.rs",
+    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_rckh3q_contract cargo test -p asupersync --test http3_qpack_support_matrix_contract --features test-internals,http3 -- --nocapture",
+    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_rckh3q_h3 cargo check -p asupersync --lib --features http3,test-internals"
+  ]
+}
