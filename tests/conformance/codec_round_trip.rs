@@ -1,13 +1,12 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Codec conformance — round-trip, fail-safe, and bounded-amplification
 //! invariants for `src/codec/*` (br-asupersync codec-conformance).
 //!
 //! # Properties verified
 //!
 //!   1. **Round-trip preserves bytes.** For every codec covered, encoding an
-//!      arbitrary item and then decoding the resulting buffer MUST recover
-//!      a byte-for-byte equal item. Tested with deterministic-seed PRNG so
+//!      non-empty item and then decoding the resulting buffer MUST recover
+//!      a byte-for-byte equal item. Empty passthrough input is covered as a
+//!      no-frame-yet decode case. Tested with deterministic-seed PRNG so
 //!      failures are reproducible.
 //!
 //!   2. **Decoder is fail-safe on truncated/malformed input.** Feeding
@@ -84,7 +83,7 @@ fn rand_line(seed: u64, max_len: usize) -> String {
 fn bytes_codec_round_trip_preserves_bytes() {
     let mut codec = BytesCodec::new();
     for seed in 1..=64u64 {
-        for len in [0, 1, 7, 31, 64, 100, 1_024, 8_192] {
+        for len in [1, 7, 31, 64, 100, 1_024, 8_192] {
             let payload = rand_payload(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15), len);
             let item = BytesMut::from(payload.as_slice());
 
