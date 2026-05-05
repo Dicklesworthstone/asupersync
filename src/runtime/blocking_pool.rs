@@ -833,19 +833,17 @@ fn blocking_pool_has_pending_work(inner: &BlockingPoolInner) -> bool {
 fn blocking_pool_affinity_metrics(
     inner: &BlockingPoolInner,
 ) -> BlockingPoolAffinityMetricsSnapshot {
-    let global_pending_count = inner.pending_count.load(Ordering::Relaxed).saturating_sub(
+    let global_pending_count =
         inner
-            .affinity
-            .as_ref()
-            .map(|affinity| {
+            .pending_count
+            .load(Ordering::Relaxed)
+            .saturating_sub(inner.affinity.as_ref().map_or(0, |affinity| {
                 affinity
                     .cohort_pending_counts
                     .iter()
                     .map(|count| count.load(Ordering::Relaxed))
                     .sum::<usize>()
-            })
-            .unwrap_or(0),
-    );
+            }));
 
     match inner.affinity.as_ref() {
         Some(affinity) => affinity.snapshot(global_pending_count),
@@ -868,12 +866,10 @@ fn pop_next_blocking_task(
 ) -> Option<(BlockingTask, BlockingTaskDequeueKind)> {
     let pop_global = || {
         inner.queue.pop().map(|task| {
-            let kind = if task.preferred_cohort.is_some() && inner.affinity.is_some() {
-                inner
-                    .affinity
-                    .as_ref()
-                    .expect("checked above")
-                    .record_spill_dispatch();
+            let kind = if let (Some(_), Some(affinity)) =
+                (task.preferred_cohort, inner.affinity.as_ref())
+            {
+                affinity.record_spill_dispatch();
                 BlockingTaskDequeueKind::Spill
             } else {
                 BlockingTaskDequeueKind::Global
@@ -1101,8 +1097,7 @@ fn blocking_worker_loop(inner: &BlockingPoolInner, assigned_cohort: Option<usize
             && inner
                 .affinity
                 .as_ref()
-                .map(|affinity| local_dispatch_streak < affinity.spill_check_interval)
-                .unwrap_or(false);
+                .is_some_and(|affinity| local_dispatch_streak < affinity.spill_check_interval);
         if let Some((task, dequeue_kind)) =
             pop_next_blocking_task(inner, assigned_cohort, prefer_local_turn)
         {
