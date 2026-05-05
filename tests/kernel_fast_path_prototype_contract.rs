@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Kernel fast path prototype contract invariants (AA-04.2).
 
 #![allow(missing_docs)]
