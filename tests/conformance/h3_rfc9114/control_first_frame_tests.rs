@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! HTTP/3 RFC 9114 Section 6.2.2.1 control stream first-frame conformance tests.
 //!
 //! Tests compliance with HTTP/3 control stream first-frame requirements:
@@ -517,8 +515,12 @@ fn create_h3_frame(frame_type: H3FrameType, payload: &[u8]) -> Vec<u8> {
     let payload = if payload.is_empty() {
         match frame_type {
             H3FrameType::Data | H3FrameType::Headers | H3FrameType::Settings => payload,
-            H3FrameType::PushPromise
-            | H3FrameType::Goaway
+            H3FrameType::PushPromise => {
+                encode_varint(0, &mut synthesized_payload).expect("default frame payload varint");
+                synthesized_payload.push(0x80);
+                synthesized_payload.as_slice()
+            }
+            H3FrameType::Goaway
             | H3FrameType::MaxPushId
             | H3FrameType::Reserved
             | H3FrameType::Reserved2 => {
@@ -716,4 +718,20 @@ fn control_first_frame_source_has_no_legacy_simulation_helper_name() {
         !source.contains(&forbidden),
         "control stream conformance should use the production-backed helper name"
     );
+}
+
+#[test]
+fn control_first_frame_results_pass() {
+    let results = run_control_first_frame_tests();
+    assert_eq!(results.len(), 5);
+
+    for result in results {
+        assert_eq!(
+            result.verdict,
+            TestVerdict::Pass,
+            "{} failed: {:?}",
+            result.test_id,
+            result.notes
+        );
+    }
 }

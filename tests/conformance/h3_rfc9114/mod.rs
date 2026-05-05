@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! HTTP/3 RFC 9114 conformance test suite.
 //!
 //! This module validates compliance with RFC 9114 requirements using systematic
@@ -7,7 +5,7 @@
 
 use serde::Serialize;
 use std::collections::HashSet;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 pub mod connection_preface_tests;
 
@@ -240,6 +238,27 @@ mod integration_tests {
             assert!(!result.test_id.is_empty());
             assert!(!result.description.is_empty());
         }
+
+        let failed_ids: Vec<_> = results
+            .iter()
+            .filter(|result| result.verdict == TestVerdict::Fail)
+            .map(|result| result.test_id.as_str())
+            .collect();
+        assert_eq!(failed_ids, Vec::<&str>::new());
+
+        let expected_failure_ids: Vec<_> = results
+            .iter()
+            .filter(|result| result.verdict == TestVerdict::ExpectedFailure)
+            .map(|result| result.test_id.as_str())
+            .collect();
+        assert_eq!(
+            expected_failure_ids,
+            vec![
+                "RFC9297-3-DATAGRAM-NEGOTIATION",
+                "RFC9114-8.1-GOAWAY-BIDIRECTIONAL"
+            ]
+        );
+
         assert!(
             results
                 .iter()
