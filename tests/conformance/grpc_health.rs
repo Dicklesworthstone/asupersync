@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! gRPC Health Checking Protocol v1 Conformance Tests
 //!
 //! This module implements metamorphic testing for the gRPC Health Checking
@@ -82,12 +80,23 @@ impl Arbitrary for TestServingStatus {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 enum HealthOperation {
-    SetStatus { service: String, status: TestServingStatus },
-    ClearStatus { service: String },
+    SetStatus {
+        service: String,
+        status: TestServingStatus,
+    },
+    ClearStatus {
+        service: String,
+    },
     ClearAll,
-    Check { service: String },
-    Watch { service: String },
-    SetServerStatus { status: TestServingStatus },
+    Check {
+        service: String,
+    },
+    Watch {
+        service: String,
+    },
+    SetServerStatus {
+        status: TestServingStatus,
+    },
 }
 
 impl Arbitrary for HealthOperation {
@@ -97,10 +106,16 @@ impl Arbitrary for HealthOperation {
     #[allow(dead_code)]
 
     fn arbitrary_with(_: Self::Parameters) -> Self::Strategy {
-        let service_names = SERVICE_NAMES.iter().map(|&s| s.to_string()).collect::<Vec<_>>();
+        let service_names = SERVICE_NAMES
+            .iter()
+            .map(|&s| s.to_string())
+            .collect::<Vec<_>>();
 
         prop_oneof![
-            (prop::sample::select(service_names.clone()), any::<TestServingStatus>())
+            (
+                prop::sample::select(service_names.clone()),
+                any::<TestServingStatus>()
+            )
                 .prop_map(|(service, status)| HealthOperation::SetStatus { service, status }),
             prop::sample::select(service_names.clone())
                 .prop_map(|service| HealthOperation::ClearStatus { service }),
@@ -172,13 +187,17 @@ impl HealthTestContext {
 
     #[allow(dead_code)]
 
-    fn compute_server_status(&self, service_statuses: &HashMap<String, ServingStatus>) -> ServingStatus {
+    fn compute_server_status(
+        &self,
+        service_statuses: &HashMap<String, ServingStatus>,
+    ) -> ServingStatus {
         // Server status computation per gRPC health protocol
         if let Some(explicit_status) = service_statuses.get("") {
             *explicit_status
         } else if service_statuses.is_empty() {
             ServingStatus::ServiceUnknown
-        } else if service_statuses.iter()
+        } else if service_statuses
+            .iter()
             .filter(|(k, _)| !k.is_empty()) // Exclude explicit server status
             .all(|(_, status)| status.is_healthy())
         {
@@ -214,13 +233,14 @@ fn mr_check_operation_idempotence(ctx: &HealthTestContext) {
     let initial_version = ctx.service.version();
 
     // Collect all services mentioned in operations
-    let mut services_to_check: HashSet<String> = ctx.initial_operations
+    let mut services_to_check: HashSet<String> = ctx
+        .initial_operations
         .iter()
         .filter_map(|op| match op {
-            HealthOperation::SetStatus { service, .. } |
-            HealthOperation::ClearStatus { service } |
-            HealthOperation::Check { service } |
-            HealthOperation::Watch { service } => Some(service.clone()),
+            HealthOperation::SetStatus { service, .. }
+            | HealthOperation::ClearStatus { service }
+            | HealthOperation::Check { service }
+            | HealthOperation::Watch { service } => Some(service.clone()),
             _ => None,
         })
         .collect();
@@ -233,7 +253,6 @@ fn mr_check_operation_idempotence(ctx: &HealthTestContext) {
     for service in &services_to_check {
         let request = HealthCheckRequest::new(service);
         let result = ctx.service.check(&request);
-        check_results.push((service.clone(), result));
 
         // Check again immediately - should get same result
         let result2 = ctx.service.check(&request);
@@ -244,7 +263,8 @@ fn mr_check_operation_idempotence(ctx: &HealthTestContext) {
                 service
             ),
             (Err(err1), Err(err2)) => assert_eq!(
-                err1.code(), err2.code(),
+                err1.code(),
+                err2.code(),
                 "Check idempotence violation: service '{}' returned different error codes on repeated calls",
                 service
             ),
@@ -253,11 +273,13 @@ fn mr_check_operation_idempotence(ctx: &HealthTestContext) {
                 service
             ),
         }
+        check_results.push((service.clone(), result));
     }
 
     // Version should not change from read operations
     assert_eq!(
-        ctx.service.version(), initial_version,
+        ctx.service.version(),
+        initial_version,
         "Check operations must not modify service version"
     );
 
@@ -282,7 +304,10 @@ fn mr_check_operation_idempotence(ctx: &HealthTestContext) {
                             service, response.status, expected_status
                         );
                     } else {
-                        panic!("Service '{}' check succeeded but service not registered", service);
+                        panic!(
+                            "Service '{}' check succeeded but service not registered",
+                            service
+                        );
                     }
                 }
             }
@@ -291,8 +316,9 @@ fn mr_check_operation_idempotence(ctx: &HealthTestContext) {
                     panic!("Server status check should never fail");
                 } else {
                     assert_eq!(
-                        status.code(), Code::NotFound,
-                        "Check for unregistered service '{}' should return NOT_FOUND",
+                        status.code(),
+                        Code::PermissionDenied,
+                        "Check for unregistered service '{}' should fail closed without revealing topology",
                         service
                     );
                     assert!(
@@ -317,7 +343,8 @@ fn mr_watch_status_change_detection(ctx: &HealthTestContext) {
     let _initial_statuses = ctx.apply_operations(&ctx.initial_operations);
 
     // Get a stable service name from operations or use a default
-    let target_service = ctx.initial_operations
+    let target_service = ctx
+        .initial_operations
         .iter()
         .find_map(|op| match op {
             HealthOperation::SetStatus { service, .. } => Some(service.clone()),
@@ -325,11 +352,18 @@ fn mr_watch_status_change_detection(ctx: &HealthTestContext) {
         })
         .unwrap_or_else(|| SERVICE_NAMES[0].to_string());
 
-    let other_service = SERVICE_NAMES[1].to_string();
+    let other_service = SERVICE_NAMES
+        .iter()
+        .copied()
+        .find(|service| *service != target_service)
+        .unwrap_or(SERVICE_NAMES[1])
+        .to_string();
 
     // Set up initial state
-    ctx.service.set_status(&target_service, ServingStatus::Serving);
-    ctx.service.set_status(&other_service, ServingStatus::Serving);
+    ctx.service
+        .set_status(&target_service, ServingStatus::Serving);
+    ctx.service
+        .set_status(&other_service, ServingStatus::Serving);
 
     // Create watchers
     let mut target_watcher = ctx.service.watch(&target_service);
@@ -342,7 +376,8 @@ fn mr_watch_status_change_detection(ctx: &HealthTestContext) {
     let initial_server_status = server_watcher.status();
 
     // Change target service status
-    ctx.service.set_status(&target_service, ServingStatus::NotServing);
+    ctx.service
+        .set_status(&target_service, ServingStatus::NotServing);
 
     // Check watcher responses
     let target_changed = target_watcher.changed();
@@ -355,7 +390,8 @@ fn mr_watch_status_change_detection(ctx: &HealthTestContext) {
         "Target service watcher failed to detect status change"
     );
     assert_eq!(
-        target_watcher.status(), ServingStatus::NotServing,
+        target_watcher.status(),
+        ServingStatus::NotServing,
         "Target service watcher reports incorrect status after change"
     );
 
@@ -365,7 +401,8 @@ fn mr_watch_status_change_detection(ctx: &HealthTestContext) {
         "Other service watcher incorrectly detected unrelated status change"
     );
     assert_eq!(
-        other_watcher.status(), initial_other_status,
+        other_watcher.status(),
+        initial_other_status,
         "Other service watcher status changed despite no updates to that service"
     );
 
@@ -375,12 +412,14 @@ fn mr_watch_status_change_detection(ctx: &HealthTestContext) {
         "Server watcher failed to detect aggregate status change"
     );
     assert_eq!(
-        server_watcher.status(), ServingStatus::NotServing,
+        server_watcher.status(),
+        ServingStatus::NotServing,
         "Server watcher reports incorrect aggregate status"
     );
 
     // Reset and test the inverse
-    ctx.service.set_status(&target_service, ServingStatus::Serving);
+    ctx.service
+        .set_status(&target_service, ServingStatus::Serving);
 
     let target_changed_back = target_watcher.changed();
     let other_still_unchanged = other_watcher.changed();
@@ -403,9 +442,9 @@ fn mr_watch_status_change_detection(ctx: &HealthTestContext) {
 /// MR3: Status Code Error Semantics
 ///
 /// The gRPC health check protocol must return appropriate status codes:
-/// - NOT_FOUND for unregistered services
+/// - PERMISSION_DENIED for unregistered services to avoid topology leaks
 /// - OK for registered services (regardless of health status)
-/// - Server status checks never return NOT_FOUND
+/// - Server status checks never return PERMISSION_DENIED
 #[allow(dead_code)]
 fn mr_status_code_error_semantics(ctx: &HealthTestContext) {
     // Apply initial operations
@@ -413,20 +452,23 @@ fn mr_status_code_error_semantics(ctx: &HealthTestContext) {
 
     // Test registered services
     for (service, _) in &expected_statuses {
-        if !service.is_empty() { // Skip explicit server status entries
+        if !service.is_empty() {
+            // Skip explicit server status entries
             let request = HealthCheckRequest::new(service);
             let result = ctx.service.check(&request);
 
             assert!(
                 result.is_ok(),
                 "Check for registered service '{}' should succeed, got error: {:?}",
-                service, result.err()
+                service,
+                result.err()
             );
         }
     }
 
     // Test unregistered services
-    let unregistered_services = SERVICE_NAMES.iter()
+    let unregistered_services = SERVICE_NAMES
+        .iter()
         .filter(|&&name| !expected_statuses.contains_key(name))
         .take(3); // Test a few unregistered services
 
@@ -442,19 +484,21 @@ fn mr_status_code_error_semantics(ctx: &HealthTestContext) {
 
         let error = result.unwrap_err();
         assert_eq!(
-            error.code(), Code::NotFound,
-            "Check for unregistered service '{}' should return NOT_FOUND, got {:?}",
-            service, error.code()
+            error.code(),
+            Code::PermissionDenied,
+            "Check for unregistered service '{}' should fail closed without revealing topology, got {:?}",
+            service,
+            error.code()
         );
 
         assert!(
-            error.message().contains(service),
-            "Error message should mention the service name: {}",
+            error.message() == "health check access denied",
+            "Error message must not reveal the service name: {}",
             error.message()
         );
     }
 
-    // Test server status check (should never return NOT_FOUND)
+    // Test server status check (should never return the missing-service error)
     let server_request = HealthCheckRequest::server();
     let server_result = ctx.service.check(&server_request);
 
@@ -466,12 +510,13 @@ fn mr_status_code_error_semantics(ctx: &HealthTestContext) {
 
     let server_response = server_result.unwrap();
     match server_response.status {
-        ServingStatus::ServiceUnknown | ServingStatus::Serving | ServingStatus::NotServing => {
+        ServingStatus::ServiceUnknown
+        | ServingStatus::Unknown
+        | ServingStatus::Serving
+        | ServingStatus::NotServing => {
             // All valid server status responses
         }
-        status => panic!(
-            "Server status check returned invalid status: {:?}", status
-        ),
+        status => panic!("Server status check returned invalid status: {:?}", status),
     }
 }
 
@@ -503,8 +548,8 @@ fn mr_per_service_independence(ctx: &HealthTestContext) {
     let mut modified_services = HashSet::new();
     for op in &ctx.initial_operations {
         match op {
-            HealthOperation::SetStatus { service, .. } |
-            HealthOperation::ClearStatus { service } => {
+            HealthOperation::SetStatus { service, .. }
+            | HealthOperation::ClearStatus { service } => {
                 modified_services.insert(service.clone());
             }
             HealthOperation::ClearAll => {
@@ -519,22 +564,28 @@ fn mr_per_service_independence(ctx: &HealthTestContext) {
     // Verify independence: unmodified services should retain their status
     if !modified_services.contains(service_a) {
         assert_eq!(
-            ctx.service.get_status(service_a), initial_a,
-            "Service '{}' status changed despite not being modified", service_a
+            ctx.service.get_status(service_a),
+            initial_a,
+            "Service '{}' status changed despite not being modified",
+            service_a
         );
     }
 
     if !modified_services.contains(service_b) {
         assert_eq!(
-            ctx.service.get_status(service_b), initial_b,
-            "Service '{}' status changed despite not being modified", service_b
+            ctx.service.get_status(service_b),
+            initial_b,
+            "Service '{}' status changed despite not being modified",
+            service_b
         );
     }
 
     if !modified_services.contains(service_c) {
         assert_eq!(
-            ctx.service.get_status(service_c), initial_c,
-            "Service '{}' status changed despite not being modified", service_c
+            ctx.service.get_status(service_c),
+            initial_c,
+            "Service '{}' status changed despite not being modified",
+            service_c
         );
     }
 
@@ -547,7 +598,8 @@ fn mr_per_service_independence(ctx: &HealthTestContext) {
     let mut watcher_test = ctx.service.watch(test_service);
 
     // Change unrelated service
-    ctx.service.set_status(test_service, ServingStatus::NotServing);
+    ctx.service
+        .set_status(test_service, ServingStatus::NotServing);
 
     let a_changed = watcher_a.changed();
     let test_changed = watcher_test.changed();
@@ -630,7 +682,8 @@ fn mr_shutdown_cleanup_semantics(ctx: &HealthTestContext) {
 
         // Version should not change on non-final drop
         assert_eq!(
-            ctx.service.version(), version_after_set,
+            ctx.service.version(),
+            version_after_set,
             "Version should not increment on non-final reporter drop"
         );
 
@@ -641,7 +694,6 @@ fn mr_shutdown_cleanup_semantics(ctx: &HealthTestContext) {
             Some(ServingStatus::NotServing),
             "Remaining reporter should still control service status"
         );
-
     } // Final reporter dropped here
 
     // Service should be cleared after final reporter drop
@@ -739,24 +791,30 @@ mod conformance_tests {
 
         // Server status with no services should be SERVICE_UNKNOWN
         let request = HealthCheckRequest::server();
-        let response = service.check(&request).expect("Server check should succeed");
+        let response = service
+            .check(&request)
+            .expect("Server check should succeed");
         assert_eq!(response.status, ServingStatus::ServiceUnknown);
 
         // Add a healthy service
         service.set_status("test.Service", ServingStatus::Serving);
-        let response = service.check(&request).expect("Server check should succeed");
+        let response = service
+            .check(&request)
+            .expect("Server check should succeed");
         assert_eq!(response.status, ServingStatus::Serving);
 
         // Check specific service
         let service_request = HealthCheckRequest::new("test.Service");
-        let response = service.check(&service_request).expect("Service check should succeed");
+        let response = service
+            .check(&service_request)
+            .expect("Service check should succeed");
         assert_eq!(response.status, ServingStatus::Serving);
 
         // Check unregistered service
         let unknown_request = HealthCheckRequest::new("unknown.Service");
         let result = service.check(&unknown_request);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().code(), Code::NotFound);
+        assert_eq!(result.unwrap_err().code(), Code::PermissionDenied);
     }
 
     #[test]

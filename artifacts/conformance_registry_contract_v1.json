@@ -3,8 +3,8 @@
   "bead_id": "asupersync-rckcnf",
   "source_registry": "tests/conformance/mod.rs",
   "readme_anchor": "README.md#conformance-suite",
-  "active_module_count": 67,
-  "dormant_module_count": 25,
+  "active_module_count": 69,
+  "dormant_module_count": 23,
   "count_policy": "Counts are machine-checked against tests/conformance/mod.rs. README prose must point here instead of hardcoding active or dormant counts.",
   "active_modules": [
     "aggregator_flush",
@@ -54,6 +54,8 @@
     "trace_replay_idempotency_metamorphic",
     "broadcast",
     "consistent_hash_ring",
+    "grpc_deadline",
+    "grpc_health",
     "grpc_max_message_size",
     "grpc_message_framing",
     "grpc_status_mapping",
@@ -182,22 +184,6 @@
       "inline_followup": "tests/conformance/mod.rs audit-recovered orphan list",
       "reason": "The module is bit-rotted against the current DNS API.",
       "retention_reason": "File deletion is forbidden; retained for DNS cache repair."
-    },
-    {
-      "module": "grpc_deadline",
-      "line": 120,
-      "disposition": "intentionally_deferred_inline_followup",
-      "inline_followup": "tests/conformance/mod.rs audit-recovered orphan list",
-      "reason": "The module depends on removed cx::test_cx and renamed time helpers.",
-      "retention_reason": "File deletion is forbidden; retained for gRPC deadline repair."
-    },
-    {
-      "module": "grpc_health",
-      "line": 121,
-      "disposition": "intentionally_deferred_inline_followup",
-      "inline_followup": "tests/conformance/mod.rs audit-recovered orphan list",
-      "reason": "The module is bit-rotted against the current grpc::health API.",
-      "retention_reason": "File deletion is forbidden; retained for gRPC health repair."
     },
     {
       "module": "grpc_status",

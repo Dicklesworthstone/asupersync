@@ -78,6 +78,8 @@ pub mod trace_replay_idempotency_metamorphic;
 //
 pub mod broadcast;
 pub mod consistent_hash_ring;
+pub mod grpc_deadline;
+pub mod grpc_health;
 pub mod grpc_max_message_size;
 pub mod grpc_message_framing;
 pub mod grpc_status_mapping;
@@ -125,8 +127,8 @@ pub mod tls_sni;
 // pub mod actor_mailbox_protocol;   // tests/conformance internal — broken imports against current API
 // pub mod broadcast_lag;            // asupersync::cx::test_cx + asupersync::time::{Duration} renamed/removed
 // pub mod dns_cache;                // bit-rot vs current dns API
-// pub mod grpc_deadline;            // asupersync::cx::test_cx + asupersync::time::{Duration, Instant}
-// pub mod grpc_health;              // bit-rot vs current grpc::health API
+// grpc_deadline and grpc_health were repaired by br-asupersync-pfvsch and are
+// wired as live modules above.
 // pub mod grpc_status;              // bit-rot vs current grpc::status API
 // pub mod h3_settings;              // bit-rot vs current h3 API (Setting enum is private)
 // pub mod http_h1_chunked_rfc9112;  // crate::http and crate::io reorganised

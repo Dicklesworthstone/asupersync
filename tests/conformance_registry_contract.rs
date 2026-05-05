@@ -82,7 +82,7 @@ fn log_contract_event(scenario_id: &str, fields: &[(&str, String)]) {
 
 #[test]
 fn registry_parser_handles_active_dormant_blank_and_duplicate_rows() {
-    let fixture = r#"
+    let fixture = r"
         pub mod active_one;
         pub mod active_one;
         // pub mod dormant_one;
@@ -91,7 +91,7 @@ fn registry_parser_handles_active_dormant_blank_and_duplicate_rows() {
         pub mod active_two; // trailing note
         pub(crate) mod private_module;
         // pub crate::not_module;
-    "#;
+    ";
 
     let (active, dormant) = registry_modules_from_str(fixture);
     assert_eq!(
@@ -111,7 +111,7 @@ fn registry_parser_handles_active_dormant_blank_and_duplicate_rows() {
             ("dormant_count", dormant.len().to_string()),
             ("docs_checked", "none".to_string()),
             ("verdict", "pass".to_string()),
-            ("first_failure", "".to_string()),
+            ("first_failure", String::new()),
         ],
     );
 }
@@ -205,7 +205,7 @@ fn conformance_registry_contract_matches_live_mod_rs() {
                         .to_string(),
                 ),
                 ("verdict", "pass".to_string()),
-                ("first_failure", "".to_string()),
+                ("first_failure", String::new()),
             ],
         );
     }
@@ -222,7 +222,7 @@ fn conformance_registry_contract_matches_live_mod_rs() {
             ),
             ("docs_checked", "README.md".to_string()),
             ("verdict", "pass".to_string()),
-            ("first_failure", "".to_string()),
+            ("first_failure", String::new()),
         ],
     );
 }
@@ -258,7 +258,7 @@ fn readme_uses_checked_contract_instead_of_stale_counts() {
                 "artifacts/conformance_registry_contract_v1.json".to_string(),
             ),
             ("verdict", "pass".to_string()),
-            ("first_failure", "".to_string()),
+            ("first_failure", String::new()),
         ],
     );
 }
