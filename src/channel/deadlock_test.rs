@@ -1,4 +1,3 @@
-#![allow(clippy::all)]
 use super::mpsc::{Sender, channel};
 use crate::cx::Cx;
 use std::future::Future;
