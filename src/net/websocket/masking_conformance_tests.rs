@@ -1,4 +1,3 @@
-#![allow(clippy::all)]
 //! WebSocket masking-key conformance tests (RFC 6455 §5.3).
 //!
 //! This module provides comprehensive golden tests validating the WebSocket
@@ -54,7 +53,7 @@ mod tests {
     use crate::codec::{Decoder, Encoder};
     use crate::util::EntropySource;
 
-    /// Mock entropy source for deterministic testing of masking behavior.
+    /// Deterministic entropy source for reproducible masking behavior tests.
     #[derive(Debug)]
     struct DeterministicEntropy {
         sequence: [u8; 16],
@@ -378,7 +377,7 @@ mod tests {
         let mut buf = BytesMut::new();
         buf.put_u8(0x81); // FIN=1, opcode=Text
         buf.put_u8(0x85); // MASK=1, len=5 (incorrectly masked!)
-        buf.put_slice(&[0x12, 0x34, 0x56, 0x78]); // fake mask key
+        buf.put_slice(&[0x12, 0x34, 0x56, 0x78]); // deterministic mask key
         buf.put_slice(b"hello"); // payload (would be masked)
 
         let result = client_codec.decode(&mut buf);
