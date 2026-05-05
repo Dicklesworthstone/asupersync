@@ -40,6 +40,49 @@
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
+enum ExpectedCopyInEnd<'a> {
+    Done,
+    Fail(&'a str),
+}
+
+fn validate_copy_in_sequence_with_production_parser(
+    stream: &[u8],
+    expected_chunks: &[Vec<u8>],
+    expected_end: ExpectedCopyInEnd<'_>,
+) -> Result<(), String> {
+    #[cfg(feature = "test-internals")]
+    {
+        use asupersync::database::postgres::{FuzzCopyInEnd, fuzz_parse_copy_in_sequence};
+
+        let parsed = fuzz_parse_copy_in_sequence(stream)
+            .map_err(|err| format!("production COPY IN parser rejected sequence: {err}"))?;
+        if parsed.copy_data_chunks != expected_chunks {
+            return Err(format!(
+                "production COPY IN parser chunk mismatch: expected {:?}, got {:?}",
+                expected_chunks, parsed.copy_data_chunks
+            ));
+        }
+
+        let expected = match expected_end {
+            ExpectedCopyInEnd::Done => FuzzCopyInEnd::Done,
+            ExpectedCopyInEnd::Fail(message) => FuzzCopyInEnd::Fail(message.to_string()),
+        };
+        if parsed.end != expected {
+            return Err(format!(
+                "production COPY IN parser terminal mismatch: expected {:?}, got {:?}",
+                expected, parsed.end
+            ));
+        }
+    }
+
+    #[cfg(not(feature = "test-internals"))]
+    {
+        let _ = (stream, expected_chunks, expected_end);
+    }
+
+    Ok(())
+}
+
 /// Test result for a single COPY protocol conformance requirement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(dead_code)]
@@ -753,6 +796,27 @@ impl PostgresCopyConformanceHarness {
             };
         }
 
+        let mut production_sequence = Vec::new();
+        for chunk in &state.chunks {
+            production_sequence.extend_from_slice(&build_copy_data_message(chunk));
+        }
+        production_sequence.extend_from_slice(&copy_done_msg);
+        if let Err(error) = validate_copy_in_sequence_with_production_parser(
+            &production_sequence,
+            &state.chunks,
+            ExpectedCopyInEnd::Done,
+        ) {
+            return PostgresCopyResult {
+                test_id: "mr3_copy_done_terminates_copy_in".to_string(),
+                description: "CopyDone must terminate COPY IN operation".to_string(),
+                category: TestCategory::CopyTermination,
+                requirement_level: RequirementLevel::Must,
+                verdict: TestVerdict::Fail,
+                error_message: Some(error),
+                execution_time_ms: start.elapsed().as_millis() as u64,
+            };
+        }
+
         // Simulate completion
         state.complete();
 
@@ -852,6 +916,27 @@ impl PostgresCopyConformanceHarness {
                 requirement_level: RequirementLevel::Must,
                 verdict: TestVerdict::Fail,
                 error_message: Some("CopyFail message not null-terminated".to_string()),
+                execution_time_ms: start.elapsed().as_millis() as u64,
+            };
+        }
+
+        let mut production_sequence = Vec::new();
+        for chunk in &state.chunks {
+            production_sequence.extend_from_slice(&build_copy_data_message(chunk));
+        }
+        production_sequence.extend_from_slice(&copy_fail_msg);
+        if let Err(error) = validate_copy_in_sequence_with_production_parser(
+            &production_sequence,
+            &state.chunks,
+            ExpectedCopyInEnd::Fail(error_message),
+        ) {
+            return PostgresCopyResult {
+                test_id: "mr4_copy_fail_rolls_back".to_string(),
+                description: "CopyFail must roll back COPY IN operation".to_string(),
+                category: TestCategory::ErrorHandling,
+                requirement_level: RequirementLevel::Must,
+                verdict: TestVerdict::Fail,
+                error_message: Some(error),
                 execution_time_ms: start.elapsed().as_millis() as u64,
             };
         }
