@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Contract invariants for the packaged bootstrap/load/reload harness
 //! (asupersync-3qv04.8.4.1).
 
