@@ -34,7 +34,751 @@ use crate::lab::runtime::{CrashpackLink, LabRuntime, SporkHarnessReport};
 use crate::lab::spork_harness::{ScenarioRunnerError, SporkScenarioConfig, SporkScenarioRunner};
 use crate::trace::{TraceBuffer, TraceBufferHandle, TraceEvent};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+/// Stable schema for deterministic replay plans synthesized from coordination packs.
+pub const COORDINATION_PRESSURE_REPLAY_SCHEMA_VERSION: &str =
+    "asupersync.coordination-pressure-replay.v1";
+
+const COORDINATION_REQUIRED_FAMILIES: [&str; 7] = [
+    "tracker_lock_contention",
+    "concurrent_rch_proofs",
+    "fail_closed_dirty_frontier",
+    "artifact_retrieval_tail",
+    "proof_runner_fanout",
+    "stale_in_progress_reclaim",
+    "coordination_latency_burst",
+];
+
+/// Runtime workload expansion pack emitted by the coordination synthesizer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoordinationWorkloadExpansionPack {
+    /// Expansion-pack schema version.
+    pub schema_version: String,
+    /// Stable expansion pack id.
+    pub pack_id: String,
+    /// Whether the pack mutates the core workload denominator.
+    pub baseline_denominator: bool,
+    /// Hash of the redacted source coordination bundle.
+    pub source_bundle_hash: String,
+    /// Source collector run id.
+    pub source_run_id: String,
+    /// Missing scenario families detected by the synthesizer.
+    #[serde(default)]
+    pub missing_scenario_families: Vec<String>,
+    /// Synthesized coordination workload entries.
+    #[serde(default)]
+    pub workloads: Vec<CoordinationWorkloadExpansion>,
+    /// Refused bundle records emitted by the synthesizer.
+    #[serde(default)]
+    pub refused_bundles: Vec<CoordinationRefusedBundle>,
+}
+
+/// One synthesized coordination workload entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoordinationWorkloadExpansion {
+    /// Runtime workload id.
+    pub workload_id: String,
+    /// Coordination scenario family.
+    pub scenario_family: String,
+    /// Scenario id used in logs and replay artifacts.
+    pub scenario_id: String,
+    /// Dimensions that become semantic runtime pressure.
+    pub semantic_pressure: Vec<String>,
+    /// Redacted context retained only for provenance and replay explanation.
+    pub provenance_only_context: Vec<String>,
+    /// Accepted source events folded into this workload.
+    pub source_event_count: usize,
+    /// Stable event hashes backing this workload.
+    pub source_hashes: Vec<String>,
+    /// Source bundle hash copied onto the workload.
+    pub source_bundle_hash: String,
+    /// Replay command for this workload.
+    pub replay_command: String,
+    /// Artifact globs expected from replay.
+    #[serde(default)]
+    pub expected_artifact_globs: Vec<String>,
+}
+
+/// Refused coordination bundle metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoordinationRefusedBundle {
+    /// Source run id that was refused.
+    pub source_run_id: String,
+    /// Stable refusal reason.
+    pub refusal_reason: String,
+    /// Scenario families whose absence caused refusal.
+    #[serde(default)]
+    pub missing_scenario_families: Vec<String>,
+}
+
+/// Deterministic replay plan for coordination-derived workload pressure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoordinationPressureReplayPlan {
+    /// Replay-plan schema version.
+    pub schema_version: String,
+    /// Seed used for deterministic replay stimulus synthesis.
+    pub seed: u64,
+    /// Source bundle hash backing all stimuli.
+    pub source_bundle_hash: String,
+    /// Canonicalized per-family stimuli.
+    pub stimuli: Vec<CoordinationReplayStimulus>,
+    /// Structured replay log summary.
+    pub log: CoordinationReplayLog,
+}
+
+/// One deterministic coordination replay stimulus.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoordinationReplayStimulus {
+    /// Runtime workload id that produced the stimulus.
+    pub workload_id: String,
+    /// Scenario id carried into replay logs.
+    pub scenario_id: String,
+    /// Coordination scenario family.
+    pub scenario_family: String,
+    /// Accepted source event count.
+    pub source_event_count: usize,
+    /// Synthesized task pressure.
+    pub synthesized_task_count: usize,
+    /// Synthesized queue pressure.
+    pub queue_depth: usize,
+    /// Synthesized timer pressure.
+    pub timer_ticks: usize,
+    /// Synthesized cancellation pressure.
+    pub cancel_count: usize,
+    /// Synthesized artifact-delay pressure.
+    pub artifact_delay_ticks: usize,
+    /// Stable source event hashes.
+    pub source_hashes: Vec<String>,
+    /// First fail-closed signal represented by this stimulus, if any.
+    pub first_failure_or_refusal: Option<String>,
+}
+
+/// Structured log emitted for a coordination replay plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoordinationReplayLog {
+    /// Aggregate replay scenario id.
+    pub scenario_id: String,
+    /// Deterministic replay seed.
+    pub seed: u64,
+    /// Source bundle hash.
+    pub source_bundle_hash: String,
+    /// Total accepted source event count.
+    pub event_count: usize,
+    /// Total synthesized task pressure.
+    pub synthesized_task_count: usize,
+    /// Total queue pressure.
+    pub queue_dimension: usize,
+    /// Total timer pressure.
+    pub timer_dimension: usize,
+    /// Total cancellation pressure.
+    pub cancel_dimension: usize,
+    /// Total artifact-delay pressure.
+    pub artifact_delay_dimension: usize,
+    /// Stable trace fingerprint for the canonical stimuli.
+    pub trace_fingerprint: u64,
+    /// Number of stimuli removed during minimization.
+    pub minimization_steps: usize,
+    /// First failure or refusal preserved for counterexample diagnosis.
+    pub first_failure_or_refusal: Option<String>,
+}
+
+/// Coordination replay synthesis failures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoordinationReplayError {
+    /// The input pack used an unsupported schema.
+    UnsupportedPackSchema {
+        /// Schema that was expected.
+        expected: &'static str,
+        /// Schema that was found.
+        found: String,
+    },
+    /// The source bundle hash was empty or not a sha256 reference.
+    InvalidSourceBundleHash {
+        /// Hash value that failed validation.
+        found: String,
+    },
+    /// Required coordination scenario families were absent.
+    MissingScenarioDimensions {
+        /// Missing scenario families.
+        missing: Vec<String>,
+    },
+    /// A workload used an unsupported scenario family.
+    UnsupportedScenarioFamily {
+        /// Unsupported family name.
+        family: String,
+    },
+    /// A workload contained a scenario field that the replay hook does not model.
+    UnsupportedScenarioField {
+        /// Workload whose field failed validation.
+        workload_id: String,
+        /// Field that carried the unsupported value.
+        field: &'static str,
+        /// Unsupported field value.
+        value: String,
+    },
+    /// A workload omitted a scenario field required by its family mapping.
+    MissingScenarioField {
+        /// Workload whose field failed validation.
+        workload_id: String,
+        /// Field with missing expected values.
+        field: &'static str,
+        /// Missing expected values.
+        missing: Vec<String>,
+    },
+    /// A workload source bundle hash did not match the pack hash.
+    MismatchedSourceBundleHash {
+        /// Workload whose bundle hash failed validation.
+        workload_id: String,
+        /// Source bundle hash from the pack.
+        expected: String,
+        /// Source bundle hash from the workload.
+        found: String,
+    },
+    /// A workload id was empty.
+    EmptyWorkloadId,
+    /// A workload did not declare semantic pressure dimensions.
+    EmptySemanticPressure {
+        /// Workload whose dimensions were empty.
+        workload_id: String,
+    },
+    /// A workload did not declare provenance-only context.
+    EmptyProvenanceContext {
+        /// Workload whose context was empty.
+        workload_id: String,
+    },
+    /// A workload had no accepted source events.
+    ZeroSourceEvents {
+        /// Workload with no accepted events.
+        workload_id: String,
+    },
+    /// A workload source hash was empty or unstable.
+    InvalidSourceHash {
+        /// Workload whose hash failed validation.
+        workload_id: String,
+        /// Hash value that failed validation.
+        found: String,
+    },
+}
+
+impl std::fmt::Display for CoordinationReplayError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsupportedPackSchema { expected, found } => {
+                write!(
+                    f,
+                    "unsupported coordination pack schema: expected {expected}, found {found}"
+                )
+            }
+            Self::InvalidSourceBundleHash { found } => {
+                write!(f, "invalid coordination source bundle hash: {found}")
+            }
+            Self::MissingScenarioDimensions { missing } => {
+                write!(
+                    f,
+                    "missing coordination scenario dimensions: {}",
+                    missing.join(",")
+                )
+            }
+            Self::UnsupportedScenarioFamily { family } => {
+                write!(f, "unsupported coordination scenario family: {family}")
+            }
+            Self::UnsupportedScenarioField {
+                workload_id,
+                field,
+                value,
+            } => write!(
+                f,
+                "coordination workload {workload_id} has unsupported {field} value: {value}"
+            ),
+            Self::MissingScenarioField {
+                workload_id,
+                field,
+                missing,
+            } => write!(
+                f,
+                "coordination workload {workload_id} is missing {field} values: {}",
+                missing.join(",")
+            ),
+            Self::MismatchedSourceBundleHash {
+                workload_id,
+                expected,
+                found,
+            } => write!(
+                f,
+                "coordination workload {workload_id} has source bundle hash {found}, expected {expected}"
+            ),
+            Self::EmptyWorkloadId => write!(f, "coordination workload id must not be empty"),
+            Self::EmptySemanticPressure { workload_id } => {
+                write!(
+                    f,
+                    "coordination workload {workload_id} has no semantic pressure dimensions"
+                )
+            }
+            Self::EmptyProvenanceContext { workload_id } => {
+                write!(
+                    f,
+                    "coordination workload {workload_id} has no provenance-only context"
+                )
+            }
+            Self::ZeroSourceEvents { workload_id } => {
+                write!(
+                    f,
+                    "coordination workload {workload_id} has no accepted source events"
+                )
+            }
+            Self::InvalidSourceHash { workload_id, found } => {
+                write!(
+                    f,
+                    "coordination workload {workload_id} has invalid source hash: {found}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for CoordinationReplayError {}
+
+/// Synthesize deterministic lab replay stimuli from a coordination expansion pack.
+pub fn synthesize_coordination_pressure_replay(
+    seed: u64,
+    pack: &CoordinationWorkloadExpansionPack,
+) -> Result<CoordinationPressureReplayPlan, CoordinationReplayError> {
+    validate_coordination_pack(seed, pack)?;
+
+    let mut workloads = pack.workloads.clone();
+    for workload in &mut workloads {
+        workload.source_hashes.sort();
+        workload.source_hashes.dedup();
+    }
+    workloads.sort_by(|left, right| {
+        (
+            left.scenario_family.as_str(),
+            left.workload_id.as_str(),
+            left.source_hashes.as_slice(),
+        )
+            .cmp(&(
+                right.scenario_family.as_str(),
+                right.workload_id.as_str(),
+                right.source_hashes.as_slice(),
+            ))
+    });
+
+    let mut stimuli = Vec::with_capacity(workloads.len());
+    for workload in &workloads {
+        stimuli.push(stimulus_from_coordination_workload(workload)?);
+    }
+
+    let log = coordination_replay_log(
+        seed,
+        &pack.source_bundle_hash,
+        &stimuli,
+        0,
+        first_failure(&stimuli),
+    );
+
+    Ok(CoordinationPressureReplayPlan {
+        schema_version: COORDINATION_PRESSURE_REPLAY_SCHEMA_VERSION.to_string(),
+        seed,
+        source_bundle_hash: pack.source_bundle_hash.clone(),
+        stimuli,
+        log,
+    })
+}
+
+/// Minimize a coordination replay plan while preserving the first fail-closed signal.
+#[must_use]
+pub fn minimize_coordination_pressure_replay(
+    plan: &CoordinationPressureReplayPlan,
+) -> CoordinationPressureReplayPlan {
+    if plan.stimuli.len() <= 1 {
+        return plan.clone();
+    }
+
+    let keep_index = plan
+        .stimuli
+        .iter()
+        .position(|stimulus| stimulus.first_failure_or_refusal.is_some())
+        .unwrap_or(0);
+    let kept = vec![plan.stimuli[keep_index].clone()];
+    let minimization_steps = plan.stimuli.len() - kept.len();
+    let first_failure = first_failure(&kept).or_else(|| plan.log.first_failure_or_refusal.clone());
+    let log = coordination_replay_log(
+        plan.seed,
+        &plan.source_bundle_hash,
+        &kept,
+        minimization_steps,
+        first_failure,
+    );
+
+    CoordinationPressureReplayPlan {
+        schema_version: plan.schema_version.clone(),
+        seed: plan.seed,
+        source_bundle_hash: plan.source_bundle_hash.clone(),
+        stimuli: kept,
+        log,
+    }
+}
+
+fn validate_coordination_pack(
+    _seed: u64,
+    pack: &CoordinationWorkloadExpansionPack,
+) -> Result<(), CoordinationReplayError> {
+    if pack.schema_version != "runtime-workload-coordination-expansion-pack-v1" {
+        return Err(CoordinationReplayError::UnsupportedPackSchema {
+            expected: "runtime-workload-coordination-expansion-pack-v1",
+            found: pack.schema_version.clone(),
+        });
+    }
+    validate_coordination_hash(&pack.source_bundle_hash)
+        .map_err(|found| CoordinationReplayError::InvalidSourceBundleHash { found })?;
+    if !pack.refused_bundles.is_empty() || !pack.missing_scenario_families.is_empty() {
+        let mut missing = pack.missing_scenario_families.clone();
+        for refused in &pack.refused_bundles {
+            missing.extend(refused.missing_scenario_families.iter().cloned());
+        }
+        missing.sort();
+        missing.dedup();
+        return Err(CoordinationReplayError::MissingScenarioDimensions { missing });
+    }
+
+    let present: BTreeSet<_> = pack
+        .workloads
+        .iter()
+        .map(|workload| workload.scenario_family.as_str())
+        .collect();
+    let missing = COORDINATION_REQUIRED_FAMILIES
+        .iter()
+        .filter(|family| !present.contains(**family))
+        .map(|family| (*family).to_string())
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(CoordinationReplayError::MissingScenarioDimensions { missing });
+    }
+    for workload in &pack.workloads {
+        if workload.source_bundle_hash != pack.source_bundle_hash {
+            return Err(CoordinationReplayError::MismatchedSourceBundleHash {
+                workload_id: workload.workload_id.clone(),
+                expected: pack.source_bundle_hash.clone(),
+                found: workload.source_bundle_hash.clone(),
+            });
+        }
+        validate_coordination_field_set(
+            workload,
+            "semantic_pressure",
+            &workload.semantic_pressure,
+            coordination_allowed_semantic_pressure(&workload.scenario_family)?,
+        )?;
+        validate_coordination_field_set(
+            workload,
+            "provenance_only_context",
+            &workload.provenance_only_context,
+            coordination_allowed_provenance_context(&workload.scenario_family)?,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn stimulus_from_coordination_workload(
+    workload: &CoordinationWorkloadExpansion,
+) -> Result<CoordinationReplayStimulus, CoordinationReplayError> {
+    if workload.workload_id.trim().is_empty() {
+        return Err(CoordinationReplayError::EmptyWorkloadId);
+    }
+    if workload.semantic_pressure.is_empty()
+        || workload
+            .semantic_pressure
+            .iter()
+            .any(|item| item.trim().is_empty())
+    {
+        return Err(CoordinationReplayError::EmptySemanticPressure {
+            workload_id: workload.workload_id.clone(),
+        });
+    }
+    if workload.provenance_only_context.is_empty()
+        || workload
+            .provenance_only_context
+            .iter()
+            .any(|item| item.trim().is_empty())
+    {
+        return Err(CoordinationReplayError::EmptyProvenanceContext {
+            workload_id: workload.workload_id.clone(),
+        });
+    }
+    if workload.source_event_count == 0 {
+        return Err(CoordinationReplayError::ZeroSourceEvents {
+            workload_id: workload.workload_id.clone(),
+        });
+    }
+    validate_coordination_hash(&workload.source_bundle_hash).map_err(|found| {
+        CoordinationReplayError::InvalidSourceHash {
+            workload_id: workload.workload_id.clone(),
+            found,
+        }
+    })?;
+    if workload.source_hashes.is_empty() {
+        return Err(CoordinationReplayError::InvalidSourceHash {
+            workload_id: workload.workload_id.clone(),
+            found: String::new(),
+        });
+    }
+    let mut source_hashes = workload.source_hashes.clone();
+    source_hashes.sort();
+    source_hashes.dedup();
+    for hash in &source_hashes {
+        validate_coordination_hash(hash).map_err(|found| {
+            CoordinationReplayError::InvalidSourceHash {
+                workload_id: workload.workload_id.clone(),
+                found,
+            }
+        })?;
+    }
+
+    let events = workload.source_event_count;
+    let (
+        synthesized_task_count,
+        queue_depth,
+        timer_ticks,
+        cancel_count,
+        artifact_delay_ticks,
+        first_failure_or_refusal,
+    ) = match workload.scenario_family.as_str() {
+        "tracker_lock_contention" => (events * 2, events * 3, events, 0, 0, None),
+        "concurrent_rch_proofs" => (events * 3, events * 2, events, 0, events * 2, None),
+        "fail_closed_dirty_frontier" => (
+            events,
+            events,
+            0,
+            events,
+            0,
+            Some("dirty_frontier_fail_closed".to_string()),
+        ),
+        "artifact_retrieval_tail" => (events, events, events * 3, 0, events * 5, None),
+        "proof_runner_fanout" => (events * 4, events * 4, events, 0, events, None),
+        "stale_in_progress_reclaim" => (
+            events * 2,
+            events * 2,
+            events,
+            events,
+            0,
+            Some("stale_in_progress_reclaim".to_string()),
+        ),
+        "coordination_latency_burst" => (events * 2, events, events * 4, 0, events, None),
+        family => {
+            return Err(CoordinationReplayError::UnsupportedScenarioFamily {
+                family: family.to_string(),
+            });
+        }
+    };
+
+    Ok(CoordinationReplayStimulus {
+        workload_id: workload.workload_id.clone(),
+        scenario_id: workload.scenario_id.clone(),
+        scenario_family: workload.scenario_family.clone(),
+        source_event_count: events,
+        synthesized_task_count,
+        queue_depth,
+        timer_ticks,
+        cancel_count,
+        artifact_delay_ticks,
+        source_hashes,
+        first_failure_or_refusal,
+    })
+}
+
+fn validate_coordination_field_set(
+    workload: &CoordinationWorkloadExpansion,
+    field: &'static str,
+    observed: &[String],
+    expected: &'static [&'static str],
+) -> Result<(), CoordinationReplayError> {
+    for value in observed {
+        if !expected.contains(&value.as_str()) {
+            return Err(CoordinationReplayError::UnsupportedScenarioField {
+                workload_id: workload.workload_id.clone(),
+                field,
+                value: value.clone(),
+            });
+        }
+    }
+
+    let observed_set = observed.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    let missing = expected
+        .iter()
+        .filter(|value| !observed_set.contains(**value))
+        .map(|value| (*value).to_string())
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(CoordinationReplayError::MissingScenarioField {
+            workload_id: workload.workload_id.clone(),
+            field,
+            missing,
+        });
+    }
+
+    Ok(())
+}
+
+fn coordination_allowed_semantic_pressure(
+    family: &str,
+) -> Result<&'static [&'static str], CoordinationReplayError> {
+    match family {
+        "tracker_lock_contention" => Ok(&[
+            "metadata-lock-waiters",
+            "ready-backlog-from-serialized-claims",
+            "queue-residency-tail",
+        ]),
+        "concurrent_rch_proofs" => Ok(&[
+            "validation-fanout",
+            "remote-proof-queue-depth",
+            "artifact-retrieval-tail",
+        ]),
+        "fail_closed_dirty_frontier" => Ok(&[
+            "admission-refusal",
+            "unsupported-dirty-frontier-count",
+            "operator-retry-pressure",
+        ]),
+        "artifact_retrieval_tail" => Ok(&[
+            "artifact-fetch-fanout",
+            "result-materialization-tail",
+            "summary-index-pressure",
+        ]),
+        "proof_runner_fanout" => Ok(&[
+            "parallel-proof-launch",
+            "ack-free-notification-burst",
+            "ready-queue-burst",
+        ]),
+        "stale_in_progress_reclaim" => Ok(&[
+            "stale-work-requeue",
+            "tracker-priority-rebalance",
+            "operator-recovery-loop",
+        ]),
+        "coordination_latency_burst" => Ok(&[
+            "ack-required-message-burst",
+            "coordination-round-trip-tail",
+            "operator-latency-amplification",
+        ]),
+        family => Err(CoordinationReplayError::UnsupportedScenarioFamily {
+            family: family.to_string(),
+        }),
+    }
+}
+
+fn coordination_allowed_provenance_context(
+    family: &str,
+) -> Result<&'static [&'static str], CoordinationReplayError> {
+    match family {
+        "tracker_lock_contention" => Ok(&[
+            "hashed-lock-path",
+            "pseudonymized-holder-agent",
+            "thread-or-bead-id",
+        ]),
+        "concurrent_rch_proofs" => Ok(&["redacted-worker-pool", "hashed-proof-command", "bead-id"]),
+        "fail_closed_dirty_frontier" => {
+            Ok(&["path-hashes", "dirty-path-count", "redaction-verdict"])
+        }
+        "artifact_retrieval_tail" => Ok(&["artifact-kind", "artifact-path-hash", "source-bead-id"]),
+        "proof_runner_fanout" => Ok(&["message-subject-hash", "pseudonymized-sender", "thread-id"]),
+        "stale_in_progress_reclaim" => Ok(&[
+            "pseudonymized-assignee",
+            "updated-at-bucket",
+            "dependency-count",
+        ]),
+        "coordination_latency_burst" => Ok(&["message-id", "thread-id", "ack-required-flag"]),
+        family => Err(CoordinationReplayError::UnsupportedScenarioFamily {
+            family: family.to_string(),
+        }),
+    }
+}
+
+fn coordination_replay_log(
+    seed: u64,
+    source_bundle_hash: &str,
+    stimuli: &[CoordinationReplayStimulus],
+    minimization_steps: usize,
+    first_failure_or_refusal: Option<String>,
+) -> CoordinationReplayLog {
+    CoordinationReplayLog {
+        scenario_id: "coordination-pressure-replay".to_string(),
+        seed,
+        source_bundle_hash: source_bundle_hash.to_string(),
+        event_count: stimuli
+            .iter()
+            .map(|stimulus| stimulus.source_event_count)
+            .sum(),
+        synthesized_task_count: stimuli
+            .iter()
+            .map(|stimulus| stimulus.synthesized_task_count)
+            .sum(),
+        queue_dimension: stimuli.iter().map(|stimulus| stimulus.queue_depth).sum(),
+        timer_dimension: stimuli.iter().map(|stimulus| stimulus.timer_ticks).sum(),
+        cancel_dimension: stimuli.iter().map(|stimulus| stimulus.cancel_count).sum(),
+        artifact_delay_dimension: stimuli
+            .iter()
+            .map(|stimulus| stimulus.artifact_delay_ticks)
+            .sum(),
+        trace_fingerprint: coordination_trace_fingerprint(seed, source_bundle_hash, stimuli),
+        minimization_steps,
+        first_failure_or_refusal,
+    }
+}
+
+fn first_failure(stimuli: &[CoordinationReplayStimulus]) -> Option<String> {
+    stimuli
+        .iter()
+        .find_map(|stimulus| stimulus.first_failure_or_refusal.clone())
+}
+
+fn validate_coordination_hash(hash: &str) -> Result<(), String> {
+    if hash.trim().is_empty() || !hash.starts_with("sha256:") {
+        return Err(hash.to_string());
+    }
+    Ok(())
+}
+
+fn coordination_trace_fingerprint(
+    seed: u64,
+    source_bundle_hash: &str,
+    stimuli: &[CoordinationReplayStimulus],
+) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    stable_hash_u64(&mut hash, seed);
+    stable_hash_str(&mut hash, source_bundle_hash);
+    for stimulus in stimuli {
+        stable_hash_str(&mut hash, &stimulus.workload_id);
+        stable_hash_str(&mut hash, &stimulus.scenario_id);
+        stable_hash_str(&mut hash, &stimulus.scenario_family);
+        stable_hash_u64(&mut hash, stimulus.source_event_count as u64);
+        stable_hash_u64(&mut hash, stimulus.synthesized_task_count as u64);
+        stable_hash_u64(&mut hash, stimulus.queue_depth as u64);
+        stable_hash_u64(&mut hash, stimulus.timer_ticks as u64);
+        stable_hash_u64(&mut hash, stimulus.cancel_count as u64);
+        stable_hash_u64(&mut hash, stimulus.artifact_delay_ticks as u64);
+        for source_hash in &stimulus.source_hashes {
+            stable_hash_str(&mut hash, source_hash);
+        }
+        if let Some(first_failure) = &stimulus.first_failure_or_refusal {
+            stable_hash_str(&mut hash, first_failure);
+        }
+    }
+    hash
+}
+
+fn stable_hash_u64(hash: &mut u64, value: u64) {
+    for byte in value.to_le_bytes() {
+        *hash ^= u64::from(byte);
+        *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+}
+
+fn stable_hash_str(hash: &mut u64, value: &str) {
+    stable_hash_u64(hash, value.len() as u64);
+    for byte in value.as_bytes() {
+        *hash ^= u64::from(*byte);
+        *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+}
 
 /// Compares two traces and returns the first divergence point.
 ///
@@ -1451,6 +2195,250 @@ mod tests {
 
     fn trace_message_contains(event: &TraceEvent, needle: &str) -> bool {
         matches!(&event.data, TraceData::Message(message) if message.contains(needle))
+    }
+
+    fn coordination_family_index(family: &str) -> usize {
+        COORDINATION_REQUIRED_FAMILIES
+            .iter()
+            .position(|candidate| candidate == &family)
+            .map_or(99, |index| index + 1)
+    }
+
+    fn coordination_workload(family: &str) -> CoordinationWorkloadExpansion {
+        let index = coordination_family_index(family);
+        CoordinationWorkloadExpansion {
+            workload_id: format!("ASWARM-WL-{index:03}"),
+            scenario_family: family.to_string(),
+            scenario_id: format!("agent-swarm.{family}"),
+            semantic_pressure: coordination_allowed_semantic_pressure(family)
+                .unwrap_or(&["live-only-pressure"])
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect(),
+            provenance_only_context: coordination_allowed_provenance_context(family)
+                .unwrap_or(&["live-only-context"])
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect(),
+            source_event_count: 1,
+            source_hashes: vec![format!("sha256:event-{index:03}")],
+            source_bundle_hash: "sha256:coordination-bundle".to_string(),
+            replay_command: format!(
+                "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload ASWARM-WL-{index:03}"
+            ),
+            expected_artifact_globs: vec![
+                "target/workload-corpus/coordination-expansion/*/coordination-workload-expansion-pack.json"
+                    .to_string(),
+            ],
+        }
+    }
+
+    fn coordination_pack_with_order(order: &[&str]) -> CoordinationWorkloadExpansionPack {
+        CoordinationWorkloadExpansionPack {
+            schema_version: "runtime-workload-coordination-expansion-pack-v1".to_string(),
+            pack_id: "agent-swarm-coordination-pressure".to_string(),
+            baseline_denominator: false,
+            source_bundle_hash: "sha256:coordination-bundle".to_string(),
+            source_run_id: "coordination-fixture".to_string(),
+            missing_scenario_families: Vec::new(),
+            workloads: order
+                .iter()
+                .map(|family| coordination_workload(family))
+                .collect(),
+            refused_bundles: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn coordination_replay_canonicalizes_shuffled_workloads() {
+        init_test("coordination_replay_canonicalizes_shuffled_workloads");
+        let canonical = coordination_pack_with_order(&[
+            "tracker_lock_contention",
+            "concurrent_rch_proofs",
+            "fail_closed_dirty_frontier",
+            "artifact_retrieval_tail",
+            "proof_runner_fanout",
+            "stale_in_progress_reclaim",
+            "coordination_latency_burst",
+        ]);
+        let shuffled = coordination_pack_with_order(&[
+            "coordination_latency_burst",
+            "stale_in_progress_reclaim",
+            "proof_runner_fanout",
+            "artifact_retrieval_tail",
+            "fail_closed_dirty_frontier",
+            "concurrent_rch_proofs",
+            "tracker_lock_contention",
+        ]);
+        let repeated = synthesize_coordination_pressure_replay(0xA5A0, &canonical)
+            .expect("repeated canonical pack should synthesize");
+
+        let first = synthesize_coordination_pressure_replay(0xA5A0, &canonical)
+            .expect("canonical pack should synthesize");
+        let second = synthesize_coordination_pressure_replay(0xA5A0, &shuffled)
+            .expect("shuffled pack should synthesize");
+
+        assert_eq!(first.log.trace_fingerprint, repeated.log.trace_fingerprint);
+        assert_eq!(first.log.trace_fingerprint, second.log.trace_fingerprint);
+        assert_eq!(first.log.event_count, 7);
+        assert_eq!(first.log.synthesized_task_count, 15);
+        assert_eq!(first.stimuli[0].scenario_family, "artifact_retrieval_tail");
+        crate::test_complete!("coordination_replay_canonicalizes_shuffled_workloads");
+    }
+
+    #[test]
+    fn coordination_replay_minimization_preserves_first_fail_closed_signal() {
+        init_test("coordination_replay_minimization_preserves_first_fail_closed_signal");
+        let pack = coordination_pack_with_order(&[
+            "tracker_lock_contention",
+            "concurrent_rch_proofs",
+            "fail_closed_dirty_frontier",
+            "artifact_retrieval_tail",
+            "proof_runner_fanout",
+            "stale_in_progress_reclaim",
+            "coordination_latency_burst",
+        ]);
+        let plan =
+            synthesize_coordination_pressure_replay(0xA5A0, &pack).expect("pack should synthesize");
+        let minimized = minimize_coordination_pressure_replay(&plan);
+
+        assert_eq!(minimized.stimuli.len(), 1);
+        assert_eq!(minimized.log.minimization_steps, 6);
+        assert_eq!(minimized.log.event_count, 1);
+        assert_eq!(
+            minimized.log.first_failure_or_refusal.as_deref(),
+            Some("dirty_frontier_fail_closed")
+        );
+        assert_eq!(
+            minimized.stimuli[0].scenario_family,
+            "fail_closed_dirty_frontier"
+        );
+        crate::test_complete!(
+            "coordination_replay_minimization_preserves_first_fail_closed_signal"
+        );
+    }
+
+    #[test]
+    fn coordination_replay_rejects_missing_and_unsupported_dimensions() {
+        init_test("coordination_replay_rejects_missing_and_unsupported_dimensions");
+        let mut missing = coordination_pack_with_order(&["tracker_lock_contention"]);
+        assert!(matches!(
+            synthesize_coordination_pressure_replay(1, &missing),
+            Err(CoordinationReplayError::MissingScenarioDimensions { .. })
+        ));
+
+        missing.workloads = COORDINATION_REQUIRED_FAMILIES
+            .iter()
+            .map(|family| coordination_workload(family))
+            .collect();
+        missing.workloads[0].scenario_family = "live_agent_mail_socket".to_string();
+        assert_eq!(
+            synthesize_coordination_pressure_replay(1, &missing),
+            Err(CoordinationReplayError::MissingScenarioDimensions {
+                missing: vec!["tracker_lock_contention".to_string()],
+            })
+        );
+
+        let mut unsupported = coordination_pack_with_order(&[
+            "tracker_lock_contention",
+            "concurrent_rch_proofs",
+            "fail_closed_dirty_frontier",
+            "artifact_retrieval_tail",
+            "proof_runner_fanout",
+            "stale_in_progress_reclaim",
+            "coordination_latency_burst",
+        ]);
+        unsupported
+            .workloads
+            .push(coordination_workload("live_agent_mail_socket"));
+        assert_eq!(
+            synthesize_coordination_pressure_replay(1, &unsupported),
+            Err(CoordinationReplayError::UnsupportedScenarioFamily {
+                family: "live_agent_mail_socket".to_string(),
+            })
+        );
+        crate::test_complete!("coordination_replay_rejects_missing_and_unsupported_dimensions");
+    }
+
+    #[test]
+    fn coordination_replay_canonicalizes_source_hashes_and_rejects_live_only_fields() {
+        init_test("coordination_replay_canonicalizes_source_hashes_and_rejects_live_only_fields");
+        let mut pack = coordination_pack_with_order(&[
+            "tracker_lock_contention",
+            "concurrent_rch_proofs",
+            "fail_closed_dirty_frontier",
+            "artifact_retrieval_tail",
+            "proof_runner_fanout",
+            "stale_in_progress_reclaim",
+            "coordination_latency_burst",
+        ]);
+        let artifact_tail = pack
+            .workloads
+            .iter_mut()
+            .find(|workload| workload.scenario_family == "artifact_retrieval_tail")
+            .expect("artifact tail workload");
+        artifact_tail.source_event_count = 2;
+        artifact_tail.source_hashes = vec![
+            "sha256:artifact-tail-b".to_string(),
+            "sha256:artifact-tail-a".to_string(),
+        ];
+
+        let mut source_shuffled = pack.clone();
+        source_shuffled.workloads.reverse();
+        source_shuffled
+            .workloads
+            .iter_mut()
+            .find(|workload| workload.scenario_family == "artifact_retrieval_tail")
+            .expect("artifact tail workload")
+            .source_hashes
+            .reverse();
+
+        let canonical = synthesize_coordination_pressure_replay(7, &pack)
+            .expect("canonical source hashes should synthesize");
+        let shuffled = synthesize_coordination_pressure_replay(7, &source_shuffled)
+            .expect("shuffled source hashes should synthesize");
+        assert_eq!(
+            canonical.log.trace_fingerprint,
+            shuffled.log.trace_fingerprint
+        );
+        assert_eq!(canonical.log.event_count, 8);
+        let artifact_tail = canonical
+            .stimuli
+            .iter()
+            .find(|stimulus| stimulus.scenario_family == "artifact_retrieval_tail")
+            .expect("artifact tail stimulus");
+        assert_eq!(artifact_tail.artifact_delay_ticks, 10);
+        assert_eq!(
+            artifact_tail.source_hashes,
+            vec![
+                "sha256:artifact-tail-a".to_string(),
+                "sha256:artifact-tail-b".to_string()
+            ]
+        );
+
+        let mut live_only = coordination_pack_with_order(&[
+            "tracker_lock_contention",
+            "concurrent_rch_proofs",
+            "fail_closed_dirty_frontier",
+            "artifact_retrieval_tail",
+            "proof_runner_fanout",
+            "stale_in_progress_reclaim",
+            "coordination_latency_burst",
+        ]);
+        live_only.workloads[0]
+            .semantic_pressure
+            .push("live-agent-mail-socket".to_string());
+        assert_eq!(
+            synthesize_coordination_pressure_replay(7, &live_only),
+            Err(CoordinationReplayError::UnsupportedScenarioField {
+                workload_id: "ASWARM-WL-001".to_string(),
+                field: "semantic_pressure",
+                value: "live-agent-mail-socket".to_string(),
+            })
+        );
+        crate::test_complete!(
+            "coordination_replay_canonicalizes_source_hashes_and_rejects_live_only_fields"
+        );
     }
 
     #[test]

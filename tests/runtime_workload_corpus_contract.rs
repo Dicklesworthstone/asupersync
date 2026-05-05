@@ -4,6 +4,10 @@
 
 #![allow(missing_docs)]
 
+use asupersync::lab::replay::{
+    CoordinationWorkloadExpansionPack, minimize_coordination_pressure_replay,
+    synthesize_coordination_pressure_replay,
+};
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -663,6 +667,62 @@ fn coordination_fixture_synthesis_emits_deterministic_scheduler_inputs() {
                     .contains("coordination-workload-expansion-pack.json"))
         );
     }
+}
+
+#[test]
+fn coordination_expansion_pack_replays_through_lab_hook() {
+    let root = temp_root("coordination-lab-replay");
+    let out = run_workload_script(&[
+        "--synthesize-coordination-pack".into(),
+        "--coordination-fixture".into(),
+        "--output-root".into(),
+        root.to_string_lossy().into_owned(),
+    ]);
+    assert!(
+        out.status.success(),
+        "accepted fixture stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let pack_path = root
+        .join("coordination-expansion")
+        .join("coordination-runtime-fixture-accepted-all-families")
+        .join("coordination-workload-expansion-pack.json");
+    let pack: CoordinationWorkloadExpansionPack =
+        serde_json::from_str(&std::fs::read_to_string(pack_path).expect("read coordination pack"))
+            .expect("parse coordination pack into lab replay type");
+
+    let plan = synthesize_coordination_pressure_replay(0xA5A0_0104, &pack)
+        .expect("coordination pack should synthesize replay stimuli");
+    assert_eq!(plan.stimuli.len(), 7);
+    assert_eq!(plan.log.scenario_id, "coordination-pressure-replay");
+    assert_eq!(plan.log.seed, 0xA5A0_0104);
+    assert_eq!(
+        plan.log.source_bundle_hash,
+        "sha256:coordination-runtime-fixture-accepted-all-families"
+    );
+    assert_eq!(plan.log.event_count, 7);
+    assert_eq!(plan.log.synthesized_task_count, 15);
+    assert_eq!(plan.log.queue_dimension, 14);
+    assert_eq!(plan.log.timer_dimension, 11);
+    assert_eq!(plan.log.cancel_dimension, 2);
+    assert_eq!(plan.log.artifact_delay_dimension, 9);
+    assert_ne!(plan.log.trace_fingerprint, 0);
+    let artifact_tail = plan
+        .stimuli
+        .iter()
+        .find(|stimulus| stimulus.scenario_family == "artifact_retrieval_tail")
+        .expect("artifact retrieval tail replay stimulus");
+    assert_eq!(artifact_tail.timer_ticks, 3);
+    assert_eq!(artifact_tail.artifact_delay_ticks, 5);
+
+    let minimized = minimize_coordination_pressure_replay(&plan);
+    assert_eq!(minimized.stimuli.len(), 1);
+    assert_eq!(minimized.log.minimization_steps, 6);
+    assert_eq!(
+        minimized.log.first_failure_or_refusal.as_deref(),
+        Some("dirty_frontier_fail_closed")
+    );
 }
 
 #[test]
