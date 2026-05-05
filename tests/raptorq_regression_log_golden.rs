@@ -1,5 +1,4 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
+//! Golden tests for RaptorQ regression log records.
 
 use asupersync::raptorq::decoder::DecodeStats;
 use asupersync::raptorq::regression::{
