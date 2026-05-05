@@ -5,8 +5,8 @@
 
 use clap::{Arg, Command};
 use opentelemetry::propagation::{Extractor, Injector, TextMapPropagator};
-use opentelemetry::trace::{SpanContext, SpanId, TraceFlags, TraceId, TraceState};
-use opentelemetry_sdk::propagation::{BaggagePropagator, TraceContextPropagator};
+use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState};
+use opentelemetry_sdk::propagation::TraceContextPropagator;
 use std::collections::HashMap;
 
 /// Conformance test result tracking
@@ -15,14 +15,6 @@ enum ConformanceTestResult {
     Pass,
     Fail { reason: String },
     ExpectedFailure { reason: String },
-}
-
-/// Test metadata for conformance tracking
-#[derive(Debug)]
-struct ConformanceCase {
-    name: &'static str,
-    description: &'static str,
-    requirement_level: RequirementLevel,
 }
 
 #[derive(Debug, PartialEq)]
@@ -47,7 +39,6 @@ enum PropagatorType {
     W3CTraceContext,
     B3Single,
     B3Multi,
-    Baggage,
 }
 
 /// Test span context input
@@ -117,7 +108,7 @@ fn main() {
     let test_name = matches.get_one::<String>("test").unwrap();
     let verbose = matches.get_flag("verbose");
 
-    match test_name.as_str() {
+    let result = match test_name.as_str() {
         "w3c-traceparent-roundtrip" => run_w3c_traceparent_roundtrip_test(verbose),
         "w3c-tracestate-roundtrip" => run_w3c_tracestate_roundtrip_test(verbose),
         "w3c-traceparent-invalid-handling" => run_w3c_invalid_handling_test(verbose),
@@ -129,10 +120,24 @@ fn main() {
             generate_compliance_report();
             return;
         }
-        "all" => run_all_tests(verbose),
+        "all" => {
+            run_all_tests(verbose);
+            return;
+        }
         _ => {
             eprintln!("Unknown test: {}", test_name);
             std::process::exit(1);
+        }
+    };
+
+    match result {
+        ConformanceTestResult::Pass => println!("ALL TESTS PASSED"),
+        ConformanceTestResult::Fail { reason } => {
+            eprintln!("FAIL: {}", reason);
+            std::process::exit(1);
+        }
+        ConformanceTestResult::ExpectedFailure { reason } => {
+            println!("EXPECTED FAILURE: {}", reason);
         }
     }
 }
@@ -293,7 +298,7 @@ fn run_all_tests(verbose: bool) {
 
         let result = run_propagation_conformance_test(test_case, verbose);
 
-        match result {
+        match &result {
             ConformanceTestResult::Pass => {
                 passed += 1;
                 println!("✅ PASS");
@@ -318,7 +323,7 @@ fn run_all_tests(verbose: bool) {
         eprintln!(
             "{{\"test\":\"{}\",\"status\":\"{}\",\"level\":\"{:?}\"}}",
             test_case.name,
-            match result {
+            match &result {
                 ConformanceTestResult::Pass => "PASS",
                 ConformanceTestResult::Fail { .. } => "FAIL",
                 ConformanceTestResult::ExpectedFailure { .. } => "XFAIL",
@@ -374,7 +379,11 @@ fn run_propagation_conformance_test(
         {
             Ok(extracted_context) => {
                 // Compare contexts for identity
-                if let Err(reason) = compare_span_contexts(&original_context, &extracted_context) {
+                if let Err(reason) = compare_span_contexts(
+                    &original_context,
+                    &extracted_context,
+                    test_case.propagator_type == PropagatorType::W3CTraceContext,
+                ) {
                     return if is_known_propagation_divergence(
                         test_case.name,
                         &span_context_input.name,
@@ -435,22 +444,15 @@ fn test_roundtrip_for_propagator(
             // In real implementation, this would use actual B3 propagator
             Ok(original_context.clone())
         }
-        PropagatorType::Baggage => {
-            let propagator = BaggagePropagator::new();
-
-            // For baggage, we test that the propagator doesn't interfere with trace context
-            let mut carrier = HeaderCarrier::default();
-            propagator.inject_context(&opentelemetry::Context::current(), &mut carrier);
-
-            let extracted_context = propagator.extract(&carrier);
-            // Baggage propagator doesn't modify trace context, so return original
-            Ok(original_context.clone())
-        }
     }
 }
 
 /// Compare two SpanContexts for identity
-fn compare_span_contexts(original: &SpanContext, extracted: &SpanContext) -> Result<(), String> {
+fn compare_span_contexts(
+    original: &SpanContext,
+    extracted: &SpanContext,
+    expect_remote_extracted: bool,
+) -> Result<(), String> {
     if original.trace_id() != extracted.trace_id() {
         return Err(format!(
             "TraceId mismatch: original={}, extracted={}",
@@ -475,7 +477,11 @@ fn compare_span_contexts(original: &SpanContext, extracted: &SpanContext) -> Res
         ));
     }
 
-    if original.is_remote() != extracted.is_remote() {
+    if expect_remote_extracted {
+        if !extracted.is_remote() {
+            return Err("Extracted W3C context should be marked remote".to_string());
+        }
+    } else if original.is_remote() != extracted.is_remote() {
         return Err(format!(
             "Remote flag mismatch: original={}, extracted={}",
             original.is_remote(),
@@ -529,7 +535,7 @@ fn create_test_span_context_with_state(
 ) -> TestSpanContext {
     let trace_id = TraceId::from_hex(trace_id_hex).expect("Valid trace ID");
     let span_id = SpanId::from_hex(span_id_hex).expect("Valid span ID");
-    let trace_state = TraceState::from_key_value_pairs(state.split(',').filter_map(|pair| {
+    let trace_state = TraceState::from_key_value(state.split(',').filter_map(|pair| {
         let mut parts = pair.splitn(2, '=');
         if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
             Some((key.to_string(), value.to_string()))
@@ -570,8 +576,12 @@ impl TestSpan {
 }
 
 impl opentelemetry::trace::Span for TestSpan {
-    fn add_event_with_timestamp<T>(&mut self, _name: T, _timestamp: std::time::SystemTime)
-    where
+    fn add_event_with_timestamp<T>(
+        &mut self,
+        _name: T,
+        _timestamp: std::time::SystemTime,
+        _attributes: Vec<opentelemetry::KeyValue>,
+    ) where
         T: Into<std::borrow::Cow<'static, str>>,
     {
         // No-op for testing
@@ -601,6 +611,10 @@ impl opentelemetry::trace::Span for TestSpan {
     }
 
     fn end_with_timestamp(&mut self, _timestamp: std::time::SystemTime) {
+        // No-op for testing
+    }
+
+    fn add_link(&mut self, _span_context: SpanContext, _attributes: Vec<opentelemetry::KeyValue>) {
         // No-op for testing
     }
 }
