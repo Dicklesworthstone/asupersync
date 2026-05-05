@@ -137,7 +137,7 @@ pub mod dns_cache; // repaired by br-asupersync-2qssae DNS cache sub-slice
 // pub mod task_inspector_wire;      // crate::observability + crate::types not in scope here
 // pub mod tls_alpn;                 // asupersync::tls module path changed
 // pub mod trace_event;              // bit-rot vs current trace API
-// pub mod udp_socket;               // asupersync::region module path changed
+pub mod udp_socket; // repaired by br-asupersync-2qssae UDP sub-slice
 // pub mod unix_listener;            // crate::net + crate::io + assert_with_log! macro missing
 // pub mod web_session_cookies;      // bit-rot — depends on `tokio` (forbidden) and asupersync::io::Cursor moved
 //

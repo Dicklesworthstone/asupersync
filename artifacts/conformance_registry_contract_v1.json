@@ -3,8 +3,8 @@
   "bead_id": "asupersync-rckcnf",
   "source_registry": "tests/conformance/mod.rs",
   "readme_anchor": "README.md#conformance-suite",
-  "active_module_count": 70,
-  "dormant_module_count": 22,
+  "active_module_count": 71,
+  "dormant_module_count": 21,
   "count_policy": "Counts are machine-checked against tests/conformance/mod.rs. README prose must point here instead of hardcoding active or dormant counts.",
   "active_modules": [
     "aggregator_flush",
@@ -76,6 +76,7 @@
     "tcp_listener",
     "tls_key_share",
     "tls_sni",
+    "udp_socket",
     "jetstream"
   ],
   "dormant_modules": [
@@ -254,14 +255,6 @@
       "inline_followup": "tests/conformance/mod.rs audit-recovered orphan list",
       "reason": "The module is bit-rotted against the current trace API.",
       "retention_reason": "File deletion is forbidden; retained for trace conformance repair."
-    },
-    {
-      "module": "udp_socket",
-      "line": 130,
-      "disposition": "intentionally_deferred_inline_followup",
-      "inline_followup": "tests/conformance/mod.rs audit-recovered orphan list",
-      "reason": "The module imports a removed asupersync::region path.",
-      "retention_reason": "File deletion is forbidden; retained for UDP conformance repair."
     },
     {
       "module": "unix_listener",
