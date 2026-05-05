@@ -407,3 +407,81 @@ opencode.json
 /test_out.txt
 /test_results_all.txt
 /rust_out
+
+# Root-level scan / fix / audit scratch outputs.
+# Whitelist the legitimate stable artifacts we actually track
+# (audit_index.jsonl, .stub-allowlist.txt, .type_fork_baseline.json)
+# and ignore the rest of the historically-accumulated shapes so
+# future sweeps cannot accidentally re-stage them.
+
+# One-off bug / findings / scan reports
+/pass1*.txt
+/pass1*.jsonl
+/*_findings.txt
+/*_findings.json
+/*_findings.jsonl
+/*_findings_text.txt
+/*_bugs.txt
+/*_bugs.json
+/cancel_bugs.txt
+/channel_bugs.txt
+/net_bugs.txt
+/db_bugs.json
+/full_bugs.json
+/raptorq_report.json
+/scan.json
+/scan.txt
+/report.json
+/report.jsonl
+/findings.jsonl
+/clippy.jsonl
+/clippy_unwraps.txt
+/drop_unwraps.txt
+/prod_unwraps.txt
+/errors.json
+/errors.txt
+/ubs-report.json
+/ubs-report.txt
+/ubs-scan.txt
+
+# Status-flag files (zero-byte completion markers from finished work)
+/*_COMPLETED
+/OTLP*_COMPLETED
+
+# Per-tool / per-session state scratch
+/claimed.json
+/ready.json
+/claude-upgrade-progress.json
+/rch_test_output.txt
+
+# Compiled scratch binaries / libs at root (catch-alls for the
+# patterns above that already list specific names)
+/generate_goldens
+/nll_test
+*.rlib
+
+# Ad-hoc agent helper scripts (extends the existing /fix_*.py,
+# /patch_*.py, /parse_*.py allowlist — these were the families of
+# one-off code-mod scripts that historically accreted at root)
+/replace_*.py
+/update_*.py
+/find_*.py
+/find_*.sh
+/dedup_*.py
+/auto_fix_*.py
+/append_audit*.py
+/append_audit*.sh
+/allow_clippy_tests.py
+/test_rtt.py
+
+# Root-level orphan .rs that aren't real Cargo targets
+/tests_query_coerce.rs
+
+# Local IDE/agent caches
+.ruff_cache/
+
+# Generated smoke-run output roots — catch-all that complements the
+# explicit per-bead list above. Any new `.<name>-smoke-artifacts/`
+# dir produced by a future smoke runner is auto-ignored without
+# requiring a one-line .gitignore edit per runner.
+/.*-smoke-artifacts/
