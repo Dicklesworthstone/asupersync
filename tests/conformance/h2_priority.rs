@@ -37,10 +37,13 @@
 //! - Exclusive dependencies restructure the dependency tree
 //! - Weight determines relative priority among sibling streams
 
+use super::h2_live_adapter::{H2LiveAdapter, encoded_request_headers};
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::http::h2::{
     error::{ErrorCode, H2Error},
-    frame::{Frame, FrameHeader, FrameType, PriorityFrame, PrioritySpec, parse_frame},
+    frame::{
+        Frame, FrameHeader, FrameType, HeadersFrame, PriorityFrame, PrioritySpec, parse_frame,
+    },
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -249,6 +252,9 @@ impl H2PriorityConformanceHarness {
 
         // Connection stream error tests
         results.extend(self.test_connection_stream_error());
+
+        // Production Connection/Frame seam tests
+        results.extend(self.test_live_priority_connection_state());
 
         results
     }
@@ -1062,6 +1068,114 @@ impl H2PriorityConformanceHarness {
                     }
                     Ok(frame) => Err(format!(
                         "Expected generic dispatch to reject Stream ID 0 PRIORITY frame, got {frame:?}"
+                    )),
+                }
+            },
+        ));
+
+        results
+    }
+
+    /// Test PRIORITY behavior through the production connection state machine.
+    #[allow(dead_code)]
+    fn test_live_priority_connection_state(&self) -> Vec<H2PriorityConformanceResult> {
+        let mut results = Vec::new();
+
+        results.push(self.run_test(
+            "priority_live_existing_stream_updates_state",
+            "PRIORITY on an existing stream MUST update observable stream priority state",
+            TestCategory::DependencyTree,
+            RequirementLevel::Must,
+            || {
+                let mut adapter = H2LiveAdapter::server()?;
+                adapter
+                    .feed(Frame::Headers(HeadersFrame::new(
+                        1,
+                        encoded_request_headers("/priority-state"),
+                        false,
+                        true,
+                    )))
+                    .map_err(|err| format!("failed to open stream through HEADERS: {err}"))?;
+
+                let priority = PrioritySpec {
+                    exclusive: true,
+                    dependency: 0,
+                    weight: 31,
+                };
+                let received = adapter
+                    .feed(Frame::Priority(PriorityFrame {
+                        stream_id: 1,
+                        priority,
+                    }))
+                    .map_err(|err| format!("failed to feed PRIORITY: {err}"))?;
+                if received.is_some() {
+                    return Err("PRIORITY should update state without yielding data".to_string());
+                }
+
+                let observed = adapter
+                    .connection()
+                    .stream(1)
+                    .ok_or_else(|| "stream opened by HEADERS was missing".to_string())?
+                    .priority();
+                assert_eq!(*observed, priority);
+                Ok(())
+            },
+        ));
+
+        results.push(self.run_test(
+            "priority_live_idle_stream_is_ignored_without_fake_state",
+            "PRIORITY on an idle unknown stream follows asupersync semantics without fabricating state",
+            TestCategory::ClosedStreamPriority,
+            RequirementLevel::Should,
+            || {
+                let mut adapter = H2LiveAdapter::server()?;
+                let priority = PrioritySpec {
+                    exclusive: false,
+                    dependency: 1,
+                    weight: 64,
+                };
+                let received = adapter
+                    .feed(Frame::Priority(PriorityFrame {
+                        stream_id: 99,
+                        priority,
+                    }))
+                    .map_err(|err| format!("failed to feed idle-stream PRIORITY: {err}"))?;
+                if received.is_some() {
+                    return Err("PRIORITY should not yield an application frame".to_string());
+                }
+                assert!(
+                    adapter.connection().stream(99).is_none(),
+                    "asupersync currently ignores PRIORITY for unknown idle streams instead of creating a fake stream"
+                );
+                Ok(())
+            },
+        ));
+
+        results.push(self.run_test(
+            "priority_live_stream_id_zero_parser_rejects",
+            "PRIORITY on stream ID 0 MUST be rejected by the real frame parser",
+            TestCategory::ConnectionStreamError,
+            RequirementLevel::Must,
+            || {
+                let priority = Frame::Priority(PriorityFrame {
+                    stream_id: 0,
+                    priority: PrioritySpec {
+                        exclusive: false,
+                        dependency: 1,
+                        weight: 32,
+                    },
+                });
+                match H2LiveAdapter::parse_encoded(&priority) {
+                    Err(message) => {
+                        assert!(
+                            message.contains("PROTOCOL_ERROR")
+                                || message.contains("PRIORITY frame with stream ID 0"),
+                            "expected stream-id-zero protocol error, got {message}"
+                        );
+                        Ok(())
+                    }
+                    Ok(frame) => Err(format!(
+                        "real parser accepted invalid Stream ID 0 PRIORITY frame: {frame:?}"
                     )),
                 }
             },
