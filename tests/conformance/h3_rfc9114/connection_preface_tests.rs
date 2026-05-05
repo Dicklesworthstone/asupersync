@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! HTTP/3 RFC 9114 Section 6.1 connection preface conformance tests.
 //!
 //! These tests validate compliance with the HTTP/3 connection establishment
@@ -7,10 +5,9 @@
 
 use super::*;
 use asupersync::http::h3_native::{
-    H3_SETTING_H3_DATAGRAM, H3ConnectionConfig, H3Frame, H3NativeError, H3QpackMode, H3Settings,
-    H3UniStreamType,
+    H3ConnectionState, H3ControlState, H3Frame, H3NativeError, H3Settings, H3UniStreamType,
 };
-use asupersync::net::quic_core::encode_varint;
+use asupersync::net::quic_core::{decode_varint, encode_varint};
 use std::time::Instant;
 
 /// Test client-side connection preface behavior per RFC 9114 Section 6.1.
@@ -232,9 +229,8 @@ pub fn run_connection_preface_tests() -> Vec<H3ConformanceResult> {
     ]
 }
 
-// Private validation functions that would interact with actual H3 implementation
-// For now, these return true to allow compilation - actual implementation would
-// interact with the asupersync H3 stack
+// Private validation functions backed by the native HTTP/3 frame and stream
+// state machines.
 
 #[allow(dead_code)]
 
@@ -242,15 +238,11 @@ fn validate_client_control_stream_order() -> bool {
     // RFC 9114 §6.1: Client MUST create control stream as first unidirectional stream
     // In QUIC, unidirectional streams are numbered 2, 6, 10, 14, ... for client-initiated
 
-    // Simulate control stream creation order validation
-    let control_stream_id = 2u64; // First client-initiated unidirectional stream
-    let stream_type = H3UniStreamType::Control;
-
-    // Verify control stream is properly typed
-    match stream_type {
-        H3UniStreamType::Control => true,
-        _ => false,
-    }
+    let mut server = H3ConnectionState::new_server();
+    matches!(
+        server.on_remote_uni_stream_type(2, 0x00),
+        Ok(H3UniStreamType::Control)
+    )
 }
 
 #[allow(dead_code)]
@@ -268,7 +260,11 @@ fn validate_client_settings_frame() -> bool {
         unknown: Vec::new(),
     };
 
-    let settings_frame = H3Frame::Settings(settings);
+    let mut control = H3ControlState::new();
+    let settings_frame = match control.build_local_settings(settings) {
+        Ok(frame) => frame,
+        Err(_) => return false,
+    };
 
     // Encode the frame to validate it's properly formed
     let mut encoded = Vec::new();
@@ -287,7 +283,6 @@ fn validate_client_datagram_ordering() -> bool {
     // RFC 9114 §6.1: Client MUST NOT send H3_DATAGRAM frames before receiving
     // server SETTINGS frame with H3_DATAGRAM=1
 
-    // Simulate server SETTINGS frame without H3_DATAGRAM enabled
     let server_settings = H3Settings {
         qpack_max_table_capacity: Some(4096),
         max_field_section_size: Some(16384),
@@ -309,12 +304,11 @@ fn validate_client_datagram_ordering() -> bool {
 fn validate_server_accepts_control_stream() -> bool {
     // RFC 9114 §6.1: Server MUST accept control stream as first unidirectional stream
 
-    // Simulate client control stream setup
-    let stream_type_byte = 0x00u64; // H3_STREAM_TYPE_CONTROL
-    let decoded_type = H3UniStreamType::decode(stream_type_byte);
-
-    // Server should properly recognize and accept control stream type
-    matches!(decoded_type, H3UniStreamType::Control)
+    let mut server = H3ConnectionState::new_server();
+    matches!(
+        server.on_remote_uni_stream_type(2, 0x00),
+        Ok(H3UniStreamType::Control)
+    )
 }
 
 #[allow(dead_code)]
@@ -322,31 +316,23 @@ fn validate_server_accepts_control_stream() -> bool {
 fn validate_server_processes_settings() -> bool {
     // RFC 9114 §6.1: Server MUST process SETTINGS frame from client
 
-    // Simulate client SETTINGS frame
-    let client_settings_payload = {
-        let settings = H3Settings {
-            qpack_max_table_capacity: Some(8192),
-            max_field_section_size: Some(32768),
-            qpack_blocked_streams: Some(50),
-            enable_connect_protocol: Some(true),
-            h3_datagram: Some(true),
-            unknown: Vec::new(),
-        };
-        let mut payload = Vec::new();
-        settings.encode_payload(&mut payload).unwrap();
-        payload
+    let mut server = H3ConnectionState::new_server();
+    if server.on_remote_uni_stream_type(2, 0x00).is_err() {
+        return false;
+    }
+
+    let client_settings = H3Settings {
+        qpack_max_table_capacity: None,
+        max_field_section_size: Some(32768),
+        qpack_blocked_streams: None,
+        enable_connect_protocol: Some(true),
+        h3_datagram: Some(true),
+        unknown: Vec::new(),
     };
 
-    // Server should be able to decode and process these settings
-    match H3Settings::decode_payload(&client_settings_payload) {
-        Ok(decoded_settings) => {
-            // Verify settings were properly decoded
-            decoded_settings.qpack_max_table_capacity == Some(8192)
-                && decoded_settings.max_field_section_size == Some(32768)
-                && decoded_settings.h3_datagram == Some(true)
-        }
-        Err(_) => false,
-    }
+    server
+        .on_uni_stream_frame(2, &H3Frame::Settings(client_settings))
+        .is_ok()
 }
 
 #[allow(dead_code)]
@@ -364,7 +350,11 @@ fn validate_server_sends_settings() -> bool {
         unknown: Vec::new(),
     };
 
-    let settings_frame = H3Frame::Settings(server_settings);
+    let mut control = H3ControlState::new();
+    let settings_frame = match control.build_local_settings(server_settings) {
+        Ok(frame) => frame,
+        Err(_) => return false,
+    };
     let mut encoded = Vec::new();
 
     // Server should be able to create and encode valid SETTINGS frame
@@ -406,27 +396,20 @@ fn validate_server_rejects_unknown_streams() -> bool {
 fn validate_settings_frame_first() -> bool {
     // RFC 9114 §7.2.4: SETTINGS frame MUST be first frame on control stream
 
-    // Simulate control stream frame sequence
-    let settings_frame = H3Frame::Settings(H3Settings::default());
-    let data_frame = H3Frame::Data(vec![1, 2, 3, 4]);
+    let mut rejects_data_first = H3ControlState::new();
+    let data_first_rejected = matches!(
+        rejects_data_first.on_remote_control_frame(&H3Frame::Data(vec![1, 2, 3, 4])),
+        Err(H3NativeError::ControlProtocol(
+            "first remote control frame must be SETTINGS"
+        ))
+    );
 
-    // Test proper ordering: SETTINGS first
-    let mut control_stream_frames = Vec::new();
+    let mut accepts_settings_first = H3ControlState::new();
+    let settings_first_accepted = accepts_settings_first
+        .on_remote_control_frame(&H3Frame::Settings(H3Settings::default()))
+        .is_ok();
 
-    // Encode SETTINGS frame first (correct)
-    let mut encoded_settings = Vec::new();
-    if settings_frame.encode(&mut encoded_settings).is_ok() {
-        control_stream_frames.push(("SETTINGS", encoded_settings));
-    }
-
-    // Then encode other frames
-    let mut encoded_data = Vec::new();
-    if data_frame.encode(&mut encoded_data).is_ok() {
-        control_stream_frames.push(("DATA", encoded_data));
-    }
-
-    // Verify SETTINGS is first
-    !control_stream_frames.is_empty() && control_stream_frames[0].0 == "SETTINGS"
+    data_first_rejected && settings_first_accepted
 }
 
 #[allow(dead_code)]
@@ -434,23 +417,13 @@ fn validate_settings_frame_first() -> bool {
 fn validate_no_settings_on_request_streams() -> bool {
     // RFC 9114 §7.2.4: SETTINGS frame MUST NOT appear on request/response streams
 
-    // Simulate request stream (bidirectional stream used for HTTP requests)
-    // Stream IDs 0, 4, 8, 12, ... are client-initiated bidirectional (requests)
-    let request_stream_id = 0u64;
-
-    // SETTINGS frame should only be allowed on control stream (unidirectional)
-    // For this test, we verify that SETTINGS frame encoding works only in control context
-
-    let settings_frame = H3Frame::Settings(H3Settings::default());
-    let mut encoded = Vec::new();
-
-    // SETTINGS frame itself should encode properly
-    let can_encode = settings_frame.encode(&mut encoded).is_ok();
-
-    // The validation is contextual - SETTINGS should not be sent on request streams
-    // Since we can't simulate full stream context here, we verify the frame structure
-    // In a real implementation, this would be enforced by the H3 protocol handler
-    can_encode && !encoded.is_empty()
+    let mut server = H3ConnectionState::new_server();
+    matches!(
+        server.on_request_stream_frame(0, &H3Frame::Settings(H3Settings::default())),
+        Err(H3NativeError::ControlProtocol(
+            "control frames are not valid on request streams"
+        ))
+    )
 }
 
 #[allow(dead_code)]
@@ -525,28 +498,29 @@ fn validate_known_stream_processing() -> bool {
 fn validate_stream_type_indicator_placement() -> bool {
     // RFC 9114 §6.2: Stream type indicator MUST be first data on unidirectional stream
 
-    // Simulate stream data with proper type indicator placement
     let mut control_stream_data = Vec::new();
 
-    // First byte should be stream type indicator (0x00 for control stream)
-    control_stream_data.push(0x00); // H3_STREAM_TYPE_CONTROL
+    encode_varint(0x00, &mut control_stream_data).expect("control stream type");
 
     // Then comes the SETTINGS frame as first frame
-    let settings = H3Settings::default();
-    let settings_frame = H3Frame::Settings(settings);
-
-    let mut frame_data = Vec::new();
-    if settings_frame.encode(&mut frame_data).is_ok() {
-        control_stream_data.extend_from_slice(&frame_data);
+    let settings_frame = H3Frame::Settings(H3Settings::default());
+    if settings_frame.encode(&mut control_stream_data).is_err() {
+        return false;
     }
 
-    // Verify stream type can be decoded from first byte
-    if !control_stream_data.is_empty() {
-        let stream_type = H3UniStreamType::decode(control_stream_data[0] as u64);
-        matches!(stream_type, H3UniStreamType::Control)
-    } else {
-        false
+    let (stream_type, consumed) = match decode_varint(&control_stream_data) {
+        Ok(decoded) => decoded,
+        Err(_) => return false,
+    };
+    let mut server = H3ConnectionState::new_server();
+    if !matches!(
+        server.on_remote_uni_stream_type(2, stream_type),
+        Ok(H3UniStreamType::Control)
+    ) {
+        return false;
     }
+
+    consumed < control_stream_data.len() && server.on_uni_stream_frame(2, &settings_frame).is_ok()
 }
 
 #[cfg(test)]
@@ -560,7 +534,6 @@ mod tests {
         assert_eq!(result.test_id, "RFC9114-6.1-CLIENT");
         assert_eq!(result.category, TestCategory::ConnectionPreface);
         assert_eq!(result.requirement_level, RequirementLevel::Must);
-        // Currently passes due to stub implementations
         assert_eq!(result.verdict, TestVerdict::Pass);
     }
 
@@ -571,7 +544,6 @@ mod tests {
         assert_eq!(result.test_id, "RFC9114-6.1-SERVER");
         assert_eq!(result.category, TestCategory::ConnectionPreface);
         assert_eq!(result.requirement_level, RequirementLevel::Must);
-        // Currently passes due to stub implementations
         assert_eq!(result.verdict, TestVerdict::Pass);
     }
 
@@ -582,7 +554,6 @@ mod tests {
         assert_eq!(result.test_id, "RFC9114-7.2.4-SETTINGS");
         assert_eq!(result.category, TestCategory::Settings);
         assert_eq!(result.requirement_level, RequirementLevel::Must);
-        // Currently passes due to stub implementations
         assert_eq!(result.verdict, TestVerdict::Pass);
     }
 
@@ -593,7 +564,6 @@ mod tests {
         assert_eq!(result.test_id, "RFC9114-6.2-STREAM-TYPES");
         assert_eq!(result.category, TestCategory::StreamTypes);
         assert_eq!(result.requirement_level, RequirementLevel::Must);
-        // Currently passes due to stub implementations
         assert_eq!(result.verdict, TestVerdict::Pass);
     }
 
