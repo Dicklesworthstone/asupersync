@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Property tests for distributed trace identifiers.
 //!
 //! Verifies TraceId and SymbolSpanId round-trip encoding, W3C format compliance,
