@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! HPACK Dynamic Table Size Update Conformance Tests (RFC 7541 Section 6.3)
 //!
 //! This module provides comprehensive conformance testing for HPACK dynamic table
@@ -37,14 +35,13 @@ use asupersync::http::h2::{
 };
 use proptest::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::time::Instant;
 
 /// Test categories for HPACK table size update conformance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub enum TestCategory {
-    /// SETTINGS frame acknowledgment tests.
-    SettingsAckRequired,
+    /// SETTINGS_HEADER_TABLE_SIZE propagation tests.
+    SettingsTableSizeUpdate,
     /// Size update ordering validation tests.
     SizeUpdateOrdering,
     /// Multiple size updates processing tests.
@@ -71,33 +68,25 @@ pub struct HpackTableSizeConformanceResult {
     pub duration_ms: u64,
 }
 
-/// Mock HPACK context for table size testing.
+/// HPACK encoder/decoder pair for table-size conformance tests.
 #[allow(dead_code)]
-struct MockHpackContext {
+struct HpackTableSizeContext {
     /// HPACK encoder.
     encoder: Encoder,
     /// HPACK decoder.
     decoder: Decoder,
     /// SETTINGS_HEADER_TABLE_SIZE value agreed upon.
     settings_table_size: usize,
-    /// Whether SETTINGS ACK was received.
-    settings_ack_received: bool,
-    /// Timestamp when SETTINGS was sent.
-    settings_sent_time: Option<Instant>,
 }
 
-#[allow(dead_code)]
-
-impl MockHpackContext {
-    /// Create a new mock HPACK context.
+impl HpackTableSizeContext {
+    /// Create a new HPACK table-size context.
     #[allow(dead_code)]
     fn new() -> Self {
         Self {
             encoder: Encoder::new(),
             decoder: Decoder::new(),
             settings_table_size: DEFAULT_MAX_TABLE_SIZE,
-            settings_ack_received: false,
-            settings_sent_time: None,
         }
     }
 
@@ -112,15 +101,12 @@ impl MockHpackContext {
             encoder,
             decoder,
             settings_table_size: table_size,
-            settings_ack_received: false,
-            settings_sent_time: None,
         }
     }
 
-    /// Simulate SETTINGS frame exchange for table size.
+    /// Apply SETTINGS_HEADER_TABLE_SIZE to the live encoder and decoder.
     #[allow(dead_code)]
-    fn exchange_settings(&mut self, new_table_size: usize) -> Result<(), H2Error> {
-        self.settings_sent_time = Some(Instant::now());
+    fn apply_settings_header_table_size(&mut self, new_table_size: usize) {
         self.settings_table_size = new_table_size;
 
         // Update decoder's allowed table size (from SETTINGS frame)
@@ -128,11 +114,6 @@ impl MockHpackContext {
 
         // Encoder will emit size update in next header block
         self.encoder.set_max_table_size(new_table_size);
-
-        // Simulate ACK reception
-        self.settings_ack_received = true;
-
-        Ok(())
     }
 
     /// Encode a raw dynamic table size update instruction.
@@ -239,30 +220,34 @@ fn arb_headers() -> impl Strategy<Value = Vec<Header>> {
 mod conformance_tests {
     use super::*;
 
-    /// MR1: SETTINGS_HEADER_TABLE_SIZE acknowledgment required (Metamorphic, Score: 8.0)
-    /// Property: settings_frame(size) → encoder → ack_required
-    /// Catches: Missing SETTINGS ACK handling, protocol violations
+    /// MR1: SETTINGS_HEADER_TABLE_SIZE update is emitted before headers.
+    /// Property: settings_table_size(size) -> encoder -> size_update_prefix -> decoder accepts
+    /// Catches: missing encoder update emission or decoder bound propagation.
     #[test]
     #[allow(dead_code)]
-    fn mr1_settings_ack_required() {
+    fn mr1_settings_table_size_update_is_emitted_and_accepted() {
         proptest!(|(table_size in arb_table_size())| {
-            let mut context = MockHpackContext::new();
+            let mut context = HpackTableSizeContext::new();
 
-            // SETTINGS_HEADER_TABLE_SIZE exchange should require ACK
-            let result = context.exchange_settings(table_size);
-            prop_assert!(result.is_ok(), "SETTINGS exchange failed: {:?}", result);
+            context.apply_settings_header_table_size(table_size);
 
-            // Verify ACK was processed (simulated)
-            prop_assert!(context.settings_ack_received,
-                "SETTINGS ACK not received for table size {}", table_size);
+            let test_headers = [Header::new(":method", "GET")];
+            let mut encoded = BytesMut::new();
+            context.encoder.encode(&test_headers, &mut encoded);
+            prop_assert!(!encoded.is_empty(), "encoded block should contain a size update");
+            prop_assert_eq!(encoded[0] & 0xe0, 0x20,
+                "header block must start with a dynamic table size update");
 
-            // Verify settings time was recorded
-            prop_assert!(context.settings_sent_time.is_some(),
-                "SETTINGS timestamp not recorded");
-
-            // Verify decoder's allowed table size was updated
+            let mut encoded_bytes = encoded.freeze();
+            let decoded = context.decoder.decode(&mut encoded_bytes);
+            prop_assert!(decoded.is_ok(),
+                "decoder should accept encoder-emitted size update: {:?}", decoded);
             prop_assert_eq!(context.settings_table_size, table_size,
                 "Settings table size mismatch");
+            prop_assert_eq!(context.decoder.allowed_table_size(), table_size,
+                "Decoder allowed table size mismatch");
+            prop_assert_eq!(context.table_max_size(), table_size,
+                "Decoder dynamic table size limit mismatch");
         });
     }
 
@@ -273,14 +258,12 @@ mod conformance_tests {
     #[allow(dead_code)]
     fn mr2_size_update_precedes_encoded_block() {
         proptest!(|(new_size in arb_table_size(), headers in arb_headers())| {
-            let mut context = MockHpackContext::with_table_size(4096);
+            let mut context = HpackTableSizeContext::with_table_size(4096);
             let new_size = new_size.min(4096);
 
             // Drive the actual SETTINGS -> encoder transition so the encoder
             // applies the same table bound it advertises on the wire.
-            context
-                .exchange_settings(new_size)
-                .expect("SETTINGS exchange should succeed");
+            context.apply_settings_header_table_size(new_size);
 
             let mut valid_block = BytesMut::new();
             context.encoder.encode(&headers, &mut valid_block);
@@ -289,10 +272,6 @@ mod conformance_tests {
             let valid_result = context.decoder.decode(&mut valid_bytes);
             prop_assert!(valid_result.is_ok(),
                 "Valid ordering (size update first) should succeed, got: {:?}", valid_result);
-
-            // Test 2: Headers BEFORE size update (invalid - would violate RFC if we tried)
-            // RFC 7541 Section 4.2: size updates only permitted at beginning of header block
-            // We don't actually test this invalid case as it would require violating the spec
         });
     }
 
@@ -308,15 +287,15 @@ mod conformance_tests {
             size3 in 1usize..8192
         )| {
             let max_allowed = 16384;
-            let mut context = MockHpackContext::with_table_size(max_allowed);
+            let mut context = HpackTableSizeContext::with_table_size(max_allowed);
 
             // Create header block with multiple size updates
             let mut block = BytesMut::new();
 
             // Add three consecutive size updates
-            let update1 = MockHpackContext::encode_size_update(size1.min(max_allowed));
-            let update2 = MockHpackContext::encode_size_update(size2.min(max_allowed));
-            let update3 = MockHpackContext::encode_size_update(size3.min(max_allowed));
+            let update1 = HpackTableSizeContext::encode_size_update(size1.min(max_allowed));
+            let update2 = HpackTableSizeContext::encode_size_update(size2.min(max_allowed));
+            let update3 = HpackTableSizeContext::encode_size_update(size3.min(max_allowed));
 
             block.extend_from_slice(&update1);
             block.extend_from_slice(&update2);
@@ -344,10 +323,10 @@ mod conformance_tests {
             oversized_factor in 2usize..10
         )| {
             let oversized_update = settings_size * oversized_factor;
-            let mut context = MockHpackContext::with_table_size(settings_size);
+            let mut context = HpackTableSizeContext::with_table_size(settings_size);
 
             // Create a header block with oversized table size update
-            let oversized_block = MockHpackContext::encode_size_update(oversized_update);
+            let oversized_block = HpackTableSizeContext::encode_size_update(oversized_update);
             let mut block_bytes = oversized_block.freeze();
 
             let result = context.decoder.decode(&mut block_bytes);
@@ -375,7 +354,7 @@ mod conformance_tests {
             headers in arb_headers(),
             slack in 0usize..1024
         )| {
-            let mut context = MockHpackContext::with_table_size(initial_size);
+            let mut context = HpackTableSizeContext::with_table_size(initial_size);
 
             // Populate table with headers
             context.populate_table(&headers);
@@ -385,7 +364,7 @@ mod conformance_tests {
             // large enough to preserve the current table contents.
             let new_size = usage_before.saturating_add(slack).min(initial_size);
 
-            let size_update = MockHpackContext::encode_size_update(new_size);
+            let size_update = HpackTableSizeContext::encode_size_update(new_size);
             let mut update_bytes = size_update.freeze();
 
             let result = context.decoder.decode(&mut update_bytes);
@@ -402,13 +381,11 @@ mod conformance_tests {
     #[test]
     #[allow(dead_code)]
     fn integration_complete_settings_exchange() {
-        let mut context = MockHpackContext::new();
+        let mut context = HpackTableSizeContext::new();
 
-        // Step 1: Exchange SETTINGS with new table size
+        // Step 1: Apply SETTINGS_HEADER_TABLE_SIZE with a new table size.
         let new_size = 2048;
-        context
-            .exchange_settings(new_size)
-            .expect("SETTINGS exchange failed");
+        context.apply_settings_header_table_size(new_size);
 
         // Step 2: Encoder should emit size update in next header block
         let test_headers = vec![
@@ -448,13 +425,13 @@ mod conformance_tests {
     #[test]
     #[allow(dead_code)]
     fn stress_rapid_size_update_sequences() {
-        let mut context = MockHpackContext::with_table_size(8192);
+        let mut context = HpackTableSizeContext::with_table_size(8192);
 
         // Rapid sequence of size updates with different values
         let sizes = [4096, 2048, 6144, 1024, 8192];
 
         for &size in &sizes {
-            let size_update = MockHpackContext::encode_size_update(size);
+            let size_update = HpackTableSizeContext::encode_size_update(size);
             let mut update_bytes = size_update.freeze();
 
             let result = context.decoder.decode(&mut update_bytes);
@@ -472,7 +449,7 @@ mod conformance_tests {
     #[test]
     #[allow(dead_code)]
     fn error_size_update_mixed_with_headers() {
-        let mut context = MockHpackContext::with_table_size(4096);
+        let mut context = HpackTableSizeContext::with_table_size(4096);
 
         // Create a block that violates RFC 7541 Section 4.2
         // (size updates must be at the beginning)
@@ -482,7 +459,7 @@ mod conformance_tests {
         invalid_block.put_u8(0x82); // Indexed header field, index 2 (:method=GET)
 
         // Then try to add a size update (INVALID per RFC)
-        let size_update = MockHpackContext::encode_size_update(2048);
+        let size_update = HpackTableSizeContext::encode_size_update(2048);
         invalid_block.extend_from_slice(&size_update);
 
         let mut invalid_bytes = invalid_block.freeze();
@@ -495,5 +472,32 @@ mod conformance_tests {
             ),
             "Mixed headers and size updates must be rejected with COMPRESSION_ERROR"
         );
+    }
+
+    #[test]
+    fn source_rejects_stale_fake_context_terms() {
+        let source = include_str!("hpack_table_size.rs");
+        let forbidden = [
+            ascii(&[77, 111, 99, 107]),
+            ascii(&[109, 111, 99, 107]),
+            ascii(&[115, 105, 109, 117, 108, 97, 116, 101, 95]),
+            ascii(&[115, 101, 116, 116, 105, 110, 103, 115, 95, 97, 99, 107]),
+            ascii(&[
+                115, 101, 116, 116, 105, 110, 103, 115, 95, 115, 101, 110, 116,
+            ]),
+            ["allow", "(warnings)"].concat(),
+            ["allow", "(clippy::all)"].concat(),
+        ];
+
+        for term in forbidden {
+            assert!(
+                !source.contains(&term),
+                "stale HPACK table-size conformance term reintroduced"
+            );
+        }
+    }
+
+    fn ascii(bytes: &[u8]) -> String {
+        String::from_utf8(bytes.to_vec()).expect("test fixture contains valid ASCII")
     }
 }
