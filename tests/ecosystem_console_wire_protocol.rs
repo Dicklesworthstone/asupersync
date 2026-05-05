@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Contract tests for ECOSYSTEM-PARITY G.1 task-inspector wire payloads.
 
 #![allow(missing_docs)]
