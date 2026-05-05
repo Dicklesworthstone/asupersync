@@ -1,8 +1,4 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Minimal tests to verify SharedLabHandle behavior.
-
-mod common;
 
 use std::collections::BTreeSet;
 use std::future::Future;
@@ -10,6 +6,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use asupersync::runtime::TaskHandle;
+use asupersync::test_utils::init_test_logging;
 use asupersync::types::Budget;
 use parking_lot::Mutex;
 
@@ -100,7 +97,7 @@ impl SharedLabHandle {
 
 #[test]
 fn shared_handle_finds_completed_value() {
-    common::init_test_logging();
+    init_test_logging();
 
     asupersync::lab::runtime::test(42, |runtime| {
         let region = runtime.state.create_root_region(Budget::INFINITE);
@@ -141,7 +138,7 @@ fn shared_handle_finds_completed_value() {
 /// try_join_probe in a loop, yielding between iterations.
 #[test]
 fn shared_handle_polling_from_task() {
-    common::init_test_logging();
+    init_test_logging();
 
     asupersync::lab::runtime::test(42, |runtime| {
         let region = runtime.state.create_root_region(Budget::INFINITE);
