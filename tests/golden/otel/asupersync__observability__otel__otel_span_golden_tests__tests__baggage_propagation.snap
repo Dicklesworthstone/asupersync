@@ -1,0 +1,28 @@
+---
+source: src/observability/otel_span_golden_tests.rs
+expression: test_span_snapshot(&child)
+---
+{
+  "attributes": {
+    "service.name": "downstream"
+  },
+  "baggage": {
+    "correlation.id": "corr-789",
+    "downstream.region": "us-west-2",
+    "tenant": "acme-corp"
+  },
+  "end_time": "[TIMESTAMP]",
+  "events": [],
+  "is_remote": false,
+  "kind": "Server",
+  "name": "downstream.service",
+  "parent_span_id": "[ID]",
+  "sampled": true,
+  "span_id": "[ID]",
+  "start_time": "[TIMESTAMP]",
+  "status": {
+    "kind": "ok"
+  },
+  "trace_id": "[ID]",
+  "trace_state": ""
+}

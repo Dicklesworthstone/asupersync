@@ -1,0 +1,40 @@
+---
+source: src/observability/otel_span_golden_tests.rs
+expression: test_span_snapshot(&span)
+---
+{
+  "attributes": {
+    "db.operation": "select",
+    "db.system": "postgresql"
+  },
+  "baggage": {},
+  "end_time": "[TIMESTAMP]",
+  "events": [
+    {
+      "attributes": {
+        "query_id": "q-12345"
+      },
+      "name": "query.start",
+      "timestamp": "[TIMESTAMP]"
+    },
+    {
+      "attributes": {
+        "rows_affected": "150"
+      },
+      "name": "query.result",
+      "timestamp": "[TIMESTAMP]"
+    }
+  ],
+  "is_remote": false,
+  "kind": "Client",
+  "name": "db.query",
+  "parent_span_id": null,
+  "sampled": true,
+  "span_id": "[ID]",
+  "start_time": "[TIMESTAMP]",
+  "status": {
+    "kind": "ok"
+  },
+  "trace_id": "[ID]",
+  "trace_state": ""
+}

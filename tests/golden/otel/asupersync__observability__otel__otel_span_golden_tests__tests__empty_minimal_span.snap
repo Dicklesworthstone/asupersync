@@ -1,0 +1,22 @@
+---
+source: src/observability/otel_span_golden_tests.rs
+expression: test_span_snapshot(&span)
+---
+{
+  "attributes": {},
+  "baggage": {},
+  "end_time": "[TIMESTAMP]",
+  "events": [],
+  "is_remote": false,
+  "kind": "Internal",
+  "name": "minimal",
+  "parent_span_id": null,
+  "sampled": true,
+  "span_id": "[ID]",
+  "start_time": "[TIMESTAMP]",
+  "status": {
+    "kind": "unset"
+  },
+  "trace_id": "[ID]",
+  "trace_state": ""
+}
