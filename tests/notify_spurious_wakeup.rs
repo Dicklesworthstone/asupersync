@@ -1,6 +1,5 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 #![allow(missing_docs)]
+
 use asupersync::sync::Notify;
 use std::future::Future;
 use std::pin::Pin;
@@ -28,9 +27,10 @@ fn notify_waiters_spurious_wakeup_bug() {
 
     drop(fut1);
 
-    let is_ready = poll_once(&mut fut2).is_ready();
-    println!("fut2 is ready: {is_ready}");
-    assert!(!is_ready, "fut2 was spuriously woken!");
+    assert!(
+        poll_once(&mut fut2).is_pending(),
+        "dropping a broadcast waiter spuriously woke a later waiter"
+    );
 }
 
 #[test]
