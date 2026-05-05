@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 #![allow(clippy::items_after_statements)]
 #![allow(missing_docs)]
 //! I/O Track Conformance and Performance Gates
