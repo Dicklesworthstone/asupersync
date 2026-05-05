@@ -1713,21 +1713,7 @@ impl SqliteTransaction<'_> {
     }
 
     pub(crate) fn poison_for_rollback(&self) {
-        if self
-            .conn
-            .needs_rollback
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            let inner = Arc::clone(&self.conn.inner);
-            let needs_rollback = Arc::clone(&self.conn.needs_rollback);
-            self.conn.pool.spawn(move || {
-                let guard = inner.lock();
-                if let Ok(conn) = guard.get() {
-                    let _ = rollback_orphaned_transaction(conn, needs_rollback.as_ref());
-                }
-            });
-        }
+        self.conn.needs_rollback.store(true, Ordering::Release);
     }
 
     /// Commits the transaction.
@@ -3051,7 +3037,10 @@ mod tests {
                 other => panic!("insert failed: {other:?}"),
             }
 
-            let rows = match conn.query(&cx, "SELECT rowid, id, name FROM t", &[]).await {
+            let rows = match conn
+                .query(&cx, "SELECT rowid AS rowid, id, name FROM t", &[])
+                .await
+            {
                 Outcome::Ok(rows) => rows,
                 other => panic!("query failed: {other:?}"),
             };
