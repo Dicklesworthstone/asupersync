@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Canonical integration target for `tests/metamorphic/io_copy.rs`.
 //!
 //! `tests/io_copy_metamorphic_test_suite.rs` is kept as the historical alias
