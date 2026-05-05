@@ -1,8 +1,9 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Deterministic Lean frontier extractor checks (bd-1dorb).
 
-use conformance::extract_frontier_report;
+#[path = "../conformance/src/lean_frontier.rs"]
+mod lean_frontier;
+
+use lean_frontier::extract_frontier_report;
 use std::collections::BTreeSet;
 
 const GAP_PLAN_JSON: &str = include_str!("../formal/lean/coverage/gap_risk_sequencing_plan.json");
