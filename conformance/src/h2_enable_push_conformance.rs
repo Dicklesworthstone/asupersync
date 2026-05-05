@@ -1,12 +1,19 @@
 //! HTTP/2 SETTINGS_ENABLE_PUSH=0 enforcement conformance testing.
 //!
-//! This harness tests that both asupersync and h2 reference implementation
-//! correctly enforce SETTINGS_ENABLE_PUSH=0 by never sending PUSH_PROMISE
-//! frames when server push is disabled by the client.
+//! This harness tests the production asupersync HTTP/2 SETTINGS_ENABLE_PUSH
+//! and PUSH_PROMISE seams. It intentionally does not fake h2 reference
+//! behavior when no live h2 peer is wired into this crate.
 
+use asupersync::bytes::{BufMut, Bytes, BytesMut};
+use asupersync::http::h2::connection::{Connection, ReceivedFrame};
+use asupersync::http::h2::error::{ErrorCode, H2Error};
+use asupersync::http::h2::frame::{
+    Frame, FrameHeader, FrameType, PushPromiseFrame, Setting, SettingsFrame, parse_frame,
+};
+use asupersync::http::h2::hpack::{Encoder, Header};
+use asupersync::http::h2::settings::Settings;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::time::Duration;
 
 /// Test verdict for enable push conformance cases.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,7 +64,18 @@ pub struct EnablePushTestResult {
     pub asupersync_push_promise_count: usize,
     pub h2_push_promise_count: usize,
     pub push_promises_match: bool,
+    pub reference_comparison_available: bool,
+    pub reference_status: String,
+    pub support_class: String,
+    pub evidence: Vec<String>,
     pub test_duration_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+struct LiveEnablePushOutcome {
+    accepted_push_promises: usize,
+    evidence: Vec<String>,
+    support_class: String,
 }
 
 /// Summary statistics for enable push conformance run.
@@ -118,7 +136,7 @@ impl EnablePushConformanceTester {
             },
             EnablePushConformanceCase {
                 id: "PUSH-002".to_string(),
-                description: "SETTINGS_ENABLE_PUSH=1 allows server push".to_string(),
+                description: "SETTINGS_ENABLE_PUSH=1 permits valid PUSH_PROMISE".to_string(),
                 enable_push_setting: true,
                 requests: vec![TestRequest {
                     method: "GET".to_string(),
@@ -126,7 +144,7 @@ impl EnablePushConformanceTester {
                     headers: vec![("Accept".to_string(), "text/html".to_string())],
                     pushable_resources: vec!["/style.css".to_string(), "/script.js".to_string()],
                 }],
-                expected_push_promise_count: 2, // May push the CSS and JS
+                expected_push_promise_count: 2,
             },
             EnablePushConformanceCase {
                 id: "PUSH-003".to_string(),
@@ -165,7 +183,8 @@ impl EnablePushConformanceTester {
             },
             EnablePushConformanceCase {
                 id: "PUSH-005".to_string(),
-                description: "Default ENABLE_PUSH setting (server decides)".to_string(),
+                description: "Enabled client accepts multiple valid PUSH_PROMISE frames"
+                    .to_string(),
                 enable_push_setting: true, // Default for servers is true
                 requests: vec![TestRequest {
                     method: "GET".to_string(),
@@ -176,7 +195,7 @@ impl EnablePushConformanceTester {
                         "/manifest.json".to_string(),
                     ],
                 }],
-                expected_push_promise_count: 0, // May vary by implementation
+                expected_push_promise_count: 2,
             },
         ]
     }
@@ -211,49 +230,46 @@ impl EnablePushConformanceTester {
         // Run test with asupersync implementation
         let asupersync_result = self.test_with_asupersync(test_case).await;
 
-        // Run test with h2 reference implementation
-        let h2_result = self.test_with_h2(test_case).await;
-
         let duration = start_time.elapsed();
 
-        match (asupersync_result, h2_result) {
-            (Ok(asupersync_count), Ok(h2_count)) => {
-                let push_promises_match = asupersync_count == h2_count;
-
-                // Check if both implementations respect ENABLE_PUSH=0
-                let verdict = if !test_case.enable_push_setting {
-                    // Push should be disabled
-                    if asupersync_count == 0 && h2_count == 0 {
-                        EnablePushTestVerdict::Pass
-                    } else {
-                        EnablePushTestVerdict::Fail
-                    }
+        match asupersync_result {
+            Ok(outcome) => {
+                let expected = test_case.expected_push_promise_count;
+                let verdict = if outcome.accepted_push_promises == expected {
+                    EnablePushTestVerdict::Pass
                 } else {
-                    // Push is enabled, both should behave the same way
-                    if push_promises_match {
-                        EnablePushTestVerdict::Pass
-                    } else {
-                        EnablePushTestVerdict::Fail
-                    }
+                    EnablePushTestVerdict::Fail
                 };
-
                 EnablePushTestResult {
                     case_id: test_case.id.clone(),
                     verdict,
-                    error: None,
-                    asupersync_push_promise_count: asupersync_count,
-                    h2_push_promise_count: h2_count,
-                    push_promises_match,
+                    error: (outcome.accepted_push_promises != expected).then(|| {
+                        format!(
+                            "expected {expected} accepted PUSH_PROMISE frame(s), got {}",
+                            outcome.accepted_push_promises
+                        )
+                    }),
+                    asupersync_push_promise_count: outcome.accepted_push_promises,
+                    h2_push_promise_count: 0,
+                    push_promises_match: false,
+                    reference_comparison_available: false,
+                    reference_status: reference_unavailable_status().to_string(),
+                    support_class: outcome.support_class,
+                    evidence: outcome.evidence,
                     test_duration_ms: duration.as_millis() as u64,
                 }
             }
-            (Err(e), _) | (_, Err(e)) => EnablePushTestResult {
+            Err(e) => EnablePushTestResult {
                 case_id: test_case.id.clone(),
                 verdict: EnablePushTestVerdict::Fail,
                 error: Some(e),
                 asupersync_push_promise_count: 0,
                 h2_push_promise_count: 0,
                 push_promises_match: false,
+                reference_comparison_available: false,
+                reference_status: reference_unavailable_status().to_string(),
+                support_class: "failed".to_string(),
+                evidence: Vec::new(),
                 test_duration_ms: duration.as_millis() as u64,
             },
         }
@@ -263,39 +279,90 @@ impl EnablePushConformanceTester {
     async fn test_with_asupersync(
         &self,
         test_case: &EnablePushConformanceCase,
-    ) -> Result<usize, String> {
-        // This is a placeholder implementation
-        // In a real conformance test, this would:
-        // 1. Start an HTTP/2 server using asupersync
-        // 2. Connect as a client and send SETTINGS_ENABLE_PUSH=0/1
-        // 3. Send the test requests
-        // 4. Count PUSH_PROMISE frames received
-        // 5. Return the count
+    ) -> Result<LiveEnablePushOutcome, String> {
+        let mut evidence = Vec::new();
+        assert_settings_parser_accepts_enable_push(test_case.enable_push_setting, &mut evidence)?;
+        assert_server_applies_client_enable_push(test_case.enable_push_setting, &mut evidence)?;
+        assert_client_rejects_server_enable_push(test_case.enable_push_setting, &mut evidence)?;
 
-        // For now, simulate the expected behavior
-        if test_case.enable_push_setting {
-            Ok(0) // Asupersync might not implement server push yet
-        } else {
-            Ok(0) // Should never send PUSH_PROMISE when disabled
+        let mut accepted_push_promises = 0;
+        let mut local_settings = Settings::client();
+        local_settings.enable_push = test_case.enable_push_setting;
+        let mut client = Connection::client(local_settings);
+        client
+            .process_frame(Frame::Settings(SettingsFrame::new(Vec::new())))
+            .map_err(|err| format!("server initial SETTINGS rejected: {err}"))?;
+
+        let mut next_promised_stream_id = 2;
+        for request in &test_case.requests {
+            let parent_stream_id = client
+                .open_stream(request_headers(request), false)
+                .map_err(|err| {
+                    format!("failed to open request stream for {}: {err}", request.path)
+                })?;
+
+            for resource in &request.pushable_resources {
+                let frame = push_promise_frame(parent_stream_id, next_promised_stream_id, resource);
+                next_promised_stream_id += 2;
+                let parsed = encode_then_parse(Frame::PushPromise(frame))
+                    .map_err(|err| format!("PUSH_PROMISE parser rejected {resource}: {err}"))?;
+                match client.process_frame(parsed) {
+                    Ok(Some(ReceivedFrame::PushPromise {
+                        stream_id,
+                        promised_stream_id,
+                        headers,
+                    })) if test_case.enable_push_setting => {
+                        if stream_id != parent_stream_id {
+                            return Err(format!(
+                                "PUSH_PROMISE associated stream mismatch: expected {parent_stream_id}, got {stream_id}"
+                            ));
+                        }
+                        if !headers.iter().any(|header| {
+                            header.name == ":path" && header.value == resource.as_str()
+                        }) {
+                            return Err(format!(
+                                "PUSH_PROMISE for stream {promised_stream_id} did not decode :path {resource}"
+                            ));
+                        }
+                        accepted_push_promises += 1;
+                    }
+                    Err(err)
+                        if !test_case.enable_push_setting
+                            && err.code == ErrorCode::ProtocolError
+                            && err.message.contains("push not enabled") =>
+                    {
+                        evidence.push(format!(
+                            "rejected PUSH_PROMISE for {resource} with push disabled"
+                        ));
+                    }
+                    Ok(other) => {
+                        return Err(format!(
+                            "unexpected PUSH_PROMISE result for {resource}: {other:?}"
+                        ));
+                    }
+                    Err(err) => {
+                        return Err(format!(
+                            "unexpected PUSH_PROMISE rejection for {resource}: {err}"
+                        ));
+                    }
+                }
+            }
         }
-    }
 
-    /// Test push promise behavior with h2 reference implementation.
-    async fn test_with_h2(&self, test_case: &EnablePushConformanceCase) -> Result<usize, String> {
-        // This is a placeholder implementation
-        // In a real conformance test, this would:
-        // 1. Start an HTTP/2 server using h2
-        // 2. Connect as a client and send SETTINGS_ENABLE_PUSH=0/1
-        // 3. Send the test requests
-        // 4. Count PUSH_PROMISE frames received
-        // 5. Return the count
-
-        // For now, simulate the expected behavior
-        if test_case.enable_push_setting {
-            Ok(0) // Reference implementation respects push settings
+        let support_class = if test_case.enable_push_setting {
+            "live-push-promise-accepted"
         } else {
-            Ok(0) // Should never send PUSH_PROMISE when disabled
-        }
+            "live-push-disabled-fail-closed"
+        };
+        evidence.push(format!(
+            "accepted {accepted_push_promises} PUSH_PROMISE frame(s) through Connection::process_frame"
+        ));
+
+        Ok(LiveEnablePushOutcome {
+            accepted_push_promises,
+            evidence,
+            support_class: support_class.to_string(),
+        })
     }
 
     /// Compute summary statistics from test results.
@@ -358,15 +425,14 @@ impl EnablePushConformanceTester {
         ));
 
         md.push_str("## Test Results\n\n");
-        md.push_str("| Test ID | Description | Verdict | Asupersync PUSH | H2 PUSH | Match |\n");
-        md.push_str("|---------|-------------|---------|-----------------|---------|-------|\n");
+        md.push_str(
+            "| Test ID | Description | Verdict | Support | Asupersync PUSH | Reference |\n",
+        );
+        md.push_str(
+            "|---------|-------------|---------|---------|-----------------|-----------|\n",
+        );
 
         for result in &report.results {
-            let match_icon = if result.push_promises_match {
-                "✅"
-            } else {
-                "❌"
-            };
             md.push_str(&format!(
                 "| {} | {} | {} | {} | {} | {} |\n",
                 result.case_id,
@@ -376,9 +442,9 @@ impl EnablePushConformanceTester {
                     .map(|case| case.description.as_str())
                     .unwrap_or("Unknown"),
                 result.verdict,
+                result.support_class,
                 result.asupersync_push_promise_count,
-                result.h2_push_promise_count,
-                match_icon
+                result.reference_status
             ));
         }
 
@@ -398,8 +464,8 @@ impl EnablePushConformanceTester {
                     md.push_str(&format!("**Error:** {}\n\n", error));
                 }
                 md.push_str(&format!(
-                    "**PUSH_PROMISE Count:** asupersync={}, h2={}\n\n",
-                    result.asupersync_push_promise_count, result.h2_push_promise_count
+                    "**PUSH_PROMISE Count:** asupersync={}\n\n",
+                    result.asupersync_push_promise_count
                 ));
             }
         }
@@ -411,5 +477,209 @@ impl EnablePushConformanceTester {
         ));
 
         md
+    }
+}
+
+fn reference_unavailable_status() -> &'static str {
+    "unavailable: no live h2 peer wired; no simulated reference parity"
+}
+
+fn assert_settings_parser_accepts_enable_push(
+    enable_push: bool,
+    evidence: &mut Vec<String>,
+) -> Result<(), String> {
+    let parsed = parse_raw_enable_push_setting(u32::from(enable_push))
+        .map_err(|err| format!("SETTINGS_ENABLE_PUSH parser rejected {enable_push}: {err}"))?;
+    match parsed {
+        Frame::Settings(frame) if frame.settings == vec![Setting::EnablePush(enable_push)] => {
+            evidence.push(format!(
+                "parsed SETTINGS_ENABLE_PUSH={} through FrameHeader::parse/parse_frame",
+                u32::from(enable_push)
+            ));
+            Ok(())
+        }
+        other => Err(format!("unexpected parsed ENABLE_PUSH frame: {other:?}")),
+    }
+}
+
+fn assert_server_applies_client_enable_push(
+    enable_push: bool,
+    evidence: &mut Vec<String>,
+) -> Result<(), String> {
+    let mut server = Connection::server(Settings::server());
+    let frame = Frame::Settings(SettingsFrame::new(vec![Setting::EnablePush(enable_push)]));
+    server.process_frame(frame).map_err(|err| {
+        format!("server rejected client SETTINGS_ENABLE_PUSH={enable_push}: {err}")
+    })?;
+    if server.remote_settings().enable_push != enable_push {
+        return Err(format!(
+            "server remote_settings.enable_push = {}, expected {enable_push}",
+            server.remote_settings().enable_push
+        ));
+    }
+    match server.next_frame() {
+        Some(Frame::Settings(settings)) if settings.ack => {
+            evidence.push(format!(
+                "server applied client SETTINGS_ENABLE_PUSH={} and queued ACK",
+                u32::from(enable_push)
+            ));
+            Ok(())
+        }
+        other => Err(format!(
+            "server did not queue SETTINGS ACK after ENABLE_PUSH: {other:?}"
+        )),
+    }
+}
+
+fn assert_client_rejects_server_enable_push(
+    enable_push: bool,
+    evidence: &mut Vec<String>,
+) -> Result<(), String> {
+    let mut client = Connection::client(Settings::client());
+    let frame = Frame::Settings(SettingsFrame::new(vec![Setting::EnablePush(enable_push)]));
+    let err = client
+        .process_frame(frame)
+        .expect_err("client must reject server-sent SETTINGS_ENABLE_PUSH");
+    if err.code != ErrorCode::ProtocolError || !err.message.contains("server MUST NOT send") {
+        return Err(format!(
+            "client rejected server SETTINGS_ENABLE_PUSH with wrong error: {err}"
+        ));
+    }
+    evidence.push(format!(
+        "client rejected server SETTINGS_ENABLE_PUSH={} as PROTOCOL_ERROR",
+        u32::from(enable_push)
+    ));
+    Ok(())
+}
+
+fn parse_raw_enable_push_setting(value: u32) -> Result<Frame, H2Error> {
+    let mut payload = BytesMut::with_capacity(6);
+    payload.put_u16(0x2);
+    payload.put_u32(value);
+    let header = FrameHeader {
+        length: 6,
+        frame_type: FrameType::Settings as u8,
+        flags: 0,
+        stream_id: 0,
+    };
+    parse_frame(&header, payload.freeze())
+}
+
+fn encode_then_parse(frame: Frame) -> Result<Frame, H2Error> {
+    let mut bytes = BytesMut::new();
+    frame.encode(&mut bytes)?;
+    let header = FrameHeader::parse(&mut bytes)?;
+    parse_frame(&header, bytes.freeze())
+}
+
+fn request_headers(request: &TestRequest) -> Vec<Header> {
+    let mut headers = vec![
+        Header::new(":method", request.method.to_ascii_uppercase()),
+        Header::new(":scheme", "https"),
+        Header::new(":authority", "example.test"),
+        Header::new(":path", request.path.clone()),
+    ];
+    for (name, value) in &request.headers {
+        headers.push(Header::new(name.to_ascii_lowercase(), value.clone()));
+    }
+    headers
+}
+
+fn push_promise_frame(
+    stream_id: u32,
+    promised_stream_id: u32,
+    resource_path: &str,
+) -> PushPromiseFrame {
+    let mut encoder = Encoder::new();
+    let mut encoded = BytesMut::new();
+    let headers = [
+        Header::new(":method", "GET"),
+        Header::new(":scheme", "https"),
+        Header::new(":authority", "example.test"),
+        Header::new(":path", resource_path),
+    ];
+    encoder.encode(&headers, &mut encoded);
+    PushPromiseFrame {
+        stream_id,
+        promised_stream_id,
+        header_block: encoded.freeze(),
+        end_headers: true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn disabled_push_uses_live_connection_rejection() {
+        let tester = EnablePushConformanceTester::new();
+        let result = tester.run_single_test(&tester.test_cases[0]).await;
+
+        assert_eq!(result.verdict, EnablePushTestVerdict::Pass);
+        assert_eq!(result.asupersync_push_promise_count, 0);
+        assert!(!result.reference_comparison_available);
+        assert_eq!(result.reference_status, reference_unavailable_status());
+        assert_eq!(result.support_class, "live-push-disabled-fail-closed");
+        assert!(
+            result
+                .evidence
+                .iter()
+                .any(|line| line.contains("push disabled"))
+        );
+    }
+
+    #[tokio::test]
+    async fn enabled_push_accepts_real_push_promise_frames() {
+        let tester = EnablePushConformanceTester::new();
+        let result = tester.run_single_test(&tester.test_cases[1]).await;
+
+        assert_eq!(result.verdict, EnablePushTestVerdict::Pass);
+        assert_eq!(result.asupersync_push_promise_count, 2);
+        assert_eq!(result.support_class, "live-push-promise-accepted");
+        assert!(
+            result
+                .evidence
+                .iter()
+                .any(|line| line.contains("FrameHeader::parse/parse_frame"))
+        );
+    }
+
+    #[test]
+    fn invalid_enable_push_value_is_parser_error() {
+        let err = parse_raw_enable_push_setting(2)
+            .expect_err("SETTINGS_ENABLE_PUSH values above 1 must fail parsing");
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+        assert!(err.message.contains("SETTINGS_ENABLE_PUSH must be 0 or 1"));
+    }
+
+    #[test]
+    fn role_rules_use_connection_state_machine() {
+        let mut evidence = Vec::new();
+        assert_server_applies_client_enable_push(false, &mut evidence).unwrap();
+        assert_client_rejects_server_enable_push(false, &mut evidence).unwrap();
+        assert!(evidence.iter().any(|line| line.contains("queued ACK")));
+        assert!(evidence.iter().any(|line| line.contains("PROTOCOL_ERROR")));
+    }
+
+    #[tokio::test]
+    async fn full_report_has_no_fake_reference_passes() {
+        let mut tester = EnablePushConformanceTester::new();
+        let report = tester.run_all_tests().await;
+
+        assert_eq!(report.summary.failed, 0);
+        assert_eq!(report.summary.passed, report.total_cases);
+        assert!(
+            report
+                .results
+                .iter()
+                .all(|result| !result.reference_comparison_available)
+        );
+        assert!(
+            report
+                .results
+                .iter()
+                .all(|result| result.reference_status == reference_unavailable_status())
+        );
     }
 }

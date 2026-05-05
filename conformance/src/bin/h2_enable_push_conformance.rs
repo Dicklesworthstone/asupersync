@@ -1,8 +1,9 @@
 //! HTTP/2 SETTINGS_ENABLE_PUSH=0 Enforcement Conformance Test Runner
 //!
 //! Tests RFC 7540 §6.5.2 compliance: when SETTINGS_ENABLE_PUSH=0 is sent,
-//! the server MUST NOT send PUSH_PROMISE frames. This test compares
-//! asupersync HTTP/2 implementation against h2 reference implementation.
+//! the server MUST NOT send PUSH_PROMISE frames. This runner reports live
+//! asupersync evidence and explicitly marks h2 reference comparison unavailable
+//! unless a real peer is wired in.
 //!
 //! Usage:
 //!   cargo run --bin h2_enable_push_conformance
@@ -54,7 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("🔧 HTTP/2 SETTINGS_ENABLE_PUSH=0 Enforcement Conformance Tester");
-    println!("   Testing asupersync against h2 reference");
+    println!("   Testing live asupersync SETTINGS/Frame/Connection seams");
     println!("   Focus: Server must not send PUSH_PROMISE when ENABLE_PUSH=0");
     println!();
 
@@ -150,8 +151,8 @@ fn generate_summary_output(report: &asupersync_conformance::EnablePushCompliance
                     result.error.as_deref().unwrap_or("Unknown error")
                 ));
                 output.push_str(&format!(
-                    "     PUSH_PROMISE sent: asupersync={}, h2={}\n",
-                    result.asupersync_push_promise_count, result.h2_push_promise_count
+                    "     PUSH_PROMISE accepted by asupersync: {}\n",
+                    result.asupersync_push_promise_count
                 ));
             }
         }
@@ -161,8 +162,11 @@ fn generate_summary_output(report: &asupersync_conformance::EnablePushCompliance
     output.push_str("\nPUSH_PROMISE ENFORCEMENT ANALYSIS:\n");
     for result in &report.results {
         output.push_str(&format!(
-            "  📊 {}: asupersync={} PUSH_PROMISE, h2={} PUSH_PROMISE\n",
-            result.case_id, result.asupersync_push_promise_count, result.h2_push_promise_count
+            "  📊 {}: support={}, asupersync={} PUSH_PROMISE, reference={}\n",
+            result.case_id,
+            result.support_class,
+            result.asupersync_push_promise_count,
+            result.reference_status
         ));
     }
 
