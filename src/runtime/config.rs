@@ -6233,6 +6233,575 @@ impl ShadowPromoteRollbackReceipt {
     }
 }
 
+/// Schema version for controller provenance dashboards.
+pub const CONTROLLER_PROVENANCE_DASHBOARD_SCHEMA_VERSION: &str =
+    "controller-provenance-dashboard-v1";
+
+/// Final verdict for a controller provenance dashboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControllerProvenanceDashboardVerdict {
+    /// Every required child decision has inspectable provenance.
+    Pass,
+    /// At least one child decision is explicitly unsupported or no-win.
+    NoWin,
+    /// A child decision is missing, stale, proxy-only, or structurally invalid.
+    FailClosed,
+}
+
+impl ControllerProvenanceDashboardVerdict {
+    /// Stable report string.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::NoWin => "no_win",
+            Self::FailClosed => "fail_closed",
+        }
+    }
+}
+
+impl fmt::Display for ControllerProvenanceDashboardVerdict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Evidence class represented by a controller provenance row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControllerProvenanceEvidenceKind {
+    /// Direct source evidence from a child controller artifact.
+    SourceEvidence,
+    /// Capacity or topology certificate evidence.
+    CapacityCertificate,
+    /// Latency or tail-risk certificate evidence.
+    LatencyCertificate,
+    /// Signed profile bundle signature and digest evidence.
+    BundleSignature,
+    /// Shadow promotion or rollback receipt evidence.
+    ShadowReceipt,
+    /// Digital-twin or interference report evidence.
+    InterferenceReport,
+    /// Explicit unsupported or no-win evidence row.
+    UnsupportedNoWin,
+}
+
+impl ControllerProvenanceEvidenceKind {
+    /// Stable report string.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SourceEvidence => "source_evidence",
+            Self::CapacityCertificate => "capacity_certificate",
+            Self::LatencyCertificate => "latency_certificate",
+            Self::BundleSignature => "bundle_signature",
+            Self::ShadowReceipt => "shadow_receipt",
+            Self::InterferenceReport => "interference_report",
+            Self::UnsupportedNoWin => "unsupported_no_win",
+        }
+    }
+}
+
+impl fmt::Display for ControllerProvenanceEvidenceKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Exact command class used to reproduce a provenance row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControllerProvenanceCommandClass {
+    /// Rch-backed cargo test command.
+    RchCargoTest,
+    /// Repo smoke runner script.
+    SmokeRunner,
+    /// Replay command emitted by a child artifact.
+    ReplayCommand,
+}
+
+impl ControllerProvenanceCommandClass {
+    /// Stable report string.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RchCargoTest => "rch_cargo_test",
+            Self::SmokeRunner => "smoke_runner",
+            Self::ReplayCommand => "replay_command",
+        }
+    }
+}
+
+impl fmt::Display for ControllerProvenanceCommandClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// One inspectable controller provenance dashboard row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControllerProvenanceDashboardRow {
+    /// Stable decision identifier.
+    pub decision_id: String,
+    /// Bead that owns the source decision.
+    pub owner_bead: String,
+    /// Controller or proof surface name.
+    pub controller: String,
+    /// Contract version emitted by the child surface.
+    pub contract_version: String,
+    /// Kind of evidence represented by this row.
+    pub evidence_kind: ControllerProvenanceEvidenceKind,
+    /// Primary child artifact path.
+    pub source_artifact_path: String,
+    /// Expected SHA-256 digest for the child artifact.
+    pub expected_artifact_sha256: String,
+    /// Observed SHA-256 digest for the child artifact.
+    pub observed_artifact_sha256: String,
+    /// Certificate artifact paths this decision depends on.
+    pub certificate_artifact_ids: Vec<String>,
+    /// Optional signed-bundle signature digest.
+    pub bundle_signature_digest_sha256: Option<String>,
+    /// Command class used by the replay command.
+    pub command_class: ControllerProvenanceCommandClass,
+    /// Exact command that reproduces or verifies this decision.
+    pub replay_command: String,
+    /// Explicit fallback or no-win reason when the row is not a pass row.
+    pub fallback_reason: Option<String>,
+    /// Whether this decision recorded a no-win outcome.
+    pub no_win: bool,
+    /// Whether this decision is explicitly unsupported by the current surface.
+    pub unsupported: bool,
+    /// Whether this row only proxies another green status without source evidence.
+    pub proxy_only: bool,
+}
+
+impl ControllerProvenanceDashboardRow {
+    fn normalized(mut self) -> Self {
+        self.certificate_artifact_ids.sort();
+        self.certificate_artifact_ids.dedup();
+        self
+    }
+
+    fn validate(&self) -> Vec<String> {
+        let mut reasons = Vec::new();
+        if let Err(reason) = validate_slug_like(&self.decision_id, "decision_id") {
+            reasons.push(reason);
+        }
+        if let Err(reason) = validate_slug_like(&self.owner_bead, "owner_bead") {
+            reasons.push(reason);
+        }
+        if let Err(reason) = validate_slug_like(&self.controller, "controller") {
+            reasons.push(reason);
+        }
+        if self.contract_version.trim().is_empty() {
+            reasons.push(format!(
+                "decision {} contract_version must not be empty",
+                self.decision_id
+            ));
+        }
+        if let Err(reason) =
+            validate_artifact_json_path(&self.source_artifact_path, "source_artifact_path")
+        {
+            reasons.push(format!("decision {} {reason}", self.decision_id));
+        }
+        if !is_hex_digest(&self.expected_artifact_sha256) {
+            reasons.push(format!(
+                "decision {} expected_artifact_sha256 must be a 64-character hexadecimal digest",
+                self.decision_id
+            ));
+        }
+        if !is_hex_digest(&self.observed_artifact_sha256) {
+            reasons.push(format!(
+                "decision {} observed_artifact_sha256 must be a 64-character hexadecimal digest",
+                self.decision_id
+            ));
+        }
+        if self.expected_artifact_sha256 != self.observed_artifact_sha256 {
+            reasons.push(format!(
+                "decision {} artifact checksum mismatch for {}",
+                self.decision_id, self.source_artifact_path
+            ));
+        }
+        for artifact_id in &self.certificate_artifact_ids {
+            if let Err(reason) = validate_artifact_json_path(artifact_id, "certificate_artifact_id")
+            {
+                reasons.push(format!("decision {} {reason}", self.decision_id));
+            }
+        }
+        if let Some(reason) = duplicate_string(&self.certificate_artifact_ids) {
+            reasons.push(format!(
+                "decision {} certificate_artifact_ids contains a duplicate entry {reason}",
+                self.decision_id
+            ));
+        }
+        if self.evidence_kind == ControllerProvenanceEvidenceKind::BundleSignature
+            && self
+                .bundle_signature_digest_sha256
+                .as_deref()
+                .is_none_or(|digest| !is_hex_digest(digest))
+        {
+            reasons.push(format!(
+                "decision {} bundle_signature_digest_sha256 must be present and valid",
+                self.decision_id
+            ));
+        }
+        if self.proxy_only {
+            reasons.push(format!(
+                "decision {} is proxy-only and lacks source evidence",
+                self.decision_id
+            ));
+        }
+        if self.replay_command.trim().is_empty() {
+            reasons.push(format!(
+                "decision {} replay_command must not be empty",
+                self.decision_id
+            ));
+        } else if let Some(reason) =
+            validate_controller_provenance_command(self.command_class, &self.replay_command)
+        {
+            reasons.push(format!("decision {} {reason}", self.decision_id));
+        }
+        if self.unsupported && !self.no_win {
+            reasons.push(format!(
+                "decision {} unsupported rows must also be no-win rows",
+                self.decision_id
+            ));
+        }
+        if (self.unsupported || self.no_win)
+            && self
+                .fallback_reason
+                .as_deref()
+                .is_none_or(|reason| reason.trim().is_empty())
+        {
+            reasons.push(format!(
+                "decision {} unsupported/no-win rows require an explicit fallback_reason",
+                self.decision_id
+            ));
+        }
+        reasons
+    }
+
+    fn render(&self) -> String {
+        [
+            self.decision_id.clone(),
+            self.owner_bead.clone(),
+            self.controller.clone(),
+            self.contract_version.clone(),
+            self.evidence_kind.as_str().to_string(),
+            self.source_artifact_path.clone(),
+            self.expected_artifact_sha256.clone(),
+            self.observed_artifact_sha256.clone(),
+            self.certificate_artifact_ids.join(","),
+            self.bundle_signature_digest_sha256
+                .clone()
+                .unwrap_or_else(|| "none".to_string()),
+            self.command_class.as_str().to_string(),
+            self.replay_command.clone(),
+            self.fallback_reason
+                .clone()
+                .unwrap_or_else(|| "none".to_string()),
+            format_bool(self.no_win),
+            format_bool(self.unsupported),
+            format_bool(self.proxy_only),
+        ]
+        .join("|")
+    }
+}
+
+/// Request used to build a controller provenance dashboard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControllerProvenanceDashboardRequest {
+    /// Stable scenario or signoff identifier.
+    pub scenario_id: String,
+    /// Owner beads that must have at least one provenance row.
+    pub required_owner_beads: Vec<String>,
+    /// Candidate rows gathered from child controller artifacts.
+    pub rows: Vec<ControllerProvenanceDashboardRow>,
+    /// Command that regenerates the dashboard.
+    pub replay_command: String,
+}
+
+impl ControllerProvenanceDashboardRequest {
+    /// Build a deterministic machine-readable and markdown dashboard.
+    #[must_use]
+    pub fn evaluate(&self) -> ControllerProvenanceDashboardReport {
+        let mut required_owner_beads = sorted_unique_strings(self.required_owner_beads.clone());
+        let mut rows = self
+            .rows
+            .clone()
+            .into_iter()
+            .map(ControllerProvenanceDashboardRow::normalized)
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| {
+            left.decision_id
+                .cmp(&right.decision_id)
+                .then_with(|| left.owner_bead.cmp(&right.owner_bead))
+                .then_with(|| left.controller.cmp(&right.controller))
+                .then_with(|| left.source_artifact_path.cmp(&right.source_artifact_path))
+        });
+
+        let mut failure_reasons = self.structural_failures(&required_owner_beads, &rows);
+        failure_reasons.sort();
+        failure_reasons.dedup();
+
+        let unsupported_rows = rows
+            .iter()
+            .filter(|row| row.unsupported || row.no_win)
+            .map(|row| row.decision_id.clone())
+            .collect::<Vec<_>>();
+        let verdict = if failure_reasons.is_empty() {
+            if unsupported_rows.is_empty() {
+                ControllerProvenanceDashboardVerdict::Pass
+            } else {
+                ControllerProvenanceDashboardVerdict::NoWin
+            }
+        } else {
+            ControllerProvenanceDashboardVerdict::FailClosed
+        };
+        let accepted = verdict == ControllerProvenanceDashboardVerdict::Pass;
+        let fallback_decision = match verdict {
+            ControllerProvenanceDashboardVerdict::Pass => "accept_controller_signoff_dashboard",
+            ControllerProvenanceDashboardVerdict::NoWin => "hold_for_explicit_no_win_rows",
+            ControllerProvenanceDashboardVerdict::FailClosed => {
+                "fail_closed_reject_proxy_dashboard"
+            }
+        }
+        .to_string();
+        let owner_beads = sorted_unique_strings(
+            rows.iter()
+                .map(|row| row.owner_bead.clone())
+                .collect::<Vec<_>>(),
+        );
+        let dashboard_digest_sha256 = controller_provenance_dashboard_digest(
+            &self.scenario_id,
+            &required_owner_beads,
+            &rows,
+            &failure_reasons,
+            &self.replay_command,
+        );
+        let markdown = render_controller_provenance_dashboard_markdown(
+            &self.scenario_id,
+            verdict,
+            &rows,
+            &failure_reasons,
+        );
+        ControllerProvenanceDashboardReport {
+            schema_version: CONTROLLER_PROVENANCE_DASHBOARD_SCHEMA_VERSION.to_string(),
+            scenario_id: self.scenario_id.clone(),
+            verdict,
+            accepted,
+            no_win: verdict == ControllerProvenanceDashboardVerdict::NoWin,
+            fallback_decision,
+            required_owner_beads: std::mem::take(&mut required_owner_beads),
+            owner_beads,
+            row_count: rows.len(),
+            rows,
+            unsupported_rows,
+            failure_reasons,
+            first_failure: None,
+            dashboard_digest_sha256,
+            markdown,
+            replay_command: self.replay_command.clone(),
+        }
+        .with_first_failure()
+    }
+
+    fn structural_failures(
+        &self,
+        required_owner_beads: &[String],
+        rows: &[ControllerProvenanceDashboardRow],
+    ) -> Vec<String> {
+        let mut reasons = Vec::new();
+        if let Err(reason) = validate_slug_like(&self.scenario_id, "scenario_id") {
+            reasons.push(reason);
+        }
+        if self.replay_command.trim().is_empty() {
+            reasons.push("dashboard replay_command must not be empty".to_string());
+        } else if !self
+            .replay_command
+            .contains("run_controller_provenance_dashboard_smoke.sh")
+        {
+            reasons.push(
+                "dashboard replay_command must use run_controller_provenance_dashboard_smoke.sh"
+                    .to_string(),
+            );
+        }
+        if required_owner_beads.is_empty() {
+            reasons.push("required_owner_beads must not be empty".to_string());
+        }
+        for owner in required_owner_beads {
+            if let Err(reason) = validate_slug_like(owner, "required_owner_beads") {
+                reasons.push(reason);
+            }
+            if !rows.iter().any(|row| row.owner_bead == *owner) {
+                reasons.push(format!("required owner bead {owner} has no provenance row"));
+            }
+        }
+        if rows.is_empty() {
+            reasons.push("dashboard rows must not be empty".to_string());
+        }
+        for row in rows {
+            reasons.extend(row.validate());
+        }
+        if let Some(duplicate) = duplicate_controller_provenance_decision(rows) {
+            reasons.push(format!(
+                "dashboard rows contain duplicate decision_id {duplicate}"
+            ));
+        }
+        reasons
+    }
+}
+
+/// Deterministic controller provenance dashboard report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControllerProvenanceDashboardReport {
+    /// Report schema version.
+    pub schema_version: String,
+    /// Scenario identifier.
+    pub scenario_id: String,
+    /// Final dashboard verdict.
+    pub verdict: ControllerProvenanceDashboardVerdict,
+    /// Whether all required rows were present and accepted.
+    pub accepted: bool,
+    /// Whether any row explicitly recorded a no-win outcome.
+    pub no_win: bool,
+    /// Deterministic fallback or acceptance action.
+    pub fallback_decision: String,
+    /// Required owner beads checked by the dashboard.
+    pub required_owner_beads: Vec<String>,
+    /// Owner beads present in the dashboard rows.
+    pub owner_beads: Vec<String>,
+    /// Number of sorted provenance rows.
+    pub row_count: usize,
+    /// Sorted provenance rows.
+    pub rows: Vec<ControllerProvenanceDashboardRow>,
+    /// Decision identifiers that explicitly reported unsupported or no-win.
+    pub unsupported_rows: Vec<String>,
+    /// Deterministically sorted validation failures.
+    pub failure_reasons: Vec<String>,
+    /// First validation failure, if any.
+    pub first_failure: Option<String>,
+    /// Digest over the stable dashboard contents.
+    pub dashboard_digest_sha256: String,
+    /// Markdown rendering with the same rows as the JSON report.
+    pub markdown: String,
+    /// Command that regenerates this dashboard.
+    pub replay_command: String,
+}
+
+impl ControllerProvenanceDashboardReport {
+    fn with_first_failure(mut self) -> Self {
+        self.first_failure = self.failure_reasons.first().cloned();
+        self
+    }
+}
+
+fn validate_controller_provenance_command(
+    command_class: ControllerProvenanceCommandClass,
+    replay_command: &str,
+) -> Option<String> {
+    match command_class {
+        ControllerProvenanceCommandClass::RchCargoTest => {
+            if replay_command.contains("rch exec") && replay_command.contains("cargo test") {
+                None
+            } else {
+                Some("rch_cargo_test command must contain `rch exec` and `cargo test`".to_string())
+            }
+        }
+        ControllerProvenanceCommandClass::SmokeRunner => {
+            if replay_command.starts_with("bash scripts/run_") && replay_command.contains(".sh") {
+                None
+            } else {
+                Some("smoke_runner command must start with `bash scripts/run_`".to_string())
+            }
+        }
+        ControllerProvenanceCommandClass::ReplayCommand => {
+            if replay_command.contains("replay") || replay_command.contains("rch exec") {
+                None
+            } else {
+                Some("replay_command must contain `replay` or `rch exec`".to_string())
+            }
+        }
+    }
+}
+
+fn duplicate_controller_provenance_decision(
+    rows: &[ControllerProvenanceDashboardRow],
+) -> Option<String> {
+    for (index, row) in rows.iter().enumerate() {
+        if rows
+            .iter()
+            .skip(index + 1)
+            .any(|other| other.decision_id == row.decision_id)
+        {
+            return Some(row.decision_id.clone());
+        }
+    }
+    None
+}
+
+fn controller_provenance_dashboard_digest(
+    scenario_id: &str,
+    required_owner_beads: &[String],
+    rows: &[ControllerProvenanceDashboardRow],
+    failure_reasons: &[String],
+    replay_command: &str,
+) -> String {
+    stable_sha256_hex(&[
+        (
+            "schema_version",
+            CONTROLLER_PROVENANCE_DASHBOARD_SCHEMA_VERSION.to_string(),
+        ),
+        ("scenario_id", scenario_id.to_string()),
+        ("required_owner_beads", required_owner_beads.join("|")),
+        (
+            "rows",
+            rows.iter()
+                .map(ControllerProvenanceDashboardRow::render)
+                .collect::<Vec<_>>()
+                .join(";"),
+        ),
+        ("failure_reasons", failure_reasons.join("|")),
+        ("replay_command", replay_command.to_string()),
+    ])
+}
+
+fn render_controller_provenance_dashboard_markdown(
+    scenario_id: &str,
+    verdict: ControllerProvenanceDashboardVerdict,
+    rows: &[ControllerProvenanceDashboardRow],
+    failure_reasons: &[String],
+) -> String {
+    let mut markdown = format!(
+        "# Controller Provenance Dashboard: {scenario_id}\n\nVerdict: {verdict}\n\n| decision_id | owner_bead | controller | evidence_kind | artifact | command_class | status | fallback_reason |\n|---|---|---|---|---|---|---|---|\n"
+    );
+    for row in rows {
+        let status = if row.unsupported {
+            "unsupported"
+        } else if row.no_win {
+            "no_win"
+        } else {
+            "pass"
+        };
+        markdown.push_str(&format!(
+            "| {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            row.decision_id,
+            row.owner_bead,
+            row.controller,
+            row.evidence_kind,
+            row.source_artifact_path,
+            row.command_class,
+            status,
+            row.fallback_reason.as_deref().unwrap_or("none")
+        ));
+    }
+    if !failure_reasons.is_empty() {
+        markdown.push_str("\nFailures:\n");
+        for reason in failure_reasons {
+            markdown.push_str(&format!("- {reason}\n"));
+        }
+    }
+    markdown
+}
+
 /// Schema version for controller-interference digital-twin signoff reports.
 pub const CONTROLLER_INTERFERENCE_DIGITAL_TWIN_REPORT_SCHEMA_VERSION: &str =
     "controller-interference-digital-twin-report-v1";

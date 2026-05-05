@@ -1,0 +1,51 @@
+{
+  "contract_version": "controller-provenance-dashboard-contract-v1",
+  "schema_version": "controller-provenance-dashboard-v1",
+  "runner_script": "scripts/run_controller_provenance_dashboard_smoke.sh",
+  "report_artifacts": [
+    "controller_provenance_dashboard.json",
+    "controller_provenance_dashboard.md",
+    "run_report.json"
+  ],
+  "required_owner_beads": [
+    "asupersync-d87ytw.1",
+    "asupersync-d87ytw.2",
+    "asupersync-d87ytw.3",
+    "asupersync-d87ytw.4",
+    "asupersync-d87ytw.5",
+    "asupersync-d87ytw.6",
+    "asupersync-d87ytw.7",
+    "asupersync-d87ytw.8",
+    "asupersync-d87ytw.9",
+    "asupersync-d87ytw.10",
+    "asupersync-d87ytw.11",
+    "asupersync-d87ytw.12",
+    "asupersync-d87ytw.13"
+  ],
+  "required_command_classes": [
+    "rch_cargo_test",
+    "smoke_runner",
+    "replay_command"
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "AA-CONTROLLER-PROVENANCE-DASHBOARD-64C-256G",
+      "description": "Controller provenance dashboard tying every v2 child decision to source evidence, certificates, bundle signatures, replay commands, fallback reasons, and owner beads.",
+      "expected_verdict": "no_win",
+      "expected_row_count": 13,
+      "expected_unsupported_rows": [
+        "unified_admission_brownout_contract"
+      ],
+      "acceptance": {
+        "schema_version": "controller-provenance-dashboard-v1",
+        "fallback_decision": "hold_for_explicit_no_win_rows",
+        "minimum_required_owner_beads": 13,
+        "requires_markdown": true,
+        "requires_dashboard_digest_sha256": true,
+        "forbid_proxy_only_rows": true,
+        "require_exact_command_classes": true,
+        "require_artifact_checksum_match": true
+      }
+    }
+  ]
+}
