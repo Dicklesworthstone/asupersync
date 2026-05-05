@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Metamorphic regression tests for pool acquire/drop behavior.
 
 use asupersync::cx::Cx;
