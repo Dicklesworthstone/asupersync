@@ -1,4 +1,3 @@
-#![allow(clippy::all)]
 //! Metamorphic Testing: Adaptive Hedge Latency Calculations
 //!
 //! This module implements metamorphic relations for the `PeakEwmaHedgeController`,
@@ -106,8 +105,8 @@ fn metamorphic_geometric_decay() {
 
 /// Metamorphic Relation 3: Time-Scale Invariance (Proportionality)
 ///
-/// If we scale all inputs and limits by a factor `K`, the resulting
-/// hedge delay should be scaled by exactly `K` (modulo integer truncation).
+/// If we scale all inputs and limits by a factor `K`, the resulting hedge
+/// delay should scale proportionally, modulo fractional-decay truncation.
 #[test]
 fn metamorphic_scale_invariance() {
     let base_min = 10;
@@ -136,15 +135,16 @@ fn metamorphic_scale_invariance() {
         controller_base.observe(obs);
         controller_scaled.observe(obs * (scale_factor as u32));
 
-        let delay_base = controller_base.current_config().hedge_delay.as_millis() as f64;
-        let delay_scaled = controller_scaled.current_config().hedge_delay.as_millis() as f64;
+        let delay_base = controller_base.current_config().hedge_delay.as_nanos();
+        let delay_scaled = controller_scaled.current_config().hedge_delay.as_nanos();
 
-        let expected_scaled = delay_base * (scale_factor as f64);
-        let diff = (delay_scaled - expected_scaled).abs();
+        let expected_scaled = delay_base * u128::from(scale_factor);
+        let diff = delay_scaled.abs_diff(expected_scaled);
+        let truncation_tolerance = 1_000;
 
         assert!(
-            diff <= 1.0,
-            "Scale invariance violated: base={}, scaled={}, expected={}, diff={}",
+            diff <= truncation_tolerance,
+            "Scale invariance violated: base_nanos={}, scaled_nanos={}, expected_nanos={}, diff_nanos={}",
             delay_base,
             delay_scaled,
             expected_scaled,
