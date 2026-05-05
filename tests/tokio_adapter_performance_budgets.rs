@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Adapter performance and correctness budget contract tests (T7.8).
 //!
 //! Validates that the budget document is complete, all NF28 thresholds are
