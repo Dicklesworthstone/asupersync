@@ -528,12 +528,15 @@ fn mr6_listener_created_child_is_drained_before_cancel_returns() {
     );
 }
 
-/// MR7: Listeners registered during cancel callbacks are notified inline once
+/// MR7: Listeners registered during cancel callbacks are notified inline and
+/// are not themselves retained after the callback returns.
 /// (Drain-before-finalize Invariant, Score: 8.0)
-/// Property: listener(on_cancel => token.add_listener(late)) -> late notified exactly once
-/// Catches: listener requeue bugs, post-drain duplicate delivery, incomplete callback drain
+/// Property: listener(on_cancel => token.add_listener(late)) -> late notified
+/// inline once per retained-listener callback; only the original retained
+/// listener is eligible for a later strengthened cancellation.
+/// Catches: listener requeue bugs, stale reason delivery, incomplete callback drain
 #[test]
-fn mr7_listener_registered_during_cancel_is_not_requeued() {
+fn mr7_listener_registered_during_cancel_callback_is_not_retained() {
     let mut rng = test_rng();
     let token = SymbolCancelToken::new(test_object_id(11, 13), &mut rng);
     let late_listener_notifications = Arc::new(AtomicUsize::new(0));
@@ -610,8 +613,18 @@ fn mr7_listener_registered_during_cancel_is_not_requeued() {
     );
     assert_eq!(
         late_listener_notifications.load(Ordering::SeqCst),
-        1,
-        "late listener must not be retained for a second notification after drain completes"
+        2,
+        "a strengthened cancel re-runs the retained outer listener, which self-notifies a fresh late listener"
+    );
+    assert_eq!(
+        *late_listener_reason.lock().unwrap(),
+        Some(CancelKind::Shutdown),
+        "fresh late listener must observe the strengthened cancellation reason"
+    );
+    assert_eq!(
+        *late_listener_time.lock().unwrap(),
+        Some(first_cancelled_at),
+        "fresh late listener must observe the canonical first-cancel timestamp"
     );
 }
 
@@ -660,8 +673,8 @@ fn mr8_duplicate_broadcast_delivery_is_idempotent_for_remote_tokens() {
     );
     assert_eq!(
         remote_listener.received_at(),
-        Some(received_at),
-        "remote listener should preserve the first delivery timestamp"
+        Some(initiated_at),
+        "remote listener should preserve the origin initiated_at timestamp"
     );
     let state_after_first = (
         remote_token.is_cancelled(),
@@ -697,8 +710,8 @@ fn mr8_duplicate_broadcast_delivery_is_idempotent_for_remote_tokens() {
     );
     assert_eq!(
         state_after_first.2,
-        Some(received_at),
-        "remote token should preserve the first delivery timestamp"
+        Some(initiated_at),
+        "remote token should preserve the origin initiated_at timestamp"
     );
     assert_eq!(
         state_after_second.0, state_after_first.0,
@@ -807,18 +820,18 @@ fn mr9_broadcast_delivery_propagates_across_remote_descendants() {
     );
     assert_eq!(
         remote_root.cancelled_at(),
-        Some(received_at),
-        "remote root should record the delivery timestamp"
+        Some(initiated_at),
+        "remote root should preserve the origin initiated_at timestamp"
     );
     assert_eq!(
         remote_child.cancelled_at(),
-        Some(received_at),
-        "existing remote child should record the propagated timestamp"
+        Some(initiated_at),
+        "existing remote child should inherit the origin initiated_at timestamp"
     );
     assert_eq!(
         remote_grandchild.cancelled_at(),
-        Some(received_at),
-        "existing remote grandchild should record the propagated timestamp"
+        Some(initiated_at),
+        "existing remote grandchild should inherit the origin initiated_at timestamp"
     );
 
     let late_remote_child = remote_root.child(&mut remote_rng);
@@ -843,13 +856,13 @@ fn mr9_broadcast_delivery_propagates_across_remote_descendants() {
     );
     assert_eq!(
         late_remote_child.cancelled_at(),
-        Some(received_at),
-        "late remote child should inherit the broadcast timestamp"
+        Some(initiated_at),
+        "late remote child should inherit the origin initiated_at timestamp"
     );
     assert_eq!(
         late_remote_grandchild.cancelled_at(),
-        Some(received_at),
-        "late remote grandchild should inherit the broadcast timestamp"
+        Some(initiated_at),
+        "late remote grandchild should inherit the origin initiated_at timestamp"
     );
     assert_eq!(
         remote_broadcaster.metrics().received,
