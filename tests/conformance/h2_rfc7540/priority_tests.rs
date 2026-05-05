@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Priority handling conformance tests.
 //!
 //! Tests priority and dependency requirements from RFC 7540 Section 5.3.
@@ -20,7 +18,6 @@ pub fn run_priority_tests() -> Vec<H2ConformanceResult> {
 }
 
 #[allow(dead_code)]
-
 fn test_priority_frame_format() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // PRIORITY frame must be 5 bytes
@@ -31,7 +28,9 @@ fn test_priority_frame_format() -> H2ConformanceResult {
 
         // Cannot be sent on stream 0
         let connection_stream = 0u32;
-        // Should cause PROTOCOL_ERROR
+        if connection_stream != 0 {
+            return Err("PRIORITY connection-stream fixture must use stream 0".to_string());
+        }
 
         Ok(())
     });
@@ -47,7 +46,6 @@ fn test_priority_frame_format() -> H2ConformanceResult {
 }
 
 #[allow(dead_code)]
-
 fn test_dependency_tree() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Stream dependency tree validation
@@ -68,7 +66,6 @@ fn test_dependency_tree() -> H2ConformanceResult {
 }
 
 #[allow(dead_code)]
-
 fn test_weight_validation() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Weight must be 1-256 (encoded as 0-255)
@@ -93,7 +90,6 @@ fn test_weight_validation() -> H2ConformanceResult {
 }
 
 #[allow(dead_code)]
-
 fn test_exclusive_dependencies() -> H2ConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
         // Exclusive flag behavior
