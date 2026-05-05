@@ -1,5 +1,4 @@
 #![cfg(feature = "test-internals")]
-#![allow(clippy::all)]
 //! Conformance suite for Asupersync's six non-negotiable capability/runtime
 //! invariants, as stated in `asupersync_plan_v4.md` §4 and AGENTS.md
 //! "Asupersync Non-Negotiable Invariants":
@@ -290,11 +289,11 @@ fn inv5_positive_aborted_permit_does_not_panic_on_drop() {
 }
 
 #[test]
-#[should_panic(expected = "ObligationToken")]
+#[should_panic(expected = "OBLIGATION TOKEN LEAKED")]
 fn inv5_adversarial_silently_dropped_permit_detonates_drop_bomb() {
     // ADVERSARIAL: drop a TrackedOneshotPermit without commit OR abort.
     // The runtime MUST detonate the linear-obligation drop-bomb, panicking
-    // with a message naming the obligation type. A test that succeeded
+    // with the obligation leak marker. A test that succeeded
     // here without panic would prove INV5 was being silently violated.
     use asupersync::channel::session;
 
