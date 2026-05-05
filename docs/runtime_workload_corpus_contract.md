@@ -53,9 +53,22 @@ The core set must include both:
 
 ## Expansion Packs
 
-Expansion packs are allowed, but they must remain outside the baseline denominator unless intentionally promoted into the core set. The v1 corpus includes one optional pack:
+Expansion packs are allowed, but they must remain outside the baseline denominator unless intentionally promoted into the core set. The v1 corpus includes these optional packs:
 
 - `http-application-io`: adds `AA01-WL-IO-HTTP-EX1` for application-layer HTTP request or response coverage without changing the core set size
+- `agent-swarm-coordination-pressure`: adds `ASWARM-WL-*` workloads synthesized from redacted coordination bundles. These workloads model real Agent Mail, Beads, bv, rch, git dirty-frontier, and proof-artifact pressure while preserving the seven-workload core denominator.
+
+The coordination pack covers:
+
+| Scenario family | Runtime workload | Semantic pressure | Provenance-only context |
+| --- | --- | --- | --- |
+| `tracker_lock_contention` | `ASWARM-WL-LOCK-001` | metadata lock waiters, serialized claim backlog, queue residency tail | hashed lock path, pseudonymized holder, bead/thread id |
+| `concurrent_rch_proofs` | `ASWARM-WL-RCH-001` | validation fanout, remote proof queue depth, artifact retrieval tail | redacted worker pool, hashed proof command, bead id |
+| `fail_closed_dirty_frontier` | `ASWARM-WL-DIRTY-001` | admission refusal, unsupported dirty-frontier count, operator retry pressure | path hashes, dirty path count, redaction verdict |
+| `artifact_retrieval_tail` | `ASWARM-WL-ARTIFACT-001` | artifact fetch fanout, result materialization tail, summary index pressure | artifact kind, artifact path hash, source bead id |
+| `proof_runner_fanout` | `ASWARM-WL-FANOUT-001` | parallel proof launch, ack-free notification burst, ready queue burst | message subject hash, pseudonymized sender, thread id |
+| `stale_in_progress_reclaim` | `ASWARM-WL-STALE-001` | stale work requeue, tracker priority rebalance, operator recovery loop | pseudonymized assignee, updated-at bucket, dependency count |
+| `coordination_latency_burst` | `ASWARM-WL-LATENCY-001` | ack-required message burst, coordination round-trip tail, operator latency amplification | message id, thread id, ack-required flag |
 
 ## Reproducibility Bundle Format
 
@@ -75,6 +88,26 @@ Every runner-emitted bundle manifest must include:
 - `exit_code`
 
 Every workload entry in the artifact must also declare its expected artifact bundle with stable path globs so later controller, benchmark, and shadow-run tracks can consume the same evidence surfaces.
+
+The coordination synthesis mode emits:
+
+- `coordination-workload-expansion-pack.json`
+- `coordination-scheduler-evidence-inputs.json`
+- `coordination-workload-synthesis-report.json`
+- `coordination-workload-expansion.jsonl`
+- `coordination-workload-synthesis.summary.txt`
+
+Focused fixture command:
+
+```bash
+bash scripts/run_runtime_workload_corpus.sh --synthesize-coordination-pack --coordination-fixture --output-root target/workload-corpus
+```
+
+Focused refusal fixture:
+
+```bash
+bash scripts/run_runtime_workload_corpus.sh --synthesize-coordination-pack --coordination-fixture-id refused-missing-scenario-dimensions --output-root target/workload-corpus
+```
 
 ## Structured Log Requirements
 
@@ -111,12 +144,15 @@ The validation checks:
 3. Every replay command resolves through the bundle runner.
 4. Every underlying entry command stays `rch`-routed and references a real script or test file.
 5. Core-set and expansion-pack IDs remain internally consistent.
+6. Coordination expansion-pack synthesis keeps all `ASWARM-WL-*` workloads outside the core denominator.
+7. Accepted and refused coordination fixtures emit deterministic hashes, stable replay commands, valid artifact globs, and explicit `missing_scenario_dimensions` refusal reports.
 
 ## Cross-References
 
 - `artifacts/runtime_workload_corpus_v1.json`
 - `scripts/run_runtime_workload_corpus.sh`
 - `tests/runtime_workload_corpus_contract.rs`
+- `artifacts/agent_swarm_coordination_workload_contract_v1.json`
 - `scripts/run_perf_e2e.sh`
 - `scripts/test_transport_e2e.sh`
 - `scripts/test_messaging_e2e.sh`

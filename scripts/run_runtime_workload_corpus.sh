@@ -4,10 +4,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 CORPUS_ARTIFACT="${PROJECT_ROOT}/artifacts/runtime_workload_corpus_v1.json"
+COORDINATION_CONTRACT="${PROJECT_ROOT}/artifacts/agent_swarm_coordination_workload_contract_v1.json"
 OUTPUT_ROOT="${WORKLOAD_CORPUS_OUTPUT_DIR:-${PROJECT_ROOT}/target/workload-corpus}"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 RUN_DIR="${OUTPUT_ROOT}/run_${TIMESTAMP}"
 LIST_ONLY=0
+SYNTHESIZE_COORDINATION_PACK=0
+COORDINATION_BUNDLE=""
+COORDINATION_FIXTURE_ID=""
+COORDINATION_GENERATED_AT="${WORKLOAD_CORPUS_GENERATED_AT:-2026-05-05T05:00:00Z}"
 
 declare -a SELECTED_WORKLOADS=()
 
@@ -19,6 +24,14 @@ Options:
   --list                  List canonical workload IDs and exit
   --workload <id>         Run one workload (repeatable)
   --output-root <dir>     Override local bundle root (default: target/workload-corpus)
+  --synthesize-coordination-pack
+                          Convert a coordination bundle into an expansion pack
+  --coordination-bundle <path>
+                          Explicit coordination workload bundle JSON input
+  --coordination-fixture  Use the accepted checked coordination fixture
+  --coordination-fixture-id <id>
+                          Use a named checked coordination fixture
+  --generated-at <ts>     Stable generated_at for synthesis artifacts
   -h, --help              Show help
 EOF
 }
@@ -30,6 +43,14 @@ require_tools() {
     fi
     if [ ! -f "$CORPUS_ARTIFACT" ]; then
         echo "FATAL: workload corpus artifact missing at ${CORPUS_ARTIFACT}" >&2
+        exit 1
+    fi
+}
+
+require_coordination_contract() {
+    require_tools
+    if [ ! -f "$COORDINATION_CONTRACT" ]; then
+        echo "FATAL: coordination workload contract missing at ${COORDINATION_CONTRACT}" >&2
         exit 1
     fi
 }
@@ -60,6 +81,208 @@ list_workloads() {
                 "$runtime_profile" \
                 "$entrypoint_kind"
         done
+}
+
+coordination_fixture_bundle_json() {
+    local fixture_id="$1"
+    jq -c --arg fixture_id "$fixture_id" '
+        .coordination_workload_synthesis.fixture_bundles[]
+        | select(.fixture_id == $fixture_id)
+        | .bundle
+    ' "$CORPUS_ARTIFACT"
+}
+
+coordination_bundle_json() {
+    if [[ -n "$COORDINATION_BUNDLE" ]]; then
+        if [[ ! -f "$COORDINATION_BUNDLE" ]]; then
+            echo "FATAL: coordination bundle missing at ${COORDINATION_BUNDLE}" >&2
+            return 2
+        fi
+        jq -c '.' "$COORDINATION_BUNDLE"
+        return
+    fi
+
+    local fixture_id="${COORDINATION_FIXTURE_ID:-accepted-all-families}"
+    local fixture_json
+    fixture_json="$(coordination_fixture_bundle_json "$fixture_id")"
+    if [[ -z "$fixture_json" ]]; then
+        echo "FATAL: unknown coordination fixture id: ${fixture_id}" >&2
+        return 2
+    fi
+    printf '%s\n' "$fixture_json"
+}
+
+synthesize_coordination_pack() {
+    require_coordination_contract
+
+    if [[ -n "$COORDINATION_BUNDLE" && -n "$COORDINATION_FIXTURE_ID" ]]; then
+        echo "FATAL: use either --coordination-bundle or --coordination-fixture-id, not both" >&2
+        return 2
+    fi
+
+    local bundle_json
+    bundle_json="$(coordination_bundle_json)"
+    local run_id
+    run_id="$(jq -r '.run_id // "coordination-bundle"' <<<"$bundle_json")"
+    local out_dir="${OUTPUT_ROOT}/coordination-expansion/${run_id}"
+    local pack_path="${out_dir}/coordination-workload-expansion-pack.json"
+    local evidence_path="${out_dir}/coordination-scheduler-evidence-inputs.json"
+    local report_path="${out_dir}/coordination-workload-synthesis-report.json"
+    local jsonl_path="${out_dir}/coordination-workload-expansion.jsonl"
+    local summary_path="${out_dir}/coordination-workload-synthesis.summary.txt"
+
+    mkdir -p "$out_dir"
+
+    jq -n \
+        --slurpfile corpus "$CORPUS_ARTIFACT" \
+        --slurpfile contract "$COORDINATION_CONTRACT" \
+        --argjson bundle "$bundle_json" \
+        --arg generated_at "$COORDINATION_GENERATED_AT" '
+        def synth: $corpus[0].coordination_workload_synthesis;
+        def mappings: synth.scenario_family_mapping;
+        def required: synth.required_scenario_families;
+        def accepted_events:
+            [($bundle.events // [])
+             | .[]
+             | select((.refusal_reason // "") == "" and (.redaction_verdict // "") != "refused")];
+        def accepted_families:
+            [accepted_events[].workload_family] | unique;
+        def missing_families:
+            required - accepted_families;
+        def events_for($family):
+            [accepted_events[] | select(.workload_family == $family)];
+
+        {
+          schema_version: "runtime-workload-coordination-expansion-pack-v1",
+          contract_version: $corpus[0].contract_version,
+          source_contract_version: $contract[0].contract_version,
+          pack_id: synth.pack_id,
+          baseline_denominator: false,
+          generated_at: $generated_at,
+          source_run_id: ($bundle.run_id // "coordination-bundle"),
+          source_bundle_hash: ($bundle.source_bundle_hash // "sha256:missing-source-bundle-hash"),
+          required_scenario_families: required,
+          covered_scenario_families: accepted_families,
+          missing_scenario_families: missing_families,
+          workloads: [
+            mappings[] as $mapping
+            | events_for($mapping.family) as $family_events
+            | select(($family_events | length) > 0)
+            | {
+                workload_id: $mapping.workload_id,
+                family: "agent-swarm-coordination",
+                scenario_family: $mapping.family,
+                scenario_id: $mapping.scenario_id,
+                runtime_profile: $mapping.runtime_profile,
+                semantic_pressure: $mapping.semantic_pressure,
+                provenance_only_context: $mapping.provenance_only_context,
+                source_event_kinds: ($family_events | map(.event_kind) | unique),
+                source_event_count: ($family_events | length),
+                source_hashes: ($family_events | map(.source_hash) | unique),
+                source_bundle_hash: ($bundle.source_bundle_hash // "sha256:missing-source-bundle-hash"),
+                replay_command: $mapping.replay_command,
+                entry_command: $mapping.entry_command,
+                expected_artifact_globs: $mapping.expected_artifact_globs,
+                scheduler_evidence_input_id: $mapping.scheduler_evidence_input_id
+              }
+          ],
+          refused_bundles:
+            if (missing_families | length) == 0 then []
+            else [{
+              source_run_id: ($bundle.run_id // "coordination-bundle"),
+              refusal_reason: "missing_scenario_dimensions",
+              missing_scenario_families: missing_families
+            }]
+            end
+        }
+    ' >"$pack_path"
+
+    jq -c '.workloads[]' "$pack_path" >"$jsonl_path"
+
+    jq -n \
+        --slurpfile pack "$pack_path" '
+        {
+          schema_version: "asupersync.scheduler-coordination-evidence-inputs.v1",
+          source_pack_id: $pack[0].pack_id,
+          source_bundle_hash: $pack[0].source_bundle_hash,
+          source_run_id: $pack[0].source_run_id,
+          evidence_inputs: [
+            $pack[0].workloads[]
+            | {
+                evidence_input_id: .scheduler_evidence_input_id,
+                workload_id: .workload_id,
+                workload_class: "interactive_swarm",
+                scenario_family: .scenario_family,
+                semantic_pressure: .semantic_pressure,
+                provenance_only_context: .provenance_only_context,
+                source_event_count: .source_event_count,
+                source_hashes: .source_hashes,
+                source_bundle_hash: .source_bundle_hash
+              }
+          ]
+        }
+    ' >"$evidence_path"
+
+    jq -n \
+        --slurpfile pack "$pack_path" \
+        --arg pack_path "$pack_path" \
+        --arg evidence_path "$evidence_path" \
+        --arg report_path "$report_path" \
+        --arg jsonl_path "$jsonl_path" \
+        --arg summary_path "$summary_path" '
+        ($pack[0].missing_scenario_families | length) as $missing_count
+        | {
+            schema_version: "runtime-workload-coordination-synthesis-report-v1",
+            pack_id: $pack[0].pack_id,
+            source_run_id: $pack[0].source_run_id,
+            source_bundle_hash: $pack[0].source_bundle_hash,
+            status: (if $missing_count == 0 then "passed" else "refused" end),
+            accepted_workload_count: ($pack[0].workloads | length),
+            refused_bundle_count: ($pack[0].refused_bundles | length),
+            missing_scenario_families: $pack[0].missing_scenario_families,
+            first_failure_line:
+              (if $missing_count == 0 then ""
+               else "missing_scenario_dimensions: " + ($pack[0].missing_scenario_families | join(","))
+               end),
+            artifact_paths: {
+              expansion_pack: $pack_path,
+              scheduler_evidence_inputs: $evidence_path,
+              report: $report_path,
+              workloads_jsonl: $jsonl_path,
+              summary: $summary_path
+            }
+          }
+    ' >"$report_path"
+
+    {
+        echo "coordination_workload_synthesis run_id=${run_id} pack=agent-swarm-coordination-pressure"
+        echo "family	source_events	semantic_pressure	provenance_only_context"
+        jq -r '
+            .workloads[]
+            | [
+                .scenario_family,
+                (.source_event_kinds | join(",")),
+                (.semantic_pressure | join(",")),
+                (.provenance_only_context | join(","))
+              ]
+            | @tsv
+        ' "$pack_path"
+        jq -r '
+            .refused_bundles[]
+            | "refused\t" + (.missing_scenario_families | join(",")) + "\tmissing_scenario_dimensions\trefusal_provenance"
+        ' "$pack_path"
+    } >"$summary_path"
+
+    local status
+    status="$(jq -r '.status' "$report_path")"
+    echo "coordination_synthesis_result run_id=${run_id} status=${status} pack=${pack_path}"
+    echo "artifact ${pack_path}"
+    echo "artifact ${evidence_path}"
+    echo "artifact ${report_path}"
+    echo "artifact ${jsonl_path}"
+    echo "artifact ${summary_path}"
+
+    [[ "$status" == "passed" ]]
 }
 
 append_result() {
@@ -176,6 +399,26 @@ while [[ $# -gt 0 ]]; do
             RUN_DIR="${OUTPUT_ROOT}/run_${TIMESTAMP}"
             shift 2
             ;;
+        --synthesize-coordination-pack)
+            SYNTHESIZE_COORDINATION_PACK=1
+            shift
+            ;;
+        --coordination-bundle)
+            COORDINATION_BUNDLE="${2:-}"
+            shift 2
+            ;;
+        --coordination-fixture)
+            COORDINATION_FIXTURE_ID="accepted-all-families"
+            shift
+            ;;
+        --coordination-fixture-id)
+            COORDINATION_FIXTURE_ID="${2:-}"
+            shift 2
+            ;;
+        --generated-at)
+            COORDINATION_GENERATED_AT="${2:-}"
+            shift 2
+            ;;
         -h|--help)
             usage
             exit 0
@@ -193,6 +436,11 @@ require_tools
 if [[ "$LIST_ONLY" -eq 1 ]]; then
     list_workloads
     exit 0
+fi
+
+if [[ "$SYNTHESIZE_COORDINATION_PACK" -eq 1 ]]; then
+    synthesize_coordination_pack
+    exit $?
 fi
 
 if [[ "${#SELECTED_WORKLOADS[@]}" -eq 0 ]]; then

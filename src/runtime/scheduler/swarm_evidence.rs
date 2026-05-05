@@ -319,6 +319,131 @@ pub enum SchedulerRecommendationReason {
     BalancedBaseline,
 }
 
+/// Stable schema for synthesized scheduler inputs from coordination bundles.
+pub const SCHEDULER_COORDINATION_EVIDENCE_SCHEMA_VERSION: &str =
+    "asupersync.scheduler-coordination-evidence-inputs.v1";
+
+/// Scheduler-facing evidence inputs synthesized from coordination workload packs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SchedulerCoordinationEvidenceInputs {
+    /// Version tag for this schema.
+    pub schema_version: String,
+    /// Expansion-pack identifier that produced the inputs.
+    pub source_pack_id: String,
+    /// Hash of the redacted source bundle used for deterministic replay.
+    pub source_bundle_hash: String,
+    /// Source collector run identifier.
+    pub source_run_id: String,
+    /// One evidence input per covered coordination-pressure family.
+    pub evidence_inputs: Vec<SchedulerCoordinationEvidenceInput>,
+}
+
+impl SchedulerCoordinationEvidenceInputs {
+    /// Validate that synthesized coordination inputs are complete enough for
+    /// downstream tuning without promoting provenance-only context to semantics.
+    pub fn validate(&self) -> Result<(), SchedulerEvidenceError> {
+        if self.schema_version != SCHEDULER_COORDINATION_EVIDENCE_SCHEMA_VERSION {
+            return Err(SchedulerEvidenceError::UnsupportedSchemaVersion {
+                expected: SCHEDULER_COORDINATION_EVIDENCE_SCHEMA_VERSION.to_string(),
+                found: self.schema_version.clone(),
+            });
+        }
+        validate_hash(&self.source_bundle_hash)?;
+        if self.source_pack_id.trim().is_empty() || self.source_run_id.trim().is_empty() {
+            return Err(SchedulerEvidenceError::EmptyEvidenceInputId);
+        }
+        if self.evidence_inputs.is_empty() {
+            return Err(SchedulerEvidenceError::EmptyEvidenceInputSet);
+        }
+        for input in &self.evidence_inputs {
+            input.validate()?;
+        }
+        Ok(())
+    }
+}
+
+/// One scheduler evidence input for a real coordination-pressure family.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SchedulerCoordinationEvidenceInput {
+    /// Stable input id used by planner and profile consumers.
+    pub evidence_input_id: String,
+    /// Runtime workload corpus id for replay.
+    pub workload_id: String,
+    /// Scheduler workload class used for recommendation grouping.
+    pub workload_class: SchedulerWorkloadClass,
+    /// Coordination family represented by this input.
+    pub scenario_family: CoordinationPressureFamily,
+    /// Dimensions that carry actual runtime pressure.
+    pub semantic_pressure: Vec<String>,
+    /// Redacted context retained only for replay/audit provenance.
+    pub provenance_only_context: Vec<String>,
+    /// Accepted source events folded into this input.
+    pub source_event_count: usize,
+    /// Stable event hashes backing the input.
+    pub source_hashes: Vec<String>,
+    /// Hash of the source bundle backing the input.
+    pub source_bundle_hash: String,
+}
+
+impl SchedulerCoordinationEvidenceInput {
+    /// Validate the semantic/provenance split and deterministic source anchors.
+    pub fn validate(&self) -> Result<(), SchedulerEvidenceError> {
+        if self.evidence_input_id.trim().is_empty() {
+            return Err(SchedulerEvidenceError::EmptyEvidenceInputId);
+        }
+        if self.workload_id.trim().is_empty() {
+            return Err(SchedulerEvidenceError::EmptyCoordinationWorkloadId);
+        }
+        if self.semantic_pressure.is_empty()
+            || self
+                .semantic_pressure
+                .iter()
+                .any(|item| item.trim().is_empty())
+        {
+            return Err(SchedulerEvidenceError::EmptySemanticPressure);
+        }
+        if self.provenance_only_context.is_empty()
+            || self
+                .provenance_only_context
+                .iter()
+                .any(|item| item.trim().is_empty())
+        {
+            return Err(SchedulerEvidenceError::EmptyProvenanceContext);
+        }
+        if self.source_event_count == 0 {
+            return Err(SchedulerEvidenceError::ZeroSourceEventCount);
+        }
+        validate_hash(&self.source_bundle_hash)?;
+        if self.source_hashes.is_empty() {
+            return Err(SchedulerEvidenceError::EmptySourceHash);
+        }
+        for hash in &self.source_hashes {
+            validate_hash(hash)?;
+        }
+        Ok(())
+    }
+}
+
+/// Coordination pressure families that can be promoted into scheduler inputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoordinationPressureFamily {
+    /// Advisory tracker/file-lock contention.
+    TrackerLockContention,
+    /// Concurrent remote proof/build activity.
+    ConcurrentRchProofs,
+    /// Dirty-frontier refusal and retry pressure.
+    FailClosedDirtyFrontier,
+    /// Tail pressure from collecting and indexing proof artifacts.
+    ArtifactRetrievalTail,
+    /// Fan-out from proof runner and robot-plan work.
+    ProofRunnerFanout,
+    /// Stale in-progress issue reclaim loops.
+    StaleInProgressReclaim,
+    /// Mail acknowledgement and coordination latency bursts.
+    CoordinationLatencyBurst,
+}
+
 /// Validation and recommendation failures for scheduler evidence artifacts.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum SchedulerEvidenceError {
@@ -360,6 +485,33 @@ pub enum SchedulerEvidenceError {
     /// The remote-steal ratio fell outside the valid percentage range.
     #[error("remote steal ratio must be between 0 and 100 inclusive, found {0}")]
     RemoteStealRatioOutOfRange(u8),
+    /// A coordination evidence document had no inputs.
+    #[error("coordination evidence input set must not be empty")]
+    EmptyEvidenceInputSet,
+    /// A coordination evidence id was empty.
+    #[error("coordination evidence input id must not be empty")]
+    EmptyEvidenceInputId,
+    /// A coordination workload id was empty.
+    #[error("coordination workload id must not be empty")]
+    EmptyCoordinationWorkloadId,
+    /// Semantic pressure dimensions were absent.
+    #[error("coordination evidence must declare semantic pressure dimensions")]
+    EmptySemanticPressure,
+    /// Provenance-only context was absent.
+    #[error("coordination evidence must declare provenance-only context")]
+    EmptyProvenanceContext,
+    /// No accepted source event backed the input.
+    #[error("coordination evidence must include at least one source event")]
+    ZeroSourceEventCount,
+    /// A source hash field was empty.
+    #[error("coordination evidence source hashes must not be empty")]
+    EmptySourceHash,
+    /// A source hash was not a stable sha256 reference.
+    #[error("coordination evidence source hash must start with sha256:, found {found}")]
+    InvalidSourceHash {
+        /// Hash value that failed validation.
+        found: String,
+    },
 }
 
 fn validate_percentiles<T: Ord>(
@@ -370,6 +522,18 @@ fn validate_percentiles<T: Ord>(
 ) -> Result<(), SchedulerEvidenceError> {
     if p50 > p95 || p95 > p99 {
         return Err(SchedulerEvidenceError::NonMonotonicPercentiles { field });
+    }
+    Ok(())
+}
+
+fn validate_hash(hash: &str) -> Result<(), SchedulerEvidenceError> {
+    if hash.trim().is_empty() {
+        return Err(SchedulerEvidenceError::EmptySourceHash);
+    }
+    if !hash.starts_with("sha256:") {
+        return Err(SchedulerEvidenceError::InvalidSourceHash {
+            found: hash.to_string(),
+        });
     }
     Ok(())
 }
@@ -410,6 +574,29 @@ mod tests {
                 cross_cohort_wake_p99_ns: Some(70_000),
             },
             notes: vec!["unit".to_string()],
+        }
+    }
+
+    fn coordination_input(
+        family: CoordinationPressureFamily,
+        workload_id: &str,
+    ) -> SchedulerCoordinationEvidenceInput {
+        SchedulerCoordinationEvidenceInput {
+            evidence_input_id: format!("coordination-evidence-{workload_id}"),
+            workload_id: workload_id.to_string(),
+            workload_class: SchedulerWorkloadClass::InteractiveSwarm,
+            scenario_family: family,
+            semantic_pressure: vec![
+                "ready-backlog".to_string(),
+                "queue-residency-tail".to_string(),
+            ],
+            provenance_only_context: vec![
+                "pseudonymized-agent".to_string(),
+                "hashed-path".to_string(),
+            ],
+            source_event_count: 2,
+            source_hashes: vec!["sha256:event-a".to_string(), "sha256:event-b".to_string()],
+            source_bundle_hash: "sha256:coordination-bundle".to_string(),
         }
     }
 
@@ -487,6 +674,85 @@ mod tests {
                 .explanation
                 .iter()
                 .any(|line| line.contains("conservative baseline envelope"))
+        );
+    }
+
+    #[test]
+    fn coordination_evidence_inputs_validate_all_pressure_families() {
+        let evidence = SchedulerCoordinationEvidenceInputs {
+            schema_version: SCHEDULER_COORDINATION_EVIDENCE_SCHEMA_VERSION.to_string(),
+            source_pack_id: "agent-swarm-coordination-pressure".to_string(),
+            source_bundle_hash: "sha256:coordination-runtime-fixture".to_string(),
+            source_run_id: "coordination-runtime-fixture-accepted-all-families".to_string(),
+            evidence_inputs: vec![
+                coordination_input(
+                    CoordinationPressureFamily::TrackerLockContention,
+                    "ASWARM-WL-LOCK-001",
+                ),
+                coordination_input(
+                    CoordinationPressureFamily::ConcurrentRchProofs,
+                    "ASWARM-WL-RCH-001",
+                ),
+                coordination_input(
+                    CoordinationPressureFamily::FailClosedDirtyFrontier,
+                    "ASWARM-WL-DIRTY-001",
+                ),
+                coordination_input(
+                    CoordinationPressureFamily::ArtifactRetrievalTail,
+                    "ASWARM-WL-ARTIFACT-001",
+                ),
+                coordination_input(
+                    CoordinationPressureFamily::ProofRunnerFanout,
+                    "ASWARM-WL-FANOUT-001",
+                ),
+                coordination_input(
+                    CoordinationPressureFamily::StaleInProgressReclaim,
+                    "ASWARM-WL-STALE-001",
+                ),
+                coordination_input(
+                    CoordinationPressureFamily::CoordinationLatencyBurst,
+                    "ASWARM-WL-LATENCY-001",
+                ),
+            ],
+        };
+
+        evidence
+            .validate()
+            .expect("coordination evidence validates");
+    }
+
+    #[test]
+    fn coordination_evidence_rejects_missing_semantics_and_unstable_hashes() {
+        let mut evidence = SchedulerCoordinationEvidenceInputs {
+            schema_version: SCHEDULER_COORDINATION_EVIDENCE_SCHEMA_VERSION.to_string(),
+            source_pack_id: "agent-swarm-coordination-pressure".to_string(),
+            source_bundle_hash: "sha256:coordination-runtime-fixture".to_string(),
+            source_run_id: "coordination-runtime-fixture-accepted-all-families".to_string(),
+            evidence_inputs: vec![coordination_input(
+                CoordinationPressureFamily::TrackerLockContention,
+                "ASWARM-WL-LOCK-001",
+            )],
+        };
+
+        evidence.evidence_inputs[0].semantic_pressure.clear();
+        assert_eq!(
+            evidence.validate(),
+            Err(SchedulerEvidenceError::EmptySemanticPressure)
+        );
+
+        evidence.evidence_inputs[0].semantic_pressure = vec!["ready-backlog".to_string()];
+        evidence.evidence_inputs[0].source_hashes = vec!["not-a-sha".to_string()];
+        assert_eq!(
+            evidence.validate(),
+            Err(SchedulerEvidenceError::InvalidSourceHash {
+                found: "not-a-sha".to_string(),
+            })
+        );
+
+        evidence.evidence_inputs.clear();
+        assert_eq!(
+            evidence.validate(),
+            Err(SchedulerEvidenceError::EmptyEvidenceInputSet)
         );
     }
 }

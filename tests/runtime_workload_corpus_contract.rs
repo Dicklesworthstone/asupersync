@@ -7,6 +7,7 @@
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 const DOC_PATH: &str = "docs/runtime_workload_corpus_contract.md";
 const ARTIFACT_PATH: &str = "artifacts/runtime_workload_corpus_v1.json";
@@ -24,6 +25,25 @@ fn load_artifact() -> Value {
     let raw = std::fs::read_to_string(repo_root().join(ARTIFACT_PATH))
         .expect("failed to load runtime workload corpus artifact");
     serde_json::from_str(&raw).expect("failed to parse runtime workload corpus artifact")
+}
+
+fn temp_root(name: &str) -> PathBuf {
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "asupersync-runtime-workload-corpus-{name}-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&path).expect("create temp root");
+    path
+}
+
+fn run_workload_script(args: &[String]) -> std::process::Output {
+    Command::new("bash")
+        .arg(repo_root().join("scripts/run_runtime_workload_corpus.sh"))
+        .args(args)
+        .current_dir(repo_root())
+        .output()
+        .expect("run workload corpus script")
 }
 
 fn workload_ids(value: &Value) -> BTreeSet<String> {
@@ -203,7 +223,7 @@ fn artifact_covers_required_runtime_profiles() {
 fn artifact_covers_required_workload_families() {
     let artifact = load_artifact();
     let families = workload_families(&artifact);
-    let expected: BTreeSet<String> = [
+    let core_expected: BTreeSet<String> = [
         "bursty",
         "cancellation-heavy",
         "cpu-heavy",
@@ -215,7 +235,14 @@ fn artifact_covers_required_workload_families() {
     .into_iter()
     .map(ToOwned::to_owned)
     .collect();
-    assert_eq!(families, expected);
+    assert!(
+        core_expected.is_subset(&families),
+        "core workload families must remain present"
+    );
+    assert!(
+        families.contains("agent-swarm-coordination"),
+        "coordination expansion family must be present outside the core denominator"
+    );
 }
 
 #[test]
@@ -254,6 +281,130 @@ fn artifact_core_set_and_expansion_packs_reference_known_ids() {
                 "expansion-pack workload must not silently enter core set: {id}"
             );
         }
+    }
+}
+
+#[test]
+fn coordination_expansion_pack_preserves_core_denominator_and_maps_all_families() {
+    let artifact = load_artifact();
+    let ids = workload_ids(&artifact);
+    let core_ids: BTreeSet<String> = artifact["default_core_set"]
+        .as_array()
+        .expect("default_core_set must be array")
+        .iter()
+        .map(|item| item.as_str().expect("core item must be string").to_string())
+        .collect();
+    let coordination = &artifact["coordination_workload_synthesis"];
+    assert_eq!(
+        coordination["pack_id"].as_str(),
+        Some("agent-swarm-coordination-pressure")
+    );
+    assert_eq!(coordination["baseline_denominator"].as_bool(), Some(false));
+
+    let required: BTreeSet<String> = coordination["required_scenario_families"]
+        .as_array()
+        .expect("required families")
+        .iter()
+        .map(|family| family.as_str().expect("family string").to_string())
+        .collect();
+    assert_eq!(
+        required,
+        BTreeSet::from([
+            "artifact_retrieval_tail".to_string(),
+            "concurrent_rch_proofs".to_string(),
+            "coordination_latency_burst".to_string(),
+            "fail_closed_dirty_frontier".to_string(),
+            "proof_runner_fanout".to_string(),
+            "stale_in_progress_reclaim".to_string(),
+            "tracker_lock_contention".to_string(),
+        ])
+    );
+
+    let mappings = coordination["scenario_family_mapping"]
+        .as_array()
+        .expect("scenario_family_mapping must be array");
+    assert_eq!(mappings.len(), 7);
+    for mapping in mappings {
+        let workload_id = mapping["workload_id"]
+            .as_str()
+            .expect("mapping workload_id string");
+        assert!(ids.contains(workload_id), "mapped workload must exist");
+        assert!(
+            !core_ids.contains(workload_id),
+            "coordination workload must stay outside the core denominator"
+        );
+        assert!(
+            !mapping["semantic_pressure"]
+                .as_array()
+                .expect("semantic_pressure array")
+                .is_empty(),
+            "mapping must declare semantic pressure"
+        );
+        assert!(
+            !mapping["provenance_only_context"]
+                .as_array()
+                .expect("provenance_only_context array")
+                .is_empty(),
+            "mapping must declare provenance-only context"
+        );
+        assert!(
+            mapping["replay_command"]
+                .as_str()
+                .expect("replay command")
+                .contains(workload_id)
+        );
+        assert!(
+            mapping["entry_command"]
+                .as_str()
+                .expect("entry command")
+                .contains("--synthesize-coordination-pack")
+        );
+    }
+}
+
+#[test]
+fn coordination_workloads_have_stable_commands_and_artifact_globs() {
+    let artifact = load_artifact();
+    let coordination_workloads: Vec<_> = artifact["workloads"]
+        .as_array()
+        .expect("workloads")
+        .iter()
+        .filter(|workload| workload["family"].as_str() == Some("agent-swarm-coordination"))
+        .collect();
+    assert_eq!(coordination_workloads.len(), 7);
+
+    for workload in coordination_workloads {
+        let workload_id = workload["workload_id"].as_str().expect("workload id");
+        let replay_command = workload["replay_command"].as_str().expect("replay command");
+        assert_eq!(
+            replay_command,
+            format!(
+                "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload {workload_id}"
+            )
+        );
+        assert!(
+            workload["entry_command"]
+                .as_str()
+                .expect("entry command")
+                .contains("RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --synthesize-coordination-pack"),
+            "coordination synthesis entry command must stay rch-routed through the script"
+        );
+        let artifact_globs: BTreeSet<_> = workload["expected_artifacts"]
+            .as_array()
+            .expect("expected_artifacts")
+            .iter()
+            .map(|artifact| artifact["path_glob"].as_str().expect("path_glob"))
+            .collect();
+        assert!(
+            artifact_globs
+                .iter()
+                .any(|glob| glob.contains("coordination-workload-expansion-pack.json"))
+        );
+        assert!(
+            artifact_globs
+                .iter()
+                .any(|glob| glob.contains("coordination-scheduler-evidence-inputs.json"))
+        );
     }
 }
 
@@ -314,23 +465,33 @@ fn entry_commands_are_rch_routed_and_reference_existing_paths() {
         let entry_command = workload["entry_command"]
             .as_str()
             .expect("entry_command must be string");
+        let is_coordination = workload["family"].as_str() == Some("agent-swarm-coordination");
 
         assert!(
             root.join(entrypoint_path).exists(),
             "entrypoint path must exist: {entrypoint_path}"
         );
-        assert!(
-            entry_command.contains(&format!("WORKLOAD_ID={workload_id}")),
-            "entry command must propagate workload id"
-        );
-        assert!(
-            entry_command.contains(&format!("RUNTIME_PROFILE={runtime_profile}")),
-            "entry command must propagate runtime profile"
-        );
-        assert!(
-            entry_command.contains("WORKLOAD_CONFIG_REF=") && entry_command.contains(config_ref),
-            "entry command must propagate config ref"
-        );
+        if is_coordination {
+            assert!(
+                entry_command.contains("--synthesize-coordination-pack")
+                    && entry_command.contains("--coordination-fixture-id accepted-all-families"),
+                "coordination entry command must use deterministic synthesis mode"
+            );
+        } else {
+            assert!(
+                entry_command.contains(&format!("WORKLOAD_ID={workload_id}")),
+                "entry command must propagate workload id"
+            );
+            assert!(
+                entry_command.contains(&format!("RUNTIME_PROFILE={runtime_profile}")),
+                "entry command must propagate runtime profile"
+            );
+            assert!(
+                entry_command.contains("WORKLOAD_CONFIG_REF=")
+                    && entry_command.contains(config_ref),
+                "entry command must propagate config ref"
+            );
+        }
         assert!(
             entry_command.contains("rch exec -- cargo")
                 || entry_command.contains("RCH_BIN=rch bash ./scripts/"),
@@ -399,4 +560,156 @@ fn every_workload_declares_bundle_artifacts_and_evidence() {
             "workload must declare expected evidence outputs: {workload_id}"
         );
     }
+}
+
+#[test]
+fn coordination_fixture_synthesis_emits_deterministic_scheduler_inputs() {
+    let root = temp_root("coordination-accepted");
+    let out = run_workload_script(&[
+        "--synthesize-coordination-pack".into(),
+        "--coordination-fixture".into(),
+        "--output-root".into(),
+        root.to_string_lossy().into_owned(),
+    ]);
+    assert!(
+        out.status.success(),
+        "accepted fixture stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let run_dir = root
+        .join("coordination-expansion")
+        .join("coordination-runtime-fixture-accepted-all-families");
+    let pack: Value = serde_json::from_str(
+        &std::fs::read_to_string(run_dir.join("coordination-workload-expansion-pack.json"))
+            .expect("read expansion pack"),
+    )
+    .expect("parse expansion pack");
+    let evidence: Value = serde_json::from_str(
+        &std::fs::read_to_string(run_dir.join("coordination-scheduler-evidence-inputs.json"))
+            .expect("read evidence inputs"),
+    )
+    .expect("parse evidence inputs");
+    let report: Value = serde_json::from_str(
+        &std::fs::read_to_string(run_dir.join("coordination-workload-synthesis-report.json"))
+            .expect("read report"),
+    )
+    .expect("parse report");
+    let summary =
+        std::fs::read_to_string(run_dir.join("coordination-workload-synthesis.summary.txt"))
+            .expect("read summary");
+
+    assert_eq!(report["status"], "passed");
+    assert_eq!(
+        pack["source_bundle_hash"],
+        "sha256:coordination-runtime-fixture-accepted-all-families"
+    );
+    assert_eq!(
+        pack["missing_scenario_families"].as_array().unwrap().len(),
+        0
+    );
+    assert_eq!(pack["workloads"].as_array().unwrap().len(), 7);
+    assert_eq!(evidence["evidence_inputs"].as_array().unwrap().len(), 7);
+    assert!(summary.contains("tracker_lock_contention"));
+    assert!(summary.contains("coordination_latency_burst"));
+
+    for workload in pack["workloads"].as_array().expect("workloads") {
+        assert!(
+            workload["source_bundle_hash"]
+                .as_str()
+                .expect("source bundle hash")
+                .starts_with("sha256:")
+        );
+        assert!(
+            !workload["source_hashes"]
+                .as_array()
+                .expect("source hashes")
+                .is_empty()
+        );
+        assert!(
+            workload["source_hashes"].as_array().unwrap()[0]
+                .as_str()
+                .unwrap()
+                .starts_with("sha256:")
+        );
+        assert!(
+            !workload["semantic_pressure"]
+                .as_array()
+                .expect("semantic pressure")
+                .is_empty()
+        );
+        assert!(
+            !workload["provenance_only_context"]
+                .as_array()
+                .expect("provenance context")
+                .is_empty()
+        );
+        assert!(
+            workload["replay_command"]
+                .as_str()
+                .expect("replay command")
+                .starts_with(
+                    "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload"
+                )
+        );
+        assert!(
+            workload["expected_artifact_globs"]
+                .as_array()
+                .expect("artifact globs")
+                .iter()
+                .any(|glob| glob
+                    .as_str()
+                    .unwrap()
+                    .contains("coordination-workload-expansion-pack.json"))
+        );
+    }
+}
+
+#[test]
+fn coordination_fixture_refuses_missing_scenario_dimensions() {
+    let root = temp_root("coordination-refused");
+    let out = run_workload_script(&[
+        "--synthesize-coordination-pack".into(),
+        "--coordination-fixture-id".into(),
+        "refused-missing-scenario-dimensions".into(),
+        "--output-root".into(),
+        root.to_string_lossy().into_owned(),
+    ]);
+    assert!(
+        !out.status.success(),
+        "missing dimensions fixture must fail closed"
+    );
+
+    let run_dir = root
+        .join("coordination-expansion")
+        .join("coordination-runtime-fixture-missing-dimensions");
+    let report: Value = serde_json::from_str(
+        &std::fs::read_to_string(run_dir.join("coordination-workload-synthesis-report.json"))
+            .expect("read refused report"),
+    )
+    .expect("parse refused report");
+    let pack: Value = serde_json::from_str(
+        &std::fs::read_to_string(run_dir.join("coordination-workload-expansion-pack.json"))
+            .expect("read refused pack"),
+    )
+    .expect("parse refused pack");
+
+    assert_eq!(report["status"], "refused");
+    assert!(
+        report["first_failure_line"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("missing_scenario_dimensions")
+    );
+    assert_eq!(
+        report["missing_scenario_families"]
+            .as_array()
+            .expect("missing families")
+            .len(),
+        6
+    );
+    assert_eq!(
+        pack["refused_bundles"][0]["refusal_reason"],
+        "missing_scenario_dimensions"
+    );
 }

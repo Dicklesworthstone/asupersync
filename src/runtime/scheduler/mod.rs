@@ -55,7 +55,9 @@ pub use priority_inversion_oracle::{
     InversionType, Priority, PriorityInversion, PriorityInversionOracle, ResourceId,
 };
 pub use swarm_evidence::{
-    SCHEDULER_EVIDENCE_SCHEMA_VERSION, SchedulerEvidenceArtifact, SchedulerEvidenceError,
+    CoordinationPressureFamily, SCHEDULER_COORDINATION_EVIDENCE_SCHEMA_VERSION,
+    SCHEDULER_EVIDENCE_SCHEMA_VERSION, SchedulerCoordinationEvidenceInput,
+    SchedulerCoordinationEvidenceInputs, SchedulerEvidenceArtifact, SchedulerEvidenceError,
     SchedulerEvidenceMetrics, SchedulerKnobProfile, SchedulerRecommendationReason,
     SchedulerTopologyDescriptor, SchedulerTuneReport, SchedulerWorkloadClass,
 };
