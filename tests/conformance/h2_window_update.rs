@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! HTTP/2 WINDOW_UPDATE flow control conformance tests.
 //!
 //! Tests conformance with RFC 9113 Section 6.9 "WINDOW_UPDATE" frame handling.
