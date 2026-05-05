@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Contract checks for the service-worker bounded broker policy
 //! (`asupersync-n6kwt.7.1`).
 
