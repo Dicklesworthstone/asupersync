@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! WASM ABI Compatibility Harness (WASM-8.5)
 //!
 //! Validates ABI compatibility invariants: fingerprint stability,
