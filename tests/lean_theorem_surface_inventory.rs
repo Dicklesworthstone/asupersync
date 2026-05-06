@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Lean theorem inventory and constructor coverage consistency tests (bd-3n3b2).
 
 use serde_json::Value;
