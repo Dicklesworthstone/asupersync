@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! HTTP/3 RFC 9114 + 9297 + 9298 must-reject conformance vectors.
 //!
 //! Each test asserts that asupersync's `H3ConnectionState` /
