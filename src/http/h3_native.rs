@@ -793,6 +793,64 @@ pub enum QpackFieldPlan {
     },
 }
 
+/// Name-reference source for QPACK encoder-stream instructions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QpackInstructionNameRef {
+    /// Name reference into the QPACK static table.
+    Static(u64),
+    /// Name reference into the QPACK dynamic table.
+    Dynamic(u64),
+}
+
+/// Side-effect-free RFC 9204 encoder-stream instruction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QpackEncoderInstruction {
+    /// Set the dynamic table capacity.
+    SetDynamicTableCapacity {
+        /// New dynamic table capacity.
+        capacity: u64,
+    },
+    /// Insert a field line using a static or dynamic name reference.
+    InsertWithNameReference {
+        /// Static or dynamic name reference.
+        name: QpackInstructionNameRef,
+        /// Header value to insert.
+        value: String,
+    },
+    /// Insert a field line with a literal name.
+    InsertWithoutNameReference {
+        /// Header name to insert.
+        name: String,
+        /// Header value to insert.
+        value: String,
+    },
+    /// Duplicate an existing dynamic table entry.
+    Duplicate {
+        /// Dynamic table index carried by the instruction.
+        index: u64,
+    },
+}
+
+/// Side-effect-free RFC 9204 decoder-stream instruction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QpackDecoderInstruction {
+    /// Acknowledge successful processing of a stream field section.
+    HeaderAcknowledgement {
+        /// Stream identifier being acknowledged.
+        stream_id: u64,
+    },
+    /// Notify that a stream has been cancelled.
+    StreamCancellation {
+        /// Stream identifier being cancelled.
+        stream_id: u64,
+    },
+    /// Increment the peer-known insert count.
+    InsertCountIncrement {
+        /// Non-zero insert count increment.
+        increment: u64,
+    },
+}
+
 /// Build a static-only QPACK plan for a validated request head.
 #[must_use]
 pub fn qpack_static_plan_for_request(head: &H3RequestHead) -> Vec<QpackFieldPlan> {
@@ -1061,6 +1119,138 @@ fn qpack_plan_required_insert_count(
         "dynamic table context required",
     ))?;
     Ok(context.dynamic_table().insertion_counter())
+}
+
+/// Encode one RFC 9204 encoder-stream instruction.
+pub fn qpack_encode_encoder_instruction(
+    out: &mut Vec<u8>,
+    instruction: &QpackEncoderInstruction,
+) -> Result<(), H3NativeError> {
+    match instruction {
+        QpackEncoderInstruction::SetDynamicTableCapacity { capacity } => {
+            qpack_encode_prefixed_int(out, 0b0010_0000, 5, *capacity)?;
+        }
+        QpackEncoderInstruction::InsertWithNameReference { name, value } => {
+            match name {
+                QpackInstructionNameRef::Static(index) => {
+                    qpack_encode_prefixed_int(out, 0b1100_0000, 6, *index)?;
+                }
+                QpackInstructionNameRef::Dynamic(index) => {
+                    qpack_encode_prefixed_int(out, 0b1000_0000, 6, *index)?;
+                }
+            }
+            qpack_encode_string(out, 0, 7, value)?;
+        }
+        QpackEncoderInstruction::InsertWithoutNameReference { name, value } => {
+            qpack_encode_string(out, 0b0100_0000, 5, name)?;
+            qpack_encode_string(out, 0, 7, value)?;
+        }
+        QpackEncoderInstruction::Duplicate { index } => {
+            qpack_encode_prefixed_int(out, 0, 5, *index)?;
+        }
+    }
+    Ok(())
+}
+
+/// Decode one RFC 9204 encoder-stream instruction.
+pub fn qpack_decode_encoder_instruction(
+    input: &[u8],
+) -> Result<(QpackEncoderInstruction, usize), H3NativeError> {
+    let first = *input.first().ok_or(H3NativeError::UnexpectedEof)?;
+    if (first & 0b1000_0000) != 0 {
+        let (index, index_extra) = qpack_decode_prefixed_int(first, 6, &input[1..])?;
+        let pos = 1 + index_extra;
+        let value_first = *input.get(pos).ok_or(H3NativeError::UnexpectedEof)?;
+        let (value, value_extra) = qpack_decode_string(value_first, 7, &input[pos + 1..])?;
+        let name = if (first & 0b0100_0000) != 0 {
+            QpackInstructionNameRef::Static(index)
+        } else {
+            QpackInstructionNameRef::Dynamic(index)
+        };
+        return Ok((
+            QpackEncoderInstruction::InsertWithNameReference { name, value },
+            pos + 1 + value_extra,
+        ));
+    }
+
+    if (first & 0b0100_0000) != 0 {
+        let (name, name_extra) = qpack_decode_string(first, 5, &input[1..])?;
+        let pos = 1 + name_extra;
+        let value_first = *input.get(pos).ok_or(H3NativeError::UnexpectedEof)?;
+        let (value, value_extra) = qpack_decode_string(value_first, 7, &input[pos + 1..])?;
+        return Ok((
+            QpackEncoderInstruction::InsertWithoutNameReference { name, value },
+            pos + 1 + value_extra,
+        ));
+    }
+
+    if (first & 0b0010_0000) != 0 {
+        let (capacity, extra) = qpack_decode_prefixed_int(first, 5, &input[1..])?;
+        return Ok((
+            QpackEncoderInstruction::SetDynamicTableCapacity { capacity },
+            1 + extra,
+        ));
+    }
+
+    let (index, extra) = qpack_decode_prefixed_int(first, 5, &input[1..])?;
+    Ok((QpackEncoderInstruction::Duplicate { index }, 1 + extra))
+}
+
+/// Encode one RFC 9204 decoder-stream instruction.
+pub fn qpack_encode_decoder_instruction(
+    out: &mut Vec<u8>,
+    instruction: &QpackDecoderInstruction,
+) -> Result<(), H3NativeError> {
+    match instruction {
+        QpackDecoderInstruction::HeaderAcknowledgement { stream_id } => {
+            qpack_encode_prefixed_int(out, 0b1000_0000, 7, *stream_id)?;
+        }
+        QpackDecoderInstruction::StreamCancellation { stream_id } => {
+            qpack_encode_prefixed_int(out, 0b0100_0000, 6, *stream_id)?;
+        }
+        QpackDecoderInstruction::InsertCountIncrement { increment } => {
+            if *increment == 0 {
+                return Err(H3NativeError::InvalidFrame(
+                    "qpack insert count increment must be non-zero",
+                ));
+            }
+            qpack_encode_prefixed_int(out, 0, 6, *increment)?;
+        }
+    }
+    Ok(())
+}
+
+/// Decode one RFC 9204 decoder-stream instruction.
+pub fn qpack_decode_decoder_instruction(
+    input: &[u8],
+) -> Result<(QpackDecoderInstruction, usize), H3NativeError> {
+    let first = *input.first().ok_or(H3NativeError::UnexpectedEof)?;
+    if (first & 0b1000_0000) != 0 {
+        let (stream_id, extra) = qpack_decode_prefixed_int(first, 7, &input[1..])?;
+        return Ok((
+            QpackDecoderInstruction::HeaderAcknowledgement { stream_id },
+            1 + extra,
+        ));
+    }
+
+    if (first & 0b0100_0000) != 0 {
+        let (stream_id, extra) = qpack_decode_prefixed_int(first, 6, &input[1..])?;
+        return Ok((
+            QpackDecoderInstruction::StreamCancellation { stream_id },
+            1 + extra,
+        ));
+    }
+
+    let (increment, extra) = qpack_decode_prefixed_int(first, 6, &input[1..])?;
+    if increment == 0 {
+        return Err(H3NativeError::InvalidFrame(
+            "qpack insert count increment must be non-zero",
+        ));
+    }
+    Ok((
+        QpackDecoderInstruction::InsertCountIncrement { increment },
+        1 + extra,
+    ))
 }
 
 /// br-asupersync-mbn0uo — Fuzz-target re-exporter for the H3
@@ -5238,6 +5428,290 @@ mod tests {
         assert!(
             result.is_err(),
             "must reject integer that would silently truncate at high shifts"
+        );
+    }
+
+    #[test]
+    fn qpack_encoder_instruction_roundtrips_all_variants() {
+        let cases = [
+            QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 4096 },
+            QpackEncoderInstruction::InsertWithNameReference {
+                name: QpackInstructionNameRef::Static(1),
+                value: "/index.html".to_string(),
+            },
+            QpackEncoderInstruction::InsertWithNameReference {
+                name: QpackInstructionNameRef::Dynamic(2),
+                value: "dynamic-value".to_string(),
+            },
+            QpackEncoderInstruction::InsertWithoutNameReference {
+                name: "x-custom".to_string(),
+                value: "literal-value".to_string(),
+            },
+            QpackEncoderInstruction::Duplicate { index: 3 },
+        ];
+
+        for instruction in cases {
+            let mut wire = Vec::new();
+            qpack_encode_encoder_instruction(&mut wire, &instruction).expect("encode");
+            let (decoded, consumed) =
+                qpack_decode_encoder_instruction(&wire).expect("decode encoder instruction");
+            assert_eq!(decoded, instruction);
+            assert_eq!(consumed, wire.len());
+        }
+    }
+
+    #[test]
+    fn qpack_encoder_instruction_uses_expected_wire_prefixes() {
+        let cases = [
+            (
+                QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 0 },
+                0b0010_0000,
+            ),
+            (
+                QpackEncoderInstruction::InsertWithNameReference {
+                    name: QpackInstructionNameRef::Static(0),
+                    value: String::new(),
+                },
+                0b1100_0000,
+            ),
+            (
+                QpackEncoderInstruction::InsertWithNameReference {
+                    name: QpackInstructionNameRef::Dynamic(0),
+                    value: String::new(),
+                },
+                0b1000_0000,
+            ),
+            (
+                QpackEncoderInstruction::InsertWithoutNameReference {
+                    name: String::new(),
+                    value: String::new(),
+                },
+                0b0100_0000,
+            ),
+            (QpackEncoderInstruction::Duplicate { index: 0 }, 0b0000_0000),
+        ];
+
+        for (instruction, expected_first) in cases {
+            let mut wire = Vec::new();
+            qpack_encode_encoder_instruction(&mut wire, &instruction).expect("encode");
+            assert_eq!(wire[0], expected_first);
+        }
+    }
+
+    #[test]
+    fn qpack_decoder_instruction_roundtrips_all_variants() {
+        let cases = [
+            QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 0 },
+            QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 4 },
+            QpackDecoderInstruction::StreamCancellation { stream_id: 8 },
+            QpackDecoderInstruction::InsertCountIncrement { increment: 1 },
+            QpackDecoderInstruction::InsertCountIncrement { increment: 128 },
+        ];
+
+        for instruction in cases {
+            let mut wire = Vec::new();
+            qpack_encode_decoder_instruction(&mut wire, &instruction).expect("encode");
+            let (decoded, consumed) =
+                qpack_decode_decoder_instruction(&wire).expect("decode decoder instruction");
+            assert_eq!(decoded, instruction);
+            assert_eq!(consumed, wire.len());
+        }
+    }
+
+    #[test]
+    fn qpack_decoder_instruction_uses_expected_wire_prefixes() {
+        let cases = [
+            (
+                QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 0 },
+                0b1000_0000,
+            ),
+            (
+                QpackDecoderInstruction::StreamCancellation { stream_id: 0 },
+                0b0100_0000,
+            ),
+            (
+                QpackDecoderInstruction::InsertCountIncrement { increment: 1 },
+                0b0000_0001,
+            ),
+        ];
+
+        for (instruction, expected_first) in cases {
+            let mut wire = Vec::new();
+            qpack_encode_decoder_instruction(&mut wire, &instruction).expect("encode");
+            assert_eq!(wire[0], expected_first);
+        }
+    }
+
+    #[test]
+    fn qpack_instruction_prefixed_integer_boundaries() {
+        for capacity in [30, 31, 32, 1337, u16::MAX as u64] {
+            let instruction = QpackEncoderInstruction::SetDynamicTableCapacity { capacity };
+            let mut wire = Vec::new();
+            qpack_encode_encoder_instruction(&mut wire, &instruction).expect("encode");
+            let (decoded, consumed) =
+                qpack_decode_encoder_instruction(&wire).expect("decode capacity");
+            assert_eq!(decoded, instruction);
+            assert_eq!(consumed, wire.len());
+        }
+
+        for stream_id in [126, 127, 128, 16_384] {
+            let instruction = QpackDecoderInstruction::HeaderAcknowledgement { stream_id };
+            let mut wire = Vec::new();
+            qpack_encode_decoder_instruction(&mut wire, &instruction).expect("encode");
+            let (decoded, consumed) =
+                qpack_decode_decoder_instruction(&wire).expect("decode stream id");
+            assert_eq!(decoded, instruction);
+            assert_eq!(consumed, wire.len());
+        }
+    }
+
+    #[test]
+    fn qpack_instruction_string_edges_roundtrip() {
+        let cases = [
+            QpackEncoderInstruction::InsertWithNameReference {
+                name: QpackInstructionNameRef::Static(0),
+                value: String::new(),
+            },
+            QpackEncoderInstruction::InsertWithNameReference {
+                name: QpackInstructionNameRef::Dynamic(0),
+                value: "www.example.com".to_string(),
+            },
+            QpackEncoderInstruction::InsertWithoutNameReference {
+                name: String::new(),
+                value: String::new(),
+            },
+            QpackEncoderInstruction::InsertWithoutNameReference {
+                name: "x-long-name".repeat(40),
+                value: "large-bounded-value".repeat(40),
+            },
+        ];
+
+        for instruction in cases {
+            let mut wire = Vec::new();
+            qpack_encode_encoder_instruction(&mut wire, &instruction).expect("encode");
+            let (decoded, consumed) =
+                qpack_decode_encoder_instruction(&wire).expect("decode string instruction");
+            assert_eq!(decoded, instruction);
+            assert_eq!(consumed, wire.len());
+        }
+    }
+
+    #[test]
+    fn qpack_instruction_value_string_uses_huffman_when_smaller() {
+        let instruction = QpackEncoderInstruction::InsertWithNameReference {
+            name: QpackInstructionNameRef::Static(0),
+            value: "www.example.com".to_string(),
+        };
+        let mut wire = Vec::new();
+        qpack_encode_encoder_instruction(&mut wire, &instruction).expect("encode");
+
+        // Static name reference index 0 fits in the first byte, so byte 1 is
+        // the value string prefix. Its high bit is the QPACK Huffman flag for
+        // a 7-bit string prefix.
+        assert_ne!(wire[1] & 0b1000_0000, 0);
+
+        let (decoded, consumed) =
+            qpack_decode_encoder_instruction(&wire).expect("decode huffman value");
+        assert_eq!(decoded, instruction);
+        assert_eq!(consumed, wire.len());
+    }
+
+    #[test]
+    fn qpack_instruction_decode_reports_consumed_prefix_only() {
+        let instruction = QpackEncoderInstruction::Duplicate { index: 31 };
+        let mut wire = Vec::new();
+        qpack_encode_encoder_instruction(&mut wire, &instruction).expect("encode");
+        let expected_instruction_len = wire.len();
+        wire.extend_from_slice(&[0xAA, 0xBB]);
+
+        let (decoded, consumed) =
+            qpack_decode_encoder_instruction(&wire).expect("decode with trailing bytes");
+        assert_eq!(decoded, instruction);
+        assert_eq!(consumed, expected_instruction_len);
+    }
+
+    #[test]
+    fn qpack_decoder_instruction_decode_reports_consumed_prefix_only() {
+        let instruction = QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 127 };
+        let mut wire = Vec::new();
+        qpack_encode_decoder_instruction(&mut wire, &instruction).expect("encode");
+        let expected_instruction_len = wire.len();
+        wire.extend_from_slice(&[0xCC, 0xDD]);
+
+        let (decoded, consumed) =
+            qpack_decode_decoder_instruction(&wire).expect("decode with trailing bytes");
+        assert_eq!(decoded, instruction);
+        assert_eq!(consumed, expected_instruction_len);
+    }
+
+    #[test]
+    fn qpack_encoder_instruction_rejects_truncated_capacity_integer() {
+        // Set Dynamic Table Capacity with inline prefix saturated to 31, but no
+        // continuation byte.
+        let err = qpack_decode_encoder_instruction(&[0x3F]).expect_err("truncated capacity");
+        assert_eq!(err, H3NativeError::UnexpectedEof);
+    }
+
+    #[test]
+    fn qpack_encoder_instruction_rejects_overflow_capacity_integer() {
+        let mut wire = vec![0x3Fu8];
+        wire.extend(std::iter::repeat_n(0x80, 9));
+        wire.push(0x02);
+
+        let err = qpack_decode_encoder_instruction(&wire).expect_err("overflow capacity");
+        assert_eq!(err, H3NativeError::InvalidFrame("qpack integer overflow"));
+    }
+
+    #[test]
+    fn qpack_encoder_instruction_rejects_truncated_value_string() {
+        // Insert With Name Reference: static name index 0, but no value string.
+        let err = qpack_decode_encoder_instruction(&[0xC0]).expect_err("missing value");
+        assert_eq!(err, H3NativeError::UnexpectedEof);
+    }
+
+    #[test]
+    fn qpack_encoder_instruction_rejects_truncated_value_length_integer() {
+        // Insert With Name Reference: static name index 0, then value length
+        // prefix saturated to 127 without its required continuation byte.
+        let err =
+            qpack_decode_encoder_instruction(&[0xC0, 0x7F]).expect_err("truncated value length");
+        assert_eq!(err, H3NativeError::UnexpectedEof);
+    }
+
+    #[test]
+    fn qpack_encoder_instruction_rejects_truncated_literal_name() {
+        // Insert Without Name Reference with literal name length 3, but only one byte follows.
+        let err =
+            qpack_decode_encoder_instruction(&[0x43, b'x']).expect_err("truncated literal name");
+        assert_eq!(err, H3NativeError::UnexpectedEof);
+    }
+
+    #[test]
+    fn qpack_decoder_instruction_rejects_truncated_stream_id_integer() {
+        // Header Acknowledgement with inline prefix saturated to 127, but no
+        // continuation byte.
+        let err =
+            qpack_decode_decoder_instruction(&[0xFF]).expect_err("truncated stream id integer");
+        assert_eq!(err, H3NativeError::UnexpectedEof);
+    }
+
+    #[test]
+    fn qpack_decoder_instruction_rejects_zero_insert_count_increment() {
+        let err = qpack_encode_decoder_instruction(
+            &mut Vec::new(),
+            &QpackDecoderInstruction::InsertCountIncrement { increment: 0 },
+        )
+        .expect_err("zero increment encode must fail");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame("qpack insert count increment must be non-zero")
+        );
+
+        let err =
+            qpack_decode_decoder_instruction(&[0x00]).expect_err("zero increment decode must fail");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame("qpack insert count increment must be non-zero")
         );
     }
 
