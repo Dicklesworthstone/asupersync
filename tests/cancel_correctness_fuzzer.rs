@@ -133,7 +133,7 @@ pub enum ViolationType {
     TimingDependentBehavior,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OracleResults {
     pub loser_drain_violations: Vec<String>,
     pub cancellation_violations: Vec<String>,
@@ -337,19 +337,23 @@ impl CancelCorrectnessFuzzer {
             drain_confirmations: Vec::new(),
         };
 
-        let outcome = match self.execute_scenario(&scenario, &mut trace) {
+        let (outcome, oracle_results) = match self.execute_scenario(&scenario, &mut trace) {
             Ok(oracle_results) => {
-                if oracle_results.has_violations() {
+                let outcome = if oracle_results.has_violations() {
                     FuzzOutcome::Fail {
                         violation: InvariantViolation::from_oracle_results(&oracle_results),
                     }
                 } else {
                     FuzzOutcome::Pass
-                }
+                };
+                (outcome, oracle_results)
             }
-            Err(error) => FuzzOutcome::Error {
-                error: error.to_string(),
-            },
+            Err(error) => (
+                FuzzOutcome::Error {
+                    error: error.to_string(),
+                },
+                OracleResults::default(),
+            ),
         };
 
         trace.total_duration_ms = start_time.elapsed().as_millis() as u64;
@@ -357,7 +361,7 @@ impl CancelCorrectnessFuzzer {
         let result = FuzzResult {
             scenario: scenario.clone(),
             outcome,
-            oracle_results: self.collect_oracle_results(),
+            oracle_results,
             execution_trace: trace,
             reproduction_command: format!("cargo test cancel_fuzz_repro_{}", scenario.scenario_id),
         };
@@ -674,9 +678,91 @@ impl CancelCorrectnessFuzzer {
         _region: RegionId,
         trace: &mut ExecutionTrace,
     ) -> Result<OracleResults, Box<dyn std::error::Error>> {
-        // TODO: Implement N-way race testing
-        trace.task_count = scenario.participant_count;
-        Ok(self.collect_oracle_results())
+        let participant_count = scenario.participant_count.max(2);
+        trace.task_count = participant_count;
+
+        let mut futures: Vec<Option<ControllableFuture<usize>>> = (0..participant_count)
+            .map(|idx| Some(ControllableFuture::new(idx)))
+            .collect();
+        let ready_flags: Vec<_> = futures
+            .iter()
+            .map(|future| Arc::clone(&future.as_ref().expect("future present").ready))
+            .collect();
+        let drain_flags: Vec<_> = futures
+            .iter()
+            .map(|future| Arc::clone(&future.as_ref().expect("future present").drain_flag))
+            .collect();
+
+        match &scenario.cancel_timing {
+            CancelTiming::Early => {}
+            CancelTiming::Partial(pattern) => {
+                for (idx, ready) in pattern.iter().copied().take(participant_count).enumerate() {
+                    if ready {
+                        futures[idx].as_ref().expect("future present").make_ready();
+                    }
+                }
+            }
+            CancelTiming::Precise { delay_ms } if *delay_ms >= 100 => {}
+            _ => {
+                futures[0].as_ref().expect("future present").make_ready();
+            }
+        }
+
+        let winner_idx = ready_flags
+            .iter()
+            .position(|ready| ready.load(Ordering::Acquire));
+        let mut oracle_results = OracleResults::default();
+
+        match winner_idx {
+            Some(winner_idx) => {
+                trace.completion_order.push(TaskId::testing_default());
+                for idx in 0..participant_count {
+                    if idx != winner_idx {
+                        drop(futures[idx].take());
+                        trace.drain_confirmations.push(TaskId::testing_default());
+                    }
+                }
+                for idx in 0..participant_count {
+                    if idx != winner_idx && !drain_flags[idx].load(Ordering::Acquire) {
+                        oracle_results.loser_drain_violations.push(format!(
+                            "race_all loser future {} was not properly drained",
+                            idx + 1
+                        ));
+                    }
+                }
+            }
+            None => {
+                for future in &mut futures {
+                    drop(future.take());
+                    trace.drain_confirmations.push(TaskId::testing_default());
+                }
+                for (idx, drained) in drain_flags.iter().enumerate() {
+                    if !drained.load(Ordering::Acquire) {
+                        oracle_results.loser_drain_violations.push(format!(
+                            "race_all future {} was not drained under external cancellation",
+                            idx + 1
+                        ));
+                    }
+                }
+            }
+        }
+
+        trace.cancellation_events.push(CancellationEvent {
+            task_id: TaskId::testing_default(),
+            timestamp_ms: 0,
+            event_type: match winner_idx {
+                Some(idx) => format!("race_all_completed_winner_{}", idx + 1),
+                None => "race_all_externally_cancelled".to_string(),
+            },
+            details: serde_json::json!({
+                "winner": winner_idx.map(|idx| idx + 1),
+                "participant_count": participant_count,
+                "drain_count": trace.drain_confirmations.len(),
+                "cancel_timing": scenario.cancel_timing,
+            }),
+        });
+
+        Ok(oracle_results)
     }
 
     fn test_join2(
@@ -805,9 +891,92 @@ impl CancelCorrectnessFuzzer {
         _region: RegionId,
         trace: &mut ExecutionTrace,
     ) -> Result<OracleResults, Box<dyn std::error::Error>> {
-        // TODO: Implement N-way join testing
-        trace.task_count = scenario.participant_count;
-        Ok(self.collect_oracle_results())
+        let participant_count = scenario.participant_count.max(2);
+        trace.task_count = participant_count;
+
+        let mut futures: Vec<Option<ControllableFuture<usize>>> = (0..participant_count)
+            .map(|idx| Some(ControllableFuture::new(idx)))
+            .collect();
+        let ready_flags: Vec<_> = futures
+            .iter()
+            .map(|future| Arc::clone(&future.as_ref().expect("future present").ready))
+            .collect();
+        let drain_flags: Vec<_> = futures
+            .iter()
+            .map(|future| Arc::clone(&future.as_ref().expect("future present").drain_flag))
+            .collect();
+
+        match &scenario.cancel_timing {
+            CancelTiming::NaturalCompletion => {
+                for future in &futures {
+                    future.as_ref().expect("future present").make_ready();
+                }
+            }
+            CancelTiming::Partial(pattern) => {
+                for (idx, ready) in pattern.iter().copied().take(participant_count).enumerate() {
+                    if ready {
+                        futures[idx].as_ref().expect("future present").make_ready();
+                    }
+                }
+            }
+            CancelTiming::Precise { delay_ms } if *delay_ms < 100 => {
+                for future in &futures {
+                    future.as_ref().expect("future present").make_ready();
+                }
+            }
+            CancelTiming::MidDrain => {
+                futures[0].as_ref().expect("future present").make_ready();
+            }
+            _ => {}
+        }
+
+        let completed: Vec<bool> = ready_flags
+            .iter()
+            .map(|ready| ready.load(Ordering::Acquire))
+            .collect();
+        let completed_count = completed.iter().filter(|completed| **completed).count();
+        let mut oracle_results = OracleResults::default();
+
+        for completed in &completed {
+            if *completed {
+                trace.completion_order.push(TaskId::testing_default());
+            }
+        }
+
+        if completed_count < participant_count {
+            for (idx, completed) in completed.iter().copied().enumerate() {
+                if !completed {
+                    drop(futures[idx].take());
+                    trace.drain_confirmations.push(TaskId::testing_default());
+                }
+            }
+            for (idx, completed) in completed.iter().copied().enumerate() {
+                if !completed && !drain_flags[idx].load(Ordering::Acquire) {
+                    oracle_results.loser_drain_violations.push(format!(
+                        "join_all pending future {} was not drained under cancellation",
+                        idx + 1
+                    ));
+                }
+            }
+        }
+
+        trace.cancellation_events.push(CancellationEvent {
+            task_id: TaskId::testing_default(),
+            timestamp_ms: 0,
+            event_type: if completed_count == participant_count {
+                "join_all_completed".to_string()
+            } else {
+                "join_all_cancelled_pending".to_string()
+            },
+            details: serde_json::json!({
+                "participant_count": participant_count,
+                "completed_count": completed_count,
+                "drained_pending_count": trace.drain_confirmations.len(),
+                "cancel_timing": scenario.cancel_timing,
+            }),
+        });
+
+        Ok(oracle_results)
     }
 
     fn test_timeout(
@@ -1122,10 +1291,69 @@ mod tests {
                 assert!(!result.execution_trace.cancellation_events.is_empty());
             }
             other => {
-                println!("Timeout test result: {other:?}");
-                // Don't fail - this is expected behavior for timeout scenarios
+                panic!("Unexpected timeout scenario result: {other:?}");
             }
         }
+    }
+
+    #[test]
+    fn test_race_all_partial_drains_all_losers() {
+        let mut fuzzer = CancelCorrectnessFuzzer::new(24680);
+
+        let scenario = CancelScenario {
+            scenario_id: "test_race_all_partial".to_string(),
+            seed: 24680,
+            combinator_type: CombinatorType::RaceAll,
+            cancel_timing: CancelTiming::Partial(vec![false, true, true, false]),
+            participant_count: 4,
+            expected_winner: Some(2),
+            chaos_config: ChaosConfig::default(),
+        };
+
+        let result = fuzzer.fuzz_scenario(scenario);
+
+        assert!(matches!(result.outcome, FuzzOutcome::Pass));
+        assert_eq!(result.execution_trace.task_count, 4);
+        assert_eq!(result.execution_trace.completion_order.len(), 1);
+        assert_eq!(result.execution_trace.drain_confirmations.len(), 3);
+        assert!(
+            result.oracle_results.loser_drain_violations.is_empty(),
+            "RaceAll should preserve loser-drain oracle results"
+        );
+        assert_eq!(
+            result.execution_trace.cancellation_events[0].event_type,
+            "race_all_completed_winner_2"
+        );
+    }
+
+    #[test]
+    fn test_join_all_partial_drains_pending_futures() {
+        let mut fuzzer = CancelCorrectnessFuzzer::new(13579);
+
+        let scenario = CancelScenario {
+            scenario_id: "test_join_all_partial".to_string(),
+            seed: 13579,
+            combinator_type: CombinatorType::JoinAll,
+            cancel_timing: CancelTiming::Partial(vec![true, false, true, false]),
+            participant_count: 4,
+            expected_winner: None,
+            chaos_config: ChaosConfig::default(),
+        };
+
+        let result = fuzzer.fuzz_scenario(scenario);
+
+        assert!(matches!(result.outcome, FuzzOutcome::Pass));
+        assert_eq!(result.execution_trace.task_count, 4);
+        assert_eq!(result.execution_trace.completion_order.len(), 2);
+        assert_eq!(result.execution_trace.drain_confirmations.len(), 2);
+        assert!(
+            result.oracle_results.loser_drain_violations.is_empty(),
+            "JoinAll should preserve pending-future drain oracle results"
+        );
+        assert_eq!(
+            result.execution_trace.cancellation_events[0].event_type,
+            "join_all_cancelled_pending"
+        );
     }
 
     #[test]
@@ -1150,7 +1378,7 @@ mod tests {
         let report = fuzzer.generate_report();
         assert!(report.contains("Cancel-Correctness Fuzz Report"));
         assert!(report.contains("Total scenarios: 3"));
-        println!("Generated report:\n{report}");
+        assert!(report.contains("Success rate: 100.00%"));
     }
 
     proptest! {
@@ -1179,12 +1407,10 @@ mod tests {
                             "Pass should have no loser drain violations");
                     }
                     FuzzOutcome::Fail { violation } => {
-                        // Log the violation for analysis
-                        println!("Invariant violation: {violation:?}");
-                        // For property test, we want to catch violations
-                        if matches!(violation.violation_type, ViolationType::LoserNotDrained) {
-                            panic!("Critical loser drain violation in race2: {}", violation.description);
-                        }
+                        panic!(
+                            "Race2 invariant violation: {:?}: {}",
+                            violation.violation_type, violation.description
+                        );
                     }
                     FuzzOutcome::Error { error } => {
                         panic!("Fuzzer error: {error}");
