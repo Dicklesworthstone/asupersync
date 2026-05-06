@@ -15,8 +15,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 const DEFAULT_SCENARIO_ID: &str = "AA-MEAN-FIELD-CAPACITY-PLANNER-64C-256G";
+const RUNNER_PATH: &str = "scripts/run_mean_field_capacity_planner_smoke.sh";
 const CAPACITY_CERT_HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 #[derive(Debug, Deserialize)]
@@ -363,4 +365,88 @@ fn mean_field_capacity_planner_smoke_emits_report() {
         )
         .expect("report writes");
     }
+}
+
+#[test]
+fn mean_field_runner_dry_run_records_rch_plan() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let output_root = tempfile::tempdir().expect("temp output root");
+    let output_root_path = output_root.path().to_string_lossy().into_owned();
+    let output = Command::new("bash")
+        .current_dir(repo_root)
+        .arg(RUNNER_PATH)
+        .arg("--dry-run")
+        .arg("--run-id")
+        .arg("dry-run-smoke")
+        .arg("--output-root")
+        .arg(&output_root_path)
+        .output()
+        .expect("run mean-field dry-run");
+
+    assert!(
+        output.status.success(),
+        "dry-run runner failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let run_dir = output_root
+        .path()
+        .join("run_dry-run-smoke")
+        .join(DEFAULT_SCENARIO_ID);
+    let report_path = run_dir.join("run_report.json");
+    let log_path = run_dir.join("run.log");
+    let report: Value = serde_json::from_str(
+        &fs::read_to_string(&report_path)
+            .unwrap_or_else(|_| panic!("missing {}", report_path.display())),
+    )
+    .expect("valid dry-run report json");
+    let log =
+        fs::read_to_string(&log_path).unwrap_or_else(|_| panic!("missing {}", log_path.display()));
+    let runner = fs::read_to_string(repo_root.join(RUNNER_PATH)).expect("read runner script");
+    let artifact: Value = serde_json::from_str(
+        &fs::read_to_string(
+            repo_root.join("artifacts/mean_field_capacity_planner_smoke_contract_v1.json"),
+        )
+        .expect("read mean-field capacity planner artifact"),
+    )
+    .expect("valid artifact json");
+
+    assert_eq!(report["mode"].as_str(), Some("dry-run"));
+    assert_eq!(report["status"].as_str(), Some("dry_run"));
+    assert_eq!(report["validation_passed"].as_bool(), Some(true));
+    assert!(
+        report["command"]
+            .as_str()
+            .expect("command")
+            .contains("rch exec --")
+    );
+    assert!(log.contains("MEAN_FIELD_CAPACITY_PLANNER command="));
+    assert!(log.contains("rch exec --"));
+    for marker in [
+        "RCH_BIN=\"${RCH_BIN:-$HOME/.local/bin/rch}\"",
+        "RCH_COMMAND=(\"${RCH_BIN}\" exec -- \"${PROOF_COMMAND[@]}\")",
+        "falling back to local",
+        "--dry-run",
+    ] {
+        assert!(runner.contains(marker), "runner missing marker: {marker}");
+    }
+    let validation_commands = artifact["validation_commands"]
+        .as_array()
+        .expect("validation_commands array");
+    assert!(
+        validation_commands
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|command| command.contains("--dry-run")),
+        "artifact must include dry-run validation command"
+    );
+    assert!(
+        validation_commands
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|command| command.contains("cargo ") || command.starts_with("rustfmt "))
+            .all(|command| command.contains("rch exec --")),
+        "cargo/rustfmt validation commands must be rch-routed"
+    );
 }

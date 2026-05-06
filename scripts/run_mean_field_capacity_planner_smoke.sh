@@ -8,6 +8,7 @@ SCENARIO="AA-MEAN-FIELD-CAPACITY-PLANNER-64C-256G"
 RUN_ID="${MEAN_FIELD_CAPACITY_PLANNER_RUN_ID:-manual}"
 MODE="dry-run"
 RCH_WRAPPER_TIMEOUT="${RCH_WRAPPER_TIMEOUT:-900}"
+RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
 
 usage() {
     cat <<'USAGE'
@@ -26,6 +27,13 @@ USAGE
 require_jq() {
     if ! command -v jq >/dev/null 2>&1; then
         echo "FATAL: jq is required for mean-field capacity planner smoke runner" >&2
+        exit 2
+    fi
+}
+
+require_rch() {
+    if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+        echo "FATAL: rch is required and was not found/executable at: ${RCH_BIN}" >&2
         exit 2
     fi
 }
@@ -87,10 +95,18 @@ RUN_REPORT_PATH="${RUN_DIR}/run_report.json"
 REPORT_JSON_MARKER="ASUPERSYNC_MEAN_FIELD_CAPACITY_PLANNER_REPORT_JSON="
 mkdir -p "$RUN_DIR"
 
-COMMAND="timeout ${RCH_WRAPPER_TIMEOUT} rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_mean_field_capacity_planner ASUPERSYNC_MEAN_FIELD_CAPACITY_PLANNER_REPORT_PATH=${REPORT_PATH} cargo test -p asupersync --test mean_field_capacity_planner_contract mean_field_capacity_planner_smoke_emits_report --features test-internals -- --nocapture"
+PROOF_COMMAND=(
+    env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 "RUSTFLAGS=-C debuginfo=0" "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_mean_field_capacity_planner" "ASUPERSYNC_MEAN_FIELD_CAPACITY_PLANNER_REPORT_PATH=${REPORT_PATH}"
+    cargo test -p asupersync --test mean_field_capacity_planner_contract mean_field_capacity_planner_smoke_emits_report --features test-internals -- --nocapture
+)
+RCH_COMMAND=("${RCH_BIN}" exec -- "${PROOF_COMMAND[@]}")
+RUN_COMMAND=(timeout "${RCH_WRAPPER_TIMEOUT}" "${RCH_COMMAND[@]}")
+printf -v COMMAND '%q ' "${RUN_COMMAND[@]}"
+COMMAND="${COMMAND% }"
 COMMAND_STATUS=0
 REMOTE_TEST_PASSED=false
 REPORT_SOURCE="not_run"
+VALIDATION_PASSED=false
 
 {
     printf 'MEAN_FIELD_CAPACITY_PLANNER scenario_id=%s mode=%s report_path=%s\n' "$SCENARIO" "$MODE" "$REPORT_PATH"
@@ -98,13 +114,20 @@ REPORT_SOURCE="not_run"
 } >"$RUN_LOG_PATH"
 
 if [[ "$MODE" == "execute" ]]; then
+    require_rch
     set +e
     (
         cd "$PROJECT_ROOT"
-        eval "$COMMAND"
+        "${RUN_COMMAND[@]}"
     ) >>"$RUN_LOG_PATH" 2>&1
     COMMAND_STATUS=$?
     set -e
+
+    if grep -Eq '^\[RCH\] local \(|falling back to local' "$RUN_LOG_PATH"; then
+        COMMAND_STATUS=86
+        echo "FATAL: rch local fallback detected; refusing local cargo execution" >>"$RUN_LOG_PATH"
+        exit "$COMMAND_STATUS"
+    fi
 
     if grep -q 'test result: ok. 1 passed' "$RUN_LOG_PATH"; then
         REMOTE_TEST_PASSED=true
@@ -140,6 +163,9 @@ if [[ "$MODE" == "execute" ]]; then
         and (.controller_settings | any(.controller == "arena_capacity"))
         and (.replay_command | contains("rch exec"))
     ' "$REPORT_PATH" >/dev/null
+    VALIDATION_PASSED=true
+else
+    VALIDATION_PASSED=true
 fi
 
 jq -n \
@@ -153,6 +179,7 @@ jq -n \
     --arg report_source "$REPORT_SOURCE" \
     --arg run_log_path "$RUN_LOG_PATH" \
     --arg report_path "$REPORT_PATH" \
+    --arg validation_passed "$VALIDATION_PASSED" \
     '{
         schema_version: $schema_version,
         scenario_id: $scenario_id,
@@ -162,6 +189,7 @@ jq -n \
         command_status: ($command_status | tonumber),
         remote_test_passed: ($remote_test_passed == "true"),
         report_source: $report_source,
+        validation_passed: ($validation_passed == "true"),
         run_log_path: $run_log_path,
         report_path: $report_path
     }' >"$RUN_REPORT_PATH"

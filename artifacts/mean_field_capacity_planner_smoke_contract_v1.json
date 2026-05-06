@@ -5,6 +5,13 @@
     "mean_field_capacity_planner_report.json",
     "run_report.json"
   ],
+  "validation_commands": [
+    "bash -n scripts/run_mean_field_capacity_planner_smoke.sh",
+    "bash scripts/run_mean_field_capacity_planner_smoke.sh --dry-run --run-id mean-field-capacity-planner-dry-run",
+    "rch exec -- rustfmt --edition 2024 --check tests/mean_field_capacity_planner_contract.rs",
+    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_mean_field_capacity_planner cargo test -p asupersync --test mean_field_capacity_planner_contract --features test-internals -- --nocapture",
+    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_mean_field_capacity_planner_clippy cargo clippy -p asupersync --test mean_field_capacity_planner_contract --features test-internals -- -D warnings"
+  ],
   "smoke_scenarios": [
     {
       "scenario_id": "AA-MEAN-FIELD-CAPACITY-PLANNER-64C-256G",
