@@ -19,9 +19,6 @@
 //! integration test stays correct because it does not run in
 //! parallel with other stub-broker consumers.
 
-#![allow(warnings)]
-#![allow(clippy::all)]
-
 #[cfg(feature = "kafka")]
 mod rebalance_lifecycle {
     use asupersync::{
