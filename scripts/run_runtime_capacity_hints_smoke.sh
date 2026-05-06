@@ -11,6 +11,7 @@ SCENARIO=""
 OUTPUT_ROOT_OVERRIDE="${RUNTIME_CAPACITY_HINTS_SMOKE_OUTPUT_DIR:-}"
 ARTIFACT_ROOT_OVERRIDE="${RUNTIME_CAPACITY_HINTS_SMOKE_ARTIFACT_ROOT:-}"
 RUN_ID_OVERRIDE="${RUNTIME_CAPACITY_HINTS_SMOKE_RUN_ID:-}"
+RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
 
 usage() {
     cat <<'EOF'
@@ -36,6 +37,10 @@ require_tools() {
     done
     if [ ! -f "$ARTIFACT" ]; then
         echo "FATAL: contract artifact missing at ${ARTIFACT}" >&2
+        missing=1
+    fi
+    if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+        echo "FATAL: rch is required and was not found/executable at: ${RCH_BIN}" >&2
         missing=1
     fi
     if [ "$missing" -ne 0 ]; then
@@ -155,11 +160,12 @@ write_bundle_manifest() {
 write_run_report() {
     local report_path="$1"
     local bundle_manifest_path="$2"
-    local command_exit_code="$3"
-    local script_exit_code="$4"
-    local validation_passed="$5"
-    local status="$6"
-    local message="$7"
+    local command="$3"
+    local command_exit_code="$4"
+    local script_exit_code="$5"
+    local validation_passed="$6"
+    local status="$7"
+    local message="$8"
 
     jq -n \
         --arg schema_version "$(jq -r '.runner_report_schema_version' "$ARTIFACT")" \
@@ -171,6 +177,7 @@ write_run_report() {
         --arg mode "$MODE" \
         --arg status "$status" \
         --arg message "$message" \
+        --arg command "$command" \
         --argjson host_fingerprint "$HOST_FINGERPRINT_JSON" \
         --argjson expected_report_projection "$EXPECTED_REPORT_PROJECTION_JSON" \
         --argjson actual_report_projection "$ACTUAL_REPORT_PROJECTION_JSON" \
@@ -190,6 +197,7 @@ write_run_report() {
             validation_passed: $validation_passed,
             status: $status,
             message: $message,
+            command: $command,
             host_fingerprint: $host_fingerprint,
             expected_report_projection: $expected_report_projection,
             actual_report_projection: $actual_report_projection
@@ -269,7 +277,8 @@ mkdir -p "$RUN_DIR"
 HOST_FINGERPRINT_JSON="$(host_fingerprint_json)"
 STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-COMMAND="rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_runtime_capacity_hints ASUPERSYNC_RUNTIME_CAPACITY_HINTS_CONTRACT_PATH=${ARTIFACT} ASUPERSYNC_RUNTIME_CAPACITY_HINTS_SCENARIO_ID=${SCENARIO} ASUPERSYNC_RUNTIME_CAPACITY_HINTS_REPORT_PATH=${SCENARIO_REPORT_PATH} cargo test -p asupersync --test runtime_capacity_hints_contract runtime_capacity_hints_smoke_contract_emits_report -- --nocapture"
+printf -v RCH_INVOCATION '%q' "$RCH_BIN"
+COMMAND="${RCH_INVOCATION} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_runtime_capacity_hints ASUPERSYNC_RUNTIME_CAPACITY_HINTS_CONTRACT_PATH=${ARTIFACT} ASUPERSYNC_RUNTIME_CAPACITY_HINTS_SCENARIO_ID=${SCENARIO} ASUPERSYNC_RUNTIME_CAPACITY_HINTS_REPORT_PATH=${SCENARIO_REPORT_PATH} cargo test -p asupersync --test runtime_capacity_hints_contract runtime_capacity_hints_smoke_contract_emits_report -- --nocapture"
 
 COMMAND_EXIT_CODE=0
 SCRIPT_EXIT_CODE=0
@@ -304,6 +313,13 @@ else
         if grep -Eq 'Remote command finished: exit=[1-9][0-9]*' "$RUN_LOG_PATH" 2>/dev/null; then
             break
         fi
+        if grep -Eq '^\[RCH\] local \(|falling back to local' "$RUN_LOG_PATH" 2>/dev/null; then
+            kill "$COMMAND_PID" 2>/dev/null || true
+            wait "$COMMAND_PID" 2>/dev/null || true
+            COMMAND_EXIT_CODE=86
+            printf 'FATAL: rch local fallback detected; refusing local cargo execution\n' >>"$RUN_LOG_PATH"
+            break
+        fi
         sleep 1
         POLL_SECONDS=$((POLL_SECONDS + 1))
         if [ "$POLL_SECONDS" -ge "$RCH_TAIL_TIMEOUT_SECONDS" ]; then
@@ -322,6 +338,12 @@ else
         set -e
     fi
 
+    if [ "$COMMAND_EXIT_CODE" -ne 86 ] \
+        && grep -Eq '^\[RCH\] local \(|falling back to local' "$RUN_LOG_PATH" 2>/dev/null; then
+        COMMAND_EXIT_CODE=86
+        printf 'FATAL: rch local fallback detected; refusing local cargo execution\n' >>"$RUN_LOG_PATH"
+    fi
+
     if [ "$COMMAND_EXIT_CODE" -eq 0 ]; then
         if [ "$EARLY_SUCCESS" -eq 1 ]; then
             MESSAGE="rch proof passed before retrieval tail timeout"
@@ -331,7 +353,11 @@ else
     else
         SCRIPT_EXIT_CODE=$COMMAND_EXIT_CODE
         STATUS="failed"
-        MESSAGE="rch proof command failed"
+        if [ "$COMMAND_EXIT_CODE" -eq 86 ]; then
+            MESSAGE="rch local fallback detected; refusing local cargo execution"
+        else
+            MESSAGE="rch proof command failed"
+        fi
     fi
 
     if [ "$STATUS" = "passed" ]; then
@@ -377,6 +403,7 @@ write_bundle_manifest \
 write_run_report \
     "$RUN_REPORT_PATH" \
     "$BUNDLE_MANIFEST_PATH" \
+    "$COMMAND" \
     "$COMMAND_EXIT_CODE" \
     "$SCRIPT_EXIT_CODE" \
     "$VALIDATION_PASSED" \
