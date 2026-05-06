@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Property tests for the Outcome severity lattice, functor/monad laws,
 //! Severity round-trip, and timer wheel invariants.
 
@@ -317,7 +315,7 @@ proptest! {
         let now = wheel.current_time();
         for i in 0..count {
             let deadline = Time::from_nanos(now.as_nanos() + (i as u64 + 1) * 1_000_000);
-            wheel.register(deadline, noop_waker());
+            let _handle = wheel.register(deadline, noop_waker());
         }
         prop_assert_eq!(wheel.len(), count);
     }
@@ -353,7 +351,7 @@ proptest! {
         let mut wheel = TimerWheel::new();
         let now = wheel.current_time();
         let deadline = Time::from_nanos(now.as_nanos() + delay_ms * 1_000_000);
-        wheel.register(deadline, noop_waker());
+        let _handle = wheel.register(deadline, noop_waker());
         prop_assert_eq!(wheel.len(), 1);
 
         // Advance past deadline
@@ -369,7 +367,7 @@ proptest! {
         let mut wheel = TimerWheel::new();
         let now = wheel.current_time();
         let deadline = Time::from_nanos(now.as_nanos() + delay_ms * 1_000_000);
-        wheel.register(deadline, noop_waker());
+        let _handle = wheel.register(deadline, noop_waker());
 
         // Advance to half the deadline
         let half = Time::from_nanos(now.as_nanos() + (delay_ms / 2) * 1_000_000);
@@ -452,7 +450,7 @@ proptest! {
         let mut wheel = TimerWheel::new();
         let now = wheel.current_time();
         let deadline = Time::from_nanos(now.as_nanos() + hours * 3_600_000_000_000);
-        wheel.register(deadline, noop_waker());
+        let _handle = wheel.register(deadline, noop_waker());
 
         // The timer may be in overflow if beyond wheel range
         let total = wheel.len();
@@ -480,7 +478,7 @@ proptest! {
         let now = wheel.current_time();
         for i in 0..count {
             let deadline = Time::from_nanos(now.as_nanos() + (i as u64 + 1) * 1_000_000);
-            wheel.register(deadline, noop_waker());
+            let _handle = wheel.register(deadline, noop_waker());
         }
         prop_assert_eq!(wheel.len(), count);
         wheel.clear();
