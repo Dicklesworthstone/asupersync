@@ -62,6 +62,26 @@ const FS_PARITY_WAVE2_SCENARIOS: &[&str] = &[
     "read-dir-drop-cancellation",
 ];
 
+const FS_PARITY_WAVE2_ROW_FIELDS: &[&str] = &[
+    "bead_id",
+    "scenario_id",
+    "api",
+    "backend",
+    "platform",
+    "feature_flags",
+    "temp_root",
+    "operation",
+    "bytes_expected",
+    "bytes_actual",
+    "metadata_expected",
+    "metadata_actual",
+    "cancellation_point",
+    "cleanup_status",
+    "unsupported_reason",
+    "verdict",
+    "first_failure",
+];
+
 #[derive(Debug)]
 struct FsProofEvidence {
     bytes_actual: u64,
@@ -118,13 +138,20 @@ fn fs_parity_row(
     let cleanup_failed = cleanup_status != "removed";
     let (bytes_actual, metadata_actual, unsupported_reason, verdict, first_failure) =
         match &scenario.result {
-            Ok(evidence) if !cleanup_failed => (
-                evidence.bytes_actual,
-                evidence.metadata_actual.clone(),
-                evidence.unsupported_reason.clone(),
-                "pass".to_string(),
-                String::new(),
-            ),
+            Ok(evidence) if !cleanup_failed => {
+                let verdict = if evidence.unsupported_reason.is_empty() {
+                    "pass"
+                } else {
+                    "skip"
+                };
+                (
+                    evidence.bytes_actual,
+                    evidence.metadata_actual.clone(),
+                    evidence.unsupported_reason.clone(),
+                    verdict.to_string(),
+                    String::new(),
+                )
+            }
             Ok(evidence) => (
                 evidence.bytes_actual,
                 evidence.metadata_actual.clone(),
@@ -1417,14 +1444,30 @@ async fn fs_parity_wave2_run() -> io::Result<Vec<Value>> {
             use std::io::Write as _;
             writeln!(rows_file, "{row}")?;
         }
+        let pass_count = rows
+            .iter()
+            .filter(|row| row["verdict"].as_str() == Some("pass"))
+            .count();
+        let skip_count = rows
+            .iter()
+            .filter(|row| row["verdict"].as_str() == Some("skip"))
+            .count();
+        let fail_count = rows
+            .iter()
+            .filter(|row| row["verdict"].as_str() == Some("fail"))
+            .count();
         let test_report = json!({
             "bead_id": bead_id,
             "scenario_count": rows.len(),
+            "pass_count": pass_count,
+            "skip_count": skip_count,
+            "fail_count": fail_count,
             "expected_scenarios": FS_PARITY_WAVE2_SCENARIOS,
+            "required_row_fields": FS_PARITY_WAVE2_ROW_FIELDS,
             "temp_root": temp_root.display().to_string(),
             "cleanup_status": cleanup_status,
             "rows_path": rows_path.display().to_string(),
-            "validation_passed": rows.iter().all(|row| row["verdict"] == "pass"),
+            "validation_passed": fail_count == 0,
         });
         let report_bytes = serde_json::to_vec_pretty(&test_report).map_err(io::Error::other)?;
         std::fs::write(output_dir.join("test_report.json"), report_bytes)?;
@@ -1452,14 +1495,65 @@ fn fs_parity_wave2_proof_runner_logs_required_scenarios() {
         .collect();
     let drifts: Vec<_> = rows
         .iter()
-        .filter(|row| row["verdict"].as_str() != Some("pass"))
+        .filter(|row| match row["verdict"].as_str() {
+            Some("pass") => false,
+            Some("skip") => row["unsupported_reason"].as_str().is_none_or(str::is_empty),
+            _ => true,
+        })
+        .collect();
+    let missing_fields: Vec<_> = rows
+        .iter()
+        .flat_map(|row| {
+            FS_PARITY_WAVE2_ROW_FIELDS
+                .iter()
+                .copied()
+                .filter(|field| {
+                    !row.as_object()
+                        .is_some_and(|object| object.contains_key(*field))
+                })
+                .map(|field| {
+                    (
+                        row["scenario_id"]
+                            .as_str()
+                            .unwrap_or("<missing>")
+                            .to_string(),
+                        field,
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let invalid_io_uring_rows: Vec<_> = rows
+        .iter()
+        .filter(|row| {
+            row["scenario_id"]
+                .as_str()
+                .is_some_and(|scenario_id| scenario_id.starts_with("io-uring-"))
+        })
+        .filter(|row| {
+            row["backend"].as_str() != Some("io_uring")
+                || !matches!(row["verdict"].as_str(), Some("pass" | "skip"))
+                || (row["verdict"].as_str() == Some("skip")
+                    && row["unsupported_reason"].as_str().is_none_or(str::is_empty))
+        })
         .collect();
 
     assert!(
         missing.is_empty(),
         "missing fs parity proof scenarios: {missing:?}"
     );
-    assert!(drifts.is_empty(), "fs parity proof drifts: {drifts:#?}");
+    assert!(
+        missing_fields.is_empty(),
+        "fs parity proof rows missing required fields: {missing_fields:?}"
+    );
+    assert!(
+        invalid_io_uring_rows.is_empty(),
+        "invalid io_uring proof rows: {invalid_io_uring_rows:#?}"
+    );
+    assert!(
+        drifts.is_empty(),
+        "fs parity proof failures or skips without unsupported_reason: {drifts:#?}"
+    );
     assert_eq!(rows.len(), FS_PARITY_WAVE2_SCENARIOS.len());
 }
 
