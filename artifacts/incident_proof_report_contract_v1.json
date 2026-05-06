@@ -1,0 +1,191 @@
+{
+  "schema_version": "incident-proof-report-contract-v1",
+  "bead_id": "asupersync-lkygsb.5",
+  "module": "src/trace/incident.rs",
+  "description": "Operator-facing report and deterministic gate connecting incident import, replay minimization, regression promotion, fallback status, support class, evidence quality, redaction policy, fixture hashes, and exact rch verification commands.",
+  "proof_report_schema_version": 1,
+  "upstream_contracts": [
+    "artifacts/incident_bundle_contract_v1.json",
+    "artifacts/incident_replay_minimization_contract_v1.json",
+    "artifacts/incident_replay_promotion_contract_v1.json"
+  ],
+  "report_statuses": [
+    "pass",
+    "fail",
+    "blocked",
+    "fixture_only",
+    "flaky",
+    "unsupported",
+    "no_win"
+  ],
+  "support_classes": [
+    "executable_regression",
+    "fixture_only",
+    "follow_up_required",
+    "unsupported",
+    "no_win"
+  ],
+  "evidence_qualities": [
+    "trusted",
+    "partial",
+    "blocked",
+    "rejected"
+  ],
+  "validation_issue_kinds": [
+    "malformed_json",
+    "unsupported_schema_version",
+    "missing_required_field",
+    "missing_proof_command",
+    "proof_command_not_rch",
+    "stale_fixture_hash",
+    "redaction_failure"
+  ],
+  "report_required_fields": [
+    "schema_version",
+    "report_id",
+    "incident_id",
+    "redaction_policy_id",
+    "redaction_passed",
+    "importer_verdict",
+    "minimizer_verdict",
+    "promotion_verdict",
+    "status",
+    "support_class",
+    "evidence_quality",
+    "proof_commands",
+    "expected_fixture_hashes",
+    "retained_source_hashes",
+    "block_kinds",
+    "human_summary"
+  ],
+  "gate_contract": {
+    "mode": "opt-in deterministic fail-closed",
+    "direct_main": "does not depend on pull requests or branch-only infrastructure",
+    "executable_proofs": "pass and fail reports require at least one proof command routed through rch exec",
+    "redaction": "redaction_passed must be true and summaries/commands must not contain secret-like material",
+    "fixture_hashes": "expected_fixture_hashes must match retained_source_hashes exactly",
+    "malformed_input": "malformed report JSON or JSONL fails closed with malformed_json"
+  },
+  "scenarios": [
+    {
+      "scenario_id": "promoted-proof-report",
+      "kind": "pipeline",
+      "promotion_scenario": "promote-crashpack-unit-proof",
+      "expected_status": "pass",
+      "expected_support_class": "executable_regression",
+      "expected_evidence_quality": "trusted",
+      "expected_gate_success": true,
+      "expected_command_contains": "rch exec"
+    },
+    {
+      "scenario_id": "manual-failing-proof-report",
+      "kind": "manual",
+      "expected_status": "fail",
+      "expected_support_class": "executable_regression",
+      "expected_evidence_quality": "rejected",
+      "expected_gate_success": true,
+      "expected_command_contains": "rch exec"
+    },
+    {
+      "scenario_id": "fixture-only-proof-report",
+      "kind": "pipeline",
+      "promotion_scenario": "fixture-only-redacted-repro",
+      "expected_status": "fixture_only",
+      "expected_support_class": "fixture_only",
+      "expected_evidence_quality": "partial",
+      "expected_gate_success": true
+    },
+    {
+      "scenario_id": "blocked-stale-fixture-hash-report",
+      "kind": "pipeline",
+      "promotion_scenario": "block-stale-fixture-hash",
+      "expected_status": "blocked",
+      "expected_support_class": "follow_up_required",
+      "expected_evidence_quality": "blocked",
+      "expected_block_kinds": [
+        "stale_fixture_hash"
+      ],
+      "expected_validation_issue_kinds": [
+        "stale_fixture_hash"
+      ],
+      "expected_gate_success": false
+    },
+    {
+      "scenario_id": "flaky-minimizer-report",
+      "kind": "pipeline",
+      "minimization_scenario": "flaky-oracle",
+      "expected_status": "flaky",
+      "expected_support_class": "follow_up_required",
+      "expected_evidence_quality": "blocked",
+      "expected_block_kinds": [
+        "flaky_oracle"
+      ],
+      "expected_gate_success": true
+    },
+    {
+      "scenario_id": "unsupported-target-report",
+      "kind": "pipeline",
+      "promotion_scenario": "unsupported-conformance-target",
+      "expected_status": "unsupported",
+      "expected_support_class": "unsupported",
+      "expected_evidence_quality": "blocked",
+      "expected_block_kinds": [
+        "unsupported_promotion_target"
+      ],
+      "expected_gate_success": false
+    },
+    {
+      "scenario_id": "no-win-budget-report",
+      "kind": "pipeline",
+      "minimization_scenario": "budget-exhausted",
+      "expected_status": "no_win",
+      "expected_support_class": "no_win",
+      "expected_evidence_quality": "blocked",
+      "expected_block_kinds": [
+        "budget_exhausted"
+      ],
+      "expected_gate_success": true
+    },
+    {
+      "scenario_id": "malformed-json-report",
+      "kind": "gate_only",
+      "expected_status": "blocked",
+      "expected_support_class": "follow_up_required",
+      "expected_evidence_quality": "blocked",
+      "expected_validation_issue_kinds": [
+        "malformed_json"
+      ],
+      "expected_gate_success": false
+    },
+    {
+      "scenario_id": "unsupported-source-report",
+      "kind": "gate_only",
+      "expected_status": "unsupported",
+      "expected_support_class": "unsupported",
+      "expected_evidence_quality": "blocked",
+      "expected_block_kinds": [
+        "unsupported_source_kind"
+      ],
+      "expected_gate_success": false
+    }
+  ],
+  "e2e_script": "scripts/validate_incident_proof_report.sh",
+  "required_log_fields": [
+    "scenario_id",
+    "bead_id",
+    "status",
+    "support_class",
+    "evidence_quality",
+    "gate_success",
+    "validation_issue_kinds",
+    "block_kinds",
+    "proof_command",
+    "artifact_path"
+  ],
+  "proof_commands": [
+    "rch exec -- rustfmt --edition 2024 --check src/trace/incident.rs src/trace/mod.rs tests/incident_proof_report.rs",
+    "bash scripts/validate_incident_proof_report.sh --output-root target/incident-proof-report --run-id asupersync-lkygsb.5",
+    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_incident_proof_report CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test incident_proof_report --features test-internals -- --nocapture",
+    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_incident_proof_report_check CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo check -p asupersync --test incident_proof_report --features test-internals"
+  ]
+}

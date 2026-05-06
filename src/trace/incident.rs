@@ -21,6 +21,9 @@ pub const INCIDENT_MINIMIZED_REPRO_SCHEMA_VERSION: u32 = 1;
 /// Current incident regression proof schema version.
 pub const INCIDENT_REGRESSION_PROOF_SCHEMA_VERSION: u32 = 1;
 
+/// Current operator-facing incident proof report schema version.
+pub const INCIDENT_PROOF_REPORT_SCHEMA_VERSION: u32 = 1;
+
 const MAX_ID_BYTES: usize = 128;
 const MAX_PATH_BYTES: usize = 512;
 const MAX_FIELD_BYTES: usize = 1024;
@@ -1290,6 +1293,493 @@ impl IncidentRegressionPromotionReport {
     }
 }
 
+/// Aggregate status for an operator-facing incident proof report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum IncidentProofReportStatus {
+    /// Import, minimization, promotion, and proof command metadata are complete.
+    Pass,
+    /// An executable proof exists, but the proof is known to fail.
+    Fail,
+    /// The pipeline stopped on a typed blocker.
+    Blocked,
+    /// The evidence is deterministic but retained as a fixture instead of an executable regression.
+    FixtureOnly,
+    /// The minimizer or oracle was inconclusive.
+    Flaky,
+    /// The source or requested target is unsupported by this report schema.
+    Unsupported,
+    /// The pipeline reached an explicit no-win/fallback outcome.
+    NoWin,
+}
+
+impl IncidentProofReportStatus {
+    /// Return the stable string tag for JSONL and artifact catalogs.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Fail => "fail",
+            Self::Blocked => "blocked",
+            Self::FixtureOnly => "fixture_only",
+            Self::Flaky => "flaky",
+            Self::Unsupported => "unsupported",
+            Self::NoWin => "no_win",
+        }
+    }
+}
+
+/// Operator support class derived from the aggregate proof status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum IncidentProofSupportClass {
+    /// The report can be checked by an executable regression proof.
+    ExecutableRegression,
+    /// The report is a retained deterministic fixture.
+    FixtureOnly,
+    /// Human or follow-up agent work is required.
+    FollowUpRequired,
+    /// The source or target vocabulary is not supported.
+    Unsupported,
+    /// The pipeline reached an explicit no-win/fallback outcome.
+    NoWin,
+}
+
+impl IncidentProofSupportClass {
+    /// Return the stable string tag for JSONL and artifact catalogs.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ExecutableRegression => "executable_regression",
+            Self::FixtureOnly => "fixture_only",
+            Self::FollowUpRequired => "follow_up_required",
+            Self::Unsupported => "unsupported",
+            Self::NoWin => "no_win",
+        }
+    }
+}
+
+/// Evidence quality assigned to an operator-facing proof report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum IncidentProofEvidenceQuality {
+    /// Evidence is complete enough to trust as a regression closeout.
+    Trusted,
+    /// Evidence is deterministic but incomplete or fixture-only.
+    Partial,
+    /// Evidence is blocked and must not be counted as success.
+    Blocked,
+    /// Evidence is rejected by a failing executable proof.
+    Rejected,
+}
+
+impl IncidentProofEvidenceQuality {
+    /// Return the stable string tag for JSONL and artifact catalogs.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Trusted => "trusted",
+            Self::Partial => "partial",
+            Self::Blocked => "blocked",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
+/// Operator-facing closeout report linking incident input to replay, minimization, and proof output.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IncidentProofReport {
+    /// Proof report schema version.
+    pub schema_version: u32,
+    /// Stable report identifier.
+    pub report_id: String,
+    /// Human or automation supplied incident identifier.
+    pub incident_id: String,
+    /// Source replay package identifier, when import succeeded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_package_id: Option<String>,
+    /// Source minimized repro identifier, when minimization emitted one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_repro_id: Option<String>,
+    /// Source regression proof identifier, when promotion emitted one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_proof_id: Option<String>,
+    /// Redaction policy id used for this proof report.
+    pub redaction_policy_id: String,
+    /// Whether the redaction pass is complete for all report material.
+    pub redaction_passed: bool,
+    /// Importer verdict.
+    pub importer_verdict: IncidentReplayImportVerdict,
+    /// Minimizer verdict.
+    pub minimizer_verdict: IncidentReplayMinimizationVerdict,
+    /// Regression promotion verdict.
+    pub promotion_verdict: IncidentRegressionPromotionVerdict,
+    /// Aggregate report status.
+    pub status: IncidentProofReportStatus,
+    /// Support class derived from the status.
+    pub support_class: IncidentProofSupportClass,
+    /// Evidence quality derived from the status.
+    pub evidence_quality: IncidentProofEvidenceQuality,
+    /// Oracle preserved by the minimized repro or promoted proof.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oracle: Option<IncidentReplayOracle>,
+    /// Original capture provenance, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<IncidentProvenance>,
+    /// Exact proof commands or blocked command rows.
+    #[serde(default)]
+    pub proof_commands: Vec<IncidentRegressionProofCommand>,
+    /// Expected retained fixture hashes keyed by source id.
+    #[serde(default)]
+    pub expected_fixture_hashes: BTreeMap<String, String>,
+    /// Actual retained source hashes keyed by source id.
+    #[serde(default)]
+    pub retained_source_hashes: BTreeMap<String, String>,
+    /// Import, minimizer, or promotion block tags collected in deterministic order.
+    #[serde(default)]
+    pub block_kinds: Vec<String>,
+    /// Concise human summary suitable for closeout mail or logs.
+    pub human_summary: String,
+}
+
+/// Validation policy for incident proof report gates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IncidentProofReportGateConfig {
+    /// Require executable `rch exec` proof commands for executable regression reports.
+    pub require_executable_proof: bool,
+}
+
+impl Default for IncidentProofReportGateConfig {
+    fn default() -> Self {
+        Self {
+            require_executable_proof: true,
+        }
+    }
+}
+
+/// Typed validation issue kind emitted by proof report gates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum IncidentProofReportValidationIssueKind {
+    /// The input report JSON did not parse.
+    MalformedJson,
+    /// The proof report schema version is not supported.
+    UnsupportedSchemaVersion,
+    /// A required field is missing or empty.
+    MissingRequiredField,
+    /// A report requiring executable proof omitted proof commands.
+    MissingProofCommand,
+    /// A proof command is not routed through `rch exec`.
+    ProofCommandNotRch,
+    /// A retained fixture hash does not match the expected hash.
+    StaleFixtureHash,
+    /// Redaction failed or sensitive material is present in unredacted report fields.
+    RedactionFailure,
+}
+
+impl IncidentProofReportValidationIssueKind {
+    /// Return the stable string tag for artifacts and logs.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MalformedJson => "malformed_json",
+            Self::UnsupportedSchemaVersion => "unsupported_schema_version",
+            Self::MissingRequiredField => "missing_required_field",
+            Self::MissingProofCommand => "missing_proof_command",
+            Self::ProofCommandNotRch => "proof_command_not_rch",
+            Self::StaleFixtureHash => "stale_fixture_hash",
+            Self::RedactionFailure => "redaction_failure",
+        }
+    }
+}
+
+/// One proof report gate validation issue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncidentProofReportValidationIssue {
+    /// Issue class.
+    pub kind: IncidentProofReportValidationIssueKind,
+    /// Field associated with the issue.
+    pub field: String,
+    /// Human-readable explanation.
+    pub message: String,
+}
+
+impl IncidentProofReportValidationIssue {
+    fn new(
+        kind: IncidentProofReportValidationIssueKind,
+        field: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind,
+            field: field.into(),
+            message: message.into(),
+        }
+    }
+}
+
+/// Fail-closed validation result for an incident proof report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncidentProofReportValidationReport {
+    /// Whether the report is accepted by the configured gate.
+    pub accepted: bool,
+    /// Typed validation issues.
+    pub issues: Vec<IncidentProofReportValidationIssue>,
+}
+
+impl IncidentProofReportValidationReport {
+    /// Return `true` if any issue has the supplied kind.
+    #[must_use]
+    pub fn contains_issue(&self, kind: IncidentProofReportValidationIssueKind) -> bool {
+        self.issues.iter().any(|issue| issue.kind == kind)
+    }
+}
+
+/// Build an operator-facing proof report from importer, minimizer, and promotion output.
+#[must_use]
+pub fn build_incident_proof_report(
+    incident_id: impl Into<String>,
+    redaction_policy_id: impl Into<String>,
+    import_report: &IncidentReplayImportReport,
+    minimization_report: &IncidentReplayMinimizationReport,
+    promotion_report: &IncidentRegressionPromotionReport,
+    expected_fixture_hashes: BTreeMap<String, String>,
+) -> IncidentProofReport {
+    let incident_id = incident_id.into();
+    let redaction_policy_id = redaction_policy_id.into();
+    let status =
+        aggregate_incident_proof_status(import_report, minimization_report, promotion_report);
+    let support_class = support_class_for_status(status);
+    let evidence_quality = evidence_quality_for_status(status);
+
+    let proof = promotion_report.proof.as_ref();
+    let source_package_id = proof
+        .map(|proof| proof.source_package_id.clone())
+        .or_else(|| {
+            minimization_report
+                .repro
+                .as_ref()
+                .map(|repro| repro.source_package_id.clone())
+        })
+        .or_else(|| {
+            import_report
+                .package
+                .as_ref()
+                .map(|package| package.package_id.clone())
+        });
+    let source_repro_id = proof
+        .map(|proof| proof.source_repro_id.clone())
+        .or_else(|| {
+            minimization_report
+                .repro
+                .as_ref()
+                .map(|repro| repro.repro_id.clone())
+        });
+    let source_proof_id = proof.map(|proof| proof.proof_id.clone());
+    let oracle = proof.map(|proof| proof.oracle.clone()).or_else(|| {
+        minimization_report
+            .repro
+            .as_ref()
+            .map(|repro| repro.oracle.clone())
+    });
+    let provenance = proof.map(|proof| proof.provenance.clone()).or_else(|| {
+        minimization_report
+            .repro
+            .as_ref()
+            .map(|repro| repro.provenance.clone())
+    });
+    let proof_commands = proof
+        .map(|proof| proof.proof_commands.clone())
+        .unwrap_or_default();
+    let retained_source_hashes = proof
+        .map(|proof| proof.retained_source_hashes.clone())
+        .or_else(|| {
+            minimization_report.repro.as_ref().map(|repro| {
+                repro
+                    .retained_sources
+                    .iter()
+                    .map(|source| (source.source_id.clone(), source.content_hash.clone()))
+                    .collect::<BTreeMap<_, _>>()
+            })
+        })
+        .unwrap_or_default();
+    let block_kinds =
+        collect_incident_report_block_kinds(import_report, minimization_report, promotion_report);
+
+    let report_id = stable_incident_proof_report_id(
+        &incident_id,
+        source_package_id.as_deref(),
+        source_repro_id.as_deref(),
+        source_proof_id.as_deref(),
+        status,
+        &proof_commands,
+        &expected_fixture_hashes,
+        &retained_source_hashes,
+        &block_kinds,
+    );
+
+    let mut report = IncidentProofReport {
+        schema_version: INCIDENT_PROOF_REPORT_SCHEMA_VERSION,
+        report_id,
+        incident_id,
+        source_package_id,
+        source_repro_id,
+        source_proof_id,
+        redaction_policy_id,
+        redaction_passed: true,
+        importer_verdict: import_report.verdict,
+        minimizer_verdict: minimization_report.verdict,
+        promotion_verdict: promotion_report.verdict,
+        status,
+        support_class,
+        evidence_quality,
+        oracle,
+        provenance,
+        proof_commands,
+        expected_fixture_hashes,
+        retained_source_hashes,
+        block_kinds,
+        human_summary: String::new(),
+    };
+    report.human_summary = render_incident_proof_report_summary(&report);
+    report
+}
+
+/// Render a concise human summary for closeout mail, CI logs, and operator review.
+#[must_use]
+pub fn render_incident_proof_report_summary(report: &IncidentProofReport) -> String {
+    format!(
+        "incident {} status={} support={} evidence={} import={} minimizer={} promotion={} proof_commands={} blocks={}",
+        report.incident_id,
+        report.status.as_str(),
+        report.support_class.as_str(),
+        report.evidence_quality.as_str(),
+        serde_tag(&report.importer_verdict),
+        serde_tag(&report.minimizer_verdict),
+        serde_tag(&report.promotion_verdict),
+        report.proof_commands.len(),
+        if report.block_kinds.is_empty() {
+            "none".to_string()
+        } else {
+            report.block_kinds.join(",")
+        }
+    )
+}
+
+/// Validate a report under a fail-closed gate policy.
+#[must_use]
+pub fn validate_incident_proof_report(
+    report: &IncidentProofReport,
+    config: IncidentProofReportGateConfig,
+) -> IncidentProofReportValidationReport {
+    let mut issues = Vec::new();
+
+    if report.schema_version != INCIDENT_PROOF_REPORT_SCHEMA_VERSION {
+        issues.push(IncidentProofReportValidationIssue::new(
+            IncidentProofReportValidationIssueKind::UnsupportedSchemaVersion,
+            "schema_version",
+            format!(
+                "unsupported schema version {}, expected {INCIDENT_PROOF_REPORT_SCHEMA_VERSION}",
+                report.schema_version
+            ),
+        ));
+    }
+    validate_report_required_text("report_id", &report.report_id, &mut issues);
+    validate_report_required_text("incident_id", &report.incident_id, &mut issues);
+    validate_report_required_text(
+        "redaction_policy_id",
+        &report.redaction_policy_id,
+        &mut issues,
+    );
+    validate_report_required_text("human_summary", &report.human_summary, &mut issues);
+
+    if !report.redaction_passed {
+        issues.push(IncidentProofReportValidationIssue::new(
+            IncidentProofReportValidationIssueKind::RedactionFailure,
+            "redaction_passed",
+            "report redaction pass must be true",
+        ));
+    }
+    if value_is_secret_like(&report.human_summary) {
+        issues.push(IncidentProofReportValidationIssue::new(
+            IncidentProofReportValidationIssueKind::RedactionFailure,
+            "human_summary",
+            "summary contains secret-like material",
+        ));
+    }
+    for (index, command) in report.proof_commands.iter().enumerate() {
+        let field = format!("proof_commands[{index}].command_line");
+        if value_is_secret_like(&command.command_line) {
+            issues.push(IncidentProofReportValidationIssue::new(
+                IncidentProofReportValidationIssueKind::RedactionFailure,
+                field.clone(),
+                "proof command contains secret-like material",
+            ));
+        }
+        if config.require_executable_proof
+            && executable_report_requires_rch(report.status)
+            && (!command.executable_through_rch
+                || !command_line_is_rch_exec(&command.command_line)
+                || command.command.program != "rch")
+        {
+            issues.push(IncidentProofReportValidationIssue::new(
+                IncidentProofReportValidationIssueKind::ProofCommandNotRch,
+                field,
+                "executable proof command must be routed through rch exec",
+            ));
+        }
+    }
+
+    if config.require_executable_proof
+        && executable_report_requires_rch(report.status)
+        && report.proof_commands.is_empty()
+    {
+        issues.push(IncidentProofReportValidationIssue::new(
+            IncidentProofReportValidationIssueKind::MissingProofCommand,
+            "proof_commands",
+            "executable proof report must include at least one proof command",
+        ));
+    }
+
+    for (source_id, expected_hash) in &report.expected_fixture_hashes {
+        let actual = report.retained_source_hashes.get(source_id);
+        if actual != Some(expected_hash) {
+            issues.push(IncidentProofReportValidationIssue::new(
+                IncidentProofReportValidationIssueKind::StaleFixtureHash,
+                format!("retained_source_hashes.{source_id}"),
+                format!(
+                    "expected retained source hash {expected_hash}, got {}",
+                    actual.map_or("<missing>", String::as_str)
+                ),
+            ));
+        }
+    }
+
+    IncidentProofReportValidationReport {
+        accepted: issues.is_empty(),
+        issues,
+    }
+}
+
+/// Parse and validate a report JSON document under a fail-closed gate policy.
+#[must_use]
+pub fn validate_incident_proof_report_json(
+    json: &str,
+    config: IncidentProofReportGateConfig,
+) -> IncidentProofReportValidationReport {
+    match serde_json::from_str::<IncidentProofReport>(json) {
+        Ok(report) => validate_incident_proof_report(&report, config),
+        Err(error) => IncidentProofReportValidationReport {
+            accepted: false,
+            issues: vec![IncidentProofReportValidationIssue::new(
+                IncidentProofReportValidationIssueKind::MalformedJson,
+                "$",
+                format!("incident proof report JSON did not parse: {error}"),
+            )],
+        },
+    }
+}
+
 /// Promote a minimized repro into a regression proof artifact or typed blocker report.
 #[must_use]
 pub fn promote_minimized_incident_repro(
@@ -2370,6 +2860,195 @@ fn stable_regression_proof_id(
     )
 }
 
+fn aggregate_incident_proof_status(
+    import_report: &IncidentReplayImportReport,
+    minimization_report: &IncidentReplayMinimizationReport,
+    promotion_report: &IncidentRegressionPromotionReport,
+) -> IncidentProofReportStatus {
+    if import_report.verdict != IncidentReplayImportVerdict::Imported {
+        return if import_report
+            .blocked_reasons
+            .iter()
+            .any(|reason| reason.kind == IncidentReplayBlockReasonKind::UnsupportedSourceKind)
+        {
+            IncidentProofReportStatus::Unsupported
+        } else {
+            IncidentProofReportStatus::Blocked
+        };
+    }
+
+    match minimization_report.verdict {
+        IncidentReplayMinimizationVerdict::Inconclusive => return IncidentProofReportStatus::Flaky,
+        IncidentReplayMinimizationVerdict::BudgetExhausted => {
+            return IncidentProofReportStatus::NoWin;
+        }
+        IncidentReplayMinimizationVerdict::Blocked => return IncidentProofReportStatus::Blocked,
+        IncidentReplayMinimizationVerdict::Minimized
+        | IncidentReplayMinimizationVerdict::AlreadyMinimal => {}
+    }
+
+    match promotion_report.verdict {
+        IncidentRegressionPromotionVerdict::Promoted => IncidentProofReportStatus::Pass,
+        IncidentRegressionPromotionVerdict::FixtureOnly => IncidentProofReportStatus::FixtureOnly,
+        IncidentRegressionPromotionVerdict::Blocked => {
+            if promotion_report
+                .contains_block(IncidentRegressionPromotionBlockKind::UnsupportedPromotionTarget)
+            {
+                IncidentProofReportStatus::Unsupported
+            } else {
+                IncidentProofReportStatus::Blocked
+            }
+        }
+    }
+}
+
+fn support_class_for_status(status: IncidentProofReportStatus) -> IncidentProofSupportClass {
+    match status {
+        IncidentProofReportStatus::Pass | IncidentProofReportStatus::Fail => {
+            IncidentProofSupportClass::ExecutableRegression
+        }
+        IncidentProofReportStatus::FixtureOnly => IncidentProofSupportClass::FixtureOnly,
+        IncidentProofReportStatus::Unsupported => IncidentProofSupportClass::Unsupported,
+        IncidentProofReportStatus::NoWin => IncidentProofSupportClass::NoWin,
+        IncidentProofReportStatus::Blocked | IncidentProofReportStatus::Flaky => {
+            IncidentProofSupportClass::FollowUpRequired
+        }
+    }
+}
+
+fn evidence_quality_for_status(status: IncidentProofReportStatus) -> IncidentProofEvidenceQuality {
+    match status {
+        IncidentProofReportStatus::Pass => IncidentProofEvidenceQuality::Trusted,
+        IncidentProofReportStatus::Fail => IncidentProofEvidenceQuality::Rejected,
+        IncidentProofReportStatus::FixtureOnly => IncidentProofEvidenceQuality::Partial,
+        IncidentProofReportStatus::Blocked
+        | IncidentProofReportStatus::Flaky
+        | IncidentProofReportStatus::Unsupported
+        | IncidentProofReportStatus::NoWin => IncidentProofEvidenceQuality::Blocked,
+    }
+}
+
+fn collect_incident_report_block_kinds(
+    import_report: &IncidentReplayImportReport,
+    minimization_report: &IncidentReplayMinimizationReport,
+    promotion_report: &IncidentRegressionPromotionReport,
+) -> Vec<String> {
+    let mut kinds = Vec::new();
+    kinds.extend(
+        import_report
+            .blocked_reasons
+            .iter()
+            .map(|reason| reason.kind.as_str().to_string()),
+    );
+    kinds.extend(
+        minimization_report
+            .issues
+            .iter()
+            .map(|issue| issue.kind.as_str().to_string()),
+    );
+    kinds.extend(
+        promotion_report
+            .blocks
+            .iter()
+            .map(|block| block.kind.as_str().to_string()),
+    );
+    sorted_strings(kinds)
+}
+
+fn stable_incident_proof_report_id(
+    incident_id: &str,
+    source_package_id: Option<&str>,
+    source_repro_id: Option<&str>,
+    source_proof_id: Option<&str>,
+    status: IncidentProofReportStatus,
+    proof_commands: &[IncidentRegressionProofCommand],
+    expected_fixture_hashes: &BTreeMap<String, String>,
+    retained_source_hashes: &BTreeMap<String, String>,
+    block_kinds: &[String],
+) -> String {
+    let mut key = String::new();
+    key.push_str("incident-proof-report-v1\n");
+    key.push_str(incident_id);
+    key.push('\n');
+    key.push_str(source_package_id.unwrap_or(""));
+    key.push('\n');
+    key.push_str(source_repro_id.unwrap_or(""));
+    key.push('\n');
+    key.push_str(source_proof_id.unwrap_or(""));
+    key.push('\n');
+    key.push_str(status.as_str());
+    key.push('\n');
+    for command in proof_commands {
+        key.push_str(&command.command_line);
+        key.push('\n');
+        key.push_str(if command.executable_through_rch {
+            "rch"
+        } else {
+            "blocked"
+        });
+        key.push('\n');
+    }
+    for (source_id, hash) in expected_fixture_hashes {
+        key.push_str("expected|");
+        key.push_str(source_id);
+        key.push('|');
+        key.push_str(hash);
+        key.push('\n');
+    }
+    for (source_id, hash) in retained_source_hashes {
+        key.push_str("retained|");
+        key.push_str(source_id);
+        key.push('|');
+        key.push_str(hash);
+        key.push('\n');
+    }
+    for kind in block_kinds {
+        key.push_str("block|");
+        key.push_str(kind);
+        key.push('\n');
+    }
+    format!("incident-proof-report-v1:{:016x}", fnv1a64(key.as_bytes()))
+}
+
+fn serde_tag<T>(value: &T) -> String
+where
+    T: Serialize,
+{
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn validate_report_required_text(
+    field: impl Into<String>,
+    value: &str,
+    issues: &mut Vec<IncidentProofReportValidationIssue>,
+) {
+    if value.is_empty() {
+        issues.push(IncidentProofReportValidationIssue::new(
+            IncidentProofReportValidationIssueKind::MissingRequiredField,
+            field,
+            "required field must not be empty",
+        ));
+    }
+}
+
+fn executable_report_requires_rch(status: IncidentProofReportStatus) -> bool {
+    matches!(
+        status,
+        IncidentProofReportStatus::Pass | IncidentProofReportStatus::Fail
+    )
+}
+
+fn command_line_is_rch_exec(command_line: &str) -> bool {
+    command_line
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .any(|window| window == ["rch", "exec"])
+}
+
 fn sorted_strings(mut values: Vec<String>) -> Vec<String> {
     values.sort();
     values.dedup();
@@ -2819,10 +3498,10 @@ mod tests {
             let mut bundle = valid_bundle();
             bundle.sources[0].kind = kind;
             bundle.sources[0].source_id = role.as_str().to_string();
-            bundle.sources[0].metadata.insert(
-                "observed_content_hash".to_string(),
-                json!(bundle.sources[0].content_hash.clone()),
-            );
+            let content_hash = bundle.sources[0].content_hash.clone();
+            bundle.sources[0]
+                .metadata
+                .insert("observed_content_hash".to_string(), json!(content_hash));
             let report = bundle.import_replay_package();
             assert!(report.is_imported(), "{role:?}: {report:#?}");
             let package = report.package.expect("package emitted");
@@ -3148,10 +3827,10 @@ mod tests {
         let mut bundle = valid_bundle();
         bundle.sources[0].kind = IncidentSourceKind::ReadmeClaimFailure;
         bundle.sources[0].source_id = "readme-claim-main".to_string();
-        bundle.sources[0].metadata.insert(
-            "observed_content_hash".to_string(),
-            json!(bundle.sources[0].content_hash.clone()),
-        );
+        let content_hash = bundle.sources[0].content_hash.clone();
+        bundle.sources[0]
+            .metadata
+            .insert("observed_content_hash".to_string(), json!(content_hash));
         let package = bundle
             .import_replay_package()
             .package
