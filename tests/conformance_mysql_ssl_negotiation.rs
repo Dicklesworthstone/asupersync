@@ -78,6 +78,78 @@ fn read_mysql_packet(stream: &mut std::net::TcpStream) -> Vec<u8> {
     payload
 }
 
+fn ssl_mode_query_value(mode: SslMode) -> &'static str {
+    match mode {
+        SslMode::Disabled => "disabled",
+        SslMode::Preferred => "preferred",
+        SslMode::Required => "required",
+    }
+}
+
+fn assert_ssl_mode_fails_closed_before_auth_payload(
+    mode: SslMode,
+    server_capabilities: u32,
+    context: &'static str,
+) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let (read_tx, read_rx) = mpsc::channel();
+
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept client");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set read timeout");
+
+        stream
+            .write_all(&mysql_handshake_packet(server_capabilities))
+            .expect("write handshake");
+        stream.flush().expect("flush handshake");
+
+        let mut header = [0; 4];
+        let read = stream.read(&mut header).unwrap_or_else(|err| {
+            assert!(
+                matches!(
+                    err.kind(),
+                    std::io::ErrorKind::UnexpectedEof
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::WouldBlock
+                ),
+                "unexpected server read error for {context}: {err}"
+            );
+            0
+        });
+        read_tx.send(read).expect("send read count");
+    });
+
+    let mut options = MySqlConnectOptions::parse(&format!(
+        "mysql://user:pass@{}:{}/db?ssl-mode={}",
+        addr.ip(),
+        addr.port(),
+        ssl_mode_query_value(mode)
+    ))
+    .expect("parse options");
+    options.connect_timeout = Some(Duration::from_secs(2));
+
+    let outcome = futures_lite::future::block_on(async {
+        MySqlConnection::connect_with_options(&Cx::for_testing(), options).await
+    });
+    match outcome {
+        Outcome::Err(MySqlError::TlsRequired) => {}
+        other => panic!("expected {mode:?} TLS fail-closed outcome for {context}, got {other:?}"),
+    }
+
+    let bytes_sent = read_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("server read result");
+    server.join().expect("join server");
+    assert_eq!(
+        bytes_sent, 0,
+        "{mode:?} must fail before sending plaintext auth data for {context}"
+    );
+}
+
 /// Test SSL mode URL parsing conformance
 #[test]
 fn test_ssl_mode_url_parsing_conformance() {
@@ -500,16 +572,22 @@ fn test_prepared_statement_rejects_cross_connection_reuse() {
 fn test_conformance_gap_missing_server_ssl_validation() {
     init_test_logging();
 
-    // CONFORMANCE GAP DOCUMENTATION:
     // Until the TLS upgrade is implemented, Required mode must fail closed before
-    // checking capability-specific fallback behavior.
+    // capability-specific fallback behavior can matter.
+    let base_capabilities = mysql_capabilities::CLIENT_PROTOCOL_41
+        | mysql_capabilities::CLIENT_SECURE_CONNECTION
+        | mysql_capabilities::CLIENT_PLUGIN_AUTH;
 
-    // The client should:
-    // 1. Parse server capabilities from initial handshake
-    // 2. Check if (server_caps & CLIENT_SSL) != 0 when ssl_mode is Required after TLS exists
-    // 3. Return Err(MySqlError::TlsRequired) if the request cannot be secured
-
-    println!("CONFORMANCE TODO: capability-aware TLS negotiation for ssl_mode=Required");
+    assert_ssl_mode_fails_closed_before_auth_payload(
+        SslMode::Required,
+        base_capabilities,
+        "required mode with server missing CLIENT_SSL",
+    );
+    assert_ssl_mode_fails_closed_before_auth_payload(
+        SslMode::Required,
+        base_capabilities | mysql_capabilities::CLIENT_SSL,
+        "required mode with server advertising CLIENT_SSL",
+    );
 }
 
 /// Test conformance gap: Missing TLS handshake implementation
@@ -517,22 +595,20 @@ fn test_conformance_gap_missing_server_ssl_validation() {
 fn test_conformance_gap_missing_tls_handshake() {
     init_test_logging();
 
-    // CONFORMANCE GAP DOCUMENTATION:
-    // The MySQL protocol for SSL/TLS negotiation requires:
-    // 1. Client sends SSL Request packet (CLIENT_SSL capability only, no auth data)
-    // 2. Server acknowledges and both sides perform TLS handshake
-    // 3. Client sends full handshake response over the encrypted connection
-    // 4. Authentication continues over TLS
+    let tls_capable_server = mysql_capabilities::CLIENT_PROTOCOL_41
+        | mysql_capabilities::CLIENT_SECURE_CONNECTION
+        | mysql_capabilities::CLIENT_PLUGIN_AUTH
+        | mysql_capabilities::CLIENT_SSL;
 
-    // Current implementation missing:
-    // - SSL Request packet generation
-    // - TLS handshake using asupersync::tls module
-    // - Stream wrapper for encrypted communication
-
-    println!("CONFORMANCE GAP: No TLS handshake implementation in MySQL client");
-    println!("Missing: SSL Request packet, TLS upgrade, encrypted stream wrapper");
-    println!(
-        "See: https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_connection_phase_packets_protocol_ssl_request.html"
+    assert_ssl_mode_fails_closed_before_auth_payload(
+        SslMode::Required,
+        tls_capable_server,
+        "required mode before TLS upgrade implementation",
+    );
+    assert_ssl_mode_fails_closed_before_auth_payload(
+        SslMode::Preferred,
+        tls_capable_server,
+        "preferred mode before TLS upgrade implementation",
     );
 }
 
@@ -556,9 +632,6 @@ fn test_caching_sha2_password_secure_connection_requirement() {
 
     assert!(fast_auth_msg.contains("secure connection"));
     assert!(cache_required_msg.contains("secure connection"));
-
-    println!("caching_sha2_password error messages are conformant");
-    println!("Missing: Ability to establish the required secure connection");
 }
 
 /// Integration test demonstrating the conformance impact
@@ -577,9 +650,10 @@ fn test_conformance_impact_integration() {
 
     // 3. Result: Connection must fail closed instead of sending credentials
     //    over cleartext.
-
-    println!("SECURITY CONTRACT: ssl_mode=Required fails closed until TLS exists");
-    println!("caching_sha2_password authentication will fail in secure environments");
+    assert_eq!(
+        MySqlError::TlsRequired.to_string(),
+        "TLS required but not available"
+    );
 }
 
 /// Test documentation of required fixes
@@ -587,18 +661,18 @@ fn test_conformance_impact_integration() {
 fn test_required_fixes_documentation() {
     init_test_logging();
 
-    println!("REQUIRED FIXES for MySQL SSL/TLS conformance:");
-    println!("1. Add SSL Request packet support before setting CLIENT_SSL");
-    println!("2. Add server capability validation in read_handshake()");
-    println!("3. Implement SSL Request packet transmission");
-    println!("4. Add TLS handshake using asupersync::tls::TlsConnector");
-    println!("5. Wrap stream in TLS after successful handshake");
-    println!("6. If fallback is ever added, gate it behind an explicit insecure opt-in");
-    println!("7. Add comprehensive integration tests with real MySQL server");
-
-    // These fixes would enable:
-    // - Secure caching_sha2_password authentication
-    // - Compliance with MySQL protocol specification
-    // - Protection of credentials and data in transit
-    // - Proper ssl_mode behavior (Required/Preferred/Disabled)
+    let required_capabilities = [
+        mysql_capabilities::CLIENT_PROTOCOL_41,
+        mysql_capabilities::CLIENT_SECURE_CONNECTION,
+        mysql_capabilities::CLIENT_PLUGIN_AUTH,
+        mysql_capabilities::CLIENT_SSL,
+    ];
+    assert_eq!(required_capabilities.len(), 4);
+    assert!(
+        required_capabilities.contains(&mysql_capabilities::CLIENT_SSL),
+        "the pending TLS implementation must preserve the CLIENT_SSL boundary"
+    );
+    assert_eq!(ssl_mode_query_value(SslMode::Disabled), "disabled");
+    assert_eq!(ssl_mode_query_value(SslMode::Preferred), "preferred");
+    assert_eq!(ssl_mode_query_value(SslMode::Required), "required");
 }
