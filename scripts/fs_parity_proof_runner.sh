@@ -23,6 +23,7 @@ EXPECTED_SCENARIOS=(
   "file-set-len-permissions"
   "read-dir-metadata-disposition"
   "buffered-lines-boundaries"
+  "buf-writer-flush-visibility"
   "unix-vfs-equivalence"
   "error-kind-remove-missing"
   "try-exists-lifecycle"

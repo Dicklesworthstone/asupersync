@@ -44,6 +44,7 @@ const FS_PARITY_WAVE2_SCENARIOS: &[&str] = &[
     "file-set-len-permissions",
     "read-dir-metadata-disposition",
     "buffered-lines-boundaries",
+    "buf-writer-flush-visibility",
     "unix-vfs-equivalence",
     "error-kind-remove-missing",
     "try-exists-lifecycle",
@@ -323,6 +324,48 @@ async fn fs_proof_buffered_lines(temp_root: &Path) -> Result<FsProofEvidence, St
     Ok(FsProofEvidence::supported(
         contents.len() as u64,
         format!("lines={lines:?},capacity=4"),
+    ))
+}
+
+async fn fs_proof_buf_writer_flush_visibility(temp_root: &Path) -> Result<FsProofEvidence, String> {
+    let dir = fs_proof_scenario_dir(temp_root, "buf-writer-flush-visibility")?;
+    let path = dir.join("buffered-writer.txt");
+    let file = fs::File::create(&path)
+        .await
+        .map_err(|err| format!("create buffered writer target: {err}"))?;
+    let mut writer = fs::BufWriter::with_capacity(16, file);
+
+    writer
+        .write_all(b"buffered")
+        .await
+        .map_err(|err| format!("buffered write: {err}"))?;
+    let buffered_len_before_flush = writer.buffer().len();
+    let capacity = writer.capacity();
+    let disk_before_flush = fs::read(&path)
+        .await
+        .map_err(|err| format!("read before flush: {err}"))?;
+    writer
+        .flush()
+        .await
+        .map_err(|err| format!("flush buffered writer: {err}"))?;
+    drop(writer);
+
+    let disk_after_flush = fs::read(&path)
+        .await
+        .map_err(|err| format!("read after flush: {err}"))?;
+    if buffered_len_before_flush != 8
+        || capacity != 16
+        || !disk_before_flush.is_empty()
+        || disk_after_flush != b"buffered"
+    {
+        return Err(format!(
+            "buf_writer drift: buffered_before={buffered_len_before_flush} capacity={capacity} disk_before={disk_before_flush:?} disk_after={disk_after_flush:?}"
+        ));
+    }
+
+    Ok(FsProofEvidence::supported(
+        disk_after_flush.len() as u64,
+        "buffered_before_flush=8,disk_before_flush=0,disk_after_flush=buffered,capacity=16",
     ))
 }
 
@@ -692,6 +735,15 @@ async fn fs_parity_wave2_run() -> io::Result<Vec<Value>> {
             metadata_expected: "lines=[alpha,,beta-no-newline],capacity=4",
             cancellation_point: "none",
             result: fs_proof_buffered_lines(&temp_root).await,
+        },
+        FsProofScenario {
+            scenario_id: "buf-writer-flush-visibility",
+            api: "BufWriter",
+            operation: "buffered_write_flush_visibility",
+            bytes_expected: 8,
+            metadata_expected: "buffered_before_flush=8,disk_before_flush=0,disk_after_flush=buffered,capacity=16",
+            cancellation_point: "none",
+            result: fs_proof_buf_writer_flush_visibility(&temp_root).await,
         },
         FsProofScenario {
             scenario_id: "unix-vfs-equivalence",
