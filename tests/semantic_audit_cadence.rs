@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Semantic Audit Cadence Validation (SEM-11.4)
 //!
 //! Validates that the audit cadence document exists, defines all required
