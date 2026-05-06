@@ -14,6 +14,7 @@
 #   RUST_BACKTRACE - 1 to enable backtraces (default: 1)
 #   TEST_SEED      - deterministic seed override (default: 0x7011C0DE)
 #   SKIP_CLIPPY    - set to 1 to skip clippy gate (default: 0)
+#   RCH_BIN        - remote compilation helper executable (default: rch)
 
 set -euo pipefail
 
@@ -26,6 +27,19 @@ LOG_FILE="${OUTPUT_DIR}/tokio_interop_e2e_${TIMESTAMP}.log"
 ARTIFACT_DIR="${OUTPUT_DIR}/artifacts_${TIMESTAMP}"
 COMPAT_LOG="${ARTIFACT_DIR}/compatibility_log.jsonl"
 SUMMARY_FILE="${ARTIFACT_DIR}/e2e_summary.md"
+RCH_BIN="${RCH_BIN:-rch}"
+CARGO_TARGET_DIR_BASE="${CARGO_TARGET_DIR_BASE:-${TMPDIR:-/tmp}/rch_target_tokio_interop_e2e}"
+DRY_RUN=0
+
+if [[ "${1:-}" == "--dry-run" ]]; then
+    DRY_RUN=1
+    shift
+fi
+
+if [[ "$#" -gt 1 ]]; then
+    echo "usage: $0 [--dry-run] [test_filter]" >&2
+    exit 2
+fi
 TEST_FILTER="${1:-}"
 
 export TEST_LOG_LEVEL="${TEST_LOG_LEVEL:-info}"
@@ -62,6 +76,39 @@ log_compat() {
         "$TEST_SEED" >> "$COMPAT_LOG"
 }
 
+format_command() {
+    local rendered
+    printf -v rendered "%q " "$@"
+    printf '%s' "${rendered% }"
+}
+
+run_cargo() {
+    local lane="$1"
+    shift
+    local target_dir="${CARGO_TARGET_DIR_BASE}/${lane}"
+    local command=(
+        "${RCH_BIN}"
+        exec
+        --
+        env
+        "CARGO_TARGET_DIR=${target_dir}"
+        "TEST_LOG_LEVEL=${TEST_LOG_LEVEL}"
+        "RUST_LOG=${RUST_LOG}"
+        "RUST_BACKTRACE=${RUST_BACKTRACE}"
+        "TEST_SEED=${TEST_SEED}"
+        cargo
+        "$@"
+    )
+
+    if [[ "${DRY_RUN}" -eq 1 ]]; then
+        format_command "${command[@]}"
+        printf '\n'
+        return 0
+    fi
+
+    "${command[@]}"
+}
+
 run_scenario() {
     local name="$1"
     local test_target="$2"
@@ -75,8 +122,12 @@ run_scenario() {
     printf "  [%02d] %-60s " "$TOTAL_SCENARIOS" "$name"
 
     local scenario_log="${ARTIFACT_DIR}/scenario_${TOTAL_SCENARIOS}_${name// /_}.log"
+    local run_args=(--nocapture)
+    if [[ -n "$test_pattern" ]]; then
+        run_args=("$test_pattern" --nocapture)
+    fi
 
-    if cargo test --test "$test_target" -- "$test_pattern" --nocapture > "$scenario_log" 2>&1; then
+    if run_cargo "scenario_${TOTAL_SCENARIOS}" test -p asupersync --test "$test_target" -- "${run_args[@]}" > "$scenario_log" 2>&1; then
         local end_ms
         end_ms=$(date +%s%3N 2>/dev/null || date +%s)
         local duration=$((end_ms - start_ms))
@@ -109,6 +160,11 @@ echo "  CORRELATION_ID:  ${CORRELATION_ID}"
 echo "  TIMESTAMP:       ${TIMESTAMP}"
 echo "  OUTPUT_DIR:      ${OUTPUT_DIR}"
 echo "  ARTIFACT_DIR:    ${ARTIFACT_DIR}"
+echo "  RUNNER:          ${RCH_BIN} exec"
+echo "  TARGET_BASE:     ${CARGO_TARGET_DIR_BASE}"
+if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo "  MODE:            dry-run"
+fi
 echo ""
 } | tee "$LOG_FILE"
 
@@ -117,8 +173,8 @@ echo ""
 echo "Phase 1: Quality Gates" | tee -a "$LOG_FILE"
 echo "-------------------------------------------------------------------" | tee -a "$LOG_FILE"
 
-echo "  [QG] cargo check --all-targets" | tee -a "$LOG_FILE"
-if ! cargo check --all-targets >> "$LOG_FILE" 2>&1; then
+echo "  [QG] rch cargo check -p asupersync-tokio-compat --all-targets" | tee -a "$LOG_FILE"
+if ! run_cargo qg_check check -p asupersync-tokio-compat --all-targets >> "$LOG_FILE" 2>&1; then
     echo "  FAIL: cargo check failed. See ${LOG_FILE}" | tee -a "$LOG_FILE"
     log_compat "FAIL" "quality-gate-check" "all" "cargo check failed" "0"
     exit 1
@@ -127,8 +183,8 @@ echo "        PASS" | tee -a "$LOG_FILE"
 log_compat "PASS" "quality-gate-check" "all" "cargo check passed" "0"
 
 if [ "$SKIP_CLIPPY" != "1" ]; then
-    echo "  [QG] cargo clippy --all-targets -- -D warnings" | tee -a "$LOG_FILE"
-    if ! cargo clippy --all-targets -- -D warnings >> "$LOG_FILE" 2>&1; then
+    echo "  [QG] rch cargo clippy -p asupersync-tokio-compat --all-targets -- -D warnings" | tee -a "$LOG_FILE"
+    if ! run_cargo qg_clippy clippy -p asupersync-tokio-compat --all-targets -- -D warnings >> "$LOG_FILE" 2>&1; then
         echo "  FAIL: clippy failed. See ${LOG_FILE}" | tee -a "$LOG_FILE"
         log_compat "FAIL" "quality-gate-clippy" "all" "clippy failed" "0"
         exit 1
@@ -137,8 +193,8 @@ if [ "$SKIP_CLIPPY" != "1" ]; then
     log_compat "PASS" "quality-gate-clippy" "all" "clippy passed" "0"
 fi
 
-echo "  [QG] cargo fmt --check" | tee -a "$LOG_FILE"
-if ! cargo fmt --check >> "$LOG_FILE" 2>&1; then
+echo "  [QG] rch cargo fmt --check -p asupersync-tokio-compat" | tee -a "$LOG_FILE"
+if ! run_cargo qg_fmt fmt --check -p asupersync-tokio-compat >> "$LOG_FILE" 2>&1; then
     echo "  FAIL: fmt check failed. See ${LOG_FILE}" | tee -a "$LOG_FILE"
     log_compat "FAIL" "quality-gate-fmt" "all" "fmt check failed" "0"
     exit 1
@@ -155,8 +211,8 @@ echo "-------------------------------------------------------------------" | tee
 
 echo "  [UT] cargo test -p asupersync-tokio-compat" | tee -a "$LOG_FILE"
 UNIT_LOG="${ARTIFACT_DIR}/unit_tests.log"
-if cargo test -p asupersync-tokio-compat --no-fail-fast -- --nocapture > "$UNIT_LOG" 2>&1; then
-    UNIT_COUNT=$(grep -c "^test .* ok$" "$UNIT_LOG" 2>/dev/null || echo "0")
+if run_cargo unit test -p asupersync-tokio-compat --no-fail-fast -- --nocapture > "$UNIT_LOG" 2>&1; then
+    UNIT_COUNT=$({ grep -c "^test .* ok$" "$UNIT_LOG" 2>/dev/null || true; } | awk '{s+=$1} END {print s+0}')
     echo "        PASS (${UNIT_COUNT} tests)" | tee -a "$LOG_FILE"
     log_compat "PASS" "adapter-unit-tests" "all" "${UNIT_COUNT} unit tests passed" "0"
 else
@@ -266,6 +322,11 @@ echo "  Correlation ID:  ${CORRELATION_ID}"
 echo "  Started:         ${RUN_STARTED_TS}"
 echo "  Finished:        ${RUN_FINISHED_TS}"
 echo "  Seed:            ${TEST_SEED}"
+echo "  Runner:          ${RCH_BIN} exec"
+echo "  Target base:     ${CARGO_TARGET_DIR_BASE}"
+if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo "  Mode:            dry-run"
+fi
 echo ""
 echo "  Scenarios:       ${TOTAL}"
 echo "  Passed:          ${PASS_COUNT}"
@@ -286,6 +347,9 @@ cat > "$SUMMARY_FILE" <<EOFMD
 **Correlation ID**: ${CORRELATION_ID}
 **Run**: ${RUN_STARTED_TS} → ${RUN_FINISHED_TS}
 **Seed**: ${TEST_SEED}
+**Runner**: ${RCH_BIN} exec
+**Target Base**: ${CARGO_TARGET_DIR_BASE}
+**Dry Run**: ${DRY_RUN}
 
 ## Results
 
@@ -306,11 +370,14 @@ cat > "$SUMMARY_FILE" <<EOFMD
 ## Repro Command
 
 \`\`\`bash
-TEST_SEED=${TEST_SEED} ./scripts/test_tokio_interop_e2e.sh
+TEST_SEED=${TEST_SEED} RCH_BIN=${RCH_BIN} CARGO_TARGET_DIR_BASE=${CARGO_TARGET_DIR_BASE} ./scripts/test_tokio_interop_e2e.sh
 \`\`\`
 EOFMD
 
-if [ "$FAIL_COUNT" -gt 0 ]; then
+if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo "  RESULT: PLANNED (cargo was not executed)" | tee -a "$LOG_FILE"
+    exit 0
+elif [ "$FAIL_COUNT" -gt 0 ]; then
     echo "  RESULT: FAIL (${FAIL_COUNT} scenario(s) failed)" | tee -a "$LOG_FILE"
     exit 1
 else
