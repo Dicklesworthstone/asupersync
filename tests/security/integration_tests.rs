@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 use crate::common::*;
 use asupersync::security::{AuthKey, AuthMode, AuthenticatedSymbol, SecurityContext};
 use asupersync::types::Symbol;
