@@ -15,6 +15,9 @@ pub const INCIDENT_BUNDLE_SCHEMA_VERSION: u32 = 1;
 /// Current replay package schema version emitted by the incident importer.
 pub const INCIDENT_REPLAY_PACKAGE_SCHEMA_VERSION: u32 = 1;
 
+/// Current minimized replay repro schema version.
+pub const INCIDENT_MINIMIZED_REPRO_SCHEMA_VERSION: u32 = 1;
+
 const MAX_ID_BYTES: usize = 128;
 const MAX_PATH_BYTES: usize = 512;
 const MAX_FIELD_BYTES: usize = 1024;
@@ -612,6 +615,149 @@ impl IncidentReplayPackage {
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(json)
     }
+
+    /// Minimize this replay package under a deterministic incident oracle.
+    #[must_use]
+    pub fn minimize_repro(
+        &self,
+        oracle: IncidentReplayOracle,
+        config: IncidentReplayMinimizationConfig,
+    ) -> IncidentReplayMinimizationReport {
+        let mut issues = minimization_preflight_issues(self, &oracle);
+        if !issues.is_empty() {
+            let verdict = if issues
+                .iter()
+                .any(|issue| issue.kind == IncidentReplayMinimizationIssueKind::FlakyOracle)
+            {
+                IncidentReplayMinimizationVerdict::Inconclusive
+            } else {
+                IncidentReplayMinimizationVerdict::Blocked
+            };
+            return IncidentReplayMinimizationReport {
+                verdict,
+                package_id: self.package_id.clone(),
+                repro: None,
+                issues,
+                steps: Vec::new(),
+            };
+        }
+
+        let mut retained_sources = self.sources.clone();
+        let mut removed_source_ids = Vec::new();
+        let mut retained_feature_flags = sorted_strings(self.determinism.feature_flags.clone());
+        let mut removed_feature_flags = Vec::new();
+        let mut steps = Vec::new();
+        let required_roles = oracle.normalized_required_roles();
+        let mut exhausted = false;
+
+        for candidate in removable_sources(self, &required_roles) {
+            if steps.len() >= config.step_budget {
+                exhausted = true;
+                push_budget_step(
+                    &mut steps,
+                    replay_unit_count(&retained_sources, &retained_feature_flags),
+                );
+                break;
+            }
+
+            let before = replay_unit_count(&retained_sources, &retained_feature_flags);
+            let mut trial = retained_sources.clone();
+            trial.retain(|source| source.source_id != candidate.source_id);
+            let preserved = oracle_preserved(&trial, &oracle);
+            if preserved {
+                retained_sources = trial;
+                removed_source_ids.push(candidate.source_id.clone());
+            }
+            let after = replay_unit_count(&retained_sources, &retained_feature_flags);
+            steps.push(IncidentReplayShrinkStep {
+                step_index: steps.len(),
+                kind: if preserved {
+                    IncidentReplayShrinkStepKind::RemoveSource
+                } else {
+                    IncidentReplayShrinkStepKind::KeepRequired
+                },
+                candidate: candidate.source_id,
+                accepted: preserved,
+                before_units: before,
+                after_units: after,
+                oracle_preserved: preserved,
+                reason: if preserved {
+                    "source removal preserved incident oracle".to_string()
+                } else {
+                    "source retained because oracle would not hold".to_string()
+                },
+            });
+        }
+
+        if !exhausted && config.shrink_feature_flags {
+            for flag in sorted_strings(retained_feature_flags.clone()) {
+                if steps.len() >= config.step_budget {
+                    exhausted = true;
+                    push_budget_step(
+                        &mut steps,
+                        replay_unit_count(&retained_sources, &retained_feature_flags),
+                    );
+                    break;
+                }
+
+                let before = replay_unit_count(&retained_sources, &retained_feature_flags);
+                retained_feature_flags.retain(|existing| existing != &flag);
+                removed_feature_flags.push(flag.clone());
+                let after = replay_unit_count(&retained_sources, &retained_feature_flags);
+                steps.push(IncidentReplayShrinkStep {
+                    step_index: steps.len(),
+                    kind: IncidentReplayShrinkStepKind::RemoveFeatureFlag,
+                    candidate: flag,
+                    accepted: true,
+                    before_units: before,
+                    after_units: after,
+                    oracle_preserved: true,
+                    reason: "feature flag removal preserved source-defined oracle".to_string(),
+                });
+            }
+        }
+
+        if exhausted {
+            issues.push(IncidentReplayMinimizationIssue::new(
+                IncidentReplayMinimizationIssueKind::BudgetExhausted,
+                "config.step_budget",
+                "step budget exhausted before minimization reached a fixed point",
+            ));
+        }
+
+        let summary = IncidentReplayMinimizationSummary {
+            original_units: replay_unit_count(&self.sources, &self.determinism.feature_flags),
+            minimized_units: replay_unit_count(&retained_sources, &retained_feature_flags),
+            accepted_steps: steps.iter().filter(|step| step.accepted).count(),
+            rejected_steps: steps.iter().filter(|step| !step.accepted).count(),
+            budget_exhausted: exhausted,
+        };
+        let repro = build_minimized_repro(
+            self,
+            oracle,
+            retained_sources,
+            removed_source_ids,
+            retained_feature_flags,
+            removed_feature_flags,
+            steps.clone(),
+            summary.clone(),
+        );
+        let verdict = if exhausted {
+            IncidentReplayMinimizationVerdict::BudgetExhausted
+        } else if summary.minimized_units < summary.original_units {
+            IncidentReplayMinimizationVerdict::Minimized
+        } else {
+            IncidentReplayMinimizationVerdict::AlreadyMinimal
+        };
+
+        IncidentReplayMinimizationReport {
+            verdict,
+            package_id: self.package_id.clone(),
+            repro: Some(repro),
+            issues,
+            steps,
+        }
+    }
 }
 
 /// Full importer report for bundle-to-replay-package conversion.
@@ -643,6 +789,289 @@ impl IncidentReplayImportReport {
             .iter()
             .any(|reason| reason.kind == kind)
     }
+}
+
+/// Incident oracle class preserved by minimization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum IncidentOracleKind {
+    /// Panic or panic-shaped failure.
+    Panic,
+    /// Cancellation protocol leak.
+    CancellationLeak,
+    /// Permit, ack, lease, or other obligation leak.
+    ObligationLeak,
+    /// Region close did not imply quiescence.
+    QuiescenceViolation,
+    /// Protocol-level error expectation.
+    ProtocolError,
+    /// README, support matrix, or documentation claim drift.
+    ClaimDrift,
+    /// Remote proof command failure.
+    ProofCommandFailure,
+}
+
+impl IncidentOracleKind {
+    /// Return the stable string tag for artifacts and logs.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Panic => "panic",
+            Self::CancellationLeak => "cancellation_leak",
+            Self::ObligationLeak => "obligation_leak",
+            Self::QuiescenceViolation => "quiescence_violation",
+            Self::ProtocolError => "protocol_error",
+            Self::ClaimDrift => "claim_drift",
+            Self::ProofCommandFailure => "proof_command_failure",
+        }
+    }
+}
+
+/// Oracle contract used by incident replay-package minimization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncidentReplayOracle {
+    /// Oracle class.
+    pub kind: IncidentOracleKind,
+    /// Deterministic signal that must remain true after shrinking.
+    pub expected_signal: String,
+    /// Whether the oracle is stable enough to minimize.
+    pub stable: bool,
+    /// Source roles that must remain present for the oracle to be meaningful.
+    #[serde(default)]
+    pub required_source_roles: Vec<IncidentReplaySourceRole>,
+    /// Trace fingerprint that must remain present, when applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_trace_fingerprint: Option<String>,
+}
+
+impl IncidentReplayOracle {
+    fn normalized_required_roles(&self) -> BTreeSet<IncidentReplaySourceRole> {
+        self.required_source_roles.iter().copied().collect()
+    }
+}
+
+/// Configuration for deterministic incident replay-package minimization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncidentReplayMinimizationConfig {
+    /// Maximum shrink attempts before returning budget-exhausted.
+    pub step_budget: usize,
+    /// Whether feature flags may be removed after source shrink attempts.
+    pub shrink_feature_flags: bool,
+}
+
+impl Default for IncidentReplayMinimizationConfig {
+    fn default() -> Self {
+        Self {
+            step_budget: 64,
+            shrink_feature_flags: true,
+        }
+    }
+}
+
+/// Result verdict for incident replay minimization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IncidentReplayMinimizationVerdict {
+    /// A smaller repro was emitted.
+    Minimized,
+    /// The input already represented a minimal repro under the oracle.
+    AlreadyMinimal,
+    /// The minimizer stopped before reaching a fixed point.
+    BudgetExhausted,
+    /// The oracle was flaky or nondeterministic.
+    Inconclusive,
+    /// The input cannot be minimized.
+    Blocked,
+}
+
+/// Typed blocker or inconclusive reason for replay minimization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IncidentReplayMinimizationIssueKind {
+    /// Replay package has no source units.
+    EmptyTrace,
+    /// Oracle was not stable.
+    FlakyOracle,
+    /// Step budget was exhausted before reaching a fixed point.
+    BudgetExhausted,
+    /// Required oracle source role was absent.
+    MissingOracleSourceRole,
+    /// Required oracle trace fingerprint was absent.
+    MissingOracleTraceFingerprint,
+}
+
+impl IncidentReplayMinimizationIssueKind {
+    /// Return the stable string tag for artifacts and logs.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::EmptyTrace => "empty_trace",
+            Self::FlakyOracle => "flaky_oracle",
+            Self::BudgetExhausted => "budget_exhausted",
+            Self::MissingOracleSourceRole => "missing_oracle_source_role",
+            Self::MissingOracleTraceFingerprint => "missing_oracle_trace_fingerprint",
+        }
+    }
+}
+
+/// One minimization blocker or inconclusive reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncidentReplayMinimizationIssue {
+    /// Issue class.
+    pub kind: IncidentReplayMinimizationIssueKind,
+    /// Field associated with the issue.
+    pub field: String,
+    /// Human-readable explanation.
+    pub message: String,
+}
+
+impl IncidentReplayMinimizationIssue {
+    fn new(
+        kind: IncidentReplayMinimizationIssueKind,
+        field: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind,
+            field: field.into(),
+            message: message.into(),
+        }
+    }
+}
+
+/// Shrink operation kind recorded in minimization provenance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IncidentReplayShrinkStepKind {
+    /// Attempted to remove one replay source.
+    RemoveSource,
+    /// Attempted to remove one feature flag.
+    RemoveFeatureFlag,
+    /// Candidate had to remain to preserve the oracle.
+    KeepRequired,
+    /// Budget was exhausted.
+    BudgetExhausted,
+}
+
+/// One deterministic shrink decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncidentReplayShrinkStep {
+    /// Zero-based shrink step index.
+    pub step_index: usize,
+    /// Shrink operation.
+    pub kind: IncidentReplayShrinkStepKind,
+    /// Candidate unit considered.
+    pub candidate: String,
+    /// Whether the candidate removal was accepted.
+    pub accepted: bool,
+    /// Size before the decision.
+    pub before_units: usize,
+    /// Size after the decision.
+    pub after_units: usize,
+    /// Whether the oracle remained true for the candidate.
+    pub oracle_preserved: bool,
+    /// Deterministic reason for the decision.
+    pub reason: String,
+}
+
+/// Summary of a minimization run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncidentReplayMinimizationSummary {
+    /// Input replay unit count.
+    pub original_units: usize,
+    /// Output replay unit count.
+    pub minimized_units: usize,
+    /// Number of accepted shrink steps.
+    pub accepted_steps: usize,
+    /// Number of rejected shrink steps.
+    pub rejected_steps: usize,
+    /// Whether budget was exhausted.
+    pub budget_exhausted: bool,
+}
+
+/// Stable minimized repro package emitted by incident minimization.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IncidentMinimizedReplayRepro {
+    /// Minimized repro schema version.
+    pub schema_version: u32,
+    /// Stable repro identifier.
+    pub repro_id: String,
+    /// Source replay package identifier.
+    pub source_package_id: String,
+    /// Source incident bundle identifier.
+    pub bundle_id: String,
+    /// Oracle preserved by this repro.
+    pub oracle: IncidentReplayOracle,
+    /// Sources retained in the repro.
+    pub retained_sources: Vec<IncidentReplaySource>,
+    /// Source IDs removed by minimization.
+    pub removed_source_ids: Vec<String>,
+    /// Feature flags retained in the repro.
+    pub retained_feature_flags: Vec<String>,
+    /// Feature flags removed by minimization.
+    pub removed_feature_flags: Vec<String>,
+    /// Original replay command metadata.
+    pub command: IncidentCommand,
+    /// Original replay determinism metadata, with retained feature flags.
+    pub determinism: IncidentDeterminism,
+    /// Original capture provenance.
+    pub provenance: IncidentProvenance,
+    /// Shrink decisions in deterministic order.
+    pub steps: Vec<IncidentReplayShrinkStep>,
+    /// Minimization summary.
+    pub summary: IncidentReplayMinimizationSummary,
+}
+
+impl IncidentMinimizedReplayRepro {
+    /// Serialize the minimized repro to deterministic pretty JSON.
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+
+    /// Parse a minimized repro from JSON.
+    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(json)
+    }
+}
+
+/// Full minimization report.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IncidentReplayMinimizationReport {
+    /// Minimization verdict.
+    pub verdict: IncidentReplayMinimizationVerdict,
+    /// Source package identifier.
+    pub package_id: String,
+    /// Repro emitted for minimized or already-minimal inputs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repro: Option<IncidentMinimizedReplayRepro>,
+    /// Issues or inconclusive reasons.
+    pub issues: Vec<IncidentReplayMinimizationIssue>,
+    /// Shrink decisions, including rejected candidates and budget stop.
+    pub steps: Vec<IncidentReplayShrinkStep>,
+}
+
+impl IncidentReplayMinimizationReport {
+    /// Return `true` if a minimized or already-minimal repro was emitted.
+    #[must_use]
+    pub const fn has_repro(&self) -> bool {
+        self.repro.is_some()
+    }
+
+    /// Return `true` if any issue has the supplied kind.
+    #[must_use]
+    pub fn contains_issue(&self, kind: IncidentReplayMinimizationIssueKind) -> bool {
+        self.issues.iter().any(|issue| issue.kind == kind)
+    }
+}
+
+/// Minimize a replay package under a deterministic incident oracle.
+#[must_use]
+pub fn minimize_incident_replay_package(
+    package: &IncidentReplayPackage,
+    oracle: IncidentReplayOracle,
+    config: IncidentReplayMinimizationConfig,
+) -> IncidentReplayMinimizationReport {
+    package.minimize_repro(oracle, config)
 }
 
 /// Import an incident bundle JSON document into a deterministic replay package report.
@@ -1201,6 +1630,207 @@ fn stable_replay_package_id(
     format!("incident-replay-v1:{:016x}", fnv1a64(key.as_bytes()))
 }
 
+fn minimization_preflight_issues(
+    package: &IncidentReplayPackage,
+    oracle: &IncidentReplayOracle,
+) -> Vec<IncidentReplayMinimizationIssue> {
+    let mut issues = Vec::new();
+    if package.sources.is_empty() {
+        issues.push(IncidentReplayMinimizationIssue::new(
+            IncidentReplayMinimizationIssueKind::EmptyTrace,
+            "sources",
+            "replay package has no source units to minimize",
+        ));
+    }
+    if !oracle.stable {
+        issues.push(IncidentReplayMinimizationIssue::new(
+            IncidentReplayMinimizationIssueKind::FlakyOracle,
+            "oracle.stable",
+            "incident oracle is marked unstable; minimization would be nondeterministic",
+        ));
+    }
+
+    let package_roles = package
+        .sources
+        .iter()
+        .map(|source| source.role)
+        .collect::<BTreeSet<_>>();
+    for role in oracle.normalized_required_roles() {
+        if !package_roles.contains(&role) {
+            issues.push(IncidentReplayMinimizationIssue::new(
+                IncidentReplayMinimizationIssueKind::MissingOracleSourceRole,
+                "oracle.required_source_roles",
+                format!("required oracle source role {} is absent", role.as_str()),
+            ));
+        }
+    }
+    if let Some(required) = &oracle.required_trace_fingerprint {
+        let present = package.sources.iter().any(|source| {
+            source
+                .trace_fingerprint
+                .as_ref()
+                .is_some_and(|fingerprint| fingerprint == required)
+        });
+        if !present {
+            issues.push(IncidentReplayMinimizationIssue::new(
+                IncidentReplayMinimizationIssueKind::MissingOracleTraceFingerprint,
+                "oracle.required_trace_fingerprint",
+                format!("required oracle trace fingerprint {required} is absent"),
+            ));
+        }
+    }
+    issues
+}
+
+fn removable_sources(
+    package: &IncidentReplayPackage,
+    required_roles: &BTreeSet<IncidentReplaySourceRole>,
+) -> Vec<IncidentReplaySource> {
+    let mut candidates = package
+        .sources
+        .iter()
+        .filter(|source| !required_roles.contains(&source.role))
+        .cloned()
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        left.role
+            .cmp(&right.role)
+            .then_with(|| left.content_hash.cmp(&right.content_hash))
+            .then_with(|| left.source_id.cmp(&right.source_id))
+    });
+    candidates
+}
+
+fn oracle_preserved(sources: &[IncidentReplaySource], oracle: &IncidentReplayOracle) -> bool {
+    let roles = sources
+        .iter()
+        .map(|source| source.role)
+        .collect::<BTreeSet<_>>();
+    if !oracle
+        .normalized_required_roles()
+        .iter()
+        .all(|role| roles.contains(role))
+    {
+        return false;
+    }
+    if let Some(required) = &oracle.required_trace_fingerprint {
+        return sources.iter().any(|source| {
+            source
+                .trace_fingerprint
+                .as_ref()
+                .is_some_and(|fingerprint| fingerprint == required)
+        });
+    }
+    true
+}
+
+fn replay_unit_count(sources: &[IncidentReplaySource], feature_flags: &[String]) -> usize {
+    sources.len() + feature_flags.len()
+}
+
+fn push_budget_step(steps: &mut Vec<IncidentReplayShrinkStep>, units: usize) {
+    steps.push(IncidentReplayShrinkStep {
+        step_index: steps.len(),
+        kind: IncidentReplayShrinkStepKind::BudgetExhausted,
+        candidate: "step_budget".to_string(),
+        accepted: false,
+        before_units: units,
+        after_units: units,
+        oracle_preserved: true,
+        reason: "step budget exhausted before fixed point".to_string(),
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_minimized_repro(
+    package: &IncidentReplayPackage,
+    oracle: IncidentReplayOracle,
+    retained_sources: Vec<IncidentReplaySource>,
+    mut removed_source_ids: Vec<String>,
+    retained_feature_flags: Vec<String>,
+    mut removed_feature_flags: Vec<String>,
+    steps: Vec<IncidentReplayShrinkStep>,
+    summary: IncidentReplayMinimizationSummary,
+) -> IncidentMinimizedReplayRepro {
+    removed_source_ids.sort();
+    removed_feature_flags.sort();
+    let mut determinism = package.determinism.clone();
+    determinism.feature_flags = retained_feature_flags.clone();
+    let repro_id = stable_minimized_repro_id(
+        package,
+        &oracle,
+        &retained_sources,
+        &removed_source_ids,
+        &retained_feature_flags,
+    );
+
+    IncidentMinimizedReplayRepro {
+        schema_version: INCIDENT_MINIMIZED_REPRO_SCHEMA_VERSION,
+        repro_id,
+        source_package_id: package.package_id.clone(),
+        bundle_id: package.bundle_id.clone(),
+        oracle,
+        retained_sources,
+        removed_source_ids,
+        retained_feature_flags,
+        removed_feature_flags,
+        command: package.command.clone(),
+        determinism,
+        provenance: package.provenance.clone(),
+        steps,
+        summary,
+    }
+}
+
+fn stable_minimized_repro_id(
+    package: &IncidentReplayPackage,
+    oracle: &IncidentReplayOracle,
+    retained_sources: &[IncidentReplaySource],
+    removed_source_ids: &[String],
+    retained_feature_flags: &[String],
+) -> String {
+    let mut key = String::new();
+    key.push_str("incident-minimized-repro-v1\n");
+    key.push_str(&package.package_id);
+    key.push('\n');
+    key.push_str(oracle.kind.as_str());
+    key.push('|');
+    key.push_str(&oracle.expected_signal);
+    key.push('|');
+    key.push_str(
+        oracle
+            .required_trace_fingerprint
+            .as_deref()
+            .unwrap_or_default(),
+    );
+    key.push('\n');
+    for source in retained_sources {
+        key.push_str(source.role.as_str());
+        key.push('|');
+        key.push_str(&source.source_id);
+        key.push('|');
+        key.push_str(&source.content_hash);
+        key.push('\n');
+    }
+    for source_id in removed_source_ids {
+        key.push_str("removed:");
+        key.push_str(source_id);
+        key.push('\n');
+    }
+    for flag in retained_feature_flags {
+        key.push_str("flag:");
+        key.push_str(flag);
+        key.push('\n');
+    }
+    format!("incident-min-repro-v1:{:016x}", fnv1a64(key.as_bytes()))
+}
+
+fn sorted_strings(mut values: Vec<String>) -> Vec<String> {
+    values.sort();
+    values.dedup();
+    values
+}
+
 fn validate_required_text(
     field: impl Into<String>,
     value: &str,
@@ -1748,5 +2378,200 @@ mod tests {
         let parsed = IncidentReplayPackage::from_json(&json).expect("package parses");
         assert_eq!(package.package_id, parsed.package_id);
         assert_eq!(package, parsed);
+    }
+
+    fn two_source_package() -> IncidentReplayPackage {
+        let mut bundle = valid_bundle();
+        bundle.sources.push(IncidentSource {
+            source_id: "trace-log-main".to_string(),
+            kind: IncidentSourceKind::TraceLog,
+            artifact_path: Some("artifacts/traces/fixture.ndjson".to_string()),
+            content_hash: HASH_B.to_string(),
+            content_bytes: 128,
+            redaction_status: IncidentRedactionStatus::Redacted,
+            payload_snippet: None,
+            metadata: BTreeMap::from([
+                ("trace_fingerprint".to_string(), json!("0xbead")),
+                ("observed_content_hash".to_string(), json!(HASH_B)),
+            ]),
+        });
+        bundle
+            .import_replay_package()
+            .package
+            .expect("fixture package imports")
+    }
+
+    fn panic_oracle() -> IncidentReplayOracle {
+        IncidentReplayOracle {
+            kind: IncidentOracleKind::Panic,
+            expected_signal: "panic after deterministic schedule seed 42".to_string(),
+            stable: true,
+            required_source_roles: vec![IncidentReplaySourceRole::CrashPack],
+            required_trace_fingerprint: Some("0xfeedbeef".to_string()),
+        }
+    }
+
+    #[test]
+    fn minimizer_preserves_oracle_and_shrinks_sources() {
+        let package = two_source_package();
+        let report = package.minimize_repro(
+            panic_oracle(),
+            IncidentReplayMinimizationConfig {
+                step_budget: 8,
+                shrink_feature_flags: false,
+            },
+        );
+
+        assert_eq!(report.verdict, IncidentReplayMinimizationVerdict::Minimized);
+        let repro = report.repro.expect("minimized repro emitted");
+        assert_eq!(repro.retained_sources.len(), 1);
+        assert_eq!(
+            repro.retained_sources[0].role,
+            IncidentReplaySourceRole::CrashPack
+        );
+        assert_eq!(repro.removed_source_ids, ["trace-log-main"]);
+        assert!(repro.summary.minimized_units < repro.summary.original_units);
+        assert!(repro.steps.iter().any(|step| step.accepted));
+    }
+
+    #[test]
+    fn minimizer_is_monotonic_and_records_rejections() {
+        let package = two_source_package();
+        let report = package.minimize_repro(
+            IncidentReplayOracle {
+                required_trace_fingerprint: Some("0xbead".to_string()),
+                ..panic_oracle()
+            },
+            IncidentReplayMinimizationConfig {
+                step_budget: 8,
+                shrink_feature_flags: false,
+            },
+        );
+        let repro = report.repro.expect("repro emitted");
+
+        assert!(
+            repro.summary.minimized_units <= repro.summary.original_units,
+            "{repro:#?}"
+        );
+        assert!(repro.steps.iter().any(|step| !step.accepted));
+    }
+
+    #[test]
+    fn minimizer_reports_budget_exhaustion() {
+        let package = two_source_package();
+        let report = package.minimize_repro(
+            panic_oracle(),
+            IncidentReplayMinimizationConfig {
+                step_budget: 0,
+                shrink_feature_flags: true,
+            },
+        );
+
+        assert_eq!(
+            report.verdict,
+            IncidentReplayMinimizationVerdict::BudgetExhausted
+        );
+        assert!(report.contains_issue(IncidentReplayMinimizationIssueKind::BudgetExhausted));
+        assert!(report.steps.iter().any(|step| {
+            step.kind == IncidentReplayShrinkStepKind::BudgetExhausted && !step.accepted
+        }));
+    }
+
+    #[test]
+    fn flaky_oracle_is_inconclusive() {
+        let package = two_source_package();
+        let mut oracle = panic_oracle();
+        oracle.stable = false;
+        let report = package.minimize_repro(oracle, IncidentReplayMinimizationConfig::default());
+
+        assert_eq!(
+            report.verdict,
+            IncidentReplayMinimizationVerdict::Inconclusive
+        );
+        assert!(report.contains_issue(IncidentReplayMinimizationIssueKind::FlakyOracle));
+        assert!(report.repro.is_none());
+    }
+
+    #[test]
+    fn empty_trace_blocks_minimization() {
+        let mut package = two_source_package();
+        package.sources.clear();
+        let report =
+            package.minimize_repro(panic_oracle(), IncidentReplayMinimizationConfig::default());
+
+        assert_eq!(report.verdict, IncidentReplayMinimizationVerdict::Blocked);
+        assert!(report.contains_issue(IncidentReplayMinimizationIssueKind::EmptyTrace));
+    }
+
+    #[test]
+    fn single_event_trace_is_already_minimal() {
+        let package = valid_bundle()
+            .import_replay_package()
+            .package
+            .expect("single source imports");
+        let report = package.minimize_repro(
+            panic_oracle(),
+            IncidentReplayMinimizationConfig {
+                step_budget: 8,
+                shrink_feature_flags: false,
+            },
+        );
+
+        assert_eq!(
+            report.verdict,
+            IncidentReplayMinimizationVerdict::AlreadyMinimal
+        );
+        let repro = report.repro.expect("already minimal repro emitted");
+        assert_eq!(repro.retained_sources.len(), 1);
+        assert!(repro.removed_source_ids.is_empty());
+    }
+
+    #[test]
+    fn already_minimal_when_all_sources_are_required() {
+        let package = two_source_package();
+        let oracle = IncidentReplayOracle {
+            kind: IncidentOracleKind::ProofCommandFailure,
+            expected_signal: "remote proof command failed".to_string(),
+            stable: true,
+            required_source_roles: vec![
+                IncidentReplaySourceRole::CrashPack,
+                IncidentReplaySourceRole::TraceLog,
+            ],
+            required_trace_fingerprint: None,
+        };
+        let report = minimize_incident_replay_package(
+            &package,
+            oracle,
+            IncidentReplayMinimizationConfig {
+                step_budget: 8,
+                shrink_feature_flags: false,
+            },
+        );
+
+        assert_eq!(
+            report.verdict,
+            IncidentReplayMinimizationVerdict::AlreadyMinimal
+        );
+        assert!(report.steps.is_empty());
+    }
+
+    #[test]
+    fn minimized_repro_json_round_trip_is_stable() {
+        let package = two_source_package();
+        let repro = package
+            .minimize_repro(
+                panic_oracle(),
+                IncidentReplayMinimizationConfig {
+                    step_budget: 8,
+                    shrink_feature_flags: false,
+                },
+            )
+            .repro
+            .expect("repro emitted");
+        let json = repro.to_json().expect("repro serializes");
+        let parsed = IncidentMinimizedReplayRepro::from_json(&json).expect("repro parses");
+
+        assert_eq!(repro.repro_id, parsed.repro_id);
+        assert_eq!(repro, parsed);
     }
 }
