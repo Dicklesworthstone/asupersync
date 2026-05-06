@@ -20,7 +20,7 @@ pub mod tls_handshake;
 // became private). Each needs targeted refactoring before being wired
 // in; tracked separately as h1-conformance-bitrot follow-up.
 //
-//   pub mod h1_body_framing;
+pub mod h1_body_framing;
 pub mod h1_chunked;
 //   pub mod h1_content_encoding;
 //   pub mod h1_expect_continue;
@@ -140,9 +140,9 @@ pub mod udp_socket; // repaired by br-asupersync-2qssae UDP sub-slice
 pub mod unix_listener; // repaired by br-asupersync-2qssae Unix listener sub-slice
 // pub mod web_session_cookies;      // bit-rot — depends on `tokio` (forbidden) and asupersync::io::Cursor moved
 //
-// h1_* siblings (h1_body_framing, h1_content_encoding,
-// h1_expect_continue, h1_keepalive, h1_methods) and
-// h2_stream_state_machine_rfc7540 and hpack_metamorphic are already
+// h1_* siblings (h1_content_encoding, h1_expect_continue,
+// h1_keepalive, h1_methods), h2_stream_state_machine_rfc7540,
+// and hpack_metamorphic are already
 // individually commented out earlier in this file with bit-rot rationale;
 // deliberately not re-declared here.
 

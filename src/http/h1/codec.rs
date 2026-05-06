@@ -1354,7 +1354,7 @@ impl Encoder<Response> for Http1Codec {
             }
 
             dst.extend_from_slice(b"\r\n");
-            if !resp.body.is_empty() {
+            if !suppress_content_length && !resp.body.is_empty() {
                 dst.extend_from_slice(&resp.body);
             }
         }
