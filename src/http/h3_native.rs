@@ -1253,6 +1253,99 @@ pub fn qpack_decode_decoder_instruction(
     ))
 }
 
+/// Apply one RFC 9204 encoder-stream instruction to an existing QPACK context.
+///
+/// This mutates only the dynamic table carried by `context`; it does not process
+/// HTTP/3 frames or alter request-stream state.
+pub fn qpack_apply_encoder_instruction(
+    context: &mut QpackContext,
+    mode: H3QpackMode,
+    instruction: &QpackEncoderInstruction,
+) -> Result<Option<u64>, H3NativeError> {
+    if mode != H3QpackMode::DynamicTableAllowed {
+        return Err(H3NativeError::QpackPolicy(
+            "encoder instructions require dynamic qpack mode",
+        ));
+    }
+
+    match instruction {
+        QpackEncoderInstruction::SetDynamicTableCapacity { capacity } => {
+            let capacity: usize = (*capacity).try_into().map_err(|_| {
+                H3NativeError::InvalidFrame(
+                    "qpack dynamic table capacity exceeds addressable range",
+                )
+            })?;
+            context
+                .set_dynamic_table_capacity(capacity)
+                .map_err(qpack_capacity_error)?;
+            Ok(None)
+        }
+        QpackEncoderInstruction::InsertWithNameReference { name, value } => {
+            let name = match name {
+                QpackInstructionNameRef::Static(index) => qpack_static_name(*index)
+                    .ok_or(H3NativeError::InvalidFrame(
+                        "unknown static qpack name index",
+                    ))?
+                    .to_string(),
+                QpackInstructionNameRef::Dynamic(index) => context
+                    .dynamic_table()
+                    .get_by_relative_index(*index)
+                    .ok_or(H3NativeError::InvalidFrame(
+                        "unknown dynamic qpack name index",
+                    ))?
+                    .name()
+                    .to_string(),
+            };
+            context
+                .insert_dynamic_entry(name, value.clone())
+                .map(Some)
+                .map_err(qpack_insert_error)
+        }
+        QpackEncoderInstruction::InsertWithoutNameReference { name, value } => context
+            .insert_dynamic_entry(name.clone(), value.clone())
+            .map(Some)
+            .map_err(qpack_insert_error),
+        QpackEncoderInstruction::Duplicate { index } => {
+            let entry = context
+                .dynamic_table()
+                .get_by_relative_index(*index)
+                .ok_or(H3NativeError::InvalidFrame(
+                    "unknown dynamic qpack duplicate index",
+                ))?;
+            let name = entry.name().to_string();
+            let value = entry.value().to_string();
+            context
+                .insert_dynamic_entry(name, value)
+                .map(Some)
+                .map_err(qpack_insert_error)
+        }
+    }
+}
+
+fn qpack_capacity_error(err: &'static str) -> H3NativeError {
+    match err {
+        "capacity exceeds peer limit" => {
+            H3NativeError::QpackPolicy("qpack dynamic table capacity exceeds peer limit")
+        }
+        "cannot reduce table capacity while entries are referenced" => H3NativeError::InvalidFrame(
+            "qpack dynamic table capacity shrink blocked by referenced entries",
+        ),
+        _ => H3NativeError::InvalidFrame("qpack dynamic table capacity update failed"),
+    }
+}
+
+fn qpack_insert_error(err: &'static str) -> H3NativeError {
+    match err {
+        "entry larger than table capacity" => {
+            H3NativeError::InvalidFrame("qpack dynamic table entry exceeds capacity")
+        }
+        "cannot evict enough space (all entries referenced)" => {
+            H3NativeError::InvalidFrame("qpack dynamic table insert blocked by referenced entries")
+        }
+        _ => H3NativeError::InvalidFrame("qpack dynamic table insert failed"),
+    }
+}
+
 /// br-asupersync-mbn0uo — Fuzz-target re-exporter for the H3
 /// status-code parser. `#[doc(hidden)]`; only exists for direct
 /// fuzz harness access.
@@ -3100,6 +3193,39 @@ impl QpackDynamicTable {
         Ok(insertion_id)
     }
 
+    /// Set the table capacity and evict least-recently-inserted unreferenced entries as needed.
+    pub fn set_capacity(&mut self, max_capacity: usize) -> Result<(), &'static str> {
+        if self.current_size <= max_capacity {
+            self.max_capacity = max_capacity;
+            return Ok(());
+        }
+
+        let mut candidates = Vec::new();
+        let mut freed = 0usize;
+        for (index, entry) in self.entries.iter().enumerate() {
+            if entry.is_referenced() {
+                continue;
+            }
+            candidates.push(index);
+            freed += entry.size;
+            if self.current_size - freed <= max_capacity {
+                break;
+            }
+        }
+
+        if self.current_size - freed > max_capacity {
+            return Err("cannot reduce table capacity while entries are referenced");
+        }
+
+        self.max_capacity = max_capacity;
+        for index in candidates.into_iter().rev() {
+            let evicted = self.entries.remove(index);
+            self.current_size -= evicted.size;
+            self.evicted_count += 1;
+        }
+        Ok(())
+    }
+
     /// Evict the least recently inserted unreferenced entry.
     fn evict_lru_unreferenced(&mut self) -> bool {
         // Find the least recently used unreferenced entry
@@ -3153,9 +3279,21 @@ impl QpackDynamicTable {
 
     /// Get an entry by absolute index (insertion_counter - insertion_id - 1).
     pub fn get_by_absolute_index(&self, absolute_index: u64) -> Option<&QpackDynamicEntry> {
-        let newest_absolute = self.insertion_counter.checked_sub(1)?;
-        let reverse_offset = newest_absolute.checked_sub(absolute_index)? as usize;
-        self.entries.iter().rev().nth(reverse_offset)
+        if absolute_index >= self.insertion_counter {
+            return None;
+        }
+        self.entries
+            .iter()
+            .find(|entry| entry.insertion_order == absolute_index)
+    }
+
+    /// Get an entry by encoder-stream relative index.
+    pub fn get_by_relative_index(&self, relative_index: u64) -> Option<&QpackDynamicEntry> {
+        let absolute_index = self
+            .insertion_counter
+            .checked_sub(1)?
+            .checked_sub(relative_index)?;
+        self.get_by_absolute_index(absolute_index)
     }
 
     /// Get the number of entries in the table.
@@ -3181,6 +3319,11 @@ impl QpackDynamicTable {
     /// Get the current insertion counter value.
     pub fn insertion_counter(&self) -> u64 {
         self.insertion_counter
+    }
+
+    /// Get the number of entries evicted from this table.
+    pub fn evicted_count(&self) -> usize {
+        self.evicted_count
     }
 }
 
@@ -3234,6 +3377,19 @@ impl QpackContext {
     /// Get a mutable reference to the dynamic table.
     pub fn dynamic_table_mut(&mut self) -> &mut QpackDynamicTable {
         &mut self.dynamic_table
+    }
+
+    /// Get the peer-advertised maximum dynamic table capacity.
+    pub fn max_table_capacity(&self) -> usize {
+        self.max_table_capacity
+    }
+
+    /// Set the active dynamic table capacity.
+    pub fn set_dynamic_table_capacity(&mut self, capacity: usize) -> Result<(), &'static str> {
+        if capacity > self.max_table_capacity {
+            return Err("capacity exceeds peer limit");
+        }
+        self.dynamic_table.set_capacity(capacity)
     }
 
     /// Insert a new entry into the dynamic table.
@@ -5712,6 +5868,392 @@ mod tests {
         assert_eq!(
             err,
             H3NativeError::InvalidFrame("qpack insert count increment must be non-zero")
+        );
+    }
+
+    #[test]
+    fn qpack_encoder_state_static_only_rejects_without_mutation() {
+        let mut context = QpackContext::new(128);
+        let before = (
+            context.dynamic_table().len(),
+            context.dynamic_table().size(),
+            context.dynamic_table().insertion_counter(),
+            context.dynamic_table().evicted_count(),
+        );
+
+        let err = qpack_apply_encoder_instruction(
+            &mut context,
+            H3QpackMode::StaticOnly,
+            &QpackEncoderInstruction::InsertWithoutNameReference {
+                name: "x-test".to_string(),
+                value: "value".to_string(),
+            },
+        )
+        .expect_err("static-only mode must reject encoder instructions");
+
+        assert_eq!(
+            err,
+            H3NativeError::QpackPolicy("encoder instructions require dynamic qpack mode")
+        );
+        assert_eq!(
+            before,
+            (
+                context.dynamic_table().len(),
+                context.dynamic_table().size(),
+                context.dynamic_table().insertion_counter(),
+                context.dynamic_table().evicted_count(),
+            )
+        );
+    }
+
+    #[test]
+    fn qpack_encoder_state_set_capacity_grows_shrinks_and_zeroes() {
+        let mut context = QpackContext::new(128);
+        context
+            .insert_dynamic_entry("alpha".to_string(), "one".to_string())
+            .expect("insert alpha");
+        context
+            .insert_dynamic_entry("beta".to_string(), "two".to_string())
+            .expect("insert beta");
+
+        qpack_apply_encoder_instruction(
+            &mut context,
+            H3QpackMode::DynamicTableAllowed,
+            &QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 96 },
+        )
+        .expect("shrink without eviction");
+        assert_eq!(context.dynamic_table().capacity(), 96);
+        assert_eq!(context.dynamic_table().len(), 2);
+
+        qpack_apply_encoder_instruction(
+            &mut context,
+            H3QpackMode::DynamicTableAllowed,
+            &QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 40 },
+        )
+        .expect("shrink with eviction");
+        assert_eq!(context.dynamic_table().capacity(), 40);
+        assert_eq!(context.dynamic_table().len(), 1);
+        assert_eq!(context.dynamic_table().size(), 39);
+        assert_eq!(context.dynamic_table().evicted_count(), 1);
+        assert!(qpack_dynamic_entry(context.dynamic_table(), 0).is_none());
+        assert_eq!(
+            qpack_dynamic_entry(context.dynamic_table(), 1),
+            Some(("beta", "two"))
+        );
+
+        qpack_apply_encoder_instruction(
+            &mut context,
+            H3QpackMode::DynamicTableAllowed,
+            &QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 0 },
+        )
+        .expect("zero capacity evicts unreferenced entries");
+        assert_eq!(context.dynamic_table().capacity(), 0);
+        assert_eq!(context.dynamic_table().len(), 0);
+        assert_eq!(context.dynamic_table().size(), 0);
+    }
+
+    #[test]
+    fn qpack_encoder_state_set_capacity_rejects_peer_limit_and_referenced_shrink() {
+        let mut context = QpackContext::new(128);
+        let err = qpack_apply_encoder_instruction(
+            &mut context,
+            H3QpackMode::DynamicTableAllowed,
+            &QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 129 },
+        )
+        .expect_err("capacity exceeds peer maximum");
+        assert_eq!(
+            err,
+            H3NativeError::QpackPolicy("qpack dynamic table capacity exceeds peer limit")
+        );
+        assert_eq!(context.dynamic_table().capacity(), 128);
+
+        let referenced = context
+            .insert_dynamic_entry("ref".to_string(), "value".to_string())
+            .expect("insert referenced");
+        let _victim = context
+            .insert_dynamic_entry("victim".to_string(), "value".to_string())
+            .expect("insert victim");
+        assert!(context.dynamic_table_mut().reference_entry(referenced));
+        let before = (
+            context.dynamic_table().len(),
+            context.dynamic_table().size(),
+            context.dynamic_table().capacity(),
+            context.dynamic_table().evicted_count(),
+        );
+
+        let err = qpack_apply_encoder_instruction(
+            &mut context,
+            H3QpackMode::DynamicTableAllowed,
+            &QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 39 },
+        )
+        .expect_err("referenced entry prevents shrink");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame(
+                "qpack dynamic table capacity shrink blocked by referenced entries"
+            )
+        );
+        assert_eq!(
+            before,
+            (
+                context.dynamic_table().len(),
+                context.dynamic_table().size(),
+                context.dynamic_table().capacity(),
+                context.dynamic_table().evicted_count(),
+            )
+        );
+    }
+
+    #[test]
+    fn qpack_encoder_state_inserts_static_dynamic_and_literal_names() {
+        let mut context = QpackContext::new(256);
+        let static_insert = qpack_apply_encoder_instruction(
+            &mut context,
+            H3QpackMode::DynamicTableAllowed,
+            &QpackEncoderInstruction::InsertWithNameReference {
+                name: QpackInstructionNameRef::Static(0),
+                value: "www.example.com".to_string(),
+            },
+        )
+        .expect("static-name insert")
+        .expect("insert id");
+        assert_eq!(
+            qpack_dynamic_entry(context.dynamic_table(), static_insert),
+            Some((":authority", "www.example.com"))
+        );
+
+        let literal_insert = qpack_apply_encoder_instruction(
+            &mut context,
+            H3QpackMode::DynamicTableAllowed,
+            &QpackEncoderInstruction::InsertWithoutNameReference {
+                name: "x-base".to_string(),
+                value: String::new(),
+            },
+        )
+        .expect("literal insert")
+        .expect("insert id");
+        assert_eq!(
+            qpack_dynamic_entry(context.dynamic_table(), literal_insert),
+            Some(("x-base", ""))
+        );
+
+        let dynamic_insert = qpack_apply_encoder_instruction(
+            &mut context,
+            H3QpackMode::DynamicTableAllowed,
+            &QpackEncoderInstruction::InsertWithNameReference {
+                name: QpackInstructionNameRef::Dynamic(0),
+                value: "next".to_string(),
+            },
+        )
+        .expect("dynamic-name insert")
+        .expect("insert id");
+        assert_eq!(
+            qpack_dynamic_entry(context.dynamic_table(), dynamic_insert),
+            Some(("x-base", "next"))
+        );
+    }
+
+    #[test]
+    fn qpack_encoder_state_insert_rejects_unknown_names_and_oversized_entries() {
+        let mut context = QpackContext::new(33);
+        let exact = qpack_apply_encoder_instruction(
+            &mut context,
+            H3QpackMode::DynamicTableAllowed,
+            &QpackEncoderInstruction::InsertWithoutNameReference {
+                name: "x".to_string(),
+                value: String::new(),
+            },
+        )
+        .expect("exact capacity insert")
+        .expect("insert id");
+        assert_eq!(
+            qpack_dynamic_entry(context.dynamic_table(), exact),
+            Some(("x", ""))
+        );
+
+        let err = qpack_apply_encoder_instruction(
+            &mut context,
+            H3QpackMode::DynamicTableAllowed,
+            &QpackEncoderInstruction::InsertWithoutNameReference {
+                name: "xx".to_string(),
+                value: String::new(),
+            },
+        )
+        .expect_err("entry exceeds capacity");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame("qpack dynamic table entry exceeds capacity")
+        );
+
+        let err = qpack_apply_encoder_instruction(
+            &mut context,
+            H3QpackMode::DynamicTableAllowed,
+            &QpackEncoderInstruction::InsertWithNameReference {
+                name: QpackInstructionNameRef::Static(999),
+                value: "value".to_string(),
+            },
+        )
+        .expect_err("unknown static name");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame("unknown static qpack name index")
+        );
+
+        let err = qpack_apply_encoder_instruction(
+            &mut context,
+            H3QpackMode::DynamicTableAllowed,
+            &QpackEncoderInstruction::InsertWithNameReference {
+                name: QpackInstructionNameRef::Dynamic(9),
+                value: "value".to_string(),
+            },
+        )
+        .expect_err("unknown dynamic name");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame("unknown dynamic qpack name index")
+        );
+    }
+
+    #[test]
+    fn qpack_encoder_state_duplicate_handles_pressure_and_evicted_targets() {
+        let mut context = QpackContext::new(100);
+        let old = context
+            .insert_dynamic_entry("old".to_string(), "1".to_string())
+            .expect("insert old");
+        let new = context
+            .insert_dynamic_entry("new".to_string(), "2".to_string())
+            .expect("insert new");
+
+        let duplicate = qpack_apply_encoder_instruction(
+            &mut context,
+            H3QpackMode::DynamicTableAllowed,
+            &QpackEncoderInstruction::Duplicate { index: 0 },
+        )
+        .expect("duplicate newest")
+        .expect("insert id");
+
+        assert!(qpack_dynamic_entry(context.dynamic_table(), old).is_none());
+        assert_eq!(
+            qpack_dynamic_entry(context.dynamic_table(), new),
+            Some(("new", "2"))
+        );
+        assert_eq!(
+            qpack_dynamic_entry(context.dynamic_table(), duplicate),
+            Some(("new", "2"))
+        );
+        assert_eq!(context.dynamic_table().evicted_count(), 1);
+
+        let err = qpack_apply_encoder_instruction(
+            &mut context,
+            H3QpackMode::DynamicTableAllowed,
+            &QpackEncoderInstruction::Duplicate { index: 2 },
+        )
+        .expect_err("duplicate target was evicted");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame("unknown dynamic qpack duplicate index")
+        );
+    }
+
+    #[test]
+    fn qpack_encoder_state_insert_fails_when_all_entries_are_referenced() {
+        let mut context = QpackContext::new(75);
+        let first = context
+            .insert_dynamic_entry("a".to_string(), "1".to_string())
+            .expect("insert first");
+        let second = context
+            .insert_dynamic_entry("b".to_string(), "2".to_string())
+            .expect("insert second");
+        assert!(context.dynamic_table_mut().reference_entry(first));
+        assert!(context.dynamic_table_mut().reference_entry(second));
+
+        let err = qpack_apply_encoder_instruction(
+            &mut context,
+            H3QpackMode::DynamicTableAllowed,
+            &QpackEncoderInstruction::InsertWithoutNameReference {
+                name: "c".to_string(),
+                value: "3".to_string(),
+            },
+        )
+        .expect_err("referenced entries block eviction");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame("qpack dynamic table insert blocked by referenced entries")
+        );
+        assert_eq!(context.dynamic_table().insertion_counter(), 2);
+        assert_eq!(context.dynamic_table().len(), 2);
+    }
+
+    #[test]
+    fn qpack_encoder_state_instruction_sequences_are_deterministic() {
+        let instructions = [
+            QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 96 },
+            QpackEncoderInstruction::InsertWithNameReference {
+                name: QpackInstructionNameRef::Static(0),
+                value: "site".to_string(),
+            },
+            QpackEncoderInstruction::InsertWithoutNameReference {
+                name: "x-test".to_string(),
+                value: "one".to_string(),
+            },
+            QpackEncoderInstruction::InsertWithNameReference {
+                name: QpackInstructionNameRef::Dynamic(0),
+                value: "two".to_string(),
+            },
+            QpackEncoderInstruction::Duplicate { index: 0 },
+        ];
+
+        let mut left = QpackContext::new(128);
+        let mut right = QpackContext::new(128);
+        for instruction in &instructions {
+            qpack_apply_encoder_instruction(
+                &mut left,
+                H3QpackMode::DynamicTableAllowed,
+                instruction,
+            )
+            .expect("left sequence step");
+            qpack_apply_encoder_instruction(
+                &mut right,
+                H3QpackMode::DynamicTableAllowed,
+                instruction,
+            )
+            .expect("right sequence step");
+        }
+
+        let left_entries: Vec<_> = left
+            .dynamic_table()
+            .entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.insertion_id(),
+                    entry.name().to_string(),
+                    entry.value().to_string(),
+                )
+            })
+            .collect();
+        let right_entries: Vec<_> = right
+            .dynamic_table()
+            .entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.insertion_id(),
+                    entry.name().to_string(),
+                    entry.value().to_string(),
+                )
+            })
+            .collect();
+
+        assert_eq!(left_entries, right_entries);
+        assert_eq!(
+            left.dynamic_table().insertion_counter(),
+            right.dynamic_table().insertion_counter()
+        );
+        assert_eq!(left.dynamic_table().size(), right.dynamic_table().size());
+        assert_eq!(
+            left.dynamic_table().evicted_count(),
+            right.dynamic_table().evicted_count()
         );
     }
 
