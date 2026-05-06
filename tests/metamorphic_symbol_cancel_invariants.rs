@@ -5,8 +5,6 @@
 //! 2. Listener notification exactness - each listener called exactly once
 //! 3. State consistency - cancellation flags, reasons, and timestamps are consistent
 
-#![allow(warnings)]
-#![allow(clippy::all)]
 #![allow(missing_docs)]
 
 use asupersync::cancel::symbol_cancel::SymbolCancelToken;
@@ -45,7 +43,7 @@ fn test_cancel_idempotency(seed: u64, num_cancellers: usize) -> (bool, usize, u6
     let cancel_time = Time::from_nanos(1000);
 
     // Spawn multiple concurrent cancellers
-    for i in 0..num_cancellers.min(8) {
+    for _ in 0..num_cancellers.min(8) {
         let token = Arc::clone(&token);
         let reason = reason.clone();
         let successful_cancels = Arc::clone(&successful_cancels);
@@ -89,7 +87,7 @@ fn test_cancel_idempotency(seed: u64, num_cancellers: usize) -> (bool, usize, u6
 /// Test state consistency across cancellation operations.
 fn test_state_consistency(seed: u64, num_operations: usize) -> Vec<bool> {
     let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(TEST_TIMEOUT_STEPS as u64));
-    let region = runtime.state.create_root_region(Budget::INFINITE);
+    let _region = runtime.state.create_root_region(Budget::INFINITE);
     let mut rng = DetRng::new(seed);
 
     let mut consistency_results = Vec::new();
