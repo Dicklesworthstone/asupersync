@@ -125,6 +125,51 @@ mod tests {
     }
 
     #[test]
+    fn budget_time_ext_deadline_boundaries() {
+        init_test("budget_time_ext_deadline_boundaries");
+
+        let unconstrained = Budget::new();
+        assert_eq!(
+            BudgetTimeExt::remaining_duration(&unconstrained, Time::from_secs(5)),
+            None
+        );
+        assert!(!BudgetTimeExt::deadline_elapsed(
+            &unconstrained,
+            Time::from_secs(5)
+        ));
+        assert!(BudgetTimeExt::deadline_sleep(&unconstrained).is_none());
+
+        let deadline = Time::from_secs(10);
+        let budget = Budget::new().with_deadline(deadline);
+
+        assert_eq!(
+            BudgetTimeExt::remaining_duration(&budget, Time::from_secs(4)),
+            Some(Duration::from_secs(6))
+        );
+        assert!(!BudgetTimeExt::deadline_elapsed(
+            &budget,
+            Time::from_secs(4)
+        ));
+        assert!(BudgetTimeExt::deadline_sleep(&budget).is_some());
+
+        assert_eq!(
+            BudgetTimeExt::remaining_duration(&budget, deadline),
+            Some(Duration::ZERO)
+        );
+        assert!(BudgetTimeExt::deadline_elapsed(&budget, deadline));
+
+        assert_eq!(
+            BudgetTimeExt::remaining_duration(&budget, Time::from_secs(12)),
+            Some(Duration::ZERO)
+        );
+        assert!(BudgetTimeExt::deadline_elapsed(
+            &budget,
+            Time::from_secs(12)
+        ));
+        crate::test_complete!("budget_time_ext_deadline_boundaries");
+    }
+
+    #[test]
     fn test_budget_sleep() {
         init_test("test_budget_sleep");
         // `Sleep`'s fallback time source starts at `Time::ZERO` on first poll.
