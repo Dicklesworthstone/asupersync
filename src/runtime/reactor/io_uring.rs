@@ -830,6 +830,9 @@ mod imp {
             let Some(info) = state.registrations.get(&token).copied() else {
                 continue;
             };
+            // Poll completions can arrive after cancellation, deregistration,
+            // or rearm. Only the currently active user_data is allowed to
+            // mutate the registration; older CQEs are stale kernel echoes.
             if info.active_poll_user_data != Some(user_data) {
                 continue;
             }
@@ -1616,6 +1619,117 @@ mod imp {
             );
 
             reactor.deregister(key).expect("deregister should succeed");
+        }
+
+        #[test]
+        fn test_stale_completion_guard_allocator_skips_reserved_and_live_reuse() {
+            let mut state = ReactorState::new();
+            state.next_poll_user_data = WAKE_USER_DATA;
+            state.poll_ops.insert(1, Token::new(1));
+
+            let allocated = state
+                .allocate_poll_user_data()
+                .expect("allocator should skip reserved and live ids after wrap");
+            assert_eq!(
+                allocated, 2,
+                "allocator must skip WAKE, REMOVE, zero, and live poll ids"
+            );
+        }
+
+        #[test]
+        fn test_stale_completion_guard_rearm_preserves_live_poll() {
+            let Some(reactor) = new_or_skip() else {
+                return;
+            };
+
+            let token = Token::new(606);
+            let stale_user_data = 70_001;
+            let live_user_data = 70_002;
+            reactor.bench_seed_registration(token, Interest::READABLE, stale_user_data);
+
+            {
+                let mut state = reactor.state.lock();
+                state.poll_ops.remove(&stale_user_data);
+                state.poll_ops.insert(live_user_data, token);
+                let info = state
+                    .registrations
+                    .get_mut(&token)
+                    .expect("seeded registration must exist");
+                info.active_poll_user_data = Some(live_user_data);
+            }
+
+            let mut events = Events::with_capacity(4);
+            let emitted = reactor.bench_process_completion_batch(
+                &[(stale_user_data, i32::from(libc::POLLIN))],
+                &mut events,
+            );
+            assert_eq!(
+                emitted, 0,
+                "stale old poll completion must not emit readiness"
+            );
+            assert!(
+                events.is_empty(),
+                "stale old poll completion must not enqueue events"
+            );
+            assert_eq!(
+                active_poll_user_data_for_token(&reactor, token),
+                Some(live_user_data),
+                "stale old poll completion must not clear the rearmed live poll"
+            );
+            assert_eq!(
+                tracked_poll_op_count(&reactor),
+                1,
+                "only the rearmed live poll should remain tracked"
+            );
+
+            let emitted = reactor.bench_process_completion_batch(
+                &[(live_user_data, i32::from(libc::POLLIN))],
+                &mut events,
+            );
+            assert_eq!(
+                emitted, 1,
+                "live rearmed completion must still emit readiness"
+            );
+            assert_eq!(events.len(), 1);
+            assert_eq!(events.iter().next().expect("event").token, token);
+            assert_eq!(
+                active_poll_user_data_for_token(&reactor, token),
+                None,
+                "live completion must disarm after emitting readiness"
+            );
+        }
+
+        #[test]
+        fn test_stale_completion_guard_unknown_preserves_live_poll_bookkeeping() {
+            let Some(reactor) = new_or_skip() else {
+                return;
+            };
+
+            let token = Token::new(707);
+            let live_user_data = 80_001;
+            let unknown_user_data = 80_002;
+            reactor.bench_seed_registration(token, Interest::READABLE, live_user_data);
+
+            let mut events = Events::with_capacity(4);
+            let emitted = reactor.bench_process_completion_batch(
+                &[(unknown_user_data, i32::from(libc::POLLIN))],
+                &mut events,
+            );
+            assert_eq!(emitted, 0, "unknown completion must not emit readiness");
+            assert!(
+                events.is_empty(),
+                "unknown completion must not enqueue events"
+            );
+            assert_eq!(
+                active_poll_user_data_for_token(&reactor, token),
+                Some(live_user_data),
+                "unknown completion must not clear live registration state"
+            );
+            assert_eq!(
+                tracked_poll_op_count(&reactor),
+                1,
+                "unknown completion must not perturb tracked poll count"
+            );
         }
 
         #[test]
