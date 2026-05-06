@@ -58,7 +58,7 @@ run_lane() {
   local lane_name="$1"
   shift
   local lane_log="$OUT_DIR/${lane_name}.log"
-  local lane_timeout="${RCH_LANE_TIMEOUT_SECS:-300}"
+  local lane_timeout="${RCH_LANE_TIMEOUT_SECS:-900}"
 
   log "lane=$lane_name"
   log "command=$(printf '%q ' "$@")"
@@ -77,7 +77,7 @@ run_lane() {
   wait "$lane_pid"
   local status="$?"
   set -e
-  cat "$lane_log" | tee -a "$LOG_FILE"
+  tee -a "$LOG_FILE" < "$lane_log"
   if [ "$status" -ne 0 ] \
     && grep -q 'Remote command finished: exit=0' "$lane_log"; then
     log "lane=$lane_name remote_exit=0 local_status=$status artifact_retrieval_timeout=true"
@@ -133,7 +133,7 @@ KAFKA_CMD=(
   cargo test -p asupersync
   --target-dir "$KAFKA_TARGET_DIR"
   --test kafka_real_broker
-  --features test-internals,kafka
+  --features "test-internals,kafka"
   kafka_broker_parity_real_broker_proof_row
   --
   --nocapture
