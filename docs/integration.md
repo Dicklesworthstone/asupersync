@@ -168,6 +168,20 @@ Override via `RuntimeBuilder::obligation_leak_response(...)` or
     QPACK instruction-stream API. This is not a claim of h3/quinn drop-in parity,
     default dynamic QPACK, or full QUIC deployment parity.
   - Support matrix: `artifacts/http3_qpack_support_matrix_v1.json`
+- Web framework: `src/web/` (router, extractors, middleware, request-region
+  wrappers, static files, sessions/cookies, security helpers, and SSE response
+  formatting)
+  - The current wave2 proof lane is `tests/e2e_web.rs`, including route/path
+    extraction, middleware short-circuiting, panic recovery plus security
+    headers, bounded SSE batch response formatting, and request-region panic
+    isolation.
+  - `Sse` currently serializes a finite list of events into one bounded
+    `text/event-stream` body. It is useful for small finite event responses, but
+    it is not long-lived streaming SSE and does not yet model client disconnect
+    or producer backpressure through a request-region-owned stream.
+  - True streaming SSE is tracked by `asupersync-o74l7u.1`. Until that bead is
+    implemented and proven, docs and support matrices must distinguish finite
+    bounded SSE batch responses from request-region-owned streaming SSE.
 
 ### Testing reference
 

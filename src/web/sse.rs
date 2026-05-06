@@ -207,7 +207,7 @@ impl fmt::Display for SseEvent {
 /// responses; the cap is per-response, not per-connection. (The single-shot
 /// non-streaming serialization in [`IntoResponse`] is documented as a
 /// deliberate simplification — true streaming SSE is a follow-up;
-/// br-asupersync-tamnew tracks the architectural change.)
+/// br-asupersync-o74l7u.1 tracks the architectural change.)
 pub const DEFAULT_SSE_MAX_TOTAL_BYTES: usize = 16 * 1024 * 1024;
 
 /// Default cap on event count per response — 100 000. Same defensive
