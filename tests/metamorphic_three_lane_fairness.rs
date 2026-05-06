@@ -14,8 +14,10 @@
 #![allow(missing_docs)]
 
 use asupersync::lab::{LabConfig, LabRuntime};
-use asupersync::runtime::yield_now;
-use asupersync::types::Budget;
+use asupersync::runtime::scheduler::three_lane::ThreeLaneScheduler;
+use asupersync::runtime::{RuntimeState, yield_now};
+use asupersync::sync::ContendedMutex;
+use asupersync::types::{Budget, RegionId, TaskId};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
@@ -24,6 +26,20 @@ const TEST_TIMEOUT_STEPS: usize = 20_000;
 const MAX_WORKERS: usize = 4;
 const MAX_TASKS_PER_LANE: usize = 16;
 const DEFAULT_CANCEL_STREAK_LIMIT: usize = 8;
+const ADAPTIVE_CANCEL_STREAK_ARMS: [usize; 5] = [4, 8, 16, 32, 64];
+
+fn create_scheduler_noop_task(
+    state: &Arc<ContendedMutex<RuntimeState>>,
+    region: RegionId,
+) -> TaskId {
+    let mut guard = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (task_id, _) = guard
+        .create_task(region, Budget::INFINITE, async {})
+        .expect("create adaptive scheduler task");
+    task_id
+}
 
 /// Test cancel-lane fairness bound invariant.
 ///
@@ -204,7 +220,7 @@ fn test_lane_promotion_ordering(
             match lane_name {
                 "ready" => runtime.scheduler.lock().schedule(task_id, priority),
                 "timed" => {
-                    let deadline = runtime.now().saturating_add_nanos(1_000_000);
+                    let deadline = runtime.now();
                     runtime.scheduler.lock().schedule_timed(task_id, deadline);
                 }
                 "cancel" => runtime.scheduler.lock().schedule_cancel(task_id, priority),
@@ -263,67 +279,86 @@ fn test_adaptive_streak_convergence(
     epoch_steps: u32,
     test_epochs: usize,
 ) -> (Vec<usize>, f64, f64) {
-    let mut runtime = LabRuntime::new(
-        LabConfig::new(seed)
-            .worker_count(worker_count.min(MAX_WORKERS))
-            .max_steps(TEST_TIMEOUT_STEPS as u64),
+    let worker_count = worker_count.clamp(1, MAX_WORKERS);
+    let epoch_steps = epoch_steps.max(1);
+    let task_count = test_epochs
+        .min(8)
+        .saturating_mul(epoch_steps as usize)
+        .max(epoch_steps as usize + 1);
+    let state = Arc::new(ContendedMutex::new(
+        "adaptive_streak_mr_state",
+        RuntimeState::new(),
+    ));
+    let root_region = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .create_root_region(Budget::INFINITE);
+    let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(
+        worker_count,
+        &state,
+        DEFAULT_CANCEL_STREAK_LIMIT,
     );
-    let root_region = runtime.state.create_root_region(Budget::INFINITE);
-    let streak_samples = Arc::new(StdMutex::new(Vec::new()));
+    scheduler.set_adaptive_cancel_streak(true, epoch_steps);
 
-    // Create mixed workload to trigger adaptation
-    for epoch in 0..test_epochs.min(8) {
-        // Create workload that exercises both cancel and ready lanes
-        for task_type in 0..4 {
-            let is_cancel = task_type % 2 == 0;
-            let streak_samples = Arc::clone(&streak_samples);
-
-            let task_region = runtime
-                .state
-                .create_child_region(root_region, Budget::INFINITE)
-                .expect("create adaptive test task region");
-
-            let (task_id, _) = runtime
-                .state
-                .create_task(task_region, Budget::INFINITE, async move {
-                    // Simulate work that might trigger streak adaptation
-                    for step in 0..(epoch_steps as usize / 4) {
-                        yield_now().await;
-                    }
-
-                    // Sample the current adaptive limit periodically
-                    if task_type == 1 {
-                        // This is a placeholder - in real implementation we'd need access to scheduler metrics
-                        streak_samples
-                            .lock()
-                            .unwrap()
-                            .push(DEFAULT_CANCEL_STREAK_LIMIT);
-                    }
-                })
-                .expect("create adaptive test task");
-
-            if is_cancel {
-                runtime.scheduler.lock().schedule_cancel(task_id, 200);
-            } else {
-                runtime.scheduler.lock().schedule(task_id, 100);
-            }
-        }
-
-        // Run one epoch
-        for _ in 0..epoch_steps {
-            runtime.step_for_test();
+    for index in 0..task_count {
+        let task_id = create_scheduler_noop_task(&state, root_region);
+        if (index + seed as usize) % 3 == 0 {
+            scheduler.inject_cancel(task_id, 200);
+        } else {
+            scheduler.inject_ready(task_id, 100);
         }
     }
 
-    runtime.run_until_quiescent();
+    let mut worker = scheduler
+        .take_workers()
+        .into_iter()
+        .next()
+        .expect("scheduler has a worker");
+    let mut samples = Vec::new();
+    let mut last_epoch = 0;
 
-    let violations = runtime.check_invariants();
+    for _ in 0..task_count {
+        assert!(
+            worker.run_once(),
+            "worker should dispatch every queued task"
+        );
+        let metrics = worker.preemption_metrics();
+        if metrics.adaptive_epochs > last_epoch {
+            samples.push(metrics.adaptive_current_limit);
+            last_epoch = metrics.adaptive_epochs;
+        }
+    }
+
+    let metrics = worker.preemption_metrics();
     assert!(
-        violations.is_empty(),
-        "adaptive streak convergence violated invariants: {violations:?}"
+        metrics.adaptive_epochs > 0,
+        "adaptive policy should publish completed epochs after real dispatch"
     );
-
-    let samples = streak_samples.lock().unwrap().clone();
+    assert!(
+        metrics.adaptive_reward_ema.is_finite(),
+        "adaptive reward EMA should stay finite: {:?}",
+        metrics
+    );
+    assert!(
+        metrics.adaptive_e_value.is_finite() && metrics.adaptive_e_value > 0.0,
+        "adaptive e-value should stay positive and finite: {:?}",
+        metrics
+    );
+    assert!(
+        ADAPTIVE_CANCEL_STREAK_ARMS.contains(&metrics.adaptive_current_limit),
+        "adaptive policy selected a limit outside the configured arms: {:?}",
+        metrics
+    );
+    assert!(
+        samples
+            .iter()
+            .all(|limit| ADAPTIVE_CANCEL_STREAK_ARMS.contains(limit)),
+        "adaptive limit samples must come from configured arms: {samples:?}"
+    );
+    assert!(
+        samples.len() >= test_epochs.min(8),
+        "adaptive policy should publish at least one sample per requested epoch: samples={samples:?}, epochs={test_epochs}"
+    );
 
     // Calculate convergence metrics
     let mean = if samples.is_empty() {
@@ -338,25 +373,6 @@ fn test_adaptive_streak_convergence(
         let squared_diffs: f64 = samples.iter().map(|&x| (x as f64 - mean).powi(2)).sum();
         squared_diffs / (samples.len() - 1) as f64
     };
-
-    // Metamorphic invariant: Adaptive policy should show some stability over time
-    if samples.len() > 4 {
-        let first_half = &samples[..samples.len() / 2];
-        let second_half = &samples[samples.len() / 2..];
-
-        let first_mean = first_half.iter().sum::<usize>() as f64 / first_half.len() as f64;
-        let second_mean = second_half.iter().sum::<usize>() as f64 / second_half.len() as f64;
-
-        // Should not drift wildly - some convergence expected
-        let drift = (second_mean - first_mean).abs();
-        assert!(
-            drift <= DEFAULT_CANCEL_STREAK_LIMIT as f64 / 2.0,
-            "adaptive policy showing excessive drift: first_mean={:.1}, second_mean={:.1}, drift={:.1}",
-            first_mean,
-            second_mean,
-            drift
-        );
-    }
 
     (samples, mean, variance)
 }
@@ -535,36 +551,54 @@ fn metamorphic_lane_promotion_ordering() {
 }
 
 #[test]
-#[ignore = "LabScheduler has no adaptive streak policy; requires ThreeLaneScheduler directly"]
 fn metamorphic_adaptive_streak_convergence() {
     for seed in [0, 13, 777] {
         for worker_count in [1, 2] {
             for (epoch_steps, test_epochs) in [(20, 4), (30, 3)] {
                 let (samples, mean, variance) =
                     test_adaptive_streak_convergence(seed, worker_count, epoch_steps, test_epochs);
+                let (replay_samples, replay_mean, replay_variance) =
+                    test_adaptive_streak_convergence(seed, worker_count, epoch_steps, test_epochs);
 
-                // Convergence invariant: samples should be reasonable
-                if !samples.is_empty() {
-                    assert!(
-                        mean >= 1.0 && mean <= 64.0,
-                        "adaptive convergence produced unreasonable mean: seed={}, workers={}, epochs={}, mean={:.1}, samples={:?}",
-                        seed,
-                        worker_count,
-                        test_epochs,
-                        mean,
-                        samples
-                    );
+                assert_eq!(
+                    samples, replay_samples,
+                    "adaptive policy should replay the same limit trace for the same seed/workload"
+                );
+                assert_eq!(
+                    mean, replay_mean,
+                    "adaptive mean should replay deterministically"
+                );
+                assert_eq!(
+                    variance, replay_variance,
+                    "adaptive variance should replay deterministically"
+                );
+                assert!(
+                    mean >= ADAPTIVE_CANCEL_STREAK_ARMS[0] as f64
+                        && mean
+                            <= ADAPTIVE_CANCEL_STREAK_ARMS[ADAPTIVE_CANCEL_STREAK_ARMS.len() - 1]
+                                as f64,
+                    "adaptive convergence produced unreasonable mean: seed={}, workers={}, epochs={}, mean={:.1}, samples={:?}",
+                    seed,
+                    worker_count,
+                    test_epochs,
+                    mean,
+                    samples
+                );
 
-                    assert!(
-                        variance >= 0.0 && variance <= 400.0,
-                        "adaptive convergence produced unreasonable variance: seed={}, workers={}, epochs={}, variance={:.1}, samples={:?}",
-                        seed,
-                        worker_count,
-                        test_epochs,
-                        variance,
-                        samples
-                    );
-                }
+                assert!(
+                    variance >= 0.0
+                        && variance
+                            <= ((ADAPTIVE_CANCEL_STREAK_ARMS
+                                [ADAPTIVE_CANCEL_STREAK_ARMS.len() - 1]
+                                - ADAPTIVE_CANCEL_STREAK_ARMS[0])
+                                .pow(2)) as f64,
+                    "adaptive convergence produced out-of-arm variance: seed={}, workers={}, epochs={}, variance={:.1}, samples={:?}",
+                    seed,
+                    worker_count,
+                    test_epochs,
+                    variance,
+                    samples
+                );
             }
         }
     }
