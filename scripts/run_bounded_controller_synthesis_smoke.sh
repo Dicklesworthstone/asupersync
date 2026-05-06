@@ -13,6 +13,8 @@ TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 RUN_DIR="${OUTPUT_ROOT}/run_${TIMESTAMP}"
 LIST_ONLY=0
 DRY_RUN=1
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_WRAPPER_TIMEOUT="${RCH_WRAPPER_TIMEOUT:-600}"
 
 declare -a SELECTED_SCENARIOS=()
 
@@ -34,12 +36,16 @@ require_tools() {
     if ! command -v jq >/dev/null 2>&1; then
         echo "FATAL: jq is required" >&2; exit 1
     fi
+    if [[ "$DRY_RUN" -eq 0 ]] && ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+        echo "FATAL: rch binary not found: ${RCH_BIN}" >&2; exit 127
+    fi
     if [ ! -f "$CONTRACT_ARTIFACT" ]; then
         echo "FATAL: contract artifact missing at ${CONTRACT_ARTIFACT}" >&2; exit 1
     fi
 }
 
 json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+shell_join() { printf '%q ' "$@"; }
 contract_version() { jq -r '.contract_version' "$CONTRACT_ARTIFACT"; }
 bundle_schema_version() { jq -r '.runner_bundle_schema_version' "$CONTRACT_ARTIFACT"; }
 report_schema_version() { jq -r '.runner_report_schema_version' "$CONTRACT_ARTIFACT"; }
@@ -59,19 +65,40 @@ append_result() {
 }
 
 run_scenario() {
-    local sid="$1" scenario_json description command scenario_dir log_file summary_file started_ts ended_ts status rc
+    local sid="$1" scenario_json description contract_command test_filter scenario_dir log_file summary_file started_ts ended_ts status rc actual_command
     scenario_json="$(load_scenario_json "$sid")"
     [[ -z "$scenario_json" ]] && { echo "FATAL: unknown scenario: $sid" >&2; return 1; }
     description="$(jq -r '.description' <<<"$scenario_json")"
-    command="$(jq -r '.command' <<<"$scenario_json")"
+    contract_command="$(jq -r '.command' <<<"$scenario_json")"
+    test_filter="$(jq -r '.test_filter // empty' <<<"$scenario_json")"
     scenario_dir="${RUN_DIR}/${sid}"; log_file="${scenario_dir}/run.log"; summary_file="${scenario_dir}/bundle_manifest.json"
     mkdir -p "$scenario_dir"
     started_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo ">>> Running scenario ${sid}"
+    local safe_sid="${sid//[^A-Za-z0-9_]/_}"
+    local -a command=(
+        "$RCH_BIN" exec --
+        env
+        CARGO_INCREMENTAL=0
+        CARGO_PROFILE_TEST_DEBUG=0
+        "RUSTFLAGS=-C debuginfo=0"
+        "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_bounded_controller_synthesis_${safe_sid}"
+        cargo test -p asupersync --test bounded_controller_synthesis_contract
+    )
+    if [[ -n "$test_filter" ]]; then
+        command+=("$test_filter")
+    fi
+    command+=(-- --nocapture)
+    actual_command="$(shell_join "${command[@]}")"
     if [[ "$DRY_RUN" -eq 1 ]]; then
-        printf 'DRY_RUN scenario=%s\n' "$sid" >"$log_file"; rc=0; status="dry_run"
+        printf 'DRY_RUN scenario=%s\ncommand=%s\n' "$sid" "$actual_command" >"$log_file"; rc=0; status="dry_run"
     else
-        rc=0; eval "$command" >"$log_file" 2>&1 || rc=$?
+        rc=0
+        timeout "$RCH_WRAPPER_TIMEOUT" "${command[@]}" >"$log_file" 2>&1 || rc=$?
+        if grep -Eiq 'local fallback|fallback to local|executing locally' "$log_file"; then
+            printf '\nFATAL: rch local fallback detected; refusing local cargo execution\n' >>"$log_file"
+            rc=86
+        fi
         status="$( [[ "$rc" -eq 0 ]] && printf "passed" || printf "failed" )"
     fi
     ended_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -83,6 +110,10 @@ run_scenario() {
   "description": "$(json_escape "$description")",
   "status": "$(json_escape "$status")",
   "exit_code": ${rc},
+  "contract_command": "$(json_escape "$contract_command")",
+  "executed_command": "$(json_escape "$actual_command")",
+  "rch_binary": "$(json_escape "$RCH_BIN")",
+  "validation_passed": $( [[ "$rc" -eq 0 ]] && printf 'true' || printf 'false' ),
   "started_ts": "$(json_escape "$started_ts")",
   "ended_ts": "$(json_escape "$ended_ts")"
 }
@@ -119,6 +150,9 @@ cat >"$RUN_REPORT" <<JSON
   "contract_version": "$(json_escape "$(contract_version)")",
   "run_dir": "$(json_escape "$RUN_DIR")",
   "dry_run": $( [[ "$DRY_RUN" -eq 1 ]] && printf 'true' || printf 'false' ),
+  "rch_required": true,
+  "rch_binary": "$(json_escape "$RCH_BIN")",
+  "validation_passed": $( [[ "$OVERALL_RC" -eq 0 ]] && printf 'true' || printf 'false' ),
   "results": [${RESULTS_JSON}],
   "status": "$([ "$OVERALL_RC" -eq 0 ] && printf "passed" || printf "failed")"
 }

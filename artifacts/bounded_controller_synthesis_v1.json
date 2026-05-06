@@ -110,17 +110,20 @@
     {
       "scenario_id": "BCS-SMOKE-DOMAINS",
       "description": "Validate controller domain catalog and action sets",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa032 cargo test --test bounded_controller_synthesis_contract domain -- --nocapture"
+      "test_filter": "domain",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_bounded_controller_synthesis cargo test -p asupersync --test bounded_controller_synthesis_contract domain -- --nocapture"
     },
     {
       "scenario_id": "BCS-SMOKE-LOSS",
       "description": "Validate loss model computation and calibration protocol",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa032 cargo test --test bounded_controller_synthesis_contract loss -- --nocapture"
+      "test_filter": "loss",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_bounded_controller_synthesis cargo test -p asupersync --test bounded_controller_synthesis_contract loss -- --nocapture"
     },
     {
       "scenario_id": "BCS-SMOKE-ARTIFACT",
       "description": "Validate artifact format compatibility with AA-02",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa032 cargo test --test bounded_controller_synthesis_contract artifact -- --nocapture"
+      "test_filter": "artifact",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_bounded_controller_synthesis cargo test -p asupersync --test bounded_controller_synthesis_contract artifact -- --nocapture"
     }
   ],
   "downstream_beads": [

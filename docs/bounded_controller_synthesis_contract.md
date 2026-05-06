@@ -95,7 +95,7 @@ bash ./scripts/run_bounded_controller_synthesis_smoke.sh --scenario BCS-SMOKE-DO
 Focused invariant test command (routed through `rch`):
 
 ```bash
-rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa032 cargo test --test bounded_controller_synthesis_contract -- --nocapture
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_bounded_controller_synthesis cargo test -p asupersync --test bounded_controller_synthesis_contract -- --nocapture
 ```
 
 ## Cross-References

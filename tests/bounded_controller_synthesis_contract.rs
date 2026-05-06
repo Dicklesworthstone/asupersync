@@ -93,7 +93,7 @@ fn doc_reproduction_command_uses_rch() {
     let doc = load_doc();
     assert!(
         doc.contains(
-            "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa032 cargo test --test bounded_controller_synthesis_contract -- --nocapture"
+            "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_bounded_controller_synthesis cargo test -p asupersync --test bounded_controller_synthesis_contract -- --nocapture"
         ),
         "doc must route heavy validation through rch"
     );
@@ -376,7 +376,25 @@ fn smoke_scenarios_are_rch_routed() {
     for scenario in scenarios {
         let sid = scenario["scenario_id"].as_str().unwrap();
         let cmd = scenario["command"].as_str().unwrap();
-        assert!(cmd.contains("rch exec --"), "scenario {sid} must use rch");
+        assert!(
+            cmd.contains("RCH_BIN"),
+            "scenario {sid} must use configurable rch"
+        );
+        assert!(cmd.contains("exec --"), "scenario {sid} must use rch exec");
+        assert!(
+            cmd.contains("CARGO_TARGET_DIR=${TMPDIR:-/tmp}/"),
+            "scenario {sid} must use TMPDIR-aware target dir"
+        );
+        assert!(
+            cmd.contains("cargo test -p asupersync"),
+            "scenario {sid} must scope cargo test to asupersync"
+        );
+        assert!(
+            scenario["test_filter"]
+                .as_str()
+                .is_some_and(|filter| !filter.is_empty()),
+            "scenario {sid} must pin a test filter"
+        );
     }
 }
 
@@ -391,11 +409,18 @@ fn runner_script_exists_and_declares_modes() {
         "--scenario",
         "--dry-run",
         "--execute",
+        "RCH_BIN",
+        "local fallback",
+        "validation_passed",
         "bounded-controller-synthesis-smoke-bundle-v1",
         "bounded-controller-synthesis-smoke-run-report-v1",
     ] {
         assert!(script.contains(token), "runner missing token: {token}");
     }
+    assert!(
+        !script.contains("eval "),
+        "runner must avoid string-based eval execution"
+    );
 }
 
 // ── Downstream beads ─────────────────────────────────────────────────
