@@ -7,6 +7,19 @@ echo "════════════════════════�
 
 export RUST_LOG="${RUST_LOG:-trace}"
 export RUST_BACKTRACE=1
+RCH_BIN="${RCH_BIN:-rch}"
+CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_cancel_attribution}"
+DRY_RUN=0
+
+if [[ "${1:-}" == "--dry-run" ]]; then
+    DRY_RUN=1
+    shift
+fi
+
+if [[ "$#" -gt 0 ]]; then
+    echo "usage: $0 [--dry-run]" >&2
+    exit 2
+fi
 
 OUTPUT_DIR="target/test-results/cancel-attribution"
 mkdir -p "$OUTPUT_DIR"
@@ -17,19 +30,56 @@ SUMMARY_TEXT_FILE="$OUTPUT_DIR/summary_${TIMESTAMP}.txt"
 SUMMARY_FILE="$OUTPUT_DIR/summary_${TIMESTAMP}.json"
 SUITE_ID="cancel-attribution_e2e"
 SCENARIO_ID="E2E-SUITE-CANCEL-ATTRIBUTION"
-REPRO_COMMAND="TEST_SEED=${TEST_SEED:-0xDEADBEEF} RUST_LOG=${RUST_LOG} bash ./scripts/$(basename "$0")"
+REPRO_COMMAND="TEST_SEED=${TEST_SEED:-0xDEADBEEF} RUST_LOG=${RUST_LOG} RCH_BIN=${RCH_BIN} CARGO_TARGET_DIR=${CARGO_TARGET_DIR} bash ./scripts/$(basename "$0")"
 
 echo "" > "$SUMMARY_TEXT_FILE"
+
+format_command() {
+    local rendered
+    printf -v rendered "%q " "$@"
+    printf '%s' "${rendered% }"
+}
+
+json_escape() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//$'\n'/\\n}"
+    printf '%s' "${value}"
+}
 
 run_test() {
     local name="$1"
     local pattern="$2"
     local log_file="$OUTPUT_DIR/${name}_${TIMESTAMP}.log"
+    local test_command=(
+        "${RCH_BIN}"
+        exec
+        --
+        env
+        "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
+        "RUST_LOG=${RUST_LOG}"
+        "RUST_BACKTRACE=${RUST_BACKTRACE}"
+        "TEST_SEED=${TEST_SEED:-0xDEADBEEF}"
+        cargo
+        test
+        "$pattern"
+        --test
+        cancel_attribution
+        --
+        --nocapture
+    )
 
     echo ""
     echo "▶ Running ${name}..."
 
-    if cargo test "$pattern" --test cancel_attribution -- --nocapture 2>&1 | tee "$log_file"; then
+    if [[ "${DRY_RUN}" -eq 1 ]]; then
+        format_command "${test_command[@]}" | tee "$log_file"
+        echo "  ${name}: PLANNED" >> "$SUMMARY_TEXT_FILE"
+        return 0
+    fi
+
+    if "${test_command[@]}" 2>&1 | tee "$log_file"; then
         local passed=$(grep -c "test .* ok" "$log_file" || true)
         echo "  ✓ ${name}: PASSED ($passed tests)" >> "$SUMMARY_TEXT_FILE"
         return 0
@@ -89,6 +139,17 @@ SUITE_STATUS="failed"
 if [ "$FAILURES" -eq 0 ]; then
     SUITE_STATUS="passed"
 fi
+if [[ "${DRY_RUN}" -eq 1 ]]; then
+    SUITE_STATUS="planned"
+fi
+DRY_RUN_JSON=false
+if [[ "${DRY_RUN}" -eq 1 ]]; then
+    DRY_RUN_JSON=true
+fi
+FAILURE_CLASS="test_or_pattern_failure"
+if [[ "${SUITE_STATUS}" == "passed" || "${SUITE_STATUS}" == "planned" ]]; then
+    FAILURE_CLASS="none"
+fi
 
 cat > "$SUMMARY_FILE" << ENDJSON
 {
@@ -99,13 +160,17 @@ cat > "$SUMMARY_FILE" << ENDJSON
   "started_ts": "${RUN_STARTED_TS}",
   "ended_ts": "${RUN_ENDED_TS}",
   "status": "${SUITE_STATUS}",
-  "repro_command": "${REPRO_COMMAND}",
-  "artifact_path": "${SUMMARY_FILE}",
+  "failure_class": "${FAILURE_CLASS}",
+  "dry_run": ${DRY_RUN_JSON},
+  "runner": "rch exec",
+  "all_rch_routed": true,
+  "repro_command": "$(json_escape "${REPRO_COMMAND}")",
+  "artifact_path": "$(json_escape "${SUMMARY_FILE}")",
   "suite": "${SUITE_ID}",
   "tests_passed": ${PASSED},
   "tests_failed": ${FAILED},
   "failure_groups": ${FAILURES},
-  "log_dir": "${OUTPUT_DIR}"
+  "log_dir": "$(json_escape "${OUTPUT_DIR}")"
 }
 ENDJSON
 
@@ -113,6 +178,12 @@ echo ""
 echo "Tests passed: $PASSED"
 echo "Tests failed: $FAILED"
 echo "Summary: $SUMMARY_FILE"
+
+if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo ""
+    echo "Cancel attribution tests planned; Cargo was not executed."
+    exit 0
+fi
 
 if [ "$FAILURES" -gt 0 ]; then
     echo ""
