@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Evidence Bundle Assembly Validation (SEM-09.2)
 //!
 //! Validates that the evidence bundle assembly script exists, supports all
