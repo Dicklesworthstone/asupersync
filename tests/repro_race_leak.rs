@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Repro test for race loser cancellation behavior.
 
 mod common;
