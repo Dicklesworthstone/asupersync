@@ -5,17 +5,17 @@
 #   bash scripts/nats_jetstream_broker_parity_proof_runner.sh [output-dir]
 #
 # Default output:
-#   target/messaging-broker-proof/asupersync-6xjxd7/{run.log,scenario_rows.jsonl,run_report.json}
+#   target/messaging-broker-proof/$ASUPERSYNC_BROKER_PROOF_BEAD_ID/{run.log,scenario_rows.jsonl,run_report.json}
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-OUT_DIR="${1:-$PROJECT_DIR/target/messaging-broker-proof/asupersync-6xjxd7}"
+BEAD_ID="${ASUPERSYNC_BROKER_PROOF_BEAD_ID:-asupersync-6xjxd7}"
+OUT_DIR="${1:-$PROJECT_DIR/target/messaging-broker-proof/$BEAD_ID}"
 LOG_FILE="$OUT_DIR/run.log"
 ROWS_FILE="$OUT_DIR/scenario_rows.jsonl"
 REPORT_FILE="$OUT_DIR/run_report.json"
-BEAD_ID="asupersync-6xjxd7"
 
 EXPECTED_SCENARIOS=(
   "nats-pub-sub-roundtrip"
@@ -211,7 +211,7 @@ if [[ -z "${REAL_NATS_TESTS+x}" ]]; then
       fi
       ;;
     jetstream)
-      if [[ "${JETSTREAM_PROOF_AUTO_BROKER:-false}" == "true" ]]; then
+      if [[ "${JETSTREAM_PROOF_AUTO_BROKER:-true}" == "true" ]]; then
         export REAL_NATS_TESTS=true
       fi
       ;;
@@ -266,7 +266,7 @@ run_cargo_test() {
   log "command[$label]=$(printf '%q ' "${cmd[@]}")"
 
   set +e
-  timeout "${RCH_COMMAND_TIMEOUT_SECS:-300}" "${cmd[@]}" 2>&1 | tee -a "$LOG_FILE" "$cmd_log"
+  timeout "${RCH_COMMAND_TIMEOUT_SECS:-900}" "${cmd[@]}" 2>&1 | tee -a "$LOG_FILE" "$cmd_log"
   local status="${PIPESTATUS[0]}"
   set -e
 
@@ -407,7 +407,7 @@ AUTH_MODE="$(auth_mode "${NATS_TEST_URL:-${NATS_URL:-}}")"
 BROKER_VERSION="$(broker_version)"
 REAL_NATS_TESTS_MODE="${REAL_NATS_TESTS:-auto}"
 NATS_PROOF_AUTO_BROKER_MODE="${NATS_PROOF_AUTO_BROKER:-true}"
-JETSTREAM_PROOF_AUTO_BROKER_MODE="${JETSTREAM_PROOF_AUTO_BROKER:-false}"
+JETSTREAM_PROOF_AUTO_BROKER_MODE="${JETSTREAM_PROOF_AUTO_BROKER:-true}"
 
 log "bead_id=$BEAD_ID"
 log "output_dir=$OUT_DIR"
