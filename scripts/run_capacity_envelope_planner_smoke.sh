@@ -11,6 +11,7 @@ SCENARIO=""
 OUTPUT_ROOT_OVERRIDE="${CAPACITY_ENVELOPE_SMOKE_OUTPUT_DIR:-}"
 ARTIFACT_ROOT_OVERRIDE="${CAPACITY_ENVELOPE_SMOKE_ARTIFACT_ROOT:-}"
 RUN_ID_OVERRIDE="${CAPACITY_ENVELOPE_SMOKE_RUN_ID:-}"
+RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
 
 usage() {
     cat <<'EOF'
@@ -34,6 +35,14 @@ require_tools() {
             missing=1
         fi
     done
+    if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+        echo "FATAL: rch is required and was not found/executable at: ${RCH_BIN}" >&2
+        missing=1
+    fi
+    if [ ! -f "$ARTIFACT" ]; then
+        echo "FATAL: contract artifact missing at ${ARTIFACT}" >&2
+        missing=1
+    fi
     if [ "$missing" -ne 0 ]; then
         exit 1
     fi
@@ -166,7 +175,8 @@ mkdir -p "$RUN_DIR"
 HOST_FINGERPRINT_JSON="$(host_fingerprint_json)"
 STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-COMMAND="rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_capacity_envelope_planner ASUPERSYNC_CAPACITY_ENVELOPE_CONTRACT_PATH=${ARTIFACT} ASUPERSYNC_CAPACITY_ENVELOPE_SCENARIO=${SCENARIO} ASUPERSYNC_CAPACITY_ENVELOPE_REPORT_PATH=${SCENARIO_REPORT_PATH} cargo test -p asupersync --test capacity_envelope_planner_contract capacity_envelope_smoke_contract_emits_report --features test-internals -- --nocapture"
+printf -v RCH_INVOCATION '%q' "$RCH_BIN"
+COMMAND="${RCH_INVOCATION} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_capacity_envelope_planner ASUPERSYNC_CAPACITY_ENVELOPE_CONTRACT_PATH=${ARTIFACT} ASUPERSYNC_CAPACITY_ENVELOPE_SCENARIO=${SCENARIO} ASUPERSYNC_CAPACITY_ENVELOPE_REPORT_PATH=${SCENARIO_REPORT_PATH} cargo test -p asupersync --test capacity_envelope_planner_contract capacity_envelope_smoke_contract_emits_report --features test-internals -- --nocapture"
 
 COMMAND_EXIT_CODE=0
 SCRIPT_EXIT_CODE=0
@@ -204,6 +214,13 @@ else
         if grep -Eq 'Remote command finished: exit=[1-9][0-9]*' "$RUN_LOG_PATH" 2>/dev/null; then
             break
         fi
+        if grep -Eq '^\[RCH\] local \(|falling back to local' "$RUN_LOG_PATH" 2>/dev/null; then
+            kill "$COMMAND_PID" 2>/dev/null || true
+            wait "$COMMAND_PID" 2>/dev/null || true
+            COMMAND_EXIT_CODE=86
+            printf 'FATAL: rch local fallback detected; refusing local cargo execution\n' >>"$RUN_LOG_PATH"
+            break
+        fi
         sleep 1
         POLL_SECONDS=$((POLL_SECONDS + 1))
         if [ "$POLL_SECONDS" -ge "$MAX_POLL_SECONDS" ]; then
@@ -222,6 +239,12 @@ else
         set -e
     fi
 
+    if [ "$COMMAND_EXIT_CODE" -ne 86 ] \
+        && grep -Eq '^\[RCH\] local \(|falling back to local' "$RUN_LOG_PATH" 2>/dev/null; then
+        COMMAND_EXIT_CODE=86
+        printf 'FATAL: rch local fallback detected; refusing local cargo execution\n' >>"$RUN_LOG_PATH"
+    fi
+
     if [ "$COMMAND_EXIT_CODE" -eq 0 ]; then
         if [ "$EARLY_SUCCESS" -eq 1 ]; then
             MESSAGE="rch proof passed before retrieval tail timeout"
@@ -231,7 +254,11 @@ else
     else
         SCRIPT_EXIT_CODE=$COMMAND_EXIT_CODE
         STATUS="failed"
-        MESSAGE="rch proof command failed"
+        if [ "$COMMAND_EXIT_CODE" -eq 86 ]; then
+            MESSAGE="rch local fallback detected; refusing local cargo execution"
+        else
+            MESSAGE="rch proof command failed"
+        fi
     fi
 
     if [ "$STATUS" = "passed" ]; then
@@ -291,6 +318,7 @@ jq -n \
     --arg status "$STATUS" \
     --arg message "$MESSAGE" \
     --arg mode "$MODE" \
+    --arg command "$COMMAND" \
     --arg report_path "$SCENARIO_REPORT_PATH" \
     --arg bundle_manifest_path "$BUNDLE_MANIFEST_PATH" \
     --arg run_log_path "$RUN_LOG_PATH" \
@@ -306,6 +334,7 @@ jq -n \
         status: $status,
         message: $message,
         mode: $mode,
+        command: $command,
         validation_passed: $validation_passed,
         command_exit_code: $command_exit_code,
         script_exit_code: $script_exit_code,
