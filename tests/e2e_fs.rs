@@ -58,6 +58,7 @@ const FS_PARITY_WAVE2_SCENARIOS: &[&str] = &[
     "path-ops-copy-hardlink-rename",
     "unix-symlink-metadata-readlink",
     "io-uring-cancellation-support-boundary",
+    "io-uring-unknown-completion-attribution",
     "read-dir-drop-cancellation",
 ];
 
@@ -1110,6 +1111,38 @@ async fn fs_proof_io_uring_cancellation_support_boundary(
     }
 }
 
+async fn fs_proof_io_uring_unknown_completion_attribution(
+    temp_root: &Path,
+) -> Result<FsProofEvidence, String> {
+    let dir = fs_proof_scenario_dir(temp_root, "io-uring-unknown-completion-attribution")?;
+
+    #[cfg(all(target_os = "linux", feature = "io-uring"))]
+    {
+        let payload = b"unknown-cqe-proof";
+        fs::uring::test_internals::ignores_unknown_completion_before_read(
+            &dir.join("unknown-cqe-read.txt"),
+            payload,
+        )
+        .await
+        .map_err(|err| format!("io_uring unknown completion attribution probe: {err}"))?;
+
+        Ok(FsProofEvidence::supported(
+            payload.len() as u64,
+            "unknown_completion_ignored=true,tracked_read_matches_payload=true",
+        ))
+    }
+    #[cfg(not(all(target_os = "linux", feature = "io-uring")))]
+    {
+        Ok(FsProofEvidence {
+            bytes_actual: 0,
+            metadata_actual:
+                "io_uring_feature_enabled=false,unknown_completion_probe=unsupported".to_string(),
+            unsupported_reason: "io_uring unknown-completion attribution proof requires linux target and io-uring feature"
+                .to_string(),
+        })
+    }
+}
+
 async fn fs_proof_read_dir_drop_cancellation(temp_root: &Path) -> Result<FsProofEvidence, String> {
     let dir = fs_proof_scenario_dir(temp_root, "read-dir-drop-cancellation")?;
     for idx in 0..8 {
@@ -1322,6 +1355,15 @@ async fn fs_parity_wave2_run() -> io::Result<Vec<Value>> {
             metadata_expected: "kernel_inflight_cancel=not_assumed,drop_drains_pending_ops=read|write|sync_or_unsupported,stale_completion_attribution=true_or_unsupported",
             cancellation_point: "drop_pending_read",
             result: fs_proof_io_uring_cancellation_support_boundary(&temp_root).await,
+        },
+        FsProofScenario {
+            scenario_id: "io-uring-unknown-completion-attribution",
+            api: "IoUringFile",
+            operation: "unknown_completion_before_tracked_read",
+            bytes_expected: 17,
+            metadata_expected: "unknown_completion_ignored=true,tracked_read_matches_payload=true",
+            cancellation_point: "unknown_cqe_before_read",
+            result: fs_proof_io_uring_unknown_completion_attribution(&temp_root).await,
         },
         FsProofScenario {
             scenario_id: "read-dir-drop-cancellation",

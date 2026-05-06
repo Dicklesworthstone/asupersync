@@ -754,7 +754,7 @@ impl IoUringFile {
 #[cfg(feature = "test-internals")]
 #[doc(hidden)]
 pub mod test_internals {
-    use super::IoUringFile;
+    use super::{IoUringFile, opcode};
     use std::io;
     use std::path::Path;
 
@@ -822,6 +822,38 @@ pub mod test_internals {
             return Err(payload_mismatch_error("sync", payload, &contents));
         }
         Ok("drained")
+    }
+
+    pub async fn ignores_unknown_completion_before_read(
+        path: &Path,
+        payload: &[u8],
+    ) -> io::Result<()> {
+        std::fs::write(path, payload)?;
+        let file = IoUringFile::open(path)?;
+
+        {
+            let entry = opcode::Nop::new().build().user_data(0xDEAD_BEEF);
+            let mut ring = file.inner.ring.lock();
+            // SAFETY: NOP has no external buffer dependencies.
+            unsafe {
+                ring.submission()
+                    .push(&entry)
+                    .map_err(|_| io::Error::other("submission queue full for unknown CQE probe"))?;
+            }
+            ring.submit()?;
+        }
+
+        let mut buf = vec![0_u8; payload.len()];
+        let n = file.read(&mut buf).await?;
+        if n != payload.len() || buf.as_slice() != payload {
+            return Err(payload_mismatch_error(
+                "unknown-cqe-read",
+                payload,
+                &buf[..n],
+            ));
+        }
+
+        Ok(())
     }
 }
 
