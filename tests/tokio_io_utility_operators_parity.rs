@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Contract tests for I/O Utility Operators Parity.
 //!
 //! Bead: asupersync-2oh2u.2.3 ([T2.3])
