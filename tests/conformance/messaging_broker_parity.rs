@@ -231,6 +231,244 @@ mod kafka_mod {
 
 mod nats_mod {
     use super::*;
+    use asupersync::cx::Cx;
+    use asupersync::messaging::{
+        AckPolicy, ConsumerConfig, JetStreamContext, JsError, NatsClient, NatsConfig, NatsError,
+        NatsMessage, StorageType, StreamConfig, Subscription,
+    };
+    use asupersync::time::timeout;
+    use serde_json::json;
+
+    fn spawn_nats_container_with_reason(suite: &str) -> Result<Container, String> {
+        if !docker_available() {
+            return Err("docker_unavailable".to_string());
+        }
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let name = format!("asupersync-{suite}-{unique}");
+        let out = Command::new("docker")
+            .args(["run", "-d", "-P", "--name", &name, "nats:2-alpine", "-js"])
+            .output()
+            .map_err(|_| "docker_run_spawn_failed".to_string())?;
+        if !out.status.success() {
+            let status = out.status.code().unwrap_or(-1);
+            return Err(format!("docker_run_failed_status_{status}"));
+        }
+
+        let Some(port) = read_port(&name, 4222) else {
+            drop(Container { name, port: 0 });
+            return Err("docker_port_mapping_unavailable".to_string());
+        };
+        Ok(Container { name, port })
+    }
+
+    fn redact_nats_url(url: &str) -> String {
+        let Some((scheme, rest)) = url.split_once("://") else {
+            return "<invalid-nats-url>".to_string();
+        };
+        if let Some((_, host)) = rest.rsplit_once('@') {
+            format!("{scheme}://<redacted>@{host}")
+        } else {
+            url.to_string()
+        }
+    }
+
+    fn nats_auth_mode(url: &str) -> &'static str {
+        let Some((_, rest)) = url.split_once("://") else {
+            return "invalid-url";
+        };
+        if let Some((creds, _)) = rest.rsplit_once('@') {
+            if creds.contains(':') {
+                "user-password"
+            } else {
+                "token"
+            }
+        } else {
+            "none"
+        }
+    }
+
+    struct NatsEndpoint {
+        url: String,
+        redacted_url: String,
+        auth_mode: &'static str,
+        _container: Option<Container>,
+    }
+
+    impl NatsEndpoint {
+        fn broker_kind_supports_jetstream(&self) -> bool {
+            self._container.is_some()
+        }
+    }
+
+    fn nats_endpoint(suite: &str) -> Result<NatsEndpoint, String> {
+        if let Ok(url) = std::env::var("NATS_TEST_URL") {
+            let url = url.trim().to_string();
+            if !url.is_empty() {
+                let redacted = redact_nats_url(&url);
+                let auth_mode = nats_auth_mode(&url);
+                return Ok(NatsEndpoint {
+                    url,
+                    redacted_url: redacted,
+                    auth_mode,
+                    _container: None,
+                });
+            }
+        }
+
+        let container = spawn_nats_container_with_reason(suite)
+            .map_err(|reason| format!("{reason}_and_NATS_TEST_URL_unset"))?;
+        let url = format!("nats://127.0.0.1:{}", container.port);
+        Ok(NatsEndpoint {
+            url: url.clone(),
+            redacted_url: url,
+            auth_mode: "none",
+            _container: Some(container),
+        })
+    }
+
+    fn nats_config_for_endpoint(endpoint: &NatsEndpoint) -> Result<NatsConfig, NatsError> {
+        let mut config = NatsConfig::from_url(&endpoint.url)?;
+        config.name = Some("asupersync-conformance".to_string());
+        config.request_timeout = Duration::from_secs(3);
+        config.max_reconnect_attempts = 1;
+        config.reconnect_delay = Duration::from_millis(25);
+        config.max_reconnect_delay = Duration::from_millis(50);
+        Ok(config)
+    }
+
+    async fn connect_nats(cx: &Cx, endpoint: &NatsEndpoint) -> Result<NatsClient, NatsError> {
+        NatsClient::connect_with_config(cx, nats_config_for_endpoint(endpoint)?).await
+    }
+
+    fn nats_error_kind(error: &NatsError) -> &'static str {
+        match error {
+            NatsError::Io(_) => "Io",
+            NatsError::Protocol(_) => "Protocol",
+            NatsError::InvalidAuth(_) => "InvalidAuth",
+            NatsError::Server(_) => "Server",
+            NatsError::InvalidUrl(_) => "InvalidUrl",
+            NatsError::Cancelled => "Cancelled",
+            NatsError::Closed => "Closed",
+            NatsError::SubscriptionNotFound(_) => "SubscriptionNotFound",
+            NatsError::NotConnected => "NotConnected",
+            NatsError::TlsRequired { .. } => "TlsRequired",
+        }
+    }
+
+    fn js_error_kind(error: &JsError) -> &'static str {
+        match error {
+            JsError::Nats(_) => "Nats",
+            JsError::Api { .. } => "Api",
+            JsError::StreamNotFound(_) => "StreamNotFound",
+            JsError::ConsumerNotFound { .. } => "ConsumerNotFound",
+            JsError::NotAcked => "NotAcked",
+            JsError::AlreadyAcknowledged => "AlreadyAcknowledged",
+            JsError::InvalidConfig(_) => "InvalidConfig",
+            JsError::ParseError(_) => "ParseError",
+        }
+    }
+
+    struct BrokerArtifact<'a> {
+        broker_kind: &'a str,
+        broker_version: &'a str,
+        scenario_id: &'a str,
+        topic_or_stream: &'a str,
+        message_count: usize,
+        ack_count: usize,
+        consumer_lag: usize,
+        cancellation_point: &'a str,
+        expected_result: &'a str,
+        actual_result: &'a str,
+        unsupported_reason: Option<&'a str>,
+        verdict: &'a str,
+        first_failure: Option<&'a str>,
+    }
+
+    fn log_broker_artifact(
+        suite: &str,
+        endpoint: Option<&NatsEndpoint>,
+        artifact: BrokerArtifact<'_>,
+    ) {
+        let connection_uri_redacted = endpoint
+            .map(|endpoint| endpoint.redacted_url.as_str())
+            .unwrap_or("unavailable");
+        let auth_mode = endpoint
+            .map(|endpoint| endpoint.auth_mode)
+            .unwrap_or("unknown");
+        let artifact_path = format!("stdout:jlog:{}", artifact.scenario_id);
+        let artifact = json!({
+            "bead_id": "asupersync-6xjxd7",
+            "broker_kind": artifact.broker_kind,
+            "broker_version": artifact.broker_version,
+            "scenario_id": artifact.scenario_id,
+            "feature_flags": {
+                "nats": true,
+                "jetstream": artifact.broker_kind == "jetstream",
+                "tls": cfg!(feature = "tls")
+            },
+            "connection_uri_redacted": connection_uri_redacted,
+            "auth_mode": auth_mode,
+            "topic_or_stream": artifact.topic_or_stream,
+            "message_count": artifact.message_count,
+            "ack_count": artifact.ack_count,
+            "consumer_lag": artifact.consumer_lag,
+            "reconnect_count": 0,
+            "cancellation_point": artifact.cancellation_point,
+            "expected_result": artifact.expected_result,
+            "actual_result": artifact.actual_result,
+            "artifact_path": artifact_path,
+            "unsupported_reason": artifact.unsupported_reason,
+            "verdict": artifact.verdict,
+            "first_failure": artifact.first_failure
+        });
+        jlog(
+            suite,
+            "artifact",
+            artifact["scenario_id"].as_str().unwrap_or("unknown"),
+            &artifact.to_string(),
+        );
+    }
+
+    fn broker_version(client: &NatsClient) -> String {
+        client
+            .server_info()
+            .map(|info| info.version)
+            .filter(|version| !version.is_empty())
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+
+    async fn await_message(
+        client: &mut NatsClient,
+        cx: &Cx,
+        subscription: &mut Subscription,
+        wait: Duration,
+    ) -> Option<NatsMessage> {
+        let started = std::time::Instant::now();
+        loop {
+            if let Some(message) = subscription.try_next() {
+                return Some(message);
+            }
+            if started.elapsed() >= wait {
+                return None;
+            }
+            let _ = timeout(cx.now(), Duration::from_millis(100), client.ping(cx)).await;
+        }
+    }
+
+    fn assert_nats_message(message: NatsMessage, subject: &str, payload: &[u8], label: &str) {
+        assert_eq!(
+            message.subject, subject,
+            "{label} received message on unexpected subject"
+        );
+        assert_eq!(
+            message.payload, payload,
+            "{label} received unexpected payload"
+        );
+    }
 
     /// Token validator parity: NATS-protocol tokens (subject + queue group
     /// names) MUST reject embedded whitespace, CR, LF, and the `>` / `*`
@@ -265,29 +503,433 @@ mod nats_mod {
             );
         }
     }
-}
 
-// =============================================================================
-// JetStream conformance — durable consumers
-// =============================================================================
-
-mod js_mod {
-    /// Documented invariant: a JetStream consumer with `durable_name = Some(_)`
-    /// is durable and survives reconnects; a consumer with
-    /// `durable_name = None` is ephemeral and is reaped after
-    /// `inactive_threshold`. The `ConsumerConfig::durable_name` field
-    /// (src/messaging/jetstream.rs:393) is the mechanism.
-    ///
-    /// True conformance requires a JetStream-enabled NATS server. We
-    /// document the contract and rely on the JetStream CI lane (when
-    /// added) for the wire-level verification.
     #[test]
-    fn js_consumer_durability_contract_documented() {
-        // No assertion — the test exists to surface the contract in the
-        // conformance inventory. The full wire-level test is gated on
-        // a JetStream-enabled docker container and the `nats:2` image
-        // with `--jetstream` flag, which a future CI lane should
-        // exercise.
+    fn nats_and_jetstream_real_broker_parity_or_skip() {
+        let suite = "nats_jetstream_broker_parity";
+        let nats_expected = "fanout subscribers each receive every payload; queue group delivers \
+            each payload to exactly one member; timeout-cancelled pending receive leaves the \
+            subscription usable; unsubscribe cleanup leaves no residual delivery";
+        let jetstream_expected = "stream create and publish acks succeed; durable explicit-ack \
+            consumer survives an empty pull timeout; pull returns stored messages; ack, nack, \
+            and term publish terminal ack frames without pending-ack leaks";
+
+        let endpoint = match nats_endpoint(suite) {
+            Ok(endpoint) => endpoint,
+            Err(reason) => {
+                log_broker_artifact(
+                    suite,
+                    None,
+                    BrokerArtifact {
+                        broker_kind: "nats",
+                        broker_version: "unavailable",
+                        scenario_id: "nats_pubsub_queue_group_real_broker",
+                        topic_or_stream: "unallocated",
+                        message_count: 0,
+                        ack_count: 0,
+                        consumer_lag: 0,
+                        cancellation_point: "not-started",
+                        expected_result: nats_expected,
+                        actual_result: "broker unavailable before scenario start",
+                        unsupported_reason: Some(&reason),
+                        verdict: "skip",
+                        first_failure: None,
+                    },
+                );
+                log_broker_artifact(
+                    suite,
+                    None,
+                    BrokerArtifact {
+                        broker_kind: "jetstream",
+                        broker_version: "unavailable",
+                        scenario_id: "jetstream_stream_durable_ack_paths_real_broker",
+                        topic_or_stream: "unallocated",
+                        message_count: 0,
+                        ack_count: 0,
+                        consumer_lag: 0,
+                        cancellation_point: "not-started",
+                        expected_result: jetstream_expected,
+                        actual_result: "broker unavailable before scenario start",
+                        unsupported_reason: Some(&reason),
+                        verdict: "skip",
+                        first_failure: None,
+                    },
+                );
+                return;
+            }
+        };
+
+        futures_lite::future::block_on(async move {
+            let cx: Cx = Cx::for_testing();
+            let mut subscriber_a = match connect_nats(&cx, &endpoint).await {
+                Ok(client) => client,
+                Err(error) => {
+                    let first_failure = nats_error_kind(&error);
+                    log_broker_artifact(
+                        suite,
+                        Some(&endpoint),
+                        BrokerArtifact {
+                            broker_kind: "nats",
+                            broker_version: "unavailable",
+                            scenario_id: "nats_pubsub_queue_group_real_broker",
+                            topic_or_stream: "unallocated",
+                            message_count: 0,
+                            ack_count: 0,
+                            consumer_lag: 0,
+                            cancellation_point: "connect",
+                            expected_result: nats_expected,
+                            actual_result: "broker endpoint could not be reached",
+                            unsupported_reason: Some("nats_connect_failed"),
+                            verdict: "skip",
+                            first_failure: Some(first_failure),
+                        },
+                    );
+                    return;
+                }
+            };
+            let mut subscriber_b = connect_nats(&cx, &endpoint)
+                .await
+                .expect("connect second NATS subscriber");
+            let mut publisher = connect_nats(&cx, &endpoint)
+                .await
+                .expect("connect NATS publisher");
+            let broker_version = broker_version(&subscriber_a);
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default();
+            let fanout_subject = format!("asupersync.conformance.{unique}.fanout");
+            let queue_subject = format!("asupersync.conformance.{unique}.queue");
+            let queue_group = format!("workers{unique}");
+
+            let mut fanout_a = subscriber_a
+                .subscribe(&cx, &fanout_subject)
+                .await
+                .expect("first fanout subscriber subscribes");
+            let mut fanout_b = subscriber_b
+                .subscribe(&cx, &fanout_subject)
+                .await
+                .expect("second fanout subscriber subscribes");
+
+            let fanout_payloads: [&[u8]; 2] = [b"fanout-first", b"fanout-second"];
+            let mut delivered_count = 0usize;
+            for payload in fanout_payloads {
+                publisher
+                    .publish(&cx, &fanout_subject, payload)
+                    .await
+                    .expect("publish fanout payload reaches broker");
+
+                let message_a = await_message(
+                    &mut subscriber_a,
+                    &cx,
+                    &mut fanout_a,
+                    Duration::from_secs(2),
+                )
+                .await
+                .expect("first fanout subscriber receives payload");
+                assert_nats_message(message_a, &fanout_subject, payload, "fanout_a");
+                delivered_count += 1;
+
+                let message_b = await_message(
+                    &mut subscriber_b,
+                    &cx,
+                    &mut fanout_b,
+                    Duration::from_secs(2),
+                )
+                .await
+                .expect("second fanout subscriber receives payload");
+                assert_nats_message(message_b, &fanout_subject, payload, "fanout_b");
+                delivered_count += 1;
+            }
+
+            let cancelled_receive =
+                timeout(cx.now(), Duration::from_millis(25), fanout_a.next(&cx)).await;
+            assert!(
+                cancelled_receive.is_err(),
+                "pending NATS receive should time out when no message is available"
+            );
+
+            let post_cancel_payload = b"after-cancel";
+            publisher
+                .publish(&cx, &fanout_subject, post_cancel_payload)
+                .await
+                .expect("publish after cancelled receive reaches broker");
+            let message_a = await_message(
+                &mut subscriber_a,
+                &cx,
+                &mut fanout_a,
+                Duration::from_secs(2),
+            )
+            .await
+            .expect("first subscriber receives after cancelled receive");
+            assert_nats_message(message_a, &fanout_subject, post_cancel_payload, "fanout_a");
+            delivered_count += 1;
+            let message_b = await_message(
+                &mut subscriber_b,
+                &cx,
+                &mut fanout_b,
+                Duration::from_secs(2),
+            )
+            .await
+            .expect("second subscriber receives after cancelled receive");
+            assert_nats_message(message_b, &fanout_subject, post_cancel_payload, "fanout_b");
+            delivered_count += 1;
+
+            subscriber_a
+                .unsubscribe(&cx, fanout_a.sid())
+                .await
+                .expect("first fanout subscriber unsubscribes");
+            subscriber_b
+                .unsubscribe(&cx, fanout_b.sid())
+                .await
+                .expect("second fanout subscriber unsubscribes");
+            publisher
+                .publish(&cx, &fanout_subject, b"cleanup-probe")
+                .await
+                .expect("publish cleanup probe reaches broker");
+            subscriber_a
+                .ping(&cx)
+                .await
+                .expect("first subscriber ping after cleanup");
+            subscriber_b
+                .ping(&cx)
+                .await
+                .expect("second subscriber ping after cleanup");
+            assert!(
+                fanout_a.try_next().is_none() && fanout_b.try_next().is_none(),
+                "unsubscribed fanout subscriptions must not receive cleanup probe"
+            );
+
+            let mut queue_a = subscriber_a
+                .queue_subscribe(&cx, &queue_subject, &queue_group)
+                .await
+                .expect("first queue subscriber subscribes");
+            let mut queue_b = subscriber_b
+                .queue_subscribe(&cx, &queue_subject, &queue_group)
+                .await
+                .expect("second queue subscriber subscribes");
+            let mut queue_a_seen = 0usize;
+            let mut queue_b_seen = 0usize;
+            for index in 0..6 {
+                let payload = format!("queue-{index}");
+                publisher
+                    .publish(&cx, &queue_subject, payload.as_bytes())
+                    .await
+                    .expect("publish queue payload reaches broker");
+
+                let started = std::time::Instant::now();
+                let mut received_this_round = 0usize;
+                while received_this_round == 0 && started.elapsed() < Duration::from_secs(2) {
+                    subscriber_a
+                        .ping(&cx)
+                        .await
+                        .expect("first queue subscriber ping");
+                    subscriber_b
+                        .ping(&cx)
+                        .await
+                        .expect("second queue subscriber ping");
+                    if let Some(message) = queue_a.try_next() {
+                        assert_nats_message(message, &queue_subject, payload.as_bytes(), "queue_a");
+                        queue_a_seen += 1;
+                        received_this_round += 1;
+                    }
+                    if let Some(message) = queue_b.try_next() {
+                        assert_nats_message(message, &queue_subject, payload.as_bytes(), "queue_b");
+                        queue_b_seen += 1;
+                        received_this_round += 1;
+                    }
+                }
+                assert_eq!(
+                    received_this_round, 1,
+                    "NATS queue group must deliver each payload to exactly one member"
+                );
+                delivered_count += received_this_round;
+            }
+
+            let nats_actual = format!(
+                "fanout_delivered={}; queue_delivered={}; queue_a={queue_a_seen}; queue_b={queue_b_seen}",
+                6,
+                queue_a_seen + queue_b_seen
+            );
+            log_broker_artifact(
+                suite,
+                Some(&endpoint),
+                BrokerArtifact {
+                    broker_kind: "nats",
+                    broker_version: &broker_version,
+                    scenario_id: "nats_pubsub_queue_group_real_broker",
+                    topic_or_stream: &format!("{fanout_subject},{queue_subject}"),
+                    message_count: 10,
+                    ack_count: delivered_count,
+                    consumer_lag: 0,
+                    cancellation_point: "pending_subscription_next_timeout",
+                    expected_result: nats_expected,
+                    actual_result: &nats_actual,
+                    unsupported_reason: None,
+                    verdict: "pass",
+                    first_failure: None,
+                },
+            );
+
+            let js_client = match connect_nats(&cx, &endpoint).await {
+                Ok(client) => client,
+                Err(error) => {
+                    let first_failure = nats_error_kind(&error);
+                    log_broker_artifact(
+                        suite,
+                        Some(&endpoint),
+                        BrokerArtifact {
+                            broker_kind: "jetstream",
+                            broker_version: &broker_version,
+                            scenario_id: "jetstream_stream_durable_ack_paths_real_broker",
+                            topic_or_stream: "unallocated",
+                            message_count: 0,
+                            ack_count: 0,
+                            consumer_lag: 0,
+                            cancellation_point: "connect",
+                            expected_result: jetstream_expected,
+                            actual_result: "JetStream client could not connect",
+                            unsupported_reason: Some("jetstream_connect_failed"),
+                            verdict: "skip",
+                            first_failure: Some(first_failure),
+                        },
+                    );
+                    return;
+                }
+            };
+            let mut js = JetStreamContext::new(js_client);
+            let stream = format!("ASYNCJS_{unique}");
+            let js_subject = format!("asupersync.jetstream.{unique}");
+            let stream_config = StreamConfig::new(&stream)
+                .subjects(&[js_subject.as_str()])
+                .storage(StorageType::Memory)
+                .max_messages(16);
+            let stream_info = match js.create_stream(&cx, stream_config).await {
+                Ok(info) => info,
+                Err(error) if !endpoint.broker_kind_supports_jetstream() => {
+                    let first_failure = js_error_kind(&error);
+                    log_broker_artifact(
+                        suite,
+                        Some(&endpoint),
+                        BrokerArtifact {
+                            broker_kind: "jetstream",
+                            broker_version: &broker_version,
+                            scenario_id: "jetstream_stream_durable_ack_paths_real_broker",
+                            topic_or_stream: &stream,
+                            message_count: 0,
+                            ack_count: 0,
+                            consumer_lag: 0,
+                            cancellation_point: "create_stream",
+                            expected_result: jetstream_expected,
+                            actual_result: "JetStream API unavailable on supplied NATS_TEST_URL",
+                            unsupported_reason: Some("jetstream_api_unavailable"),
+                            verdict: "skip",
+                            first_failure: Some(first_failure),
+                        },
+                    );
+                    return;
+                }
+                Err(error) => panic!("JetStream stream creation failed: {error:?}"),
+            };
+            assert_eq!(stream_info.config.name, stream);
+
+            let consumer_name = format!("dur{unique}");
+            let consumer = js
+                .create_consumer(
+                    &cx,
+                    &stream,
+                    ConsumerConfig::new(&consumer_name)
+                        .ack_policy(AckPolicy::Explicit)
+                        .filter_subject(&js_subject)
+                        .max_ack_pending(8),
+                )
+                .await
+                .expect("create durable JetStream consumer");
+            assert_eq!(consumer.name(), consumer_name);
+
+            let empty_pull = consumer
+                .pull_with_timeout(js.client(), &cx, 1, Duration::from_millis(25))
+                .await
+                .expect("empty JetStream pull timeout is bounded");
+            assert!(
+                empty_pull.is_empty(),
+                "empty JetStream pull should return no messages"
+            );
+            assert_eq!(
+                consumer.pending_acks(),
+                0,
+                "empty pull timeout must not leak pending ack credit"
+            );
+
+            let js_payloads: [&[u8]; 3] = [b"ack-path", b"nack-path", b"term-path"];
+            for (index, payload) in js_payloads.iter().enumerate() {
+                let ack = js
+                    .publish(&cx, &js_subject, payload)
+                    .await
+                    .expect("JetStream publish returns broker ack");
+                assert_eq!(ack.stream, stream);
+                assert_eq!(ack.seq, (index + 1) as u64);
+                assert!(!ack.duplicate, "unique test payloads must not deduplicate");
+            }
+
+            let messages = consumer
+                .pull_with_timeout(js.client(), &cx, 3, Duration::from_secs(2))
+                .await
+                .expect("pull JetStream payloads");
+            assert_eq!(messages.len(), 3, "durable pull must return all payloads");
+            for (message, payload) in messages.iter().zip(js_payloads) {
+                assert_eq!(message.subject, js_subject);
+                assert_eq!(message.payload, payload);
+            }
+            assert_eq!(
+                consumer.pending_acks(),
+                3,
+                "pull should account for three pending explicit acks"
+            );
+
+            consumer
+                .ack_message(js.client(), &cx, &messages[0])
+                .await
+                .expect("JetStream ACK publishes terminal ack frame");
+            consumer
+                .nack_message(js.client(), &cx, &messages[1])
+                .await
+                .expect("JetStream NAK publishes terminal ack frame");
+            messages[2]
+                .term(js.client(), &cx)
+                .await
+                .expect("JetStream TERM publishes terminal ack frame");
+            assert_eq!(
+                consumer.pending_acks(),
+                0,
+                "ack/nack/term must release all pending ack credits"
+            );
+            let _ = js.delete_stream(&cx, &stream).await;
+
+            let jetstream_actual = format!(
+                "stream={stream}; consumer={consumer_name}; messages=3; terminal_acks=3; pending_acks={}",
+                consumer.pending_acks()
+            );
+            log_broker_artifact(
+                suite,
+                Some(&endpoint),
+                BrokerArtifact {
+                    broker_kind: "jetstream",
+                    broker_version: &broker_version,
+                    scenario_id: "jetstream_stream_durable_ack_paths_real_broker",
+                    topic_or_stream: &format!("{stream}:{js_subject}"),
+                    message_count: 3,
+                    ack_count: 3,
+                    consumer_lag: consumer.pending_acks(),
+                    cancellation_point: "empty_pull_timeout_before_publish",
+                    expected_result: jetstream_expected,
+                    actual_result: &jetstream_actual,
+                    unsupported_reason: None,
+                    verdict: "pass",
+                    first_failure: None,
+                },
+            );
+        });
     }
 }
 
