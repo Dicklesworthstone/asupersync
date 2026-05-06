@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Compile-fail emulation and enforcement tests for capability and obligation types.
 //!
 //! These tests verify that the safety invariants enforced by sealed traits,
