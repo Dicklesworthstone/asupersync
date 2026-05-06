@@ -6,7 +6,9 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 ARTIFACT="${PROJECT_ROOT}/artifacts/scheduler_global_ready_contention_smoke_contract_v1.json"
 SCENARIO=""
 LIST_ONLY=0
+MODE="execute"
 OUTPUT_ROOT_OVERRIDE="${SCHEDULER_GLOBAL_READY_CONTENTION_OUTPUT_DIR:-}"
+RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
 
 usage() {
     cat <<'USAGE'
@@ -15,25 +17,36 @@ Usage: ./scripts/run_scheduler_global_ready_contention_smoke.sh [options]
 Options:
   --list                  List scenario IDs and exit
   --scenario <id>         Run one scenario (defaults to the first artifact scenario)
+  --dry-run               Emit manifests without executing the rch proof
+  --execute               Execute the rch proof and validate emitted artifacts (default)
   --output-root <dir>     Override output root
   -h, --help              Show help
 
 Environment:
-  SCHEDULER_GLOBAL_READY_CONTENTION_USE_RCH=0
-      Run the contract command directly instead of through rch. Agent workflows
-      should leave this unset so Rust validation is remote-executed.
+  RCH_BIN=<path>
+      Override the rch binary path. Defaults to $HOME/.local/bin/rch.
   SCHEDULER_GLOBAL_READY_CONTENTION_CARGO_TARGET_DIR=<dir>
       Override the remote Cargo target dir used by rch.
 USAGE
 }
 
 require_tools() {
-    if ! command -v jq >/dev/null 2>&1; then
-        echo "FATAL: jq is required for scheduler global-ready contention runner" >&2
-        exit 1
+    local missing=0
+    for tool in jq date; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            echo "FATAL: missing required tool: $tool" >&2
+            missing=1
+        fi
+    done
+    if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+        echo "FATAL: rch is required and was not found/executable at: ${RCH_BIN}" >&2
+        missing=1
     fi
     if [ ! -f "$ARTIFACT" ]; then
         echo "FATAL: contract artifact missing at ${ARTIFACT}" >&2
+        missing=1
+    fi
+    if [ "$missing" -ne 0 ]; then
         exit 1
     fi
 }
@@ -296,6 +309,14 @@ while [[ $# -gt 0 ]]; do
             SCENARIO="${2:-}"
             shift 2
             ;;
+        --dry-run)
+            MODE="dry-run"
+            shift
+            ;;
+        --execute)
+            MODE="execute"
+            shift
+            ;;
         --output-root)
             OUTPUT_ROOT_OVERRIDE="${2:-}"
             shift 2
@@ -333,7 +354,6 @@ SCENARIO_DESCRIPTION="$(jq -r '.description' <<<"$SCENARIO_JSON")"
 SCENARIO_OUTPUT_ROOT="$(jq -r '.output_root' <<<"$SCENARIO_JSON")"
 SCENARIO_CLASS="$(jq -r '.scenario_class' <<<"$SCENARIO_JSON")"
 EXECUTION_POLICY="$(jq -r '.execution_policy' <<<"$SCENARIO_JSON")"
-COMMAND_PREFIX="$(jq -r '.command_prefix' <<<"$SCENARIO_JSON")"
 EXPECTED_METRICS_JSON="$(jq -cS '.expected_metrics' <<<"$SCENARIO_JSON")"
 OUTPUT_ROOT="${OUTPUT_ROOT_OVERRIDE:-${PROJECT_ROOT}/${SCENARIO_OUTPUT_ROOT}}"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
@@ -344,57 +364,88 @@ CONTENTION_MANIFEST="${SCENARIO_DIR}/contention_manifest.json"
 CONTENTION_METRICS="${SCENARIO_DIR}/contention_metrics.json"
 BUNDLE_MANIFEST="${SCENARIO_DIR}/bundle_manifest.json"
 RUN_REPORT="${SCENARIO_DIR}/run_report.json"
-COMMAND="${COMMAND_PREFIX}"
 DEFAULT_RCH_TMP="${TMPDIR:-}"
 if [[ (-z "$DEFAULT_RCH_TMP" || "$DEFAULT_RCH_TMP" == "/tmp") && -d /data/tmp ]]; then
     DEFAULT_RCH_TMP="/data/tmp"
 fi
 DEFAULT_RCH_TMP="${DEFAULT_RCH_TMP:-/tmp}"
 RCH_CARGO_TARGET_DIR="${SCHEDULER_GLOBAL_READY_CONTENTION_CARGO_TARGET_DIR:-${DEFAULT_RCH_TMP}/rch_target_scheduler_global_ready_contention}"
-EXECUTED_COMMAND="$COMMAND"
+COMMAND_ARGS=(
+    "$RCH_BIN"
+    exec
+    --
+    env
+    "CARGO_INCREMENTAL=0"
+    "CARGO_PROFILE_TEST_DEBUG=0"
+    "RUSTFLAGS=-D warnings -C debuginfo=0"
+    "CARGO_TARGET_DIR=${RCH_CARGO_TARGET_DIR}"
+    "ASUPERSYNC_GLOBAL_READY_CONTENTION_SCENARIO=${SCENARIO}"
+    "ASUPERSYNC_GLOBAL_READY_CONTENTION_OUTPUT_DIR=${SCENARIO_DIR}"
+    cargo
+    test
+    -p
+    asupersync
+    --lib
+    global_ready_contention_contract_scenarios_match_expected_metrics
+    --features
+    test-internals
+    --
+    --nocapture
+)
+printf -v EXECUTED_COMMAND '%q ' "${COMMAND_ARGS[@]}"
+EXECUTED_COMMAND="${EXECUTED_COMMAND% }"
 STARTED_TS="$(date --iso-8601=seconds)"
 
 mkdir -p "$SCENARIO_DIR"
 
-set +e
-if [[ "${SCHEDULER_GLOBAL_READY_CONTENTION_USE_RCH:-1}" == "1" ]]; then
-    EXECUTED_COMMAND="rch exec -- env CARGO_TARGET_DIR=${RCH_CARGO_TARGET_DIR} ASUPERSYNC_GLOBAL_READY_CONTENTION_SCENARIO=${SCENARIO} ASUPERSYNC_GLOBAL_READY_CONTENTION_OUTPUT_DIR=${SCENARIO_DIR} ${COMMAND}"
-    rch exec -- env \
-        CARGO_TARGET_DIR="$RCH_CARGO_TARGET_DIR" \
-        ASUPERSYNC_GLOBAL_READY_CONTENTION_SCENARIO="$SCENARIO" \
-        ASUPERSYNC_GLOBAL_READY_CONTENTION_OUTPUT_DIR="$SCENARIO_DIR" \
-        $COMMAND >"$RUN_LOG" 2>&1
-else
-    ASUPERSYNC_GLOBAL_READY_CONTENTION_SCENARIO="$SCENARIO" \
-    ASUPERSYNC_GLOBAL_READY_CONTENTION_OUTPUT_DIR="$SCENARIO_DIR" \
-        $COMMAND >"$RUN_LOG" 2>&1
-fi
-COMMAND_EXIT_CODE=$?
-set -e
-
-recover_contention_artifacts_from_run_log
-
+COMMAND_EXIT_CODE=0
 SCRIPT_EXIT_CODE=0
 STATUS="passed"
 VALIDATION_PASSED=true
 MESSAGE="scheduler global-ready contention validation passed"
 
-if [[ "$COMMAND_EXIT_CODE" -ne 0 ]]; then
-    STATUS="failed"
-    VALIDATION_PASSED=false
-    SCRIPT_EXIT_CODE=1
-    MESSAGE="scheduler global-ready contention test command failed"
-fi
+if [[ "$MODE" == "dry-run" ]]; then
+    {
+        printf 'DRY_RUN scenario=%s\n' "$SCENARIO"
+        printf 'DRY_RUN command=%s\n' "$EXECUTED_COMMAND"
+    } >"$RUN_LOG"
+    STATUS="dry_run"
+    MESSAGE="dry run emitted manifests only"
+else
+    set +e
+    (
+        cd "$PROJECT_ROOT"
+        "${COMMAND_ARGS[@]}"
+    ) >"$RUN_LOG" 2>&1
+    COMMAND_EXIT_CODE=$?
+    set -e
 
-if [[ ! -f "$CONTENTION_MANIFEST" || ! -f "$CONTENTION_METRICS" ]]; then
-    STATUS="failed"
-    VALIDATION_PASSED=false
-    SCRIPT_EXIT_CODE=1
-    MESSAGE="expected contention artifact files were not emitted"
+    if grep -Eq '^\[RCH\] local \(|falling back to local' "$RUN_LOG"; then
+        COMMAND_EXIT_CODE=86
+        SCRIPT_EXIT_CODE=86
+        STATUS="failed"
+        VALIDATION_PASSED=false
+        MESSAGE="rch local fallback detected; refusing local cargo execution"
+        printf 'FATAL: rch local fallback detected; refusing local cargo execution\n' >>"$RUN_LOG"
+    elif [[ "$COMMAND_EXIT_CODE" -ne 0 ]]; then
+        STATUS="failed"
+        VALIDATION_PASSED=false
+        SCRIPT_EXIT_CODE="$COMMAND_EXIT_CODE"
+        MESSAGE="scheduler global-ready contention test command failed"
+    fi
+
+    recover_contention_artifacts_from_run_log
+
+    if [[ "$STATUS" == "passed" && (! -f "$CONTENTION_MANIFEST" || ! -f "$CONTENTION_METRICS") ]]; then
+        STATUS="failed"
+        VALIDATION_PASSED=false
+        SCRIPT_EXIT_CODE=1
+        MESSAGE="expected contention artifact files were not emitted"
+    fi
 fi
 
 ACTUAL_METRICS_JSON='{}'
-if [[ -f "$CONTENTION_METRICS" ]]; then
+if [[ "$STATUS" == "passed" && -f "$CONTENTION_METRICS" ]]; then
     ACTUAL_METRICS_JSON="$(jq -cS '{total_injected, batch_mode_activated, fallback_to_baseline, global_ready_batch_drains, global_ready_batch_tasks, duplicate_dispatches, lost_tasks, configured_batch_size, activation_threshold}' "$CONTENTION_METRICS")"
 
     ACTUAL_TOTAL_INJECTED="$(jq -r '.total_injected' "$CONTENTION_METRICS")"
@@ -491,7 +542,7 @@ write_bundle_manifest \
     "$SCENARIO_CLASS" \
     "$EXECUTION_POLICY" \
     "$RUN_ID" \
-    "execute" \
+    "$MODE" \
     "$RUN_LOG" \
     "$CONTENTION_MANIFEST" \
     "$CONTENTION_METRICS" \
@@ -508,7 +559,7 @@ write_run_report \
     "$BUNDLE_MANIFEST" \
     "$RUN_ID" \
     "$SCENARIO" \
-    "execute" \
+    "$MODE" \
     "$COMMAND_EXIT_CODE" \
     "$SCRIPT_EXIT_CODE" \
     "$VALIDATION_PASSED" \
