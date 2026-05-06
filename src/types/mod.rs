@@ -68,14 +68,18 @@ pub use policy::Policy;
 pub use pressure::SystemPressure;
 pub use rref::{RRef, RRefAccess, RRefAccessWitness, RRefError};
 pub use slo_policy::{
-    SLO_POLICY_BUNDLE_SCHEMA_VERSION, SLO_POLICY_COMPILER_SCHEMA_VERSION, SloCompiledAdmission,
-    SloCompiledAdmissionDecision, SloCompiledBrownoutStage, SloCompiledBrownoutStep,
-    SloCompiledBudget, SloCompiledNoWinReceipt, SloCompiledPolicy, SloCompiledPolicyProvenance,
-    SloCompiledPolicyStatus, SloLatencyObjective, SloLatencyUnit, SloNoWinFallback,
-    SloOptionalWorkClass, SloPolicyBundle, SloPolicyCapacityEvidence, SloPolicyCompilerBlocker,
-    SloPolicyCompilerBlockerKind, SloPolicyProvenance, SloPolicyRedaction,
-    SloPolicyValidationIssue, SloPolicyValidationIssueKind, SloPolicyValidationReport,
-    SloResourcePressureThresholds, SloWorkloadClass, validate_slo_policy_bundle_json,
+    SLO_POLICY_BUNDLE_SCHEMA_VERSION, SLO_POLICY_COMPILER_SCHEMA_VERSION,
+    SLO_POLICY_PROOF_REPORT_SCHEMA_VERSION, SloCompiledAdmission, SloCompiledAdmissionDecision,
+    SloCompiledBrownoutStage, SloCompiledBrownoutStep, SloCompiledBudget, SloCompiledNoWinReceipt,
+    SloCompiledPolicy, SloCompiledPolicyProvenance, SloCompiledPolicyStatus, SloLatencyObjective,
+    SloLatencyUnit, SloNoWinFallback, SloOptionalWorkClass, SloPolicyBundle,
+    SloPolicyCapacityEvidence, SloPolicyCompilerBlocker, SloPolicyCompilerBlockerKind,
+    SloPolicyProvenance, SloPolicyRedaction, SloPolicyValidationIssue,
+    SloPolicyValidationIssueKind, SloPolicyValidationReport, SloProofCommand, SloProofNoWinReceipt,
+    SloProofReport, SloProofReportIssue, SloProofReportIssueKind, SloProofReportProvenance,
+    SloProofReportRow, SloProofReportStatus, SloProofReportStatusCounts, SloProofReportValidation,
+    SloResourcePressureThresholds, SloWorkloadClass, slo_proof_report_status_counts,
+    validate_slo_policy_bundle_json, validate_slo_proof_report_json,
 };
 pub use symbol::{DEFAULT_SYMBOL_SIZE, ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
 pub use symbol_set::{

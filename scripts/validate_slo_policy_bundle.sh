@@ -142,11 +142,17 @@ required = {
     "compiler_blocker_kinds",
     "lab_replay_contract_version",
     "lab_replay_statuses",
+    "proof_report_bead_id",
+    "proof_report_schema_version",
+    "proof_report_statuses",
+    "proof_report_issue_kinds",
+    "proof_report_gate",
     "required_bundle_fields",
     "gate_contract",
     "scenarios",
     "compiler_scenarios",
     "lab_replay_scenarios",
+    "proof_report_scenarios",
     "e2e_script",
     "required_log_fields",
     "proof_commands",
@@ -178,6 +184,27 @@ expected_compiler_blocker_kinds = {
     "conflicting_fallback_declaration",
 }
 expected_lab_replay_statuses = {"passed", "brownout", "no_win", "blocked"}
+expected_proof_report_statuses = {
+    "pass",
+    "fail",
+    "blocked",
+    "degraded",
+    "no_win",
+    "unsupported",
+    "stale_evidence",
+}
+expected_proof_report_issue_kinds = {
+    "malformed_report",
+    "unsupported_schema_version",
+    "missing_required_field",
+    "missing_rch_command",
+    "stale_profile_hash",
+    "missing_no_win_receipt",
+    "redaction_failure",
+    "secret_like_material",
+    "non_passing_status",
+    "oversized_field",
+}
 required_bundle_fields = {
     "schema_version",
     "policy_id",
@@ -215,6 +242,17 @@ if artifact.get("lab_replay_contract_version") != "slo-lab-replay-contract-v1":
     validation_errors.append({"kind": "unsupported_schema_version", "field": "lab_replay_contract_version"})
 if set(artifact.get("lab_replay_statuses") or []) != expected_lab_replay_statuses:
     validation_errors.append({"kind": "missing_required_field", "field": "lab_replay_statuses"})
+if artifact.get("proof_report_schema_version") != "slo-proof-report-v1":
+    validation_errors.append({"kind": "unsupported_schema_version", "field": "proof_report_schema_version"})
+if set(artifact.get("proof_report_statuses") or []) != expected_proof_report_statuses:
+    validation_errors.append({"kind": "missing_required_field", "field": "proof_report_statuses"})
+if set(artifact.get("proof_report_issue_kinds") or []) != expected_proof_report_issue_kinds:
+    validation_errors.append({"kind": "missing_required_field", "field": "proof_report_issue_kinds"})
+proof_report_gate = artifact.get("proof_report_gate") or {}
+if set(proof_report_gate.get("accepted_statuses") or []) != {"pass", "degraded", "no_win"}:
+    validation_errors.append({"kind": "missing_required_field", "field": "proof_report_gate.accepted_statuses"})
+if "rch exec" not in str(proof_report_gate.get("command_rendering") or ""):
+    validation_errors.append({"kind": "missing_required_field", "field": "proof_report_gate.command_rendering"})
 if not required_bundle_fields.issubset(set(artifact.get("required_bundle_fields") or [])):
     validation_errors.append({"kind": "missing_required_field", "field": "required_bundle_fields"})
 
@@ -366,6 +404,93 @@ missing_replay_statuses = sorted(required_replay_statuses - replay_statuses_seen
 if missing_replay_statuses:
     validation_errors.append({"kind": "missing_required_field", "field": "lab_replay_scenarios", "missing": missing_replay_statuses})
 
+proof_report_statuses_seen = set()
+proof_report_count = 0
+for proof_scenario in artifact.get("proof_report_scenarios") or []:
+    scenario_id = proof_scenario.get("scenario_id")
+    if not scenario_id:
+        validation_errors.append({"kind": "missing_required_field", "field": "proof_report_scenario_id"})
+        continue
+    expected = proof_scenario.get("expected") or {}
+    status = expected.get("status")
+    accepted = bool(expected.get("accepted", False))
+    success = bool(expected.get("success", False))
+    issue_kinds = list(expected.get("issue_kinds") or [])
+    if status not in expected_proof_report_statuses:
+        validation_errors.append({"kind": "unsupported_schema_version", "field": scenario_id})
+    proof_report_statuses_seen.add(status)
+    proof_report_count += 1
+    unknown_issues = sorted(set(issue_kinds) - expected_proof_report_issue_kinds)
+    if unknown_issues:
+        validation_errors.append({"kind": "unsupported_schema_version", "field": scenario_id, "unknown_issues": unknown_issues})
+    if "fixture_document" in proof_scenario:
+        if issue_kinds != ["malformed_report"]:
+            validation_errors.append({"kind": "malformed_json", "field": scenario_id})
+        report = {}
+    else:
+        report = proof_scenario.get("report") or {}
+        if not report:
+            validation_errors.append({"kind": "missing_required_field", "field": f"{scenario_id}.report"})
+        if report.get("schema_version") != "slo-proof-report-v1":
+            validation_errors.append({"kind": "unsupported_schema_version", "field": f"{scenario_id}.report.schema_version"})
+        if report.get("status") != status:
+            validation_errors.append({"kind": "missing_required_field", "field": f"{scenario_id}.report.status"})
+        if not report.get("report_id") or not report.get("policy_id") or not report.get("human_summary"):
+            validation_errors.append({"kind": "missing_required_field", "field": scenario_id})
+        proof_commands = list(report.get("proof_commands") or [])
+        if not proof_commands:
+            validation_errors.append({"kind": "missing_required_field", "field": f"{scenario_id}.proof_commands"})
+        for index, command in enumerate(proof_commands):
+            rendered = command.get("command") or ""
+            if "rch exec" not in rendered:
+                validation_errors.append({"kind": "missing_rch_command", "field": f"{scenario_id}.proof_commands[{index}]"})
+        if status == "no_win":
+            receipt = report.get("no_win_receipt")
+            if not receipt:
+                validation_errors.append({"kind": "missing_no_win_receipt", "field": scenario_id})
+            elif "rch exec" not in str(receipt.get("proof_command") or ""):
+                validation_errors.append({"kind": "missing_rch_command", "field": f"{scenario_id}.no_win_receipt.proof_command"})
+        if status == "degraded" and "degraded" not in str(report.get("human_summary") or "").lower():
+            validation_errors.append({"kind": "missing_required_field", "field": f"{scenario_id}.human_summary"})
+        if status == "no_win":
+            summary = str(report.get("human_summary") or "").lower()
+            if "no-win" not in summary and "no win" not in summary:
+                validation_errors.append({"kind": "missing_required_field", "field": f"{scenario_id}.human_summary"})
+        provenance = report.get("provenance") or {}
+        if status == "stale_evidence" and provenance.get("observed_profile_hash") == provenance.get("profile_hash"):
+            validation_errors.append({"kind": "stale_profile_hash", "field": f"{scenario_id}.provenance"})
+        if not (report.get("redaction") or {}).get("passed", False):
+            validation_errors.append({"kind": "redaction_failure", "field": f"{scenario_id}.redaction"})
+        if not list(report.get("rows") or []):
+            validation_errors.append({"kind": "missing_required_field", "field": f"{scenario_id}.rows"})
+    if success and status != "pass":
+        validation_errors.append({"kind": "missing_required_field", "field": f"{scenario_id}.success"})
+    if accepted and status not in {"pass", "degraded", "no_win"}:
+        validation_errors.append({"kind": "missing_required_field", "field": f"{scenario_id}.accepted"})
+
+    event = {
+        "scenario_id": scenario_id,
+        "bead_id": artifact.get("proof_report_bead_id", artifact.get("bead_id", "")),
+        "accepted": accepted,
+        "issue_kinds": issue_kinds,
+        "policy_id": report.get("policy_id", ""),
+        "artifact_path": str(artifact_path),
+        "proof_report_status": status,
+        "proof_report_success": success,
+        "gate_accepted": accepted,
+        "proof_report_issue_kinds": issue_kinds,
+        "proof_commands_count": len(report.get("proof_commands") or []),
+        "no_win_receipt": bool(report.get("no_win_receipt")),
+    }
+    event_missing = sorted(field for field in required_log_fields if field not in event)
+    if event_missing:
+        validation_errors.append({"kind": "missing_required_field", "field": scenario_id, "missing": event_missing})
+    events.append(event)
+
+missing_proof_statuses = sorted(expected_proof_report_statuses - proof_report_statuses_seen)
+if missing_proof_statuses:
+    validation_errors.append({"kind": "missing_required_field", "field": "proof_report_scenarios", "missing": missing_proof_statuses})
+
 log_path.write_text("".join(json.dumps(event, sort_keys=True) + "\n" for event in events))
 
 report = {
@@ -377,6 +502,7 @@ report = {
     "accepted_count": accepted_count,
     "rejected_count": rejected_count,
     "malformed_count": malformed_count,
+    "proof_report_count": proof_report_count,
     "events_log": str(log_path),
     "validation_errors": validation_errors,
 }

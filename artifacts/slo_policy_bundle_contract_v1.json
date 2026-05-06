@@ -52,6 +52,51 @@
     "no_win",
     "blocked"
   ],
+  "proof_report_bead_id": "asupersync-bgtplc.4",
+  "proof_report_schema_version": "slo-proof-report-v1",
+  "proof_report_statuses": [
+    "pass",
+    "fail",
+    "blocked",
+    "degraded",
+    "no_win",
+    "unsupported",
+    "stale_evidence"
+  ],
+  "proof_report_issue_kinds": [
+    "malformed_report",
+    "unsupported_schema_version",
+    "missing_required_field",
+    "missing_rch_command",
+    "stale_profile_hash",
+    "missing_no_win_receipt",
+    "redaction_failure",
+    "secret_like_material",
+    "non_passing_status",
+    "oversized_field"
+  ],
+  "proof_report_gate": {
+    "mode": "opt-in deterministic direct-main gate",
+    "accepted_statuses": [
+      "pass",
+      "degraded",
+      "no_win"
+    ],
+    "success_statuses": [
+      "pass"
+    ],
+    "fail_closed_for": [
+      "malformed_report",
+      "missing_rch_command",
+      "stale_profile_hash",
+      "missing_no_win_receipt",
+      "redaction_failure",
+      "secret_like_material",
+      "unsupported_schema_version",
+      "missing_required_field"
+    ],
+    "command_rendering": "rch exec -- bash scripts/validate_slo_policy_bundle.sh --output-root <dir> --run-id <id>"
+  },
   "required_bundle_fields": [
     "schema_version",
     "policy_id",
@@ -749,6 +794,342 @@
       }
     }
   ],
+  "proof_report_scenarios": [
+    {
+      "scenario_id": "proof-report-pass",
+      "expected": {
+        "status": "pass",
+        "accepted": true,
+        "success": true,
+        "issue_kinds": []
+      },
+      "report": {
+        "schema_version": "slo-proof-report-v1",
+        "report_id": "slo-proof-pass",
+        "policy_id": "agent-swarm-standard",
+        "status": "pass",
+        "human_summary": "SLO proof passed with complete rch evidence",
+        "provenance": {
+          "profile_id": "agent-swarm-prod",
+          "profile_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "observed_profile_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "target_commit": "b8f24024890da34b9151aaea62fff2d06d90f282",
+          "related_bead_id": "asupersync-bgtplc.4"
+        },
+        "proof_commands": [
+          {
+            "label": "slo-proof-contract",
+            "command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
+          }
+        ],
+        "rows": [
+          {
+            "row_id": "row-pass",
+            "status": "pass",
+            "evidence_ref": "target/slo-policy-bundle/asupersync-bgtplc.4/slo-policy-bundle-events.ndjson",
+            "summary": "SLO proof passed with complete rch evidence"
+          }
+        ],
+        "redaction": {
+          "policy_id": "slo-proof-redaction-v1",
+          "passed": true
+        },
+        "metadata": {
+          "gate_mode": "opt-in-direct-main"
+        }
+      }
+    },
+    {
+      "scenario_id": "proof-report-degraded",
+      "expected": {
+        "status": "degraded",
+        "accepted": true,
+        "success": false,
+        "issue_kinds": []
+      },
+      "report": {
+        "schema_version": "slo-proof-report-v1",
+        "report_id": "slo-proof-degraded",
+        "policy_id": "agent-swarm-standard",
+        "status": "degraded",
+        "human_summary": "SLO proof degraded optional work before violation",
+        "provenance": {
+          "profile_id": "agent-swarm-prod",
+          "profile_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "observed_profile_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "target_commit": "b8f24024890da34b9151aaea62fff2d06d90f282",
+          "related_bead_id": "asupersync-bgtplc.4"
+        },
+        "proof_commands": [
+          {
+            "label": "slo-proof-contract",
+            "command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
+          }
+        ],
+        "rows": [
+          {
+            "row_id": "row-degraded",
+            "status": "degraded",
+            "evidence_ref": "target/slo-policy-bundle/asupersync-bgtplc.4/slo-policy-bundle-events.ndjson",
+            "summary": "SLO proof degraded optional work before violation"
+          }
+        ],
+        "redaction": {
+          "policy_id": "slo-proof-redaction-v1",
+          "passed": true
+        },
+        "metadata": {
+          "gate_mode": "opt-in-direct-main"
+        }
+      }
+    },
+    {
+      "scenario_id": "proof-report-no-win",
+      "expected": {
+        "status": "no_win",
+        "accepted": true,
+        "success": false,
+        "issue_kinds": []
+      },
+      "report": {
+        "schema_version": "slo-proof-report-v1",
+        "report_id": "slo-proof-no_win",
+        "policy_id": "agent-swarm-standard",
+        "status": "no_win",
+        "human_summary": "SLO proof reached no-win fallback with receipt",
+        "provenance": {
+          "profile_id": "agent-swarm-prod",
+          "profile_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "observed_profile_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "target_commit": "b8f24024890da34b9151aaea62fff2d06d90f282",
+          "related_bead_id": "asupersync-bgtplc.4"
+        },
+        "proof_commands": [
+          {
+            "label": "slo-proof-contract",
+            "command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
+          }
+        ],
+        "no_win_receipt": {
+          "fallback_profile": "agent-swarm-safe-mode",
+          "fallback_reason": "objectives-conflict-with-pressure",
+          "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
+        },
+        "rows": [
+          {
+            "row_id": "row-no_win",
+            "status": "no_win",
+            "evidence_ref": "target/slo-policy-bundle/asupersync-bgtplc.4/slo-policy-bundle-events.ndjson",
+            "summary": "SLO proof reached no-win fallback with receipt"
+          }
+        ],
+        "redaction": {
+          "policy_id": "slo-proof-redaction-v1",
+          "passed": true
+        },
+        "metadata": {
+          "gate_mode": "opt-in-direct-main"
+        }
+      }
+    },
+    {
+      "scenario_id": "proof-report-fail",
+      "expected": {
+        "status": "fail",
+        "accepted": false,
+        "success": false,
+        "issue_kinds": [
+          "non_passing_status"
+        ]
+      },
+      "report": {
+        "schema_version": "slo-proof-report-v1",
+        "report_id": "slo-proof-fail",
+        "policy_id": "agent-swarm-standard",
+        "status": "fail",
+        "human_summary": "SLO proof failed with explicit failure status",
+        "provenance": {
+          "profile_id": "agent-swarm-prod",
+          "profile_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "observed_profile_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "target_commit": "b8f24024890da34b9151aaea62fff2d06d90f282",
+          "related_bead_id": "asupersync-bgtplc.4"
+        },
+        "proof_commands": [
+          {
+            "label": "slo-proof-contract",
+            "command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
+          }
+        ],
+        "rows": [
+          {
+            "row_id": "row-fail",
+            "status": "fail",
+            "evidence_ref": "target/slo-policy-bundle/asupersync-bgtplc.4/slo-policy-bundle-events.ndjson",
+            "summary": "SLO proof failed with explicit failure status"
+          }
+        ],
+        "redaction": {
+          "policy_id": "slo-proof-redaction-v1",
+          "passed": true
+        },
+        "metadata": {
+          "gate_mode": "opt-in-direct-main"
+        }
+      }
+    },
+    {
+      "scenario_id": "proof-report-blocked",
+      "expected": {
+        "status": "blocked",
+        "accepted": false,
+        "success": false,
+        "issue_kinds": [
+          "non_passing_status"
+        ]
+      },
+      "report": {
+        "schema_version": "slo-proof-report-v1",
+        "report_id": "slo-proof-blocked",
+        "policy_id": "agent-swarm-standard",
+        "status": "blocked",
+        "human_summary": "SLO proof blocked before gate admission",
+        "provenance": {
+          "profile_id": "agent-swarm-prod",
+          "profile_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "observed_profile_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "target_commit": "b8f24024890da34b9151aaea62fff2d06d90f282",
+          "related_bead_id": "asupersync-bgtplc.4"
+        },
+        "proof_commands": [
+          {
+            "label": "slo-proof-contract",
+            "command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
+          }
+        ],
+        "rows": [
+          {
+            "row_id": "row-blocked",
+            "status": "blocked",
+            "evidence_ref": "target/slo-policy-bundle/asupersync-bgtplc.4/slo-policy-bundle-events.ndjson",
+            "summary": "SLO proof blocked before gate admission"
+          }
+        ],
+        "redaction": {
+          "policy_id": "slo-proof-redaction-v1",
+          "passed": true
+        },
+        "metadata": {
+          "gate_mode": "opt-in-direct-main"
+        }
+      }
+    },
+    {
+      "scenario_id": "proof-report-unsupported",
+      "expected": {
+        "status": "unsupported",
+        "accepted": false,
+        "success": false,
+        "issue_kinds": [
+          "non_passing_status"
+        ]
+      },
+      "report": {
+        "schema_version": "slo-proof-report-v1",
+        "report_id": "slo-proof-unsupported",
+        "policy_id": "agent-swarm-standard",
+        "status": "unsupported",
+        "human_summary": "SLO proof unsupported workload lane",
+        "provenance": {
+          "profile_id": "agent-swarm-prod",
+          "profile_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "observed_profile_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "target_commit": "b8f24024890da34b9151aaea62fff2d06d90f282",
+          "related_bead_id": "asupersync-bgtplc.4"
+        },
+        "proof_commands": [
+          {
+            "label": "slo-proof-contract",
+            "command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
+          }
+        ],
+        "rows": [
+          {
+            "row_id": "row-unsupported",
+            "status": "unsupported",
+            "evidence_ref": "target/slo-policy-bundle/asupersync-bgtplc.4/slo-policy-bundle-events.ndjson",
+            "summary": "SLO proof unsupported workload lane"
+          }
+        ],
+        "redaction": {
+          "policy_id": "slo-proof-redaction-v1",
+          "passed": true
+        },
+        "metadata": {
+          "gate_mode": "opt-in-direct-main"
+        }
+      }
+    },
+    {
+      "scenario_id": "proof-report-stale-evidence",
+      "expected": {
+        "status": "stale_evidence",
+        "accepted": false,
+        "success": false,
+        "issue_kinds": [
+          "non_passing_status",
+          "stale_profile_hash"
+        ]
+      },
+      "report": {
+        "schema_version": "slo-proof-report-v1",
+        "report_id": "slo-proof-stale_evidence",
+        "policy_id": "agent-swarm-standard",
+        "status": "stale_evidence",
+        "human_summary": "SLO proof stale evidence hash mismatch",
+        "provenance": {
+          "profile_id": "agent-swarm-prod",
+          "profile_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "observed_profile_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "target_commit": "b8f24024890da34b9151aaea62fff2d06d90f282",
+          "related_bead_id": "asupersync-bgtplc.4"
+        },
+        "proof_commands": [
+          {
+            "label": "slo-proof-contract",
+            "command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
+          }
+        ],
+        "rows": [
+          {
+            "row_id": "row-stale_evidence",
+            "status": "stale_evidence",
+            "evidence_ref": "target/slo-policy-bundle/asupersync-bgtplc.4/slo-policy-bundle-events.ndjson",
+            "summary": "SLO proof stale evidence hash mismatch"
+          }
+        ],
+        "redaction": {
+          "policy_id": "slo-proof-redaction-v1",
+          "passed": true
+        },
+        "metadata": {
+          "gate_mode": "opt-in-direct-main"
+        }
+      }
+    },
+    {
+      "scenario_id": "proof-report-malformed",
+      "expected": {
+        "status": "blocked",
+        "accepted": false,
+        "success": false,
+        "issue_kinds": [
+          "malformed_report"
+        ]
+      },
+      "fixture_document": "{\"schema_version\":\"slo-proof-report-v1\","
+    }
+  ],
   "e2e_script": "scripts/validate_slo_policy_bundle.sh",
   "required_log_fields": [
     "scenario_id",
@@ -761,10 +1142,10 @@
   "proof_commands": [
     "python3 -m json.tool artifacts/slo_policy_bundle_contract_v1.json >/dev/null",
     "bash -n scripts/validate_slo_policy_bundle.sh",
-    "bash scripts/validate_slo_policy_bundle.sh --output-root target/slo-policy-bundle --run-id asupersync-bgtplc.3",
+    "bash scripts/validate_slo_policy_bundle.sh --output-root target/slo-policy-bundle --run-id asupersync-bgtplc.4",
     "rch exec -- rustfmt --edition 2024 --check src/types/slo_policy.rs src/types/mod.rs tests/slo_policy_bundle_contract.rs",
-    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_compiler CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture",
-    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_compiler_check CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo check -p asupersync --test slo_policy_bundle_contract --features test-internals",
-    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_compiler_clippy CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --test slo_policy_bundle_contract --features test-internals -- -D warnings"
+    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_report CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture",
+    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_report_check CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo check -p asupersync --test slo_policy_bundle_contract --features test-internals",
+    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_report_clippy CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --test slo_policy_bundle_contract --features test-internals -- -D warnings"
   ]
 }

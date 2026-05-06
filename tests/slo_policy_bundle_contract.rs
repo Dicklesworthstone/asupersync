@@ -4,11 +4,14 @@ use asupersync::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
 use asupersync::runtime::yield_now;
 use asupersync::types::{
     Budget, Outcome, SLO_POLICY_BUNDLE_SCHEMA_VERSION, SLO_POLICY_COMPILER_SCHEMA_VERSION,
-    SloCompiledAdmissionDecision, SloCompiledPolicy, SloCompiledPolicyStatus, SloLatencyObjective,
-    SloLatencyUnit, SloNoWinFallback, SloOptionalWorkClass, SloPolicyBundle,
-    SloPolicyCapacityEvidence, SloPolicyCompilerBlockerKind, SloPolicyProvenance,
-    SloPolicyRedaction, SloPolicyValidationIssueKind, SloPolicyValidationReport,
-    SloResourcePressureThresholds, SloWorkloadClass, validate_slo_policy_bundle_json,
+    SLO_POLICY_PROOF_REPORT_SCHEMA_VERSION, SloCompiledAdmissionDecision, SloCompiledPolicy,
+    SloCompiledPolicyStatus, SloLatencyObjective, SloLatencyUnit, SloNoWinFallback,
+    SloOptionalWorkClass, SloPolicyBundle, SloPolicyCapacityEvidence, SloPolicyCompilerBlockerKind,
+    SloPolicyProvenance, SloPolicyRedaction, SloPolicyValidationIssueKind,
+    SloPolicyValidationReport, SloProofCommand, SloProofNoWinReceipt, SloProofReport,
+    SloProofReportIssueKind, SloProofReportProvenance, SloProofReportRow, SloProofReportStatus,
+    SloResourcePressureThresholds, SloWorkloadClass, slo_proof_report_status_counts,
+    validate_slo_policy_bundle_json, validate_slo_proof_report_json,
 };
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -283,6 +286,104 @@ fn validation_issue_tags() -> BTreeSet<String> {
     .into_iter()
     .map(|kind| kind.as_str().to_string())
     .collect()
+}
+
+fn proof_report_status_tags() -> BTreeSet<String> {
+    [
+        SloProofReportStatus::Pass,
+        SloProofReportStatus::Fail,
+        SloProofReportStatus::Blocked,
+        SloProofReportStatus::Degraded,
+        SloProofReportStatus::NoWin,
+        SloProofReportStatus::Unsupported,
+        SloProofReportStatus::StaleEvidence,
+    ]
+    .into_iter()
+    .map(|status| status.as_str().to_string())
+    .collect()
+}
+
+fn proof_report_issue_tags() -> BTreeSet<String> {
+    [
+        SloProofReportIssueKind::MalformedReport,
+        SloProofReportIssueKind::UnsupportedSchemaVersion,
+        SloProofReportIssueKind::MissingRequiredField,
+        SloProofReportIssueKind::MissingRchCommand,
+        SloProofReportIssueKind::StaleProfileHash,
+        SloProofReportIssueKind::MissingNoWinReceipt,
+        SloProofReportIssueKind::RedactionFailure,
+        SloProofReportIssueKind::SecretLikeMaterial,
+        SloProofReportIssueKind::NonPassingStatus,
+        SloProofReportIssueKind::OversizedField,
+    ]
+    .into_iter()
+    .map(|kind| kind.as_str().to_string())
+    .collect()
+}
+
+fn valid_proof_report(status: SloProofReportStatus) -> SloProofReport {
+    let summary = match status {
+        SloProofReportStatus::Pass => "SLO proof passed with complete rch evidence",
+        SloProofReportStatus::Fail => "SLO proof failed with explicit failure status",
+        SloProofReportStatus::Blocked => "SLO proof blocked before gate admission",
+        SloProofReportStatus::Degraded => "SLO proof degraded optional work before violation",
+        SloProofReportStatus::NoWin => "SLO proof reached no-win fallback with receipt",
+        SloProofReportStatus::Unsupported => "SLO proof unsupported workload lane",
+        SloProofReportStatus::StaleEvidence => "SLO proof stale evidence hash mismatch",
+    };
+    let no_win_receipt = (status == SloProofReportStatus::NoWin).then(|| SloProofNoWinReceipt {
+        fallback_profile: "agent-swarm-safe-mode".to_string(),
+        fallback_reason: "objectives-conflict-with-pressure".to_string(),
+        proof_command: "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture".to_string(),
+    });
+    let observed_profile_hash = if status == SloProofReportStatus::StaleEvidence {
+        Some(profile_hash('b'))
+    } else {
+        Some(profile_hash('a'))
+    };
+
+    SloProofReport {
+        schema_version: SLO_POLICY_PROOF_REPORT_SCHEMA_VERSION.to_string(),
+        report_id: format!("slo-proof-{}", status.as_str()),
+        policy_id: "agent-swarm-standard".to_string(),
+        status,
+        human_summary: summary.to_string(),
+        provenance: SloProofReportProvenance {
+            profile_id: "agent-swarm-prod".to_string(),
+            profile_hash: profile_hash('a'),
+            observed_profile_hash,
+            target_commit: "b8f24024890da34b9151aaea62fff2d06d90f282".to_string(),
+            related_bead_id: Some("asupersync-bgtplc.4".to_string()),
+        },
+        proof_commands: vec![SloProofCommand {
+            label: "slo-proof-contract".to_string(),
+            command: "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture".to_string(),
+        }],
+        no_win_receipt,
+        rows: vec![SloProofReportRow {
+            row_id: format!("row-{}", status.as_str()),
+            status,
+            evidence_ref: "target/slo-policy-bundle/asupersync-bgtplc.4/slo-policy-bundle-events.ndjson".to_string(),
+            summary: summary.to_string(),
+        }],
+        redaction: SloPolicyRedaction {
+            policy_id: "slo-proof-redaction-v1".to_string(),
+            passed: true,
+        },
+        metadata: BTreeMap::from([(
+            "gate_mode".to_string(),
+            Value::String("opt-in-direct-main".to_string()),
+        )]),
+    }
+}
+
+fn proof_report_issue_set(report: &SloProofReport) -> BTreeSet<String> {
+    report
+        .validate()
+        .issues
+        .iter()
+        .map(|issue| issue.kind.as_str().to_string())
+        .collect()
 }
 
 fn expected_issue_tags(scenario_value: &Value) -> BTreeSet<String> {
@@ -613,6 +714,18 @@ fn artifact_catalog_matches_rust_tags_and_required_fields() {
         .iter()
         .map(|value| value.as_str().expect("lab replay status").to_string())
         .collect::<BTreeSet<_>>();
+    let artifact_proof_report_statuses = artifact["proof_report_statuses"]
+        .as_array()
+        .expect("proof report statuses")
+        .iter()
+        .map(|value| value.as_str().expect("proof report status").to_string())
+        .collect::<BTreeSet<_>>();
+    let artifact_proof_report_issues = artifact["proof_report_issue_kinds"]
+        .as_array()
+        .expect("proof report issue kinds")
+        .iter()
+        .map(|value| value.as_str().expect("proof report issue").to_string())
+        .collect::<BTreeSet<_>>();
     let required_fields = artifact["required_bundle_fields"]
         .as_array()
         .expect("required bundle fields")
@@ -626,9 +739,15 @@ fn artifact_catalog_matches_rust_tags_and_required_fields() {
     assert_eq!(artifact_compiler_statuses, compiler_status_tags());
     assert_eq!(artifact_compiler_blockers, compiler_blocker_tags());
     assert_eq!(artifact_lab_replay_statuses, lab_replay_status_tags());
+    assert_eq!(artifact_proof_report_statuses, proof_report_status_tags());
+    assert_eq!(artifact_proof_report_issues, proof_report_issue_tags());
     assert_eq!(
         artifact["compiler_schema_version"].as_str(),
         Some(SLO_POLICY_COMPILER_SCHEMA_VERSION)
+    );
+    assert_eq!(
+        artifact["proof_report_schema_version"].as_str(),
+        Some(SLO_POLICY_PROOF_REPORT_SCHEMA_VERSION)
     );
     assert_eq!(
         artifact["policy_bundle_schema_version"].as_u64(),
@@ -780,6 +899,100 @@ fn compiler_blocks_missing_evidence_and_conflicting_fallbacks() {
         compiled_blocker_tags(&compiled)
             .contains(SloPolicyCompilerBlockerKind::ConflictingFallbackDeclaration.as_str())
     );
+}
+
+#[test]
+fn proof_report_serializes_validates_and_renders_rch_gate_command() {
+    let report = valid_proof_report(SloProofReportStatus::Pass);
+    let validation = report.validate();
+    assert!(
+        validation.accepted,
+        "proof report validation: {validation:?}"
+    );
+    assert!(validation.success);
+    assert!(validation.issues.is_empty());
+
+    let json = report.to_json().expect("proof report serializes");
+    assert!(json.contains("\"status\": \"pass\""));
+    assert!(json.contains("\"proof_commands\""));
+    let reparsed = SloProofReport::from_json(&json).expect("proof report reparses");
+    assert_eq!(report, reparsed);
+
+    let validation_from_json = validate_slo_proof_report_json(&json);
+    assert!(validation_from_json.accepted);
+    assert!(validation_from_json.success);
+    let command =
+        SloProofReport::render_ci_gate_command("target/slo-policy-bundle", "asupersync-bgtplc.4");
+    assert!(command.starts_with("rch exec -- bash scripts/validate_slo_policy_bundle.sh"));
+    assert!(command.contains("--run-id asupersync-bgtplc.4"));
+}
+
+#[test]
+fn proof_report_fail_closed_required_issue_modes() {
+    let mut missing_rch = valid_proof_report(SloProofReportStatus::Pass);
+    missing_rch.proof_commands[0].command =
+        "cargo test -p asupersync --test slo_policy_bundle_contract".to_string();
+    assert!(
+        missing_rch
+            .validate()
+            .contains_issue(SloProofReportIssueKind::MissingRchCommand)
+    );
+
+    let stale = valid_proof_report(SloProofReportStatus::StaleEvidence);
+    let stale_validation = stale.validate();
+    assert!(!stale_validation.accepted);
+    assert!(stale_validation.contains_issue(SloProofReportIssueKind::StaleProfileHash));
+
+    let mut no_win_missing_receipt = valid_proof_report(SloProofReportStatus::NoWin);
+    no_win_missing_receipt.no_win_receipt = None;
+    assert!(
+        no_win_missing_receipt
+            .validate()
+            .contains_issue(SloProofReportIssueKind::MissingNoWinReceipt)
+    );
+
+    let mut redaction = valid_proof_report(SloProofReportStatus::Pass);
+    redaction.redaction.passed = false;
+    redaction.metadata.insert(
+        "api_token".to_string(),
+        Value::String("sk-redacted-proof".to_string()),
+    );
+    let redaction_validation = redaction.validate();
+    assert!(redaction_validation.contains_issue(SloProofReportIssueKind::RedactionFailure));
+    assert!(redaction_validation.contains_issue(SloProofReportIssueKind::SecretLikeMaterial));
+
+    let malformed = validate_slo_proof_report_json("{\"schema_version\":\"slo-proof-report-v1\",");
+    assert!(!malformed.accepted);
+    assert!(malformed.contains_issue(SloProofReportIssueKind::MalformedReport));
+}
+
+#[test]
+fn proof_report_status_aggregation_preserves_non_success_states() {
+    let reports = [
+        valid_proof_report(SloProofReportStatus::Pass),
+        valid_proof_report(SloProofReportStatus::Fail),
+        valid_proof_report(SloProofReportStatus::Blocked),
+        valid_proof_report(SloProofReportStatus::Degraded),
+        valid_proof_report(SloProofReportStatus::NoWin),
+        valid_proof_report(SloProofReportStatus::Unsupported),
+        valid_proof_report(SloProofReportStatus::StaleEvidence),
+    ];
+    let counts = slo_proof_report_status_counts(&reports);
+    assert_eq!(counts.total(), 7);
+    assert_eq!(counts.pass, 1);
+    assert_eq!(counts.fail, 1);
+    assert_eq!(counts.blocked, 1);
+    assert_eq!(counts.degraded, 1);
+    assert_eq!(counts.no_win, 1);
+    assert_eq!(counts.unsupported, 1);
+    assert_eq!(counts.stale_evidence, 1);
+
+    let degraded = valid_proof_report(SloProofReportStatus::Degraded).validate();
+    assert!(degraded.accepted);
+    assert!(!degraded.success, "degraded must not collapse into success");
+    let no_win = valid_proof_report(SloProofReportStatus::NoWin).validate();
+    assert!(no_win.accepted);
+    assert!(!no_win.success, "no-win must not collapse into success");
 }
 
 #[test]
@@ -1091,6 +1304,71 @@ fn lab_replay_artifact_scenarios_match_rust_replay() {
 }
 
 #[test]
+fn proof_report_artifact_scenarios_match_rust_gate() {
+    let artifact = contract();
+    let mut statuses_seen = BTreeSet::new();
+    for scenario in artifact["proof_report_scenarios"]
+        .as_array()
+        .expect("proof report scenarios")
+    {
+        let scenario_id = scenario["scenario_id"].as_str().expect("scenario id");
+        let validation = if let Some(document) = scenario["fixture_document"].as_str() {
+            validate_slo_proof_report_json(document)
+        } else {
+            let report: SloProofReport = serde_json::from_value(scenario["report"].clone())
+                .unwrap_or_else(|error| panic!("proof report scenario parses: {error}"));
+            let expected_report_issues = scenario["expected"]["issue_kinds"]
+                .as_array()
+                .expect("expected proof issues")
+                .iter()
+                .map(|value| value.as_str().expect("proof issue").to_string())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                proof_report_issue_set(&report),
+                expected_report_issues,
+                "proof report issue set for {scenario_id}"
+            );
+            report.validate()
+        };
+        let expected = &scenario["expected"];
+        statuses_seen.insert(
+            expected["status"]
+                .as_str()
+                .expect("expected status")
+                .to_string(),
+        );
+        assert_eq!(
+            validation.status.as_str(),
+            expected["status"].as_str().expect("expected status"),
+            "scenario {scenario_id}"
+        );
+        assert_eq!(
+            validation.accepted,
+            expected["accepted"].as_bool().expect("expected accepted"),
+            "scenario {scenario_id}"
+        );
+        assert_eq!(
+            validation.success,
+            expected["success"].as_bool().expect("expected success"),
+            "scenario {scenario_id}"
+        );
+        let issues = validation
+            .issues
+            .iter()
+            .map(|issue| issue.kind.as_str().to_string())
+            .collect::<BTreeSet<_>>();
+        let expected_issues = expected["issue_kinds"]
+            .as_array()
+            .expect("expected issue kinds")
+            .iter()
+            .map(|value| value.as_str().expect("issue kind").to_string())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(issues, expected_issues, "scenario {scenario_id}");
+    }
+    assert_eq!(statuses_seen, proof_report_status_tags());
+}
+
+#[test]
 fn script_emits_accepted_rejected_and_malformed_rows() {
     let output_root = "target/slo-policy-bundle-contract-test";
     let run_id = "script-emits";
@@ -1131,6 +1409,16 @@ fn script_emits_accepted_rejected_and_malformed_rows() {
         events
             .iter()
             .any(|event| event["lab_replay_status"] == "no_win")
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["proof_report_status"] == "pass")
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["proof_report_status"] == "no_win")
     );
 
     let input_status = Command::new("bash")
