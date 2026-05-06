@@ -173,7 +173,7 @@
       { "rank": 12, "idea": "read-biased snapshot substrate", "bead_id": "asupersync-l0q0rs" },
       { "rank": 13, "idea": "incremental governor state snapshot", "bead_id": "asupersync-k7nx5t" },
       { "rank": 14, "idea": "blocking-pool affinity", "bead_id": "asupersync-lpffta" },
-      { "rank": 15, "idea": "large-memory evidence/storage profile", "bead_id": "asupersync-yaj7g6" }
+      { "rank": 15, "idea": "bounded-load distributed hot-node routing", "bead_id": "asupersync-lgj5tz" }
     ],
     "parked_ideas": [
       {

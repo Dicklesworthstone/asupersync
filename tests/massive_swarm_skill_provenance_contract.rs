@@ -49,6 +49,46 @@ fn validate_mapping(mapping: &Value, required_fields: &[String]) -> Result<(), S
     Ok(())
 }
 
+fn ranked_ideas(value: &Value, field: &str) -> Result<BTreeMap<u64, String>, String> {
+    let ideas = value[field]
+        .as_array()
+        .ok_or_else(|| format!("{field} must be array"))?;
+    let mut ranked = BTreeMap::new();
+
+    for item in ideas {
+        let rank = item["rank"]
+            .as_u64()
+            .ok_or_else(|| format!("{field} rank must be unsigned integer"))?;
+        let idea = item["idea"]
+            .as_str()
+            .ok_or_else(|| format!("{field} idea must be string"))?
+            .to_string();
+        if idea.trim().is_empty() {
+            return Err(format!("{field} idea must be nonempty"));
+        }
+        if ranked.insert(rank, idea).is_some() {
+            return Err(format!("{field} contains duplicate rank {rank}"));
+        }
+    }
+
+    Ok(ranked)
+}
+
+fn require_exact_rank_window(
+    ranked: &BTreeMap<u64, String>,
+    field: &str,
+    expected: std::ops::RangeInclusive<u64>,
+) -> Result<(), String> {
+    let actual = ranked.keys().copied().collect::<Vec<_>>();
+    let expected = expected.collect::<Vec<_>>();
+    if actual != expected {
+        return Err(format!(
+            "{field} ranks must be exactly {expected:?}, got {actual:?}"
+        ));
+    }
+    Ok(())
+}
+
 fn validate_artifact(artifact: &Value) -> Result<(), String> {
     let top_level_required = [
         "contract_version",
@@ -87,6 +127,33 @@ fn validate_artifact(artifact: &Value) -> Result<(), String> {
     }
     if ledger["parked_ideas"].as_array().map_or(0, Vec::len) != 5 {
         return Err("idea-wizard overlap pass must preserve parked ideas".to_string());
+    }
+
+    let generated_ideas = ranked_ideas(ledger, "generated_ideas")?;
+    let top_5 = ranked_ideas(ledger, "top_5")?;
+    let next_10 = ranked_ideas(ledger, "next_10")?;
+    let parked_ideas = ranked_ideas(ledger, "parked_ideas")?;
+    require_exact_rank_window(&generated_ideas, "generated_ideas", 1..=30)?;
+    require_exact_rank_window(&top_5, "top_5", 1..=5)?;
+    require_exact_rank_window(&next_10, "next_10", 6..=15)?;
+    require_exact_rank_window(&parked_ideas, "parked_ideas", 26..=30)?;
+
+    for (field, ranked) in [
+        ("top_5", &top_5),
+        ("next_10", &next_10),
+        ("parked_ideas", &parked_ideas),
+    ] {
+        for (rank, idea) in ranked {
+            match generated_ideas.get(rank) {
+                Some(generated) if generated == idea => {}
+                Some(generated) => {
+                    return Err(format!(
+                        "{field} rank {rank} idea must match generated idea {generated:?}"
+                    ));
+                }
+                None => return Err(format!("{field} rank {rank} missing from generated ideas")),
+            }
+        }
     }
 
     let required_fields: Vec<String> = artifact["required_mapping_fields"]
@@ -225,6 +292,28 @@ fn missing_idea_wizard_phase_is_rejected() {
         validate_artifact(&artifact)
             .expect_err("missing idea-wizard phase evidence should fail")
             .contains("30 generated ideas")
+    );
+}
+
+#[test]
+fn idea_wizard_rank_drift_is_rejected() {
+    let mut artifact = load_artifact();
+    artifact["idea_wizard_phase_ledger"]["next_10"][9]["idea"] =
+        Value::from("large-memory evidence/storage profile");
+    assert!(
+        validate_artifact(&artifact)
+            .expect_err("rank drift should fail")
+            .contains("next_10 rank 15 idea"),
+        "error should identify the drifted rank"
+    );
+
+    let mut artifact = load_artifact();
+    artifact["idea_wizard_phase_ledger"]["top_5"][4]["rank"] = Value::from(4);
+    assert!(
+        validate_artifact(&artifact)
+            .expect_err("duplicate rank should fail")
+            .contains("duplicate rank 4"),
+        "error should identify duplicate ranks"
     );
 }
 
