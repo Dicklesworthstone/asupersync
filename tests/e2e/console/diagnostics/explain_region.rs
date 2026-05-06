@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Region explanation E2E tests.
 
 use crate::console_e2e::common::create_test_runtime_state;
