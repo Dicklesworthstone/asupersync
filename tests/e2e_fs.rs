@@ -51,6 +51,7 @@ const FS_PARITY_WAVE2_SCENARIOS: &[&str] = &[
     "dir-create-remove-boundaries",
     "unix-vfs-equivalence",
     "error-kind-remove-missing",
+    "error-kind-invalid-utf8-read-to-string",
     "try-exists-lifecycle",
     "path-ops-copy-hardlink-rename",
     "unix-symlink-metadata-readlink",
@@ -709,6 +710,34 @@ async fn fs_proof_remove_missing_error_kind(temp_root: &Path) -> Result<FsProofE
     }
 }
 
+async fn fs_proof_invalid_utf8_read_to_string(temp_root: &Path) -> Result<FsProofEvidence, String> {
+    let dir = fs_proof_scenario_dir(temp_root, "error-kind-invalid-utf8-read-to-string")?;
+    let path = dir.join("invalid-utf8.txt");
+    let invalid = [0xff, b'a', 0xfe];
+    fs::write(&path, invalid)
+        .await
+        .map_err(|err| format!("write invalid utf8 fixture: {err}"))?;
+
+    let raw = fs::read(&path)
+        .await
+        .map_err(|err| format!("read invalid utf8 fixture as bytes: {err}"))?;
+    let err = fs::read_to_string(&path)
+        .await
+        .expect_err("read_to_string must reject invalid UTF-8");
+
+    if raw != invalid || err.kind() != io::ErrorKind::InvalidData {
+        return Err(format!(
+            "invalid UTF-8 error drift: raw={raw:?} error_kind={:?}",
+            err.kind()
+        ));
+    }
+
+    Ok(FsProofEvidence::supported(
+        raw.len() as u64,
+        "read_bytes=3,read_to_string_error=InvalidData",
+    ))
+}
+
 async fn fs_proof_file_set_len_permissions(temp_root: &Path) -> Result<FsProofEvidence, String> {
     let dir = fs_proof_scenario_dir(temp_root, "file-set-len-permissions")?;
     let path = dir.join("set-len-permissions.txt");
@@ -1079,6 +1108,15 @@ async fn fs_parity_wave2_run() -> io::Result<Vec<Value>> {
             metadata_expected: "error_kind=NotFound,path_absent=true",
             cancellation_point: "none",
             result: fs_proof_remove_missing_error_kind(&temp_root).await,
+        },
+        FsProofScenario {
+            scenario_id: "error-kind-invalid-utf8-read-to-string",
+            api: "path_ops::read_to_string",
+            operation: "invalid_utf8_error_mapping",
+            bytes_expected: 3,
+            metadata_expected: "read_bytes=3,read_to_string_error=InvalidData",
+            cancellation_point: "none",
+            result: fs_proof_invalid_utf8_read_to_string(&temp_root).await,
         },
         FsProofScenario {
             scenario_id: "try-exists-lifecycle",
