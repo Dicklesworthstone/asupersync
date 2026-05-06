@@ -45,6 +45,9 @@ const FS_PARITY_WAVE2_SCENARIOS: &[&str] = &[
     "buffered-lines-boundaries",
     "unix-vfs-equivalence",
     "error-kind-remove-missing",
+    "try-exists-lifecycle",
+    "path-ops-copy-hardlink-rename",
+    "unix-symlink-metadata-readlink",
     "read-dir-drop-cancellation",
 ];
 
@@ -381,6 +384,154 @@ async fn fs_proof_remove_missing_error_kind(temp_root: &Path) -> Result<FsProofE
     }
 }
 
+async fn fs_proof_try_exists_lifecycle(temp_root: &Path) -> Result<FsProofEvidence, String> {
+    let dir = fs_proof_scenario_dir(temp_root, "try-exists-lifecycle")?;
+    let path = dir.join("lifecycle.txt");
+
+    let before = fs::try_exists(&path)
+        .await
+        .map_err(|err| format!("try_exists before create: {err}"))?;
+    fs::write(&path, b"exists")
+        .await
+        .map_err(|err| format!("write lifecycle file: {err}"))?;
+    let after_create = fs::try_exists(&path)
+        .await
+        .map_err(|err| format!("try_exists after create: {err}"))?;
+    fs::remove_file(&path)
+        .await
+        .map_err(|err| format!("remove lifecycle file: {err}"))?;
+    let after_remove = fs::try_exists(&path)
+        .await
+        .map_err(|err| format!("try_exists after remove: {err}"))?;
+
+    if before || !after_create || after_remove {
+        return Err(format!(
+            "try_exists lifecycle drift: before={before} after_create={after_create} after_remove={after_remove}"
+        ));
+    }
+
+    Ok(FsProofEvidence::supported(
+        3,
+        "exists_sequence=false,true,false",
+    ))
+}
+
+async fn fs_proof_path_ops_copy_hardlink_rename(
+    temp_root: &Path,
+) -> Result<FsProofEvidence, String> {
+    let dir = fs_proof_scenario_dir(temp_root, "path-ops-copy-hardlink-rename")?;
+    let source = dir.join("source.txt");
+    let copied = dir.join("copied.txt");
+    let renamed = dir.join("renamed.txt");
+    let hard_link = dir.join("hard-link.txt");
+
+    fs::write(&source, b"path-ops")
+        .await
+        .map_err(|err| format!("write source: {err}"))?;
+    let copy_len = fs::copy(&source, &copied)
+        .await
+        .map_err(|err| format!("copy source: {err}"))?;
+    fs::hard_link(&source, &hard_link)
+        .await
+        .map_err(|err| format!("hard_link source: {err}"))?;
+    fs::rename(&copied, &renamed)
+        .await
+        .map_err(|err| format!("rename copied file: {err}"))?;
+
+    let source_bytes = fs::read(&source)
+        .await
+        .map_err(|err| format!("read source: {err}"))?;
+    let renamed_bytes = fs::read(&renamed)
+        .await
+        .map_err(|err| format!("read renamed: {err}"))?;
+    let hard_link_bytes = fs::read(&hard_link)
+        .await
+        .map_err(|err| format!("read hard link: {err}"))?;
+    let canonical = fs::canonicalize(&renamed)
+        .await
+        .map_err(|err| format!("canonicalize renamed: {err}"))?;
+    let copied_still_exists = fs::try_exists(&copied)
+        .await
+        .map_err(|err| format!("try_exists copied after rename: {err}"))?;
+
+    if copy_len != 8
+        || source_bytes != b"path-ops"
+        || renamed_bytes != source_bytes
+        || hard_link_bytes != source_bytes
+        || !canonical.ends_with("renamed.txt")
+        || copied_still_exists
+    {
+        return Err(format!(
+            "path ops drift: copy_len={copy_len} source={source_bytes:?} renamed={renamed_bytes:?} hard_link={hard_link_bytes:?} canonical={} copied_exists={copied_still_exists}",
+            canonical.display()
+        ));
+    }
+
+    Ok(FsProofEvidence::supported(
+        source_bytes.len() as u64,
+        "copy_len=8,hard_link_matches=true,rename_removed_source_copy=true,canonicalized=true",
+    ))
+}
+
+async fn fs_proof_unix_symlink_metadata_readlink(
+    temp_root: &Path,
+) -> Result<FsProofEvidence, String> {
+    #[cfg(unix)]
+    {
+        let dir = fs_proof_scenario_dir(temp_root, "unix-symlink-metadata-readlink")?;
+        let target = dir.join("target.txt");
+        let link = dir.join("link.txt");
+
+        fs::write(&target, b"symlink-target")
+            .await
+            .map_err(|err| format!("write symlink target: {err}"))?;
+        fs::symlink(&target, &link)
+            .await
+            .map_err(|err| format!("create symlink: {err}"))?;
+
+        let read_link = fs::read_link(&link)
+            .await
+            .map_err(|err| format!("read_link: {err}"))?;
+        let link_metadata = fs::symlink_metadata(&link)
+            .await
+            .map_err(|err| format!("symlink_metadata: {err}"))?;
+        let target_metadata = fs::metadata(&link)
+            .await
+            .map_err(|err| format!("metadata follows symlink: {err}"))?;
+        let contents = fs::read_to_string(&link)
+            .await
+            .map_err(|err| format!("read symlink contents: {err}"))?;
+
+        if read_link != target
+            || !link_metadata.is_symlink()
+            || !target_metadata.is_file()
+            || contents != "symlink-target"
+        {
+            return Err(format!(
+                "symlink drift: read_link={} target={} link_is_symlink={} target_is_file={} contents={contents}",
+                read_link.display(),
+                target.display(),
+                link_metadata.is_symlink(),
+                target_metadata.is_file()
+            ));
+        }
+
+        Ok(FsProofEvidence::supported(
+            contents.len() as u64,
+            "read_link_matches_target=true,symlink_metadata_is_symlink=true,metadata_follows_to_file=true",
+        ))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = temp_root;
+        Ok(FsProofEvidence {
+            bytes_actual: 0,
+            metadata_actual: "unsupported_platform=non_unix".to_string(),
+            unsupported_reason: "symlink proof requires unix symlink support".to_string(),
+        })
+    }
+}
+
 async fn fs_proof_read_dir_drop_cancellation(temp_root: &Path) -> Result<FsProofEvidence, String> {
     let dir = fs_proof_scenario_dir(temp_root, "read-dir-drop-cancellation")?;
     for idx in 0..8 {
@@ -476,6 +627,33 @@ async fn fs_parity_wave2_run() -> io::Result<Vec<Value>> {
             metadata_expected: "error_kind=NotFound,path_absent=true",
             cancellation_point: "none",
             result: fs_proof_remove_missing_error_kind(&temp_root).await,
+        },
+        FsProofScenario {
+            scenario_id: "try-exists-lifecycle",
+            api: "try_exists",
+            operation: "missing_create_remove_transitions",
+            bytes_expected: 3,
+            metadata_expected: "exists_sequence=false,true,false",
+            cancellation_point: "none",
+            result: fs_proof_try_exists_lifecycle(&temp_root).await,
+        },
+        FsProofScenario {
+            scenario_id: "path-ops-copy-hardlink-rename",
+            api: "path_ops",
+            operation: "write_copy_hard_link_rename_canonicalize",
+            bytes_expected: 8,
+            metadata_expected: "copy_len=8,hard_link_matches=true,rename_removed_source_copy=true,canonicalized=true",
+            cancellation_point: "none",
+            result: fs_proof_path_ops_copy_hardlink_rename(&temp_root).await,
+        },
+        FsProofScenario {
+            scenario_id: "unix-symlink-metadata-readlink",
+            api: "path_ops::symlink_metadata",
+            operation: "symlink_read_link_metadata_follow_boundary",
+            bytes_expected: 14,
+            metadata_expected: "read_link_matches_target=true,symlink_metadata_is_symlink=true,metadata_follows_to_file=true",
+            cancellation_point: "none",
+            result: fs_proof_unix_symlink_metadata_readlink(&temp_root).await,
         },
         FsProofScenario {
             scenario_id: "read-dir-drop-cancellation",

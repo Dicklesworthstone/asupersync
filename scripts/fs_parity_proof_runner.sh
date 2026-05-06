@@ -24,6 +24,9 @@ EXPECTED_SCENARIOS=(
   "buffered-lines-boundaries"
   "unix-vfs-equivalence"
   "error-kind-remove-missing"
+  "try-exists-lifecycle"
+  "path-ops-copy-hardlink-rename"
+  "unix-symlink-metadata-readlink"
   "read-dir-drop-cancellation"
 )
 
