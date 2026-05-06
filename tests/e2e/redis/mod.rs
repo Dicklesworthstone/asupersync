@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Redis end-to-end (E2E) test suite.
 //!
 //! This test crate is intentionally split from unit tests:
