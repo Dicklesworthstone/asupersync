@@ -91,7 +91,7 @@ bash ./scripts/run_claim_evidence_graph_smoke.sh --execute
 ## Validation
 
 ```bash
-rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa101 cargo test --test claim_evidence_graph_contract -- --nocapture
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_claim_evidence_graph cargo test -p asupersync --test claim_evidence_graph_contract --features test-internals -- --nocapture
 ```
 
 ## Cross-References

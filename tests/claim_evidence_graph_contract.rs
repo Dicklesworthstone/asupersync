@@ -53,6 +53,17 @@ fn doc_references_bead_id() {
     );
 }
 
+#[test]
+fn doc_validation_command_uses_scoped_rch() {
+    let doc = load_doc();
+    assert!(
+        doc.contains(
+            "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_claim_evidence_graph cargo test -p asupersync --test claim_evidence_graph_contract --features test-internals -- --nocapture"
+        ),
+        "doc must route validation through scoped rch command"
+    );
+}
+
 // ── Artifact stability ─────────────────────────────────────────────
 
 #[test]
@@ -340,9 +351,21 @@ fn smoke_scenarios_are_rch_routed() {
     for scenario in scenarios {
         let sid = scenario["scenario_id"].as_str().unwrap();
         let cmd = scenario["command"].as_str().unwrap();
+        assert!(cmd.contains("RCH_BIN"), "{sid}: must use configurable rch");
+        assert!(cmd.contains("exec --"), "{sid}: command must use rch exec");
         assert!(
-            cmd.starts_with("rch exec"),
-            "{sid}: command must be rch-routed"
+            cmd.contains("CARGO_TARGET_DIR=${TMPDIR:-/tmp}/"),
+            "{sid}: must use TMPDIR-aware target dir"
+        );
+        assert!(
+            cmd.contains("cargo test -p asupersync"),
+            "{sid}: must scope cargo test to asupersync"
+        );
+        assert!(
+            scenario["test_filter"]
+                .as_str()
+                .is_some_and(|filter| !filter.is_empty()),
+            "{sid}: must pin a test filter"
         );
     }
 }
@@ -350,18 +373,20 @@ fn smoke_scenarios_are_rch_routed() {
 #[test]
 fn runner_script_exists_and_declares_modes() {
     let runner = load_runner();
-    assert!(runner.contains("--list"), "runner must support --list");
+    for mode in &[
+        "--list",
+        "--dry-run",
+        "--execute",
+        "--scenario",
+        "RCH_BIN",
+        "local fallback",
+        "validation_passed",
+    ] {
+        assert!(runner.contains(mode), "runner must support {mode}");
+    }
     assert!(
-        runner.contains("--dry-run"),
-        "runner must support --dry-run"
-    );
-    assert!(
-        runner.contains("--execute"),
-        "runner must support --execute"
-    );
-    assert!(
-        runner.contains("--scenario"),
-        "runner must support --scenario"
+        !runner.contains("eval "),
+        "runner must avoid string-based eval execution"
     );
 }
 

@@ -151,17 +151,20 @@
     {
       "scenario_id": "CEG-SMOKE-SCHEMA",
       "description": "Validate graph schema node and edge type definitions",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa101 cargo test --test claim_evidence_graph_contract schema -- --nocapture"
+      "test_filter": "schema",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_claim_evidence_graph cargo test -p asupersync --test claim_evidence_graph_contract --features test-internals schema -- --nocapture"
     },
     {
       "scenario_id": "CEG-SMOKE-BUNDLE",
       "description": "Validate bundle contract and validation rules",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa101 cargo test --test claim_evidence_graph_contract bundle -- --nocapture"
+      "test_filter": "bundle",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_claim_evidence_graph cargo test -p asupersync --test claim_evidence_graph_contract --features test-internals bundle -- --nocapture"
     },
     {
       "scenario_id": "CEG-SMOKE-VALIDATION",
       "description": "Validate graph validation logic and rejection reporting",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa101 cargo test --test claim_evidence_graph_contract validation -- --nocapture"
+      "test_filter": "validation",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_claim_evidence_graph cargo test -p asupersync --test claim_evidence_graph_contract --features test-internals validation -- --nocapture"
     }
   ],
   "downstream_beads": [

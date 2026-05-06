@@ -178,7 +178,7 @@ closure packet's cited evidence surfaces.
 
 | Command ID | Purpose | Exact command |
 |------------|---------|---------------|
-| `RACP-REFRESH-CLAIM-GRAPH` | Refresh AA-10 claim/evidence graph contract | `rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa101 cargo test --test claim_evidence_graph_contract -- --nocapture` |
+| `RACP-REFRESH-CLAIM-GRAPH` | Refresh AA-10 claim/evidence graph contract | `rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_claim_evidence_graph cargo test -p asupersync --test claim_evidence_graph_contract --features test-internals -- --nocapture` |
 | `RACP-REFRESH-CI-GATES` | Refresh AA-10 CI proof gates contract | `rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa102 cargo test --test ci_proof_gates_contract -- --nocapture` |
 | `RACP-REFRESH-COMPOSITION` | Refresh AA-10 cross-track composition contract | `rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa104 cargo test --test cross_track_composition_contract -- --nocapture` |
 | `RACP-REFRESH-PACKET` | Refresh this closure packet contract | `rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa106 cargo test --test runtime_ascension_closure_packet_contract -- --nocapture` |
@@ -193,7 +193,7 @@ Use these commands to refresh this packet's inputs:
 
 ```bash
 # Claim/evidence graph
-rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa101 cargo test --test claim_evidence_graph_contract -- --nocapture
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_claim_evidence_graph cargo test -p asupersync --test claim_evidence_graph_contract --features test-internals -- --nocapture
 
 # CI proof gates
 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa102 cargo test --test ci_proof_gates_contract -- --nocapture
