@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 #![allow(unsafe_code)]
 //! Contract tests for [T3.7] Deterministic Conformance and Fault-Injection Suites
 //!
