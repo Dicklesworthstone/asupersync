@@ -1797,6 +1797,12 @@ struct RedisConnection {
     resp3_push_backlog: Option<Arc<parking_lot::Mutex<RedisResp3PushBacklog>>>,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum Resp3PushHandling {
+    RouteToRegularClientBacklog,
+    ReturnToPubSubCaller,
+}
+
 impl RedisConnection {
     async fn connect(
         config: RedisConfig,
@@ -1971,7 +1977,11 @@ impl RedisConnection {
         Ok(())
     }
 
-    async fn read_response(&mut self, cx: &Cx) -> Result<RespValue, RedisError> {
+    async fn read_response_with_push_handling(
+        &mut self,
+        cx: &Cx,
+        push_handling: Resp3PushHandling,
+    ) -> Result<RespValue, RedisError> {
         loop {
             cx.checkpoint().map_err(|_| RedisError::Cancelled)?;
 
@@ -1989,13 +1999,20 @@ impl RedisConnection {
                     }
                     push_value @ RespValue::Push(_) => {
                         // RESP3 push frames (server-initiated messages like
-                        // client-tracking invalidations or monitoring events)
-                        // must never be returned as synchronous command
-                        // responses. Route them into the regular-client
-                        // backlog in arrival order, then continue reading for
-                        // the actual reply.
-                        self.record_resp3_push(cx, push_value, consumed)?;
-                        continue;
+                        // client-tracking invalidations or pub/sub events)
+                        // are not synchronous command replies. Regular
+                        // clients route them into the push backlog and keep
+                        // reading for the command reply; dedicated Pub/Sub
+                        // connections return them to the Pub/Sub parser.
+                        match push_handling {
+                            Resp3PushHandling::RouteToRegularClientBacklog => {
+                                self.record_resp3_push(cx, push_value, consumed)?;
+                                continue;
+                            }
+                            Resp3PushHandling::ReturnToPubSubCaller => {
+                                return Ok(push_value);
+                            }
+                        }
                     }
                     other => {
                         return Ok(other);
@@ -2036,6 +2053,16 @@ impl RedisConnection {
             }
             self.read_buf.extend(&tmp[..n]);
         }
+    }
+
+    async fn read_response(&mut self, cx: &Cx) -> Result<RespValue, RedisError> {
+        self.read_response_with_push_handling(cx, Resp3PushHandling::RouteToRegularClientBacklog)
+            .await
+    }
+
+    async fn read_pubsub_response(&mut self, cx: &Cx) -> Result<RespValue, RedisError> {
+        self.read_response_with_push_handling(cx, Resp3PushHandling::ReturnToPubSubCaller)
+            .await
     }
 
     async fn exec_no_init(&mut self, cx: &Cx, args: &[&[u8]]) -> Result<RespValue, RedisError> {
@@ -3385,7 +3412,7 @@ impl RedisPubSub {
     }
 
     async fn read_next_event(&mut self, cx: &Cx) -> Result<PubSubEvent, RedisError> {
-        let response = self.conn.read_response(cx).await?;
+        let response = self.conn.read_pubsub_response(cx).await?;
         Self::parse_event(response)
     }
 

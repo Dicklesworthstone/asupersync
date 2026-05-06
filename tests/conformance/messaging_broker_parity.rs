@@ -299,12 +299,13 @@ mod redis_mod {
     use super::*;
     use asupersync::cx::Cx;
     use asupersync::messaging::RedisClient;
-    use asupersync::messaging::redis::RespValue;
+    use asupersync::messaging::redis::{PubSubEvent, RedisError, RespValue};
+    use asupersync::time::timeout;
+    use serde_json::json;
 
-    fn spawn_redis_container(suite: &str) -> Option<Container> {
+    fn spawn_redis_container_with_reason(suite: &str) -> Result<Container, String> {
         if !docker_available() {
-            jlog(suite, "skip", "no_docker", "{}");
-            return None;
+            return Err("docker_unavailable".to_string());
         }
 
         let unique = std::time::SystemTime::now()
@@ -327,23 +328,102 @@ mod redis_mod {
                 "no",
             ])
             .output()
-            .ok()?;
+            .map_err(|_| "docker_run_spawn_failed".to_string())?;
         if !out.status.success() {
-            jlog(
-                suite,
-                "skip",
-                "docker_run_failed",
-                &format!(
-                    r#"{{"status":{},"stderr":{:?}}}"#,
-                    out.status.code().unwrap_or(-1),
-                    String::from_utf8_lossy(&out.stderr)
-                ),
-            );
-            return None;
+            let status = out.status.code().unwrap_or(-1);
+            return Err(format!("docker_run_failed_status_{status}"));
         }
 
-        let port = read_port(&name, 6379)?;
-        Some(Container { name, port })
+        let Some(port) = read_port(&name, 6379) else {
+            drop(Container { name, port: 0 });
+            return Err("docker_port_mapping_unavailable".to_string());
+        };
+        Ok(Container { name, port })
+    }
+
+    fn spawn_redis_container(suite: &str) -> Option<Container> {
+        match spawn_redis_container_with_reason(suite) {
+            Ok(container) => Some(container),
+            Err(reason) => {
+                jlog(
+                    suite,
+                    "skip",
+                    "redis_container_unavailable",
+                    &json!({ "unsupported_reason": reason }).to_string(),
+                );
+                None
+            }
+        }
+    }
+
+    fn redis_error_kind(error: &RedisError) -> &'static str {
+        match error {
+            RedisError::Io(_) => "Io",
+            RedisError::Protocol(_) => "Protocol",
+            RedisError::Redis(_) => "Redis",
+            RedisError::PoolExhausted => "PoolExhausted",
+            RedisError::InvalidUrl(_) => "InvalidUrl",
+            RedisError::Cancelled => "Cancelled",
+            RedisError::NoAuth => "NoAuth",
+            RedisError::WrongPassword => "WrongPassword",
+            RedisError::SubscriberLag { .. } => "SubscriberLag",
+            RedisError::Resp3PushLag { .. } => "Resp3PushLag",
+        }
+    }
+
+    fn redact_redis_url(url: &str) -> String {
+        let Some((scheme, rest)) = url.split_once("://") else {
+            return "<invalid-redis-url>".to_string();
+        };
+        if let Some((_, host)) = rest.rsplit_once('@') {
+            format!("{scheme}://<redacted>@{host}")
+        } else {
+            url.to_string()
+        }
+    }
+
+    fn redis_auth_mode(url: &str) -> &'static str {
+        let Some((_, rest)) = url.split_once("://") else {
+            return "invalid-url";
+        };
+        if rest.rsplit_once('@').is_some() {
+            "password-or-acl"
+        } else {
+            "none"
+        }
+    }
+
+    struct RedisPubSubEndpoint {
+        url: String,
+        redacted_url: String,
+        auth_mode: &'static str,
+        _container: Option<Container>,
+    }
+
+    fn redis_pubsub_endpoint(suite: &str) -> Result<RedisPubSubEndpoint, String> {
+        if let Ok(url) = std::env::var("REDIS_TEST_URL") {
+            let url = url.trim().to_string();
+            if !url.is_empty() {
+                let redacted = redact_redis_url(&url);
+                let auth_mode = redis_auth_mode(&url);
+                return Ok(RedisPubSubEndpoint {
+                    url,
+                    redacted_url: redacted,
+                    auth_mode,
+                    _container: None,
+                });
+            }
+        }
+
+        let container = spawn_redis_container_with_reason(suite)
+            .map_err(|reason| format!("{reason}_and_REDIS_TEST_URL_unset"))?;
+        let url = format!("redis://127.0.0.1:{}", container.port);
+        Ok(RedisPubSubEndpoint {
+            url: url.clone(),
+            redacted_url: url,
+            auth_mode: "none",
+            _container: Some(container),
+        })
     }
 
     fn resp_text(value: &RespValue) -> Option<String> {
@@ -359,6 +439,84 @@ mod redis_mod {
             let key = resp_text(key)?;
             (key == wanted).then_some(value)
         })
+    }
+
+    async fn redis_broker_version(cx: &Cx, client: &RedisClient) -> String {
+        match client.cmd(cx, &["HELLO", "3"]).await {
+            Ok(RespValue::Map(entries)) => map_field(&entries, "version")
+                .and_then(resp_text)
+                .unwrap_or_else(|| "unknown".to_string()),
+            _ => "unknown".to_string(),
+        }
+    }
+
+    fn assert_pubsub_message(event: PubSubEvent, channel: &str, payload: &[u8], subscriber: &str) {
+        match event {
+            PubSubEvent::Message(message) => {
+                assert_eq!(
+                    message.channel, channel,
+                    "{subscriber} received message on unexpected channel"
+                );
+                assert_eq!(
+                    message.payload, payload,
+                    "{subscriber} received unexpected payload"
+                );
+                assert_eq!(
+                    message.pattern, None,
+                    "{subscriber} received pattern message on plain subscription"
+                );
+            }
+            other => panic!("{subscriber} expected pubsub message, got {other:?}"),
+        }
+    }
+
+    struct RedisPubSubArtifact<'a> {
+        broker_version: &'a str,
+        connection_uri_redacted: &'a str,
+        auth_mode: &'a str,
+        topic_or_stream: &'a str,
+        message_count: usize,
+        ack_count: i64,
+        consumer_lag: u64,
+        cancellation_point: &'a str,
+        expected_result: &'a str,
+        actual_result: &'a str,
+        unsupported_reason: Option<&'a str>,
+        verdict: &'a str,
+        first_failure: Option<&'a str>,
+    }
+
+    fn log_redis_pubsub_artifact(suite: &str, artifact: RedisPubSubArtifact<'_>) {
+        let artifact = json!({
+            "bead_id": "asupersync-esfwb1",
+            "broker_kind": "redis",
+            "broker_version": artifact.broker_version,
+            "scenario_id": "redis_pubsub_fanout_two_subscribers_cleanup",
+            "feature_flags": {
+                "redis": true,
+                "tls": cfg!(feature = "tls")
+            },
+            "connection_uri_redacted": artifact.connection_uri_redacted,
+            "auth_mode": artifact.auth_mode,
+            "topic_or_stream": artifact.topic_or_stream,
+            "message_count": artifact.message_count,
+            "ack_count": artifact.ack_count,
+            "consumer_lag": artifact.consumer_lag,
+            "reconnect_count": 0,
+            "cancellation_point": artifact.cancellation_point,
+            "expected_result": artifact.expected_result,
+            "actual_result": artifact.actual_result,
+            "artifact_path": "stdout:jlog:redis_pubsub_fanout",
+            "unsupported_reason": artifact.unsupported_reason,
+            "verdict": artifact.verdict,
+            "first_failure": artifact.first_failure
+        });
+        jlog(
+            suite,
+            "artifact",
+            "redis_pubsub_fanout_two_subscribers_cleanup",
+            &artifact.to_string(),
+        );
     }
 
     /// Redis 6+ `HELLO 3` replies with a RESP3 map that advertises the
@@ -438,26 +596,189 @@ mod redis_mod {
     /// uses the `*3 $9 message $<chan-len> <chan> $<msg-len> <msg>`
     /// reply shape which the asupersync client does support.
     ///
-    /// True conformance requires a Redis broker; gracefully skip
-    /// when docker is absent.
+    /// True conformance requires a Redis broker. The test uses
+    /// `REDIS_TEST_URL` when supplied, otherwise starts `redis:7-alpine`
+    /// when Docker is available. Broker setup failures emit a structured
+    /// skip artifact instead of silently passing.
     #[test]
-    fn redis_pubsub_fanout_to_multiple_subscribers_skips_without_docker() {
+    fn redis_pubsub_fanout_to_multiple_subscribers_real_broker_or_skip() {
         let suite = "redis_pubsub_fanout";
-        if !docker_available() {
-            jlog(suite, "skip", "no_docker", "{}");
-            return;
-        }
-        // The full wire-level fan-out test is currently scoped out due
-        // to the size of the harness; the protocol shape is exercised
-        // by the in-tree unit tests (src/messaging/redis.rs:2659+
-        // `pubsub_reconnect_discards_buffered_events_from_previous_connection`).
-        // This conformance test logs the skip and defers to the unit
-        // test for the wire-level guarantee.
-        jlog(
-            suite,
-            "skip",
-            "deferred_to_unit_test",
-            r#"{"ref":"src/messaging/redis.rs:2659"}"#,
-        );
+        let expected_result = "four payloads delivered once to both subscribers in publish order; \
+            timeout-cancelled pending receive leaves the subscriber usable; unsubscribe cleanup \
+            leaves zero live recipients";
+        let endpoint = match redis_pubsub_endpoint(suite) {
+            Ok(endpoint) => endpoint,
+            Err(reason) => {
+                log_redis_pubsub_artifact(
+                    suite,
+                    RedisPubSubArtifact {
+                        broker_version: "unavailable",
+                        connection_uri_redacted: "unavailable",
+                        auth_mode: "unknown",
+                        topic_or_stream: "unallocated",
+                        message_count: 0,
+                        ack_count: 0,
+                        consumer_lag: 0,
+                        cancellation_point: "not-started",
+                        expected_result,
+                        actual_result: "broker unavailable before scenario start",
+                        unsupported_reason: Some(&reason),
+                        verdict: "skip",
+                        first_failure: None,
+                    },
+                );
+                return;
+            }
+        };
+        let RedisPubSubEndpoint {
+            url,
+            redacted_url: connection_uri_redacted,
+            auth_mode,
+            _container,
+        } = endpoint;
+
+        futures_lite::future::block_on(async move {
+            let cx: Cx = Cx::for_testing();
+            let client = match RedisClient::connect(&cx, &url).await {
+                Ok(client) => client,
+                Err(error) => {
+                    let first_failure = redis_error_kind(&error);
+                    log_redis_pubsub_artifact(
+                        suite,
+                        RedisPubSubArtifact {
+                            broker_version: "unavailable",
+                            connection_uri_redacted: &connection_uri_redacted,
+                            auth_mode,
+                            topic_or_stream: "unallocated",
+                            message_count: 0,
+                            ack_count: 0,
+                            consumer_lag: 0,
+                            cancellation_point: "connect",
+                            expected_result,
+                            actual_result: "broker endpoint could not be reached",
+                            unsupported_reason: Some("redis_connect_failed"),
+                            verdict: "skip",
+                            first_failure: Some(first_failure),
+                        },
+                    );
+                    return;
+                }
+            };
+
+            let broker_version = redis_broker_version(&cx, &client).await;
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default();
+            let channel = format!("asupersync:conformance:{unique}:pubsub");
+            let mut subscriber_a = client.pubsub(&cx).await.expect("open first pubsub client");
+            let mut subscriber_b = client.pubsub(&cx).await.expect("open second pubsub client");
+
+            subscriber_a
+                .subscribe(&cx, &[channel.as_str()])
+                .await
+                .expect("first subscriber subscribes");
+            subscriber_b
+                .subscribe(&cx, &[channel.as_str()])
+                .await
+                .expect("second subscriber subscribes");
+
+            let payloads: [&[u8]; 3] = [b"first", b"second", b"third"];
+            let mut ack_count = 0i64;
+            for payload in payloads {
+                let delivered = client
+                    .publish(&cx, &channel, payload)
+                    .await
+                    .expect("publish reaches broker");
+                assert_eq!(delivered, 2, "PUBLISH must report both subscribers");
+                ack_count += delivered;
+
+                let event_a = subscriber_a
+                    .next_event(&cx)
+                    .await
+                    .expect("first subscriber receives message");
+                assert_pubsub_message(event_a, &channel, payload, "subscriber_a");
+
+                let event_b = subscriber_b
+                    .next_event(&cx)
+                    .await
+                    .expect("second subscriber receives message");
+                assert_pubsub_message(event_b, &channel, payload, "subscriber_b");
+            }
+
+            let cancelled_receive = timeout(
+                cx.now(),
+                Duration::from_millis(25),
+                subscriber_a.next_event(&cx),
+            )
+            .await;
+            assert!(
+                cancelled_receive.is_err(),
+                "pending receive should time out when no message is available"
+            );
+
+            let post_cancel_payload = b"after-cancel";
+            let delivered = client
+                .publish(&cx, &channel, post_cancel_payload)
+                .await
+                .expect("publish after cancelled receive reaches broker");
+            assert_eq!(
+                delivered, 2,
+                "cancelled pending receive must not remove either subscription"
+            );
+            ack_count += delivered;
+
+            let event_a = subscriber_a
+                .next_event(&cx)
+                .await
+                .expect("first subscriber receives after cancelled receive");
+            assert_pubsub_message(event_a, &channel, post_cancel_payload, "subscriber_a");
+
+            let event_b = subscriber_b
+                .next_event(&cx)
+                .await
+                .expect("second subscriber receives after cancelled receive");
+            assert_pubsub_message(event_b, &channel, post_cancel_payload, "subscriber_b");
+
+            let consumer_lag =
+                subscriber_a.pubsub_dropped_events() + subscriber_b.pubsub_dropped_events();
+
+            subscriber_a
+                .unsubscribe(&cx, &[channel.as_str()])
+                .await
+                .expect("first subscriber unsubscribes");
+            subscriber_b
+                .unsubscribe(&cx, &[channel.as_str()])
+                .await
+                .expect("second subscriber unsubscribes");
+
+            let delivered_after_cleanup = client
+                .publish(&cx, &channel, b"cleanup-probe")
+                .await
+                .expect("cleanup probe publish reaches broker");
+            assert_eq!(
+                delivered_after_cleanup, 0,
+                "unsubscribed channel should have no remaining subscribers"
+            );
+
+            log_redis_pubsub_artifact(
+                suite,
+                RedisPubSubArtifact {
+                    broker_version: &broker_version,
+                    connection_uri_redacted: &connection_uri_redacted,
+                    auth_mode,
+                    topic_or_stream: &channel,
+                    message_count: 4,
+                    ack_count,
+                    consumer_lag,
+                    cancellation_point: "pending_next_event_timeout",
+                    expected_result,
+                    actual_result: "all payloads delivered to both subscribers; cleanup probe reached zero recipients",
+                    unsupported_reason: None,
+                    verdict: "pass",
+                    first_failure: None,
+                },
+            );
+        });
     }
 }
