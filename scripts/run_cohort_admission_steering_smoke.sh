@@ -180,8 +180,31 @@ mkdir -p "$RUN_DIR"
 HOST_FINGERPRINT_JSON="$(host_fingerprint_json)"
 STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-printf -v RCH_INVOCATION '%q' "$RCH_BIN"
-COMMAND="${RCH_INVOCATION} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_cohort_admission_steering ASUPERSYNC_COHORT_ADMISSION_STEERING_CONTRACT_PATH=${ARTIFACT} ASUPERSYNC_COHORT_ADMISSION_STEERING_SCENARIO=${SCENARIO} ASUPERSYNC_COHORT_ADMISSION_STEERING_REPORT_PATH=${SCENARIO_REPORT_PATH} cargo test -p asupersync --test cohort_admission_steering_contract cohort_admission_steering_smoke_contract_emits_report --features test-internals -- --nocapture"
+COMMAND_ARGS=(
+    "$RCH_BIN"
+    exec
+    --
+    env
+    "CARGO_INCREMENTAL=0"
+    "RUSTFLAGS=-D warnings"
+    "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_cohort_admission_steering"
+    "ASUPERSYNC_COHORT_ADMISSION_STEERING_CONTRACT_PATH=${ARTIFACT}"
+    "ASUPERSYNC_COHORT_ADMISSION_STEERING_SCENARIO=${SCENARIO}"
+    "ASUPERSYNC_COHORT_ADMISSION_STEERING_REPORT_PATH=${SCENARIO_REPORT_PATH}"
+    cargo
+    test
+    -p
+    asupersync
+    --test
+    cohort_admission_steering_contract
+    cohort_admission_steering_smoke_contract_emits_report
+    --features
+    test-internals
+    --
+    --nocapture
+)
+printf -v COMMAND '%q ' "${COMMAND_ARGS[@]}"
+COMMAND="${COMMAND% }"
 
 COMMAND_EXIT_CODE=0
 SCRIPT_EXIT_CODE=0
@@ -197,7 +220,10 @@ if [ "$MODE" = "dry-run" ]; then
     MESSAGE="dry run emitted manifests only"
 else
     set +e
-    eval "$COMMAND" >"$RUN_LOG_PATH" 2>&1
+    (
+        cd "$PROJECT_ROOT"
+        "${COMMAND_ARGS[@]}"
+    ) >"$RUN_LOG_PATH" 2>&1
     COMMAND_EXIT_CODE=$?
     set -e
 
