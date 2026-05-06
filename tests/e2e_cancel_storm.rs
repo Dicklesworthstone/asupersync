@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 #![allow(missing_docs)]
 //! T5.1 — Cancellation storm with obligation cleanup E2E test.
 //!
