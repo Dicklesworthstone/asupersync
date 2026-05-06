@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Lean Proof Regression Script Validation (SEM-12.3)
 //!
 //! Validates that the Lean regression runner script exists, is well-formed,
