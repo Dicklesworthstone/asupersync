@@ -25,7 +25,7 @@ pub mod h1_chunked;
 //   pub mod h1_content_encoding;
 //   pub mod h1_expect_continue;
 //   pub mod h1_keepalive;
-//   pub mod h1_methods;
+pub mod h1_methods;
 //
 // h1_protocol.rs is the new RFC 7230 obs-fold + TE/CL precedence suite
 // (no bit-rot — built against current Http1Codec API).
@@ -141,8 +141,8 @@ pub mod unix_listener; // repaired by br-asupersync-2qssae Unix listener sub-sli
 // pub mod web_session_cookies;      // bit-rot — depends on `tokio` (forbidden) and asupersync::io::Cursor moved
 //
 // h1_* siblings (h1_content_encoding, h1_expect_continue,
-// h1_keepalive, h1_methods), h2_stream_state_machine_rfc7540,
-// and hpack_metamorphic are already
+// h1_keepalive), h2_stream_state_machine_rfc7540, and
+// hpack_metamorphic are already
 // individually commented out earlier in this file with bit-rot rationale;
 // deliberately not re-declared here.
 
