@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! TLA+ Bounded Model-Check Scenario Configuration Validation (SEM-07.4)
 //!
 //! Validates that the scenario configuration document exists, defines
