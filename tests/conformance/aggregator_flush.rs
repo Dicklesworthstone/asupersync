@@ -607,10 +607,15 @@ mod property_tests {
         #[allow(dead_code)]
         fn prop_flush_interval_respected(
             interval_ms in 1u64..100,
-            symbols in prop::collection::vec(0u64..10, 1..5)
+            buffered_esi in 2u64..10
         ) {
             let aggregator = MultipathAggregator::new(AggregatorConfig {
                 flush_interval: Time::from_millis(interval_ms),
+                reorder: ReordererConfig {
+                    max_wait_time: Time::from_millis(interval_ms),
+                    immediate_delivery: false,
+                    ..Default::default()
+                },
                 ..Default::default()
             });
 
@@ -619,20 +624,24 @@ mod property_tests {
 
             let base_time = Time::ZERO;
 
-            // Process symbols
-            for (i, &symbol_esi) in symbols.iter().enumerate() {
-                let symbol = create_test_symbol(1, symbol_esi, symbol_esi);
-                aggregator.process(symbol, path_id, base_time + Duration::from_millis(i as u64));
-            }
+            let first = aggregator.process(create_test_symbol(1, 0, 0), path_id, base_time);
+            prop_assert_eq!(first.ready.len(), 1);
+
+            let buffered =
+                aggregator.process(create_test_symbol(1, buffered_esi, 0), path_id, base_time);
+            prop_assert!(buffered.ready.is_empty());
+            prop_assert_eq!(aggregator.stats().reorder.symbols_buffered, 1);
 
             // Test flush before interval
             let early_flush = aggregator.flush(base_time + Duration::from_millis(interval_ms / 2));
             prop_assert!(early_flush.is_empty());
+            prop_assert_eq!(aggregator.stats().reorder.symbols_buffered, 1);
 
             // Test flush after interval
-            let _late_flush = aggregator.flush(base_time + Duration::from_millis(interval_ms + 1));
-            // Should respect interval (may or may not flush depending on buffer state)
-            prop_assert!(true); // Always passes - interval is respected internally
+            let late_flush = aggregator.flush(base_time + Duration::from_millis(interval_ms + 1));
+            prop_assert_eq!(late_flush.len(), 1);
+            prop_assert_eq!(late_flush[0].esi(), u32::try_from(buffered_esi).unwrap());
+            prop_assert_eq!(aggregator.stats().reorder.symbols_buffered, 0);
         }
 
         #[test]
@@ -677,9 +686,10 @@ mod property_tests {
             let mut all_ready = Vec::new();
             let base_time = Time::ZERO;
 
-            // Process symbols in order
+            // Process all generated ESIs in one source block; ordering is
+            // only meaningful inside a single object/block reorder stream.
             for (i, &esi) in symbols.iter().enumerate() {
-                let symbol = create_test_symbol(1, esi, esi);
+                let symbol = create_test_symbol(1, esi, 0);
                 let result =
                     aggregator.process(symbol, path_id, base_time + Duration::from_millis(i as u64));
                 all_ready.extend(result.ready);
@@ -763,7 +773,13 @@ mod unit_tests {
 
         // Flush after interval should work
         let flush2 = aggregator.flush(now + Duration::from_millis(20));
-        // Should return empty since symbol was already delivered
-        assert!(flush2.is_empty() || !flush2.is_empty()); // May vary based on implementation
+        assert!(
+            flush2.is_empty(),
+            "Flush after interval must not re-deliver an already emitted symbol"
+        );
+
+        let stats = aggregator.stats();
+        assert_eq!(stats.reorder.symbols_buffered, 0);
+        assert_eq!(stats.reorder.in_order_deliveries, 1);
     }
 }
