@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Integration target for sync mutex metamorphic relations.
 //!
 //! Originally just poison-observation MRs (`mr_poison_observation_*`,
@@ -171,11 +169,10 @@ fn mr_mutual_exclusion_one_holder_at_a_time() {
 
     // Release A. B MUST then acquire on the next poll.
     drop(guard_a);
-    let res_b = poll_once(&mut fut_b)
+    poll_once(&mut fut_b)
         .expect("B must complete after A releases")
         .expect("B's lock must succeed after release");
-    let _ = res_b;
-    // B's guard dropped here (let _) — mutex now unlocked.
+    // B's guard dropped here, so the mutex is now unlocked.
     assert!(
         !mutex.is_locked(),
         "mutex must be unlocked after both drops"
@@ -218,10 +215,9 @@ fn mr_cancel_safety_cancelled_waiter_does_not_corrupt_queue() {
     // Release A. C MUST acquire on the next poll — B's slot in the queue
     // was correctly removed, so C is the head of the queue.
     drop(guard_a);
-    let res_c = poll_once(&mut fut_c)
+    poll_once(&mut fut_c)
         .expect("C must complete after A releases (B was cancelled)")
         .expect("C's lock must succeed");
-    let _ = res_c;
 
     // After C drops, mutex is unlocked and queue is drained.
     assert!(!mutex.is_locked(), "mutex unlocked after C releases");
@@ -260,9 +256,9 @@ fn mr_fifo_fairness_three_waiter_chain() {
 
     // B, C, D queue in that order; each MUST block behind A.
     let mut futures: Vec<Pin<Box<dyn Future<Output = Result<(), LockError>>>>> = Vec::new();
-    for i in 1..4 {
+    for (i, cxi) in ctxs.iter().enumerate().take(4).skip(1) {
         let m = Arc::clone(&mutex);
-        let cxi = ctxs[i].clone();
+        let cxi = cxi.clone();
         let mut f: Pin<Box<dyn Future<Output = Result<(), LockError>>>> =
             Box::pin(async move { m.lock(&cxi).await.map(|_| ()) });
         assert!(
@@ -281,11 +277,10 @@ fn mr_fifo_fairness_three_waiter_chain() {
     // order. Each one releases its (transient) guard inside the future via
     // `.map(|_| ())`, so the next poll observes the next acquire.
     drop(guard_a);
-    for i in 0..3 {
-        let res = poll_once(&mut futures[i])
+    for (i, future) in futures.iter_mut().enumerate() {
+        poll_once(future)
             .unwrap_or_else(|| panic!("waiter {i} must complete after A releases"))
             .unwrap_or_else(|e| panic!("waiter {i} acquire must succeed, got {e:?}"));
-        let _ = res;
     }
 
     assert!(!mutex.is_locked(), "all four guards released");
