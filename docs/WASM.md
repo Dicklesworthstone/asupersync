@@ -326,7 +326,7 @@ Use this shorthand when reading Browser Edition diagnostics:
 | Browser-native messaging (`MessageChannel`, `MessagePort`, `BroadcastChannel`) | `preview_only` | a future public SDK export plus explicit API contract tests | keep these surfaces at the application boundary or reactor substrate; do not market them as shipped Browser Edition APIs |
 | `SharedArrayBuffer` / worker offload / parallel executor lanes | `nightly-only` | explicit cross-origin isolation, worker-offload policy green, replay/perf evidence green, and no lane-health demotion | disable the lane immediately on missing isolation, replay drift, chaos regression, or performance instability; preserve the single-threaded browser runtime as the supported default |
 | Service-worker direct runtime | `broker/coordinator-only` | bounded broker contract and browser-run evidence stay green; direct runtime remains unsupported | fail closed for direct runtime and route operators to the broker registration / durable handoff contract instead of pretending the service worker owns a runtime |
-| Shared-worker direct runtime | `unsupported` today | not applicable until its dedicated tenancy contract is implemented and promoted | fail closed and route operators to the coordinator tenancy contract instead of pretending direct runtime is already shipped |
+| Shared-worker direct runtime | `broker/coordinator-only` | bounded coordinator contract and browser-run evidence stay green; direct runtime remains unsupported | fail closed for direct runtime and route operators to the coordinator attach/detach/fallback contract instead of pretending the shared worker owns a runtime |
 
 Explicit non-goals of the current ladder contract:
 
@@ -342,10 +342,12 @@ contract in `docs/wasm_service_worker_broker_contract.md` is the supported
 service-worker surface, and direct `BrowserRuntime` creation in
 `ServiceWorkerGlobalScope` remains fail-closed unless a future separate
 promotion bead proves browser-lifetime region ownership. Shared-worker direct
-runtime now has a dedicated tenancy/lifecycle contract in
-`docs/wasm_shared_worker_tenancy_lifecycle_contract.md`, but the shipped
-execution ladder must still fail closed there until that contract is
-implemented and promoted.
+runtime is classified as broker/coordinator-only: the bounded coordinator
+contract in `docs/wasm_shared_worker_tenancy_lifecycle_contract.md` is the
+supported shared-worker surface, and direct `BrowserRuntime` creation in
+`SharedWorkerGlobalScope` remains fail-closed unless a future separate
+promotion bead proves browser-lifetime region ownership, client fanout
+cancellation, drain/finalize, replay, and durable recovery semantics.
 
 ### Runtime contexts
 
@@ -354,7 +356,7 @@ implemented and promoted.
 | Browser main thread (`window` + `document` + `WebAssembly`) | Direct-runtime supported | `packages/browser/src/index.ts`, `tests/wasm_js_exports_coverage_contract.rs` | Primary shipped JS/TS Browser Edition lane |
 | Dedicated Web Worker (`DedicatedWorkerGlobalScope`) | Direct-runtime supported | `packages/browser/src/index.ts`, `asupersync-browser-core/src/lib.rs`, `tests/wasm_js_exports_coverage_contract.rs` | Shipped: SDK detects `DedicatedWorkerGlobalScope`, fetch routes through `WorkerGlobalScope.fetch()`; examples and QA are catching up |
 | Service worker direct runtime | Broker/coordinator-only; direct runtime unsupported | `packages/browser/src/index.ts` detects service-worker-like hosts and returns `service_worker_not_yet_shipped`; `src/runtime/builder.rs` maps `ServiceWorkerGlobalScope` to `service_worker_direct_runtime_not_shipped` | Governed by `docs/wasm_service_worker_broker_contract.md`; direct runtime remains fail-closed, while the package exposes `detectBrowserServiceWorkerBrokerSupport()` and `BrowserServiceWorkerBrokerStore` only for bounded registration/durable-handoff orchestration |
-| Shared worker direct runtime | Direct-runtime feasible but not yet shipped | `src/runtime/builder.rs` explicitly detects `SharedWorkerGlobalScope` and returns `shared_worker_direct_runtime_not_shipped`; `packages/browser/src/index.ts` still rejects it as an unsupported direct-runtime host | Governed by `docs/wasm_shared_worker_tenancy_lifecycle_contract.md`; direct runtime remains fail-closed, while the package now exposes `detectBrowserSharedWorkerCoordinatorSupport()` and `createBrowserSharedWorkerCoordinatorSelection()` only for bounded coordinator attach/handshake/fallback from browser main-thread or dedicated-worker callers. The maintained browser-run proof lives in `tests/fixtures/shared-worker-consumer/` and `scripts/validate_shared_worker_consumer.sh`. |
+| Shared worker direct runtime | Broker/coordinator-only; direct runtime unsupported | `src/runtime/builder.rs` explicitly detects `SharedWorkerGlobalScope` and returns `shared_worker_direct_runtime_not_shipped`; `packages/browser/src/index.ts` still rejects it as an unsupported direct-runtime host while exposing bounded coordinator helpers | Governed by `docs/wasm_shared_worker_tenancy_lifecycle_contract.md`; direct runtime remains fail-closed, while the package exposes `detectBrowserSharedWorkerCoordinatorSupport()` and `createBrowserSharedWorkerCoordinatorSelection()` only for bounded coordinator attach/handshake/fallback from browser main-thread or dedicated-worker callers. The maintained browser-run proof lives in `tests/fixtures/shared-worker-consumer/` and `scripts/validate_shared_worker_consumer.sh`. |
 | Node / SSR / edge direct runtime via `@asupersync/browser` | Impossible for direct browser runtime; bridge-only or unsupported | `packages/browser/src/index.ts`, `packages/next/src/index.ts` | Browser package fails closed; Next diagnostics classify server/edge as bridge-only targets |
 | Rust-authored `wasm32-unknown-unknown` consumer path | Preview public lane | `src/runtime/builder.rs` exposes `RuntimeBuilder::browser()` with truthful execution-ladder selection over the wasm dispatcher, while `docs/wasm_quickstart_migration.md` and `tests/wasm_rust_browser_example_contract.rs` pin the supported usage and evidence flow | Preview public support, not broad stable parity with the JS/TS Browser Edition packages |
 | Multi-worker / `SharedArrayBuffer` parallel execution | Guarded optional, not shipped | browser model is single-threaded today; true parallelism requires cross-origin isolation | Explicitly non-default even if pursued later |
@@ -652,7 +654,7 @@ The current browser runtime model (Phase 1) is:
   and a single dedicated Web Worker; service-worker direct runtime is
   broker/coordinator-only behind
   `docs/wasm_service_worker_broker_contract.md`, and shared-worker direct
-  runtime remains deferred behind
+  runtime is broker/coordinator-only behind
   `docs/wasm_shared_worker_tenancy_lifecycle_contract.md`. True parallelism
   requires additional workers plus the Phase 2 model below.
 

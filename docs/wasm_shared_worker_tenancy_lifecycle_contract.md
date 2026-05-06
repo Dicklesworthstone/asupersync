@@ -7,8 +7,9 @@ Depends on: `asupersync-2jhnk.6.1`
 
 ## Purpose
 
-Define the authoritative contract for a future SharedWorker Browser Edition
-lane without pretending that lane has already shipped.
+Define the authoritative contract for the bounded SharedWorker coordinator
+Browser Edition lane without pretending that coordinator ownership is direct
+runtime support inside `SharedWorkerGlobalScope`.
 
 This contract answers:
 
@@ -26,19 +27,29 @@ Browser Edition claims.
 
 ## Current Truthful Runtime Status
 
-The live tree still fail-closes SharedWorker direct runtime today:
+The live tree classifies SharedWorker direct runtime as
+broker/coordinator-only:
 
 - `@asupersync/browser` only ships browser main-thread and dedicated-worker
   direct-runtime lanes.
 - `src/runtime/builder.rs` detects `SharedWorkerGlobalScope`, but maps it to
   `BrowserRuntimeSupportReason::SharedWorkerNotYetShipped` and
   `BrowserExecutionReasonCode::SharedWorkerDirectRuntimeNotShipped`.
-- This document is therefore a future implementation contract, not a present
-  support claim.
+- `@asupersync/browser` exposes a bounded coordinator helper for browser
+  main-thread or dedicated-worker callers to negotiate a same-origin
+  SharedWorker coordinator, attach explicit per-client ports, detect protocol
+  or feature mismatch, and downgrade mechanically.
+- This document is therefore a present coordinator contract and a direct-runtime
+  non-support claim.
 
 The downgrade promise is non-negotiable: SharedWorker disappearance, host
 policy denial, or namespace mismatch may change execution strategy and
 diagnostics, but must not silently widen the semantic claim.
+
+Direct runtime can only be reconsidered by a future owner bead that proves the
+shared-worker host can own regions, obligations, scheduler state, cancellation,
+drain/finalize, replay evidence, client fanout, and durable recovery without
+silent remapping to browser main-thread or dedicated-worker lanes.
 
 ## Admission And Tenancy Law
 

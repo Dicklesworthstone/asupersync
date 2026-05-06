@@ -1444,9 +1444,10 @@ applications via `wasm-bindgen`.
   The browser package keeps direct `BrowserRuntime` creation fail-closed inside
   `ServiceWorkerGlobalScope`; use the bounded broker registration and durable
   handoff APIs instead.
-- **Shared worker direct runtime**: still deferred. Keep shared-worker hosts on
-  explicit message/data boundaries until a worker-specific tenancy contract is
-  promoted deliberately.
+- **Shared worker direct runtime**: intentionally broker/coordinator-only.
+  Direct `BrowserRuntime` creation remains fail-closed inside
+  `SharedWorkerGlobalScope`; use the bounded coordinator attach, version
+  handshake, detach cleanup, and truthful fallback APIs instead.
 - **Multi-threaded WASM**: the browser runtime is single-threaded.
   A future phase may add `SharedArrayBuffer` + Web Worker parallelism,
   but this requires cross-origin isolation headers that many deployments
@@ -1516,7 +1517,7 @@ and known limitations.
 | Formal methods (TLA+ export + Lean checked core-invariant coverage) | ⚠️ Partial implementation (Lean-checked core invariants cover the six non-negotiable runtime invariants; broader adapter/protocol/runtime refinement proof remains tiered and lane-specific) |
 | Browser Edition (WASM, JS/TS consumers) | ✅ Implemented for browser main-thread and dedicated-worker consumers (single-threaded, event-loop-driven) |
 | Service worker direct runtime | Broker/coordinator-only; direct runtime unsupported, bounded broker/handoff supported |
-| Shared worker direct runtime | Deferred; not yet shipped |
+| Shared worker direct runtime | Broker/coordinator-only; direct runtime unsupported, bounded coordinator attach/detach/fallback supported |
 | Rust-to-WASM compilation path | Preview public lane exists via `RuntimeBuilder::browser()`, but current Rust support is still narrower than the shipped JS/TS packages and remains anchored by fixture/evidence validation |
 
 ### What Asupersync Doesn't Do
@@ -1647,7 +1648,7 @@ Open an issue at https://github.com/Dicklesworthstone/asupersync/issues
 | [`docs/lab_live_differential_scope_matrix.md`](./docs/lab_live_differential_scope_matrix.md) | **Lab-vs-Live Differential Scope Matrix**: admitted semantic surfaces, rollout ladder, and eligibility gates for future external-boundary work |
 | [`docs/lab_live_time_normalization_policy.md`](./docs/lab_live_time_normalization_policy.md) | **Time + Scheduler-Noise Policy**: scenario-clock rules, qualified-time semantics, and the boundary between semantic timing claims and provenance-only timing |
 | [`docs/lab_live_virtualized_surface_matrix.md`](./docs/lab_live_virtualized_surface_matrix.md) | **Phase 2 Virtualized Surface Matrix**: timer/virtual-transport coverage rows, required logs, invalid-experiment signals, and promotion floors |
-| [`docs/WASM.md`](./docs/WASM.md) | **Browser Edition Overview**: what works today (browser main thread + dedicated-worker `@asupersync/browser`), what remains deferred (service/shared worker direct runtime), the preview public Rust-to-WASM `RuntimeBuilder::browser()` lane, architectural boundary, current Rust-authored browser contract, runtime model, known limitations, and future phases |
+| [`docs/WASM.md`](./docs/WASM.md) | **Browser Edition Overview**: what works today (browser main thread + dedicated-worker `@asupersync/browser`), the broker/coordinator-only service/shared worker boundaries, the preview public Rust-to-WASM `RuntimeBuilder::browser()` lane, architectural boundary, current Rust-authored browser contract, runtime model, known limitations, and future phases |
 | [`docs/wasm_quickstart_migration.md`](./docs/wasm_quickstart_migration.md) | **Browser Quickstart + Migration**: deterministic onboarding commands, Rust-authored browser status snapshot, migration anti-pattern map, and deferred-surface fallback guidance |
 | [`docs/wasm_canonical_examples.md`](./docs/wasm_canonical_examples.md) | **Browser Canonical Examples**: vanilla/TypeScript/React/Next scenario catalog with deterministic repro commands and artifact pointers |
 | [`docs/wasm_troubleshooting_compendium.md`](./docs/wasm_troubleshooting_compendium.md) | **Browser Troubleshooting Cookbook**: unsupported-runtime recovery paths, failure recipes, and deterministic verification commands |

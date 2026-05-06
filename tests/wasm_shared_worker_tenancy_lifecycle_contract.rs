@@ -132,6 +132,88 @@ fn canonical_browser_docs_reference_the_contract() {
 }
 
 #[test]
+fn docs_and_artifact_pin_broker_coordinator_only_decision() {
+    let readme = read_file("README.md");
+    let wasm = read_file("docs/WASM.md");
+    let integration = read_file("docs/integration.md");
+    let contract = read_file(DOC_PATH);
+    let registry = read_file("artifacts/wave2_capability_evidence_registry_v1.json");
+    let artifact = read_file("artifacts/wave2/wasm_shared_worker_direct_runtime_evidence.json");
+
+    for marker in [
+        "Shared worker direct runtime**: intentionally broker/coordinator-only",
+        "Broker/coordinator-only; direct runtime unsupported, bounded coordinator attach/detach/fallback supported",
+    ] {
+        assert!(readme.contains(marker), "README missing marker: {marker}");
+    }
+
+    for marker in [
+        "| Shared-worker direct runtime | `broker/coordinator-only`",
+        "| Shared worker direct runtime | Broker/coordinator-only; direct runtime unsupported",
+        "supported shared-worker surface",
+        "`SharedWorkerGlobalScope` remains fail-closed",
+    ] {
+        assert!(wasm.contains(marker), "WASM guide missing marker: {marker}");
+    }
+
+    for marker in [
+        "shared-worker browser contexts classified as broker/coordinator-only",
+        "shared-worker bounded coordinator attach/detach/fallback",
+        "| Browser shared worker | broker/coordinator-only; direct runtime unsupported",
+    ] {
+        assert!(
+            integration.contains(marker),
+            "integration guide missing marker: {marker}"
+        );
+    }
+
+    for marker in [
+        "The live tree classifies SharedWorker direct runtime as",
+        "broker/coordinator-only",
+        "present coordinator contract",
+        "non-support claim",
+        "client fanout",
+        "durable recovery",
+    ] {
+        assert!(
+            contract.contains(marker),
+            "contract doc missing decision marker: {marker}"
+        );
+    }
+
+    for marker in [
+        "\"capability_id\": \"wasm_shared_worker_direct_runtime\"",
+        "\"support_class_after\": \"broker/coordinator-only\"",
+        "\"decision_status\": \"resolved_broker_coordinator_only\"",
+        "\"client_instance_id\"",
+        "\"handshake_state\"",
+        "\"detach_event\"",
+        "\"fallback_selected\"",
+        "\"shared_worker_protocol_mismatch_fallback\"",
+        "\"shared_worker_crash_recovery_reconnect\"",
+        "scripts/run_wasm_shared_worker_direct_runtime_evidence.sh",
+    ] {
+        assert!(
+            artifact.contains(marker),
+            "artifact missing decision/proof marker: {marker}"
+        );
+    }
+
+    for marker in [
+        "\"capability_id\": \"wasm_shared_worker_direct_runtime\"",
+        "\"support_class_after\": \"broker/coordinator-only\"",
+        "\"artifact_paths\": [\"artifacts/wave2/wasm_shared_worker_direct_runtime_evidence.json\"]",
+        "\"planned_artifact_paths\": []",
+        "client fanout cancellation",
+    ] {
+        assert!(
+            registry.contains(marker),
+            "registry missing shared-worker marker: {marker}"
+        );
+    }
+}
+
+#[test]
 fn browser_package_support_surface_pins_admission_and_recovery_guards() {
     let browser = read_file("packages/browser/src/index.ts");
     for marker in [
