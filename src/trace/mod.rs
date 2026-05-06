@@ -61,6 +61,7 @@ pub mod geodesic;
 pub mod gf2;
 pub mod independence;
 pub mod integrity;
+pub mod incident;
 pub mod minimizer;
 pub mod recorder;
 pub mod refinement_firewall;
@@ -131,6 +132,12 @@ pub use independence::{
 pub use integrity::{
     IntegrityIssue, IssueSeverity, VerificationOptions, VerificationResult, find_first_corruption,
     is_trace_valid_quick, verify_trace,
+};
+pub use incident::{
+    INCIDENT_BUNDLE_SCHEMA_VERSION, IncidentBundle, IncidentCommand, IncidentDeterminism,
+    IncidentEnvVar, IncidentPrivacy, IncidentPrivacyClass, IncidentProvenance,
+    IncidentRedactionStatus, IncidentSource, IncidentSourceKind, IncidentValidationIssue,
+    IncidentValidationIssueKind, IncidentValidationReport, IncidentValidationVerdict,
 };
 pub use minimizer::{
     MinimizationReport, MinimizationStep, ScenarioElement, StepKind, TraceMinimizer,

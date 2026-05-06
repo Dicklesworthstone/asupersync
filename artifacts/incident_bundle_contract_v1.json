@@ -1,0 +1,360 @@
+{
+  "schema_version": "incident-bundle-contract-v1",
+  "bead_id": "asupersync-lkygsb.1",
+  "module": "src/trace/incident.rs",
+  "description": "Canonical contract for fail-closed production incident bundles that bridge crash packs, trace logs, support bundles, README claim failures, conformance failures, rch proof failures, and manual repro notes into deterministic replay work.",
+  "source_kinds": [
+    "crash_pack",
+    "trace_log",
+    "support_bundle",
+    "readme_claim_failure",
+    "conformance_failure",
+    "rch_proof_failure",
+    "repro_notes"
+  ],
+  "required_top_level_fields": [
+    "schema_version",
+    "bundle_id",
+    "sources",
+    "command",
+    "determinism",
+    "privacy",
+    "provenance"
+  ],
+  "required_source_fields": [
+    "source_id",
+    "kind",
+    "content_hash",
+    "content_bytes",
+    "redaction_status"
+  ],
+  "fail_closed_triggers": [
+    "unsupported_schema_version",
+    "missing_required_field",
+    "duplicate_source_id",
+    "unsupported_source_kind",
+    "missing_redaction_policy",
+    "redaction_required_but_missing",
+    "secret_like_material",
+    "oversized_field",
+    "external_path",
+    "malformed_content_hash",
+    "binary_like_payload",
+    "duplicate_feature_flag"
+  ],
+  "redaction_contract": {
+    "policy_required": true,
+    "confidential_or_secret_requires_redacted_status": true,
+    "secret_like_key_fragments": [
+      "authorization",
+      "cookie",
+      "credential",
+      "passwd",
+      "password",
+      "private_key",
+      "secret",
+      "session",
+      "token",
+      "api_key"
+    ],
+    "secret_like_value_fragments": [
+      "bearer ",
+      "basic ",
+      "sk-",
+      "ghp_",
+      "akia",
+      "-----begin",
+      ".ssh",
+      "id_rsa"
+    ],
+    "host_private_path_fragments": [
+      "/home/",
+      "/users/",
+      "c:\\users\\",
+      "/.ssh/",
+      "\\.ssh\\",
+      "/appdata/",
+      "\\appdata\\"
+    ]
+  },
+  "determinism_contract": {
+    "hash_format": "sha256:<64 hex characters>",
+    "bundle_fingerprint": "stable local FNV-1a over deterministic JSON; not a security hash",
+    "paths": "repository-relative only; absolute paths and parent traversal are blocked",
+    "ambient_inputs": "no wall-clock, randomness, network, host path traversal, or hidden downloads"
+  },
+  "fixtures": {
+    "accepted": {
+      "schema_version": 1,
+      "bundle_id": "incident-fixture-accepted",
+      "sources": [
+        {
+          "source_id": "crashpack-main",
+          "kind": "crash_pack",
+          "artifact_path": "artifacts/crashpacks/fixture.json",
+          "content_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "content_bytes": 512,
+          "redaction_status": "redacted",
+          "payload_snippet": "panic after deterministic schedule seed 42",
+          "metadata": {
+            "trace_fingerprint": "0xfeedbeef"
+          }
+        }
+      ],
+      "command": {
+        "program": "rch",
+        "args": [
+          "exec",
+          "--",
+          "cargo",
+          "test",
+          "-p",
+          "asupersync"
+        ],
+        "env": [
+          {
+            "key": "RUSTFLAGS",
+            "value": "-C debuginfo=0"
+          }
+        ],
+        "working_dir": "."
+      },
+      "determinism": {
+        "seed": 42,
+        "schedule_seed": 42,
+        "virtual_time_nanos": 0,
+        "config_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "feature_flags": [
+          "test-internals"
+        ],
+        "target_triple": "x86_64-unknown-linux-gnu"
+      },
+      "privacy": {
+        "classification": "internal",
+        "redaction_status": "redacted",
+        "redaction_policy_id": "incident-redaction-v1"
+      },
+      "provenance": {
+        "capture_id": "support-incident-fixture-accepted",
+        "origin": "support_bundle",
+        "reporter": "operator",
+        "captured_commit": "34b057288",
+        "related_bead_id": "asupersync-lkygsb.1"
+      },
+      "metadata": {
+        "scenario": "accepted"
+      }
+    },
+    "rejected": [
+      {
+        "scenario_id": "missing-redaction-policy",
+        "expected_issue_kinds": [
+          "missing_required_field",
+          "missing_redaction_policy"
+        ],
+        "bundle": {
+          "schema_version": 1,
+          "bundle_id": "incident-fixture-missing-policy",
+          "sources": [
+            {
+              "source_id": "support-main",
+              "kind": "support_bundle",
+              "artifact_path": "artifacts/support/fixture.json",
+              "content_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "content_bytes": 256,
+              "redaction_status": "redacted"
+            }
+          ],
+          "command": {
+            "program": "rch",
+            "args": [
+              "exec",
+              "--",
+              "cargo",
+              "test"
+            ],
+            "env": [],
+            "working_dir": "."
+          },
+          "determinism": {
+            "seed": 7,
+            "config_hash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "feature_flags": [],
+            "target_triple": "x86_64-unknown-linux-gnu"
+          },
+          "privacy": {
+            "classification": "confidential",
+            "redaction_status": "redacted",
+            "redaction_policy_id": ""
+          },
+          "provenance": {
+            "capture_id": "support-incident-fixture-missing-policy",
+            "origin": "support_bundle",
+            "reporter": "operator"
+          }
+        }
+      },
+      {
+        "scenario_id": "unknown-source-kind",
+        "expected_issue_kinds": [
+          "unsupported_source_kind"
+        ],
+        "bundle": {
+          "schema_version": 1,
+          "bundle_id": "incident-fixture-unknown-source",
+          "sources": [
+            {
+              "source_id": "future-source",
+              "kind": "future_tool_bundle",
+              "artifact_path": "artifacts/future/fixture.json",
+              "content_hash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "content_bytes": 128,
+              "redaction_status": "redacted"
+            }
+          ],
+          "command": {
+            "program": "rch",
+            "args": [
+              "exec",
+              "--",
+              "cargo",
+              "test"
+            ],
+            "env": [],
+            "working_dir": "."
+          },
+          "determinism": {
+            "seed": 9,
+            "config_hash": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "feature_flags": [],
+            "target_triple": "x86_64-unknown-linux-gnu"
+          },
+          "privacy": {
+            "classification": "internal",
+            "redaction_status": "redacted",
+            "redaction_policy_id": "incident-redaction-v1"
+          },
+          "provenance": {
+            "capture_id": "support-incident-fixture-unknown-source",
+            "origin": "support_bundle",
+            "reporter": "operator"
+          }
+        }
+      },
+      {
+        "scenario_id": "secret-env",
+        "expected_issue_kinds": [
+          "secret_like_material"
+        ],
+        "bundle": {
+          "schema_version": 1,
+          "bundle_id": "incident-fixture-secret-env",
+          "sources": [
+            {
+              "source_id": "rch-main",
+              "kind": "rch_proof_failure",
+              "artifact_path": "artifacts/rch/fixture.json",
+              "content_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+              "content_bytes": 128,
+              "redaction_status": "redacted"
+            }
+          ],
+          "command": {
+            "program": "rch",
+            "args": [
+              "exec",
+              "--",
+              "cargo",
+              "test"
+            ],
+            "env": [
+              {
+                "key": "API_TOKEN",
+                "value": "sk-test-should-not-ship"
+              }
+            ],
+            "working_dir": "."
+          },
+          "determinism": {
+            "seed": 11,
+            "config_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+            "feature_flags": [],
+            "target_triple": "x86_64-unknown-linux-gnu"
+          },
+          "privacy": {
+            "classification": "internal",
+            "redaction_status": "redacted",
+            "redaction_policy_id": "incident-redaction-v1"
+          },
+          "provenance": {
+            "capture_id": "support-incident-fixture-secret-env",
+            "origin": "rch_failure",
+            "reporter": "operator"
+          }
+        }
+      },
+      {
+        "scenario_id": "private-path",
+        "expected_issue_kinds": [
+          "external_path"
+        ],
+        "bundle": {
+          "schema_version": 1,
+          "bundle_id": "incident-fixture-private-path",
+          "sources": [
+            {
+              "source_id": "notes-main",
+              "kind": "repro_notes",
+              "artifact_path": "/home/alice/.ssh/id_rsa",
+              "content_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+              "content_bytes": 64,
+              "redaction_status": "redacted"
+            }
+          ],
+          "command": {
+            "program": "rch",
+            "args": [
+              "exec",
+              "--",
+              "cargo",
+              "test"
+            ],
+            "env": [],
+            "working_dir": "."
+          },
+          "determinism": {
+            "seed": 13,
+            "config_hash": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+            "feature_flags": [],
+            "target_triple": "x86_64-unknown-linux-gnu"
+          },
+          "privacy": {
+            "classification": "internal",
+            "redaction_status": "redacted",
+            "redaction_policy_id": "incident-redaction-v1"
+          },
+          "provenance": {
+            "capture_id": "support-incident-fixture-private-path",
+            "origin": "manual_repro",
+            "reporter": "operator"
+          }
+        }
+      }
+    ]
+  },
+  "e2e_script": "scripts/validate_incident_bundle_contract.sh",
+  "required_log_fields": [
+    "scenario_id",
+    "bead_id",
+    "bundle_id",
+    "verdict",
+    "issue_kinds",
+    "artifact_path"
+  ],
+  "proof_commands": [
+    "rch exec -- rustfmt --edition 2024 --check src/trace/incident.rs tests/incident_bundle_contract.rs",
+    "bash scripts/validate_incident_bundle_contract.sh --output-root target/incident-bundle-contract --run-id asupersync-lkygsb.1",
+    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_incident_bundle_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test incident_bundle_contract --features test-internals -- --nocapture",
+    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_incident_bundle_lib CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync trace::incident --features test-internals -- --nocapture"
+  ]
+}
