@@ -157,17 +157,20 @@
     {
       "scenario_id": "CTM-SMOKE-TOKEN",
       "description": "Validate token structure and capability type definitions",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa071 cargo test --test capability_token_model_contract token -- --nocapture"
+      "test_filter": "token",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_capability_token_model_CTM_SMOKE_TOKEN cargo test -p asupersync --test capability_token_model_contract --features test-internals token -- --nocapture"
     },
     {
       "scenario_id": "CTM-SMOKE-ATTENUATION",
       "description": "Validate attenuation rules and delegation semantics",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa071 cargo test --test capability_token_model_contract attenuation -- --nocapture"
+      "test_filter": "attenuation",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_capability_token_model_CTM_SMOKE_ATTENUATION cargo test -p asupersync --test capability_token_model_contract --features test-internals attenuation -- --nocapture"
     },
     {
       "scenario_id": "CTM-SMOKE-REVOCATION",
       "description": "Validate revocation model and cascade semantics",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa071 cargo test --test capability_token_model_contract revocation -- --nocapture"
+      "test_filter": "revocation",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_capability_token_model_CTM_SMOKE_REVOCATION cargo test -p asupersync --test capability_token_model_contract --features test-internals revocation -- --nocapture"
     }
   ],
   "downstream_beads": [

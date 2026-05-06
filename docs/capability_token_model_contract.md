@@ -69,7 +69,7 @@ CAP-OBSERVE
 ## Validation
 
 ```bash
-rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa071 cargo test --test capability_token_model_contract -- --nocapture
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_capability_token_model cargo test -p asupersync --test capability_token_model_contract --features test-internals -- --nocapture
 ```
 
 ## Cross-References
