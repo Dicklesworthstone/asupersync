@@ -89,6 +89,31 @@ fn require_exact_rank_window(
     Ok(())
 }
 
+fn ranked_bead_ids(value: &Value, field: &str) -> Result<BTreeMap<u64, String>, String> {
+    let ideas = value[field]
+        .as_array()
+        .ok_or_else(|| format!("{field} must be array"))?;
+    let mut ranked = BTreeMap::new();
+
+    for item in ideas {
+        let rank = item["rank"]
+            .as_u64()
+            .ok_or_else(|| format!("{field} rank must be unsigned integer"))?;
+        let bead_id = item["bead_id"]
+            .as_str()
+            .ok_or_else(|| format!("{field} bead_id must be string"))?
+            .to_string();
+        if bead_id.trim().is_empty() {
+            return Err(format!("{field} bead_id must be nonempty"));
+        }
+        if ranked.insert(rank, bead_id).is_some() {
+            return Err(format!("{field} contains duplicate bead_id rank {rank}"));
+        }
+    }
+
+    Ok(ranked)
+}
+
 fn validate_artifact(artifact: &Value) -> Result<(), String> {
     let top_level_required = [
         "contract_version",
@@ -133,6 +158,8 @@ fn validate_artifact(artifact: &Value) -> Result<(), String> {
     let top_5 = ranked_ideas(ledger, "top_5")?;
     let next_10 = ranked_ideas(ledger, "next_10")?;
     let parked_ideas = ranked_ideas(ledger, "parked_ideas")?;
+    let top_5_bead_ids = ranked_bead_ids(ledger, "top_5")?;
+    let next_10_bead_ids = ranked_bead_ids(ledger, "next_10")?;
     require_exact_rank_window(&generated_ideas, "generated_ideas", 1..=30)?;
     require_exact_rank_window(&top_5, "top_5", 1..=5)?;
     require_exact_rank_window(&next_10, "next_10", 6..=15)?;
@@ -174,6 +201,12 @@ fn validate_artifact(artifact: &Value) -> Result<(), String> {
     if mappings.len() < 16 {
         return Err("selected_bead_mappings must cover the selected program surface".to_string());
     }
+    let graveyard_provenance = artifact["alien_graveyard_provenance"]
+        .as_array()
+        .ok_or_else(|| "alien_graveyard_provenance must be array".to_string())?;
+    if graveyard_provenance.len() < 6 {
+        return Err("graveyard provenance must cover all selected primitive families".to_string());
+    }
 
     let mut bead_ids = BTreeSet::new();
     for mapping in mappings {
@@ -183,6 +216,46 @@ fn validate_artifact(artifact: &Value) -> Result<(), String> {
             .ok_or_else(|| "bead_id must be string".to_string())?;
         if !bead_ids.insert(bead_id.to_string()) {
             return Err(format!("duplicate bead mapping {bead_id}"));
+        }
+    }
+
+    let mut operationalized_bead_ids = bead_ids.clone();
+    for requirement in artifact["objective_requirements"]
+        .as_array()
+        .ok_or_else(|| "objective_requirements must be array".to_string())?
+    {
+        for linked in requirement["linked_bead_ids"]
+            .as_array()
+            .ok_or_else(|| "objective requirement linked_bead_ids must be array".to_string())?
+        {
+            operationalized_bead_ids.insert(
+                linked
+                    .as_str()
+                    .ok_or_else(|| "objective linked bead id must be string".to_string())?
+                    .to_string(),
+            );
+        }
+    }
+    for provenance in graveyard_provenance {
+        for linked in provenance["linked_bead_ids"]
+            .as_array()
+            .ok_or_else(|| "graveyard linked_bead_ids must be array".to_string())?
+        {
+            operationalized_bead_ids.insert(
+                linked
+                    .as_str()
+                    .ok_or_else(|| "graveyard linked bead id must be string".to_string())?
+                    .to_string(),
+            );
+        }
+    }
+    for (field, ranked) in [("top_5", &top_5_bead_ids), ("next_10", &next_10_bead_ids)] {
+        for (rank, bead_id) in ranked {
+            if !operationalized_bead_ids.contains(bead_id) {
+                return Err(format!(
+                    "{field} rank {rank} bead id {bead_id} is not operationalized"
+                ));
+            }
         }
     }
 
@@ -231,14 +304,6 @@ fn validate_artifact(artifact: &Value) -> Result<(), String> {
         < 2.0
     {
         return Err("minimum EV score gate must be at least 2.0".to_string());
-    }
-
-    if artifact["alien_graveyard_provenance"]
-        .as_array()
-        .map_or(0, Vec::len)
-        < 6
-    {
-        return Err("graveyard provenance must cover all selected primitive families".to_string());
     }
 
     Ok(())
@@ -314,6 +379,19 @@ fn idea_wizard_rank_drift_is_rejected() {
             .expect_err("duplicate rank should fail")
             .contains("duplicate rank 4"),
         "error should identify duplicate ranks"
+    );
+}
+
+#[test]
+fn unoperationalized_idea_wizard_bead_id_is_rejected() {
+    let mut artifact = load_artifact();
+    artifact["idea_wizard_phase_ledger"]["next_10"][9]["bead_id"] =
+        Value::from("asupersync-missing-link");
+    assert!(
+        validate_artifact(&artifact)
+            .expect_err("unoperationalized bead id should fail")
+            .contains("not operationalized"),
+        "error should identify missing operationalization"
     );
 }
 
