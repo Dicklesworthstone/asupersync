@@ -2,10 +2,17 @@
 
 mod common;
 
+use asupersync::Cx;
 use asupersync::web::extract::{Json as JsonExtract, Path, Query, Request};
-use asupersync::web::handler::{FnHandler, FnHandler1};
-use asupersync::web::response::{Html, Json, Redirect, StatusCode};
+use asupersync::web::handler::{FnHandler, FnHandler1, Handler};
+use asupersync::web::middleware::{HeaderOverwrite, MiddlewareStack};
+use asupersync::web::request_region::RequestRegion;
+use asupersync::web::response::{Html, Json, Redirect, Response, StatusCode};
 use asupersync::web::router::{Router, delete, get, post};
+use asupersync::web::sse::{Sse, SseEvent};
+use serde_json::{Value, json};
+use std::io;
+use std::path::PathBuf;
 
 // =========================================================================
 // Handlers
@@ -53,8 +60,378 @@ fn redirect_handler() -> Redirect {
 }
 
 // =========================================================================
+// Web framework proof runner
+// =========================================================================
+
+const WEB_FRAMEWORK_BEAD_ID: &str = "asupersync-o74l7u";
+const WEB_FRAMEWORK_WAVE2_SCENARIOS: &[&str] = &[
+    "router-path-json-extractor",
+    "middleware-body-limit-short-circuit",
+    "middleware-panic-recovery-with-security-header",
+    "bounded-sse-batch-response",
+    "request-region-panic-isolation",
+];
+const WEB_FRAMEWORK_REQUIRED_ROW_FIELDS: &[&str] = &[
+    "bead_id",
+    "scenario_id",
+    "route",
+    "method",
+    "middleware_stack",
+    "extractor_set",
+    "response_kind",
+    "streaming",
+    "client_disconnect_at",
+    "region_count_before",
+    "region_count_after",
+    "obligation_count_before",
+    "obligation_count_after",
+    "expected_status",
+    "actual_status",
+    "expected_body_digest",
+    "actual_body_digest",
+    "verdict",
+    "first_failure",
+];
+
+fn web_body_digest(body: &[u8]) -> String {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in body {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("fnv1a64:{hash:016x}:len={}", body.len())
+}
+
+fn web_framework_first_failure(
+    resp: &Response,
+    expected_status: StatusCode,
+    expected_body: &[u8],
+    extra_failure: Option<String>,
+) -> String {
+    if resp.status != expected_status {
+        return format!(
+            "status mismatch: expected {} actual {}",
+            expected_status.as_u16(),
+            resp.status.as_u16()
+        );
+    }
+    if resp.body.as_ref() != expected_body {
+        return format!(
+            "body digest mismatch: expected {} actual {}",
+            web_body_digest(expected_body),
+            web_body_digest(&resp.body)
+        );
+    }
+    extra_failure.unwrap_or_default()
+}
+
+fn web_framework_row(
+    bead_id: &str,
+    scenario_id: &str,
+    route: &str,
+    method: &str,
+    middleware_stack: &[&str],
+    extractor_set: &[&str],
+    response_kind: &str,
+    streaming: bool,
+    client_disconnect_at: &str,
+    region_count_before: Option<u64>,
+    region_count_after: Option<u64>,
+    obligation_count_before: Option<u64>,
+    obligation_count_after: Option<u64>,
+    expected_status: StatusCode,
+    expected_body: &[u8],
+    resp: &Response,
+    extra_failure: Option<String>,
+) -> Value {
+    let first_failure =
+        web_framework_first_failure(resp, expected_status, expected_body, extra_failure);
+    let verdict = if first_failure.is_empty() {
+        "pass"
+    } else {
+        "fail"
+    };
+
+    json!({
+        "bead_id": bead_id,
+        "scenario_id": scenario_id,
+        "route": route,
+        "method": method,
+        "middleware_stack": middleware_stack,
+        "extractor_set": extractor_set,
+        "response_kind": response_kind,
+        "streaming": streaming,
+        "client_disconnect_at": client_disconnect_at,
+        "region_count_before": region_count_before,
+        "region_count_after": region_count_after,
+        "obligation_count_before": obligation_count_before,
+        "obligation_count_after": obligation_count_after,
+        "expected_status": expected_status.as_u16(),
+        "actual_status": resp.status.as_u16(),
+        "expected_body_digest": web_body_digest(expected_body),
+        "actual_body_digest": web_body_digest(resp.body.as_ref()),
+        "verdict": verdict,
+        "first_failure": first_failure,
+    })
+}
+
+struct WebProofPanicHandler;
+
+impl Handler for WebProofPanicHandler {
+    fn call(&self, _req: Request) -> Response {
+        panic!("web framework proof panic");
+    }
+}
+
+fn web_proof_router_path_json(bead_id: &str) -> Value {
+    let router = Router::new().route(
+        "/users/:id",
+        get(FnHandler1::<_, Path<String>>::new(get_user)),
+    );
+    let resp = router.handle(Request::new("GET", "/users/42"));
+    web_framework_row(
+        bead_id,
+        "router-path-json-extractor",
+        "/users/:id",
+        "GET",
+        &[],
+        &["Path<String>"],
+        "plain_text",
+        false,
+        "none",
+        None,
+        None,
+        None,
+        None,
+        StatusCode::OK,
+        b"user:42",
+        &resp,
+        None,
+    )
+}
+
+fn web_proof_middleware_body_limit(bead_id: &str) -> Value {
+    let handler = MiddlewareStack::new(FnHandler::new(index))
+        .with_body_limit(4)
+        .build();
+    let req = Request::new("POST", "/upload")
+        .with_header("content-length", "8")
+        .with_body(b"abcdefgh".to_vec());
+    let resp = handler.call(req);
+    web_framework_row(
+        bead_id,
+        "middleware-body-limit-short-circuit",
+        "/upload",
+        "POST",
+        &["RequestBodyLimitMiddleware"],
+        &[],
+        "error",
+        false,
+        "none",
+        None,
+        None,
+        None,
+        None,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        b"Payload Too Large: Content-Length 8 bytes exceeds limit 4 bytes",
+        &resp,
+        None,
+    )
+}
+
+fn web_proof_middleware_panic_recovery(bead_id: &str) -> Value {
+    let handler = MiddlewareStack::new(WebProofPanicHandler)
+        .with_catch_panic()
+        .with_response_header("x-frame-options", "DENY", HeaderOverwrite::IfMissing)
+        .build();
+    let resp = handler.call(Request::new("GET", "/panic"));
+    let extra_failure = (resp.headers.get("x-frame-options").map(String::as_str) != Some("DENY"))
+        .then(|| "missing x-frame-options=DENY".to_string());
+    web_framework_row(
+        bead_id,
+        "middleware-panic-recovery-with-security-header",
+        "/panic",
+        "GET",
+        &["CatchPanicMiddleware", "SetResponseHeaderMiddleware"],
+        &[],
+        "panic_recovery",
+        false,
+        "none",
+        None,
+        None,
+        None,
+        None,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        b"Internal Server Error",
+        &resp,
+        extra_failure,
+    )
+}
+
+fn web_proof_bounded_sse(bead_id: &str) -> Value {
+    let router = Router::new().route(
+        "/events",
+        get(FnHandler::new(|| {
+            Sse::new(vec![
+                SseEvent::default()
+                    .event("update")
+                    .data(r#"{"count":1}"#)
+                    .id("1"),
+                SseEvent::default()
+                    .event("update")
+                    .data(r#"{"count":2}"#)
+                    .id("2"),
+            ])
+            .keep_alive()
+        })),
+    );
+    let resp = router.handle(Request::new("GET", "/events"));
+    let expected_body = concat!(
+        ":keep-alive\n\n",
+        "event:update\n",
+        "data:{\"count\":1}\n",
+        "id:1\n\n",
+        "event:update\n",
+        "data:{\"count\":2}\n",
+        "id:2\n\n"
+    );
+    let extra_failure = (resp.headers.get("content-type").map(String::as_str)
+        != Some("text/event-stream"))
+    .then(|| "missing content-type=text/event-stream".to_string());
+    web_framework_row(
+        bead_id,
+        "bounded-sse-batch-response",
+        "/events",
+        "GET",
+        &[],
+        &[],
+        "bounded_sse_batch",
+        false,
+        "not_applicable_single_response_body",
+        None,
+        None,
+        None,
+        None,
+        StatusCode::OK,
+        expected_body.as_bytes(),
+        &resp,
+        extra_failure,
+    )
+}
+
+fn web_proof_request_region_panic(bead_id: &str) -> Value {
+    let cx = Cx::for_testing();
+    let region = RequestRegion::new(&cx, Request::new("GET", "/region-panic"));
+    let outcome = region.run(|_ctx| {
+        panic!("request region proof panic");
+    });
+    let resp = outcome.into_response();
+    web_framework_row(
+        bead_id,
+        "request-region-panic-isolation",
+        "/region-panic",
+        "GET",
+        &[],
+        &["RequestContext"],
+        "request_region_panic_500",
+        false,
+        "none",
+        None,
+        None,
+        None,
+        None,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        b"Internal Server Error",
+        &resp,
+        None,
+    )
+}
+
+fn web_framework_wave2_run() -> io::Result<Vec<Value>> {
+    let bead_id = std::env::var("ASUPERSYNC_WEB_FRAMEWORK_BEAD_ID")
+        .unwrap_or_else(|_| WEB_FRAMEWORK_BEAD_ID.to_string());
+    let rows = vec![
+        web_proof_router_path_json(&bead_id),
+        web_proof_middleware_body_limit(&bead_id),
+        web_proof_middleware_panic_recovery(&bead_id),
+        web_proof_bounded_sse(&bead_id),
+        web_proof_request_region_panic(&bead_id),
+    ];
+
+    if let Some(output_dir) = std::env::var_os("ASUPERSYNC_WEB_FRAMEWORK_PROOF_DIR") {
+        let output_dir = PathBuf::from(output_dir);
+        std::fs::create_dir_all(&output_dir)?;
+        let rows_path = output_dir.join("test_rows.jsonl");
+        let mut rows_file = std::fs::File::create(&rows_path)?;
+        for row in &rows {
+            use std::io::Write as _;
+            writeln!(rows_file, "{row}")?;
+        }
+        let report = json!({
+            "bead_id": bead_id,
+            "scenario_count": rows.len(),
+            "expected_scenarios": WEB_FRAMEWORK_WAVE2_SCENARIOS,
+            "rows_path": rows_path.display().to_string(),
+            "validation_passed": rows.iter().all(|row| row["verdict"] == "pass"),
+        });
+        let report_bytes = serde_json::to_vec_pretty(&report).map_err(io::Error::other)?;
+        std::fs::write(output_dir.join("test_report.json"), report_bytes)?;
+    }
+
+    Ok(rows)
+}
+
+// =========================================================================
 // Tests
 // =========================================================================
+
+#[test]
+fn web_framework_wave2_proof_runner_logs_required_scenarios() {
+    common::init_test_logging();
+    let rows = web_framework_wave2_run().expect("web framework proof runner");
+    println!();
+    for row in &rows {
+        println!("{row}");
+    }
+
+    let missing: Vec<_> = WEB_FRAMEWORK_WAVE2_SCENARIOS
+        .iter()
+        .copied()
+        .filter(|scenario_id| {
+            !rows
+                .iter()
+                .any(|row| row["scenario_id"].as_str() == Some(*scenario_id))
+        })
+        .collect();
+    let drifts: Vec<_> = rows
+        .iter()
+        .filter(|row| row["verdict"].as_str() != Some("pass"))
+        .collect();
+    let missing_fields: Vec<_> = rows
+        .iter()
+        .filter_map(|row| {
+            WEB_FRAMEWORK_REQUIRED_ROW_FIELDS
+                .iter()
+                .copied()
+                .find(|field| row.get(*field).is_none())
+                .map(|field| {
+                    let scenario = row["scenario_id"].as_str().unwrap_or("<unknown>");
+                    format!("{scenario}:{field}")
+                })
+        })
+        .collect();
+
+    assert!(
+        missing.is_empty(),
+        "missing web framework proof scenarios: {missing:?}"
+    );
+    assert!(
+        missing_fields.is_empty(),
+        "missing web framework proof row fields: {missing_fields:?}"
+    );
+    assert!(drifts.is_empty(), "web framework proof drifts: {drifts:#?}");
+    assert_eq!(rows.len(), WEB_FRAMEWORK_WAVE2_SCENARIOS.len());
+}
 
 #[test]
 fn e2e_route_resolution_and_method_dispatch() {
