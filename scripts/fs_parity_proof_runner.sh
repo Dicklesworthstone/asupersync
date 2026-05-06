@@ -19,6 +19,7 @@ BEAD_ID="asupersync-oc0ybw"
 
 EXPECTED_SCENARIOS=(
   "open-options-seek-sync"
+  "open-options-append-truncate"
   "file-create-new-exclusive"
   "file-set-len-permissions"
   "read-dir-metadata-disposition"

@@ -40,6 +40,7 @@ fn cleanup(path: &std::path::Path) {
 
 const FS_PARITY_WAVE2_SCENARIOS: &[&str] = &[
     "open-options-seek-sync",
+    "open-options-append-truncate",
     "file-create-new-exclusive",
     "file-set-len-permissions",
     "read-dir-metadata-disposition",
@@ -201,6 +202,75 @@ async fn fs_proof_open_options_seek_sync(temp_root: &Path) -> Result<FsProofEvid
         metadata.len(),
         "len=10,is_file=true,seek_window=456",
     ))
+}
+
+async fn fs_proof_open_options_append_truncate(
+    temp_root: &Path,
+) -> Result<FsProofEvidence, String> {
+    let dir = fs_proof_scenario_dir(temp_root, "open-options-append-truncate")?;
+    let path = dir.join("append-truncate.txt");
+    fs::write(&path, b"alpha")
+        .await
+        .map_err(|err| format!("write initial append/truncate file: {err}"))?;
+
+    let mut appender = fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .await
+        .map_err(|err| format!("open append mode: {err}"))?;
+    appender
+        .write_all(b"_beta")
+        .await
+        .map_err(|err| format!("append bytes: {err}"))?;
+    appender
+        .sync_data()
+        .await
+        .map_err(|err| format!("sync appended bytes: {err}"))?;
+    drop(appender);
+
+    let appended = fs::read_to_string(&path)
+        .await
+        .map_err(|err| format!("read appended contents: {err}"))?;
+    if appended != "alpha_beta" {
+        return Err(format!(
+            "append drift: expected alpha_beta actual {appended}"
+        ));
+    }
+
+    let mut truncating = fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&path)
+        .await
+        .map_err(|err| format!("open truncate mode: {err}"))?;
+    truncating
+        .write_all(b"z")
+        .await
+        .map_err(|err| format!("write truncated contents: {err}"))?;
+    truncating
+        .sync_all()
+        .await
+        .map_err(|err| format!("sync truncated contents: {err}"))?;
+    drop(truncating);
+
+    let truncated = fs::read_to_string(&path)
+        .await
+        .map_err(|err| format!("read truncated contents: {err}"))?;
+    let metadata = fs::metadata(&path)
+        .await
+        .map_err(|err| format!("metadata after append/truncate: {err}"))?;
+    let metadata_actual = format!(
+        "appended={appended},truncated={truncated},len={}",
+        metadata.len()
+    );
+    let metadata_expected = "appended=alpha_beta,truncated=z,len=1";
+    if metadata_actual != metadata_expected {
+        return Err(format!(
+            "append/truncate drift: actual={metadata_actual} expected={metadata_expected}"
+        ));
+    }
+
+    Ok(FsProofEvidence::supported(metadata.len(), metadata_actual))
 }
 
 async fn fs_proof_file_create_new_exclusive(temp_root: &Path) -> Result<FsProofEvidence, String> {
@@ -842,6 +912,15 @@ async fn fs_parity_wave2_run() -> io::Result<Vec<Value>> {
             metadata_expected: "len=10,is_file=true,seek_window=456",
             cancellation_point: "none",
             result: fs_proof_open_options_seek_sync(&temp_root).await,
+        },
+        FsProofScenario {
+            scenario_id: "open-options-append-truncate",
+            api: "OpenOptions",
+            operation: "append_preserves_existing_truncate_clears",
+            bytes_expected: 1,
+            metadata_expected: "appended=alpha_beta,truncated=z,len=1",
+            cancellation_point: "none",
+            result: fs_proof_open_options_append_truncate(&temp_root).await,
         },
         FsProofScenario {
             scenario_id: "file-create-new-exclusive",
