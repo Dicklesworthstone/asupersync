@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Semantic Failure Replay Cookbook Validation (SEM-12.12)
 //!
 //! Validates that the failure replay cookbook, rerun shortcut script, and
