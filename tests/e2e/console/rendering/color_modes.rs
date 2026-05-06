@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Color mode E2E tests.
 
 use crate::console_e2e::util::{
