@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Builder Pattern Verification Suite
 //!
 //! Verifies the public API surface of runtime and lab builders:
