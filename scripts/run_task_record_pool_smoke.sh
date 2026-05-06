@@ -11,6 +11,7 @@ SCENARIO=""
 OUTPUT_ROOT_OVERRIDE="${TASK_RECORD_POOL_SMOKE_OUTPUT_DIR:-}"
 ARTIFACT_ROOT_OVERRIDE="${TASK_RECORD_POOL_SMOKE_ARTIFACT_ROOT:-}"
 RUN_ID_OVERRIDE="${TASK_RECORD_POOL_SMOKE_RUN_ID:-}"
+RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
 
 usage() {
     cat <<'EOF'
@@ -28,12 +29,16 @@ EOF
 
 require_tools() {
     local missing=0
-    for tool in jq awk date uname timeout rch; do
+    for tool in jq awk date uname timeout; do
         if ! command -v "$tool" >/dev/null 2>&1; then
             echo "FATAL: missing required tool: $tool" >&2
             missing=1
         fi
     done
+    if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+        echo "FATAL: rch is required and was not found/executable at: ${RCH_BIN}" >&2
+        missing=1
+    fi
     if [ ! -f "$ARTIFACT" ]; then
         echo "FATAL: contract artifact missing at ${ARTIFACT}" >&2
         missing=1
@@ -210,9 +215,11 @@ run_once() {
     local tail_timeout_seconds="${TASK_RECORD_POOL_RCH_TIMEOUT_SECONDS:-300}"
     local poll_seconds=0
     local command_exit_code=-1
+    local rch_invocation
 
+    printf -v rch_invocation '%q' "$RCH_BIN"
     local command="
-        rch exec -- env \
+        ${rch_invocation} exec -- env \
         CARGO_INCREMENTAL=0 \
         CARGO_TARGET_DIR=${target_dir} \
         ASUPERSYNC_TASK_RECORD_POOL_CONTRACT_PATH=${ARTIFACT} \
@@ -240,6 +247,13 @@ run_once() {
         if grep -Eq 'Remote command finished: exit=[1-9][0-9]*' "$log_path" 2>/dev/null; then
             break
         fi
+        if grep -Eq '^\[RCH\] local \(|falling back to local' "$log_path" 2>/dev/null; then
+            kill "$command_pid" 2>/dev/null || true
+            wait "$command_pid" 2>/dev/null || true
+            command_exit_code=86
+            printf 'FATAL: rch local fallback detected; refusing local cargo execution\n' >>"$log_path"
+            break
+        fi
         sleep 1
         poll_seconds=$((poll_seconds + 1))
         if [ "$poll_seconds" -ge "$tail_timeout_seconds" ]; then
@@ -256,6 +270,11 @@ run_once() {
         wait "$command_pid"
         command_exit_code=$?
         set -e
+    fi
+
+    if [ "$command_exit_code" -ne 86 ] && grep -Eq '^\[RCH\] local \(|falling back to local' "$log_path" 2>/dev/null; then
+        command_exit_code=86
+        printf 'FATAL: rch local fallback detected; refusing local cargo execution\n' >>"$log_path"
     fi
 
     if [ ! -s "$report_path" ]; then
@@ -393,7 +412,7 @@ if [ "$EXPECTED_REPORT_PROJECTION_JSON" = "null" ]; then
     exit 1
 fi
 
-COMMAND_STRING="rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_task_record_pool_<run> ASUPERSYNC_TASK_RECORD_POOL_CONTRACT_PATH=${ARTIFACT} ASUPERSYNC_TASK_RECORD_POOL_SCENARIO_ID=${SCENARIO} ASUPERSYNC_TASK_RECORD_POOL_REPORT_PATH=<report> cargo test -p asupersync --test task_record_pool_contract task_record_pool_smoke_contract_emits_report --features test-internals -- --nocapture"
+COMMAND_STRING="${RCH_BIN} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_task_record_pool_<run> ASUPERSYNC_TASK_RECORD_POOL_CONTRACT_PATH=${ARTIFACT} ASUPERSYNC_TASK_RECORD_POOL_SCENARIO_ID=${SCENARIO} ASUPERSYNC_TASK_RECORD_POOL_REPORT_PATH=<report> cargo test -p asupersync --test task_record_pool_contract task_record_pool_smoke_contract_emits_report --features test-internals -- --nocapture"
 
 set +e
 run_once "run1" "$REPORT_PATH" "$RUN_LOG_PATH"
