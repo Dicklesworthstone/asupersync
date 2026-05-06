@@ -158,6 +158,25 @@ fn package_validation_script_checks_abi_metadata_keys() {
 }
 
 #[test]
+fn cross_framework_runner_reads_canonical_abi_metadata_fingerprint_key() {
+    let script = read("scripts/test_wasm_cross_framework_e2e.sh");
+    for marker in [
+        "ABI_METADATA_PATH=\"${PROJECT_ROOT}/packages/browser-core/abi-metadata.json\"",
+        "ABI_FINGERPRINT=\"$(jq -r '.abi_signature_fingerprint_v1 // 0'",
+        "--argjson abi_fingerprint \"${ABI_FINGERPRINT}\"",
+    ] {
+        assert!(
+            script.contains(marker),
+            "cross-framework E2E runner missing ABI fingerprint metadata marker: {marker}"
+        );
+    }
+    assert!(
+        !script.contains("ABI_FINGERPRINT=\"$(jq -r '.abi_fingerprint // 0'"),
+        "cross-framework E2E runner must not read the obsolete ABI fingerprint key"
+    );
+}
+
+#[test]
 fn raw_browser_core_export_tests_cover_version_and_fingerprint() {
     let tests = read("asupersync-browser-core/tests/abi_exports.rs");
     for marker in [

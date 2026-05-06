@@ -139,7 +139,7 @@ ABI_METADATA_PATH="${PROJECT_ROOT}/packages/browser-core/abi-metadata.json"
 if [[ -f "${ABI_METADATA_PATH}" ]]; then
     ABI_MAJOR="$(jq -r '.abi_version.major // 0' "${ABI_METADATA_PATH}" 2>/dev/null || echo 0)"
     ABI_MINOR="$(jq -r '.abi_version.minor // 0' "${ABI_METADATA_PATH}" 2>/dev/null || echo 0)"
-    ABI_FINGERPRINT="$(jq -r '.abi_fingerprint // 0' "${ABI_METADATA_PATH}" 2>/dev/null || echo 0)"
+    ABI_FINGERPRINT="$(jq -r '.abi_signature_fingerprint_v1 // 0' "${ABI_METADATA_PATH}" 2>/dev/null || echo 0)"
 else
     ABI_MAJOR=0
     ABI_MINOR=0
