@@ -11,6 +11,7 @@ SCENARIO=""
 OUTPUT_ROOT_OVERRIDE="${OVERLOAD_BROWNOUT_SMOKE_OUTPUT_DIR:-}"
 ARTIFACT_ROOT_OVERRIDE="${OVERLOAD_BROWNOUT_SMOKE_ARTIFACT_ROOT:-}"
 RUN_ID_OVERRIDE="${OVERLOAD_BROWNOUT_SMOKE_RUN_ID:-}"
+RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
 
 usage() {
     cat <<'EOF'
@@ -34,6 +35,14 @@ require_tools() {
             missing=1
         fi
     done
+    if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+        echo "FATAL: rch is required and was not found/executable at: ${RCH_BIN}" >&2
+        missing=1
+    fi
+    if [ ! -f "$ARTIFACT" ]; then
+        echo "FATAL: contract artifact missing at ${ARTIFACT}" >&2
+        missing=1
+    fi
     if [ "$missing" -ne 0 ]; then
         exit 1
     fi
@@ -169,7 +178,8 @@ mkdir -p "$RUN_DIR"
 HOST_FINGERPRINT_JSON="$(host_fingerprint_json)"
 STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-COMMAND="rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_overload_brownout ASUPERSYNC_OVERLOAD_BROWNOUT_CONTRACT_PATH=${ARTIFACT} ASUPERSYNC_OVERLOAD_BROWNOUT_SCENARIO=${SCENARIO} ASUPERSYNC_OVERLOAD_BROWNOUT_REPORT_PATH=${SCENARIO_REPORT_PATH} cargo test -p asupersync --test overload_brownout_contract overload_brownout_smoke_contract_emits_report --features test-internals -- --nocapture"
+printf -v RCH_INVOCATION '%q' "$RCH_BIN"
+COMMAND="${RCH_INVOCATION} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_overload_brownout ASUPERSYNC_OVERLOAD_BROWNOUT_CONTRACT_PATH=${ARTIFACT} ASUPERSYNC_OVERLOAD_BROWNOUT_SCENARIO=${SCENARIO} ASUPERSYNC_OVERLOAD_BROWNOUT_REPORT_PATH=${SCENARIO_REPORT_PATH} cargo test -p asupersync --test overload_brownout_contract overload_brownout_smoke_contract_emits_report --features test-internals -- --nocapture"
 
 COMMAND_EXIT_CODE=0
 SCRIPT_EXIT_CODE=0
@@ -189,6 +199,12 @@ else
         SCRIPT_EXIT_CODE=$COMMAND_EXIT_CODE
         STATUS="failed"
         MESSAGE="rch proof command failed"
+    elif grep -Eq '^\[RCH\] local \(|falling back to local' "$RUN_LOG_PATH"; then
+        COMMAND_EXIT_CODE=86
+        SCRIPT_EXIT_CODE=86
+        STATUS="failed"
+        MESSAGE="rch local fallback detected; refusing local cargo execution"
+        printf 'FATAL: rch local fallback detected; refusing local cargo execution\n' >>"$RUN_LOG_PATH"
     else
         if ! extract_report_from_log "$RUN_LOG_PATH" "$SCENARIO_REPORT_PATH"; then
             SCRIPT_EXIT_CODE=1
@@ -243,6 +259,8 @@ jq -n \
     --arg mode "$MODE" \
     --arg status "$STATUS" \
     --arg message "$MESSAGE" \
+    --arg command "$COMMAND" \
+    --arg run_log_path "$RUN_LOG_PATH" \
     --arg report_path "$SCENARIO_REPORT_PATH" \
     --argjson validation_passed "$VALIDATION_PASSED" \
     --argjson command_exit_code "$COMMAND_EXIT_CODE" \
@@ -253,6 +271,8 @@ jq -n \
         mode: $mode,
         status: $status,
         message: $message,
+        command: $command,
+        run_log_path: $run_log_path,
         validation_passed: $validation_passed,
         command_exit_code: $command_exit_code,
         script_exit_code: $script_exit_code,
