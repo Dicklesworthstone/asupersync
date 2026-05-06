@@ -571,7 +571,10 @@ What Rust authors can rely on today:
   alternative binding strategies; it is not a second shipped ABI owner.
 - The maintained fixture workflow at `tests/fixtures/rust-browser-consumer/`
   plus `scripts/validate_rust_browser_consumer.sh` remains the authoritative
-  end-to-end evidence bundle for this preview lane.
+  end-to-end evidence bundle for this preview lane. The refreshed
+  `asupersync-j1xbon.4` support decision keeps the lane
+  artifact-contract-backed preview, not stable external Rust Browser Edition
+  API parity.
 
 What Rust authors cannot rely on yet:
 

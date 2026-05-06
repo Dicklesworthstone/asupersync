@@ -19,8 +19,18 @@
     "support_class_before": "preview",
     "support_class_after": "artifact-contract-backed",
     "promotion_state": "evidence-ready",
+    "decision_review_bead_id": "asupersync-j1xbon.4",
+    "stable_external_rust_api_verdict": "not_promoted",
+    "decision_outcome": "keep-preview-artifact-contract-backed",
+    "decision_contract_test_names": [
+      "rust_browser_runtime_support_decision_stays_preview_until_stable_proof_exists"
+    ],
     "unsupported_reason": "The Rust-authored Browser Edition runtime API remains a preview public lane until ABI major/minor compatibility and downgrade behavior are fully stabilized beyond the maintained fixture.",
     "fallback_target": "Use the maintained rust-browser-consumer fixture and JS/TS Browser Edition packages for shipped Browser Edition workflows.",
+    "decision_rationale": [
+      "The maintained fixture and builder contracts prove a dispatcher-backed preview lane, not broad stable parity with the shipped JS/TS Browser Edition packages.",
+      "Stable promotion remains blocked until ABI semantic-version policy, downgrade guidance, fixture logs, public support wording, and Browser Edition package boundaries are promoted together."
+    ],
     "residual_risks": [
       "RuntimeBuilder::browser() is artifact-backed but still preview.",
       "ABI version mismatch policy is documented but not promoted to a broad stable external Rust contract.",

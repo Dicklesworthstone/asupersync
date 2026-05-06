@@ -316,6 +316,96 @@ fn rust_browser_runtime_stability_artifact_matches_registry_runner_and_fixture()
 }
 
 #[test]
+fn rust_browser_runtime_support_decision_stays_preview_until_stable_proof_exists() {
+    let artifact = read_json(RUST_BROWSER_EVIDENCE_ARTIFACT_PATH);
+    let registry = read_json(WAVE2_REGISTRY_PATH);
+    let readme = read_file("README.md");
+    let wasm_doc = read_file("docs/WASM.md");
+    let integration_doc = read_file("docs/integration.md");
+
+    let decision = &artifact["support_decision"];
+    let registry_row = registry["capability_rows"]
+        .as_array()
+        .expect("capability_rows")
+        .iter()
+        .find(|row| row["capability_id"].as_str() == Some("browser_rust_runtime_api_stability"))
+        .expect("browser_rust_runtime_api_stability registry row");
+
+    for source in [decision, registry_row] {
+        assert_eq!(
+            source["decision_review_bead_id"].as_str(),
+            Some("asupersync-j1xbon.4")
+        );
+        assert_eq!(
+            source["stable_external_rust_api_verdict"].as_str(),
+            Some("not_promoted")
+        );
+        assert_eq!(
+            source["decision_outcome"].as_str(),
+            Some("keep-preview-artifact-contract-backed")
+        );
+        assert_eq!(
+            source["support_class_after"].as_str(),
+            Some("artifact-contract-backed")
+        );
+        assert_eq!(source["promotion_state"].as_str(), Some("evidence-ready"));
+    }
+    assert_eq!(
+        string_array(decision, "decision_contract_test_names"),
+        vec!["rust_browser_runtime_support_decision_stays_preview_until_stable_proof_exists"]
+    );
+    assert_eq!(
+        string_array(registry_row, "decision_contract_test_names"),
+        vec!["rust_browser_runtime_support_decision_stays_preview_until_stable_proof_exists"]
+    );
+
+    let rationale = string_array(decision, "decision_rationale");
+    assert!(
+        rationale
+            .iter()
+            .any(|entry| entry.contains("not broad stable parity")),
+        "decision rationale must reject broad stable parity"
+    );
+    assert!(
+        rationale
+            .iter()
+            .any(|entry| entry.contains("Stable promotion remains blocked")),
+        "decision rationale must keep stable promotion gated"
+    );
+
+    assert_contains_all(
+        &readme,
+        "README.md",
+        &[
+            "asupersync-j1xbon.4",
+            "artifact-contract-backed preview",
+            "not a stable external Rust Browser Edition",
+            "API.",
+        ],
+    );
+    assert_contains_all(
+        &wasm_doc,
+        "docs/WASM.md",
+        &[
+            "asupersync-j1xbon.4",
+            "artifact-contract-backed preview",
+            "not stable external Rust Browser Edition",
+            "API parity.",
+        ],
+    );
+    assert_contains_all(
+        &integration_doc,
+        "docs/integration.md",
+        &[
+            "asupersync-j1xbon.4",
+            "artifact-contract-backed preview",
+            "not stable external Rust Browser Edition",
+            "API parity.",
+        ],
+    );
+}
+
+#[test]
 fn rust_browser_runtime_stability_artifact_tracks_builder_abi_negotiation_contract() {
     let artifact = read_json(RUST_BROWSER_EVIDENCE_ARTIFACT_PATH);
     let builder = read_file("src/runtime/builder.rs");

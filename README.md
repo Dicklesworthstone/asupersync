@@ -1431,7 +1431,10 @@ applications via `wasm-bindgen`.
 - **Preview public Rust builder lane**: external Rust consumers now have a
   preview browser-runtime bootstrap path through `RuntimeBuilder::browser()`.
   It is dispatcher-backed, narrower than the shipped JS/TS Browser Edition
-  packages, and truthful about fail-closed host support.
+  packages, and truthful about fail-closed host support. The refreshed
+  `asupersync-j1xbon.4` support decision keeps this lane
+  artifact-contract-backed preview, not a stable external Rust Browser Edition
+  API.
 - **Core invariants preserved**: no orphan tasks, cancel-correctness,
   obligation accounting, and region-close-implies-quiescence all hold in
   the browser runtime.
@@ -1447,7 +1450,9 @@ applications via `wasm-bindgen`.
   dispatcher-backed and truthful about host support: supported hosts construct
   a preview browser runtime, while unsupported hosts fail closed to structured
   execution-ladder diagnostics rather than pretending full native-thread
-  parity already exists.
+  parity already exists. `asupersync-j1xbon.4` explicitly keeps this support
+  class at artifact-contract-backed preview until the stable API, ABI policy,
+  fixture logs, and docs are promoted together.
 - **Service worker direct runtime**: intentionally broker/coordinator-only.
   The browser package keeps direct `BrowserRuntime` creation fail-closed inside
   `ServiceWorkerGlobalScope`; use the bounded broker registration and durable

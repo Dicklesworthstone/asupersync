@@ -385,6 +385,9 @@ Rules:
   JS/WASM boundary and `asupersync-wasm` as retained non-canonical scaffold
   rather than a second live boundary.
 - Do not imply external Rust `RuntimeBuilder` parity on `wasm32`; the public Rust browser lane is still a preview dispatcher-backed surface.
+- `asupersync-j1xbon.4` refreshes that decision explicitly: the lane remains
+  artifact-contract-backed preview, not stable external Rust Browser Edition
+  API parity.
 - If you need a shipped application-facing browser product surface today, start
   from `@asupersync/browser`, `@asupersync/react`, or `@asupersync/next`.
 - If you need the truthful current Rust-authored workflow, use the maintained
