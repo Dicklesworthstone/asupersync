@@ -3,14 +3,13 @@
 //! Tests that both implementations exhibit identical wake-order behavior under fairness
 //! constraints with N permits and K acquirers (where K > N).
 
-use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use asupersync::cx::Cx;
-use asupersync::runtime::test::LabRuntime;
 use asupersync::sync::Semaphore as AsupersyncSemaphore;
+use asupersync::types::{Budget, RegionId, TaskId};
+use asupersync::util::ArenaIndex;
 use tokio::sync::Semaphore as TokioSemaphore;
 
 /// Conformance test result tracking wake order across implementations
@@ -50,15 +49,11 @@ enum ReleasePattern {
 /// Test context for running conformance tests
 struct ConformanceTestContext {
     config: ConformanceTestConfig,
-    runtime: LabRuntime,
 }
 
 impl ConformanceTestContext {
     fn new(config: ConformanceTestConfig) -> Self {
-        Self {
-            config,
-            runtime: LabRuntime::new(),
-        }
+        Self { config }
     }
 
     /// Run the same test scenario on both semaphore implementations
@@ -82,22 +77,25 @@ impl ConformanceTestContext {
             let wake_order_clone = Arc::clone(&wake_order);
             let permits_to_acquire = self.config.permits_per_acquirer;
 
-            let handle = self.runtime.spawn({
-                let cx = Cx::root();
-                async move {
-                    // Try to acquire permits
-                    match sem_clone.acquire(&cx, permits_to_acquire).await {
-                        Ok(permit) => {
-                            // Record successful acquisition
-                            wake_order_clone.lock().push(acquirer_id);
+            let handle = tokio::spawn(async move {
+                let cx = Cx::new(
+                    RegionId::from_arena(ArenaIndex::new(0, acquirer_id as u32)),
+                    TaskId::from_arena(ArenaIndex::new(0, acquirer_id as u32)),
+                    Budget::INFINITE,
+                );
 
-                            // Hold permit briefly then drop it
-                            tokio::time::sleep(Duration::from_millis(1)).await;
-                            drop(permit);
-                        }
-                        Err(_) => {
-                            // Acquisition failed (timeout, cancellation, etc.)
-                        }
+                // Try to acquire permits
+                match sem_clone.acquire(&cx, permits_to_acquire).await {
+                    Ok(permit) => {
+                        // Record successful acquisition
+                        wake_order_clone.lock().push(acquirer_id);
+
+                        // Hold permit briefly then drop it
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                        drop(permit);
+                    }
+                    Err(_) => {
+                        // Acquisition failed (timeout, cancellation, etc.)
                     }
                 }
             });
@@ -216,8 +214,7 @@ impl ConformanceTestContext {
         match &self.config.release_pattern {
             ReleasePattern::AllAtOnce => {
                 // Add permits to wake up all waiters
-                semaphore
-                    .add_permits((self.config.acquirers * self.config.permits_per_acquirer) as u32);
+                semaphore.add_permits(self.config.acquirers * self.config.permits_per_acquirer);
             }
             ReleasePattern::Sequential { delay_ms } => {
                 for _ in 0..(self.config.acquirers * self.config.permits_per_acquirer) {
@@ -234,7 +231,7 @@ impl ConformanceTestContext {
 
                 while remaining > 0 {
                     let batch = remaining.min(*batch_size);
-                    semaphore.add_permits(batch as u32);
+                    semaphore.add_permits(batch);
                     remaining -= batch;
 
                     if remaining > 0 {
@@ -443,32 +440,97 @@ async fn conformance_comprehensive_matrix() {
     }
 }
 
-/// Generate conformance coverage report
+/// Verify that the advertised coverage report is backed by executable scenarios.
 #[tokio::test]
-async fn generate_conformance_report() {
-    println!("\n=== Semaphore Conformance Coverage Report ===\n");
-
-    println!("| Test Case | Permits | Acquirers | Pattern | Status |");
-    println!("|-----------|---------|-----------|---------|--------|");
-
+async fn conformance_coverage_report_exercises_declared_scenarios() {
     let test_cases = vec![
-        ("Basic FIFO", 2, 5, "AllAtOnce"),
-        ("Sequential Release", 1, 4, "Sequential"),
-        ("Batched Release", 0, 6, "Batched"),
-        ("Multi-Permit", 3, 4, "AllAtOnce"),
-        ("High Contention", 2, 10, "Sequential"),
-        ("Abundant Permits", 10, 3, "AllAtOnce"),
-        ("Zero Permits", 0, 4, "AllAtOnce"),
+        (
+            "Basic FIFO",
+            ConformanceTestConfig {
+                permits: 2,
+                acquirers: 5,
+                permits_per_acquirer: 1,
+                release_pattern: ReleasePattern::AllAtOnce,
+            },
+        ),
+        (
+            "Sequential Release",
+            ConformanceTestConfig {
+                permits: 1,
+                acquirers: 4,
+                permits_per_acquirer: 1,
+                release_pattern: ReleasePattern::Sequential { delay_ms: 1 },
+            },
+        ),
+        (
+            "Batched Release",
+            ConformanceTestConfig {
+                permits: 0,
+                acquirers: 6,
+                permits_per_acquirer: 1,
+                release_pattern: ReleasePattern::Batched {
+                    batch_size: 2,
+                    delay_ms: 1,
+                },
+            },
+        ),
+        (
+            "Multi-Permit",
+            ConformanceTestConfig {
+                permits: 3,
+                acquirers: 4,
+                permits_per_acquirer: 2,
+                release_pattern: ReleasePattern::AllAtOnce,
+            },
+        ),
+        (
+            "High Contention",
+            ConformanceTestConfig {
+                permits: 2,
+                acquirers: 10,
+                permits_per_acquirer: 1,
+                release_pattern: ReleasePattern::Sequential { delay_ms: 1 },
+            },
+        ),
+        (
+            "Abundant Permits",
+            ConformanceTestConfig {
+                permits: 10,
+                acquirers: 3,
+                permits_per_acquirer: 1,
+                release_pattern: ReleasePattern::AllAtOnce,
+            },
+        ),
+        (
+            "Zero Permits",
+            ConformanceTestConfig {
+                permits: 0,
+                acquirers: 4,
+                permits_per_acquirer: 1,
+                release_pattern: ReleasePattern::AllAtOnce,
+            },
+        ),
     ];
 
-    for (name, permits, acquirers, pattern) in test_cases {
-        println!(
-            "| {} | {} | {} | {} | ✅ PASS |",
-            name, permits, acquirers, pattern
+    assert_eq!(test_cases.len(), 7, "coverage matrix should stay explicit");
+
+    let mut passed = 0usize;
+    for (name, config) in test_cases {
+        let expected_acquisitions = config.acquirers;
+        let mut ctx = ConformanceTestContext::new(config);
+        let (asupersync_result, tokio_result) = ctx.run_differential_test().await;
+
+        assert_wake_order_conformance(&asupersync_result, &tokio_result, name);
+        assert_eq!(
+            asupersync_result.successful_acquisitions, expected_acquisitions,
+            "{name}: asupersync did not execute every declared acquirer"
         );
+        assert_eq!(
+            tokio_result.successful_acquisitions, expected_acquisitions,
+            "{name}: tokio did not execute every declared acquirer"
+        );
+        passed += 1;
     }
 
-    println!("\n✅ All conformance tests passing");
-    println!("📊 Coverage: 7/7 test scenarios (100%)");
-    println!("🎯 Wake-order conformance: VERIFIED");
+    assert_eq!(passed, 7, "all declared semaphore scenarios must execute");
 }
