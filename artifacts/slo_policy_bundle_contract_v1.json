@@ -30,6 +30,20 @@
     "oversized_field",
     "redaction_failure"
   ],
+  "compiler_bead_id": "asupersync-bgtplc.2",
+  "compiler_schema_version": "slo-budget-admission-compiler-v1",
+  "compiler_statuses": [
+    "compiled",
+    "no_win",
+    "blocked"
+  ],
+  "compiler_blocker_kinds": [
+    "invalid_bundle",
+    "impossible_objective",
+    "missing_capacity_evidence",
+    "unsupported_workload_class",
+    "conflicting_fallback_declaration"
+  ],
   "required_bundle_fields": [
     "schema_version",
     "policy_id",
@@ -578,6 +592,61 @@
       "fixture_document": "{\"schema_version\":1,"
     }
   ],
+  "compiler_scenarios": [
+    {
+      "scenario_id": "compile-agent-swarm-success",
+      "bundle_scenario_id": "accepted-agent-swarm",
+      "policy_id": "agent-swarm-standard",
+      "capacity_evidence": {
+        "profile_id": "agent-swarm-prod",
+        "profile_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "workload_class": "agent_swarm",
+        "sample_count": 64,
+        "queue_depth": 12000,
+        "memory_basis_points": 6500,
+        "fd_basis_points": 5900,
+        "timer_queue_depth": 12000
+      },
+      "expected": {
+        "status": "compiled",
+        "blocker_kinds": [],
+        "no_win_fallback": false
+      }
+    },
+    {
+      "scenario_id": "compile-agent-swarm-no-win",
+      "bundle_scenario_id": "accepted-agent-swarm",
+      "policy_id": "agent-swarm-standard",
+      "capacity_evidence": {
+        "profile_id": "agent-swarm-prod",
+        "profile_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "workload_class": "agent_swarm",
+        "sample_count": 64,
+        "queue_depth": 12000,
+        "memory_basis_points": 9500,
+        "fd_basis_points": 5900,
+        "timer_queue_depth": 12000
+      },
+      "expected": {
+        "status": "no_win",
+        "blocker_kinds": [],
+        "no_win_fallback": true
+      }
+    },
+    {
+      "scenario_id": "compile-agent-swarm-missing-evidence",
+      "bundle_scenario_id": "accepted-agent-swarm",
+      "policy_id": "agent-swarm-standard",
+      "capacity_evidence": null,
+      "expected": {
+        "status": "blocked",
+        "blocker_kinds": [
+          "missing_capacity_evidence"
+        ],
+        "no_win_fallback": false
+      }
+    }
+  ],
   "e2e_script": "scripts/validate_slo_policy_bundle.sh",
   "required_log_fields": [
     "scenario_id",
@@ -590,10 +659,10 @@
   "proof_commands": [
     "python3 -m json.tool artifacts/slo_policy_bundle_contract_v1.json >/dev/null",
     "bash -n scripts/validate_slo_policy_bundle.sh",
-    "bash scripts/validate_slo_policy_bundle.sh --output-root target/slo-policy-bundle --run-id asupersync-bgtplc.1",
+    "bash scripts/validate_slo_policy_bundle.sh --output-root target/slo-policy-bundle --run-id asupersync-bgtplc.2",
     "rch exec -- rustfmt --edition 2024 --check src/types/slo_policy.rs src/types/mod.rs tests/slo_policy_bundle_contract.rs",
-    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_bundle CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture",
-    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_bundle_check CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo check -p asupersync --test slo_policy_bundle_contract --features test-internals",
-    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_bundle_clippy CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --test slo_policy_bundle_contract --features test-internals -- -D warnings"
+    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_compiler CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture",
+    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_compiler_check CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo check -p asupersync --test slo_policy_bundle_contract --features test-internals",
+    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_compiler_clippy CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --test slo_policy_bundle_contract --features test-internals -- -D warnings"
   ]
 }

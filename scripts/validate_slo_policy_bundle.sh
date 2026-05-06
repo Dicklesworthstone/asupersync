@@ -137,9 +137,13 @@ required = {
     "workload_classes",
     "latency_units",
     "validation_issue_kinds",
+    "compiler_schema_version",
+    "compiler_statuses",
+    "compiler_blocker_kinds",
     "required_bundle_fields",
     "gate_contract",
     "scenarios",
+    "compiler_scenarios",
     "e2e_script",
     "required_log_fields",
     "proof_commands",
@@ -161,6 +165,14 @@ expected_issue_kinds = {
     "impossible_deadline",
     "oversized_field",
     "redaction_failure",
+}
+expected_compiler_statuses = {"compiled", "no_win", "blocked"}
+expected_compiler_blocker_kinds = {
+    "invalid_bundle",
+    "impossible_objective",
+    "missing_capacity_evidence",
+    "unsupported_workload_class",
+    "conflicting_fallback_declaration",
 }
 required_bundle_fields = {
     "schema_version",
@@ -189,6 +201,12 @@ if set(artifact.get("latency_units") or []) != expected_latency_units:
     validation_errors.append({"kind": "invalid_unit", "field": "latency_units"})
 if set(artifact.get("validation_issue_kinds") or []) != expected_issue_kinds:
     validation_errors.append({"kind": "missing_required_field", "field": "validation_issue_kinds"})
+if artifact.get("compiler_schema_version") != "slo-budget-admission-compiler-v1":
+    validation_errors.append({"kind": "unsupported_schema_version", "field": "compiler_schema_version"})
+if set(artifact.get("compiler_statuses") or []) != expected_compiler_statuses:
+    validation_errors.append({"kind": "missing_required_field", "field": "compiler_statuses"})
+if set(artifact.get("compiler_blocker_kinds") or []) != expected_compiler_blocker_kinds:
+    validation_errors.append({"kind": "missing_required_field", "field": "compiler_blocker_kinds"})
 if not required_bundle_fields.issubset(set(artifact.get("required_bundle_fields") or [])):
     validation_errors.append({"kind": "missing_required_field", "field": "required_bundle_fields"})
 
@@ -251,6 +269,51 @@ if rejected_count == 0:
 if malformed_count == 0:
     validation_errors.append({"kind": "malformed_json", "field": "malformed_scenarios"})
 
+compiled_count = 0
+no_win_or_blocked_count = 0
+for compiler_scenario in artifact.get("compiler_scenarios") or []:
+    scenario_id = compiler_scenario.get("scenario_id")
+    if not scenario_id:
+        validation_errors.append({"kind": "missing_required_field", "field": "compiler_scenario_id"})
+        continue
+    expected = compiler_scenario.get("expected") or {}
+    status = expected.get("status")
+    blocker_kinds = list(expected.get("blocker_kinds") or [])
+    if status not in expected_compiler_statuses:
+        validation_errors.append({"kind": "unsupported_schema_version", "field": scenario_id})
+    unknown_blockers = sorted(set(blocker_kinds) - expected_compiler_blocker_kinds)
+    if unknown_blockers:
+        validation_errors.append({"kind": "unsupported_schema_version", "field": scenario_id, "unknown_blockers": unknown_blockers})
+    if status == "compiled":
+        compiled_count += 1
+        if blocker_kinds:
+            validation_errors.append({"kind": "invalid_unit", "field": scenario_id})
+    elif status in {"no_win", "blocked"}:
+        no_win_or_blocked_count += 1
+        if status == "blocked" and not blocker_kinds:
+            validation_errors.append({"kind": "missing_required_field", "field": scenario_id})
+
+    event = {
+        "scenario_id": scenario_id,
+        "bead_id": artifact.get("compiler_bead_id", artifact.get("bead_id", "")),
+        "accepted": status == "compiled",
+        "issue_kinds": blocker_kinds,
+        "policy_id": compiler_scenario.get("policy_id", ""),
+        "artifact_path": str(artifact_path),
+        "compiler_status": status,
+        "blocker_kinds": blocker_kinds,
+        "no_win_fallback": bool(expected.get("no_win_fallback", False)),
+    }
+    event_missing = sorted(field for field in required_log_fields if field not in event)
+    if event_missing:
+        validation_errors.append({"kind": "missing_required_field", "field": scenario_id, "missing": event_missing})
+    events.append(event)
+
+if compiled_count == 0:
+    validation_errors.append({"kind": "missing_required_field", "field": "compiled_compiler_scenarios"})
+if no_win_or_blocked_count == 0:
+    validation_errors.append({"kind": "missing_required_field", "field": "no_win_or_blocked_compiler_scenarios"})
+
 log_path.write_text("".join(json.dumps(event, sort_keys=True) + "\n" for event in events))
 
 report = {
@@ -278,7 +341,7 @@ if [[ "$EXECUTE_RCH" -eq 1 ]]; then
   RCH_CMD=(
     "$RCH_BIN" exec --
     env
-    "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_bundle_script"
+    "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_compiler_script"
     CARGO_INCREMENTAL=0
     CARGO_PROFILE_TEST_DEBUG=0
     "RUSTFLAGS=-C debuginfo=0"

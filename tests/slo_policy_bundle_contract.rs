@@ -1,8 +1,10 @@
 //! Contract tests for operator SLO policy bundles.
 
 use asupersync::types::{
-    SLO_POLICY_BUNDLE_SCHEMA_VERSION, SloLatencyObjective, SloLatencyUnit, SloNoWinFallback,
-    SloOptionalWorkClass, SloPolicyBundle, SloPolicyProvenance, SloPolicyRedaction,
+    SLO_POLICY_BUNDLE_SCHEMA_VERSION, SLO_POLICY_COMPILER_SCHEMA_VERSION,
+    SloCompiledAdmissionDecision, SloCompiledPolicyStatus, SloLatencyObjective, SloLatencyUnit,
+    SloNoWinFallback, SloOptionalWorkClass, SloPolicyBundle, SloPolicyCapacityEvidence,
+    SloPolicyCompilerBlockerKind, SloPolicyProvenance, SloPolicyRedaction,
     SloPolicyValidationIssueKind, SloPolicyValidationReport, SloResourcePressureThresholds,
     SloWorkloadClass, validate_slo_policy_bundle_json,
 };
@@ -102,11 +104,56 @@ fn valid_bundle() -> SloPolicyBundle {
     }
 }
 
+fn valid_capacity_evidence() -> SloPolicyCapacityEvidence {
+    SloPolicyCapacityEvidence {
+        profile_id: "agent-swarm-prod".to_string(),
+        profile_hash: profile_hash('a'),
+        workload_class: SloWorkloadClass::AgentSwarm,
+        sample_count: 64,
+        queue_depth: 12_000,
+        memory_basis_points: 6_500,
+        fd_basis_points: 5_900,
+        timer_queue_depth: 12_000,
+    }
+}
+
 fn issue_tags(report: &SloPolicyValidationReport) -> BTreeSet<String> {
     report
         .issues
         .iter()
         .map(|issue| issue.kind.as_str().to_string())
+        .collect()
+}
+
+fn compiler_status_tags() -> BTreeSet<String> {
+    [
+        SloCompiledPolicyStatus::Compiled,
+        SloCompiledPolicyStatus::NoWin,
+        SloCompiledPolicyStatus::Blocked,
+    ]
+    .into_iter()
+    .map(|status| status.as_str().to_string())
+    .collect()
+}
+
+fn compiler_blocker_tags() -> BTreeSet<String> {
+    [
+        SloPolicyCompilerBlockerKind::InvalidBundle,
+        SloPolicyCompilerBlockerKind::ImpossibleObjective,
+        SloPolicyCompilerBlockerKind::MissingCapacityEvidence,
+        SloPolicyCompilerBlockerKind::UnsupportedWorkloadClass,
+        SloPolicyCompilerBlockerKind::ConflictingFallbackDeclaration,
+    ]
+    .into_iter()
+    .map(|kind| kind.as_str().to_string())
+    .collect()
+}
+
+fn compiled_blocker_tags(compiled: &asupersync::types::SloCompiledPolicy) -> BTreeSet<String> {
+    compiled
+        .blockers
+        .iter()
+        .map(|blocker| blocker.kind.as_str().to_string())
         .collect()
 }
 
@@ -195,6 +242,28 @@ fn artifact_catalog_matches_rust_tags_and_required_fields() {
         .iter()
         .map(|value| value.as_str().expect("issue is string").to_string())
         .collect::<BTreeSet<_>>();
+    let artifact_compiler_statuses = artifact["compiler_statuses"]
+        .as_array()
+        .expect("compiler statuses")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("compiler status is string")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    let artifact_compiler_blockers = artifact["compiler_blocker_kinds"]
+        .as_array()
+        .expect("compiler blocker kinds")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("compiler blocker is string")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
     let required_fields = artifact["required_bundle_fields"]
         .as_array()
         .expect("required bundle fields")
@@ -205,6 +274,12 @@ fn artifact_catalog_matches_rust_tags_and_required_fields() {
     assert_eq!(artifact_workloads, workload_class_tags());
     assert_eq!(artifact_units, latency_unit_tags());
     assert_eq!(artifact_issues, validation_issue_tags());
+    assert_eq!(artifact_compiler_statuses, compiler_status_tags());
+    assert_eq!(artifact_compiler_blockers, compiler_blocker_tags());
+    assert_eq!(
+        artifact["compiler_schema_version"].as_str(),
+        Some(SLO_POLICY_COMPILER_SCHEMA_VERSION)
+    );
     assert_eq!(
         artifact["policy_bundle_schema_version"].as_u64(),
         Some(u64::from(SLO_POLICY_BUNDLE_SCHEMA_VERSION))
@@ -243,6 +318,118 @@ fn accepted_bundle_validates_and_fingerprint_is_stable() {
         "json report: {report_from_json:?}"
     );
     assert_eq!(report.fingerprint, report_from_json.fingerprint);
+}
+
+#[test]
+fn compiler_output_id_and_budget_projection_are_stable() {
+    let bundle = valid_bundle();
+    let evidence = valid_capacity_evidence();
+    let first = bundle.compile_for_budget_admission(Some(&evidence));
+    let second = bundle.compile_for_budget_admission(Some(&evidence));
+
+    assert_eq!(first.status, SloCompiledPolicyStatus::Compiled);
+    assert!(first.is_executable());
+    assert_eq!(first.output_id, second.output_id);
+    assert_eq!(first.provenance.policy_fingerprint, bundle.fingerprint());
+    assert_eq!(
+        first.provenance.capacity_evidence_fingerprint,
+        Some(evidence.fingerprint())
+    );
+    assert_eq!(first.budget.p999_latency_budget_ms, 250);
+    assert_eq!(first.budget.cleanup_deadline_ms, 300);
+    assert_eq!(first.budget.max_queue_wait_ms, 80);
+    assert_eq!(first.budget.poll_quota, 1_200);
+    assert_eq!(
+        first.admission.decision,
+        SloCompiledAdmissionDecision::Admit
+    );
+
+    let budget = first.budget.to_budget();
+    assert_eq!(budget.deadline.expect("deadline").as_millis(), 300);
+    assert_eq!(budget.poll_quota, 1_200);
+    assert_eq!(budget.priority, 208);
+}
+
+#[test]
+fn compiler_orders_optional_work_by_brownout_priority() {
+    let mut bundle = valid_bundle();
+    bundle.optional_work_classes[0].brownout_priority = 5;
+    bundle.optional_work_classes[1].brownout_priority = 1;
+
+    let compiled = bundle.compile_for_budget_admission(Some(&valid_capacity_evidence()));
+    let ordered = compiled
+        .brownout_order
+        .iter()
+        .map(|step| step.class_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(ordered, vec!["analytics_rollup", "index_refresh"]);
+}
+
+#[test]
+fn compiler_blocks_impossible_normalized_p999_objectives() {
+    let mut bundle = valid_bundle();
+    bundle.latency_objectives[0] = SloLatencyObjective {
+        objective_id: "microsecond-cleanup".to_string(),
+        unit: SloLatencyUnit::Microseconds,
+        p50: 100_000,
+        p95: 200_000,
+        p99: 350_000,
+        p999: 400_000,
+    };
+
+    let compiled = bundle.compile_for_budget_admission(Some(&valid_capacity_evidence()));
+    assert_eq!(compiled.status, SloCompiledPolicyStatus::Blocked);
+    assert!(!compiled.is_executable());
+    assert!(
+        compiled_blocker_tags(&compiled)
+            .contains(SloPolicyCompilerBlockerKind::ImpossibleObjective.as_str())
+    );
+    assert_eq!(compiled.budget.p999_latency_budget_ms, 400);
+}
+
+#[test]
+fn compiler_emits_no_win_fallback_when_capacity_exceeds_thresholds() {
+    let bundle = valid_bundle();
+    let mut evidence = valid_capacity_evidence();
+    evidence.memory_basis_points = 9_500;
+
+    let compiled = bundle.compile_for_budget_admission(Some(&evidence));
+    assert_eq!(compiled.status, SloCompiledPolicyStatus::NoWin);
+    assert_eq!(
+        compiled.admission.decision,
+        SloCompiledAdmissionDecision::NoWin
+    );
+    assert!(compiled.blockers.is_empty());
+    let fallback = compiled.no_win_fallback.expect("no-win fallback receipt");
+    assert_eq!(fallback.fallback_profile, "agent-swarm-safe-mode");
+    assert_eq!(
+        fallback.triggered_by,
+        "capacity-evidence-exceeds-thresholds"
+    );
+    assert!(fallback.proof_command.contains("rch exec"));
+}
+
+#[test]
+fn compiler_blocks_missing_evidence_and_conflicting_fallbacks() {
+    let missing_evidence = valid_bundle().compile_for_budget_admission(None);
+    assert_eq!(missing_evidence.status, SloCompiledPolicyStatus::Blocked);
+    assert!(
+        compiled_blocker_tags(&missing_evidence)
+            .contains(SloPolicyCompilerBlockerKind::MissingCapacityEvidence.as_str())
+    );
+
+    let mut conflicting = valid_bundle();
+    conflicting
+        .no_win_fallback
+        .as_mut()
+        .expect("fallback")
+        .proof_command = "cargo test -p asupersync".to_string();
+    let compiled = conflicting.compile_for_budget_admission(Some(&valid_capacity_evidence()));
+    assert_eq!(compiled.status, SloCompiledPolicyStatus::Blocked);
+    assert!(
+        compiled_blocker_tags(&compiled)
+            .contains(SloPolicyCompilerBlockerKind::ConflictingFallbackDeclaration.as_str())
+    );
 }
 
 #[test]
@@ -371,6 +558,61 @@ fn contract_scenarios_match_rust_validator() {
         scenario(&artifact, "accepted-agent-swarm")["expected"]["accepted"].as_bool(),
         Some(true)
     );
+}
+
+#[test]
+fn compiler_scenarios_match_rust_compiler() {
+    let artifact = contract();
+    let compiler_scenarios = artifact["compiler_scenarios"]
+        .as_array()
+        .expect("compiler scenarios");
+
+    for compiler_scenario in compiler_scenarios {
+        let bundle_scenario_id = compiler_scenario["bundle_scenario_id"]
+            .as_str()
+            .expect("bundle scenario id");
+        let bundle: SloPolicyBundle =
+            serde_json::from_value(scenario(&artifact, bundle_scenario_id)["bundle"].clone())
+                .unwrap_or_else(|error| panic!("compiler scenario bundle parses: {error}"));
+        let evidence = if compiler_scenario["capacity_evidence"].is_null() {
+            None
+        } else {
+            Some(
+                serde_json::from_value::<SloPolicyCapacityEvidence>(
+                    compiler_scenario["capacity_evidence"].clone(),
+                )
+                .unwrap_or_else(|error| panic!("capacity evidence parses: {error}")),
+            )
+        };
+        let compiled = bundle.compile_for_budget_admission(evidence.as_ref());
+        let expected = &compiler_scenario["expected"];
+        assert_eq!(
+            compiled.status.as_str(),
+            expected["status"].as_str().expect("expected status"),
+            "compiler scenario {}",
+            compiler_scenario["scenario_id"]
+        );
+        let expected_blockers = expected["blocker_kinds"]
+            .as_array()
+            .expect("blocker kinds")
+            .iter()
+            .map(|value| value.as_str().expect("blocker kind").to_string())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            compiled_blocker_tags(&compiled),
+            expected_blockers,
+            "compiler scenario {}",
+            compiler_scenario["scenario_id"]
+        );
+        assert_eq!(
+            compiled.no_win_fallback.is_some(),
+            expected["no_win_fallback"]
+                .as_bool()
+                .expect("no-win fallback flag"),
+            "compiler scenario {}",
+            compiler_scenario["scenario_id"]
+        );
+    }
 }
 
 #[test]

@@ -68,8 +68,12 @@ pub use policy::Policy;
 pub use pressure::SystemPressure;
 pub use rref::{RRef, RRefAccess, RRefAccessWitness, RRefError};
 pub use slo_policy::{
-    SLO_POLICY_BUNDLE_SCHEMA_VERSION, SloLatencyObjective, SloLatencyUnit, SloNoWinFallback,
-    SloOptionalWorkClass, SloPolicyBundle, SloPolicyProvenance, SloPolicyRedaction,
+    SLO_POLICY_BUNDLE_SCHEMA_VERSION, SLO_POLICY_COMPILER_SCHEMA_VERSION, SloCompiledAdmission,
+    SloCompiledAdmissionDecision, SloCompiledBrownoutStage, SloCompiledBrownoutStep,
+    SloCompiledBudget, SloCompiledNoWinReceipt, SloCompiledPolicy, SloCompiledPolicyProvenance,
+    SloCompiledPolicyStatus, SloLatencyObjective, SloLatencyUnit, SloNoWinFallback,
+    SloOptionalWorkClass, SloPolicyBundle, SloPolicyCapacityEvidence, SloPolicyCompilerBlocker,
+    SloPolicyCompilerBlockerKind, SloPolicyProvenance, SloPolicyRedaction,
     SloPolicyValidationIssue, SloPolicyValidationIssueKind, SloPolicyValidationReport,
     SloResourcePressureThresholds, SloWorkloadClass, validate_slo_policy_bundle_json,
 };
