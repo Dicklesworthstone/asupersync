@@ -11,6 +11,7 @@ SCENARIO=""
 OUTPUT_ROOT_OVERRIDE="${OTLP_BROWNOUT_SHEDDING_OUTPUT_DIR:-}"
 ARTIFACT_ROOT_OVERRIDE="${OTLP_BROWNOUT_SHEDDING_ARTIFACT_ROOT:-}"
 RUN_ID_OVERRIDE="${OTLP_BROWNOUT_SHEDDING_RUN_ID:-}"
+RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
 
 usage() {
     cat <<'EOF'
@@ -34,6 +35,14 @@ require_tools() {
             missing=1
         fi
     done
+    if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+        echo "FATAL: rch is required and was not found/executable at: ${RCH_BIN}" >&2
+        missing=1
+    fi
+    if [ ! -f "$ARTIFACT" ]; then
+        echo "FATAL: contract artifact missing at ${ARTIFACT}" >&2
+        missing=1
+    fi
     if [ "$missing" -ne 0 ]; then
         exit 1
     fi
@@ -169,7 +178,32 @@ mkdir -p "$RUN_DIR"
 HOST_FINGERPRINT_JSON="$(host_fingerprint_json)"
 STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-COMMAND="rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_otlp_brownout_shedding ASUPERSYNC_OTLP_BROWNOUT_CONTRACT_PATH=${ARTIFACT} ASUPERSYNC_OTLP_BROWNOUT_SCENARIO=${SCENARIO} ASUPERSYNC_OTLP_BROWNOUT_REPORT_PATH=${SCENARIO_REPORT_PATH} cargo test -p asupersync --test otlp_brownout_shedding_contract otlp_brownout_shedding_smoke_contract_emits_report -- --nocapture"
+COMMAND_ARGS=(
+    "$RCH_BIN"
+    exec
+    --
+    env
+    "CARGO_INCREMENTAL=0"
+    "CARGO_PROFILE_TEST_DEBUG=0"
+    "RUSTFLAGS=-D warnings -C debuginfo=0"
+    "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_otlp_brownout_shedding"
+    "ASUPERSYNC_OTLP_BROWNOUT_CONTRACT_PATH=${ARTIFACT}"
+    "ASUPERSYNC_OTLP_BROWNOUT_SCENARIO=${SCENARIO}"
+    "ASUPERSYNC_OTLP_BROWNOUT_REPORT_PATH=${SCENARIO_REPORT_PATH}"
+    cargo
+    test
+    -p
+    asupersync
+    --test
+    otlp_brownout_shedding_contract
+    otlp_brownout_shedding_smoke_contract_emits_report
+    --features
+    test-internals
+    --
+    --nocapture
+)
+printf -v COMMAND '%q ' "${COMMAND_ARGS[@]}"
+COMMAND="${COMMAND% }"
 
 COMMAND_EXIT_CODE=0
 SCRIPT_EXIT_CODE=0
@@ -183,9 +217,19 @@ if [ "$MODE" = "dry-run" ]; then
     VALIDATION_PASSED=true
     MESSAGE="dry run emitted manifests only"
 else
-    if ! eval "$COMMAND" >"$RUN_LOG_PATH" 2>&1; then
-        COMMAND_EXIT_CODE=$?
-        SCRIPT_EXIT_CODE=$COMMAND_EXIT_CODE
+    set +e
+    "${COMMAND_ARGS[@]}" >"$RUN_LOG_PATH" 2>&1
+    COMMAND_EXIT_CODE=$?
+    set -e
+
+    if grep -Eq '^\[RCH\] local \(|falling back to local' "$RUN_LOG_PATH"; then
+        COMMAND_EXIT_CODE=86
+        SCRIPT_EXIT_CODE=86
+        STATUS="failed"
+        MESSAGE="rch local fallback detected; refusing local cargo execution"
+        printf 'FATAL: rch local fallback detected; refusing local cargo execution\n' >>"$RUN_LOG_PATH"
+    elif [ "$COMMAND_EXIT_CODE" -ne 0 ]; then
+        SCRIPT_EXIT_CODE="$COMMAND_EXIT_CODE"
         STATUS="failed"
         MESSAGE="rch proof command failed"
     else
@@ -239,6 +283,8 @@ jq -n \
     --arg mode "$MODE" \
     --arg status "$STATUS" \
     --arg message "$MESSAGE" \
+    --arg command "$COMMAND" \
+    --arg run_log_path "$RUN_LOG_PATH" \
     --arg report_path "$SCENARIO_REPORT_PATH" \
     --argjson validation_passed "$VALIDATION_PASSED" \
     --argjson command_exit_code "$COMMAND_EXIT_CODE" \
@@ -249,6 +295,8 @@ jq -n \
         mode: $mode,
         status: $status,
         message: $message,
+        command: $command,
+        run_log_path: $run_log_path,
         validation_passed: $validation_passed,
         command_exit_code: $command_exit_code,
         script_exit_code: $script_exit_code,
