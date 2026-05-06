@@ -1661,6 +1661,14 @@ impl WasmExportDispatcher {
         self
     }
 
+    /// Overrides the producer ABI version for compatibility-path tests.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_producer_version_for_test(mut self, version: WasmAbiVersion) -> Self {
+        self.producer_version = version;
+        self
+    }
+
     /// Returns a reference to the handle table.
     #[must_use]
     pub fn handles(&self) -> &WasmHandleTable {

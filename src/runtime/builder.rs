@@ -2017,6 +2017,22 @@ fn build_browser_runtime_selection_from_probe(
     abort_mode: WasmAbortPropagationMode,
     probe: BrowserExecutionProbe,
 ) -> BrowserRuntimeSelectionResult {
+    build_browser_runtime_selection_with_dispatcher_from_probe(
+        preferred_lane,
+        consumer_version,
+        abort_mode,
+        probe,
+        WasmExportDispatcher::new(),
+    )
+}
+
+fn build_browser_runtime_selection_with_dispatcher_from_probe(
+    preferred_lane: Option<BrowserExecutionLane>,
+    consumer_version: Option<WasmAbiVersion>,
+    abort_mode: WasmAbortPropagationMode,
+    probe: BrowserExecutionProbe,
+    dispatcher: WasmExportDispatcher,
+) -> BrowserRuntimeSelectionResult {
     let execution_ladder = build_browser_execution_ladder_from_probe(preferred_lane, probe);
 
     if !execution_ladder.supported {
@@ -2030,7 +2046,7 @@ fn build_browser_runtime_selection_from_probe(
         };
     }
 
-    let mut dispatcher = WasmExportDispatcher::new().with_abort_mode(abort_mode);
+    let mut dispatcher = dispatcher.with_abort_mode(abort_mode);
     match dispatcher.runtime_create(consumer_version) {
         Ok(runtime_handle) => BrowserRuntimeSelectionResult {
             runtime: Some(BrowserRuntime::new(
@@ -4804,6 +4820,47 @@ mod tests {
                 "runtime must retain the consumer ABI version used at the boundary"
             );
             runtime.close().expect("compatible runtime closes cleanly");
+        }
+
+        let newer_producer = WasmAbiVersion {
+            major: WasmAbiVersion::CURRENT.major,
+            minor: WasmAbiVersion::CURRENT.minor + 1,
+        };
+        let old_consumer = WasmAbiVersion::CURRENT;
+        let selection = build_browser_runtime_selection_with_dispatcher_from_probe(
+            None,
+            Some(old_consumer),
+            WasmAbortPropagationMode::Bidirectional,
+            supported_probe,
+            WasmExportDispatcher::new().with_producer_version_for_test(newer_producer),
+        );
+
+        assert!(
+            !selection.runtime_available(),
+            "consumer ABI older than producer minor must fail closed"
+        );
+        assert_eq!(
+            selection.execution_ladder.selected_lane,
+            BrowserExecutionLane::BrowserMainThreadDirectRuntime,
+            "consumer-too-old mismatch must preserve truthful host lane diagnostics"
+        );
+        let error = selection.error.expect("structured consumer-too-old error");
+        match error {
+            BrowserRuntimeBuildError::RuntimeCreate {
+                source:
+                    WasmDispatchError::Incompatible {
+                        decision:
+                            crate::types::WasmAbiCompatibilityDecision::ConsumerTooOld {
+                                producer_minor,
+                                consumer_minor,
+                            },
+                    },
+                ..
+            } => {
+                assert_eq!(producer_minor, newer_producer.minor);
+                assert_eq!(consumer_minor, old_consumer.minor);
+            }
+            other => panic!("expected ABI consumer-too-old runtime-create error, got {other:?}"),
         }
 
         let incompatible = WasmAbiVersion {

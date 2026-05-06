@@ -30,6 +30,9 @@
   "supplemental_contracts": [
     {
       "bead_id": "asupersync-j1xbon.2",
+      "follow_up_bead_ids": [
+        "asupersync-j1xbon.3"
+      ],
       "contract_id": "browser_runtime_builder_abi_negotiation",
       "test_path": "src/runtime/builder.rs",
       "test_names": [
@@ -38,10 +41,10 @@
       "covered_paths": [
         "exact_current_consumer_version_constructs_runtime",
         "newer_minor_consumer_version_is_backward_compatible",
+        "consumer_too_old_fail_closes_with_structured_error",
         "major_mismatch_consumer_version_fail_closes_with_structured_error"
       ],
       "residual_limits": [
-        "consumer_too_old remains covered by the generic ABI compatibility classifier until the producer minor version is greater than zero.",
         "This supplemental contract does not promote the Rust browser runtime lane beyond the artifact-contract-backed preview posture."
       ]
     },

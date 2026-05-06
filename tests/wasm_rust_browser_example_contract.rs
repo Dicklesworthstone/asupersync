@@ -330,6 +330,10 @@ fn rust_browser_runtime_stability_artifact_tracks_builder_abi_negotiation_contra
 
     assert_eq!(contract["bead_id"].as_str(), Some("asupersync-j1xbon.2"));
     assert_eq!(
+        string_array(contract, "follow_up_bead_ids"),
+        vec!["asupersync-j1xbon.3"]
+    );
+    assert_eq!(
         contract["test_path"].as_str(),
         Some("src/runtime/builder.rs")
     );
@@ -342,6 +346,7 @@ fn rust_browser_runtime_stability_artifact_tracks_builder_abi_negotiation_contra
         vec![
             "exact_current_consumer_version_constructs_runtime",
             "newer_minor_consumer_version_is_backward_compatible",
+            "consumer_too_old_fail_closes_with_structured_error",
             "major_mismatch_consumer_version_fail_closes_with_structured_error",
         ]
     );
@@ -353,9 +358,11 @@ fn rust_browser_runtime_stability_artifact_tracks_builder_abi_negotiation_contra
             "browser_runtime_builder_consumer_version_negotiates_abi_contract",
             "WasmAbiVersion::CURRENT",
             "minor: WasmAbiVersion::CURRENT.minor + 1",
+            "with_producer_version_for_test",
             "runtime.consumer_version()",
             "BrowserRuntimeBuildError::RuntimeCreate",
             "WasmDispatchError::Incompatible",
+            "ConsumerTooOld",
             "MajorMismatch",
         ],
     );
@@ -364,8 +371,8 @@ fn rust_browser_runtime_stability_artifact_tracks_builder_abi_negotiation_contra
     assert!(
         residual_limits
             .iter()
-            .any(|limit| limit.contains("generic ABI compatibility classifier")),
-        "supplemental contract must keep consumer-too-old coverage bounded to the generic ABI classifier"
+            .all(|limit| !limit.contains("generic ABI compatibility classifier")),
+        "consumer-too-old must be covered by the browser builder contract, not delegated only to the generic classifier"
     );
     assert!(
         residual_limits
