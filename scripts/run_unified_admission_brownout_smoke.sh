@@ -11,6 +11,7 @@ SCENARIO=""
 OUTPUT_ROOT_OVERRIDE="${UNIFIED_ADMISSION_BROWNOUT_SMOKE_OUTPUT_DIR:-}"
 ARTIFACT_ROOT_OVERRIDE="${UNIFIED_ADMISSION_BROWNOUT_SMOKE_ARTIFACT_ROOT:-}"
 RUN_ID_OVERRIDE="${UNIFIED_ADMISSION_BROWNOUT_SMOKE_RUN_ID:-}"
+RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
 
 usage() {
     cat <<'EOF'
@@ -34,11 +35,15 @@ require_tools() {
             missing=1
         fi
     done
-    if [ "$missing" -ne 0 ]; then
-        exit 1
+    if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+        echo "FATAL: rch is required and was not found/executable at: ${RCH_BIN}" >&2
+        missing=1
     fi
     if [ ! -f "$ARTIFACT" ]; then
         echo "FATAL: contract artifact missing at ${ARTIFACT}" >&2
+        missing=1
+    fi
+    if [ "$missing" -ne 0 ]; then
         exit 1
     fi
 }
@@ -173,7 +178,32 @@ mkdir -p "$RUN_DIR"
 HOST_FINGERPRINT_JSON="$(host_fingerprint_json)"
 STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-COMMAND="rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_unified_admission_brownout ASUPERSYNC_UNIFIED_ADMISSION_BROWNOUT_CONTRACT_PATH=${ARTIFACT} ASUPERSYNC_UNIFIED_ADMISSION_BROWNOUT_SCENARIO=${SCENARIO} ASUPERSYNC_UNIFIED_ADMISSION_BROWNOUT_REPORT_PATH=${SCENARIO_REPORT_PATH} cargo test -p asupersync --test unified_admission_brownout_contract unified_admission_brownout_smoke_contract_emits_report --features test-internals -- --nocapture"
+COMMAND_ARGS=(
+    "$RCH_BIN"
+    exec
+    --
+    env
+    "CARGO_INCREMENTAL=0"
+    "CARGO_PROFILE_TEST_DEBUG=0"
+    "RUSTFLAGS=-D warnings -C debuginfo=0"
+    "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_unified_admission_brownout"
+    "ASUPERSYNC_UNIFIED_ADMISSION_BROWNOUT_CONTRACT_PATH=${ARTIFACT}"
+    "ASUPERSYNC_UNIFIED_ADMISSION_BROWNOUT_SCENARIO=${SCENARIO}"
+    "ASUPERSYNC_UNIFIED_ADMISSION_BROWNOUT_REPORT_PATH=${SCENARIO_REPORT_PATH}"
+    cargo
+    test
+    -p
+    asupersync
+    --test
+    unified_admission_brownout_contract
+    unified_admission_brownout_smoke_contract_emits_report
+    --features
+    test-internals
+    --
+    --nocapture
+)
+printf -v COMMAND '%q ' "${COMMAND_ARGS[@]}"
+COMMAND="${COMMAND% }"
 
 COMMAND_EXIT_CODE=0
 SCRIPT_EXIT_CODE=0
@@ -188,9 +218,19 @@ if [ "$MODE" = "dry-run" ]; then
     VALIDATION_PASSED=true
     MESSAGE="dry run emitted manifests only"
 else
-    if ! eval "$COMMAND" >"$RUN_LOG_PATH" 2>&1; then
-        COMMAND_EXIT_CODE=$?
-        SCRIPT_EXIT_CODE=$COMMAND_EXIT_CODE
+    set +e
+    "${COMMAND_ARGS[@]}" >"$RUN_LOG_PATH" 2>&1
+    COMMAND_EXIT_CODE=$?
+    set -e
+
+    if grep -Eq '^\[RCH\] local \(|falling back to local' "$RUN_LOG_PATH"; then
+        COMMAND_EXIT_CODE=86
+        SCRIPT_EXIT_CODE=86
+        STATUS="failed"
+        MESSAGE="rch local fallback detected; refusing local cargo execution"
+        printf 'FATAL: rch local fallback detected; refusing local cargo execution\n' >>"$RUN_LOG_PATH"
+    elif [ "$COMMAND_EXIT_CODE" -ne 0 ]; then
+        SCRIPT_EXIT_CODE="$COMMAND_EXIT_CODE"
         STATUS="failed"
         MESSAGE="rch proof command failed"
     else
@@ -253,6 +293,7 @@ jq -n \
     --arg bundle_manifest_path "$BUNDLE_MANIFEST_PATH" \
     --arg report_artifact_path "$SCENARIO_REPORT_PATH" \
     --argjson command_exit_code "$COMMAND_EXIT_CODE" \
+    --argjson script_exit_code "$SCRIPT_EXIT_CODE" \
     --argjson validation_passed "$VALIDATION_PASSED" \
     --argjson expected_report_projection "$EXPECTED_REPORT_PROJECTION_JSON" \
     --argjson actual_report_projection "$ACTUAL_REPORT_PROJECTION_JSON" \
@@ -264,7 +305,9 @@ jq -n \
         mode: $mode,
         run_id: $run_id,
         command_exit_code: $command_exit_code,
+        script_exit_code: $script_exit_code,
         validation_passed: $validation_passed,
+        command: $command,
         replay_command: $command,
         run_log_path: $run_log_path,
         bundle_manifest_path: $bundle_manifest_path,
