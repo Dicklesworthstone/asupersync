@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Perfect E2E & Integration Tests (No Mocks) for TCP
 //!
 //! Follows the manifesto from /testing-perfect-e2e-integration-tests-with-logging-and-no-mocks:
@@ -39,7 +37,7 @@ fn net_tcp_real_integration_echo_log() {
     init_test("net_tcp_real_integration_echo_log");
     let suite = "tcp_real_integration";
 
-    json_log(suite, "setup", "phase_start", r#"{}"#);
+    json_log(suite, "setup", "phase_start", r"{}");
 
     let result = block_on(async {
         // 1. SETUP: Real TCP Listener
@@ -55,7 +53,7 @@ fn net_tcp_real_integration_echo_log() {
         // Server Task (Echoes until connection drops)
         let server_handle = std::thread::spawn(move || {
             block_on(async {
-                let (mut stream, peer_addr) = listener.accept().await?;
+                let (mut stream, _peer_addr) = listener.accept().await?;
                 let mut buf = vec![0u8; 1024];
                 loop {
                     let n = match stream.read(&mut buf).await {
@@ -74,7 +72,7 @@ fn net_tcp_real_integration_echo_log() {
         std::thread::sleep(std::time::Duration::from_millis(50));
 
         // 2. ACT: Client sends data
-        json_log(suite, "act", "phase_start", r#"{}"#);
+        json_log(suite, "act", "phase_start", r"{}");
         let mut client = TcpStream::connect(addr).await?;
         let test_payload = b"integration_test_payload_123";
         client.write_all(test_payload).await?;
@@ -83,7 +81,7 @@ fn net_tcp_real_integration_echo_log() {
         client.read_exact(&mut response).await?;
 
         // 3. ASSERT: Compare real received data with sent payload
-        json_log(suite, "assert", "phase_start", r#"{}"#);
+        json_log(suite, "assert", "phase_start", r"{}");
         let match_ok = response == test_payload;
         json_log(
             suite,
@@ -97,7 +95,7 @@ fn net_tcp_real_integration_echo_log() {
         assert!(match_ok, "Echoed data must match exactly");
 
         // 4. TEARDOWN: Clean closure
-        json_log(suite, "teardown", "phase_start", r#"{}"#);
+        json_log(suite, "teardown", "phase_start", r"{}");
         drop(client);
         let _ = server_handle.join();
 
