@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Common utilities and fixtures for console E2E tests.
 
 use asupersync::runtime::RuntimeState;
