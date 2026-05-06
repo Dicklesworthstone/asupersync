@@ -166,6 +166,79 @@ W7n9v0wIyo4e/O0DO2fczXZD
         TlsConnector::new(make_client_config())
     }
 
+    struct GeneratedMtlsMaterial {
+        ca_cert: Certificate,
+        server_chain: CertificateChain,
+        server_key: PrivateKey,
+        client_chain: CertificateChain,
+        client_key: PrivateKey,
+    }
+
+    fn generated_mtls_material() -> GeneratedMtlsMaterial {
+        let mut ca_params =
+            rcgen::CertificateParams::new(Vec::new()).expect("empty CA SAN set is valid");
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        ca_params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "asupersync test ca");
+        ca_params.key_usages.extend([
+            rcgen::KeyUsagePurpose::DigitalSignature,
+            rcgen::KeyUsagePurpose::KeyCertSign,
+            rcgen::KeyUsagePurpose::CrlSign,
+        ]);
+        ca_params.not_before = rcgen::date_time_ymd(2025, 1, 1);
+        ca_params.not_after = rcgen::date_time_ymd(2035, 1, 1);
+
+        let ca_key = rcgen::KeyPair::generate().unwrap();
+        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+        let ca_cert = Certificate::from_der(ca_cert.der().as_ref().to_vec());
+        let issuer = rcgen::Issuer::new(ca_params, ca_key);
+
+        fn leaf_material(
+            issuer: &rcgen::Issuer<'static, rcgen::KeyPair>,
+            common_name: &str,
+            extended_key_usage: rcgen::ExtendedKeyUsagePurpose,
+        ) -> (CertificateChain, PrivateKey) {
+            let mut params = rcgen::CertificateParams::new(vec![common_name.into()]).unwrap();
+            params.is_ca = rcgen::IsCa::ExplicitNoCa;
+            params
+                .distinguished_name
+                .push(rcgen::DnType::CommonName, common_name);
+            params
+                .key_usages
+                .push(rcgen::KeyUsagePurpose::DigitalSignature);
+            params.extended_key_usages.push(extended_key_usage);
+            params.not_before = rcgen::date_time_ymd(2025, 1, 1);
+            params.not_after = rcgen::date_time_ymd(2035, 1, 1);
+
+            let key = rcgen::KeyPair::generate().unwrap();
+            let cert = params.signed_by(&key, issuer).unwrap();
+            let chain =
+                CertificateChain::from_cert(Certificate::from_der(cert.der().as_ref().to_vec()));
+            let key = PrivateKey::from_pkcs8_der(key.serialize_der());
+            (chain, key)
+        }
+
+        let (server_chain, server_key) = leaf_material(
+            &issuer,
+            "localhost",
+            rcgen::ExtendedKeyUsagePurpose::ServerAuth,
+        );
+        let (client_chain, client_key) = leaf_material(
+            &issuer,
+            "asupersync-test-client",
+            rcgen::ExtendedKeyUsagePurpose::ClientAuth,
+        );
+
+        GeneratedMtlsMaterial {
+            ca_cert,
+            server_chain,
+            server_key,
+            client_chain,
+            client_key,
+        }
+    }
+
     /// Run client and server handshakes cooperatively on a single thread using zip.
     /// VirtualTcpStream wakers properly wake the block_on executor.
     fn handshake_pair(
@@ -590,53 +663,28 @@ W7n9v0wIyo4e/O0DO2fczXZD
 
     #[test]
     fn mtls_required_client_provides_cert() {
-        let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
-        let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
-        let certs_for_root = Certificate::from_pem(TEST_CERT_PEM).unwrap();
-        let mut root_store = RootCertStore::empty();
-        for cert in &certs_for_root {
-            root_store.add(&cert).unwrap();
-        }
-        let acceptor = TlsAcceptorBuilder::new(chain.clone(), key.clone())
-            .client_auth(ClientAuth::Required(root_store))
+        let material = generated_mtls_material();
+
+        let mut server_client_roots = RootCertStore::empty();
+        server_client_roots.add(&material.ca_cert).unwrap();
+        let acceptor = TlsAcceptorBuilder::new(material.server_chain, material.server_key)
+            .client_auth(ClientAuth::Required(server_client_roots))
+            .handshake_timeout(Duration::from_secs(1))
             .build()
             .unwrap();
 
-        // Build client config with AcceptAnyCert + client identity
-        let config = {
-            use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-            use std::sync::Arc;
-
-            let cert_ders: Vec<CertificateDer<'static>> = {
-                let mut reader = std::io::BufReader::new(TEST_CERT_PEM);
-                rustls_pemfile::certs(&mut reader)
-                    .collect::<Result<Vec<_>, _>>()
-                    .unwrap()
-            };
-            let key_der: PrivateKeyDer<'static> = {
-                let mut reader = std::io::BufReader::new(TEST_KEY_PEM);
-                rustls_pemfile::private_key(&mut reader).unwrap().unwrap()
-            };
-
-            rustls::ClientConfig::builder_with_provider(Arc::new(
-                rustls::crypto::ring::default_provider(),
-            ))
-            .with_safe_default_protocol_versions()
-            .unwrap()
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(AcceptAnyCert))
-            .with_client_auth_cert(cert_ders, key_der)
-            .unwrap()
-        };
-        let connector = TlsConnector::new(config);
+        let connector = TlsConnectorBuilder::new()
+            .add_root_certificate(&material.ca_cert)
+            .identity(material.client_chain, material.client_key)
+            .handshake_timeout(Duration::from_secs(1))
+            .build()
+            .unwrap();
 
         let (client_res, server_res) = handshake_pair(connector, acceptor, 6110);
-        // The test cert has CA:TRUE so webpki rejects it as a client cert too.
-        // We verify the handshake completes (both sides get a result, not hang),
-        // and that at least the client side succeeds since AcceptAnyCert is used.
-        // Server-side may reject due to CA-as-end-entity constraint.
-        let _ = server_res; // may be Err due to CA cert used as client cert
-        assert!(client_res.is_ok() || client_res.is_err()); // handshake didn't hang
+        let client = client_res.expect("client mTLS handshake should succeed");
+        let server = server_res.expect("server mTLS handshake should succeed");
+        assert!(client.peer_leaf_certificate_der().is_some());
+        assert!(server.peer_leaf_certificate_der().is_some());
     }
 
     #[test]
