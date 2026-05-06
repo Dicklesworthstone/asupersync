@@ -19,9 +19,13 @@ Options:
   --run-id <id>           Deterministic run id for tests.
   --timeout-sec <sec>     Wall-clock timeout for each rch cargo proof.
   --contract-only         Validate the contract artifact without running cargo.
+  --dry-run               Print planned rch proof commands without running cargo.
   -h, --help              Show this help.
 USAGE
 }
+
+DRY_RUN=0
+RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -43,6 +47,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --contract-only)
             CONTRACT_ONLY=1
+            shift
+            ;;
+        --dry-run)
+            DRY_RUN=1
             shift
             ;;
         -h|--help)
@@ -68,33 +76,49 @@ TRACE_STATUS=0
 run_proof() {
     local label="$1"
     shift
+    local -a rch_command=("${RCH_BIN}" exec -- "$@")
 
     {
         printf 'ACTOR_TRACE_CONFORMANCE_COMMAND label=%s timeout_sec=%s command=' "$label" "$TIMEOUT_SEC"
-        printf '%q ' "$@"
+        printf '%q ' "${rch_command[@]}"
         printf '\n'
     } >> "${RUN_LOG_PATH}"
 
+    if [[ "${DRY_RUN}" -eq 1 ]]; then
+        printf 'ACTOR_TRACE_CONFORMANCE_DRY_RUN label=%s command=' "$label" >> "${RUN_LOG_PATH}"
+        printf '%q ' "${rch_command[@]}" >> "${RUN_LOG_PATH}"
+        printf '\n' >> "${RUN_LOG_PATH}"
+        echo "ACTOR_TRACE_CONFORMANCE_COMMAND_STATUS label=${label} status=0 dry_run=true" >> "${RUN_LOG_PATH}"
+        return 0
+    fi
+
     set +e
-    timeout "${TIMEOUT_SEC}" "$@" >> "${RUN_LOG_PATH}" 2>&1
+    timeout "${TIMEOUT_SEC}" "${rch_command[@]}" >> "${RUN_LOG_PATH}" 2>&1
     local status=$?
     set -e
+
+    if grep -Eq '^\[RCH\] local \(|falling back to local' "${RUN_LOG_PATH}"; then
+        status=86
+    fi
 
     echo "ACTOR_TRACE_CONFORMANCE_COMMAND_STATUS label=${label} status=${status}" >> "${RUN_LOG_PATH}"
     return "${status}"
 }
+
+if [[ "${CONTRACT_ONLY}" -eq 0 && "${DRY_RUN}" -eq 0 && ! -x "${RCH_BIN}" ]]; then
+    echo "FATAL: rch is required and was not found/executable at: ${RCH_BIN}" >&2
+    exit 1
+fi
 
 if [[ "${CONTRACT_ONLY}" -eq 1 ]]; then
     : > "${RUN_LOG_PATH}"
 else
     : > "${RUN_LOG_PATH}"
     run_proof actor_mailbox \
-        rch exec -- \
         env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 "RUSTFLAGS=-C debuginfo=0" "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_actor_mailbox" \
         cargo test -p asupersync --test conformance --features test-internals actor_mailbox_protocol -- --nocapture || ACTOR_STATUS=$?
 
     run_proof trace_event \
-        rch exec -- \
         env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 "RUSTFLAGS=-C debuginfo=0" "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_trace_event" \
         cargo test -p asupersync --test conformance --features test-internals trace_event -- --nocapture || TRACE_STATUS=$?
 
@@ -116,6 +140,10 @@ contract_only = sys.argv[6] == "1"
 timeout_sec = int(sys.argv[7])
 actor_status = int(sys.argv[8])
 trace_status = int(sys.argv[9])
+dry_run = any(
+    "ACTOR_TRACE_CONFORMANCE_DRY_RUN " in line
+    for line in Path(sys.argv[3]).read_text().splitlines()
+) if Path(sys.argv[3]).exists() else False
 
 contract = json.loads(artifact_path.read_text())
 required_fields = contract["required_log_fields"]
@@ -181,9 +209,9 @@ for scenario in contract["scenario_matrix"]:
     suite_status = row_suite_status(suite_id)
     first_failure = ""
 
-    if contract_only:
+    if contract_only or dry_run:
         verdict = "contract_present"
-        actual_sequence = "contract_only"
+        actual_sequence = "dry_run" if dry_run else "contract_only"
     elif suite_status != 0:
         verdict = "fail"
         first_failure = f"{suite_id}_status:{suite_status}"
@@ -224,7 +252,7 @@ for scenario in contract["scenario_matrix"]:
     if verdict == "fail":
         drifts.append(f"{scenario_id}:{first_failure}")
 
-validation_passed = not drifts and (contract_only or len(observed_scenarios) == len(expected_scenarios))
+validation_passed = not drifts and (contract_only or dry_run or len(observed_scenarios) == len(expected_scenarios))
 report = {
     "schema_version": "conformance-actor-mailbox-trace-event-run-report-v1",
     "contract_schema_version": contract["schema_version"],
@@ -232,6 +260,7 @@ report = {
     "capability_id": contract["capability_id"],
     "run_id": run_id,
     "contract_only": contract_only,
+    "dry_run": dry_run,
     "artifact_path": repo_relative(artifact_path),
     "run_report_path": repo_relative(run_report_path),
     "run_log_path": repo_relative(run_log_path),
