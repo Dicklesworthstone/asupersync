@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Exhaustive Unit-Test Matrix for FS/Process/Signal (Track 3.9)
 //!
 //! Maps test coverage to T3 implementation beads (T3.3, T3.5, T3.6, T3.7),
