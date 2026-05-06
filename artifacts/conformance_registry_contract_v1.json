@@ -3,8 +3,8 @@
   "bead_id": "asupersync-rckcnf",
   "source_registry": "tests/conformance/mod.rs",
   "readme_anchor": "README.md#conformance-suite",
-  "active_module_count": 79,
-  "dormant_module_count": 13,
+  "active_module_count": 80,
+  "dormant_module_count": 12,
   "count_policy": "Counts are machine-checked against tests/conformance/mod.rs. README prose must point here instead of hardcoding active or dormant counts.",
   "active_modules": [
     "aggregator_flush",
@@ -17,6 +17,7 @@
     "h1_body_framing",
     "h1_content_encoding",
     "h1_expect_continue",
+    "h1_keepalive",
     "h1_ows_normalization",
     "h1_chunked",
     "h1_protocol",
@@ -97,14 +98,6 @@
       ],
       "reason": "The old flat file would collide with the codec_framing directory; the exhaustive-properties suite is live.",
       "retention_reason": "File deletion is forbidden; retained for archaeology."
-    },
-    {
-      "module": "h1_keepalive",
-      "line": 27,
-      "disposition": "intentionally_deferred_inline_followup",
-      "inline_followup": "tests/conformance/mod.rs h1-conformance-bitrot",
-      "reason": "Older h1 sibling has API drift noted inline before it can be rewired.",
-      "retention_reason": "File deletion is forbidden; retained for targeted refactor."
     },
     {
       "module": "h2_stream_state_machine_rfc7540",
