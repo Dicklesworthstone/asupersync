@@ -424,7 +424,11 @@ mod sqlite {
         wait_retry_delay,
     };
     use crate::database::sqlite::{SqliteConnection, SqliteError, SqliteTransaction};
-    use std::{cell::Cell, fmt, pin::Pin};
+    use std::{
+        fmt,
+        pin::Pin,
+        sync::atomic::{AtomicBool, Ordering},
+    };
 
     type SqliteTxFuture<'a, T> = Pin<Box<dyn Future<Output = Outcome<T, SqliteError>> + Send + 'a>>;
 
@@ -544,15 +548,16 @@ mod sqlite {
         mut f: F,
     ) -> Outcome<T, SqliteError>
     where
-        F: for<'a> FnMut(&'a SqliteTransaction<'_>, &'a Cx) -> SqliteTxFuture<'a, T>,
+        T: Send,
+        F: for<'a> FnMut(&'a SqliteTransaction<'_>, &'a Cx) -> SqliteTxFuture<'a, T> + Send,
     {
-        let body_started = Cell::new(false);
+        let body_started = AtomicBool::new(false);
         let mut attempt = 0u32;
 
         loop {
-            body_started.set(false);
+            body_started.store(false, Ordering::Relaxed);
             let result = with_sqlite_transaction(conn, cx, |tx, tx_cx| {
-                body_started.set(true);
+                body_started.store(true, Ordering::Relaxed);
                 f(tx, tx_cx)
             })
             .await;
@@ -561,7 +566,7 @@ mod sqlite {
                 Outcome::Err(err)
                     if (err.is_busy() || err.is_locked())
                         && (replay_safety == TransactionReplaySafety::ReplaySafe
-                            || !body_started.get())
+                            || !body_started.load(Ordering::Relaxed))
                         && attempt < policy.max_retries =>
                 {
                     let delay = policy.delay_for(attempt);

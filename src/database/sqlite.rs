@@ -729,11 +729,12 @@ struct SqliteRowStreamCounters {
 impl SqliteRowStreamCounters {
     fn record_buffered_row(&self) {
         let buffered = self.buffered_rows.fetch_add(1, Ordering::AcqRel) + 1;
+        let observed = buffered.min(SQLITE_ROW_STREAM_CHANNEL_CAPACITY);
         let mut peak = self.peak_buffered_rows.load(Ordering::Acquire);
-        while buffered > peak {
+        while observed > peak {
             match self.peak_buffered_rows.compare_exchange_weak(
                 peak,
-                buffered,
+                observed,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
@@ -744,8 +745,8 @@ impl SqliteRowStreamCounters {
     }
 
     fn record_yielded_row(&self) {
-        self.rows_yielded.fetch_add(1, Ordering::AcqRel);
         self.buffered_rows.fetch_sub(1, Ordering::AcqRel);
+        self.rows_yielded.fetch_add(1, Ordering::AcqRel);
     }
 
     fn snapshot(&self) -> SqliteRowStreamStats {
@@ -790,8 +791,9 @@ fn send_sqlite_stream_message(
                 }
                 match permit.send(message) {
                     Outcome::Ok(()) => return true,
-                    Outcome::Err(mpsc::SendError::Disconnected(_))
-                    | Outcome::Err(mpsc::SendError::Cancelled(_)) => {
+                    Outcome::Err(
+                        mpsc::SendError::Disconnected(_) | mpsc::SendError::Cancelled(_),
+                    ) => {
                         if is_row {
                             counters.buffered_rows.fetch_sub(1, Ordering::AcqRel);
                         }
@@ -806,7 +808,7 @@ fn send_sqlite_stream_message(
                     Outcome::Cancelled(_) | Outcome::Panicked(_) => return false,
                 }
             }
-            Err(mpsc::SendError::Disconnected(())) | Err(mpsc::SendError::Cancelled(())) => {
+            Err(mpsc::SendError::Disconnected(()) | mpsc::SendError::Cancelled(())) => {
                 return false;
             }
             Err(mpsc::SendError::Full(())) => {

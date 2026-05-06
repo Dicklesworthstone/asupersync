@@ -73,9 +73,8 @@ pub mod quic_retry_rfc9000;
 pub mod race_loser_drain_metamorphic;
 pub mod tls_0rtt_replay_rfc8446;
 pub mod trace_replay_idempotency_metamorphic;
-// TODO: SQLite conformance tests - module has unresolved dependencies
-// pub mod sqlite_prepared_statements;
-//
+#[cfg(feature = "sqlite")]
+pub mod sqlite_prepared_statements;
 pub mod broadcast;
 pub mod consistent_hash_ring;
 pub mod grpc_deadline;
@@ -143,16 +142,9 @@ pub mod unix_listener; // repaired by br-asupersync-2qssae Unix listener sub-sli
 //
 // h1_* siblings (h1_body_framing, h1_content_encoding,
 // h1_expect_continue, h1_keepalive, h1_methods) and
-// h2_stream_state_machine_rfc7540, hpack_metamorphic,
-// sqlite_prepared_statements is already individually
-// commented out earlier in this file with bit-rot rationale; deliberately
-// not re-declared here.
-// The h1_* siblings (h1_body_framing, h1_content_encoding,
-// h1_expect_continue, h1_keepalive, h1_methods) and
-// h2_stream_state_machine_rfc7540, hpack_metamorphic,
-// sqlite_prepared_statements are already individually
-// commented out earlier in this file with bit-rot rationale; deliberately
-// not re-declared here.
+// h2_stream_state_machine_rfc7540 and hpack_metamorphic are already
+// individually commented out earlier in this file with bit-rot rationale;
+// deliberately not re-declared here.
 
 // Re-export main conformance test functionality
 pub use aggregator_flush::AggregatorFlushConformanceHarness;

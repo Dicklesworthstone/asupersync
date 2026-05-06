@@ -3,8 +3,8 @@
   "bead_id": "asupersync-rckcnf",
   "source_registry": "tests/conformance/mod.rs",
   "readme_anchor": "README.md#conformance-suite",
-  "active_module_count": 74,
-  "dormant_module_count": 18,
+  "active_module_count": 75,
+  "dormant_module_count": 17,
   "count_policy": "Counts are machine-checked against tests/conformance/mod.rs. README prose must point here instead of hardcoding active or dormant counts.",
   "active_modules": [
     "aggregator_flush",
@@ -55,6 +55,7 @@
     "tls_0rtt_replay_rfc8446",
     "trace_event",
     "trace_replay_idempotency_metamorphic",
+    "sqlite_prepared_statements",
     "broadcast",
     "consistent_hash_ring",
     "grpc_deadline",
@@ -155,14 +156,6 @@
       ],
       "reason": "Current HPACK coverage is split across RFC7541, Appendix C, and table-size suites.",
       "retention_reason": "File deletion is forbidden; retained for future metamorphic repair."
-    },
-    {
-      "module": "sqlite_prepared_statements",
-      "line": 73,
-      "disposition": "intentionally_deferred_inline_followup",
-      "inline_followup": "tests/conformance/mod.rs unresolved SQLite dependencies",
-      "reason": "The module has unresolved dependencies noted inline before it can be rewired.",
-      "retention_reason": "File deletion is forbidden; retained for SQLite conformance repair."
     },
     {
       "module": "broadcast_lag",
