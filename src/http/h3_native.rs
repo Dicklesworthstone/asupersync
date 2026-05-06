@@ -2114,6 +2114,396 @@ impl QpackBlockedStreamScheduler {
     }
 }
 
+/// Summary of QPACK instruction bytes processed from one stream read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct QpackInstructionStreamOutcome {
+    instructions_processed: usize,
+    inserted_entry_ids: Vec<u64>,
+    unblocked_stream_ids: Vec<u64>,
+}
+
+impl QpackInstructionStreamOutcome {
+    fn record_encoder_result(&mut self, inserted: Option<u64>, mut unblocked: Vec<u64>) {
+        self.instructions_processed += 1;
+        if let Some(insertion_id) = inserted {
+            self.inserted_entry_ids.push(insertion_id);
+        }
+        self.unblocked_stream_ids.append(&mut unblocked);
+    }
+
+    fn record_decoder_result(&mut self, mut unblocked: Vec<u64>) {
+        self.instructions_processed += 1;
+        self.unblocked_stream_ids.append(&mut unblocked);
+    }
+
+    /// Number of complete QPACK instructions processed from the byte slice.
+    #[must_use]
+    pub fn instructions_processed(&self) -> usize {
+        self.instructions_processed
+    }
+
+    /// Dynamic-table insertion IDs created by encoder-stream instructions.
+    #[must_use]
+    pub fn inserted_entry_ids(&self) -> &[u64] {
+        &self.inserted_entry_ids
+    }
+
+    /// Request/response stream IDs unblocked by encoder or decoder instructions.
+    #[must_use]
+    pub fn unblocked_stream_ids(&self) -> &[u64] {
+        &self.unblocked_stream_ids
+    }
+}
+
+/// Deterministic QPACK instruction-stream state for an HTTP/3 connection.
+///
+/// This owns the peer-facing QPACK dynamic table, peer decoder-feedback
+/// accounting, and blocked-stream scheduler. It intentionally processes raw
+/// QPACK instruction bytes only; HTTP/3 DATA/HEADERS frame mapping remains the
+/// job of `H3ConnectionState`.
+#[derive(Debug)]
+pub struct QpackInstructionStreamState {
+    mode: H3QpackMode,
+    context: QpackContext,
+    decoder_feedback: QpackDecoderFeedbackState,
+    blocked_scheduler: QpackBlockedStreamScheduler,
+    encoder_stream_id: Option<u64>,
+    decoder_stream_id: Option<u64>,
+    first_failure: Option<H3NativeError>,
+}
+
+impl QpackInstructionStreamState {
+    /// Construct QPACK instruction-stream state from explicit negotiated limits.
+    pub fn new(
+        mode: H3QpackMode,
+        max_table_capacity: u64,
+        settings_blocked_streams: u64,
+    ) -> Result<Self, H3NativeError> {
+        if mode == H3QpackMode::StaticOnly {
+            if max_table_capacity > 0 {
+                return Err(H3NativeError::QpackPolicy(
+                    "dynamic qpack table disabled by policy",
+                ));
+            }
+            if settings_blocked_streams > 0 {
+                return Err(H3NativeError::QpackPolicy(
+                    "qpack blocked streams must be zero in static-only mode",
+                ));
+            }
+        }
+        let max_table_capacity: usize = max_table_capacity.try_into().map_err(|_| {
+            H3NativeError::InvalidFrame("qpack dynamic table capacity exceeds addressable range")
+        })?;
+        Ok(Self {
+            mode,
+            context: QpackContext::new(max_table_capacity),
+            decoder_feedback: QpackDecoderFeedbackState::new(),
+            blocked_scheduler: QpackBlockedStreamScheduler::new(settings_blocked_streams),
+            encoder_stream_id: None,
+            decoder_stream_id: None,
+            first_failure: None,
+        })
+    }
+
+    /// Construct QPACK instruction-stream state from peer HTTP/3 SETTINGS.
+    pub fn from_settings(mode: H3QpackMode, settings: &H3Settings) -> Result<Self, H3NativeError> {
+        Self::new(
+            mode,
+            settings.qpack_max_table_capacity.unwrap_or(0),
+            settings.qpack_blocked_streams.unwrap_or(0),
+        )
+    }
+
+    /// QPACK mode used by this instruction-stream state.
+    #[must_use]
+    pub fn mode(&self) -> H3QpackMode {
+        self.mode
+    }
+
+    /// Dynamic QPACK context.
+    #[must_use]
+    pub fn context(&self) -> &QpackContext {
+        &self.context
+    }
+
+    /// Decoder-feedback state.
+    #[must_use]
+    pub fn decoder_feedback(&self) -> &QpackDecoderFeedbackState {
+        &self.decoder_feedback
+    }
+
+    /// Blocked-stream scheduler.
+    #[must_use]
+    pub fn blocked_scheduler(&self) -> &QpackBlockedStreamScheduler {
+        &self.blocked_scheduler
+    }
+
+    /// Registered peer QPACK encoder-stream id.
+    #[must_use]
+    pub fn encoder_stream_id(&self) -> Option<u64> {
+        self.encoder_stream_id
+    }
+
+    /// Registered peer QPACK decoder-stream id.
+    #[must_use]
+    pub fn decoder_stream_id(&self) -> Option<u64> {
+        self.decoder_stream_id
+    }
+
+    /// Peer Known Received Count.
+    #[must_use]
+    pub fn known_received_count(&self) -> u64 {
+        self.decoder_feedback.known_received_count()
+    }
+
+    /// Number of streams currently blocked by Required Insert Count gates.
+    #[must_use]
+    pub fn blocked_stream_count(&self) -> u64 {
+        self.blocked_scheduler.blocked_stream_count()
+    }
+
+    /// SETTINGS_QPACK_BLOCKED_STREAMS limit used by the scheduler.
+    #[must_use]
+    pub fn settings_blocked_streams(&self) -> u64 {
+        self.blocked_scheduler.settings_blocked_streams()
+    }
+
+    /// First instruction-stream failure observed.
+    #[must_use]
+    pub fn first_failure(&self) -> Option<&H3NativeError> {
+        self.first_failure
+            .as_ref()
+            .or_else(|| self.blocked_scheduler.first_failure())
+            .or_else(|| self.decoder_feedback.first_error())
+    }
+
+    /// Register a peer QPACK stream directly.
+    pub fn register_stream(
+        &mut self,
+        stream_id: u64,
+        kind: H3UniStreamType,
+    ) -> Result<(), H3NativeError> {
+        if self.registered_stream_kind(stream_id).is_some() {
+            return self.fail(H3NativeError::StreamProtocol(
+                "qpack instruction stream id already registered",
+            ));
+        }
+        match kind {
+            H3UniStreamType::QpackEncoder => {
+                if self.encoder_stream_id.is_some() {
+                    return self.fail(H3NativeError::StreamProtocol(
+                        "duplicate remote qpack encoder stream",
+                    ));
+                }
+                self.encoder_stream_id = Some(stream_id);
+                Ok(())
+            }
+            H3UniStreamType::QpackDecoder => {
+                if self.decoder_stream_id.is_some() {
+                    return self.fail(H3NativeError::StreamProtocol(
+                        "duplicate remote qpack decoder stream",
+                    ));
+                }
+                self.decoder_stream_id = Some(stream_id);
+                Ok(())
+            }
+            H3UniStreamType::Control | H3UniStreamType::Push | H3UniStreamType::Unknown(_) => self
+                .fail(H3NativeError::StreamProtocol(
+                    "qpack instruction stream requires qpack stream type",
+                )),
+        }
+    }
+
+    /// Register a peer QPACK stream from `H3ConnectionState` stream typing.
+    pub fn register_from_connection(
+        &mut self,
+        connection: &H3ConnectionState,
+        stream_id: u64,
+    ) -> Result<H3UniStreamType, H3NativeError> {
+        let kind =
+            connection
+                .remote_uni_stream_type(stream_id)
+                .ok_or(H3NativeError::StreamProtocol(
+                    "unknown unidirectional stream",
+                ))?;
+        self.register_stream(stream_id, kind)?;
+        Ok(kind)
+    }
+
+    /// Ensure the stream is registered with the same QPACK stream kind.
+    pub fn ensure_stream_registered(
+        &mut self,
+        stream_id: u64,
+        kind: H3UniStreamType,
+    ) -> Result<(), H3NativeError> {
+        match self.registered_stream_kind(stream_id) {
+            Some(actual) if actual == kind => Ok(()),
+            Some(_) => self.fail(H3NativeError::StreamProtocol(
+                "qpack instruction type does not match registered stream",
+            )),
+            None => self.register_stream(stream_id, kind),
+        }
+    }
+
+    /// Feed encoder-stream instruction bytes.
+    pub fn feed_encoder_stream_bytes(
+        &mut self,
+        stream_id: u64,
+        bytes: &[u8],
+    ) -> Result<QpackInstructionStreamOutcome, H3NativeError> {
+        self.ensure_stream_kind(stream_id, H3UniStreamType::QpackEncoder)?;
+        let mut pos = 0usize;
+        let mut outcome = QpackInstructionStreamOutcome::default();
+        while pos < bytes.len() {
+            let (instruction, consumed) = match qpack_decode_encoder_instruction(&bytes[pos..]) {
+                Ok(decoded) => decoded,
+                Err(error) => return self.fail(error),
+            };
+            let (inserted, unblocked) = match self.blocked_scheduler.apply_encoder_instruction(
+                &mut self.context,
+                &mut self.decoder_feedback,
+                self.mode,
+                &instruction,
+            ) {
+                Ok(result) => result,
+                Err(error) => {
+                    self.record_error(&error);
+                    return Err(error);
+                }
+            };
+            outcome.record_encoder_result(inserted, unblocked);
+            pos += consumed;
+        }
+        Ok(outcome)
+    }
+
+    /// Feed decoder-stream instruction bytes.
+    pub fn feed_decoder_stream_bytes(
+        &mut self,
+        stream_id: u64,
+        bytes: &[u8],
+    ) -> Result<QpackInstructionStreamOutcome, H3NativeError> {
+        self.ensure_stream_kind(stream_id, H3UniStreamType::QpackDecoder)?;
+        let mut pos = 0usize;
+        let mut outcome = QpackInstructionStreamOutcome::default();
+        while pos < bytes.len() {
+            let (instruction, consumed) = match qpack_decode_decoder_instruction(&bytes[pos..]) {
+                Ok(decoded) => decoded,
+                Err(error) => return self.fail(error),
+            };
+            let unblocked = match self.blocked_scheduler.apply_decoder_instruction(
+                &mut self.decoder_feedback,
+                &mut self.context,
+                self.mode,
+                &instruction,
+            ) {
+                Ok(result) => result,
+                Err(error) => {
+                    self.record_error(&error);
+                    return Err(error);
+                }
+            };
+            outcome.record_decoder_result(unblocked);
+            pos += consumed;
+        }
+        Ok(outcome)
+    }
+
+    /// Feed bytes from a typed QPACK instruction stream.
+    pub fn feed_instruction_stream_bytes(
+        &mut self,
+        stream_id: u64,
+        kind: H3UniStreamType,
+        bytes: &[u8],
+    ) -> Result<QpackInstructionStreamOutcome, H3NativeError> {
+        match kind {
+            H3UniStreamType::QpackEncoder => self.feed_encoder_stream_bytes(stream_id, bytes),
+            H3UniStreamType::QpackDecoder => self.feed_decoder_stream_bytes(stream_id, bytes),
+            H3UniStreamType::Control | H3UniStreamType::Push | H3UniStreamType::Unknown(_) => self
+                .fail(H3NativeError::StreamProtocol(
+                    "qpack instruction stream requires qpack stream type",
+                )),
+        }
+    }
+
+    /// Schedule one outbound field section against peer Known Received Count.
+    pub fn submit_field_section(
+        &mut self,
+        stream_id: u64,
+        field_section: &[u8],
+    ) -> Result<QpackBlockedStreamStatus, H3NativeError> {
+        self.blocked_scheduler.submit_field_section(
+            &mut self.context,
+            &mut self.decoder_feedback,
+            self.mode,
+            stream_id,
+            field_section,
+        )
+    }
+
+    /// Schedule one received field section that may wait for encoder instructions.
+    pub fn submit_received_field_section(
+        &mut self,
+        stream_id: u64,
+        field_section: &[u8],
+    ) -> Result<QpackBlockedStreamStatus, H3NativeError> {
+        self.blocked_scheduler.submit_received_field_section(
+            &mut self.context,
+            &mut self.decoder_feedback,
+            self.mode,
+            stream_id,
+            field_section,
+        )
+    }
+
+    /// Cancel a scheduled field section and release dynamic-table references.
+    pub fn cancel_stream(&mut self, stream_id: u64) -> Result<(), H3NativeError> {
+        self.blocked_scheduler.cancel_stream(
+            &mut self.decoder_feedback,
+            &mut self.context,
+            self.mode,
+            stream_id,
+        )
+    }
+
+    fn ensure_stream_kind(
+        &mut self,
+        stream_id: u64,
+        expected: H3UniStreamType,
+    ) -> Result<(), H3NativeError> {
+        match self.registered_stream_kind(stream_id) {
+            Some(actual) if actual == expected => Ok(()),
+            Some(_) => self.fail(H3NativeError::StreamProtocol(
+                "qpack instruction type does not match registered stream",
+            )),
+            None => self.fail(H3NativeError::StreamProtocol(
+                "unknown qpack instruction stream",
+            )),
+        }
+    }
+
+    fn registered_stream_kind(&self, stream_id: u64) -> Option<H3UniStreamType> {
+        if self.encoder_stream_id == Some(stream_id) {
+            return Some(H3UniStreamType::QpackEncoder);
+        }
+        if self.decoder_stream_id == Some(stream_id) {
+            return Some(H3UniStreamType::QpackDecoder);
+        }
+        None
+    }
+
+    fn fail<T>(&mut self, error: H3NativeError) -> Result<T, H3NativeError> {
+        self.record_error(&error);
+        Err(error)
+    }
+
+    fn record_error(&mut self, error: &H3NativeError) {
+        if self.first_failure.is_none() {
+            self.first_failure = Some(error.clone());
+        }
+    }
+}
+
 fn qpack_plan_dynamic_references(plan: &[QpackFieldPlan]) -> Vec<u64> {
     let mut references = BTreeSet::new();
     for field in plan {
@@ -3767,6 +4157,53 @@ impl H3ConnectionState {
                 Ok(())
             }
         }
+    }
+
+    /// Registered remote unidirectional stream type for `stream_id`.
+    #[must_use]
+    pub fn remote_uni_stream_type(&self, stream_id: u64) -> Option<H3UniStreamType> {
+        self.uni_stream_types.get(&stream_id).copied()
+    }
+
+    /// Remote QPACK encoder-stream id, if the peer opened one.
+    #[must_use]
+    pub fn qpack_encoder_stream_id(&self) -> Option<u64> {
+        self.qpack_encoder_stream_id
+    }
+
+    /// Remote QPACK decoder-stream id, if the peer opened one.
+    #[must_use]
+    pub fn qpack_decoder_stream_id(&self) -> Option<u64> {
+        self.qpack_decoder_stream_id
+    }
+
+    /// Register a previously typed remote QPACK stream with instruction state.
+    pub fn register_qpack_instruction_stream(
+        &self,
+        qpack: &mut QpackInstructionStreamState,
+        stream_id: u64,
+    ) -> Result<H3UniStreamType, H3NativeError> {
+        qpack.register_from_connection(self, stream_id)
+    }
+
+    /// Feed raw QPACK instruction bytes from a typed remote unidirectional stream.
+    ///
+    /// QPACK encoder/decoder streams remain separate from HTTP/3 frame parsing:
+    /// `on_uni_stream_frame` still rejects them as frame streams, while this API
+    /// processes their RFC 9204 instruction bytes.
+    pub fn feed_qpack_instruction_stream_bytes(
+        &self,
+        qpack: &mut QpackInstructionStreamState,
+        stream_id: u64,
+        bytes: &[u8],
+    ) -> Result<QpackInstructionStreamOutcome, H3NativeError> {
+        let kind = self
+            .remote_uni_stream_type(stream_id)
+            .ok_or(H3NativeError::StreamProtocol(
+                "unknown unidirectional stream",
+            ))?;
+        qpack.ensure_stream_registered(stream_id, kind)?;
+        qpack.feed_instruction_stream_bytes(stream_id, kind, bytes)
     }
 
     fn validate_qpack_settings(&self, settings: &H3Settings) -> Result<(), H3NativeError> {
@@ -7713,6 +8150,522 @@ mod tests {
         );
     }
 
+    fn qpack_instruction_settings() -> H3Settings {
+        H3Settings {
+            qpack_max_table_capacity: Some(128),
+            qpack_blocked_streams: Some(2),
+            ..H3Settings::default()
+        }
+    }
+
+    fn qpack_encoder_instruction_bytes(instruction: &QpackEncoderInstruction) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        qpack_encode_encoder_instruction(&mut bytes, instruction).expect("encode encoder");
+        bytes
+    }
+
+    fn qpack_decoder_instruction_bytes(instruction: &QpackDecoderInstruction) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        qpack_encode_decoder_instruction(&mut bytes, instruction).expect("encode decoder");
+        bytes
+    }
+
+    fn qpack_response_status_dynamic_wire() -> Vec<u8> {
+        let mut wire = Vec::new();
+        let encoded_ric = qpack_encode_required_insert_count(1, 128).expect("encode RIC");
+        qpack_encode_prefixed_int(&mut wire, 0, 8, encoded_ric).expect("RIC prefix");
+        qpack_encode_prefixed_int(&mut wire, 0, 7, 0).expect("base prefix");
+        qpack_encode_prefixed_int(&mut wire, 0b1000_0000, 6, 0).expect("dynamic relative index 0");
+        wire
+    }
+
+    fn qpack_instruction_row(
+        state: &QpackInstructionStreamState,
+        scenario_id: &str,
+        required_insert_count: u64,
+        expected_event: &str,
+        actual_event: &str,
+        verdict: &str,
+        first_failure: Option<String>,
+    ) -> serde_json::Value {
+        let row = serde_json::json!({
+            "bead_id": "asupersync-1xxmyo",
+            "scenario_id": scenario_id,
+            "qpack_mode": format!("{:?}", state.mode()),
+            "encoder_stream_id": state.encoder_stream_id(),
+            "decoder_stream_id": state.decoder_stream_id(),
+            "required_insert_count": required_insert_count,
+            "known_received_count": state.known_received_count(),
+            "blocked_stream_count": state.blocked_stream_count(),
+            "settings_blocked_streams": state.settings_blocked_streams(),
+            "expected_event": expected_event,
+            "actual_event": actual_event,
+            "support_class": "deterministic-http3-qpack-instruction-proof",
+            "verdict": verdict,
+            "first_failure": first_failure,
+        });
+        for field in [
+            "bead_id",
+            "scenario_id",
+            "qpack_mode",
+            "encoder_stream_id",
+            "decoder_stream_id",
+            "required_insert_count",
+            "known_received_count",
+            "blocked_stream_count",
+            "settings_blocked_streams",
+            "expected_event",
+            "actual_event",
+            "support_class",
+            "verdict",
+            "first_failure",
+        ] {
+            assert!(row.get(field).is_some(), "missing proof log field {field}");
+        }
+        println!("{row}");
+        row
+    }
+
+    #[test]
+    fn qpack_instruction_stream_registers_from_h3_state_and_keeps_frame_boundary() {
+        let mut connection =
+            H3ConnectionState::with_config(H3ConnectionConfig::default().with_dynamic_qpack());
+        assert_eq!(
+            connection
+                .on_remote_uni_stream_type(3, H3_STREAM_TYPE_QPACK_ENCODER)
+                .expect("encoder stream type"),
+            H3UniStreamType::QpackEncoder
+        );
+        assert_eq!(
+            connection
+                .on_remote_uni_stream_type(7, H3_STREAM_TYPE_QPACK_DECODER)
+                .expect("decoder stream type"),
+            H3UniStreamType::QpackDecoder
+        );
+        assert_eq!(connection.qpack_encoder_stream_id(), Some(3));
+        assert_eq!(connection.qpack_decoder_stream_id(), Some(7));
+
+        let err = connection
+            .on_uni_stream_frame(3, &H3Frame::Data(vec![1]))
+            .expect_err("qpack encoder stream must not parse h3 frames");
+        assert_eq!(
+            err,
+            H3NativeError::StreamProtocol("qpack streams carry instructions, not h3 frames")
+        );
+        let err = connection
+            .on_uni_stream_frame(7, &H3Frame::Headers(vec![0]))
+            .expect_err("qpack decoder stream must not parse h3 frames");
+        assert_eq!(
+            err,
+            H3NativeError::StreamProtocol("qpack streams carry instructions, not h3 frames")
+        );
+
+        let mut qpack = QpackInstructionStreamState::from_settings(
+            H3QpackMode::DynamicTableAllowed,
+            &qpack_instruction_settings(),
+        )
+        .expect("qpack instruction state");
+        assert_eq!(
+            connection
+                .register_qpack_instruction_stream(&mut qpack, 3)
+                .expect("register encoder"),
+            H3UniStreamType::QpackEncoder
+        );
+        assert_eq!(
+            connection
+                .register_qpack_instruction_stream(&mut qpack, 7)
+                .expect("register decoder"),
+            H3UniStreamType::QpackDecoder
+        );
+
+        let insert =
+            qpack_encoder_instruction_bytes(&QpackEncoderInstruction::InsertWithoutNameReference {
+                name: "x-h3-boundary".to_string(),
+                value: "value".to_string(),
+            });
+        let outcome = connection
+            .feed_qpack_instruction_stream_bytes(&mut qpack, 3, &insert)
+            .expect("encoder instruction bytes");
+        assert_eq!(outcome.instructions_processed(), 1);
+        assert_eq!(outcome.inserted_entry_ids(), &[0]);
+    }
+
+    #[test]
+    fn qpack_instruction_stream_registration_and_wrong_stream_errors() {
+        let mut qpack = QpackInstructionStreamState::from_settings(
+            H3QpackMode::DynamicTableAllowed,
+            &qpack_instruction_settings(),
+        )
+        .expect("qpack state");
+        qpack
+            .register_stream(3, H3UniStreamType::QpackEncoder)
+            .expect("encoder registration");
+        qpack
+            .register_stream(7, H3UniStreamType::QpackDecoder)
+            .expect("decoder registration");
+
+        let err = qpack
+            .register_stream(11, H3UniStreamType::QpackEncoder)
+            .expect_err("duplicate encoder stream");
+        assert_eq!(
+            err,
+            H3NativeError::StreamProtocol("duplicate remote qpack encoder stream")
+        );
+
+        let err = qpack
+            .feed_encoder_stream_bytes(99, &[])
+            .expect_err("unknown qpack stream id");
+        assert_eq!(
+            err,
+            H3NativeError::StreamProtocol("unknown qpack instruction stream")
+        );
+
+        let decoder =
+            qpack_decoder_instruction_bytes(&QpackDecoderInstruction::InsertCountIncrement {
+                increment: 1,
+            });
+        let err = qpack
+            .feed_instruction_stream_bytes(3, H3UniStreamType::QpackDecoder, &decoder)
+            .expect_err("decoder instruction on encoder stream");
+        assert_eq!(
+            err,
+            H3NativeError::StreamProtocol(
+                "qpack instruction type does not match registered stream"
+            )
+        );
+
+        let err = qpack
+            .register_stream(19, H3UniStreamType::Control)
+            .expect_err("non-qpack stream rejected");
+        assert_eq!(
+            err,
+            H3NativeError::StreamProtocol("qpack instruction stream requires qpack stream type")
+        );
+    }
+
+    #[test]
+    fn qpack_instruction_stream_dynamic_sequence_blocks_unblocks_and_decodes() {
+        let mut connection =
+            H3ConnectionState::with_config(H3ConnectionConfig::default().with_dynamic_qpack());
+        connection
+            .on_remote_uni_stream_type(3, H3_STREAM_TYPE_QPACK_ENCODER)
+            .expect("encoder stream");
+        connection
+            .on_remote_uni_stream_type(7, H3_STREAM_TYPE_QPACK_DECODER)
+            .expect("decoder stream");
+
+        let mut qpack = QpackInstructionStreamState::from_settings(
+            H3QpackMode::DynamicTableAllowed,
+            &qpack_instruction_settings(),
+        )
+        .expect("qpack state");
+        connection
+            .register_qpack_instruction_stream(&mut qpack, 3)
+            .expect("register encoder");
+        connection
+            .register_qpack_instruction_stream(&mut qpack, 7)
+            .expect("register decoder");
+
+        let field_section = qpack_response_status_dynamic_wire();
+        let status = qpack
+            .submit_received_field_section(4, &field_section)
+            .expect("field section blocks before insert");
+        assert_eq!(status, QpackBlockedStreamStatus::Blocked);
+        assert_eq!(qpack.blocked_stream_count(), 1);
+
+        let insert =
+            qpack_encoder_instruction_bytes(&QpackEncoderInstruction::InsertWithoutNameReference {
+                name: ":status".to_string(),
+                value: "200".to_string(),
+            });
+        let outcome = connection
+            .feed_qpack_instruction_stream_bytes(&mut qpack, 3, &insert)
+            .expect("encoder insert unblocks field section");
+        assert_eq!(outcome.inserted_entry_ids(), &[0]);
+        assert_eq!(outcome.unblocked_stream_ids(), &[4]);
+        assert_eq!(qpack.blocked_stream_count(), 0);
+
+        let response = qpack_decode_response_field_section(
+            &field_section,
+            H3QpackMode::DynamicTableAllowed,
+            Some(qpack.context()),
+        )
+        .expect("decode unblocked response field section");
+        assert_eq!(response.status, 200);
+
+        let increment =
+            qpack_decoder_instruction_bytes(&QpackDecoderInstruction::InsertCountIncrement {
+                increment: 1,
+            });
+        let outcome = connection
+            .feed_qpack_instruction_stream_bytes(&mut qpack, 7, &increment)
+            .expect("decoder feedback increment");
+        assert_eq!(outcome.instructions_processed(), 1);
+        assert_eq!(qpack.known_received_count(), 1);
+    }
+
+    #[test]
+    fn qpack_instruction_stream_proof_runner_scenarios_log_required_fields() {
+        let mut rows = Vec::new();
+
+        let mut static_only =
+            QpackInstructionStreamState::new(H3QpackMode::StaticOnly, 0, 0).expect("static qpack");
+        static_only
+            .register_stream(3, H3UniStreamType::QpackEncoder)
+            .expect("encoder stream");
+        let insert =
+            qpack_encoder_instruction_bytes(&QpackEncoderInstruction::InsertWithoutNameReference {
+                name: "x-static".to_string(),
+                value: "reject".to_string(),
+            });
+        let err = static_only
+            .feed_encoder_stream_bytes(3, &insert)
+            .expect_err("static-only rejects encoder stream instructions");
+        rows.push(qpack_instruction_row(
+            &static_only,
+            "static-only-rejection",
+            0,
+            "qpack-policy-error",
+            &err.to_string(),
+            "pass",
+            Some(err.to_string()),
+        ));
+
+        let mut encoder_rt = QpackInstructionStreamState::from_settings(
+            H3QpackMode::DynamicTableAllowed,
+            &qpack_instruction_settings(),
+        )
+        .expect("dynamic qpack");
+        encoder_rt
+            .register_stream(3, H3UniStreamType::QpackEncoder)
+            .expect("encoder stream");
+        let insert =
+            qpack_encoder_instruction_bytes(&QpackEncoderInstruction::InsertWithoutNameReference {
+                name: "x-roundtrip".to_string(),
+                value: "ok".to_string(),
+            });
+        let outcome = encoder_rt
+            .feed_encoder_stream_bytes(3, &insert)
+            .expect("encoder roundtrip");
+        rows.push(qpack_instruction_row(
+            &encoder_rt,
+            "encoder-instruction-roundtrip",
+            0,
+            "inserted:[0]",
+            &format!("inserted:{:?}", outcome.inserted_entry_ids()),
+            if outcome.inserted_entry_ids() == [0] {
+                "pass"
+            } else {
+                "fail"
+            },
+            None,
+        ));
+
+        let mut decoder_rt = QpackInstructionStreamState::from_settings(
+            H3QpackMode::DynamicTableAllowed,
+            &qpack_instruction_settings(),
+        )
+        .expect("dynamic qpack");
+        decoder_rt
+            .register_stream(7, H3UniStreamType::QpackDecoder)
+            .expect("decoder stream");
+        let increment =
+            qpack_decoder_instruction_bytes(&QpackDecoderInstruction::InsertCountIncrement {
+                increment: 1,
+            });
+        decoder_rt
+            .feed_decoder_stream_bytes(7, &increment)
+            .expect("decoder feedback");
+        rows.push(qpack_instruction_row(
+            &decoder_rt,
+            "decoder-feedback-roundtrip",
+            0,
+            "known-received-count:1",
+            &format!("known-received-count:{}", decoder_rt.known_received_count()),
+            if decoder_rt.known_received_count() == 1 {
+                "pass"
+            } else {
+                "fail"
+            },
+            None,
+        ));
+
+        let mut blocked = QpackInstructionStreamState::from_settings(
+            H3QpackMode::DynamicTableAllowed,
+            &qpack_instruction_settings(),
+        )
+        .expect("dynamic qpack");
+        blocked
+            .register_stream(3, H3UniStreamType::QpackEncoder)
+            .expect("encoder stream");
+        blocked
+            .submit_received_field_section(4, &qpack_response_status_dynamic_wire())
+            .expect("blocked field section");
+        let insert =
+            qpack_encoder_instruction_bytes(&QpackEncoderInstruction::InsertWithoutNameReference {
+                name: ":status".to_string(),
+                value: "200".to_string(),
+            });
+        let outcome = blocked
+            .feed_encoder_stream_bytes(3, &insert)
+            .expect("encoder instruction unblocks");
+        rows.push(qpack_instruction_row(
+            &blocked,
+            "blocked-then-unblocked-stream",
+            1,
+            "unblocked:[4]",
+            &format!("unblocked:{:?}", outcome.unblocked_stream_ids()),
+            if outcome.unblocked_stream_ids() == [4] {
+                "pass"
+            } else {
+                "fail"
+            },
+            None,
+        ));
+
+        let mut cancelled = QpackInstructionStreamState::from_settings(
+            H3QpackMode::DynamicTableAllowed,
+            &qpack_instruction_settings(),
+        )
+        .expect("dynamic qpack");
+        cancelled
+            .register_stream(3, H3UniStreamType::QpackEncoder)
+            .expect("encoder stream");
+        cancelled
+            .register_stream(7, H3UniStreamType::QpackDecoder)
+            .expect("decoder stream");
+        let cancel_insert =
+            qpack_encoder_instruction_bytes(&QpackEncoderInstruction::InsertWithoutNameReference {
+                name: "x-cancel-blocked".to_string(),
+                value: "value".to_string(),
+            });
+        let inserted = cancelled
+            .feed_encoder_stream_bytes(3, &cancel_insert)
+            .expect("insert cancellation reference");
+        let cancel_wire = qpack_dynamic_wire(cancelled.context(), inserted.inserted_entry_ids()[0])
+            .expect("wire");
+        cancelled
+            .submit_field_section(8, &cancel_wire)
+            .expect("outbound blocked field section");
+        let cancel =
+            qpack_decoder_instruction_bytes(&QpackDecoderInstruction::StreamCancellation {
+                stream_id: 8,
+            });
+        cancelled
+            .feed_decoder_stream_bytes(7, &cancel)
+            .expect("cancel blocked stream");
+        let cancel_event = format!(
+            "cancelled:{:?}",
+            cancelled
+                .blocked_scheduler()
+                .record(8)
+                .expect("cancelled record")
+                .status()
+        );
+        rows.push(qpack_instruction_row(
+            &cancelled,
+            "cancellation-while-blocked",
+            1,
+            "cancelled:Cancelled",
+            &cancel_event,
+            if cancel_event == "cancelled:Cancelled" {
+                "pass"
+            } else {
+                "fail"
+            },
+            None,
+        ));
+
+        let mut capacity =
+            QpackInstructionStreamState::new(H3QpackMode::DynamicTableAllowed, 64, 1)
+                .expect("capacity-limited qpack");
+        capacity
+            .register_stream(3, H3UniStreamType::QpackEncoder)
+            .expect("encoder stream");
+        let set_too_large =
+            qpack_encoder_instruction_bytes(&QpackEncoderInstruction::SetDynamicTableCapacity {
+                capacity: 128,
+            });
+        let err = capacity
+            .feed_encoder_stream_bytes(3, &set_too_large)
+            .expect_err("capacity exceeds setting");
+        rows.push(qpack_instruction_row(
+            &capacity,
+            "capacity-exceeded",
+            0,
+            "capacity-policy-error",
+            &err.to_string(),
+            "pass",
+            Some(err.to_string()),
+        ));
+
+        let mut malformed = QpackInstructionStreamState::from_settings(
+            H3QpackMode::DynamicTableAllowed,
+            &qpack_instruction_settings(),
+        )
+        .expect("dynamic qpack");
+        malformed
+            .register_stream(3, H3UniStreamType::QpackEncoder)
+            .expect("encoder stream");
+        let err = malformed
+            .feed_encoder_stream_bytes(3, &[0b0100_0001])
+            .expect_err("truncated encoder instruction");
+        rows.push(qpack_instruction_row(
+            &malformed,
+            "malformed-instruction",
+            0,
+            "malformed-error",
+            &err.to_string(),
+            "pass",
+            Some(err.to_string()),
+        ));
+
+        let mut wrong_stream = QpackInstructionStreamState::from_settings(
+            H3QpackMode::DynamicTableAllowed,
+            &qpack_instruction_settings(),
+        )
+        .expect("dynamic qpack");
+        wrong_stream
+            .register_stream(3, H3UniStreamType::QpackEncoder)
+            .expect("encoder stream");
+        let increment =
+            qpack_decoder_instruction_bytes(&QpackDecoderInstruction::InsertCountIncrement {
+                increment: 1,
+            });
+        let err = wrong_stream
+            .feed_instruction_stream_bytes(3, H3UniStreamType::QpackDecoder, &increment)
+            .expect_err("wrong stream type");
+        rows.push(qpack_instruction_row(
+            &wrong_stream,
+            "wrong-stream-instruction",
+            0,
+            "wrong-stream-error",
+            &err.to_string(),
+            "pass",
+            Some(err.to_string()),
+        ));
+
+        let expected = [
+            "static-only-rejection",
+            "encoder-instruction-roundtrip",
+            "decoder-feedback-roundtrip",
+            "blocked-then-unblocked-stream",
+            "cancellation-while-blocked",
+            "capacity-exceeded",
+            "malformed-instruction",
+            "wrong-stream-instruction",
+        ];
+        assert_eq!(rows.len(), expected.len());
+        for scenario_id in expected {
+            let row = rows
+                .iter()
+                .find(|row| row["scenario_id"] == scenario_id)
+                .expect("scenario row");
+            assert_eq!(row["bead_id"], "asupersync-1xxmyo");
+            assert_eq!(row["verdict"], "pass");
+        }
+    }
+
     #[test]
     fn qpack_encoder_state_static_only_rejects_without_mutation() {
         let mut context = QpackContext::new(128);
@@ -9019,6 +9972,7 @@ mod tests {
                 decode_varint(&buf[quarter_stream_id_start..]).expect("quarter_stream_id");
 
             assert_eq!(decoded_id, quarter_stream_id);
+            assert_eq!(declared_length as usize, id_len + 1);
             assert_eq!(
                 &buf[quarter_stream_id_start..quarter_stream_id_start + id_len],
                 &expected_varint
