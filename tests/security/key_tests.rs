@@ -133,25 +133,19 @@ fn debug_does_not_leak_full_key_material() {
     init_test_logging();
     test_phase!("debug_does_not_leak_full_key_material");
     let key = AuthKey::from_seed(7);
+    let prefix = format!("{:02x}{:02x}", key.as_bytes()[0], key.as_bytes()[1]);
     let debug_output = format!("{key:?}");
     assert_with_log!(
-        debug_output.starts_with("AuthKey("),
-        "debug should start with AuthKey(",
-        true,
-        debug_output.starts_with("AuthKey(")
+        debug_output == "AuthKey(<redacted>)",
+        "debug should fully redact key material",
+        "AuthKey(<redacted>)",
+        debug_output.as_str()
     );
     assert_with_log!(
-        debug_output.ends_with("...)"),
-        "debug should end with ...)",
-        true,
-        debug_output.ends_with("...)")
-    );
-    let short_enough = debug_output.len() < 32;
-    assert_with_log!(
-        short_enough,
-        "debug should be abbreviated",
-        "< 32",
-        debug_output.len()
+        !debug_output.contains(&prefix),
+        "debug should not expose key prefix",
+        false,
+        debug_output.contains(&prefix)
     );
     test_complete!("debug_does_not_leak_full_key_material");
 }
