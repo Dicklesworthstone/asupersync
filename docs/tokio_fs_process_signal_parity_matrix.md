@@ -12,7 +12,7 @@
 
 | Tokio Family | Asupersync Surface | Ownership Boundary | Current Parity | Key Existing Evidence |
 |---|---|---|---|---|
-| `tokio::fs` | `src/fs/{file,open_options,path_ops,dir,read_dir,metadata,buf_reader,buf_writer,vfs,uring}.rs` | `core` (+ `io-uring` feature path) | Partial/Active | `tests/fs_verification.rs`, `tests/e2e_fs.rs` |
+| `tokio::fs` | `src/fs/{file,open_options,path_ops,dir,read_dir,metadata,buf_reader,buf_writer,vfs,uring}.rs` | `core` (+ `io-uring` feature path) | Active / wave2-proven for named support class | `tests/fs_verification.rs`, `tests/e2e_fs.rs`, `scripts/fs_parity_proof_runner.sh` |
 | `tokio::process` | `src/process.rs` | `core` | Active with critical semantic divergences | `tests/compile_test_process.rs`, inline tests in `src/process.rs` |
 | `tokio::signal` | `src/signal/{signal,ctrl_c,kind,shutdown,graceful}.rs` | `core` (Unix runtime behavior) | Active on Unix, partial cross-platform parity | `tests/e2e_signal.rs`, inline tests in `src/signal/*.rs` |
 
@@ -40,6 +40,35 @@ Track-level gap alignment from T1 artifacts:
 | Buffered file I/O (`BufReader`, `BufWriter`) | `fs::BufReader`, `fs::BufWriter` | Complete | `src/fs/buf_reader.rs`, `src/fs/buf_writer.rs` | Explicit buffering semantics.
 | `tokio::fs` Linux acceleration analog | `IoUringFile` | Partial (feature-gated) | `src/fs/uring.rs` | Only on Linux + `io-uring` feature.
 | Deterministic FS seam | `Vfs`, `UnixVfs` | Partial | `src/fs/vfs.rs` | Unix-focused VFS; broader deterministic virtualization pending.
+
+### 2.1.1 Wave2 Filesystem Proof Overlay (`asupersync-oc0ybw`)
+
+The May 2026 wave2 closeout keeps filesystem support class scoped rather than
+claiming platform-universal `tokio::fs` replacement. The current inventory is:
+
+| Surface | Supported / Platform-Scoped Operations | Evidence |
+|---|---|---|
+| `File` / `OpenOptions` | `open`, `create`, `create_new`, read, write, seek, `sync_all`, `sync_data`, `metadata`, `try_clone`, `set_len`, `set_permissions`, append, truncate | `tests/fs_verification.rs` FS-VERIFY-001..010, 035; `tests/e2e_fs.rs` scenarios `open-options-seek-sync`, `open-options-append-truncate`, `file-create-new-exclusive`, `file-clone-position-rewind`, `file-set-len-permissions` |
+| Convenience path ops | `read`, `read_to_string`, `write`, `try_exists`, `copy`, `hard_link`, `rename`, `remove_file`, `canonicalize`, `read_link`, `write_atomic` | `tests/fs_verification.rs` FS-VERIFY-011..017, 031..034; `tests/e2e_fs.rs` scenarios `error-kind-*`, `try-exists-lifecycle`, `path-ops-copy-hardlink-rename`, `write-atomic-replace-cleanup` |
+| Directory ops | `create_dir`, `create_dir_all`, `remove_dir`, `remove_dir_all`, `read_dir`, `DirEntry::file_type`, `ReadDir::next_entry` | `tests/fs_verification.rs` FS-VERIFY-018..022, 036; `tests/e2e_fs.rs` scenarios `dir-create-remove-boundaries`, `read-dir-metadata-disposition`, `read-dir-drop-cancellation` |
+| Metadata / permissions / symlinks | `metadata`, `symlink_metadata`, `set_permissions`; Unix `symlink`; Windows `symlink_file` / `symlink_dir` are platform-scoped exports | `tests/fs_verification.rs` FS-VERIFY-023..026; `tests/e2e_fs.rs` scenario `unix-symlink-metadata-readlink`; non-Unix symlink support must report stable unsupported/platform diagnostics rather than pass silently |
+| Buffered file I/O | `BufReader`, `Lines`, `BufWriter`, flush visibility, empty line and final-unterminated-line behavior, large-write bypass | `tests/fs_verification.rs` FS-VERIFY-027..030; `tests/e2e_fs.rs` scenarios `buffered-lines-boundaries`, `buf-writer-flush-visibility` |
+| VFS seam | `UnixVfs` and `VfsFile` equivalence for write/read/copy/metadata over the real filesystem | `tests/e2e_fs.rs` scenario `unix-vfs-equivalence`; broader lab/virtual filesystem implementations remain outside this support class |
+| `io_uring` acceleration | `IoUringFile` on Linux with `io-uring`; dropped futures do not claim kernel in-flight cancellation, but stale completions are matched/ignored safely and reported separately from unsupported worker/platform cases | Child `asupersync-3jh6i2` closed; `tests/e2e_fs.rs` scenarios `io-uring-cancellation-support-boundary`, `io-uring-unknown-completion-attribution`; `src/runtime/reactor/io_uring.rs` stale completion guard tests |
+
+Current proof commands were run through `rch exec` only:
+
+| Lane | Command / Artifact | Result |
+|---|---|---|
+| Script syntax | `bash -n scripts/fs_parity_proof_runner.sh` | Pass |
+| Default feature proof | `timeout 1200 bash scripts/fs_parity_proof_runner.sh ${TMPDIR:-/tmp}/fs-parity-proof/asupersync-oc0ybw-boldhill-script` | `validation_passed=true`, `row_count=21`, `pass_count=19`, `skip_count=2`, `fail_count=0`; skips are the two `io_uring` rows with nonempty `unsupported_reason` |
+| `io-uring` feature proof | `timeout 1200 env ASUPERSYNC_FS_PARITY_FEATURES=test-internals,io-uring bash scripts/fs_parity_proof_runner.sh ${TMPDIR:-/tmp}/fs-parity-proof/asupersync-oc0ybw-boldhill-script-io-uring` | `validation_passed=true`, `row_count=21`, `pass_count=21`, `skip_count=0`, `fail_count=0` |
+| Unit-style fs parity suite | `timeout 1200 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fs_verification_oc0ybw CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test fs_verification --features test-internals -- --nocapture` | 50 passed, 0 failed |
+
+Cleanup evidence is part of the proof schema: every row carries
+`cleanup_status`, and the runner rejects cleanup failures. Test cleanup is
+bounded to test-owned temp roots; it does not authorize arbitrary filesystem
+deletion.
 
 ### 2.2 Filesystem Gap Register (T3)
 
