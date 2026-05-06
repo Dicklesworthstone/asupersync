@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Semantic Verification Log Schema Validation (SEM-12.7)
 //!
 //! Bead: `asupersync-3cddg.12.7`
