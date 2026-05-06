@@ -906,7 +906,7 @@ impl Drop for JsMessage {
             );
             // Decrement pending ack count for flow control
             if let Some(ref pending) = self.pending_acks {
-                pending.fetch_sub(1, Ordering::Relaxed);
+                decrement_pending_counter(pending);
             }
         }
     }
@@ -1013,6 +1013,21 @@ impl Drop for JetStreamPublishPermit<'_> {
         self.gate
             .in_flight_publishes
             .fetch_sub(1, Ordering::Release);
+    }
+}
+
+fn decrement_pending_counter(counter: &AtomicUsize) {
+    let mut current = counter.load(Ordering::Relaxed);
+    while current > 0 {
+        match counter.compare_exchange_weak(
+            current,
+            current - 1,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return,
+            Err(observed) => current = observed,
+        }
     }
 }
 
@@ -1391,7 +1406,7 @@ impl Consumer {
 
     /// Decrement pending ack count (called when ack/nack).
     fn decrement_pending(&self) {
-        self.pending_acks.fetch_sub(1, Ordering::Relaxed);
+        decrement_pending_counter(&self.pending_acks);
     }
 
     /// Acknowledge a message and update pending ack count.
@@ -1403,11 +1418,7 @@ impl Consumer {
         cx: &Cx,
         msg: &JsMessage,
     ) -> Result<(), JsError> {
-        let result = msg.ack(client, cx).await;
-        if result.is_ok() {
-            self.decrement_pending();
-        }
-        result
+        msg.ack(client, cx).await
     }
 
     /// Negative acknowledge a message and update pending ack count.
@@ -1419,11 +1430,7 @@ impl Consumer {
         cx: &Cx,
         msg: &JsMessage,
     ) -> Result<(), JsError> {
-        let result = msg.nack(client, cx).await;
-        if result.is_ok() {
-            self.decrement_pending();
-        }
-        result
+        msg.nack(client, cx).await
     }
 
     /// Negative acknowledge a message with delay and update pending ack count.
@@ -1436,11 +1443,7 @@ impl Consumer {
         msg: &JsMessage,
         delay: Duration,
     ) -> Result<(), JsError> {
-        let result = msg.nack_with_delay(client, cx, delay).await;
-        if result.is_ok() {
-            self.decrement_pending();
-        }
-        result
+        msg.nack_with_delay(client, cx, delay).await
     }
 
     /// Pull a batch of messages.
@@ -2546,7 +2549,7 @@ impl JsMessage {
                 self.ack_state.store(committed, Ordering::Release);
                 // Decrement pending ack count for flow control
                 if let Some(ref pending) = self.pending_acks {
-                    pending.fetch_sub(1, Ordering::Relaxed);
+                    decrement_pending_counter(pending);
                 }
                 Ok(())
             }
@@ -4418,6 +4421,104 @@ mod tests {
         }
 
         history
+    }
+
+    #[test]
+    fn consumer_terminal_ack_wrappers_do_not_double_decrement_pending_6xjxd7() {
+        let transcript = capture_publish_transcript(3, |cx, addr| async move {
+            let mut client = NatsClient::connect_with_config(
+                &cx,
+                NatsConfig {
+                    host: addr.ip().to_string(),
+                    port: addr.port(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("connect JetStream ack mock server");
+
+            let pending_acks = Arc::new(AtomicUsize::new(3));
+            let consumer = Consumer {
+                stream: "ORDERS".to_string(),
+                name: "processor".to_string(),
+                prefix: "$JS.API".to_string(),
+                pending_acks: Arc::clone(&pending_acks),
+                max_ack_pending: 1000,
+            };
+            let messages = [
+                JsMessage {
+                    subject: "orders.created".to_string(),
+                    payload: b"ack".to_vec(),
+                    sequence: 1,
+                    delivered: 1,
+                    reply_subject: "$JS.ACK.ORDERS.processor.1.1.1.1713790000000000000.2"
+                        .to_string(),
+                    ack_state: AtomicU8::new(ACK_STATE_PENDING),
+                    pending_acks: Some(Arc::clone(&pending_acks)),
+                },
+                JsMessage {
+                    subject: "orders.created".to_string(),
+                    payload: b"nack".to_vec(),
+                    sequence: 2,
+                    delivered: 1,
+                    reply_subject: "$JS.ACK.ORDERS.processor.1.2.2.1713790000000000001.1"
+                        .to_string(),
+                    ack_state: AtomicU8::new(ACK_STATE_PENDING),
+                    pending_acks: Some(Arc::clone(&pending_acks)),
+                },
+                JsMessage {
+                    subject: "orders.created".to_string(),
+                    payload: b"term".to_vec(),
+                    sequence: 3,
+                    delivered: 1,
+                    reply_subject: "$JS.ACK.ORDERS.processor.1.3.3.1713790000000000002.0"
+                        .to_string(),
+                    ack_state: AtomicU8::new(ACK_STATE_PENDING),
+                    pending_acks: Some(Arc::clone(&pending_acks)),
+                },
+            ];
+
+            consumer
+                .ack_message(&mut client, &cx, &messages[0])
+                .await
+                .expect("consumer ACK wrapper succeeds");
+            assert_eq!(
+                consumer.pending_acks(),
+                2,
+                "ACK wrapper must decrement pending acks exactly once"
+            );
+            consumer
+                .nack_message(&mut client, &cx, &messages[1])
+                .await
+                .expect("consumer NAK wrapper succeeds");
+            assert_eq!(
+                consumer.pending_acks(),
+                1,
+                "NAK wrapper must decrement pending acks exactly once"
+            );
+            messages[2]
+                .term(&mut client, &cx)
+                .await
+                .expect("direct TERM succeeds");
+            assert_eq!(
+                consumer.pending_acks(),
+                0,
+                "ACK/NAK/TERM must release all pending ack credits without underflow"
+            );
+            consumer.decrement_pending();
+            assert_eq!(
+                consumer.pending_acks(),
+                0,
+                "defensive pending decrement must saturate at zero"
+            );
+        });
+
+        let payloads: Vec<_> = transcript
+            .publishes
+            .iter()
+            .map(|publish| publish.payload.as_slice())
+            .collect();
+        assert_eq!(payloads, vec![b"+ACK".as_slice(), b"-NAK", b"+TERM"]);
     }
 
     fn capture_wire_transcript<F, Fut>(reply: MockServerReply, action: F) -> String

@@ -1886,7 +1886,7 @@ impl NatsClient {
 
         let header_block_end = body_start + header_len;
         let header_block = buf[body_start..header_block_end].to_vec();
-        if !header_block.starts_with(b"NATS/1.0\r\n") || !header_block.ends_with(b"\r\n\r\n") {
+        if !is_valid_nats_header_block(&header_block) {
             return Err(NatsError::Protocol(
                 "malformed HMSG header block".to_string(),
             ));
@@ -1932,17 +1932,32 @@ impl NatsClient {
 
         let headers = message.headers.as_deref()?;
         let header_text = std::str::from_utf8(headers).ok()?;
-        if !header_text.starts_with("NATS/1.0\r\n") {
+        let mut lines = header_text.split("\r\n");
+        let first_line = lines.next()?;
+        if first_line != "NATS/1.0" && !first_line.starts_with("NATS/1.0 ") {
             return None;
         }
 
         let mut status = None;
         let mut description = None;
-        for line in header_text["NATS/1.0\r\n".len()..].split("\r\n") {
+        if let Some(status_line) = first_line.strip_prefix("NATS/1.0 ") {
+            let status_line = status_line.trim();
+            let mut parts = status_line.splitn(2, char::is_whitespace);
+            status = parts.next().and_then(|value| value.parse::<u16>().ok());
+            description = parts
+                .next()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
+        }
+
+        for line in lines {
             if line.is_empty() {
                 break;
             }
-            let (name, value) = line.split_once(':')?;
+            let Some((name, value)) = line.split_once(':') else {
+                continue;
+            };
             let value = value.trim();
             if name.eq_ignore_ascii_case("Status") {
                 status = value.parse::<u16>().ok();
@@ -2646,6 +2661,18 @@ impl NatsClient {
     pub fn server_info(&self) -> Option<ServerInfo> {
         self.state.server_info.lock().clone()
     }
+}
+
+fn is_valid_nats_header_block(header_block: &[u8]) -> bool {
+    if !header_block.ends_with(b"\r\n\r\n") {
+        return false;
+    }
+
+    let Some(first_line_end) = header_block.windows(2).position(|window| window == b"\r\n") else {
+        return false;
+    };
+    let first_line = &header_block[..first_line_end];
+    first_line == b"NATS/1.0" || first_line.starts_with(b"NATS/1.0 ")
 }
 
 /// A subscription to a NATS subject.
@@ -4507,6 +4534,70 @@ mod tests {
             }
             other => panic!("expected server error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_hmsg_accepts_nats_status_line_header_block_6xjxd7() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept client");
+            drop(stream);
+        });
+
+        run_test_with_cx(|_cx| async move {
+            let stream = TcpStream::connect(format!("{addr}"))
+                .await
+                .expect("connect client");
+            let mut client = NatsClient {
+                config: NatsConfig::default(),
+                stream,
+                read_buf: NatsReadBuffer::new(),
+                state: Arc::new(SharedState::new()),
+                next_sid: AtomicU64::new(1),
+                connected: true,
+            };
+
+            let headers = b"NATS/1.0 408 Request Timeout\r\n\r\n";
+            let frame = format!("HMSG _INBOX.1 42 {} {}\r\n", headers.len(), headers.len());
+            client
+                .read_buf
+                .extend(frame.as_bytes())
+                .expect("buffer HMSG status header");
+            client.read_buf.extend(headers).expect("buffer headers");
+            client.read_buf.extend(b"\r\n").expect("buffer terminator");
+
+            let parsed = client
+                .try_parse_message()
+                .expect("parse status HMSG")
+                .expect("complete status HMSG frame");
+            let NatsMessage::Msg(message) = parsed else {
+                panic!("expected status HMSG to parse as Msg");
+            };
+
+            assert_eq!(message.subject, "_INBOX.1");
+            assert_eq!(message.sid, 42);
+            assert!(message.payload.is_empty());
+            assert_eq!(message.headers.as_deref(), Some(headers.as_slice()));
+
+            let err = NatsClient::reply_status_error(&message)
+                .expect("status-line HMSG reply must surface as server error");
+            match err {
+                NatsError::Server(message) => {
+                    assert!(
+                        message.contains("408"),
+                        "expected status code, got {message}"
+                    );
+                    assert!(
+                        message.contains("Request Timeout"),
+                        "expected status description, got {message}"
+                    );
+                }
+                other => panic!("expected server error, got {other:?}"),
+            }
+        });
+
+        server.join().expect("server join");
     }
 
     #[test]
