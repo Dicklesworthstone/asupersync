@@ -598,7 +598,7 @@ async fn run_kafka_broker_parity_roundtrip(
 }
 
 #[test]
-fn kafka_broker_parity_real_broker_proof_row() {
+fn kafka_broker_parity_real_broker_proof_row() -> Result<(), String> {
     let config = RealBrokerConfig::new();
     let redacted_servers = redacted_bootstrap_servers(&config.bootstrap_servers);
     let topic = unique_topic("asupersync-kafka-parity");
@@ -624,7 +624,7 @@ fn kafka_broker_parity_real_broker_proof_row() {
             "skip",
             "",
         );
-        return;
+        return Ok(());
     }
 
     let outcome_slot = Arc::new(Mutex::new(None));
@@ -635,32 +635,38 @@ fn kafka_broker_parity_real_broker_proof_row() {
     run_test_with_cx(|cx| async move {
         let outcome =
             run_kafka_broker_parity_roundtrip(&cx, bootstrap_servers, &topic_for_test).await;
-        *result_slot.lock().expect("outcome slot poisoned") = Some(outcome);
+        match result_slot.lock() {
+            Ok(mut slot) => *slot = Some(outcome),
+            Err(poisoned) => *poisoned.into_inner() = Some(outcome),
+        }
     });
 
-    let outcome = outcome_slot
-        .lock()
-        .expect("outcome slot poisoned")
-        .take()
-        .expect("Kafka broker proof did not record an outcome");
+    let outcome = match outcome_slot.lock() {
+        Ok(mut slot) => slot.take(),
+        Err(poisoned) => poisoned.into_inner().take(),
+    }
+    .ok_or_else(|| "Kafka broker proof did not record an outcome".to_string())?;
 
     match outcome {
-        Ok(outcome) => emit_kafka_broker_proof_row(
-            "kafka-producer-consumer-roundtrip",
-            "unknown",
-            redacted_servers,
-            &topic,
-            outcome.message_count,
-            outcome.ack_count,
-            outcome.consumer_lag,
-            0,
-            "producer-consumer-cleanup",
-            "real broker producer send, consumer receive, explicit offset commit, and cleanup",
-            "message reached broker and was consumed with explicit offset commit",
-            "",
-            "pass",
-            "",
-        ),
+        Ok(outcome) => {
+            emit_kafka_broker_proof_row(
+                "kafka-producer-consumer-roundtrip",
+                "unknown",
+                redacted_servers,
+                &topic,
+                outcome.message_count,
+                outcome.ack_count,
+                outcome.consumer_lag,
+                0,
+                "producer-consumer-cleanup",
+                "real broker producer send, consumer receive, explicit offset commit, and cleanup",
+                "message reached broker and was consumed with explicit offset commit",
+                "",
+                "pass",
+                "",
+            );
+            Ok(())
+        }
         Err(error) => {
             emit_kafka_broker_proof_row(
                 "kafka-producer-consumer-roundtrip",
@@ -678,7 +684,7 @@ fn kafka_broker_parity_real_broker_proof_row() {
                 "fail",
                 &error,
             );
-            panic!("Kafka broker parity proof failed: {error}");
+            Err(format!("Kafka broker parity proof failed: {error}"))
         }
     }
 }
