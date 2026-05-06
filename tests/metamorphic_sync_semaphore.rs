@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Metamorphic Tests: sync::Semaphore Invariants
 //!
 //! Tests metamorphic relations for semaphore correctness using LabRuntime + proptest.
@@ -9,17 +7,14 @@
 use asupersync::{
     cx::Cx,
     lab::{LabConfig, LabRuntime},
-    sync::semaphore::{AcquireError, Semaphore, SemaphorePermit},
-    types::{Budget, Outcome, RegionId, TaskId},
-    util::ArenaIndex,
+    sync::semaphore::{AcquireError, Semaphore},
+    types::Budget,
 };
 use proptest::prelude::*;
-use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
-use std::time::{Duration, Instant};
 
 /// Helper to create a test context
 fn test_cx() -> Cx {
@@ -252,11 +247,11 @@ fn mr5_fifo_fairness_ordering() {
         let mut completion_order = Vec::new();
 
         for (i, ctx) in contexts.iter().enumerate() {
-            let mut fut = sem.acquire(ctx, 1);
+            let fut = sem.acquire(ctx, 1);
             futures.push((i, fut));
         }
 
-        for round in 0..num_waiters {
+        for _ in 0..num_waiters {
             sem.add_permits(1);
 
             for (waiter_id, fut) in futures.iter_mut() {
@@ -303,10 +298,8 @@ fn mr6_permit_conservation_stress() {
                     if let Ok(permit) = sem.try_acquire(1) {
                         drop(permit);
                     }
-                } else {
-                    if let Ok(permit) = sem.acquire(&cx, 1).await {
-                        drop(permit);
-                    }
+                } else if let Ok(permit) = sem.acquire(&cx, 1).await {
+                    drop(permit);
                 }
             }).unwrap();
             lab.scheduler.lock().schedule(task_id, 0);
@@ -331,15 +324,15 @@ fn mr7_high_contention_fifo() {
     let contexts: Vec<_> = (0..num_waiters).map(|_| test_cx()).collect();
     let mut futures = Vec::new();
 
-    for i in 0..num_waiters {
-        let mut fut = sem.acquire(&contexts[i], 1);
+    for ctx in contexts.iter().take(num_waiters) {
+        let mut fut = sem.acquire(ctx, 1);
         assert!(poll_once(&mut fut).is_none());
         futures.push(fut);
     }
 
-    for i in 0..num_waiters {
+    for fut in futures.iter_mut().take(num_waiters) {
         sem.add_permits(1);
-        let result = poll_once(&mut futures[i]);
+        let result = poll_once(fut);
         assert!(result.is_some());
         let _permit = result.unwrap().unwrap();
     }
