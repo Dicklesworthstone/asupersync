@@ -37,6 +37,25 @@ enum TlsState {
     Closed,
 }
 
+#[cfg(any(feature = "tls", test))]
+impl TlsState {
+    const fn requires_handshake(self) -> bool {
+        matches!(self, Self::Handshaking)
+    }
+
+    const fn allows_application_io(self) -> bool {
+        matches!(self, Self::Ready)
+    }
+
+    const fn shutdown_pending(self) -> bool {
+        matches!(self, Self::ShuttingDown)
+    }
+
+    const fn is_terminal(self) -> bool {
+        matches!(self, Self::Closed)
+    }
+}
+
 /// A TLS stream wrapping an underlying async transport.
 ///
 /// This implements `AsyncRead` and `AsyncWrite`, transparently encrypting
@@ -231,17 +250,17 @@ impl<IO> TlsStream<IO> {
 
     /// Check if the TLS session is established.
     pub fn is_ready(&self) -> bool {
-        self.state == TlsState::Ready
+        self.state.allows_application_io()
     }
 
     /// Check if the connection is closed.
     pub fn is_closed(&self) -> bool {
-        self.state == TlsState::Closed
+        self.state.is_terminal()
     }
 
     fn note_read_eof(&mut self) {
         self.read_closed = true;
-        if self.state == TlsState::ShuttingDown {
+        if self.state.shutdown_pending() {
             self.state = TlsState::Closed;
         }
     }
@@ -399,12 +418,12 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
 
     /// Poll for graceful TLS shutdown.
     pub fn poll_shutdown_tls(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), TlsError>> {
-        if self.state == TlsState::Closed {
+        if self.state.is_terminal() {
             return Poll::Ready(Ok(()));
         }
 
         // Send close_notify if not already done
-        if self.state != TlsState::ShuttingDown {
+        if !self.state.shutdown_pending() {
             #[cfg(feature = "tracing-integration")]
             debug!("Initiating TLS shutdown");
             self.state = TlsState::ShuttingDown;
@@ -444,12 +463,12 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsStream<IO> {
             return Poll::Ready(Ok(()));
         }
 
-        if self.read_closed || self.state == TlsState::Closed {
+        if self.read_closed || self.state.is_terminal() {
             return Poll::Ready(Ok(()));
         }
 
         // If still handshaking, complete handshake first
-        if self.state == TlsState::Handshaking {
+        if self.state.requires_handshake() {
             match self.poll_handshake(cx) {
                 Poll::Ready(Ok(())) => {}
                 Poll::Ready(Err(e)) => {
@@ -512,7 +531,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        if self.state == TlsState::ShuttingDown || self.state == TlsState::Closed {
+        if self.state.shutdown_pending() || self.state.is_terminal() {
             return Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 "TLS write side closed",
@@ -520,7 +539,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
         }
 
         // If still handshaking, complete handshake first
-        if self.state == TlsState::Handshaking {
+        if self.state.requires_handshake() {
             match self.poll_handshake(cx) {
                 Poll::Ready(Ok(())) => {}
                 Poll::Ready(Err(e)) => {
@@ -596,12 +615,12 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if self.state == TlsState::Closed {
+        if self.state.is_terminal() {
             return Pin::new(&mut self.io).poll_shutdown(cx);
         }
 
         // Send close_notify if not already done
-        if self.state != TlsState::ShuttingDown {
+        if !self.state.shutdown_pending() {
             self.state = TlsState::ShuttingDown;
             self.conn.send_close_notify();
         }
@@ -693,11 +712,20 @@ mod tests {
     }
 
     #[test]
-    fn tls_state_self_equality() {
-        assert_eq!(TlsState::Handshaking, TlsState::Handshaking);
-        assert_eq!(TlsState::Ready, TlsState::Ready);
-        assert_eq!(TlsState::ShuttingDown, TlsState::ShuttingDown);
-        assert_eq!(TlsState::Closed, TlsState::Closed);
+    fn tls_state_lifecycle_classifiers_are_exclusive() {
+        let cases = [
+            (TlsState::Handshaking, true, false, false, false),
+            (TlsState::Ready, false, true, false, false),
+            (TlsState::ShuttingDown, false, false, true, false),
+            (TlsState::Closed, false, false, false, true),
+        ];
+
+        for (state, requires_handshake, allows_io, shutdown_pending, terminal) in cases {
+            assert_eq!(state.requires_handshake(), requires_handshake);
+            assert_eq!(state.allows_application_io(), allows_io);
+            assert_eq!(state.shutdown_pending(), shutdown_pending);
+            assert_eq!(state.is_terminal(), terminal);
+        }
     }
 
     #[test]
