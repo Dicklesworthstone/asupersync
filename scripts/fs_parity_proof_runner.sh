@@ -24,6 +24,7 @@ EXPECTED_SCENARIOS=(
   "read-dir-metadata-disposition"
   "buffered-lines-boundaries"
   "buf-writer-flush-visibility"
+  "write-atomic-replace-cleanup"
   "unix-vfs-equivalence"
   "error-kind-remove-missing"
   "try-exists-lifecycle"

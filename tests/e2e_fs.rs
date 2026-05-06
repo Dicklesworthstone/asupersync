@@ -45,6 +45,7 @@ const FS_PARITY_WAVE2_SCENARIOS: &[&str] = &[
     "read-dir-metadata-disposition",
     "buffered-lines-boundaries",
     "buf-writer-flush-visibility",
+    "write-atomic-replace-cleanup",
     "unix-vfs-equivalence",
     "error-kind-remove-missing",
     "try-exists-lifecycle",
@@ -367,6 +368,88 @@ async fn fs_proof_buf_writer_flush_visibility(temp_root: &Path) -> Result<FsProo
         disk_after_flush.len() as u64,
         "buffered_before_flush=8,disk_before_flush=0,disk_after_flush=buffered,capacity=16",
     ))
+}
+
+fn fs_proof_write_atomic_metadata_expected() -> &'static str {
+    #[cfg(unix)]
+    {
+        "contents=replacement,len=11,mode=640,entries=[atomic.txt]"
+    }
+    #[cfg(not(unix))]
+    {
+        "contents=replacement,len=11,entries=[atomic.txt]"
+    }
+}
+
+async fn fs_proof_write_atomic_replace_cleanup(
+    temp_root: &Path,
+) -> Result<FsProofEvidence, String> {
+    let dir = fs_proof_scenario_dir(temp_root, "write-atomic-replace-cleanup")?;
+    let path = dir.join("atomic.txt");
+
+    fs::write(&path, b"initial")
+        .await
+        .map_err(|err| format!("write initial file: {err}"))?;
+
+    #[cfg(unix)]
+    {
+        let mut permissions = fs::metadata(&path)
+            .await
+            .map_err(|err| format!("metadata before permission set: {err}"))?
+            .permissions();
+        permissions.set_mode(0o640);
+        fs::set_permissions(&path, permissions)
+            .await
+            .map_err(|err| format!("set unix permissions before atomic replace: {err}"))?;
+    }
+
+    fs::write_atomic(&path, b"replacement")
+        .await
+        .map_err(|err| format!("atomic replace: {err}"))?;
+
+    let contents = fs::read_to_string(&path)
+        .await
+        .map_err(|err| format!("read replaced file as string: {err}"))?;
+    let metadata = fs::metadata(&path)
+        .await
+        .map_err(|err| format!("metadata after atomic replace: {err}"))?;
+    let mut read_dir = fs::read_dir(&dir)
+        .await
+        .map_err(|err| format!("read scenario directory: {err}"))?;
+    let mut entries = Vec::new();
+    while let Some(entry) = read_dir
+        .next_entry()
+        .await
+        .map_err(|err| format!("iterate scenario directory: {err}"))?
+    {
+        entries.push(entry.file_name().to_string_lossy().into_owned());
+    }
+    entries.sort();
+
+    #[cfg(unix)]
+    let metadata_actual = {
+        let mode = metadata.permissions().mode() & 0o777;
+        format!(
+            "contents={contents},len={},mode={mode:o},entries=[{}]",
+            metadata.len(),
+            entries.join(",")
+        )
+    };
+    #[cfg(not(unix))]
+    let metadata_actual = format!(
+        "contents={contents},len={},entries=[{}]",
+        metadata.len(),
+        entries.join(",")
+    );
+
+    let metadata_expected = fs_proof_write_atomic_metadata_expected();
+    if metadata_actual != metadata_expected {
+        return Err(format!(
+            "write_atomic drift: actual={metadata_actual} expected={metadata_expected}"
+        ));
+    }
+
+    Ok(FsProofEvidence::supported(metadata.len(), metadata_actual))
 }
 
 async fn fs_proof_unix_vfs_equivalence(temp_root: &Path) -> Result<FsProofEvidence, String> {
@@ -744,6 +827,15 @@ async fn fs_parity_wave2_run() -> io::Result<Vec<Value>> {
             metadata_expected: "buffered_before_flush=8,disk_before_flush=0,disk_after_flush=buffered,capacity=16",
             cancellation_point: "none",
             result: fs_proof_buf_writer_flush_visibility(&temp_root).await,
+        },
+        FsProofScenario {
+            scenario_id: "write-atomic-replace-cleanup",
+            api: "path_ops::write_atomic",
+            operation: "write_replace_preserve_permissions_cleanup_temp",
+            bytes_expected: 11,
+            metadata_expected: fs_proof_write_atomic_metadata_expected(),
+            cancellation_point: "none",
+            result: fs_proof_write_atomic_replace_cleanup(&temp_root).await,
         },
         FsProofScenario {
             scenario_id: "unix-vfs-equivalence",
