@@ -3793,7 +3793,7 @@ fn parse_resp3_non_pubsub_push(value: RespValue) -> Result<RedisResp3NonPubSubPu
     }
     if kind.eq_ignore_ascii_case("invalidate") || kind.eq_ignore_ascii_case("tracking-redir-broken")
     {
-        return parse_client_tracking_push_for_fuzz(RespValue::Push(items))
+        return parse_client_tracking_push(RespValue::Push(items))
             .map(RedisResp3NonPubSubPush::ClientTracking);
     }
 

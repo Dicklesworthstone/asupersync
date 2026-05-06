@@ -1405,6 +1405,7 @@ impl Consumer {
     }
 
     /// Decrement pending ack count (called when ack/nack).
+    #[cfg(any(test, feature = "test-internals"))]
     fn decrement_pending(&self) {
         decrement_pending_counter(&self.pending_acks);
     }
@@ -1661,6 +1662,7 @@ impl PullSubscriberState {
         matches!(self.termination, PullSubscriberTermination::Active)
     }
 
+    #[cfg(any(test, feature = "test-internals"))]
     fn termination(&self) -> PullSubscriberTermination {
         self.termination
     }
