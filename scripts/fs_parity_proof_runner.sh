@@ -30,10 +30,35 @@ EXPECTED_SCENARIOS=(
   "dir-create-remove-boundaries"
   "unix-vfs-equivalence"
   "error-kind-remove-missing"
+  "error-kind-invalid-utf8-read-to-string"
+  "error-kind-create-dir-existing-file"
+  "error-kind-read-dir-non-directory"
   "try-exists-lifecycle"
   "path-ops-copy-hardlink-rename"
   "unix-symlink-metadata-readlink"
+  "io-uring-cancellation-support-boundary"
+  "io-uring-unknown-completion-attribution"
   "read-dir-drop-cancellation"
+)
+
+REQUIRED_ROW_FIELDS=(
+  "bead_id"
+  "scenario_id"
+  "api"
+  "backend"
+  "platform"
+  "feature_flags"
+  "temp_root"
+  "operation"
+  "bytes_expected"
+  "bytes_actual"
+  "metadata_expected"
+  "metadata_actual"
+  "cancellation_point"
+  "cleanup_status"
+  "unsupported_reason"
+  "verdict"
+  "first_failure"
 )
 
 mkdir -p "$OUT_DIR"
@@ -48,13 +73,15 @@ log() {
 
 RUN_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || printf 'unknown')"
+FEATURES="${ASUPERSYNC_FS_PARITY_FEATURES:-test-internals}"
+TARGET_DIR_SAFE_BEAD="${BEAD_ID//[^[:alnum:]_]/_}"
+TARGET_DIR_SAFE_FEATURES="${FEATURES//[^[:alnum:]_]/_}"
+RCH_TARGET_DIR="${ASUPERSYNC_FS_PARITY_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_fs_parity_${TARGET_DIR_SAFE_BEAD}_${TARGET_DIR_SAFE_FEATURES}}"
 
 CMD=(
-  env
-  -u
-  CARGO_TARGET_DIR
   rch exec --
   env
+  "CARGO_TARGET_DIR=$RCH_TARGET_DIR"
   CARGO_INCREMENTAL=0
   CARGO_PROFILE_TEST_DEBUG=0
   "RUSTFLAGS=-C debuginfo=0"
@@ -62,7 +89,7 @@ CMD=(
   "ASUPERSYNC_FS_PARITY_BEAD_ID=$BEAD_ID"
   cargo test -p asupersync
   --test e2e_fs
-  --features test-internals
+  --features "$FEATURES"
   fs_parity_wave2_proof_runner_logs_required_scenarios
   --
   --nocapture
@@ -72,6 +99,8 @@ log "bead_id=$BEAD_ID"
 log "scenario_filter=fs_parity_wave2_proof_runner_logs_required_scenarios"
 log "output_dir=$OUT_DIR"
 log "git_sha=$GIT_SHA"
+log "features=$FEATURES"
+log "rch_target_dir=$RCH_TARGET_DIR"
 log "command=$(printf '%q ' "${CMD[@]}")"
 
 set +e
@@ -90,6 +119,7 @@ for scenario in "${EXPECTED_SCENARIOS[@]}"; do
 done
 
 EXPECTED_JSON="$(printf '%s\n' "${EXPECTED_SCENARIOS[@]}" | jq -R . | jq -s .)"
+REQUIRED_FIELDS_JSON="$(printf '%s\n' "${REQUIRED_ROW_FIELDS[@]}" | jq -R . | jq -s .)"
 if [ "${#MISSING_SCENARIOS[@]}" -eq 0 ]; then
   MISSING_JSON="[]"
 else
@@ -97,17 +127,23 @@ else
 fi
 if [ -s "$ROWS_FILE" ]; then
   ROWS_JSON="$(jq -s . "$ROWS_FILE")"
-  DRIFTS_JSON="$(jq -s '[.[] | select(.verdict != "pass")]' "$ROWS_FILE")"
+  DRIFTS_JSON="$(jq -s '[.[] | select((.verdict == "fail") or (.verdict == "skip" and ((.unsupported_reason // "") == "")) or (.verdict != "pass" and .verdict != "skip"))]' "$ROWS_FILE")"
+  MISSING_FIELDS_JSON="$(jq -s --argjson fields "$REQUIRED_FIELDS_JSON" '[.[] as $row | $fields[] as $field | select(($row | has($field)) | not) | {scenario_id: ($row.scenario_id // "<missing>"), field: $field}]' "$ROWS_FILE")"
 else
   ROWS_JSON="[]"
   DRIFTS_JSON="[]"
+  MISSING_FIELDS_JSON="[]"
 fi
 
 ROW_COUNT="$(wc -l < "$ROWS_FILE" | tr -d ' ')"
+PASS_COUNT="$(jq -s '[.[] | select(.verdict == "pass")] | length' "$ROWS_FILE")"
+SKIP_COUNT="$(jq -s '[.[] | select(.verdict == "skip")] | length' "$ROWS_FILE")"
+FAIL_COUNT="$(jq -s '[.[] | select(.verdict == "fail")] | length' "$ROWS_FILE")"
 VALIDATION_PASSED=false
 if [ "$TEST_STATUS" -eq 0 ] \
   && [ "${#MISSING_SCENARIOS[@]}" -eq 0 ] \
   && [ "$(jq 'length' <<<"$DRIFTS_JSON")" -eq 0 ] \
+  && [ "$(jq 'length' <<<"$MISSING_FIELDS_JSON")" -eq 0 ] \
   && [ "$ROW_COUNT" -eq "${#EXPECTED_SCENARIOS[@]}" ]; then
   VALIDATION_PASSED=true
 fi
@@ -123,10 +159,17 @@ jq -n \
   --arg log_path "$LOG_FILE" \
   --arg rows_path "$ROWS_FILE" \
   --arg command "$(printf '%q ' "${CMD[@]}")" \
+  --arg features "$FEATURES" \
+  --arg rch_target_dir "$RCH_TARGET_DIR" \
   --argjson test_status "$TEST_STATUS" \
   --argjson row_count "$ROW_COUNT" \
+  --argjson pass_count "$PASS_COUNT" \
+  --argjson skip_count "$SKIP_COUNT" \
+  --argjson fail_count "$FAIL_COUNT" \
   --argjson expected_scenarios "$EXPECTED_JSON" \
+  --argjson required_row_fields "$REQUIRED_FIELDS_JSON" \
   --argjson missing_scenarios "$MISSING_JSON" \
+  --argjson missing_fields "$MISSING_FIELDS_JSON" \
   --argjson rows "$ROWS_JSON" \
   --argjson drifts "$DRIFTS_JSON" \
   --argjson validation_passed "$VALIDATION_PASSED" \
@@ -139,11 +182,18 @@ jq -n \
     run_log: $log_path,
     scenario_rows: $rows_path,
     command: $command,
+    features: $features,
+    rch_target_dir: $rch_target_dir,
     test_status: $test_status,
     row_count: $row_count,
+    pass_count: $pass_count,
+    skip_count: $skip_count,
+    fail_count: $fail_count,
     validation_passed: $validation_passed,
     expected_scenarios: $expected_scenarios,
+    required_row_fields: $required_row_fields,
     missing_scenarios: $missing_scenarios,
+    missing_fields: $missing_fields,
     drifts: $drifts,
     rows: $rows
   }' > "$REPORT_FILE"
