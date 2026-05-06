@@ -140,10 +140,13 @@ required = {
     "compiler_schema_version",
     "compiler_statuses",
     "compiler_blocker_kinds",
+    "lab_replay_contract_version",
+    "lab_replay_statuses",
     "required_bundle_fields",
     "gate_contract",
     "scenarios",
     "compiler_scenarios",
+    "lab_replay_scenarios",
     "e2e_script",
     "required_log_fields",
     "proof_commands",
@@ -174,6 +177,7 @@ expected_compiler_blocker_kinds = {
     "unsupported_workload_class",
     "conflicting_fallback_declaration",
 }
+expected_lab_replay_statuses = {"passed", "brownout", "no_win", "blocked"}
 required_bundle_fields = {
     "schema_version",
     "policy_id",
@@ -207,6 +211,10 @@ if set(artifact.get("compiler_statuses") or []) != expected_compiler_statuses:
     validation_errors.append({"kind": "missing_required_field", "field": "compiler_statuses"})
 if set(artifact.get("compiler_blocker_kinds") or []) != expected_compiler_blocker_kinds:
     validation_errors.append({"kind": "missing_required_field", "field": "compiler_blocker_kinds"})
+if artifact.get("lab_replay_contract_version") != "slo-lab-replay-contract-v1":
+    validation_errors.append({"kind": "unsupported_schema_version", "field": "lab_replay_contract_version"})
+if set(artifact.get("lab_replay_statuses") or []) != expected_lab_replay_statuses:
+    validation_errors.append({"kind": "missing_required_field", "field": "lab_replay_statuses"})
 if not required_bundle_fields.issubset(set(artifact.get("required_bundle_fields") or [])):
     validation_errors.append({"kind": "missing_required_field", "field": "required_bundle_fields"})
 
@@ -313,6 +321,50 @@ if compiled_count == 0:
     validation_errors.append({"kind": "missing_required_field", "field": "compiled_compiler_scenarios"})
 if no_win_or_blocked_count == 0:
     validation_errors.append({"kind": "missing_required_field", "field": "no_win_or_blocked_compiler_scenarios"})
+
+replay_statuses_seen = set()
+for replay_scenario in artifact.get("lab_replay_scenarios") or []:
+    scenario_id = replay_scenario.get("scenario_id")
+    if not scenario_id:
+        validation_errors.append({"kind": "missing_required_field", "field": "lab_replay_scenario_id"})
+        continue
+    expected = replay_scenario.get("expected") or {}
+    replay_status = expected.get("replay_status")
+    issue_kinds = list(expected.get("issue_kinds") or [])
+    if replay_status not in expected_lab_replay_statuses:
+        validation_errors.append({"kind": "unsupported_schema_version", "field": scenario_id})
+    replay_statuses_seen.add(replay_status)
+    unknown_issues = sorted(set(issue_kinds) - expected_issue_kinds - expected_compiler_blocker_kinds)
+    if unknown_issues:
+        validation_errors.append({"kind": "unsupported_schema_version", "field": scenario_id, "unknown_issues": unknown_issues})
+    proof_command = replay_scenario.get("proof_command") or ""
+    if "rch exec" not in proof_command:
+        validation_errors.append({"kind": "missing_required_field", "field": f"{scenario_id}.proof_command"})
+
+    event = {
+        "scenario_id": scenario_id,
+        "bead_id": artifact.get("lab_replay_bead_id", artifact.get("bead_id", "")),
+        "accepted": replay_status in {"passed", "brownout"},
+        "issue_kinds": issue_kinds,
+        "policy_id": replay_scenario.get("policy_id", ""),
+        "artifact_path": str(artifact_path),
+        "lab_replay_status": replay_status,
+        "admitted_work_units": expected.get("admitted_work_units", 0),
+        "rejected_work_units": expected.get("rejected_work_units", 0),
+        "optional_work_units_browned_out": expected.get("optional_work_units_browned_out", 0),
+        "cleanup_deadline_misses": expected.get("cleanup_deadline_misses", 0),
+        "fallback_reason": expected.get("fallback_reason"),
+        "proof_command": proof_command,
+    }
+    event_missing = sorted(field for field in required_log_fields if field not in event)
+    if event_missing:
+        validation_errors.append({"kind": "missing_required_field", "field": scenario_id, "missing": event_missing})
+    events.append(event)
+
+required_replay_statuses = {"passed", "brownout", "no_win", "blocked"}
+missing_replay_statuses = sorted(required_replay_statuses - replay_statuses_seen)
+if missing_replay_statuses:
+    validation_errors.append({"kind": "missing_required_field", "field": "lab_replay_scenarios", "missing": missing_replay_statuses})
 
 log_path.write_text("".join(json.dumps(event, sort_keys=True) + "\n" for event in events))
 

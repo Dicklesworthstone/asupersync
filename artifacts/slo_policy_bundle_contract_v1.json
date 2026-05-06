@@ -44,6 +44,14 @@
     "unsupported_workload_class",
     "conflicting_fallback_declaration"
   ],
+  "lab_replay_bead_id": "asupersync-bgtplc.3",
+  "lab_replay_contract_version": "slo-lab-replay-contract-v1",
+  "lab_replay_statuses": [
+    "passed",
+    "brownout",
+    "no_win",
+    "blocked"
+  ],
   "required_bundle_fields": [
     "schema_version",
     "policy_id",
@@ -647,6 +655,100 @@
       }
     }
   ],
+  "lab_replay_scenarios": [
+    {
+      "scenario_id": "lab-replay-normal-load",
+      "policy_id": "agent-swarm-standard",
+      "seed": 1358954497,
+      "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture",
+      "expected": {
+        "replay_status": "passed",
+        "admitted_work_units": 4,
+        "rejected_work_units": 0,
+        "optional_work_units_browned_out": 0,
+        "cleanup_deadline_misses": 0,
+        "fallback_reason": null,
+        "issue_kinds": []
+      }
+    },
+    {
+      "scenario_id": "lab-replay-overload",
+      "policy_id": "agent-swarm-standard",
+      "seed": 1358954498,
+      "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture",
+      "expected": {
+        "replay_status": "passed",
+        "admitted_work_units": 8,
+        "rejected_work_units": 4,
+        "optional_work_units_browned_out": 0,
+        "cleanup_deadline_misses": 0,
+        "fallback_reason": null,
+        "issue_kinds": []
+      }
+    },
+    {
+      "scenario_id": "lab-replay-cleanup-deadline-pressure",
+      "policy_id": "agent-swarm-standard",
+      "seed": 1358954499,
+      "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture",
+      "expected": {
+        "replay_status": "passed",
+        "admitted_work_units": 4,
+        "rejected_work_units": 0,
+        "optional_work_units_browned_out": 0,
+        "cleanup_deadline_misses": 1,
+        "fallback_reason": null,
+        "issue_kinds": []
+      }
+    },
+    {
+      "scenario_id": "lab-replay-optional-brownout",
+      "policy_id": "agent-swarm-standard",
+      "seed": 1358954500,
+      "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture",
+      "expected": {
+        "replay_status": "brownout",
+        "admitted_work_units": 4,
+        "rejected_work_units": 0,
+        "optional_work_units_browned_out": 3,
+        "cleanup_deadline_misses": 0,
+        "fallback_reason": null,
+        "issue_kinds": []
+      }
+    },
+    {
+      "scenario_id": "lab-replay-no-win-fallback",
+      "policy_id": "agent-swarm-standard",
+      "seed": 1358954501,
+      "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture",
+      "expected": {
+        "replay_status": "no_win",
+        "admitted_work_units": 0,
+        "rejected_work_units": 4,
+        "optional_work_units_browned_out": 0,
+        "cleanup_deadline_misses": 0,
+        "fallback_reason": "objectives-conflict-with-pressure",
+        "issue_kinds": []
+      }
+    },
+    {
+      "scenario_id": "lab-replay-malformed-policy",
+      "policy_id": "",
+      "seed": 1359015949,
+      "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture",
+      "expected": {
+        "replay_status": "blocked",
+        "admitted_work_units": 0,
+        "rejected_work_units": 3,
+        "optional_work_units_browned_out": 1,
+        "cleanup_deadline_misses": 0,
+        "fallback_reason": null,
+        "issue_kinds": [
+          "malformed_json"
+        ]
+      }
+    }
+  ],
   "e2e_script": "scripts/validate_slo_policy_bundle.sh",
   "required_log_fields": [
     "scenario_id",
@@ -659,7 +761,7 @@
   "proof_commands": [
     "python3 -m json.tool artifacts/slo_policy_bundle_contract_v1.json >/dev/null",
     "bash -n scripts/validate_slo_policy_bundle.sh",
-    "bash scripts/validate_slo_policy_bundle.sh --output-root target/slo-policy-bundle --run-id asupersync-bgtplc.2",
+    "bash scripts/validate_slo_policy_bundle.sh --output-root target/slo-policy-bundle --run-id asupersync-bgtplc.3",
     "rch exec -- rustfmt --edition 2024 --check src/types/slo_policy.rs src/types/mod.rs tests/slo_policy_bundle_contract.rs",
     "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_compiler CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture",
     "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_compiler_check CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo check -p asupersync --test slo_policy_bundle_contract --features test-internals",

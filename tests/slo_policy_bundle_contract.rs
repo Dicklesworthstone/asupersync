@@ -1,16 +1,20 @@
 //! Contract tests for operator SLO policy bundles.
 
+use asupersync::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
+use asupersync::runtime::yield_now;
 use asupersync::types::{
-    SLO_POLICY_BUNDLE_SCHEMA_VERSION, SLO_POLICY_COMPILER_SCHEMA_VERSION,
-    SloCompiledAdmissionDecision, SloCompiledPolicyStatus, SloLatencyObjective, SloLatencyUnit,
-    SloNoWinFallback, SloOptionalWorkClass, SloPolicyBundle, SloPolicyCapacityEvidence,
-    SloPolicyCompilerBlockerKind, SloPolicyProvenance, SloPolicyRedaction,
-    SloPolicyValidationIssueKind, SloPolicyValidationReport, SloResourcePressureThresholds,
-    SloWorkloadClass, validate_slo_policy_bundle_json,
+    Budget, Outcome, SLO_POLICY_BUNDLE_SCHEMA_VERSION, SLO_POLICY_COMPILER_SCHEMA_VERSION,
+    SloCompiledAdmissionDecision, SloCompiledPolicy, SloCompiledPolicyStatus, SloLatencyObjective,
+    SloLatencyUnit, SloNoWinFallback, SloOptionalWorkClass, SloPolicyBundle,
+    SloPolicyCapacityEvidence, SloPolicyCompilerBlockerKind, SloPolicyProvenance,
+    SloPolicyRedaction, SloPolicyValidationIssueKind, SloPolicyValidationReport,
+    SloResourcePressureThresholds, SloWorkloadClass, validate_slo_policy_bundle_json,
 };
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::Command;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
 
 const CONTRACT_PATH: &str = "artifacts/slo_policy_bundle_contract_v1.json";
 const SCRIPT_PATH: &str = "scripts/validate_slo_policy_bundle.sh";
@@ -117,6 +121,73 @@ fn valid_capacity_evidence() -> SloPolicyCapacityEvidence {
     }
 }
 
+#[derive(Clone)]
+struct LabReplayFixture {
+    scenario_id: &'static str,
+    seed: u64,
+    bundle: Option<SloPolicyBundle>,
+    malformed_document: Option<&'static str>,
+    capacity_evidence: Option<SloPolicyCapacityEvidence>,
+    work_units: u64,
+    optional_work_units: u64,
+    cleanup_work_ms: u64,
+    proof_command: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LabReplayEvidence {
+    scenario_id: String,
+    replay_status: String,
+    compiler_status: String,
+    admitted_work_units: u64,
+    rejected_work_units: u64,
+    optional_work_units_browned_out: u64,
+    cleanup_deadline_misses: u64,
+    fallback_reason: Option<String>,
+    proof_command: String,
+    lab_seed: u64,
+    lab_steps: u64,
+    lab_virtual_elapsed_ms: u64,
+    trace_events: usize,
+    oracle_violations: Vec<String>,
+    issue_kinds: Vec<String>,
+}
+
+impl LabReplayEvidence {
+    fn to_json(&self) -> Value {
+        json!({
+            "scenario_id": self.scenario_id,
+            "replay_status": self.replay_status,
+            "compiler_status": self.compiler_status,
+            "admitted_work_units": self.admitted_work_units,
+            "rejected_work_units": self.rejected_work_units,
+            "optional_work_units_browned_out": self.optional_work_units_browned_out,
+            "cleanup_deadline_misses": self.cleanup_deadline_misses,
+            "fallback_reason": self.fallback_reason,
+            "proof_command": self.proof_command,
+            "lab_seed": self.lab_seed,
+            "lab_steps": self.lab_steps,
+            "lab_virtual_elapsed_ms": self.lab_virtual_elapsed_ms,
+            "trace_events": self.trace_events,
+            "oracle_violations": self.oracle_violations,
+            "issue_kinds": self.issue_kinds,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+struct LabReplayCoreOutcome {
+    replay_status: String,
+    compiler_status: String,
+    admitted_work_units: u64,
+    rejected_work_units: u64,
+    optional_work_units_browned_out: u64,
+    cleanup_deadline_misses: u64,
+    fallback_reason: Option<String>,
+    issue_kinds: Vec<String>,
+    virtual_elapsed_ms: u64,
+}
+
 fn issue_tags(report: &SloPolicyValidationReport) -> BTreeSet<String> {
     report
         .issues
@@ -147,6 +218,13 @@ fn compiler_blocker_tags() -> BTreeSet<String> {
     .into_iter()
     .map(|kind| kind.as_str().to_string())
     .collect()
+}
+
+fn lab_replay_status_tags() -> BTreeSet<String> {
+    ["passed", "brownout", "no_win", "blocked"]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
 }
 
 fn compiled_blocker_tags(compiled: &asupersync::types::SloCompiledPolicy) -> BTreeSet<String> {
@@ -216,6 +294,271 @@ fn expected_issue_tags(scenario_value: &Value) -> BTreeSet<String> {
         .collect()
 }
 
+fn replay_fixture(
+    scenario_id: &'static str,
+    seed: u64,
+    capacity_evidence: Option<SloPolicyCapacityEvidence>,
+    work_units: u64,
+    optional_work_units: u64,
+    cleanup_work_ms: u64,
+) -> LabReplayFixture {
+    LabReplayFixture {
+        scenario_id,
+        seed,
+        bundle: Some(valid_bundle()),
+        malformed_document: None,
+        capacity_evidence,
+        work_units,
+        optional_work_units,
+        cleanup_work_ms,
+        proof_command: "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture",
+    }
+}
+
+fn malformed_replay_fixture() -> LabReplayFixture {
+    LabReplayFixture {
+        scenario_id: "lab-replay-malformed-policy",
+        seed: 0x5100_F00D,
+        bundle: None,
+        malformed_document: Some("{\"schema_version\":1,"),
+        capacity_evidence: None,
+        work_units: 3,
+        optional_work_units: 1,
+        cleanup_work_ms: 0,
+        proof_command: "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture",
+    }
+}
+
+fn lab_replay_fixtures() -> Vec<LabReplayFixture> {
+    let normal = valid_capacity_evidence();
+
+    let mut overload = valid_capacity_evidence();
+    overload.queue_depth = 12_500;
+
+    let cleanup_pressure = valid_capacity_evidence();
+
+    let mut brownout = valid_capacity_evidence();
+    brownout.memory_basis_points = 8_200;
+
+    let mut no_win = valid_capacity_evidence();
+    no_win.memory_basis_points = 9_500;
+
+    vec![
+        replay_fixture(
+            "lab-replay-normal-load",
+            0x5100_0001,
+            Some(normal),
+            4,
+            0,
+            120,
+        ),
+        replay_fixture(
+            "lab-replay-overload",
+            0x5100_0002,
+            Some(overload),
+            12,
+            0,
+            120,
+        ),
+        replay_fixture(
+            "lab-replay-cleanup-deadline-pressure",
+            0x5100_0003,
+            Some(cleanup_pressure),
+            4,
+            0,
+            400,
+        ),
+        replay_fixture(
+            "lab-replay-optional-brownout",
+            0x5100_0004,
+            Some(brownout),
+            4,
+            3,
+            120,
+        ),
+        replay_fixture(
+            "lab-replay-no-win-fallback",
+            0x5100_0005,
+            Some(no_win),
+            4,
+            2,
+            120,
+        ),
+        malformed_replay_fixture(),
+    ]
+}
+
+fn evaluate_lab_replay_fixture(fixture: LabReplayFixture) -> LabReplayEvidence {
+    let config = TestConfig::new()
+        .with_seed(fixture.seed)
+        .with_tracing(true)
+        .with_max_steps(20_000);
+    let mut runtime = LabRuntimeTarget::create_runtime(config);
+    let proof_command = fixture.proof_command.to_string();
+    let lab_seed = fixture.seed;
+    let scenario_id = fixture.scenario_id.to_string();
+
+    let core =
+        LabRuntimeTarget::block_on(
+            &mut runtime,
+            async move { run_lab_replay_core(fixture).await },
+        );
+
+    LabRuntimeTarget::advance_time(&mut runtime, Duration::from_millis(core.virtual_elapsed_ms));
+    let report = runtime.run_until_quiescent_with_report();
+    let oracle_violations = runtime
+        .oracles
+        .check_all(runtime.now())
+        .into_iter()
+        .map(|violation| violation.to_string())
+        .collect::<Vec<_>>();
+
+    LabReplayEvidence {
+        scenario_id,
+        replay_status: core.replay_status,
+        compiler_status: core.compiler_status,
+        admitted_work_units: core.admitted_work_units,
+        rejected_work_units: core.rejected_work_units,
+        optional_work_units_browned_out: core.optional_work_units_browned_out,
+        cleanup_deadline_misses: core.cleanup_deadline_misses,
+        fallback_reason: core.fallback_reason,
+        proof_command,
+        lab_seed,
+        lab_steps: runtime.steps(),
+        lab_virtual_elapsed_ms: LabRuntimeTarget::now(&runtime).as_millis() as u64,
+        trace_events: report.trace_len,
+        oracle_violations,
+        issue_kinds: core.issue_kinds,
+    }
+}
+
+async fn run_lab_replay_core(fixture: LabReplayFixture) -> LabReplayCoreOutcome {
+    if let Some(document) = fixture.malformed_document {
+        let report = validate_slo_policy_bundle_json(document);
+        return LabReplayCoreOutcome {
+            replay_status: "blocked".to_string(),
+            compiler_status: "blocked".to_string(),
+            admitted_work_units: 0,
+            rejected_work_units: fixture.work_units,
+            optional_work_units_browned_out: fixture.optional_work_units,
+            cleanup_deadline_misses: 0,
+            fallback_reason: None,
+            issue_kinds: issue_tags(&report).into_iter().collect(),
+            virtual_elapsed_ms: 0,
+        };
+    }
+
+    let bundle = fixture.bundle.expect("replay fixture has bundle");
+    let compiled = bundle.compile_for_budget_admission(fixture.capacity_evidence.as_ref());
+    let compiler_status = compiled.status.as_str().to_string();
+    let capacity_limit = replay_capacity_limit(&compiled);
+    let admitted_work_units = if compiled.is_executable() {
+        fixture.work_units.min(capacity_limit)
+    } else {
+        0
+    };
+    let rejected_work_units = fixture.work_units.saturating_sub(admitted_work_units);
+    let optional_work_units_browned_out = if should_brownout_optional_work(&compiled) {
+        fixture.optional_work_units
+    } else {
+        0
+    };
+    let cleanup_deadline_misses = u64::from(
+        compiled.is_executable() && fixture.cleanup_work_ms > compiled.budget.cleanup_deadline_ms,
+    );
+    let fallback_reason = compiled
+        .no_win_fallback
+        .as_ref()
+        .map(|fallback| fallback.fallback_reason.clone());
+    let issue_kinds = compiled_blocker_tags(&compiled).into_iter().collect();
+    let replay_status = if !compiled.blockers.is_empty() {
+        "blocked"
+    } else if compiled.status == SloCompiledPolicyStatus::NoWin {
+        "no_win"
+    } else if optional_work_units_browned_out > 0 {
+        "brownout"
+    } else {
+        "passed"
+    }
+    .to_string();
+    let completed_work_units =
+        run_admitted_replay_tasks(admitted_work_units, compiled.budget.to_budget()).await;
+    assert_eq!(
+        completed_work_units, admitted_work_units,
+        "all admitted replay units should complete"
+    );
+    let virtual_elapsed_ms = admitted_work_units
+        .saturating_mul(2)
+        .saturating_add(optional_work_units_browned_out)
+        .saturating_add(
+            fixture
+                .cleanup_work_ms
+                .min(compiled.budget.cleanup_deadline_ms),
+        );
+
+    LabReplayCoreOutcome {
+        replay_status,
+        compiler_status,
+        admitted_work_units,
+        rejected_work_units,
+        optional_work_units_browned_out,
+        cleanup_deadline_misses,
+        fallback_reason,
+        issue_kinds,
+        virtual_elapsed_ms,
+    }
+}
+
+async fn run_admitted_replay_tasks(work_units: u64, budget: Budget) -> u64 {
+    let cx = asupersync::Cx::current().expect("LabRuntimeTarget installs current Cx");
+    let completions = Arc::new(StdMutex::new(0_u64));
+    let mut handles = Vec::new();
+
+    for _ in 0..work_units {
+        let task_cx = cx.clone();
+        let task_completions = Arc::clone(&completions);
+        handles.push(LabRuntimeTarget::spawn(
+            &task_cx.clone(),
+            budget,
+            async move {
+                yield_now().await;
+                *task_completions.lock().expect("completion mutex") += 1;
+                1_u64
+            },
+        ));
+    }
+
+    let mut completed = 0;
+    for handle in handles {
+        match handle.await {
+            Outcome::Ok(units) => completed += units,
+            other => panic!("replay task failed: {other:?}"),
+        }
+    }
+    assert_eq!(
+        *completions.lock().expect("completion mutex"),
+        completed,
+        "completion counter matches awaited tasks"
+    );
+    completed
+}
+
+fn replay_capacity_limit(compiled: &SloCompiledPolicy) -> u64 {
+    (compiled.admission.queue_wait_threshold_ms / 10).max(1)
+}
+
+fn should_brownout_optional_work(compiled: &SloCompiledPolicy) -> bool {
+    let Some(memory) = compiled.admission.evidence_memory_basis_points else {
+        return false;
+    };
+    compiled.is_executable()
+        && memory
+            >= compiled
+                .admission
+                .memory_soft_basis_points
+                .saturating_sub(500)
+}
+
 #[test]
 fn artifact_catalog_matches_rust_tags_and_required_fields() {
     let artifact = contract();
@@ -264,6 +607,12 @@ fn artifact_catalog_matches_rust_tags_and_required_fields() {
                 .to_string()
         })
         .collect::<BTreeSet<_>>();
+    let artifact_lab_replay_statuses = artifact["lab_replay_statuses"]
+        .as_array()
+        .expect("lab replay statuses")
+        .iter()
+        .map(|value| value.as_str().expect("lab replay status").to_string())
+        .collect::<BTreeSet<_>>();
     let required_fields = artifact["required_bundle_fields"]
         .as_array()
         .expect("required bundle fields")
@@ -276,6 +625,7 @@ fn artifact_catalog_matches_rust_tags_and_required_fields() {
     assert_eq!(artifact_issues, validation_issue_tags());
     assert_eq!(artifact_compiler_statuses, compiler_status_tags());
     assert_eq!(artifact_compiler_blockers, compiler_blocker_tags());
+    assert_eq!(artifact_lab_replay_statuses, lab_replay_status_tags());
     assert_eq!(
         artifact["compiler_schema_version"].as_str(),
         Some(SLO_POLICY_COMPILER_SCHEMA_VERSION)
@@ -616,6 +966,131 @@ fn compiler_scenarios_match_rust_compiler() {
 }
 
 #[test]
+fn lab_runtime_slo_policy_replay_fixtures_cover_required_outcomes() {
+    let mut evidence_by_id = BTreeMap::new();
+    for fixture in lab_replay_fixtures() {
+        let first = evaluate_lab_replay_fixture(fixture.clone());
+        let second = evaluate_lab_replay_fixture(fixture);
+        assert_eq!(first, second, "LabRuntime replay must be deterministic");
+        assert!(
+            first.oracle_violations.is_empty(),
+            "lab replay leaves runtime oracles clean: {:?}",
+            first.oracle_violations
+        );
+        assert!(first.proof_command.contains("rch exec"));
+        let json = first.to_json();
+        assert_eq!(json["scenario_id"], first.scenario_id);
+        assert_eq!(json["replay_status"], first.replay_status);
+        assert_eq!(json["lab_seed"], first.lab_seed);
+        evidence_by_id.insert(first.scenario_id.clone(), first);
+    }
+
+    assert_eq!(
+        evidence_by_id["lab-replay-normal-load"].replay_status,
+        "passed"
+    );
+    assert_eq!(
+        evidence_by_id["lab-replay-normal-load"].admitted_work_units,
+        4
+    );
+    assert_eq!(evidence_by_id["lab-replay-overload"].rejected_work_units, 4);
+    assert_eq!(
+        evidence_by_id["lab-replay-cleanup-deadline-pressure"].cleanup_deadline_misses,
+        1
+    );
+    assert_eq!(
+        evidence_by_id["lab-replay-optional-brownout"].replay_status,
+        "brownout"
+    );
+    assert_eq!(
+        evidence_by_id["lab-replay-optional-brownout"].optional_work_units_browned_out,
+        3
+    );
+    assert_eq!(
+        evidence_by_id["lab-replay-no-win-fallback"].replay_status,
+        "no_win"
+    );
+    assert_eq!(
+        evidence_by_id["lab-replay-no-win-fallback"]
+            .fallback_reason
+            .as_deref(),
+        Some("objectives-conflict-with-pressure")
+    );
+    assert_eq!(
+        evidence_by_id["lab-replay-malformed-policy"].issue_kinds,
+        vec!["malformed_json".to_string()]
+    );
+}
+
+#[test]
+fn lab_replay_artifact_scenarios_match_rust_replay() {
+    let artifact = contract();
+    let mut evidence_by_id = BTreeMap::new();
+    for fixture in lab_replay_fixtures() {
+        let evidence = evaluate_lab_replay_fixture(fixture);
+        evidence_by_id.insert(evidence.scenario_id.clone(), evidence);
+    }
+
+    for scenario in artifact["lab_replay_scenarios"]
+        .as_array()
+        .expect("lab replay scenarios")
+    {
+        let scenario_id = scenario["scenario_id"]
+            .as_str()
+            .expect("scenario id is string");
+        let evidence = evidence_by_id
+            .get(scenario_id)
+            .unwrap_or_else(|| panic!("missing rust replay fixture {scenario_id}"));
+        let expected = &scenario["expected"];
+        assert_eq!(
+            evidence.replay_status,
+            expected["replay_status"]
+                .as_str()
+                .expect("expected replay status"),
+            "scenario {scenario_id}"
+        );
+        assert_eq!(
+            evidence.admitted_work_units,
+            expected["admitted_work_units"]
+                .as_u64()
+                .expect("expected admitted units"),
+            "scenario {scenario_id}"
+        );
+        assert_eq!(
+            evidence.rejected_work_units,
+            expected["rejected_work_units"]
+                .as_u64()
+                .expect("expected rejected units"),
+            "scenario {scenario_id}"
+        );
+        assert_eq!(
+            evidence.optional_work_units_browned_out,
+            expected["optional_work_units_browned_out"]
+                .as_u64()
+                .expect("expected optional brownout units"),
+            "scenario {scenario_id}"
+        );
+        assert_eq!(
+            evidence.cleanup_deadline_misses,
+            expected["cleanup_deadline_misses"]
+                .as_u64()
+                .expect("expected cleanup misses"),
+            "scenario {scenario_id}"
+        );
+        assert_eq!(
+            evidence.issue_kinds,
+            expected["issue_kinds"]
+                .as_array()
+                .expect("expected issue kinds")
+                .iter()
+                .map(|value| value.as_str().expect("issue kind").to_string())
+                .collect::<Vec<_>>(),
+            "scenario {scenario_id}"
+        );
+    }
+}
+
+#[test]
 fn script_emits_accepted_rejected_and_malformed_rows() {
     let output_root = "target/slo-policy-bundle-contract-test";
     let run_id = "script-emits";
@@ -647,6 +1122,16 @@ fn script_emits_accepted_rejected_and_malformed_rows() {
             .iter()
             .any(|kind| kind.as_str() == Some("malformed_json"))
     }));
+    assert!(
+        events
+            .iter()
+            .any(|event| event["lab_replay_status"] == "passed")
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["lab_replay_status"] == "no_win")
+    );
 
     let input_status = Command::new("bash")
         .args([SCRIPT_PATH, "--input-jsonl", &log_path])
