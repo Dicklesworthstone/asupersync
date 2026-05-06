@@ -3845,11 +3845,12 @@ mod tests {
     }
 
     #[test]
-    fn browser_trace_log_fields_include_worker_replay_linkage() {
+    fn browser_trace_log_fields_redact_worker_identity_while_preserving_replay_linkage() {
+        let raw_worker_id = "worker-a";
         let event = TraceEvent::worker_cancel_requested(
             21,
             Time::from_nanos(55),
-            "worker-a",
+            raw_worker_id,
             77,
             91,
             0x00C0_FFEE,
@@ -3864,10 +3865,14 @@ mod tests {
         assert_eq!(fields.get("region"), Some(&region(10).to_string()));
         assert_eq!(fields.get("replay_hash"), Some(&"12648430".to_string()));
         assert_eq!(fields.get("task"), Some(&task(9).to_string()));
-        assert_eq!(fields.get("worker_id"), Some(&"worker-a".to_string()));
+        assert_eq!(fields.get("worker_id"), Some(&"<redacted>".to_string()));
         assert_eq!(
             fields.get("sequence_group"),
-            Some(&"worker_job:77:worker-a".to_string())
+            Some(&"worker_job:77:<redacted>".to_string())
+        );
+        assert!(
+            fields.values().all(|value| !value.contains(raw_worker_id)),
+            "browser trace log fields must not leak raw worker identity: {fields:?}"
         );
     }
 
@@ -3956,12 +3961,12 @@ mod tests {
     }
 
     #[test]
-    fn browser_trace_log_fields_cap_large_worker_attributes_without_utf8_breakage() {
-        let worker_id = format!("worker-{}", "e\u{0301}".repeat(200));
+    fn browser_trace_log_fields_redact_large_worker_attributes() {
+        let raw_worker_id = format!("worker-{}", "e\u{0301}".repeat(200));
         let event = TraceEvent::worker_cancel_requested(
             30,
             Time::from_nanos(60),
-            worker_id,
+            raw_worker_id.clone(),
             123,
             456,
             0xDEAD_BEEF,
@@ -3978,12 +3983,23 @@ mod tests {
             .get("sequence_group")
             .expect("sequence_group field should be present");
 
-        assert!(worker_id.len() <= MAX_BROWSER_TRACE_ATTRIBUTE_BYTES);
-        assert!(sequence_group.len() <= MAX_BROWSER_TRACE_ATTRIBUTE_BYTES);
-        assert!(worker_id.starts_with("worker-"));
-        assert!(sequence_group.starts_with("worker_job:123:worker-"));
-        assert!(worker_id.contains('#'));
-        assert!(sequence_group.contains('#'));
+        assert_eq!(worker_id, "<redacted>");
+        assert_eq!(sequence_group, "worker_job:123:<redacted>");
+        assert!(
+            fields.values().all(|value| !value.contains(&raw_worker_id)),
+            "browser trace log fields must not leak large raw worker identity: {fields:?}"
+        );
+    }
+
+    #[test]
+    fn browser_trace_attribute_cap_preserves_utf8_boundary() {
+        let raw = format!("group:{}", "e\u{0301}".repeat(200));
+        let capped = cap_browser_trace_attribute(&raw);
+
+        assert!(capped.len() <= MAX_BROWSER_TRACE_ATTRIBUTE_BYTES);
+        assert!(capped.starts_with("group:"));
+        assert!(capped.contains('#'));
+        assert!(capped.is_char_boundary(capped.len()));
     }
 
     // ── canonical serialization golden ─────────────────────────────
