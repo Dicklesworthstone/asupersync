@@ -46,7 +46,7 @@ This contract defines the adversarial validation corpus for authority flow: abus
 ## Validation
 
 ```bash
-rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa073 cargo test --test authority_flow_audit_contract -- --nocapture
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_authority_flow_audit cargo test -p asupersync --test authority_flow_audit_contract --features test-internals -- --nocapture
 ```
 
 ## Cross-References

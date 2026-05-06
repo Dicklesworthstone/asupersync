@@ -131,17 +131,20 @@
     {
       "scenario_id": "AFA-SMOKE-ABUSE",
       "description": "Validate abuse scenario definitions and expected outcomes",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa073 cargo test --test authority_flow_audit_contract abuse -- --nocapture"
+      "test_filter": "abuse",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_authority_flow_audit_AFA_SMOKE_ABUSE cargo test -p asupersync --test authority_flow_audit_contract --features test-internals abuse -- --nocapture"
     },
     {
       "scenario_id": "AFA-SMOKE-REVOCATION",
       "description": "Validate revocation drill definitions and evidence requirements",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa073 cargo test --test authority_flow_audit_contract revocation -- --nocapture"
+      "test_filter": "revocation",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_authority_flow_audit_AFA_SMOKE_REVOCATION cargo test -p asupersync --test authority_flow_audit_contract --features test-internals revocation -- --nocapture"
     },
     {
       "scenario_id": "AFA-SMOKE-AUDIT",
       "description": "Validate audit evidence requirements and log field coverage",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa073 cargo test --test authority_flow_audit_contract audit -- --nocapture"
+      "test_filter": "audit",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_authority_flow_audit_AFA_SMOKE_AUDIT cargo test -p asupersync --test authority_flow_audit_contract --features test-internals audit -- --nocapture"
     }
   ],
   "downstream_beads": []
