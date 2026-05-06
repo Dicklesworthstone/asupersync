@@ -42,6 +42,7 @@ const FS_PARITY_WAVE2_SCENARIOS: &[&str] = &[
     "open-options-seek-sync",
     "open-options-append-truncate",
     "file-create-new-exclusive",
+    "file-clone-position-rewind",
     "file-set-len-permissions",
     "read-dir-metadata-disposition",
     "buffered-lines-boundaries",
@@ -308,6 +309,73 @@ async fn fs_proof_file_create_new_exclusive(temp_root: &Path) -> Result<FsProofE
             err.kind()
         )),
     }
+}
+
+async fn fs_proof_file_clone_position_rewind(temp_root: &Path) -> Result<FsProofEvidence, String> {
+    let dir = fs_proof_scenario_dir(temp_root, "file-clone-position-rewind")?;
+    let path = dir.join("cursor-shared.txt");
+    fs::write(&path, b"abcdef")
+        .await
+        .map_err(|err| format!("write clone cursor fixture: {err}"))?;
+
+    let mut file = fs::File::open(&path)
+        .await
+        .map_err(|err| format!("open clone cursor fixture: {err}"))?;
+    let mut clone = file
+        .try_clone()
+        .await
+        .map_err(|err| format!("try_clone file: {err}"))?;
+
+    let mut first = [0_u8; 2];
+    file.read_exact(&mut first)
+        .await
+        .map_err(|err| format!("read first bytes from original: {err}"))?;
+    let original_position = file
+        .stream_position()
+        .await
+        .map_err(|err| format!("stream_position after original read: {err}"))?;
+    let clone_position_after_original_read = clone
+        .stream_position()
+        .await
+        .map_err(|err| format!("clone stream_position after original read: {err}"))?;
+
+    let mut clone_next = [0_u8; 2];
+    clone
+        .read_exact(&mut clone_next)
+        .await
+        .map_err(|err| format!("read next bytes from clone: {err}"))?;
+    let original_position_after_clone_read = file
+        .stream_position()
+        .await
+        .map_err(|err| format!("original stream_position after clone read: {err}"))?;
+
+    file.rewind()
+        .await
+        .map_err(|err| format!("rewind original file: {err}"))?;
+    let clone_position_after_rewind = clone
+        .stream_position()
+        .await
+        .map_err(|err| format!("clone stream_position after rewind: {err}"))?;
+    let mut rewound = [0_u8; 3];
+    clone
+        .read_exact(&mut rewound)
+        .await
+        .map_err(|err| format!("read rewound bytes from clone: {err}"))?;
+
+    let first = String::from_utf8_lossy(&first);
+    let clone_next = String::from_utf8_lossy(&clone_next);
+    let rewound = String::from_utf8_lossy(&rewound);
+    let metadata_actual = format!(
+        "first={first},original_position={original_position},clone_position_after_original_read={clone_position_after_original_read},clone_next={clone_next},original_position_after_clone_read={original_position_after_clone_read},clone_position_after_rewind={clone_position_after_rewind},rewound={rewound}"
+    );
+    let metadata_expected = "first=ab,original_position=2,clone_position_after_original_read=2,clone_next=cd,original_position_after_clone_read=4,clone_position_after_rewind=0,rewound=abc";
+    if metadata_actual != metadata_expected {
+        return Err(format!(
+            "clone/position/rewind drift: actual={metadata_actual} expected={metadata_expected}"
+        ));
+    }
+
+    Ok(FsProofEvidence::supported(6, metadata_actual))
 }
 
 async fn fs_proof_read_dir_metadata(temp_root: &Path) -> Result<FsProofEvidence, String> {
@@ -930,6 +998,15 @@ async fn fs_parity_wave2_run() -> io::Result<Vec<Value>> {
             metadata_expected: "read_write=true,second_error=AlreadyExists",
             cancellation_point: "none",
             result: fs_proof_file_create_new_exclusive(&temp_root).await,
+        },
+        FsProofScenario {
+            scenario_id: "file-clone-position-rewind",
+            api: "File",
+            operation: "try_clone_shared_cursor_stream_position_rewind",
+            bytes_expected: 6,
+            metadata_expected: "first=ab,original_position=2,clone_position_after_original_read=2,clone_next=cd,original_position_after_clone_read=4,clone_position_after_rewind=0,rewound=abc",
+            cancellation_point: "none",
+            result: fs_proof_file_clone_position_rewind(&temp_root).await,
         },
         FsProofScenario {
             scenario_id: "file-set-len-permissions",

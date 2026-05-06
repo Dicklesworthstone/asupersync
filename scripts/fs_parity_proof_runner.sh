@@ -21,6 +21,7 @@ EXPECTED_SCENARIOS=(
   "open-options-seek-sync"
   "open-options-append-truncate"
   "file-create-new-exclusive"
+  "file-clone-position-rewind"
   "file-set-len-permissions"
   "read-dir-metadata-disposition"
   "buffered-lines-boundaries"
