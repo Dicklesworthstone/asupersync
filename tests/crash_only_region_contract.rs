@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Crash-only region semantics contract invariants (AA-09.1).
 
 #![allow(missing_docs, clippy::cast_precision_loss, clippy::cast_sign_loss)]
