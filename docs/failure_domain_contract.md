@@ -57,7 +57,7 @@ This contract defines failure-domain compilation, restart topology hooks, and re
 ## Validation
 
 ```bash
-rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa092 cargo test --test failure_domain_contract -- --nocapture
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_failure_domain cargo test -p asupersync --test failure_domain_contract --features test-internals -- --nocapture
 ```
 
 ## Cross-References

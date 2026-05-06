@@ -139,17 +139,20 @@
     {
       "scenario_id": "FDC-SMOKE-DOMAINS",
       "description": "Validate failure domain model properties and domain types",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa092 cargo test --test failure_domain_contract domain -- --nocapture"
+      "test_filter": "domain",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_failure_domain cargo test -p asupersync --test failure_domain_contract --features test-internals domain -- --nocapture"
     },
     {
       "scenario_id": "FDC-SMOKE-TOPOLOGY",
       "description": "Validate restart topology and hooks",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa092 cargo test --test failure_domain_contract topology -- --nocapture"
+      "test_filter": "topology",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_failure_domain cargo test -p asupersync --test failure_domain_contract --features test-internals topology -- --nocapture"
     },
     {
       "scenario_id": "FDC-SMOKE-AUTHORITY",
       "description": "Validate recovery authority rules and capability transitions",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa092 cargo test --test failure_domain_contract authority -- --nocapture"
+      "test_filter": "authority",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_failure_domain cargo test -p asupersync --test failure_domain_contract --features test-internals authority -- --nocapture"
     }
   ],
   "downstream_beads": [

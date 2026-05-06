@@ -52,6 +52,17 @@ fn doc_references_bead_id() {
     );
 }
 
+#[test]
+fn doc_validation_command_uses_scoped_rch() {
+    let doc = load_doc();
+    assert!(
+        doc.contains(
+            "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_failure_domain cargo test -p asupersync --test failure_domain_contract --features test-internals -- --nocapture"
+        ),
+        "doc must route validation through scoped rch command"
+    );
+}
+
 // ── Artifact stability ─────────────────────────────────────────────
 
 #[test]
@@ -365,16 +376,43 @@ fn smoke_scenarios_are_rch_routed() {
     for scenario in scenarios {
         let sid = scenario["scenario_id"].as_str().unwrap();
         let cmd = scenario["command"].as_str().unwrap();
-        assert!(cmd.starts_with("rch exec"), "{sid}: must be rch-routed");
+        assert!(cmd.contains("RCH_BIN"), "{sid}: must use configurable rch");
+        assert!(cmd.contains("exec --"), "{sid}: must use rch exec");
+        assert!(
+            cmd.contains("CARGO_TARGET_DIR=${TMPDIR:-/tmp}/"),
+            "{sid}: must use TMPDIR-aware target dir"
+        );
+        assert!(
+            cmd.contains("cargo test -p asupersync"),
+            "{sid}: must scope cargo test to asupersync"
+        );
+        assert!(
+            scenario["test_filter"]
+                .as_str()
+                .is_some_and(|filter| !filter.is_empty()),
+            "{sid}: must pin a test filter"
+        );
     }
 }
 
 #[test]
 fn runner_script_exists_and_declares_modes() {
     let runner = load_runner();
-    for mode in &["--list", "--dry-run", "--execute", "--scenario"] {
+    for mode in &[
+        "--list",
+        "--dry-run",
+        "--execute",
+        "--scenario",
+        "RCH_BIN",
+        "local fallback",
+        "validation_passed",
+    ] {
         assert!(runner.contains(mode), "runner must support {mode}");
     }
+    assert!(
+        !runner.contains("eval "),
+        "runner must avoid string-based eval execution"
+    );
 }
 
 // ── Functional: domain membership invariant ─────────────────────────
