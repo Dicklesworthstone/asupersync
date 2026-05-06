@@ -1,5 +1,4 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
+#![allow(missing_docs)]
 
 use asupersync::lab::{
     DporCoverageMetrics, DporExplorer, ExplorationReport, ExplorerConfig, ScheduleExplorer,
