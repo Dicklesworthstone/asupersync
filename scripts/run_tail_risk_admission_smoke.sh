@@ -10,6 +10,7 @@ LIST_ONLY=0
 OUTPUT_ROOT_OVERRIDE="${TAIL_RISK_ADMISSION_SMOKE_OUTPUT_DIR:-}"
 ARTIFACT_ROOT_OVERRIDE="${TAIL_RISK_ADMISSION_SMOKE_ARTIFACT_ROOT:-}"
 RUN_ID_OVERRIDE="${TAIL_RISK_ADMISSION_SMOKE_RUN_ID:-}"
+RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
 
 usage() {
     cat <<'USAGE'
@@ -28,6 +29,10 @@ USAGE
 require_tools() {
     if ! command -v jq >/dev/null 2>&1; then
         echo "FATAL: jq is required for tail-risk admission smoke runner" >&2
+        exit 1
+    fi
+    if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+        echo "FATAL: rch is required and was not found/executable at: ${RCH_BIN}" >&2
         exit 1
     fi
     if [ ! -f "$ARTIFACT" ]; then
@@ -176,7 +181,8 @@ mkdir -p "$RUN_DIR"
 HOST_FINGERPRINT_JSON="$(host_fingerprint_json)"
 STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-COMMAND="rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_tail_risk_admission ASUPERSYNC_TAIL_RISK_ADMISSION_CONTRACT_PATH=${ARTIFACT} ASUPERSYNC_TAIL_RISK_ADMISSION_SCENARIO=${SCENARIO} ASUPERSYNC_TAIL_RISK_ADMISSION_REPORT_PATH=${SCENARIO_REPORT_PATH} cargo test -p asupersync --lib tail_risk_admission_smoke_contract_emits_report --features test-internals -- --nocapture"
+printf -v RCH_INVOCATION '%q' "$RCH_BIN"
+COMMAND="${RCH_INVOCATION} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_tail_risk_admission ASUPERSYNC_TAIL_RISK_ADMISSION_CONTRACT_PATH=${ARTIFACT} ASUPERSYNC_TAIL_RISK_ADMISSION_SCENARIO=${SCENARIO} ASUPERSYNC_TAIL_RISK_ADMISSION_REPORT_PATH=${SCENARIO_REPORT_PATH} cargo test -p asupersync --lib tail_risk_admission_smoke_contract_emits_report --features test-internals -- --nocapture"
 
 COMMAND_EXIT_CODE=0
 SCRIPT_EXIT_CODE=0
@@ -191,11 +197,21 @@ if [ "$MODE" = "dry-run" ]; then
     VALIDATION_PASSED=true
     MESSAGE="dry run emitted manifests only"
 else
-    if ! eval "$COMMAND" >"$RUN_LOG_PATH" 2>&1; then
-        COMMAND_EXIT_CODE=$?
+    set +e
+    eval "$COMMAND" >"$RUN_LOG_PATH" 2>&1
+    COMMAND_EXIT_CODE=$?
+    set -e
+
+    if [ "$COMMAND_EXIT_CODE" -ne 0 ]; then
         SCRIPT_EXIT_CODE=$COMMAND_EXIT_CODE
         STATUS="failed"
         MESSAGE="rch proof command failed"
+    elif grep -Eq '^\[RCH\] local \(|falling back to local' "$RUN_LOG_PATH" 2>/dev/null; then
+        COMMAND_EXIT_CODE=86
+        SCRIPT_EXIT_CODE=86
+        STATUS="failed"
+        MESSAGE="rch local fallback detected; refusing local cargo execution"
+        printf 'FATAL: rch local fallback detected; refusing local cargo execution\n' >>"$RUN_LOG_PATH"
     else
         if ! extract_report_from_log "$RUN_LOG_PATH" "$SCENARIO_REPORT_PATH"; then
             SCRIPT_EXIT_CODE=1
@@ -215,6 +231,14 @@ else
                 MESSAGE="report projection diverged from the contract"
             fi
         fi
+    fi
+    if [ "$COMMAND_EXIT_CODE" -ne 86 ] \
+        && grep -Eq '^\[RCH\] local \(|falling back to local' "$RUN_LOG_PATH" 2>/dev/null; then
+        COMMAND_EXIT_CODE=86
+        SCRIPT_EXIT_CODE=86
+        STATUS="failed"
+        MESSAGE="rch local fallback detected; refusing local cargo execution"
+        printf 'FATAL: rch local fallback detected; refusing local cargo execution\n' >>"$RUN_LOG_PATH"
     fi
 fi
 
@@ -278,6 +302,7 @@ jq -n \
     --arg mode "$MODE" \
     --arg status "$STATUS" \
     --arg message "$MESSAGE" \
+    --arg command "$COMMAND" \
     --arg report_path "$SCENARIO_REPORT_PATH" \
     --argjson fixture "$FIXTURE_JSON" \
     --argjson tail_risk_profile "$TAIL_RISK_PROFILE_JSON" \
@@ -301,6 +326,7 @@ jq -n \
         validation_passed: $validation_passed,
         status: $status,
         message: $message,
+        command: $command,
         fixture: $fixture,
         tail_risk_profile: $tail_risk_profile,
         fixed_threshold_profile: $fixed_threshold_profile,
