@@ -809,6 +809,8 @@ mod tests {
     use super::*;
     use crate::EvidenceLedgerBuilder;
 
+    type Renderer = fn(&EvidenceLedger) -> String;
+
     fn test_entry() -> EvidenceLedger {
         EvidenceLedgerBuilder::new()
             .ts_unix_ms(1_700_000_000_000)
@@ -971,12 +973,28 @@ mod tests {
     #[test]
     fn deterministic_output() {
         let entry = test_entry();
-        assert_eq!(level0(&entry), level0(&entry));
-        assert_eq!(level1(&entry), level1(&entry));
-        assert_eq!(level1_plain(&entry), level1_plain(&entry));
-        assert_eq!(level2(&entry), level2(&entry));
-        assert_eq!(html(&entry), html(&entry));
-        assert_eq!(markdown(&entry), markdown(&entry));
+        let equivalent_entry = test_entry();
+        assert_eq!(entry, equivalent_entry);
+
+        let renderers: [(&str, Renderer); 6] = [
+            ("level0", level0),
+            ("level1", level1),
+            ("level1_plain", level1_plain),
+            ("level2", level2),
+            ("html", html),
+            ("markdown", markdown),
+        ];
+
+        for (name, render) in renderers {
+            let first = render(&entry);
+            let second = render(&equivalent_entry);
+            assert_eq!(
+                first, second,
+                "{name} should render equal ledgers identically"
+            );
+            assert!(first.contains("scheduler"), "{name} output: {first}");
+            assert!(first.contains("preempt"), "{name} output: {first}");
+        }
     }
 
     // ------------------------------------------------------------------

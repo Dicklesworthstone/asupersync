@@ -11,6 +11,7 @@ use proptest::prelude::*;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -496,6 +497,7 @@ fn exporter_rotation_creates_multiple_files() {
     let config = ExporterConfig {
         max_bytes: 300,
         buf_capacity: 64,
+        clock: Arc::new(|| 1_700_000_000u64),
     };
     let mut exporter = JsonlExporter::open_with_config(path.clone(), &config).unwrap();
 

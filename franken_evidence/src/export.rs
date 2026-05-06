@@ -398,6 +398,7 @@ mod tests {
         let config = ExporterConfig {
             max_bytes: 200, // Very small to trigger rotation quickly.
             buf_capacity: 64,
+            clock: Arc::new(|| 1_700_000_000u64),
         };
         let mut exporter = JsonlExporter::open_with_config(path.clone(), &config).unwrap();
 
@@ -453,7 +454,7 @@ mod tests {
             buf_capacity: 8192,
             clock: Arc::new(|| 1_700_000_000u64),
         };
-        let mut exporter = JsonlExporter::open_with_config(path.clone(), &config).unwrap();
+        let mut exporter = JsonlExporter::open_with_config(path, &config).unwrap();
 
         // Write enough entries to force at least one rotation.
         for i in 0..32 {
@@ -468,8 +469,7 @@ mod tests {
         let expected_rotated = dir.path().join("evidence.1700000000.jsonl");
         assert!(
             expected_rotated.exists(),
-            "expected deterministic rotated filename {:?}",
-            expected_rotated
+            "expected deterministic rotated filename {expected_rotated:?}"
         );
     }
 
