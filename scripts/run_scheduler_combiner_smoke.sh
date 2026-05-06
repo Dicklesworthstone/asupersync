@@ -6,6 +6,7 @@ DRY_RUN=0
 LIST_ONLY=0
 SCENARIO_ID="AA-SCHEDULER-COMBINER-CONTENTION"
 ARTIFACT_DIR="${ASUPERSYNC_COMBINER_SMOKE_OUT:-$PROJECT_ROOT/.scheduler-combiner-smoke-artifacts/$(date -u +%Y%m%dT%H%M%SZ)}"
+RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
 
 usage() {
     cat <<'USAGE'
@@ -64,11 +65,17 @@ if [[ "$LIST_ONLY" -eq 1 ]]; then
     exit 0
 fi
 
+if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+    echo "FATAL: rch is required and was not found/executable at: ${RCH_BIN}" >&2
+    exit 1
+fi
+
 LOG_FILE="$ARTIFACT_DIR/run.log"
 REPORT_FILE="$ARTIFACT_DIR/report.json"
 BUNDLE_MANIFEST_FILE="$ARTIFACT_DIR/bundle_manifest.json"
 RUN_REPORT_FILE="$ARTIFACT_DIR/run_report.json"
-COMMAND="rch exec -- cargo test -p asupersync --features test-internals --lib ready_combiner_contention_scenario_logs_required_producer_counts -- --nocapture"
+printf -v RCH_INVOCATION '%q' "$RCH_BIN"
+COMMAND="${RCH_INVOCATION} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_scheduler_combiner cargo test -p asupersync --features test-internals --lib ready_combiner_contention_scenario_logs_required_producer_counts -- --nocapture"
 
 mkdir -p "$ARTIFACT_DIR"
 STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -101,7 +108,12 @@ else
     COMMAND_EXIT_CODE=${PIPESTATUS[0]}
     set -e
 
-    if [[ "$COMMAND_EXIT_CODE" == "0" ]]; then
+    if grep -Eq '^\[RCH\] local \(|falling back to local' "$LOG_FILE" 2>/dev/null; then
+        COMMAND_EXIT_CODE=86
+        STATUS="failed"
+        VERDICT="rch local fallback detected; refusing local cargo execution"
+        printf 'FATAL: rch local fallback detected; refusing local cargo execution\n' >>"$LOG_FILE"
+    elif [[ "$COMMAND_EXIT_CODE" == "0" ]]; then
         STATUS="passed"
         VERDICT="adaptive ready-lane combiner scenario passed for producer counts 1, 8, 32, and 64"
     else
@@ -113,6 +125,8 @@ fi
 SCRIPT_EXIT_CODE="$COMMAND_EXIT_CODE"
 VALIDATION_PASSED=false
 if [[ "$COMMAND_EXIT_CODE" == "0" && "$STATUS" == "passed" ]]; then
+    VALIDATION_PASSED=true
+elif [[ "$COMMAND_EXIT_CODE" == "0" && "$STATUS" == "dry_run" ]]; then
     VALIDATION_PASSED=true
 fi
 ENDED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -182,6 +196,7 @@ cat >"$RUN_REPORT_FILE" <<JSON
   "run_log_path": "$LOG_FILE",
   "report_path": "$REPORT_FILE",
   "mode": "$([[ "$DRY_RUN" == "1" ]] && printf "dry_run" || printf "execute")",
+  "command": "$COMMAND",
   "command_exit_code": $COMMAND_EXIT_CODE,
   "script_exit_code": $SCRIPT_EXIT_CODE,
   "validation_passed": $VALIDATION_PASSED,
