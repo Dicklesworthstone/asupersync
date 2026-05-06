@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Semantic Enablement FAQ Validation (SEM-11.3)
 //!
 //! Validates that the enablement FAQ exists, covers key topic areas,
