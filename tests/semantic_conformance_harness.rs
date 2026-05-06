@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! SEM-08.4: Differential conformance harness (trace-driven).
 //!
 //! This harness compares runtime-observed transitions against canonical contract
