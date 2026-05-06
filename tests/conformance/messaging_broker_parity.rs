@@ -1,4 +1,3 @@
-#![allow(clippy::all)]
 //! Conformance suite for the messaging crate against documented broker
 //! protocol semantics.
 //!
@@ -154,10 +153,10 @@ mod kafka_mod {
 
     #[test]
     fn kafka_required_feature_probe_logs_redacted_config_and_verdict() {
-        let secret = "super-secret-kafka-password";
+        let redaction_sentinel = "kafka-redaction-sentinel";
         let config = ProducerConfig::new(vec!["localhost:9092".to_string()])
             .require_kafka_feature()
-            .sasl_scram_sha_256("integration-user", secret);
+            .sasl_scram_sha_256("integration-user", redaction_sentinel);
 
         let validation = config.validate();
         let validation_error_kind = validation
@@ -212,7 +211,7 @@ mod kafka_mod {
             "<redacted>"
         );
         assert!(
-            !artifact_text.contains(secret),
+            !artifact_text.contains(redaction_sentinel),
             "diagnostic artifact leaked Kafka credential: {artifact_text}"
         );
         assert_eq!(artifact["final_verdict"], "pass");
@@ -381,9 +380,12 @@ mod redis_mod {
                 .await
                 .expect("connect redis client");
             let response = client.cmd(&cx, &["HELLO", "3"]).await.expect("HELLO 3");
-            let entries = match response {
-                RespValue::Map(entries) => entries,
-                other => panic!("HELLO 3 must return a RESP3 map, got {other:?}"),
+            assert!(
+                matches!(&response, RespValue::Map(_)),
+                "HELLO 3 must return a RESP3 map, got {response:?}"
+            );
+            let RespValue::Map(entries) = response else {
+                return;
             };
 
             assert_eq!(
