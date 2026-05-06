@@ -1253,6 +1253,235 @@ pub fn qpack_decode_decoder_instruction(
     ))
 }
 
+/// Deterministic state for RFC 9204 decoder-stream feedback.
+///
+/// This is the accounting an encoder needs after receiving peer decoder-stream
+/// instructions: acknowledged/cancelled stream IDs, released dynamic-table
+/// references, and the peer's Known Received Count.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct QpackDecoderFeedbackState {
+    known_received_count: u64,
+    acknowledged_streams: BTreeSet<u64>,
+    cancelled_streams: BTreeSet<u64>,
+    outstanding_references: BTreeMap<u64, Vec<u64>>,
+    first_error: Option<H3NativeError>,
+}
+
+impl QpackDecoderFeedbackState {
+    /// Construct empty decoder-feedback state.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Peer Known Received Count after Insert Count Increment instructions.
+    #[must_use]
+    pub fn known_received_count(&self) -> u64 {
+        self.known_received_count
+    }
+
+    /// Streams acknowledged by Header Acknowledgement instructions.
+    #[must_use]
+    pub fn acknowledged_stream_ids(&self) -> &BTreeSet<u64> {
+        &self.acknowledged_streams
+    }
+
+    /// Streams cancelled by Stream Cancellation instructions.
+    #[must_use]
+    pub fn cancelled_stream_ids(&self) -> &BTreeSet<u64> {
+        &self.cancelled_streams
+    }
+
+    /// Total dynamic references still protected by live field sections.
+    #[must_use]
+    pub fn outstanding_reference_count(&self) -> usize {
+        self.outstanding_references.values().map(Vec::len).sum()
+    }
+
+    /// Dynamic references still protected by one stream.
+    #[must_use]
+    pub fn stream_outstanding_reference_count(&self, stream_id: u64) -> usize {
+        self.outstanding_references
+            .get(&stream_id)
+            .map_or(0, Vec::len)
+    }
+
+    /// First decoder-feedback error observed by this state machine.
+    #[must_use]
+    pub fn first_error(&self) -> Option<&H3NativeError> {
+        self.first_error.as_ref()
+    }
+
+    /// Track the dynamic-table references protected by a stream field section.
+    ///
+    /// The caller supplies absolute insertion IDs referenced by the encoded
+    /// field section. Entries are reference-protected until the stream is
+    /// acknowledged or cancelled.
+    pub fn track_stream_references(
+        &mut self,
+        context: &mut QpackContext,
+        stream_id: u64,
+        references: &[u64],
+    ) -> Result<(), H3NativeError> {
+        if self.acknowledged_streams.contains(&stream_id) {
+            return self.fail(H3NativeError::InvalidFrame(
+                "qpack stream already acknowledged",
+            ));
+        }
+        if self.cancelled_streams.contains(&stream_id) {
+            return self.fail(H3NativeError::InvalidFrame(
+                "qpack stream already cancelled",
+            ));
+        }
+        if self.outstanding_references.contains_key(&stream_id) {
+            return self.fail(H3NativeError::InvalidFrame("qpack stream already tracked"));
+        }
+        for insertion_id in references {
+            if context
+                .dynamic_table()
+                .get_by_insertion_id(*insertion_id)
+                .is_none()
+            {
+                return self.fail(H3NativeError::InvalidFrame(
+                    "unknown dynamic qpack reference for stream",
+                ));
+            }
+        }
+        for insertion_id in references {
+            let referenced = context.dynamic_table_mut().reference_entry(*insertion_id);
+            debug_assert!(referenced, "prechecked qpack reference must exist");
+        }
+        self.outstanding_references
+            .insert(stream_id, references.to_vec());
+        Ok(())
+    }
+
+    fn apply_header_acknowledgement(
+        &mut self,
+        context: &mut QpackContext,
+        stream_id: u64,
+    ) -> Result<(), H3NativeError> {
+        if self.acknowledged_streams.contains(&stream_id) {
+            return self.fail(H3NativeError::InvalidFrame(
+                "duplicate qpack header acknowledgement",
+            ));
+        }
+        if self.cancelled_streams.contains(&stream_id) {
+            return self.fail(H3NativeError::InvalidFrame(
+                "qpack acknowledgement after stream cancellation",
+            ));
+        }
+        self.release_stream_references(context, stream_id)?;
+        self.acknowledged_streams.insert(stream_id);
+        Ok(())
+    }
+
+    fn apply_stream_cancellation(
+        &mut self,
+        context: &mut QpackContext,
+        stream_id: u64,
+    ) -> Result<(), H3NativeError> {
+        if self.cancelled_streams.contains(&stream_id) {
+            return self.fail(H3NativeError::InvalidFrame(
+                "duplicate qpack stream cancellation",
+            ));
+        }
+        if self.acknowledged_streams.contains(&stream_id) {
+            return self.fail(H3NativeError::InvalidFrame(
+                "qpack stream cancellation after acknowledgement",
+            ));
+        }
+        self.release_stream_references(context, stream_id)?;
+        self.cancelled_streams.insert(stream_id);
+        Ok(())
+    }
+
+    fn release_stream_references(
+        &mut self,
+        context: &mut QpackContext,
+        stream_id: u64,
+    ) -> Result<(), H3NativeError> {
+        let Some(references) = self.outstanding_references.get(&stream_id) else {
+            return self.fail(H3NativeError::InvalidFrame(
+                "unknown qpack decoder feedback stream",
+            ));
+        };
+        let references = references.clone();
+        for insertion_id in &references {
+            if context
+                .dynamic_table()
+                .get_by_insertion_id(*insertion_id)
+                .is_none()
+            {
+                return self.fail(H3NativeError::InvalidFrame(
+                    "tracked dynamic qpack reference missing",
+                ));
+            }
+        }
+        self.outstanding_references.remove(&stream_id);
+        for insertion_id in references {
+            let released = context.dynamic_table_mut().unreference_entry(insertion_id);
+            debug_assert!(released, "prechecked qpack reference must still exist");
+        }
+        Ok(())
+    }
+
+    fn apply_insert_count_increment(&mut self, increment: u64) -> Result<(), H3NativeError> {
+        if increment == 0 {
+            return self.fail(H3NativeError::InvalidFrame(
+                "qpack decoder feedback increment must be non-zero",
+            ));
+        }
+        let Some(next) = self.known_received_count.checked_add(increment) else {
+            return self.fail(H3NativeError::InvalidFrame(
+                "qpack known received count overflow",
+            ));
+        };
+        self.known_received_count = next;
+        Ok(())
+    }
+
+    fn fail<T>(&mut self, error: H3NativeError) -> Result<T, H3NativeError> {
+        self.record_error(&error);
+        Err(error)
+    }
+
+    fn record_error(&mut self, error: &H3NativeError) {
+        if self.first_error.is_none() {
+            self.first_error = Some(error.clone());
+        }
+    }
+}
+
+/// Apply one RFC 9204 decoder-stream instruction to decoder-feedback state.
+///
+/// This updates feedback accounting only; dynamic table mutations remain owned
+/// by encoder-stream instruction application.
+pub fn qpack_apply_decoder_instruction(
+    feedback: &mut QpackDecoderFeedbackState,
+    context: &mut QpackContext,
+    mode: H3QpackMode,
+    instruction: &QpackDecoderInstruction,
+) -> Result<(), H3NativeError> {
+    if mode != H3QpackMode::DynamicTableAllowed {
+        let error = H3NativeError::QpackPolicy("decoder feedback requires dynamic qpack mode");
+        feedback.record_error(&error);
+        return Err(error);
+    }
+
+    match instruction {
+        QpackDecoderInstruction::HeaderAcknowledgement { stream_id } => {
+            feedback.apply_header_acknowledgement(context, *stream_id)
+        }
+        QpackDecoderInstruction::StreamCancellation { stream_id } => {
+            feedback.apply_stream_cancellation(context, *stream_id)
+        }
+        QpackDecoderInstruction::InsertCountIncrement { increment } => {
+            feedback.apply_insert_count_increment(*increment)
+        }
+    }
+}
+
 /// Apply one RFC 9204 encoder-stream instruction to an existing QPACK context.
 ///
 /// This mutates only the dynamic table carried by `context`; it does not process
@@ -5920,6 +6149,337 @@ mod tests {
         assert_eq!(
             err,
             H3NativeError::InvalidFrame("qpack insert count increment must be non-zero")
+        );
+    }
+
+    #[test]
+    fn qpack_decoder_feedback_ack_releases_references_and_tracks_fields() {
+        let mut context = QpackContext::new(128);
+        let first = context
+            .insert_dynamic_entry("one".to_string(), "1".to_string())
+            .expect("insert first");
+        let second = context
+            .insert_dynamic_entry("two".to_string(), "2".to_string())
+            .expect("insert second");
+        let mut feedback = QpackDecoderFeedbackState::new();
+
+        feedback
+            .track_stream_references(&mut context, 4, &[first, second])
+            .expect("track references");
+        assert_eq!(feedback.known_received_count(), 0);
+        assert_eq!(feedback.stream_outstanding_reference_count(4), 2);
+        assert_eq!(feedback.outstanding_reference_count(), 2);
+        assert_eq!(feedback.first_error(), None);
+        assert_eq!(
+            context
+                .set_dynamic_table_capacity(0)
+                .expect_err("referenced entries must block shrink"),
+            "cannot reduce table capacity while entries are referenced"
+        );
+
+        qpack_apply_decoder_instruction(
+            &mut feedback,
+            &mut context,
+            H3QpackMode::DynamicTableAllowed,
+            &QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 4 },
+        )
+        .expect("ack releases references");
+
+        assert!(feedback.acknowledged_stream_ids().contains(&4));
+        assert!(!feedback.cancelled_stream_ids().contains(&4));
+        assert_eq!(feedback.stream_outstanding_reference_count(4), 0);
+        assert_eq!(feedback.outstanding_reference_count(), 0);
+        assert_eq!(feedback.first_error(), None);
+        context
+            .set_dynamic_table_capacity(0)
+            .expect("released references allow shrink");
+    }
+
+    #[test]
+    fn qpack_decoder_feedback_ack_rejects_unknown_duplicate_and_cancelled() {
+        let mut context = QpackContext::new(128);
+        let mut feedback = QpackDecoderFeedbackState::new();
+
+        let err = qpack_apply_decoder_instruction(
+            &mut feedback,
+            &mut context,
+            H3QpackMode::DynamicTableAllowed,
+            &QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 4 },
+        )
+        .expect_err("unknown stream");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame("unknown qpack decoder feedback stream")
+        );
+        assert_eq!(feedback.first_error(), Some(&err));
+
+        let mut duplicate = QpackDecoderFeedbackState::new();
+        duplicate
+            .track_stream_references(&mut context, 8, &[])
+            .expect("track empty references");
+        qpack_apply_decoder_instruction(
+            &mut duplicate,
+            &mut context,
+            H3QpackMode::DynamicTableAllowed,
+            &QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 8 },
+        )
+        .expect("first ack");
+        let err = qpack_apply_decoder_instruction(
+            &mut duplicate,
+            &mut context,
+            H3QpackMode::DynamicTableAllowed,
+            &QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 8 },
+        )
+        .expect_err("duplicate ack");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame("duplicate qpack header acknowledgement")
+        );
+        assert_eq!(duplicate.first_error(), Some(&err));
+
+        let mut cancelled = QpackDecoderFeedbackState::new();
+        cancelled
+            .track_stream_references(&mut context, 12, &[])
+            .expect("track stream");
+        qpack_apply_decoder_instruction(
+            &mut cancelled,
+            &mut context,
+            H3QpackMode::DynamicTableAllowed,
+            &QpackDecoderInstruction::StreamCancellation { stream_id: 12 },
+        )
+        .expect("cancel");
+        let err = qpack_apply_decoder_instruction(
+            &mut cancelled,
+            &mut context,
+            H3QpackMode::DynamicTableAllowed,
+            &QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 12 },
+        )
+        .expect_err("ack after cancel");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame("qpack acknowledgement after stream cancellation")
+        );
+    }
+
+    #[test]
+    fn qpack_decoder_feedback_cancellation_releases_references_and_rejects_edges() {
+        let mut context = QpackContext::new(128);
+        let mut unknown = QpackDecoderFeedbackState::new();
+        let err = qpack_apply_decoder_instruction(
+            &mut unknown,
+            &mut context,
+            H3QpackMode::DynamicTableAllowed,
+            &QpackDecoderInstruction::StreamCancellation { stream_id: 14 },
+        )
+        .expect_err("unknown cancellation stream");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame("unknown qpack decoder feedback stream")
+        );
+        assert_eq!(unknown.first_error(), Some(&err));
+
+        let insertion_id = context
+            .insert_dynamic_entry("ref".to_string(), "value".to_string())
+            .expect("insert reference");
+        let mut feedback = QpackDecoderFeedbackState::new();
+        feedback
+            .track_stream_references(&mut context, 16, &[insertion_id])
+            .expect("track references");
+
+        qpack_apply_decoder_instruction(
+            &mut feedback,
+            &mut context,
+            H3QpackMode::DynamicTableAllowed,
+            &QpackDecoderInstruction::StreamCancellation { stream_id: 16 },
+        )
+        .expect("cancel releases references");
+        assert!(feedback.cancelled_stream_ids().contains(&16));
+        assert!(!feedback.acknowledged_stream_ids().contains(&16));
+        assert_eq!(feedback.outstanding_reference_count(), 0);
+        context
+            .set_dynamic_table_capacity(0)
+            .expect("cancellation released references");
+
+        let err = qpack_apply_decoder_instruction(
+            &mut feedback,
+            &mut context,
+            H3QpackMode::DynamicTableAllowed,
+            &QpackDecoderInstruction::StreamCancellation { stream_id: 16 },
+        )
+        .expect_err("duplicate cancellation");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame("duplicate qpack stream cancellation")
+        );
+
+        let mut acked = QpackDecoderFeedbackState::new();
+        acked
+            .track_stream_references(&mut context, 20, &[])
+            .expect("track acked stream");
+        qpack_apply_decoder_instruction(
+            &mut acked,
+            &mut context,
+            H3QpackMode::DynamicTableAllowed,
+            &QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 20 },
+        )
+        .expect("ack");
+        let err = qpack_apply_decoder_instruction(
+            &mut acked,
+            &mut context,
+            H3QpackMode::DynamicTableAllowed,
+            &QpackDecoderInstruction::StreamCancellation { stream_id: 20 },
+        )
+        .expect_err("cancel after ack");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame("qpack stream cancellation after acknowledgement")
+        );
+    }
+
+    #[test]
+    fn qpack_decoder_feedback_insert_count_increment_boundaries() {
+        let mut context = QpackContext::new(128);
+        let mut feedback = QpackDecoderFeedbackState::new();
+
+        qpack_apply_decoder_instruction(
+            &mut feedback,
+            &mut context,
+            H3QpackMode::DynamicTableAllowed,
+            &QpackDecoderInstruction::InsertCountIncrement { increment: 1 },
+        )
+        .expect("increment one");
+        assert_eq!(feedback.known_received_count(), 1);
+        qpack_apply_decoder_instruction(
+            &mut feedback,
+            &mut context,
+            H3QpackMode::DynamicTableAllowed,
+            &QpackDecoderInstruction::InsertCountIncrement { increment: 2 },
+        )
+        .expect("increment many");
+        assert_eq!(feedback.known_received_count(), 3);
+        qpack_apply_decoder_instruction(
+            &mut feedback,
+            &mut context,
+            H3QpackMode::DynamicTableAllowed,
+            &QpackDecoderInstruction::InsertCountIncrement {
+                increment: u64::MAX - 3,
+            },
+        )
+        .expect("reach max boundary");
+        assert_eq!(feedback.known_received_count(), u64::MAX);
+
+        let err = qpack_apply_decoder_instruction(
+            &mut feedback,
+            &mut context,
+            H3QpackMode::DynamicTableAllowed,
+            &QpackDecoderInstruction::InsertCountIncrement { increment: 1 },
+        )
+        .expect_err("overflow");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame("qpack known received count overflow")
+        );
+        assert_eq!(feedback.known_received_count(), u64::MAX);
+        assert_eq!(feedback.first_error(), Some(&err));
+
+        let mut zero = QpackDecoderFeedbackState::new();
+        let err = qpack_apply_decoder_instruction(
+            &mut zero,
+            &mut context,
+            H3QpackMode::DynamicTableAllowed,
+            &QpackDecoderInstruction::InsertCountIncrement { increment: 0 },
+        )
+        .expect_err("zero increment");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame("qpack decoder feedback increment must be non-zero")
+        );
+        assert_eq!(zero.known_received_count(), 0);
+        assert_eq!(zero.first_error(), Some(&err));
+    }
+
+    #[test]
+    fn qpack_decoder_feedback_static_only_rejects_before_mutation() {
+        let mut context = QpackContext::new(128);
+        let mut feedback = QpackDecoderFeedbackState::new();
+        feedback
+            .track_stream_references(&mut context, 24, &[])
+            .expect("track stream");
+
+        let before = feedback.clone();
+        let err = qpack_apply_decoder_instruction(
+            &mut feedback,
+            &mut context,
+            H3QpackMode::StaticOnly,
+            &QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 24 },
+        )
+        .expect_err("static-only rejects decoder feedback");
+        assert_eq!(
+            err,
+            H3NativeError::QpackPolicy("decoder feedback requires dynamic qpack mode")
+        );
+        assert_eq!(feedback.first_error(), Some(&err));
+        assert_eq!(
+            feedback.known_received_count(),
+            before.known_received_count()
+        );
+        assert_eq!(
+            feedback.acknowledged_stream_ids(),
+            before.acknowledged_stream_ids()
+        );
+        assert_eq!(
+            feedback.cancelled_stream_ids(),
+            before.cancelled_stream_ids()
+        );
+        assert_eq!(
+            feedback.outstanding_reference_count(),
+            before.outstanding_reference_count()
+        );
+    }
+
+    #[test]
+    fn qpack_decoder_feedback_track_rejects_duplicate_terminal_and_unknown_reference() {
+        let mut context = QpackContext::new(128);
+        let mut feedback = QpackDecoderFeedbackState::new();
+
+        let err = feedback
+            .track_stream_references(&mut context, 28, &[0])
+            .expect_err("unknown reference");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame("unknown dynamic qpack reference for stream")
+        );
+        assert_eq!(feedback.first_error(), Some(&err));
+
+        let mut duplicate = QpackDecoderFeedbackState::new();
+        duplicate
+            .track_stream_references(&mut context, 32, &[])
+            .expect("track once");
+        let err = duplicate
+            .track_stream_references(&mut context, 32, &[])
+            .expect_err("duplicate track");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame("qpack stream already tracked")
+        );
+
+        let mut terminal = QpackDecoderFeedbackState::new();
+        terminal
+            .track_stream_references(&mut context, 36, &[])
+            .expect("track terminal");
+        qpack_apply_decoder_instruction(
+            &mut terminal,
+            &mut context,
+            H3QpackMode::DynamicTableAllowed,
+            &QpackDecoderInstruction::HeaderAcknowledgement { stream_id: 36 },
+        )
+        .expect("ack terminal");
+        let err = terminal
+            .track_stream_references(&mut context, 36, &[])
+            .expect_err("cannot retrack acked stream");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame("qpack stream already acknowledged")
         );
     }
 
