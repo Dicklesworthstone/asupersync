@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! First Recurring Audit Retrospective Validation (SEM-11.5)
 //!
 //! Validates that the first audit retrospective exists, documents gate
