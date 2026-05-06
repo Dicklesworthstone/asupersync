@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! T6.12 — Exhaustive Unit-Test Matrix for Database and Messaging Semantics
 //!
 //! Bead: `asupersync-2oh2u.6.12`
