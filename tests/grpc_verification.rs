@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! gRPC Framework Verification Suite
 //!
 //! Verifies the public API surface of the gRPC module:
@@ -499,7 +497,7 @@ fn grpc_verify_013_request_basics() {
 
     // With metadata
     let mut meta = Metadata::new();
-    meta.insert("x-key", "value");
+    let _ = meta.insert("x-key", "value");
     let req = Request::with_metadata("hello", meta);
     assert_eq!(*req.get_ref(), "hello");
     assert!(!req.metadata().is_empty());
@@ -508,7 +506,7 @@ fn grpc_verify_013_request_basics() {
     let mut req = Request::new(10);
     *req.get_mut() = 20;
     assert_eq!(*req.get_ref(), 20);
-    req.metadata_mut().insert("new-key", "new-value");
+    let _ = req.metadata_mut().insert("new-key", "new-value");
     assert!(req.metadata().get("new-key").is_some());
 
     // Map
@@ -531,7 +529,7 @@ fn grpc_verify_014_response_basics() {
     assert!(resp.metadata().is_empty());
 
     let mut meta = Metadata::new();
-    meta.insert("x-resp", "ok");
+    let _ = meta.insert("x-resp", "ok");
     let resp = Response::with_metadata(100, meta);
     assert_eq!(*resp.get_ref(), 100);
     assert!(resp.metadata().get("x-resp").is_some());
@@ -559,8 +557,8 @@ fn grpc_verify_015_metadata_operations() {
     assert_eq!(meta.len(), 0);
 
     // ASCII insert and get
-    meta.insert("content-type", "application/grpc");
-    meta.insert("x-custom", "value");
+    let _ = meta.insert("content-type", "application/grpc");
+    let _ = meta.insert("x-custom", "value");
     assert_eq!(meta.len(), 2);
     assert!(!meta.is_empty());
 
@@ -570,7 +568,7 @@ fn grpc_verify_015_metadata_operations() {
     }
 
     // Binary insert and get
-    meta.insert_bin("data-bin", Bytes::from_static(b"\x00\x01\x02\xff"));
+    let _ = meta.insert_bin("data-bin", Bytes::from_static(b"\x00\x01\x02\xff"));
     assert_eq!(meta.len(), 3);
 
     match meta.get("data-bin") {
@@ -842,7 +840,7 @@ fn grpc_verify_024_health_service_lifecycle() {
 /// GRPC-VERIFY-025: HealthService check() logic
 ///
 /// check() returns the status for registered services, derives server status,
-/// and returns NotFound for unknown services.
+/// and fail-closes unknown services without revealing topology.
 #[test]
 fn grpc_verify_025_health_check_logic() {
     init_test("grpc_verify_025_health_check_logic");
@@ -872,11 +870,11 @@ fn grpc_verify_025_health_check_logic() {
     let resp = svc.check(&HealthCheckRequest::server()).unwrap();
     assert_eq!(resp.status, ServingStatus::Serving);
 
-    // Unknown service returns NotFound error
+    // Unknown service access is denied without revealing service topology
     let err = svc
         .check(&HealthCheckRequest::new("nonexistent"))
         .unwrap_err();
-    assert_eq!(err.code(), Code::NotFound);
+    assert_eq!(err.code(), Code::PermissionDenied);
 
     test_complete!("grpc_verify_025_health_check_logic");
 }
@@ -1257,13 +1255,15 @@ fn grpc_verify_039_bearer_auth() {
 
     // Valid token
     let mut req = Request::new(Bytes::new());
-    req.metadata_mut()
+    let _ = req
+        .metadata_mut()
         .insert("authorization", "Bearer secret-token");
     assert!(validator.intercept_request(&mut req).is_ok());
 
     // Invalid token
     let mut req = Request::new(Bytes::new());
-    req.metadata_mut()
+    let _ = req
+        .metadata_mut()
         .insert("authorization", "Bearer wrong-token");
     let err = validator.intercept_request(&mut req).unwrap_err();
     assert_eq!(err.code(), Code::Unauthenticated);
@@ -1275,7 +1275,7 @@ fn grpc_verify_039_bearer_auth() {
 
     // Bad format (no "Bearer " prefix)
     let mut req = Request::new(Bytes::new());
-    req.metadata_mut().insert("authorization", "Basic abc");
+    let _ = req.metadata_mut().insert("authorization", "Basic abc");
     let err = validator.intercept_request(&mut req).unwrap_err();
     assert_eq!(err.code(), Code::Unauthenticated);
 
@@ -1290,7 +1290,7 @@ fn grpc_verify_040_fn_interceptor() {
     init_test("grpc_verify_040_fn_interceptor");
 
     let interceptor = fn_interceptor(|request: &mut Request<Bytes>| {
-        request.metadata_mut().insert("x-fn-interceptor", "applied");
+        let _ = request.metadata_mut().insert("x-fn-interceptor", "applied");
         Ok(())
     });
 
@@ -1319,6 +1319,7 @@ fn grpc_verify_041_rate_limit_interceptor() {
 
     let limiter = rate_limiter(3);
     assert_eq!(limiter.current_count(), 0);
+    let mut admitted = Vec::new();
 
     // Allow 3 requests
     for i in 0..3 {
@@ -1326,6 +1327,7 @@ fn grpc_verify_041_rate_limit_interceptor() {
         limiter
             .intercept_request(&mut req)
             .unwrap_or_else(|_| panic!("request {i} should succeed"));
+        admitted.push(req);
     }
     assert_eq!(limiter.current_count(), 3);
 
@@ -1335,6 +1337,7 @@ fn grpc_verify_041_rate_limit_interceptor() {
     assert_eq!(err.code(), Code::ResourceExhausted);
 
     // Reset allows new requests
+    drop(admitted);
     limiter.reset();
     assert_eq!(limiter.current_count(), 0);
     let mut req = Request::new(Bytes::new());
@@ -1362,7 +1365,7 @@ fn grpc_verify_042_tracing_interceptor() {
 
     // Unsigned client IDs are replaced by default at an untrusted edge.
     let mut req2 = Request::new(Bytes::new());
-    req2.metadata_mut().insert("x-request-id", "custom-id");
+    let _ = req2.metadata_mut().insert("x-request-id", "custom-id");
     interceptor.intercept_request(&mut req2).unwrap();
     match req2.metadata().get("x-request-id") {
         Some(MetadataValue::Ascii(s)) => assert_eq!(s, "req-0000000000000002"),
@@ -1372,7 +1375,7 @@ fn grpc_verify_042_tracing_interceptor() {
     // Trusted-edge mode preserves an upstream ID deliberately.
     let trusted = trace_interceptor().with_trusted_client_request_ids();
     let mut req3 = Request::new(Bytes::new());
-    req3.metadata_mut().insert("x-request-id", "custom-id");
+    let _ = req3.metadata_mut().insert("x-request-id", "custom-id");
     trusted.intercept_request(&mut req3).unwrap();
     match req3.metadata().get("x-request-id") {
         Some(MetadataValue::Ascii(s)) => assert_eq!(s, "custom-id"),
@@ -1401,7 +1404,7 @@ fn grpc_verify_043_timeout_interceptor() {
 
     // Preserves existing header
     let mut req = Request::new(Bytes::new());
-    req.metadata_mut().insert("grpc-timeout", "1000m");
+    let _ = req.metadata_mut().insert("grpc-timeout", "1000m");
     interceptor.intercept_request(&mut req).unwrap();
     match req.metadata().get("grpc-timeout") {
         Some(MetadataValue::Ascii(s)) => assert_eq!(s, "1000m"),
@@ -1442,8 +1445,8 @@ fn grpc_verify_045_metadata_propagator() {
     let propagator = metadata_propagator(["x-request-id", "x-trace-id", "x-missing"]);
 
     let mut req = Request::new(Bytes::new());
-    req.metadata_mut().insert("x-request-id", "req-123");
-    req.metadata_mut().insert("x-trace-id", "trace-456");
+    let _ = req.metadata_mut().insert("x-request-id", "req-123");
+    let _ = req.metadata_mut().insert("x-trace-id", "trace-456");
     // x-missing is not set
 
     propagator.intercept_request(&mut req).unwrap();
