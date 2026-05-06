@@ -12,6 +12,7 @@
 #   RUST_LOG       - tracing filter (default: asupersync=debug)
 #   RUST_BACKTRACE - 1 to enable backtraces (default: 1)
 #   TEST_SEED      - deterministic seed override (default: 0xDEADBEEF)
+#   RCH_BIN        - remote compilation helper executable (default: rch)
 #
 # Pass/Fail Semantics:
 #   PASS when cargo test exits 0 and no failure patterns are detected.
@@ -30,6 +31,19 @@ TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 RUN_STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 LOG_FILE="${OUTPUT_DIR}/websocket_e2e_${TIMESTAMP}.log"
 ARTIFACT_DIR="${OUTPUT_DIR}/artifacts_${TIMESTAMP}"
+RCH_BIN="${RCH_BIN:-rch}"
+CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_websocket_e2e}"
+DRY_RUN=0
+
+if [[ "${1:-}" == "--dry-run" ]]; then
+    DRY_RUN=1
+    shift
+fi
+
+if [[ "$#" -gt 1 ]]; then
+    echo "usage: $0 [--dry-run] [test_filter]" >&2
+    exit 2
+fi
 TEST_FILTER="${1:-}"
 
 export TEST_LOG_LEVEL="${TEST_LOG_LEVEL:-trace}"
@@ -38,6 +52,29 @@ export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
 export TEST_SEED="${TEST_SEED:-0xDEADBEEF}"
 
 mkdir -p "$OUTPUT_DIR" "$ARTIFACT_DIR"
+
+format_command() {
+    local rendered
+    printf -v rendered "%q " "$@"
+    printf '%s' "${rendered% }"
+}
+
+json_escape() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//$'\n'/\\n}"
+    printf '%s' "${value}"
+}
+
+run_or_print() {
+    if [[ "${DRY_RUN}" -eq 1 ]]; then
+        format_command "$@"
+        printf '\n'
+        return 0
+    fi
+    "$@"
+}
 
 echo "==================================================================="
 echo "              Asupersync WebSocket E2E Tests                       "
@@ -50,11 +87,31 @@ echo "  TEST_SEED:       ${TEST_SEED}"
 echo "  Timestamp:       ${TIMESTAMP}"
 echo "  Output:          ${LOG_FILE}"
 echo "  Artifacts:       ${ARTIFACT_DIR}"
+echo "  Runner:          ${RCH_BIN} exec"
+echo "  Target dir:      ${CARGO_TARGET_DIR}"
+if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo "  Mode:            dry-run"
+fi
 echo ""
 
 # --- Section: Build Check ---
 echo ">>> [1/4] Pre-flight: checking compilation..."
-if ! cargo check --test e2e_websocket --all-features 2>"${ARTIFACT_DIR}/compile_errors.log"; then
+CHECK_COMMAND=(
+    "${RCH_BIN}"
+    exec
+    --
+    env
+    "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
+    "RUST_LOG=${RUST_LOG}"
+    "RUST_BACKTRACE=${RUST_BACKTRACE}"
+    "TEST_SEED=${TEST_SEED}"
+    cargo
+    check
+    --test
+    e2e_websocket
+    --all-features
+)
+if ! run_or_print "${CHECK_COMMAND[@]}" 2>"${ARTIFACT_DIR}/compile_errors.log"; then
     echo "  FATAL: compilation failed — see ${ARTIFACT_DIR}/compile_errors.log"
     exit 1
 fi
@@ -72,8 +129,28 @@ if [ -n "$TEST_FILTER" ]; then
     RUN_ARGS+=("$TEST_FILTER")
 fi
 
+TEST_COMMAND=(
+    "${RCH_BIN}"
+    exec
+    --
+    env
+    "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
+    "TEST_LOG_LEVEL=${TEST_LOG_LEVEL}"
+    "RUST_LOG=${RUST_LOG}"
+    "RUST_BACKTRACE=${RUST_BACKTRACE}"
+    "TEST_SEED=${TEST_SEED}"
+    cargo
+    test
+    "${CARGO_ARGS[@]}"
+    --
+    "${RUN_ARGS[@]}"
+)
+
 pushd "$PROJECT_ROOT" >/dev/null
-if timeout 180 cargo test "${CARGO_ARGS[@]}" -- "${RUN_ARGS[@]}" 2>&1 | tee "$LOG_FILE"; then
+if [[ "${DRY_RUN}" -eq 1 ]]; then
+    format_command "${TEST_COMMAND[@]}" | tee "$LOG_FILE"
+    TEST_RESULT=0
+elif timeout 180 "${TEST_COMMAND[@]}" 2>&1 | tee "$LOG_FILE"; then
     TEST_RESULT=0
 else
     TEST_RESULT=$?
@@ -115,19 +192,28 @@ fi
 echo ""
 echo ">>> [4/4] Collecting artifacts..."
 
-PASSED=$(grep -c "^test .* ok$" "$LOG_FILE" 2>/dev/null || echo "0")
-FAILED=$(grep -c "^test .* FAILED$" "$LOG_FILE" 2>/dev/null || echo "0")
+PASSED=$({ grep -c "^test .* ok$" "$LOG_FILE" 2>/dev/null || true; } | awk '{s+=$1} END {print s+0}')
+FAILED=$({ grep -c "^test .* FAILED$" "$LOG_FILE" 2>/dev/null || true; } | awk '{s+=$1} END {print s+0}')
 SUITE_ID="websocket_e2e"
 SCENARIO_ID="E2E-SUITE-WEBSOCKET"
 SUMMARY_FILE="${ARTIFACT_DIR}/summary.json"
-REPRO_COMMAND="TEST_LOG_LEVEL=${TEST_LOG_LEVEL} RUST_LOG=${RUST_LOG} TEST_SEED=${TEST_SEED} bash ${SCRIPT_DIR}/$(basename "$0")"
+REPRO_COMMAND="TEST_LOG_LEVEL=${TEST_LOG_LEVEL} RUST_LOG=${RUST_LOG} TEST_SEED=${TEST_SEED} RCH_BIN=${RCH_BIN} CARGO_TARGET_DIR=${CARGO_TARGET_DIR} bash ${SCRIPT_DIR}/$(basename "$0")"
 RUN_ENDED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 SUITE_STATUS="failed"
 if [ "$TEST_RESULT" -eq 0 ] && [ "$PATTERN_FAILURES" -eq 0 ]; then
     SUITE_STATUS="passed"
 fi
+if [[ "${DRY_RUN}" -eq 1 ]]; then
+    SUITE_STATUS="planned"
+fi
+DRY_RUN_JSON=false
+if [[ "${DRY_RUN}" -eq 1 ]]; then
+    DRY_RUN_JSON=true
+fi
 FAILURE_CLASS="test_or_pattern_failure"
 if [ "$SUITE_STATUS" = "passed" ]; then
+    FAILURE_CLASS="none"
+elif [ "$SUITE_STATUS" = "planned" ]; then
     FAILURE_CLASS="none"
 fi
 
@@ -141,17 +227,20 @@ cat > "${SUMMARY_FILE}" << ENDJSON
   "ended_ts": "${RUN_ENDED_TS}",
   "status": "${SUITE_STATUS}",
   "failure_class": "${FAILURE_CLASS}",
-  "repro_command": "${REPRO_COMMAND}",
-  "artifact_path": "${SUMMARY_FILE}",
+  "dry_run": ${DRY_RUN_JSON},
+  "runner": "rch exec",
+  "all_rch_routed": true,
+  "repro_command": "$(json_escape "${REPRO_COMMAND}")",
+  "artifact_path": "$(json_escape "${SUMMARY_FILE}")",
   "suite": "${SUITE_ID}",
   "timestamp": "${TIMESTAMP}",
-  "test_log_level": "${TEST_LOG_LEVEL}",
+  "test_log_level": "$(json_escape "${TEST_LOG_LEVEL}")",
   "tests_passed": ${PASSED},
   "tests_failed": ${FAILED},
   "exit_code": ${TEST_RESULT},
   "pattern_failures": ${PATTERN_FAILURES},
-  "log_file": "${LOG_FILE}",
-  "artifact_dir": "${ARTIFACT_DIR}"
+  "log_file": "$(json_escape "${LOG_FILE}")",
+  "artifact_dir": "$(json_escape "${ARTIFACT_DIR}")"
 }
 ENDJSON
 
@@ -171,7 +260,10 @@ echo "  Failed:   ${FAILED}"
 echo "  Patterns: ${PATTERN_FAILURES} failure patterns"
 echo ""
 
-if [ "$TEST_RESULT" -eq 0 ] && [ "$PATTERN_FAILURES" -eq 0 ]; then
+if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo "  Status: PLANNED"
+    echo "  Cargo was not executed."
+elif [ "$TEST_RESULT" -eq 0 ] && [ "$PATTERN_FAILURES" -eq 0 ]; then
     echo "  Status: PASSED"
 else
     echo "  Status: FAILED"
@@ -180,7 +272,7 @@ else
 fi
 echo "==================================================================="
 
-find "$ARTIFACT_DIR" -name "*.txt" -empty -delete 2>/dev/null || true
+echo "  Diagnostic artifacts are retained for auditability, including empty files."
 
 if [ "$TEST_RESULT" -ne 0 ] || [ "$PATTERN_FAILURES" -ne 0 ]; then
     exit 1
