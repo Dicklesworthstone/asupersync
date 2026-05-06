@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Rendering tests for console output.
 //!
 //! This module tests:
