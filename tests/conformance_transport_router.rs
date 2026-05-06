@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Conformance tests for transport router symbol dispatch correctness.
 //!
 //! These tests verify that symbols are correctly routed and dispatched to endpoints
@@ -10,7 +8,6 @@
 
 use asupersync::security::SecurityContext;
 use asupersync::security::authenticated::AuthenticatedSymbol;
-use asupersync::security::tag::AuthenticationTag;
 use asupersync::transport::router::{
     DispatchStrategy, Endpoint, EndpointId, EndpointState, LoadBalanceStrategy, RouteKey,
     RoutingEntry, RoutingTable, SymbolRouter,
