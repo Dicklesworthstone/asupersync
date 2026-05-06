@@ -36,6 +36,14 @@ The posture contract is recorded in
 `artifacts/formal_proof_posture_contract_v1.json` and enforced by
 `tests/formal_proof_posture_contract.rs`.
 
+Wave2 adapter/protocol refinement coverage is recorded separately in
+`artifacts/formal_wave2_refinement_coverage_v1.json` and enforced by
+`tests/formal_wave2_refinement_coverage_contract.rs`. That artifact maps
+selected adapter, protocol, platform, runtime, and broker lanes to explicit
+proof tiers, source/test/artifact evidence, assumptions, and missing-evidence
+owners. It extends the runtime-facing refinement inventory without changing the
+current no-blanket-proof boundary.
+
 Lean coverage planning artifacts live in `formal/lean/coverage/`:
 - `README.md`: ontology, statuses, blocker codes, evidence fields, validation rules
 - `lean_coverage_matrix.schema.json`: canonical machine-readable schema (v1.0.0)
@@ -49,6 +57,7 @@ Lean coverage planning artifacts live in `formal/lean/coverage/`:
 - `baseline_report_v1.md`: human-readable baseline report for contributors
 - `ci_verification_profiles.json`: smoke/frontier/full Lean CI profile definitions for deterministic gates
 - `lean_frontier_buckets_v1.json`: deterministic Lean build frontier error buckets with bead linkage
+- `../../artifacts/formal_wave2_refinement_coverage_v1.json`: wave2 adapter/protocol lane proof-tier inventory
 
 ## Lean (preferred)
 

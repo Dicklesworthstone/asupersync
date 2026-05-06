@@ -1,0 +1,530 @@
+{
+  "schema_version": "formal-wave2-refinement-coverage-v1",
+  "bead_id": "asupersync-i6uzso",
+  "wave_id": "reality-check-wave2",
+  "created_date": "2026-05-06",
+  "status": "adapter_protocol_refinement_tiers_recorded",
+  "runner_script": "scripts/run_formal_wave2_refinement_coverage.sh",
+  "purpose": "Machine-readable proof-tier inventory for selected wave2 adapter, protocol, platform, runtime, and broker lanes. This extends the core Lean invariant posture without claiming blanket mechanized proof for every lane.",
+  "proof_tier_vocabulary": [
+    "lean-checked",
+    "tla-checked",
+    "lab-oracle-backed",
+    "artifact-contract-backed",
+    "assumption-bound",
+    "unproved"
+  ],
+  "required_log_fields": [
+    "bead_id",
+    "lane_id",
+    "invariant_id",
+    "proof_tier",
+    "theorem_name",
+    "model_artifact",
+    "source_path",
+    "runtime_test",
+    "e2e_artifact",
+    "assumption_count",
+    "missing_evidence_count",
+    "verdict",
+    "first_failure"
+  ],
+  "canonical_core_invariants": [
+    "inv.structured_concurrency.single_owner",
+    "inv.region_close.quiescence",
+    "inv.cancel.protocol",
+    "inv.race.losers_drained",
+    "inv.obligation.no_leaks",
+    "inv.authority.no_ambient"
+  ],
+  "doc_truth_contract": {
+    "readme_path": "README.md",
+    "formal_readme_path": "formal/README.md",
+    "required_phrases": [
+      "not a blanket mechanized proof",
+      "artifacts/formal_wave2_refinement_coverage_v1.json",
+      "tests/formal_wave2_refinement_coverage_contract.rs"
+    ],
+    "forbidden_claims": [
+      "is a blanket mechanized proof of every adapter",
+      "all adapter and protocol lanes are Lean-checked",
+      "full mechanized proof of the runtime"
+    ]
+  },
+  "lane_rows": [
+    {
+      "lane_id": "massive_swarm_capacity_envelope",
+      "owner_bead_id": "asupersync-j1dwk6",
+      "support_class": "artifact-contract-backed",
+      "proof_tier": "artifact-contract-backed",
+      "invariant_ids": [
+        "inv.structured_concurrency.single_owner",
+        "inv.region_close.quiescence",
+        "inv.cancel.protocol"
+      ],
+      "theorem_names": [
+        "step_preserves_single_owner",
+        "close_implies_quiescent",
+        "cancel_protocol_terminates"
+      ],
+      "model_states": [
+        "scheduler.three_lane.next_task",
+        "runtime_state.cancel_request"
+      ],
+      "model_artifacts": [
+        "formal/lean/coverage/runtime_state_refinement_map.json",
+        "formal/lean/coverage/invariant_theorem_test_link_map.json"
+      ],
+      "source_paths": [
+        "src/runtime",
+        "src/observability/diagnostics.rs"
+      ],
+      "runtime_tests": [
+        "tests/massive_swarm_capacity_envelope_contract.rs"
+      ],
+      "e2e_artifacts": [
+        "artifacts/wave2/massive_swarm_capacity_envelope_evidence.json"
+      ],
+      "proof_commands": [
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_massive_swarm_capacity cargo test -p asupersync --test massive_swarm_capacity_envelope_contract --features test-internals -- --nocapture",
+        "bash scripts/run_massive_swarm_capacity_envelope.sh --output-root target/massive-swarm-capacity-envelope --profile all"
+      ],
+      "assumptions": [
+        "Large-host live proof is host-gated; unsupported hosts must emit an explicit unsupported_reason."
+      ],
+      "missing_evidence": [],
+      "missing_evidence_disposition": "none"
+    },
+    {
+      "lane_id": "operator_swarm_profile_diagnostics",
+      "owner_bead_id": "asupersync-5dudcn",
+      "support_class": "artifact-contract-backed",
+      "proof_tier": "artifact-contract-backed",
+      "invariant_ids": [
+        "inv.cancel.protocol",
+        "inv.authority.no_ambient"
+      ],
+      "theorem_names": [
+        "cancel_step_strengthens_reason",
+        "no_ambient_effect_without_context"
+      ],
+      "model_states": [
+        "runtime_state.cancel_request",
+        "scheduler.three_lane.next_task"
+      ],
+      "model_artifacts": [
+        "formal/lean/coverage/runtime_state_refinement_map.json"
+      ],
+      "source_paths": [
+        "src/observability",
+        "src/runtime/config.rs",
+        "src/runtime/resource_monitor.rs"
+      ],
+      "runtime_tests": [
+        "tests/operator_swarm_profile_diagnostics_contract.rs"
+      ],
+      "e2e_artifacts": [
+        "artifacts/wave2/operator_swarm_profile_diagnostics_evidence.json"
+      ],
+      "proof_commands": [
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_operator_swarm_profile cargo test -p asupersync --test operator_swarm_profile_diagnostics_contract --features test-internals -- --nocapture",
+        "bash scripts/run_operator_swarm_profile_diagnostics.sh --output-root target/operator-swarm-profile-diagnostics --profile all"
+      ],
+      "assumptions": [
+        "Profile recommendations remain evidence-gated and cannot override proof-impact constraints."
+      ],
+      "missing_evidence": [],
+      "missing_evidence_disposition": "none"
+    },
+    {
+      "lane_id": "remote_transport_lifecycle",
+      "owner_bead_id": "asupersync-5d9s85",
+      "support_class": "production-backed",
+      "proof_tier": "lab-oracle-backed",
+      "invariant_ids": [
+        "inv.structured_concurrency.single_owner",
+        "inv.region_close.quiescence",
+        "inv.cancel.protocol"
+      ],
+      "theorem_names": [
+        "spawned_task_in_region",
+        "close_implies_quiescent",
+        "cancel_protocol_terminates"
+      ],
+      "model_states": [
+        "runtime_state.cancel_request",
+        "runtime_state.advance_region_state"
+      ],
+      "model_artifacts": [
+        "formal/lean/coverage/runtime_state_refinement_map.json",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "source_paths": [
+        "src/remote.rs",
+        "docs/integration.md"
+      ],
+      "runtime_tests": [
+        "tests/remote_transport_lifecycle_contract.rs"
+      ],
+      "e2e_artifacts": [
+        "artifacts/wave2/remote_transport_lifecycle_evidence.json"
+      ],
+      "proof_commands": [
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_remote_transport_lifecycle cargo test -p asupersync --test remote_transport_lifecycle_contract --features test-internals -- --nocapture",
+        "bash scripts/run_remote_transport_lifecycle_evidence.sh --run-id wave2-remote-transport --timeout-sec 180"
+      ],
+      "assumptions": [
+        "Deployment discovery, TLS/authentication, WAN retry policy, and stable production wire format remain adapter-scoped."
+      ],
+      "missing_evidence": [],
+      "missing_evidence_disposition": "none"
+    },
+    {
+      "lane_id": "http3_qpack_instruction_streams",
+      "owner_bead_id": "asupersync-fjkixh",
+      "support_class": "pending-proof",
+      "proof_tier": "assumption-bound",
+      "invariant_ids": [
+        "inv.cancel.protocol",
+        "inv.authority.no_ambient"
+      ],
+      "theorem_names": [
+        "cancel_protocol_terminates",
+        "no_ambient_effect_without_context"
+      ],
+      "model_states": [
+        "runtime_state.cancel_request"
+      ],
+      "model_artifacts": [
+        "formal/lean/coverage/runtime_state_refinement_map.json"
+      ],
+      "source_paths": [
+        "src/http/h3_native.rs",
+        "artifacts/http3_qpack_support_matrix_v1.json"
+      ],
+      "runtime_tests": [
+        "tests/http3_qpack_support_matrix_contract.rs"
+      ],
+      "e2e_artifacts": [
+        "artifacts/http3_qpack_support_matrix_v1.json"
+      ],
+      "proof_commands": [
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_h3_qpack cargo test -p asupersync --test http3_qpack_support_matrix_contract --features test-internals,http3 -- --nocapture"
+      ],
+      "assumptions": [
+        "QPACK instruction-stream scheduling is presently covered by support-matrix contract evidence, not a lane-specific Lean theorem."
+      ],
+      "missing_evidence": [
+        {
+          "evidence_id": "missing.http3_qpack.lane_specific_lean_or_tla",
+          "owner_bead_id": "asupersync-fjkixh",
+          "required_evidence": "Lane-specific Lean/TLA model for blocked-stream scheduling and QPACK instruction-stream progress."
+        }
+      ],
+      "missing_evidence_disposition": "assumption-bound-owner-bead"
+    },
+    {
+      "lane_id": "wasm_service_worker_direct_runtime",
+      "owner_bead_id": "asupersync-szdl85",
+      "support_class": "broker/coordinator-only",
+      "proof_tier": "artifact-contract-backed",
+      "invariant_ids": [
+        "inv.cancel.protocol",
+        "inv.authority.no_ambient"
+      ],
+      "theorem_names": [
+        "cancel_protocol_terminates",
+        "spawn_authority_gated"
+      ],
+      "model_states": [
+        "runtime_state.cancel_request"
+      ],
+      "model_artifacts": [
+        "formal/lean/coverage/runtime_state_refinement_map.json"
+      ],
+      "source_paths": [
+        "packages/browser/src/index.ts",
+        "docs/wasm_service_worker_broker_contract.md",
+        "artifacts/wasm_browser_support_boundary_contract_v1.json"
+      ],
+      "runtime_tests": [
+        "tests/wasm_service_worker_broker_contract.rs"
+      ],
+      "e2e_artifacts": [
+        "artifacts/wave2/wasm_service_worker_direct_runtime_evidence.json",
+        "artifacts/wasm_browser_support_boundary_contract_v1.json"
+      ],
+      "proof_commands": [
+        "bash scripts/run_wasm_service_worker_direct_runtime_evidence.sh --contract-only --run-id contract-smoke",
+        "bash scripts/run_wasm_service_worker_direct_runtime_evidence.sh --run-id wave2-wasm-service-worker --timeout-sec 180"
+      ],
+      "assumptions": [
+        "Direct runtime execution remains fail-closed on service-worker hosts; the shipped lane is bounded broker registration and durable handoff."
+      ],
+      "missing_evidence": [],
+      "missing_evidence_disposition": "none"
+    },
+    {
+      "lane_id": "wasm_shared_worker_direct_runtime",
+      "owner_bead_id": "asupersync-422iga",
+      "support_class": "broker/coordinator-only",
+      "proof_tier": "artifact-contract-backed",
+      "invariant_ids": [
+        "inv.cancel.protocol",
+        "inv.authority.no_ambient"
+      ],
+      "theorem_names": [
+        "cancel_protocol_terminates",
+        "spawn_authority_gated"
+      ],
+      "model_states": [
+        "runtime_state.cancel_request"
+      ],
+      "model_artifacts": [
+        "formal/lean/coverage/runtime_state_refinement_map.json"
+      ],
+      "source_paths": [
+        "packages/browser/src/index.ts",
+        "docs/wasm_shared_worker_tenancy_lifecycle_contract.md"
+      ],
+      "runtime_tests": [
+        "tests/wasm_shared_worker_tenancy_lifecycle_contract.rs"
+      ],
+      "e2e_artifacts": [
+        "artifacts/wave2/wasm_shared_worker_direct_runtime_evidence.json"
+      ],
+      "proof_commands": [
+        "bash scripts/run_wasm_shared_worker_direct_runtime_evidence.sh --contract-only --run-id contract-smoke",
+        "bash scripts/run_wasm_shared_worker_direct_runtime_evidence.sh --run-id wave2-wasm-shared-worker --timeout-sec 180"
+      ],
+      "assumptions": [
+        "Direct runtime execution remains fail-closed on shared-worker hosts; the supported lane is bounded coordinator attach and downgrade."
+      ],
+      "missing_evidence": [],
+      "missing_evidence_disposition": "none"
+    },
+    {
+      "lane_id": "browser_native_message_and_stream_apis",
+      "owner_bead_id": "asupersync-b35gbf",
+      "support_class": "guarded-public-browser-boundary",
+      "proof_tier": "artifact-contract-backed",
+      "invariant_ids": [
+        "inv.cancel.protocol",
+        "inv.authority.no_ambient"
+      ],
+      "theorem_names": [
+        "cancel_protocol_terminates",
+        "no_ambient_effect_without_context"
+      ],
+      "model_states": [
+        "runtime_state.cancel_request"
+      ],
+      "model_artifacts": [
+        "formal/lean/coverage/runtime_state_refinement_map.json"
+      ],
+      "source_paths": [
+        "src/io/browser_stream.rs",
+        "src/runtime/reactor/browser.rs",
+        "packages/browser/src/index.ts"
+      ],
+      "runtime_tests": [
+        "tests/browser_native_message_stream_evidence_contract.rs"
+      ],
+      "e2e_artifacts": [
+        "artifacts/wave2/browser_native_message_and_stream_apis_evidence.json"
+      ],
+      "proof_commands": [
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS=-C debuginfo=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_browser_native_message_stream_contract cargo test -p asupersync --test browser_native_message_stream_evidence_contract --features test-internals -- --nocapture",
+        "bash scripts/run_browser_native_message_stream_evidence.sh --run-id wave2-browser-native-message-stream --timeout-sec 180"
+      ],
+      "assumptions": [
+        "Browser helpers stay at the explicit application boundary and are not raw transports, cross-origin bridges, or server/edge adapters."
+      ],
+      "missing_evidence": [],
+      "missing_evidence_disposition": "none"
+    },
+    {
+      "lane_id": "browser_rust_runtime_api_stability",
+      "owner_bead_id": "asupersync-j1xbon",
+      "support_class": "artifact-contract-backed",
+      "proof_tier": "artifact-contract-backed",
+      "invariant_ids": [
+        "inv.structured_concurrency.single_owner",
+        "inv.authority.no_ambient"
+      ],
+      "theorem_names": [
+        "spawned_task_in_region",
+        "spawn_authority_gated"
+      ],
+      "model_states": [
+        "runtime_state.advance_region_state"
+      ],
+      "model_artifacts": [
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "source_paths": [
+        "src/runtime/builder.rs",
+        "tests/fixtures/rust-browser-consumer",
+        "docs/WASM.md"
+      ],
+      "runtime_tests": [
+        "tests/wasm_rust_browser_example_contract.rs"
+      ],
+      "e2e_artifacts": [
+        "artifacts/wave2/browser_rust_runtime_api_stability_evidence.json"
+      ],
+      "proof_commands": [
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_browser_rust cargo test -p asupersync --test wasm_rust_browser_example_contract --features test-internals,wasm-browser-dev -- --nocapture",
+        "PATH=/usr/bin:$PATH bash scripts/validate_rust_browser_consumer.sh --run-id wave2-browser-rust-runtime-api"
+      ],
+      "assumptions": [
+        "Wasm/browser host support remains lane-scoped and does not imply native parity."
+      ],
+      "missing_evidence": [],
+      "missing_evidence_disposition": "none"
+    },
+    {
+      "lane_id": "web_middleware_streaming",
+      "owner_bead_id": "asupersync-o74l7u",
+      "support_class": "pending-proof",
+      "proof_tier": "assumption-bound",
+      "invariant_ids": [
+        "inv.region_close.quiescence",
+        "inv.cancel.protocol"
+      ],
+      "theorem_names": [
+        "close_implies_quiescent",
+        "cancel_protocol_terminates"
+      ],
+      "model_states": [
+        "runtime_state.advance_region_state",
+        "runtime_state.cancel_request"
+      ],
+      "model_artifacts": [
+        "formal/lean/coverage/runtime_state_refinement_map.json"
+      ],
+      "source_paths": [
+        "src/web/mod.rs",
+        "src/service/mod.rs",
+        "docs/integration.md"
+      ],
+      "runtime_tests": [
+        "tests/e2e_web.rs"
+      ],
+      "e2e_artifacts": [],
+      "proof_commands": [
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_web cargo test -p asupersync --lib web --features test-internals -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_web_e2e cargo test -p asupersync --test e2e_web --features test-internals -- --nocapture"
+      ],
+      "assumptions": [
+        "Request-region and streaming proofs are executable-test backed until a dedicated model artifact is committed."
+      ],
+      "missing_evidence": [
+        {
+          "evidence_id": "missing.web_middleware_streaming.committed_e2e_artifact",
+          "owner_bead_id": "asupersync-o74l7u",
+          "required_evidence": "Committed wave2 evidence artifact for request-region middleware and streaming drain scenarios."
+        }
+      ],
+      "missing_evidence_disposition": "assumption-bound-owner-bead"
+    },
+    {
+      "lane_id": "filesystem_parity_cancellation",
+      "owner_bead_id": "asupersync-oc0ybw",
+      "support_class": "pending-proof",
+      "proof_tier": "assumption-bound",
+      "invariant_ids": [
+        "inv.cancel.protocol",
+        "inv.obligation.no_leaks"
+      ],
+      "theorem_names": [
+        "cancel_protocol_terminates",
+        "close_implies_ledger_empty"
+      ],
+      "model_states": [
+        "runtime_state.cancel_request",
+        "runtime_state.abort_obligation"
+      ],
+      "model_artifacts": [
+        "formal/lean/coverage/runtime_state_refinement_map.json"
+      ],
+      "source_paths": [
+        "src/fs/mod.rs",
+        "docs/integration.md",
+        "scripts/fs_parity_proof_runner.sh"
+      ],
+      "runtime_tests": [
+        "tests/e2e_fs.rs",
+        "tests/fs_verification.rs"
+      ],
+      "e2e_artifacts": [],
+      "proof_commands": [
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_fs cargo test -p asupersync --lib fs --features test-internals -- --nocapture",
+        "bash scripts/fs_parity_proof_runner.sh"
+      ],
+      "assumptions": [
+        "Filesystem parity has executable cancellation checks; committed cross-platform artifact evidence is still lane-owned."
+      ],
+      "missing_evidence": [
+        {
+          "evidence_id": "missing.filesystem_parity_cancellation.committed_e2e_artifact",
+          "owner_bead_id": "asupersync-oc0ybw",
+          "required_evidence": "Committed filesystem parity runner report with platform requirement and unsupported_reason fields."
+        }
+      ],
+      "missing_evidence_disposition": "assumption-bound-owner-bead"
+    },
+    {
+      "lane_id": "messaging_real_broker_e2e",
+      "owner_bead_id": "asupersync-tohua1",
+      "support_class": "broker-backed-pending-proof",
+      "proof_tier": "assumption-bound",
+      "invariant_ids": [
+        "inv.cancel.protocol",
+        "inv.obligation.no_leaks",
+        "inv.authority.no_ambient"
+      ],
+      "theorem_names": [
+        "cancel_protocol_terminates",
+        "abort_resolves",
+        "no_ambient_effect_without_context"
+      ],
+      "model_states": [
+        "runtime_state.cancel_request",
+        "runtime_state.abort_obligation"
+      ],
+      "model_artifacts": [
+        "formal/lean/coverage/runtime_state_refinement_map.json",
+        "formal/lean/coverage/invariant_theorem_test_link_map.json"
+      ],
+      "source_paths": [
+        "src/messaging/redis.rs",
+        "src/messaging/nats.rs",
+        "src/messaging/kafka.rs",
+        "scripts/nats_jetstream_broker_parity_proof_runner.sh",
+        "scripts/kafka_broker_parity_proof_runner.sh"
+      ],
+      "runtime_tests": [
+        "tests/integration/nats_real_server.rs",
+        "tests/integration/kafka_real_broker.rs"
+      ],
+      "e2e_artifacts": [],
+      "proof_commands": [
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_messaging cargo test -p asupersync --lib messaging --features test-internals,kafka -- --nocapture",
+        "bash scripts/nats_jetstream_broker_parity_proof_runner.sh",
+        "bash scripts/kafka_broker_parity_proof_runner.sh"
+      ],
+      "assumptions": [
+        "Broker-backed lanes require live broker context for pass rows; unavailable-broker skips must remain explicit and deterministic."
+      ],
+      "missing_evidence": [
+        {
+          "evidence_id": "missing.messaging_real_broker_e2e.committed_aggregate_artifact",
+          "owner_bead_id": "asupersync-tohua1",
+          "required_evidence": "Committed aggregate broker parity proof artifact covering Redis, NATS/JetStream, and Kafka under one support-class row."
+        }
+      ],
+      "missing_evidence_disposition": "assumption-bound-owner-bead"
+    }
+  ]
+}
