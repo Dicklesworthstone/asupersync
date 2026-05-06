@@ -134,10 +134,14 @@ pub use integrity::{
     is_trace_valid_quick, verify_trace,
 };
 pub use incident::{
-    INCIDENT_BUNDLE_SCHEMA_VERSION, IncidentBundle, IncidentCommand, IncidentDeterminism,
-    IncidentEnvVar, IncidentPrivacy, IncidentPrivacyClass, IncidentProvenance,
-    IncidentRedactionStatus, IncidentSource, IncidentSourceKind, IncidentValidationIssue,
+    INCIDENT_BUNDLE_SCHEMA_VERSION, INCIDENT_REPLAY_PACKAGE_SCHEMA_VERSION, IncidentBundle,
+    IncidentCommand, IncidentDeterminism, IncidentEnvVar, IncidentPrivacy, IncidentPrivacyClass,
+    IncidentProvenance, IncidentRedactionStatus, IncidentReplayBlockReason,
+    IncidentReplayBlockReasonKind, IncidentReplayCanonicalization, IncidentReplayImportReport,
+    IncidentReplayImportVerdict, IncidentReplayPackage, IncidentReplaySource,
+    IncidentReplaySourceRole, IncidentSource, IncidentSourceKind, IncidentValidationIssue,
     IncidentValidationIssueKind, IncidentValidationReport, IncidentValidationVerdict,
+    import_incident_bundle_json,
 };
 pub use minimizer::{
     MinimizationReport, MinimizationStep, ScenarioElement, StepKind, TraceMinimizer,

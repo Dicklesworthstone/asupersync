@@ -12,6 +12,9 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Current incident bundle schema version.
 pub const INCIDENT_BUNDLE_SCHEMA_VERSION: u32 = 1;
 
+/// Current replay package schema version emitted by the incident importer.
+pub const INCIDENT_REPLAY_PACKAGE_SCHEMA_VERSION: u32 = 1;
+
 const MAX_ID_BYTES: usize = 128;
 const MAX_PATH_BYTES: usize = 512;
 const MAX_FIELD_BYTES: usize = 1024;
@@ -414,6 +417,253 @@ impl IncidentValidationReport {
     }
 }
 
+/// Import verdict for converting a validated incident bundle into a replay package.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IncidentReplayImportVerdict {
+    /// A deterministic replay package was emitted.
+    Imported,
+    /// The input parsed but must not be imported until blockers are resolved.
+    Blocked,
+    /// The input was not a valid incident bundle JSON document.
+    Malformed,
+}
+
+/// Structured blocker classes emitted by the incident replay importer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IncidentReplayBlockReasonKind {
+    /// The importer could not parse incident bundle JSON.
+    MalformedJson,
+    /// The bundle-level schema/redaction validator rejected the input.
+    ValidationIssue,
+    /// A source kind is not understood by this importer.
+    UnsupportedSourceKind,
+    /// A source lacks artifact path, snippet, or metadata payload evidence.
+    MissingSourcePayload,
+    /// A source carries an observed hash that does not match its declared hash.
+    StaleContentHash,
+    /// A source or bundle requires redaction before replay import.
+    RedactionRequiredButMissing,
+}
+
+impl IncidentReplayBlockReasonKind {
+    /// Return the stable string tag for artifact comparisons and logs.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MalformedJson => "malformed_json",
+            Self::ValidationIssue => "validation_issue",
+            Self::UnsupportedSourceKind => "unsupported_source_kind",
+            Self::MissingSourcePayload => "missing_source_payload",
+            Self::StaleContentHash => "stale_content_hash",
+            Self::RedactionRequiredButMissing => "redaction_required_but_missing",
+        }
+    }
+}
+
+/// One typed blocker emitted by incident replay import.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncidentReplayBlockReason {
+    /// Blocker class.
+    pub kind: IncidentReplayBlockReasonKind,
+    /// Source identifier, when the blocker is source-local.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
+    /// Field path associated with the blocker.
+    pub field: String,
+    /// Human-readable blocked reason.
+    pub message: String,
+}
+
+impl IncidentReplayBlockReason {
+    fn new(
+        kind: IncidentReplayBlockReasonKind,
+        source_id: Option<String>,
+        field: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind,
+            source_id,
+            field: field.into(),
+            message: message.into(),
+        }
+    }
+}
+
+/// Replay role assigned to one imported incident source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum IncidentReplaySourceRole {
+    /// Native crash pack source.
+    CrashPack,
+    /// Trace-log source already aligned with trace tooling.
+    TraceLog,
+    /// Support bundle source retained as provenance and payload evidence.
+    SupportBundle,
+    /// README claim-failure source.
+    ReadmeClaimFailure,
+    /// Conformance failure source.
+    ConformanceFailure,
+    /// Remote `rch` proof failure source.
+    RchProofFailure,
+    /// Manual reproduction notes.
+    ReproNotes,
+}
+
+impl IncidentReplaySourceRole {
+    fn from_kind(kind: &IncidentSourceKind) -> Option<Self> {
+        match kind {
+            IncidentSourceKind::CrashPack => Some(Self::CrashPack),
+            IncidentSourceKind::TraceLog => Some(Self::TraceLog),
+            IncidentSourceKind::SupportBundle => Some(Self::SupportBundle),
+            IncidentSourceKind::ReadmeClaimFailure => Some(Self::ReadmeClaimFailure),
+            IncidentSourceKind::ConformanceFailure => Some(Self::ConformanceFailure),
+            IncidentSourceKind::RchProofFailure => Some(Self::RchProofFailure),
+            IncidentSourceKind::ReproNotes => Some(Self::ReproNotes),
+            IncidentSourceKind::Unsupported(_) => None,
+        }
+    }
+
+    /// Return the stable string tag for deterministic package keys.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CrashPack => "crash_pack",
+            Self::TraceLog => "trace_log",
+            Self::SupportBundle => "support_bundle",
+            Self::ReadmeClaimFailure => "readme_claim_failure",
+            Self::ConformanceFailure => "conformance_failure",
+            Self::RchProofFailure => "rch_proof_failure",
+            Self::ReproNotes => "repro_notes",
+        }
+    }
+}
+
+/// One imported source inside an [`IncidentReplayPackage`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IncidentReplaySource {
+    /// Stable source identifier from the incident bundle.
+    pub source_id: String,
+    /// Source role used by replay package consumers.
+    pub role: IncidentReplaySourceRole,
+    /// Original source kind tag.
+    pub kind: IncidentSourceKind,
+    /// Repo-relative artifact path, when file-backed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_path: Option<String>,
+    /// Declared content hash in `sha256:<64 hex>` form.
+    pub content_hash: String,
+    /// Declared content size in bytes.
+    pub content_bytes: u64,
+    /// Optional trace fingerprint carried by source metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_fingerprint: Option<String>,
+    /// Deterministic provenance edge from bundle capture to this source.
+    pub provenance_edge: String,
+}
+
+/// Canonicalization summary for a replay package.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncidentReplayCanonicalization {
+    /// FNV-1a digest of canonical source descriptors.
+    pub source_digest: u64,
+    /// Source IDs in canonical package order.
+    pub source_order: Vec<String>,
+    /// Trace fingerprints extracted from source metadata.
+    pub trace_fingerprints: Vec<String>,
+    /// Deterministic normalization strategy used by this importer.
+    pub normalization_strategy: String,
+}
+
+/// Deterministic replay package emitted from one incident bundle.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IncidentReplayPackage {
+    /// Replay package schema version.
+    pub schema_version: u32,
+    /// Stable package identifier derived from replay-relevant content.
+    pub package_id: String,
+    /// Source incident bundle identifier.
+    pub bundle_id: String,
+    /// Stable local fingerprint of the source bundle.
+    pub bundle_fingerprint: u64,
+    /// Imported replay-capable sources.
+    pub sources: Vec<IncidentReplaySource>,
+    /// Replay metadata compatible with existing trace tooling.
+    pub trace_metadata: crate::trace::replay::TraceMetadata,
+    /// Reproduction or proof command metadata.
+    pub command: IncidentCommand,
+    /// Deterministic capture metadata from the source bundle.
+    pub determinism: IncidentDeterminism,
+    /// Capture provenance from the source bundle.
+    pub provenance: IncidentProvenance,
+    /// Canonicalization summary for stable package IDs.
+    pub canonicalization: IncidentReplayCanonicalization,
+}
+
+impl IncidentReplayPackage {
+    /// Serialize the replay package to deterministic pretty JSON.
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+
+    /// Parse a replay package from JSON.
+    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(json)
+    }
+}
+
+/// Full importer report for bundle-to-replay-package conversion.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IncidentReplayImportReport {
+    /// Import verdict.
+    pub verdict: IncidentReplayImportVerdict,
+    /// Bundle identifier, when parsing reached a bundle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_id: Option<String>,
+    /// Replay package emitted for successful imports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package: Option<IncidentReplayPackage>,
+    /// Blocking reasons for malformed or blocked imports.
+    pub blocked_reasons: Vec<IncidentReplayBlockReason>,
+}
+
+impl IncidentReplayImportReport {
+    /// Return `true` when the importer emitted a replay package.
+    #[must_use]
+    pub const fn is_imported(&self) -> bool {
+        matches!(self.verdict, IncidentReplayImportVerdict::Imported)
+    }
+
+    /// Return `true` if any blocker has the supplied kind.
+    #[must_use]
+    pub fn contains_kind(&self, kind: IncidentReplayBlockReasonKind) -> bool {
+        self.blocked_reasons
+            .iter()
+            .any(|reason| reason.kind == kind)
+    }
+}
+
+/// Import an incident bundle JSON document into a deterministic replay package report.
+#[must_use]
+pub fn import_incident_bundle_json(json: &str) -> IncidentReplayImportReport {
+    match IncidentBundle::from_json(json) {
+        Ok(bundle) => bundle.import_replay_package(),
+        Err(error) => IncidentReplayImportReport {
+            verdict: IncidentReplayImportVerdict::Malformed,
+            bundle_id: None,
+            package: None,
+            blocked_reasons: vec![IncidentReplayBlockReason::new(
+                IncidentReplayBlockReasonKind::MalformedJson,
+                None,
+                "$",
+                format!("incident bundle JSON did not parse: {error}"),
+            )],
+        },
+    }
+}
+
 impl IncidentBundle {
     /// Parse an incident bundle from JSON.
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
@@ -452,6 +702,30 @@ impl IncidentBundle {
         }
     }
 
+    /// Import this bundle into a deterministic replay package or typed blocker report.
+    #[must_use]
+    pub fn import_replay_package(&self) -> IncidentReplayImportReport {
+        let mut blockers = validation_blockers(&self.validate());
+        append_import_source_blockers(self, &mut blockers);
+
+        if !blockers.is_empty() {
+            return IncidentReplayImportReport {
+                verdict: IncidentReplayImportVerdict::Blocked,
+                bundle_id: Some(self.bundle_id.clone()),
+                package: None,
+                blocked_reasons: blockers,
+            };
+        }
+
+        let package = self.build_replay_package();
+        IncidentReplayImportReport {
+            verdict: IncidentReplayImportVerdict::Imported,
+            bundle_id: Some(self.bundle_id.clone()),
+            package: Some(package),
+            blocked_reasons: Vec::new(),
+        }
+    }
+
     /// Compute a deterministic FNV-1a fingerprint over the bundle JSON.
     ///
     /// This is not a security hash. It is a stable local key for fixture
@@ -461,6 +735,58 @@ impl IncidentBundle {
     pub fn fingerprint(&self) -> u64 {
         let bytes = serde_json::to_vec(self).unwrap_or_default();
         fnv1a64(&bytes)
+    }
+
+    fn build_replay_package(&self) -> IncidentReplayPackage {
+        let mut sources = self
+            .sources
+            .iter()
+            .filter_map(import_source)
+            .collect::<Vec<_>>();
+        sources.sort_by(|left, right| {
+            left.role
+                .cmp(&right.role)
+                .then_with(|| left.content_hash.cmp(&right.content_hash))
+                .then_with(|| left.source_id.cmp(&right.source_id))
+        });
+
+        let source_digest = canonical_source_digest(&sources);
+        let source_order = sources
+            .iter()
+            .map(|source| source.source_id.clone())
+            .collect::<Vec<_>>();
+        let trace_fingerprints = sources
+            .iter()
+            .filter_map(|source| source.trace_fingerprint.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+
+        let mut trace_metadata =
+            crate::trace::replay::TraceMetadata::new(self.determinism.seed.unwrap_or(0))
+                .with_config_hash(fnv1a64(self.determinism.config_hash.as_bytes()))
+                .with_description(format!("incident:{}", self.bundle_id));
+        trace_metadata.recorded_at = self.determinism.virtual_time_nanos.unwrap_or(0);
+
+        let package_id = stable_replay_package_id(self, &sources, source_digest);
+        IncidentReplayPackage {
+            schema_version: INCIDENT_REPLAY_PACKAGE_SCHEMA_VERSION,
+            package_id,
+            bundle_id: self.bundle_id.clone(),
+            bundle_fingerprint: self.fingerprint(),
+            sources,
+            trace_metadata,
+            command: self.command.clone(),
+            determinism: self.determinism.clone(),
+            provenance: self.provenance.clone(),
+            canonicalization: IncidentReplayCanonicalization {
+                source_digest,
+                source_order,
+                trace_fingerprints,
+                normalization_strategy: "stable-source-digest-for-geodesic-ready-trace-import"
+                    .to_string(),
+            },
+        }
     }
 
     fn validate_header(&self, issues: &mut Vec<IncidentValidationIssue>) {
@@ -690,6 +1016,189 @@ impl IncidentBundle {
             issues,
         );
     }
+}
+
+fn validation_blockers(report: &IncidentValidationReport) -> Vec<IncidentReplayBlockReason> {
+    report
+        .issues
+        .iter()
+        .map(|issue| {
+            let kind = match issue.kind {
+                IncidentValidationIssueKind::UnsupportedSourceKind => {
+                    IncidentReplayBlockReasonKind::UnsupportedSourceKind
+                }
+                IncidentValidationIssueKind::RedactionRequiredButMissing => {
+                    IncidentReplayBlockReasonKind::RedactionRequiredButMissing
+                }
+                IncidentValidationIssueKind::UnsupportedSchemaVersion
+                | IncidentValidationIssueKind::MissingRequiredField
+                | IncidentValidationIssueKind::DuplicateSourceId
+                | IncidentValidationIssueKind::MissingRedactionPolicy
+                | IncidentValidationIssueKind::SecretLikeMaterial
+                | IncidentValidationIssueKind::OversizedField
+                | IncidentValidationIssueKind::ExternalPath
+                | IncidentValidationIssueKind::MalformedContentHash
+                | IncidentValidationIssueKind::BinaryLikePayload
+                | IncidentValidationIssueKind::DuplicateFeatureFlag => {
+                    IncidentReplayBlockReasonKind::ValidationIssue
+                }
+            };
+            IncidentReplayBlockReason::new(
+                kind,
+                source_id_from_field(&issue.field),
+                issue.field.clone(),
+                issue.message.clone(),
+            )
+        })
+        .collect()
+}
+
+fn append_import_source_blockers(
+    bundle: &IncidentBundle,
+    blockers: &mut Vec<IncidentReplayBlockReason>,
+) {
+    for (index, source) in bundle.sources.iter().enumerate() {
+        let prefix = format!("sources[{index}]");
+        if IncidentReplaySourceRole::from_kind(&source.kind).is_none() {
+            blockers.push(IncidentReplayBlockReason::new(
+                IncidentReplayBlockReasonKind::UnsupportedSourceKind,
+                Some(source.source_id.clone()),
+                format!("{prefix}.kind"),
+                format!("source kind {} cannot be imported", source.kind.as_str()),
+            ));
+        }
+        if !source_has_payload_evidence(source) {
+            blockers.push(IncidentReplayBlockReason::new(
+                IncidentReplayBlockReasonKind::MissingSourcePayload,
+                Some(source.source_id.clone()),
+                prefix.clone(),
+                "source must include artifact_path, payload_snippet, or metadata payload evidence",
+            ));
+        }
+        if let Some(observed_hash) = observed_content_hash(source)
+            && observed_hash != source.content_hash
+        {
+            blockers.push(IncidentReplayBlockReason::new(
+                IncidentReplayBlockReasonKind::StaleContentHash,
+                Some(source.source_id.clone()),
+                format!("{prefix}.metadata.observed_content_hash"),
+                format!(
+                    "observed source hash {observed_hash} does not match declared {}",
+                    source.content_hash
+                ),
+            ));
+        }
+    }
+}
+
+fn import_source(source: &IncidentSource) -> Option<IncidentReplaySource> {
+    let role = IncidentReplaySourceRole::from_kind(&source.kind)?;
+    Some(IncidentReplaySource {
+        source_id: source.source_id.clone(),
+        role,
+        kind: source.kind.clone(),
+        artifact_path: source.artifact_path.clone(),
+        content_hash: source.content_hash.clone(),
+        content_bytes: source.content_bytes,
+        trace_fingerprint: source
+            .metadata
+            .get("trace_fingerprint")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        provenance_edge: format!("{}->{}", source.source_id, role.as_str()),
+    })
+}
+
+fn source_has_payload_evidence(source: &IncidentSource) -> bool {
+    source.content_bytes > 0
+        && (source
+            .artifact_path
+            .as_ref()
+            .is_some_and(|path| !path.is_empty())
+            || source
+                .payload_snippet
+                .as_ref()
+                .is_some_and(|snippet| !snippet.is_empty())
+            || !source.metadata.is_empty())
+}
+
+fn observed_content_hash(source: &IncidentSource) -> Option<String> {
+    source
+        .metadata
+        .get("observed_content_hash")
+        .or_else(|| source.metadata.get("computed_content_hash"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn source_id_from_field(field: &str) -> Option<String> {
+    if !field.starts_with("sources[") {
+        return None;
+    }
+    Some(field.to_string())
+}
+
+fn canonical_source_digest(sources: &[IncidentReplaySource]) -> u64 {
+    let mut key = String::new();
+    for source in sources {
+        key.push_str(source.role.as_str());
+        key.push('|');
+        key.push_str(&source.source_id);
+        key.push('|');
+        key.push_str(&source.content_hash);
+        key.push('|');
+        key.push_str(source.artifact_path.as_deref().unwrap_or(""));
+        key.push('|');
+        key.push_str(source.trace_fingerprint.as_deref().unwrap_or(""));
+        key.push('\n');
+    }
+    fnv1a64(key.as_bytes())
+}
+
+fn stable_replay_package_id(
+    bundle: &IncidentBundle,
+    sources: &[IncidentReplaySource],
+    source_digest: u64,
+) -> String {
+    let mut feature_flags = bundle.determinism.feature_flags.clone();
+    feature_flags.sort();
+
+    let mut env = bundle
+        .command
+        .env
+        .iter()
+        .map(|var| format!("{}={}", var.key, var.value))
+        .collect::<Vec<_>>();
+    env.sort();
+
+    let mut key = String::new();
+    key.push_str("incident-replay-package-v1\n");
+    key.push_str(&format!("source_digest={source_digest:016x}\n"));
+    key.push_str(&format!("seed={:?}\n", bundle.determinism.seed));
+    key.push_str(&format!(
+        "schedule_seed={:?}\n",
+        bundle.determinism.schedule_seed
+    ));
+    key.push_str(&format!(
+        "virtual_time_nanos={:?}\n",
+        bundle.determinism.virtual_time_nanos
+    ));
+    key.push_str(&format!("config_hash={}\n", bundle.determinism.config_hash));
+    key.push_str(&format!("target={}\n", bundle.determinism.target_triple));
+    key.push_str(&format!("features={}\n", feature_flags.join(",")));
+    key.push_str(&format!("program={}\n", bundle.command.program));
+    key.push_str(&format!("args={}\n", bundle.command.args.join("\u{1f}")));
+    key.push_str(&format!("env={}\n", env.join("\u{1f}")));
+    for source in sources {
+        key.push_str(source.role.as_str());
+        key.push('|');
+        key.push_str(&source.content_hash);
+        key.push('|');
+        key.push_str(source.trace_fingerprint.as_deref().unwrap_or(""));
+        key.push('\n');
+    }
+
+    format!("incident-replay-v1:{:016x}", fnv1a64(key.as_bytes()))
 }
 
 fn validate_required_text(
@@ -1094,5 +1603,150 @@ mod tests {
         let json = bundle.to_json().expect("valid bundle should serialize");
         let parsed = IncidentBundle::from_json(&json).expect("serialized bundle should parse");
         assert_eq!(bundle.fingerprint(), parsed.fingerprint());
+    }
+
+    #[test]
+    fn imports_valid_crashpack_bundle_to_replay_package() {
+        let report = valid_bundle().import_replay_package();
+        assert!(report.is_imported(), "{report:#?}");
+        let package = report.package.expect("valid import emits package");
+        assert_eq!(
+            package.schema_version,
+            INCIDENT_REPLAY_PACKAGE_SCHEMA_VERSION
+        );
+        assert_eq!(package.bundle_id, "incident-fixture-accepted");
+        assert_eq!(package.sources[0].role, IncidentReplaySourceRole::CrashPack);
+        assert_eq!(package.trace_metadata.seed, 42);
+        assert_eq!(package.trace_metadata.recorded_at, 0);
+        assert_eq!(package.canonicalization.trace_fingerprints, ["0xfeedbeef"]);
+    }
+
+    #[test]
+    fn imports_required_source_kinds_without_mock_downgrade() {
+        for (kind, role) in [
+            (
+                IncidentSourceKind::CrashPack,
+                IncidentReplaySourceRole::CrashPack,
+            ),
+            (
+                IncidentSourceKind::TraceLog,
+                IncidentReplaySourceRole::TraceLog,
+            ),
+            (
+                IncidentSourceKind::RchProofFailure,
+                IncidentReplaySourceRole::RchProofFailure,
+            ),
+            (
+                IncidentSourceKind::ReadmeClaimFailure,
+                IncidentReplaySourceRole::ReadmeClaimFailure,
+            ),
+        ] {
+            let mut bundle = valid_bundle();
+            bundle.sources[0].kind = kind;
+            bundle.sources[0].source_id = role.as_str().to_string();
+            bundle.sources[0].metadata.insert(
+                "observed_content_hash".to_string(),
+                json!(bundle.sources[0].content_hash.clone()),
+            );
+            let report = bundle.import_replay_package();
+            assert!(report.is_imported(), "{role:?}: {report:#?}");
+            let package = report.package.expect("package emitted");
+            assert_eq!(package.sources[0].role, role);
+        }
+    }
+
+    #[test]
+    fn malformed_bundle_json_returns_malformed_import_report() {
+        let report = import_incident_bundle_json("{definitely-not-json");
+        assert_eq!(report.verdict, IncidentReplayImportVerdict::Malformed);
+        assert!(report.contains_kind(IncidentReplayBlockReasonKind::MalformedJson));
+    }
+
+    #[test]
+    fn schema_validation_failure_blocks_import() {
+        let mut bundle = valid_bundle();
+        bundle.schema_version = INCIDENT_BUNDLE_SCHEMA_VERSION + 1;
+        let report = bundle.import_replay_package();
+        assert_eq!(report.verdict, IncidentReplayImportVerdict::Blocked);
+        assert!(report.contains_kind(IncidentReplayBlockReasonKind::ValidationIssue));
+    }
+
+    #[test]
+    fn missing_source_payload_blocks_import() {
+        let mut bundle = valid_bundle();
+        bundle.sources[0].artifact_path = None;
+        bundle.sources[0].payload_snippet = None;
+        bundle.sources[0].metadata.clear();
+        bundle.sources[0].content_bytes = 0;
+        let report = bundle.import_replay_package();
+        assert_eq!(report.verdict, IncidentReplayImportVerdict::Blocked);
+        assert!(report.contains_kind(IncidentReplayBlockReasonKind::MissingSourcePayload));
+    }
+
+    #[test]
+    fn stale_observed_hash_blocks_import() {
+        let mut bundle = valid_bundle();
+        bundle.sources[0].metadata.insert(
+            "observed_content_hash".to_string(),
+            json!("sha256:9999999999999999999999999999999999999999999999999999999999999999"),
+        );
+        let report = bundle.import_replay_package();
+        assert_eq!(report.verdict, IncidentReplayImportVerdict::Blocked);
+        assert!(report.contains_kind(IncidentReplayBlockReasonKind::StaleContentHash));
+    }
+
+    #[test]
+    fn redaction_required_blocks_import() {
+        let mut bundle = valid_bundle();
+        bundle.privacy.classification = IncidentPrivacyClass::Secret;
+        bundle.privacy.redaction_status = IncidentRedactionStatus::RequiredButMissing;
+        let report = bundle.import_replay_package();
+        assert_eq!(report.verdict, IncidentReplayImportVerdict::Blocked);
+        assert!(report.contains_kind(IncidentReplayBlockReasonKind::RedactionRequiredButMissing));
+    }
+
+    #[test]
+    fn package_id_is_stable_for_equivalent_source_order() {
+        let mut first = valid_bundle();
+        first.sources.push(IncidentSource {
+            source_id: "trace-log-main".to_string(),
+            kind: IncidentSourceKind::TraceLog,
+            artifact_path: Some("artifacts/traces/fixture.ndjson".to_string()),
+            content_hash: HASH_B.to_string(),
+            content_bytes: 128,
+            redaction_status: IncidentRedactionStatus::Redacted,
+            payload_snippet: None,
+            metadata: BTreeMap::from([("trace_fingerprint".to_string(), json!("0xbead"))]),
+        });
+
+        let mut second = first.clone();
+        second.sources.reverse();
+
+        let first_package = first
+            .import_replay_package()
+            .package
+            .expect("first import emits package");
+        let second_package = second
+            .import_replay_package()
+            .package
+            .expect("second import emits package");
+
+        assert_eq!(first_package.package_id, second_package.package_id);
+        assert_eq!(
+            first_package.canonicalization.source_order,
+            second_package.canonicalization.source_order
+        );
+    }
+
+    #[test]
+    fn replay_package_json_round_trip_is_stable() {
+        let package = valid_bundle()
+            .import_replay_package()
+            .package
+            .expect("valid import emits package");
+        let json = package.to_json().expect("package serializes");
+        let parsed = IncidentReplayPackage::from_json(&json).expect("package parses");
+        assert_eq!(package.package_id, parsed.package_id);
+        assert_eq!(package, parsed);
     }
 }
