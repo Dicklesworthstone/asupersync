@@ -11,6 +11,7 @@ SCENARIO=""
 OUTPUT_ROOT_OVERRIDE="${HOST_PROFILE_PLANNER_SMOKE_OUTPUT_DIR:-}"
 ARTIFACT_ROOT_OVERRIDE="${HOST_PROFILE_PLANNER_SMOKE_ARTIFACT_ROOT:-}"
 RUN_ID_OVERRIDE="${HOST_PROFILE_PLANNER_SMOKE_RUN_ID:-}"
+RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
 
 usage() {
     cat <<'EOF'
@@ -34,6 +35,14 @@ require_tools() {
             missing=1
         fi
     done
+    if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+        echo "FATAL: rch is required and was not found/executable at: ${RCH_BIN}" >&2
+        missing=1
+    fi
+    if [ ! -f "$ARTIFACT" ]; then
+        echo "FATAL: contract artifact missing at ${ARTIFACT}" >&2
+        missing=1
+    fi
     if [ "$missing" -ne 0 ]; then
         exit 1
     fi
@@ -173,7 +182,8 @@ mkdir -p "$RUN_DIR"
 HOST_FINGERPRINT_JSON="$(host_fingerprint_json)"
 STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-COMMAND="rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_host_profile_planner ASUPERSYNC_HOST_PROFILE_PLANNER_CONTRACT_PATH=${ARTIFACT} ASUPERSYNC_HOST_PROFILE_PLANNER_SCENARIO=${SCENARIO} ASUPERSYNC_HOST_PROFILE_PLANNER_REPORT_PATH=${SCENARIO_REPORT_PATH} cargo test -p asupersync --test host_profile_planner_contract host_profile_planner_smoke_contract_emits_report --features test-internals -- --nocapture"
+printf -v RCH_INVOCATION '%q' "$RCH_BIN"
+COMMAND="${RCH_INVOCATION} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_host_profile_planner ASUPERSYNC_HOST_PROFILE_PLANNER_CONTRACT_PATH=${ARTIFACT} ASUPERSYNC_HOST_PROFILE_PLANNER_SCENARIO=${SCENARIO} ASUPERSYNC_HOST_PROFILE_PLANNER_REPORT_PATH=${SCENARIO_REPORT_PATH} cargo test -p asupersync --test host_profile_planner_contract host_profile_planner_smoke_contract_emits_report --features test-internals -- --nocapture"
 
 COMMAND_EXIT_CODE=0
 SCRIPT_EXIT_CODE=0
@@ -201,6 +211,14 @@ else
             STATUS="failed"
             MESSAGE="rch proof command failed"
         fi
+    fi
+
+    if grep -Eq '^\[RCH\] local \(|falling back to local' "$RUN_LOG_PATH" 2>/dev/null; then
+        COMMAND_EXIT_CODE=86
+        SCRIPT_EXIT_CODE=86
+        STATUS="failed"
+        MESSAGE="rch local fallback detected; refusing local cargo execution"
+        printf 'FATAL: rch local fallback detected; refusing local cargo execution\n' >>"$RUN_LOG_PATH"
     fi
 
     if [ "$STATUS" = "passed" ]; then
@@ -259,6 +277,7 @@ jq -n \
     --arg status "$STATUS" \
     --arg message "$MESSAGE" \
     --arg mode "$MODE" \
+    --arg command "$COMMAND" \
     --arg report_path "$SCENARIO_REPORT_PATH" \
     --arg bundle_manifest_path "$BUNDLE_MANIFEST_PATH" \
     --arg run_log_path "$RUN_LOG_PATH" \
@@ -273,6 +292,7 @@ jq -n \
         status: $status,
         message: $message,
         mode: $mode,
+        command: $command,
         validation_passed: $validation_passed,
         command_exit_code: $command_exit_code,
         script_exit_code: $script_exit_code,
