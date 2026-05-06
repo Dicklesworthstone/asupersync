@@ -16,6 +16,16 @@ use asupersync::runtime::region_table::{RegionCreateError, RegionTable};
 use asupersync::types::{Budget, RegionId, TaskId, Time};
 use asupersync::util::ArenaIndex;
 
+const README: &str = include_str!("../README.md");
+const REGION_TABLE_SOURCE: &str = include_str!("../src/runtime/region_table.rs");
+const OBLIGATION_TABLE_SOURCE: &str = include_str!("../src/runtime/obligation_table.rs");
+const LAB_RUNTIME_SOURCE: &str = include_str!("../src/lab/runtime.rs");
+const LAB_CONFIG_SOURCE: &str = include_str!("../src/lab/config.rs");
+
+fn assert_contains(haystack: &str, needle: &str, label: &str) {
+    assert!(haystack.contains(needle), "{label} must contain `{needle}`");
+}
+
 #[test]
 fn readme_claim_1_structured_concurrency_enforced() {
     // CLAIM: "Tasks don't float free. Every task is owned by a region.
@@ -46,7 +56,16 @@ fn readme_claim_1_structured_concurrency_enforced() {
     // The implementation has comprehensive tests like `close_requires_quiescence_for_all_live_work`
     // and `close_quiescence_race_spawn_after_begin_close_blocked` proving this guarantee
 
-    println!("✓ VERIFIED: Structured concurrency enforced by region ownership tree");
+    assert_contains(
+        REGION_TABLE_SOURCE,
+        "close_requires_quiescence_for_all_live_work",
+        "region table quiescence regression coverage",
+    );
+    assert_contains(
+        REGION_TABLE_SOURCE,
+        "close_quiescence_race_spawn_after_begin_close_blocked",
+        "region table spawn-after-close regression coverage",
+    );
 }
 
 #[test]
@@ -88,7 +107,11 @@ fn readme_claim_2_no_obligation_leaks() {
     let double_leak = table.mark_leaked(obligation_id, now);
     assert!(double_leak.is_err());
 
-    println!("✓ VERIFIED: Obligation leak detection prevents silent resource loss");
+    assert_contains(
+        OBLIGATION_TABLE_SOURCE,
+        "mark_leaked_obligation",
+        "obligation table leak regression coverage",
+    );
 }
 
 #[test]
@@ -121,7 +144,11 @@ fn readme_claim_3_deterministic_testing() {
     // Lab runtime uses deterministic worker selection based on seed
     // (verified by comprehensive tests in lab/runtime.rs like deterministic_multiworker_schedule)
 
-    println!("✓ VERIFIED: Lab runtime provides deterministic execution with virtual time");
+    assert_contains(
+        LAB_RUNTIME_SOURCE,
+        "deterministic_multiworker_schedule",
+        "lab runtime deterministic scheduler regression coverage",
+    );
 }
 
 #[test]
@@ -129,15 +156,78 @@ fn readme_claims_comprehensive_verification() {
     // This test serves as a high-level verification that the three core claims
     // are not just present but actively enforced in the type system and runtime.
 
-    println!("\n=== README CLAIMS REALITY CHECK COMPLETE ===");
-    println!("✓ Structured concurrency: Region ownership tree prevents orphan tasks");
-    println!("✓ No obligation leaks: Explicit tracking with ObligationLeakInfo");
-    println!("✓ Deterministic testing: Seed-based virtual time and scheduling");
-    println!();
-    println!("Sampled files verified:");
-    println!("  - src/runtime/region_table.rs: Region lifecycle and quiescence");
-    println!("  - src/runtime/obligation_table.rs: Leak detection and tracking");
-    println!("  - src/lab/runtime.rs: Virtual time and deterministic execution");
-    println!();
-    println!("STATUS: All README claims verified against actual implementation ✓");
+    for (needle, label) in [
+        (
+            "Every spawned task is owned by a region; region close waits for all children",
+            "README no-orphan structured-concurrency claim",
+        ),
+        (
+            "Tasks don't float free. Every task is owned by a region.",
+            "README region ownership explanation",
+        ),
+        (
+            "region_close requires all obligations resolved",
+            "README region-close obligation invariant",
+        ),
+        (
+            "Lab runtime: virtual time, deterministic scheduling, trace replay",
+            "README deterministic lab-runtime claim",
+        ),
+        (
+            "Deterministic scheduling**: same seed → same execution",
+            "README same-seed deterministic scheduling claim",
+        ),
+    ] {
+        assert_contains(README, needle, label);
+    }
+
+    for (source, needle, label) in [
+        (
+            REGION_TABLE_SOURCE,
+            "pub fn create_root",
+            "region table root creation API",
+        ),
+        (
+            REGION_TABLE_SOURCE,
+            "pub fn create_child",
+            "region table child creation API",
+        ),
+        (
+            REGION_TABLE_SOURCE,
+            "ParentNotFound",
+            "region table fail-closed parent validation",
+        ),
+        (
+            OBLIGATION_TABLE_SOURCE,
+            "pub struct ObligationLeakInfo",
+            "obligation leak evidence payload",
+        ),
+        (
+            OBLIGATION_TABLE_SOURCE,
+            "pub fn mark_leaked",
+            "obligation leak marking API",
+        ),
+        (
+            OBLIGATION_TABLE_SOURCE,
+            "pub fn pending_count_for_kind",
+            "per-kind pending obligation counter",
+        ),
+        (
+            LAB_RUNTIME_SOURCE,
+            "pub fn with_seed",
+            "lab runtime seeded constructor",
+        ),
+        (
+            LAB_RUNTIME_SOURCE,
+            "pub fn advance_time",
+            "lab runtime virtual-time control",
+        ),
+        (
+            LAB_CONFIG_SOURCE,
+            "pub const fn worker_count",
+            "lab config deterministic worker-count control",
+        ),
+    ] {
+        assert_contains(source, needle, label);
+    }
 }
