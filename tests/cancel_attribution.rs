@@ -358,15 +358,18 @@ fn cancel_kind_eq_and_hash() {
     init_test("cancel_kind_eq_and_hash");
 
     test_section!("equality");
-    assert_eq!(CancelKind::User, CancelKind::User);
-    assert_ne!(CancelKind::User, CancelKind::Timeout);
+    let user_kind = CancelReason::user("operator stop").kind;
+    let timeout_kind = CancelReason::timeout().kind;
+    assert_eq!(user_kind, CancelKind::User);
+    assert_ne!(user_kind, timeout_kind);
     tracing::info!("Equality works");
 
     test_section!("hash set membership");
     let mut set = HashSet::new();
-    set.insert(CancelKind::User);
-    set.insert(CancelKind::Deadline);
-    set.insert(CancelKind::Shutdown);
+    assert!(set.insert(user_kind));
+    assert!(!set.insert(CancelReason::user("duplicate user stop").kind));
+    assert!(set.insert(CancelKind::Deadline));
+    assert!(set.insert(CancelKind::Shutdown));
 
     assert!(set.contains(&CancelKind::User));
     assert!(set.contains(&CancelKind::Deadline));
