@@ -305,13 +305,13 @@ Asupersync is a library/runtime. Core code should not write to stdout/stderr.
 
 ```bash
 # Check for compiler errors and warnings
-cargo check --all-targets
+rch exec -- cargo check --all-targets
 
 # Check for clippy lints (pedantic + nursery are enabled)
-cargo clippy --all-targets -- -D warnings
+rch exec -- cargo clippy --all-targets -- -D warnings
 
 # Verify formatting
-cargo fmt --check
+rch exec -- cargo fmt --check
 ```
 
 If you see errors, **carefully understand and resolve each issue**. Read sufficient context to fix them the RIGHT way.
@@ -339,21 +339,21 @@ Prefer deterministic lab-runtime tests for concurrency-sensitive behavior.
 
 ```bash
 # Run all tests
-cargo test
+rch exec -- cargo test
 
 # Run with output
-cargo test -- --nocapture
+rch exec -- cargo test -- --nocapture
 
 # Run tests for a specific module
-cargo test --lib <module_name>
+rch exec -- cargo test --lib <module_name>
 
 # Run tests for a workspace member
-cargo test -p asupersync-macros
-cargo test -p asupersync-conformance
-cargo test -p franken-kernel
-cargo test -p franken-evidence
-cargo test -p franken-decision
-cargo test -p frankenlab
+rch exec -- cargo test -p asupersync-macros
+rch exec -- cargo test -p asupersync-conformance
+rch exec -- cargo test -p franken-kernel
+rch exec -- cargo test -p franken-evidence
+rch exec -- cargo test -p franken-decision
+rch exec -- cargo test -p frankenlab
 ```
 
 ### Test Categories
@@ -824,9 +824,15 @@ rch status                    # Overview of current state
 rch queue                     # See active/waiting builds
 ```
 
-If rch or its workers are unavailable, it fails open — builds run locally as normal.
+If rch or its workers are unavailable, it may fail open by running the command
+locally. Codex/GPT agents must not rely on that fallback for CPU-intensive
+Cargo work in this repository; treat it as a blocker unless the user explicitly
+authorizes a local run.
 
-**Note for Codex/GPT-5.2:** Codex does not have the automatic PreToolUse hook, but you can (and should) still manually offload compute-intensive compilation commands using `rch exec -- <command>`. This avoids local resource contention when multiple agents are building simultaneously.
+**Note for Codex/GPT-5.2:** Codex does not have the automatic PreToolUse hook,
+so manually offload compute-intensive compilation commands using
+`rch exec -- <command>`. This avoids local resource contention when multiple
+agents are building simultaneously.
 
 ---
 
