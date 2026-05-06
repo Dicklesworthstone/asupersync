@@ -2206,6 +2206,8 @@ impl MySqlConnection {
         match data[0] {
             0x00 => {
                 // OK packet - authentication successful
+                let ok = Self::parse_ok_packet(&data)?;
+                self.inner.status_flags = ok.status_flags;
                 Ok(())
             }
             0xFF => {
@@ -2290,7 +2292,11 @@ impl MySqlConnection {
         self.inner.sequence = seq.wrapping_add(1);
 
         match data.first() {
-            Some(0x00) => Ok(()),
+            Some(0x00) => {
+                let ok = Self::parse_ok_packet(&data)?;
+                self.inner.status_flags = ok.status_flags;
+                Ok(())
+            }
             Some(0xFF) => Err(Self::parse_error(&data)),
             Some(0x01) if plugin_name == "caching_sha2_password" => {
                 // Need to handle more data for caching_sha2_password
@@ -2314,7 +2320,11 @@ impl MySqlConnection {
             let (data, seq) = self.read_packet().await?;
             self.inner.sequence = seq.wrapping_add(1);
             match data.first() {
-                Some(0x00) => Ok(()),
+                Some(0x00) => {
+                    let ok = Self::parse_ok_packet(&data)?;
+                    self.inner.status_flags = ok.status_flags;
+                    Ok(())
+                }
                 Some(0xFF) => Err(Self::parse_error(&data)),
                 _ => Err(MySqlError::Protocol(
                     "unexpected response after fast auth".to_string(),
@@ -2346,7 +2356,11 @@ impl MySqlConnection {
                 let (data, seq) = self.read_packet().await?;
                 self.inner.sequence = seq.wrapping_add(1);
                 match data.first() {
-                    Some(0x00) => Ok(()),
+                    Some(0x00) => {
+                        let ok = Self::parse_ok_packet(&data)?;
+                        self.inner.status_flags = ok.status_flags;
+                        Ok(())
+                    }
                     Some(0xFF) => Err(Self::parse_error(&data)),
                     _ => Err(MySqlError::Protocol(
                         "unexpected response after fast auth".to_string(),
@@ -5219,6 +5233,34 @@ mod tests {
         }
     }
 
+    fn make_test_connection_with_peer() -> (MySqlConnection, std::net::TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let std_stream = std::net::TcpStream::connect(addr).expect("connect");
+        let (peer_stream, _) = listener.accept().expect("accept");
+        let stream = crate::net::TcpStream::from_std(std_stream).expect("from_std");
+        (
+            MySqlConnection {
+                inner: MySqlConnectionInner {
+                    stream,
+                    connection_id: 0,
+                    capabilities: 0,
+                    charset: 0,
+                    status_flags: 0,
+                    sequence: 0,
+                    closed: false,
+                    server_version: String::new(),
+                    needs_rollback: false,
+                    max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                    prepared_statement_epoch: 0,
+                    query_in_flight: std::sync::atomic::AtomicBool::new(false),
+                },
+                options: None,
+            },
+            peer_stream,
+        )
+    }
+
     fn make_command_connection_with_single_response(
         response_payload: Vec<u8>,
     ) -> (MySqlConnection, std::thread::JoinHandle<()>) {
@@ -6495,6 +6537,49 @@ mod tests {
             conn.inner.closed,
             "malformed ERR packets must keep execute connections fail-closed"
         );
+    }
+
+    #[test]
+    fn malformed_auth_ok_packet_is_rejected() {
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        conn.inner.sequence = 2;
+
+        let mut packet = PacketBuffer::new();
+        packet.set_sequence(2);
+        packet.buf = vec![0x00];
+        let packet = packet.build_packet();
+        std::io::Write::write_all(&mut peer, &packet.bytes).expect("write malformed auth ok");
+
+        let options = MySqlConnectOptions {
+            host: "localhost".to_string(),
+            port: 3306,
+            database: None,
+            user: "root".to_string(),
+            password: Some(SecretString::new("secret")),
+            connect_timeout: None,
+            ssl_mode: SslMode::Preferred,
+            insecure_legacy_mysql_native_password: false,
+            insecure_allow_auth_switch_downgrade: false,
+            requested_charset: None,
+        };
+        let handshake = Handshake {
+            server_version: "8.0.0".to_string(),
+            connection_id: 1,
+            auth_plugin_data: b"0123456789abcdefghijkl".to_vec(),
+            capabilities: capability::CLIENT_PROTOCOL_41
+                | capability::CLIENT_PLUGIN_AUTH
+                | capability::CLIENT_SECURE_CONNECTION,
+            charset: 45,
+            status_flags: 0,
+            auth_plugin_name: "caching_sha2_password".to_string(),
+        };
+
+        match run(conn.handle_auth_response(&options, &handshake)) {
+            Err(MySqlError::Protocol(msg)) => {
+                assert!(msg.contains("unexpected end of packet"), "got: {msg}");
+            }
+            other => panic!("expected malformed auth OK to fail closed, got {other:?}"),
+        }
     }
 
     #[test]
