@@ -855,6 +855,111 @@ fn browser_native_messaging_helpers_fail_closed_and_pin_lifecycle_semantics() {
 }
 
 #[test]
+fn browser_package_exports_guarded_native_stream_helpers() {
+    let src = read_source("packages/browser/src/index.ts");
+    for marker in [
+        "BROWSER_NATIVE_STREAM_CONTRACT_ID",
+        "BROWSER_NATIVE_STREAM_UNSUPPORTED_CODE",
+        "BROWSER_NATIVE_STREAM_OPERATION_FAILED_CODE",
+        "export interface BrowserNativeStreamCapability",
+        "export interface BrowserNativeStreamSupportDiagnostics",
+        "export function detectBrowserNativeStreamSupport(",
+        "export function createBrowserNativeStreamUnsupportedError(",
+        "export function assertBrowserNativeStreamSupport(",
+        "export class BrowserReadableStream",
+        "export class BrowserWritableStream",
+        "export function createBrowserReadableStream(",
+        "export function createBrowserWritableStream(",
+        "rustAsyncReadWriteBridge: \"substrate_only\"",
+    ] {
+        assert!(
+            src.contains(marker),
+            "browser src/index.ts must export native stream marker: {marker}"
+        );
+    }
+
+    let dts_path = repo_root().join("packages/browser/dist/index.d.ts");
+    if dts_path.exists() {
+        let dts = std::fs::read_to_string(&dts_path)
+            .unwrap_or_else(|_| panic!("missing {}", dts_path.display()));
+        for marker in [
+            "BROWSER_NATIVE_STREAM_CONTRACT_ID",
+            "BROWSER_NATIVE_STREAM_UNSUPPORTED_CODE",
+            "BROWSER_NATIVE_STREAM_OPERATION_FAILED_CODE",
+            "export interface BrowserNativeStreamCapability",
+            "export interface BrowserNativeStreamSupportDiagnostics",
+            "export declare function detectBrowserNativeStreamSupport(",
+            "export declare function createBrowserNativeStreamUnsupportedError(",
+            "export declare function assertBrowserNativeStreamSupport(",
+            "export declare class BrowserReadableStream",
+            "export declare class BrowserWritableStream",
+            "export declare function createBrowserReadableStream(",
+            "export declare function createBrowserWritableStream(",
+            "rustAsyncReadWriteBridge: \"substrate_only\"",
+        ] {
+            assert!(
+                dts.contains(marker),
+                "browser dist/index.d.ts must export native stream marker: {marker}"
+            );
+        }
+    }
+}
+
+#[test]
+fn browser_native_stream_helpers_fail_closed_and_pin_lifecycle_semantics() {
+    let src = read_source("packages/browser/src/index.ts");
+    for marker in [
+        "\"capability_not_granted\"",
+        "\"degraded_mode_denied\"",
+        "\"missing_readable_stream\"",
+        "\"missing_writable_stream\"",
+        "capabilityGranted: boolean",
+        "degradedMode: boolean",
+        "redactionPolicy: BrowserNativeStreamRedactionPolicy",
+        "Pass an explicit BrowserNativeStreamCapability with capabilityGranted: true",
+        "These BrowserReadableStream and BrowserWritableStream helpers are browser-native WHATWG stream wrappers; they do not promote the Rust AsyncRead/AsyncWrite wasm ABI.",
+        "supportForNativeStreamConstruction(",
+        "this.stateValue = \"closed\";",
+        "this.stateValue = \"cancelled\";",
+        "this.stateValue = \"aborted\";",
+        "this.stateValue = \"released\";",
+        "this.stateValue = \"errored\";",
+        "async read(): Promise<Uint8Array | null>",
+        "async readAll(): Promise<Uint8Array>",
+        "async write(chunk: BrowserNativeStreamChunk): Promise<number>",
+        "await this.writer.ready;",
+        "releaseLock(): void",
+        "\"read_limit_exceeded\"",
+        "\"write_limit_exceeded\"",
+        "\"unsupported_chunk\"",
+        "Create a fresh browser-native stream helper after close, cancel, abort, release, or stream error.",
+        "This API does not claim Rust AsyncRead/AsyncWrite browser-core ABI support.",
+    ] {
+        assert!(
+            src.contains(marker),
+            "browser native stream lifecycle marker missing: {marker}"
+        );
+    }
+
+    let stream_src = read_source("src/io/browser_stream.rs");
+    for marker in [
+        "readable_stream_cancel_produces_error",
+        "writable_stream_abort_transitions_to_errored",
+        "writable_stream_shutdown_transitions_to_closed",
+        "writable_stream_backpressure_detection",
+        "writable_stream_allows_partial_write_when_configured",
+        "stream_io_cap_tracks_stats",
+        "stream_io_cap_readable_bridge_updates_bytes_and_close_stats",
+        "stream_io_cap_writable_bridge_updates_bytes_and_close_stats",
+    ] {
+        assert!(
+            stream_src.contains(marker),
+            "Rust browser stream substrate test marker missing: {marker}"
+        );
+    }
+}
+
+#[test]
 fn browser_core_fetch_bridge_supports_window_or_worker_hosts() {
     let content = read_source("asupersync-browser-core/src/lib.rs");
     for marker in [

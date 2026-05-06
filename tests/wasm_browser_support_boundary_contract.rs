@@ -10,6 +10,7 @@ const CONTRACT_PATH: &str = "artifacts/wasm_browser_support_boundary_contract_v1
 const INTEGRATION_DOC_PATH: &str = "docs/integration.md";
 const POLICY_PATH: &str = ".github/wasm_worker_offload_policy.json";
 const REACTOR_SRC_PATH: &str = "src/runtime/reactor/browser.rs";
+const STREAM_SRC_PATH: &str = "src/io/browser_stream.rs";
 const WASM_DOC_PATH: &str = "docs/WASM.md";
 
 fn repo_path(relative: &str) -> PathBuf {
@@ -108,13 +109,22 @@ fn support_boundary_contract_names_canonical_docs_tests_and_scope_limits() {
     for shipped_claim in [
         "message_channel_public_browser_sdk_shipped",
         "broadcast_channel_public_browser_sdk_shipped",
+        "readable_stream_public_browser_sdk_shipped",
+        "writable_stream_public_browser_sdk_shipped",
     ] {
         assert_eq!(
             scope.get(shipped_claim).and_then(JsonValue::as_bool),
             Some(true),
-            "{shipped_claim} must be true after asupersync-b35gbf.1"
+            "{shipped_claim} must be true after browser native API promotion"
         );
     }
+    assert_eq!(
+        scope
+            .get("rust_async_read_write_browser_core_abi_shipped")
+            .and_then(JsonValue::as_bool),
+        Some(false),
+        "Rust AsyncRead/AsyncWrite browser-core ABI must stay false for JS-native stream wrappers"
+    );
 }
 
 #[test]
@@ -276,6 +286,59 @@ fn browser_native_messaging_is_guarded_public_sdk_surface_without_raw_transport_
         assert!(
             wasm_doc.contains(marker),
             "docs/WASM.md must preserve messaging boundary marker: {marker}"
+        );
+    }
+}
+
+#[test]
+fn browser_native_streams_are_guarded_public_sdk_surface_without_rust_abi_claim() {
+    let contract = contract();
+    let browser_src = read_repo_file(BROWSER_SRC_PATH);
+    let stream_src = read_repo_file(STREAM_SRC_PATH);
+    let wasm_doc = read_repo_file(WASM_DOC_PATH);
+
+    let streams = array(&contract, "capability_surfaces")
+        .iter()
+        .find(|surface| {
+            surface.get("surface").and_then(JsonValue::as_str) == Some("browser_native_streams")
+        })
+        .expect("browser_native_streams surface");
+    assert_eq!(
+        streams.get("public_label").and_then(JsonValue::as_str),
+        Some("guarded_package_level_support")
+    );
+    assert_eq!(
+        streams
+            .get("rust_async_read_write_bridge")
+            .and_then(JsonValue::as_str),
+        Some("substrate_only")
+    );
+
+    for marker in array(streams, "allowed_internal_markers") {
+        let marker = marker.as_str().expect("allowed marker string");
+        assert!(
+            stream_src.contains(marker) || browser_src.contains(marker),
+            "internal stream marker must remain visible: {marker}"
+        );
+    }
+
+    for marker in array(streams, "required_public_export_markers") {
+        let marker = marker.as_str().expect("public marker string");
+        assert!(
+            browser_src.contains(marker),
+            "browser SDK must export guarded stream marker: {marker}"
+        );
+    }
+
+    for marker in [
+        "WHATWG `ReadableStream` / `WritableStream` browser-native helpers",
+        "explicit BrowserNativeStreamCapability",
+        "The Rust `AsyncRead` / `AsyncWrite` browser-core ABI remains substrate-only",
+        "these helpers do not claim wasm ABI parity",
+    ] {
+        assert!(
+            wasm_doc.contains(marker),
+            "docs/WASM.md must preserve stream boundary marker: {marker}"
         );
     }
 }

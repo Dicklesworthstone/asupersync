@@ -1237,17 +1237,14 @@ fn known_contradictions_are_tracked() {
         "IndexedDB BrowserStorage surface should now be shipped"
     );
 
-    // Boundary 2: the public SDK still must not turn generic browser-native
-    // messaging into a broad surface area, but the bounded SharedWorker
-    // coordinator lane is now allowed to name MessagePort explicitly.
+    // Resolved contradiction 2: browser-native messaging is now a guarded
+    // public package surface, still bounded to browser application
+    // coordination rather than runtime channels or raw transports.
     assert!(
-        !browser_src.contains("BroadcastChannel"),
-        "public browser SDK must not silently export BroadcastChannel"
-    );
-    assert!(
-        browser_src.contains("BrowserSharedWorkerCoordinatorClient")
-            && browser_src.contains("MessagePort"),
-        "bounded shared-worker coordinator scaffolding may now name MessagePort explicitly"
+        browser_src.contains("detectBrowserNativeMessagingSupport")
+            && browser_src.contains("BrowserMessageChannel")
+            && browser_src.contains("BrowserBroadcastChannel"),
+        "browser-native messaging public surface should now be guarded and explicit"
     );
 
     // Resolved contradiction 3: localStorage host backend is now elevated
@@ -1257,63 +1254,68 @@ fn known_contradictions_are_tracked() {
         "localStorage package surface should now be explicit"
     );
 
-    // Contradiction 4: Browser stream bridge (ReadableStream/WritableStream
-    // → AsyncRead/AsyncWrite) exists in Rust but has no public JS/TS API.
+    // Resolved contradiction 4: public JS/TS stream helpers now exist, while
+    // Rust AsyncRead/AsyncWrite browser-core ABI parity remains substrate-only.
     assert!(
-        !browser_src.contains("ReadableStream") && !browser_src.contains("WritableStream"),
-        "When WHATWG stream bridges are shipped, update this test"
+        browser_src.contains("detectBrowserNativeStreamSupport")
+            && browser_src.contains("BrowserReadableStream")
+            && browser_src.contains("BrowserWritableStream")
+            && browser_src.contains("rustAsyncReadWriteBridge: \"substrate_only\""),
+        "browser-native stream helpers should be public without claiming Rust I/O ABI parity"
     );
 }
 
 #[test]
-fn messaging_surfaces_remain_public_sdk_unshipped_but_explicitly_documented() {
+fn browser_native_surfaces_are_guarded_public_helpers() {
     let browser_src = read_file("packages/browser/src/index.ts");
     assert!(
-        !browser_src.contains("MessageChannel") && !browser_src.contains("BroadcastChannel"),
-        "browser SDK must not silently export generic browser-native messaging APIs"
-    );
-    assert!(
-        browser_src.contains("createBrowserSharedWorkerCoordinatorSelection(")
-            && browser_src.contains("MessagePort"),
-        "the bounded shared-worker coordinator helper may use MessagePort explicitly"
+        browser_src.contains("detectBrowserNativeMessagingSupport(")
+            && browser_src.contains("createBrowserMessageChannel(")
+            && browser_src.contains("createBrowserBroadcastChannel(")
+            && browser_src.contains("detectBrowserNativeStreamSupport(")
+            && browser_src.contains("createBrowserReadableStream(")
+            && browser_src.contains("createBrowserWritableStream("),
+        "browser SDK must expose guarded browser-native messaging and stream helpers explicitly"
     );
 
     let wasm_doc = read_file("docs/WASM.md");
     for marker in [
         "Browser-native messaging surfaces (`MessageChannel`, `MessagePort`, `BroadcastChannel`)",
-        "Direct-runtime feasible but not yet shipped as public Browser Edition APIs",
-        "bootstrap a Browser Edition runtime inside a dedicated worker",
-        "keep `MessageChannel` / `BroadcastChannel` at the application boundary",
-        "use bridge-only adapters",
+        "guarded public Browser Edition helpers",
+        "explicit BrowserNativeMessagingCapability",
+        "WHATWG `ReadableStream` / `WritableStream` browser-native helpers",
+        "explicit BrowserNativeStreamCapability",
+        "The Rust `AsyncRead` / `AsyncWrite` browser-core ABI remains substrate-only",
     ] {
         assert!(
             wasm_doc.contains(marker),
-            "docs/WASM.md must preserve messaging boundary marker: {marker}"
+            "docs/WASM.md must preserve browser-native boundary marker: {marker}"
         );
     }
 
     let census_doc = read_file("docs/wasm_api_surface_census.md");
     for marker in [
         "Browser-native messaging surfaces (`MessageChannel`, `MessagePort`, `BroadcastChannel`)",
-        "Direct-runtime feasible substrate, not yet shipped as public Browser Edition APIs",
-        "direct off-main-thread execution belongs in a dedicated worker runtime",
+        "Guarded package-level support in `@asupersync/browser`",
+        "WHATWG `ReadableStream` / `WritableStream` browser-native helpers",
+        "Rust `AsyncRead`/`AsyncWrite` browser-core ABI remains substrate-only",
     ] {
         assert!(
             census_doc.contains(marker),
-            "wasm_api_surface_census.md must preserve messaging boundary marker: {marker}"
+            "wasm_api_surface_census.md must preserve browser-native boundary marker: {marker}"
         );
     }
 
     let troubleshooting = read_file("docs/wasm_troubleshooting_compendium.md");
     for marker in [
-        "`MessageChannel` / `MessagePort` / `BroadcastChannel` expected as public Browser Edition APIs, but nothing is exported",
-        "dedicated-worker direct-runtime support",
-        "same-origin app coordination",
-        "bridge-only adapters",
+        "`MessageChannel` / `MessagePort` / `BroadcastChannel` helpers deny construction",
+        "`ReadableStream` / `WritableStream` helpers deny construction or fail after close/cancel/abort/release",
+        "browser-native byte wrappers while Rust `AsyncRead` / `AsyncWrite` browser-core ABI parity remains substrate-only",
+        "any claim that these helpers are asupersync structured channels, raw transports, cross-origin bridges, or direct runtime lanes",
     ] {
         assert!(
             troubleshooting.contains(marker),
-            "troubleshooting compendium must preserve messaging fallback marker: {marker}"
+            "troubleshooting compendium must preserve browser-native fallback marker: {marker}"
         );
     }
 }

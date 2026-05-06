@@ -171,10 +171,12 @@ export interface BrowserCapabilitySnapshot {
   hasIndexedDb: boolean;
   hasLocalStorage: boolean;
   hasMessageChannel: boolean;
+  hasReadableStream: boolean;
   hasWebAssembly: boolean;
   hasWebTransport: boolean;
   hasWebSocket: boolean;
   hasWindow: boolean;
+  hasWritableStream: boolean;
 }
 
 export type BrowserRuntimeSupportClass =
@@ -958,6 +960,12 @@ export const BROWSER_NATIVE_MESSAGING_UNSUPPORTED_CODE =
   "ASUPERSYNC_BROWSER_NATIVE_MESSAGING_UNSUPPORTED";
 export const BROWSER_NATIVE_MESSAGING_OPERATION_FAILED_CODE =
   "ASUPERSYNC_BROWSER_NATIVE_MESSAGING_OPERATION_FAILED";
+export const BROWSER_NATIVE_STREAM_CONTRACT_ID =
+  "browser-native-stream-api-v1";
+export const BROWSER_NATIVE_STREAM_UNSUPPORTED_CODE =
+  "ASUPERSYNC_BROWSER_NATIVE_STREAM_UNSUPPORTED";
+export const BROWSER_NATIVE_STREAM_OPERATION_FAILED_CODE =
+  "ASUPERSYNC_BROWSER_NATIVE_STREAM_OPERATION_FAILED";
 
 export type BrowserNativeMessagingSurface =
   | "message_channel"
@@ -1046,6 +1054,103 @@ export type BrowserNativeMessageHandler = (message: unknown) => void;
 export type BrowserNativeMessageErrorHandler = (
   diagnostics: BrowserNativeMessagingOperationDiagnostics,
 ) => void;
+
+export type BrowserNativeStreamSurface =
+  | "readable_stream"
+  | "writable_stream";
+
+export type BrowserNativeStreamSupportClass =
+  | "direct_runtime_supported"
+  | "unsupported";
+
+export type BrowserNativeStreamReason =
+  | BrowserRuntimeSupportReason
+  | "capability_not_granted"
+  | "degraded_mode_denied"
+  | "missing_readable_stream"
+  | "missing_writable_stream";
+
+export type BrowserNativeStreamState =
+  | "open"
+  | "closed"
+  | "cancelled"
+  | "aborted"
+  | "released"
+  | "errored";
+
+export type BrowserNativeStreamRedactionPolicy =
+  | "metadata_only"
+  | "omit_payloads";
+
+export type BrowserNativeStreamChunk =
+  | Uint8Array
+  | ArrayBuffer
+  | ArrayBufferView
+  | number[]
+  | string;
+
+export interface BrowserNativeStreamCapability {
+  capabilityGranted: boolean;
+  degradedMode?: boolean;
+  redactionPolicy?: BrowserNativeStreamRedactionPolicy;
+}
+
+export interface BrowserNativeStreamSupportOptions {
+  capability?: BrowserNativeStreamCapability | null;
+  globalObject?: Record<string, unknown>;
+}
+
+export interface BrowserNativeStreamSupportDiagnostics {
+  supported: boolean;
+  contractId: typeof BROWSER_NATIVE_STREAM_CONTRACT_ID;
+  surface: BrowserNativeStreamSurface;
+  runtimeContext: BrowserRuntimeContext;
+  capabilityGranted: boolean;
+  degradedMode: boolean;
+  supportClass: BrowserNativeStreamSupportClass;
+  reason: BrowserNativeStreamReason;
+  reasonCode: BrowserNativeStreamReason;
+  message: string;
+  guidance: string[];
+  redactionPolicy: BrowserNativeStreamRedactionPolicy;
+  capabilities: BrowserCapabilitySnapshot;
+  rustAsyncReadWriteBridge: "substrate_only";
+}
+
+export interface BrowserNativeStreamOperationDiagnostics {
+  surface: BrowserNativeStreamSurface;
+  operation: string;
+  state: BrowserNativeStreamState;
+  reason:
+    | "closed"
+    | "cancelled"
+    | "aborted"
+    | "released"
+    | "errored"
+    | "read_limit_exceeded"
+    | "write_limit_exceeded"
+    | "unsupported_chunk";
+  message: string;
+  guidance: string[];
+  runtimeContext: BrowserRuntimeContext;
+  firstFailure: string | null;
+  bytesRead: number;
+  bytesWritten: number;
+}
+
+export interface BrowserReadableStreamOptions
+  extends BrowserNativeStreamSupportOptions {
+  support?: BrowserNativeStreamSupportDiagnostics | null;
+  maxBytes?: number | null;
+  autoReleaseLock?: boolean;
+}
+
+export interface BrowserWritableStreamOptions
+  extends BrowserNativeStreamSupportOptions {
+  support?: BrowserNativeStreamSupportDiagnostics | null;
+  maxBytes?: number | null;
+  autoReleaseLock?: boolean;
+}
 
 const DEDICATED_WORKER_GLOBAL_SCOPE_TAG = "[object DedicatedWorkerGlobalScope]";
 const INDEXEDDB_STORAGE_KEY_PREFIX = "asupersync:indexeddb:v1:";
@@ -1163,6 +1268,40 @@ interface BrowserNativeMessagingGlobalLike extends Record<string, unknown> {
   MessageChannel?: BrowserNativeMessageChannelConstructorLike;
 }
 
+export interface BrowserNativeReadableStreamReadResultLike {
+  done?: boolean;
+  value?: unknown;
+}
+
+export interface BrowserNativeReadableStreamReaderLike {
+  cancel?(reason?: unknown): Promise<void> | void;
+  closed?: Promise<unknown>;
+  read(): Promise<BrowserNativeReadableStreamReadResultLike>;
+  releaseLock?(): void;
+}
+
+export interface BrowserNativeReadableStreamLike {
+  getReader(): BrowserNativeReadableStreamReaderLike;
+}
+
+export interface BrowserNativeWritableStreamWriterLike {
+  abort?(reason?: unknown): Promise<void> | void;
+  close?(): Promise<void> | void;
+  closed?: Promise<unknown>;
+  ready?: Promise<unknown>;
+  releaseLock?(): void;
+  write(chunk: Uint8Array): Promise<void> | void;
+}
+
+export interface BrowserNativeWritableStreamLike {
+  getWriter(): BrowserNativeWritableStreamWriterLike;
+}
+
+interface BrowserNativeStreamGlobalLike extends Record<string, unknown> {
+  ReadableStream?: unknown;
+  WritableStream?: unknown;
+}
+
 interface BrowserWebTransportReadableLike {
   getReader(): BrowserWebTransportReaderLike;
 }
@@ -1250,10 +1389,12 @@ function browserCapabilitySnapshot(
     hasIndexedDb: browserIndexedDbFactory(globalObject) !== null,
     hasLocalStorage: browserLocalStorage(globalObject) !== null,
     hasMessageChannel: typeof globalObject?.MessageChannel === "function",
+    hasReadableStream: typeof globalObject?.ReadableStream === "function",
     hasWebAssembly: typeof globalObject?.WebAssembly === "object",
     hasWebTransport: typeof globalObject?.WebTransport === "function",
     hasWebSocket: typeof globalObject?.WebSocket === "function",
     hasWindow: typeof globalObject?.window === "object",
+    hasWritableStream: typeof globalObject?.WritableStream === "function",
   };
 }
 
@@ -2113,6 +2254,619 @@ export function createBrowserBroadcastChannel(
     new BroadcastChannelConstructor(name),
     support,
   );
+}
+
+function nativeStreamGuidance(
+  surface: BrowserNativeStreamSurface,
+  reason: BrowserNativeStreamReason,
+): string[] {
+  const shared = [
+    "Call detectBrowserNativeStreamSupport() before constructing browser-native stream helpers.",
+    "Pass an explicit BrowserNativeStreamCapability with capabilityGranted: true from your application policy.",
+    "These BrowserReadableStream and BrowserWritableStream helpers are browser-native WHATWG stream wrappers; they do not promote the Rust AsyncRead/AsyncWrite wasm ABI.",
+  ];
+  switch (reason) {
+    case "capability_not_granted":
+      return [
+        "Grant ReadableStream or WritableStream host API authority explicitly before construction.",
+        ...shared,
+      ];
+    case "degraded_mode_denied":
+      return [
+        "Do not construct native stream helpers while the host API capability is in degraded mode.",
+        "Use a supported browser main-thread or dedicated-worker runtime with native WHATWG Streams support.",
+        ...shared,
+      ];
+    case "missing_readable_stream":
+      return [
+        "Use a browser/runtime that exposes globalThis.ReadableStream before creating readable stream helpers.",
+        ...shared,
+      ];
+    case "missing_writable_stream":
+      return [
+        "Use a browser/runtime that exposes globalThis.WritableStream before creating writable stream helpers.",
+        ...shared,
+      ];
+    default:
+      return surface === "readable_stream"
+        ? [
+            "Use BrowserReadableStream for byte-oriented browser application boundaries and pass bytes into asupersync scopes explicitly.",
+            ...shared,
+          ]
+        : [
+            "Use BrowserWritableStream for byte-oriented browser application boundaries and pass bytes out of asupersync scopes explicitly.",
+            ...shared,
+          ];
+  }
+}
+
+function nativeStreamMissingReason(
+  surface: BrowserNativeStreamSurface,
+): BrowserNativeStreamReason {
+  return surface === "readable_stream"
+    ? "missing_readable_stream"
+    : "missing_writable_stream";
+}
+
+function browserNativeStreamGlobals(
+  globalObject: Record<string, unknown> | undefined,
+): BrowserNativeStreamGlobalLike | undefined {
+  return globalObject as BrowserNativeStreamGlobalLike | undefined;
+}
+
+function browserNativeStreamSurfaceAvailable(
+  surface: BrowserNativeStreamSurface,
+  globalObject: Record<string, unknown> | undefined,
+): boolean {
+  const globals = browserNativeStreamGlobals(globalObject);
+  return surface === "readable_stream"
+    ? typeof globals?.ReadableStream === "function"
+    : typeof globals?.WritableStream === "function";
+}
+
+export function detectBrowserNativeStreamSupport(
+  surface: BrowserNativeStreamSurface,
+  options: BrowserNativeStreamSupportOptions = {},
+): BrowserNativeStreamSupportDiagnostics {
+  const globalObject = options.globalObject ?? defaultGlobalObject();
+  const runtime = detectBrowserRuntimeSupport(globalObject);
+  const capability = options.capability ?? null;
+  const capabilityGranted = capability?.capabilityGranted === true;
+  const degradedMode = capability?.degradedMode === true;
+  const redactionPolicy = capability?.redactionPolicy ?? "metadata_only";
+  let reason: BrowserNativeStreamReason = "supported";
+  let message = `${surface} browser-native WHATWG stream prerequisites are available.`;
+
+  if (!runtime.supported) {
+    reason = runtime.reason;
+    message = runtime.message;
+  } else if (!capabilityGranted) {
+    reason = "capability_not_granted";
+    message = `${surface} construction requires explicit browser-native stream capability authority.`;
+  } else if (degradedMode) {
+    reason = "degraded_mode_denied";
+    message = `${surface} construction is denied because the host API capability is degraded.`;
+  } else if (!browserNativeStreamSurfaceAvailable(surface, globalObject)) {
+    reason = nativeStreamMissingReason(surface);
+    message =
+      surface === "readable_stream"
+        ? "ReadableStream is unavailable in this browser/runtime."
+        : "WritableStream is unavailable in this browser/runtime.";
+  }
+
+  const supported = reason === "supported";
+  return {
+    supported,
+    contractId: BROWSER_NATIVE_STREAM_CONTRACT_ID,
+    surface,
+    runtimeContext: runtime.runtimeContext,
+    capabilityGranted,
+    degradedMode,
+    supportClass: supported ? "direct_runtime_supported" : "unsupported",
+    reason,
+    reasonCode: reason,
+    message,
+    guidance: supported ? [] : nativeStreamGuidance(surface, reason),
+    redactionPolicy,
+    capabilities: runtime.capabilities,
+    rustAsyncReadWriteBridge: "substrate_only",
+  };
+}
+
+export function createBrowserNativeStreamUnsupportedError(
+  diagnostics: BrowserNativeStreamSupportDiagnostics,
+): Error & {
+  code: typeof BROWSER_NATIVE_STREAM_UNSUPPORTED_CODE;
+  diagnostics: BrowserNativeStreamSupportDiagnostics;
+} {
+  const error = new Error(
+    `${BROWSER_NATIVE_STREAM_UNSUPPORTED_CODE}: ${diagnostics.message} ${diagnostics.guidance.join(" ")}`.trim(),
+  ) as Error & {
+    code: typeof BROWSER_NATIVE_STREAM_UNSUPPORTED_CODE;
+    diagnostics: BrowserNativeStreamSupportDiagnostics;
+  };
+  error.code = BROWSER_NATIVE_STREAM_UNSUPPORTED_CODE;
+  error.diagnostics = diagnostics;
+  return error;
+}
+
+export function assertBrowserNativeStreamSupport(
+  diagnostics: BrowserNativeStreamSupportDiagnostics,
+): BrowserNativeStreamSupportDiagnostics {
+  if (!diagnostics.supported) {
+    throw createBrowserNativeStreamUnsupportedError(diagnostics);
+  }
+  return diagnostics;
+}
+
+export function createBrowserNativeStreamOperationError(
+  diagnostics: BrowserNativeStreamOperationDiagnostics,
+): Error & {
+  code: typeof BROWSER_NATIVE_STREAM_OPERATION_FAILED_CODE;
+  diagnostics: BrowserNativeStreamOperationDiagnostics;
+} {
+  const error = new Error(
+    `${BROWSER_NATIVE_STREAM_OPERATION_FAILED_CODE}: ${diagnostics.message} ${diagnostics.guidance.join(" ")}`.trim(),
+  ) as Error & {
+    code: typeof BROWSER_NATIVE_STREAM_OPERATION_FAILED_CODE;
+    diagnostics: BrowserNativeStreamOperationDiagnostics;
+  };
+  error.code = BROWSER_NATIVE_STREAM_OPERATION_FAILED_CODE;
+  error.diagnostics = diagnostics;
+  return error;
+}
+
+function supportForNativeStreamConstruction(
+  surface: BrowserNativeStreamSurface,
+  options: BrowserReadableStreamOptions | BrowserWritableStreamOptions,
+): BrowserNativeStreamSupportDiagnostics {
+  const diagnostics =
+    options.support ?? detectBrowserNativeStreamSupport(surface, options);
+  if (diagnostics.surface !== surface) {
+    throw createBrowserNativeStreamUnsupportedError({
+      ...diagnostics,
+      supported: false,
+      surface,
+      supportClass: "unsupported",
+      reason: "capability_not_granted",
+      reasonCode: "capability_not_granted",
+      message: `Expected ${surface} support diagnostics, received ${diagnostics.surface}.`,
+      guidance: nativeStreamGuidance(surface, "capability_not_granted"),
+      rustAsyncReadWriteBridge: "substrate_only",
+    });
+  }
+  return assertBrowserNativeStreamSupport(diagnostics);
+}
+
+function nativeStreamOperationDiagnostics(
+  support: BrowserNativeStreamSupportDiagnostics,
+  operation: string,
+  state: BrowserNativeStreamState,
+  reason: BrowserNativeStreamOperationDiagnostics["reason"],
+  firstFailure: string | null,
+  bytesRead: number,
+  bytesWritten: number,
+): BrowserNativeStreamOperationDiagnostics {
+  return {
+    surface: support.surface,
+    operation,
+    state,
+    reason,
+    message: `${operation} is not allowed while ${support.surface} is ${state}.`,
+    guidance: [
+      "Create a fresh browser-native stream helper after close, cancel, abort, release, or stream error.",
+      "Keep WHATWG streams at the browser application boundary; serialize bytes explicitly before handing data to runtime scopes.",
+      "This API does not claim Rust AsyncRead/AsyncWrite browser-core ABI support.",
+    ],
+    runtimeContext: support.runtimeContext,
+    firstFailure,
+    bytesRead,
+    bytesWritten,
+  };
+}
+
+function normalizeBrowserNativeStreamByteLimit(
+  value: number | null | undefined,
+  label: string,
+): number | null {
+  if (value == null) {
+    return null;
+  }
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new RangeError(`${label} must be a non-negative safe integer.`);
+  }
+  return value;
+}
+
+function normalizeBrowserNativeStreamChunk(value: unknown): Uint8Array {
+  if (value instanceof Uint8Array) {
+    return value;
+  }
+  if (value instanceof ArrayBuffer) {
+    return new Uint8Array(value);
+  }
+  if (ArrayBuffer.isView(value)) {
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  }
+  if (Array.isArray(value)) {
+    return Uint8Array.from(value);
+  }
+  if (typeof value === "string") {
+    return new TextEncoder().encode(value);
+  }
+  throw new TypeError(
+    "Browser-native stream chunks must be Uint8Array, ArrayBuffer, ArrayBufferView, byte[], or string.",
+  );
+}
+
+export class BrowserReadableStream {
+  private readonly reader: BrowserNativeReadableStreamReaderLike;
+  private readonly support: BrowserNativeStreamSupportDiagnostics;
+  private readonly maxBytes: number | null;
+  private readonly autoReleaseLock: boolean;
+  private bytesReadValue = 0;
+  private bytesWrittenValue = 0;
+  private firstFailure: string | null = null;
+  private stateValue: BrowserNativeStreamState = "open";
+
+  constructor(
+    stream: BrowserNativeReadableStreamLike,
+    support: BrowserNativeStreamSupportDiagnostics,
+    options: BrowserReadableStreamOptions = {},
+  ) {
+    this.support = supportForNativeStreamConstruction("readable_stream", {
+      ...options,
+      support,
+    });
+    this.reader = stream.getReader();
+    this.maxBytes = normalizeBrowserNativeStreamByteLimit(
+      options.maxBytes,
+      "BrowserReadableStream maxBytes",
+    );
+    this.autoReleaseLock = options.autoReleaseLock !== false;
+  }
+
+  get state(): BrowserNativeStreamState {
+    return this.stateValue;
+  }
+
+  get bytesRead(): number {
+    return this.bytesReadValue;
+  }
+
+  diagnostics(): BrowserNativeStreamSupportDiagnostics {
+    return this.support;
+  }
+
+  async read(): Promise<Uint8Array | null> {
+    this.ensureOpen("read");
+    let result: BrowserNativeReadableStreamReadResultLike;
+    try {
+      result = await this.reader.read();
+    } catch (error) {
+      this.markErrored("errored");
+      throw this.operationError("read", "errored", errorMessage(error));
+    }
+    if (result.done === true) {
+      this.stateValue = "closed";
+      this.releaseReaderLock();
+      return null;
+    }
+    let chunk: Uint8Array;
+    try {
+      chunk = normalizeBrowserNativeStreamChunk(result.value);
+    } catch (error) {
+      this.markErrored("unsupported_chunk");
+      throw this.operationError("read", "unsupported_chunk", errorMessage(error));
+    }
+    this.recordRead(chunk.byteLength);
+    return chunk;
+  }
+
+  async readAll(): Promise<Uint8Array> {
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    for (;;) {
+      const chunk = await this.read();
+      if (chunk === null) {
+        break;
+      }
+      chunks.push(chunk);
+      total += chunk.byteLength;
+    }
+    const joined = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      joined.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return joined;
+  }
+
+  async cancel(reason = "cancelled"): Promise<void> {
+    if (this.stateValue === "cancelled") {
+      return;
+    }
+    if (this.stateValue === "closed" || this.stateValue === "released") {
+      return;
+    }
+    this.stateValue = "cancelled";
+    this.firstFailure = reason;
+    await this.reader.cancel?.(reason);
+    this.releaseReaderLock();
+  }
+
+  releaseLock(): void {
+    if (this.stateValue === "open") {
+      this.stateValue = "released";
+      this.firstFailure = "released";
+    }
+    this.releaseReaderLock();
+  }
+
+  private recordRead(bytes: number): void {
+    const next = this.bytesReadValue + bytes;
+    if (this.maxBytes !== null && next > this.maxBytes) {
+      this.markErrored("read_limit_exceeded");
+      throw createBrowserNativeStreamOperationError(
+        nativeStreamOperationDiagnostics(
+          this.support,
+          "read",
+          this.stateValue,
+          "read_limit_exceeded",
+          this.firstFailure,
+          this.bytesReadValue,
+          this.bytesWrittenValue,
+        ),
+      );
+    }
+    this.bytesReadValue = next;
+  }
+
+  private ensureOpen(operation: string): void {
+    if (this.stateValue === "open") {
+      return;
+    }
+    throw this.operationError(operation, this.stateReason());
+  }
+
+  private stateReason(): BrowserNativeStreamOperationDiagnostics["reason"] {
+    switch (this.stateValue) {
+      case "cancelled":
+        return "cancelled";
+      case "aborted":
+        return "aborted";
+      case "released":
+        return "released";
+      case "errored":
+        return "errored";
+      default:
+        return "closed";
+    }
+  }
+
+  private markErrored(firstFailure: string): void {
+    if (this.stateValue === "errored") {
+      return;
+    }
+    this.stateValue = "errored";
+    this.firstFailure = firstFailure;
+  }
+
+  private operationError(
+    operation: string,
+    reason: BrowserNativeStreamOperationDiagnostics["reason"],
+    firstFailure = this.firstFailure,
+  ): Error & {
+    code: typeof BROWSER_NATIVE_STREAM_OPERATION_FAILED_CODE;
+    diagnostics: BrowserNativeStreamOperationDiagnostics;
+  } {
+    return createBrowserNativeStreamOperationError(
+      nativeStreamOperationDiagnostics(
+        this.support,
+        operation,
+        this.stateValue,
+        reason,
+        firstFailure,
+        this.bytesReadValue,
+        this.bytesWrittenValue,
+      ),
+    );
+  }
+
+  private releaseReaderLock(): void {
+    if (this.autoReleaseLock) {
+      this.reader.releaseLock?.();
+    }
+  }
+}
+
+export class BrowserWritableStream {
+  private readonly writer: BrowserNativeWritableStreamWriterLike;
+  private readonly support: BrowserNativeStreamSupportDiagnostics;
+  private readonly maxBytes: number | null;
+  private readonly autoReleaseLock: boolean;
+  private bytesReadValue = 0;
+  private bytesWrittenValue = 0;
+  private firstFailure: string | null = null;
+  private stateValue: BrowserNativeStreamState = "open";
+
+  constructor(
+    stream: BrowserNativeWritableStreamLike,
+    support: BrowserNativeStreamSupportDiagnostics,
+    options: BrowserWritableStreamOptions = {},
+  ) {
+    this.support = supportForNativeStreamConstruction("writable_stream", {
+      ...options,
+      support,
+    });
+    this.writer = stream.getWriter();
+    this.maxBytes = normalizeBrowserNativeStreamByteLimit(
+      options.maxBytes,
+      "BrowserWritableStream maxBytes",
+    );
+    this.autoReleaseLock = options.autoReleaseLock !== false;
+  }
+
+  get state(): BrowserNativeStreamState {
+    return this.stateValue;
+  }
+
+  get bytesWritten(): number {
+    return this.bytesWrittenValue;
+  }
+
+  diagnostics(): BrowserNativeStreamSupportDiagnostics {
+    return this.support;
+  }
+
+  async write(chunk: BrowserNativeStreamChunk): Promise<number> {
+    this.ensureOpen("write");
+    let bytes: Uint8Array;
+    try {
+      bytes = normalizeBrowserNativeStreamChunk(chunk);
+    } catch (error) {
+      this.markErrored("unsupported_chunk");
+      throw this.operationError("write", "unsupported_chunk", errorMessage(error));
+    }
+    this.ensureWriteBudget(bytes.byteLength);
+    try {
+      await this.writer.ready;
+      await this.writer.write(bytes);
+      this.bytesWrittenValue += bytes.byteLength;
+      return bytes.byteLength;
+    } catch (error) {
+      this.markErrored("errored");
+      throw this.operationError("write", "errored", errorMessage(error));
+    }
+  }
+
+  async close(): Promise<void> {
+    if (this.stateValue === "closed") {
+      return;
+    }
+    this.ensureOpen("close");
+    try {
+      await this.writer.close?.();
+      this.stateValue = "closed";
+      this.releaseWriterLock();
+    } catch (error) {
+      this.markErrored("errored");
+      throw this.operationError("close", "errored", errorMessage(error));
+    }
+  }
+
+  async abort(reason = "aborted"): Promise<void> {
+    if (this.stateValue === "aborted") {
+      return;
+    }
+    if (this.stateValue === "closed" || this.stateValue === "released") {
+      return;
+    }
+    this.stateValue = "aborted";
+    this.firstFailure = reason;
+    await this.writer.abort?.(reason);
+    this.releaseWriterLock();
+  }
+
+  releaseLock(): void {
+    if (this.stateValue === "open") {
+      this.stateValue = "released";
+      this.firstFailure = "released";
+    }
+    this.releaseWriterLock();
+  }
+
+  private ensureWriteBudget(bytes: number): void {
+    const next = this.bytesWrittenValue + bytes;
+    if (this.maxBytes !== null && next > this.maxBytes) {
+      this.markErrored("write_limit_exceeded");
+      throw createBrowserNativeStreamOperationError(
+        nativeStreamOperationDiagnostics(
+          this.support,
+          "write",
+          this.stateValue,
+          "write_limit_exceeded",
+          this.firstFailure,
+          this.bytesReadValue,
+          this.bytesWrittenValue,
+        ),
+      );
+    }
+  }
+
+  private ensureOpen(operation: string): void {
+    if (this.stateValue === "open") {
+      return;
+    }
+    throw this.operationError(operation, this.stateReason());
+  }
+
+  private stateReason(): BrowserNativeStreamOperationDiagnostics["reason"] {
+    switch (this.stateValue) {
+      case "cancelled":
+        return "cancelled";
+      case "aborted":
+        return "aborted";
+      case "released":
+        return "released";
+      case "errored":
+        return "errored";
+      default:
+        return "closed";
+    }
+  }
+
+  private markErrored(firstFailure: string): void {
+    if (this.stateValue === "errored") {
+      return;
+    }
+    this.stateValue = "errored";
+    this.firstFailure = firstFailure;
+  }
+
+  private operationError(
+    operation: string,
+    reason: BrowserNativeStreamOperationDiagnostics["reason"],
+    firstFailure = this.firstFailure,
+  ): Error & {
+    code: typeof BROWSER_NATIVE_STREAM_OPERATION_FAILED_CODE;
+    diagnostics: BrowserNativeStreamOperationDiagnostics;
+  } {
+    return createBrowserNativeStreamOperationError(
+      nativeStreamOperationDiagnostics(
+        this.support,
+        operation,
+        this.stateValue,
+        reason,
+        firstFailure,
+        this.bytesReadValue,
+        this.bytesWrittenValue,
+      ),
+    );
+  }
+
+  private releaseWriterLock(): void {
+    if (this.autoReleaseLock) {
+      this.writer.releaseLock?.();
+    }
+  }
+}
+
+export function createBrowserReadableStream(
+  stream: BrowserNativeReadableStreamLike,
+  options: BrowserReadableStreamOptions,
+): BrowserReadableStream {
+  const support = supportForNativeStreamConstruction("readable_stream", options);
+  return new BrowserReadableStream(stream, support, options);
+}
+
+export function createBrowserWritableStream(
+  stream: BrowserNativeWritableStreamLike,
+  options: BrowserWritableStreamOptions,
+): BrowserWritableStream {
+  const support = supportForNativeStreamConstruction("writable_stream", options);
+  return new BrowserWritableStream(stream, support, options);
 }
 
 function browserExecutionReasonCodeFromRuntimeSupport(

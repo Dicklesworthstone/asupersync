@@ -56,7 +56,8 @@ wins.
 | Runtime trace / crash / evidence artifact persistence | Direct-runtime supported through explicit `BrowserArtifactStore` export flows in `@asupersync/browser` | `packages/browser/src/index.ts` adds `BrowserArtifactStore`, explicit retention policy, `persistTraceRecord()` / `persistCrashArtifact()` / `persistEvidenceArtifact()`, plus `exportArtifact()` / `exportArchive()` / `downloadArtifact()` | Persistence remains opt-in and quota-bounded. Main-thread DOM runtimes can trigger direct downloads; dedicated workers export bytes/blob payloads and hand them to a UI boundary. |
 | Browser-native transport: `fetch` + WebSocket | Direct-runtime supported on the main thread and in dedicated workers | `asupersync-browser-core/src/lib.rs` exports `fetch_request`, `websocket_open`, `websocket_send`, `websocket_recv`, and `websocket_close`, and the fetch host now accepts `window` or `WorkerGlobalScope` | This is the live browser I/O envelope today for supported browser SDK hosts. |
 | Browser-native transport: WebTransport datagrams | Guarded direct-runtime support in `@asupersync/browser-core` and `@asupersync/browser` | `src/io/cap.rs` defines `BrowserTransportKind::WebTransport`; `packages/browser-core/index.js` + `index.d.ts` expose `webtransport_*`; `packages/browser/src/index.ts` adds diagnostics plus `RegionHandle.openWebTransport()` / `WebTransportHandle` | Shipped as an explicit capability-gated lane. The public surface is datagram-oriented and intentionally does not imply raw-socket parity; fall back to `WebSocket` or `fetch` when the browser/runtime lacks WebTransport support or rejects the session. |
-| Browser-native messaging surfaces (`MessageChannel`, `MessagePort`, `BroadcastChannel`) | Direct-runtime feasible substrate, not yet shipped as public Browser Edition APIs | `src/io/cap.rs` models explicit authority for all three surfaces; `src/runtime/reactor/browser.rs` wires `MessagePort` / `BroadcastChannel` host listeners | Treat these as an explicit boundary rather than an accidental gap: direct off-main-thread execution belongs in a dedicated worker runtime, same-origin messaging belongs at the application boundary, and server/edge hops remain bridge-only. |
+| Browser-native messaging surfaces (`MessageChannel`, `MessagePort`, `BroadcastChannel`) | Guarded package-level support in `@asupersync/browser` | `src/io/cap.rs` models explicit authority for all three surfaces; `src/runtime/reactor/browser.rs` wires `MessagePort` / `BroadcastChannel` host listeners; `packages/browser/src/index.ts` exports `BrowserMessageChannel`, `BrowserMessagePort`, and `BrowserBroadcastChannel` helpers | Treat these as browser application-boundary helpers rather than runtime channels or raw transports: direct off-main-thread execution belongs in a dedicated worker runtime, same-origin messaging belongs behind explicit `BrowserNativeMessagingCapability`, and server/edge hops remain bridge-only. |
+| WHATWG `ReadableStream` / `WritableStream` browser-native helpers | Guarded package-level support in `@asupersync/browser`; Rust `AsyncRead`/`AsyncWrite` browser-core ABI remains substrate-only | `src/io/browser_stream.rs` contains the Rust substrate; `packages/browser/src/index.ts` exports `BrowserReadableStream`, `BrowserWritableStream`, and `detectBrowserNativeStreamSupport()` | Treat these as byte-oriented browser application-boundary helpers behind explicit `BrowserNativeStreamCapability`. They do not claim Rust `AsyncRead` / `AsyncWrite` wasm ABI parity or raw transport support. |
 | Rust-authored Asupersync consumer compiled to `wasm32-unknown-unknown` | Preview public lane | `src/runtime/builder.rs` exposes `RuntimeBuilder::browser()`, `docs/WASM.md` and `docs/wasm_quickstart_migration.md` document the supported path, `tests/wasm_rust_browser_example_contract.rs` pins the contract, and `tests/fixtures/rust-browser-consumer/` plus `scripts/validate_rust_browser_consumer.sh` provide the canonical browser-run evidence lane | The public Rust-facing browser bootstrap contract already exists as a preview dispatcher-backed lane with narrower scope than the shipped JS/TS Browser Edition packages. The maintained `rust-browser-consumer` fixture is validation evidence for that public preview, not a separate repo-only support bucket. |
 | SharedArrayBuffer / multi-worker browser offload | Feasible, but not yet shipped | `src/runtime/config.rs` defines `BrowserWorkerOffloadConfig`, while `docs/WASM.md` still treats threaded WASM as a future phase gated on cross-origin isolation | Parallel browser execution remains scaffolded policy, not a shipped runtime lane. |
 | Native OS surfaces (`fs`, `process`, `signal`, raw TCP/UDP, native DB clients, Kafka, native QUIC/H3`) | Impossible or non-goal for direct browser runtime | `docs/WASM.md` calls these native-only or browser-unavailable, and the workspace keeps them behind wasm-incompatible feature gates | Reach them through browser-native substitutes or explicit server/edge bridges, not direct Browser Edition execution. |
@@ -70,15 +71,18 @@ wins.
    remains fail-closed and the package-level broker/coordinator helpers stay
    narrower than a shipped host lane. Framework adapters still target
    client-rendered browser trees.
-2. Browser-native messaging surfaces are now explicitly bounded: the Rust
-   substrate models authority for `MessageChannel`, `MessagePort`, and
-   `BroadcastChannel`, and the browser reactor wires host listeners for the
-   latter two, but the public JS/TS package surface still intentionally does
-   not export them. Use dedicated-worker runtime bootstrap for direct
+2. Browser-native messaging surfaces are now guarded public package helpers:
+   the Rust substrate models authority for `MessageChannel`, `MessagePort`,
+   and `BroadcastChannel`, the browser reactor wires host listeners for the
+   latter two, and the public JS/TS package exports helpers that require
+   explicit capability. Use dedicated-worker runtime bootstrap for direct
    execution, keep same-origin messaging at the application boundary, and use
    bridge-only adapters across server/edge boundaries.
-3. Browser stream bridging (`src/io/browser_stream.rs`) is implemented in
-   Rust, but it still is not exported as a public JS/TS Browser Edition API.
+3. Browser-native WHATWG stream helpers are now guarded public package helpers:
+   `BrowserReadableStream` and `BrowserWritableStream` handle byte-oriented
+   browser application-boundary flows with explicit capability, byte limits,
+   cancel/abort/close, and lock release. The Rust `AsyncRead` / `AsyncWrite`
+   browser-core ABI bridge remains substrate-only.
 4. WebTransport is now shipped at the JS package layer, but some package/topology
    docs still describe browser transport as only `fetch` + WebSocket. The
    architecture is also easy to misstate: the low-level `@asupersync/browser-core`

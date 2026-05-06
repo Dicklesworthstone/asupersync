@@ -115,6 +115,28 @@
       ]
     },
     {
+      "surface": "browser_native_streams",
+      "public_label": "guarded_package_level_support",
+      "must_require_explicit_capability": true,
+      "rust_async_read_write_bridge": "substrate_only",
+      "allowed_internal_markers": [
+        "BrowserReadableStream",
+        "BrowserWritableStream",
+        "BrowserStreamIoCap",
+        "ReadableStream",
+        "WritableStream"
+      ],
+      "required_public_export_markers": [
+        "BROWSER_NATIVE_STREAM_CONTRACT_ID",
+        "detectBrowserNativeStreamSupport",
+        "assertBrowserNativeStreamSupport",
+        "export class BrowserReadableStream",
+        "export class BrowserWritableStream",
+        "export function createBrowserReadableStream",
+        "export function createBrowserWritableStream"
+      ]
+    },
+    {
       "surface": "webtransport_datagrams",
       "public_label": "guarded_direct_runtime_support",
       "fallback_required": true,
@@ -131,6 +153,9 @@
     "shared_worker_direct_runtime_shipped": false,
     "message_channel_public_browser_sdk_shipped": true,
     "broadcast_channel_public_browser_sdk_shipped": true,
+    "readable_stream_public_browser_sdk_shipped": true,
+    "writable_stream_public_browser_sdk_shipped": true,
+    "rust_async_read_write_browser_core_abi_shipped": false,
     "webtransport_implies_raw_socket_parity": false
   },
   "validation_commands": [
