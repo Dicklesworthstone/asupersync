@@ -23,8 +23,6 @@
 //!     forensics can reconstruct the protocol negotiation without
 //!     a packet capture.
 
-#![allow(warnings)]
-#![allow(clippy::all)]
 #![allow(missing_docs)]
 
 #[macro_use]
@@ -136,25 +134,25 @@ fn redis_e2e_resp3_push_message_received_via_subscribe() {
 
         // Loop past any subscription-ack frame the broker may emit
         // before the data message.
-        let event = loop {
+        let message = loop {
             let ev = pubsub.next_event(&cx_sub).await.expect("next_event");
             tracing::info!(?ev, "pubsub event observed");
-            if matches!(ev, PubSubEvent::Message(_)) {
-                break ev;
+            if let PubSubEvent::Message(message) = ev {
+                break message;
             }
         };
-        match event {
-            PubSubEvent::Message(m) => {
-                assert_with_log!(
-                    m.payload == payload,
-                    "RESP3 push preserves byte-exact payload",
-                    payload,
-                    m.payload
-                );
-                assert_with_log!(m.channel == chan, "channel preserved", chan, m.channel);
-            }
-            other => panic!("expected Message, got {other:?}"),
-        }
+        assert_with_log!(
+            message.payload == payload,
+            "RESP3 push preserves byte-exact payload",
+            payload,
+            message.payload
+        );
+        assert_with_log!(
+            message.channel == chan,
+            "channel preserved",
+            chan,
+            message.channel
+        );
     });
     test_complete!(name);
 }
