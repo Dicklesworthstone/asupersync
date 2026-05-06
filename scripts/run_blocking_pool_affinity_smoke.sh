@@ -10,6 +10,7 @@ LIST_ONLY=0
 OUTPUT_ROOT_OVERRIDE="${BLOCKING_POOL_AFFINITY_SMOKE_OUTPUT_DIR:-}"
 ARTIFACT_ROOT_OVERRIDE="${BLOCKING_POOL_AFFINITY_SMOKE_ARTIFACT_ROOT:-}"
 RUN_ID_OVERRIDE="${BLOCKING_POOL_AFFINITY_SMOKE_RUN_ID:-}"
+RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
 
 usage() {
     cat <<'USAGE'
@@ -28,6 +29,10 @@ USAGE
 require_tools() {
     if ! command -v jq >/dev/null 2>&1; then
         echo "FATAL: jq is required for blocking-pool affinity smoke runner" >&2
+        exit 1
+    fi
+    if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+        echo "FATAL: rch is required and was not found/executable at: ${RCH_BIN}" >&2
         exit 1
     fi
     if [ ! -f "$ARTIFACT" ]; then
@@ -168,11 +173,12 @@ write_run_report() {
     local report_path="$1"
     local bundle_manifest_path="$2"
     local scenario_report_path="$3"
-    local command_exit_code="$4"
-    local script_exit_code="$5"
-    local validation_passed="$6"
-    local status="$7"
-    local message="$8"
+    local command="$4"
+    local command_exit_code="$5"
+    local script_exit_code="$6"
+    local validation_passed="$7"
+    local status="$8"
+    local message="$9"
 
     jq -n \
         --arg schema_version "$(artifact_value '.runner_report_schema_version')" \
@@ -184,6 +190,7 @@ write_run_report() {
         --arg mode "$MODE" \
         --arg status "$status" \
         --arg message "$message" \
+        --arg command "$command" \
         --arg report_path "$scenario_report_path" \
         --argjson host_requirements "$HOST_REQUIREMENTS_JSON" \
         --argjson workload_model "$WORKLOAD_MODEL_JSON" \
@@ -207,6 +214,7 @@ write_run_report() {
             validation_passed: $validation_passed,
             status: $status,
             message: $message,
+            command: $command,
             host_requirements: $host_requirements,
             workload_model: $workload_model,
             operator_notes: $operator_notes,
@@ -288,7 +296,8 @@ OPERATOR_NOTES_JSON="$(jq -c '.operator_notes' <<<"$SCENARIO_JSON")"
 EXPECTED_REPORT_PROJECTION_JSON="$(jq -c '.expected_report_projection' <<<"$SCENARIO_JSON")"
 HOST_FINGERPRINT_JSON="$(host_fingerprint_json)"
 
-COMMAND="rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_blocking_pool_affinity_smoke ASUPERSYNC_BLOCKING_POOL_AFFINITY_CONTRACT_PATH=${ARTIFACT} ASUPERSYNC_BLOCKING_POOL_AFFINITY_SCENARIO=${SCENARIO} ASUPERSYNC_BLOCKING_POOL_AFFINITY_REPORT_PATH=${SCENARIO_REPORT_PATH} cargo test -p asupersync --test runtime_blocking_pool_queue_when_saturated_audit --features test-internals blocking_pool_affinity_smoke_contract_emits_report -- --nocapture"
+printf -v RCH_INVOCATION '%q' "$RCH_BIN"
+COMMAND="${RCH_INVOCATION} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_blocking_pool_affinity_smoke ASUPERSYNC_BLOCKING_POOL_AFFINITY_CONTRACT_PATH=${ARTIFACT} ASUPERSYNC_BLOCKING_POOL_AFFINITY_SCENARIO=${SCENARIO} ASUPERSYNC_BLOCKING_POOL_AFFINITY_REPORT_PATH=${SCENARIO_REPORT_PATH} cargo test -p asupersync --test runtime_blocking_pool_queue_when_saturated_audit --features test-internals blocking_pool_affinity_smoke_contract_emits_report -- --nocapture"
 
 STARTED_TS="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 COMMAND_EXIT_CODE=0
@@ -319,6 +328,13 @@ if [ "$MODE" = "execute" ]; then
         if grep -Eq 'Remote command finished: exit=[1-9][0-9]*' "$RUN_LOG_PATH" 2>/dev/null; then
             break
         fi
+        if grep -Eq '^\[RCH\] local \(|falling back to local' "$RUN_LOG_PATH" 2>/dev/null; then
+            kill "$COMMAND_PID" 2>/dev/null || true
+            wait "$COMMAND_PID" 2>/dev/null || true
+            COMMAND_EXIT_CODE=86
+            printf 'FATAL: rch local fallback detected; refusing local cargo execution\n' >>"$RUN_LOG_PATH"
+            break
+        fi
         sleep 1
         POLL_SECONDS=$((POLL_SECONDS + 1))
         if [ "$POLL_SECONDS" -ge "$MAX_POLL_SECONDS" ]; then
@@ -337,18 +353,30 @@ if [ "$MODE" = "execute" ]; then
         set -e
     fi
 
+    if [ "$COMMAND_EXIT_CODE" -ne 86 ] \
+        && grep -Eq '^\[RCH\] local \(|falling back to local' "$RUN_LOG_PATH" 2>/dev/null; then
+        COMMAND_EXIT_CODE=86
+        printf 'FATAL: rch local fallback detected; refusing local cargo execution\n' >>"$RUN_LOG_PATH"
+    fi
+
     if [ "$COMMAND_EXIT_CODE" -eq 0 ] && extract_report_from_log "$RUN_LOG_PATH" "$SCENARIO_REPORT_PATH"; then
         ACTUAL_REPORT_PROJECTION_JSON="$(jq -c '.report_projection' "$SCENARIO_REPORT_PATH")"
         VALIDATION_PASSED=true
         STATUS="passed"
         MESSAGE="blocking-pool affinity proof passed and emitted operator-visible locality report"
     else
+        SCRIPT_EXIT_CODE=$COMMAND_EXIT_CODE
         VALIDATION_PASSED=false
         STATUS="failed"
-        MESSAGE="blocking-pool affinity proof failed"
+        if [ "$COMMAND_EXIT_CODE" -eq 86 ]; then
+            MESSAGE="rch local fallback detected; refusing local cargo execution"
+        else
+            MESSAGE="blocking-pool affinity proof failed"
+        fi
     fi
 else
     printf 'dry-run: skipped execution for scenario %s\n' "$SCENARIO" >"$RUN_LOG_PATH"
+    VALIDATION_PASSED=true
 fi
 
 VERDICT_SUMMARY_JSON="$(jq -nc \
@@ -377,6 +405,7 @@ write_run_report \
     "$RUN_REPORT_PATH" \
     "$BUNDLE_MANIFEST_PATH" \
     "$SCENARIO_REPORT_PATH" \
+    "$COMMAND" \
     "$COMMAND_EXIT_CODE" \
     "$SCRIPT_EXIT_CODE" \
     "$VALIDATION_PASSED" \
