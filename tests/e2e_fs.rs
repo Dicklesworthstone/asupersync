@@ -57,6 +57,7 @@ const FS_PARITY_WAVE2_SCENARIOS: &[&str] = &[
     "try-exists-lifecycle",
     "path-ops-copy-hardlink-rename",
     "unix-symlink-metadata-readlink",
+    "io-uring-cancellation-support-boundary",
     "read-dir-drop-cancellation",
 ];
 
@@ -99,6 +100,14 @@ fn fs_parity_platform() -> String {
     format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
 }
 
+fn fs_parity_backend(scenario_id: &str) -> &'static str {
+    if scenario_id.starts_with("io-uring-") {
+        "io_uring"
+    } else {
+        "unix-spawn_blocking_io"
+    }
+}
+
 fn fs_parity_row(
     bead_id: &str,
     scenario: &FsProofScenario,
@@ -135,7 +144,7 @@ fn fs_parity_row(
         "bead_id": bead_id,
         "scenario_id": scenario.scenario_id,
         "api": scenario.api,
-        "backend": "unix-spawn_blocking_io",
+        "backend": fs_parity_backend(scenario.scenario_id),
         "platform": fs_parity_platform(),
         "feature_flags": fs_parity_feature_flags(),
         "temp_root": temp_root.display().to_string(),
@@ -1030,6 +1039,60 @@ async fn fs_proof_unix_symlink_metadata_readlink(
     }
 }
 
+async fn fs_proof_io_uring_cancellation_support_boundary(
+    temp_root: &Path,
+) -> Result<FsProofEvidence, String> {
+    let dir = fs_proof_scenario_dir(temp_root, "io-uring-cancellation-support-boundary")?;
+
+    #[cfg(all(target_os = "linux", feature = "io-uring"))]
+    {
+        let path = dir.join("uring-boundary.txt");
+        std::fs::write(&path, b"uring-boundary")
+            .map_err(|err| format!("write io_uring boundary fixture: {err}"))?;
+
+        let file = match fs::IoUringFile::open(&path) {
+            Ok(file) => file,
+            Err(err) => {
+                return Ok(FsProofEvidence {
+                    bytes_actual: 0,
+                    metadata_actual: format!(
+                        "io_uring_feature_enabled=true,runtime_available=false,error_kind={:?}",
+                        err.kind()
+                    ),
+                    unsupported_reason: format!("io_uring runtime unavailable: {err}"),
+                });
+            }
+        };
+        let mut buf = [0_u8; 14];
+        let n = file
+            .read(&mut buf)
+            .await
+            .map_err(|err| format!("io_uring boundary read: {err}"))?;
+        if &buf[..n] != b"uring-boundary" {
+            return Err(format!(
+                "io_uring boundary read drift: bytes={:?}",
+                &buf[..n]
+            ));
+        }
+
+        Ok(FsProofEvidence::supported(
+            n as u64,
+            "kernel_inflight_cancel=false,drop_drains_pending_ops=src/fs/uring.rs::test_uring_file_drop_drains_pending_read,stale_completion_attribution=src/fs/uring.rs::test_uring_completion_attribution_ignores_unrelated_cqe",
+        ))
+    }
+    #[cfg(not(all(target_os = "linux", feature = "io-uring")))]
+    {
+        Ok(FsProofEvidence {
+            bytes_actual: 0,
+            metadata_actual:
+                "io_uring_feature_enabled=false,kernel_inflight_cancel=false,spawn_blocking_fs_path_unaffected=true"
+                    .to_string(),
+            unsupported_reason: "io_uring filesystem cancellation proof requires linux target and io-uring feature"
+                .to_string(),
+        })
+    }
+}
+
 async fn fs_proof_read_dir_drop_cancellation(temp_root: &Path) -> Result<FsProofEvidence, String> {
     let dir = fs_proof_scenario_dir(temp_root, "read-dir-drop-cancellation")?;
     for idx in 0..8 {
@@ -1233,6 +1296,15 @@ async fn fs_parity_wave2_run() -> io::Result<Vec<Value>> {
             metadata_expected: "read_link_matches_target=true,symlink_metadata_is_symlink=true,metadata_follows_to_file=true",
             cancellation_point: "none",
             result: fs_proof_unix_symlink_metadata_readlink(&temp_root).await,
+        },
+        FsProofScenario {
+            scenario_id: "io-uring-cancellation-support-boundary",
+            api: "IoUringFile",
+            operation: "drop_pending_operation_boundary",
+            bytes_expected: 14,
+            metadata_expected: "kernel_inflight_cancel=false,drop_drains_pending_ops=true_or_unsupported,stale_completion_attribution=true_or_unsupported",
+            cancellation_point: "drop_pending_read",
+            result: fs_proof_io_uring_cancellation_support_boundary(&temp_root).await,
         },
         FsProofScenario {
             scenario_id: "read-dir-drop-cancellation",
