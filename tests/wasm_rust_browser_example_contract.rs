@@ -51,6 +51,45 @@ fn assert_contains_all(haystack: &str, label: &str, markers: &[&str]) {
 }
 
 #[test]
+fn rust_browser_runtime_builder_public_api_contract_compiles_under_canonical_profile() {
+    let current_version = asupersync::WasmAbiVersion::CURRENT;
+    let newer_minor_version = asupersync::WasmAbiVersion {
+        major: current_version.major,
+        minor: current_version.minor + 1,
+    };
+
+    for consumer_version in [current_version, newer_minor_version] {
+        let selection = asupersync::runtime::RuntimeBuilder::browser()
+            .consumer_version(consumer_version)
+            .build_selection();
+
+        assert!(
+            !selection.runtime_available(),
+            "native integration proof must fail closed instead of constructing a browser runtime"
+        );
+        assert!(
+            matches!(
+                selection.error,
+                Some(asupersync::runtime::BrowserRuntimeBuildError::Unsupported { .. })
+            ),
+            "native integration proof must surface a structured unsupported-browser result"
+        );
+    }
+
+    let build_error = asupersync::runtime::RuntimeBuilder::browser()
+        .consumer_version(current_version)
+        .build()
+        .expect_err("native browser runtime construction must fail closed");
+    assert!(
+        matches!(
+            build_error,
+            asupersync::runtime::BrowserRuntimeBuildError::Unsupported { .. }
+        ),
+        "fallible build API must preserve the same structured unsupported-browser result"
+    );
+}
+
+#[test]
 fn rust_browser_consumer_fixture_exists_with_required_files() {
     let fixture = repo_root().join("tests/fixtures/rust-browser-consumer");
     assert!(
@@ -333,6 +372,91 @@ fn rust_browser_runtime_stability_artifact_tracks_builder_abi_negotiation_contra
             .iter()
             .any(|limit| limit.contains("does not promote the Rust browser runtime lane")),
         "supplemental contract must preserve preview posture"
+    );
+}
+
+#[test]
+fn rust_browser_runtime_stability_artifact_tracks_canonical_profile_matrix_contract() {
+    let artifact = read_json(RUST_BROWSER_EVIDENCE_ARTIFACT_PATH);
+    let cargo_toml = read_file("Cargo.toml");
+
+    let contracts = artifact["supplemental_contracts"]
+        .as_array()
+        .expect("supplemental_contracts");
+    let contract = contracts
+        .iter()
+        .find(|row| {
+            row["contract_id"].as_str() == Some("browser_runtime_builder_canonical_profile_matrix")
+        })
+        .expect("browser runtime builder canonical profile matrix contract");
+
+    let expected_profiles = vec![
+        "wasm-browser-dev",
+        "wasm-browser-prod",
+        "wasm-browser-deterministic",
+        "wasm-browser-minimal",
+    ];
+    let expected_commands = vec![
+        "env RCH_FORCE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=900 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_rust_browser_profile_matrix_dev cargo test -p asupersync --test wasm_rust_browser_example_contract --features test-internals,wasm-browser-dev rust_browser_runtime_builder_public_api_contract_compiles_under_canonical_profile -- --nocapture",
+        "env RCH_FORCE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=900 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_rust_browser_profile_matrix_prod cargo test -p asupersync --test wasm_rust_browser_example_contract --features test-internals,wasm-browser-prod rust_browser_runtime_builder_public_api_contract_compiles_under_canonical_profile -- --nocapture",
+        "env RCH_FORCE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=900 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_rust_browser_profile_matrix_deterministic cargo test -p asupersync --test wasm_rust_browser_example_contract --features test-internals,wasm-browser-deterministic rust_browser_runtime_builder_public_api_contract_compiles_under_canonical_profile -- --nocapture",
+        "env RCH_FORCE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=900 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_rust_browser_profile_matrix_minimal cargo test -p asupersync --test wasm_rust_browser_example_contract --features test-internals,wasm-browser-minimal rust_browser_runtime_builder_public_api_contract_compiles_under_canonical_profile -- --nocapture",
+    ];
+
+    assert_eq!(contract["bead_id"].as_str(), Some("asupersync-uxu0y2"));
+    assert_eq!(
+        contract["test_path"].as_str(),
+        Some("tests/wasm_rust_browser_example_contract.rs")
+    );
+    assert_eq!(
+        string_array(contract, "test_names"),
+        vec![
+            "rust_browser_runtime_builder_public_api_contract_compiles_under_canonical_profile",
+            "rust_browser_runtime_stability_artifact_tracks_canonical_profile_matrix_contract",
+        ]
+    );
+    assert_eq!(
+        string_array(contract, "canonical_profiles"),
+        expected_profiles
+    );
+    assert_eq!(
+        string_array(contract, "covered_paths"),
+        vec![
+            "runtime_builder_browser_contract_compiles_under_dev_profile",
+            "runtime_builder_browser_contract_compiles_under_prod_profile",
+            "runtime_builder_browser_contract_compiles_under_deterministic_profile",
+            "runtime_builder_browser_contract_compiles_under_minimal_profile",
+        ]
+    );
+    assert_eq!(
+        string_array(contract, "validation_commands"),
+        expected_commands
+    );
+
+    let artifact_validation_commands = string_array(&artifact, "validation_commands");
+    for command in expected_commands {
+        assert!(
+            artifact_validation_commands.contains(&command),
+            "top-level validation_commands must list profile proof: {command}"
+        );
+    }
+
+    assert_contains_all(
+        &cargo_toml,
+        "Cargo.toml",
+        &[
+            "wasm-browser-dev = [\"wasm-runtime\", \"browser-io\"]",
+            "wasm-browser-prod = [\"wasm-runtime\", \"browser-io\"]",
+            "wasm-browser-deterministic = [\"wasm-runtime\", \"deterministic-mode\", \"browser-trace\"]",
+            "wasm-browser-minimal = [\"wasm-runtime\"]",
+        ],
+    );
+
+    let residual_limits = string_array(contract, "residual_limits");
+    assert!(
+        residual_limits.iter().any(|limit| limit
+            .contains("does not imply broad stable external Rust Browser Edition parity")),
+        "profile matrix contract must preserve the preview support boundary"
     );
 }
 

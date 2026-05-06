@@ -44,6 +44,37 @@
         "consumer_too_old remains covered by the generic ABI compatibility classifier until the producer minor version is greater than zero.",
         "This supplemental contract does not promote the Rust browser runtime lane beyond the artifact-contract-backed preview posture."
       ]
+    },
+    {
+      "bead_id": "asupersync-uxu0y2",
+      "contract_id": "browser_runtime_builder_canonical_profile_matrix",
+      "test_path": "tests/wasm_rust_browser_example_contract.rs",
+      "test_names": [
+        "rust_browser_runtime_builder_public_api_contract_compiles_under_canonical_profile",
+        "rust_browser_runtime_stability_artifact_tracks_canonical_profile_matrix_contract"
+      ],
+      "canonical_profiles": [
+        "wasm-browser-dev",
+        "wasm-browser-prod",
+        "wasm-browser-deterministic",
+        "wasm-browser-minimal"
+      ],
+      "covered_paths": [
+        "runtime_builder_browser_contract_compiles_under_dev_profile",
+        "runtime_builder_browser_contract_compiles_under_prod_profile",
+        "runtime_builder_browser_contract_compiles_under_deterministic_profile",
+        "runtime_builder_browser_contract_compiles_under_minimal_profile"
+      ],
+      "validation_commands": [
+        "env RCH_FORCE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=900 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_rust_browser_profile_matrix_dev cargo test -p asupersync --test wasm_rust_browser_example_contract --features test-internals,wasm-browser-dev rust_browser_runtime_builder_public_api_contract_compiles_under_canonical_profile -- --nocapture",
+        "env RCH_FORCE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=900 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_rust_browser_profile_matrix_prod cargo test -p asupersync --test wasm_rust_browser_example_contract --features test-internals,wasm-browser-prod rust_browser_runtime_builder_public_api_contract_compiles_under_canonical_profile -- --nocapture",
+        "env RCH_FORCE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=900 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_rust_browser_profile_matrix_deterministic cargo test -p asupersync --test wasm_rust_browser_example_contract --features test-internals,wasm-browser-deterministic rust_browser_runtime_builder_public_api_contract_compiles_under_canonical_profile -- --nocapture",
+        "env RCH_FORCE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=900 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_rust_browser_profile_matrix_minimal cargo test -p asupersync --test wasm_rust_browser_example_contract --features test-internals,wasm-browser-minimal rust_browser_runtime_builder_public_api_contract_compiles_under_canonical_profile -- --nocapture"
+      ],
+      "residual_limits": [
+        "Canonical profile coverage proves the preview builder contract compiles under every browser feature profile but does not imply broad stable external Rust Browser Edition parity.",
+        "The maintained browser fixture remains the shipped artifact-backed Rust consumer lane."
+      ]
     }
   ],
   "required_log_fields": [
@@ -125,6 +156,10 @@
     "bash -n scripts/validate_rust_browser_consumer.sh",
     "rch exec -- rustfmt --edition 2024 --check tests/wasm_rust_browser_example_contract.rs",
     "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_rust_browser_builder_abi cargo test -p asupersync --lib --features test-internals,wasm-browser-dev browser_runtime_builder_consumer_version_negotiates_abi_contract -- --nocapture",
+    "env RCH_FORCE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=900 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_rust_browser_profile_matrix_dev cargo test -p asupersync --test wasm_rust_browser_example_contract --features test-internals,wasm-browser-dev rust_browser_runtime_builder_public_api_contract_compiles_under_canonical_profile -- --nocapture",
+    "env RCH_FORCE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=900 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_rust_browser_profile_matrix_prod cargo test -p asupersync --test wasm_rust_browser_example_contract --features test-internals,wasm-browser-prod rust_browser_runtime_builder_public_api_contract_compiles_under_canonical_profile -- --nocapture",
+    "env RCH_FORCE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=900 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_rust_browser_profile_matrix_deterministic cargo test -p asupersync --test wasm_rust_browser_example_contract --features test-internals,wasm-browser-deterministic rust_browser_runtime_builder_public_api_contract_compiles_under_canonical_profile -- --nocapture",
+    "env RCH_FORCE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=900 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_rust_browser_profile_matrix_minimal cargo test -p asupersync --test wasm_rust_browser_example_contract --features test-internals,wasm-browser-minimal rust_browser_runtime_builder_public_api_contract_compiles_under_canonical_profile -- --nocapture",
     "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS=-C debuginfo=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_rust_browser_contract cargo test -p asupersync --test wasm_rust_browser_example_contract --features test-internals,wasm-browser-dev -- --nocapture",
     "PATH=/usr/bin:$PATH bash scripts/validate_rust_browser_consumer.sh --run-id wave2-browser-rust-runtime-api"
   ],
