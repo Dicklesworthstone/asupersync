@@ -1124,11 +1124,34 @@ async fn fs_proof_io_uring_unknown_completion_attribution(
             payload,
         )
         .await
-        .map_err(|err| format!("io_uring unknown completion attribution probe: {err}"))?;
+        .map_err(|err| format!("io_uring unknown read completion attribution probe: {err}"))?;
+        fs::uring::test_internals::ignores_unknown_completion_before_write(
+            &dir.join("unknown-cqe-write.txt"),
+            payload,
+        )
+        .await
+        .map_err(|err| format!("io_uring unknown write completion attribution probe: {err}"))?;
+        fs::uring::test_internals::ignores_unknown_completion_before_sync(
+            &dir.join("unknown-cqe-sync.txt"),
+            payload,
+        )
+        .await
+        .map_err(|err| format!("io_uring unknown sync completion attribution probe: {err}"))?;
+        let truncated_len = fs::uring::test_internals::truncate_is_sync_boundary(
+            &dir.join("truncate-sync-boundary.txt"),
+            b"truncate-boundary",
+            8,
+        )
+        .map_err(|err| format!("io_uring truncate boundary probe: {err}"))?;
+        if truncated_len != 8 {
+            return Err(format!(
+                "io_uring truncate boundary drift: expected len=8 actual len={truncated_len}"
+            ));
+        }
 
         Ok(FsProofEvidence::supported(
             payload.len() as u64,
-            "unknown_completion_ignored=true,tracked_read_matches_payload=true",
+            "unknown_completion_ignored=true,tracked_read_matches_payload=true,tracked_write_matches_payload=true,tracked_sync_preserves_payload=true,truncate_boundary=ftruncate_sync_no_pending_ops",
         ))
     }
     #[cfg(not(all(target_os = "linux", feature = "io-uring")))]
@@ -1136,7 +1159,7 @@ async fn fs_proof_io_uring_unknown_completion_attribution(
         Ok(FsProofEvidence {
             bytes_actual: 0,
             metadata_actual:
-                "io_uring_feature_enabled=false,unknown_completion_probe=unsupported".to_string(),
+                "io_uring_feature_enabled=false,unknown_completion_and_truncate_boundary_probe=unsupported".to_string(),
             unsupported_reason: "io_uring unknown-completion attribution proof requires linux target and io-uring feature"
                 .to_string(),
         })
@@ -1359,9 +1382,9 @@ async fn fs_parity_wave2_run() -> io::Result<Vec<Value>> {
         FsProofScenario {
             scenario_id: "io-uring-unknown-completion-attribution",
             api: "IoUringFile",
-            operation: "unknown_completion_before_tracked_read",
+            operation: "unknown_completion_before_tracked_read_write_sync",
             bytes_expected: 17,
-            metadata_expected: "unknown_completion_ignored=true,tracked_read_matches_payload=true",
+            metadata_expected: "unknown_completion_ignored=true,tracked_read_matches_payload=true,tracked_write_matches_payload=true,tracked_sync_preserves_payload=true,truncate_boundary=ftruncate_sync_no_pending_ops",
             cancellation_point: "unknown_cqe_before_read",
             result: fs_proof_io_uring_unknown_completion_attribution(&temp_root).await,
         },

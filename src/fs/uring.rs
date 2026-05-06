@@ -631,6 +631,19 @@ impl AsRawFd for IoUringFile {
 
 #[cfg(any(test, feature = "test-internals"))]
 impl IoUringFile {
+    fn submit_unknown_nop_for_test(&self, user_data: u64) -> io::Result<()> {
+        let entry = opcode::Nop::new().build().user_data(user_data);
+        let mut ring = self.inner.ring.lock();
+        // SAFETY: NOP has no external buffer dependencies.
+        unsafe {
+            ring.submission()
+                .push(&entry)
+                .map_err(|_| io::Error::other("submission queue full for unknown CQE probe"))?;
+        }
+        ring.submit()?;
+        Ok(())
+    }
+
     fn submit_pending_read_for_test(&self, buf: &mut [u8], offset: u64) -> io::Result<u64> {
         let user_data = self.allocate_user_data(OpKind::Read);
         {
@@ -754,9 +767,11 @@ impl IoUringFile {
 #[cfg(feature = "test-internals")]
 #[doc(hidden)]
 pub mod test_internals {
-    use super::{IoUringFile, opcode};
+    use super::{IoUringFile, any_ops_pending};
     use std::io;
     use std::path::Path;
+
+    const UNKNOWN_CQE_USER_DATA: u64 = 0xDEAD_BEEF;
 
     fn all_zero(bytes: &[u8]) -> bool {
         bytes.iter().all(|byte| *byte == 0)
@@ -831,17 +846,7 @@ pub mod test_internals {
         std::fs::write(path, payload)?;
         let file = IoUringFile::open(path)?;
 
-        {
-            let entry = opcode::Nop::new().build().user_data(0xDEAD_BEEF);
-            let mut ring = file.inner.ring.lock();
-            // SAFETY: NOP has no external buffer dependencies.
-            unsafe {
-                ring.submission()
-                    .push(&entry)
-                    .map_err(|_| io::Error::other("submission queue full for unknown CQE probe"))?;
-            }
-            ring.submit()?;
-        }
+        file.submit_unknown_nop_for_test(UNKNOWN_CQE_USER_DATA)?;
 
         let mut buf = vec![0_u8; payload.len()];
         let n = file.read(&mut buf).await?;
@@ -854,6 +859,81 @@ pub mod test_internals {
         }
 
         Ok(())
+    }
+
+    pub async fn ignores_unknown_completion_before_write(
+        path: &Path,
+        payload: &[u8],
+    ) -> io::Result<()> {
+        let file = IoUringFile::open_with_flags(
+            path,
+            libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
+            0o644,
+        )?;
+
+        file.submit_unknown_nop_for_test(UNKNOWN_CQE_USER_DATA)?;
+
+        let n = file.write(payload).await?;
+        if n != payload.len() {
+            return Err(payload_mismatch_error(
+                "unknown-cqe-write-len",
+                payload,
+                &payload[..n.min(payload.len())],
+            ));
+        }
+        file.sync_all().await?;
+        drop(file);
+
+        let contents = std::fs::read(path)?;
+        if contents.as_slice() != payload {
+            return Err(payload_mismatch_error(
+                "unknown-cqe-write",
+                payload,
+                &contents,
+            ));
+        }
+
+        Ok(())
+    }
+
+    pub async fn ignores_unknown_completion_before_sync(
+        path: &Path,
+        payload: &[u8],
+    ) -> io::Result<()> {
+        std::fs::write(path, payload)?;
+        let file = IoUringFile::open_with_flags(path, libc::O_RDWR, 0)?;
+
+        file.submit_unknown_nop_for_test(UNKNOWN_CQE_USER_DATA)?;
+
+        file.sync_all().await?;
+        drop(file);
+
+        let contents = std::fs::read(path)?;
+        if contents.as_slice() != payload {
+            return Err(payload_mismatch_error(
+                "unknown-cqe-sync",
+                payload,
+                &contents,
+            ));
+        }
+
+        Ok(())
+    }
+
+    pub fn truncate_is_sync_boundary(path: &Path, payload: &[u8], len: u64) -> io::Result<u64> {
+        std::fs::write(path, payload)?;
+        let file = IoUringFile::open_with_flags(path, libc::O_RDWR, 0)?;
+
+        file.set_len(len)?;
+        if any_ops_pending(&file.inner) {
+            return Err(io::Error::other(
+                "io_uring set_len boundary left pending operation state",
+            ));
+        }
+
+        let actual_len = file.metadata()?.len();
+        drop(file);
+        Ok(actual_len)
     }
 }
 
@@ -1249,17 +1329,7 @@ mod tests {
 
             let file = IoUringFile::open(&path).unwrap();
 
-            {
-                let entry = opcode::Nop::new().build().user_data(0xDEAD_BEEF);
-                let mut ring = file.inner.ring.lock();
-                // SAFETY: NOP has no external buffer dependencies.
-                unsafe {
-                    ring.submission()
-                        .push(&entry)
-                        .expect("submission queue full");
-                }
-                ring.submit().unwrap();
-            }
+            file.submit_unknown_nop_for_test(0xDEAD_BEEF).unwrap();
 
             let mut buf = [0u8; 5];
             let n = file.read(&mut buf).await.unwrap();
@@ -1272,6 +1342,93 @@ mod tests {
             );
         });
         crate::test_complete!("test_uring_completion_attribution_ignores_unrelated_cqe");
+    }
+
+    #[test]
+    fn test_uring_completion_attribution_ignores_unrelated_cqe_before_write() {
+        init_test("test_uring_completion_attribution_ignores_unrelated_cqe_before_write");
+        futures_lite::future::block_on(async {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("uring_unrelated_cqe_write.txt");
+
+            let file = IoUringFile::open_with_flags(
+                &path,
+                libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
+                0o644,
+            )
+            .unwrap();
+
+            file.submit_unknown_nop_for_test(0xDEAD_BEEF).unwrap();
+
+            let n = file.write(b"hello").await.unwrap();
+            crate::assert_with_log!(n == 5, "write length", 5usize, n);
+            file.sync_all().await.unwrap();
+            drop(file);
+
+            let contents = std::fs::read(&path).unwrap();
+            crate::assert_with_log!(
+                contents.as_slice() == b"hello",
+                "write ignores unrelated CQE and persists actual data",
+                "hello",
+                String::from_utf8_lossy(&contents)
+            );
+        });
+        crate::test_complete!(
+            "test_uring_completion_attribution_ignores_unrelated_cqe_before_write"
+        );
+    }
+
+    #[test]
+    fn test_uring_completion_attribution_ignores_unrelated_cqe_before_sync() {
+        init_test("test_uring_completion_attribution_ignores_unrelated_cqe_before_sync");
+        futures_lite::future::block_on(async {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("uring_unrelated_cqe_sync.txt");
+            std::fs::write(&path, b"hello").unwrap();
+
+            let file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
+
+            file.submit_unknown_nop_for_test(0xDEAD_BEEF).unwrap();
+
+            file.sync_all().await.unwrap();
+            drop(file);
+
+            let contents = std::fs::read(&path).unwrap();
+            crate::assert_with_log!(
+                contents.as_slice() == b"hello",
+                "sync ignores unrelated CQE and preserves actual data",
+                "hello",
+                String::from_utf8_lossy(&contents)
+            );
+        });
+        crate::test_complete!(
+            "test_uring_completion_attribution_ignores_unrelated_cqe_before_sync"
+        );
+    }
+
+    #[test]
+    fn test_uring_set_len_has_no_async_truncate_completion() {
+        init_test("test_uring_set_len_has_no_async_truncate_completion");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("uring_truncate_no_pending.txt");
+        std::fs::write(&path, b"truncate-boundary").unwrap();
+
+        let file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
+        file.set_len(8).unwrap();
+
+        crate::assert_with_log!(
+            !any_ops_pending(&file.inner),
+            "set_len uses synchronous ftruncate and leaves no io_uring state",
+            false,
+            any_ops_pending(&file.inner)
+        );
+        crate::assert_with_log!(
+            file.metadata().unwrap().len() == 8,
+            "truncated len",
+            8u64,
+            file.metadata().unwrap().len()
+        );
+        crate::test_complete!("test_uring_set_len_has_no_async_truncate_completion");
     }
 
     #[test]
