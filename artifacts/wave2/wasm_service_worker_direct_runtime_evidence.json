@@ -1,0 +1,218 @@
+{
+  "schema_version": "wasm-service-worker-direct-runtime-evidence-v1",
+  "bead_id": "asupersync-szdl85",
+  "capability_id": "wasm_service_worker_direct_runtime",
+  "title": "Service-worker direct-runtime boundary and broker handoff evidence",
+  "decision": {
+    "direct_runtime_supported": false,
+    "support_class_after": "broker/coordinator-only",
+    "blocker_bead_id": "asupersync-9r5lmo",
+    "blocked_reason": "ServiceWorkerGlobalScope can be terminated between lifecycle events, so a direct BrowserRuntime lane needs a dedicated lifetime and region-ownership contract before it can preserve asupersync cancellation, drain/finalize, and replay invariants. The shipped user path remains bounded broker registration plus durable handoff to dedicated-worker or browser-main direct-runtime lanes."
+  },
+  "scope": {
+    "runtime_builder": "src/runtime/builder.rs",
+    "browser_package": "packages/browser/src/index.ts",
+    "broker_contract": "docs/wasm_service_worker_broker_contract.md",
+    "rust_contract_test": "tests/wasm_service_worker_broker_contract.rs",
+    "browser_fixture": "tests/fixtures/service-worker-broker-consumer",
+    "runner_script": "scripts/run_wasm_service_worker_direct_runtime_evidence.sh"
+  },
+  "required_log_fields": [
+    "bead_id",
+    "scenario_id",
+    "host_context",
+    "service_worker_scope",
+    "lifecycle_event",
+    "selected_lane",
+    "direct_runtime_supported",
+    "fallback_target",
+    "region_count_before",
+    "region_count_after",
+    "cancel_event_count",
+    "durable_state_key",
+    "expected_reason",
+    "actual_reason",
+    "verdict",
+    "first_failure"
+  ],
+  "source_evidence_paths": [
+    "src/runtime/builder.rs",
+    "packages/browser/src/index.ts",
+    "docs/WASM.md",
+    "docs/integration.md",
+    "docs/wasm_service_worker_broker_contract.md",
+    "tests/wasm_service_worker_broker_contract.rs",
+    "tests/fixtures/service-worker-broker-consumer/scripts/check-browser-run.mjs",
+    "scripts/validate_service_worker_broker_consumer.sh",
+    "scripts/run_wasm_service_worker_direct_runtime_evidence.sh",
+    "artifacts/wave2_capability_evidence_registry_v1.json"
+  ],
+  "scenario_matrix": [
+    {
+      "scenario_id": "service_worker_direct_runtime_fails_closed",
+      "proof_source": "rust_contract",
+      "test_markers": [
+        "browser_package_and_runtime_builder_preserve_service_worker_fail_closed_markers"
+      ],
+      "host_context": "service_worker",
+      "service_worker_scope": "https://example.test/app/",
+      "lifecycle_event": "runtime_probe",
+      "selected_lane": "lane.unsupported",
+      "direct_runtime_supported": "false",
+      "fallback_target": "bounded_service_worker_broker",
+      "region_count_before": "0",
+      "region_count_after": "0",
+      "cancel_event_count": "0",
+      "durable_state_key": "none",
+      "expected_reason": "service_worker_direct_runtime_not_shipped",
+      "actual_reason": "service_worker_direct_runtime_not_shipped"
+    },
+    {
+      "scenario_id": "service_worker_broker_preflight_supported",
+      "proof_source": "rust_contract",
+      "test_markers": [
+        "doc_and_browser_package_pin_bounded_broker_exports",
+        "maintained_service_worker_broker_validation_path_is_pinned"
+      ],
+      "host_context": "service_worker",
+      "service_worker_scope": "https://example.test/app/",
+      "lifecycle_event": "preflight",
+      "selected_lane": "lane.browser.service_worker.broker",
+      "direct_runtime_supported": "false",
+      "fallback_target": "lane.browser.dedicated_worker.direct_runtime",
+      "region_count_before": "0",
+      "region_count_after": "0",
+      "cancel_event_count": "0",
+      "durable_state_key": "broker_admission_tuple",
+      "expected_reason": "supported",
+      "actual_reason": "supported"
+    },
+    {
+      "scenario_id": "service_worker_install_activate_registers_broker",
+      "proof_source": "browser_fixture",
+      "test_markers": [
+        "registration_marker",
+        "browser_registration_lifecycle_state"
+      ],
+      "host_context": "service_worker",
+      "service_worker_scope": "http://127.0.0.1/app/",
+      "lifecycle_event": "install_activate",
+      "selected_lane": "lane.browser.service_worker.broker",
+      "direct_runtime_supported": "false",
+      "fallback_target": "lane.browser.dedicated_worker.direct_runtime",
+      "region_count_before": "0",
+      "region_count_after": "0",
+      "cancel_event_count": "0",
+      "durable_state_key": "__service_worker_broker_registration__",
+      "expected_reason": "supported",
+      "actual_reason": "supported"
+    },
+    {
+      "scenario_id": "service_worker_fetch_message_persists_restartable_work",
+      "proof_source": "browser_fixture",
+      "test_markers": [
+        "work_marker",
+        "browser_pending_work_count"
+      ],
+      "host_context": "service_worker",
+      "service_worker_scope": "http://127.0.0.1/app/",
+      "lifecycle_event": "fetch_message",
+      "selected_lane": "lane.browser.service_worker.broker",
+      "direct_runtime_supported": "false",
+      "fallback_target": "lane.browser.dedicated_worker.direct_runtime",
+      "region_count_before": "0",
+      "region_count_after": "0",
+      "cancel_event_count": "0",
+      "durable_state_key": "broker_work:<broker_work_id>",
+      "expected_reason": "pending_work_count=1",
+      "actual_reason": "pending_work_count=1"
+    },
+    {
+      "scenario_id": "service_worker_handoff_targets_dedicated_worker",
+      "proof_source": "browser_fixture",
+      "test_markers": [
+        "handoff_marker",
+        "browser_handoff_target_lane_id"
+      ],
+      "host_context": "service_worker",
+      "service_worker_scope": "http://127.0.0.1/app/",
+      "lifecycle_event": "message_handoff",
+      "selected_lane": "lane.browser.dedicated_worker.direct_runtime",
+      "direct_runtime_supported": "false",
+      "fallback_target": "lane.browser.dedicated_worker.direct_runtime",
+      "region_count_before": "0",
+      "region_count_after": "0",
+      "cancel_event_count": "0",
+      "durable_state_key": "broker_handoff:<broker_work_id>",
+      "expected_reason": "service_worker_direct_runtime_not_shipped",
+      "actual_reason": "service_worker_direct_runtime_not_shipped"
+    },
+    {
+      "scenario_id": "service_worker_restart_reopens_durable_state",
+      "proof_source": "browser_fixture",
+      "test_markers": [
+        "reopen_marker",
+        "browser_reopened_pending_work_count",
+        "browser_reopened_handoff_count"
+      ],
+      "host_context": "service_worker",
+      "service_worker_scope": "http://127.0.0.1/app/",
+      "lifecycle_event": "restart_reopen",
+      "selected_lane": "lane.browser.service_worker.broker",
+      "direct_runtime_supported": "false",
+      "fallback_target": "lane.browser.dedicated_worker.direct_runtime",
+      "region_count_before": "0",
+      "region_count_after": "0",
+      "cancel_event_count": "0",
+      "durable_state_key": "registration+broker_work+broker_handoff",
+      "expected_reason": "reopened_pending_work_count=1,reopened_handoff_count=1",
+      "actual_reason": "reopened_pending_work_count=1,reopened_handoff_count=1"
+    },
+    {
+      "scenario_id": "service_worker_protocol_mismatch_fails_closed",
+      "proof_source": "browser_fixture",
+      "test_markers": [
+        "mismatch_marker",
+        "browser_mismatch_reason"
+      ],
+      "host_context": "service_worker",
+      "service_worker_scope": "http://127.0.0.1/app/",
+      "lifecycle_event": "capability_mismatch",
+      "selected_lane": "lane.unsupported",
+      "direct_runtime_supported": "false",
+      "fallback_target": "lane.browser.dedicated_worker.direct_runtime",
+      "region_count_before": "0",
+      "region_count_after": "0",
+      "cancel_event_count": "0",
+      "durable_state_key": "broker_admission_tuple",
+      "expected_reason": "broker_protocol_version_mismatch",
+      "actual_reason": "broker_protocol_version_mismatch"
+    },
+    {
+      "scenario_id": "service_worker_cleanup_returns_to_quiescence",
+      "proof_source": "browser_fixture",
+      "test_markers": [
+        "cleanup_marker",
+        "browser_post_cleanup_registration_missing"
+      ],
+      "host_context": "service_worker",
+      "service_worker_scope": "http://127.0.0.1/app/",
+      "lifecycle_event": "cleanup",
+      "selected_lane": "lane.browser.service_worker.broker",
+      "direct_runtime_supported": "false",
+      "fallback_target": "lane.browser.dedicated_worker.direct_runtime",
+      "region_count_before": "0",
+      "region_count_after": "0",
+      "cancel_event_count": "0",
+      "durable_state_key": "cleared",
+      "expected_reason": "post_cleanup_empty",
+      "actual_reason": "post_cleanup_empty"
+    }
+  ],
+  "validation_commands": [
+    "bash -n scripts/run_wasm_service_worker_direct_runtime_evidence.sh",
+    "bash scripts/run_wasm_service_worker_direct_runtime_evidence.sh --contract-only --run-id contract-smoke",
+    "bash scripts/run_wasm_service_worker_direct_runtime_evidence.sh --run-id wave2-wasm-service-worker --timeout-sec 180",
+    "bash scripts/run_wave2_capability_evidence_registry.sh --output-root target/wave2-capability-evidence-registry"
+  ]
+}
