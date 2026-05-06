@@ -176,6 +176,7 @@ fn matrix_references_current_evidence_artifacts() {
     for token in [
         "tests/fs_verification.rs",
         "tests/e2e_fs.rs",
+        "scripts/fs_parity_proof_runner.sh",
         "tests/compile_test_process.rs",
         "tests/e2e_signal.rs",
     ] {
@@ -184,6 +185,82 @@ fn matrix_references_current_evidence_artifacts() {
             "matrix missing evidence token: {token}"
         );
     }
+}
+
+#[test]
+fn matrix_records_wave2_filesystem_proof_inventory() {
+    let doc = load_matrix_doc();
+    for token in [
+        "Wave2 Filesystem Proof Overlay",
+        "asupersync-oc0ybw",
+        "File",
+        "OpenOptions",
+        "Convenience path ops",
+        "Directory ops",
+        "Metadata / permissions / symlinks",
+        "Buffered file I/O",
+        "VFS seam",
+        "io_uring",
+        "platform-scoped",
+        "unsupported/platform diagnostics",
+    ] {
+        assert!(
+            doc.contains(token),
+            "wave2 filesystem overlay missing token: {token}"
+        );
+    }
+}
+
+#[test]
+fn matrix_records_wave2_filesystem_proof_results() {
+    let doc = load_matrix_doc();
+    for token in [
+        "validation_passed=true",
+        "row_count=21",
+        "pass_count=19",
+        "skip_count=2",
+        "pass_count=21",
+        "skip_count=0",
+        "fail_count=0",
+        "50 passed, 0 failed",
+        "cleanup_status",
+        "bounded to test-owned temp roots",
+    ] {
+        assert!(
+            doc.contains(token),
+            "wave2 filesystem proof summary missing token: {token}"
+        );
+    }
+}
+
+#[test]
+fn matrix_wave2_reproduction_commands_route_through_rch() {
+    let doc = load_matrix_doc();
+    let wave2_section = doc
+        .split("### 2.1.1 Wave2 Filesystem Proof Overlay")
+        .nth(1)
+        .and_then(|section| section.split("### 2.2 Filesystem Gap Register").next())
+        .expect("matrix must contain bounded wave2 filesystem proof overlay section");
+    for command in [
+        "bash scripts/fs_parity_proof_runner.sh",
+        "ASUPERSYNC_FS_PARITY_FEATURES=test-internals,io-uring bash scripts/fs_parity_proof_runner.sh",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fs_verification_oc0ybw",
+    ] {
+        assert!(
+            wave2_section.contains(command),
+            "wave2 filesystem command missing from matrix: {command}"
+        );
+    }
+
+    let non_rch_cargo_commands: Vec<_> = wave2_section
+        .lines()
+        .filter(|line| line.contains("cargo test") || line.contains("cargo check"))
+        .filter(|line| !line.contains("rch exec"))
+        .collect();
+    assert!(
+        non_rch_cargo_commands.is_empty(),
+        "matrix must not document local cargo proof commands: {non_rch_cargo_commands:#?}"
+    );
 }
 
 #[test]
