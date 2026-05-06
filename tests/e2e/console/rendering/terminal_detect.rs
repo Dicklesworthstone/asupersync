@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Terminal capability detection E2E tests.
 
 use crate::console_e2e::util::{
