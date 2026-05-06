@@ -1,8 +1,9 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Lean coverage matrix schema validation tests (bd-13aa6).
 
-use conformance::{
+#[path = "../conformance/src/lean_coverage_matrix.rs"]
+mod lean_coverage_matrix;
+
+use lean_coverage_matrix::{
     CoverageRowType, CoverageStatus, LEAN_COVERAGE_SCHEMA_VERSION, LeanCoverageMatrix,
 };
 use serde_json::Value;
@@ -18,6 +19,12 @@ fn sample_matrix_parses_and_validates() {
         .validate()
         .expect("sample matrix must satisfy validation rules");
     assert_eq!(matrix.schema_version, LEAN_COVERAGE_SCHEMA_VERSION);
+
+    let rendered = matrix
+        .to_pretty_json()
+        .expect("sample matrix must serialize");
+    let reparsed = LeanCoverageMatrix::from_json_str(&rendered).expect("rendered sample parses");
+    assert_eq!(reparsed.schema_version, LEAN_COVERAGE_SCHEMA_VERSION);
 }
 
 #[test]
