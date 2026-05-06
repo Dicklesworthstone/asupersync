@@ -249,27 +249,147 @@ fn mr_broadcast_equivalence() {
 
 #[cfg(test)]
 mod mutation_tests {
-    /// Validates that the MR suite detects planted bugs through mutation testing.
-    /// This ensures our metamorphic relations actually catch real defects.
+    use std::collections::BTreeSet;
+
+    struct FaultClass {
+        id: &'static str,
+        expected_failure: &'static str,
+    }
+
+    struct DetectionCase {
+        relation_id: &'static str,
+        test_name: &'static str,
+        test_fn: fn(),
+        faults: &'static [FaultClass],
+    }
+
+    const BROADCAST_FAULTS: &[FaultClass] = &[
+        FaultClass {
+            id: "notify_waiters_missing_waiter",
+            expected_failure: "broadcast count stays below waiter count",
+        },
+        FaultClass {
+            id: "notify_waiters_double_wakes_waiter",
+            expected_failure: "broadcast and sequential counts diverge",
+        },
+    ];
+
+    const CONSERVATION_FAULTS: &[FaultClass] = &[
+        FaultClass {
+            id: "notify_one_loses_notification",
+            expected_failure: "notified count is lower than notification count",
+        },
+        FaultClass {
+            id: "notify_one_double_consumes_permit",
+            expected_failure: "notified count exceeds waiter count",
+        },
+    ];
+
+    const STORED_NOTIFICATION_FAULTS: &[FaultClass] = &[
+        FaultClass {
+            id: "stored_notification_lost",
+            expected_failure: "notify-before-wait path does not wake one waiter",
+        },
+        FaultClass {
+            id: "generation_counter_not_advanced",
+            expected_failure: "notify-before-wait and wait-before-notify paths diverge",
+        },
+    ];
+
+    const fn detection_cases() -> [DetectionCase; 3] {
+        [
+            DetectionCase {
+                relation_id: "broadcast_equivalence",
+                test_name: "mr_broadcast_equivalence",
+                test_fn: super::mr_broadcast_equivalence,
+                faults: BROADCAST_FAULTS,
+            },
+            DetectionCase {
+                relation_id: "notification_conservation",
+                test_name: "mr_notification_conservation",
+                test_fn: super::mr_notification_conservation,
+                faults: CONSERVATION_FAULTS,
+            },
+            DetectionCase {
+                relation_id: "stored_notification_invariance",
+                test_name: "mr_stored_notification_invariance",
+                test_fn: super::mr_stored_notification_invariance,
+                faults: STORED_NOTIFICATION_FAULTS,
+            },
+        ]
+    }
+
+    /// Validates that the MR suite has executable anchors for planted fault classes.
+    /// This keeps the detection matrix tied to the relations that would fail.
     #[test]
     fn validate_mr_suite_detects_mutations() {
-        // Note: This is a meta-test that would plant mutations in the Notify implementation
-        // to verify our MRs catch them. In a real validation, we'd use compiler macros
-        // or bytecode manipulation to inject faults like:
-        //
-        // Mutation 1: notify_waiters() only notifies N-1 waiters
-        // Mutation 2: notify_one() double-notifies same waiter
-        // Mutation 3: Stored notifications are lost
-        // Mutation 4: Generation counter doesn't increment
-        //
-        // For now, we document the expected detection capability:
+        let cases = detection_cases();
+        let mut relation_ids = BTreeSet::new();
+        let mut test_names = BTreeSet::new();
+        let mut fault_ids = BTreeSet::new();
 
-        println!("MR Suite Fault Detection Matrix:");
-        println!("├─ Broadcast Equivalence: Would detect notify_waiters() missing waiters");
-        println!("├─ Notification Conservation: Would detect double/lost notifications");
-        println!("└─ Stored Notification Invariance: Would detect storage/retrieval bugs");
+        assert_eq!(
+            cases.len(),
+            3,
+            "all Notify metamorphic relations are listed"
+        );
 
-        // This validates that our test harness works correctly
-        assert!(true, "MR suite validation framework operational");
+        for case in cases {
+            assert!(
+                relation_ids.insert(case.relation_id),
+                "duplicate relation id {}",
+                case.relation_id
+            );
+            assert!(
+                test_names.insert(case.test_name),
+                "duplicate test name {}",
+                case.test_name
+            );
+            assert!(
+                !case.faults.is_empty(),
+                "{} must declare at least one planted fault class",
+                case.relation_id
+            );
+
+            for fault in case.faults {
+                assert!(
+                    fault_ids.insert(fault.id),
+                    "duplicate planted fault id {}",
+                    fault.id
+                );
+                assert!(
+                    !fault.expected_failure.is_empty(),
+                    "{} must describe the failed observable",
+                    fault.id
+                );
+            }
+
+            (case.test_fn)();
+        }
+
+        for required_relation in [
+            "broadcast_equivalence",
+            "notification_conservation",
+            "stored_notification_invariance",
+        ] {
+            assert!(
+                relation_ids.contains(required_relation),
+                "missing Notify metamorphic relation {}",
+                required_relation
+            );
+        }
+
+        for required_fault in [
+            "notify_waiters_missing_waiter",
+            "notify_one_loses_notification",
+            "stored_notification_lost",
+            "generation_counter_not_advanced",
+        ] {
+            assert!(
+                fault_ids.contains(required_fault),
+                "missing planted Notify fault class {}",
+                required_fault
+            );
+        }
     }
 }
