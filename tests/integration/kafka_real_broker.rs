@@ -16,6 +16,7 @@ use asupersync::{
     test_utils::run_test_with_cx,
 };
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -393,6 +394,27 @@ fn redacted_bootstrap_servers(servers: &[String]) -> Value {
     )
 }
 
+fn payload_sha256(payload: &[u8]) -> String {
+    hex::encode(Sha256::digest(payload))
+}
+
+#[test]
+fn kafka_broker_parity_redacts_credentials_and_hashes_payloads() {
+    let servers = vec![
+        "alice:super-secret@broker-one:9092".to_string(),
+        "broker-two:9092".to_string(),
+    ];
+
+    assert_eq!(
+        redacted_bootstrap_servers(&servers),
+        json!(["redacted@broker-one:9092", "broker-two:9092"])
+    );
+    assert_eq!(
+        payload_sha256(b"asupersync-kafka-proof-payload"),
+        "bb9487100a163143e9d771b9bf506962ac3310a2cf2c1f8cdfd30e3909571a11"
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_kafka_broker_proof_row(
     scenario_id: &str,
@@ -402,6 +424,11 @@ fn emit_kafka_broker_proof_row(
     message_count: usize,
     ack_count: usize,
     consumer_lag: i64,
+    partition: Option<i32>,
+    offset: Option<i64>,
+    delivery_status: &str,
+    payload_sha256: &str,
+    expected_ordering_scope: &str,
     reconnect_count: usize,
     cancellation_point: &str,
     expected_result: &str,
@@ -424,6 +451,11 @@ fn emit_kafka_broker_proof_row(
             "message_count": message_count,
             "ack_count": ack_count,
             "consumer_lag": consumer_lag,
+            "partition": partition,
+            "offset": offset,
+            "delivery_status": delivery_status,
+            "payload_sha256": payload_sha256,
+            "expected_ordering_scope": expected_ordering_scope,
             "reconnect_count": reconnect_count,
             "cancellation_point": cancellation_point,
             "expected_result": expected_result,
@@ -483,6 +515,11 @@ fn kafka_broker_parity_default_feature_gate_logs_required_fields() {
         0,
         0,
         0,
+        None,
+        None,
+        "not-attempted",
+        "",
+        "not-applicable",
         0,
         "feature-gate",
         "default build fails closed for real Kafka broker requirement",
@@ -500,6 +537,11 @@ struct KafkaBrokerProofOutcome {
     message_count: usize,
     ack_count: usize,
     consumer_lag: i64,
+    partition: i32,
+    offset: i64,
+    delivery_status: String,
+    payload_sha256: String,
+    expected_ordering_scope: String,
 }
 
 async fn run_kafka_broker_parity_roundtrip(
@@ -581,12 +623,31 @@ async fn run_kafka_broker_parity_roundtrip(
         let committed = consumer
             .committed_offset(&record.topic, record.partition)
             .ok_or_else(|| "committed offset not visible after commit".to_string())?;
+        if metadata.partition != record.partition || metadata.offset != record.offset {
+            return Err(format!(
+                "producer metadata partition/offset {}:{} did not match consumed record {}:{}",
+                metadata.partition, metadata.offset, record.partition, record.offset
+            ));
+        }
+        let expected_committed_offset = record.offset + 1;
+        if committed != expected_committed_offset {
+            return Err(format!(
+                "committed offset {committed} did not advance to {expected_committed_offset}"
+            ));
+        }
         let consumer_lag = metadata.offset.saturating_add(1).saturating_sub(committed);
+        let payload_digest = payload_sha256(&record.payload);
+        let expected_ordering_scope = format!("topic={topic};partition={}", record.partition);
 
         Ok(KafkaBrokerProofOutcome {
             message_count: 1,
-            ack_count: usize::from(metadata.offset >= 0),
+            ack_count: usize::from(committed == expected_committed_offset),
             consumer_lag,
+            partition: record.partition,
+            offset: record.offset,
+            delivery_status: "offset-committed".to_string(),
+            payload_sha256: payload_digest,
+            expected_ordering_scope,
         })
     }
     .await;
@@ -604,11 +665,16 @@ async fn run_kafka_broker_parity_roundtrip(
     Ok(outcome)
 }
 
-#[test]
-fn kafka_broker_parity_real_broker_proof_row() -> Result<(), String> {
+fn emit_kafka_broker_parity_roundtrip_proof_row(
+    scenario_id: &str,
+    topic_prefix: &str,
+    cancellation_point: &str,
+    expected_result: &str,
+    pass_actual_result: &str,
+) -> Result<(), String> {
     let config = RealBrokerConfig::new();
     let redacted_servers = redacted_bootstrap_servers(&config.bootstrap_servers);
-    let topic = unique_topic("asupersync-kafka-parity");
+    let topic = unique_topic(topic_prefix);
 
     if !config.enabled {
         let unsupported_reason = config
@@ -616,16 +682,21 @@ fn kafka_broker_parity_real_broker_proof_row() -> Result<(), String> {
             .as_deref()
             .unwrap_or("real Kafka broker unavailable");
         emit_kafka_broker_proof_row(
-            "kafka-producer-consumer-roundtrip",
+            scenario_id,
             "unavailable",
             redacted_servers,
             &topic,
             0,
             0,
             0,
+            None,
+            None,
+            "not-attempted",
+            "",
+            "topic-partition-offset",
             0,
             "broker-availability",
-            "real broker producer send, consumer receive, explicit offset commit, and cleanup",
+            expected_result,
             "deterministic skip because broker configuration is unavailable",
             unsupported_reason,
             "skip",
@@ -657,17 +728,22 @@ fn kafka_broker_parity_real_broker_proof_row() -> Result<(), String> {
     match outcome {
         Ok(outcome) => {
             emit_kafka_broker_proof_row(
-                "kafka-producer-consumer-roundtrip",
+                scenario_id,
                 "unknown",
                 redacted_servers,
                 &topic,
                 outcome.message_count,
                 outcome.ack_count,
                 outcome.consumer_lag,
+                Some(outcome.partition),
+                Some(outcome.offset),
+                &outcome.delivery_status,
+                &outcome.payload_sha256,
+                &outcome.expected_ordering_scope,
                 0,
-                "producer-consumer-cleanup",
-                "real broker producer send, consumer receive, explicit offset commit, and cleanup",
-                "message reached broker and was consumed with explicit offset commit",
+                cancellation_point,
+                expected_result,
+                pass_actual_result,
                 "",
                 "pass",
                 "",
@@ -676,24 +752,53 @@ fn kafka_broker_parity_real_broker_proof_row() -> Result<(), String> {
         }
         Err(error) => {
             emit_kafka_broker_proof_row(
-                "kafka-producer-consumer-roundtrip",
+                scenario_id,
                 "unknown",
                 redacted_servers,
                 &topic,
                 0,
                 0,
                 0,
+                None,
+                None,
+                "failed-before-commit",
+                "",
+                "topic-partition-offset",
                 0,
-                "producer-consumer-cleanup",
-                "real broker producer send, consumer receive, explicit offset commit, and cleanup",
+                cancellation_point,
+                expected_result,
                 "real broker proof failed",
                 "",
                 "fail",
                 &error,
             );
-            Err(format!("Kafka broker parity proof failed: {error}"))
+            Err(format!(
+                "Kafka broker parity proof failed for {scenario_id}: {error}"
+            ))
         }
     }
+}
+
+#[test]
+fn kafka_broker_parity_real_broker_proof_row() -> Result<(), String> {
+    emit_kafka_broker_parity_roundtrip_proof_row(
+        "kafka-producer-consumer-roundtrip",
+        "asupersync-kafka-parity",
+        "producer-consumer-cleanup",
+        "real broker producer send, consumer receive, explicit offset commit, and cleanup",
+        "message reached broker and was consumed with explicit offset commit",
+    )
+}
+
+#[test]
+fn kafka_broker_parity_offset_ack_redaction_row() -> Result<(), String> {
+    emit_kafka_broker_parity_roundtrip_proof_row(
+        "kafka-producer-consumer-offset-ack-redaction",
+        "asupersync-kafka-offset-ack-redaction",
+        "offset-ack-redaction-cleanup",
+        "real broker producer metadata matches consumed partition/offset, payload digest is emitted, bootstrap credentials are redacted, and offset commit is observed",
+        "message reached broker, payload digest was emitted without raw payload, and consumed offset was explicitly committed",
+    )
 }
 
 #[test]

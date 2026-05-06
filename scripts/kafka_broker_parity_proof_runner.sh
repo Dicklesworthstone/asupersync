@@ -17,10 +17,23 @@ LOG_FILE="$OUT_DIR/run.log"
 ROWS_FILE="$OUT_DIR/scenario_rows.jsonl"
 REPORT_FILE="$OUT_DIR/run_report.json"
 
+INCLUDE_OFFSET_ACK_PROOF=false
+case "${ASUPERSYNC_KAFKA_BROKER_PARITY_INCLUDE_OFFSET_ACK_PROOF:-}" in
+  1 | true | TRUE | yes | YES | on | ON)
+    INCLUDE_OFFSET_ACK_PROOF=true
+    ;;
+esac
+if [ "$BEAD_ID" = "asupersync-0xbecl.2" ]; then
+  INCLUDE_OFFSET_ACK_PROOF=true
+fi
+
 EXPECTED_SCENARIOS=(
   "kafka-default-feature-gate"
   "kafka-producer-consumer-roundtrip"
 )
+if [ "$INCLUDE_OFFSET_ACK_PROOF" = true ]; then
+  EXPECTED_SCENARIOS+=("kafka-producer-consumer-offset-ack-redaction")
+fi
 
 REQUIRED_FIELDS=(
   "bead_id"
@@ -34,6 +47,11 @@ REQUIRED_FIELDS=(
   "message_count"
   "ack_count"
   "consumer_lag"
+  "partition"
+  "offset"
+  "delivery_status"
+  "payload_sha256"
+  "expected_ordering_scope"
   "reconnect_count"
   "cancellation_point"
   "expected_result"
@@ -91,6 +109,7 @@ RUN_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || printf 'unknown')"
 DEFAULT_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_asupersync_kafka_broker_parity_default"
 KAFKA_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_asupersync_kafka_broker_parity_kafka"
+OFFSET_ACK_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_asupersync_kafka_broker_parity_offset_ack"
 
 DEFAULT_CMD=(
   env
@@ -142,13 +161,42 @@ KAFKA_CMD=(
   --test-threads=1
 )
 
+OFFSET_ACK_CMD=(
+  env
+  -u
+  CARGO_TARGET_DIR
+  RCH_FORCE_REMOTE=1
+  RCH_QUEUE_WHEN_BUSY=1
+  RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=900
+  RCH_DAEMON_RESPONSE_TIMEOUT_SECS=900
+  rch exec --
+  env
+  CARGO_INCREMENTAL=0
+  CARGO_PROFILE_TEST_DEBUG=0
+  "RUSTFLAGS=-C debuginfo=0"
+  "ASUPERSYNC_KAFKA_BROKER_PARITY_PROOF_DIR=$OUT_DIR"
+  "ASUPERSYNC_KAFKA_BROKER_PARITY_BEAD_ID=$BEAD_ID"
+  cargo test -p asupersync
+  --target-dir "$OFFSET_ACK_TARGET_DIR"
+  --test kafka_real_broker
+  --features "test-internals,kafka"
+  kafka_broker_parity_offset_ack_redaction_row
+  --
+  --nocapture
+  --test-threads=1
+)
+
 log "bead_id=$BEAD_ID"
 log "output_dir=$OUT_DIR"
 log "git_sha=$GIT_SHA"
+log "include_offset_ack_proof=$INCLUDE_OFFSET_ACK_PROOF"
 
 TEST_STATUS=0
 run_lane default-feature-gate "${DEFAULT_CMD[@]}" || TEST_STATUS=1
 run_lane kafka-broker-proof "${KAFKA_CMD[@]}" || TEST_STATUS=1
+if [ "$INCLUDE_OFFSET_ACK_PROOF" = true ]; then
+  run_lane kafka-offset-ack-redaction-proof "${OFFSET_ACK_CMD[@]}" || TEST_STATUS=1
+fi
 
 jq -Rr --arg bead_id "$BEAD_ID" '
   def event_object:
@@ -187,11 +235,42 @@ if [ -s "$ROWS_FILE" ]; then
       | "\($row.scenario_id // "<unknown>"):\($field)"
     ]
   ' "$ROWS_FILE")"
+  INVALID_OFFSET_ACK_ROWS_JSON="$(jq -s '
+    [
+      .[]
+      | select(.scenario_id == "kafka-producer-consumer-offset-ack-redaction")
+      | select(
+          (
+            .verdict == "pass"
+            and (
+              (.partition | type) != "number"
+              or (.offset | type) != "number"
+              or .delivery_status != "offset-committed"
+              or ((.payload_sha256 | type) != "string")
+              or ((.payload_sha256 | test("^[0-9a-f]{64}$")) | not)
+              or ((.expected_ordering_scope | type) != "string")
+              or .expected_ordering_scope == ""
+            )
+          )
+          or (
+            .verdict == "skip"
+            and (
+              (.unsupported_reason | type) != "string"
+              or .unsupported_reason == ""
+              or .delivery_status != "not-attempted"
+              or .payload_sha256 != ""
+            )
+          )
+          or (.verdict != "pass" and .verdict != "skip")
+        )
+    ]
+  ' "$ROWS_FILE")"
 else
   ROWS_JSON="[]"
   DRIFTS_JSON="[]"
   SKIPS_JSON="[]"
   MISSING_FIELDS_JSON="[]"
+  INVALID_OFFSET_ACK_ROWS_JSON="[]"
 fi
 
 ROW_COUNT="$(wc -l < "$ROWS_FILE" | tr -d ' ')"
@@ -200,6 +279,7 @@ if [ "$TEST_STATUS" -eq 0 ] \
   && [ "${#MISSING_SCENARIOS[@]}" -eq 0 ] \
   && [ "$(jq 'length' <<<"$DRIFTS_JSON")" -eq 0 ] \
   && [ "$(jq 'length' <<<"$MISSING_FIELDS_JSON")" -eq 0 ] \
+  && [ "$(jq 'length' <<<"$INVALID_OFFSET_ACK_ROWS_JSON")" -eq 0 ] \
   && [ "$ROW_COUNT" -eq "${#EXPECTED_SCENARIOS[@]}" ]; then
   VALIDATION_PASSED=true
 fi
@@ -220,6 +300,7 @@ jq -n \
   --argjson required_fields "$REQUIRED_FIELDS_JSON" \
   --argjson missing_scenarios "$MISSING_JSON" \
   --argjson missing_fields "$MISSING_FIELDS_JSON" \
+  --argjson invalid_offset_ack_rows "$INVALID_OFFSET_ACK_ROWS_JSON" \
   --argjson rows "$ROWS_JSON" \
   --argjson drifts "$DRIFTS_JSON" \
   --argjson skips "$SKIPS_JSON" \
@@ -239,6 +320,7 @@ jq -n \
     required_fields: $required_fields,
     missing_scenarios: $missing_scenarios,
     missing_fields: $missing_fields,
+    invalid_offset_ack_rows: $invalid_offset_ack_rows,
     drifts: $drifts,
     skips: $skips,
     rows: $rows
