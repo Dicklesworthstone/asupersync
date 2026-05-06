@@ -16,6 +16,7 @@
 #   --trend-window N         Days of trend history to analyze (default: 14)
 #   --stress-schedules N     Obligation stress schedule count (default: 1000000)
 #   --skip-flake-detection   Skip flake detector pass
+#   --dry-run                Plan suites and reports without executing cargo
 #   -h, --help               Show this help
 #
 # Exit codes:
@@ -42,6 +43,8 @@ JSON_OUTPUT=true
 TREND_WINDOW=14
 STRESS_SCHEDULES=1000000
 SKIP_FLAKE_DETECTION=false
+DRY_RUN=false
+RCH_BIN="${RCH_BIN:-rch}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -77,6 +80,10 @@ while [ $# -gt 0 ]; do
       SKIP_FLAKE_DETECTION=true
       shift
       ;;
+    --dry-run)
+      DRY_RUN=true
+      shift
+      ;;
     -h|--help)
       head -28 "$0" | tail -25
       exit 0
@@ -95,6 +102,12 @@ BURNDOWN_FILE="$REPORT_DIR/burndown_report.json"
 LOG_DIR="$REPORT_DIR/suite_logs"
 
 mkdir -p "$LOG_DIR"
+
+format_command() {
+  local rendered
+  printf -v rendered "%q " "$@"
+  printf '%s' "${rendered% }"
+}
 
 # ── Suite registry ──────────────────────────────────────────────────────
 
@@ -140,6 +153,10 @@ echo "Suites:    $SUITES"
 echo "Timeout:   ${TIMEOUT}s per suite"
 echo "Schedules: $STRESS_SCHEDULES (obligation stress)"
 echo "Report:    $REPORT_DIR"
+echo "Runner:    ${RCH_BIN} exec"
+if [ "$DRY_RUN" = true ]; then
+  echo "Mode:      dry-run"
+fi
 echo ""
 
 run_suite() {
@@ -149,20 +166,43 @@ run_suite() {
   local env_vars="${SUITE_ENVS[$id]}"
   local log_file="$LOG_DIR/${id}.log"
   local suite_start suite_end duration exit_code tests_total tests_pass tests_fail
+  local target_dir="${TMPDIR:-/tmp}/rch_target_nightly_stress_${id}"
+  local target_args=()
+  local env_args=()
 
   suite_start=$(date +%s)
   echo "--- Running suite: $id ($category) ---"
 
-  # Build cargo test command
-  local cmd="cargo test $target -- --nocapture"
+  # Build rch-routed cargo test command.
+  read -r -a target_args <<< "$target"
+  local test_cmd=(
+    "$RCH_BIN"
+    exec
+    --
+    env
+    "CARGO_TARGET_DIR=$target_dir"
+  )
   if [ -n "$env_vars" ]; then
-    cmd="env $env_vars $cmd"
+    read -r -a env_args <<< "$env_vars"
+    test_cmd+=("${env_args[@]}")
   fi
+  test_cmd+=(cargo test "${target_args[@]}" -- --nocapture)
 
   # Run with timeout
   set +e
-  timeout "$TIMEOUT" bash -c "cd '$PROJECT_ROOT' && $cmd" > "$log_file" 2>&1
-  exit_code=$?
+  if [ "$DRY_RUN" = true ]; then
+    {
+      echo "DRY_RUN planned command:"
+      format_command "${test_cmd[@]}"
+      echo
+    } > "$log_file"
+    exit_code=0
+  else
+    pushd "$PROJECT_ROOT" >/dev/null
+    timeout "$TIMEOUT" "${test_cmd[@]}" > "$log_file" 2>&1
+    exit_code=$?
+    popd >/dev/null
+  fi
   set -e
 
   suite_end=$(date +%s)
@@ -193,10 +233,8 @@ run_suite() {
   TOTAL_TESTS_PASSED=$((TOTAL_TESTS_PASSED + tests_pass))
   TOTAL_TESTS_FAILED=$((TOTAL_TESTS_FAILED + tests_fail))
 
-  local repro_cmd="cargo test $target -- --nocapture"
-  if [ -n "$env_vars" ]; then
-    repro_cmd="$env_vars $repro_cmd"
-  fi
+  local repro_cmd
+  repro_cmd="$(format_command "${test_cmd[@]}")"
 
   # Append JSON suite result
   SUITE_RESULTS+=("{\"id\":\"$id\",\"category\":\"$category\",\"result\":\"$result\",\"duration_secs\":$duration,\"tests_run\":$tests_total,\"tests_passed\":$tests_pass,\"tests_failed\":$tests_fail,\"log_file\":\"suite_logs/${id}.log\",\"repro_command\":\"$repro_cmd\"}")
@@ -216,12 +254,21 @@ if [ "$SKIP_FLAKE_DETECTION" = false ] && [ -x "$SCRIPT_DIR/run_semantic_flake_d
   echo "--- Running flake detection pass ---"
   local_flake_log="$LOG_DIR/flake_detection.log"
   set +e
-  timeout "$TIMEOUT" bash "$SCRIPT_DIR/run_semantic_flake_detector.sh" \
-    --iterations 3 --ci --json > "$local_flake_log" 2>&1
-  flake_exit=$?
+  if [ "$DRY_RUN" = true ]; then
+    {
+      echo "DRY_RUN planned command:"
+      format_command env "RCH_BIN=$RCH_BIN" bash "$SCRIPT_DIR/run_semantic_flake_detector.sh" --iterations 3 --ci --json
+      echo
+    } > "$local_flake_log"
+    flake_exit=0
+  else
+    timeout "$TIMEOUT" env "RCH_BIN=$RCH_BIN" bash "$SCRIPT_DIR/run_semantic_flake_detector.sh" \
+      --iterations 3 --ci --json > "$local_flake_log" 2>&1
+    flake_exit=$?
+  fi
   set -e
 
-  local flake_result="pass"
+  flake_result="pass"
   if [ "$flake_exit" -ne 0 ]; then
     flake_result="fail"
     OVERALL_RESULT="fail"
@@ -230,7 +277,7 @@ if [ "$SKIP_FLAKE_DETECTION" = false ] && [ -x "$SCRIPT_DIR/run_semantic_flake_d
     echo "  FLAKE DETECTION PASSED"
   fi
 
-  SUITE_RESULTS+=("{\"id\":\"flake_detection\",\"category\":\"flake\",\"result\":\"$flake_result\",\"duration_secs\":0,\"tests_run\":0,\"tests_passed\":0,\"tests_failed\":0,\"log_file\":\"suite_logs/flake_detection.log\",\"repro_command\":\"bash scripts/run_semantic_flake_detector.sh --iterations 3 --ci --json\"}")
+  SUITE_RESULTS+=("{\"id\":\"flake_detection\",\"category\":\"flake\",\"result\":\"$flake_result\",\"duration_secs\":0,\"tests_run\":0,\"tests_passed\":0,\"tests_failed\":0,\"log_file\":\"suite_logs/flake_detection.log\",\"repro_command\":\"RCH_BIN=$RCH_BIN bash scripts/run_semantic_flake_detector.sh --iterations 3 --ci --json\"}")
 fi
 
 # ── Build run manifest ──────────────────────────────────────────────────
@@ -265,7 +312,9 @@ if [ "$JSON_OUTPUT" = true ]; then
     "os": "$OS_NAME",
     "arch": "$ARCH_NAME",
     "obligation_stress_schedules": $STRESS_SCHEDULES,
-    "timeout_secs": $TIMEOUT
+    "timeout_secs": $TIMEOUT,
+    "runner": "rch exec",
+    "dry_run": $DRY_RUN
   }
 }
 MANIFEST_EOF
