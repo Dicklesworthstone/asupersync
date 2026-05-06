@@ -7,6 +7,13 @@
 //!         NATS_URL=nats://127.0.0.1:4222 \
 //!         cargo test --test nats_real_server -- --nocapture
 //!
+//! Behavior:
+//! - If `NATS_TEST_URL` or `NATS_URL` is set, connect to that broker after
+//!   localhost / production safety checks.
+//! - Otherwise, if `nats-server` is available on `PATH` (or via
+//!   `NATS_SERVER_BIN`), auto-start a local `nats-server` fixture.
+//! - If neither is available, the tests skip cleanly.
+//!
 //! Production safety guards block:
 //!  * `NODE_ENV=production`
 //!  * URLs containing `prod` or `production`
@@ -21,6 +28,9 @@ use asupersync::runtime::RuntimeBuilder;
 use asupersync::time::timeout;
 
 use std::future::Future;
+use std::io::Read;
+use std::net::{TcpListener, TcpStream};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread;
@@ -29,40 +39,54 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 static UNIQUE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 struct RealNatsConfig {
-    url: String,
+    external_url: Option<String>,
+    nats_server_bin: Option<String>,
     enabled: bool,
     reason: Option<String>,
 }
 
 impl RealNatsConfig {
     fn from_env() -> Self {
-        let url = std::env::var("NATS_URL").unwrap_or_else(|_| "nats://127.0.0.1:4222".to_string());
+        let external_url = std::env::var("NATS_TEST_URL")
+            .ok()
+            .or_else(|| std::env::var("NATS_URL").ok());
         let toggle = std::env::var("REAL_NATS_TESTS").unwrap_or_default() == "true";
         let allow_remote = std::env::var("ALLOW_NON_LOCALHOST_NATS").unwrap_or_default() == "true";
         let node_env = std::env::var("NODE_ENV").unwrap_or_default();
-
-        let url_lc = url.to_ascii_lowercase();
-        let host_looks_local = url_lc.contains("://127.0.0.1")
-            || url_lc.contains("://localhost")
-            || url_lc.contains("://[::1]");
-        let looks_prod = url_lc.contains("prod") || url_lc.contains("production");
+        let nats_server_bin = resolve_nats_server_bin();
 
         let reason = if !toggle {
             Some("REAL_NATS_TESTS not set to 'true' — running unit-only".to_string())
         } else if node_env == "production" {
             Some("BLOCKED: NODE_ENV=production".to_string())
-        } else if looks_prod {
-            Some(format!("BLOCKED: NATS_URL looks like production: {url}"))
-        } else if !host_looks_local && !allow_remote {
-            Some(format!(
-                "BLOCKED: non-localhost NATS_URL without ALLOW_NON_LOCALHOST_NATS=true: {url}"
-            ))
+        } else if let Some(url) = &external_url {
+            let url_lc = url.to_ascii_lowercase();
+            let host_looks_local = url_lc.contains("://127.0.0.1")
+                || url_lc.contains("://localhost")
+                || url_lc.contains("://[::1]");
+            let looks_prod = url_lc.contains("prod") || url_lc.contains("production");
+
+            if looks_prod {
+                Some(format!("BLOCKED: NATS URL looks like production: {url}"))
+            } else if !host_looks_local && !allow_remote {
+                Some(format!(
+                    "BLOCKED: non-localhost NATS URL without ALLOW_NON_LOCALHOST_NATS=true: {url}"
+                ))
+            } else {
+                None
+            }
+        } else if nats_server_bin.is_none() {
+            Some(
+                "REAL_NATS_TESTS=true but neither NATS_TEST_URL/NATS_URL nor nats-server binary is available"
+                    .to_string(),
+            )
         } else {
             None
         };
 
         Self {
-            url,
+            external_url,
+            nats_server_bin,
             enabled: toggle && reason.is_none(),
             reason,
         }
@@ -128,6 +152,102 @@ impl NatsTestLogger {
     }
 }
 
+struct LocalNatsServer {
+    child: Child,
+    url: String,
+}
+
+impl LocalNatsServer {
+    fn start(bin: &str, log: &NatsTestLogger) -> Result<Self, String> {
+        let port = reserve_local_port()?;
+        let mut child = Command::new(bin)
+            .args(["-a", "127.0.0.1", "-p", &port.to_string()])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("spawn {bin}: {e}"))?;
+
+        wait_for_local_server(&mut child, port)?;
+        let url = format!("nats://127.0.0.1:{port}");
+        log.line(
+            "server_ready",
+            &[("url", url.clone()), ("binary", bin.to_string())],
+        );
+
+        Ok(Self { child, url })
+    }
+}
+
+impl Drop for LocalNatsServer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn resolve_nats_server_bin() -> Option<String> {
+    if let Ok(bin) = std::env::var("NATS_SERVER_BIN") {
+        if command_reports_version(&bin) {
+            return Some(bin);
+        }
+        return None;
+    }
+
+    let default = "nats-server";
+    if command_reports_version(default) {
+        Some(default.to_string())
+    } else {
+        None
+    }
+}
+
+fn command_reports_version(bin: &str) -> bool {
+    Command::new(bin)
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+fn reserve_local_port() -> Result<u16, String> {
+    let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("bind local port: {e}"))?;
+    listener
+        .local_addr()
+        .map(|addr| addr.port())
+        .map_err(|e| format!("local_addr for reserved port: {e}"))
+}
+
+fn wait_for_local_server(child: &mut Child, port: u16) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let addr = format!("127.0.0.1:{port}");
+
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|e| format!("poll nats-server status: {e}"))?
+        {
+            let mut stderr_text = String::new();
+            if let Some(mut stderr) = child.stderr.take() {
+                let _ = stderr.read_to_string(&mut stderr_text);
+            }
+            return Err(format!(
+                "nats-server exited early with {status}: {}",
+                stderr_text.trim()
+            ));
+        }
+
+        if TcpStream::connect(&addr).is_ok() {
+            thread::sleep(Duration::from_millis(100));
+            return Ok(());
+        }
+
+        if Instant::now() >= deadline {
+            return Err(format!("timed out waiting for nats-server on {addr}"));
+        }
+
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn skip_if_disabled(cfg: &RealNatsConfig, test_name: &str) -> bool {
     if !cfg.enabled {
         let ts = SystemTime::now()
@@ -141,6 +261,32 @@ fn skip_if_disabled(cfg: &RealNatsConfig, test_name: &str) -> bool {
         return true;
     }
     false
+}
+
+fn start_local_nats_server(
+    cfg: &RealNatsConfig,
+    log: &NatsTestLogger,
+) -> Result<Option<LocalNatsServer>, String> {
+    if cfg.external_url.is_some() {
+        return Ok(None);
+    }
+
+    let bin = cfg
+        .nats_server_bin
+        .as_deref()
+        .ok_or_else(|| "enabled config without nats-server binary".to_string())?;
+    LocalNatsServer::start(bin, log).map(Some)
+}
+
+fn active_nats_url(cfg: &RealNatsConfig, local_server: Option<&LocalNatsServer>) -> String {
+    local_server.map_or_else(
+        || {
+            cfg.external_url
+                .clone()
+                .expect("external URL exists when no local server is started")
+        },
+        |server| server.url.clone(),
+    )
 }
 
 fn unique_subject(prefix: &str) -> String {
@@ -177,11 +323,13 @@ fn nats_real_pub_sub_roundtrip() {
     }
 
     let log = NatsTestLogger::new("nats_real", "nats_real_pub_sub_roundtrip");
+    let local_server = start_local_nats_server(&cfg, &log).expect("start local nats-server");
+    let active_url = active_nats_url(&cfg, local_server.as_ref());
     let subject = unique_subject("pubsub");
     let payload = b"hello-from-live-nats".to_vec();
 
     let (ready_tx, ready_rx) = mpsc::channel();
-    let url = cfg.url.clone();
+    let url = active_url.clone();
     let subject_for_sub = subject.clone();
     let subscriber = spawn_runtime_task("nats-real-subscriber", async move {
         let cx = Cx::current().expect("runtime task context");
@@ -211,7 +359,7 @@ fn nats_real_pub_sub_roundtrip() {
         .recv_timeout(Duration::from_secs(5))
         .expect("subscriber ready");
 
-    let url = cfg.url.clone();
+    let url = active_url.clone();
     let subject_for_pub = subject.clone();
     let payload_for_pub = payload.clone();
     let publisher = spawn_runtime_task("nats-real-publisher", async move {
@@ -242,11 +390,13 @@ fn nats_real_request_reply_roundtrip() {
     }
 
     let log = NatsTestLogger::new("nats_real", "nats_real_request_reply_roundtrip");
+    let local_server = start_local_nats_server(&cfg, &log).expect("start local nats-server");
+    let active_url = active_nats_url(&cfg, local_server.as_ref());
     let subject = unique_subject("request");
     let payload = b"ping-live-nats".to_vec();
 
     let (ready_tx, ready_rx) = mpsc::channel();
-    let url = cfg.url.clone();
+    let url = active_url.clone();
     let subject_for_responder = subject.clone();
     let responder = spawn_runtime_task("nats-real-responder", async move {
         let cx = Cx::current().expect("runtime task context");
@@ -280,7 +430,7 @@ fn nats_real_request_reply_roundtrip() {
         .recv_timeout(Duration::from_secs(5))
         .expect("responder ready");
 
-    let url = cfg.url.clone();
+    let url = active_url.clone();
     let subject_for_request = subject.clone();
     let payload_for_request = payload.clone();
     let response = spawn_runtime_task("nats-real-requester", async move {
@@ -316,6 +466,8 @@ fn nats_real_queue_group_single_delivery() {
     }
 
     let log = NatsTestLogger::new("nats_real", "nats_real_queue_group_single_delivery");
+    let local_server = start_local_nats_server(&cfg, &log).expect("start local nats-server");
+    let active_url = active_nats_url(&cfg, local_server.as_ref());
     let subject = unique_subject("queue");
     let queue = unique_subject("workers");
     let payload = b"queue-work-item".to_vec();
@@ -323,7 +475,7 @@ fn nats_real_queue_group_single_delivery() {
     let (ready_tx, ready_rx) = mpsc::channel();
 
     let spawn_worker = |name: &'static str| {
-        let url = cfg.url.clone();
+        let url = active_url.clone();
         let subject = subject.clone();
         let queue = queue.clone();
         let ready_tx = ready_tx.clone();
@@ -370,7 +522,7 @@ fn nats_real_queue_group_single_delivery() {
         .recv_timeout(Duration::from_secs(5))
         .expect("worker b ready");
 
-    let url = cfg.url.clone();
+    let url = active_url.clone();
     let subject_for_pub = subject.clone();
     let payload_for_pub = payload.clone();
     let publisher = spawn_runtime_task("nats-real-queue-publisher", async move {

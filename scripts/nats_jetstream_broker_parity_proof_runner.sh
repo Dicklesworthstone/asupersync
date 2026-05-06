@@ -89,11 +89,161 @@ broker_version() {
   fi
 }
 
+observed_broker_version() {
+  local observed
+  observed="$(grep -E '^nats_proof_broker_version\[[^]]+\]=' "$LOG_FILE" \
+    | tail -n 1 \
+    | sed -E 's/^nats_proof_broker_version\[[^]]+\]=//')"
+  if [[ -n "$observed" ]]; then
+    printf '%s' "$observed"
+  else
+    return 1
+  fi
+}
+
+remote_test_script() {
+  cat <<'REMOTE_SCRIPT'
+set -euo pipefail
+
+label="$1"
+target="$2"
+bead_id="$3"
+
+command_reports_version() {
+  local bin="$1"
+  if [[ -x "$bin" ]]; then
+    "$bin" --version >/dev/null 2>&1
+  else
+    command -v "$bin" >/dev/null 2>&1 && "$bin" --version >/dev/null 2>&1
+  fi
+}
+
+print_nats_server_version() {
+  local bin="$1"
+  if [[ -x "$bin" ]]; then
+    "$bin" --version 2>/dev/null | head -n 1 || true
+  else
+    "$bin" --version 2>/dev/null | head -n 1 || true
+  fi
+}
+
+download_nats_server() {
+  local version_tag="${NATS_SERVER_VERSION:-v2.12.5}"
+  local os arch platform archive root url dest bin
+  os="$(uname -s)"
+  arch="$(uname -m)"
+
+  case "${os}:${arch}" in
+    Linux:x86_64|Linux:amd64)
+      platform="linux-amd64"
+      ;;
+    Linux:aarch64|Linux:arm64)
+      platform="linux-arm64"
+      ;;
+    *)
+      echo "nats_proof_broker_download_skipped[$label]=unsupported_platform_${os}_${arch}"
+      return 1
+      ;;
+  esac
+
+  archive="nats-server-${version_tag}-${platform}.tar.gz"
+  root="nats-server-${version_tag}-${platform}"
+  url="https://github.com/nats-io/nats-server/releases/download/${version_tag}/${archive}"
+  dest="${NATS_SERVER_CACHE_DIR:-${TMPDIR:-/tmp}/asupersync-nats-server-${version_tag}-${platform}}"
+  bin="${dest}/nats-server"
+
+  if [[ -x "$bin" ]] && "$bin" --version >/dev/null 2>&1; then
+    export NATS_SERVER_BIN="$bin"
+    echo "nats_proof_broker_source[$label]=cache"
+    echo "nats_proof_broker_version[$label]=$("$bin" --version 2>/dev/null | head -n 1)"
+    return 0
+  fi
+
+  mkdir -p "$dest"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$url" -o "${dest}/${archive}"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q "$url" -O "${dest}/${archive}"
+  else
+    echo "nats_proof_broker_download_skipped[$label]=missing_curl_or_wget"
+    return 1
+  fi
+
+  tar -xzf "${dest}/${archive}" -C "$dest" --strip-components=1 "${root}/nats-server"
+  chmod +x "$bin"
+  export NATS_SERVER_BIN="$bin"
+  echo "nats_proof_broker_source[$label]=download"
+  echo "nats_proof_broker_version[$label]=$("$bin" --version 2>/dev/null | head -n 1)"
+}
+
+prepare_nats_server() {
+  if [[ -n "${NATS_TEST_URL:-}" || -n "${NATS_URL:-}" ]]; then
+    echo "nats_proof_broker_source[$label]=external_url"
+    return 0
+  fi
+
+  if [[ -n "${NATS_SERVER_BIN:-}" ]] && command_reports_version "$NATS_SERVER_BIN"; then
+    echo "nats_proof_broker_source[$label]=env"
+    echo "nats_proof_broker_version[$label]=$(print_nats_server_version "$NATS_SERVER_BIN")"
+    return 0
+  fi
+
+  if command -v nats-server >/dev/null 2>&1 && nats-server --version >/dev/null 2>&1; then
+    export NATS_SERVER_BIN="nats-server"
+    echo "nats_proof_broker_source[$label]=path"
+    echo "nats_proof_broker_version[$label]=$(nats-server --version 2>/dev/null | head -n 1)"
+    return 0
+  fi
+
+  if [[ "${NATS_PROOF_DOWNLOAD_SERVER:-true}" == "true" ]]; then
+    download_nats_server
+  else
+    echo "nats_proof_broker_download_skipped[$label]=disabled"
+    return 1
+  fi
+}
+
+if [[ -z "${REAL_NATS_TESTS+x}" ]]; then
+  case "$label" in
+    nats)
+      if [[ "${NATS_PROOF_AUTO_BROKER:-true}" == "true" ]]; then
+        export REAL_NATS_TESTS=true
+      fi
+      ;;
+    jetstream)
+      if [[ "${JETSTREAM_PROOF_AUTO_BROKER:-false}" == "true" ]]; then
+        export REAL_NATS_TESTS=true
+      fi
+      ;;
+  esac
+fi
+
+if [[ "${REAL_NATS_TESTS:-}" == "true" ]]; then
+  prepare_nats_server || true
+fi
+
+env \
+  CARGO_INCREMENTAL=0 \
+  CARGO_PROFILE_TEST_DEBUG=0 \
+  "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_${bead_id}_${label}" \
+  "RUSTFLAGS=-C debuginfo=0" \
+  cargo test -p asupersync \
+    --test "$target" \
+    --features test-internals \
+    -- \
+    --nocapture \
+    --test-threads=1
+REMOTE_SCRIPT
+}
+
 run_cargo_test() {
   local label="$1"
   local target="$2"
   local cmd_log="$OUT_DIR/${label}.log"
   : > "$cmd_log"
+
+  local remote_script
+  remote_script="$(remote_test_script)"
 
   local cmd=(
     env
@@ -103,17 +253,13 @@ run_cargo_test() {
     RCH_QUEUE_WHEN_BUSY=1
     RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=900
     rch exec --
-    env
-    CARGO_INCREMENTAL=0
-    CARGO_PROFILE_TEST_DEBUG=0
-    "CARGO_TARGET_DIR=/tmp/rch_target_${BEAD_ID}_${label}"
-    "RUSTFLAGS=-C debuginfo=0"
-    cargo test -p asupersync
-    --test "$target"
-    --features test-internals
-    --
-    --nocapture
-    --test-threads=1
+    bash
+    -lc
+    "$remote_script"
+    "nats-proof-$label"
+    "$label"
+    "$target"
+    "$BEAD_ID"
   )
 
   log "target=$target"
@@ -143,7 +289,10 @@ test_result_for() {
   local skip_reason
 
   skip_reason="$(jq -Rr --arg test "$test_name" '
-    fromjson? | objects
+    def event_object:
+      (fromjson? // empty),
+      (capture("(?<json>\\{.*\\})")? | .json | fromjson? // empty);
+    event_object | objects
     | select(.event == "test_skipped" and .test == $test)
     | .reason
   ' "$LOG_FILE" | tail -n 1)"
@@ -154,7 +303,10 @@ test_result_for() {
   fi
 
   if jq -Rr --arg suite "$suite" --arg test "$test_name" '
-    fromjson? | objects
+    def event_object:
+      (fromjson? // empty),
+      (capture("(?<json>\\{.*\\})")? | .json | fromjson? // empty);
+    event_object | objects
     | select(.suite == $suite and .test == $test and .event == "test_end" and .result == "pass")
     | .result
   ' "$LOG_FILE" | grep -qx 'pass'; then
@@ -250,14 +402,19 @@ emit_row() {
 
 RUN_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || printf 'unknown')"
-CONNECTION_URI_REDACTED="$(redact_uri "${NATS_URL:-nats://127.0.0.1:4222}")"
-AUTH_MODE="$(auth_mode "${NATS_URL:-}")"
+CONNECTION_URI_REDACTED="$(redact_uri "${NATS_TEST_URL:-${NATS_URL:-nats://127.0.0.1:4222}}")"
+AUTH_MODE="$(auth_mode "${NATS_TEST_URL:-${NATS_URL:-}}")"
 BROKER_VERSION="$(broker_version)"
+REAL_NATS_TESTS_MODE="${REAL_NATS_TESTS:-auto}"
+NATS_PROOF_AUTO_BROKER_MODE="${NATS_PROOF_AUTO_BROKER:-true}"
+JETSTREAM_PROOF_AUTO_BROKER_MODE="${JETSTREAM_PROOF_AUTO_BROKER:-false}"
 
 log "bead_id=$BEAD_ID"
 log "output_dir=$OUT_DIR"
 log "git_sha=$GIT_SHA"
-log "real_nats_tests=${REAL_NATS_TESTS:-false}"
+log "real_nats_tests=$REAL_NATS_TESTS_MODE"
+log "nats_proof_auto_broker=$NATS_PROOF_AUTO_BROKER_MODE"
+log "jetstream_proof_auto_broker=$JETSTREAM_PROOF_AUTO_BROKER_MODE"
 log "connection_uri_redacted=$CONNECTION_URI_REDACTED"
 log "broker_version=$BROKER_VERSION"
 
@@ -265,6 +422,7 @@ NATS_STATUS=0
 JETSTREAM_STATUS=0
 run_cargo_test "nats" "nats_real_server" || NATS_STATUS="$?"
 run_cargo_test "jetstream" "jetstream_real_server" || JETSTREAM_STATUS="$?"
+BROKER_VERSION="$(observed_broker_version || broker_version)"
 
 emit_row "nats-pub-sub-roundtrip" "nats_real_pub_sub_roundtrip" "nats_real" "nats" "asupersync.pubsub.<unique>" 1 0 0 0 "none"
 emit_row "nats-request-reply-roundtrip" "nats_real_request_reply_roundtrip" "nats_real" "nats" "asupersync.request.<unique>" 1 1 0 0 "none"
@@ -320,7 +478,9 @@ jq -n \
   --arg report_path "$REPORT_FILE" \
   --arg connection_uri_redacted "$CONNECTION_URI_REDACTED" \
   --arg broker_version "$BROKER_VERSION" \
-  --arg real_nats_tests "${REAL_NATS_TESTS:-false}" \
+  --arg real_nats_tests "$REAL_NATS_TESTS_MODE" \
+  --arg nats_proof_auto_broker "$NATS_PROOF_AUTO_BROKER_MODE" \
+  --arg jetstream_proof_auto_broker "$JETSTREAM_PROOF_AUTO_BROKER_MODE" \
   --argjson nats_status "$NATS_STATUS" \
   --argjson jetstream_status "$JETSTREAM_STATUS" \
   --argjson row_count "$ROW_COUNT" \
@@ -345,6 +505,8 @@ jq -n \
     connection_uri_redacted: $connection_uri_redacted,
     broker_version: $broker_version,
     real_nats_tests: $real_nats_tests,
+    nats_proof_auto_broker: $nats_proof_auto_broker,
+    jetstream_proof_auto_broker: $jetstream_proof_auto_broker,
     nats_status: $nats_status,
     jetstream_status: $jetstream_status,
     row_count: $row_count,
