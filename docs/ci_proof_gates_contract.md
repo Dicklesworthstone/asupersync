@@ -12,6 +12,44 @@ This contract defines the hard CI gates that make the ascension program operatio
 2. Smoke runner: `scripts/run_ci_proof_gates_smoke.sh`
 3. Invariant suite: `tests/ci_proof_gates_contract.rs`
 
+## SLO Policy Proof Loop
+
+The SLO policy lane is a direct-main operator gate for service-objective policy changes. It does not replace the broad Phase 6 gates; it gives SLO bundle edits their own deterministic contract:
+
+1. Canonical artifact: `artifacts/slo_policy_bundle_contract_v1.json`
+2. Runtime API and exported constants: `src/types/slo_policy.rs`, `SLO_POLICY_BUNDLE_SCHEMA_VERSION`, `SLO_POLICY_COMPILER_SCHEMA_VERSION`, `SLO_POLICY_PROOF_REPORT_SCHEMA_VERSION`
+3. JSON validators: `validate_slo_policy_bundle_json` and `validate_slo_proof_report_json`
+4. Invariant suite: `tests/slo_policy_bundle_contract.rs`
+5. Operator script: `scripts/validate_slo_policy_bundle.sh`
+
+The artifact records the bundle schema, compiler schema `slo-budget-admission-compiler-v1`, LabRuntime replay contract `slo-lab-replay-contract-v1`, and proof-report schema `slo-proof-report-v1`. Operators should read those as one chain: bundle input, compiled Budget/admission decision, replay evidence, and final proof-report gate.
+
+Proof reports intentionally preserve separate outcomes instead of collapsing them into success:
+
+| Status | Gate meaning |
+|--------|--------------|
+| `pass` | Accepted and counted as full success |
+| `degraded` | Accepted only when issue-free; records brownout/degradation evidence |
+| `no_win` | Accepted only when issue-free and accompanied by a no-win receipt |
+| `fail` | Rejected |
+| `blocked` | Rejected |
+| `unsupported` | Rejected |
+| `stale_evidence` | Rejected and treated as stale profile evidence |
+
+Malformed reports, missing `rch exec` commands, stale profile hashes, missing no-win receipts, redaction failures, secret-like material, unsupported schema versions, and missing required fields fail closed. The proof-report JSONL rows emitted by `scripts/validate_slo_policy_bundle.sh` include `proof_report_status`, `proof_report_success`, `gate_accepted`, `proof_report_issue_kinds`, `proof_commands_count`, and `no_win_receipt`.
+
+Direct-main SLO doc or policy changes should run the gate through `rch exec --`:
+
+```bash
+rch exec -- bash scripts/validate_slo_policy_bundle.sh --output-root target/slo-policy-bundle --run-id asupersync-bgtplc.5
+```
+
+The Rust contract for the artifact, exported APIs, README section, and this operator doc is:
+
+```bash
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_docs CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture
+```
+
 ## Gate Definitions
 
 | Gate | Severity | Purpose |

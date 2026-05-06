@@ -21,14 +21,31 @@ use std::time::Duration;
 
 const CONTRACT_PATH: &str = "artifacts/slo_policy_bundle_contract_v1.json";
 const SCRIPT_PATH: &str = "scripts/validate_slo_policy_bundle.sh";
+const README_PATH: &str = "README.md";
+const OPERATOR_DOC_PATH: &str = "docs/ci_proof_gates_contract.md";
+
+fn text_file(path: &str) -> String {
+    std::fs::read_to_string(path).unwrap_or_else(|error| panic!("read {path}: {error}"))
+}
 
 fn json_file(path: &str) -> Value {
-    let raw = std::fs::read_to_string(path).unwrap_or_else(|error| panic!("read {path}: {error}"));
+    let raw = text_file(path);
     serde_json::from_str(&raw).unwrap_or_else(|error| panic!("parse {path}: {error}"))
 }
 
 fn contract() -> Value {
     json_file(CONTRACT_PATH)
+}
+
+fn section_between<'a>(document: &'a str, heading: &str, next_heading: &str) -> &'a str {
+    let start = document
+        .find(heading)
+        .unwrap_or_else(|| panic!("missing heading {heading}"));
+    let after_start = start + heading.len();
+    let end = document[after_start..]
+        .find(next_heading)
+        .map_or(document.len(), |offset| after_start + offset);
+    &document[start..end]
 }
 
 fn scenario<'a>(artifact: &'a Value, id: &str) -> &'a Value {
@@ -766,6 +783,76 @@ fn artifact_catalog_matches_rust_tags_and_required_fields() {
         "redaction",
     ] {
         assert!(required_fields.contains(field), "required field {field}");
+    }
+}
+
+#[test]
+fn readme_and_operator_docs_track_slo_artifact_and_exports() {
+    let artifact = contract();
+    let readme = text_file(README_PATH);
+    let operator_doc = text_file(OPERATOR_DOC_PATH);
+    let readme_section = section_between(&readme, "### SLO Policy Proof Loop", "### Gate matrix");
+    let operator_section = section_between(
+        &operator_doc,
+        "## SLO Policy Proof Loop",
+        "## Gate Definitions",
+    );
+    let gate_command =
+        SloProofReport::render_ci_gate_command("target/slo-policy-bundle", "asupersync-bgtplc.5");
+
+    for (label, section) in [
+        ("README", readme_section),
+        ("operator doc", operator_section),
+    ] {
+        for token in [
+            CONTRACT_PATH,
+            SCRIPT_PATH,
+            "src/types/slo_policy.rs",
+            "tests/slo_policy_bundle_contract.rs",
+            "SLO_POLICY_BUNDLE_SCHEMA_VERSION",
+            "SLO_POLICY_COMPILER_SCHEMA_VERSION",
+            "SLO_POLICY_PROOF_REPORT_SCHEMA_VERSION",
+            "validate_slo_policy_bundle_json",
+            "validate_slo_proof_report_json",
+            artifact["compiler_schema_version"]
+                .as_str()
+                .expect("compiler schema"),
+            artifact["lab_replay_contract_version"]
+                .as_str()
+                .expect("lab replay contract"),
+            artifact["proof_report_schema_version"]
+                .as_str()
+                .expect("proof report schema"),
+            "direct-main",
+            "rch exec --",
+            &gate_command,
+        ] {
+            assert!(section.contains(token), "{label} missing {token}");
+        }
+
+        for status in artifact["proof_report_statuses"]
+            .as_array()
+            .expect("proof report statuses")
+            .iter()
+            .map(|value| value.as_str().expect("proof status"))
+        {
+            assert!(section.contains(status), "{label} missing status {status}");
+        }
+
+        for rejected in [
+            "Malformed reports",
+            "stale profile hashes",
+            "missing no-win receipts",
+            "redaction failures",
+            "secret-like material",
+        ] {
+            assert!(section.contains(rejected), "{label} missing {rejected}");
+        }
+
+        assert!(
+            !section.contains("master"),
+            "{label} SLO section must describe direct-main workflow without branch drift"
+        );
     }
 }
 

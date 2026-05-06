@@ -1579,6 +1579,29 @@ Phase 6 ships as a continuous hardening track rather than a one-shot release. Th
 
 The checked signoff for this split is [`artifacts/phase6_methodology_gate_enforcement_contract_v1.json`](./artifacts/phase6_methodology_gate_enforcement_contract_v1.json), and [`tests/phase6_methodology_gate_contract.rs`](./tests/phase6_methodology_gate_contract.rs) verifies that this README, the signoff artifact, and the PR workflow agree about the enforcement mode.
 
+### SLO Policy Proof Loop
+
+The SLO-to-budget lane is an opt-in direct-main proof loop for operator policy changes. It is grounded in the live schema and verifier, not a separate docs-only process:
+
+- Canonical artifact: [`artifacts/slo_policy_bundle_contract_v1.json`](./artifacts/slo_policy_bundle_contract_v1.json)
+- Runtime API surface: [`src/types/slo_policy.rs`](./src/types/slo_policy.rs), exported through `SLO_POLICY_BUNDLE_SCHEMA_VERSION`, `SLO_POLICY_COMPILER_SCHEMA_VERSION`, `SLO_POLICY_PROOF_REPORT_SCHEMA_VERSION`, `validate_slo_policy_bundle_json`, and `validate_slo_proof_report_json`
+- Contract test: [`tests/slo_policy_bundle_contract.rs`](./tests/slo_policy_bundle_contract.rs)
+- Operator script: [`scripts/validate_slo_policy_bundle.sh`](./scripts/validate_slo_policy_bundle.sh)
+
+The artifact covers the policy bundle schema, compiler output, LabRuntime replay evidence, and proof-report gate in one JSON contract. The compiler schema is `slo-budget-admission-compiler-v1`, the replay contract is `slo-lab-replay-contract-v1`, and the proof-report schema is `slo-proof-report-v1`. The proof report preserves `pass`, `fail`, `blocked`, `degraded`, `no_win`, `unsupported`, and `stale_evidence` as separate outcomes. The opt-in gate accepts only issue-free `pass`, `degraded`, and `no_win` reports. Only `pass` is counted as full success. Malformed reports, missing `rch exec` commands, stale profile hashes, missing no-win receipts, redaction failures, secret-like material, unsupported schema versions, and missing required fields fail closed.
+
+The direct-main proof command for this lane is:
+
+```bash
+rch exec -- bash scripts/validate_slo_policy_bundle.sh --output-root target/slo-policy-bundle --run-id asupersync-bgtplc.5
+```
+
+Rust proof for artifact/API/doc consistency stays scoped to the touched crate:
+
+```bash
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_docs CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture
+```
+
 ### Gate matrix
 
 | Gate | Direct-main trigger | Direct-main enforcement | PR workflow enforcement | Required artifact |
