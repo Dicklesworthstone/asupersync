@@ -20,7 +20,8 @@
 //!
 //! ```
 //! use franken_decision::{
-//!     DecisionContract, EvalContext, FallbackPolicy, LossMatrix, Posterior, evaluate,
+//!     DecisionContract, EvalContext, FallbackPolicy, LossMatrix, Posterior,
+//!     UpdatePosteriorError, evaluate,
 //! };
 //! use franken_kernel::DecisionId;
 //!
@@ -33,13 +34,18 @@
 //! }
 //!
 //! impl DecisionContract for MyContract {
-//!     fn name(&self) -> &str { "example" }
+//!     fn name(&self) -> &'static str { "example" }
 //!     fn state_space(&self) -> &[String] { &self.states }
 //!     fn action_set(&self) -> &[String] { &self.actions }
 //!     fn loss_matrix(&self) -> &LossMatrix { &self.losses }
-//!     fn update_posterior(&self, posterior: &mut Posterior, observation: usize) {
+//!     fn update_posterior(
+//!         &self,
+//!         posterior: &mut Posterior,
+//!         observation: usize,
+//!     ) -> Result<(), UpdatePosteriorError> {
 //!         let likelihoods = [0.9, 0.1];
 //!         posterior.bayesian_update(&likelihoods);
+//!         Ok(())
 //!     }
 //!     fn choose_action(&self, posterior: &Posterior) -> usize {
 //!         self.losses.bayes_action(posterior)
@@ -1781,7 +1787,7 @@ mod tests {
     }
 
     impl DecisionContract for OutOfRangeContract {
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "OutOfRange"
         }
         fn state_space(&self) -> &[String] {
@@ -1863,7 +1869,7 @@ mod tests {
             policy: FallbackPolicy,
         }
         impl DecisionContract for AlwaysFallback {
-            fn name(&self) -> &str {
+            fn name(&self) -> &'static str {
                 "AlwaysFallback"
             }
             fn state_space(&self) -> &[String] {
@@ -1934,7 +1940,7 @@ mod tests {
             actions: vec!["alpha".to_string(), "beta".to_string()],
             loss: LossMatrix::new(
                 vec!["s0".to_string(), "s1".to_string()],
-                vec!["a0".to_string(), "a1".to_string()],
+                vec!["alpha".to_string(), "beta".to_string()],
                 vec![0.0, 1.0, 1.0, 0.0],
             )
             .expect("loss"),
