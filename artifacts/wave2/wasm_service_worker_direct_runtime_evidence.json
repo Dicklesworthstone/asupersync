@@ -6,8 +6,11 @@
   "decision": {
     "direct_runtime_supported": false,
     "support_class_after": "broker/coordinator-only",
+    "decision_bead_id": "asupersync-9r5lmo",
+    "decision_status": "resolved_broker_coordinator_only",
     "blocker_bead_id": "asupersync-9r5lmo",
-    "blocked_reason": "ServiceWorkerGlobalScope can be terminated between lifecycle events, so a direct BrowserRuntime lane needs a dedicated lifetime and region-ownership contract before it can preserve asupersync cancellation, drain/finalize, and replay invariants. The shipped user path remains bounded broker registration plus durable handoff to dedicated-worker or browser-main direct-runtime lanes."
+    "blocked_reason": "ServiceWorkerGlobalScope can be terminated between lifecycle events, so direct BrowserRuntime ownership of regions, obligations, scheduler state, cancellation, drain/finalize, and replay evidence is not a shipped product surface. The shipped service-worker path is bounded broker registration plus durable handoff to dedicated-worker or browser-main direct-runtime lanes.",
+    "future_direct_runtime_promotion_rule": "Open a new owner bead and prove browser-lifetime region ownership, cancellation, drain/finalize, durable replay, and no silent remapping before changing this support class."
   },
   "scope": {
     "runtime_builder": "src/runtime/builder.rs",

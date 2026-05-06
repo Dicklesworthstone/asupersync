@@ -1440,9 +1440,12 @@ applications via `wasm-bindgen`.
   a preview browser runtime, while unsupported hosts fail closed to structured
   execution-ladder diagnostics rather than pretending full native-thread
   parity already exists.
-- **Service worker / shared worker direct runtime**: the shipped browser
-  package does not expose these as direct-runtime lanes yet. Keep them on
-  explicit message/data boundaries until a worker-specific host contract is
+- **Service worker direct runtime**: intentionally broker/coordinator-only.
+  The browser package keeps direct `BrowserRuntime` creation fail-closed inside
+  `ServiceWorkerGlobalScope`; use the bounded broker registration and durable
+  handoff APIs instead.
+- **Shared worker direct runtime**: still deferred. Keep shared-worker hosts on
+  explicit message/data boundaries until a worker-specific tenancy contract is
   promoted deliberately.
 - **Multi-threaded WASM**: the browser runtime is single-threaded.
   A future phase may add `SharedArrayBuffer` + Web Worker parallelism,
@@ -1512,7 +1515,8 @@ and known limitations.
 | RaptorQ fountain coding for snapshot distribution | ✅ Implemented |
 | Formal methods (TLA+ export + Lean checked core-invariant coverage) | ⚠️ Partial implementation (Lean-checked core invariants cover the six non-negotiable runtime invariants; broader adapter/protocol/runtime refinement proof remains tiered and lane-specific) |
 | Browser Edition (WASM, JS/TS consumers) | ✅ Implemented for browser main-thread and dedicated-worker consumers (single-threaded, event-loop-driven) |
-| Service worker / shared worker direct runtime | Deferred; not yet shipped |
+| Service worker direct runtime | Broker/coordinator-only; direct runtime unsupported, bounded broker/handoff supported |
+| Shared worker direct runtime | Deferred; not yet shipped |
 | Rust-to-WASM compilation path | Preview public lane exists via `RuntimeBuilder::browser()`, but current Rust support is still narrower than the shipped JS/TS packages and remains anchored by fixture/evidence validation |
 
 ### What Asupersync Doesn't Do

@@ -155,9 +155,9 @@
       "e2e_proof_commands": ["bash scripts/run_wasm_service_worker_direct_runtime_evidence.sh --run-id wave2-wasm-service-worker --timeout-sec 180"],
       "artifact_paths": ["artifacts/wasm_browser_support_boundary_contract_v1.json", "artifacts/wave2/wasm_service_worker_direct_runtime_evidence.json"],
       "planned_artifact_paths": [],
-      "unsupported_reason": "Direct BrowserRuntime creation inside ServiceWorkerGlobalScope remains fail-closed until blocker asupersync-9r5lmo specifies a browser-lifecycle contract for region ownership, cancellation, drain/finalize, durable state, and replay across install/activate/fetch/message event boundaries.",
+      "unsupported_reason": "Direct BrowserRuntime creation inside ServiceWorkerGlobalScope is classified by asupersync-9r5lmo as broker/coordinator-only: browser termination between lifecycle events prevents volatile service-worker memory from owning regions, obligations, scheduler state, cancellation, drain/finalize, and replay evidence as a shipped product surface.",
       "fallback_target": "bounded service-worker broker/handoff path with dedicated-worker and browser-main direct-runtime fallbacks",
-      "residual_risks": ["direct service-worker runtime may remain permanently broker/coordinator-only if browser lifecycle termination cannot preserve asupersync invariants"],
+      "residual_risks": ["future direct service-worker runtime promotion would require a new owner bead with browser-lifetime region ownership proof and no silent remapping to browser main-thread or dedicated-worker lanes"],
       "redaction_verdict": "required_for_origin_scope"
     },
     {

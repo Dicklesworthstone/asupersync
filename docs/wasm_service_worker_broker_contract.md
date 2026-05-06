@@ -2,12 +2,15 @@
 
 Contract ID: `wasm-service-worker-broker-contract-v1`  
 Bead: `asupersync-n6kwt.7.1`  
+Resolution bead: `asupersync-9r5lmo`
+Support class: `broker/coordinator-only`
 Depends on: `asupersync-2jhnk.6.1`, `asupersync-3ak5y`
 
 ## Purpose
 
-Define the authoritative contract for a future Browser Edition service-worker
-lane without pretending that lane has already shipped as a direct runtime.
+Define the authoritative contract for the Browser Edition service-worker
+bounded broker lane without pretending that lane has shipped as a direct
+runtime.
 
 The service worker is only admissible as a bounded broker/orchestration surface.
 It is not a general-purpose always-alive runtime, and it must never silently
@@ -19,7 +22,24 @@ This contract answers:
 2. which durable state must survive worker termination,
 3. how restart reconciliation and capability re-establishment work,
 4. which downgrade reasons are mandatory,
-5. which non-goals stay explicit even after promotion work begins.
+5. why the current support class is broker/coordinator-only,
+6. which non-goals stay explicit even after promotion work begins.
+
+## Product Support Decision
+
+As of `asupersync-9r5lmo`, service-worker direct runtime is classified as
+`broker/coordinator-only`. The supported service-worker surface is bounded
+broker registration, restartable work descriptors, durable handoff, and
+downgrade evidence. Direct `BrowserRuntime` creation inside
+`ServiceWorkerGlobalScope` remains fail-closed.
+
+The reason is structural, not just missing glue code: browsers may terminate a
+service worker between lifecycle events, so volatile service-worker memory
+cannot own asupersync regions, obligations, scheduler state, or authoritative
+runtime leases. A future direct-runtime attempt must be a new owner bead with
+proof for browser-lifetime region ownership, cancellation, drain/finalize,
+durable replay, and no silent remapping to browser main-thread or
+dedicated-worker lanes.
 
 ## Current Truthful Runtime Status
 
@@ -33,8 +53,8 @@ The live tree still fail-closes service-worker direct runtime today:
   `BrowserRuntimeSupportReason::ServiceWorkerNotYetShipped` and
   `BrowserExecutionReasonCode::ServiceWorkerDirectRuntimeNotShipped`.
 - The execution ladder therefore remains fail-closed for service-worker direct
-  runtime. This document is a future implementation contract for bounded
-  brokering, not a present support claim.
+  runtime. This document is the current support contract for bounded
+  brokering, not a direct-runtime support claim.
 
 At the same time, the Browser Edition package now exposes a bounded broker API
 that keeps this direct-runtime denial intact:
@@ -67,7 +87,7 @@ quietly widen the support claim.
 
 ### Allowed broker responsibilities
 
-The future service-worker lane may:
+The bounded service-worker broker lane may:
 
 - serialize fetch/push/sync/notification ingress into explicit broker work
   descriptors before any restartable progress is claimed,
@@ -81,7 +101,7 @@ The future service-worker lane may:
 
 ### Forbidden expansions
 
-The future service-worker lane may not:
+The bounded service-worker broker lane may not:
 
 - behave like a general-purpose always-alive runtime,
 - run arbitrary application tasks as if `ServiceWorkerGlobalScope` had

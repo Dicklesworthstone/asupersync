@@ -590,6 +590,84 @@ fn doc_scopes_bounded_broker_responsibilities() {
 }
 
 #[test]
+fn docs_and_artifact_pin_broker_coordinator_only_decision() {
+    let doc = read_file(DOC_PATH);
+    for marker in [
+        "Resolution bead: `asupersync-9r5lmo`",
+        "Support class: `broker/coordinator-only`",
+        "Product Support Decision",
+        "service-worker direct runtime is classified as",
+        "A future direct-runtime attempt must be a new owner bead",
+        "browser-lifetime region ownership",
+    ] {
+        assert!(
+            doc.contains(marker),
+            "contract doc missing support-decision marker: {marker}"
+        );
+    }
+
+    let wasm = read_file("docs/WASM.md");
+    for marker in [
+        "Service-worker direct runtime | `broker/coordinator-only`",
+        "Service worker direct runtime | Broker/coordinator-only; direct runtime unsupported",
+        "broker registration / durable handoff contract",
+    ] {
+        assert!(
+            wasm.contains(marker),
+            "WASM guide missing support-decision marker: {marker}"
+        );
+    }
+
+    let integration = read_file("docs/integration.md");
+    for marker in [
+        "| Broker/coordinator-only |",
+        "service-worker bounded broker registration and durable handoff",
+        "Browser service worker | broker/coordinator-only; direct runtime unsupported",
+    ] {
+        assert!(
+            integration.contains(marker),
+            "integration guide missing support-decision marker: {marker}"
+        );
+    }
+
+    let readme = read_file("README.md");
+    for marker in [
+        "Service worker direct runtime",
+        "intentionally broker/coordinator-only",
+        "Broker/coordinator-only; direct runtime unsupported, bounded broker/handoff supported",
+    ] {
+        assert!(
+            readme.contains(marker),
+            "README missing support-decision marker: {marker}"
+        );
+    }
+
+    let artifact: Value = serde_json::from_str(&read_file(
+        "artifacts/wave2/wasm_service_worker_direct_runtime_evidence.json",
+    ))
+    .expect("service-worker direct-runtime evidence artifact must be valid JSON");
+    assert_eq!(
+        artifact["decision"]["decision_bead_id"],
+        Value::String("asupersync-9r5lmo".into())
+    );
+    assert_eq!(
+        artifact["decision"]["decision_status"],
+        Value::String("resolved_broker_coordinator_only".into())
+    );
+    assert_eq!(
+        artifact["decision"]["support_class_after"],
+        Value::String("broker/coordinator-only".into())
+    );
+    assert!(
+        artifact["decision"]["future_direct_runtime_promotion_rule"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Open a new owner bead"),
+        "artifact must pin future promotion rule"
+    );
+}
+
+#[test]
 fn doc_distinguishes_ephemeral_and_durable_state() {
     let doc = read_file(DOC_PATH);
     for marker in [
