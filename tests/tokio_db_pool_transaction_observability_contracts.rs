@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Contract enforcement tests for T6.5: Pool, Transaction, and Observability
 //! Contracts Across Databases.
 //!
