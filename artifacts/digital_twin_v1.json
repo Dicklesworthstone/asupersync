@@ -155,17 +155,20 @@
     {
       "scenario_id": "DT-SMOKE-STAGES",
       "description": "Validate queue stage catalog and service curve types",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa031 cargo test --test digital_twin_contract stage -- --nocapture"
+      "test_filter": "stage",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_digital_twin cargo test -p asupersync --test digital_twin_contract --features test-internals stage -- --nocapture"
     },
     {
       "scenario_id": "DT-SMOKE-MAPPING",
       "description": "Validate snapshot field mapping completeness",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa031 cargo test --test digital_twin_contract mapping -- --nocapture"
+      "test_filter": "mapping",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_digital_twin cargo test -p asupersync --test digital_twin_contract --features test-internals mapping -- --nocapture"
     },
     {
       "scenario_id": "DT-SMOKE-ERROR",
       "description": "Validate error budget and prediction comparator",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa031 cargo test --test digital_twin_contract error -- --nocapture"
+      "test_filter": "error",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_digital_twin cargo test -p asupersync --test digital_twin_contract --features test-internals error -- --nocapture"
     }
   ],
   "downstream_beads": [

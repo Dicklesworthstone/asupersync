@@ -13,6 +13,8 @@ TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 RUN_DIR="${OUTPUT_ROOT}/run_${TIMESTAMP}"
 LIST_ONLY=0
 DRY_RUN=1
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_WRAPPER_TIMEOUT="${RCH_WRAPPER_TIMEOUT:-600}"
 
 declare -a SELECTED_SCENARIOS=()
 
@@ -35,6 +37,10 @@ require_tools() {
         echo "FATAL: jq is required" >&2
         exit 1
     fi
+    if [[ "$DRY_RUN" -eq 0 ]] && ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+        echo "FATAL: rch binary not found: ${RCH_BIN}" >&2
+        exit 127
+    fi
     if [ ! -f "$CONTRACT_ARTIFACT" ]; then
         echo "FATAL: contract artifact missing at ${CONTRACT_ARTIFACT}" >&2
         exit 1
@@ -43,6 +49,10 @@ require_tools() {
 
 json_escape() {
     printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+shell_join() {
+    printf '%q ' "$@"
 }
 
 contract_version() { jq -r '.contract_version' "$CONTRACT_ARTIFACT"; }
@@ -79,14 +89,15 @@ run_scenario() {
         return 1
     fi
 
-    local description command
+    local description contract_command test_filter
     description="$(jq -r '.description' <<<"$scenario_json")"
-    command="$(jq -r '.command' <<<"$scenario_json")"
+    contract_command="$(jq -r '.command' <<<"$scenario_json")"
+    test_filter="$(jq -r '.test_filter // empty' <<<"$scenario_json")"
 
     local scenario_dir="${RUN_DIR}/${sid}"
     local log_file="${scenario_dir}/run.log"
     local summary_file="${scenario_dir}/bundle_manifest.json"
-    local started_ts ended_ts status rc
+    local started_ts ended_ts status rc actual_command
 
     mkdir -p "$scenario_dir"
     started_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -94,13 +105,33 @@ run_scenario() {
     echo ">>> Running scenario ${sid}"
     echo "    description: ${description}"
 
+    local safe_sid="${sid//[^A-Za-z0-9_]/_}"
+    local -a command=(
+        "$RCH_BIN" exec --
+        env
+        CARGO_INCREMENTAL=0
+        CARGO_PROFILE_TEST_DEBUG=0
+        "RUSTFLAGS=-C debuginfo=0"
+        "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_digital_twin_${safe_sid}"
+        cargo test -p asupersync --test digital_twin_contract --features test-internals
+    )
+    if [[ -n "$test_filter" ]]; then
+        command+=("$test_filter")
+    fi
+    command+=(-- --nocapture)
+    actual_command="$(shell_join "${command[@]}")"
+
     if [[ "$DRY_RUN" -eq 1 ]]; then
-        printf 'DRY_RUN scenario=%s\n' "$sid" | tee "$log_file" >/dev/null
+        printf 'DRY_RUN scenario=%s\ncommand=%s\n' "$sid" "$actual_command" | tee "$log_file" >/dev/null
         rc=0
         status="dry_run"
     else
         rc=0
-        eval "$command" > "$log_file" 2>&1 || rc=$?
+        timeout "$RCH_WRAPPER_TIMEOUT" "${command[@]}" >"$log_file" 2>&1 || rc=$?
+        if grep -Eiq 'local fallback|fallback to local|executing locally' "$log_file"; then
+            printf '\nFATAL: rch local fallback detected; refusing local cargo execution\n' >>"$log_file"
+            rc=86
+        fi
         status="$( [[ "$rc" -eq 0 ]] && printf "passed" || printf "failed" )"
     fi
 
@@ -112,7 +143,10 @@ run_scenario() {
   "contract_version": "$(json_escape "$(contract_version)")",
   "scenario_id": "$(json_escape "$sid")",
   "description": "$(json_escape "$description")",
-  "command": "$(json_escape "$command")",
+  "contract_command": "$(json_escape "$contract_command")",
+  "executed_command": "$(json_escape "$actual_command")",
+  "rch_binary": "$(json_escape "$RCH_BIN")",
+  "validation_passed": $( [[ "$rc" -eq 0 ]] && printf 'true' || printf 'false' ),
   "status": "$(json_escape "$status")",
   "exit_code": ${rc},
   "started_ts": "$(json_escape "$started_ts")",
@@ -164,6 +198,9 @@ cat >"$RUN_REPORT" <<JSON
   "contract_version": "$(json_escape "$(contract_version)")",
   "run_dir": "$(json_escape "$RUN_DIR")",
   "dry_run": $( [[ "$DRY_RUN" -eq 1 ]] && printf 'true' || printf 'false' ),
+  "rch_required": true,
+  "rch_binary": "$(json_escape "$RCH_BIN")",
+  "validation_passed": $( [[ "$OVERALL_RC" -eq 0 ]] && printf 'true' || printf 'false' ),
   "results": [${RESULTS_JSON}],
   "status": "$([ "$OVERALL_RC" -eq 0 ] && printf "passed" || printf "failed")"
 }

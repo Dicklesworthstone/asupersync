@@ -95,7 +95,7 @@ bash ./scripts/run_digital_twin_smoke.sh --scenario DT-SMOKE-STAGES --execute
 Focused invariant test command (routed through `rch`):
 
 ```bash
-rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa031 cargo test --test digital_twin_contract -- --nocapture
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_digital_twin cargo test -p asupersync --test digital_twin_contract --features test-internals -- --nocapture
 ```
 
 ## Cross-References
