@@ -9,6 +9,7 @@ MODE="execute"
 LIST_ONLY=0
 OUTPUT_ROOT_OVERRIDE="${RESOURCE_MONITOR_PLATFORM_GAP_SMOKE_OUTPUT_DIR:-}"
 RUN_ID_OVERRIDE="${RESOURCE_MONITOR_PLATFORM_GAP_SMOKE_RUN_ID:-}"
+RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
 
 usage() {
     cat <<'USAGE'
@@ -32,6 +33,10 @@ require_tools() {
             missing=1
         fi
     done
+    if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+        echo "FATAL: rch is required and was not found/executable at: ${RCH_BIN}" >&2
+        missing=1
+    fi
     if [ "$missing" -ne 0 ]; then
         exit 1
     fi
@@ -200,7 +205,8 @@ RUN_LOG_PATH="${RUN_DIR}/run.log"
 REPORT_PATH="${ARTIFACT_ROOT}/resource_monitor_platform_gap_report.json"
 MANIFEST_PATH="${RUN_DIR}/bundle_manifest.json"
 RUN_REPORT_PATH="${RUN_DIR}/run_report.json"
-COMMAND="rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_resource_monitor_platform_gap ASUPERSYNC_RESOURCE_MONITOR_PLATFORM_GAP_REPORT=1 cargo test -p asupersync --lib m4oxsk_resource_monitor_platform_gap_smoke_emits_operator_report --features test-internals -- --nocapture"
+printf -v RCH_INVOCATION '%q' "$RCH_BIN"
+COMMAND="${RCH_INVOCATION} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_resource_monitor_platform_gap ASUPERSYNC_RESOURCE_MONITOR_PLATFORM_GAP_REPORT=1 cargo test -p asupersync --lib m4oxsk_resource_monitor_platform_gap_smoke_emits_operator_report --features test-internals -- --nocapture"
 RCH_TIMEOUT_SECONDS="${RESOURCE_MONITOR_PLATFORM_GAP_RCH_TIMEOUT_SECONDS:-900}"
 
 mkdir -p "$RUN_DIR" "$ARTIFACT_ROOT"
@@ -234,7 +240,13 @@ else
     COMMAND_EXIT_CODE=$?
     set -e
 
-    if [ "$COMMAND_EXIT_CODE" -ne 0 ] \
+    if grep -Eq '^\[RCH\] local \(|falling back to local' "$RUN_LOG_PATH" 2>/dev/null; then
+        COMMAND_EXIT_CODE=86
+        SCRIPT_EXIT_CODE=86
+        STATUS="failed"
+        MESSAGE="rch local fallback detected; refusing local cargo execution"
+        printf 'FATAL: rch local fallback detected; refusing local cargo execution\n' >>"$RUN_LOG_PATH"
+    elif [ "$COMMAND_EXIT_CODE" -ne 0 ] \
         && ! grep -q 'Remote command finished: exit=0' "$RUN_LOG_PATH"; then
         SCRIPT_EXIT_CODE=$COMMAND_EXIT_CODE
         STATUS="failed"
