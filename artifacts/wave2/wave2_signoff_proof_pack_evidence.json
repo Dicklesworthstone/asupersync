@@ -1,0 +1,1382 @@
+{
+  "schema_version": "wave2-signoff-proof-pack-evidence-v1",
+  "bead_id": "asupersync-1e5xeh",
+  "wave_id": "reality-check-wave2",
+  "capability_id": "wave2_signoff_proof_pack",
+  "created_date": "2026-05-06",
+  "artifact_path": "artifacts/wave2/wave2_signoff_proof_pack_evidence.json",
+  "runner_script": "scripts/run_wave2_signoff_proof_pack.sh",
+  "contract_test": "tests/wave2_signoff_proof_pack_contract.rs",
+  "registry_path": "artifacts/wave2_capability_evidence_registry_v1.json",
+  "issues_path": ".beads/issues.jsonl",
+  "required_log_fields": [
+    "bead_id",
+    "wave_id",
+    "child_bead_count",
+    "closed_child_count",
+    "promoted_count",
+    "deferred_count",
+    "proof_command_count",
+    "e2e_artifact_count",
+    "docs_drift_count",
+    "bv_cycle_count",
+    "br_ready_count",
+    "residual_risk_count",
+    "artifact_path",
+    "verdict",
+    "first_failure"
+  ],
+  "finalization_model": {
+    "self_owner_bead_id": "asupersync-1e5xeh",
+    "allowed_preclose_self_statuses": [
+      "in_progress",
+      "closed"
+    ],
+    "closeout_rule": "Before br close, the signoff bead may be the only non-closed required child. After close, every required Wave2 child bead must be closed.",
+    "closed_tracker_status_is_not_proof": true,
+    "proof_source_order": [
+      "registry source_paths",
+      "registry artifact_paths",
+      "signoff row proof commands",
+      "runner source/path rechecks",
+      "current .beads/issues.jsonl status"
+    ]
+  },
+  "control_plane_checks": [
+    {
+      "command_id": "br_lint",
+      "command": "timeout 20s br lint --json",
+      "status": "passed",
+      "exit_code": 0,
+      "summary": {
+        "total": 0,
+        "issues": 0
+      }
+    },
+    {
+      "command_id": "br_ready_json",
+      "command": "timeout 20s br ready --json",
+      "status": "passed",
+      "exit_code": 0,
+      "ready_count": 1,
+      "summary": "asupersync-ukxhi9 became the sole ready item after asupersync-1e5xeh closed"
+    },
+    {
+      "command_id": "br_dep_cycles_json",
+      "command": "timeout 20s br dep cycles --json",
+      "status": "timed_out",
+      "exit_code": 124,
+      "cycle_count": 0,
+      "degraded_fallback": "Post-close br dep cycles timed out again; br lint passed, br ready exposed only asupersync-ukxhi9, bv --robot-plan reported a single actionable epic, and bv --robot-alerts reported zero alerts."
+    },
+    {
+      "command_id": "bv_robot_plan",
+      "command": "timeout 30s bv --robot-plan",
+      "status": "passed",
+      "exit_code": 0,
+      "generated_at": "2026-05-06T18:48:21Z",
+      "data_hash": "497639006d2a210f",
+      "total_actionable": 1,
+      "highest_impact": "asupersync-ukxhi9",
+      "unblocks_count": 0,
+      "cycles_status": "skipped:not computed for --robot-plan"
+    },
+    {
+      "command_id": "bv_robot_alerts",
+      "command": "timeout 30s bv --robot-alerts",
+      "status": "passed",
+      "exit_code": 0,
+      "generated_at": "2026-05-06T18:48:32Z",
+      "data_hash": "497639006d2a210f",
+      "alert_count": 0
+    },
+    {
+      "command_id": "bv_robot_suggest",
+      "command": "timeout 30s bv --robot-suggest",
+      "status": "passed",
+      "exit_code": 0,
+      "generated_at": "2026-05-06T18:48:55Z",
+      "data_hash": "497639006d2a210f",
+      "suggestion_count": 23,
+      "actionable_count": 3,
+      "notes": "No suggestions were applied during signoff; output was recorded as advisory hygiene only."
+    }
+  ],
+  "signoff_rows": [
+    {
+      "capability_id": "http3_qpack_instruction_streams",
+      "owner_bead_id": "asupersync-fjkixh",
+      "title": "Implement full QPACK instruction streams and blocked-stream scheduling",
+      "tracker_status_at_capture": "closed",
+      "disposition": "deferred_with_owner_risk",
+      "promotion_state": "pending",
+      "support_class_before": "feature-gated",
+      "support_class_after": "pending-proof",
+      "feature_flags": [
+        "http3",
+        "quic",
+        "test-internals"
+      ],
+      "source_files": [
+        "src/http/h3_native.rs",
+        "artifacts/http3_qpack_support_matrix_v1.json"
+      ],
+      "test_files": [
+        "tests/conformance/h3_rfc9114",
+        "tests/http3_qpack_support_matrix_contract.rs"
+      ],
+      "unit_proofs": [
+        {
+          "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_h3_qpack cargo test -p asupersync --test http3_qpack_support_matrix_contract --features test-internals,http3 -- --nocapture",
+          "status": "recorded_for_deferred_or_preview_row",
+          "observed_result": "Recorded but not accepted as broad promotion proof; row remains preview, pending, or signoff-self until owner criteria close."
+        }
+      ],
+      "e2e_proofs": [
+        {
+          "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_h3_qpack_e2e cargo test -p asupersync --test e2e_http3_qpack_instruction_streams --features test-internals,http3 -- --nocapture",
+          "status": "recorded_for_deferred_or_preview_row",
+          "observed_result": "Recorded as planned or bounded evidence; unresolved risks remain visible in this signoff row."
+        }
+      ],
+      "e2e_artifacts": [
+        {
+          "path": "artifacts/http3_qpack_support_matrix_v1.json",
+          "state": "shipped"
+        },
+        {
+          "path": "artifacts/wave2/http3_qpack_instruction_streams_evidence.json",
+          "state": "planned"
+        }
+      ],
+      "unsupported_reason": "Full QPACK instruction-stream parity is not advertised until this owner bead lands source and proof.",
+      "fallback_target": "StaticOnly QPACK policy and existing dynamic field-section context",
+      "residual_risks": [
+        "blocked-stream scheduler semantics remain unpromoted"
+      ],
+      "redaction_verdict": "not_applicable"
+    },
+    {
+      "capability_id": "remote_transport_lifecycle",
+      "owner_bead_id": "asupersync-5d9s85",
+      "title": "Add production transport-backed RemoteRuntime lifecycle proof",
+      "tracker_status_at_capture": "closed",
+      "disposition": "promoted_with_full_evidence",
+      "promotion_state": "promoted",
+      "support_class_before": "virtual-lab-proof",
+      "support_class_after": "production-backed",
+      "feature_flags": [
+        "test-internals"
+      ],
+      "source_files": [
+        "src/remote.rs",
+        "README.md",
+        "docs/integration.md",
+        "tests/remote_transport_lifecycle_contract.rs",
+        "scripts/run_remote_transport_lifecycle_evidence.sh",
+        "artifacts/wave2/remote_transport_lifecycle_evidence.json"
+      ],
+      "test_files": [
+        "tests/remote_transport_lifecycle_contract.rs"
+      ],
+      "unit_proofs": [
+        {
+          "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_remote_transport_unit cargo test -p asupersync --test remote_transport_lifecycle_contract --features test-internals remote_transport_wire_codec_preserves_protocol_fields -- --nocapture",
+          "status": "passed",
+          "observed_result": "Owner closeout reported pass; signoff rechecks command presence, rch usage for Rust proof, source paths, and artifact paths."
+        }
+      ],
+      "e2e_proofs": [
+        {
+          "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_remote_transport_lifecycle cargo test -p asupersync --test remote_transport_lifecycle_contract --features test-internals -- --nocapture",
+          "status": "passed",
+          "observed_result": "Owner closeout reported pass; signoff rechecks script/artifact linkage."
+        },
+        {
+          "command": "bash scripts/run_remote_transport_lifecycle_evidence.sh --run-id wave2-remote-transport --timeout-sec 180",
+          "status": "passed",
+          "observed_result": "Owner closeout reported pass; signoff rechecks script/artifact linkage."
+        }
+      ],
+      "e2e_artifacts": [
+        {
+          "path": "artifacts/wave2/remote_transport_lifecycle_evidence.json",
+          "state": "shipped"
+        }
+      ],
+      "unsupported_reason": "",
+      "fallback_target": "Injected virtual/lab RemoteRuntime lifecycle proof",
+      "residual_risks": [
+        "loopback transport proof does not claim arbitrary WAN deployment, TLS/authentication, or a frozen production wire format"
+      ],
+      "redaction_verdict": "not_applicable"
+    },
+    {
+      "capability_id": "wasm_service_worker_direct_runtime",
+      "owner_bead_id": "asupersync-szdl85",
+      "title": "Promote service-worker direct runtime lane",
+      "tracker_status_at_capture": "closed",
+      "disposition": "deferred_with_owner_risk",
+      "promotion_state": "pending",
+      "support_class_before": "fail-closed-boundary",
+      "support_class_after": "broker/coordinator-only",
+      "feature_flags": [
+        "wasm-browser-dev",
+        "wasm-runtime"
+      ],
+      "source_files": [
+        "src/runtime/builder.rs",
+        "packages/browser/src/index.ts",
+        "docs/WASM.md",
+        "docs/integration.md",
+        "docs/wasm_service_worker_broker_contract.md",
+        "tests/wasm_service_worker_broker_contract.rs",
+        "tests/fixtures/service-worker-broker-consumer/scripts/check-browser-run.mjs",
+        "scripts/validate_service_worker_broker_consumer.sh",
+        "scripts/run_wasm_service_worker_direct_runtime_evidence.sh",
+        "artifacts/wasm_browser_support_boundary_contract_v1.json",
+        "artifacts/wave2/wasm_service_worker_direct_runtime_evidence.json"
+      ],
+      "test_files": [
+        "tests/fixtures/service-worker-broker-consumer/scripts/check-browser-run.mjs",
+        "tests/wasm_service_worker_broker_contract.rs"
+      ],
+      "unit_proofs": [
+        {
+          "command": "bash -n scripts/run_wasm_service_worker_direct_runtime_evidence.sh",
+          "status": "recorded_for_deferred_or_preview_row",
+          "observed_result": "Recorded but not accepted as broad promotion proof; row remains preview, pending, or signoff-self until owner criteria close."
+        },
+        {
+          "command": "bash scripts/run_wasm_service_worker_direct_runtime_evidence.sh --contract-only --run-id contract-smoke",
+          "status": "recorded_for_deferred_or_preview_row",
+          "observed_result": "Recorded but not accepted as broad promotion proof; row remains preview, pending, or signoff-self until owner criteria close."
+        }
+      ],
+      "e2e_proofs": [
+        {
+          "command": "bash scripts/run_wasm_service_worker_direct_runtime_evidence.sh --run-id wave2-wasm-service-worker --timeout-sec 180",
+          "status": "recorded_for_deferred_or_preview_row",
+          "observed_result": "Recorded as planned or bounded evidence; unresolved risks remain visible in this signoff row."
+        }
+      ],
+      "e2e_artifacts": [
+        {
+          "path": "artifacts/wasm_browser_support_boundary_contract_v1.json",
+          "state": "shipped"
+        },
+        {
+          "path": "artifacts/wave2/wasm_service_worker_direct_runtime_evidence.json",
+          "state": "shipped"
+        }
+      ],
+      "unsupported_reason": "Direct BrowserRuntime creation inside ServiceWorkerGlobalScope is classified by asupersync-9r5lmo as broker/coordinator-only: browser termination between lifecycle events prevents volatile service-worker memory from owning regions, obligations, scheduler state, cancellation, drain/finalize, and replay evidence as a shipped product surface.",
+      "fallback_target": "bounded service-worker broker/handoff path with dedicated-worker and browser-main direct-runtime fallbacks",
+      "residual_risks": [
+        "future direct service-worker runtime promotion would require a new owner bead with browser-lifetime region ownership proof and no silent remapping to browser main-thread or dedicated-worker lanes"
+      ],
+      "redaction_verdict": "required_for_origin_scope"
+    },
+    {
+      "capability_id": "wasm_shared_worker_direct_runtime",
+      "owner_bead_id": "asupersync-422iga",
+      "title": "Promote shared-worker direct runtime lane",
+      "tracker_status_at_capture": "closed",
+      "disposition": "deferred_with_owner_risk",
+      "promotion_state": "pending",
+      "support_class_before": "fail-closed-boundary",
+      "support_class_after": "broker/coordinator-only",
+      "feature_flags": [
+        "wasm-browser-dev",
+        "wasm-runtime"
+      ],
+      "source_files": [
+        "src/runtime/builder.rs",
+        "packages/browser/src/index.ts",
+        "README.md",
+        "docs/WASM.md",
+        "docs/integration.md",
+        "docs/wasm_shared_worker_tenancy_lifecycle_contract.md",
+        "tests/wasm_shared_worker_tenancy_lifecycle_contract.rs",
+        "tests/fixtures/shared-worker-consumer/scripts/check-browser-run.mjs",
+        "tests/fixtures/shared-worker-consumer/src/main.ts",
+        "tests/fixtures/shared-worker-consumer/src/shared-worker.ts",
+        "scripts/validate_shared_worker_consumer.sh",
+        "scripts/run_wasm_shared_worker_direct_runtime_evidence.sh",
+        "artifacts/wave2/wasm_shared_worker_direct_runtime_evidence.json"
+      ],
+      "test_files": [
+        "tests/fixtures/shared-worker-consumer/scripts/check-browser-run.mjs",
+        "tests/fixtures/shared-worker-consumer/src/main.ts",
+        "tests/fixtures/shared-worker-consumer/src/shared-worker.ts",
+        "tests/wasm_shared_worker_tenancy_lifecycle_contract.rs"
+      ],
+      "unit_proofs": [
+        {
+          "command": "bash -n scripts/run_wasm_shared_worker_direct_runtime_evidence.sh",
+          "status": "recorded_for_deferred_or_preview_row",
+          "observed_result": "Recorded but not accepted as broad promotion proof; row remains preview, pending, or signoff-self until owner criteria close."
+        },
+        {
+          "command": "bash scripts/run_wasm_shared_worker_direct_runtime_evidence.sh --contract-only --run-id contract-smoke",
+          "status": "recorded_for_deferred_or_preview_row",
+          "observed_result": "Recorded but not accepted as broad promotion proof; row remains preview, pending, or signoff-self until owner criteria close."
+        }
+      ],
+      "e2e_proofs": [
+        {
+          "command": "bash scripts/run_wasm_shared_worker_direct_runtime_evidence.sh --run-id wave2-wasm-shared-worker --timeout-sec 180",
+          "status": "recorded_for_deferred_or_preview_row",
+          "observed_result": "Recorded as planned or bounded evidence; unresolved risks remain visible in this signoff row."
+        }
+      ],
+      "e2e_artifacts": [
+        {
+          "path": "artifacts/wave2/wasm_shared_worker_direct_runtime_evidence.json",
+          "state": "shipped"
+        }
+      ],
+      "unsupported_reason": "Direct BrowserRuntime creation inside SharedWorkerGlobalScope is classified by asupersync-422iga as broker/coordinator-only: multi-client membership, browser reclaim, coordinator loss, and per-client fanout prevent volatile shared-worker memory from owning regions, obligations, scheduler state, cancellation, drain/finalize, and replay evidence as a shipped product surface.",
+      "fallback_target": "bounded shared-worker coordinator attach/detach/fallback path with browser-main and dedicated-worker direct-runtime fallbacks",
+      "residual_risks": [
+        "future direct shared-worker runtime promotion would require a new owner bead with client fanout cancellation, region ownership, drain/finalize, durable recovery, replay proof, and no silent remapping to browser main-thread or dedicated-worker lanes"
+      ],
+      "redaction_verdict": "required_for_client_identity_logs"
+    },
+    {
+      "capability_id": "browser_native_message_and_stream_apis",
+      "owner_bead_id": "asupersync-b35gbf",
+      "title": "Promote browser-native messaging and WHATWG stream APIs",
+      "tracker_status_at_capture": "closed",
+      "disposition": "evidence_ready_not_broadly_promoted",
+      "promotion_state": "evidence-ready",
+      "support_class_before": "substrate-only",
+      "support_class_after": "guarded-public-browser-boundary",
+      "feature_flags": [
+        "browser-io",
+        "wasm-browser-dev"
+      ],
+      "source_files": [
+        "src/io/browser_stream.rs",
+        "src/runtime/reactor/browser.rs",
+        "src/io/cap.rs",
+        "packages/browser/src/index.ts",
+        "tests/browser_native_message_stream_evidence_contract.rs",
+        "tests/fixtures/browser-native-message-stream-consumer/src/main.ts",
+        "tests/fixtures/browser-native-message-stream-consumer/scripts/check-browser-run.mjs",
+        "tests/fixtures/browser-native-message-stream-consumer/scripts/check-bundle.mjs",
+        "scripts/run_browser_native_message_stream_evidence.sh",
+        "artifacts/wave2/browser_native_message_and_stream_apis_evidence.json"
+      ],
+      "test_files": [
+        "tests/browser_native_message_stream_evidence_contract.rs",
+        "tests/fixtures/browser-native-message-stream-consumer/scripts/check-browser-run.mjs",
+        "tests/fixtures/browser-native-message-stream-consumer/scripts/check-bundle.mjs",
+        "tests/fixtures/browser-native-message-stream-consumer/src/main.ts"
+      ],
+      "unit_proofs": [
+        {
+          "command": "bash -n scripts/run_browser_native_message_stream_evidence.sh",
+          "status": "recorded_for_deferred_or_preview_row",
+          "observed_result": "Recorded but not accepted as broad promotion proof; row remains preview, pending, or signoff-self until owner criteria close."
+        },
+        {
+          "command": "bash scripts/run_browser_native_message_stream_evidence.sh --contract-only --run-id contract-smoke",
+          "status": "recorded_for_deferred_or_preview_row",
+          "observed_result": "Recorded but not accepted as broad promotion proof; row remains preview, pending, or signoff-self until owner criteria close."
+        },
+        {
+          "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS=-C debuginfo=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_browser_native_message_stream_contract cargo test -p asupersync --test browser_native_message_stream_evidence_contract --features test-internals -- --nocapture",
+          "status": "recorded_for_deferred_or_preview_row",
+          "observed_result": "Recorded but not accepted as broad promotion proof; row remains preview, pending, or signoff-self until owner criteria close."
+        }
+      ],
+      "e2e_proofs": [
+        {
+          "command": "bash scripts/run_browser_native_message_stream_evidence.sh --run-id wave2-browser-native-message-stream --timeout-sec 180",
+          "status": "recorded_for_deferred_or_preview_row",
+          "observed_result": "Recorded as planned or bounded evidence; unresolved risks remain visible in this signoff row."
+        }
+      ],
+      "e2e_artifacts": [
+        {
+          "path": "artifacts/wave2/browser_native_message_and_stream_apis_evidence.json",
+          "state": "shipped"
+        }
+      ],
+      "unsupported_reason": "",
+      "fallback_target": "internal browser stream/message substrate for unsupported hosts; explicit guarded public helpers for same-browser MessageChannel, BroadcastChannel, ReadableStream, and WritableStream capabilities",
+      "residual_risks": [
+        "Raw TCP/UDP/filesystem/process parity is not implied.",
+        "Rust AsyncRead/AsyncWrite browser-core ABI remains out of scope.",
+        "The browser evidence fixture covers same-browser public package helpers, not cross-origin broker semantics."
+      ],
+      "redaction_verdict": "required_for_trace_payloads"
+    },
+    {
+      "capability_id": "browser_rust_runtime_api_stability",
+      "owner_bead_id": "asupersync-j1xbon",
+      "title": "Stabilize external Rust Browser Edition runtime API",
+      "tracker_status_at_capture": "closed",
+      "disposition": "evidence_ready_not_broadly_promoted",
+      "promotion_state": "evidence-ready",
+      "support_class_before": "preview",
+      "support_class_after": "artifact-contract-backed",
+      "feature_flags": [
+        "wasm-browser-dev",
+        "wasm-browser-prod",
+        "wasm-browser-deterministic"
+      ],
+      "source_files": [
+        "src/runtime/builder.rs",
+        "tests/fixtures/rust-browser-consumer",
+        "docs/WASM.md",
+        "scripts/validate_rust_browser_consumer.sh",
+        "tests/wasm_rust_browser_example_contract.rs",
+        "artifacts/wave2/browser_rust_runtime_api_stability_evidence.json"
+      ],
+      "test_files": [
+        "tests/fixtures/rust-browser-consumer",
+        "tests/wasm_rust_browser_example_contract.rs"
+      ],
+      "unit_proofs": [
+        {
+          "command": "bash -n scripts/validate_rust_browser_consumer.sh",
+          "status": "recorded_for_deferred_or_preview_row",
+          "observed_result": "Recorded but not accepted as broad promotion proof; row remains preview, pending, or signoff-self until owner criteria close."
+        },
+        {
+          "command": "jq empty artifacts/wave2/browser_rust_runtime_api_stability_evidence.json",
+          "status": "recorded_for_deferred_or_preview_row",
+          "observed_result": "Recorded but not accepted as broad promotion proof; row remains preview, pending, or signoff-self until owner criteria close."
+        },
+        {
+          "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_browser_rust cargo test -p asupersync --test wasm_rust_browser_example_contract --features test-internals,wasm-browser-dev -- --nocapture",
+          "status": "recorded_for_deferred_or_preview_row",
+          "observed_result": "Recorded but not accepted as broad promotion proof; row remains preview, pending, or signoff-self until owner criteria close."
+        }
+      ],
+      "e2e_proofs": [
+        {
+          "command": "PATH=/usr/bin:$PATH bash scripts/validate_rust_browser_consumer.sh --run-id wave2-browser-rust-runtime-api",
+          "status": "recorded_for_deferred_or_preview_row",
+          "observed_result": "Recorded as planned or bounded evidence; unresolved risks remain visible in this signoff row."
+        }
+      ],
+      "e2e_artifacts": [
+        {
+          "path": "artifacts/wave2/browser_rust_runtime_api_stability_evidence.json",
+          "state": "shipped"
+        }
+      ],
+      "unsupported_reason": "External Rust browser API remains a preview public lane until ABI major/minor compatibility and downgrade behavior are fully stabilized beyond the maintained fixture.",
+      "fallback_target": "asupersync-browser-core maintained fixture workflow and shipped JS/TS Browser Edition packages",
+      "residual_risks": [
+        "RuntimeBuilder::browser() is artifact-backed but still preview.",
+        "ABI version mismatch policy is documented but not promoted to a broad stable external Rust contract.",
+        "Native-only browser-impossible surfaces remain unsupported in wasm."
+      ],
+      "redaction_verdict": "not_applicable"
+    },
+    {
+      "capability_id": "conformance_grpc_deadline_health",
+      "owner_bead_id": "asupersync-pfvsch",
+      "title": "Repair gRPC deadline and health dormant suites",
+      "tracker_status_at_capture": "closed",
+      "disposition": "promoted_with_full_evidence",
+      "promotion_state": "promoted",
+      "support_class_before": "dormant",
+      "support_class_after": "artifact-contract-backed",
+      "feature_flags": [
+        "test-internals"
+      ],
+      "source_files": [
+        "tests/conformance/mod.rs",
+        "tests/conformance/grpc_deadline.rs",
+        "tests/conformance/grpc_health.rs",
+        "tests/conformance_registry_contract.rs",
+        "tests/wave2_capability_evidence_registry_contract.rs",
+        "src/grpc",
+        "scripts/run_grpc_deadline_health_conformance_evidence.sh",
+        "artifacts/conformance_registry_contract_v1.json",
+        "artifacts/wave2/conformance_grpc_deadline_health_evidence.json"
+      ],
+      "test_files": [
+        "tests/conformance/grpc_deadline.rs",
+        "tests/conformance/grpc_health.rs",
+        "tests/conformance/mod.rs",
+        "tests/conformance_registry_contract.rs",
+        "tests/wave2_capability_evidence_registry_contract.rs"
+      ],
+      "unit_proofs": [
+        {
+          "command": "rch exec -- rustfmt --edition 2024 --check tests/conformance/grpc_deadline.rs tests/conformance/grpc_health.rs",
+          "status": "passed",
+          "observed_result": "Owner closeout reported pass; signoff rechecks command presence, rch usage for Rust proof, source paths, and artifact paths."
+        },
+        {
+          "command": "bash -n scripts/run_grpc_deadline_health_conformance_evidence.sh",
+          "status": "passed",
+          "observed_result": "Owner closeout reported pass; signoff rechecks command presence, rch usage for Rust proof, source paths, and artifact paths."
+        },
+        {
+          "command": "bash scripts/run_grpc_deadline_health_conformance_evidence.sh --contract-only --run-id contract-smoke",
+          "status": "passed",
+          "observed_result": "Owner closeout reported pass; signoff rechecks command presence, rch usage for Rust proof, source paths, and artifact paths."
+        }
+      ],
+      "e2e_proofs": [
+        {
+          "command": "bash scripts/run_grpc_deadline_health_conformance_evidence.sh --run-id wave2-grpc-deadline-health --timeout-sec 180",
+          "status": "passed",
+          "observed_result": "Owner closeout reported pass; signoff rechecks script/artifact linkage."
+        }
+      ],
+      "e2e_artifacts": [
+        {
+          "path": "artifacts/conformance_registry_contract_v1.json",
+          "state": "shipped"
+        },
+        {
+          "path": "artifacts/wave2/conformance_grpc_deadline_health_evidence.json",
+          "state": "shipped"
+        }
+      ],
+      "unsupported_reason": "",
+      "fallback_target": "active gRPC deadline and health conformance suites in tests/conformance",
+      "residual_risks": [
+        "suite activation proves deadline and health contracts, not full end-to-end network transport interop"
+      ],
+      "redaction_verdict": "not_applicable"
+    },
+    {
+      "capability_id": "conformance_http1_web_session",
+      "owner_bead_id": "asupersync-nax796",
+      "title": "Repair HTTP/1 and web session dormant suites",
+      "tracker_status_at_capture": "closed",
+      "disposition": "deferred_with_owner_risk",
+      "promotion_state": "pending",
+      "support_class_before": "dormant",
+      "support_class_after": "pending-proof",
+      "feature_flags": [
+        "test-internals"
+      ],
+      "source_files": [
+        "tests/conformance/mod.rs",
+        "src/http/h1",
+        "src/web"
+      ],
+      "test_files": [
+        "tests/conformance/h1_protocol.rs",
+        "tests/conformance/mod.rs",
+        "tests/conformance/web_session_cookies.rs",
+        "tests/conformance_registry_contract.rs",
+        "tests/e2e_web.rs"
+      ],
+      "unit_proofs": [
+        {
+          "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_h1_web_conformance cargo test -p asupersync --test conformance_registry_contract --features test-internals -- --nocapture",
+          "status": "recorded_for_deferred_or_preview_row",
+          "observed_result": "Recorded but not accepted as broad promotion proof; row remains preview, pending, or signoff-self until owner criteria close."
+        }
+      ],
+      "e2e_proofs": [
+        {
+          "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_h1_web_conformance_e2e cargo test -p asupersync --test conformance --features test-internals -- h1 web_session --nocapture",
+          "status": "recorded_for_deferred_or_preview_row",
+          "observed_result": "Recorded as planned or bounded evidence; unresolved risks remain visible in this signoff row."
+        }
+      ],
+      "e2e_artifacts": [
+        {
+          "path": "artifacts/conformance_registry_contract_v1.json",
+          "state": "shipped"
+        },
+        {
+          "path": "artifacts/wave2/conformance_http1_web_session_evidence.json",
+          "state": "planned"
+        }
+      ],
+      "unsupported_reason": "Dormant HTTP/1 and web-session suites must be repaired before public support claims can expand.",
+      "fallback_target": "current active HTTP/1/web E2E lanes",
+      "residual_risks": [
+        "cookie/session semantics can drift from active registry if not rewired"
+      ],
+      "redaction_verdict": "required_for_cookie_values"
+    },
+    {
+      "capability_id": "conformance_dns_udp_unix_sqlite",
+      "owner_bead_id": "asupersync-2qssae",
+      "title": "Repair DNS/UDP/Unix/SQLite dormant suites",
+      "tracker_status_at_capture": "closed",
+      "disposition": "deferred_with_owner_risk",
+      "promotion_state": "pending",
+      "support_class_before": "dormant",
+      "support_class_after": "pending-proof",
+      "feature_flags": [
+        "test-internals",
+        "sqlite"
+      ],
+      "source_files": [
+        "tests/conformance/mod.rs",
+        "src/net/dns",
+        "src/net/udp.rs",
+        "src/net/unix",
+        "src/database/sqlite.rs"
+      ],
+      "test_files": [
+        "tests/conformance/dns_message.rs",
+        "tests/conformance/mod.rs",
+        "tests/conformance/sqlite_prepared_statements.rs",
+        "tests/conformance/udp_socket.rs",
+        "tests/conformance/unix_listener.rs",
+        "tests/conformance_registry_contract.rs"
+      ],
+      "unit_proofs": [
+        {
+          "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_dns_udp_sqlite cargo test -p asupersync --test conformance_registry_contract --features test-internals,sqlite -- --nocapture",
+          "status": "recorded_for_deferred_or_preview_row",
+          "observed_result": "Recorded but not accepted as broad promotion proof; row remains preview, pending, or signoff-self until owner criteria close."
+        }
+      ],
+      "e2e_proofs": [
+        {
+          "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_dns_udp_sqlite_e2e cargo test -p asupersync --test conformance --features test-internals,sqlite -- dns udp unix sqlite --nocapture",
+          "status": "recorded_for_deferred_or_preview_row",
+          "observed_result": "Recorded as planned or bounded evidence; unresolved risks remain visible in this signoff row."
+        }
+      ],
+      "e2e_artifacts": [
+        {
+          "path": "artifacts/conformance_registry_contract_v1.json",
+          "state": "shipped"
+        },
+        {
+          "path": "artifacts/wave2/conformance_dns_udp_unix_sqlite_evidence.json",
+          "state": "planned"
+        }
+      ],
+      "unsupported_reason": "Dormant suites must be repaired and platform-gated before support-class promotion.",
+      "fallback_target": "active DNS/UDP/SQLite unit and integration tests",
+      "residual_risks": [
+        "Unix socket and filesystem fixture cleanup are platform-scoped"
+      ],
+      "redaction_verdict": "required_for_temp_paths"
+    },
+    {
+      "capability_id": "conformance_actor_mailbox_trace_event",
+      "owner_bead_id": "asupersync-8m6dfx",
+      "title": "Repair actor mailbox and trace event dormant suites",
+      "tracker_status_at_capture": "closed",
+      "disposition": "promoted_with_full_evidence",
+      "promotion_state": "promoted",
+      "support_class_before": "dormant",
+      "support_class_after": "artifact-contract-backed",
+      "feature_flags": [
+        "test-internals"
+      ],
+      "source_files": [
+        "tests/conformance/mod.rs",
+        "tests/conformance/actor_mailbox_protocol.rs",
+        "tests/conformance/trace_event.rs",
+        "tests/conformance_registry_contract.rs",
+        "src/actor.rs",
+        "src/trace",
+        "scripts/run_actor_trace_conformance_evidence.sh",
+        "artifacts/conformance_registry_contract_v1.json",
+        "artifacts/wave2/conformance_actor_mailbox_trace_event_evidence.json"
+      ],
+      "test_files": [
+        "tests/conformance/actor_mailbox_protocol.rs",
+        "tests/conformance/mod.rs",
+        "tests/conformance/trace_event.rs",
+        "tests/conformance_registry_contract.rs"
+      ],
+      "unit_proofs": [
+        {
+          "command": "rch exec -- rustfmt --edition 2024 --check tests/conformance/mod.rs tests/conformance/actor_mailbox_protocol.rs tests/conformance/trace_event.rs",
+          "status": "passed",
+          "observed_result": "Owner closeout reported pass; signoff rechecks command presence, rch usage for Rust proof, source paths, and artifact paths."
+        },
+        {
+          "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_actor_trace_registry cargo test -p asupersync --test conformance_registry_contract --features test-internals -- --nocapture",
+          "status": "passed",
+          "observed_result": "Owner closeout reported pass; signoff rechecks command presence, rch usage for Rust proof, source paths, and artifact paths."
+        }
+      ],
+      "e2e_proofs": [
+        {
+          "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_actor_mailbox cargo test -p asupersync --test conformance --features test-internals actor_mailbox_protocol -- --nocapture",
+          "status": "passed",
+          "observed_result": "Owner closeout reported pass; signoff rechecks script/artifact linkage."
+        },
+        {
+          "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_trace_event cargo test -p asupersync --test conformance --features test-internals trace_event -- --nocapture",
+          "status": "passed",
+          "observed_result": "Owner closeout reported pass; signoff rechecks script/artifact linkage."
+        },
+        {
+          "command": "bash scripts/run_actor_trace_conformance_evidence.sh --run-id wave2-actor-trace --timeout-sec 900",
+          "status": "passed",
+          "observed_result": "Owner closeout reported pass; signoff rechecks script/artifact linkage."
+        }
+      ],
+      "e2e_artifacts": [
+        {
+          "path": "artifacts/conformance_registry_contract_v1.json",
+          "state": "shipped"
+        },
+        {
+          "path": "artifacts/wave2/conformance_actor_mailbox_trace_event_evidence.json",
+          "state": "shipped"
+        }
+      ],
+      "unsupported_reason": "",
+      "fallback_target": "active actor mailbox and trace event conformance suites in tests/conformance",
+      "residual_risks": [
+        "suite activation proves actor mailbox and trace event contracts, not new public actor or trace APIs"
+      ],
+      "redaction_verdict": "not_applicable"
+    },
+    {
+      "capability_id": "web_middleware_streaming",
+      "owner_bead_id": "asupersync-o74l7u",
+      "title": "Close web framework middleware and streaming support gap",
+      "tracker_status_at_capture": "closed",
+      "disposition": "deferred_with_owner_risk",
+      "promotion_state": "pending",
+      "support_class_before": "in-progress",
+      "support_class_after": "pending-proof",
+      "feature_flags": [
+        "test-internals"
+      ],
+      "source_files": [
+        "src/web/mod.rs",
+        "src/service/mod.rs",
+        "docs/integration.md"
+      ],
+      "test_files": [
+        "src/web/mod.rs",
+        "tests/e2e_web.rs",
+        "tests/web_middleware_golden.rs"
+      ],
+      "unit_proofs": [
+        {
+          "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_web cargo test -p asupersync --lib web --features test-internals -- --nocapture",
+          "status": "recorded_for_deferred_or_preview_row",
+          "observed_result": "Recorded but not accepted as broad promotion proof; row remains preview, pending, or signoff-self until owner criteria close."
+        }
+      ],
+      "e2e_proofs": [
+        {
+          "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_web_e2e cargo test -p asupersync --test e2e_web --features test-internals -- --nocapture",
+          "status": "recorded_for_deferred_or_preview_row",
+          "observed_result": "Recorded as planned or bounded evidence; unresolved risks remain visible in this signoff row."
+        }
+      ],
+      "e2e_artifacts": [
+        {
+          "path": "artifacts/wave2/web_middleware_streaming_evidence.json",
+          "state": "planned"
+        }
+      ],
+      "unsupported_reason": "Middleware and streaming are not promoted until extractor, response, SSE, backpressure, and disconnect proof land.",
+      "fallback_target": "current service/web substrate and active E2E coverage",
+      "residual_risks": [
+        "client disconnect and streaming resource cleanup remain under-proven"
+      ],
+      "redaction_verdict": "required_for_request_headers"
+    },
+    {
+      "capability_id": "filesystem_parity_cancellation",
+      "owner_bead_id": "asupersync-oc0ybw",
+      "title": "Complete filesystem API parity and cancellation semantics",
+      "tracker_status_at_capture": "closed",
+      "disposition": "deferred_with_owner_risk",
+      "promotion_state": "pending",
+      "support_class_before": "in-progress",
+      "support_class_after": "pending-proof",
+      "feature_flags": [
+        "test-internals",
+        "io-uring"
+      ],
+      "source_files": [
+        "src/fs/mod.rs",
+        "docs/integration.md"
+      ],
+      "test_files": [
+        "src/fs/mod.rs",
+        "tests/tokio_fs_process_signal_conformance.rs"
+      ],
+      "unit_proofs": [
+        {
+          "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_fs cargo test -p asupersync --lib fs --features test-internals -- --nocapture",
+          "status": "recorded_for_deferred_or_preview_row",
+          "observed_result": "Recorded but not accepted as broad promotion proof; row remains preview, pending, or signoff-self until owner criteria close."
+        }
+      ],
+      "e2e_proofs": [
+        {
+          "command": "bash scripts/run_filesystem_parity_evidence.sh",
+          "status": "recorded_for_deferred_or_preview_row",
+          "observed_result": "Recorded as planned or bounded evidence; unresolved risks remain visible in this signoff row."
+        }
+      ],
+      "e2e_artifacts": [
+        {
+          "path": "artifacts/wave2/filesystem_parity_cancellation_evidence.json",
+          "state": "planned"
+        }
+      ],
+      "unsupported_reason": "Filesystem parity remains early/mixed until platform, cancellation, cleanup, and virtualized proof are complete.",
+      "fallback_target": "current spawn_blocking_io and Vfs-backed APIs",
+      "residual_risks": [
+        "platform-specific permission and symlink semantics need explicit gating"
+      ],
+      "redaction_verdict": "required_for_temp_paths"
+    },
+    {
+      "capability_id": "messaging_real_broker_e2e",
+      "owner_bead_id": "asupersync-tohua1",
+      "title": "Close Redis/NATS/Kafka real-broker E2E parity",
+      "tracker_status_at_capture": "closed",
+      "disposition": "deferred_with_owner_risk",
+      "promotion_state": "pending",
+      "support_class_before": "mixed",
+      "support_class_after": "broker-backed-pending-proof",
+      "feature_flags": [
+        "test-internals",
+        "kafka"
+      ],
+      "source_files": [
+        "src/messaging/redis.rs",
+        "src/messaging/nats.rs",
+        "src/messaging/kafka.rs"
+      ],
+      "test_files": [
+        "tests/conformance/messaging_broker_parity.rs",
+        "tests/e2e_messaging.rs",
+        "tests/t6_database_messaging_unit_matrix.rs"
+      ],
+      "unit_proofs": [
+        {
+          "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_messaging cargo test -p asupersync --lib messaging --features test-internals,kafka -- --nocapture",
+          "status": "recorded_for_deferred_or_preview_row",
+          "observed_result": "Recorded but not accepted as broad promotion proof; row remains preview, pending, or signoff-self until owner criteria close."
+        }
+      ],
+      "e2e_proofs": [
+        {
+          "command": "bash scripts/run_messaging_broker_evidence.sh",
+          "status": "recorded_for_deferred_or_preview_row",
+          "observed_result": "Recorded as planned or bounded evidence; unresolved risks remain visible in this signoff row."
+        }
+      ],
+      "e2e_artifacts": [
+        {
+          "path": "artifacts/wave2/messaging_real_broker_e2e_evidence.json",
+          "state": "planned"
+        }
+      ],
+      "unsupported_reason": "Stub-only proof cannot promote production broker claims.",
+      "fallback_target": "parser/local-stub fixtures and feature-gated broker skips",
+      "residual_risks": [
+        "real broker availability and redacted credentials must be handled deterministically"
+      ],
+      "redaction_verdict": "required_for_connection_uri"
+    },
+    {
+      "capability_id": "massive_swarm_capacity_envelope",
+      "owner_bead_id": "asupersync-j1dwk6",
+      "title": "Prove 64-core/256GiB massive-swarm capacity envelope",
+      "tracker_status_at_capture": "closed",
+      "disposition": "promoted_with_full_evidence",
+      "promotion_state": "promoted",
+      "support_class_before": "assumption-bound",
+      "support_class_after": "artifact-contract-backed",
+      "feature_flags": [
+        "test-internals"
+      ],
+      "source_files": [
+        "src/runtime",
+        "src/observability/diagnostics.rs",
+        "artifacts/wave2/massive_swarm_capacity_envelope_evidence.json",
+        "artifacts/capacity_envelope_planner_smoke_contract_v1.json",
+        "artifacts/massive_swarm_signoff_smoke_contract_v1.json",
+        "scripts/run_massive_swarm_capacity_envelope.sh",
+        "scripts/run_massive_swarm_signoff_smoke.sh",
+        "tests/massive_swarm_capacity_envelope_contract.rs"
+      ],
+      "test_files": [
+        "tests/massive_swarm_capacity_envelope_contract.rs",
+        "tests/massive_swarm_signoff_contract.rs"
+      ],
+      "unit_proofs": [
+        {
+          "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_massive_swarm_capacity cargo test -p asupersync --test massive_swarm_capacity_envelope_contract --features test-internals -- --nocapture",
+          "status": "passed",
+          "observed_result": "Owner closeout reported pass; signoff rechecks command presence, rch usage for Rust proof, source paths, and artifact paths."
+        }
+      ],
+      "e2e_proofs": [
+        {
+          "command": "bash scripts/run_massive_swarm_capacity_envelope.sh --output-root target/massive-swarm-capacity-envelope --profile all",
+          "status": "passed",
+          "observed_result": "Owner closeout reported pass; signoff rechecks script/artifact linkage."
+        },
+        {
+          "command": "bash scripts/run_massive_swarm_signoff_smoke.sh",
+          "status": "passed",
+          "observed_result": "Owner closeout reported pass; signoff rechecks script/artifact linkage."
+        }
+      ],
+      "e2e_artifacts": [
+        {
+          "path": "artifacts/capacity_envelope_planner_smoke_contract_v1.json",
+          "state": "shipped"
+        },
+        {
+          "path": "artifacts/massive_swarm_signoff_smoke_contract_v1.json",
+          "state": "shipped"
+        },
+        {
+          "path": "artifacts/wave2/massive_swarm_capacity_envelope_evidence.json",
+          "state": "shipped"
+        }
+      ],
+      "unsupported_reason": "",
+      "fallback_target": "fast and standard profiles run everywhere; large-host profile passes only on 64 CPU / 256 binary GiB hosts and otherwise logs an explicit unsupported_reason",
+      "residual_risks": [
+        "live large-host reruns still require a true 64 CPU / 256 binary GiB worker"
+      ],
+      "redaction_verdict": "not_applicable"
+    },
+    {
+      "capability_id": "operator_swarm_profile_diagnostics",
+      "owner_bead_id": "asupersync-5dudcn",
+      "title": "Add swarm profile recommendations and no-win diagnostics",
+      "tracker_status_at_capture": "closed",
+      "disposition": "promoted_with_full_evidence",
+      "promotion_state": "promoted",
+      "support_class_before": "assumption-bound",
+      "support_class_after": "artifact-contract-backed",
+      "feature_flags": [
+        "test-internals"
+      ],
+      "source_files": [
+        "src/observability",
+        "src/runtime/config.rs",
+        "src/runtime/resource_monitor.rs",
+        "src/observability/diagnostics.rs",
+        "artifacts/wave2/operator_swarm_profile_diagnostics_evidence.json",
+        "artifacts/wave2/massive_swarm_capacity_envelope_evidence.json",
+        "artifacts/host_profile_planner_smoke_contract_v1.json",
+        "artifacts/capacity_envelope_planner_smoke_contract_v1.json",
+        "scripts/run_operator_swarm_profile_diagnostics.sh",
+        "tests/operator_swarm_profile_diagnostics_contract.rs"
+      ],
+      "test_files": [
+        "tests/operator_swarm_profile_diagnostics_contract.rs"
+      ],
+      "unit_proofs": [
+        {
+          "command": "rch exec -- rustfmt --edition 2024 --check tests/operator_swarm_profile_diagnostics_contract.rs",
+          "status": "passed",
+          "observed_result": "Owner closeout reported pass; signoff rechecks command presence, rch usage for Rust proof, source paths, and artifact paths."
+        },
+        {
+          "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_operator_swarm_profile cargo test -p asupersync --test operator_swarm_profile_diagnostics_contract --features test-internals -- --nocapture",
+          "status": "passed",
+          "observed_result": "Owner closeout reported pass; signoff rechecks command presence, rch usage for Rust proof, source paths, and artifact paths."
+        },
+        {
+          "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_operator_swarm_profile_clippy cargo clippy -p asupersync --test operator_swarm_profile_diagnostics_contract --features test-internals -- -D warnings",
+          "status": "passed",
+          "observed_result": "Owner closeout reported pass; signoff rechecks command presence, rch usage for Rust proof, source paths, and artifact paths."
+        }
+      ],
+      "e2e_proofs": [
+        {
+          "command": "bash -n scripts/run_operator_swarm_profile_diagnostics.sh",
+          "status": "passed",
+          "observed_result": "Owner closeout reported pass; signoff rechecks script/artifact linkage."
+        },
+        {
+          "command": "bash scripts/run_operator_swarm_profile_diagnostics.sh --output-root target/operator-swarm-profile-diagnostics --profile all",
+          "status": "passed",
+          "observed_result": "Owner closeout reported pass; signoff rechecks script/artifact linkage."
+        }
+      ],
+      "e2e_artifacts": [
+        {
+          "path": "artifacts/capacity_envelope_planner_smoke_contract_v1.json",
+          "state": "shipped"
+        },
+        {
+          "path": "artifacts/host_profile_planner_smoke_contract_v1.json",
+          "state": "shipped"
+        },
+        {
+          "path": "artifacts/wave2/massive_swarm_capacity_envelope_evidence.json",
+          "state": "shipped"
+        },
+        {
+          "path": "artifacts/wave2/operator_swarm_profile_diagnostics_evidence.json",
+          "state": "shipped"
+        }
+      ],
+      "unsupported_reason": "",
+      "fallback_target": "conservative profile and explicit no-win/no-evidence diagnostics; aggressive profile requires evidence confidence >= 90 plus a rollback trigger",
+      "residual_risks": [
+        "docs/support-matrix reconciliation still needs to publish the operator guidance after wave2 signoff"
+      ],
+      "redaction_verdict": "required_for_endpoint_and_host_facts"
+    },
+    {
+      "capability_id": "formal_adapter_protocol_refinement",
+      "owner_bead_id": "asupersync-i6uzso",
+      "title": "Expand refinement proof coverage into adapter/protocol lanes",
+      "tracker_status_at_capture": "closed",
+      "disposition": "promoted_with_full_evidence",
+      "promotion_state": "promoted",
+      "support_class_before": "checked-core-invariants",
+      "support_class_after": "artifact-contract-backed",
+      "feature_flags": [
+        "test-internals"
+      ],
+      "source_files": [
+        "formal/lean/coverage",
+        "artifacts/formal_proof_posture_contract_v1.json",
+        "artifacts/formal_wave2_refinement_coverage_v1.json",
+        "scripts/run_formal_wave2_refinement_coverage.sh",
+        "tests/formal_wave2_refinement_coverage_contract.rs"
+      ],
+      "test_files": [
+        "formal/lean/coverage",
+        "tests/formal_proof_posture_contract.rs",
+        "tests/formal_wave2_refinement_coverage_contract.rs"
+      ],
+      "unit_proofs": [
+        {
+          "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_formal cargo test -p asupersync --test formal_proof_posture_contract --features test-internals -- --nocapture",
+          "status": "passed",
+          "observed_result": "Owner closeout reported pass; signoff rechecks command presence, rch usage for Rust proof, source paths, and artifact paths."
+        },
+        {
+          "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_formal_adapter cargo test -p asupersync --test formal_wave2_refinement_coverage_contract --features test-internals -- --nocapture",
+          "status": "passed",
+          "observed_result": "Owner closeout reported pass; signoff rechecks command presence, rch usage for Rust proof, source paths, and artifact paths."
+        }
+      ],
+      "e2e_proofs": [
+        {
+          "command": "rch exec -- bash -lc 'cd formal/lean && lake build'",
+          "status": "passed",
+          "observed_result": "Owner closeout reported pass; signoff rechecks script/artifact linkage."
+        },
+        {
+          "command": "bash scripts/run_formal_wave2_refinement_coverage.sh",
+          "status": "passed",
+          "observed_result": "Owner closeout reported pass; signoff rechecks script/artifact linkage."
+        }
+      ],
+      "e2e_artifacts": [
+        {
+          "path": "artifacts/formal_proof_posture_contract_v1.json",
+          "state": "shipped"
+        },
+        {
+          "path": "artifacts/formal_wave2_refinement_coverage_v1.json",
+          "state": "shipped"
+        }
+      ],
+      "unsupported_reason": "",
+      "fallback_target": "Lean-checked six core invariants plus lane-specific proof tiers",
+      "residual_risks": [
+        "lane-specific Lean/TLA proofs remain tiered; assumption-bound rows in artifacts/formal_wave2_refinement_coverage_v1.json must retain owner beads and missing-evidence disposition"
+      ],
+      "redaction_verdict": "not_applicable"
+    },
+    {
+      "capability_id": "docs_support_matrix_reconciliation",
+      "owner_bead_id": "asupersync-xl06qj",
+      "title": "Reconcile docs and support matrices after capability promotions",
+      "tracker_status_at_capture": "closed",
+      "disposition": "promoted_with_full_evidence",
+      "promotion_state": "promoted",
+      "support_class_before": "docs-follow-source",
+      "support_class_after": "artifact-contract-backed",
+      "feature_flags": [],
+      "source_files": [
+        "README.md",
+        "docs/integration.md",
+        "docs/WASM.md",
+        "formal/README.md",
+        "artifacts/reality_check_docs_contract_v1.json",
+        "artifacts/wave2/docs_support_matrix_reconciliation_evidence.json",
+        "scripts/run_wave2_docs_support_matrix_reconciliation.sh",
+        "tests/wave2_docs_support_matrix_reconciliation_contract.rs"
+      ],
+      "test_files": [
+        "tests/reality_check_docs_contract.rs",
+        "tests/wave2_docs_support_matrix_reconciliation_contract.rs"
+      ],
+      "unit_proofs": [
+        {
+          "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_docs cargo test -p asupersync --test reality_check_docs_contract --features test-internals -- --nocapture",
+          "status": "passed",
+          "observed_result": "Owner closeout reported pass; signoff rechecks command presence, rch usage for Rust proof, source paths, and artifact paths."
+        },
+        {
+          "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_docs_support cargo test -p asupersync --test wave2_docs_support_matrix_reconciliation_contract --features test-internals -- --nocapture",
+          "status": "passed",
+          "observed_result": "Owner closeout reported pass; signoff rechecks command presence, rch usage for Rust proof, source paths, and artifact paths."
+        }
+      ],
+      "e2e_proofs": [
+        {
+          "command": "bash scripts/run_reality_check_docs_evidence.sh",
+          "status": "passed",
+          "observed_result": "Owner closeout reported pass; signoff rechecks script/artifact linkage."
+        },
+        {
+          "command": "bash scripts/run_wave2_docs_support_matrix_reconciliation.sh",
+          "status": "passed",
+          "observed_result": "Owner closeout reported pass; signoff rechecks script/artifact linkage."
+        }
+      ],
+      "e2e_artifacts": [
+        {
+          "path": "artifacts/reality_check_docs_contract_v1.json",
+          "state": "shipped"
+        },
+        {
+          "path": "artifacts/wave2/docs_support_matrix_reconciliation_evidence.json",
+          "state": "shipped"
+        }
+      ],
+      "unsupported_reason": "",
+      "fallback_target": "Wave2 registry-backed docs support matrix reconciliation",
+      "residual_risks": [
+        "future Wave2 promotions must add public docs markers and source artifacts before broadening support language"
+      ],
+      "redaction_verdict": "not_applicable"
+    },
+    {
+      "capability_id": "wave2_signoff_proof_pack",
+      "owner_bead_id": "asupersync-1e5xeh",
+      "title": "Publish capability-completion proof pack",
+      "tracker_status_at_capture": "closed",
+      "disposition": "promoted_with_full_evidence",
+      "promotion_state": "signoff-ready",
+      "support_class_before": "signoff-pending",
+      "support_class_after": "artifact-contract-backed",
+      "feature_flags": [],
+      "source_files": [
+        "artifacts/reality_check_gap_closure_signoff_v1.json",
+        "artifacts/wave2/wave2_signoff_proof_pack_evidence.json",
+        "artifacts/wave2_capability_evidence_registry_v1.json",
+        "scripts/run_reality_check_gap_closure_signoff.sh",
+        "scripts/run_wave2_signoff_proof_pack.sh",
+        "tests/wave2_signoff_proof_pack_contract.rs"
+      ],
+      "test_files": [
+        "tests/reality_check_gap_closure_signoff.rs",
+        "tests/wave2_signoff_proof_pack_contract.rs"
+      ],
+      "unit_proofs": [
+        {
+          "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_signoff cargo test -p asupersync --test reality_check_gap_closure_signoff --features test-internals -- --nocapture",
+          "status": "passed",
+          "observed_result": "First-wave signoff contract remains runnable and artifact-backed."
+        },
+        {
+          "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_signoff_pack CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test wave2_signoff_proof_pack_contract --features test-internals -- --nocapture",
+          "status": "passed",
+          "observed_result": "Wave2 signoff proof-pack contract validates schema, registry coverage, promoted/deferred gates, rch usage, control-plane degradation, runner output, and negative drift cases."
+        }
+      ],
+      "e2e_proofs": [
+        {
+          "command": "bash scripts/run_reality_check_gap_closure_signoff.sh",
+          "status": "passed",
+          "observed_result": "First-wave signoff runner remains a durable comparison artifact."
+        },
+        {
+          "command": "bash scripts/run_wave2_signoff_proof_pack.sh --output-root target/wave2-signoff-proof-pack --run-id asupersync-1e5xeh",
+          "status": "passed",
+          "observed_result": "Wave2 signoff runner recomputes child, proof, artifact, drift, graph, ready, and residual-risk counts from the current registry and .beads/issues.jsonl."
+        }
+      ],
+      "e2e_artifacts": [
+        {
+          "path": "artifacts/reality_check_gap_closure_signoff_v1.json",
+          "state": "shipped"
+        },
+        {
+          "path": "artifacts/wave2/wave2_signoff_proof_pack_evidence.json",
+          "state": "shipped"
+        }
+      ],
+      "unsupported_reason": "",
+      "fallback_target": "Wave2 signoff runner plus live residual-risk owner rows for every deferred capability",
+      "residual_risks": [
+        "signoff artifact can become stale if it trusts tracker status alone"
+      ],
+      "redaction_verdict": "not_applicable"
+    },
+    {
+      "capability_id": "capability_examples_smoke_recipes",
+      "owner_bead_id": "asupersync-osh9jv",
+      "title": "Publish capability-first user examples and smoke recipes",
+      "tracker_status_at_capture": "closed",
+      "disposition": "promoted_with_full_evidence",
+      "promotion_state": "promoted",
+      "support_class_before": "user-examples-missing",
+      "support_class_after": "artifact-contract-backed",
+      "feature_flags": [],
+      "source_files": [
+        "examples",
+        "README.md",
+        "docs/integration.md",
+        "artifacts/wave2/capability_examples_smoke_recipes_evidence.json",
+        "tests/wave2_capability_examples_contract.rs",
+        "scripts/run_wave2_capability_examples_smoke.sh"
+      ],
+      "test_files": [
+        "examples",
+        "tests/wave2_capability_examples_contract.rs"
+      ],
+      "unit_proofs": [
+        {
+          "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_examples_public_recipes cargo test -p asupersync --test wave2_capability_examples_contract --features test-internals -- --nocapture",
+          "status": "passed",
+          "observed_result": "Owner closeout reported pass; signoff rechecks command presence, rch usage for Rust proof, source paths, and artifact paths."
+        }
+      ],
+      "e2e_proofs": [
+        {
+          "command": "bash scripts/run_wave2_capability_examples_smoke.sh",
+          "status": "passed",
+          "observed_result": "Owner closeout reported pass; signoff rechecks script/artifact linkage."
+        }
+      ],
+      "e2e_artifacts": [
+        {
+          "path": "artifacts/wave2/capability_examples_smoke_recipes_evidence.json",
+          "state": "shipped"
+        }
+      ],
+      "unsupported_reason": "",
+      "fallback_target": "docs/integration.md Wave2 Capability Smoke Recipes plus stable unsupported rows for gated formal/broker lanes",
+      "residual_risks": [
+        "broker and formal-tooling examples remain gated by stable unsupported rows until their public host prerequisites are reproducible without private services"
+      ],
+      "redaction_verdict": "not_applicable"
+    },
+    {
+      "capability_id": "supervision_storm_monitor_alignment",
+      "owner_bead_id": "asupersync-4a3ghz",
+      "title": "Fix default storm-monitor alignment regression",
+      "tracker_status_at_capture": "closed",
+      "disposition": "deferred_with_owner_risk",
+      "promotion_state": "pending",
+      "support_class_before": "bug-regression",
+      "support_class_after": "pending-proof",
+      "feature_flags": [
+        "test-internals"
+      ],
+      "source_files": [
+        "src/supervision.rs",
+        "tests/metamorphic_supervision_strategies.rs"
+      ],
+      "test_files": [
+        "src/supervision.rs",
+        "tests/metamorphic_supervision_strategies.rs"
+      ],
+      "unit_proofs": [
+        {
+          "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_supervision_lib cargo test -p asupersync --lib restart_tracker_ -- --nocapture",
+          "status": "recorded_for_deferred_or_preview_row",
+          "observed_result": "Recorded but not accepted as broad promotion proof; row remains preview, pending, or signoff-self until owner criteria close."
+        }
+      ],
+      "e2e_proofs": [
+        {
+          "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_supervision_metamorphic cargo test -p asupersync --test metamorphic_supervision_strategies -- --nocapture",
+          "status": "recorded_for_deferred_or_preview_row",
+          "observed_result": "Recorded as planned or bounded evidence; unresolved risks remain visible in this signoff row."
+        }
+      ],
+      "e2e_artifacts": [
+        {
+          "path": "artifacts/wave2/supervision_storm_monitor_alignment_evidence.json",
+          "state": "planned"
+        }
+      ],
+      "unsupported_reason": "A live source-unit regression remains until the storm monitor and restart-budget oracle are reconciled.",
+      "fallback_target": "existing supervision policies with known failing source filter",
+      "residual_risks": [
+        "weakening storm detection would preserve tests while harming users"
+      ],
+      "redaction_verdict": "not_applicable"
+    },
+    {
+      "capability_id": "wave2_capability_evidence_registry",
+      "owner_bead_id": "asupersync-6qju7t",
+      "title": "Build unified capability evidence registry and proof manifest",
+      "tracker_status_at_capture": "closed",
+      "disposition": "promoted_with_full_evidence",
+      "promotion_state": "registry-shipped",
+      "support_class_before": "missing-registry",
+      "support_class_after": "artifact-contract-backed",
+      "feature_flags": [],
+      "source_files": [
+        "artifacts/wave2_capability_evidence_registry_v1.json",
+        "tests/wave2_capability_evidence_registry_contract.rs",
+        "scripts/run_wave2_capability_evidence_registry.sh"
+      ],
+      "test_files": [
+        "tests/wave2_capability_evidence_registry_contract.rs"
+      ],
+      "unit_proofs": [
+        {
+          "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_registry cargo test -p asupersync --test wave2_capability_evidence_registry_contract --features test-internals -- --nocapture",
+          "status": "passed",
+          "observed_result": "Owner closeout reported pass; signoff rechecks command presence, rch usage for Rust proof, source paths, and artifact paths."
+        }
+      ],
+      "e2e_proofs": [
+        {
+          "command": "bash scripts/run_wave2_capability_evidence_registry.sh",
+          "status": "passed",
+          "observed_result": "Owner closeout reported pass; signoff rechecks script/artifact linkage."
+        }
+      ],
+      "e2e_artifacts": [
+        {
+          "path": "artifacts/wave2_capability_evidence_registry_v1.json",
+          "state": "shipped"
+        },
+        {
+          "path": "target/wave2-capability-evidence-registry/asupersync-6qju7t/registry-report.json",
+          "state": "planned"
+        }
+      ],
+      "unsupported_reason": "",
+      "fallback_target": "fail closed on missing field or stale evidence",
+      "residual_risks": [
+        "future wave2 beads must be added to required_wave2_child_beads when created"
+      ],
+      "redaction_verdict": "not_applicable"
+    }
+  ],
+  "signoff_invariants": {
+    "every_required_wave2_child_has_one_row": true,
+    "promoted_rows_require_source_unit_e2e_artifact_and_no_unsupported_reason": true,
+    "deferred_rows_preserve_reason_fallback_or_residual_risk": true,
+    "cargo_backed_rust_commands_are_rch_offloaded": true,
+    "control_plane_degradation_is_recorded_not_ignored": true,
+    "docs_drift_count_source": "docs_support_matrix_reconciliation promoted row plus artifacts/wave2/docs_support_matrix_reconciliation_evidence.json"
+  }
+}
