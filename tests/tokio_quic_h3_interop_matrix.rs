@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 #![allow(clippy::cast_precision_loss)]
 //! Contract tests for the QUIC/H3 Interoperability Matrix.
 //!
