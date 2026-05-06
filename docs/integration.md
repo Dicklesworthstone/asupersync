@@ -156,9 +156,17 @@ Override via `RuntimeBuilder::obligation_leak_response(...)` or
   - Default support is default static-only QPACK.
   - The opt-in dynamic QPACK field-section/table support is exposed through
     `H3QpackMode::DynamicTableAllowed` and `QpackContext`.
+  - The opt-in dynamic QPACK instruction-stream state machine is exposed
+    through `QpackInstructionStreamState`: callers register remote QPACK
+    encoder/decoder unidirectional streams explicitly, feed instruction bytes
+    outside HTTP/3 frame parsing, and use the bounded blocked-stream scheduler
+    tied to `SETTINGS_QPACK_BLOCKED_STREAMS`.
   - QPACK string literals support Huffman encode/decode through the shared
     HPACK Huffman implementation.
-  - QPACK encoder/decoder unidirectional stream types are recognized and duplicate streams fail closed, but there is no full QPACK encoder/decoder instruction-stream parity or blocked-stream scheduler claim.
+  - QPACK encoder/decoder unidirectional stream types still reject HTTP/3 frame
+    mapping; instruction processing is available only through the explicit
+    QPACK instruction-stream API. This is not a claim of h3/quinn drop-in parity,
+    default dynamic QPACK, or full QUIC deployment parity.
   - Support matrix: `artifacts/http3_qpack_support_matrix_v1.json`
 
 ### Testing reference

@@ -1,10 +1,10 @@
 {
   "contract_version": "http3-qpack-support-matrix-v1",
-  "bead_id": "asupersync-rckh3q",
+  "bead_id": "asupersync-bdw1hb",
   "summary": {
     "default_posture": "HTTP/3 uses static-only QPACK by default.",
-    "opt_in_posture": "Dynamic QPACK field-section references are supported through H3QpackMode::DynamicTableAllowed plus QpackContext.",
-    "parity_boundary": "Full QPACK encoder/decoder instruction-stream parity and blocked-stream scheduling are not advertised as shipped production parity."
+    "opt_in_posture": "Dynamic QPACK field-section references, encoder/decoder instruction streams, and bounded blocked-stream scheduling are supported through H3QpackMode::DynamicTableAllowed plus QpackInstructionStreamState.",
+    "parity_boundary": "The native HTTP/3 state machine supports opt-in QPACK instruction-stream processing and blocked-stream wake scheduling, but this is not a claim of h3/quinn drop-in parity, full QUIC deployment parity, or default dynamic QPACK enablement."
   },
   "source_files": [
     "src/http/h3_native.rs",
@@ -93,49 +93,94 @@
     },
     {
       "feature_id": "qpack_uni_stream_types",
-      "status": "recognized_fail_closed",
-      "support_class": "fail_closed_boundary",
+      "status": "recognized_instruction_boundary",
+      "support_class": "production_live_opt_in",
       "evidence": [
-        "Remote QPACK encoder and decoder unidirectional streams are recognized and duplicate stream creation is rejected.",
-        "QPACK streams currently reject HTTP/3 frame mapping because QPACK instruction processing is a separate unadvertised parity boundary."
+        "Remote QPACK encoder and decoder unidirectional streams are recognized, duplicate stream creation is rejected, and the streams can be registered with QpackInstructionStreamState.",
+        "QPACK streams continue to reject HTTP/3 frame mapping; instruction bytes are processed through the explicit instruction-stream API."
       ],
       "source_markers": [
         "H3UniStreamType::QpackEncoder",
         "H3UniStreamType::QpackDecoder",
         "duplicate remote qpack encoder stream",
+        "register_qpack_instruction_stream",
         "qpack streams carry instructions, not h3 frames"
       ]
     },
     {
       "feature_id": "qpack_instruction_stream_state_machine",
-      "status": "deferred_not_advertised",
-      "support_class": "not_advertised_deferred",
+      "status": "supported_opt_in",
+      "support_class": "production_live_opt_in",
       "evidence": [
-        "The native HTTP/3 layer does not advertise full QPACK encoder/decoder instruction-stream parity.",
-        "Applications must not infer h3/quinn-level dynamic instruction processing from the presence of dynamic field-section helpers."
+        "QpackInstructionStreamState processes encoder-stream SetDynamicTableCapacity, InsertWithNameReference, InsertWithoutNameReference, and Duplicate instructions when H3QpackMode::DynamicTableAllowed is enabled.",
+        "Decoder-stream feedback handles InsertCountIncrement, HeaderAcknowledgement, and StreamCancellation.",
+        "The proof runner emits pass rows for encoder instruction round trip, decoder feedback round trip, malformed instruction, wrong-stream instruction, and static-only rejection."
       ],
       "source_markers": [
-        "qpack streams carry instructions, not h3 frames"
+        "pub struct QpackInstructionStreamState",
+        "feed_qpack_instruction_stream_bytes",
+        "qpack_instruction_stream_proof_runner_scenarios_log_required_fields",
+        "encoder-instruction-roundtrip",
+        "decoder-feedback-roundtrip"
       ]
     },
     {
       "feature_id": "qpack_blocked_stream_scheduling",
-      "status": "deferred_not_advertised",
-      "support_class": "not_advertised_deferred",
+      "status": "supported_opt_in",
+      "support_class": "production_live_opt_in",
       "evidence": [
-        "Blocked-stream SETTINGS are parsed and policy-checked, but no production blocked-stream scheduler is advertised in this support matrix.",
-        "Dynamic field-section decoding fails closed when Required Insert Count exceeds the current dynamic table state."
+        "Blocked-stream SETTINGS are parsed, policy-checked, enforced as a bound, and wired into QpackInstructionStreamState.",
+        "Received field sections with Required Insert Count above Known Received Count enter a bounded blocked state and unblock deterministically after encoder instructions insert the required dynamic-table entry.",
+        "The proof runner emits pass rows for blocked-then-unblocked-stream, cancellation-while-blocked, and capacity-exceeded."
       ],
       "source_markers": [
         "qpack_blocked_streams",
-        "required insert count exceeds dynamic table state"
+        "submit_received_field_section",
+        "blocked_stream_count",
+        "blocked-then-unblocked-stream",
+        "cancellation-while-blocked"
+      ]
+    }
+  ],
+  "proof_artifacts": [
+    {
+      "runner": "scripts/http3_qpack_proof_runner.sh",
+      "report_path": "target/http3-qpack-instruction-proof/asupersync-1xxmyo/run_report.json",
+      "scenario_rows_path": "target/http3-qpack-instruction-proof/asupersync-1xxmyo/scenario_rows.jsonl",
+      "required_fields": [
+        "bead_id",
+        "scenario_id",
+        "qpack_mode",
+        "encoder_stream_id",
+        "decoder_stream_id",
+        "required_insert_count",
+        "known_received_count",
+        "blocked_stream_count",
+        "settings_blocked_streams",
+        "expected_event",
+        "actual_event",
+        "support_class",
+        "verdict",
+        "first_failure"
+      ],
+      "expected_scenarios": [
+        "static-only-rejection",
+        "encoder-instruction-roundtrip",
+        "decoder-feedback-roundtrip",
+        "blocked-then-unblocked-stream",
+        "cancellation-while-blocked",
+        "capacity-exceeded",
+        "malformed-instruction",
+        "wrong-stream-instruction"
       ]
     }
   ],
   "validation_commands": [
     "python3 -m json.tool artifacts/http3_qpack_support_matrix_v1.json",
+    "bash -n scripts/http3_qpack_proof_runner.sh",
+    "bash scripts/http3_qpack_proof_runner.sh",
     "rch exec -- rustfmt --edition 2024 --check tests/http3_qpack_support_matrix_contract.rs",
-    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_rckh3q_contract cargo test -p asupersync --test http3_qpack_support_matrix_contract --features test-internals,http3 -- --nocapture",
-    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_rckh3q_h3 cargo check -p asupersync --lib --features http3,test-internals"
+    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test http3_qpack_support_matrix_contract --features test-internals,http3 -- --nocapture",
+    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_1xxmyo cargo test -p asupersync --lib --features test-internals,http3 qpack_instruction_stream -- --nocapture"
   ]
 }

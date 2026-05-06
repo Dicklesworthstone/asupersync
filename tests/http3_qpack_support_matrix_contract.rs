@@ -31,11 +31,18 @@ fn assert_contains(haystack: &str, needle: &str, label: &str) {
     );
 }
 
+fn assert_not_contains(haystack: &str, needle: &str, label: &str) {
+    assert!(
+        !haystack.contains(needle),
+        "{label} must not contain stale marker {needle:?}"
+    );
+}
+
 #[test]
 fn support_matrix_names_every_http3_qpack_boundary() {
     let matrix = matrix();
     assert_eq!(matrix["contract_version"], "http3-qpack-support-matrix-v1");
-    assert_eq!(matrix["bead_id"], "asupersync-rckh3q");
+    assert_eq!(matrix["bead_id"], "asupersync-bdw1hb");
 
     let feature_ids = matrix["feature_matrix"]
         .as_array()
@@ -75,7 +82,11 @@ fn support_matrix_names_every_http3_qpack_boundary() {
     );
     assert_eq!(
         feature(&matrix, "qpack_instruction_stream_state_machine")["status"],
-        "deferred_not_advertised"
+        "supported_opt_in"
+    );
+    assert_eq!(
+        feature(&matrix, "qpack_blocked_stream_scheduling")["status"],
+        "supported_opt_in"
     );
 }
 
@@ -102,6 +113,11 @@ fn docs_state_default_dynamic_and_instruction_stream_boundaries() {
         assert_contains(text, "opt-in dynamic QPACK field-section", "HTTP/3 docs");
         assert_contains(
             text,
+            "not a claim of h3/quinn drop-in parity",
+            "HTTP/3 docs",
+        );
+        assert_not_contains(
+            text,
             "no full QPACK encoder/decoder instruction-stream parity",
             "HTTP/3 docs",
         );
@@ -109,8 +125,13 @@ fn docs_state_default_dynamic_and_instruction_stream_boundaries() {
 
     assert_contains(
         &readme,
-        "dynamic QPACK field-section/table and Huffman strings are supported",
+        "encoder/decoder instruction-stream processing",
         "README current-state table",
+    );
+    assert_contains(
+        &integration,
+        "opt-in dynamic QPACK instruction-stream state machine",
+        "integration QPACK stream state",
     );
     assert_contains(
         &integration,
@@ -120,23 +141,64 @@ fn docs_state_default_dynamic_and_instruction_stream_boundaries() {
 }
 
 #[test]
-fn matrix_does_not_advertise_full_qpack_parity() {
+fn matrix_advertises_only_native_opt_in_qpack_instruction_parity() {
     let matrix = matrix();
     let summary = matrix["summary"]["parity_boundary"]
         .as_str()
         .expect("parity boundary");
     assert_contains(
         summary,
-        "Full QPACK encoder/decoder instruction-stream parity",
+        "native HTTP/3 state machine supports opt-in QPACK instruction-stream processing",
+        "matrix summary",
+    );
+    assert_contains(
+        summary,
+        "not a claim of h3/quinn drop-in parity",
         "matrix summary",
     );
 
-    let deferred = [
+    let promoted = [
         feature(&matrix, "qpack_instruction_stream_state_machine"),
         feature(&matrix, "qpack_blocked_stream_scheduling"),
     ];
-    for row in deferred {
-        assert_eq!(row["support_class"], "not_advertised_deferred");
-        assert_eq!(row["status"], "deferred_not_advertised");
+    for row in promoted {
+        assert_eq!(row["support_class"], "production_live_opt_in");
+        assert_eq!(row["status"], "supported_opt_in");
+    }
+}
+
+#[test]
+fn proof_artifact_schema_and_runner_cover_promoted_qpack_boundaries() {
+    let matrix = matrix();
+    let proof = matrix["proof_artifacts"]
+        .as_array()
+        .expect("proof artifacts")
+        .first()
+        .expect("proof artifact row");
+    let runner_path = proof["runner"].as_str().expect("runner path");
+    let runner = repo_text(runner_path);
+    let source = repo_text("src/http/h3_native.rs");
+
+    assert_contains(
+        &runner,
+        "validation_passed",
+        "QPACK proof runner validation summary",
+    );
+
+    for field in proof["required_fields"]
+        .as_array()
+        .expect("required fields")
+    {
+        let field = field.as_str().expect("required field string");
+        assert_contains(&source, field, "QPACK proof source row fields");
+    }
+
+    for scenario in proof["expected_scenarios"]
+        .as_array()
+        .expect("expected scenarios")
+    {
+        let scenario = scenario.as_str().expect("scenario string");
+        assert_contains(&runner, scenario, "QPACK proof runner scenarios");
+        assert_contains(&source, scenario, "QPACK proof source scenarios");
     }
 }

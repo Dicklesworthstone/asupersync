@@ -438,7 +438,7 @@ It maps common Tokio ecosystem crates to the corresponding Asupersync modules.
 | TLS | `tokio-rustls`, `native-tls` | `src/tls/` (`tls`, `tls-native-roots`, `tls-webpki-roots`) | Feature-gated | Active | Mixed | Medium |
 | WebSocket | `tokio-tungstenite` | `src/net/websocket/` | Built-in | Active (broad RFC6455 conformance registry wired; runtime e2e coverage remains lane-specific) | Mixed | Medium |
 | HTTP stack (HTTP/1.1 + HTTP/2) | `hyper`, `h2`, `http-body`, `hyper-util` | `src/http/h1/`, `src/http/h2/`, `src/http/body.rs`, `src/http/pool.rs` | Built-in | Active | Mixed | Medium |
-| QUIC + HTTP/3 (default static-only QPACK; opt-in dynamic QPACK field-section context) | `quinn`, `h3`, `h3-quinn` | `src/net/quic_core/`, `src/net/quic_native/`, `src/http/h3_native.rs` (native core feature surfaces exposed via `quic`/`http3`; historical wrapper sources in `src/net/quic/` and `src/http/h3/` remain parked outside the core feature graph; support matrix: `artifacts/http3_qpack_support_matrix_v1.json`) | Feature-gated | Active | Mixed | Medium |
+| QUIC + HTTP/3 (default static-only QPACK; opt-in dynamic QPACK field-section and instruction-stream state machine) | `quinn`, `h3`, `h3-quinn` | `src/net/quic_core/`, `src/net/quic_native/`, `src/http/h3_native.rs` (native core feature surfaces exposed via `quic`/`http3`; historical wrapper sources in `src/net/quic/` and `src/http/h3/` remain parked outside the core feature graph; support matrix: `artifacts/http3_qpack_support_matrix_v1.json`) | Feature-gated | Active | Mixed | Medium |
 | Web framework | `axum`, `warp`, `tower-http` | `src/web/`, `src/service/`, `src/server/` | In progress | Active | Mixed | Medium |
 | gRPC | `tonic` + `prost` + `tower` + `hyper` | `src/grpc/` | Built-in | Active | Mixed | Medium |
 | Database clients | `tokio-postgres`, `mysql_async`, `sqlx` | `src/database/{postgres,mysql,sqlite}.rs` | Feature-gated | Active | Mixed | Medium |
@@ -1522,7 +1522,7 @@ and known limitations.
 | I/O reactor (Linux epoll + optional io_uring primary path; BSD/Windows reactors have narrower interest support) | ✅ Implemented |
 | TCP, HTTP/1.1, HTTP/2, TLS | ✅ Implemented |
 | WebSocket | ⚠️ Runtime surface shipped; live RFC6455 conformance coverage now wires extension negotiation plus broader framing/control/close/masking/fragmentation harnesses, with runtime e2e coverage still lane-specific |
-| HTTP/3 (default static-only QPACK; opt-in dynamic QPACK field-section context) | ⚠️ Partial implementation: dynamic QPACK field-section/table and Huffman strings are supported, but there is no full QPACK encoder/decoder instruction-stream parity or blocked-stream scheduler claim |
+| HTTP/3 (default static-only QPACK; opt-in dynamic QPACK field-section and instruction-stream state machine) | ⚠️ Partial implementation: dynamic QPACK field-section/table, Huffman strings, encoder/decoder instruction-stream processing, and bounded blocked-stream scheduling are supported in the native opt-in state machine. Static-only remains the default, and this is not a claim of h3/quinn drop-in parity or full QUIC deployment parity. |
 | Database clients (SQLite, PostgreSQL, MySQL) | ✅ Implemented |
 | Actor supervision (GenServer, links, monitors) | ✅ Implemented |
 | DPOR schedule exploration | ✅ Implemented |
