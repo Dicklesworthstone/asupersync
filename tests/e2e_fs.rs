@@ -52,6 +52,7 @@ const FS_PARITY_WAVE2_SCENARIOS: &[&str] = &[
     "unix-vfs-equivalence",
     "error-kind-remove-missing",
     "error-kind-invalid-utf8-read-to-string",
+    "error-kind-create-dir-existing-file",
     "try-exists-lifecycle",
     "path-ops-copy-hardlink-rename",
     "unix-symlink-metadata-readlink",
@@ -738,6 +739,39 @@ async fn fs_proof_invalid_utf8_read_to_string(temp_root: &Path) -> Result<FsProo
     ))
 }
 
+async fn fs_proof_create_dir_existing_file_error_kind(
+    temp_root: &Path,
+) -> Result<FsProofEvidence, String> {
+    let dir = fs_proof_scenario_dir(temp_root, "error-kind-create-dir-existing-file")?;
+    let file_path = dir.join("not-a-directory");
+    fs::write(&file_path, b"file")
+        .await
+        .map_err(|err| format!("write existing file fixture: {err}"))?;
+
+    let err = fs::create_dir(&file_path)
+        .await
+        .expect_err("create_dir must reject an existing file path");
+    if err.kind() != io::ErrorKind::AlreadyExists {
+        return Err(format!(
+            "create_dir existing-file error drift: error_kind={:?}",
+            err.kind()
+        ));
+    }
+
+    let still_file = fs::metadata(&file_path)
+        .await
+        .map_err(|err| format!("metadata after rejected create_dir: {err}"))?
+        .is_file();
+    if !still_file {
+        return Err("create_dir existing-file rejection changed file disposition".to_string());
+    }
+
+    Ok(FsProofEvidence::supported(
+        0,
+        "error_kind=AlreadyExists,existing_file_preserved=true",
+    ))
+}
+
 async fn fs_proof_file_set_len_permissions(temp_root: &Path) -> Result<FsProofEvidence, String> {
     let dir = fs_proof_scenario_dir(temp_root, "file-set-len-permissions")?;
     let path = dir.join("set-len-permissions.txt");
@@ -1117,6 +1151,15 @@ async fn fs_parity_wave2_run() -> io::Result<Vec<Value>> {
             metadata_expected: "read_bytes=3,read_to_string_error=InvalidData",
             cancellation_point: "none",
             result: fs_proof_invalid_utf8_read_to_string(&temp_root).await,
+        },
+        FsProofScenario {
+            scenario_id: "error-kind-create-dir-existing-file",
+            api: "dir::create_dir",
+            operation: "existing_file_error_mapping",
+            bytes_expected: 0,
+            metadata_expected: "error_kind=AlreadyExists,existing_file_preserved=true",
+            cancellation_point: "none",
+            result: fs_proof_create_dir_existing_file_error_kind(&temp_root).await,
         },
         FsProofScenario {
             scenario_id: "try-exists-lifecycle",
