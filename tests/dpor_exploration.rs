@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Integration tests for DPOR race detection and schedule exploration.
 //!
 //! These tests verify the Phase 5 DPOR infrastructure end-to-end:
