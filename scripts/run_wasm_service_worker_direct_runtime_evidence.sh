@@ -19,9 +19,13 @@ Options:
   --run-id <id>           Deterministic run id for tests.
   --timeout-sec <sec>     Wall-clock timeout for each proof command.
   --contract-only         Validate the contract artifact without running proofs.
+  --dry-run               Print planned proof commands without running cargo or browser fixtures.
   -h, --help              Show this help.
 USAGE
 }
+
+DRY_RUN=0
+RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -43,6 +47,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --contract-only)
             CONTRACT_ONLY=1
+            shift
+            ;;
+        --dry-run)
+            DRY_RUN=1
             shift
             ;;
         -h|--help)
@@ -68,28 +76,48 @@ BROWSER_STATUS=0
 run_proof() {
     local label="$1"
     shift
+    local -a command=("$@")
+    if [[ "$label" == "rust_contract" ]]; then
+        command=("${RCH_BIN}" exec -- "$@")
+    fi
 
     {
         printf 'WASM_SERVICE_WORKER_DIRECT_RUNTIME_COMMAND label=%s timeout_sec=%s command=' "$label" "$TIMEOUT_SEC"
-        printf '%q ' "$@"
+        printf '%q ' "${command[@]}"
         printf '\n'
     } >> "${RUN_LOG_PATH}"
 
+    if [[ "${DRY_RUN}" -eq 1 ]]; then
+        printf 'WASM_SERVICE_WORKER_DIRECT_RUNTIME_DRY_RUN label=%s command=' "$label" >> "${RUN_LOG_PATH}"
+        printf '%q ' "${command[@]}" >> "${RUN_LOG_PATH}"
+        printf '\n' >> "${RUN_LOG_PATH}"
+        echo "WASM_SERVICE_WORKER_DIRECT_RUNTIME_COMMAND_STATUS label=${label} status=0 dry_run=true" >> "${RUN_LOG_PATH}"
+        return 0
+    fi
+
     set +e
-    timeout "${TIMEOUT_SEC}" "$@" >> "${RUN_LOG_PATH}" 2>&1
+    timeout "${TIMEOUT_SEC}" "${command[@]}" >> "${RUN_LOG_PATH}" 2>&1
     local status=$?
     set -e
+
+    if [[ "$label" == "rust_contract" ]] && grep -Eq '^\[RCH\] local \(|falling back to local' "${RUN_LOG_PATH}"; then
+        status=86
+    fi
 
     echo "WASM_SERVICE_WORKER_DIRECT_RUNTIME_COMMAND_STATUS label=${label} status=${status}" >> "${RUN_LOG_PATH}"
     return "${status}"
 }
+
+if [[ "${CONTRACT_ONLY}" -eq 0 && "${DRY_RUN}" -eq 0 && ! -x "${RCH_BIN}" ]]; then
+    echo "FATAL: rch is required and was not found/executable at: ${RCH_BIN}" >&2
+    exit 1
+fi
 
 if [[ "${CONTRACT_ONLY}" -eq 1 ]]; then
     : > "${RUN_LOG_PATH}"
 else
     : > "${RUN_LOG_PATH}"
     run_proof rust_contract \
-        rch exec -- \
         env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 "RUSTFLAGS=-C debuginfo=0" "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_wasm_sw_broker_contract" \
         cargo test -p asupersync --test wasm_service_worker_broker_contract --features test-internals,wasm-browser-dev -- --nocapture || RUST_STATUS=$?
 
@@ -114,6 +142,10 @@ contract_only = sys.argv[6] == "1"
 timeout_sec = int(sys.argv[7])
 rust_status = int(sys.argv[8])
 browser_status = int(sys.argv[9])
+dry_run = any(
+    "WASM_SERVICE_WORKER_DIRECT_RUNTIME_DRY_RUN " in line
+    for line in Path(sys.argv[3]).read_text().splitlines()
+) if Path(sys.argv[3]).exists() else False
 
 contract = json.loads(artifact_path.read_text())
 required_fields = contract["required_log_fields"]
@@ -177,7 +209,7 @@ browser_status_note = ""
 browser_result_root = repo_root / "target/e2e-results/service_worker_broker_consumer"
 browser_summary = None
 browser_summary_path = None
-if not contract_only and browser_result_root.exists():
+if not contract_only and not dry_run and browser_result_root.exists():
     summaries = sorted(
         browser_result_root.glob("*/summary.json"),
         key=lambda path: path.stat().st_mtime,
@@ -193,7 +225,7 @@ browser_checks = (browser_summary or {}).get("checks", {})
 
 
 def check_browser_expectations(scenario_id):
-    if contract_only:
+    if contract_only or dry_run:
         return []
     failures = []
     if effective_browser_status != 0:
@@ -277,13 +309,13 @@ for scenario in contract["scenario_matrix"]:
     proof_source = scenario.get("proof_source", "")
     markers = scenario.get("test_markers", [])
     marker_text = combined_browser_text if proof_source == "browser_fixture" else log_text
-    missing_markers = [] if contract_only else [marker for marker in markers if marker not in marker_text]
-    browser_failures = [] if proof_source != "browser_fixture" else check_browser_expectations(scenario_id)
+    missing_markers = [] if contract_only or dry_run else [marker for marker in markers if marker not in marker_text]
+    browser_failures = [] if dry_run or proof_source != "browser_fixture" else check_browser_expectations(scenario_id)
     first_failure = ""
 
-    if contract_only:
+    if contract_only or dry_run:
         verdict = "contract_present"
-        actual_reason = scenario["actual_reason"]
+        actual_reason = "dry_run" if dry_run else scenario["actual_reason"]
     elif proof_source == "rust_contract" and effective_rust_status != 0:
         verdict = "fail"
         first_failure = f"rust_contract_status:{effective_rust_status}"
@@ -334,7 +366,7 @@ for scenario in contract["scenario_matrix"]:
         drifts.append(f"{scenario_id}:{first_failure}")
 
 validation_passed = not drifts and (
-    contract_only or len(observed_scenarios) == len(expected_scenarios)
+    contract_only or dry_run or len(observed_scenarios) == len(expected_scenarios)
 )
 report = {
     "schema_version": "wasm-service-worker-direct-runtime-run-report-v1",
@@ -345,6 +377,7 @@ report = {
     "support_class_after": contract["decision"]["support_class_after"],
     "run_id": run_id,
     "contract_only": contract_only,
+    "dry_run": dry_run,
     "artifact_path": repo_relative(artifact_path),
     "run_report_path": repo_relative(run_report_path),
     "run_log_path": repo_relative(run_log_path),
