@@ -5,7 +5,7 @@
 # saves structured artifacts under target/e2e-results/.
 #
 # Usage:
-#   ./scripts/test_redis_e2e.sh
+#   ./scripts/test_redis_e2e.sh [--dry-run]
 #
 # Environment Variables:
 #   REDIS_IMAGE    - Docker image (default: redis:7)
@@ -14,6 +14,7 @@
 #   RUST_LOG       - tracing filter (default: asupersync=debug)
 #   RUST_BACKTRACE - 1 to enable backtraces (default: 1)
 #   TEST_SEED      - deterministic seed override (default: 0xDEADBEEF)
+#   RCH_BIN        - remote compilation helper executable (default: rch)
 
 set -euo pipefail
 
@@ -24,6 +25,19 @@ TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 RUN_STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 LOG_FILE="${OUTPUT_DIR}/redis_e2e_${TIMESTAMP}.log"
 ARTIFACT_DIR="${OUTPUT_DIR}/artifacts_${TIMESTAMP}"
+RCH_BIN="${RCH_BIN:-rch}"
+CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_redis_e2e}"
+DRY_RUN=0
+
+if [[ "${1:-}" == "--dry-run" ]]; then
+    DRY_RUN=1
+    shift
+fi
+
+if [[ "$#" -gt 0 ]]; then
+    echo "usage: $0 [--dry-run]" >&2
+    exit 2
+fi
 
 export REDIS_IMAGE="${REDIS_IMAGE:-redis:7}"
 export REDIS_PORT="${REDIS_PORT:-6379}"
@@ -37,6 +51,29 @@ CONTAINER_NAME="asupersync_redis_e2e"
 
 mkdir -p "$OUTPUT_DIR" "$ARTIFACT_DIR"
 
+format_command() {
+    local rendered
+    printf -v rendered "%q " "$@"
+    printf '%s' "${rendered% }"
+}
+
+json_escape() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//$'\n'/\\n}"
+    printf '%s' "${value}"
+}
+
+run_or_print() {
+    if [[ "${DRY_RUN}" -eq 1 ]]; then
+        format_command "$@"
+        printf '\n'
+        return 0
+    fi
+    "$@"
+}
+
 echo "==================================================================="
 echo "                   Asupersync Redis E2E Tests                      "
 echo "==================================================================="
@@ -49,6 +86,11 @@ echo "  RUST_LOG:        ${RUST_LOG}"
 echo "  TEST_SEED:       ${TEST_SEED}"
 echo "  Output:          ${LOG_FILE}"
 echo "  Artifacts:       ${ARTIFACT_DIR}"
+echo "  Runner:          ${RCH_BIN} exec"
+echo "  Target dir:      ${CARGO_TARGET_DIR}"
+if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo "  Mode:            dry-run"
+fi
 echo ""
 
 cleanup() {
@@ -56,11 +98,28 @@ cleanup() {
   echo ">>> Cleaning up docker container..."
   docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
 }
-trap cleanup EXIT
+if [[ "${DRY_RUN}" -eq 0 ]]; then
+  trap cleanup EXIT
+fi
 
 # --- [1/4] Pre-flight: compilation check ---
 echo ">>> [1/4] Pre-flight: checking compilation..."
-if ! cargo check --test e2e_redis --all-features 2>"${ARTIFACT_DIR}/compile_errors.log"; then
+CHECK_COMMAND=(
+    "${RCH_BIN}"
+    exec
+    --
+    env
+    "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
+    "RUST_LOG=${RUST_LOG}"
+    "RUST_BACKTRACE=${RUST_BACKTRACE}"
+    "TEST_SEED=${TEST_SEED}"
+    cargo
+    check
+    --test
+    e2e_redis
+    --all-features
+)
+if ! run_or_print "${CHECK_COMMAND[@]}" 2>"${ARTIFACT_DIR}/compile_errors.log"; then
     echo "  FATAL: compilation failed — see ${ARTIFACT_DIR}/compile_errors.log"
     exit 1
 fi
@@ -69,8 +128,6 @@ echo "  OK"
 # --- [2/4] Start Redis and run tests ---
 echo ""
 echo ">>> [2/4] Starting Redis container..."
-
-docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
 
 pick_free_port() {
   python3 - <<'PY'
@@ -87,29 +144,39 @@ start_redis() {
   docker run -d --name "${CONTAINER_NAME}" -p "127.0.0.1:${port}:6379" "${REDIS_IMAGE}" >/dev/null
 }
 
-if ! start_redis "${REDIS_PORT}"; then
-  echo ">>> Failed to bind ${REDIS_PORT}; retrying with a free port..."
-  REDIS_PORT="$(pick_free_port)"
+if [[ "${DRY_RUN}" -eq 1 ]]; then
+  echo ">>> Dry-run: skipping Redis container startup."
+else
   docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
-  start_redis "${REDIS_PORT}"
+
+  if ! start_redis "${REDIS_PORT}"; then
+    echo ">>> Failed to bind ${REDIS_PORT}; retrying with a free port..."
+    REDIS_PORT="$(pick_free_port)"
+    docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+    start_redis "${REDIS_PORT}"
+  fi
 fi
 
 echo ">>> Redis listening on 127.0.0.1:${REDIS_PORT}"
 
 echo ">>> Waiting for Redis to become ready..."
 READY=0
-for i in $(seq 1 50); do
-  if docker exec "${CONTAINER_NAME}" redis-cli ping >/dev/null 2>&1; then
-    READY=1
-    break
-  fi
-  sleep 0.1
-done
+if [[ "${DRY_RUN}" -eq 1 ]]; then
+  READY=1
+else
+  for i in $(seq 1 50); do
+    if docker exec "${CONTAINER_NAME}" redis-cli ping >/dev/null 2>&1; then
+      READY=1
+      break
+    fi
+    sleep 0.1
+  done
 
-if [[ "${READY}" -ne 1 ]]; then
-  echo "ERROR: Redis did not become ready in time"
-  docker logs "${CONTAINER_NAME}" || true
-  exit 1
+  if [[ "${READY}" -ne 1 ]]; then
+    echo "ERROR: Redis did not become ready in time"
+    docker logs "${CONTAINER_NAME}" || true
+    exit 1
+  fi
 fi
 
 export REDIS_URL="redis://127.0.0.1:${REDIS_PORT}"
@@ -117,7 +184,30 @@ export REDIS_URL="redis://127.0.0.1:${REDIS_PORT}"
 echo ""
 echo ">>> Running Redis E2E tests..."
 TEST_RESULT=0
-if timeout 180 cargo test --test e2e_redis --all-features -- --nocapture --test-threads=1 2>&1 | tee "$LOG_FILE"; then
+TEST_COMMAND=(
+    "${RCH_BIN}"
+    exec
+    --
+    env
+    "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
+    "REDIS_URL=${REDIS_URL}"
+    "TEST_LOG_LEVEL=${TEST_LOG_LEVEL}"
+    "RUST_LOG=${RUST_LOG}"
+    "RUST_BACKTRACE=${RUST_BACKTRACE}"
+    "TEST_SEED=${TEST_SEED}"
+    cargo
+    test
+    --test
+    e2e_redis
+    --all-features
+    --
+    --nocapture
+    --test-threads=1
+)
+if [[ "${DRY_RUN}" -eq 1 ]]; then
+  format_command "${TEST_COMMAND[@]}" | tee "$LOG_FILE"
+  TEST_RESULT=0
+elif timeout 180 "${TEST_COMMAND[@]}" 2>&1 | tee "$LOG_FILE"; then
   TEST_RESULT=0
 else
   TEST_RESULT=$?
@@ -153,16 +243,27 @@ fi
 echo ""
 echo ">>> [4/4] Collecting artifacts..."
 
-PASSED=$(grep -c "^test .* ok$" "$LOG_FILE" 2>/dev/null || echo "0")
-FAILED=$(grep -c "^test .* FAILED$" "$LOG_FILE" 2>/dev/null || echo "0")
+PASSED=$({ grep -c "^test .* ok$" "$LOG_FILE" 2>/dev/null || true; } | awk '{s+=$1} END {print s+0}')
+FAILED=$({ grep -c "^test .* FAILED$" "$LOG_FILE" 2>/dev/null || true; } | awk '{s+=$1} END {print s+0}')
 SUITE_ID="redis_e2e"
 SCENARIO_ID="E2E-SUITE-REDIS"
 SUMMARY_FILE="${ARTIFACT_DIR}/summary.json"
-REPRO_COMMAND="TEST_LOG_LEVEL=${TEST_LOG_LEVEL} RUST_LOG=${RUST_LOG} TEST_SEED=${TEST_SEED} bash ${SCRIPT_DIR}/$(basename "$0")"
+REPRO_COMMAND="REDIS_IMAGE=${REDIS_IMAGE} REDIS_PORT=${REDIS_PORT} TEST_LOG_LEVEL=${TEST_LOG_LEVEL} RUST_LOG=${RUST_LOG} TEST_SEED=${TEST_SEED} RCH_BIN=${RCH_BIN} CARGO_TARGET_DIR=${CARGO_TARGET_DIR} bash ${SCRIPT_DIR}/$(basename "$0")"
 RUN_ENDED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 SUITE_STATUS="failed"
 if [[ "$TEST_RESULT" -eq 0 && "$PATTERN_FAILURES" -eq 0 ]]; then
   SUITE_STATUS="passed"
+fi
+if [[ "${DRY_RUN}" -eq 1 ]]; then
+  SUITE_STATUS="planned"
+fi
+DRY_RUN_JSON=false
+if [[ "${DRY_RUN}" -eq 1 ]]; then
+  DRY_RUN_JSON=true
+fi
+FAILURE_CLASS="test_or_pattern_failure"
+if [[ "$SUITE_STATUS" == "passed" || "$SUITE_STATUS" == "planned" ]]; then
+  FAILURE_CLASS="none"
 fi
 
 cat > "${SUMMARY_FILE}" << ENDJSON
@@ -174,19 +275,23 @@ cat > "${SUMMARY_FILE}" << ENDJSON
   "started_ts": "${RUN_STARTED_TS}",
   "ended_ts": "${RUN_ENDED_TS}",
   "status": "${SUITE_STATUS}",
-  "repro_command": "${REPRO_COMMAND}",
-  "artifact_path": "${SUMMARY_FILE}",
+  "failure_class": "${FAILURE_CLASS}",
+  "dry_run": ${DRY_RUN_JSON},
+  "runner": "rch exec",
+  "all_rch_routed": true,
+  "repro_command": "$(json_escape "${REPRO_COMMAND}")",
+  "artifact_path": "$(json_escape "${SUMMARY_FILE}")",
   "suite": "${SUITE_ID}",
   "timestamp": "${TIMESTAMP}",
-  "test_log_level": "${TEST_LOG_LEVEL}",
-  "redis_image": "${REDIS_IMAGE}",
+  "test_log_level": "$(json_escape "${TEST_LOG_LEVEL}")",
+  "redis_image": "$(json_escape "${REDIS_IMAGE}")",
   "redis_port": ${REDIS_PORT},
   "tests_passed": ${PASSED},
   "tests_failed": ${FAILED},
   "exit_code": ${TEST_RESULT},
   "pattern_failures": ${PATTERN_FAILURES},
-  "log_file": "${LOG_FILE}",
-  "artifact_dir": "${ARTIFACT_DIR}"
+  "log_file": "$(json_escape "${LOG_FILE}")",
+  "artifact_dir": "$(json_escape "${ARTIFACT_DIR}")"
 }
 ENDJSON
 
@@ -202,7 +307,10 @@ echo ""
 echo "==================================================================="
 echo "                           SUMMARY                                 "
 echo "==================================================================="
-if [[ "$TEST_RESULT" -eq 0 && "$PATTERN_FAILURES" -eq 0 ]]; then
+if [[ "${DRY_RUN}" -eq 1 ]]; then
+  echo "Status: PLANNED"
+  echo "Docker and Cargo were not executed."
+elif [[ "$TEST_RESULT" -eq 0 && "$PATTERN_FAILURES" -eq 0 ]]; then
   echo "Status: PASSED"
 else
   echo "Status: FAILED"
@@ -211,7 +319,7 @@ else
 fi
 echo "==================================================================="
 
-find "$ARTIFACT_DIR" -name "*.txt" -empty -delete 2>/dev/null || true
+echo "Diagnostic artifacts are retained for auditability, including empty files."
 
 if [[ "$TEST_RESULT" -ne 0 || "$PATTERN_FAILURES" -ne 0 ]]; then
   exit 1
