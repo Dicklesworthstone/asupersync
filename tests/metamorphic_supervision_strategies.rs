@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Metamorphic integration tests for supervision configuration and trackers.
 //!
 //! These tests validate relationships that should hold across transformed
