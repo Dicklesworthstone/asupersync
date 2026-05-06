@@ -53,6 +53,7 @@ const FS_PARITY_WAVE2_SCENARIOS: &[&str] = &[
     "error-kind-remove-missing",
     "error-kind-invalid-utf8-read-to-string",
     "error-kind-create-dir-existing-file",
+    "error-kind-read-dir-non-directory",
     "try-exists-lifecycle",
     "path-ops-copy-hardlink-rename",
     "unix-symlink-metadata-readlink",
@@ -772,6 +773,42 @@ async fn fs_proof_create_dir_existing_file_error_kind(
     ))
 }
 
+async fn fs_proof_read_dir_non_directory_error_kind(
+    temp_root: &Path,
+) -> Result<FsProofEvidence, String> {
+    let dir = fs_proof_scenario_dir(temp_root, "error-kind-read-dir-non-directory")?;
+    let file_path = dir.join("regular-file.txt");
+    fs::write(&file_path, b"not-a-dir")
+        .await
+        .map_err(|err| format!("write read_dir non-directory fixture: {err}"))?;
+
+    let err = fs::read_dir(&file_path)
+        .await
+        .expect_err("read_dir must reject a regular file path");
+    if err.kind() != io::ErrorKind::NotADirectory {
+        return Err(format!(
+            "read_dir non-directory error drift: error_kind={:?}",
+            err.kind()
+        ));
+    }
+
+    let metadata = fs::metadata(&file_path)
+        .await
+        .map_err(|err| format!("metadata after rejected read_dir: {err}"))?;
+    if !metadata.is_file() || metadata.len() != 9 {
+        return Err(format!(
+            "read_dir non-directory rejection changed file disposition: is_file={} len={}",
+            metadata.is_file(),
+            metadata.len()
+        ));
+    }
+
+    Ok(FsProofEvidence::supported(
+        metadata.len(),
+        "error_kind=NotADirectory,existing_file_preserved=true,len=9",
+    ))
+}
+
 async fn fs_proof_file_set_len_permissions(temp_root: &Path) -> Result<FsProofEvidence, String> {
     let dir = fs_proof_scenario_dir(temp_root, "file-set-len-permissions")?;
     let path = dir.join("set-len-permissions.txt");
@@ -1160,6 +1197,15 @@ async fn fs_parity_wave2_run() -> io::Result<Vec<Value>> {
             metadata_expected: "error_kind=AlreadyExists,existing_file_preserved=true",
             cancellation_point: "none",
             result: fs_proof_create_dir_existing_file_error_kind(&temp_root).await,
+        },
+        FsProofScenario {
+            scenario_id: "error-kind-read-dir-non-directory",
+            api: "read_dir",
+            operation: "regular_file_error_mapping",
+            bytes_expected: 9,
+            metadata_expected: "error_kind=NotADirectory,existing_file_preserved=true,len=9",
+            cancellation_point: "none",
+            result: fs_proof_read_dir_non_directory_error_kind(&temp_root).await,
         },
         FsProofScenario {
             scenario_id: "try-exists-lifecycle",
