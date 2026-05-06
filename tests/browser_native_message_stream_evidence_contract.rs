@@ -7,6 +7,11 @@ use std::process::Command;
 const ARTIFACT_PATH: &str = "artifacts/wave2/browser_native_message_and_stream_apis_evidence.json";
 const REGISTRY_PATH: &str = "artifacts/wave2_capability_evidence_registry_v1.json";
 const RUNNER_PATH: &str = "scripts/run_browser_native_message_stream_evidence.sh";
+const WASM_DOC_PATH: &str = "docs/WASM.md";
+const INTEGRATION_DOC_PATH: &str = "docs/integration.md";
+const README_PATH: &str = "README.md";
+const PACKAGE_MANIFEST_PATH: &str = "packages/browser/package.json";
+const PACKAGE_SOURCE_PATH: &str = "packages/browser/src/index.ts";
 const FIXTURE_MAIN_PATH: &str = "tests/fixtures/browser-native-message-stream-consumer/src/main.ts";
 const FIXTURE_BROWSER_CHECK_PATH: &str =
     "tests/fixtures/browser-native-message-stream-consumer/scripts/check-browser-run.mjs";
@@ -40,6 +45,15 @@ fn string_array<'a>(value: &'a serde_json::Value, key: &str) -> Vec<&'a str> {
                 .unwrap_or_else(|| panic!("{key} entry must be a string"))
         })
         .collect()
+}
+
+fn assert_contains_all(haystack: &str, label: &str, markers: &[&str]) {
+    for marker in markers {
+        assert!(
+            haystack.contains(marker),
+            "{label} missing marker: {marker}"
+        );
+    }
 }
 
 #[test]
@@ -176,6 +190,185 @@ fn fixture_imports_only_public_browser_package_and_exercises_required_surfaces()
             "fixture validation surface missing marker: {marker}"
         );
     }
+}
+
+#[test]
+fn promoted_docs_package_registry_and_artifact_claim_the_same_public_boundary() {
+    let wasm_doc = read_file(WASM_DOC_PATH);
+    let integration_doc = read_file(INTEGRATION_DOC_PATH);
+    let readme = read_file(README_PATH);
+    let package_manifest = read_file(PACKAGE_MANIFEST_PATH);
+    let package_source = read_file(PACKAGE_SOURCE_PATH);
+    let registry = read_json(REGISTRY_PATH);
+    let artifact = read_json(ARTIFACT_PATH);
+
+    let artifact_entrypoints = string_array(&artifact, "public_entrypoints");
+    for entrypoint in &artifact_entrypoints {
+        assert!(
+            package_source.contains(entrypoint),
+            "artifact public entrypoint missing from package source: {entrypoint}"
+        );
+    }
+
+    assert_contains_all(
+        &package_manifest,
+        PACKAGE_MANIFEST_PATH,
+        &[
+            "\"name\": \"@asupersync/browser\"",
+            "\"types\": \"./dist/index.d.ts\"",
+            "\"dist\"",
+        ],
+    );
+    assert_contains_all(
+        &package_source,
+        PACKAGE_SOURCE_PATH,
+        &[
+            "BROWSER_NATIVE_MESSAGING_CONTRACT_ID",
+            "BROWSER_NATIVE_STREAM_CONTRACT_ID",
+            "BROWSER_NATIVE_MESSAGING_UNSUPPORTED_CODE",
+            "BROWSER_NATIVE_MESSAGING_OPERATION_FAILED_CODE",
+            "BROWSER_NATIVE_STREAM_UNSUPPORTED_CODE",
+            "BROWSER_NATIVE_STREAM_OPERATION_FAILED_CODE",
+            "\"ASUPERSYNC_BROWSER_NATIVE_MESSAGING_UNSUPPORTED\"",
+            "\"ASUPERSYNC_BROWSER_NATIVE_MESSAGING_OPERATION_FAILED\"",
+            "\"ASUPERSYNC_BROWSER_NATIVE_STREAM_UNSUPPORTED\"",
+            "\"ASUPERSYNC_BROWSER_NATIVE_STREAM_OPERATION_FAILED\"",
+            "\"capability_not_granted\"",
+            "\"degraded_mode_denied\"",
+            "supportClass: supported ? \"direct_runtime_supported\" : \"unsupported\"",
+            "export type BrowserNativeMessagingSurface",
+            "export type BrowserNativeStreamSurface",
+            "BrowserNativeMessagingCapability",
+            "BrowserNativeStreamCapability",
+            "BrowserMessagePort",
+            "BrowserMessageChannel",
+            "BrowserBroadcastChannel",
+            "BrowserReadableStream",
+            "BrowserWritableStream",
+            "BROWSER_NATIVE_MESSAGING_UNSUPPORTED_CODE",
+            "BROWSER_NATIVE_MESSAGING_OPERATION_FAILED_CODE",
+            "BROWSER_NATIVE_STREAM_UNSUPPORTED_CODE",
+            "BROWSER_NATIVE_STREAM_OPERATION_FAILED_CODE",
+        ],
+    );
+
+    assert_contains_all(
+        &wasm_doc,
+        WASM_DOC_PATH,
+        &[
+            "guarded-public-browser-boundary",
+            ARTIFACT_PATH,
+            RUNNER_PATH,
+            "Browser-native messaging surfaces",
+            "MessageChannel",
+            "MessagePort",
+            "BroadcastChannel",
+            "BrowserNativeMessagingCapability",
+            "detectBrowserNativeMessagingSupport()",
+            "assertBrowserNativeMessagingSupport()",
+            "WHATWG `ReadableStream` / `WritableStream` browser-native helpers",
+            "BrowserReadableStream",
+            "BrowserWritableStream",
+            "BrowserNativeStreamCapability",
+            "detectBrowserNativeStreamSupport()",
+            "assertBrowserNativeStreamSupport()",
+            "capability_not_granted",
+            "degraded_mode_denied",
+            "ASUPERSYNC_BROWSER_NATIVE_MESSAGING_UNSUPPORTED",
+            "ASUPERSYNC_BROWSER_NATIVE_MESSAGING_OPERATION_FAILED",
+            "ASUPERSYNC_BROWSER_NATIVE_STREAM_UNSUPPORTED",
+            "ASUPERSYNC_BROWSER_NATIVE_STREAM_OPERATION_FAILED",
+            "cross-origin",
+            "raw transport",
+            "process",
+            "Rust `AsyncRead` / `AsyncWrite` browser-core ABI remains substrate-only",
+        ],
+    );
+    assert_contains_all(
+        &integration_doc,
+        INTEGRATION_DOC_PATH,
+        &[
+            "Guarded public browser boundary",
+            "guarded-public-browser-boundary",
+            ARTIFACT_PATH,
+            RUNNER_PATH,
+            "createBrowserMessageChannel()",
+            "createBrowserMessagePort()",
+            "createBrowserBroadcastChannel()",
+            "createBrowserReadableStream()",
+            "createBrowserWritableStream()",
+            "BrowserNativeMessagingCapability",
+            "BrowserNativeStreamCapability",
+            "capability_not_granted",
+            "degraded_mode_denied",
+            "ASUPERSYNC_BROWSER_NATIVE_MESSAGING_UNSUPPORTED",
+            "ASUPERSYNC_BROWSER_NATIVE_MESSAGING_OPERATION_FAILED",
+            "ASUPERSYNC_BROWSER_NATIVE_STREAM_UNSUPPORTED",
+            "ASUPERSYNC_BROWSER_NATIVE_STREAM_OPERATION_FAILED",
+            "raw TCP/UDP/filesystem/process",
+            "cross-origin federation",
+            "service-worker or shared-worker direct-runtime support",
+            "`AsyncRead` / `AsyncWrite` browser-core wasm ABI",
+        ],
+    );
+    assert!(
+        !integration_doc.contains("public messaging-surface APIs"),
+        "integration guide must not retain the stale unpromoted messaging row"
+    );
+    assert_contains_all(
+        &readme,
+        README_PATH,
+        &[
+            "Browser-native application-boundary helpers",
+            ARTIFACT_PATH,
+            "MessageChannel",
+            "MessagePort",
+            "BroadcastChannel",
+            "ReadableStream",
+            "WritableStream",
+            "BrowserNativeMessagingCapability",
+            "BrowserNativeStreamCapability",
+            "capability_not_granted",
+            "degraded_mode_denied",
+            "ASUPERSYNC_BROWSER_NATIVE_*",
+            "cross-origin federation",
+            "service/shared-worker direct runtime",
+            "public Rust `AsyncRead` / `AsyncWrite` browser-core",
+        ],
+    );
+
+    let row = registry["capability_rows"]
+        .as_array()
+        .expect("registry capability_rows")
+        .iter()
+        .find(|row| row["capability_id"].as_str() == Some("browser_native_message_and_stream_apis"))
+        .expect("browser_native_message_and_stream_apis registry row");
+    let decision = &artifact["support_decision"];
+    assert_eq!(
+        row["support_class_after"].as_str(),
+        decision["support_class_after"].as_str()
+    );
+    assert_eq!(
+        row["promotion_state"].as_str(),
+        decision["promotion_state"].as_str()
+    );
+    assert_eq!(
+        row["support_class_after"].as_str(),
+        Some("guarded-public-browser-boundary")
+    );
+    assert_eq!(
+        row["artifact_paths"]
+            .as_array()
+            .expect("artifact_paths")
+            .iter()
+            .filter(|path| path.as_str() == Some(ARTIFACT_PATH))
+            .count(),
+        1
+    );
+    assert_eq!(
+        row["planned_artifact_paths"].as_array().map(Vec::len),
+        Some(0)
+    );
 }
 
 #[test]

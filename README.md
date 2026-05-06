@@ -1412,6 +1412,14 @@ applications via `wasm-bindgen`.
 - **Capability-gated browser transports**: shipped browser networking uses
   `fetch`, `WebSocket`, and an explicit WebTransport datagram lane when the
   host exposes `globalThis.WebTransport` over HTTPS.
+- **Browser-native application-boundary helpers**: `@asupersync/browser` now
+  exposes guarded `MessageChannel` / `MessagePort` / `BroadcastChannel` helpers
+  and WHATWG `ReadableStream` / `WritableStream` byte wrappers. Construction
+  requires explicit `BrowserNativeMessagingCapability` or
+  `BrowserNativeStreamCapability` authority, denies `capability_not_granted`
+  and `degraded_mode_denied`, and reports stable
+  `ASUPERSYNC_BROWSER_NATIVE_*` error codes. The proof artifact is
+  `artifacts/wave2/browser_native_message_and_stream_apis_evidence.json`.
 - **Framework adapters on the browser main thread**: `@asupersync/react` and
   `@asupersync/next` remain client-rendered browser adapters layered on top of
   the same Browser Edition runtime boundary.
@@ -1455,6 +1463,12 @@ applications via `wasm-bindgen`.
 - **Raw TCP/UDP, filesystem, process/signal**: these native-only surfaces
   are `cfg`-gated out on `wasm32`. Browser networking uses `fetch`,
   `WebSocket`, and capability-gated `WebTransport` datagrams instead.
+- **Native host parity from browser-native helpers**: the public
+  `MessageChannel` / `BroadcastChannel` / WHATWG stream helpers are guarded
+  same-browser wrappers only. They do not imply raw transport parity,
+  cross-origin federation, service/shared-worker direct runtime, filesystem or
+  process access, or a public Rust `AsyncRead` / `AsyncWrite` browser-core
+  wasm ABI.
 
 ### Quick start
 

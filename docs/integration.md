@@ -306,10 +306,38 @@ capability belong to right now?"
 |---|---|---|---|---|
 | Direct-runtime supported | Shipped, package-guarded, and covered by Browser Edition evidence lanes | browser main thread, dedicated worker, React client tree, Next client component | keep runtime creation inside that browser boundary and debug the specific failing capability | `docs/WASM.md`, matrix below |
 | Guarded direct-runtime support | Shipped only when explicit host or deployment prerequisites hold | `WebTransport` datagrams, browser-main-thread-only download helpers, `localStorage` substrate | check the prerequisite/denial reason first, then fall back to the documented safe lane instead of widening the support claim | `docs/WASM.md`, `docs/wasm_troubleshooting_compendium.md` |
+| Guarded public browser boundary | Shipped public `@asupersync/browser` helpers over same-browser host APIs; not a new direct-runtime host lane | browser-native `MessageChannel` / `MessagePort` / `BroadcastChannel` helpers; WHATWG `ReadableStream` / `WritableStream` byte helpers | require the explicit browser-native capability token, inspect stable reason/error codes, and fall back to serialized app-boundary handoff when denied | `docs/WASM.md`, `artifacts/wave2/browser_native_message_and_stream_apis_evidence.json` |
 | Broker/coordinator-only | The host may coordinate bounded work and durable handoff, but must not own a direct Browser Edition runtime | service-worker bounded broker registration and durable handoff; shared-worker bounded coordinator attach/detach/fallback | keep runtime creation out of service/shared-worker hosts; use the broker/coordinator helpers only for scoped registration, restartable work descriptors, per-client attach, detach cleanup, and handoff evidence | `docs/WASM.md`, `docs/wasm_service_worker_broker_contract.md`, `docs/wasm_shared_worker_tenancy_lifecycle_contract.md` |
-| Direct-runtime feasible but not yet shipped | Real substrate exists, but there is no promoted public Browser Edition API/contract yet | public messaging-surface APIs | do not present it as supported; keep it on explicit app-boundary or repo-internal validation lanes until promotion closes | `docs/WASM.md` |
+| Direct-runtime feasible but not yet shipped | Real substrate exists, but there is no promoted public Browser Edition API/contract yet | Rust `AsyncRead` / `AsyncWrite` browser-core stream ABI | do not present it as public JS/TS SDK support; keep it on repo-internal validation lanes until promotion closes | `docs/WASM.md` |
 | Bridge-only | Direct Browser Edition runtime execution is not allowed at that boundary; use serialization or an adapter seam instead | React SSR, Next server components, Next route handlers, Next edge runtime | move runtime creation back into a browser-owned boundary and cross the server/edge hop with serializable data only | matrix below, `docs/wasm_troubleshooting_compendium.md` |
 | Impossible / unsupported | The browser security model or shipped package contract rules out direct Browser Edition runtime support | Node-only direct runtime, raw TCP/UDP, filesystem, process/signal, native DB clients | switch to native `asupersync` or an explicit bridge; do not add fake parity shims | `docs/WASM.md` |
+
+### Browser-Native Messaging And Stream Helper Contract
+
+The promoted browser-native support class is
+`guarded-public-browser-boundary`. The public `@asupersync/browser` package
+exports `detectBrowserNativeMessagingSupport()`,
+`assertBrowserNativeMessagingSupport()`, `createBrowserMessageChannel()`,
+`createBrowserMessagePort()`, `createBrowserBroadcastChannel()`,
+`detectBrowserNativeStreamSupport()`, `assertBrowserNativeStreamSupport()`,
+`createBrowserReadableStream()`, and `createBrowserWritableStream()`.
+
+Messaging construction requires an explicit
+`BrowserNativeMessagingCapability`; stream construction requires an explicit
+`BrowserNativeStreamCapability`. Denials are intentionally stable:
+`capability_not_granted`, `degraded_mode_denied`,
+`ASUPERSYNC_BROWSER_NATIVE_MESSAGING_UNSUPPORTED`,
+`ASUPERSYNC_BROWSER_NATIVE_MESSAGING_OPERATION_FAILED`,
+`ASUPERSYNC_BROWSER_NATIVE_STREAM_UNSUPPORTED`, and
+`ASUPERSYNC_BROWSER_NATIVE_STREAM_OPERATION_FAILED` are the operator-facing
+markers. The proof artifact is
+`artifacts/wave2/browser_native_message_and_stream_apis_evidence.json`, and the
+maintained runner is `scripts/run_browser_native_message_stream_evidence.sh`.
+
+These helpers are same-browser application-boundary wrappers. They do not imply
+raw TCP/UDP/filesystem/process support, cross-origin federation,
+service-worker or shared-worker direct-runtime support, or a public Rust
+`AsyncRead` / `AsyncWrite` browser-core wasm ABI.
 
 ### Browser Environment Support Matrix
 
@@ -419,6 +447,7 @@ class:
 |---|---|---|
 | Direct-runtime supported | stay in the current browser boundary, capture the emitted diagnostics, and follow the matching recipe in `docs/wasm_troubleshooting_compendium.md` | do not move runtime creation across boundaries just because one capability failed |
 | Guarded direct-runtime support | verify the missing prerequisite or denial reason, then use the documented fallback (`WebSocket`, `fetch`, export handoff, etc.) | do not rewrite docs or package claims to make the guarded lane sound ambient |
+| Guarded public browser boundary | require the matching `BrowserNativeMessagingCapability` or `BrowserNativeStreamCapability`, check `capability_not_granted` / `degraded_mode_denied` / `ASUPERSYNC_BROWSER_NATIVE_*` diagnostics, and fall back to serialized app-boundary handoff | do not treat same-browser helper wrappers as raw transports, cross-origin federation, process/filesystem access, service/shared-worker direct runtime, or Rust `AsyncRead` / `AsyncWrite` wasm ABI support |
 | Direct-runtime feasible but not yet shipped | keep the behavior on a repo-internal fixture, app-boundary adapter, or explicit experimental lane until the public contract is promoted | do not present substrate existence as shipped SDK support |
 | Bridge-only | move direct runtime creation into a browser main-thread or dedicated-worker entrypoint and keep the server/edge hop serialized | do not tunnel live Browser Edition handles across client/server boundaries |
 | Impossible / unsupported | change runtime lane entirely: native `asupersync`, server-side bridge, or another explicit non-browser path | do not add hidden partial-runtime fallbacks or pretend the browser package can emulate native surfaces |

@@ -379,6 +379,19 @@ cancellation, drain/finalize, replay, and durable recovery semantics.
 | WHATWG `ReadableStream` / `WritableStream` browser-native helpers | Guarded public Browser Edition helpers | `src/io/browser_stream.rs`, `packages/browser/src/index.ts` | `BrowserReadableStream`, `BrowserWritableStream`, `detectBrowserNativeStreamSupport()`, and `assertBrowserNativeStreamSupport()` expose byte-oriented browser-native wrappers for application-boundary streams. Construction requires explicit BrowserNativeStreamCapability authority, denies degraded-mode capability, and pins read/write byte limits, cancel, abort, close, and lock-release behavior. The Rust `AsyncRead` / `AsyncWrite` browser-core ABI remains substrate-only; these helpers do not claim wasm ABI parity. |
 | Raw TCP/UDP, Unix sockets, filesystem, process/signal | Impossible for direct browser runtime | `cfg`-gated native surfaces in core/runtime/docs | Must remain bridge-only or unsupported |
 
+The browser-native messaging/stream promotion class is
+`guarded-public-browser-boundary`: public same-browser package helpers with
+explicit capability grants, not a broader runtime lane. The machine-checked
+contract reads this guide, `docs/integration.md`, the README, package
+source/types, the registry, and
+`artifacts/wave2/browser_native_message_and_stream_apis_evidence.json`; the
+maintained proof runner is `scripts/run_browser_native_message_stream_evidence.sh`.
+Stable operator markers are `capability_not_granted`,
+`degraded_mode_denied`, `ASUPERSYNC_BROWSER_NATIVE_MESSAGING_UNSUPPORTED`,
+`ASUPERSYNC_BROWSER_NATIVE_MESSAGING_OPERATION_FAILED`,
+`ASUPERSYNC_BROWSER_NATIVE_STREAM_UNSUPPORTED`, and
+`ASUPERSYNC_BROWSER_NATIVE_STREAM_OPERATION_FAILED`.
+
 ### Other substrate-only capabilities (Rust layer complete, no public JS/TS API)
 
 These items have real Rust implementations but are not yet exposed in the
@@ -480,7 +493,10 @@ package), the corresponding test assertion must be updated.
    into Asupersync-owned scopes/tasks. If the hop leaves the browser runtime
    boundary entirely (server, edge, Node, another process), use an explicit
    bridge-only adapter instead of pretending the browser SDK exports a native
-   cross-origin or process transport.
+   cross-origin or process transport. Operator-facing failures use
+   `capability_not_granted`, `degraded_mode_denied`,
+   `ASUPERSYNC_BROWSER_NATIVE_MESSAGING_UNSUPPORTED`, and
+   `ASUPERSYNC_BROWSER_NATIVE_MESSAGING_OPERATION_FAILED`.
 3. **Browser-native WHATWG streams are guarded byte helpers, not Rust I/O ABI
    parity.**
    Use `BrowserReadableStream` and `BrowserWritableStream` only after
@@ -490,6 +506,9 @@ package), the corresponding test assertion must be updated.
    explicit read/write limits, cancellation, abort, close, and lock-release
    semantics. The Rust `AsyncRead` / `AsyncWrite` browser-core ABI bridge
    remains substrate-only until a separate proof bead exposes and validates it.
+   Operator-facing failures use `capability_not_granted`,
+   `degraded_mode_denied`, `ASUPERSYNC_BROWSER_NATIVE_STREAM_UNSUPPORTED`, and
+   `ASUPERSYNC_BROWSER_NATIVE_STREAM_OPERATION_FAILED`.
 
 ## Maintainer Admission Rule For New Browser Surfaces
 
