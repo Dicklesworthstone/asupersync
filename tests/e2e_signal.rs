@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! E2E: Signal handling under load — graceful shutdown, drain in-flight,
 //! ShutdownController coordination, multiple receivers, double shutdown.
 
@@ -195,7 +193,7 @@ fn e2e_concurrent_shutdown_calls() {
     }
 
     for h in handles {
-        h.join().unwrap();
+        h.join().expect("shutdown caller panicked");
     }
 
     assert!(controller.is_shutting_down());
