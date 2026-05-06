@@ -1074,10 +1074,27 @@ async fn fs_proof_io_uring_cancellation_support_boundary(
                 &buf[..n]
             ));
         }
+        let pending_read = fs::uring::test_internals::drop_drains_pending_read(
+            &dir.join("drop-drain-read.txt"),
+            b"drop-drained-read",
+        )
+        .map_err(|err| format!("io_uring pending read drop-drain probe: {err}"))?;
+        let pending_write = fs::uring::test_internals::drop_drains_pending_write(
+            &dir.join("drop-drain-write.txt"),
+            b"drop-drained-write",
+        )
+        .map_err(|err| format!("io_uring pending write drop-drain probe: {err}"))?;
+        let pending_sync = fs::uring::test_internals::drop_drains_pending_sync(
+            &dir.join("drop-drain-sync.txt"),
+            b"sync-before-drop",
+        )
+        .map_err(|err| format!("io_uring pending sync drop-drain probe: {err}"))?;
 
         Ok(FsProofEvidence::supported(
             n as u64,
-            "kernel_inflight_cancel=false,drop_drains_pending_ops=src/fs/uring.rs::test_uring_file_drop_drains_pending_read,stale_completion_attribution=src/fs/uring.rs::test_uring_completion_attribution_ignores_unrelated_cqe",
+            format!(
+                "kernel_inflight_cancel=not_assumed,drop_drains_pending_ops=read:{pending_read}|write:{pending_write}|sync:{pending_sync},drop_probes=fs::uring::test_internals::drop_drains_pending_read|drop_drains_pending_write|drop_drains_pending_sync,stale_completion_attribution=src/fs/uring.rs::test_uring_completion_attribution_ignores_unrelated_cqe"
+            ),
         ))
     }
     #[cfg(not(all(target_os = "linux", feature = "io-uring")))]
@@ -1302,7 +1319,7 @@ async fn fs_parity_wave2_run() -> io::Result<Vec<Value>> {
             api: "IoUringFile",
             operation: "drop_pending_operation_boundary",
             bytes_expected: 14,
-            metadata_expected: "kernel_inflight_cancel=false,drop_drains_pending_ops=true_or_unsupported,stale_completion_attribution=true_or_unsupported",
+            metadata_expected: "kernel_inflight_cancel=not_assumed,drop_drains_pending_ops=read|write|sync_or_unsupported,stale_completion_attribution=true_or_unsupported",
             cancellation_point: "drop_pending_read",
             result: fs_proof_io_uring_cancellation_support_boundary(&temp_root).await,
         },

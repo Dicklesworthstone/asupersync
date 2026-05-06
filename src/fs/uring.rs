@@ -15,9 +15,10 @@
 //! - `read_at`/`write_at`: Cancel-safe (in-flight operations complete in kernel)
 //! - `sync_data`/`sync_all`: Cancel-safe (atomic completion)
 //!
-//! Note: In-flight io_uring operations cannot be truly cancelled - they will
-//! complete in the kernel. Dropping an IoUringFile with pending operations
-//! waits for completion to avoid use-after-free of buffers.
+//! Note: in-flight io_uring operations cannot be assumed cancellable. Drop
+//! requests cancellation for tracked operations, then drains completions so
+//! buffers and the ring mapping are not torn down while the kernel can still
+//! report a result.
 
 #![cfg(all(target_os = "linux", feature = "io-uring"))]
 #![allow(unsafe_code)]
@@ -628,7 +629,7 @@ impl AsRawFd for IoUringFile {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-internals"))]
 impl IoUringFile {
     fn submit_pending_read_for_test(&self, buf: &mut [u8], offset: u64) -> io::Result<u64> {
         let user_data = self.allocate_user_data(OpKind::Read);
@@ -667,6 +668,160 @@ impl IoUringFile {
         }
 
         Ok(user_data)
+    }
+
+    fn submit_pending_write_for_test(&self, buf: &[u8], offset: u64) -> io::Result<u64> {
+        let user_data = self.allocate_user_data(OpKind::Write);
+        {
+            let mut state = self.inner.write_state.lock();
+            if !matches!(*state, OpState::Idle) {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "test pending write already registered",
+                ));
+            }
+            *state = OpState::Pending {
+                user_data,
+                waker: None,
+            };
+        }
+
+        let entry = opcode::Write::new(
+            types::Fd(self.inner.fd.as_raw_fd()),
+            buf.as_ptr(),
+            u32::try_from(buf.len()).unwrap_or(u32::MAX),
+        )
+        .offset(offset)
+        .build()
+        .user_data(user_data);
+
+        let submit_result = {
+            let mut ring = self.inner.ring.lock();
+            self.push_entry_with_recovery(&mut ring, &entry)
+                .and_then(|()| ring.submit())
+        };
+
+        if let Err(err) = submit_result {
+            *self.inner.write_state.lock() = OpState::Idle;
+            return Err(err);
+        }
+
+        Ok(user_data)
+    }
+
+    fn submit_pending_sync_for_test(&self, datasync: bool) -> io::Result<u64> {
+        let kind = if datasync {
+            OpKind::Fdatasync
+        } else {
+            OpKind::Fsync
+        };
+        let user_data = self.allocate_user_data(kind);
+        {
+            let mut state = self.inner.sync_state.lock();
+            if !matches!(*state, OpState::Idle) {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "test pending sync already registered",
+                ));
+            }
+            *state = OpState::Pending {
+                user_data,
+                waker: None,
+            };
+        }
+
+        let mut builder = opcode::Fsync::new(types::Fd(self.inner.fd.as_raw_fd()));
+        if datasync {
+            builder = builder.flags(types::FsyncFlags::DATASYNC);
+        }
+        let entry = builder.build().user_data(user_data);
+
+        let submit_result = {
+            let mut ring = self.inner.ring.lock();
+            self.push_entry_with_recovery(&mut ring, &entry)
+                .and_then(|()| ring.submit())
+        };
+
+        if let Err(err) = submit_result {
+            *self.inner.sync_state.lock() = OpState::Idle;
+            return Err(err);
+        }
+
+        Ok(user_data)
+    }
+}
+
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub mod test_internals {
+    use super::IoUringFile;
+    use std::io;
+    use std::path::Path;
+
+    fn all_zero(bytes: &[u8]) -> bool {
+        bytes.iter().all(|byte| *byte == 0)
+    }
+
+    fn payload_mismatch_error(operation: &str, expected: &[u8], actual: &[u8]) -> io::Error {
+        io::Error::other(format!(
+            "io_uring {operation} drop-drain mismatch: expected={:?} actual={:?}",
+            String::from_utf8_lossy(expected),
+            String::from_utf8_lossy(actual)
+        ))
+    }
+
+    pub fn drop_drains_pending_read(path: &Path, payload: &[u8]) -> io::Result<&'static str> {
+        std::fs::write(path, payload)?;
+        let file = IoUringFile::open(path)?;
+        let mut buf = vec![0_u8; payload.len()];
+
+        let _user_data = file.submit_pending_read_for_test(&mut buf, 0)?;
+
+        drop(file);
+
+        if buf != payload {
+            if all_zero(&buf) {
+                return Ok("cancelled");
+            }
+            return Err(payload_mismatch_error("read", payload, &buf));
+        }
+        Ok("completed")
+    }
+
+    pub fn drop_drains_pending_write(path: &Path, payload: &[u8]) -> io::Result<&'static str> {
+        let file = IoUringFile::open_with_flags(
+            path,
+            libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
+            0o644,
+        )?;
+
+        let _user_data = file.submit_pending_write_for_test(payload, 0)?;
+
+        drop(file);
+
+        let contents = std::fs::read(path)?;
+        if contents.as_slice() != payload {
+            if contents.is_empty() {
+                return Ok("cancelled");
+            }
+            return Err(payload_mismatch_error("write", payload, &contents));
+        }
+        Ok("completed")
+    }
+
+    pub fn drop_drains_pending_sync(path: &Path, payload: &[u8]) -> io::Result<&'static str> {
+        std::fs::write(path, payload)?;
+        let file = IoUringFile::open_with_flags(path, libc::O_RDWR, 0)?;
+
+        let _user_data = file.submit_pending_sync_for_test(false)?;
+
+        drop(file);
+
+        let contents = std::fs::read(path)?;
+        if contents.as_slice() != payload {
+            return Err(payload_mismatch_error("sync", payload, &contents));
+        }
+        Ok("drained")
     }
 }
 
@@ -942,13 +1097,75 @@ mod tests {
 
         drop(file);
 
+        let read_completed = buf == b"hello";
+        let read_cancelled = buf.iter().all(|byte| *byte == 0);
         crate::assert_with_log!(
-            &buf == b"hello",
-            "drop drained read",
-            "hello",
+            read_completed || read_cancelled,
+            "drop drained read to completion or cancellation",
+            "completed_or_cancelled",
             String::from_utf8_lossy(&buf)
         );
+        let file_contents = std::fs::read(&path).unwrap();
+        crate::assert_with_log!(
+            file_contents == b"hello",
+            "drop drained read leaves source file intact",
+            "hello",
+            String::from_utf8_lossy(&file_contents)
+        );
         crate::test_complete!("test_uring_file_drop_drains_pending_read");
+    }
+
+    #[test]
+    fn test_uring_file_drop_drains_pending_write() {
+        init_test("test_uring_file_drop_drains_pending_write");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("uring_drop_pending_write.txt");
+
+        let file = IoUringFile::open_with_flags(
+            &path,
+            libc::O_RDWR | libc::O_CREAT | libc::O_TRUNC,
+            0o644,
+        )
+        .unwrap();
+        let payload = b"drop-drained-write";
+
+        let _user_data = file.submit_pending_write_for_test(payload, 0).unwrap();
+
+        drop(file);
+
+        let contents = std::fs::read(&path).unwrap();
+        let write_completed = contents.as_slice() == payload;
+        let write_cancelled = contents.is_empty();
+        crate::assert_with_log!(
+            write_completed || write_cancelled,
+            "drop drained write to completion or cancellation",
+            "completed_or_cancelled",
+            String::from_utf8_lossy(&contents)
+        );
+        crate::test_complete!("test_uring_file_drop_drains_pending_write");
+    }
+
+    #[test]
+    fn test_uring_file_drop_drains_pending_sync() {
+        init_test("test_uring_file_drop_drains_pending_sync");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("uring_drop_pending_sync.txt");
+        std::fs::write(&path, b"sync-before-drop").unwrap();
+
+        let file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
+
+        let _user_data = file.submit_pending_sync_for_test(false).unwrap();
+
+        drop(file);
+
+        let contents = std::fs::read(&path).unwrap();
+        crate::assert_with_log!(
+            contents.as_slice() == b"sync-before-drop",
+            "drop drained sync without corrupting file",
+            "sync-before-drop",
+            String::from_utf8_lossy(&contents)
+        );
+        crate::test_complete!("test_uring_file_drop_drains_pending_sync");
     }
 
     #[test]
