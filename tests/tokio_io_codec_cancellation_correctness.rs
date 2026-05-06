@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 #![allow(clippy::items_after_statements)]
 #![allow(missing_docs)]
 //! I/O and Codec Cancellation-Correctness Contract Tests
@@ -318,7 +316,6 @@ use asupersync::io::{ReaderStream, StreamReader};
 use asupersync::stream::Stream;
 use std::io;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 fn noop_waker() -> Waker {
