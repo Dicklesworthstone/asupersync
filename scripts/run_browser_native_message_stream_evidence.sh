@@ -8,6 +8,8 @@ OUTPUT_ROOT="${BROWSER_NATIVE_MESSAGE_STREAM_OUTPUT_ROOT:-${REPO_ROOT}/target/br
 RUN_ID="$(date -u +%Y%m%d_%H%M%S)"
 CONTRACT_ONLY=0
 TIMEOUT_SEC="${BROWSER_NATIVE_MESSAGE_STREAM_TIMEOUT_SEC:-180}"
+DRY_RUN=0
+RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
 
 usage() {
     cat <<'USAGE'
@@ -19,6 +21,7 @@ Options:
   --run-id <id>           Deterministic run id for tests.
   --timeout-sec <sec>     Wall-clock timeout for each proof command.
   --contract-only         Validate the contract artifact without running proofs.
+  --dry-run               Print planned proof commands without running cargo or browser fixtures.
   -h, --help              Show this help.
 USAGE
 }
@@ -43,6 +46,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --contract-only)
             CONTRACT_ONLY=1
+            shift
+            ;;
+        --dry-run)
+            DRY_RUN=1
             shift
             ;;
         -h|--help)
@@ -77,17 +84,30 @@ require_cmd() {
 run_proof() {
     local label="$1"
     shift
+    local -a rch_command=("${RCH_BIN}" exec -- "$@")
 
     {
         printf 'BROWSER_NATIVE_MESSAGE_STREAM_COMMAND label=%s timeout_sec=%s command=' "$label" "$TIMEOUT_SEC"
-        printf '%q ' "$@"
+        printf '%q ' "${rch_command[@]}"
         printf '\n'
     } >> "${RUN_LOG_PATH}"
 
+    if [[ "${DRY_RUN}" -eq 1 ]]; then
+        printf 'BROWSER_NATIVE_MESSAGE_STREAM_DRY_RUN label=%s command=' "$label" >> "${RUN_LOG_PATH}"
+        printf '%q ' "${rch_command[@]}" >> "${RUN_LOG_PATH}"
+        printf '\n' >> "${RUN_LOG_PATH}"
+        echo "BROWSER_NATIVE_MESSAGE_STREAM_COMMAND_STATUS label=${label} status=0 dry_run=true" >> "${RUN_LOG_PATH}"
+        return 0
+    fi
+
     set +e
-    timeout "${TIMEOUT_SEC}" "$@" >> "${RUN_LOG_PATH}" 2>&1
+    timeout "${TIMEOUT_SEC}" "${rch_command[@]}" >> "${RUN_LOG_PATH}" 2>&1
     local status=$?
     set -e
+
+    if grep -Eq '^\[RCH\] local \(|falling back to local' "${RUN_LOG_PATH}"; then
+        status=86
+    fi
 
     echo "BROWSER_NATIVE_MESSAGE_STREAM_COMMAND_STATUS label=${label} status=${status}" >> "${RUN_LOG_PATH}"
     return "${status}"
@@ -172,25 +192,34 @@ PY
 
 : > "${RUN_LOG_PATH}"
 
+if [[ "${CONTRACT_ONLY}" -eq 0 && "${DRY_RUN}" -eq 0 ]] && ! command -v "${RCH_BIN}" >/dev/null 2>&1; then
+    echo "FATAL: rch is required and was not found/executable at: ${RCH_BIN}" >&2
+    exit 1
+fi
+
 if [[ "${CONTRACT_ONLY}" -eq 0 ]]; then
     run_proof rust_contract \
-        rch exec -- \
         env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 "RUSTFLAGS=-C debuginfo=0" "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_browser_native_message_stream_contract" \
         cargo test -p asupersync --test browser_native_message_stream_evidence_contract --features test-internals -- --nocapture || RUST_STATUS=$?
 
     {
         printf 'BROWSER_NATIVE_MESSAGE_STREAM_COMMAND label=browser_fixture timeout_sec=%s command=bash_function:%s\n' "$TIMEOUT_SEC" "run_browser_fixture"
     } >> "${RUN_LOG_PATH}"
-    set +e
-    (set -e; run_browser_fixture) >> "${RUN_LOG_PATH}" 2>&1
-    BROWSER_STATUS=$?
-    set -e
-    echo "BROWSER_NATIVE_MESSAGE_STREAM_COMMAND_STATUS label=browser_fixture status=${BROWSER_STATUS}" >> "${RUN_LOG_PATH}"
+    if [[ "${DRY_RUN}" -eq 1 ]]; then
+        echo "BROWSER_NATIVE_MESSAGE_STREAM_DRY_RUN label=browser_fixture command=bash_function:run_browser_fixture" >> "${RUN_LOG_PATH}"
+        echo "BROWSER_NATIVE_MESSAGE_STREAM_COMMAND_STATUS label=browser_fixture status=0 dry_run=true" >> "${RUN_LOG_PATH}"
+    else
+        set +e
+        (set -e; run_browser_fixture) >> "${RUN_LOG_PATH}" 2>&1
+        BROWSER_STATUS=$?
+        set -e
+        echo "BROWSER_NATIVE_MESSAGE_STREAM_COMMAND_STATUS label=browser_fixture status=${BROWSER_STATUS}" >> "${RUN_LOG_PATH}"
+    fi
 
     cat "${RUN_LOG_PATH}"
 fi
 
-python3 - "$REPO_ROOT" "$ARTIFACT_PATH" "$RUN_LOG_PATH" "$RUN_REPORT_PATH" "$RUN_ID" "$CONTRACT_ONLY" "$TIMEOUT_SEC" "$RUST_STATUS" "$BROWSER_STATUS" "$BROWSER_RUN_PATH" <<'PY' | tee -a "$RUN_LOG_PATH"
+python3 - "$REPO_ROOT" "$ARTIFACT_PATH" "$RUN_LOG_PATH" "$RUN_REPORT_PATH" "$RUN_ID" "$CONTRACT_ONLY" "$TIMEOUT_SEC" "$RUST_STATUS" "$BROWSER_STATUS" "$DRY_RUN" "$BROWSER_RUN_PATH" <<'PY' | tee -a "$RUN_LOG_PATH"
 import json
 import re
 import sys
@@ -205,7 +234,8 @@ contract_only = sys.argv[6] == "1"
 timeout_sec = int(sys.argv[7])
 rust_status = int(sys.argv[8])
 browser_status = int(sys.argv[9])
-browser_run_path = Path(sys.argv[10]).resolve()
+dry_run = sys.argv[10] == "1"
+browser_run_path = Path(sys.argv[11]).resolve()
 
 contract = json.loads(artifact_path.read_text())
 required_fields = contract["required_log_fields"]
@@ -291,7 +321,7 @@ for forbidden in ("packages/browser/src", "../packages/browser", "../../packages
 
 runner_text = (repo_root / contract["runner_script"]).read_text()
 for marker in [
-    "rch exec --",
+    '"${RCH_BIN}" exec --',
     "Remote command finished: exit=0",
     "test result: ok",
     "target/browser-native-message-stream-evidence",
@@ -299,6 +329,9 @@ for marker in [
     "run.log",
     "BROWSER_NATIVE_MESSAGE_STREAM_SCENARIO",
     "--contract-only",
+    "--dry-run",
+    "BROWSER_NATIVE_MESSAGE_STREAM_DRY_RUN",
+    "falling back to local",
 ]:
     if marker not in runner_text:
         drifts.append(f"runner_missing_marker:{marker}")
@@ -308,7 +341,7 @@ effective_browser_status = browser_status
 browser_status_note = ""
 test_result_ok_count = len(re.findall(r"test result: ok", log_text))
 
-if not contract_only:
+if not contract_only and not dry_run:
     if browser_run_path.exists():
         browser_run = json.loads(browser_run_path.read_text())
     else:
@@ -371,7 +404,7 @@ else:
 
 observed_scenarios = [row.get("scenario_id") for row in rows]
 missing_scenarios = (
-    [] if contract_only else sorted(set(expected_scenarios) - set(observed_scenarios))
+    [] if contract_only or dry_run else sorted(set(expected_scenarios) - set(observed_scenarios))
 )
 for scenario_id in missing_scenarios:
     drifts.append(f"missing_scenario:{scenario_id}")
@@ -385,7 +418,7 @@ for row in rows:
     )
 
 validation_passed = not drifts and (
-    contract_only or len(set(observed_scenarios)) == len(expected_scenarios)
+    contract_only or dry_run or len(set(observed_scenarios)) == len(expected_scenarios)
 )
 report = {
     "schema_version": contract["report_schema_version"],
@@ -394,6 +427,7 @@ report = {
     "capability_id": contract["capability_id"],
     "run_id": run_id,
     "contract_only": contract_only,
+    "dry_run": dry_run,
     "artifact_path": repo_relative(artifact_path),
     "fixture_path": contract["fixture_path"],
     "browser_run_path": repo_relative(browser_run_path) if browser_run_path.exists() else "",

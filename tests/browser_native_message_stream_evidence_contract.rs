@@ -375,16 +375,20 @@ fn promoted_docs_package_registry_and_artifact_claim_the_same_public_boundary() 
 fn runner_uses_rch_and_preserves_timeout_after_remote_success_classification() {
     let runner = read_file(RUNNER_PATH);
     for marker in [
-        "rch exec --",
+        "RCH_BIN=\"${RCH_BIN:-$HOME/.local/bin/rch}\"",
+        "local -a rch_command=(\"${RCH_BIN}\" exec -- \"$@\")",
         "cargo test -p asupersync --test browser_native_message_stream_evidence_contract",
         "Remote command finished: exit=0",
         "test result: ok",
         "retrieval_timeout_after_remote_success",
+        "falling back to local",
         "target/browser-native-message-stream-evidence",
         "run_report.json",
         "run.log",
         "BROWSER_NATIVE_MESSAGE_STREAM_SCENARIO",
+        "BROWSER_NATIVE_MESSAGE_STREAM_DRY_RUN",
         "--contract-only",
+        "--dry-run",
         "browser-native-message-stream-consumer",
     ] {
         assert!(runner.contains(marker), "runner missing marker: {marker}");
@@ -435,6 +439,50 @@ fn contract_only_runner_smoke_writes_valid_report_without_browser_fixture() {
     );
     assert_eq!(report["drifts"].as_array().map(Vec::len), Some(0));
     assert_eq!(report["scenario_rows"].as_array().map(Vec::len), Some(9));
+}
+
+#[test]
+fn dry_run_runner_smoke_records_planned_rch_and_browser_fixture_commands() {
+    let output_root = tempfile::tempdir().expect("tempdir");
+    let output_root_path = output_root.path().to_string_lossy().into_owned();
+    let output = Command::new("bash")
+        .current_dir(repo_root())
+        .arg(RUNNER_PATH)
+        .arg("--dry-run")
+        .arg("--run-id")
+        .arg("dry-run-smoke")
+        .arg("--output-root")
+        .arg(&output_root_path)
+        .output()
+        .expect("run dry-run evidence script");
+
+    assert!(
+        output.status.success(),
+        "dry-run runner failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let run_dir = output_root.path().join("run_dry-run-smoke");
+    let report_path = run_dir.join("run_report.json");
+    let log_path = run_dir.join("run.log");
+    let report: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&report_path)
+            .unwrap_or_else(|_| panic!("missing {}", report_path.display())),
+    )
+    .expect("valid dry-run run_report.json");
+    let log = std::fs::read_to_string(&log_path)
+        .unwrap_or_else(|_| panic!("missing {}", log_path.display()));
+
+    assert_eq!(report["dry_run"].as_bool(), Some(true));
+    assert_eq!(report["validation_passed"].as_bool(), Some(true));
+    assert_eq!(
+        report["missing_scenarios"].as_array().map(Vec::len),
+        Some(0)
+    );
+    assert!(log.contains("BROWSER_NATIVE_MESSAGE_STREAM_DRY_RUN label=rust_contract"));
+    assert!(log.contains("BROWSER_NATIVE_MESSAGE_STREAM_DRY_RUN label=browser_fixture"));
+    assert!(log.contains("rch exec -- env CARGO_INCREMENTAL=0"));
 }
 
 #[test]
