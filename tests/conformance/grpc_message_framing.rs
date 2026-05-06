@@ -44,6 +44,55 @@ fn grpc_compressed_flag_round_trips_without_mutating_payload() {
 }
 
 #[test]
+fn grpc_codec_preserves_incomplete_header_until_more_bytes_arrive() {
+    let mut codec = GrpcCodec::new();
+    let mut wire = BytesMut::from(b"\x00\x00\x00".as_slice());
+    let buffered = wire.clone();
+
+    let pending = <GrpcCodec as Decoder>::decode(&mut codec, &mut wire)
+        .expect("incomplete header should remain pending");
+
+    assert!(
+        pending.is_none(),
+        "decoder must wait for all five gRPC header bytes"
+    );
+    assert_eq!(
+        wire, buffered,
+        "partial header bytes must remain buffered for the next read"
+    );
+}
+
+#[test]
+fn grpc_codec_preserves_partial_body_then_decodes_after_completion() {
+    let mut codec = GrpcCodec::new();
+    let mut wire = BytesMut::from(b"\x00\x00\x00\x00\x05he".as_slice());
+    let partial = wire.clone();
+
+    let pending = <GrpcCodec as Decoder>::decode(&mut codec, &mut wire)
+        .expect("partial body should remain pending");
+    assert!(
+        pending.is_none(),
+        "decoder must wait for the declared payload length"
+    );
+    assert_eq!(
+        wire, partial,
+        "partial body bytes must remain buffered until the payload completes"
+    );
+
+    wire.extend_from_slice(b"llo");
+    let decoded = <GrpcCodec as Decoder>::decode(&mut codec, &mut wire)
+        .expect("completed frame should decode")
+        .expect("completed frame should produce one message");
+
+    assert!(!decoded.compressed);
+    assert_eq!(decoded.data.as_ref(), b"hello");
+    assert!(
+        wire.is_empty(),
+        "completed frame must be consumed after decode"
+    );
+}
+
+#[test]
 fn grpc_codec_rejects_invalid_compression_flag_values() {
     let mut codec = GrpcCodec::new();
     let mut wire = BytesMut::from(&b"\x02\x00\x00\x00\x00"[..]);
