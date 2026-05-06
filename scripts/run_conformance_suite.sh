@@ -3,6 +3,27 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUTPUT_DIR="${ROOT_DIR}/target/conformance-results"
+RCH_BIN="${RCH_BIN:-rch}"
+CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_asupersync_conformance_suite}"
+
+DRY_RUN=0
+if [[ "${1:-}" == "--dry-run" ]]; then
+    DRY_RUN=1
+    shift
+fi
+
+if [[ "$#" -ne 0 ]]; then
+    echo "usage: $0 [--dry-run]" >&2
+    exit 2
+fi
+
+json_escape() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//$'\n'/\\n}"
+    printf '%s' "${value}"
+}
 
 mkdir -p "$OUTPUT_DIR"
 
@@ -15,16 +36,51 @@ LATEST_JSON="${OUTPUT_DIR}/latest.json"
 export RUST_LOG="${RUST_LOG:-trace}"
 export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
 
+TEST_COMMAND=(
+    "${RCH_BIN}"
+    exec
+    --
+    env
+    "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
+    "RUST_LOG=${RUST_LOG}"
+    "RUST_BACKTRACE=${RUST_BACKTRACE}"
+    cargo
+    test
+    -p
+    asupersync-conformance
+    --
+    --nocapture
+)
+
+printf -v REPLAY_COMMAND "%q " "${TEST_COMMAND[@]}"
+REPLAY_COMMAND="${REPLAY_COMMAND% }"
+
 echo "==== Asupersync Conformance Suite ===="
 echo "Log:  ${LOG_FILE}"
 echo "JSON: ${JSON_FILE}"
+echo "Command: ${REPLAY_COMMAND}"
 echo ""
 
+if [[ "${DRY_RUN}" -eq 1 ]]; then
+    cat > "${JSON_FILE}" <<EOF
+{
+  "timestamp": "$(date -Iseconds)",
+  "suite": "asupersync-conformance",
+  "dry_run": true,
+  "runner": "rch exec",
+  "replay_command": "$(json_escape "${REPLAY_COMMAND}")",
+  "target_dir": "$(json_escape "${CARGO_TARGET_DIR}")",
+  "status": "planned"
+}
+EOF
+    cp "${JSON_FILE}" "${LATEST_JSON}"
+    echo "Dry run planned without executing Cargo."
+    exit 0
+fi
+
 set +e
-pushd "${ROOT_DIR}/conformance" >/dev/null
-cargo test -- --nocapture 2>&1 | tee "${LOG_FILE}"
+"${TEST_COMMAND[@]}" 2>&1 | tee "${LOG_FILE}"
 STATUS=${PIPESTATUS[0]}
-popd >/dev/null
 set -e
 
 PASSED=$(grep -c "test .* ok" "${LOG_FILE}" 2>/dev/null || echo "0")
@@ -47,7 +103,10 @@ cat > "${JSON_FILE}" <<EOF
     "failed": ${FAILED},
     "ignored": ${IGNORED}
   },
-  "log_file": "${LOG_FILE}",
+  "log_file": "$(json_escape "${LOG_FILE}")",
+  "runner": "rch exec",
+  "replay_command": "$(json_escape "${REPLAY_COMMAND}")",
+  "target_dir": "$(json_escape "${CARGO_TARGET_DIR}")",
   "status": "${STATUS_LABEL}"
 }
 EOF
