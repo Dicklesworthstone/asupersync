@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Metamorphic Testing for Graded Obligations System
 //!
 //! Tests linear type discipline approximation, drop bomb behavior, and scope-based
@@ -493,6 +491,8 @@ fn metamorphic_graded_obligations_integration() {
         let total_tracker_ops = tracker.resolved_count + tracker.dropped_count;
         prop_assert_eq!(total_tracker_ops, tracker.created_count,
             "Tracker should account for all created obligations");
+        prop_assert_eq!(tracker.outstanding(), 0,
+            "Tracker should have zero outstanding obligations after processing");
 
         // MR: Scope should close successfully
         let close_result = scope.close();
