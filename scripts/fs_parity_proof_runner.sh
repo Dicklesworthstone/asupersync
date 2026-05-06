@@ -20,6 +20,7 @@ BEAD_ID="asupersync-oc0ybw"
 EXPECTED_SCENARIOS=(
   "open-options-seek-sync"
   "file-create-new-exclusive"
+  "file-set-len-permissions"
   "read-dir-metadata-disposition"
   "buffered-lines-boundaries"
   "unix-vfs-equivalence"

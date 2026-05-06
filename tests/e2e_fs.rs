@@ -41,6 +41,7 @@ fn cleanup(path: &std::path::Path) {
 const FS_PARITY_WAVE2_SCENARIOS: &[&str] = &[
     "open-options-seek-sync",
     "file-create-new-exclusive",
+    "file-set-len-permissions",
     "read-dir-metadata-disposition",
     "buffered-lines-boundaries",
     "unix-vfs-equivalence",
@@ -384,6 +385,79 @@ async fn fs_proof_remove_missing_error_kind(temp_root: &Path) -> Result<FsProofE
     }
 }
 
+async fn fs_proof_file_set_len_permissions(temp_root: &Path) -> Result<FsProofEvidence, String> {
+    let dir = fs_proof_scenario_dir(temp_root, "file-set-len-permissions")?;
+    let path = dir.join("set-len-permissions.txt");
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .await
+        .map_err(|err| format!("open read-write set_len file: {err}"))?;
+
+    file.write_all(b"abcdefgh")
+        .await
+        .map_err(|err| format!("write set_len fixture: {err}"))?;
+    file.set_len(4)
+        .await
+        .map_err(|err| format!("truncate file to four bytes: {err}"))?;
+    file.rewind()
+        .await
+        .map_err(|err| format!("rewind truncated file: {err}"))?;
+
+    let mut truncated = String::new();
+    file.read_to_string(&mut truncated)
+        .await
+        .map_err(|err| format!("read truncated file: {err}"))?;
+    file.set_len(10)
+        .await
+        .map_err(|err| format!("extend file to ten bytes: {err}"))?;
+
+    let mut permissions = file
+        .metadata()
+        .await
+        .map_err(|err| format!("metadata before permission update: {err}"))?
+        .permissions();
+    permissions.set_readonly(true);
+    file.set_permissions(permissions)
+        .await
+        .map_err(|err| format!("set readonly permission: {err}"))?;
+    let readonly = file
+        .metadata()
+        .await
+        .map_err(|err| format!("metadata after readonly update: {err}"))?
+        .permissions()
+        .readonly();
+
+    let mut writable_permissions = file
+        .metadata()
+        .await
+        .map_err(|err| format!("metadata before writable reset: {err}"))?
+        .permissions();
+    writable_permissions.set_readonly(false);
+    file.set_permissions(writable_permissions)
+        .await
+        .map_err(|err| format!("reset writable permission: {err}"))?;
+    drop(file);
+
+    let metadata = fs::metadata(&path)
+        .await
+        .map_err(|err| format!("metadata after set_len/permission roundtrip: {err}"))?;
+    if truncated != "abcd" || metadata.len() != 10 || !readonly {
+        return Err(format!(
+            "set_len/permissions drift: truncated={truncated:?} len={} readonly={readonly}",
+            metadata.len()
+        ));
+    }
+
+    Ok(FsProofEvidence::supported(
+        metadata.len(),
+        "truncated=abcd,extended_len=10,readonly_roundtrip=true",
+    ))
+}
+
 async fn fs_proof_try_exists_lifecycle(temp_root: &Path) -> Result<FsProofEvidence, String> {
     let dir = fs_proof_scenario_dir(temp_root, "try-exists-lifecycle")?;
     let path = dir.join("lifecycle.txt");
@@ -591,6 +665,15 @@ async fn fs_parity_wave2_run() -> io::Result<Vec<Value>> {
             metadata_expected: "read_write=true,second_error=AlreadyExists",
             cancellation_point: "none",
             result: fs_proof_file_create_new_exclusive(&temp_root).await,
+        },
+        FsProofScenario {
+            scenario_id: "file-set-len-permissions",
+            api: "File",
+            operation: "set_len_truncate_extend_set_permissions",
+            bytes_expected: 10,
+            metadata_expected: "truncated=abcd,extended_len=10,readonly_roundtrip=true",
+            cancellation_point: "none",
+            result: fs_proof_file_set_len_permissions(&temp_root).await,
         },
         FsProofScenario {
             scenario_id: "read-dir-metadata-disposition",
