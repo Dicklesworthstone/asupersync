@@ -46,6 +46,38 @@ fn string_set(value: &JsonValue, key: &str) -> BTreeSet<String> {
         .collect()
 }
 
+fn array<'a>(value: &'a JsonValue, key: &str) -> &'a Vec<JsonValue> {
+    value
+        .get(key)
+        .and_then(JsonValue::as_array)
+        .unwrap_or_else(|| panic!("{key} must be an array"))
+}
+
+fn nonempty_string<'a>(value: &'a JsonValue, key: &str) -> &'a str {
+    let item = value
+        .get(key)
+        .and_then(JsonValue::as_str)
+        .unwrap_or_else(|| panic!("{key} must be a string"));
+    assert!(!item.trim().is_empty(), "{key} must be nonempty");
+    item
+}
+
+fn row_string_set(value: &JsonValue, key: &str) -> BTreeSet<String> {
+    array(value, key)
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .unwrap_or_else(|| panic!("{key} entries must be strings"))
+                .to_string()
+        })
+        .collect()
+}
+
+fn path_is_live_or_dynamic(relative: &str) -> bool {
+    relative.starts_with("target/") || repo_path(relative).exists()
+}
+
 fn invariant_ids(inventory: &JsonValue) -> BTreeSet<String> {
     inventory
         .get("invariants")
@@ -224,6 +256,166 @@ fn proof_tiers_keep_scope_limits_explicit() {
             tier_names.contains(required),
             "missing proof tier {required}"
         );
+    }
+}
+
+#[test]
+fn wave2_refinement_contract_keeps_adapter_claims_lane_specific() {
+    let contract = json_file(CONTRACT_PATH);
+    let scope = contract.get("scope_limits").expect("scope_limits object");
+    assert_eq!(
+        scope
+            .get("adapter_protocol_proof_claimed")
+            .and_then(JsonValue::as_bool),
+        Some(false),
+        "existing formal posture must not become a blanket adapter/protocol proof"
+    );
+
+    let refinement = contract
+        .get("wave2_adapter_protocol_refinement")
+        .expect("wave2_adapter_protocol_refinement object");
+    assert_eq!(
+        refinement.get("bead_id").and_then(JsonValue::as_str),
+        Some("asupersync-i6uzso")
+    );
+
+    let policy = refinement.get("claim_policy").expect("claim_policy object");
+    assert_eq!(
+        policy
+            .get("blanket_adapter_protocol_proof_claimed")
+            .and_then(JsonValue::as_bool),
+        Some(false)
+    );
+    for key in [
+        "lane_specific_evidence_required",
+        "missing_evidence_must_be_dispositioned",
+        "assumptions_must_remain_visible",
+    ] {
+        assert_eq!(
+            policy.get(key).and_then(JsonValue::as_bool),
+            Some(true),
+            "claim_policy.{key} must stay enabled"
+        );
+    }
+
+    let allowed_tiers = string_set(refinement, "allowed_proof_tiers");
+    for required in [
+        "lean_checked",
+        "tla_checked",
+        "lab_oracle_backed",
+        "artifact_contract_backed",
+        "assumption_bound",
+        "unproved_deferred",
+    ] {
+        assert!(
+            allowed_tiers.contains(required),
+            "missing allowed wave2 proof tier {required}"
+        );
+    }
+
+    let required_fields = string_set(refinement, "required_lane_fields");
+    for required in [
+        "lane_id",
+        "owner_bead_id",
+        "invariant_ids",
+        "proof_tier",
+        "theorem_or_model_names",
+        "source_paths",
+        "runtime_tests",
+        "e2e_artifacts",
+        "assumptions",
+        "missing_evidence_disposition",
+        "claim_scope",
+    ] {
+        assert!(
+            required_fields.contains(required),
+            "missing required lane field {required}"
+        );
+    }
+}
+
+#[test]
+fn wave2_refinement_lanes_link_to_live_evidence_and_visible_assumptions() {
+    let contract = json_file(CONTRACT_PATH);
+    let refinement = contract
+        .get("wave2_adapter_protocol_refinement")
+        .expect("wave2_adapter_protocol_refinement object");
+    let allowed_tiers = string_set(refinement, "allowed_proof_tiers");
+    let required_fields = string_set(refinement, "required_lane_fields");
+    let lanes = array(refinement, "selected_lanes");
+    assert!(
+        lanes.len() >= 6,
+        "wave2 refinement coverage must include multiple adapter/protocol lanes"
+    );
+
+    let lane_ids = lanes
+        .iter()
+        .map(|lane| nonempty_string(lane, "lane_id").to_string())
+        .collect::<BTreeSet<_>>();
+    for required in [
+        "core_runtime_invariants",
+        "remote_transport_lifecycle",
+        "http3_qpack_instruction_streams",
+        "browser_runtime_support_boundaries",
+        "web_fs_messaging_adapters",
+        "massive_swarm_capacity",
+    ] {
+        assert!(
+            lane_ids.contains(required),
+            "missing selected wave2 lane {required}"
+        );
+    }
+
+    for lane in lanes {
+        let lane_id = nonempty_string(lane, "lane_id");
+        for field in &required_fields {
+            assert!(
+                lane.get(field).is_some(),
+                "{lane_id}: missing required field {field}"
+            );
+        }
+
+        let proof_tier = nonempty_string(lane, "proof_tier");
+        assert!(
+            allowed_tiers.contains(proof_tier),
+            "{lane_id}: unsupported proof tier {proof_tier}"
+        );
+        assert!(
+            !row_string_set(lane, "invariant_ids").is_empty(),
+            "{lane_id}: invariant_ids must not be empty"
+        );
+        assert!(
+            !row_string_set(lane, "theorem_or_model_names").is_empty(),
+            "{lane_id}: theorem_or_model_names must not be empty"
+        );
+        assert!(
+            !array(lane, "assumptions").is_empty(),
+            "{lane_id}: assumptions must remain visible"
+        );
+        assert!(
+            !nonempty_string(lane, "missing_evidence_disposition")
+                .trim()
+                .is_empty(),
+            "{lane_id}: missing_evidence_disposition must be explicit"
+        );
+        let claim_scope = nonempty_string(lane, "claim_scope");
+        assert!(
+            !claim_scope.contains("blanket mechanized proof")
+                && !claim_scope.contains("full runtime proof"),
+            "{lane_id}: claim_scope must not advertise blanket mechanized proof"
+        );
+
+        for key in ["source_paths", "runtime_tests", "e2e_artifacts"] {
+            let paths = array(lane, key);
+            assert!(!paths.is_empty(), "{lane_id}: {key} must not be empty");
+            for path in paths {
+                let path = path.as_str().expect("path entries must be strings");
+                assert!(
+                    path_is_live_or_dynamic(path),
+                    "{lane_id}: {key} entry does not resolve: {path}"
+                );
+            }
+        }
     }
 }
 

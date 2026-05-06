@@ -81,6 +81,239 @@
     "core_invariants_fully_proven": true,
     "runtime_behavior_requires_refinement_evidence": true
   },
+  "wave2_adapter_protocol_refinement": {
+    "bead_id": "asupersync-i6uzso",
+    "claim_policy": {
+      "blanket_adapter_protocol_proof_claimed": false,
+      "lane_specific_evidence_required": true,
+      "missing_evidence_must_be_dispositioned": true,
+      "assumptions_must_remain_visible": true
+    },
+    "allowed_proof_tiers": [
+      "lean_checked",
+      "tla_checked",
+      "lab_oracle_backed",
+      "artifact_contract_backed",
+      "assumption_bound",
+      "unproved_deferred"
+    ],
+    "required_lane_fields": [
+      "lane_id",
+      "owner_bead_id",
+      "invariant_ids",
+      "proof_tier",
+      "theorem_or_model_names",
+      "source_paths",
+      "runtime_tests",
+      "e2e_artifacts",
+      "assumptions",
+      "missing_evidence_disposition",
+      "claim_scope"
+    ],
+    "selected_lanes": [
+      {
+        "lane_id": "core_runtime_invariants",
+        "owner_bead_id": "asupersync-rckfrm",
+        "invariant_ids": [
+          "inv.structured_concurrency.single_owner",
+          "inv.region_close.quiescence",
+          "inv.cancel.protocol",
+          "inv.race.losers_drained",
+          "inv.obligation.no_leaks",
+          "inv.authority.no_ambient"
+        ],
+        "proof_tier": "lean_checked",
+        "theorem_or_model_names": [
+          "spawn_authority_gated",
+          "cancel_masked_step",
+          "no_ambient_effect_without_context",
+          "region_close_quiescent"
+        ],
+        "source_paths": [
+          "formal/lean/Asupersync.lean",
+          "formal/lean/coverage/invariant_status_inventory.json",
+          "formal/lean/coverage/invariant_theorem_test_link_map.json"
+        ],
+        "runtime_tests": [
+          "tests/formal_proof_posture_contract.rs",
+          "tests/lean_invariant_theorem_test_link_map.rs"
+        ],
+        "e2e_artifacts": [
+          "formal/lean/coverage/invariant_status_inventory.json"
+        ],
+        "assumptions": [
+          "Readiness remains the explicit opaque model boundary inventoried in marker_inventory."
+        ],
+        "missing_evidence_disposition": "none; this row is limited to the six checked non-negotiable invariants.",
+        "claim_scope": "Lean-checked only for the core invariant theorem families named by the inventory."
+      },
+      {
+        "lane_id": "remote_transport_lifecycle",
+        "owner_bead_id": "asupersync-5d9s85",
+        "invariant_ids": [
+          "inv.cancel.protocol",
+          "inv.obligation.no_leaks",
+          "inv.authority.no_ambient"
+        ],
+        "proof_tier": "artifact_contract_backed",
+        "theorem_or_model_names": [
+          "RemoteRuntime protocol artifact contract",
+          "runtime_state_refinement_map"
+        ],
+        "source_paths": [
+          "src/remote.rs",
+          "tests/remote_transport_lifecycle_contract.rs",
+          "scripts/run_remote_transport_lifecycle_evidence.sh"
+        ],
+        "runtime_tests": [
+          "tests/remote_transport_lifecycle_contract.rs"
+        ],
+        "e2e_artifacts": [
+          "artifacts/wave2/remote_transport_lifecycle_evidence.json"
+        ],
+        "assumptions": [
+          "Loopback transport proof does not imply arbitrary WAN deployment, TLS, authentication, or closure migration."
+        ],
+        "missing_evidence_disposition": "Lane has artifact-contract proof only; no lane-specific Lean theorem is claimed.",
+        "claim_scope": "Remote lifecycle messages and cleanup are mapped to runtime invariants through artifact and contract-test evidence."
+      },
+      {
+        "lane_id": "http3_qpack_instruction_streams",
+        "owner_bead_id": "asupersync-fjkixh",
+        "invariant_ids": [
+          "inv.cancel.protocol",
+          "inv.obligation.no_leaks"
+        ],
+        "proof_tier": "artifact_contract_backed",
+        "theorem_or_model_names": [
+          "QPACK support matrix",
+          "HTTP/3 stream lifecycle proof rows"
+        ],
+        "source_paths": [
+          "src/http/h3_native.rs",
+          "artifacts/http3_qpack_support_matrix_v1.json",
+          "scripts/http3_qpack_proof_runner.sh"
+        ],
+        "runtime_tests": [
+          "tests/http3_qpack_support_matrix_contract.rs"
+        ],
+        "e2e_artifacts": [
+          "artifacts/http3_qpack_support_matrix_v1.json",
+          "target/http3-qpack-proof/run_report.json"
+        ],
+        "assumptions": [
+          "The matrix is an artifact contract, not a mechanized proof of every QPACK scheduler interleaving."
+        ],
+        "missing_evidence_disposition": "Any unsupported or pending row must stay in the matrix with an owner bead before docs can promote it.",
+        "claim_scope": "HTTP/3/QPACK claims are bounded to source, support-matrix, and runner evidence."
+      },
+      {
+        "lane_id": "browser_runtime_support_boundaries",
+        "owner_bead_id": "asupersync-j1xbon",
+        "invariant_ids": [
+          "inv.authority.no_ambient",
+          "inv.structured_concurrency.single_owner"
+        ],
+        "proof_tier": "artifact_contract_backed",
+        "theorem_or_model_names": [
+          "Browser runtime support boundary contract",
+          "capability evidence registry"
+        ],
+        "source_paths": [
+          "src/runtime/builder.rs",
+          "packages/browser/src/index.ts",
+          "tests/wasm_rust_browser_example_contract.rs",
+          "artifacts/wave2/browser_rust_runtime_api_stability_evidence.json"
+        ],
+        "runtime_tests": [
+          "tests/wasm_rust_browser_example_contract.rs",
+          "tests/browser_native_message_stream_evidence_contract.rs"
+        ],
+        "e2e_artifacts": [
+          "artifacts/wave2/browser_rust_runtime_api_stability_evidence.json",
+          "artifacts/wave2/browser_native_message_and_stream_apis_evidence.json"
+        ],
+        "assumptions": [
+          "Browser support proof is scoped to guarded main-thread and worker fixtures, not a blanket browser-host theorem."
+        ],
+        "missing_evidence_disposition": "Service-worker and shared-worker claims remain lane-specific and must keep their broker/coordinator fallback evidence visible.",
+        "claim_scope": "Browser capability-security claims are artifact-contract backed and bounded by fixture/runtime support rows."
+      },
+      {
+        "lane_id": "web_fs_messaging_adapters",
+        "owner_bead_id": "asupersync-osh9jv",
+        "invariant_ids": [
+          "inv.cancel.protocol",
+          "inv.region_close.quiescence",
+          "inv.obligation.no_leaks"
+        ],
+        "proof_tier": "lab_oracle_backed",
+        "theorem_or_model_names": [
+          "web framework proof runner",
+          "filesystem parity proof runner",
+          "broker parity proof runners"
+        ],
+        "source_paths": [
+          "tests/e2e_web.rs",
+          "scripts/web_framework_proof_runner.sh",
+          "tests/tokio_fs_process_signal_parity_matrix.rs",
+          "scripts/fs_parity_proof_runner.sh",
+          "tests/conformance/messaging_broker_parity.rs",
+          "scripts/nats_jetstream_broker_parity_proof_runner.sh",
+          "scripts/kafka_broker_parity_proof_runner.sh"
+        ],
+        "runtime_tests": [
+          "tests/e2e_web.rs",
+          "tests/tokio_fs_process_signal_parity_matrix.rs",
+          "tests/conformance/messaging_broker_parity.rs"
+        ],
+        "e2e_artifacts": [
+          "target/web-framework-proof/run_report.json",
+          "target/fs-parity-proof/run_report.json",
+          "target/messaging-broker-proof/asupersync-6xjxd7.2/run_report.json",
+          "target/kafka-broker-parity-proof/asupersync-0xbecl.3/run_report.json"
+        ],
+        "assumptions": [
+          "External broker availability can produce deterministic unsupported skips instead of proof passes.",
+          "Adapter runners prove named scenarios, not all possible host filesystems, HTTP clients, or brokers."
+        ],
+        "missing_evidence_disposition": "Each unsupported host/broker/platform condition must remain in runner output or a live owner bead.",
+        "claim_scope": "Adapter/protocol lanes are runtime and script backed; no lane-specific Lean proof is claimed."
+      },
+      {
+        "lane_id": "massive_swarm_capacity",
+        "owner_bead_id": "asupersync-j1dwk6",
+        "invariant_ids": [
+          "inv.structured_concurrency.single_owner",
+          "inv.region_close.quiescence"
+        ],
+        "proof_tier": "artifact_contract_backed",
+        "theorem_or_model_names": [
+          "massive swarm capacity evidence contract",
+          "capacity envelope planner smoke contract"
+        ],
+        "source_paths": [
+          "src/runtime",
+          "src/observability/diagnostics.rs",
+          "tests/massive_swarm_capacity_envelope_contract.rs",
+          "scripts/run_massive_swarm_signoff_smoke.sh"
+        ],
+        "runtime_tests": [
+          "tests/massive_swarm_capacity_envelope_contract.rs"
+        ],
+        "e2e_artifacts": [
+          "artifacts/wave2/massive_swarm_capacity_envelope_evidence.json",
+          "artifacts/capacity_envelope_planner_smoke_contract_v1.json",
+          "artifacts/massive_swarm_signoff_smoke_contract_v1.json"
+        ],
+        "assumptions": [
+          "Capacity evidence is profile and host-class scoped; it is not a theorem that every 64-core/256GiB host has identical latency tails."
+        ],
+        "missing_evidence_disposition": "Residual capacity risks stay in the evidence artifact and final signoff until host-profile proof is rerun.",
+        "claim_scope": "Scale claims are artifact-contract backed and tied to specific smoke/signoff rows."
+      }
+    ]
+  },
   "marker_inventory": [
     {
       "marker": "sorry",
