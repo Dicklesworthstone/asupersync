@@ -59,9 +59,9 @@ pub mod filter;
 pub mod format;
 pub mod geodesic;
 pub mod gf2;
+pub mod incident;
 pub mod independence;
 pub mod integrity;
-pub mod incident;
 pub mod minimizer;
 pub mod recorder;
 pub mod refinement_firewall;
@@ -126,26 +126,32 @@ pub use geodesic::{
     normalize as geodesic_normalize,
 };
 pub use gf2::{BitVec, BoundaryMatrix, PersistencePairs, ReducedMatrix};
+pub use incident::{
+    INCIDENT_BUNDLE_SCHEMA_VERSION, INCIDENT_MINIMIZED_REPRO_SCHEMA_VERSION,
+    INCIDENT_REGRESSION_PROOF_SCHEMA_VERSION, INCIDENT_REPLAY_PACKAGE_SCHEMA_VERSION,
+    IncidentBundle, IncidentCommand, IncidentDeterminism, IncidentEnvVar,
+    IncidentMinimizedReplayRepro, IncidentOracleKind, IncidentPrivacy, IncidentPrivacyClass,
+    IncidentProvenance, IncidentRedactionStatus, IncidentRegressionPromotionBlock,
+    IncidentRegressionPromotionBlockKind, IncidentRegressionPromotionPolicy,
+    IncidentRegressionPromotionReport, IncidentRegressionPromotionVerdict,
+    IncidentRegressionProofArtifact, IncidentRegressionProofCommand, IncidentRegressionProofTarget,
+    IncidentReplayBlockReason, IncidentReplayBlockReasonKind, IncidentReplayCanonicalization,
+    IncidentReplayImportReport, IncidentReplayImportVerdict, IncidentReplayMinimizationConfig,
+    IncidentReplayMinimizationIssue, IncidentReplayMinimizationIssueKind,
+    IncidentReplayMinimizationReport, IncidentReplayMinimizationSummary,
+    IncidentReplayMinimizationVerdict, IncidentReplayOracle, IncidentReplayPackage,
+    IncidentReplayShrinkStep, IncidentReplayShrinkStepKind, IncidentReplaySource,
+    IncidentReplaySourceRole, IncidentSource, IncidentSourceKind, IncidentValidationIssue,
+    IncidentValidationIssueKind, IncidentValidationReport, IncidentValidationVerdict,
+    import_incident_bundle_json, minimize_incident_replay_package,
+    promote_minimized_incident_repro,
+};
 pub use independence::{
     AccessMode, Resource, ResourceAccess, accesses_conflict, independent, resource_footprint,
 };
 pub use integrity::{
     IntegrityIssue, IssueSeverity, VerificationOptions, VerificationResult, find_first_corruption,
     is_trace_valid_quick, verify_trace,
-};
-pub use incident::{
-    INCIDENT_BUNDLE_SCHEMA_VERSION, INCIDENT_MINIMIZED_REPRO_SCHEMA_VERSION,
-    INCIDENT_REPLAY_PACKAGE_SCHEMA_VERSION, IncidentBundle, IncidentCommand, IncidentDeterminism,
-    IncidentEnvVar, IncidentMinimizedReplayRepro, IncidentOracleKind, IncidentPrivacy,
-    IncidentPrivacyClass, IncidentProvenance, IncidentRedactionStatus, IncidentReplayBlockReason,
-    IncidentReplayBlockReasonKind, IncidentReplayCanonicalization, IncidentReplayImportReport,
-    IncidentReplayImportVerdict, IncidentReplayMinimizationConfig, IncidentReplayMinimizationIssue,
-    IncidentReplayMinimizationIssueKind, IncidentReplayMinimizationReport,
-    IncidentReplayMinimizationSummary, IncidentReplayMinimizationVerdict, IncidentReplayOracle,
-    IncidentReplayPackage, IncidentReplayShrinkStep, IncidentReplayShrinkStepKind,
-    IncidentReplaySource, IncidentReplaySourceRole, IncidentSource, IncidentSourceKind,
-    IncidentValidationIssue, IncidentValidationIssueKind, IncidentValidationReport,
-    IncidentValidationVerdict, import_incident_bundle_json, minimize_incident_replay_package,
 };
 pub use minimizer::{
     MinimizationReport, MinimizationStep, ScenarioElement, StepKind, TraceMinimizer,

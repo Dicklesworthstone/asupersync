@@ -18,6 +18,9 @@ pub const INCIDENT_REPLAY_PACKAGE_SCHEMA_VERSION: u32 = 1;
 /// Current minimized replay repro schema version.
 pub const INCIDENT_MINIMIZED_REPRO_SCHEMA_VERSION: u32 = 1;
 
+/// Current incident regression proof schema version.
+pub const INCIDENT_REGRESSION_PROOF_SCHEMA_VERSION: u32 = 1;
+
 const MAX_ID_BYTES: usize = 128;
 const MAX_PATH_BYTES: usize = 512;
 const MAX_FIELD_BYTES: usize = 1024;
@@ -1064,6 +1067,337 @@ impl IncidentReplayMinimizationReport {
     }
 }
 
+/// Durable proof target selected for a minimized incident repro.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum IncidentRegressionProofTarget {
+    /// Inline unit-level regression test.
+    UnitTest,
+    /// Repository integration test target.
+    IntegrationTest,
+    /// Golden artifact or snapshot fixture.
+    GoldenArtifact,
+    /// Fuzzer seed corpus entry.
+    FuzzSeed,
+    /// RFC or conformance fixture.
+    ConformanceFixture,
+    /// Deterministic fixture only; not executable as a normal regression yet.
+    FixtureOnly,
+    /// Follow-up blocker bead instead of a committed proof.
+    BlockerBead,
+}
+
+impl IncidentRegressionProofTarget {
+    /// Return the stable string tag for artifacts and logs.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UnitTest => "unit_test",
+            Self::IntegrationTest => "integration_test",
+            Self::GoldenArtifact => "golden_artifact",
+            Self::FuzzSeed => "fuzz_seed",
+            Self::ConformanceFixture => "conformance_fixture",
+            Self::FixtureOnly => "fixture_only",
+            Self::BlockerBead => "blocker_bead",
+        }
+    }
+}
+
+/// Promotion outcome for a minimized incident repro.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IncidentRegressionPromotionVerdict {
+    /// A normal executable proof artifact was emitted.
+    Promoted,
+    /// A fixture-only proof artifact was emitted.
+    FixtureOnly,
+    /// Promotion was blocked with typed reasons.
+    Blocked,
+}
+
+/// Typed reason a minimized repro cannot be promoted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum IncidentRegressionPromotionBlockKind {
+    /// The requested proof target does not fit the repro oracle/source shape.
+    UnsupportedPromotionTarget,
+    /// A proof seed with the same deterministic identity already exists.
+    DuplicateSeed,
+    /// A retained fixture hash no longer matches the expected hash.
+    StaleFixtureHash,
+    /// No redaction policy was supplied for the promoted proof artifact.
+    MissingRedactionPolicy,
+    /// The repro command cannot be executed through `rch exec`.
+    ProofCommandNotRch,
+    /// A blocker-bead promotion target omitted the follow-up bead id.
+    MissingBlockerBead,
+}
+
+impl IncidentRegressionPromotionBlockKind {
+    /// Return the stable string tag for artifacts and logs.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UnsupportedPromotionTarget => "unsupported_promotion_target",
+            Self::DuplicateSeed => "duplicate_seed",
+            Self::StaleFixtureHash => "stale_fixture_hash",
+            Self::MissingRedactionPolicy => "missing_redaction_policy",
+            Self::ProofCommandNotRch => "proof_command_not_rch",
+            Self::MissingBlockerBead => "missing_blocker_bead",
+        }
+    }
+}
+
+/// One typed promotion blocker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncidentRegressionPromotionBlock {
+    /// Blocker class.
+    pub kind: IncidentRegressionPromotionBlockKind,
+    /// Field or source id associated with the blocker.
+    pub field: String,
+    /// Human-readable blocked reason.
+    pub message: String,
+}
+
+impl IncidentRegressionPromotionBlock {
+    fn new(
+        kind: IncidentRegressionPromotionBlockKind,
+        field: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind,
+            field: field.into(),
+            message: message.into(),
+        }
+    }
+}
+
+/// Operator policy for promoting a minimized repro into durable regression proof.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncidentRegressionPromotionPolicy {
+    /// Optional explicit target. When absent, the target is selected from the oracle/source shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<IncidentRegressionProofTarget>,
+    /// Seed identities that are already committed and must not be duplicated.
+    #[serde(default)]
+    pub existing_seed_ids: Vec<String>,
+    /// Expected source hashes keyed by retained source id.
+    #[serde(default)]
+    pub expected_fixture_hashes: BTreeMap<String, String>,
+    /// Redaction policy id to preserve in the emitted proof artifact.
+    pub redaction_policy_id: String,
+    /// Whether a fixture-only proof is allowed when the repro is not directly executable.
+    #[serde(default)]
+    pub allow_fixture_only: bool,
+    /// Follow-up bead id used when the selected target is [`IncidentRegressionProofTarget::BlockerBead`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_bead_id: Option<String>,
+}
+
+impl Default for IncidentRegressionPromotionPolicy {
+    fn default() -> Self {
+        Self {
+            target: None,
+            existing_seed_ids: Vec::new(),
+            expected_fixture_hashes: BTreeMap::new(),
+            redaction_policy_id: "incident-redaction-v1".to_string(),
+            allow_fixture_only: false,
+            blocked_bead_id: None,
+        }
+    }
+}
+
+/// Reproduction command preserved in a regression proof artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncidentRegressionProofCommand {
+    /// Original command metadata.
+    pub command: IncidentCommand,
+    /// Deterministic single-line rendering for reports and operators.
+    pub command_line: String,
+    /// Whether the command satisfies the repository's remote-first proof rule.
+    pub executable_through_rch: bool,
+    /// Typed text when the command is not executable through `rch`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<String>,
+}
+
+/// Stable proof artifact emitted by incident repro promotion.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IncidentRegressionProofArtifact {
+    /// Proof schema version.
+    pub schema_version: u32,
+    /// Stable proof identifier.
+    pub proof_id: String,
+    /// Selected promotion target.
+    pub target: IncidentRegressionProofTarget,
+    /// Source minimized repro identifier.
+    pub source_repro_id: String,
+    /// Source replay package identifier.
+    pub source_package_id: String,
+    /// Source incident bundle identifier.
+    pub bundle_id: String,
+    /// Oracle preserved by the proof.
+    pub oracle: IncidentReplayOracle,
+    /// Minimization summary preserved from the repro.
+    pub minimization_summary: IncidentReplayMinimizationSummary,
+    /// Retained feature flags from the minimized repro.
+    pub retained_feature_flags: Vec<String>,
+    /// Retained source hashes keyed by source id.
+    pub retained_source_hashes: BTreeMap<String, String>,
+    /// Provenance edges from bundle source to replay role.
+    pub source_provenance_edges: Vec<String>,
+    /// Proof commands or blocked command rows.
+    pub proof_commands: Vec<IncidentRegressionProofCommand>,
+    /// Deterministic seed identity used for duplicate detection.
+    pub seed_id: String,
+    /// Redaction policy carried forward into the proof artifact.
+    pub redaction_policy_id: String,
+    /// Original capture provenance.
+    pub provenance: IncidentProvenance,
+    /// Follow-up blocker bead when promotion cannot become an executable proof.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_bead_id: Option<String>,
+}
+
+/// Full promotion report for a minimized incident repro.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IncidentRegressionPromotionReport {
+    /// Promotion verdict.
+    pub verdict: IncidentRegressionPromotionVerdict,
+    /// Selected or requested target.
+    pub target: IncidentRegressionProofTarget,
+    /// Source minimized repro identifier.
+    pub repro_id: String,
+    /// Proof artifact for promoted or fixture-only verdicts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof: Option<IncidentRegressionProofArtifact>,
+    /// Typed blockers for failed promotion.
+    pub blocks: Vec<IncidentRegressionPromotionBlock>,
+}
+
+impl IncidentRegressionPromotionReport {
+    /// Return `true` when this report emitted a proof artifact.
+    #[must_use]
+    pub const fn has_proof(&self) -> bool {
+        self.proof.is_some()
+    }
+
+    /// Return `true` if any blocker has the supplied kind.
+    #[must_use]
+    pub fn contains_block(&self, kind: IncidentRegressionPromotionBlockKind) -> bool {
+        self.blocks.iter().any(|block| block.kind == kind)
+    }
+}
+
+/// Promote a minimized repro into a regression proof artifact or typed blocker report.
+#[must_use]
+pub fn promote_minimized_incident_repro(
+    repro: &IncidentMinimizedReplayRepro,
+    policy: IncidentRegressionPromotionPolicy,
+) -> IncidentRegressionPromotionReport {
+    let target = policy
+        .target
+        .unwrap_or_else(|| select_regression_proof_target(repro, policy.allow_fixture_only));
+    let seed_id = regression_seed_id(repro, target);
+    let mut blocks = Vec::new();
+
+    if !promotion_target_supported(repro, target, policy.allow_fixture_only) {
+        blocks.push(IncidentRegressionPromotionBlock::new(
+            IncidentRegressionPromotionBlockKind::UnsupportedPromotionTarget,
+            "target",
+            format!(
+                "target {} does not preserve oracle {} for repro {}",
+                target.as_str(),
+                repro.oracle.kind.as_str(),
+                repro.repro_id
+            ),
+        ));
+    }
+    if policy.existing_seed_ids.iter().any(|id| id == &seed_id) {
+        blocks.push(IncidentRegressionPromotionBlock::new(
+            IncidentRegressionPromotionBlockKind::DuplicateSeed,
+            "determinism.seed",
+            format!("promotion seed {seed_id} already exists"),
+        ));
+    }
+    for (source_id, expected_hash) in &policy.expected_fixture_hashes {
+        let actual_hash = repro
+            .retained_sources
+            .iter()
+            .find(|source| source.source_id == *source_id)
+            .map(|source| source.content_hash.as_str());
+        if actual_hash != Some(expected_hash.as_str()) {
+            blocks.push(IncidentRegressionPromotionBlock::new(
+                IncidentRegressionPromotionBlockKind::StaleFixtureHash,
+                format!("retained_sources.{source_id}.content_hash"),
+                format!(
+                    "expected retained source {source_id} hash {expected_hash}, got {:?}",
+                    actual_hash.unwrap_or("<missing>")
+                ),
+            ));
+        }
+    }
+    if policy.redaction_policy_id.is_empty() {
+        blocks.push(IncidentRegressionPromotionBlock::new(
+            IncidentRegressionPromotionBlockKind::MissingRedactionPolicy,
+            "redaction_policy_id",
+            "promotion requires an explicit redaction policy id",
+        ));
+    }
+
+    let proof_command = regression_proof_command(&repro.command);
+    if requires_executable_proof_command(target) && !proof_command.executable_through_rch {
+        blocks.push(IncidentRegressionPromotionBlock::new(
+            IncidentRegressionPromotionBlockKind::ProofCommandNotRch,
+            "command",
+            proof_command
+                .blocked_reason
+                .clone()
+                .unwrap_or_else(|| "proof command must be executable through rch".to_string()),
+        ));
+    }
+    if target == IncidentRegressionProofTarget::BlockerBead && policy.blocked_bead_id.is_none() {
+        blocks.push(IncidentRegressionPromotionBlock::new(
+            IncidentRegressionPromotionBlockKind::MissingBlockerBead,
+            "blocked_bead_id",
+            "blocker-bead promotion requires a follow-up bead id",
+        ));
+    }
+
+    if !blocks.is_empty() {
+        return IncidentRegressionPromotionReport {
+            verdict: IncidentRegressionPromotionVerdict::Blocked,
+            target,
+            repro_id: repro.repro_id.clone(),
+            proof: None,
+            blocks,
+        };
+    }
+
+    let proof = build_regression_proof_artifact(
+        repro,
+        target,
+        seed_id,
+        policy.redaction_policy_id,
+        policy.blocked_bead_id,
+        proof_command,
+    );
+    let verdict = if target == IncidentRegressionProofTarget::FixtureOnly {
+        IncidentRegressionPromotionVerdict::FixtureOnly
+    } else {
+        IncidentRegressionPromotionVerdict::Promoted
+    };
+
+    IncidentRegressionPromotionReport {
+        verdict,
+        target,
+        repro_id: repro.repro_id.clone(),
+        proof: Some(proof),
+        blocks,
+    }
+}
+
 /// Minimize a replay package under a deterministic incident oracle.
 #[must_use]
 pub fn minimize_incident_replay_package(
@@ -1755,7 +2089,9 @@ fn build_minimized_repro(
     removed_source_ids.sort();
     removed_feature_flags.sort();
     let mut determinism = package.determinism.clone();
-    determinism.feature_flags = retained_feature_flags.clone();
+    determinism
+        .feature_flags
+        .clone_from(&retained_feature_flags);
     let repro_id = stable_minimized_repro_id(
         package,
         &oracle,
@@ -1823,6 +2159,215 @@ fn stable_minimized_repro_id(
         key.push('\n');
     }
     format!("incident-min-repro-v1:{:016x}", fnv1a64(key.as_bytes()))
+}
+
+fn select_regression_proof_target(
+    repro: &IncidentMinimizedReplayRepro,
+    allow_fixture_only: bool,
+) -> IncidentRegressionProofTarget {
+    let has_role = |role| {
+        repro
+            .retained_sources
+            .iter()
+            .any(|source| source.role == role)
+    };
+    if has_role(IncidentReplaySourceRole::ConformanceFailure)
+        || repro.oracle.kind == IncidentOracleKind::ProtocolError
+    {
+        IncidentRegressionProofTarget::ConformanceFixture
+    } else if has_role(IncidentReplaySourceRole::ReadmeClaimFailure)
+        || repro.oracle.kind == IncidentOracleKind::ClaimDrift
+    {
+        IncidentRegressionProofTarget::GoldenArtifact
+    } else if has_role(IncidentReplaySourceRole::TraceLog)
+        || has_role(IncidentReplaySourceRole::RchProofFailure)
+        || repro.oracle.kind == IncidentOracleKind::ProofCommandFailure
+    {
+        IncidentRegressionProofTarget::IntegrationTest
+    } else if has_role(IncidentReplaySourceRole::ReproNotes) && allow_fixture_only {
+        IncidentRegressionProofTarget::FixtureOnly
+    } else {
+        IncidentRegressionProofTarget::UnitTest
+    }
+}
+
+fn promotion_target_supported(
+    repro: &IncidentMinimizedReplayRepro,
+    target: IncidentRegressionProofTarget,
+    allow_fixture_only: bool,
+) -> bool {
+    let has_role = |role| {
+        repro
+            .retained_sources
+            .iter()
+            .any(|source| source.role == role)
+    };
+    match target {
+        IncidentRegressionProofTarget::UnitTest => {
+            matches!(
+                repro.oracle.kind,
+                IncidentOracleKind::Panic
+                    | IncidentOracleKind::CancellationLeak
+                    | IncidentOracleKind::ObligationLeak
+                    | IncidentOracleKind::QuiescenceViolation
+            ) && has_role(IncidentReplaySourceRole::CrashPack)
+        }
+        IncidentRegressionProofTarget::IntegrationTest => {
+            has_role(IncidentReplaySourceRole::CrashPack)
+                || has_role(IncidentReplaySourceRole::TraceLog)
+                || has_role(IncidentReplaySourceRole::SupportBundle)
+                || has_role(IncidentReplaySourceRole::RchProofFailure)
+                || repro.oracle.kind == IncidentOracleKind::ProofCommandFailure
+        }
+        IncidentRegressionProofTarget::GoldenArtifact => {
+            has_role(IncidentReplaySourceRole::ReadmeClaimFailure)
+                || repro.oracle.kind == IncidentOracleKind::ClaimDrift
+        }
+        IncidentRegressionProofTarget::FuzzSeed => {
+            has_role(IncidentReplaySourceRole::TraceLog)
+                || has_role(IncidentReplaySourceRole::CrashPack)
+        }
+        IncidentRegressionProofTarget::ConformanceFixture => {
+            has_role(IncidentReplaySourceRole::ConformanceFailure)
+                || repro.oracle.kind == IncidentOracleKind::ProtocolError
+        }
+        IncidentRegressionProofTarget::FixtureOnly => allow_fixture_only,
+        IncidentRegressionProofTarget::BlockerBead => true,
+    }
+}
+
+fn requires_executable_proof_command(target: IncidentRegressionProofTarget) -> bool {
+    !matches!(
+        target,
+        IncidentRegressionProofTarget::FixtureOnly | IncidentRegressionProofTarget::BlockerBead
+    )
+}
+
+fn regression_proof_command(command: &IncidentCommand) -> IncidentRegressionProofCommand {
+    let command_line = render_incident_command(command);
+    let executable_through_rch = command.program == "rch"
+        && command.args.first().is_some_and(|arg| arg == "exec")
+        && command.args.iter().any(|arg| arg == "cargo")
+        && command
+            .args
+            .iter()
+            .any(|arg| matches!(arg.as_str(), "test" | "check"));
+    let blocked_reason = (!executable_through_rch).then(|| {
+        format!("proof command must use `rch exec` with cargo test/check: {command_line}")
+    });
+
+    IncidentRegressionProofCommand {
+        command: command.clone(),
+        command_line,
+        executable_through_rch,
+        blocked_reason,
+    }
+}
+
+fn render_incident_command(command: &IncidentCommand) -> String {
+    let mut parts = command
+        .env
+        .iter()
+        .map(|var| format!("{}={}", var.key, var.value))
+        .collect::<Vec<_>>();
+    parts.push(command.program.clone());
+    parts.extend(command.args.clone());
+    parts.join(" ")
+}
+
+fn regression_seed_id(
+    repro: &IncidentMinimizedReplayRepro,
+    target: IncidentRegressionProofTarget,
+) -> String {
+    let mut flags = repro.retained_feature_flags.clone();
+    flags.sort();
+    format!(
+        "incident-regression-seed-v1:{}:{:?}:{:?}:{}:{}",
+        target.as_str(),
+        repro.determinism.seed,
+        repro.determinism.schedule_seed,
+        repro.determinism.config_hash,
+        flags.join(",")
+    )
+}
+
+fn build_regression_proof_artifact(
+    repro: &IncidentMinimizedReplayRepro,
+    target: IncidentRegressionProofTarget,
+    seed_id: String,
+    redaction_policy_id: String,
+    blocked_bead_id: Option<String>,
+    proof_command: IncidentRegressionProofCommand,
+) -> IncidentRegressionProofArtifact {
+    let retained_source_hashes = repro
+        .retained_sources
+        .iter()
+        .map(|source| (source.source_id.clone(), source.content_hash.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let source_provenance_edges = repro
+        .retained_sources
+        .iter()
+        .map(|source| source.provenance_edge.clone())
+        .collect::<Vec<_>>();
+    let proof_id = stable_regression_proof_id(
+        repro,
+        target,
+        &seed_id,
+        &redaction_policy_id,
+        &retained_source_hashes,
+    );
+
+    IncidentRegressionProofArtifact {
+        schema_version: INCIDENT_REGRESSION_PROOF_SCHEMA_VERSION,
+        proof_id,
+        target,
+        source_repro_id: repro.repro_id.clone(),
+        source_package_id: repro.source_package_id.clone(),
+        bundle_id: repro.bundle_id.clone(),
+        oracle: repro.oracle.clone(),
+        minimization_summary: repro.summary.clone(),
+        retained_feature_flags: repro.retained_feature_flags.clone(),
+        retained_source_hashes,
+        source_provenance_edges,
+        proof_commands: vec![proof_command],
+        seed_id,
+        redaction_policy_id,
+        provenance: repro.provenance.clone(),
+        blocked_bead_id,
+    }
+}
+
+fn stable_regression_proof_id(
+    repro: &IncidentMinimizedReplayRepro,
+    target: IncidentRegressionProofTarget,
+    seed_id: &str,
+    redaction_policy_id: &str,
+    retained_source_hashes: &BTreeMap<String, String>,
+) -> String {
+    let mut key = String::new();
+    key.push_str("incident-regression-proof-v1\n");
+    key.push_str(target.as_str());
+    key.push('\n');
+    key.push_str(&repro.repro_id);
+    key.push('\n');
+    key.push_str(repro.oracle.kind.as_str());
+    key.push('|');
+    key.push_str(&repro.oracle.expected_signal);
+    key.push('\n');
+    key.push_str(seed_id);
+    key.push('\n');
+    key.push_str(redaction_policy_id);
+    key.push('\n');
+    for (source_id, hash) in retained_source_hashes {
+        key.push_str(source_id);
+        key.push('|');
+        key.push_str(hash);
+        key.push('\n');
+    }
+    format!(
+        "incident-regression-proof-v1:{:016x}",
+        fnv1a64(key.as_bytes())
+    )
 }
 
 fn sorted_strings(mut values: Vec<String>) -> Vec<String> {
@@ -2573,5 +3118,151 @@ mod tests {
 
         assert_eq!(repro.repro_id, parsed.repro_id);
         assert_eq!(repro, parsed);
+    }
+
+    fn minimized_crash_repro() -> IncidentMinimizedReplayRepro {
+        two_source_package()
+            .minimize_repro(
+                panic_oracle(),
+                IncidentReplayMinimizationConfig {
+                    step_budget: 8,
+                    shrink_feature_flags: false,
+                },
+            )
+            .repro
+            .expect("crash repro emitted")
+    }
+
+    #[test]
+    fn promotion_class_selection_uses_oracle_and_sources() {
+        let crash_report = promote_minimized_incident_repro(
+            &minimized_crash_repro(),
+            IncidentRegressionPromotionPolicy::default(),
+        );
+        assert_eq!(
+            crash_report.verdict,
+            IncidentRegressionPromotionVerdict::Promoted
+        );
+        assert_eq!(crash_report.target, IncidentRegressionProofTarget::UnitTest);
+
+        let mut bundle = valid_bundle();
+        bundle.sources[0].kind = IncidentSourceKind::ReadmeClaimFailure;
+        bundle.sources[0].source_id = "readme-claim-main".to_string();
+        bundle.sources[0].metadata.insert(
+            "observed_content_hash".to_string(),
+            json!(bundle.sources[0].content_hash.clone()),
+        );
+        let package = bundle
+            .import_replay_package()
+            .package
+            .expect("readme claim imports");
+        let repro = package
+            .minimize_repro(
+                IncidentReplayOracle {
+                    kind: IncidentOracleKind::ClaimDrift,
+                    expected_signal: "region close claim drift".to_string(),
+                    stable: true,
+                    required_source_roles: vec![IncidentReplaySourceRole::ReadmeClaimFailure],
+                    required_trace_fingerprint: None,
+                },
+                IncidentReplayMinimizationConfig {
+                    step_budget: 8,
+                    shrink_feature_flags: false,
+                },
+            )
+            .repro
+            .expect("claim drift repro emitted");
+        let claim_report =
+            promote_minimized_incident_repro(&repro, IncidentRegressionPromotionPolicy::default());
+
+        assert_eq!(
+            claim_report.target,
+            IncidentRegressionProofTarget::GoldenArtifact
+        );
+        assert!(claim_report.has_proof());
+    }
+
+    #[test]
+    fn unsupported_promotion_target_blocks() {
+        let policy = IncidentRegressionPromotionPolicy {
+            target: Some(IncidentRegressionProofTarget::ConformanceFixture),
+            ..IncidentRegressionPromotionPolicy::default()
+        };
+        let report = promote_minimized_incident_repro(&minimized_crash_repro(), policy);
+
+        assert_eq!(report.verdict, IncidentRegressionPromotionVerdict::Blocked);
+        assert!(
+            report.contains_block(IncidentRegressionPromotionBlockKind::UnsupportedPromotionTarget)
+        );
+        assert!(report.proof.is_none());
+    }
+
+    #[test]
+    fn duplicate_seed_detection_blocks_repromotion() {
+        let repro = minimized_crash_repro();
+        let promoted =
+            promote_minimized_incident_repro(&repro, IncidentRegressionPromotionPolicy::default());
+        let seed_id = promoted
+            .proof
+            .as_ref()
+            .expect("promotion proof emitted")
+            .seed_id
+            .clone();
+        let report = promote_minimized_incident_repro(
+            &repro,
+            IncidentRegressionPromotionPolicy {
+                existing_seed_ids: vec![seed_id],
+                ..IncidentRegressionPromotionPolicy::default()
+            },
+        );
+
+        assert_eq!(report.verdict, IncidentRegressionPromotionVerdict::Blocked);
+        assert!(report.contains_block(IncidentRegressionPromotionBlockKind::DuplicateSeed));
+    }
+
+    #[test]
+    fn stale_fixture_hash_rejects_promotion() {
+        let repro = minimized_crash_repro();
+        let report = promote_minimized_incident_repro(
+            &repro,
+            IncidentRegressionPromotionPolicy {
+                expected_fixture_hashes: BTreeMap::from([(
+                    "crashpack-main".to_string(),
+                    "sha256:9999999999999999999999999999999999999999999999999999999999999999"
+                        .to_string(),
+                )]),
+                ..IncidentRegressionPromotionPolicy::default()
+            },
+        );
+
+        assert_eq!(report.verdict, IncidentRegressionPromotionVerdict::Blocked);
+        assert!(report.contains_block(IncidentRegressionPromotionBlockKind::StaleFixtureHash));
+    }
+
+    #[test]
+    fn redaction_policy_is_preserved_without_payload_leakage() {
+        let report = promote_minimized_incident_repro(
+            &minimized_crash_repro(),
+            IncidentRegressionPromotionPolicy {
+                redaction_policy_id: "incident-redaction-v1".to_string(),
+                ..IncidentRegressionPromotionPolicy::default()
+            },
+        );
+        let proof = report.proof.expect("promotion proof emitted");
+        let json = serde_json::to_string(&proof).expect("proof serializes");
+
+        assert_eq!(proof.redaction_policy_id, "incident-redaction-v1");
+        assert_eq!(
+            proof.minimization_summary.accepted_steps,
+            proof
+                .proof_commands
+                .iter()
+                .filter(|command| command.executable_through_rch)
+                .count()
+        );
+        assert!(
+            !json.contains("panic after deterministic schedule seed 42"),
+            "promotion proof must not reintroduce source payload snippets"
+        );
     }
 }
