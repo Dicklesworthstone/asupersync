@@ -41,7 +41,7 @@ This contract defines the cross-track composition gauntlet: a compatibility matr
 ## Validation
 
 ```bash
-rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa104 cargo test --test cross_track_composition_contract -- --nocapture
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_cross_track_composition cargo test -p asupersync --test cross_track_composition_contract --features test-internals -- --nocapture
 ```
 
 ## Cross-References
