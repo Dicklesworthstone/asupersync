@@ -109,6 +109,7 @@ mod tests {
     use crate::test_utils::init_test_logging;
     use crate::types::{Budget, RegionId, TaskId};
     use crate::util::ArenaIndex;
+    use std::future::{pending, ready};
     use std::time::Duration;
 
     fn init_test(name: &str) {
@@ -167,6 +168,30 @@ mod tests {
             Time::from_secs(12)
         ));
         crate::test_complete!("budget_time_ext_deadline_boundaries");
+    }
+
+    #[test]
+    fn budget_timeout_respects_exhausted_deadline_boundary() {
+        init_test("budget_timeout_respects_exhausted_deadline_boundary");
+        let cx = test_cx(Budget::new().with_deadline(Time::ZERO));
+
+        futures_lite::future::block_on(async {
+            let elapsed = budget_timeout(&cx, Duration::from_secs(10), pending::<()>(), Time::ZERO)
+                .await
+                .expect_err("pending work must time out at an exhausted budget deadline");
+            assert_eq!(elapsed.deadline(), Time::ZERO);
+
+            let completed = budget_timeout(
+                &cx,
+                Duration::from_secs(10),
+                ready("already-complete"),
+                Time::ZERO,
+            )
+            .await
+            .expect("ready work wins the timeout boundary");
+            assert_eq!(completed, "already-complete");
+        });
+        crate::test_complete!("budget_timeout_respects_exhausted_deadline_boundary");
     }
 
     #[test]
