@@ -39,6 +39,36 @@ Notes:
 
 ---
 
+## Wave2 Capability Smoke Recipes
+
+These recipes are the public entry points for the promoted Wave2 capability
+evidence lanes. They are intentionally small: each row names the capability, the
+host context, the proof command, and the evidence artifact to inspect after the
+command. Cargo-backed checks must run through `rch exec`; broker or browser
+lanes must emit deterministic skip rows when their host prerequisites are not
+available.
+
+| Capability | Host context | Smoke command | Evidence |
+|---|---|---|---|
+| Remote transport lifecycle | remote worker | `bash scripts/run_remote_transport_lifecycle_evidence.sh --output-root ${TMPDIR:-/tmp}/wave2_remote_transport_examples` | `artifacts/wave2/remote_transport_lifecycle_evidence.json` |
+| gRPC deadline + health conformance | native deterministic conformance | `bash scripts/run_grpc_deadline_health_conformance_evidence.sh --output-root ${TMPDIR:-/tmp}/wave2_grpc_examples` | `artifacts/wave2/conformance_grpc_deadline_health_evidence.json` |
+| Actor mailbox + trace-event conformance | native deterministic conformance | `bash scripts/run_actor_trace_conformance_evidence.sh --output-root ${TMPDIR:-/tmp}/wave2_actor_trace_examples` | `artifacts/wave2/conformance_actor_mailbox_trace_event_evidence.json` |
+| Massive-swarm capacity envelope | operator profile / large-host planning | `bash scripts/run_massive_swarm_capacity_envelope.sh --output-root ${TMPDIR:-/tmp}/wave2_capacity_examples` | `artifacts/wave2/massive_swarm_capacity_envelope_evidence.json` |
+| Operator swarm profile diagnostics | operator diagnostics | `bash scripts/run_operator_swarm_profile_diagnostics.sh --output-root ${TMPDIR:-/tmp}/wave2_operator_examples` | `artifacts/wave2/operator_swarm_profile_diagnostics_evidence.json` |
+
+Recipe rules:
+
+- Keep `Cx` flow, region ownership, cancellation/drain/finalize, and no-ambient-runtime boundaries visible in any Rust example promoted from these recipes.
+- Do not convert evidence artifacts into decorative demos; a row is public only when the command and artifact form a reproducible adoption path.
+- Do not add Tokio, hyper, axum, reqwest, async-std, or smol dependencies to core runtime examples.
+- If a capability is platform, broker, or formal-tooling gated, keep a stable `unsupported_reason`, fallback target, owner bead, and deterministic log row instead of silently skipping it.
+
+The inventory and fail-closed contract for these recipes live in
+`artifacts/wave2/capability_examples_smoke_recipes_evidence.json` and
+`tests/wave2_capability_examples_contract.rs`.
+
+---
+
 ## Effect-Safe Context Wrappers
 
 Framework integrations should wrap `Cx` to provide least-privilege access.

@@ -175,6 +175,19 @@ fn validate_promoted_registry_coverage(
     if !missing.is_empty() {
         return Err(format!("promoted_capability_examples_missing:{missing:?}"));
     }
+    for row in array(artifact, "example_rows") {
+        let capability_id = string(row, "capability_id");
+        if promoted.contains(capability_id)
+            && optional_string(row, "unsupported_reason").trim().is_empty()
+        {
+            let example_path = string(row, "example_path");
+            if example_path.starts_with("artifacts/") {
+                return Err(format!(
+                    "{capability_id}:promoted_example_path_not_public:{example_path}"
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -325,6 +338,44 @@ fn missing_promoted_registry_capability_is_rejected() {
         "negative-missing-promoted-registry-row",
         &[
             ("removed_capability", target),
+            ("rejected", "true".to_string()),
+            ("verdict", "pass".to_string()),
+            ("first_failure", String::new()),
+        ],
+    );
+}
+
+#[test]
+fn artifact_only_promoted_recipe_is_rejected() {
+    let mut artifact = artifact();
+    let registry = read_repo_json(REGISTRY_PATH);
+    let target = promoted_registry_capability_ids(&registry)
+        .into_iter()
+        .next()
+        .expect("at least one promoted capability");
+    let rows = artifact
+        .get_mut("example_rows")
+        .and_then(JsonValue::as_array_mut)
+        .expect("example rows");
+    let row = rows
+        .iter_mut()
+        .find(|row| row.get("capability_id").and_then(JsonValue::as_str) == Some(target.as_str()))
+        .expect("promoted example row");
+    row["example_path"] =
+        JsonValue::String("artifacts/wave2/capability_examples_smoke_recipes_evidence.json".into());
+    row["unsupported_reason"] = JsonValue::String(String::new());
+
+    let err = validate_promoted_registry_coverage(&artifact, &registry)
+        .expect_err("artifact-only promoted capability must fail");
+    assert!(
+        err.contains("promoted_example_path_not_public"),
+        "unexpected error: {err}"
+    );
+
+    log_contract_event(
+        "negative-artifact-only-promoted-row",
+        &[
+            ("capability_id", target),
             ("rejected", "true".to_string()),
             ("verdict", "pass".to_string()),
             ("first_failure", String::new()),
