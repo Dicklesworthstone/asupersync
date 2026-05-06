@@ -62,6 +62,25 @@ impl File {
         })
     }
 
+    /// Opens a file in read-write mode, failing if it already exists.
+    ///
+    /// The create-new operation is atomic with respect to other filesystem
+    /// creators. If this succeeds, the returned file is guaranteed to be new.
+    pub async fn create_new(path: impl AsRef<Path>) -> io::Result<Self> {
+        let path = path.as_ref().to_owned();
+        let file = spawn_blocking_io(move || {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&path)
+        })
+        .await?;
+        Ok(Self {
+            inner: Arc::new(file),
+        })
+    }
+
     /// Returns a new `OpenOptions` object.
     #[must_use]
     pub fn options() -> OpenOptions {
@@ -268,6 +287,40 @@ mod tests {
             crate::assert_with_log!(&buf == b"56789", "seek contents", b"56789", buf);
         });
         crate::test_complete!("test_file_seek");
+    }
+
+    #[test]
+    fn test_file_create_new_is_exclusive_and_read_write() {
+        init_test("test_file_create_new_is_exclusive_and_read_write");
+        futures_lite::future::block_on(async {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("exclusive.txt");
+
+            let mut file = File::create_new(&path).await.unwrap();
+            file.write_all(b"exclusive").await.unwrap();
+            file.rewind().await.unwrap();
+
+            let mut contents = String::new();
+            file.read_to_string(&mut contents).await.unwrap();
+            crate::assert_with_log!(
+                contents == "exclusive",
+                "create_new file is read-write",
+                "exclusive",
+                contents
+            );
+            drop(file);
+
+            let err = File::create_new(&path)
+                .await
+                .expect_err("second create_new must fail");
+            crate::assert_with_log!(
+                err.kind() == io::ErrorKind::AlreadyExists,
+                "create_new existing error kind",
+                io::ErrorKind::AlreadyExists,
+                err.kind()
+            );
+        });
+        crate::test_complete!("test_file_create_new_is_exclusive_and_read_write");
     }
 
     #[test]

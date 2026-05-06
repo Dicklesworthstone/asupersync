@@ -40,6 +40,7 @@ fn cleanup(path: &std::path::Path) {
 
 const FS_PARITY_WAVE2_SCENARIOS: &[&str] = &[
     "open-options-seek-sync",
+    "file-create-new-exclusive",
     "read-dir-metadata-disposition",
     "buffered-lines-boundaries",
     "unix-vfs-equivalence",
@@ -193,6 +194,43 @@ async fn fs_proof_open_options_seek_sync(temp_root: &Path) -> Result<FsProofEvid
         metadata.len(),
         "len=10,is_file=true,seek_window=456",
     ))
+}
+
+async fn fs_proof_file_create_new_exclusive(temp_root: &Path) -> Result<FsProofEvidence, String> {
+    let dir = fs_proof_scenario_dir(temp_root, "file-create-new-exclusive")?;
+    let path = dir.join("new-only.txt");
+    let mut file = fs::File::create_new(&path)
+        .await
+        .map_err(|err| format!("create_new first open: {err}"))?;
+    file.write_all(b"exclusive-create")
+        .await
+        .map_err(|err| format!("create_new write: {err}"))?;
+    file.rewind()
+        .await
+        .map_err(|err| format!("create_new rewind: {err}"))?;
+
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)
+        .await
+        .map_err(|err| format!("create_new read back: {err}"))?;
+    if contents != "exclusive-create" {
+        return Err(format!(
+            "create_new read/write drift: expected exclusive-create actual {contents}"
+        ));
+    }
+    drop(file);
+
+    match fs::File::create_new(&path).await {
+        Ok(_) => Err("second create_new unexpectedly succeeded".to_string()),
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => Ok(FsProofEvidence::supported(
+            contents.len() as u64,
+            "read_write=true,second_error=AlreadyExists",
+        )),
+        Err(err) => Err(format!(
+            "second create_new returned wrong error kind: {:?}: {err}",
+            err.kind()
+        )),
+    }
 }
 
 async fn fs_proof_read_dir_metadata(temp_root: &Path) -> Result<FsProofEvidence, String> {
@@ -393,6 +431,15 @@ async fn fs_parity_wave2_run() -> io::Result<Vec<Value>> {
             metadata_expected: "len=10,is_file=true,seek_window=456",
             cancellation_point: "none",
             result: fs_proof_open_options_seek_sync(&temp_root).await,
+        },
+        FsProofScenario {
+            scenario_id: "file-create-new-exclusive",
+            api: "File::create_new",
+            operation: "atomic_create_new_read_write_second_open_rejects",
+            bytes_expected: 16,
+            metadata_expected: "read_write=true,second_error=AlreadyExists",
+            cancellation_point: "none",
+            result: fs_proof_file_create_new_exclusive(&temp_root).await,
         },
         FsProofScenario {
             scenario_id: "read-dir-metadata-disposition",
