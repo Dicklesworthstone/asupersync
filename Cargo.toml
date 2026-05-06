@@ -138,7 +138,6 @@ required-features = ["cli", "simd-intrinsics"]
 # Dependencies added here must preserve determinism in the lab runtime.
 thiserror = "2.0"
 crossbeam-queue = "0.3"
-faa_array_queue = "0.1.2"
 parking_lot = "0.12"
 slab = "0.4"
 smallvec = "1.15"
@@ -287,6 +286,7 @@ web-sys = { version = "0.3", features = [
 # Native-only dependencies: platform I/O, sockets, signals, and crypto.
 # These are excluded from wasm32 browser builds (umelq.3.3).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+faa_array_queue = "0.1.2"
 polling = "3.11"
 socket2 = { version = "0.6", features = ["all"] }
 libc = "0.2"

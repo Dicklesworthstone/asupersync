@@ -1,0 +1,134 @@
+{
+  "schema_version": "browser-rust-runtime-api-stability-evidence-v1",
+  "bead_id": "asupersync-j1xbon.1",
+  "parent_bead_id": "asupersync-j1xbon",
+  "capability_id": "browser_rust_runtime_api_stability",
+  "title": "Rust-authored Browser Edition runtime API stability evidence",
+  "fixture_path": "tests/fixtures/rust-browser-consumer",
+  "runner_script": "scripts/validate_rust_browser_consumer.sh",
+  "run_report_schema_version": "browser-rust-runtime-api-stability-run-report-v1",
+  "public_rust_api": [
+    "RuntimeBuilder::browser()",
+    "RuntimeBuilder::inspect_browser_execution_ladder()",
+    "RuntimeBuilder::inspect_browser_execution_ladder_with_preferred_lane()",
+    "BrowserRuntimeBuilder::build_selection()",
+    "BrowserRuntimeBuilder::preferred_lane()",
+    "BrowserRuntimeBuilder::consumer_version()"
+  ],
+  "support_decision": {
+    "support_class_before": "preview",
+    "support_class_after": "artifact-contract-backed",
+    "promotion_state": "evidence-ready",
+    "unsupported_reason": "The Rust-authored Browser Edition runtime API remains a preview public lane until ABI major/minor compatibility and downgrade behavior are fully stabilized beyond the maintained fixture.",
+    "fallback_target": "Use the maintained rust-browser-consumer fixture and JS/TS Browser Edition packages for shipped Browser Edition workflows.",
+    "residual_risks": [
+      "RuntimeBuilder::browser() is artifact-backed but still preview.",
+      "ABI version mismatch policy is documented but not promoted to a broad stable external Rust contract.",
+      "Native-only browser-impossible surfaces remain unsupported in wasm."
+    ]
+  },
+  "required_log_fields": [
+    "bead_id",
+    "scenario_id",
+    "profile",
+    "host_context",
+    "api_version",
+    "consumer_version",
+    "selected_lane",
+    "unsupported_surfaces",
+    "wasm_artifact_path",
+    "browser_run_artifact_path",
+    "expected_output",
+    "actual_output",
+    "verdict",
+    "first_failure"
+  ],
+  "scenario_matrix": [
+    {
+      "scenario_id": "main_thread_browser_runtime_selection",
+      "profile": "wasm-browser-dev",
+      "host_context": "browser_main_thread",
+      "selected_lane": "lane.browser.main_thread.direct_runtime",
+      "expected_output": "ok",
+      "test_markers": [
+        "select_rust_browser_runtime",
+        "main_thread_browser_selection_lane"
+      ]
+    },
+    {
+      "scenario_id": "dedicated_worker_browser_runtime_selection",
+      "profile": "wasm-browser-dev",
+      "host_context": "dedicated_worker",
+      "selected_lane": "lane.browser.dedicated_worker.direct_runtime",
+      "expected_output": "ok",
+      "test_markers": [
+        "select_rust_browser_runtime",
+        "dedicated_worker_browser_selection_lane"
+      ]
+    },
+    {
+      "scenario_id": "service_worker_direct_runtime_fail_closed",
+      "profile": "wasm-browser-dev",
+      "host_context": "service_worker",
+      "selected_lane": "lane.unsupported",
+      "expected_output": "service_worker_direct_runtime_not_shipped",
+      "test_markers": [
+        "service_worker_fail_closed_reason_code",
+        "service_worker_direct_runtime_not_shipped"
+      ]
+    },
+    {
+      "scenario_id": "shared_worker_direct_runtime_fail_closed",
+      "profile": "wasm-browser-dev",
+      "host_context": "shared_worker",
+      "selected_lane": "lane.unsupported",
+      "expected_output": "shared_worker_direct_runtime_not_shipped",
+      "test_markers": [
+        "shared_worker_fail_closed_reason_code",
+        "shared_worker_direct_runtime_not_shipped"
+      ]
+    },
+    {
+      "scenario_id": "missing_webassembly_downgrade",
+      "profile": "wasm-browser-dev",
+      "host_context": "browser_main_thread_without_webassembly",
+      "selected_lane": "lane.unsupported",
+      "expected_output": "missing_webassembly",
+      "test_markers": [
+        "downgrade_reason_code",
+        "missing_webassembly"
+      ]
+    }
+  ],
+  "validation_commands": [
+    "jq empty artifacts/wave2/browser_rust_runtime_api_stability_evidence.json",
+    "jq empty artifacts/wave2_capability_evidence_registry_v1.json",
+    "bash -n scripts/validate_rust_browser_consumer.sh",
+    "rch exec -- rustfmt --edition 2024 --check tests/wasm_rust_browser_example_contract.rs",
+    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS=-C debuginfo=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_rust_browser_contract cargo test -p asupersync --test wasm_rust_browser_example_contract --features test-internals,wasm-browser-dev -- --nocapture",
+    "PATH=/usr/bin:$PATH bash scripts/validate_rust_browser_consumer.sh --run-id wave2-browser-rust-runtime-api"
+  ],
+  "artifact_paths": [
+    "target/e2e-results/rust_browser_consumer/wave2-browser-rust-runtime-api/summary.json",
+    "target/e2e-results/rust_browser_consumer/wave2-browser-rust-runtime-api/browser-run.json"
+  ],
+  "source_evidence_paths": [
+    "src/runtime/builder.rs",
+    "tests/fixtures/rust-browser-consumer",
+    "tests/wasm_rust_browser_example_contract.rs",
+    "scripts/validate_rust_browser_consumer.sh",
+    "artifacts/wave2/browser_rust_runtime_api_stability_evidence.json"
+  ],
+  "unsupported_surfaces": [
+    "service_worker_direct_runtime",
+    "shared_worker_direct_runtime",
+    "native_tcp_udp_filesystem_process"
+  ],
+  "non_goals": [
+    "native_only_surfaces_in_wasm",
+    "stable_abi_major_minor_promotion_without_follow_on_proof",
+    "service_worker_direct_runtime",
+    "shared_worker_direct_runtime",
+    "js_ts_package_destabilization"
+  ]
+}

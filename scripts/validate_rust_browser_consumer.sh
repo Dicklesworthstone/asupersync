@@ -7,9 +7,47 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 FIXTURE_DIR="${REPO_ROOT}/tests/fixtures/rust-browser-consumer"
 CRATE_DIR="${FIXTURE_DIR}/crate"
-RESULT_ROOT="${REPO_ROOT}/target/e2e-results/rust_browser_consumer"
-TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-RUN_DIR="${RESULT_ROOT}/${TIMESTAMP}"
+RESULT_ROOT="${RUST_BROWSER_CONSUMER_OUTPUT_ROOT:-${REPO_ROOT}/target/e2e-results/rust_browser_consumer}"
+RUN_ID="${RUST_BROWSER_CONSUMER_RUN_ID:-}"
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/validate_rust_browser_consumer.sh [options]
+
+Options:
+  --run-id <id>          Deterministic run directory name.
+  --output-root <dir>    Directory for run artifacts.
+  -h, --help             Show this help.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --run-id)
+      RUN_ID="${2:-}"
+      shift 2
+      ;;
+    --output-root)
+      RESULT_ROOT="${2:-}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ -z "${RUN_ID}" ]]; then
+  RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+fi
+
+RUN_DIR="${RESULT_ROOT}/${RUN_ID}"
 LOG_FILE="${RUN_DIR}/consumer_build.log"
 SUMMARY_FILE="${RUN_DIR}/summary.json"
 BROWSER_RUN_FILE="${RUN_DIR}/browser-run.json"
@@ -48,12 +86,19 @@ cat > "${CARGO_WRAPPER}" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 cd "${REPO_ROOT}"
+export RCH_FORCE_REMOTE="\${RCH_FORCE_REMOTE:-1}"
+export RCH_QUEUE_WHEN_BUSY="\${RCH_QUEUE_WHEN_BUSY:-1}"
+export RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS="\${RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS:-900}"
 exec rch exec -- env CARGO_TARGET_DIR="${TARGET_DIR}" cargo "\$@"
 EOF
 chmod +x "${CARGO_WRAPPER}"
 
 (
   cd "${REPO_ROOT}"
+  "${CARGO_WRAPPER}" build \
+    --lib \
+    --target wasm32-unknown-unknown \
+    --manifest-path "${CRATE_DIR}/Cargo.toml"
   CARGO="${CARGO_WRAPPER}" wasm-pack build "${CRATE_DIR}" \
     --target web \
     --dev \
@@ -85,21 +130,51 @@ cp -R "${PKG_DIR}/." "${CONSUMER_DIR}/pkg/"
   npm run check:browser -- "${BROWSER_RUN_FILE}"
 ) | tee -a "${LOG_FILE}"
 
-python3 - "${CONSUMER_DIR}" "${SUMMARY_FILE}" "${TIMESTAMP}" "${BROWSER_RUN_FILE}" <<'PY'
+python3 - "${REPO_ROOT}" "${CONSUMER_DIR}" "${SUMMARY_FILE}" "${RUN_ID}" "${BROWSER_RUN_FILE}" <<'PY'
 import json
+import os
 import pathlib
 import sys
 
-consumer = pathlib.Path(sys.argv[1])
-summary_path = pathlib.Path(sys.argv[2])
-timestamp = sys.argv[3]
-browser_run_path = pathlib.Path(sys.argv[4])
+repo_root = pathlib.Path(sys.argv[1])
+consumer = pathlib.Path(sys.argv[2])
+summary_path = pathlib.Path(sys.argv[3])
+run_id = sys.argv[4]
+browser_run_path = pathlib.Path(sys.argv[5])
 dist = consumer / "dist"
 assets = dist / "assets"
 browser_run = json.loads(browser_run_path.read_text())
+package = json.loads((consumer / "package.json").read_text())
+wasm_assets = sorted(assets.glob("*.wasm")) if assets.exists() else []
+wasm_artifact_path = (
+    os.path.relpath(wasm_assets[0], repo_root) if wasm_assets else ""
+)
+browser_run_artifact_path = os.path.relpath(browser_run_path, repo_root)
+summary_artifact_path = os.path.relpath(summary_path, repo_root)
+unsupported_surfaces = [
+    "service_worker_direct_runtime",
+    "shared_worker_direct_runtime",
+    "native_tcp_udp_filesystem_process",
+]
 summary = {
+    "schema_version": "browser-rust-runtime-api-stability-run-report-v1",
+    "bead_id": "asupersync-j1xbon.1",
+    "parent_bead_id": "asupersync-j1xbon",
     "scenario_id": "L6-RUST-BROWSER-CONSUMER",
-    "timestamp": timestamp,
+    "run_id": run_id,
+    "profile": "wasm-browser-dev",
+    "host_context": "browser_main_thread_and_dedicated_worker",
+    "api_version": "runtime-builder-browser-preview-v1",
+    "consumer_version": f"{package['name']}@{package['version']}",
+    "selected_lane": browser_run["main_thread_browser_selection_lane"],
+    "unsupported_surfaces": unsupported_surfaces,
+    "wasm_artifact_path": wasm_artifact_path,
+    "browser_run_artifact_path": browser_run_artifact_path,
+    "summary_artifact_path": summary_artifact_path,
+    "expected_output": "ok",
+    "actual_output": browser_run["completed_task_outcome"],
+    "verdict": "pass",
+    "first_failure": "",
     "fixture": "tests/fixtures/rust-browser-consumer",
     "status": "pass",
     "browser_run": {
@@ -171,6 +246,23 @@ summary = {
     },
 }
 summary_path.write_text(json.dumps(summary, indent=2) + "\n")
+ordered = [
+    f"bead_id={summary['bead_id']}",
+    f"scenario_id={summary['scenario_id']}",
+    f"profile={summary['profile']}",
+    f"host_context={summary['host_context']}",
+    f"api_version={summary['api_version']}",
+    f"consumer_version={summary['consumer_version']}",
+    f"selected_lane={summary['selected_lane']}",
+    "unsupported_surfaces=" + ",".join(summary["unsupported_surfaces"]),
+    f"wasm_artifact_path={summary['wasm_artifact_path']}",
+    f"browser_run_artifact_path={summary['browser_run_artifact_path']}",
+    f"expected_output={summary['expected_output']}",
+    f"actual_output={summary['actual_output']}",
+    f"verdict={summary['verdict']}",
+    f"first_failure={summary['first_failure']}",
+]
+print("RUST_BROWSER_RUNTIME_API_SCENARIO " + " ".join(ordered))
 PY
 
 cat <<EOF

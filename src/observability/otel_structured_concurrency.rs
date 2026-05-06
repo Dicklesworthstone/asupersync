@@ -68,6 +68,7 @@ pub enum EntityId {
 
 impl EntityId {
     /// Creates a region entity ID from a raw number for testing.
+    #[cfg(any(test, feature = "test-internals"))]
     pub fn region_from_raw(id: u64) -> Self {
         Self::Region(RegionId::new_for_test(id as u32, 1))
     }

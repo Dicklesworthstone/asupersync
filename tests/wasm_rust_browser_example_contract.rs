@@ -6,8 +6,48 @@
 
 use std::path::PathBuf;
 
+const RUST_BROWSER_EVIDENCE_ARTIFACT_PATH: &str =
+    "artifacts/wave2/browser_rust_runtime_api_stability_evidence.json";
+const WAVE2_REGISTRY_PATH: &str = "artifacts/wave2_capability_evidence_registry_v1.json";
+const RUST_BROWSER_VALIDATOR_PATH: &str = "scripts/validate_rust_browser_consumer.sh";
+const RUST_BROWSER_FIXTURE_PATH: &str = "tests/fixtures/rust-browser-consumer";
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn read_file(path: &str) -> String {
+    let path = repo_root().join(path);
+    std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing {}", path.display()))
+}
+
+fn read_json(path: &str) -> serde_json::Value {
+    let path = repo_root().join(path);
+    let content =
+        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("missing {}", path.display()));
+    serde_json::from_str(&content).unwrap_or_else(|_| panic!("invalid JSON {}", path.display()))
+}
+
+fn string_array<'a>(value: &'a serde_json::Value, key: &str) -> Vec<&'a str> {
+    value[key]
+        .as_array()
+        .unwrap_or_else(|| panic!("{key} must be an array"))
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .unwrap_or_else(|| panic!("{key} entry must be a string"))
+        })
+        .collect()
+}
+
+fn assert_contains_all(haystack: &str, label: &str, markers: &[&str]) {
+    for marker in markers {
+        assert!(
+            haystack.contains(marker),
+            "{label} missing marker: {marker}"
+        );
+    }
 }
 
 #[test]
@@ -33,6 +73,207 @@ fn rust_browser_consumer_fixture_exists_with_required_files() {
         let path = fixture.join(rel);
         assert!(path.exists(), "missing fixture file: {}", path.display());
     }
+}
+
+#[test]
+fn rust_browser_runtime_stability_artifact_matches_registry_runner_and_fixture() {
+    let artifact = read_json(RUST_BROWSER_EVIDENCE_ARTIFACT_PATH);
+    let registry = read_json(WAVE2_REGISTRY_PATH);
+    let runner = read_file(RUST_BROWSER_VALIDATOR_PATH);
+    let fixture_source = read_file("tests/fixtures/rust-browser-consumer/src/main.ts");
+    let fixture_worker = read_file("tests/fixtures/rust-browser-consumer/src/worker.ts");
+    let fixture_crate = read_file("tests/fixtures/rust-browser-consumer/crate/src/lib.rs");
+    let browser_check =
+        read_file("tests/fixtures/rust-browser-consumer/scripts/check-browser-run.mjs");
+    let fixture_readme = read_file("tests/fixtures/rust-browser-consumer/README.md");
+    let wasm_doc = read_file("docs/WASM.md");
+    let integration_doc = read_file("docs/integration.md");
+
+    assert_eq!(
+        artifact["schema_version"].as_str(),
+        Some("browser-rust-runtime-api-stability-evidence-v1")
+    );
+    assert_eq!(artifact["bead_id"].as_str(), Some("asupersync-j1xbon.1"));
+    assert_eq!(
+        artifact["parent_bead_id"].as_str(),
+        Some("asupersync-j1xbon")
+    );
+    assert_eq!(
+        artifact["capability_id"].as_str(),
+        Some("browser_rust_runtime_api_stability")
+    );
+    assert_eq!(
+        artifact["fixture_path"].as_str(),
+        Some(RUST_BROWSER_FIXTURE_PATH)
+    );
+    assert_eq!(
+        artifact["runner_script"].as_str(),
+        Some(RUST_BROWSER_VALIDATOR_PATH)
+    );
+    assert_eq!(
+        artifact["run_report_schema_version"].as_str(),
+        Some("browser-rust-runtime-api-stability-run-report-v1")
+    );
+
+    assert_eq!(
+        string_array(&artifact, "required_log_fields"),
+        vec![
+            "bead_id",
+            "scenario_id",
+            "profile",
+            "host_context",
+            "api_version",
+            "consumer_version",
+            "selected_lane",
+            "unsupported_surfaces",
+            "wasm_artifact_path",
+            "browser_run_artifact_path",
+            "expected_output",
+            "actual_output",
+            "verdict",
+            "first_failure",
+        ]
+    );
+
+    let scenarios = artifact["scenario_matrix"]
+        .as_array()
+        .expect("scenario_matrix");
+    let scenario_ids = scenarios
+        .iter()
+        .map(|row| row["scenario_id"].as_str().expect("scenario_id"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        scenario_ids,
+        vec![
+            "main_thread_browser_runtime_selection",
+            "dedicated_worker_browser_runtime_selection",
+            "service_worker_direct_runtime_fail_closed",
+            "shared_worker_direct_runtime_fail_closed",
+            "missing_webassembly_downgrade",
+        ]
+    );
+
+    let row = registry["capability_rows"]
+        .as_array()
+        .expect("capability_rows")
+        .iter()
+        .find(|row| row["capability_id"].as_str() == Some("browser_rust_runtime_api_stability"))
+        .expect("browser_rust_runtime_api_stability registry row");
+    let decision = &artifact["support_decision"];
+    assert_eq!(
+        row["support_class_after"].as_str(),
+        decision["support_class_after"].as_str()
+    );
+    assert_eq!(
+        row["promotion_state"].as_str(),
+        decision["promotion_state"].as_str()
+    );
+    assert_eq!(
+        row["support_class_after"].as_str(),
+        Some("artifact-contract-backed")
+    );
+    assert_eq!(row["promotion_state"].as_str(), Some("evidence-ready"));
+    assert!(
+        row["artifact_paths"]
+            .as_array()
+            .expect("artifact_paths")
+            .iter()
+            .any(|path| path.as_str() == Some(RUST_BROWSER_EVIDENCE_ARTIFACT_PATH)),
+        "registry must link the Rust browser runtime API evidence artifact"
+    );
+    assert_eq!(
+        row["planned_artifact_paths"].as_array().map(Vec::len),
+        Some(0)
+    );
+
+    assert_contains_all(
+        &runner,
+        RUST_BROWSER_VALIDATOR_PATH,
+        &[
+            "--run-id",
+            "--output-root",
+            "browser-rust-runtime-api-stability-run-report-v1",
+            "asupersync-j1xbon.1",
+            "runtime-builder-browser-preview-v1",
+            "unsupported_surfaces",
+            "wasm_artifact_path",
+            "browser_run_artifact_path",
+            "RUST_BROWSER_RUNTIME_API_SCENARIO",
+        ],
+    );
+    assert_contains_all(
+        &fixture_crate,
+        "tests/fixtures/rust-browser-consumer/crate/src/lib.rs",
+        &[
+            "RuntimeBuilder::browser()",
+            "preferred_lane",
+            "build_selection()",
+            "missing_webassembly",
+        ],
+    );
+    assert_contains_all(
+        &fixture_source,
+        "tests/fixtures/rust-browser-consumer/src/main.ts",
+        &[
+            "select_rust_browser_runtime",
+            "select_rust_browser_runtime_preferred_dedicated_worker",
+            "collectDedicatedWorkerMatrix",
+            "withDeletedGlobalProperty(\"WebAssembly\"",
+            "downgrade_browser_selection",
+        ],
+    );
+    assert_contains_all(
+        &fixture_worker,
+        "tests/fixtures/rust-browser-consumer/src/worker.ts",
+        &[
+            "select_rust_browser_runtime",
+            "select_rust_browser_runtime_preferred_main_thread",
+            "rust-browser-worker-ready",
+        ],
+    );
+    assert_contains_all(
+        &browser_check,
+        "tests/fixtures/rust-browser-consumer/scripts/check-browser-run.mjs",
+        &[
+            "main_thread_browser_selection_lane",
+            "dedicated_worker_browser_selection_lane",
+            "downgrade_reason_code",
+            "missing_webassembly",
+            "service_worker_direct_runtime_not_shipped",
+            "shared_worker_direct_runtime_not_shipped",
+        ],
+    );
+    assert_contains_all(
+        &fixture_readme,
+        "tests/fixtures/rust-browser-consumer/README.md",
+        &[
+            "preview public Rust browser builder",
+            "maintained in-repo lane",
+            "service_worker_fail_closed_reason_code",
+            "shared_worker_fail_closed_reason_code",
+            "downgrade_reason_code",
+        ],
+    );
+    assert_contains_all(
+        &wasm_doc,
+        "docs/WASM.md",
+        &[
+            "RuntimeBuilder::browser()",
+            "Preview public lane",
+            "scripts/validate_rust_browser_consumer.sh",
+            "not broad stable parity",
+        ],
+    );
+    assert_contains_all(
+        &integration_doc,
+        "docs/integration.md",
+        &[
+            "RuntimeBuilder::browser()",
+            "Preview public lane",
+            "tests/fixtures/rust-browser-consumer",
+            "asupersync-browser-core",
+        ],
+    );
 }
 
 #[test]

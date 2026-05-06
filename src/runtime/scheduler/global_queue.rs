@@ -5,24 +5,87 @@
 
 use crate::types::TaskId;
 use crate::util::CachePadded;
+#[cfg(not(target_family = "wasm"))]
 use faa_array_queue::FaaArrayQueue;
+#[cfg(target_family = "wasm")]
+use parking_lot::Mutex;
+#[cfg(target_family = "wasm")]
+use std::collections::VecDeque;
 use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[cfg(not(target_family = "wasm"))]
+struct FaaQueueInner<T: Send> {
+    queue: FaaArrayQueue<T>,
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl<T: Send> Default for FaaQueueInner<T> {
+    fn default() -> Self {
+        Self {
+            queue: FaaArrayQueue::default(),
+        }
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl<T: Send> FaaQueueInner<T> {
+    #[inline]
+    fn enqueue(&self, item: T) {
+        self.queue.enqueue(item);
+    }
+
+    #[inline]
+    fn dequeue(&self) -> Option<T> {
+        self.queue.dequeue()
+    }
+}
+
+#[cfg(target_family = "wasm")]
+struct FaaQueueInner<T: Send> {
+    queue: Mutex<VecDeque<T>>,
+}
+
+#[cfg(target_family = "wasm")]
+impl<T: Send> Default for FaaQueueInner<T> {
+    fn default() -> Self {
+        Self {
+            queue: Mutex::new(VecDeque::new()),
+        }
+    }
+}
+
+#[cfg(target_family = "wasm")]
+impl<T: Send> FaaQueueInner<T> {
+    #[inline]
+    fn enqueue(&self, item: T) {
+        self.queue.lock().push_back(item);
+    }
+
+    #[inline]
+    fn dequeue(&self) -> Option<T> {
+        self.queue.lock().pop_front()
+    }
+}
 
 /// Fetch-and-add FIFO queue with a best-effort count snapshot.
 ///
 /// This wraps an unbounded FAA-based linked-array queue so the scheduler keeps
-/// FIFO semantics without taking the GPL/C-FFI path of `liblcrq-sys`.
+/// FIFO semantics without taking the GPL/C-FFI path of `liblcrq-sys`. Browser
+/// wasm builds use a mutex-backed FIFO because the native FAA queue currently
+/// depends on OS thread-local APIs that wasm32 does not expose.
 pub(crate) struct FaaFifoQueue<T: Send> {
-    inner: FaaArrayQueue<T>,
+    inner: FaaQueueInner<T>,
     count: CachePadded<AtomicUsize>,
+    published: CachePadded<AtomicUsize>,
 }
 
 impl<T: Send> Default for FaaFifoQueue<T> {
     fn default() -> Self {
         Self {
-            inner: FaaArrayQueue::default(),
+            inner: FaaQueueInner::default(),
             count: CachePadded::new(AtomicUsize::new(0)),
+            published: CachePadded::new(AtomicUsize::new(0)),
         }
     }
 }
@@ -54,9 +117,19 @@ impl<T: Send> FaaFifoQueue<T> {
     }
 
     #[inline]
+    fn try_reserve_published(counter: &AtomicUsize) -> bool {
+        counter
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                count.checked_sub(1)
+            })
+            .is_ok()
+    }
+
+    #[inline]
     pub(crate) fn push(&self, item: T) {
         self.count.fetch_add(1, Ordering::Relaxed);
         self.inner.enqueue(item);
+        self.published.fetch_add(1, Ordering::Release);
     }
 
     #[inline]
@@ -69,6 +142,7 @@ impl<T: Send> FaaFifoQueue<T> {
     /// would leave a phantom positive count on an empty queue.
     pub(crate) fn push_uncounted(&self, item: T) {
         self.inner.enqueue(item);
+        self.published.fetch_add(1, Ordering::Release);
     }
 
     #[inline]
@@ -107,11 +181,21 @@ impl<T: Send> FaaFifoQueue<T> {
 
     #[inline]
     pub(crate) fn pop(&self) -> Option<T> {
-        let result = self.inner.dequeue();
-        if result.is_some() {
-            self.decrement_count();
+        if !Self::try_reserve_published(&self.published) {
+            return None;
         }
-        result
+
+        let result = self.inner.dequeue();
+        match result {
+            Some(item) => {
+                self.decrement_count();
+                Some(item)
+            }
+            None => {
+                self.published.fetch_add(1, Ordering::Release);
+                None
+            }
+        }
     }
 
     #[inline]
@@ -120,8 +204,21 @@ impl<T: Send> FaaFifoQueue<T> {
             return 0;
         }
 
-        let start_len = out.len();
+        let mut reserved = 0usize;
         for _ in 0..max {
+            if Self::try_reserve_published(&self.published) {
+                reserved += 1;
+            } else {
+                break;
+            }
+        }
+
+        if reserved == 0 {
+            return 0;
+        }
+
+        let start_len = out.len();
+        for _ in 0..reserved {
             match self.inner.dequeue() {
                 Some(item) => out.push(item),
                 None => break,
@@ -129,6 +226,10 @@ impl<T: Send> FaaFifoQueue<T> {
         }
 
         let drained = out.len().saturating_sub(start_len);
+        if reserved > drained {
+            self.published
+                .fetch_add(reserved.saturating_sub(drained), Ordering::Release);
+        }
         if drained > 0 {
             Self::saturating_sub(&self.count, drained);
         }

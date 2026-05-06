@@ -99,6 +99,7 @@ const ADAPTIVE_EPROCESS_LAMBDA: f64 = 0.5;
 const SPIN_LIMIT: u32 = 8;
 const YIELD_LIMIT: u32 = 2;
 const SHORT_WAIT_LE_5MS_NANOS: u64 = 5_000_000;
+#[cfg(any(test, feature = "test-internals"))]
 const DEFAULT_SCHEDULER_EVIDENCE_MAX_INFLIGHT_MULTIPLIER: usize = 4;
 
 type LocalReadyQueue = Mutex<VecDeque<TaskId>>;
@@ -2472,6 +2473,7 @@ struct SchedulerEvidenceCollector {
 }
 
 impl SchedulerEvidenceCollector {
+    #[cfg(any(test, feature = "test-internals"))]
     fn new(sample_window: usize) -> Self {
         let sample_window = sample_window.max(1);
         Self {
