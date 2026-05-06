@@ -67,6 +67,37 @@ The inventory and fail-closed contract for these recipes live in
 `artifacts/wave2/capability_examples_smoke_recipes_evidence.json` and
 `tests/wave2_capability_examples_contract.rs`.
 
+## Wave2 Support-Matrix Reconciliation
+
+The Wave2 docs support matrix is downstream of machine-checkable source
+evidence, not tracker status. The canonical registry is
+`artifacts/wave2_capability_evidence_registry_v1.json`; public docs reconcile
+against that registry plus the lane-specific artifacts before a support class is
+promoted.
+
+Public support-class vocabulary used by the docs matrix:
+
+| Support class | Meaning |
+|---|---|
+| `shipped` | Source, artifact, and command proof support the public claim without a feature-gate caveat |
+| `feature-gated` | Shipped only when the named Cargo feature or host gate is enabled |
+| `preview` | Public but explicitly not a stable blanket support promise |
+| `lab/virtual-backed` | Proven through deterministic lab or virtual runtime evidence |
+| `substrate-only` | Internal or lower-level substrate exists, but no public runtime lane is promoted |
+| `broker/coordinator-only` | Host can coordinate bounded work but must not own a direct Browser Edition runtime |
+| `deferred` | Tracked and intentionally not promoted yet |
+| `unsupported` | The platform or runtime contract rules out the claim |
+| `platform-scoped` | Support depends on an explicit OS, browser, or host prerequisite |
+
+Reconciliation proof lives in
+`artifacts/wave2/docs_support_matrix_reconciliation_evidence.json`,
+`scripts/run_wave2_docs_support_matrix_reconciliation.sh`, and
+`tests/wave2_docs_support_matrix_reconciliation_contract.rs`. The proof checks
+README, Browser Edition docs, integration docs, formal proof posture, QPACK
+support posture, conformance evidence, capability examples, and the Wave2
+registry together so promoted rows have public markers and non-promoted rows
+keep an explicit fallback, owner, residual risk, or unsupported reason.
+
 ---
 
 ## Effect-Safe Context Wrappers

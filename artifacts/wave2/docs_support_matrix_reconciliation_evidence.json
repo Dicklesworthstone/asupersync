@@ -1,0 +1,293 @@
+{
+  "schema_version": "wave2-docs-support-matrix-reconciliation-evidence-v1",
+  "bead_id": "asupersync-xl06qj",
+  "capability_id": "docs_support_matrix_reconciliation",
+  "created_date": "2026-05-06",
+  "artifact_path": "artifacts/wave2/docs_support_matrix_reconciliation_evidence.json",
+  "runner_script": "scripts/run_wave2_docs_support_matrix_reconciliation.sh",
+  "contract_test": "tests/wave2_docs_support_matrix_reconciliation_contract.rs",
+  "support_class": "artifact-contract-backed",
+  "decision_contract": {
+    "purpose": "Keep README, integration docs, Browser Edition docs, formal posture, support matrices, and the Wave2 capability registry reconciled after capability promotions.",
+    "tracker_status_policy": "Tracker state is not proof. Promoted public docs require source paths, proof commands, artifacts, and public documentation markers.",
+    "deferred_policy": "Non-promoted capabilities must retain unsupported reasons, residual risks, fallback targets, planned artifacts, or owner-linked rationale.",
+    "command_policy": "Cargo-backed and proof-heavy commands must run through rch exec; docs-only runners may be direct bash scripts when they do not compile."
+  },
+  "required_log_fields": [
+    "bead_id",
+    "scenario_id",
+    "docs_checked",
+    "source_artifacts_checked",
+    "support_classes_seen",
+    "promoted_capabilities",
+    "deferred_capabilities",
+    "deferred_links_checked",
+    "command_examples_checked",
+    "drift_count",
+    "artifact_path",
+    "verdict",
+    "first_failure"
+  ],
+  "docs_checked": [
+    "README.md",
+    "docs/integration.md",
+    "docs/WASM.md",
+    "formal/README.md"
+  ],
+  "source_artifacts_checked": [
+    "artifacts/wave2_capability_evidence_registry_v1.json",
+    "artifacts/http3_qpack_support_matrix_v1.json",
+    "artifacts/conformance_registry_contract_v1.json",
+    "artifacts/formal_wave2_refinement_coverage_v1.json",
+    "artifacts/formal_proof_posture_contract_v1.json",
+    "artifacts/wave2/capability_examples_smoke_recipes_evidence.json",
+    "artifacts/reality_check_docs_contract_v1.json",
+    "artifacts/wave2/docs_support_matrix_reconciliation_evidence.json"
+  ],
+  "public_support_classes": [
+    "shipped",
+    "feature-gated",
+    "preview",
+    "lab/virtual-backed",
+    "substrate-only",
+    "broker/coordinator-only",
+    "deferred",
+    "unsupported",
+    "platform-scoped"
+  ],
+  "doc_marker_contract": [
+    {
+      "path": "README.md",
+      "required": [
+        "docs/integration.md",
+        "docs/WASM.md",
+        "support class",
+        "RemoteRuntime",
+        "QPACK",
+        "broker/coordinator-only",
+        "preview browser-runtime bootstrap",
+        "Lean-checked core invariants"
+      ],
+      "forbidden": [
+        "Service worker direct runtime | Supported",
+        "Shared worker direct runtime | Supported",
+        "transport-backed remote lifecycle still in progress"
+      ]
+    },
+    {
+      "path": "docs/integration.md",
+      "required": [
+        "Wave2 Capability Smoke Recipes",
+        "Wave2 Support-Matrix Reconciliation",
+        "Browser Support-Class Quick Reference",
+        "Direct-runtime supported",
+        "Guarded direct-runtime support",
+        "Broker/coordinator-only",
+        "Bridge-only",
+        "Impossible / unsupported",
+        "artifacts/http3_qpack_support_matrix_v1.json",
+        "artifacts/wave2_capability_evidence_registry_v1.json"
+      ],
+      "forbidden": [
+        "transport-backed remote lifecycle still in progress",
+        "automatic fallback from unsupported runtimes is supported"
+      ]
+    },
+    {
+      "path": "docs/WASM.md",
+      "required": [
+        "broker/coordinator-only",
+        "preview public Rust surface",
+        "Impossible for direct browser runtime",
+        "Browser-native transport: `WebTransport` datagrams",
+        "WHATWG `ReadableStream` / `WritableStream` browser-native helpers"
+      ],
+      "forbidden": [
+        "service worker direct runtime | supported",
+        "shared worker direct runtime | supported"
+      ]
+    },
+    {
+      "path": "formal/README.md",
+      "required": [
+        "Wave2 adapter/protocol refinement coverage",
+        "artifacts/formal_wave2_refinement_coverage_v1.json"
+      ],
+      "forbidden": [
+        "blanket mechanized proof of every adapter"
+      ]
+    }
+  ],
+  "support_class_doc_markers": [
+    {
+      "support_class": "shipped",
+      "docs_required": [
+        {"path": "docs/integration.md", "markers": ["`shipped`"]}
+      ]
+    },
+    {
+      "support_class": "feature-gated",
+      "docs_required": [
+        {"path": "docs/integration.md", "markers": ["`feature-gated`", "Feature-gated"]}
+      ]
+    },
+    {
+      "support_class": "preview",
+      "docs_required": [
+        {"path": "docs/integration.md", "markers": ["`preview`"]},
+        {"path": "docs/WASM.md", "markers": ["preview public Rust surface"]}
+      ]
+    },
+    {
+      "support_class": "lab/virtual-backed",
+      "docs_required": [
+        {"path": "docs/integration.md", "markers": ["`lab/virtual-backed`"]}
+      ]
+    },
+    {
+      "support_class": "substrate-only",
+      "docs_required": [
+        {"path": "docs/integration.md", "markers": ["`substrate-only`"]}
+      ]
+    },
+    {
+      "support_class": "broker/coordinator-only",
+      "docs_required": [
+        {"path": "docs/integration.md", "markers": ["`broker/coordinator-only`", "Broker/coordinator-only"]},
+        {"path": "docs/WASM.md", "markers": ["broker/coordinator-only"]}
+      ]
+    },
+    {
+      "support_class": "deferred",
+      "docs_required": [
+        {"path": "docs/integration.md", "markers": ["`deferred`"]}
+      ]
+    },
+    {
+      "support_class": "unsupported",
+      "docs_required": [
+        {"path": "docs/integration.md", "markers": ["`unsupported`", "Impossible / unsupported"]},
+        {"path": "docs/WASM.md", "markers": ["Impossible for direct browser runtime"]}
+      ]
+    },
+    {
+      "support_class": "platform-scoped",
+      "docs_required": [
+        {"path": "docs/integration.md", "markers": ["`platform-scoped`"]}
+      ]
+    }
+  ],
+  "promoted_capability_markers": [
+    {
+      "capability_id": "remote_transport_lifecycle",
+      "expected_support_class_after": "production-backed",
+      "source_artifacts": ["artifacts/wave2/remote_transport_lifecycle_evidence.json"],
+      "doc_markers": [
+        {"path": "README.md", "marker": "RemoteRuntime"},
+        {"path": "docs/integration.md", "marker": "Remote transport lifecycle"}
+      ]
+    },
+    {
+      "capability_id": "conformance_grpc_deadline_health",
+      "expected_support_class_after": "artifact-contract-backed",
+      "source_artifacts": [
+        "artifacts/conformance_registry_contract_v1.json",
+        "artifacts/wave2/conformance_grpc_deadline_health_evidence.json"
+      ],
+      "doc_markers": [
+        {"path": "docs/integration.md", "marker": "gRPC deadline + health conformance"}
+      ]
+    },
+    {
+      "capability_id": "conformance_actor_mailbox_trace_event",
+      "expected_support_class_after": "artifact-contract-backed",
+      "source_artifacts": [
+        "artifacts/conformance_registry_contract_v1.json",
+        "artifacts/wave2/conformance_actor_mailbox_trace_event_evidence.json"
+      ],
+      "doc_markers": [
+        {"path": "docs/integration.md", "marker": "Actor mailbox + trace-event conformance"}
+      ]
+    },
+    {
+      "capability_id": "massive_swarm_capacity_envelope",
+      "expected_support_class_after": "artifact-contract-backed",
+      "source_artifacts": ["artifacts/wave2/massive_swarm_capacity_envelope_evidence.json"],
+      "doc_markers": [
+        {"path": "docs/integration.md", "marker": "Massive-swarm capacity envelope"}
+      ]
+    },
+    {
+      "capability_id": "operator_swarm_profile_diagnostics",
+      "expected_support_class_after": "artifact-contract-backed",
+      "source_artifacts": ["artifacts/wave2/operator_swarm_profile_diagnostics_evidence.json"],
+      "doc_markers": [
+        {"path": "docs/integration.md", "marker": "Operator swarm profile diagnostics"}
+      ]
+    },
+    {
+      "capability_id": "formal_adapter_protocol_refinement",
+      "expected_support_class_after": "artifact-contract-backed",
+      "source_artifacts": [
+        "artifacts/formal_proof_posture_contract_v1.json",
+        "artifacts/formal_wave2_refinement_coverage_v1.json"
+      ],
+      "doc_markers": [
+        {"path": "README.md", "marker": "Lean-checked core invariants"},
+        {"path": "formal/README.md", "marker": "Wave2 adapter/protocol refinement coverage"}
+      ]
+    },
+    {
+      "capability_id": "wave2_capability_evidence_registry",
+      "expected_support_class_after": "artifact-contract-backed",
+      "source_artifacts": ["artifacts/wave2_capability_evidence_registry_v1.json"],
+      "doc_markers": [
+        {"path": "docs/integration.md", "marker": "artifacts/wave2_capability_evidence_registry_v1.json"}
+      ]
+    },
+    {
+      "capability_id": "capability_examples_smoke_recipes",
+      "expected_support_class_after": "artifact-contract-backed",
+      "source_artifacts": ["artifacts/wave2/capability_examples_smoke_recipes_evidence.json"],
+      "doc_markers": [
+        {"path": "docs/integration.md", "marker": "Wave2 Capability Smoke Recipes"}
+      ]
+    },
+    {
+      "capability_id": "docs_support_matrix_reconciliation",
+      "expected_support_class_after": "artifact-contract-backed",
+      "source_artifacts": ["artifacts/wave2/docs_support_matrix_reconciliation_evidence.json"],
+      "doc_markers": [
+        {"path": "docs/integration.md", "marker": "Wave2 Support-Matrix Reconciliation"}
+      ]
+    }
+  ],
+  "deferred_registry_policy": {
+    "registry_path": "artifacts/wave2_capability_evidence_registry_v1.json",
+    "required_rationale_fields": [
+      "unsupported_reason",
+      "fallback_target",
+      "residual_risks",
+      "planned_artifact_paths",
+      "artifact_paths"
+    ],
+    "non_promoted_policy": "Rows outside promoted registry states must keep visible rationale through unsupported_reason or residual_risks plus fallback/planned/artifact evidence."
+  },
+  "command_examples_checked": [
+    {
+      "command_id": "docs-support-runner",
+      "command": "bash scripts/run_wave2_docs_support_matrix_reconciliation.sh",
+      "requires_rch": false
+    },
+    {
+      "command_id": "docs-support-contract",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_docs_support cargo test -p asupersync --test wave2_docs_support_matrix_reconciliation_contract --features test-internals -- --nocapture",
+      "requires_rch": true
+    },
+    {
+      "command_id": "registry-contract",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_registry_docs cargo test -p asupersync --test wave2_capability_evidence_registry_contract --features test-internals -- --nocapture",
+      "requires_rch": true
+    }
+  ]
+}
