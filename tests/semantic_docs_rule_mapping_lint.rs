@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Docs-to-Rule-ID Mapping Lint Tests (SEM-05.1)
 //!
 //! Validates that the section-to-rule-ID mapping in
@@ -69,8 +67,8 @@ fn load_mapping_doc() -> String {
 }
 
 fn load_fos_doc() -> String {
-    std::fs::read_to_string("docs/asupersync_v4_formal_semantics.md")
-        .expect("failed to load docs/asupersync_v4_formal_semantics.md")
+    std::fs::read_to_string("asupersync_v4_formal_semantics.md")
+        .expect("failed to load asupersync_v4_formal_semantics.md")
 }
 
 #[test]
