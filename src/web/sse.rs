@@ -32,6 +32,9 @@ use std::fmt::{self, Write};
 use std::time::Duration;
 
 use crate::cx::Cx;
+use crate::http::h1::codec::HttpError;
+use crate::http::h1::stream::{OutgoingBodySender, StreamingResponse};
+use crate::http::h1::types as h1_types;
 
 use super::response::{IntoResponse, Response, StatusCode};
 
@@ -222,6 +225,53 @@ impl fmt::Display for StreamingSseError {
 
 impl std::error::Error for StreamingSseError {}
 
+/// Default bounded HTTP/1 body-channel capacity for streaming SSE responses.
+pub const DEFAULT_STREAMING_SSE_H1_CHANNEL_CAPACITY: usize = 8;
+
+/// Backpressure policy name recorded by transport proof artifacts.
+pub const STREAMING_SSE_H1_BACKPRESSURE_POLICY: &str = "bounded-h1-body-channel";
+
+/// Error raised while draining [`StreamingSse`] into an HTTP/1 body stream.
+#[derive(Debug)]
+pub enum StreamingSseTransportError {
+    /// The SSE source or byte-limit state rejected the next chunk.
+    Stream(StreamingSseError),
+    /// The HTTP/1 outgoing body channel rejected the chunk or finish signal.
+    Transport(HttpError),
+}
+
+impl fmt::Display for StreamingSseTransportError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Stream(error) => write!(f, "streaming SSE source error: {error}"),
+            Self::Transport(error) => write!(f, "streaming SSE HTTP/1 transport error: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for StreamingSseTransportError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Stream(error) => Some(error),
+            Self::Transport(error) => Some(error),
+        }
+    }
+}
+
+/// Result of one host-driven HTTP/1 streaming drain step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamingSseTransportStep {
+    /// One SSE chunk was committed to the HTTP/1 outgoing body channel.
+    Sent {
+        /// Bytes committed by this chunk.
+        bytes: usize,
+        /// Total SSE bytes committed by the stream so far.
+        total_bytes: usize,
+    },
+    /// The SSE source completed and the HTTP/1 body sender was finished.
+    Complete,
+}
+
 /// Incremental producer for [`StreamingSse`].
 ///
 /// Implementations should yield at most one event per call and should not block
@@ -367,6 +417,81 @@ impl<S: StreamingSseSource> StreamingSse<S> {
         cx.set_cancel_requested(true);
     }
 
+    /// Build the HTTP/1 chunked response head and body sender for this stream.
+    ///
+    /// The caller owns the host loop: repeatedly call
+    /// [`send_next_h1_chunk`](Self::send_next_h1_chunk), flush the transport
+    /// after each committed chunk, and call
+    /// [`cancel_for_disconnect`](Self::cancel_for_disconnect) when the client
+    /// disconnects. This keeps `StreamingSse` out of the synchronous
+    /// [`IntoResponse`] path while still using the real HTTP/1 streaming body
+    /// primitives that a host/server transport consumes.
+    #[must_use]
+    pub fn h1_chunked_response(
+        &self,
+        cx: &Cx,
+        capacity: usize,
+    ) -> (StreamingResponse, OutgoingBodySender) {
+        let (mut response, sender) = StreamingResponse::chunked(
+            cx,
+            capacity,
+            StatusCode::OK.as_u16(),
+            h1_types::default_reason(StatusCode::OK.as_u16()),
+        );
+        response.head.headers.reserve(Self::headers().len());
+        for (name, value) in Self::headers() {
+            response
+                .head
+                .headers
+                .push((name.to_string(), value.to_string()));
+        }
+        (response, sender)
+    }
+
+    /// Commit one SSE event chunk to an HTTP/1 outgoing body channel.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StreamingSseTransportError::Stream`] for SSE source,
+    /// cancellation, or byte-limit errors. Returns
+    /// [`StreamingSseTransportError::Transport`] when the HTTP/1 outgoing body
+    /// rejects the write; body cancellation or closure is reflected back into
+    /// the request [`Cx`] through [`cancel_for_disconnect`](Self::cancel_for_disconnect).
+    pub async fn send_next_h1_chunk(
+        &mut self,
+        cx: &Cx,
+        sender: &mut OutgoingBodySender,
+    ) -> Result<StreamingSseTransportStep, StreamingSseTransportError> {
+        let Some(chunk) = self
+            .next_chunk(cx)
+            .map_err(StreamingSseTransportError::Stream)?
+        else {
+            sender
+                .finish(cx)
+                .map_err(StreamingSseTransportError::Transport)?;
+            return Ok(StreamingSseTransportStep::Complete);
+        };
+
+        self.send_h1_bytes(cx, sender, &chunk).await
+    }
+
+    /// Commit one heartbeat/comment chunk to an HTTP/1 outgoing body channel.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as
+    /// [`send_next_h1_chunk`](Self::send_next_h1_chunk).
+    pub async fn send_h1_heartbeat(
+        &mut self,
+        cx: &Cx,
+        sender: &mut OutgoingBodySender,
+    ) -> Result<StreamingSseTransportStep, StreamingSseTransportError> {
+        let chunk = self
+            .heartbeat_chunk(cx)
+            .map_err(StreamingSseTransportError::Stream)?;
+        self.send_h1_bytes(cx, sender, &chunk).await
+    }
+
     /// Emit one serialized event chunk.
     ///
     /// # Errors
@@ -439,6 +564,30 @@ impl<S: StreamingSseSource> StreamingSse<S> {
 
         self.bytes_emitted = next_total;
         Ok(chunk.into_bytes())
+    }
+
+    async fn send_h1_bytes(
+        &mut self,
+        cx: &Cx,
+        sender: &mut OutgoingBodySender,
+        chunk: &[u8],
+    ) -> Result<StreamingSseTransportStep, StreamingSseTransportError> {
+        let bytes = chunk.len();
+        match sender.send_chunk(cx, chunk).await {
+            Ok(()) => Ok(StreamingSseTransportStep::Sent {
+                bytes,
+                total_bytes: self.bytes_emitted,
+            }),
+            Err(error) => {
+                if matches!(
+                    error,
+                    HttpError::BodyCancelled | HttpError::BodyChannelClosed
+                ) {
+                    self.cancel_for_disconnect(cx);
+                }
+                Err(StreamingSseTransportError::Transport(error))
+            }
+        }
     }
 }
 
@@ -630,6 +779,41 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use crate::bytes::Buf;
+    use crate::http::body::{Body, Frame};
+    use std::pin::Pin;
+    use std::task::{Context, Poll, Waker};
+
+    fn noop_waker() -> Waker {
+        std::task::Waker::noop().clone()
+    }
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut pinned = std::pin::pin!(future);
+        loop {
+            match pinned.as_mut().poll(&mut cx) {
+                Poll::Ready(value) => return value,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
+
+    fn poll_body<B: Body + Unpin>(body: &mut B) -> Option<Result<Frame<B::Data>, B::Error>> {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        loop {
+            match Pin::new(&mut *body).poll_frame(&mut cx) {
+                Poll::Ready(value) => return value,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
+
+    fn body_has_no_more_data_after_cancel<B>(frame: Option<Result<Frame<B>, HttpError>>) -> bool {
+        matches!(frame, None | Some(Err(HttpError::BodyCancelled)))
+    }
 
     // ================================================================
     // SseEvent serialization
@@ -1018,6 +1202,262 @@ mod tests {
                 ("connection", "keep-alive"),
             ]
         );
+    }
+
+    #[test]
+    fn streaming_sse_h1_response_head_is_chunked_event_stream() {
+        let cx = Cx::for_testing();
+        let stream = StreamingSse::new(vec![SseEvent::default().data("hello")]);
+        let (response, sender) =
+            stream.h1_chunked_response(&cx, DEFAULT_STREAMING_SSE_H1_CHANNEL_CAPACITY);
+
+        let header = |name: &str| {
+            response
+                .head
+                .headers
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(response.head.status, StatusCode::OK.as_u16());
+        assert_eq!(header("transfer-encoding"), Some("chunked"));
+        assert_eq!(header("content-type"), Some("text/event-stream"));
+        assert_eq!(header("cache-control"), Some("no-cache"));
+        assert_eq!(header("connection"), Some("keep-alive"));
+        assert!(sender.kind().is_chunked());
+    }
+
+    #[test]
+    fn streaming_sse_h1_transport_sends_events_in_order_and_finishes() {
+        let cx = Cx::for_testing();
+        let mut stream = StreamingSse::new(vec![
+            SseEvent::default().data("first"),
+            SseEvent::default().data("second"),
+        ]);
+        let (response, mut sender) = stream.h1_chunked_response(&cx, 2);
+        let mut body = response.body;
+
+        let first = block_on(stream.send_next_h1_chunk(&cx, &mut sender)).expect("first send");
+        assert_eq!(
+            first,
+            StreamingSseTransportStep::Sent {
+                bytes: "data:first\n\n".len(),
+                total_bytes: "data:first\n\n".len(),
+            }
+        );
+        let first_frame = poll_body(&mut body)
+            .expect("first frame")
+            .expect("first frame ok");
+        assert_eq!(
+            first_frame.into_data().expect("data frame").chunk(),
+            b"data:first\n\n"
+        );
+
+        let second = block_on(stream.send_next_h1_chunk(&cx, &mut sender)).expect("second send");
+        assert_eq!(
+            second,
+            StreamingSseTransportStep::Sent {
+                bytes: "data:second\n\n".len(),
+                total_bytes: "data:first\n\n".len() + "data:second\n\n".len(),
+            }
+        );
+        let second_frame = poll_body(&mut body)
+            .expect("second frame")
+            .expect("second frame ok");
+        assert_eq!(
+            second_frame.into_data().expect("data frame").chunk(),
+            b"data:second\n\n"
+        );
+
+        let complete =
+            block_on(stream.send_next_h1_chunk(&cx, &mut sender)).expect("complete send");
+        assert_eq!(complete, StreamingSseTransportStep::Complete);
+        assert!(sender.is_finished());
+        assert!(poll_body(&mut body).is_none());
+    }
+
+    #[test]
+    fn streaming_sse_h1_transport_sends_heartbeat_comment() {
+        let cx = Cx::for_testing();
+        let mut stream =
+            StreamingSse::new(vec![SseEvent::default().data("payload")]).heartbeat_comment("tick");
+        let (response, mut sender) = stream.h1_chunked_response(&cx, 2);
+        let mut body = response.body;
+
+        let heartbeat =
+            block_on(stream.send_h1_heartbeat(&cx, &mut sender)).expect("heartbeat send");
+        assert_eq!(
+            heartbeat,
+            StreamingSseTransportStep::Sent {
+                bytes: ":tick\n\n".len(),
+                total_bytes: ":tick\n\n".len(),
+            }
+        );
+        let heartbeat_frame = poll_body(&mut body)
+            .expect("heartbeat frame")
+            .expect("heartbeat frame ok");
+        assert_eq!(
+            heartbeat_frame.into_data().expect("data frame").chunk(),
+            b":tick\n\n"
+        );
+
+        block_on(stream.send_next_h1_chunk(&cx, &mut sender)).expect("event send");
+        let event_frame = poll_body(&mut body)
+            .expect("event frame")
+            .expect("event frame ok");
+        assert_eq!(
+            event_frame.into_data().expect("data frame").chunk(),
+            b"data:payload\n\n"
+        );
+    }
+
+    #[test]
+    fn streaming_sse_h1_transport_empty_stream_finishes_body() {
+        let cx = Cx::for_testing();
+        let mut stream = StreamingSse::empty();
+        let (response, mut sender) = stream.h1_chunked_response(&cx, 1);
+        let mut body = response.body;
+
+        let step = block_on(stream.send_next_h1_chunk(&cx, &mut sender)).expect("finish");
+
+        assert_eq!(step, StreamingSseTransportStep::Complete);
+        assert!(sender.is_finished());
+        assert!(stream.is_closed());
+        assert!(poll_body(&mut body).is_none());
+    }
+
+    #[test]
+    fn streaming_sse_h1_transport_propagates_producer_error_without_commit() {
+        struct FailingSource;
+
+        impl StreamingSseSource for FailingSource {
+            fn next_event(&mut self, _cx: &Cx) -> Result<Option<SseEvent>, StreamingSseError> {
+                Err(StreamingSseError::Producer("synthetic failure".to_string()))
+            }
+        }
+
+        let cx = Cx::for_testing();
+        let mut stream = StreamingSse::from_source(FailingSource);
+        let (_response, mut sender) = stream.h1_chunked_response(&cx, 1);
+
+        let err = block_on(stream.send_next_h1_chunk(&cx, &mut sender))
+            .expect_err("producer error should surface");
+
+        assert!(matches!(
+            err,
+            StreamingSseTransportError::Stream(StreamingSseError::Producer(message))
+                if message == "synthetic failure"
+        ));
+        assert_eq!(stream.bytes_emitted(), 0);
+        assert_eq!(sender.total_bytes(), 0);
+    }
+
+    #[test]
+    fn streaming_sse_h1_transport_rejects_event_and_total_overflow() {
+        let cx = Cx::for_testing();
+
+        let mut oversized =
+            StreamingSse::new(vec![SseEvent::default().data("abcdef")]).max_event_bytes(8);
+        let (_response, mut sender) = oversized.h1_chunked_response(&cx, 1);
+        let err = block_on(oversized.send_next_h1_chunk(&cx, &mut sender))
+            .expect_err("oversized event should fail");
+        assert!(matches!(
+            err,
+            StreamingSseTransportError::Stream(StreamingSseError::EventTooLarge {
+                actual,
+                max: 8,
+            }) if actual > 8
+        ));
+        assert_eq!(oversized.bytes_emitted(), 0);
+        assert_eq!(sender.total_bytes(), 0);
+
+        let first_len = "data:one\n\n".len();
+        let mut over_total = StreamingSse::new(vec![
+            SseEvent::default().data("one"),
+            SseEvent::default().data("two"),
+        ])
+        .max_total_bytes(first_len);
+        let (response, mut sender) = over_total.h1_chunked_response(&cx, 1);
+        let mut body = response.body;
+        block_on(over_total.send_next_h1_chunk(&cx, &mut sender)).expect("first send");
+        let _ = poll_body(&mut body)
+            .expect("first frame")
+            .expect("ok frame");
+        let err = block_on(over_total.send_next_h1_chunk(&cx, &mut sender))
+            .expect_err("total overflow should fail");
+        assert!(matches!(
+            err,
+            StreamingSseTransportError::Stream(StreamingSseError::TotalBytesExceeded {
+                actual,
+                max,
+            }) if actual > max && max == first_len
+        ));
+        assert_eq!(over_total.bytes_emitted(), first_len);
+        assert_eq!(sender.total_bytes(), first_len as u64);
+    }
+
+    #[test]
+    fn streaming_sse_h1_transport_disconnect_before_first_chunk_finishes_empty() {
+        let cx = Cx::for_testing();
+        let mut stream = StreamingSse::new(vec![SseEvent::default().data("pending")]);
+        let (response, mut sender) = stream.h1_chunked_response(&cx, 1);
+        let mut body = response.body;
+
+        stream.cancel_for_disconnect(&cx);
+        let step =
+            block_on(stream.send_next_h1_chunk(&cx, &mut sender)).expect("closed stream finish");
+
+        assert_eq!(step, StreamingSseTransportStep::Complete);
+        assert!(cx.is_cancel_requested());
+        assert_eq!(stream.bytes_emitted(), 0);
+        assert!(body_has_no_more_data_after_cancel(poll_body(&mut body)));
+    }
+
+    #[test]
+    fn streaming_sse_h1_transport_disconnect_after_committed_chunk_stops_later_events() {
+        let cx = Cx::for_testing();
+        let mut stream = StreamingSse::new(vec![
+            SseEvent::default().data("first"),
+            SseEvent::default().data("second"),
+        ]);
+        let (response, mut sender) = stream.h1_chunked_response(&cx, 1);
+        let mut body = response.body;
+
+        block_on(stream.send_next_h1_chunk(&cx, &mut sender)).expect("first send");
+        let frame = poll_body(&mut body)
+            .expect("first frame")
+            .expect("first frame ok");
+        assert_eq!(
+            frame.into_data().expect("data frame").chunk(),
+            b"data:first\n\n"
+        );
+
+        stream.cancel_for_disconnect(&cx);
+        let step =
+            block_on(stream.send_next_h1_chunk(&cx, &mut sender)).expect("closed stream finish");
+
+        assert_eq!(step, StreamingSseTransportStep::Complete);
+        assert!(cx.is_cancel_requested());
+        assert_eq!(stream.bytes_emitted(), "data:first\n\n".len());
+        assert!(body_has_no_more_data_after_cancel(poll_body(&mut body)));
+    }
+
+    #[test]
+    fn streaming_sse_h1_transport_cancellation_while_producing_closes_source() {
+        let cx = Cx::for_testing();
+        cx.set_cancel_requested(true);
+        let mut stream = StreamingSse::new(vec![SseEvent::default().data("pending")]);
+        let (_response, mut sender) = stream.h1_chunked_response(&cx, 1);
+
+        let err = block_on(stream.send_next_h1_chunk(&cx, &mut sender))
+            .expect_err("cancelled stream should fail");
+
+        assert!(matches!(
+            err,
+            StreamingSseTransportError::Stream(StreamingSseError::Cancelled)
+        ));
+        assert!(stream.is_closed());
+        assert_eq!(stream.bytes_emitted(), 0);
     }
 
     // ================================================================
