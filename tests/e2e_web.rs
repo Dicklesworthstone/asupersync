@@ -9,7 +9,7 @@ use asupersync::web::middleware::{HeaderOverwrite, MiddlewareStack};
 use asupersync::web::request_region::RequestRegion;
 use asupersync::web::response::{Html, Json, Redirect, Response, StatusCode};
 use asupersync::web::router::{Router, delete, get, post};
-use asupersync::web::sse::{Sse, SseEvent};
+use asupersync::web::sse::{Sse, SseEvent, StreamingSse};
 use serde_json::{Value, json};
 use std::io;
 use std::path::PathBuf;
@@ -63,12 +63,14 @@ fn redirect_handler() -> Redirect {
 // Web framework proof runner
 // =========================================================================
 
-const WEB_FRAMEWORK_BEAD_ID: &str = "asupersync-o74l7u";
+const WEB_FRAMEWORK_BEAD_ID: &str = "asupersync-o74l7u.1.3";
+const WEB_FRAMEWORK_ARTIFACT_DIR: &str = "target/web-framework-proof/asupersync-o74l7u.1.3";
 const WEB_FRAMEWORK_WAVE2_SCENARIOS: &[&str] = &[
     "router-path-json-extractor",
     "middleware-body-limit-short-circuit",
     "middleware-panic-recovery-with-security-header",
     "bounded-sse-batch-response",
+    "streaming-sse-request-region-disconnect",
     "request-region-panic-isolation",
 ];
 const WEB_FRAMEWORK_REQUIRED_ROW_FIELDS: &[&str] = &[
@@ -89,6 +91,9 @@ const WEB_FRAMEWORK_REQUIRED_ROW_FIELDS: &[&str] = &[
     "actual_status",
     "expected_body_digest",
     "actual_body_digest",
+    "expected_chunk_digests",
+    "actual_chunk_digests",
+    "artifact_path",
     "verdict",
     "first_failure",
 ];
@@ -143,6 +148,9 @@ fn web_framework_row(
     expected_body: &[u8],
     resp: &Response,
     extra_failure: Option<String>,
+    expected_chunk_digests: &[String],
+    actual_chunk_digests: &[String],
+    artifact_path: &str,
 ) -> Value {
     let first_failure =
         web_framework_first_failure(resp, expected_status, expected_body, extra_failure);
@@ -170,6 +178,9 @@ fn web_framework_row(
         "actual_status": resp.status.as_u16(),
         "expected_body_digest": web_body_digest(expected_body),
         "actual_body_digest": web_body_digest(resp.body.as_ref()),
+        "expected_chunk_digests": expected_chunk_digests,
+        "actual_chunk_digests": actual_chunk_digests,
+        "artifact_path": artifact_path,
         "verdict": verdict,
         "first_failure": first_failure,
     })
@@ -183,7 +194,7 @@ impl Handler for WebProofPanicHandler {
     }
 }
 
-fn web_proof_router_path_json(bead_id: &str) -> Value {
+fn web_proof_router_path_json(bead_id: &str, artifact_path: &str) -> Value {
     let router = Router::new().route(
         "/users/:id",
         get(FnHandler1::<_, Path<String>>::new(get_user)),
@@ -207,10 +218,13 @@ fn web_proof_router_path_json(bead_id: &str) -> Value {
         b"user:42",
         &resp,
         None,
+        &[],
+        &[],
+        artifact_path,
     )
 }
 
-fn web_proof_middleware_body_limit(bead_id: &str) -> Value {
+fn web_proof_middleware_body_limit(bead_id: &str, artifact_path: &str) -> Value {
     let handler = MiddlewareStack::new(FnHandler::new(index))
         .with_body_limit(4)
         .build();
@@ -236,10 +250,13 @@ fn web_proof_middleware_body_limit(bead_id: &str) -> Value {
         b"Payload Too Large: Content-Length 8 bytes exceeds limit 4 bytes",
         &resp,
         None,
+        &[],
+        &[],
+        artifact_path,
     )
 }
 
-fn web_proof_middleware_panic_recovery(bead_id: &str) -> Value {
+fn web_proof_middleware_panic_recovery(bead_id: &str, artifact_path: &str) -> Value {
     let handler = MiddlewareStack::new(WebProofPanicHandler)
         .with_catch_panic()
         .with_response_header("x-frame-options", "DENY", HeaderOverwrite::IfMissing)
@@ -265,10 +282,13 @@ fn web_proof_middleware_panic_recovery(bead_id: &str) -> Value {
         b"Internal Server Error",
         &resp,
         extra_failure,
+        &[],
+        &[],
+        artifact_path,
     )
 }
 
-fn web_proof_bounded_sse(bead_id: &str) -> Value {
+fn web_proof_bounded_sse(bead_id: &str, artifact_path: &str) -> Value {
     let router = Router::new().route(
         "/events",
         get(FnHandler::new(|| {
@@ -316,10 +336,91 @@ fn web_proof_bounded_sse(bead_id: &str) -> Value {
         expected_body.as_bytes(),
         &resp,
         extra_failure,
+        &[],
+        &[],
+        artifact_path,
     )
 }
 
-fn web_proof_request_region_panic(bead_id: &str) -> Value {
+fn web_proof_streaming_sse_request_region(bead_id: &str, artifact_path: &str) -> Value {
+    let expected_event = SseEvent::default()
+        .event("update")
+        .data(r#"{"count":1}"#)
+        .id("1");
+    let expected_chunk = expected_event.to_string().into_bytes();
+    let expected_chunk_digests = vec![web_body_digest(&expected_chunk)];
+    let mut actual_chunk_digests = Vec::new();
+    let mut buffer_bytes_after_disconnect = 0;
+
+    let cx = Cx::for_testing();
+    let region = RequestRegion::new(&cx, Request::new("GET", "/events/stream"));
+    let outcome = region.run(|ctx| {
+        let mut stream = StreamingSse::new(vec![
+            expected_event,
+            SseEvent::default()
+                .event("update")
+                .data(r#"{"count":2}"#)
+                .id("2"),
+        ]);
+        let first_chunk = stream
+            .next_chunk(ctx.cx())
+            .expect("first streaming SSE chunk should serialize")
+            .expect("first streaming SSE event should be present");
+        actual_chunk_digests.push(web_body_digest(&first_chunk));
+
+        stream.cancel_for_disconnect(ctx.cx());
+        assert!(
+            stream
+                .next_chunk(ctx.cx())
+                .expect("closed streaming SSE should not error after disconnect")
+                .is_none(),
+            "client disconnect must stop later SSE chunks",
+        );
+        buffer_bytes_after_disconnect = stream.bytes_emitted();
+        Response::empty(StatusCode::CLIENT_CLOSED_REQUEST)
+    });
+    let resp = outcome.into_response();
+
+    let extra_failure = if actual_chunk_digests != expected_chunk_digests {
+        Some(format!(
+            "chunk digest mismatch: expected {expected_chunk_digests:?} actual {actual_chunk_digests:?}"
+        ))
+    } else if !cx.is_cancel_requested() {
+        Some("streaming SSE disconnect did not request cancellation".to_string())
+    } else if buffer_bytes_after_disconnect != expected_chunk.len() {
+        Some(format!(
+            "buffer byte mismatch after disconnect: expected {} actual {buffer_bytes_after_disconnect}",
+            expected_chunk.len()
+        ))
+    } else {
+        None
+    };
+
+    web_framework_row(
+        bead_id,
+        "streaming-sse-request-region-disconnect",
+        "/events/stream",
+        "GET",
+        &["RequestRegion"],
+        &["StreamingSse"],
+        "streaming_sse",
+        true,
+        "after-first-event",
+        Some(0),
+        Some(0),
+        Some(0),
+        Some(0),
+        StatusCode::CLIENT_CLOSED_REQUEST,
+        b"",
+        &resp,
+        extra_failure,
+        &expected_chunk_digests,
+        &actual_chunk_digests,
+        artifact_path,
+    )
+}
+
+fn web_proof_request_region_panic(bead_id: &str, artifact_path: &str) -> Value {
     let cx = Cx::for_testing();
     let region = RequestRegion::new(&cx, Request::new("GET", "/region-panic"));
     let outcome = region.run(|_ctx| {
@@ -344,39 +445,47 @@ fn web_proof_request_region_panic(bead_id: &str) -> Value {
         b"Internal Server Error",
         &resp,
         None,
+        &[],
+        &[],
+        artifact_path,
     )
 }
 
 fn web_framework_wave2_run() -> io::Result<Vec<Value>> {
     let bead_id = std::env::var("ASUPERSYNC_WEB_FRAMEWORK_BEAD_ID")
         .unwrap_or_else(|_| WEB_FRAMEWORK_BEAD_ID.to_string());
+    let output_dir = std::env::var_os("ASUPERSYNC_WEB_FRAMEWORK_PROOF_DIR").map_or_else(
+        || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(WEB_FRAMEWORK_ARTIFACT_DIR),
+        PathBuf::from,
+    );
+    let rows_path = output_dir.join("test_rows.jsonl");
+    let report_path = output_dir.join("test_report.json");
+    let artifact_path = rows_path.display().to_string();
     let rows = vec![
-        web_proof_router_path_json(&bead_id),
-        web_proof_middleware_body_limit(&bead_id),
-        web_proof_middleware_panic_recovery(&bead_id),
-        web_proof_bounded_sse(&bead_id),
-        web_proof_request_region_panic(&bead_id),
+        web_proof_router_path_json(&bead_id, &artifact_path),
+        web_proof_middleware_body_limit(&bead_id, &artifact_path),
+        web_proof_middleware_panic_recovery(&bead_id, &artifact_path),
+        web_proof_bounded_sse(&bead_id, &artifact_path),
+        web_proof_streaming_sse_request_region(&bead_id, &artifact_path),
+        web_proof_request_region_panic(&bead_id, &artifact_path),
     ];
 
-    if let Some(output_dir) = std::env::var_os("ASUPERSYNC_WEB_FRAMEWORK_PROOF_DIR") {
-        let output_dir = PathBuf::from(output_dir);
-        std::fs::create_dir_all(&output_dir)?;
-        let rows_path = output_dir.join("test_rows.jsonl");
-        let mut rows_file = std::fs::File::create(&rows_path)?;
-        for row in &rows {
-            use std::io::Write as _;
-            writeln!(rows_file, "{row}")?;
-        }
-        let report = json!({
-            "bead_id": bead_id,
-            "scenario_count": rows.len(),
-            "expected_scenarios": WEB_FRAMEWORK_WAVE2_SCENARIOS,
-            "rows_path": rows_path.display().to_string(),
-            "validation_passed": rows.iter().all(|row| row["verdict"] == "pass"),
-        });
-        let report_bytes = serde_json::to_vec_pretty(&report).map_err(io::Error::other)?;
-        std::fs::write(output_dir.join("test_report.json"), report_bytes)?;
+    std::fs::create_dir_all(&output_dir)?;
+    let mut rows_file = std::fs::File::create(&rows_path)?;
+    for row in &rows {
+        use std::io::Write as _;
+        writeln!(rows_file, "{row}")?;
     }
+    let report = json!({
+        "bead_id": bead_id,
+        "scenario_count": rows.len(),
+        "expected_scenarios": WEB_FRAMEWORK_WAVE2_SCENARIOS,
+        "rows_path": artifact_path,
+        "report_path": report_path.display().to_string(),
+        "validation_passed": rows.iter().all(|row| row["verdict"] == "pass"),
+    });
+    let report_bytes = serde_json::to_vec_pretty(&report).map_err(io::Error::other)?;
+    std::fs::write(report_path, report_bytes)?;
 
     Ok(rows)
 }
@@ -431,6 +540,46 @@ fn web_framework_wave2_proof_runner_logs_required_scenarios() {
     );
     assert!(drifts.is_empty(), "web framework proof drifts: {drifts:#?}");
     assert_eq!(rows.len(), WEB_FRAMEWORK_WAVE2_SCENARIOS.len());
+}
+
+#[test]
+fn web_framework_readme_sse_support_claim_matches_streaming_artifact() {
+    common::init_test_logging();
+    let rows = web_framework_wave2_run().expect("web framework proof runner");
+    let streaming_row = rows
+        .iter()
+        .find(|row| row["scenario_id"].as_str() == Some("streaming-sse-request-region-disconnect"))
+        .expect("streaming SSE proof row must exist");
+
+    assert_eq!(streaming_row["verdict"].as_str(), Some("pass"));
+    assert_eq!(streaming_row["streaming"].as_bool(), Some(true));
+    assert!(
+        streaming_row["actual_chunk_digests"]
+            .as_array()
+            .is_some_and(|digests| !digests.is_empty()),
+        "streaming proof row must carry chunk digests",
+    );
+    let artifact_path = streaming_row["artifact_path"]
+        .as_str()
+        .expect("artifact_path must be a string");
+    assert!(
+        PathBuf::from(artifact_path).exists(),
+        "streaming proof artifact path must exist: {artifact_path}",
+    );
+
+    let readme_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("README.md");
+    let readme = std::fs::read_to_string(&readme_path).expect("read README.md");
+    for phrase in [
+        "`Sse` finite bounded batch",
+        "`StreamingSse` pull API",
+        "request-region E2E proof",
+        "transport integration in progress",
+    ] {
+        assert!(
+            readme.contains(phrase),
+            "README SSE support matrix must contain `{phrase}` after streaming artifact proof",
+        );
+    }
 }
 
 #[test]
