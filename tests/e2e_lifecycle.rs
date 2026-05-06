@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! T1.1 — Full runtime startup-to-shutdown lifecycle E2E test.
 //!
 //! Verifies: LabRuntime -> root region -> 3-level region tree -> 50 tasks ->
