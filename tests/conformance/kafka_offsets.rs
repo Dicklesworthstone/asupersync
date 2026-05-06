@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Kafka Offset Management Conformance Tests
 //!
 //! Implements metamorphic relations for Kafka consumer offset management to verify
@@ -40,11 +38,7 @@ async fn create_test_consumer(
     config: ConformanceConfig,
     use_stub: bool,
 ) -> Result<KafkaConsumer, KafkaError> {
-    let bootstrap_servers = if use_stub {
-        vec!["stub://localhost".to_string()]
-    } else {
-        vec!["localhost:9092".to_string()]
-    };
+    let bootstrap_servers = vec!["localhost:9092".to_string()];
 
     let consumer_config = ConsumerConfig::new(bootstrap_servers, config.group_id.clone())
         .enable_auto_commit(config.enable_auto_commit)
@@ -61,6 +55,21 @@ async fn create_test_consumer(
 
     let _ = config.retention_minutes;
     KafkaConsumer::new(consumer_config)
+}
+
+/// Subscribe the consumer and deterministically assign every partition used by a relation.
+async fn prepare_consumer_offsets(
+    cx: &Cx,
+    consumer: &KafkaConsumer,
+    offsets: &[TopicPartitionOffset],
+) -> Result<(), KafkaError> {
+    let mut topics: Vec<&str> = offsets.iter().map(|tpo| tpo.topic.as_str()).collect();
+    topics.sort_unstable();
+    topics.dedup();
+
+    consumer.subscribe(cx, &topics).await?;
+    consumer.rebalance(cx, offsets).await?;
+    Ok(())
 }
 
 /// Helper to create test offset data
@@ -113,6 +122,7 @@ fn mr1_commit_offsets_monotonic_per_partition() -> Result<(), Box<dyn std::error
                 offset: 100,
             }];
 
+            prepare_consumer_offsets(&cx, &consumer, &initial_offsets).await?;
             consumer.commit_offsets(&cx, &initial_offsets).await?;
             let committed_1 = consumer.committed_offset(topic, partition);
             assert_eq!(committed_1, Some(100));
@@ -147,7 +157,11 @@ fn mr1_commit_offsets_monotonic_per_partition() -> Result<(), Box<dyn std::error
                     );
                 }
                 Ok(_) => {
-                    panic!("Offset regression should have been rejected");
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "Offset regression should have been rejected",
+                    )
+                    .into());
                 }
                 Err(e) => return Err(e.into()),
             }
@@ -199,6 +213,9 @@ fn mr2_idempotent_commit_same_group() -> Result<(), Box<dyn std::error::Error>> 
 
             let topic = "test-idempotent";
             let offsets = create_test_offsets(topic, &[0, 1, 2], 1000);
+
+            prepare_consumer_offsets(&cx, &consumer1, &offsets).await?;
+            prepare_consumer_offsets(&cx, &consumer2, &offsets).await?;
 
             // First commit
             consumer1.commit_offsets(&cx, &offsets).await?;
@@ -293,6 +310,8 @@ fn mr3_offset_retention_respected() -> Result<(), Box<dyn std::error::Error>> {
             let topic = "test-retention-short";
             let offsets = create_test_offsets(topic, &[0], 500);
 
+            prepare_consumer_offsets(&cx, &short_consumer, &offsets).await?;
+
             // Commit offsets
             short_consumer.commit_offsets(&cx, &offsets).await?;
 
@@ -315,6 +334,7 @@ fn mr3_offset_retention_respected() -> Result<(), Box<dyn std::error::Error>> {
             let long_topic = "test-retention-long";
             let long_offsets = create_test_offsets(long_topic, &[0], 1000);
 
+            prepare_consumer_offsets(&cx, &long_consumer, &long_offsets).await?;
             long_consumer.commit_offsets(&cx, &long_offsets).await?;
 
             // Verify offsets are available within retention period
@@ -358,6 +378,8 @@ fn mr4_rebalance_preserves_committed_offsets() -> Result<(), Box<dyn std::error:
 
             let topic = "test-rebalance";
             let initial_assignments = create_test_offsets(topic, &[0, 1, 2], 2000);
+
+            prepare_consumer_offsets(&cx, &consumer, &initial_assignments).await?;
 
             // Commit initial offsets
             consumer.commit_offsets(&cx, &initial_assignments).await?;
@@ -469,6 +491,8 @@ fn mr5_transactional_commit_atomic() -> Result<(), Box<dyn std::error::Error>> {
                 },
             ];
 
+            prepare_consumer_offsets(&cx, &consumer, &transaction_offsets).await?;
+
             // Store initial state (should be None for new partitions)
             let initial_state: Vec<Option<i64>> = transaction_offsets
                 .iter()
@@ -534,7 +558,11 @@ fn mr5_transactional_commit_atomic() -> Result<(), Box<dyn std::error::Error>> {
                 }
             } else {
                 // If the implementation allows partial commits, verify atomicity constraints
-                panic!("Expected transaction to fail atomically, but got: {:?}", mixed_result);
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Expected transaction to fail atomically, but got: {mixed_result:?}"),
+                )
+                .into());
             }
         }
 
@@ -564,6 +592,7 @@ fn integration_all_metamorphic_relations() -> Result<(), Box<dyn std::error::Err
 
         // MR1: Verify monotonic commits
         let offsets_v1 = create_test_offsets(topic, &[0, 1], 100);
+        prepare_consumer_offsets(&cx, &consumer, &offsets_v1).await?;
         consumer.commit_offsets(&cx, &offsets_v1).await?;
 
         let offsets_v2 = create_test_offsets(topic, &[0, 1], 200);
@@ -580,6 +609,7 @@ fn integration_all_metamorphic_relations() -> Result<(), Box<dyn std::error::Err
 
         // MR5: Verify atomic behavior
         let atomic_offsets = create_test_offsets(topic, &[0, 2, 3], 300);
+        prepare_consumer_offsets(&cx, &consumer, &atomic_offsets).await?;
         consumer.commit_offsets(&cx, &atomic_offsets).await?;
 
         for tpo in &atomic_offsets {
