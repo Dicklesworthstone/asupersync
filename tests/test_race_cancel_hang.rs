@@ -1,7 +1,6 @@
 //! Regression coverage for empty `Cx::race` cancellation wakeups.
 
 #![allow(missing_docs)]
-#![allow(clippy::all)]
 
 use asupersync::cx::Cx;
 use asupersync::runtime::{JoinError, RuntimeState};
@@ -80,7 +79,7 @@ fn test_race_empty_wakes_on_cancel() {
     }
 
     match handle.try_join() {
-        Ok(Some(Err(JoinError::Cancelled(reason)))) => {
+        Err(JoinError::Cancelled(reason)) => {
             assert_eq!(reason.kind, CancelKind::User);
         }
         other => panic!("expected race([]) cancellation result, got {other:?}"),
