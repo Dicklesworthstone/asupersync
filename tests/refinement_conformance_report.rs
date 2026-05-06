@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Deterministic refinement conformance report contract checks (bd-1psg4).
 
 use serde_json::Value;
