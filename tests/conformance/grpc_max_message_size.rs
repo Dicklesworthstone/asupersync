@@ -49,6 +49,51 @@ fn grpc_codec_enforces_directional_message_caps() {
 }
 
 #[test]
+fn grpc_codec_accepts_messages_exactly_at_directional_caps() {
+    let exact_payload = Bytes::from_static(b"four");
+    let mut wire = BytesMut::new();
+
+    GrpcCodec::with_message_size_limits(exact_payload.len(), 32)
+        .encode(GrpcMessage::new(exact_payload.clone()), &mut wire)
+        .expect("payload exactly at max_send_message_size must encode");
+
+    assert_eq!(
+        &wire[1..5],
+        &(exact_payload.len() as u32).to_be_bytes(),
+        "encoded length prefix must match the exact-limit payload"
+    );
+
+    let mut decoder = GrpcCodec::with_message_size_limits(32, exact_payload.len());
+    let decoded = <GrpcCodec as Decoder>::decode(&mut decoder, &mut wire)
+        .expect("payload exactly at max_recv_message_size must decode")
+        .expect("full exact-limit frame should be available");
+
+    assert!(!decoded.compressed);
+    assert_eq!(decoded.data, exact_payload);
+    assert!(
+        wire.is_empty(),
+        "exact-limit frame should be fully consumed after successful decode"
+    );
+}
+
+#[test]
+fn grpc_codec_rejects_oversized_declared_length_before_body_arrives() {
+    let mut wire = BytesMut::from(b"\x00\x00\x00\x00\x04".as_slice());
+
+    let mut decoder = GrpcCodec::with_message_size_limits(32, 3);
+    let err = <GrpcCodec as Decoder>::decode(&mut decoder, &mut wire)
+        .expect_err("declared inbound length above max_recv_message_size must fail immediately");
+
+    assert!(matches!(err, GrpcError::MessageTooLarge));
+    assert_eq!(err.into_status().code(), Code::ResourceExhausted);
+    assert_eq!(
+        wire.as_ref(),
+        b"\x00\x00\x00\x00\x04",
+        "oversized length-prefix rejection must not consume bytes before the caller handles the error"
+    );
+}
+
+#[test]
 fn server_builder_preserves_custom_send_and_receive_caps() {
     let server = Server::builder()
         .max_recv_message_size(1024)
