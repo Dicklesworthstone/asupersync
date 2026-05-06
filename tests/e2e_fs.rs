@@ -11,8 +11,13 @@
 mod common;
 
 use asupersync::fs;
+use asupersync::fs::Vfs as _;
 use asupersync::io::{AsyncReadExt, AsyncWriteExt};
+use asupersync::stream::StreamExt as _;
 use futures_lite::future;
+use serde_json::{Value, json};
+use std::io;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -31,6 +36,473 @@ fn unique_temp_dir(prefix: &str) -> PathBuf {
 
 fn cleanup(path: &std::path::Path) {
     let _ = std::fs::remove_dir_all(path);
+}
+
+const FS_PARITY_WAVE2_SCENARIOS: &[&str] = &[
+    "open-options-seek-sync",
+    "read-dir-metadata-disposition",
+    "buffered-lines-boundaries",
+    "unix-vfs-equivalence",
+    "error-kind-remove-missing",
+    "read-dir-drop-cancellation",
+];
+
+#[derive(Debug)]
+struct FsProofEvidence {
+    bytes_actual: u64,
+    metadata_actual: String,
+    unsupported_reason: String,
+}
+
+impl FsProofEvidence {
+    fn supported(bytes_actual: u64, metadata_actual: impl Into<String>) -> Self {
+        Self {
+            bytes_actual,
+            metadata_actual: metadata_actual.into(),
+            unsupported_reason: String::new(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct FsProofScenario {
+    scenario_id: &'static str,
+    api: &'static str,
+    operation: &'static str,
+    bytes_expected: u64,
+    metadata_expected: &'static str,
+    cancellation_point: &'static str,
+    result: Result<FsProofEvidence, String>,
+}
+
+fn fs_parity_feature_flags() -> String {
+    format!(
+        "test-internals=true,io-uring={}",
+        cfg!(feature = "io-uring")
+    )
+}
+
+fn fs_parity_platform() -> String {
+    format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
+}
+
+fn fs_parity_row(
+    bead_id: &str,
+    scenario: &FsProofScenario,
+    temp_root: &Path,
+    cleanup_status: &str,
+) -> Value {
+    let cleanup_failed = cleanup_status != "removed";
+    let (bytes_actual, metadata_actual, unsupported_reason, verdict, first_failure) =
+        match &scenario.result {
+            Ok(evidence) if !cleanup_failed => (
+                evidence.bytes_actual,
+                evidence.metadata_actual.clone(),
+                evidence.unsupported_reason.clone(),
+                "pass".to_string(),
+                String::new(),
+            ),
+            Ok(evidence) => (
+                evidence.bytes_actual,
+                evidence.metadata_actual.clone(),
+                evidence.unsupported_reason.clone(),
+                "fail".to_string(),
+                format!("cleanup_status={cleanup_status}"),
+            ),
+            Err(first_failure) => (
+                0,
+                String::new(),
+                String::new(),
+                "fail".to_string(),
+                first_failure.clone(),
+            ),
+        };
+
+    json!({
+        "bead_id": bead_id,
+        "scenario_id": scenario.scenario_id,
+        "api": scenario.api,
+        "backend": "unix-spawn_blocking_io",
+        "platform": fs_parity_platform(),
+        "feature_flags": fs_parity_feature_flags(),
+        "temp_root": temp_root.display().to_string(),
+        "operation": scenario.operation,
+        "bytes_expected": scenario.bytes_expected,
+        "bytes_actual": bytes_actual,
+        "metadata_expected": scenario.metadata_expected,
+        "metadata_actual": metadata_actual,
+        "cancellation_point": scenario.cancellation_point,
+        "cleanup_status": cleanup_status,
+        "unsupported_reason": unsupported_reason,
+        "verdict": verdict,
+        "first_failure": first_failure,
+    })
+}
+
+fn fs_proof_scenario_dir(temp_root: &Path, scenario_id: &str) -> Result<PathBuf, String> {
+    let dir = temp_root.join(scenario_id);
+    std::fs::create_dir_all(&dir)
+        .map_err(|err| format!("{scenario_id}: create scenario dir: {err}"))?;
+    Ok(dir)
+}
+
+async fn fs_proof_open_options_seek_sync(temp_root: &Path) -> Result<FsProofEvidence, String> {
+    let dir = fs_proof_scenario_dir(temp_root, "open-options-seek-sync")?;
+    let path = dir.join("cursor.txt");
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .await
+        .map_err(|err| format!("open read/write/create/truncate: {err}"))?;
+
+    file.write_all(b"0123456789")
+        .await
+        .map_err(|err| format!("write all: {err}"))?;
+    file.sync_data()
+        .await
+        .map_err(|err| format!("sync data: {err}"))?;
+    file.seek(io::SeekFrom::Start(4))
+        .await
+        .map_err(|err| format!("seek start 4: {err}"))?;
+    let mut window = [0_u8; 3];
+    file.read_exact(&mut window)
+        .await
+        .map_err(|err| format!("read exact window: {err}"))?;
+    if &window != b"456" {
+        return Err(format!(
+            "seek/read window drift: expected 456 actual {window:?}"
+        ));
+    }
+
+    let metadata = file
+        .metadata()
+        .await
+        .map_err(|err| format!("file metadata: {err}"))?;
+    if metadata.len() != 10 || !metadata.is_file() {
+        return Err(format!(
+            "metadata drift: len={} is_file={}",
+            metadata.len(),
+            metadata.is_file()
+        ));
+    }
+
+    Ok(FsProofEvidence::supported(
+        metadata.len(),
+        "len=10,is_file=true,seek_window=456",
+    ))
+}
+
+async fn fs_proof_read_dir_metadata(temp_root: &Path) -> Result<FsProofEvidence, String> {
+    let dir = fs_proof_scenario_dir(temp_root, "read-dir-metadata-disposition")?;
+    fs::write(dir.join("alpha.txt"), b"a")
+        .await
+        .map_err(|err| format!("write alpha: {err}"))?;
+    fs::write(dir.join("beta.txt"), b"bb")
+        .await
+        .map_err(|err| format!("write beta: {err}"))?;
+    fs::create_dir(dir.join("nested"))
+        .await
+        .map_err(|err| format!("create nested dir: {err}"))?;
+
+    let mut entries = fs::read_dir(&dir)
+        .await
+        .map_err(|err| format!("read_dir open: {err}"))?;
+    let mut names = Vec::new();
+    let mut file_count = 0_u64;
+    let mut dir_count = 0_u64;
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|err| format!("read_dir next_entry: {err}"))?
+    {
+        let file_type = entry
+            .file_type()
+            .await
+            .map_err(|err| format!("dir entry file_type: {err}"))?;
+        if file_type.is_file() {
+            file_count += 1;
+        }
+        if file_type.is_dir() {
+            dir_count += 1;
+        }
+        names.push(entry.file_name().to_string_lossy().to_string());
+    }
+    names.sort();
+
+    let expected = vec![
+        "alpha.txt".to_string(),
+        "beta.txt".to_string(),
+        "nested".to_string(),
+    ];
+    if names != expected || file_count != 2 || dir_count != 1 {
+        return Err(format!(
+            "read_dir drift: names={names:?} file_count={file_count} dir_count={dir_count}"
+        ));
+    }
+
+    Ok(FsProofEvidence::supported(
+        names.len() as u64,
+        format!("entries={names:?},file_count=2,dir_count=1"),
+    ))
+}
+
+async fn fs_proof_buffered_lines(temp_root: &Path) -> Result<FsProofEvidence, String> {
+    let dir = fs_proof_scenario_dir(temp_root, "buffered-lines-boundaries")?;
+    let path = dir.join("lines.txt");
+    let contents = b"alpha\n\nbeta-no-newline";
+    fs::write(&path, contents)
+        .await
+        .map_err(|err| format!("write lines fixture: {err}"))?;
+
+    let file = fs::File::open(&path)
+        .await
+        .map_err(|err| format!("open lines fixture: {err}"))?;
+    let reader = fs::BufReader::with_capacity(4, file);
+    let mut stream = reader.lines();
+    let mut lines = Vec::new();
+    while let Some(line) = stream.next().await {
+        lines.push(line.map_err(|err| format!("read line: {err}"))?);
+    }
+
+    let expected = vec![
+        "alpha".to_string(),
+        String::new(),
+        "beta-no-newline".to_string(),
+    ];
+    if lines != expected {
+        return Err(format!(
+            "line boundary drift: expected={expected:?} actual={lines:?}"
+        ));
+    }
+
+    Ok(FsProofEvidence::supported(
+        contents.len() as u64,
+        format!("lines={lines:?},capacity=4"),
+    ))
+}
+
+async fn fs_proof_unix_vfs_equivalence(temp_root: &Path) -> Result<FsProofEvidence, String> {
+    let dir = fs_proof_scenario_dir(temp_root, "unix-vfs-equivalence")?;
+    let path = dir.join("vfs.txt");
+    let copied = dir.join("vfs-copy.txt");
+    let vfs = fs::UnixVfs::new();
+
+    vfs.write(&path, b"vfs-equivalent")
+        .await
+        .map_err(|err| format!("vfs write: {err}"))?;
+    let direct = fs::read(&path)
+        .await
+        .map_err(|err| format!("direct read after vfs write: {err}"))?;
+    let copied_len = vfs
+        .copy(&path, &copied)
+        .await
+        .map_err(|err| format!("vfs copy: {err}"))?;
+    let copied_bytes = fs::read(&copied)
+        .await
+        .map_err(|err| format!("direct read vfs copy: {err}"))?;
+    let metadata = vfs
+        .metadata(&path)
+        .await
+        .map_err(|err| format!("vfs metadata: {err}"))?;
+
+    if direct != b"vfs-equivalent" || copied_bytes != direct || copied_len != direct.len() as u64 {
+        return Err(format!(
+            "vfs equivalence drift: direct={direct:?} copied={copied_bytes:?} copied_len={copied_len}"
+        ));
+    }
+    if metadata.len() != direct.len() as u64 || !metadata.is_file() {
+        return Err(format!(
+            "vfs metadata drift: len={} is_file={}",
+            metadata.len(),
+            metadata.is_file()
+        ));
+    }
+
+    Ok(FsProofEvidence::supported(
+        direct.len() as u64,
+        "unix_vfs_matches_direct_fs_read_copy_metadata",
+    ))
+}
+
+async fn fs_proof_remove_missing_error_kind(temp_root: &Path) -> Result<FsProofEvidence, String> {
+    let dir = fs_proof_scenario_dir(temp_root, "error-kind-remove-missing")?;
+    let missing = dir.join("missing.txt");
+    match fs::remove_file(&missing).await {
+        Ok(()) => Err("remove_file unexpectedly succeeded for missing path".to_string()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(FsProofEvidence::supported(
+            0,
+            "error_kind=NotFound,path_absent=true",
+        )),
+        Err(err) => Err(format!(
+            "remove_file missing path returned wrong error kind: {:?}: {err}",
+            err.kind()
+        )),
+    }
+}
+
+async fn fs_proof_read_dir_drop_cancellation(temp_root: &Path) -> Result<FsProofEvidence, String> {
+    let dir = fs_proof_scenario_dir(temp_root, "read-dir-drop-cancellation")?;
+    for idx in 0..8 {
+        fs::write(dir.join(format!("entry-{idx}.txt")), format!("entry-{idx}"))
+            .await
+            .map_err(|err| format!("write cancellation fixture {idx}: {err}"))?;
+    }
+
+    let mut entries = fs::read_dir(&dir)
+        .await
+        .map_err(|err| format!("read_dir open for cancellation drop: {err}"))?;
+    let first = entries
+        .next_entry()
+        .await
+        .map_err(|err| format!("read_dir first entry: {err}"))?
+        .ok_or_else(|| "read_dir fixture unexpectedly empty".to_string())?;
+    let first_name = first.file_name().to_string_lossy().to_string();
+    drop(first);
+    drop(entries);
+
+    let metadata = fs::metadata(&dir)
+        .await
+        .map_err(|err| format!("metadata after dropping read_dir: {err}"))?;
+    if !metadata.is_dir() {
+        return Err("read_dir drop left scenario directory unavailable".to_string());
+    }
+
+    Ok(FsProofEvidence::supported(
+        8,
+        format!("dropped_after_first={first_name},dir_still_accessible=true"),
+    ))
+}
+
+async fn fs_parity_wave2_run() -> io::Result<Vec<Value>> {
+    let bead_id = std::env::var("ASUPERSYNC_FS_PARITY_BEAD_ID")
+        .unwrap_or_else(|_| "asupersync-oc0ybw".to_string());
+    let temp = tempfile::Builder::new()
+        .prefix("asupersync_fs_parity_wave2_")
+        .tempdir()?;
+    let temp_root = temp.path().to_path_buf();
+
+    let scenarios = vec![
+        FsProofScenario {
+            scenario_id: "open-options-seek-sync",
+            api: "File/OpenOptions",
+            operation: "open_write_sync_seek_read_metadata",
+            bytes_expected: 10,
+            metadata_expected: "len=10,is_file=true,seek_window=456",
+            cancellation_point: "none",
+            result: fs_proof_open_options_seek_sync(&temp_root).await,
+        },
+        FsProofScenario {
+            scenario_id: "read-dir-metadata-disposition",
+            api: "ReadDir/DirEntry",
+            operation: "read_dir_next_entry_file_type",
+            bytes_expected: 3,
+            metadata_expected: "entries=[alpha.txt,beta.txt,nested],file_count=2,dir_count=1",
+            cancellation_point: "none",
+            result: fs_proof_read_dir_metadata(&temp_root).await,
+        },
+        FsProofScenario {
+            scenario_id: "buffered-lines-boundaries",
+            api: "BufReader/Lines",
+            operation: "buffered_line_iteration_empty_and_final_unterminated",
+            bytes_expected: 22,
+            metadata_expected: "lines=[alpha,,beta-no-newline],capacity=4",
+            cancellation_point: "none",
+            result: fs_proof_buffered_lines(&temp_root).await,
+        },
+        FsProofScenario {
+            scenario_id: "unix-vfs-equivalence",
+            api: "UnixVfs/VfsFile",
+            operation: "vfs_write_direct_read_vfs_copy_metadata",
+            bytes_expected: 14,
+            metadata_expected: "unix_vfs_matches_direct_fs_read_copy_metadata",
+            cancellation_point: "none",
+            result: fs_proof_unix_vfs_equivalence(&temp_root).await,
+        },
+        FsProofScenario {
+            scenario_id: "error-kind-remove-missing",
+            api: "path_ops::remove_file",
+            operation: "missing_path_error_mapping",
+            bytes_expected: 0,
+            metadata_expected: "error_kind=NotFound,path_absent=true",
+            cancellation_point: "none",
+            result: fs_proof_remove_missing_error_kind(&temp_root).await,
+        },
+        FsProofScenario {
+            scenario_id: "read-dir-drop-cancellation",
+            api: "ReadDir",
+            operation: "drop_iterator_after_first_entry",
+            bytes_expected: 8,
+            metadata_expected: "dropped_after_first_entry,dir_still_accessible=true",
+            cancellation_point: "drop_after_first_entry",
+            result: fs_proof_read_dir_drop_cancellation(&temp_root).await,
+        },
+    ];
+
+    let cleanup_status = match temp.close() {
+        Ok(()) => "removed".to_string(),
+        Err(err) => format!("failed:{err}"),
+    };
+    let rows: Vec<Value> = scenarios
+        .iter()
+        .map(|scenario| fs_parity_row(&bead_id, scenario, &temp_root, &cleanup_status))
+        .collect();
+
+    if let Some(output_dir) = std::env::var_os("ASUPERSYNC_FS_PARITY_PROOF_DIR") {
+        let output_dir = PathBuf::from(output_dir);
+        std::fs::create_dir_all(&output_dir)?;
+        let rows_path = output_dir.join("test_rows.jsonl");
+        let mut rows_file = std::fs::File::create(&rows_path)?;
+        for row in &rows {
+            use std::io::Write as _;
+            writeln!(rows_file, "{row}")?;
+        }
+        let test_report = json!({
+            "bead_id": bead_id,
+            "scenario_count": rows.len(),
+            "expected_scenarios": FS_PARITY_WAVE2_SCENARIOS,
+            "temp_root": temp_root.display().to_string(),
+            "cleanup_status": cleanup_status,
+            "rows_path": rows_path.display().to_string(),
+            "validation_passed": rows.iter().all(|row| row["verdict"] == "pass"),
+        });
+        let report_bytes = serde_json::to_vec_pretty(&test_report).map_err(io::Error::other)?;
+        std::fs::write(output_dir.join("test_report.json"), report_bytes)?;
+    }
+
+    Ok(rows)
+}
+
+#[test]
+fn fs_parity_wave2_proof_runner_logs_required_scenarios() {
+    common::init_test_logging();
+    let rows = future::block_on(fs_parity_wave2_run()).expect("fs parity proof runner");
+    for row in &rows {
+        println!("{row}");
+    }
+
+    let missing: Vec<_> = FS_PARITY_WAVE2_SCENARIOS
+        .iter()
+        .copied()
+        .filter(|scenario_id| {
+            !rows
+                .iter()
+                .any(|row| row["scenario_id"].as_str() == Some(*scenario_id))
+        })
+        .collect();
+    let drifts: Vec<_> = rows
+        .iter()
+        .filter(|row| row["verdict"].as_str() != Some("pass"))
+        .collect();
+
+    assert!(
+        missing.is_empty(),
+        "missing fs parity proof scenarios: {missing:?}"
+    );
+    assert!(drifts.is_empty(), "fs parity proof drifts: {drifts:#?}");
+    assert_eq!(rows.len(), FS_PARITY_WAVE2_SCENARIOS.len());
 }
 
 // === File Operations ===
