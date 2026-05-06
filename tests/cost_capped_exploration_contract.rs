@@ -5,6 +5,7 @@
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 const DOC_PATH: &str = "docs/cost_capped_exploration_contract.md";
 const ARTIFACT_PATH: &str = "artifacts/cost_capped_exploration_contract_v1.json";
@@ -500,6 +501,32 @@ fn smoke_scenarios_are_rch_routed() {
 }
 
 #[test]
+fn validation_commands_are_rch_routed_for_rust_proofs() {
+    let artifact = load_artifact();
+    let commands = artifact["validation_commands"]
+        .as_array()
+        .expect("validation_commands must be array");
+    assert!(
+        !commands.is_empty(),
+        "artifact must record reproducible validation commands"
+    );
+
+    for command in commands {
+        let command = command.as_str().expect("command must be string");
+        if command.contains("cargo ") || command.contains("rustfmt ") {
+            assert!(
+                command.contains("rch exec --"),
+                "rust proof command must be routed through rch: {command}"
+            );
+        }
+        assert!(
+            !command.contains("eval "),
+            "validation command must not rely on shell eval: {command}"
+        );
+    }
+}
+
+#[test]
 fn runner_script_exists_and_declares_modes() {
     let root = repo_root();
     let script_path = root.join(RUNNER_SCRIPT_PATH);
@@ -513,12 +540,76 @@ fn runner_script_exists_and_declares_modes() {
         "--execute",
         "cost-capped-exploration-smoke-bundle-v1",
         "cost-capped-exploration-smoke-run-report-v1",
+        "RCH_BIN",
+        "run_report.json",
+        "validation_passed",
+        "local_fallback_detected",
+        "test_filter_for_scenario",
     ] {
         assert!(
             script.contains(token),
             "runner script missing token: {token}"
         );
     }
+    assert!(
+        !script.contains("eval "),
+        "runner script must not execute artifact command strings through eval"
+    );
+}
+
+#[test]
+fn runner_dry_run_emits_bundle_and_run_report() {
+    let root = repo_root();
+    let output_root = root.join("target/cost-capped-exploration-contract-dry-run");
+    let run_id = "contract-dry-run";
+    let scenario = "AA06-SMOKE-GEODESIC-BUDGET";
+
+    let status = Command::new("bash")
+        .current_dir(&root)
+        .arg(RUNNER_SCRIPT_PATH)
+        .arg("--scenario")
+        .arg(scenario)
+        .arg("--dry-run")
+        .arg("--run-id")
+        .arg(run_id)
+        .arg("--output-root")
+        .arg(&output_root)
+        .env("RCH_BIN", "/bin/false")
+        .status()
+        .expect("failed to execute dry-run runner");
+    assert!(status.success(), "dry-run runner must succeed");
+
+    let run_dir = output_root.join(format!("run_{run_id}")).join(scenario);
+    let bundle: Value = serde_json::from_str(
+        &std::fs::read_to_string(run_dir.join("bundle_manifest.json"))
+            .expect("dry-run bundle manifest must exist"),
+    )
+    .expect("dry-run bundle manifest must parse");
+    let report: Value = serde_json::from_str(
+        &std::fs::read_to_string(run_dir.join("run_report.json"))
+            .expect("dry-run report must exist"),
+    )
+    .expect("dry-run report must parse");
+
+    assert_eq!(
+        bundle["schema"].as_str(),
+        Some("cost-capped-exploration-smoke-bundle-v1")
+    );
+    assert_eq!(
+        report["schema"].as_str(),
+        Some("cost-capped-exploration-smoke-run-report-v1")
+    );
+    assert_eq!(report["mode"].as_str(), Some("dry-run"));
+    assert_eq!(report["status"].as_str(), Some("dry_run"));
+    assert_eq!(report["validation_passed"].as_bool(), Some(true));
+    assert_eq!(report["local_fallback_detected"].as_bool(), Some(false));
+    assert!(
+        report["command"]
+            .as_str()
+            .expect("command must be string")
+            .contains("/bin/false exec --"),
+        "dry-run command must honor RCH_BIN"
+    );
 }
 
 // ── Downstream beads ─────────────────────────────────────────────────
