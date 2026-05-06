@@ -1,0 +1,599 @@
+{
+  "schema_version": "slo-policy-bundle-contract-v1",
+  "bead_id": "asupersync-bgtplc.1",
+  "module": "src/types/slo_policy.rs",
+  "description": "Operator-facing SLO policy bundle schema and fail-closed validation contract for compiling service goals into Budget, admission, brownout, resource-pressure, and no-win fallback policy lanes.",
+  "policy_bundle_schema_version": 1,
+  "workload_classes": [
+    "control_plane",
+    "data_plane",
+    "background",
+    "agent_swarm"
+  ],
+  "latency_units": [
+    "milliseconds",
+    "microseconds"
+  ],
+  "validation_issue_kinds": [
+    "malformed_json",
+    "unsupported_schema_version",
+    "missing_required_field",
+    "non_monotonic_percentile",
+    "invalid_unit",
+    "missing_no_win_fallback",
+    "secret_like_material",
+    "external_path",
+    "stale_profile_hash",
+    "unsupported_workload_class",
+    "duplicate_objective",
+    "impossible_deadline",
+    "oversized_field",
+    "redaction_failure"
+  ],
+  "required_bundle_fields": [
+    "schema_version",
+    "policy_id",
+    "workload_class",
+    "latency_objectives",
+    "cleanup_deadline_ms",
+    "max_queue_wait_ms",
+    "resource_pressure",
+    "no_win_fallback",
+    "provenance",
+    "redaction"
+  ],
+  "gate_contract": {
+    "mode": "deterministic fail-closed schema validation",
+    "provenance": "profile_id, profile_hash, observed_profile_hash, target_commit, feature_flags, artifact_path, and related_bead_id are preserved in JSON",
+    "slo_objectives": "latency percentiles must be positive, monotonic, supported-unit, and compatible with cleanup deadlines",
+    "resource_pressure": "memory and fd thresholds are basis points and timer queue depth must be positive",
+    "fallback": "every bundle must declare a no-win fallback and an rch-routed proof command",
+    "redaction": "redaction.passed must be true and metadata/commands must not contain secret-like material",
+    "paths": "file-backed provenance must stay repository-relative and avoid host-private path fragments",
+    "malformed_input": "malformed bundle JSON or JSONL fails closed with malformed_json"
+  },
+  "scenarios": [
+    {
+      "scenario_id": "accepted-agent-swarm",
+      "kind": "valid",
+      "expected": {
+        "accepted": true,
+        "issue_kinds": []
+      },
+      "bundle": {
+        "schema_version": 1,
+        "policy_id": "agent-swarm-standard",
+        "workload_class": "agent_swarm",
+        "latency_objectives": [
+          {
+            "objective_id": "queue_wait",
+            "unit": "milliseconds",
+            "p50": 5,
+            "p95": 25,
+            "p99": 60,
+            "p999": 120
+          },
+          {
+            "objective_id": "cleanup",
+            "unit": "milliseconds",
+            "p50": 10,
+            "p95": 50,
+            "p99": 150,
+            "p999": 250
+          }
+        ],
+        "cleanup_deadline_ms": 300,
+        "max_queue_wait_ms": 80,
+        "resource_pressure": {
+          "memory_basis_points": 8500,
+          "fd_basis_points": 8000,
+          "timer_queue_depth": 50000
+        },
+        "optional_work_classes": [
+          {
+            "class_id": "index_refresh",
+            "brownout_priority": 1,
+            "degradation_step": "delay non-critical index refresh jobs"
+          },
+          {
+            "class_id": "analytics_rollup",
+            "brownout_priority": 2,
+            "degradation_step": "batch analytics rollups until pressure clears"
+          }
+        ],
+        "no_win_fallback": {
+          "fallback_profile": "agent-swarm-safe-mode",
+          "fallback_reason": "objectives-conflict-with-pressure",
+          "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
+        },
+        "provenance": {
+          "profile_id": "agent-swarm-prod",
+          "profile_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "observed_profile_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "target_commit": "b8f24024890da34b9151aaea62fff2d06d90f282",
+          "feature_flags": [
+            "test-internals"
+          ],
+          "artifact_path": "artifacts/slo_policy_bundle_contract_v1.json",
+          "related_bead_id": "asupersync-bgtplc.1"
+        },
+        "redaction": {
+          "policy_id": "slo-redaction-v1",
+          "passed": true
+        },
+        "metadata": {
+          "compiler_target": "budget-admission-v1",
+          "operator_notes": "redacted deterministic fixture"
+        }
+      }
+    },
+    {
+      "scenario_id": "non-monotonic-percentiles",
+      "kind": "invalid",
+      "expected": {
+        "accepted": false,
+        "issue_kinds": [
+          "non_monotonic_percentile"
+        ]
+      },
+      "bundle": {
+        "schema_version": 1,
+        "policy_id": "agent-swarm-non-monotonic",
+        "workload_class": "agent_swarm",
+        "latency_objectives": [
+          {
+            "objective_id": "queue_wait",
+            "unit": "milliseconds",
+            "p50": 50,
+            "p95": 25,
+            "p99": 60,
+            "p999": 120
+          }
+        ],
+        "cleanup_deadline_ms": 300,
+        "max_queue_wait_ms": 80,
+        "resource_pressure": {
+          "memory_basis_points": 8500,
+          "fd_basis_points": 8000,
+          "timer_queue_depth": 50000
+        },
+        "optional_work_classes": [],
+        "no_win_fallback": {
+          "fallback_profile": "agent-swarm-safe-mode",
+          "fallback_reason": "objectives-conflict-with-pressure",
+          "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
+        },
+        "provenance": {
+          "profile_id": "agent-swarm-prod",
+          "profile_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "observed_profile_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "target_commit": "b8f24024890da34b9151aaea62fff2d06d90f282",
+          "feature_flags": [
+            "test-internals"
+          ],
+          "artifact_path": "artifacts/slo_policy_bundle_contract_v1.json",
+          "related_bead_id": "asupersync-bgtplc.1"
+        },
+        "redaction": {
+          "policy_id": "slo-redaction-v1",
+          "passed": true
+        },
+        "metadata": {}
+      }
+    },
+    {
+      "scenario_id": "missing-no-win-fallback",
+      "kind": "invalid",
+      "expected": {
+        "accepted": false,
+        "issue_kinds": [
+          "missing_no_win_fallback"
+        ]
+      },
+      "bundle": {
+        "schema_version": 1,
+        "policy_id": "agent-swarm-missing-fallback",
+        "workload_class": "agent_swarm",
+        "latency_objectives": [
+          {
+            "objective_id": "queue_wait",
+            "unit": "milliseconds",
+            "p50": 5,
+            "p95": 25,
+            "p99": 60,
+            "p999": 120
+          }
+        ],
+        "cleanup_deadline_ms": 300,
+        "max_queue_wait_ms": 80,
+        "resource_pressure": {
+          "memory_basis_points": 8500,
+          "fd_basis_points": 8000,
+          "timer_queue_depth": 50000
+        },
+        "optional_work_classes": [],
+        "provenance": {
+          "profile_id": "agent-swarm-prod",
+          "profile_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "observed_profile_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "target_commit": "b8f24024890da34b9151aaea62fff2d06d90f282",
+          "feature_flags": [
+            "test-internals"
+          ],
+          "artifact_path": "artifacts/slo_policy_bundle_contract_v1.json",
+          "related_bead_id": "asupersync-bgtplc.1"
+        },
+        "redaction": {
+          "policy_id": "slo-redaction-v1",
+          "passed": true
+        },
+        "metadata": {}
+      }
+    },
+    {
+      "scenario_id": "unsupported-schema-version",
+      "kind": "invalid",
+      "expected": {
+        "accepted": false,
+        "issue_kinds": [
+          "unsupported_schema_version"
+        ]
+      },
+      "bundle": {
+        "schema_version": 99,
+        "policy_id": "agent-swarm-unsupported-schema",
+        "workload_class": "agent_swarm",
+        "latency_objectives": [
+          {
+            "objective_id": "queue_wait",
+            "unit": "milliseconds",
+            "p50": 5,
+            "p95": 25,
+            "p99": 60,
+            "p999": 120
+          }
+        ],
+        "cleanup_deadline_ms": 300,
+        "max_queue_wait_ms": 80,
+        "resource_pressure": {
+          "memory_basis_points": 8500,
+          "fd_basis_points": 8000,
+          "timer_queue_depth": 50000
+        },
+        "optional_work_classes": [],
+        "no_win_fallback": {
+          "fallback_profile": "agent-swarm-safe-mode",
+          "fallback_reason": "objectives-conflict-with-pressure",
+          "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
+        },
+        "provenance": {
+          "profile_id": "agent-swarm-prod",
+          "profile_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "observed_profile_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "target_commit": "b8f24024890da34b9151aaea62fff2d06d90f282",
+          "feature_flags": [
+            "test-internals"
+          ],
+          "artifact_path": "artifacts/slo_policy_bundle_contract_v1.json",
+          "related_bead_id": "asupersync-bgtplc.1"
+        },
+        "redaction": {
+          "policy_id": "slo-redaction-v1",
+          "passed": true
+        },
+        "metadata": {}
+      }
+    },
+    {
+      "scenario_id": "stale-profile-hash",
+      "kind": "invalid",
+      "expected": {
+        "accepted": false,
+        "issue_kinds": [
+          "stale_profile_hash"
+        ]
+      },
+      "bundle": {
+        "schema_version": 1,
+        "policy_id": "agent-swarm-stale-profile",
+        "workload_class": "agent_swarm",
+        "latency_objectives": [
+          {
+            "objective_id": "queue_wait",
+            "unit": "milliseconds",
+            "p50": 5,
+            "p95": 25,
+            "p99": 60,
+            "p999": 120
+          }
+        ],
+        "cleanup_deadline_ms": 300,
+        "max_queue_wait_ms": 80,
+        "resource_pressure": {
+          "memory_basis_points": 8500,
+          "fd_basis_points": 8000,
+          "timer_queue_depth": 50000
+        },
+        "optional_work_classes": [],
+        "no_win_fallback": {
+          "fallback_profile": "agent-swarm-safe-mode",
+          "fallback_reason": "objectives-conflict-with-pressure",
+          "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
+        },
+        "provenance": {
+          "profile_id": "agent-swarm-prod",
+          "profile_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "observed_profile_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "target_commit": "b8f24024890da34b9151aaea62fff2d06d90f282",
+          "feature_flags": [
+            "test-internals"
+          ],
+          "artifact_path": "artifacts/slo_policy_bundle_contract_v1.json",
+          "related_bead_id": "asupersync-bgtplc.1"
+        },
+        "redaction": {
+          "policy_id": "slo-redaction-v1",
+          "passed": true
+        },
+        "metadata": {}
+      }
+    },
+    {
+      "scenario_id": "redaction-failure-secret-metadata",
+      "kind": "invalid",
+      "expected": {
+        "accepted": false,
+        "issue_kinds": [
+          "redaction_failure",
+          "secret_like_material"
+        ]
+      },
+      "bundle": {
+        "schema_version": 1,
+        "policy_id": "agent-swarm-redaction-failure",
+        "workload_class": "agent_swarm",
+        "latency_objectives": [
+          {
+            "objective_id": "queue_wait",
+            "unit": "milliseconds",
+            "p50": 5,
+            "p95": 25,
+            "p99": 60,
+            "p999": 120
+          }
+        ],
+        "cleanup_deadline_ms": 300,
+        "max_queue_wait_ms": 80,
+        "resource_pressure": {
+          "memory_basis_points": 8500,
+          "fd_basis_points": 8000,
+          "timer_queue_depth": 50000
+        },
+        "optional_work_classes": [],
+        "no_win_fallback": {
+          "fallback_profile": "agent-swarm-safe-mode",
+          "fallback_reason": "objectives-conflict-with-pressure",
+          "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
+        },
+        "provenance": {
+          "profile_id": "agent-swarm-prod",
+          "profile_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "observed_profile_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "target_commit": "b8f24024890da34b9151aaea62fff2d06d90f282",
+          "feature_flags": [
+            "test-internals"
+          ],
+          "artifact_path": "artifacts/slo_policy_bundle_contract_v1.json",
+          "related_bead_id": "asupersync-bgtplc.1"
+        },
+        "redaction": {
+          "policy_id": "slo-redaction-v1",
+          "passed": false
+        },
+        "metadata": {
+          "api_token": "sk-redacted-fixture"
+        }
+      }
+    },
+    {
+      "scenario_id": "unsupported-workload-and-unit",
+      "kind": "invalid",
+      "expected": {
+        "accepted": false,
+        "issue_kinds": [
+          "invalid_unit",
+          "unsupported_workload_class"
+        ]
+      },
+      "bundle": {
+        "schema_version": 1,
+        "policy_id": "agent-swarm-unsupported-vocab",
+        "workload_class": "space_station",
+        "latency_objectives": [
+          {
+            "objective_id": "queue_wait",
+            "unit": "fortnights",
+            "p50": 5,
+            "p95": 25,
+            "p99": 60,
+            "p999": 120
+          }
+        ],
+        "cleanup_deadline_ms": 300,
+        "max_queue_wait_ms": 80,
+        "resource_pressure": {
+          "memory_basis_points": 8500,
+          "fd_basis_points": 8000,
+          "timer_queue_depth": 50000
+        },
+        "optional_work_classes": [],
+        "no_win_fallback": {
+          "fallback_profile": "agent-swarm-safe-mode",
+          "fallback_reason": "objectives-conflict-with-pressure",
+          "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
+        },
+        "provenance": {
+          "profile_id": "agent-swarm-prod",
+          "profile_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "observed_profile_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "target_commit": "b8f24024890da34b9151aaea62fff2d06d90f282",
+          "feature_flags": [
+            "test-internals"
+          ],
+          "artifact_path": "artifacts/slo_policy_bundle_contract_v1.json",
+          "related_bead_id": "asupersync-bgtplc.1"
+        },
+        "redaction": {
+          "policy_id": "slo-redaction-v1",
+          "passed": true
+        },
+        "metadata": {}
+      }
+    },
+    {
+      "scenario_id": "external-artifact-path",
+      "kind": "invalid",
+      "expected": {
+        "accepted": false,
+        "issue_kinds": [
+          "external_path"
+        ]
+      },
+      "bundle": {
+        "schema_version": 1,
+        "policy_id": "agent-swarm-external-path",
+        "workload_class": "agent_swarm",
+        "latency_objectives": [
+          {
+            "objective_id": "queue_wait",
+            "unit": "milliseconds",
+            "p50": 5,
+            "p95": 25,
+            "p99": 60,
+            "p999": 120
+          }
+        ],
+        "cleanup_deadline_ms": 300,
+        "max_queue_wait_ms": 80,
+        "resource_pressure": {
+          "memory_basis_points": 8500,
+          "fd_basis_points": 8000,
+          "timer_queue_depth": 50000
+        },
+        "optional_work_classes": [],
+        "no_win_fallback": {
+          "fallback_profile": "agent-swarm-safe-mode",
+          "fallback_reason": "objectives-conflict-with-pressure",
+          "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
+        },
+        "provenance": {
+          "profile_id": "agent-swarm-prod",
+          "profile_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "observed_profile_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "target_commit": "b8f24024890da34b9151aaea62fff2d06d90f282",
+          "feature_flags": [
+            "test-internals"
+          ],
+          "artifact_path": "/home/ubuntu/private/profile.json",
+          "related_bead_id": "asupersync-bgtplc.1"
+        },
+        "redaction": {
+          "policy_id": "slo-redaction-v1",
+          "passed": true
+        },
+        "metadata": {}
+      }
+    },
+    {
+      "scenario_id": "duplicate-objective",
+      "kind": "invalid",
+      "expected": {
+        "accepted": false,
+        "issue_kinds": [
+          "duplicate_objective"
+        ]
+      },
+      "bundle": {
+        "schema_version": 1,
+        "policy_id": "agent-swarm-duplicate-objective",
+        "workload_class": "agent_swarm",
+        "latency_objectives": [
+          {
+            "objective_id": "queue_wait",
+            "unit": "milliseconds",
+            "p50": 5,
+            "p95": 25,
+            "p99": 60,
+            "p999": 120
+          },
+          {
+            "objective_id": "queue_wait",
+            "unit": "milliseconds",
+            "p50": 6,
+            "p95": 30,
+            "p99": 70,
+            "p999": 130
+          }
+        ],
+        "cleanup_deadline_ms": 300,
+        "max_queue_wait_ms": 80,
+        "resource_pressure": {
+          "memory_basis_points": 8500,
+          "fd_basis_points": 8000,
+          "timer_queue_depth": 50000
+        },
+        "optional_work_classes": [],
+        "no_win_fallback": {
+          "fallback_profile": "agent-swarm-safe-mode",
+          "fallback_reason": "objectives-conflict-with-pressure",
+          "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture"
+        },
+        "provenance": {
+          "profile_id": "agent-swarm-prod",
+          "profile_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "observed_profile_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "target_commit": "b8f24024890da34b9151aaea62fff2d06d90f282",
+          "feature_flags": [
+            "test-internals"
+          ],
+          "artifact_path": "artifacts/slo_policy_bundle_contract_v1.json",
+          "related_bead_id": "asupersync-bgtplc.1"
+        },
+        "redaction": {
+          "policy_id": "slo-redaction-v1",
+          "passed": true
+        },
+        "metadata": {}
+      }
+    },
+    {
+      "scenario_id": "malformed-json",
+      "kind": "invalid",
+      "expected": {
+        "accepted": false,
+        "issue_kinds": [
+          "malformed_json"
+        ]
+      },
+      "fixture_document": "{\"schema_version\":1,"
+    }
+  ],
+  "e2e_script": "scripts/validate_slo_policy_bundle.sh",
+  "required_log_fields": [
+    "scenario_id",
+    "bead_id",
+    "accepted",
+    "issue_kinds",
+    "policy_id",
+    "artifact_path"
+  ],
+  "proof_commands": [
+    "python3 -m json.tool artifacts/slo_policy_bundle_contract_v1.json >/dev/null",
+    "bash -n scripts/validate_slo_policy_bundle.sh",
+    "bash scripts/validate_slo_policy_bundle.sh --output-root target/slo-policy-bundle --run-id asupersync-bgtplc.1",
+    "rch exec -- rustfmt --edition 2024 --check src/types/slo_policy.rs src/types/mod.rs tests/slo_policy_bundle_contract.rs",
+    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_bundle CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture",
+    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_bundle_check CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo check -p asupersync --test slo_policy_bundle_contract --features test-internals",
+    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_bundle_clippy CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --test slo_policy_bundle_contract --features test-internals -- -D warnings"
+  ]
+}

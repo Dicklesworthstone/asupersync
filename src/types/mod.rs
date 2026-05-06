@@ -20,6 +20,7 @@ pub mod policy;
 pub mod pressure;
 pub mod resource;
 pub mod rref;
+pub mod slo_policy;
 pub mod symbol;
 pub mod symbol_set;
 pub mod task_context;
@@ -66,6 +67,12 @@ pub use outcome::{Outcome, OutcomeError, PanicPayload, Severity, join_outcomes};
 pub use policy::Policy;
 pub use pressure::SystemPressure;
 pub use rref::{RRef, RRefAccess, RRefAccessWitness, RRefError};
+pub use slo_policy::{
+    SLO_POLICY_BUNDLE_SCHEMA_VERSION, SloLatencyObjective, SloLatencyUnit, SloNoWinFallback,
+    SloOptionalWorkClass, SloPolicyBundle, SloPolicyProvenance, SloPolicyRedaction,
+    SloPolicyValidationIssue, SloPolicyValidationIssueKind, SloPolicyValidationReport,
+    SloResourcePressureThresholds, SloWorkloadClass, validate_slo_policy_bundle_json,
+};
 pub use symbol::{DEFAULT_SYMBOL_SIZE, ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
 pub use symbol_set::{
     BlockProgress, ConcurrentSymbolSet, InsertResult, SymbolSet, ThresholdConfig,
