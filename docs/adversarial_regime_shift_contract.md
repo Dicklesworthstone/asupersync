@@ -61,7 +61,7 @@ bash ./scripts/run_adversarial_regime_shift_smoke.sh --execute
 ## Validation
 
 ```bash
-rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa064 cargo test --test adversarial_regime_shift_contract -- --nocapture
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_adversarial_regime_shift cargo test -p asupersync --test adversarial_regime_shift_contract --features test-internals -- --nocapture
 ```
 
 ## Cross-References

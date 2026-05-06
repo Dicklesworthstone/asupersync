@@ -243,17 +243,20 @@
     {
       "scenario_id": "ARS-SMOKE-OBJECTIVES",
       "description": "Validate search objective definitions and invariant coverage",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa064 cargo test --test adversarial_regime_shift_contract objective -- --nocapture"
+      "test_filter": "objective",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_adversarial_regime_shift_ARS_SMOKE_OBJECTIVES cargo test -p asupersync --test adversarial_regime_shift_contract --features test-internals objective -- --nocapture"
     },
     {
       "scenario_id": "ARS-SMOKE-MUTATION",
       "description": "Validate mutation model axes, budget, and determinism",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa064 cargo test --test adversarial_regime_shift_contract mutation -- --nocapture"
+      "test_filter": "mutation",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_adversarial_regime_shift_ARS_SMOKE_MUTATION cargo test -p asupersync --test adversarial_regime_shift_contract --features test-internals mutation -- --nocapture"
     },
     {
       "scenario_id": "ARS-SMOKE-CORPUS",
       "description": "Validate challenge corpus promotion and feedback loop",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa064 cargo test --test adversarial_regime_shift_contract corpus -- --nocapture"
+      "test_filter": "corpus",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_adversarial_regime_shift_ARS_SMOKE_CORPUS cargo test -p asupersync --test adversarial_regime_shift_contract --features test-internals corpus -- --nocapture"
     }
   ],
   "downstream_beads": [
