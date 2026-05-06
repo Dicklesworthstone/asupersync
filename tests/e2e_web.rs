@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! E2E: Web full stack — route resolution, middleware, handlers, extractors, responses.
 
 mod common;
