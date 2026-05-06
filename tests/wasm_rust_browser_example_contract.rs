@@ -277,6 +277,66 @@ fn rust_browser_runtime_stability_artifact_matches_registry_runner_and_fixture()
 }
 
 #[test]
+fn rust_browser_runtime_stability_artifact_tracks_builder_abi_negotiation_contract() {
+    let artifact = read_json(RUST_BROWSER_EVIDENCE_ARTIFACT_PATH);
+    let builder = read_file("src/runtime/builder.rs");
+
+    let contracts = artifact["supplemental_contracts"]
+        .as_array()
+        .expect("supplemental_contracts");
+    let contract = contracts
+        .iter()
+        .find(|row| row["contract_id"].as_str() == Some("browser_runtime_builder_abi_negotiation"))
+        .expect("browser runtime builder ABI negotiation contract");
+
+    assert_eq!(contract["bead_id"].as_str(), Some("asupersync-j1xbon.2"));
+    assert_eq!(
+        contract["test_path"].as_str(),
+        Some("src/runtime/builder.rs")
+    );
+    assert_eq!(
+        string_array(contract, "test_names"),
+        vec!["browser_runtime_builder_consumer_version_negotiates_abi_contract"]
+    );
+    assert_eq!(
+        string_array(contract, "covered_paths"),
+        vec![
+            "exact_current_consumer_version_constructs_runtime",
+            "newer_minor_consumer_version_is_backward_compatible",
+            "major_mismatch_consumer_version_fail_closes_with_structured_error",
+        ]
+    );
+
+    assert_contains_all(
+        &builder,
+        "src/runtime/builder.rs",
+        &[
+            "browser_runtime_builder_consumer_version_negotiates_abi_contract",
+            "WasmAbiVersion::CURRENT",
+            "minor: WasmAbiVersion::CURRENT.minor + 1",
+            "runtime.consumer_version()",
+            "BrowserRuntimeBuildError::RuntimeCreate",
+            "WasmDispatchError::Incompatible",
+            "MajorMismatch",
+        ],
+    );
+
+    let residual_limits = string_array(contract, "residual_limits");
+    assert!(
+        residual_limits
+            .iter()
+            .any(|limit| limit.contains("generic ABI compatibility classifier")),
+        "supplemental contract must keep consumer-too-old coverage bounded to the generic ABI classifier"
+    );
+    assert!(
+        residual_limits
+            .iter()
+            .any(|limit| limit.contains("does not promote the Rust browser runtime lane")),
+        "supplemental contract must preserve preview posture"
+    );
+}
+
+#[test]
 fn rust_browser_consumer_crate_declares_expected_dependencies() {
     let path = repo_root().join("tests/fixtures/rust-browser-consumer/crate/Cargo.toml");
     let content =

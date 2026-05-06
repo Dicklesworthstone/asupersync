@@ -4770,6 +4770,83 @@ mod tests {
     }
 
     #[test]
+    fn browser_runtime_builder_consumer_version_negotiates_abi_contract() {
+        let supported_probe = browser_probe(
+            BrowserExecutionHostRole::BrowserMainThread,
+            BrowserRuntimeContext::BrowserMainThread,
+            true,
+            true,
+            true,
+        );
+
+        for consumer_version in [
+            WasmAbiVersion::CURRENT,
+            WasmAbiVersion {
+                major: WasmAbiVersion::CURRENT.major,
+                minor: WasmAbiVersion::CURRENT.minor + 1,
+            },
+        ] {
+            let selection = build_browser_runtime_selection_from_probe(
+                None,
+                Some(consumer_version),
+                WasmAbortPropagationMode::Bidirectional,
+                supported_probe,
+            );
+            assert!(
+                selection.runtime_available(),
+                "compatible consumer ABI {consumer_version} should construct the preview runtime"
+            );
+            assert!(selection.error.is_none(), "compatible ABI must not error");
+            let runtime = selection.runtime.expect("compatible runtime");
+            assert_eq!(
+                runtime.consumer_version(),
+                Some(consumer_version),
+                "runtime must retain the consumer ABI version used at the boundary"
+            );
+            runtime.close().expect("compatible runtime closes cleanly");
+        }
+
+        let incompatible = WasmAbiVersion {
+            major: WasmAbiVersion::CURRENT.major + 1,
+            minor: 0,
+        };
+        let selection = build_browser_runtime_selection_from_probe(
+            None,
+            Some(incompatible),
+            WasmAbortPropagationMode::Bidirectional,
+            supported_probe,
+        );
+
+        assert!(
+            !selection.runtime_available(),
+            "major-mismatched consumer ABI must fail closed"
+        );
+        assert_eq!(
+            selection.execution_ladder.selected_lane,
+            BrowserExecutionLane::BrowserMainThreadDirectRuntime,
+            "ABI mismatch must preserve the truthful host lane diagnostics"
+        );
+        let error = selection.error.expect("structured ABI mismatch error");
+        match error {
+            BrowserRuntimeBuildError::RuntimeCreate {
+                source:
+                    WasmDispatchError::Incompatible {
+                        decision:
+                            crate::types::WasmAbiCompatibilityDecision::MajorMismatch {
+                                producer_major,
+                                consumer_major,
+                            },
+                    },
+                ..
+            } => {
+                assert_eq!(producer_major, WasmAbiVersion::CURRENT.major);
+                assert_eq!(consumer_major, incompatible.major);
+            }
+            other => panic!("expected ABI major mismatch runtime-create error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn browser_runtime_builder_selection_preserves_truthful_lane_under_mismatch() {
         let selection = build_browser_runtime_selection_from_probe(
             Some(BrowserExecutionLane::DedicatedWorkerDirectRuntime),

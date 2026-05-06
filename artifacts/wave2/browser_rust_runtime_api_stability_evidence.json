@@ -27,6 +27,25 @@
       "Native-only browser-impossible surfaces remain unsupported in wasm."
     ]
   },
+  "supplemental_contracts": [
+    {
+      "bead_id": "asupersync-j1xbon.2",
+      "contract_id": "browser_runtime_builder_abi_negotiation",
+      "test_path": "src/runtime/builder.rs",
+      "test_names": [
+        "browser_runtime_builder_consumer_version_negotiates_abi_contract"
+      ],
+      "covered_paths": [
+        "exact_current_consumer_version_constructs_runtime",
+        "newer_minor_consumer_version_is_backward_compatible",
+        "major_mismatch_consumer_version_fail_closes_with_structured_error"
+      ],
+      "residual_limits": [
+        "consumer_too_old remains covered by the generic ABI compatibility classifier until the producer minor version is greater than zero.",
+        "This supplemental contract does not promote the Rust browser runtime lane beyond the artifact-contract-backed preview posture."
+      ]
+    }
+  ],
   "required_log_fields": [
     "bead_id",
     "scenario_id",
@@ -105,6 +124,7 @@
     "jq empty artifacts/wave2_capability_evidence_registry_v1.json",
     "bash -n scripts/validate_rust_browser_consumer.sh",
     "rch exec -- rustfmt --edition 2024 --check tests/wasm_rust_browser_example_contract.rs",
+    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_rust_browser_builder_abi cargo test -p asupersync --lib --features test-internals,wasm-browser-dev browser_runtime_builder_consumer_version_negotiates_abi_contract -- --nocapture",
     "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS=-C debuginfo=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_rust_browser_contract cargo test -p asupersync --test wasm_rust_browser_example_contract --features test-internals,wasm-browser-dev -- --nocapture",
     "PATH=/usr/bin:$PATH bash scripts/validate_rust_browser_consumer.sh --run-id wave2-browser-rust-runtime-api"
   ],
