@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Combinator E2E test suite with cancel-correctness verification.
 //!
 //! This test suite validates the core combinator invariants:
@@ -32,13 +30,6 @@ use std::task::{Context, Poll, Waker};
 fn init_test(name: &str) {
     common::init_test_logging();
     test_phase!(name);
-}
-
-struct NoopWake;
-
-use std::task::Wake;
-impl Wake for NoopWake {
-    fn wake(self: Arc<Self>) {}
 }
 
 fn noop_waker() -> Waker {
