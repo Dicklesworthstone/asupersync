@@ -138,7 +138,7 @@ pub mod dns_cache; // repaired by br-asupersync-2qssae DNS cache sub-slice
 pub mod trace_event; // repaired by br-asupersync-8m6dfx trace event sub-slice
 pub mod udp_socket; // repaired by br-asupersync-2qssae UDP sub-slice
 pub mod unix_listener; // repaired by br-asupersync-2qssae Unix listener sub-slice
-// pub mod web_session_cookies;      // bit-rot — depends on `tokio` (forbidden) and asupersync::io::Cursor moved
+pub mod web_session_cookies; // repaired by br-asupersync-nax796 web session-cookie sub-slice
 //
 // h2_stream_state_machine_rfc7540 and hpack_metamorphic are already
 // individually commented out earlier in this file with bit-rot rationale;

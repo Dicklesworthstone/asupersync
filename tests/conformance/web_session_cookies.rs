@@ -1,3 +1,6 @@
+#[rustfmt::skip]
+#[cfg(any())]
+mod stale_web_session_cookies_suite {
 #![allow(warnings)]
 #![allow(clippy::all)]
 //! RFC 6265 Cookie Signature Validation Conformance Tests
@@ -650,5 +653,623 @@ mod tests {
         let mut tampered_sig = signature.clone();
         tampered_sig.push('x');
         assert!(!signer.verify(data, &tampered_sig));
+    }
+}
+}
+// Live web session-cookie conformance tests.
+//
+// The stale suite above modeled cookie signing with test-only helpers and
+// depended on removed paths. These tests exercise the current public
+// `asupersync::web::session` middleware instead: cookie attributes, malformed
+// IDs, server-side session fixation defense, clear/expiry behavior, and CSRF
+// protection for existing sessions.
+
+use asupersync::web::extract::Request;
+use asupersync::web::handler::Handler;
+use asupersync::web::session::{
+    MemoryStore, SameSite, Session, SessionData, SessionLayer, SessionStore,
+};
+use asupersync::web::{Response, StatusCode};
+
+const BEAD_ID: &str = "asupersync-nax796";
+const SUITE_ID: &str = "web_session_cookies";
+
+#[derive(Debug)]
+struct SessionCookieCaseResult {
+    scenario_id: &'static str,
+    method: &'static str,
+    headers: &'static str,
+    body_shape: &'static str,
+    connection_reused: &'static str,
+    cookie_case: &'static str,
+    expected_status: &'static str,
+    actual_status: String,
+    expected_connection_state: &'static str,
+    actual_connection_state: String,
+    verdict: &'static str,
+    first_failure: String,
+}
+
+impl SessionCookieCaseResult {
+    fn pass(
+        scenario_id: &'static str,
+        method: &'static str,
+        headers: &'static str,
+        body_shape: &'static str,
+        cookie_case: &'static str,
+        expected_status: &'static str,
+        expected_connection_state: &'static str,
+    ) -> Self {
+        Self {
+            scenario_id,
+            method,
+            headers,
+            body_shape,
+            connection_reused: "n/a",
+            cookie_case,
+            expected_status,
+            actual_status: expected_status.to_string(),
+            expected_connection_state,
+            actual_connection_state: expected_connection_state.to_string(),
+            verdict: "pass",
+            first_failure: String::new(),
+        }
+    }
+
+    fn fail(
+        scenario_id: &'static str,
+        method: &'static str,
+        headers: &'static str,
+        body_shape: &'static str,
+        cookie_case: &'static str,
+        expected_status: &'static str,
+        actual_status: impl Into<String>,
+        expected_connection_state: &'static str,
+        actual_connection_state: impl Into<String>,
+        first_failure: impl Into<String>,
+    ) -> Self {
+        Self {
+            scenario_id,
+            method,
+            headers,
+            body_shape,
+            connection_reused: "n/a",
+            cookie_case,
+            expected_status,
+            actual_status: actual_status.into(),
+            expected_connection_state,
+            actual_connection_state: actual_connection_state.into(),
+            verdict: "fail",
+            first_failure: first_failure.into(),
+        }
+    }
+
+    fn emit(&self) {
+        println!(
+            "bead_id={} suite_id={} scenario_id={} protocol_version=web-session method={} headers={} body_shape={} connection_reused={} cookie_case={} expected_status={} actual_status={} expected_connection_state={} actual_connection_state={} verdict={} first_failure={}",
+            BEAD_ID,
+            SUITE_ID,
+            self.scenario_id,
+            self.method,
+            self.headers,
+            self.body_shape,
+            self.connection_reused,
+            self.cookie_case,
+            self.expected_status,
+            self.actual_status,
+            self.expected_connection_state,
+            self.actual_connection_state,
+            self.verdict,
+            self.first_failure
+        );
+    }
+
+    fn assert_pass(self) {
+        self.emit();
+        assert_eq!(
+            self.verdict, "pass",
+            "web session-cookie conformance failed: {self:?}"
+        );
+    }
+}
+
+fn body_text(resp: &Response) -> &str {
+    std::str::from_utf8(&resp.body).expect("test response body should be utf-8")
+}
+
+fn set_cookie(resp: &Response) -> Option<&str> {
+    resp.header_value("set-cookie")
+}
+
+fn extract_cookie_value(set_cookie_header: &str, name: &str) -> Option<String> {
+    let first_pair = set_cookie_header.split(';').next()?;
+    let (cookie_name, value) = first_pair.split_once('=')?;
+    (cookie_name == name).then(|| value.to_string())
+}
+
+fn assert_hex_session_id(id: &str) {
+    assert_eq!(id.len(), 32, "session ID must be 32 hex characters");
+    assert!(
+        id.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "session ID must be hex: {id}"
+    );
+}
+
+struct WriteSessionHandler;
+
+impl Handler for WriteSessionHandler {
+    fn call(&self, req: Request) -> Response {
+        let Some(session) = req.extensions.get_typed::<Session>() else {
+            return Response::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                b"missing session".to_vec(),
+            );
+        };
+        let next = session
+            .get("count")
+            .and_then(|count| count.parse::<u32>().ok())
+            .unwrap_or(0)
+            + 1;
+        session.insert("count", next.to_string());
+        Response::new(StatusCode::OK, format!("count={next}").into_bytes())
+    }
+}
+
+struct ClearSessionHandler;
+
+impl Handler for ClearSessionHandler {
+    fn call(&self, req: Request) -> Response {
+        if let Some(session) = req.extensions.get_typed::<Session>() {
+            session.clear();
+        }
+        Response::new(StatusCode::OK, b"cleared".to_vec())
+    }
+}
+
+struct CsrfEchoOrMutateHandler;
+
+impl Handler for CsrfEchoOrMutateHandler {
+    fn call(&self, req: Request) -> Response {
+        let Some(session) = req.extensions.get_typed::<Session>() else {
+            return Response::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                b"missing session".to_vec(),
+            );
+        };
+        if req.method.eq_ignore_ascii_case("GET") {
+            let token = session.csrf_token().unwrap_or_default();
+            return Response::new(StatusCode::OK, token.into_bytes());
+        }
+        session.insert("mutated", "yes");
+        Response::new(StatusCode::OK, b"mutated".to_vec())
+    }
+}
+
+#[test]
+fn default_session_cookie_uses_secure_attributes() {
+    let scenario = "WEB_SESSION_COOKIE_DEFAULT_ATTRIBUTES";
+    let store = MemoryStore::new();
+    let handler = SessionLayer::new(store.clone()).wrap(WriteSessionHandler);
+    let resp = handler.call(Request::new("GET", "/"));
+
+    let Some(cookie) = set_cookie(&resp) else {
+        SessionCookieCaseResult::fail(
+            scenario,
+            "GET",
+            "none",
+            "empty",
+            "default_attributes",
+            "200",
+            resp.status.as_u16().to_string(),
+            "set_cookie_with_secure_defaults",
+            "missing_set_cookie",
+            "response did not include Set-Cookie",
+        )
+        .assert_pass();
+        return;
+    };
+    let id = extract_cookie_value(cookie, "session_id").unwrap_or_default();
+    let ok = resp.status == StatusCode::OK
+        && store.len() == 1
+        && cookie.contains("; Path=/")
+        && cookie.contains("; HttpOnly")
+        && cookie.contains("; Secure")
+        && cookie.contains("; SameSite=Lax")
+        && !cookie.contains("Domain=")
+        && id.len() == 32
+        && id.bytes().all(|byte| byte.is_ascii_hexdigit());
+
+    if ok {
+        SessionCookieCaseResult::pass(
+            scenario,
+            "GET",
+            "none",
+            "empty",
+            "default_attributes",
+            "200",
+            "set_cookie_with_secure_defaults",
+        )
+        .assert_pass();
+    } else {
+        SessionCookieCaseResult::fail(
+            scenario,
+            "GET",
+            "none",
+            "empty",
+            "default_attributes",
+            "200",
+            resp.status.as_u16().to_string(),
+            "set_cookie_with_secure_defaults",
+            format!("cookie={cookie}; store_len={}", store.len()),
+            "default cookie attributes did not match the secure contract",
+        )
+        .assert_pass();
+    }
+}
+
+#[test]
+fn custom_cookie_attributes_are_reflected_in_set_cookie() {
+    let scenario = "WEB_SESSION_COOKIE_CUSTOM_ATTRIBUTES";
+    let store = MemoryStore::new();
+    let handler = SessionLayer::new(store.clone())
+        .cookie_name("sid")
+        .cookie_path("/app")
+        .http_only(false)
+        .secure(true)
+        .same_site(SameSite::Strict)
+        .max_age(3600)
+        .wrap(WriteSessionHandler);
+    let resp = handler.call(Request::new("GET", "/app"));
+
+    let Some(cookie) = set_cookie(&resp) else {
+        SessionCookieCaseResult::fail(
+            scenario,
+            "GET",
+            "none",
+            "empty",
+            "custom_attributes",
+            "200",
+            resp.status.as_u16().to_string(),
+            "custom_cookie_attributes",
+            "missing_set_cookie",
+            "response did not include Set-Cookie",
+        )
+        .assert_pass();
+        return;
+    };
+    let id = extract_cookie_value(cookie, "sid").unwrap_or_default();
+    let ok = resp.status == StatusCode::OK
+        && store.len() == 1
+        && cookie.contains("sid=")
+        && cookie.contains("; Path=/app")
+        && !cookie.contains("; HttpOnly")
+        && cookie.contains("; Secure")
+        && cookie.contains("; SameSite=Strict")
+        && cookie.contains("; Max-Age=3600")
+        && id.len() == 32
+        && id.bytes().all(|byte| byte.is_ascii_hexdigit());
+
+    if ok {
+        SessionCookieCaseResult::pass(
+            scenario,
+            "GET",
+            "none",
+            "empty",
+            "custom_attributes",
+            "200",
+            "custom_cookie_attributes",
+        )
+        .assert_pass();
+    } else {
+        SessionCookieCaseResult::fail(
+            scenario,
+            "GET",
+            "none",
+            "empty",
+            "custom_attributes",
+            "200",
+            resp.status.as_u16().to_string(),
+            "custom_cookie_attributes",
+            format!("cookie={cookie}; store_len={}", store.len()),
+            "custom cookie attributes did not match configuration",
+        )
+        .assert_pass();
+    }
+}
+
+#[test]
+fn same_site_none_requires_secure_configuration() {
+    let scenario = "WEB_SESSION_COOKIE_SAMESITE_NONE_REQUIRES_SECURE";
+    let outcome = std::panic::catch_unwind(|| {
+        let _ = SessionLayer::new(MemoryStore::new())
+            .secure(false)
+            .same_site(SameSite::None);
+    });
+
+    if outcome.is_err() {
+        SessionCookieCaseResult::pass(
+            scenario,
+            "CONFIG",
+            "n/a",
+            "n/a",
+            "samesite_none_without_secure",
+            "panic",
+            "configuration_rejected",
+        )
+        .assert_pass();
+    } else {
+        SessionCookieCaseResult::fail(
+            scenario,
+            "CONFIG",
+            "n/a",
+            "n/a",
+            "samesite_none_without_secure",
+            "panic",
+            "no_panic",
+            "configuration_rejected",
+            "configuration_accepted",
+            "SameSite=None without Secure must fail closed",
+        )
+        .assert_pass();
+    }
+}
+
+#[test]
+fn malformed_or_unknown_session_cookie_gets_replaced() {
+    let scenario = "WEB_SESSION_COOKIE_MALFORMED_OR_UNKNOWN_REPLACED";
+    let store = MemoryStore::new();
+    let handler = SessionLayer::new(store.clone()).wrap(WriteSessionHandler);
+    let attacker_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let malformed = handler.call(Request::new("GET", "/").with_header("Cookie", "session_id=bad!"));
+    let unknown = handler
+        .call(Request::new("GET", "/").with_header("Cookie", format!("session_id={attacker_id}")));
+
+    let Some(malformed_cookie) = set_cookie(&malformed) else {
+        SessionCookieCaseResult::fail(
+            scenario,
+            "GET",
+            "cookie",
+            "empty",
+            "unknown_session_id",
+            "200",
+            malformed.status.as_u16().to_string(),
+            "attacker_id_replaced",
+            "missing_set_cookie",
+            "replacement Set-Cookie was missing for malformed cookie",
+        )
+        .assert_pass();
+        return;
+    };
+    let Some(unknown_cookie) = set_cookie(&unknown) else {
+        SessionCookieCaseResult::fail(
+            scenario,
+            "GET",
+            "cookie",
+            "empty",
+            "unknown_session_id",
+            "200",
+            unknown.status.as_u16().to_string(),
+            "attacker_id_replaced",
+            "missing_set_cookie",
+            "replacement Set-Cookie was missing for unknown valid-format cookie",
+        )
+        .assert_pass();
+        return;
+    };
+    let malformed_id = extract_cookie_value(malformed_cookie, "session_id").unwrap_or_default();
+    let unknown_id = extract_cookie_value(unknown_cookie, "session_id").unwrap_or_default();
+    let ok = malformed.status == StatusCode::OK
+        && unknown.status == StatusCode::OK
+        && store.len() == 2
+        && malformed_id != "bad!"
+        && unknown_id != attacker_id
+        && malformed_id != unknown_id;
+
+    if ok {
+        assert_hex_session_id(&malformed_id);
+        assert_hex_session_id(&unknown_id);
+        SessionCookieCaseResult::pass(
+            scenario,
+            "GET",
+            "cookie",
+            "empty",
+            "unknown_session_id",
+            "200",
+            "attacker_id_replaced",
+        )
+        .assert_pass();
+    } else {
+        SessionCookieCaseResult::fail(
+            scenario,
+            "GET",
+            "cookie",
+            "empty",
+            "unknown_session_id",
+            "200",
+            format!(
+                "malformed={},unknown={}",
+                malformed.status.as_u16(),
+                unknown.status.as_u16()
+            ),
+            "attacker_id_replaced",
+            format!(
+                "malformed_id={malformed_id}; unknown_id={unknown_id}; store_len={}",
+                store.len()
+            ),
+            "middleware reused or failed to replace attacker-controlled ID",
+        )
+        .assert_pass();
+    }
+}
+
+#[test]
+fn existing_session_cookie_loads_and_persists_mutation() {
+    let scenario = "WEB_SESSION_COOKIE_EXISTING_SESSION_ROUND_TRIP";
+    let store = MemoryStore::new();
+    let session_id = "0123456789abcdef0123456789abcdef";
+    let mut data = SessionData::new();
+    data.insert("count", "1");
+    store.save(session_id, &data);
+    let handler = SessionLayer::new(store.clone()).wrap(WriteSessionHandler);
+    let resp = handler.call(
+        Request::new("GET", "/counter").with_header("Cookie", format!("session_id={session_id}")),
+    );
+    let persisted = store.load(session_id);
+    let cookie_id = set_cookie(&resp)
+        .and_then(|cookie| extract_cookie_value(cookie, "session_id"))
+        .unwrap_or_default();
+    let ok = resp.status == StatusCode::OK
+        && body_text(&resp) == "count=2"
+        && cookie_id == session_id
+        && persisted.as_ref().and_then(|session| session.get("count")) == Some("2");
+
+    if ok {
+        SessionCookieCaseResult::pass(
+            scenario,
+            "GET",
+            "cookie",
+            "empty",
+            "existing_session",
+            "200",
+            "loaded_and_persisted_same_id",
+        )
+        .assert_pass();
+    } else {
+        SessionCookieCaseResult::fail(
+            scenario,
+            "GET",
+            "cookie",
+            "empty",
+            "existing_session",
+            "200",
+            resp.status.as_u16().to_string(),
+            "loaded_and_persisted_same_id",
+            format!(
+                "body={}; cookie_id={cookie_id}; persisted_count={:?}",
+                body_text(&resp),
+                persisted.as_ref().and_then(|session| session.get("count"))
+            ),
+            "existing session was not loaded, persisted, or reissued under the same ID",
+        )
+        .assert_pass();
+    }
+}
+
+#[test]
+fn clearing_existing_session_expires_cookie_and_deletes_store_entry() {
+    let scenario = "WEB_SESSION_COOKIE_CLEAR_EXPIRES_COOKIE";
+    let store = MemoryStore::new();
+    let session_id = "abcdef0123456789abcdef0123456789";
+    let mut data = SessionData::new();
+    data.insert("user", "alice");
+    store.save(session_id, &data);
+    let handler = SessionLayer::new(store.clone()).wrap(ClearSessionHandler);
+    let resp = handler.call(
+        Request::new("GET", "/logout").with_header("Cookie", format!("session_id={session_id}")),
+    );
+
+    let cookie = set_cookie(&resp).unwrap_or_default();
+    let ok = resp.status == StatusCode::OK
+        && store.is_empty()
+        && cookie.starts_with("session_id=;")
+        && cookie.contains("; Max-Age=0")
+        && cookie.contains("; HttpOnly")
+        && cookie.contains("; Secure")
+        && cookie.contains("; SameSite=Lax");
+
+    if ok {
+        SessionCookieCaseResult::pass(
+            scenario,
+            "GET",
+            "cookie",
+            "empty",
+            "clear_session",
+            "200",
+            "expired_cookie_and_deleted_store",
+        )
+        .assert_pass();
+    } else {
+        SessionCookieCaseResult::fail(
+            scenario,
+            "GET",
+            "cookie",
+            "empty",
+            "clear_session",
+            "200",
+            resp.status.as_u16().to_string(),
+            "expired_cookie_and_deleted_store",
+            format!("cookie={cookie}; store_len={}", store.len()),
+            "clearing the session did not expire the browser cookie and delete server data",
+        )
+        .assert_pass();
+    }
+}
+
+#[test]
+fn existing_session_post_requires_matching_csrf_token_and_allowed_origin() {
+    let scenario = "WEB_SESSION_COOKIE_CSRF_EXISTING_SESSION";
+    let store = MemoryStore::new();
+    let handler = SessionLayer::new(store.clone())
+        .allowed_origins(["https://app.example"])
+        .wrap(CsrfEchoOrMutateHandler);
+
+    let seed_resp = handler.call(Request::new("GET", "/form"));
+    let seed_cookie = set_cookie(&seed_resp).unwrap_or_default().to_string();
+    let session_id = extract_cookie_value(&seed_cookie, "session_id").unwrap_or_default();
+    let csrf = body_text(&seed_resp).to_string();
+    let missing_token = handler.call(
+        Request::new("POST", "/form")
+            .with_header("Cookie", format!("session_id={session_id}"))
+            .with_header("Origin", "https://app.example"),
+    );
+    let accepted = handler.call(
+        Request::new("POST", "/form")
+            .with_header("Cookie", format!("session_id={session_id}"))
+            .with_header("Origin", "https://app.example")
+            .with_header("X-CSRF-Token", csrf.clone()),
+    );
+    let persisted = store.load(&session_id);
+    let ok = seed_resp.status == StatusCode::OK
+        && missing_token.status == StatusCode::FORBIDDEN
+        && accepted.status == StatusCode::OK
+        && body_text(&accepted) == "mutated"
+        && !csrf.is_empty()
+        && persisted
+            .as_ref()
+            .and_then(|session| session.get("mutated"))
+            == Some("yes");
+
+    if ok {
+        SessionCookieCaseResult::pass(
+            scenario,
+            "POST",
+            "cookie+origin+x-csrf-token",
+            "empty",
+            "csrf_existing_session",
+            "200",
+            "forbid_missing_token_accept_matching_token",
+        )
+        .assert_pass();
+    } else {
+        SessionCookieCaseResult::fail(
+            scenario,
+            "POST",
+            "cookie+origin+x-csrf-token",
+            "empty",
+            "csrf_existing_session",
+            "200",
+            accepted.status.as_u16().to_string(),
+            "forbid_missing_token_accept_matching_token",
+            format!(
+                "seed_status={}; missing_status={}; accepted_status={}; csrf_len={}; persisted_mutated={:?}",
+                seed_resp.status.as_u16(),
+                missing_token.status.as_u16(),
+                accepted.status.as_u16(),
+                csrf.len(),
+                persisted.as_ref().and_then(|session| session.get("mutated"))
+            ),
+            "CSRF enforcement did not reject the missing token and accept the matching token",
+        )
+        .assert_pass();
     }
 }
