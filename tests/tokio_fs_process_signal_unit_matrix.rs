@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Contract tests for [T3.9] Exhaustive Unit-Test Matrix: FS, Process, Signal
 //!
 //! Maps each test explicitly to its owning T3 bead for traceability.
