@@ -1098,7 +1098,7 @@ fn qpack_encode_required_insert_count(
         .ok_or(H3NativeError::InvalidFrame(
             "required insert count range overflow",
         ))?;
-    Ok(((required_insert_count - 1) % full_range) + 1)
+    Ok((required_insert_count % full_range) + 1)
 }
 
 fn qpack_plan_required_insert_count(
@@ -3277,23 +3277,28 @@ impl QpackDynamicTable {
         }
     }
 
-    /// Get an entry by absolute index (insertion_counter - insertion_id - 1).
+    /// Get an entry by absolute index / insertion ID.
     pub fn get_by_absolute_index(&self, absolute_index: u64) -> Option<&QpackDynamicEntry> {
-        if absolute_index >= self.insertion_counter {
+        self.get_by_insertion_id(absolute_index)
+    }
+
+    /// Get an entry by insertion id.
+    pub fn get_by_insertion_id(&self, insertion_id: u64) -> Option<&QpackDynamicEntry> {
+        if insertion_id >= self.insertion_counter {
             return None;
         }
         self.entries
             .iter()
-            .find(|entry| entry.insertion_order == absolute_index)
+            .find(|entry| entry.insertion_order == insertion_id)
     }
 
     /// Get an entry by encoder-stream relative index.
     pub fn get_by_relative_index(&self, relative_index: u64) -> Option<&QpackDynamicEntry> {
-        let absolute_index = self
+        let insertion_id = self
             .insertion_counter
             .checked_sub(1)?
             .checked_sub(relative_index)?;
-        self.get_by_absolute_index(absolute_index)
+        self.get_by_insertion_id(insertion_id)
     }
 
     /// Get the number of entries in the table.
@@ -3419,6 +3424,15 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+
+    fn qpack_entry_by_insertion_id(
+        table: &QpackDynamicTable,
+        insertion_id: u64,
+    ) -> Option<(&str, &str)> {
+        table
+            .get_by_insertion_id(insertion_id)
+            .map(|entry| (entry.name(), entry.value()))
+    }
 
     fn test_config() -> H3ConnectionConfig {
         H3ConnectionConfig::default()
@@ -5401,6 +5415,44 @@ mod tests {
     }
 
     #[test]
+    fn qpack_required_insert_count_encoder_matches_decoder_boundaries() {
+        for required_insert_count in [1, 2, 3, 127, 128, 129, 255, 256, 257] {
+            let encoded =
+                qpack_encode_required_insert_count(required_insert_count, 4096).expect("encode");
+            let decoded = qpack_decode_required_insert_count(encoded, required_insert_count, 4096)
+                .expect("decode");
+            assert_eq!(
+                decoded, required_insert_count,
+                "required insert count {required_insert_count} encoded as {encoded}"
+            );
+        }
+    }
+
+    #[test]
+    fn qpack_dynamic_lookup_preserves_evicted_absolute_gaps() {
+        let mut table = QpackDynamicTable::new(76);
+        let old = table
+            .insert("old".to_string(), "1".to_string())
+            .expect("insert old");
+        let middle = table
+            .insert("middle".to_string(), "2".to_string())
+            .expect("insert middle");
+        assert!(table.reference_entry(old));
+
+        let new = table
+            .insert("new".to_string(), "3".to_string())
+            .expect("insert new");
+
+        assert_eq!(old, 0);
+        assert_eq!(middle, 1);
+        assert_eq!(new, 2);
+        assert_eq!(table.evicted_count(), 1);
+        assert_eq!(qpack_dynamic_entry(&table, old), Some(("old", "1")));
+        assert_eq!(qpack_dynamic_entry(&table, middle), None);
+        assert_eq!(qpack_dynamic_entry(&table, new), Some(("new", "3")));
+    }
+
+    #[test]
     fn qpack_wire_decodes_huffman_strings_in_static_mode() {
         let mut encoded_value = BytesMut::new();
         hpack_encode_huffman(&mut encoded_value, b"www.example.com");
@@ -6018,7 +6070,7 @@ mod tests {
         .expect("static-name insert")
         .expect("insert id");
         assert_eq!(
-            qpack_dynamic_entry(context.dynamic_table(), static_insert),
+            qpack_entry_by_insertion_id(context.dynamic_table(), static_insert),
             Some((":authority", "www.example.com"))
         );
 
@@ -6033,7 +6085,7 @@ mod tests {
         .expect("literal insert")
         .expect("insert id");
         assert_eq!(
-            qpack_dynamic_entry(context.dynamic_table(), literal_insert),
+            qpack_entry_by_insertion_id(context.dynamic_table(), literal_insert),
             Some(("x-base", ""))
         );
 
@@ -6048,7 +6100,7 @@ mod tests {
         .expect("dynamic-name insert")
         .expect("insert id");
         assert_eq!(
-            qpack_dynamic_entry(context.dynamic_table(), dynamic_insert),
+            qpack_entry_by_insertion_id(context.dynamic_table(), dynamic_insert),
             Some(("x-base", "next"))
         );
     }
@@ -6067,7 +6119,7 @@ mod tests {
         .expect("exact capacity insert")
         .expect("insert id");
         assert_eq!(
-            qpack_dynamic_entry(context.dynamic_table(), exact),
+            qpack_entry_by_insertion_id(context.dynamic_table(), exact),
             Some(("x", ""))
         );
 
@@ -6132,13 +6184,13 @@ mod tests {
         .expect("duplicate newest")
         .expect("insert id");
 
-        assert!(qpack_dynamic_entry(context.dynamic_table(), old).is_none());
+        assert!(qpack_entry_by_insertion_id(context.dynamic_table(), old).is_none());
         assert_eq!(
-            qpack_dynamic_entry(context.dynamic_table(), new),
+            qpack_entry_by_insertion_id(context.dynamic_table(), new),
             Some(("new", "2"))
         );
         assert_eq!(
-            qpack_dynamic_entry(context.dynamic_table(), duplicate),
+            qpack_entry_by_insertion_id(context.dynamic_table(), duplicate),
             Some(("new", "2"))
         );
         assert_eq!(context.dynamic_table().evicted_count(), 1);
