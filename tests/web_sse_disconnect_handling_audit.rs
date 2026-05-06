@@ -14,9 +14,9 @@
 //!       wire format and emitted as a single HTTP response body".
 //!       A second doc note (sse.rs:207-210) confirms: "The
 //!       single-shot non-streaming serialization in
-//!       [`IntoResponse`] is documented as a deliberate
-//!       simplification — true streaming SSE is a follow-up;
-//!       br-asupersync-tamnew tracks the architectural change."
+//!       [`IntoResponse`] is retained for bounded batch
+//!       responses, while the separate `StreamingSse` state
+//!       machine owns incremental chunks and cancellation checks.
 //!
 //!   (b) **`IntoResponse for Sse`** (sse.rs:308-343) calls
 //!       `self.to_body()` synchronously to produce the entire
@@ -34,12 +34,12 @@
 //!       allocation. This bounds the worst-case
 //!       memory-per-request.
 //!
-//!   (d) **No `Stream`, `Iterator<Item = SseEvent>`,
-//!       `poll_next`, `async`, `await`, or channel/receiver
-//!       usage** appears in `sse.rs`. There is structurally
-//!       nothing that could hang waiting for the next event:
-//!       the entire event sequence is already in `Vec<SseEvent>`
-//!       when `into_response` runs.
+//!   (d) **The streaming surface is explicit and not hidden
+//!       inside `Sse::into_response`.** `StreamingSse` exposes
+//!       pull-based `next_chunk(&Cx)` / `heartbeat_chunk(&Cx)`
+//!       methods. It does not implement `IntoResponse`, `Stream`,
+//!       or `poll_next`, so callers must wire it to a transport
+//!       loop that owns request-region cancellation.
 //!
 //!   (e) **Client-disconnect surfaces at the HTTP transport
 //!       layer.** The `Response` is consumed by the HTTP
@@ -48,29 +48,15 @@
 //!       module does not need to detect that itself because it
 //!       is not driving any per-event push.
 //!
-//! Verdict: **SOUND**. The operator's failure mode (emit-loop
-//! hanging on disconnected client) is STRUCTURALLY IMPOSSIBLE
-//! today because no emit-loop exists. The deliberate
-//! simplification of treating SSE as a one-shot batch removes
-//! the entire class of hang-on-disconnect bugs. Cancel-aware
-//! behavior is delegated to the HTTP transport layer at write
-//! time; this matches asupersync's "no orphan tasks, no silent
-//! drops" philosophy because the failure mode shifts to
-//! observable I/O errors at the byte-write boundary.
+//! Verdict: **SOUND**. The existing batch `Sse` response still
+//! has no emit-loop. The new `StreamingSse` surface is separate
+//! and cancel-aware: it checkpoints the request `Cx` before
+//! each event/heartbeat chunk and exposes an explicit
+//! disconnect hook that closes producer state.
 //!
-//! When the streaming-SSE follow-up (br-asupersync-tamnew)
-//! lands, this audit MUST be updated to verify:
-//!   1. The streaming variant takes a `&Cx` and checkpoints on
-//!      the cancel signal between events.
-//!   2. Disconnect detection happens within one event's
-//!      worth of write attempt (NOT pending the next event
-//!      indefinitely).
-//!   3. The streaming variant terminates within bounded time
-//!      after `Cx::cancel()` is called.
-//!
-//! This file pins the CURRENT non-streaming behavior so the
-//! follow-up can't accidentally regress to a half-baked
-//! streaming variant that hangs.
+//! This file pins both surfaces so future work cannot silently
+//! replace the safe batch response or regress `StreamingSse`
+//! into a hidden, non-cancel-aware emit loop.
 
 use std::path::PathBuf;
 
@@ -169,9 +155,10 @@ fn sse_into_response_materializes_body_synchronously() {
 
 #[test]
 fn sse_module_has_no_async_or_stream_imports() {
-    // Pin (d): the entire sse.rs file has NO async / Stream /
-    // channel imports. A regression that pulled them in for
-    // any reason should be reviewed.
+    // Pin (d): streaming remains an explicit pull-based state
+    // machine, not an implicit async task/channel hidden inside
+    // the response type. A regression that pulled these imports
+    // in for any reason should be reviewed.
     let source = read_sse_source();
 
     let suspect_imports = [
@@ -189,9 +176,9 @@ fn sse_module_has_no_async_or_stream_imports() {
         assert!(
             !source.contains(pat),
             "REGRESSION: sse.rs now imports `{pat}` — async / \
-             streaming surface added. Verify the new code is \
-             cancel-aware (Cx checkpoint between emits, bounded \
-             disconnect detection) and update this audit test.",
+             channel machinery appeared. Verify the code is \
+             request-region owned and cancel-aware before allowing \
+             this dependency.",
         );
     }
 
@@ -201,11 +188,39 @@ fn sse_module_has_no_async_or_stream_imports() {
         assert!(
             !source.contains(pat),
             "REGRESSION: sse.rs now defines `{pat}` — a \
-             streaming surface. The audit assumes the entire \
-             module is non-streaming; update this test to \
-             cover the streaming variant's cancel-awareness.",
+             streaming surface. `StreamingSse` is intentionally \
+             pull-based via next_chunk(&Cx); update this audit \
+             only with equivalent cancel-aware proof.",
         );
     }
+}
+
+#[test]
+fn streaming_sse_variant_is_separate_and_cancel_checked() {
+    let source = read_sse_source();
+
+    for phrase in [
+        "pub struct StreamingSse<",
+        "pub trait StreamingSseSource",
+        "pub fn next_chunk(&mut self, cx: &Cx)",
+        "pub fn heartbeat_chunk(&mut self, cx: &Cx)",
+        "cx.checkpoint()",
+        "StreamingSseError::Cancelled",
+        "self.source.cancel()",
+    ] {
+        assert!(
+            source.contains(phrase),
+            "REGRESSION: streaming SSE source no longer contains `{phrase}`; \
+             cancel-aware incremental emission must stay explicit.",
+        );
+    }
+
+    assert!(
+        !source.contains("impl IntoResponse for StreamingSse"),
+        "REGRESSION: StreamingSse must not be hidden behind the synchronous \
+         IntoResponse batch path; transport integration must own the request \
+         Cx and drive next_chunk(&Cx).",
+    );
 }
 
 #[test]
@@ -260,10 +275,9 @@ fn sse_per_response_caps_are_enforced() {
 #[test]
 fn sse_doc_comment_explicitly_notes_non_streaming_design() {
     // Pin: the doc comment EXPLICITLY notes the deliberate
-    // non-streaming design. If a future change adds a streaming
-    // variant, the doc must be updated together with the audit
-    // test. Pinning the doc text ensures the architectural
-    // intent stays visible in the source.
+    // non-streaming batch design and points streaming callers to
+    // the separate StreamingSse surface. Pinning the doc text
+    // ensures the architectural intent stays visible in the source.
     let source = read_sse_source();
 
     // The doc phrasing wraps across lines. Match individual
@@ -272,18 +286,18 @@ fn sse_doc_comment_explicitly_notes_non_streaming_design() {
     let required_doc_phrases = [
         "single-shot",
         "non-streaming serialization",
-        "true streaming SSE is a follow-up",
-        "br-asupersync-tamnew",
+        "bounded batch",
+        "StreamingSse",
+        "checkpoint request cancellation",
+        "br-asupersync-o74l7u.1",
     ];
     for phrase in &required_doc_phrases {
         assert!(
             source.contains(phrase),
             "REGRESSION: sse.rs doc no longer contains `{phrase}`. \
-             If the streaming variant landed, update this audit \
-             test to verify cancel-aware emit-loop semantics. If \
-             the doc was just reworded, ensure the new wording \
-             still flags the architectural intent so future \
-             readers know SSE is non-streaming today.",
+             If the doc was just reworded, ensure the new wording \
+             still distinguishes bounded batch SSE from the explicit \
+             StreamingSse incremental path.",
         );
     }
 }
@@ -421,8 +435,7 @@ mod behavioral {
             .headers
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
-            .map(|(_, v)| v.as_str())
-            .unwrap_or("");
+            .map_or("", |(_, v)| v.as_str());
         assert_eq!(
             ct, "text/event-stream",
             "content-type MUST be text/event-stream so EventSource \
@@ -433,8 +446,7 @@ mod behavioral {
             .headers
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("cache-control"))
-            .map(|(_, v)| v.as_str())
-            .unwrap_or("");
+            .map_or("", |(_, v)| v.as_str());
         assert_eq!(
             cc, "no-cache",
             "cache-control MUST be no-cache so proxies don't \

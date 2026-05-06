@@ -27,8 +27,11 @@
 //! }
 //! ```
 
+use std::collections::VecDeque;
 use std::fmt::{self, Write};
 use std::time::Duration;
+
+use crate::cx::Cx;
 
 use super::response::{IntoResponse, Response, StatusCode};
 
@@ -173,6 +176,272 @@ impl fmt::Display for SseEvent {
     }
 }
 
+// ─── Streaming SSE ──────────────────────────────────────────────────────────
+
+/// Error raised while incrementally emitting a streaming SSE response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamingSseError {
+    /// The request capability context observed cancellation.
+    Cancelled,
+    /// One serialized event or heartbeat exceeded the per-chunk byte cap.
+    EventTooLarge {
+        /// Serialized chunk size in bytes.
+        actual: usize,
+        /// Configured per-chunk maximum.
+        max: usize,
+    },
+    /// Emitting this chunk would exceed the per-response byte cap.
+    TotalBytesExceeded {
+        /// Total bytes that would have been emitted.
+        actual: usize,
+        /// Configured per-response maximum.
+        max: usize,
+    },
+    /// The event producer failed before yielding the next event.
+    Producer(String),
+}
+
+impl fmt::Display for StreamingSseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cancelled => f.write_str("streaming SSE cancelled"),
+            Self::EventTooLarge { actual, max } => {
+                write!(
+                    f,
+                    "streaming SSE event exceeds max bytes ({actual} > {max})"
+                )
+            }
+            Self::TotalBytesExceeded { actual, max } => write!(
+                f,
+                "streaming SSE response exceeds max total bytes ({actual} > {max})"
+            ),
+            Self::Producer(message) => write!(f, "streaming SSE producer failed: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for StreamingSseError {}
+
+/// Incremental producer for [`StreamingSse`].
+///
+/// Implementations should yield at most one event per call and should not block
+/// indefinitely. A transport loop can apply backpressure by delaying the next
+/// call to [`StreamingSse::next_chunk`].
+pub trait StreamingSseSource {
+    /// Return the next event, or `Ok(None)` when the stream is complete.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StreamingSseError::Cancelled`] when `cx` has been cancelled,
+    /// or [`StreamingSseError::Producer`] for source-specific failures.
+    fn next_event(&mut self, cx: &Cx) -> Result<Option<SseEvent>, StreamingSseError>;
+
+    /// Cancel producer-side state after request cancellation or disconnect.
+    fn cancel(&mut self) {}
+}
+
+/// Finite event source for deterministic tests and bounded streaming adapters.
+#[derive(Debug, Clone, Default)]
+pub struct VecSseSource {
+    events: VecDeque<SseEvent>,
+}
+
+impl VecSseSource {
+    /// Create a source from a finite list of events.
+    #[must_use]
+    pub fn new(events: Vec<SseEvent>) -> Self {
+        Self {
+            events: events.into(),
+        }
+    }
+
+    /// Return the number of events not yet emitted.
+    #[must_use]
+    pub fn remaining(&self) -> usize {
+        self.events.len()
+    }
+}
+
+impl StreamingSseSource for VecSseSource {
+    fn next_event(&mut self, cx: &Cx) -> Result<Option<SseEvent>, StreamingSseError> {
+        cx.checkpoint().map_err(|_| StreamingSseError::Cancelled)?;
+        Ok(self.events.pop_front())
+    }
+
+    fn cancel(&mut self) {
+        self.events.clear();
+    }
+}
+
+/// Incremental Server-Sent Events response state.
+///
+/// This is separate from [`Sse`], which remains a finite batch response that
+/// materializes one complete HTTP body. `StreamingSse` emits one serialized
+/// event or heartbeat chunk per call to [`next_chunk`](Self::next_chunk), checks
+/// the request [`Cx`] between chunks, and closes producer state on cancellation.
+#[derive(Debug, Clone)]
+pub struct StreamingSse<S = VecSseSource> {
+    source: S,
+    max_event_bytes: usize,
+    max_total_bytes: usize,
+    bytes_emitted: usize,
+    heartbeat_comment: String,
+    closed: bool,
+}
+
+impl StreamingSse<VecSseSource> {
+    /// Create a streaming SSE response from a finite event list.
+    #[must_use]
+    pub fn new(events: Vec<SseEvent>) -> Self {
+        Self::from_source(VecSseSource::new(events))
+    }
+
+    /// Create an empty streaming SSE response.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self::new(Vec::new())
+    }
+}
+
+impl<S: StreamingSseSource> StreamingSse<S> {
+    /// Create a streaming SSE response from an event source.
+    #[must_use]
+    pub fn from_source(source: S) -> Self {
+        Self {
+            source,
+            max_event_bytes: DEFAULT_SSE_MAX_TOTAL_BYTES,
+            max_total_bytes: DEFAULT_SSE_MAX_TOTAL_BYTES,
+            bytes_emitted: 0,
+            heartbeat_comment: "keep-alive".to_string(),
+            closed: false,
+        }
+    }
+
+    /// Header set required for a streaming SSE HTTP response.
+    #[must_use]
+    pub const fn headers() -> [(&'static str, &'static str); 3] {
+        [
+            ("content-type", "text/event-stream"),
+            ("cache-control", "no-cache"),
+            ("connection", "keep-alive"),
+        ]
+    }
+
+    /// Override the maximum serialized bytes for one event or heartbeat chunk.
+    #[must_use]
+    pub fn max_event_bytes(mut self, max: usize) -> Self {
+        self.max_event_bytes = max;
+        self
+    }
+
+    /// Override the maximum total bytes emitted by this streaming response.
+    #[must_use]
+    pub fn max_total_bytes(mut self, max: usize) -> Self {
+        self.max_total_bytes = max;
+        self
+    }
+
+    /// Override the heartbeat comment payload.
+    #[must_use]
+    pub fn heartbeat_comment(mut self, comment: impl Into<String>) -> Self {
+        self.heartbeat_comment = comment.into();
+        self
+    }
+
+    /// Return the number of serialized bytes emitted so far.
+    #[must_use]
+    pub const fn bytes_emitted(&self) -> usize {
+        self.bytes_emitted
+    }
+
+    /// Return `true` once the source is complete or cancellation closed it.
+    #[must_use]
+    pub const fn is_closed(&self) -> bool {
+        self.closed
+    }
+
+    /// Mark the stream closed and cancel the request context for disconnect.
+    pub fn cancel_for_disconnect(&mut self, cx: &Cx) {
+        self.closed = true;
+        self.source.cancel();
+        cx.set_cancel_requested(true);
+    }
+
+    /// Emit one serialized event chunk.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StreamingSseError::Cancelled`] when `cx` has been cancelled,
+    /// [`StreamingSseError::EventTooLarge`] when the next event exceeds
+    /// `max_event_bytes`, [`StreamingSseError::TotalBytesExceeded`] when the
+    /// stream would exceed `max_total_bytes`, or producer-specific errors from
+    /// the configured [`StreamingSseSource`].
+    pub fn next_chunk(&mut self, cx: &Cx) -> Result<Option<Vec<u8>>, StreamingSseError> {
+        if self.closed {
+            return Ok(None);
+        }
+
+        self.checkpoint(cx)?;
+        match self.source.next_event(cx) {
+            Ok(Some(event)) => self.serialize_event(&event).map(Some),
+            Ok(None) => {
+                self.closed = true;
+                Ok(None)
+            }
+            Err(StreamingSseError::Cancelled) => {
+                self.closed = true;
+                self.source.cancel();
+                Err(StreamingSseError::Cancelled)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Emit one heartbeat/comment chunk without advancing the event source.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same cancellation and byte-limit errors as
+    /// [`next_chunk`](Self::next_chunk).
+    pub fn heartbeat_chunk(&mut self, cx: &Cx) -> Result<Vec<u8>, StreamingSseError> {
+        self.checkpoint(cx)?;
+        let heartbeat = SseEvent::default().comment(self.heartbeat_comment.clone());
+        self.serialize_event(&heartbeat)
+    }
+
+    fn checkpoint(&mut self, cx: &Cx) -> Result<(), StreamingSseError> {
+        if cx.checkpoint().is_err() {
+            self.closed = true;
+            self.source.cancel();
+            return Err(StreamingSseError::Cancelled);
+        }
+        Ok(())
+    }
+
+    fn serialize_event(&mut self, event: &SseEvent) -> Result<Vec<u8>, StreamingSseError> {
+        let mut chunk = String::new();
+        event.write_to(&mut chunk);
+        let chunk_len = chunk.len();
+        if chunk_len > self.max_event_bytes {
+            return Err(StreamingSseError::EventTooLarge {
+                actual: chunk_len,
+                max: self.max_event_bytes,
+            });
+        }
+
+        let next_total = self.bytes_emitted.saturating_add(chunk_len);
+        if next_total > self.max_total_bytes {
+            return Err(StreamingSseError::TotalBytesExceeded {
+                actual: next_total,
+                max: self.max_total_bytes,
+            });
+        }
+
+        self.bytes_emitted = next_total;
+        Ok(chunk.into_bytes())
+    }
+}
+
 // ─── Sse Response ────────────────────────────────────────────────────────────
 
 /// An SSE response containing a sequence of events.
@@ -204,10 +473,10 @@ impl fmt::Display for SseEvent {
 /// Defends against a misbehaving handler that derives event count or
 /// per-event payload from attacker-controlled input. Override with
 /// [`Sse::max_total_bytes`] for legitimate use cases that need larger
-/// responses; the cap is per-response, not per-connection. (The single-shot
-/// non-streaming serialization in [`IntoResponse`] is documented as a
-/// deliberate simplification — true streaming SSE is a follow-up;
-/// br-asupersync-o74l7u.1 tracks the architectural change.)
+/// responses; the cap is per-response, not per-connection. The single-shot
+/// non-streaming serialization in [`IntoResponse`] is kept for bounded batch
+/// responses; use [`StreamingSse`] when a handler needs incremental chunks that
+/// checkpoint request cancellation between emits (br-asupersync-o74l7u.1).
 pub const DEFAULT_SSE_MAX_TOTAL_BYTES: usize = 16 * 1024 * 1024;
 
 /// Default cap on event count per response — 100 000. Same defensive
@@ -575,6 +844,180 @@ mod tests {
         let body = sse.to_body();
         assert!(body.starts_with(":keep-alive\n\n"));
         assert_eq!(body, ":keep-alive\n\ndata:a\n\ndata:b\n\ndata:c\n\n");
+    }
+
+    // ================================================================
+    // StreamingSse response state
+    // ================================================================
+
+    #[test]
+    fn streaming_sse_emits_one_chunk_per_event_in_order() {
+        let cx = Cx::for_testing();
+        let mut stream = StreamingSse::new(vec![
+            SseEvent::default().event("update").data("one").id("1"),
+            SseEvent::default().event("update").data("two").id("2"),
+        ]);
+
+        let first = stream
+            .next_chunk(&cx)
+            .expect("first chunk")
+            .expect("first event");
+        let second = stream
+            .next_chunk(&cx)
+            .expect("second chunk")
+            .expect("second event");
+        let done = stream.next_chunk(&cx).expect("stream end");
+
+        assert_eq!(
+            std::str::from_utf8(&first).expect("utf8"),
+            "event:update\ndata:one\nid:1\n\n"
+        );
+        assert_eq!(
+            std::str::from_utf8(&second).expect("utf8"),
+            "event:update\ndata:two\nid:2\n\n"
+        );
+        assert!(done.is_none());
+        assert!(stream.is_closed());
+        assert_eq!(stream.bytes_emitted(), first.len() + second.len());
+    }
+
+    #[test]
+    fn streaming_sse_heartbeat_chunk_is_comment_without_advancing_events() {
+        let cx = Cx::for_testing();
+        let mut stream =
+            StreamingSse::new(vec![SseEvent::default().data("payload")]).heartbeat_comment("tick");
+
+        let heartbeat = stream.heartbeat_chunk(&cx).expect("heartbeat");
+        let event = stream
+            .next_chunk(&cx)
+            .expect("event chunk")
+            .expect("event present");
+
+        assert_eq!(std::str::from_utf8(&heartbeat).expect("utf8"), ":tick\n\n");
+        assert_eq!(
+            std::str::from_utf8(&event).expect("utf8"),
+            "data:payload\n\n"
+        );
+    }
+
+    #[test]
+    fn streaming_sse_rejects_oversized_event_chunk() {
+        let cx = Cx::for_testing();
+        let mut stream =
+            StreamingSse::new(vec![SseEvent::default().data("abcdef")]).max_event_bytes(8);
+
+        let err = stream.next_chunk(&cx).expect_err("event should exceed cap");
+        assert!(matches!(
+            err,
+            StreamingSseError::EventTooLarge { actual, max: 8 } if actual > 8
+        ));
+        assert_eq!(stream.bytes_emitted(), 0);
+    }
+
+    #[test]
+    fn streaming_sse_rejects_total_bytes_limit_without_partial_accounting() {
+        let cx = Cx::for_testing();
+        let mut stream = StreamingSse::new(vec![
+            SseEvent::default().data("one"),
+            SseEvent::default().data("two"),
+        ])
+        .max_total_bytes("data:one\n\n".len());
+
+        let first = stream
+            .next_chunk(&cx)
+            .expect("first chunk")
+            .expect("first event");
+        let err = stream
+            .next_chunk(&cx)
+            .expect_err("second chunk should exceed total cap");
+
+        assert_eq!(std::str::from_utf8(&first).expect("utf8"), "data:one\n\n");
+        assert!(matches!(
+            err,
+            StreamingSseError::TotalBytesExceeded { actual, max }
+                if actual > max && max == first.len()
+        ));
+        assert_eq!(stream.bytes_emitted(), first.len());
+    }
+
+    #[test]
+    fn streaming_sse_cancellation_closes_source_before_next_emit() {
+        let cx = Cx::for_testing();
+        let mut stream = StreamingSse::new(vec![
+            SseEvent::default().data("first"),
+            SseEvent::default().data("second"),
+        ]);
+        let _first = stream
+            .next_chunk(&cx)
+            .expect("first chunk")
+            .expect("first event");
+
+        cx.set_cancel_requested(true);
+        let err = stream
+            .next_chunk(&cx)
+            .expect_err("cancelled stream should fail");
+
+        assert_eq!(err, StreamingSseError::Cancelled);
+        assert!(stream.is_closed());
+        assert!(stream.next_chunk(&Cx::for_testing()).unwrap().is_none());
+    }
+
+    #[test]
+    fn streaming_sse_disconnect_sets_request_cancellation() {
+        let cx = Cx::for_testing();
+        let region = crate::web::request_region::RequestRegion::new(
+            &cx,
+            crate::web::extract::Request::new("GET", "/events"),
+        );
+
+        let outcome = region.run(|ctx| {
+            let mut stream = StreamingSse::new(vec![SseEvent::default().data("pending")]);
+            stream.cancel_for_disconnect(ctx.cx());
+            assert!(stream.is_closed());
+            Response::empty(StatusCode::CLIENT_CLOSED_REQUEST)
+        });
+
+        assert!(
+            cx.is_cancel_requested(),
+            "client disconnect should mark the request Cx cancelled"
+        );
+        assert_eq!(
+            outcome.into_response().status,
+            StatusCode::CLIENT_CLOSED_REQUEST
+        );
+    }
+
+    #[test]
+    fn streaming_sse_propagates_source_error() {
+        struct FailingSource;
+
+        impl StreamingSseSource for FailingSource {
+            fn next_event(&mut self, _cx: &Cx) -> Result<Option<SseEvent>, StreamingSseError> {
+                Err(StreamingSseError::Producer("synthetic failure".to_string()))
+            }
+        }
+
+        let cx = Cx::for_testing();
+        let mut stream = StreamingSse::from_source(FailingSource);
+        let err = stream.next_chunk(&cx).expect_err("producer error");
+
+        assert_eq!(
+            err,
+            StreamingSseError::Producer("synthetic failure".to_string())
+        );
+        assert!(!stream.is_closed());
+    }
+
+    #[test]
+    fn streaming_sse_headers_match_event_stream_response_requirements() {
+        assert_eq!(
+            StreamingSse::<VecSseSource>::headers(),
+            [
+                ("content-type", "text/event-stream"),
+                ("cache-control", "no-cache"),
+                ("connection", "keep-alive"),
+            ]
+        );
     }
 
     // ================================================================
