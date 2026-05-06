@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Metamorphic Testing for Three-Lane Scheduler Cross-Lane Budget Invariants
 //!
 //! Tests budget enforcement and fairness across cancel, timed, and ready lanes
@@ -30,7 +28,6 @@ use asupersync::types::{TaskId, Time};
 
 /// Test harness for cross-lane budget testing
 struct BudgetTestHarness {
-    lab_runtime: LabRuntime,
     scheduler: ThreeLaneScheduler,
     /// Workers owned by the harness so phase1/phase2/phase3 simulations reuse
     /// the same worker set. `ThreeLaneScheduler::take_workers()` is one-shot
@@ -38,10 +35,6 @@ struct BudgetTestHarness {
     /// would leave later phases with an empty worker vector and silently
     /// dispatch zero tasks.
     workers: Vec<ThreeLaneWorker>,
-    state: Arc<ContendedMutex<RuntimeState>>,
-    task_table: Arc<ContendedMutex<TaskTable>>,
-    cancel_streak_limit: usize,
-    browser_handoff_limit: usize,
 }
 
 impl BudgetTestHarness {
@@ -55,7 +48,7 @@ impl BudgetTestHarness {
             .worker_count(worker_count)
             .trace_capacity(2048)
             .max_steps(15000);
-        let lab_runtime = LabRuntime::new(config);
+        let _lab_runtime = LabRuntime::new(config);
 
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let task_table = Arc::new(ContendedMutex::new("task_table", TaskTable::new()));
@@ -81,15 +74,7 @@ impl BudgetTestHarness {
         // would leave later simulation phases empty and silently pass.
         let workers = scheduler.take_workers();
 
-        Self {
-            lab_runtime,
-            scheduler,
-            workers,
-            state,
-            task_table,
-            cancel_streak_limit,
-            browser_handoff_limit,
-        }
+        Self { scheduler, workers }
     }
 
     /// Inject a balanced workload across all three lanes
@@ -210,7 +195,7 @@ struct BudgetStats {
     max_effective_cancel_limit: usize,
     fairness_violations: Vec<String>,
     total_dispatches_by_type: HashMap<TaskType, usize>,
-    idle_workers: Vec<usize>, // steps where workers were idle
+    idle_workers: Vec<(usize, usize)>, // (worker, step) samples where workers were idle
 }
 
 impl BudgetStats {
@@ -283,7 +268,7 @@ impl BudgetStats {
     }
 
     fn record_idle(&mut self, worker_id: usize, step: usize) {
-        self.idle_workers.push(step);
+        self.idle_workers.push((worker_id, step));
     }
 
     fn ensure_worker_capacity(&mut self, min_workers: usize) {
