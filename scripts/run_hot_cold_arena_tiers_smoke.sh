@@ -11,6 +11,7 @@ LIST_ONLY=0
 OUTPUT_ROOT_OVERRIDE="${HOT_COLD_ARENA_TIERS_SMOKE_OUTPUT_DIR:-}"
 ARTIFACT_ROOT_OVERRIDE="${HOT_COLD_ARENA_TIERS_SMOKE_ARTIFACT_ROOT:-}"
 RUN_ID_OVERRIDE="${HOT_COLD_ARENA_TIERS_SMOKE_RUN_ID:-}"
+RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
 
 usage() {
     cat <<'USAGE'
@@ -28,12 +29,16 @@ USAGE
 
 require_tools() {
     local missing=0
-    for tool in jq awk date uname rch; do
+    for tool in jq awk date uname; do
         if ! command -v "$tool" >/dev/null 2>&1; then
             echo "FATAL: missing required tool: $tool" >&2
             missing=1
         fi
     done
+    if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+        echo "FATAL: rch is required and was not found/executable at: ${RCH_BIN}" >&2
+        missing=1
+    fi
     if [ ! -f "$ARTIFACT" ]; then
         echo "FATAL: contract artifact missing at ${ARTIFACT}" >&2
         missing=1
@@ -239,13 +244,15 @@ run_once() {
     local poll_seconds=0
     local command_exit_code=-1
     local had_errexit=0
+    local rch_invocation
 
     case $- in
         *e*) had_errexit=1 ;;
     esac
 
+    printf -v rch_invocation '%q' "$RCH_BIN"
     local command="
-        rch exec -- env \
+        ${rch_invocation} exec -- env \
         CARGO_INCREMENTAL=0 \
         CARGO_TARGET_DIR=${target_dir} \
         ASUPERSYNC_HOT_COLD_ARENA_CONTRACT_PATH=${ARTIFACT} \
@@ -273,6 +280,13 @@ run_once() {
         if grep -Eq 'Remote command finished: exit=[1-9][0-9]*' "$log_path" 2>/dev/null; then
             break
         fi
+        if grep -Eq '^\[RCH\] local \(|falling back to local' "$log_path" 2>/dev/null; then
+            kill "$command_pid" 2>/dev/null || true
+            wait "$command_pid" 2>/dev/null || true
+            command_exit_code=86
+            printf 'FATAL: rch local fallback detected; refusing local cargo execution\n' >>"$log_path"
+            break
+        fi
         sleep 1
         poll_seconds=$((poll_seconds + 1))
         if [ "$poll_seconds" -ge "$tail_timeout_seconds" ]; then
@@ -293,6 +307,11 @@ run_once() {
         else
             set +e
         fi
+    fi
+
+    if [ "$command_exit_code" -ne 86 ] && grep -Eq '^\[RCH\] local \(|falling back to local' "$log_path" 2>/dev/null; then
+        command_exit_code=86
+        printf 'FATAL: rch local fallback detected; refusing local cargo execution\n' >>"$log_path"
     fi
 
     if [ ! -s "$report_path" ]; then
@@ -385,7 +404,7 @@ REPORT_PATH_REPEAT_2="${ARTIFACT_DIR}/hot_cold_arena_tiers_report_repeat_2.json"
 mkdir -p "$RUN_DIR" "$ARTIFACT_DIR"
 HOST_FINGERPRINT_JSON="$(host_fingerprint_json)"
 
-COMMAND_STRING="rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_hot_cold_arena_<run> ASUPERSYNC_HOT_COLD_ARENA_CONTRACT_PATH=${ARTIFACT} ASUPERSYNC_HOT_COLD_ARENA_SCENARIO=${SCENARIO} ASUPERSYNC_HOT_COLD_ARENA_REPORT_PATH=<report> cargo test -p asupersync --test hot_cold_arena_tiers hot_cold_arena_tiers_smoke_contract_emits_operator_report --features test-internals -- --nocapture"
+COMMAND_STRING="${RCH_BIN} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_hot_cold_arena_<run> ASUPERSYNC_HOT_COLD_ARENA_CONTRACT_PATH=${ARTIFACT} ASUPERSYNC_HOT_COLD_ARENA_SCENARIO=${SCENARIO} ASUPERSYNC_HOT_COLD_ARENA_REPORT_PATH=<report> cargo test -p asupersync --test hot_cold_arena_tiers hot_cold_arena_tiers_smoke_contract_emits_operator_report --features test-internals -- --nocapture"
 
 ACTUAL_REPORT_PROJECTION_JSON='null'
 ACTUAL_REPORT_PROJECTION_REPEAT_2_JSON='null'
