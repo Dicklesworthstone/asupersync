@@ -1006,15 +1006,57 @@ mod tests {
             });
             cancel_thread.join().expect("cancel thread panicked");
 
-            // MR4: Response should be either complete or properly cancelled
+            // MR4: Response should be either complete or properly cancelled.
+            // A handler-produced 499 is still a committed response under the
+            // br-asupersync-bmc8m5 cancel-race contract.
             match outcome {
-                RegionOutcome::Ok(_) => assert!(
-                    response_complete.load(Ordering::SeqCst),
-                    "Complete response should only be returned if fully built"
-                ),
+                RegionOutcome::Ok(response) => {
+                    let complete = response_complete.load(Ordering::SeqCst);
+                    let cancel_requested = cx.is_cancel_requested();
+                    let body = response.body.as_ref();
+
+                    match response.status {
+                        StatusCode::OK => {
+                            assert!(
+                                complete,
+                                "OK response must only commit after full build: status={:?} cancel_requested={cancel_requested} body_len={}",
+                                response.status,
+                                body.len()
+                            );
+                            assert_eq!(
+                                body, b"abcdefghij",
+                                "OK response body must be complete: status={:?} cancel_requested={cancel_requested}",
+                                response.status
+                            );
+                        }
+                        StatusCode::CLIENT_CLOSED_REQUEST => {
+                            assert!(
+                                !complete,
+                                "499 cancellation response must not mark the full body complete: status={:?} cancel_requested={cancel_requested} body_len={}",
+                                response.status,
+                                body.len()
+                            );
+                            assert!(
+                                cancel_requested,
+                                "499 cancellation response requires an observable cancel signal: status={:?} body_len={}",
+                                response.status,
+                                body.len()
+                            );
+                            assert_eq!(
+                                body, b"cancelled",
+                                "499 response body must be the atomic cancellation response"
+                            );
+                        }
+                        status => panic!(
+                            "Unexpected committed response status: status={status:?} cancel_requested={cancel_requested} complete={complete} body_len={}",
+                            body.len()
+                        ),
+                    }
+                }
                 RegionOutcome::Cancelled => assert!(
                     !response_complete.load(Ordering::SeqCst),
-                    "Cancelled response should not complete response building"
+                    "Pre-handler cancellation must not complete response building: cancel_requested={}",
+                    cx.is_cancel_requested()
                 ),
                 _ => panic!("Unexpected outcome: {:?}", outcome),
             }
@@ -1171,11 +1213,31 @@ mod tests {
                 "All tasks should have performed cleanup"
             );
 
-            // 3. Request should be cancelled
-            assert!(
-                outcome.is_cancelled(),
-                "Request should be marked as cancelled"
-            );
+            // 3. Request cancellation should stay observable, while the
+            // handler-produced 499 remains a committed response.
+            let cancel_requested = cx.is_cancel_requested();
+            match outcome {
+                RegionOutcome::Ok(response) => {
+                    assert_eq!(
+                        response.status,
+                        StatusCode::CLIENT_CLOSED_REQUEST,
+                        "Composite disconnect should commit the handler's cancellation response: cancel_requested={cancel_requested} body_len={}",
+                        response.body.as_ref().len()
+                    );
+                    assert!(
+                        cancel_requested,
+                        "Composite disconnect must leave cancel signal observable after committed response: status={:?}",
+                        response.status
+                    );
+                }
+                RegionOutcome::Cancelled => assert!(
+                    cancel_requested,
+                    "Pre-handler cancellation must be observable after cancelled outcome"
+                ),
+                other => panic!(
+                    "Unexpected composite disconnect outcome: {other:?}; cancel_requested={cancel_requested}"
+                ),
+            }
         }
 
         struct CleanupGuard {
