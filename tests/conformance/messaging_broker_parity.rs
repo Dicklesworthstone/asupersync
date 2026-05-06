@@ -610,6 +610,14 @@ mod nats_mod {
                 .subscribe(&cx, &fanout_subject)
                 .await
                 .expect("second fanout subscriber subscribes");
+            subscriber_a
+                .ping(&cx)
+                .await
+                .expect("first fanout subscriber registration is flushed");
+            subscriber_b
+                .ping(&cx)
+                .await
+                .expect("second fanout subscriber registration is flushed");
 
             let fanout_payloads: [&[u8]; 2] = [b"fanout-first", b"fanout-second"];
             let mut delivered_count = 0usize;
@@ -708,6 +716,14 @@ mod nats_mod {
                 .queue_subscribe(&cx, &queue_subject, &queue_group)
                 .await
                 .expect("second queue subscriber subscribes");
+            subscriber_a
+                .ping(&cx)
+                .await
+                .expect("first queue subscriber registration is flushed");
+            subscriber_b
+                .ping(&cx)
+                .await
+                .expect("second queue subscriber registration is flushed");
             let mut queue_a_seen = 0usize;
             let mut queue_b_seen = 0usize;
             for index in 0..6 {

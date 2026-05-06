@@ -1938,18 +1938,21 @@ impl NatsClient {
             return None;
         }
 
-        let mut status = None;
-        let mut description = None;
-        if let Some(status_line) = first_line.strip_prefix("NATS/1.0 ") {
-            let status_line = status_line.trim();
-            let mut parts = status_line.splitn(2, char::is_whitespace);
-            status = parts.next().and_then(|value| value.parse::<u16>().ok());
-            description = parts
-                .next()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned);
-        }
+        let (mut status, mut description) =
+            if let Some(status_line) = first_line.strip_prefix("NATS/1.0 ") {
+                let status_line = status_line.trim();
+                let mut parts = status_line.splitn(2, char::is_whitespace);
+                (
+                    parts.next().and_then(|value| value.parse::<u16>().ok()),
+                    parts
+                        .next()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(ToOwned::to_owned),
+                )
+            } else {
+                (None, None)
+            };
 
         for line in lines {
             if line.is_empty() {
