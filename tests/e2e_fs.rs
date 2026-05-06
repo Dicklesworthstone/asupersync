@@ -46,6 +46,7 @@ const FS_PARITY_WAVE2_SCENARIOS: &[&str] = &[
     "buffered-lines-boundaries",
     "buf-writer-flush-visibility",
     "write-atomic-replace-cleanup",
+    "dir-create-remove-boundaries",
     "unix-vfs-equivalence",
     "error-kind-remove-missing",
     "try-exists-lifecycle",
@@ -452,6 +453,65 @@ async fn fs_proof_write_atomic_replace_cleanup(
     Ok(FsProofEvidence::supported(metadata.len(), metadata_actual))
 }
 
+async fn fs_proof_dir_create_remove_boundaries(
+    temp_root: &Path,
+) -> Result<FsProofEvidence, String> {
+    let dir = fs_proof_scenario_dir(temp_root, "dir-create-remove-boundaries")?;
+    let single = dir.join("single");
+    let nested_leaf = dir.join("nested/a/b");
+    let recursive_root = dir.join("recursive");
+    let recursive_leaf = recursive_root.join("leaf");
+
+    fs::create_dir(&single)
+        .await
+        .map_err(|err| format!("create single directory: {err}"))?;
+    fs::remove_dir(&single)
+        .await
+        .map_err(|err| format!("remove empty single directory: {err}"))?;
+    let single_removed = !fs::try_exists(&single)
+        .await
+        .map_err(|err| format!("try_exists removed single directory: {err}"))?;
+
+    fs::create_dir_all(&nested_leaf)
+        .await
+        .map_err(|err| format!("create nested directory tree: {err}"))?;
+    fs::write(nested_leaf.join("payload.txt"), b"payload")
+        .await
+        .map_err(|err| format!("write nested payload: {err}"))?;
+    let nested_created = fs::try_exists(&nested_leaf)
+        .await
+        .map_err(|err| format!("try_exists nested leaf: {err}"))?;
+    let nonempty_error = fs::remove_dir(dir.join("nested/a"))
+        .await
+        .expect_err("remove_dir must reject non-empty directories")
+        .kind();
+
+    fs::create_dir_all(&recursive_leaf)
+        .await
+        .map_err(|err| format!("create recursive cleanup directory: {err}"))?;
+    fs::write(recursive_leaf.join("payload.txt"), b"payload")
+        .await
+        .map_err(|err| format!("write recursive cleanup payload: {err}"))?;
+    fs::remove_dir_all(&recursive_root)
+        .await
+        .map_err(|err| format!("remove recursive directory tree: {err}"))?;
+    let recursive_removed = !fs::try_exists(&recursive_root)
+        .await
+        .map_err(|err| format!("try_exists removed recursive root: {err}"))?;
+
+    let metadata_actual = format!(
+        "single_removed={single_removed},nested_created={nested_created},nonempty_error={nonempty_error:?},recursive_removed={recursive_removed}"
+    );
+    let metadata_expected = "single_removed=true,nested_created=true,nonempty_error=DirectoryNotEmpty,recursive_removed=true";
+    if metadata_actual != metadata_expected {
+        return Err(format!(
+            "dir create/remove drift: actual={metadata_actual} expected={metadata_expected}"
+        ));
+    }
+
+    Ok(FsProofEvidence::supported(4, metadata_actual))
+}
+
 async fn fs_proof_unix_vfs_equivalence(temp_root: &Path) -> Result<FsProofEvidence, String> {
     let dir = fs_proof_scenario_dir(temp_root, "unix-vfs-equivalence")?;
     let path = dir.join("vfs.txt");
@@ -836,6 +896,15 @@ async fn fs_parity_wave2_run() -> io::Result<Vec<Value>> {
             metadata_expected: fs_proof_write_atomic_metadata_expected(),
             cancellation_point: "none",
             result: fs_proof_write_atomic_replace_cleanup(&temp_root).await,
+        },
+        FsProofScenario {
+            scenario_id: "dir-create-remove-boundaries",
+            api: "dir",
+            operation: "create_dir_create_dir_all_remove_dir_remove_dir_all",
+            bytes_expected: 4,
+            metadata_expected: "single_removed=true,nested_created=true,nonempty_error=DirectoryNotEmpty,recursive_removed=true",
+            cancellation_point: "none",
+            result: fs_proof_dir_create_remove_boundaries(&temp_root).await,
         },
         FsProofScenario {
             scenario_id: "unix-vfs-equivalence",

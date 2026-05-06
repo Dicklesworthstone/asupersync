@@ -25,6 +25,7 @@ EXPECTED_SCENARIOS=(
   "buffered-lines-boundaries"
   "buf-writer-flush-visibility"
   "write-atomic-replace-cleanup"
+  "dir-create-remove-boundaries"
   "unix-vfs-equivalence"
   "error-kind-remove-missing"
   "try-exists-lifecycle"
