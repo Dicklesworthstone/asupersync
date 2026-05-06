@@ -771,6 +771,90 @@ fn browser_package_exports_shared_worker_coordinator_helpers_without_promoting_d
 }
 
 #[test]
+fn browser_package_exports_guarded_native_messaging_helpers() {
+    let src = read_source("packages/browser/src/index.ts");
+    for marker in [
+        "BROWSER_NATIVE_MESSAGING_CONTRACT_ID",
+        "BROWSER_NATIVE_MESSAGING_UNSUPPORTED_CODE",
+        "BROWSER_NATIVE_MESSAGING_OPERATION_FAILED_CODE",
+        "export interface BrowserNativeMessagingCapability",
+        "export interface BrowserNativeMessagingSupportDiagnostics",
+        "export function detectBrowserNativeMessagingSupport(",
+        "export function createBrowserNativeMessagingUnsupportedError(",
+        "export function assertBrowserNativeMessagingSupport(",
+        "export class BrowserMessagePort",
+        "export class BrowserMessageChannel",
+        "export class BrowserBroadcastChannel",
+        "export function createBrowserMessagePort(",
+        "export function createBrowserMessageChannel(",
+        "export function createBrowserBroadcastChannel(",
+    ] {
+        assert!(
+            src.contains(marker),
+            "browser src/index.ts must export native messaging marker: {marker}"
+        );
+    }
+
+    let dts_path = repo_root().join("packages/browser/dist/index.d.ts");
+    if dts_path.exists() {
+        let dts = std::fs::read_to_string(&dts_path)
+            .unwrap_or_else(|_| panic!("missing {}", dts_path.display()));
+        for marker in [
+            "BROWSER_NATIVE_MESSAGING_CONTRACT_ID",
+            "BROWSER_NATIVE_MESSAGING_UNSUPPORTED_CODE",
+            "BROWSER_NATIVE_MESSAGING_OPERATION_FAILED_CODE",
+            "export interface BrowserNativeMessagingCapability",
+            "export interface BrowserNativeMessagingSupportDiagnostics",
+            "export declare function detectBrowserNativeMessagingSupport(",
+            "export declare function createBrowserNativeMessagingUnsupportedError(",
+            "export declare function assertBrowserNativeMessagingSupport(",
+            "export declare class BrowserMessagePort",
+            "export declare class BrowserMessageChannel",
+            "export declare class BrowserBroadcastChannel",
+            "export declare function createBrowserMessagePort(",
+            "export declare function createBrowserMessageChannel(",
+            "export declare function createBrowserBroadcastChannel(",
+        ] {
+            assert!(
+                dts.contains(marker),
+                "browser dist/index.d.ts must export native messaging marker: {marker}"
+            );
+        }
+    }
+}
+
+#[test]
+fn browser_native_messaging_helpers_fail_closed_and_pin_lifecycle_semantics() {
+    let src = read_source("packages/browser/src/index.ts");
+    for marker in [
+        "\"capability_not_granted\"",
+        "\"degraded_mode_denied\"",
+        "\"missing_message_channel\"",
+        "\"missing_broadcast_channel\"",
+        "capabilityGranted: boolean",
+        "degradedMode: boolean",
+        "redactionPolicy: BrowserNativeMessagingRedactionPolicy",
+        "Pass an explicit BrowserNativeMessagingCapability with capabilityGranted: true",
+        "Keep browser-native messaging at the browser application boundary; it is not an asupersync channel, raw transport, or cross-origin bridge.",
+        "supportForNativeMessagingConstruction(",
+        "this.stateValue = \"errored\";",
+        "this.firstFailure = \"messageerror\";",
+        "this.stateValue = \"closed\";",
+        "this.stateValue = \"aborted\";",
+        "this.stateValue = \"detached\";",
+        "send(message: unknown, transfer: Transferable[] = [])",
+        "post(message: unknown): void",
+        "takeMessages(): unknown[]",
+        "Create a fresh browser-native messaging helper after close, abort, detach, or messageerror.",
+    ] {
+        assert!(
+            src.contains(marker),
+            "browser native messaging lifecycle marker missing: {marker}"
+        );
+    }
+}
+
+#[test]
 fn browser_core_fetch_bridge_supports_window_or_worker_hosts() {
     let content = read_source("asupersync-browser-core/src/lib.rs");
     for marker in [
@@ -1075,12 +1159,15 @@ fn readme_pins_deferred_service_and_shared_worker_direct_runtime_truth() {
         &content,
         &[
             "### What does not work yet",
-            "- **Service worker / shared worker direct runtime**: the shipped browser",
-            "package does not expose these as direct-runtime lanes yet. Keep them on",
-            "explicit message/data boundaries until a worker-specific host contract is",
-            "promoted deliberately.",
+            "- **Service worker direct runtime**: intentionally broker/coordinator-only.",
+            "The browser package keeps direct `BrowserRuntime` creation fail-closed inside",
+            "`ServiceWorkerGlobalScope`; use the bounded broker registration and durable",
+            "- **Shared worker direct runtime**: intentionally broker/coordinator-only.",
+            "Direct `BrowserRuntime` creation remains fail-closed inside",
+            "`SharedWorkerGlobalScope`; use the bounded coordinator attach, version",
             "## Limitations",
-            "| Service worker / shared worker direct runtime | Deferred; not yet shipped |",
+            "| Service worker direct runtime | Broker/coordinator-only; direct runtime unsupported, bounded broker/handoff supported |",
+            "| Shared worker direct runtime | Broker/coordinator-only; direct runtime unsupported, bounded coordinator attach/detach/fallback supported |",
         ],
         "README must preserve the deferred service/shared-worker direct-runtime contract",
     );
@@ -1089,7 +1176,7 @@ fn readme_pins_deferred_service_and_shared_worker_direct_runtime_truth() {
         "See [`docs/WASM.md`](./docs/WASM.md) for the full Browser Edition guide,",
         "| Browser Edition (WASM, JS/TS consumers) | ✅ Implemented for browser main-thread and dedicated-worker consumers (single-threaded, event-loop-driven) |",
         "| Rust-to-WASM compilation path | Preview public lane exists via `RuntimeBuilder::browser()`, but current Rust support is still narrower than the shipped JS/TS packages and remains anchored by fixture/evidence validation |",
-        "what remains deferred (service/shared worker direct runtime), the preview public Rust-to-WASM `RuntimeBuilder::browser()` lane",
+        "the broker/coordinator-only service/shared worker boundaries, the preview public Rust-to-WASM `RuntimeBuilder::browser()` lane",
     ] {
         assert!(
             content.contains(marker),

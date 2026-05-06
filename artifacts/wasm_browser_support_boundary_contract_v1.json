@@ -95,15 +95,18 @@
     },
     {
       "surface": "browser_native_messaging",
-      "public_label": "substrate_only_not_public_browser_sdk",
-      "must_not_export_public_browser_api": true,
+      "public_label": "guarded_package_level_support",
+      "must_require_explicit_capability": true,
       "allowed_internal_markers": [
         "MessagePort",
         "BroadcastChannel",
         "register_message_port",
         "register_broadcast_channel"
       ],
-      "forbidden_public_export_markers": [
+      "required_public_export_markers": [
+        "BROWSER_NATIVE_MESSAGING_CONTRACT_ID",
+        "detectBrowserNativeMessagingSupport",
+        "assertBrowserNativeMessagingSupport",
         "export class BrowserMessageChannel",
         "export class BrowserMessagePort",
         "export class BrowserBroadcastChannel",
@@ -126,8 +129,8 @@
   "scope_limits": {
     "service_worker_direct_runtime_shipped": false,
     "shared_worker_direct_runtime_shipped": false,
-    "message_channel_public_browser_sdk_shipped": false,
-    "broadcast_channel_public_browser_sdk_shipped": false,
+    "message_channel_public_browser_sdk_shipped": true,
+    "broadcast_channel_public_browser_sdk_shipped": true,
     "webtransport_implies_raw_socket_parity": false
   },
   "validation_commands": [

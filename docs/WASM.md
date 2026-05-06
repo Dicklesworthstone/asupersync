@@ -323,7 +323,7 @@ Use this shorthand when reading Browser Edition diagnostics:
 | Shared-worker bounded coordinator attach | `guarded canary-only` | fail-closed shared-worker direct-runtime truth plus green attach/reuse/fallback evidence from `scripts/validate_shared_worker_consumer.sh` | fall back to the truthful dedicated-worker or browser main-thread lane when attach is denied, mismatched, or the coordinator crashes before handshake |
 | `WebTransport` datagrams | `guarded canary-only` | direct-runtime support plus explicit `WebTransport` prerequisite satisfaction and healthy lane state | fall back to `WebSocket` or `fetch` when the tuple carries `candidate_prerequisite_missing`, `downgrade_to_websocket_or_fetch`, or any lane-health demotion |
 | Rust-authored browser path | `preview_only` | maintained fixture evidence plus the dispatcher-backed `RuntimeBuilder::browser()` lane | keep public docs explicit that this remains a preview Rust-authored browser bootstrap path, not broad parity with the JS/TS Browser Edition packages |
-| Browser-native messaging (`MessageChannel`, `MessagePort`, `BroadcastChannel`) | `preview_only` | a future public SDK export plus explicit API contract tests | keep these surfaces at the application boundary or reactor substrate; do not market them as shipped Browser Edition APIs |
+| Browser-native messaging (`MessageChannel`, `MessagePort`, `BroadcastChannel`) | `guarded canary-only` | guarded public Browser Edition helpers plus explicit API contract tests | construct only through `detectBrowserNativeMessagingSupport()` / `assertBrowserNativeMessagingSupport()` with an explicit `BrowserNativeMessagingCapability`; this is not an asupersync channel, raw transport, or cross-origin bridge |
 | `SharedArrayBuffer` / worker offload / parallel executor lanes | `nightly-only` | explicit cross-origin isolation, worker-offload policy green, replay/perf evidence green, and no lane-health demotion | disable the lane immediately on missing isolation, replay drift, chaos regression, or performance instability; preserve the single-threaded browser runtime as the supported default |
 | Service-worker direct runtime | `broker/coordinator-only` | bounded broker contract and browser-run evidence stay green; direct runtime remains unsupported | fail closed for direct runtime and route operators to the broker registration / durable handoff contract instead of pretending the service worker owns a runtime |
 | Shared-worker direct runtime | `broker/coordinator-only` | bounded coordinator contract and browser-run evidence stay green; direct runtime remains unsupported | fail closed for direct runtime and route operators to the coordinator attach/detach/fallback contract instead of pretending the shared worker owns a runtime |
@@ -375,7 +375,7 @@ cancellation, drain/finalize, replay, and durable recovery semantics.
 | Service-worker bounded broker registration and durable handoff | Guarded package-level support on service-worker hosts | `packages/browser/src/index.ts`, `docs/wasm_service_worker_broker_contract.md`, `tests/fixtures/service-worker-broker-consumer/` | `detectBrowserServiceWorkerBrokerSupport()`, `BrowserServiceWorkerBrokerStore`, `registerBroker()`, `persistBrokerWork()`, and `persistDurableHandoff()` keep direct runtime fail-closed while persisting broker manifests, restartable work descriptors, and fallback metadata; the maintained browser-run lifecycle proof lives in `tests/fixtures/service-worker-broker-consumer/` and `scripts/validate_service_worker_broker_consumer.sh` |
 | Shared-worker bounded coordinator attach, version handshake, and downgrade | Guarded package-level support from browser main-thread or dedicated-worker callers | `packages/browser/src/index.ts`, `docs/wasm_shared_worker_tenancy_lifecycle_contract.md`, `tests/fixtures/shared-worker-consumer/` | `detectBrowserSharedWorkerCoordinatorSupport()` and `createBrowserSharedWorkerCoordinatorSelection()` keep direct runtime fail-closed on shared-worker hosts while negotiating a same-origin coordinator, attaching a per-client port, checking protocol/features, and downgrading mechanically to the truthful fallback lane on denial or loss. Validate the maintained browser-run fixture with `scripts/validate_shared_worker_consumer.sh`. |
 | Browser-native transport: `WebTransport` datagrams | Guarded direct-runtime support | `src/io/cap.rs`, `packages/browser-core/index.js`, `packages/browser-core/index.d.ts`, `packages/browser/src/index.ts` | Shipped as an explicit, capability-gated datagram lane when the browser exposes `globalThis.WebTransport`; this does not imply raw-socket parity. Fall back to `WebSocket` or `fetch` when the browser/runtime lacks WebTransport support or rejects the session. |
-| Browser-native messaging surfaces (`MessageChannel`, `MessagePort`, `BroadcastChannel`) | Direct-runtime feasible but not yet shipped as public Browser Edition APIs | `src/io/cap.rs`, `src/runtime/reactor/browser.rs` | The Rust/browser substrate models explicit authority for these surfaces and the reactor wires `MessagePort` / `BroadcastChannel`, but `@asupersync/browser` intentionally does not export them yet. For direct off-main-thread execution, bootstrap a Browser Edition runtime inside a dedicated worker; for same-origin app coordination, keep `MessageChannel` / `BroadcastChannel` at the application boundary; for server/edge boundaries, use bridge-only adapters. |
+| Browser-native messaging surfaces (`MessageChannel`, `MessagePort`, `BroadcastChannel`) | Guarded public Browser Edition helpers | `src/io/cap.rs`, `src/runtime/reactor/browser.rs`, `packages/browser/src/index.ts` | The Rust/browser substrate models explicit authority and the public package now exposes guarded `BrowserMessageChannel`, `BrowserMessagePort`, and `BrowserBroadcastChannel` helpers. Construction requires explicit BrowserNativeMessagingCapability authority through the `BrowserNativeMessagingCapability` token or prior support assertion, denies degraded-mode capability, and keeps lifecycle errors deterministic. These helpers stay at the browser application boundary; they are not asupersync channels, raw transports, cross-origin bridges, or server/edge adapters. |
 | Raw TCP/UDP, Unix sockets, filesystem, process/signal | Impossible for direct browser runtime | `cfg`-gated native surfaces in core/runtime/docs | Must remain bridge-only or unsupported |
 
 ### Other substrate-only capabilities (Rust layer complete, no public JS/TS API)
@@ -412,16 +412,20 @@ download helpers to browser main-thread DOM runtimes.
    The remaining gap is maintained onboarding/example coverage rather than
    runtime support semantics. **Follow-on:** `asupersync-2w5tu`.
 
-2. **Browser-native messaging surfaces are explicitly bounded, not silently
-   shipped.** `src/io/cap.rs` grants explicit authority for
+2. **Browser-native messaging surfaces are guarded public package helpers, not
+   silent ambient transports.** `src/io/cap.rs` grants explicit authority for
    `MessageChannel`, `MessagePort`, and `BroadcastChannel`, and
    `src/runtime/reactor/browser.rs` wires `register_message_port()` /
    `register_broadcast_channel()` to real host listeners. The public package
-   contract is still "no direct JS/TS messaging API yet": use dedicated-worker
-   runtime bootstrap for direct off-main-thread execution, keep same-origin
-   `MessageChannel` / `BroadcastChannel` usage at the application boundary,
-   and use bridge-only adapters when the hop leaves the browser runtime
-   boundary. Future public promotion should be deliberate, not inferred.
+   contract is now deliberate: `detectBrowserNativeMessagingSupport()` reports
+   `surface`, `runtimeContext`, `capabilityGranted`, `degradedMode`,
+   `supportClass`, `reasonCode`, guidance, and redaction policy before any
+   constructor touches ambient browser APIs. `createBrowserMessageChannel()`,
+   `createBrowserMessagePort()`, and `createBrowserBroadcastChannel()` require
+   an explicit `BrowserNativeMessagingCapability` or a prior supported
+   diagnostic assertion. Keep same-origin `MessageChannel`, `MessagePort`, and
+   `BroadcastChannel` usage at the browser application boundary; this is not
+   an asupersync channel, raw transport, or cross-origin bridge.
 
 3. **Browser stream bridge: real implementation, no public surface.**
    `src/io/browser_stream.rs` bridges WHATWG `ReadableStream`/
@@ -457,16 +461,18 @@ package), the corresponding test assertion must be updated.
    lane denial and fall back to `WebSocket` or `fetch`. Do not widen the
    direct-runtime support claim just because a particular browser exposes a
    partial constructor.
-2. **Browser-native messaging is a substrate boundary today, not a public SDK
-   lane.**
+2. **Browser-native messaging is a guarded browser-application boundary, not a
+   raw transport lane.**
    If you need direct off-main-thread runtime execution, start the runtime
    inside a dedicated worker. If you need same-origin coordination between UI
-   and worker/browser contexts, keep `MessageChannel`, `MessagePort`,
-   `BroadcastChannel`, or `postMessage()` at the application boundary and pass
-   serialized data into Asupersync-owned scopes/tasks. If the hop leaves the
-   browser runtime boundary entirely (server, edge, Node, another process),
-   use an explicit bridge-only adapter instead of pretending the browser SDK
-   exports a native messaging transport.
+   and worker/browser contexts, use the public `BrowserMessageChannel`,
+   transferred `BrowserMessagePort`, or `BrowserBroadcastChannel` helpers only
+   after `detectBrowserNativeMessagingSupport()` / `assertBrowserNativeMessagingSupport()`
+   sees an explicit `BrowserNativeMessagingCapability`. Pass serialized data
+   into Asupersync-owned scopes/tasks. If the hop leaves the browser runtime
+   boundary entirely (server, edge, Node, another process), use an explicit
+   bridge-only adapter instead of pretending the browser SDK exports a native
+   cross-origin or process transport.
 
 ## Maintainer Admission Rule For New Browser Surfaces
 

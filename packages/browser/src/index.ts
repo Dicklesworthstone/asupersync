@@ -165,10 +165,12 @@ export interface CancellationTokenOptions {
 
 export interface BrowserCapabilitySnapshot {
   hasAbortController: boolean;
+  hasBroadcastChannel: boolean;
   hasDocument: boolean;
   hasFetch: boolean;
   hasIndexedDb: boolean;
   hasLocalStorage: boolean;
+  hasMessageChannel: boolean;
   hasWebAssembly: boolean;
   hasWebTransport: boolean;
   hasWebSocket: boolean;
@@ -950,6 +952,101 @@ export interface BrowserSharedWorkerCoordinatorSelectionResult {
   fallbackLaneId: BrowserExecutionLane | null;
 }
 
+export const BROWSER_NATIVE_MESSAGING_CONTRACT_ID =
+  "browser-native-messaging-api-v1";
+export const BROWSER_NATIVE_MESSAGING_UNSUPPORTED_CODE =
+  "ASUPERSYNC_BROWSER_NATIVE_MESSAGING_UNSUPPORTED";
+export const BROWSER_NATIVE_MESSAGING_OPERATION_FAILED_CODE =
+  "ASUPERSYNC_BROWSER_NATIVE_MESSAGING_OPERATION_FAILED";
+
+export type BrowserNativeMessagingSurface =
+  | "message_channel"
+  | "message_port"
+  | "broadcast_channel";
+
+export type BrowserNativeMessagingSupportClass =
+  | "direct_runtime_supported"
+  | "unsupported";
+
+export type BrowserNativeMessagingReason =
+  | BrowserRuntimeSupportReason
+  | "capability_not_granted"
+  | "degraded_mode_denied"
+  | "missing_message_channel"
+  | "missing_broadcast_channel";
+
+export type BrowserNativeMessagingState =
+  | "open"
+  | "closed"
+  | "aborted"
+  | "detached"
+  | "errored";
+
+export type BrowserNativeMessagingRedactionPolicy =
+  | "metadata_only"
+  | "omit_payloads";
+
+export interface BrowserNativeMessagingCapability {
+  capabilityGranted: boolean;
+  degradedMode?: boolean;
+  redactionPolicy?: BrowserNativeMessagingRedactionPolicy;
+}
+
+export interface BrowserNativeMessagingSupportOptions {
+  capability?: BrowserNativeMessagingCapability | null;
+  globalObject?: Record<string, unknown>;
+}
+
+export interface BrowserNativeMessagingSupportDiagnostics {
+  supported: boolean;
+  contractId: typeof BROWSER_NATIVE_MESSAGING_CONTRACT_ID;
+  surface: BrowserNativeMessagingSurface;
+  runtimeContext: BrowserRuntimeContext;
+  capabilityGranted: boolean;
+  degradedMode: boolean;
+  supportClass: BrowserNativeMessagingSupportClass;
+  reason: BrowserNativeMessagingReason;
+  reasonCode: BrowserNativeMessagingReason;
+  message: string;
+  guidance: string[];
+  redactionPolicy: BrowserNativeMessagingRedactionPolicy;
+  capabilities: BrowserCapabilitySnapshot;
+}
+
+export interface BrowserNativeMessagingOperationDiagnostics {
+  surface: BrowserNativeMessagingSurface;
+  operation: string;
+  state: BrowserNativeMessagingState;
+  reason: "closed" | "aborted" | "detached" | "errored" | "messageerror";
+  message: string;
+  guidance: string[];
+  runtimeContext: BrowserRuntimeContext;
+  firstFailure: string | null;
+}
+
+export interface BrowserMessagePortOptions
+  extends BrowserNativeMessagingSupportOptions {
+  support?: BrowserNativeMessagingSupportDiagnostics | null;
+  start?: boolean;
+}
+
+export interface BrowserMessageChannelOptions
+  extends BrowserNativeMessagingSupportOptions {
+  support?: BrowserNativeMessagingSupportDiagnostics | null;
+  startPorts?: boolean;
+}
+
+export interface BrowserBroadcastChannelOptions
+  extends BrowserNativeMessagingSupportOptions {
+  support?: BrowserNativeMessagingSupportDiagnostics | null;
+}
+
+export type BrowserNativeMessageHandler = (message: unknown) => void;
+
+export type BrowserNativeMessageErrorHandler = (
+  diagnostics: BrowserNativeMessagingOperationDiagnostics,
+) => void;
+
 const DEDICATED_WORKER_GLOBAL_SCOPE_TAG = "[object DedicatedWorkerGlobalScope]";
 const INDEXEDDB_STORAGE_KEY_PREFIX = "asupersync:indexeddb:v1:";
 const LOCAL_STORAGE_KEY_PREFIX = "asupersync:storage:v1:";
@@ -1011,6 +1108,59 @@ interface BrowserSharedWorkerCoordinatorSelectionFailure {
   reason: BrowserSharedWorkerCoordinatorSupportReason;
   message: string;
   guidance: string[];
+}
+
+export interface BrowserNativeMessageEventLike {
+  data?: unknown;
+}
+
+export interface BrowserNativeMessagePortLike {
+  addEventListener?(
+    type: "message" | "messageerror",
+    listener: (event: BrowserNativeMessageEventLike) => void,
+  ): void;
+  close?(): void;
+  onmessage?: ((event: BrowserNativeMessageEventLike) => void) | null;
+  onmessageerror?: ((event: BrowserNativeMessageEventLike) => void) | null;
+  postMessage(message: unknown, transfer?: Transferable[]): void;
+  removeEventListener?(
+    type: "message" | "messageerror",
+    listener: (event: BrowserNativeMessageEventLike) => void,
+  ): void;
+  start?(): void;
+}
+
+export interface BrowserNativeMessageChannelLike {
+  port1: BrowserNativeMessagePortLike;
+  port2: BrowserNativeMessagePortLike;
+}
+
+type BrowserNativeMessageChannelConstructorLike =
+  new () => BrowserNativeMessageChannelLike;
+
+export interface BrowserNativeBroadcastChannelLike {
+  addEventListener?(
+    type: "message" | "messageerror",
+    listener: (event: BrowserNativeMessageEventLike) => void,
+  ): void;
+  close(): void;
+  name: string;
+  onmessage?: ((event: BrowserNativeMessageEventLike) => void) | null;
+  onmessageerror?: ((event: BrowserNativeMessageEventLike) => void) | null;
+  postMessage(message: unknown): void;
+  removeEventListener?(
+    type: "message" | "messageerror",
+    listener: (event: BrowserNativeMessageEventLike) => void,
+  ): void;
+}
+
+type BrowserNativeBroadcastChannelConstructorLike = new (
+  name: string,
+) => BrowserNativeBroadcastChannelLike;
+
+interface BrowserNativeMessagingGlobalLike extends Record<string, unknown> {
+  BroadcastChannel?: BrowserNativeBroadcastChannelConstructorLike;
+  MessageChannel?: BrowserNativeMessageChannelConstructorLike;
 }
 
 interface BrowserWebTransportReadableLike {
@@ -1094,10 +1244,12 @@ function browserCapabilitySnapshot(
 ): BrowserCapabilitySnapshot {
   return {
     hasAbortController: typeof globalObject?.AbortController === "function",
+    hasBroadcastChannel: typeof globalObject?.BroadcastChannel === "function",
     hasDocument: typeof globalObject?.document === "object",
     hasFetch: typeof globalObject?.fetch === "function",
     hasIndexedDb: browserIndexedDbFactory(globalObject) !== null,
     hasLocalStorage: browserLocalStorage(globalObject) !== null,
+    hasMessageChannel: typeof globalObject?.MessageChannel === "function",
     hasWebAssembly: typeof globalObject?.WebAssembly === "object",
     hasWebTransport: typeof globalObject?.WebTransport === "function",
     hasWebSocket: typeof globalObject?.WebSocket === "function",
@@ -1323,6 +1475,644 @@ export function assertBrowserRuntimeSupport(
     throw createUnsupportedRuntimeError(diagnostics);
   }
   return diagnostics;
+}
+
+function nativeMessagingGuidance(
+  surface: BrowserNativeMessagingSurface,
+  reason: BrowserNativeMessagingReason,
+): string[] {
+  const shared = [
+    "Call detectBrowserNativeMessagingSupport() before constructing browser-native messaging helpers.",
+    "Pass an explicit BrowserNativeMessagingCapability with capabilityGranted: true from your application policy.",
+    "Keep browser-native messaging at the browser application boundary; it is not an asupersync channel, raw transport, or cross-origin bridge.",
+  ];
+  switch (reason) {
+    case "capability_not_granted":
+      return [
+        "Grant HostApiSurface.MessageChannel, HostApiSurface.MessagePort, or HostApiSurface.BroadcastChannel authority explicitly before construction.",
+        ...shared,
+      ];
+    case "degraded_mode_denied":
+      return [
+        "Do not construct native messaging helpers while the host API capability is in degraded mode.",
+        "Use a supported browser main-thread or dedicated-worker runtime with native MessageChannel/BroadcastChannel support.",
+        ...shared,
+      ];
+    case "missing_message_channel":
+      return [
+        "Use a browser/runtime that exposes globalThis.MessageChannel before creating MessageChannel or transferred MessagePort helpers.",
+        ...shared,
+      ];
+    case "missing_broadcast_channel":
+      return [
+        "Use a browser/runtime that exposes globalThis.BroadcastChannel before creating BroadcastChannel helpers.",
+        ...shared,
+      ];
+    default:
+      return surface === "broadcast_channel"
+        ? [
+            "Use BroadcastChannel only for same-origin browser coordination and keep payload redaction at the application boundary.",
+            ...shared,
+          ]
+        : shared;
+  }
+}
+
+function nativeMessagingMissingReason(
+  surface: BrowserNativeMessagingSurface,
+): BrowserNativeMessagingReason {
+  return surface === "broadcast_channel"
+    ? "missing_broadcast_channel"
+    : "missing_message_channel";
+}
+
+function browserNativeMessagingGlobals(
+  globalObject: Record<string, unknown> | undefined,
+): BrowserNativeMessagingGlobalLike | undefined {
+  return globalObject as BrowserNativeMessagingGlobalLike | undefined;
+}
+
+function browserNativeMessagingSurfaceAvailable(
+  surface: BrowserNativeMessagingSurface,
+  globalObject: Record<string, unknown> | undefined,
+): boolean {
+  const globals = browserNativeMessagingGlobals(globalObject);
+  if (surface === "broadcast_channel") {
+    return typeof globals?.BroadcastChannel === "function";
+  }
+  return typeof globals?.MessageChannel === "function";
+}
+
+export function detectBrowserNativeMessagingSupport(
+  surface: BrowserNativeMessagingSurface,
+  options: BrowserNativeMessagingSupportOptions = {},
+): BrowserNativeMessagingSupportDiagnostics {
+  const globalObject = options.globalObject ?? defaultGlobalObject();
+  const runtime = detectBrowserRuntimeSupport(globalObject);
+  const capability = options.capability ?? null;
+  const capabilityGranted = capability?.capabilityGranted === true;
+  const degradedMode = capability?.degradedMode === true;
+  const redactionPolicy = capability?.redactionPolicy ?? "metadata_only";
+  let reason: BrowserNativeMessagingReason = "supported";
+  let message = `${surface} browser-native messaging prerequisites are available.`;
+
+  if (!runtime.supported) {
+    reason = runtime.reason;
+    message = runtime.message;
+  } else if (!capabilityGranted) {
+    reason = "capability_not_granted";
+    message = `${surface} construction requires explicit browser-native messaging capability authority.`;
+  } else if (degradedMode) {
+    reason = "degraded_mode_denied";
+    message = `${surface} construction is denied because the host API capability is degraded.`;
+  } else if (!browserNativeMessagingSurfaceAvailable(surface, globalObject)) {
+    reason = nativeMessagingMissingReason(surface);
+    message =
+      surface === "broadcast_channel"
+        ? "BroadcastChannel is unavailable in this browser/runtime."
+        : "MessageChannel is unavailable in this browser/runtime.";
+  }
+
+  const supported = reason === "supported";
+  return {
+    supported,
+    contractId: BROWSER_NATIVE_MESSAGING_CONTRACT_ID,
+    surface,
+    runtimeContext: runtime.runtimeContext,
+    capabilityGranted,
+    degradedMode,
+    supportClass: supported ? "direct_runtime_supported" : "unsupported",
+    reason,
+    reasonCode: reason,
+    message,
+    guidance: supported ? [] : nativeMessagingGuidance(surface, reason),
+    redactionPolicy,
+    capabilities: runtime.capabilities,
+  };
+}
+
+export function createBrowserNativeMessagingUnsupportedError(
+  diagnostics: BrowserNativeMessagingSupportDiagnostics,
+): Error & {
+  code: typeof BROWSER_NATIVE_MESSAGING_UNSUPPORTED_CODE;
+  diagnostics: BrowserNativeMessagingSupportDiagnostics;
+} {
+  const error = new Error(
+    `${BROWSER_NATIVE_MESSAGING_UNSUPPORTED_CODE}: ${diagnostics.message} ${diagnostics.guidance.join(" ")}`.trim(),
+  ) as Error & {
+    code: typeof BROWSER_NATIVE_MESSAGING_UNSUPPORTED_CODE;
+    diagnostics: BrowserNativeMessagingSupportDiagnostics;
+  };
+  error.code = BROWSER_NATIVE_MESSAGING_UNSUPPORTED_CODE;
+  error.diagnostics = diagnostics;
+  return error;
+}
+
+export function assertBrowserNativeMessagingSupport(
+  diagnostics: BrowserNativeMessagingSupportDiagnostics,
+): BrowserNativeMessagingSupportDiagnostics {
+  if (!diagnostics.supported) {
+    throw createBrowserNativeMessagingUnsupportedError(diagnostics);
+  }
+  return diagnostics;
+}
+
+export function createBrowserNativeMessagingOperationError(
+  diagnostics: BrowserNativeMessagingOperationDiagnostics,
+): Error & {
+  code: typeof BROWSER_NATIVE_MESSAGING_OPERATION_FAILED_CODE;
+  diagnostics: BrowserNativeMessagingOperationDiagnostics;
+} {
+  const error = new Error(
+    `${BROWSER_NATIVE_MESSAGING_OPERATION_FAILED_CODE}: ${diagnostics.message} ${diagnostics.guidance.join(" ")}`.trim(),
+  ) as Error & {
+    code: typeof BROWSER_NATIVE_MESSAGING_OPERATION_FAILED_CODE;
+    diagnostics: BrowserNativeMessagingOperationDiagnostics;
+  };
+  error.code = BROWSER_NATIVE_MESSAGING_OPERATION_FAILED_CODE;
+  error.diagnostics = diagnostics;
+  return error;
+}
+
+function supportForNativeMessagingConstruction(
+  surface: BrowserNativeMessagingSurface,
+  options:
+    | BrowserMessagePortOptions
+    | BrowserMessageChannelOptions
+    | BrowserBroadcastChannelOptions,
+): BrowserNativeMessagingSupportDiagnostics {
+  const diagnostics =
+    options.support ?? detectBrowserNativeMessagingSupport(surface, options);
+  if (diagnostics.surface !== surface) {
+    throw createBrowserNativeMessagingUnsupportedError({
+      ...diagnostics,
+      supported: false,
+      surface,
+      supportClass: "unsupported",
+      reason: "capability_not_granted",
+      reasonCode: "capability_not_granted",
+      message: `Expected ${surface} support diagnostics, received ${diagnostics.surface}.`,
+      guidance: nativeMessagingGuidance(surface, "capability_not_granted"),
+    });
+  }
+  return assertBrowserNativeMessagingSupport(diagnostics);
+}
+
+function nativeMessagingOperationDiagnostics(
+  support: BrowserNativeMessagingSupportDiagnostics,
+  operation: string,
+  state: BrowserNativeMessagingState,
+  reason: BrowserNativeMessagingOperationDiagnostics["reason"],
+  firstFailure: string | null,
+): BrowserNativeMessagingOperationDiagnostics {
+  return {
+    surface: support.surface,
+    operation,
+    state,
+    reason,
+    message: `${operation} is not allowed while ${support.surface} is ${state}.`,
+    guidance: [
+      "Create a fresh browser-native messaging helper after close, abort, detach, or messageerror.",
+      "Keep browser-native messaging lifecycle outside asupersync structured channels and pass only serialized data into runtime scopes.",
+    ],
+    runtimeContext: support.runtimeContext,
+    firstFailure,
+  };
+}
+
+function nativeMessagingStartPort(
+  port: BrowserNativeMessagePortLike,
+  enabled: boolean | undefined,
+): void {
+  if (enabled !== false) {
+    port.start?.();
+  }
+}
+
+function nativeMessagingAddPortListener(
+  port: BrowserNativeMessagePortLike,
+  type: "message" | "messageerror",
+  listener: (event: BrowserNativeMessageEventLike) => void,
+): void {
+  if (typeof port.addEventListener === "function") {
+    port.addEventListener(type, listener);
+    return;
+  }
+  if (type === "message") {
+    port.onmessage = listener;
+  } else {
+    port.onmessageerror = listener;
+  }
+}
+
+function nativeMessagingRemovePortListener(
+  port: BrowserNativeMessagePortLike,
+  type: "message" | "messageerror",
+  listener: (event: BrowserNativeMessageEventLike) => void,
+): void {
+  if (typeof port.removeEventListener === "function") {
+    port.removeEventListener(type, listener);
+    return;
+  }
+  if (type === "message" && port.onmessage === listener) {
+    port.onmessage = null;
+  }
+  if (type === "messageerror" && port.onmessageerror === listener) {
+    port.onmessageerror = null;
+  }
+}
+
+export class BrowserMessagePort {
+  private readonly messageHandlers = new Set<BrowserNativeMessageHandler>();
+  private readonly errorHandlers = new Set<BrowserNativeMessageErrorHandler>();
+  private readonly messages: unknown[] = [];
+  private firstFailure: string | null = null;
+  private stateValue: BrowserNativeMessagingState = "open";
+
+  private readonly messageListener = (event: BrowserNativeMessageEventLike): void => {
+    if (this.stateValue !== "open") {
+      return;
+    }
+    this.messages.push(event.data);
+    for (const handler of this.messageHandlers) {
+      handler(event.data);
+    }
+  };
+
+  private readonly messageErrorListener = (): void => {
+    if (this.stateValue !== "open") {
+      return;
+    }
+    this.stateValue = "errored";
+    this.firstFailure = "messageerror";
+    const diagnostics = nativeMessagingOperationDiagnostics(
+      this.support,
+      "messageerror",
+      this.stateValue,
+      "messageerror",
+      this.firstFailure,
+    );
+    for (const handler of this.errorHandlers) {
+      handler(diagnostics);
+    }
+    this.detachListeners();
+  };
+
+  constructor(
+    private readonly port: BrowserNativeMessagePortLike,
+    private readonly support: BrowserNativeMessagingSupportDiagnostics,
+    options: { start?: boolean } = {},
+  ) {
+    nativeMessagingAddPortListener(this.port, "message", this.messageListener);
+    nativeMessagingAddPortListener(
+      this.port,
+      "messageerror",
+      this.messageErrorListener,
+    );
+    nativeMessagingStartPort(this.port, options.start);
+  }
+
+  get state(): BrowserNativeMessagingState {
+    return this.stateValue;
+  }
+
+  diagnostics(): BrowserNativeMessagingSupportDiagnostics {
+    return this.support;
+  }
+
+  onMessage(handler: BrowserNativeMessageHandler): () => void {
+    this.messageHandlers.add(handler);
+    return () => {
+      this.messageHandlers.delete(handler);
+    };
+  }
+
+  onMessageError(handler: BrowserNativeMessageErrorHandler): () => void {
+    this.errorHandlers.add(handler);
+    return () => {
+      this.errorHandlers.delete(handler);
+    };
+  }
+
+  takeMessages(): unknown[] {
+    const drained = [...this.messages];
+    this.messages.length = 0;
+    return drained;
+  }
+
+  send(message: unknown, transfer: Transferable[] = []): void {
+    this.ensureOpen("send");
+    this.port.postMessage(message, transfer);
+  }
+
+  close(): void {
+    if (this.stateValue === "closed") {
+      return;
+    }
+    if (this.stateValue === "open") {
+      this.stateValue = "closed";
+    }
+    this.detachListeners();
+    this.port.close?.();
+  }
+
+  abort(reason = "aborted"): void {
+    if (this.stateValue === "aborted") {
+      return;
+    }
+    this.stateValue = "aborted";
+    this.firstFailure = reason;
+    this.detachListeners();
+    this.port.close?.();
+  }
+
+  detach(): BrowserNativeMessagePortLike {
+    if (this.stateValue === "open") {
+      this.stateValue = "detached";
+    }
+    this.detachListeners();
+    return this.port;
+  }
+
+  private ensureOpen(operation: string): void {
+    if (this.stateValue === "open") {
+      return;
+    }
+    const reason =
+      this.stateValue === "aborted"
+        ? "aborted"
+        : this.stateValue === "detached"
+          ? "detached"
+          : this.stateValue === "errored"
+            ? "errored"
+            : "closed";
+    throw createBrowserNativeMessagingOperationError(
+      nativeMessagingOperationDiagnostics(
+        this.support,
+        operation,
+        this.stateValue,
+        reason,
+        this.firstFailure,
+      ),
+    );
+  }
+
+  private detachListeners(): void {
+    nativeMessagingRemovePortListener(this.port, "message", this.messageListener);
+    nativeMessagingRemovePortListener(
+      this.port,
+      "messageerror",
+      this.messageErrorListener,
+    );
+    this.messageHandlers.clear();
+    this.errorHandlers.clear();
+  }
+}
+
+export class BrowserMessageChannel {
+  readonly port1: BrowserMessagePort;
+  readonly port2: BrowserMessagePort;
+
+  constructor(
+    channel: BrowserNativeMessageChannelLike,
+    support: BrowserNativeMessagingSupportDiagnostics,
+    options: { startPorts?: boolean } = {},
+  ) {
+    this.port1 = new BrowserMessagePort(channel.port1, support, {
+      start: options.startPorts,
+    });
+    this.port2 = new BrowserMessagePort(channel.port2, support, {
+      start: options.startPorts,
+    });
+  }
+
+  close(): void {
+    this.port1.close();
+    this.port2.close();
+  }
+
+  abort(reason = "aborted"): void {
+    this.port1.abort(reason);
+    this.port2.abort(reason);
+  }
+}
+
+export class BrowserBroadcastChannel {
+  private readonly messageHandlers = new Set<BrowserNativeMessageHandler>();
+  private readonly errorHandlers = new Set<BrowserNativeMessageErrorHandler>();
+  private readonly messages: unknown[] = [];
+  private firstFailure: string | null = null;
+  private stateValue: BrowserNativeMessagingState = "open";
+
+  private readonly messageListener = (event: BrowserNativeMessageEventLike): void => {
+    if (this.stateValue !== "open") {
+      return;
+    }
+    this.messages.push(event.data);
+    for (const handler of this.messageHandlers) {
+      handler(event.data);
+    }
+  };
+
+  private readonly messageErrorListener = (): void => {
+    if (this.stateValue !== "open") {
+      return;
+    }
+    this.stateValue = "errored";
+    this.firstFailure = "messageerror";
+    const diagnostics = nativeMessagingOperationDiagnostics(
+      this.support,
+      "messageerror",
+      this.stateValue,
+      "messageerror",
+      this.firstFailure,
+    );
+    for (const handler of this.errorHandlers) {
+      handler(diagnostics);
+    }
+    this.detachListeners();
+  };
+
+  constructor(
+    private readonly channel: BrowserNativeBroadcastChannelLike,
+    private readonly support: BrowserNativeMessagingSupportDiagnostics,
+  ) {
+    this.attachListeners();
+  }
+
+  get name(): string {
+    return this.channel.name;
+  }
+
+  get state(): BrowserNativeMessagingState {
+    return this.stateValue;
+  }
+
+  diagnostics(): BrowserNativeMessagingSupportDiagnostics {
+    return this.support;
+  }
+
+  onMessage(handler: BrowserNativeMessageHandler): () => void {
+    this.messageHandlers.add(handler);
+    return () => {
+      this.messageHandlers.delete(handler);
+    };
+  }
+
+  onMessageError(handler: BrowserNativeMessageErrorHandler): () => void {
+    this.errorHandlers.add(handler);
+    return () => {
+      this.errorHandlers.delete(handler);
+    };
+  }
+
+  takeMessages(): unknown[] {
+    const drained = [...this.messages];
+    this.messages.length = 0;
+    return drained;
+  }
+
+  post(message: unknown): void {
+    this.ensureOpen("post");
+    this.channel.postMessage(message);
+  }
+
+  close(): void {
+    if (this.stateValue === "closed") {
+      return;
+    }
+    if (this.stateValue === "open") {
+      this.stateValue = "closed";
+    }
+    this.detachListeners();
+    this.channel.close();
+  }
+
+  abort(reason = "aborted"): void {
+    if (this.stateValue === "aborted") {
+      return;
+    }
+    this.stateValue = "aborted";
+    this.firstFailure = reason;
+    this.detachListeners();
+    this.channel.close();
+  }
+
+  private ensureOpen(operation: string): void {
+    if (this.stateValue === "open") {
+      return;
+    }
+    const reason =
+      this.stateValue === "aborted"
+        ? "aborted"
+        : this.stateValue === "errored"
+          ? "errored"
+          : "closed";
+    throw createBrowserNativeMessagingOperationError(
+      nativeMessagingOperationDiagnostics(
+        this.support,
+        operation,
+        this.stateValue,
+        reason,
+        this.firstFailure,
+      ),
+    );
+  }
+
+  private attachListeners(): void {
+    if (typeof this.channel.addEventListener === "function") {
+      this.channel.addEventListener("message", this.messageListener);
+      this.channel.addEventListener("messageerror", this.messageErrorListener);
+      return;
+    }
+    this.channel.onmessage = this.messageListener;
+    this.channel.onmessageerror = this.messageErrorListener;
+  }
+
+  private detachListeners(): void {
+    if (typeof this.channel.removeEventListener === "function") {
+      this.channel.removeEventListener("message", this.messageListener);
+      this.channel.removeEventListener(
+        "messageerror",
+        this.messageErrorListener,
+      );
+    }
+    if (this.channel.onmessage === this.messageListener) {
+      this.channel.onmessage = null;
+    }
+    if (this.channel.onmessageerror === this.messageErrorListener) {
+      this.channel.onmessageerror = null;
+    }
+    this.messageHandlers.clear();
+    this.errorHandlers.clear();
+  }
+}
+
+export function createBrowserMessagePort(
+  port: BrowserNativeMessagePortLike,
+  options: BrowserMessagePortOptions,
+): BrowserMessagePort {
+  const support = supportForNativeMessagingConstruction("message_port", options);
+  return new BrowserMessagePort(port, support, { start: options.start });
+}
+
+export function createBrowserMessageChannel(
+  options: BrowserMessageChannelOptions,
+): BrowserMessageChannel {
+  const support = supportForNativeMessagingConstruction(
+    "message_channel",
+    options,
+  );
+  const globals = browserNativeMessagingGlobals(
+    options.globalObject ?? defaultGlobalObject(),
+  );
+  const MessageChannelConstructor = globals?.MessageChannel;
+  if (typeof MessageChannelConstructor !== "function") {
+    throw createBrowserNativeMessagingUnsupportedError({
+      ...support,
+      supported: false,
+      supportClass: "unsupported",
+      reason: "missing_message_channel",
+      reasonCode: "missing_message_channel",
+      message: "MessageChannel is unavailable in this browser/runtime.",
+      guidance: nativeMessagingGuidance("message_channel", "missing_message_channel"),
+    });
+  }
+  return new BrowserMessageChannel(new MessageChannelConstructor(), support, {
+    startPorts: options.startPorts,
+  });
+}
+
+export function createBrowserBroadcastChannel(
+  name: string,
+  options: BrowserBroadcastChannelOptions,
+): BrowserBroadcastChannel {
+  const support = supportForNativeMessagingConstruction(
+    "broadcast_channel",
+    options,
+  );
+  const globals = browserNativeMessagingGlobals(
+    options.globalObject ?? defaultGlobalObject(),
+  );
+  const BroadcastChannelConstructor = globals?.BroadcastChannel;
+  if (typeof BroadcastChannelConstructor !== "function") {
+    throw createBrowserNativeMessagingUnsupportedError({
+      ...support,
+      supported: false,
+      supportClass: "unsupported",
+      reason: "missing_broadcast_channel",
+      reasonCode: "missing_broadcast_channel",
+      message: "BroadcastChannel is unavailable in this browser/runtime.",
+      guidance: nativeMessagingGuidance(
+        "broadcast_channel",
+        "missing_broadcast_channel",
+      ),
+    });
+  }
+  return new BrowserBroadcastChannel(
+    new BroadcastChannelConstructor(name),
+    support,
+  );
 }
 
 function browserExecutionReasonCodeFromRuntimeSupport(

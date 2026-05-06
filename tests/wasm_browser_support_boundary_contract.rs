@@ -97,14 +97,22 @@ fn support_boundary_contract_names_canonical_docs_tests_and_scope_limits() {
     for forbidden_claim in [
         "service_worker_direct_runtime_shipped",
         "shared_worker_direct_runtime_shipped",
-        "message_channel_public_browser_sdk_shipped",
-        "broadcast_channel_public_browser_sdk_shipped",
         "webtransport_implies_raw_socket_parity",
     ] {
         assert_eq!(
             scope.get(forbidden_claim).and_then(JsonValue::as_bool),
             Some(false),
             "{forbidden_claim} must stay false"
+        );
+    }
+    for shipped_claim in [
+        "message_channel_public_browser_sdk_shipped",
+        "broadcast_channel_public_browser_sdk_shipped",
+    ] {
+        assert_eq!(
+            scope.get(shipped_claim).and_then(JsonValue::as_bool),
+            Some(true),
+            "{shipped_claim} must be true after asupersync-b35gbf.1"
         );
     }
 }
@@ -226,7 +234,7 @@ fn service_and_shared_worker_helpers_do_not_widen_direct_runtime_claims() {
 }
 
 #[test]
-fn browser_native_messaging_stays_substrate_only_not_public_sdk_surface() {
+fn browser_native_messaging_is_guarded_public_sdk_surface_without_raw_transport_claim() {
     let contract = contract();
     let browser_src = read_repo_file(BROWSER_SRC_PATH);
     let reactor_src = read_repo_file(REACTOR_SRC_PATH);
@@ -240,7 +248,7 @@ fn browser_native_messaging_stays_substrate_only_not_public_sdk_surface() {
         .expect("browser_native_messaging surface");
     assert_eq!(
         messaging.get("public_label").and_then(JsonValue::as_str),
-        Some("substrate_only_not_public_browser_sdk")
+        Some("guarded_package_level_support")
     );
 
     for marker in array(messaging, "allowed_internal_markers") {
@@ -251,18 +259,19 @@ fn browser_native_messaging_stays_substrate_only_not_public_sdk_surface() {
         );
     }
 
-    for marker in array(messaging, "forbidden_public_export_markers") {
-        let marker = marker.as_str().expect("forbidden marker string");
+    for marker in array(messaging, "required_public_export_markers") {
+        let marker = marker.as_str().expect("public marker string");
         assert!(
-            !browser_src.contains(marker),
-            "browser SDK must not add public messaging export marker: {marker}"
+            browser_src.contains(marker),
+            "browser SDK must export guarded messaging marker: {marker}"
         );
     }
 
     for marker in [
         "Browser-native messaging surfaces (`MessageChannel`, `MessagePort`, `BroadcastChannel`)",
-        "Direct-runtime feasible but not yet shipped as public Browser Edition APIs",
-        "keep `MessageChannel` / `BroadcastChannel` at the application boundary",
+        "guarded public Browser Edition helpers",
+        "explicit BrowserNativeMessagingCapability",
+        "not an asupersync channel, raw transport, or cross-origin bridge",
     ] {
         assert!(
             wasm_doc.contains(marker),
