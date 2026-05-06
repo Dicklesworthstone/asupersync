@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 #![allow(missing_docs, clippy::many_single_char_names)]
 
 //! E2E stream processing pipeline test (T4.3).
