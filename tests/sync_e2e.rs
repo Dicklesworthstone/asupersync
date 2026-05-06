@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Sync Primitives E2E Verification Suite (bd-3qc6)
 //!
 //! Comprehensive verification for cancel-aware synchronization primitives
