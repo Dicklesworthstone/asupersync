@@ -147,6 +147,37 @@ fn validate_example_rows(artifact: &JsonValue) -> Result<(), String> {
     Ok(())
 }
 
+fn promoted_registry_capability_ids(registry: &JsonValue) -> BTreeSet<String> {
+    array(registry, "capability_rows")
+        .iter()
+        .filter(|row| row.get("promotion_state").and_then(JsonValue::as_str) == Some("promoted"))
+        .map(|row| string(row, "capability_id").to_string())
+        .collect()
+}
+
+fn example_capability_ids(artifact: &JsonValue) -> BTreeSet<String> {
+    array(artifact, "example_rows")
+        .iter()
+        .map(|row| string(row, "capability_id").to_string())
+        .collect()
+}
+
+fn validate_promoted_registry_coverage(
+    artifact: &JsonValue,
+    registry: &JsonValue,
+) -> Result<(), String> {
+    let promoted = promoted_registry_capability_ids(registry);
+    let covered = example_capability_ids(artifact);
+    let missing = promoted
+        .difference(&covered)
+        .cloned()
+        .collect::<Vec<String>>();
+    if !missing.is_empty() {
+        return Err(format!("promoted_capability_examples_missing:{missing:?}"));
+    }
+    Ok(())
+}
+
 #[test]
 fn artifact_declares_examples_schema_sources_and_required_logs() {
     let artifact = artifact();
@@ -241,6 +272,60 @@ fn example_rows_have_public_recipe_or_stable_unsupported_reason() {
         &[
             ("example_rows", rows.len().to_string()),
             ("unsupported_rows", unsupported_rows.to_string()),
+            ("verdict", "pass".to_string()),
+            ("first_failure", String::new()),
+        ],
+    );
+}
+
+#[test]
+fn example_rows_cover_every_promoted_wave2_registry_capability() {
+    let artifact = artifact();
+    let registry = read_repo_json(REGISTRY_PATH);
+    validate_promoted_registry_coverage(&artifact, &registry)
+        .expect("promoted registry capability coverage");
+
+    let promoted = promoted_registry_capability_ids(&registry);
+    let covered = example_capability_ids(&artifact);
+    log_contract_event(
+        "promoted-registry-coverage",
+        &[
+            ("promoted_count", promoted.len().to_string()),
+            ("covered_count", covered.len().to_string()),
+            ("verdict", "pass".to_string()),
+            ("first_failure", String::new()),
+        ],
+    );
+}
+
+#[test]
+fn missing_promoted_registry_capability_is_rejected() {
+    let mut artifact = artifact();
+    let registry = read_repo_json(REGISTRY_PATH);
+    let target = promoted_registry_capability_ids(&registry)
+        .into_iter()
+        .next()
+        .expect("at least one promoted capability");
+    let rows = artifact
+        .get_mut("example_rows")
+        .and_then(JsonValue::as_array_mut)
+        .expect("example rows");
+    rows.retain(|row| {
+        row.get("capability_id").and_then(JsonValue::as_str) != Some(target.as_str())
+    });
+
+    let err = validate_promoted_registry_coverage(&artifact, &registry)
+        .expect_err("missing promoted capability must fail");
+    assert!(
+        err.contains("promoted_capability_examples_missing"),
+        "unexpected error: {err}"
+    );
+
+    log_contract_event(
+        "negative-missing-promoted-registry-row",
+        &[
+            ("removed_capability", target),
+            ("rejected", "true".to_string()),
             ("verdict", "pass".to_string()),
             ("first_failure", String::new()),
         ],
