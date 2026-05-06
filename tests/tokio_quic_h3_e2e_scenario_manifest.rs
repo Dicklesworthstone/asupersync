@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Contract tests for [T4.11] End-to-End QUIC/H3 Scenario Manifest with Deep Telemetry Logs.
 //!
 //! Bead: asupersync-2oh2u.4.11
@@ -388,9 +386,9 @@ fn eh_02_goaway_received() {
     let settings = H3Frame::Settings(H3Settings::default());
     state.on_control_frame(&settings).expect("SETTINGS");
 
-    let goaway = H3Frame::Goaway(42);
+    let goaway = H3Frame::Goaway(40);
     state.on_control_frame(&goaway).expect("GOAWAY");
-    assert_eq!(state.goaway_id(), Some(42));
+    assert_eq!(state.goaway_id(), Some(40));
 }
 
 /// EH-03: Multiple concurrent requests on separate streams — no interference.
