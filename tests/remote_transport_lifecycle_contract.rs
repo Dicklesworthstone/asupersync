@@ -18,8 +18,11 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::fs;
 use std::io;
 use std::net::{Shutdown, SocketAddr};
+use std::path::Path;
+use std::process::Command;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -29,6 +32,7 @@ const ORIGIN_NODE: &str = "origin-prod-loopback";
 const REMOTE_NODE: &str = "remote-prod-loopback";
 const TRANSPORT_KIND: &str = "asupersync_tcp_loopback";
 const MAX_FRAME_BYTES: usize = 64 * 1024;
+const RUNNER_PATH: &str = "scripts/run_remote_transport_lifecycle_evidence.sh";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
@@ -1281,4 +1285,76 @@ fn remote_transport_capability_denial_and_phase0_fallback_are_explicit() {
         "Failed",
     )
     .emit();
+}
+
+#[test]
+fn remote_transport_runner_dry_run_records_rch_plan() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let output_root = tempfile::tempdir().expect("temp output root");
+    let output_root_path = output_root.path().to_string_lossy().into_owned();
+    let output = Command::new("bash")
+        .current_dir(repo_root)
+        .arg(RUNNER_PATH)
+        .arg("--dry-run")
+        .arg("--run-id")
+        .arg("dry-run-smoke")
+        .arg("--output-root")
+        .arg(&output_root_path)
+        .output()
+        .expect("run remote transport lifecycle dry-run");
+
+    assert!(
+        output.status.success(),
+        "dry-run runner failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let run_dir = output_root.path().join("run_dry-run-smoke");
+    let report_path = run_dir.join("run_report.json");
+    let log_path = run_dir.join("run.log");
+    let report: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&report_path)
+            .unwrap_or_else(|_| panic!("missing {}", report_path.display())),
+    )
+    .expect("valid dry-run report json");
+    let log =
+        fs::read_to_string(&log_path).unwrap_or_else(|_| panic!("missing {}", log_path.display()));
+    let runner = fs::read_to_string(repo_root.join(RUNNER_PATH)).expect("read runner script");
+    let artifact: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(
+            repo_root.join("artifacts/wave2/remote_transport_lifecycle_evidence.json"),
+        )
+        .expect("read remote transport lifecycle artifact"),
+    )
+    .expect("valid artifact json");
+
+    assert_eq!(report["dry_run"].as_bool(), Some(true));
+    assert_eq!(report["validation_passed"].as_bool(), Some(true));
+    assert_eq!(
+        report["missing_scenarios"].as_array().map(Vec::len),
+        Some(0)
+    );
+    assert!(log.contains("REMOTE_TRANSPORT_LIFECYCLE_DRY_RUN"));
+    assert!(log.contains("rch exec -- env CARGO_INCREMENTAL=0"));
+    for marker in [
+        "RCH_BIN=\"${RCH_BIN:-$HOME/.local/bin/rch}\"",
+        "RCH_COMMAND=(\"${RCH_BIN}\" exec -- \"${TEST_COMMAND[@]}\")",
+        "falling back to local",
+        "REMOTE_TRANSPORT_LIFECYCLE_DRY_RUN",
+        "--dry-run",
+    ] {
+        assert!(runner.contains(marker), "runner missing marker: {marker}");
+    }
+    let validation_commands = artifact["validation_commands"]
+        .as_array()
+        .expect("validation_commands array");
+    assert!(
+        validation_commands
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .filter(|command| command.contains("cargo ") || command.starts_with("rustfmt "))
+            .all(|command| command.contains("rch exec --")),
+        "cargo/rustfmt validation commands must be rch-routed"
+    );
 }

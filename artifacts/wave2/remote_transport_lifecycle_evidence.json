@@ -139,8 +139,9 @@
     }
   ],
   "validation_commands": [
-    "rustfmt --edition 2024 --check tests/remote_transport_lifecycle_contract.rs",
+    "rch exec -- rustfmt --edition 2024 --check tests/remote_transport_lifecycle_contract.rs",
     "bash -n scripts/run_remote_transport_lifecycle_evidence.sh",
+    "bash scripts/run_remote_transport_lifecycle_evidence.sh --dry-run --run-id wave2-remote-transport-dry-run --timeout-sec 180",
     "bash scripts/run_remote_transport_lifecycle_evidence.sh --run-id wave2-remote-transport --timeout-sec 180",
     "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_remote_transport_lifecycle cargo test -p asupersync --test remote_transport_lifecycle_contract --features test-internals -- --nocapture",
     "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_remote_transport_clippy cargo clippy -p asupersync --test remote_transport_lifecycle_contract --features test-internals -- -D warnings",
