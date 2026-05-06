@@ -507,7 +507,7 @@ fn smoke_runner_emits_required_log_fields_and_report() {
 }
 
 #[test]
-fn registry_row_keeps_examples_proof_pending_until_artifact_is_promoted() {
+fn registry_row_records_promoted_examples_artifact_contract() {
     let registry = read_repo_json(REGISTRY_PATH);
     let rows = array(&registry, "capability_rows");
     let row = rows
@@ -524,11 +524,27 @@ fn registry_row_keeps_examples_proof_pending_until_artifact_is_promoted() {
     );
     assert_eq!(
         row.get("promotion_state").and_then(JsonValue::as_str),
-        Some("pending")
+        Some("promoted")
+    );
+    assert_eq!(
+        row.get("support_class_after").and_then(JsonValue::as_str),
+        Some("artifact-contract-backed")
     );
     assert!(
-        string_set(row, "planned_artifact_paths").contains(ARTIFACT_PATH),
-        "registry row must keep the examples artifact as planned proof"
+        string_set(row, "artifact_paths").contains(ARTIFACT_PATH),
+        "registry row must record the examples artifact as shipped proof"
+    );
+    assert!(
+        string_set(row, "planned_artifact_paths").is_empty(),
+        "promoted examples registry row cannot keep planned artifact paths"
+    );
+    assert!(
+        row.get("unsupported_reason")
+            .and_then(JsonValue::as_str)
+            .unwrap_or_default()
+            .trim()
+            .is_empty(),
+        "promoted examples registry row cannot carry unsupported_reason"
     );
     assert!(
         string_set(row, "unit_proof_commands")
@@ -543,10 +559,10 @@ fn registry_row_keeps_examples_proof_pending_until_artifact_is_promoted() {
     );
 
     log_contract_event(
-        "registry-pending-link",
+        "registry-promoted-link",
         &[
-            ("promotion_state", "pending".to_string()),
-            ("planned_artifact", ARTIFACT_PATH.to_string()),
+            ("promotion_state", "promoted".to_string()),
+            ("artifact", ARTIFACT_PATH.to_string()),
             ("verdict", "pass".to_string()),
             ("first_failure", String::new()),
         ],
