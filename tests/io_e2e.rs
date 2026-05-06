@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Async I/O Traits Verification Suite - E2E Tests
 //!
 //! These tests exercise adapter composition and end-to-end I/O flows using the
