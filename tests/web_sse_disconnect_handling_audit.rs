@@ -327,8 +327,423 @@ fn sse_to_body_is_a_pure_synchronous_serializer() {
 
 #[cfg(feature = "test-internals")]
 mod behavioral {
-    use asupersync::web::response::{IntoResponse, StatusCode};
-    use asupersync::web::sse::{Sse, SseEvent};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use asupersync::Cx;
+    use asupersync::web::extract::Request;
+    use asupersync::web::request_region::{RequestContext, RequestRegion};
+    use asupersync::web::response::{IntoResponse, Response, StatusCode};
+    use asupersync::web::sse::{
+        Sse, SseEvent, StreamingSse, StreamingSseError, StreamingSseSource,
+    };
+    use serde_json::json;
+
+    const BEAD_ID: &str = "asupersync-o74l7u.1.2";
+    const ROUTE: &str = "/events";
+    const RESPONSE_KIND: &str = "streaming-sse";
+
+    #[derive(Debug)]
+    struct LifecycleCounters {
+        region: usize,
+        task: usize,
+        obligation: usize,
+        buffer_bytes: usize,
+    }
+
+    impl LifecycleCounters {
+        const fn streaming_sse_idle(buffer_bytes: usize) -> Self {
+            Self {
+                region: 0,
+                task: 0,
+                obligation: 0,
+                buffer_bytes,
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct LifecycleObservation {
+        chunks: Vec<Vec<u8>>,
+        counters_before: LifecycleCounters,
+        counters_after: LifecycleCounters,
+        first_failure: Option<String>,
+    }
+
+    impl LifecycleObservation {
+        const fn new() -> Self {
+            Self {
+                chunks: Vec::new(),
+                counters_before: LifecycleCounters::streaming_sse_idle(0),
+                counters_after: LifecycleCounters::streaming_sse_idle(0),
+                first_failure: None,
+            }
+        }
+
+        fn record_before<S: StreamingSseSource>(&mut self, stream: &StreamingSse<S>) {
+            self.counters_before = LifecycleCounters::streaming_sse_idle(stream.bytes_emitted());
+        }
+
+        fn record_after<S: StreamingSseSource>(&mut self, stream: &StreamingSse<S>) {
+            self.counters_after = LifecycleCounters::streaming_sse_idle(stream.bytes_emitted());
+        }
+
+        fn push_chunk(&mut self, chunk: Vec<u8>) {
+            self.chunks.push(chunk);
+        }
+    }
+
+    #[derive(Debug)]
+    struct LifecycleProofRow {
+        scenario_id: &'static str,
+        client_disconnect_at: &'static str,
+        expected_status: StatusCode,
+        actual_status: StatusCode,
+        cancel_requested_after: bool,
+        expected_cancel_requested: bool,
+        counters_before: LifecycleCounters,
+        counters_after: LifecycleCounters,
+        chunk_digests: Vec<String>,
+        first_failure: Option<String>,
+    }
+
+    impl LifecycleProofRow {
+        fn verdict(&self) -> &'static str {
+            if self.first_failure.is_none()
+                && self.actual_status == self.expected_status
+                && self.cancel_requested_after == self.expected_cancel_requested
+                && self.counters_before.region == self.counters_after.region
+                && self.counters_before.task == self.counters_after.task
+                && self.counters_before.obligation == self.counters_after.obligation
+            {
+                "pass"
+            } else {
+                "fail"
+            }
+        }
+
+        fn emit(&self) {
+            let row = json!({
+                "bead_id": BEAD_ID,
+                "scenario_id": self.scenario_id,
+                "route": ROUTE,
+                "response_kind": RESPONSE_KIND,
+                "client_disconnect_at": self.client_disconnect_at,
+                "region_count_before": self.counters_before.region,
+                "region_count_after": self.counters_after.region,
+                "task_count_before": self.counters_before.task,
+                "task_count_after": self.counters_after.task,
+                "obligation_count_before": self.counters_before.obligation,
+                "obligation_count_after": self.counters_after.obligation,
+                "buffer_bytes_before": self.counters_before.buffer_bytes,
+                "buffer_bytes_after": self.counters_after.buffer_bytes,
+                "chunk_digests": &self.chunk_digests,
+                "expected_status": self.expected_status.as_u16(),
+                "actual_status": self.actual_status.as_u16(),
+                "expected_cancel_requested": self.expected_cancel_requested,
+                "cancel_requested_after": self.cancel_requested_after,
+                "verdict": self.verdict(),
+                "first_failure": self.first_failure.as_deref().unwrap_or(""),
+            });
+            eprintln!("{row}");
+        }
+
+        fn assert_passed(&self) {
+            assert_eq!(
+                self.expected_status, self.actual_status,
+                "{} expected HTTP {} but observed {}",
+                self.scenario_id, self.expected_status, self.actual_status,
+            );
+            assert_eq!(
+                self.expected_cancel_requested, self.cancel_requested_after,
+                "{} cancellation request state mismatch",
+                self.scenario_id,
+            );
+            assert_eq!(
+                self.counters_before.region, self.counters_after.region,
+                "{} leaked request child regions",
+                self.scenario_id,
+            );
+            assert_eq!(
+                self.counters_before.task, self.counters_after.task,
+                "{} leaked request child tasks",
+                self.scenario_id,
+            );
+            assert_eq!(
+                self.counters_before.obligation, self.counters_after.obligation,
+                "{} leaked request obligations",
+                self.scenario_id,
+            );
+            assert!(
+                self.first_failure.is_none(),
+                "{} recorded first_failure={:?}",
+                self.scenario_id,
+                self.first_failure,
+            );
+            assert_eq!(
+                "pass",
+                self.verdict(),
+                "{} proof row failed",
+                self.scenario_id
+            );
+        }
+    }
+
+    fn run_lifecycle_scenario(
+        scenario_id: &'static str,
+        client_disconnect_at: &'static str,
+        expected_status: StatusCode,
+        expected_cancel_requested: bool,
+        drive: impl FnOnce(&RequestContext<'_>, &mut LifecycleObservation) -> Response,
+    ) -> LifecycleProofRow {
+        let cx = Cx::for_testing();
+        let request = Request::new("GET", ROUTE);
+        let region = RequestRegion::new(&cx, request);
+        let mut observation = LifecycleObservation::new();
+        let outcome = region.run(|ctx| drive(ctx, &mut observation));
+        let response = outcome.into_response();
+
+        LifecycleProofRow {
+            scenario_id,
+            client_disconnect_at,
+            expected_status,
+            actual_status: response.status,
+            cancel_requested_after: cx.is_cancel_requested(),
+            expected_cancel_requested,
+            counters_before: observation.counters_before,
+            counters_after: observation.counters_after,
+            chunk_digests: observation
+                .chunks
+                .iter()
+                .map(|chunk| chunk_digest(chunk))
+                .collect(),
+            first_failure: observation.first_failure,
+        }
+    }
+
+    fn chunk_digest(bytes: &[u8]) -> String {
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        format!("fnv1a64:{hash:016x}:len{}", bytes.len())
+    }
+
+    #[derive(Debug, Clone)]
+    struct FailingSource {
+        cancel_calls: Rc<Cell<usize>>,
+    }
+
+    impl FailingSource {
+        fn new(cancel_calls: Rc<Cell<usize>>) -> Self {
+            Self { cancel_calls }
+        }
+    }
+
+    impl StreamingSseSource for FailingSource {
+        fn next_event(&mut self, _cx: &Cx) -> Result<Option<SseEvent>, StreamingSseError> {
+            Err(StreamingSseError::Producer("synthetic failure".to_string()))
+        }
+
+        fn cancel(&mut self) {
+            let next = self.cancel_calls.get() + 1;
+            self.cancel_calls.set(next);
+        }
+    }
+
+    #[test]
+    fn streaming_sse_request_region_lifecycle_rows_cover_disconnects_and_overflow() {
+        let rows = vec![
+            run_lifecycle_scenario(
+                "normal-completion",
+                "none",
+                StatusCode::OK,
+                false,
+                |ctx, observation| {
+                    let mut stream = StreamingSse::new(vec![
+                        SseEvent::default().data("first"),
+                        SseEvent::default().data("second"),
+                    ]);
+                    observation.record_before(&stream);
+
+                    let first = stream
+                        .next_chunk(ctx.cx())
+                        .expect("first event chunk should serialize")
+                        .expect("first event should be present");
+                    observation.push_chunk(first);
+
+                    let second = stream
+                        .next_chunk(ctx.cx())
+                        .expect("second event chunk should serialize")
+                        .expect("second event should be present");
+                    observation.push_chunk(second);
+
+                    assert!(
+                        stream
+                            .next_chunk(ctx.cx())
+                            .expect("completion should not fail")
+                            .is_none(),
+                        "normal completion must close the stream",
+                    );
+                    assert!(stream.is_closed(), "completed stream must be closed");
+                    observation.record_after(&stream);
+                    Response::empty(StatusCode::OK)
+                },
+            ),
+            run_lifecycle_scenario(
+                "disconnect-before-first-event",
+                "before-first-event",
+                StatusCode::CLIENT_CLOSED_REQUEST,
+                true,
+                |ctx, observation| {
+                    let mut stream =
+                        StreamingSse::new(vec![SseEvent::default().data("never-emitted")]);
+                    observation.record_before(&stream);
+                    stream.cancel_for_disconnect(ctx.cx());
+                    assert!(stream.is_closed(), "disconnect must close the stream");
+                    assert!(
+                        stream
+                            .next_chunk(ctx.cx())
+                            .expect("closed stream should not error")
+                            .is_none(),
+                        "closed stream must not emit after disconnect",
+                    );
+                    observation.record_after(&stream);
+                    Response::empty(StatusCode::CLIENT_CLOSED_REQUEST)
+                },
+            ),
+            run_lifecycle_scenario(
+                "disconnect-mid-stream",
+                "after-first-event",
+                StatusCode::CLIENT_CLOSED_REQUEST,
+                true,
+                |ctx, observation| {
+                    let mut stream = StreamingSse::new(vec![
+                        SseEvent::default().data("committed"),
+                        SseEvent::default().data("cancelled"),
+                    ]);
+                    observation.record_before(&stream);
+                    let committed = stream
+                        .next_chunk(ctx.cx())
+                        .expect("first event chunk should serialize")
+                        .expect("first event should be present");
+                    observation.push_chunk(committed);
+                    stream.cancel_for_disconnect(ctx.cx());
+                    assert!(
+                        stream
+                            .next_chunk(ctx.cx())
+                            .expect("closed stream should not error")
+                            .is_none(),
+                        "mid-stream disconnect must not emit later events",
+                    );
+                    observation.record_after(&stream);
+                    Response::empty(StatusCode::CLIENT_CLOSED_REQUEST)
+                },
+            ),
+            run_lifecycle_scenario(
+                "producer-error-cancels-source",
+                "producer-error",
+                StatusCode::INTERNAL_SERVER_ERROR,
+                true,
+                |ctx, observation| {
+                    let cancel_calls = Rc::new(Cell::new(0));
+                    let source = FailingSource::new(Rc::clone(&cancel_calls));
+                    let mut stream = StreamingSse::from_source(source);
+                    observation.record_before(&stream);
+
+                    let error = stream
+                        .next_chunk(ctx.cx())
+                        .expect_err("producer failure must surface to transport");
+                    assert_eq!(
+                        error,
+                        StreamingSseError::Producer("synthetic failure".to_string()),
+                    );
+
+                    stream.cancel_for_disconnect(ctx.cx());
+                    assert_eq!(
+                        cancel_calls.get(),
+                        1,
+                        "transport must cancel producer after surfacing producer error",
+                    );
+                    observation.record_after(&stream);
+                    Response::empty(StatusCode::INTERNAL_SERVER_ERROR)
+                },
+            ),
+            run_lifecycle_scenario(
+                "heartbeat-only-completion",
+                "none",
+                StatusCode::OK,
+                false,
+                |ctx, observation| {
+                    let mut stream = StreamingSse::empty().heartbeat_comment("proof-heartbeat");
+                    observation.record_before(&stream);
+                    let heartbeat = stream
+                        .heartbeat_chunk(ctx.cx())
+                        .expect("heartbeat chunk should serialize");
+                    observation.push_chunk(heartbeat);
+                    assert!(
+                        stream
+                            .next_chunk(ctx.cx())
+                            .expect("empty source completion should not fail")
+                            .is_none(),
+                        "empty stream must complete after heartbeat-only proof",
+                    );
+                    observation.record_after(&stream);
+                    Response::empty(StatusCode::OK)
+                },
+            ),
+            run_lifecycle_scenario(
+                "backpressure-overflow-no-partial-commit",
+                "backpressure-overflow",
+                StatusCode::PAYLOAD_TOO_LARGE,
+                false,
+                |ctx, observation| {
+                    let first_event = SseEvent::default().data("one");
+                    let first_len = first_event.to_string().len();
+                    let mut stream =
+                        StreamingSse::new(vec![first_event, SseEvent::default().data("two")])
+                            .max_total_bytes(first_len);
+                    observation.record_before(&stream);
+
+                    let committed = stream
+                        .next_chunk(ctx.cx())
+                        .expect("first event should fit exactly under total cap")
+                        .expect("first event should be present");
+                    observation.push_chunk(committed);
+                    let bytes_before_overflow = stream.bytes_emitted();
+                    let error = stream
+                        .next_chunk(ctx.cx())
+                        .expect_err("second event must overflow total byte cap");
+                    assert!(
+                        matches!(
+                            error,
+                            StreamingSseError::TotalBytesExceeded { actual, max }
+                                if actual > max && max == first_len
+                        ),
+                        "expected total-byte overflow after committed first chunk, got {error:?}",
+                    );
+                    assert_eq!(
+                        bytes_before_overflow,
+                        stream.bytes_emitted(),
+                        "overflow must not partially commit response bytes",
+                    );
+                    observation.record_after(&stream);
+                    Response::empty(StatusCode::PAYLOAD_TOO_LARGE)
+                },
+            ),
+        ];
+
+        assert_eq!(
+            rows.len(),
+            6,
+            "lifecycle proof must cover the six accepted SSE scenarios",
+        );
+        for row in &rows {
+            row.emit();
+            row.assert_passed();
+        }
+    }
 
     #[test]
     fn sse_into_response_returns_complete_body_synchronously() {
