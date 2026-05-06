@@ -334,7 +334,6 @@ tokio = { version = "1.0", features = ["rt", "sync", "time"] }
 [[test]]
 name = "kafka_real_broker"
 path = "tests/integration/kafka_real_broker.rs"
-required-features = ["kafka"]
 
 [[bench]]
 name = "phase0_baseline"

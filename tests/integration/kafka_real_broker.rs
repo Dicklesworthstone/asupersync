@@ -17,9 +17,11 @@ use asupersync::{
 };
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+const KAFKA_BROKER_PARITY_BEAD_ID: &str = "asupersync-0xbecl";
 
 /// Real-broker test configuration
 struct RealBrokerConfig {
@@ -271,13 +273,14 @@ impl KafkaMessageFactory {
     }
 
     /// Create transaction message for abort/replay testing.
+    #[allow(dead_code)]
     fn create_transaction_message(
         &self,
         transaction_id: &str,
         transaction_type: &str,
         amount: u64,
     ) -> (Vec<u8>, Vec<u8>) {
-        let key = format!("{}", transaction_id).into_bytes();
+        let key = transaction_id.to_string().into_bytes();
         let payload = json!({
             "transaction_id": transaction_id,
             "type": transaction_type,
@@ -293,6 +296,7 @@ impl KafkaMessageFactory {
     }
 
     /// Create payment message with sequence for ordering tests.
+    #[allow(dead_code)]
     fn create_payment_message_with_sequence(
         &self,
         user_id: &str,
@@ -339,6 +343,344 @@ fn unique_topic(base: &str) -> String {
         .as_millis();
     let random = fastrand::u32(..);
     format!("{}-{}-{}", base, timestamp, random)
+}
+
+fn kafka_broker_proof_artifact_path() -> String {
+    std::env::var("ASUPERSYNC_KAFKA_BROKER_PARITY_PROOF_DIR")
+        .unwrap_or_else(|_| "target/kafka-broker-parity-proof/asupersync-0xbecl".to_string())
+}
+
+fn kafka_broker_proof_features() -> Value {
+    json!({
+        "kafka": cfg!(feature = "kafka"),
+        "test_internals": cfg!(feature = "test-internals")
+    })
+}
+
+fn kafka_auth_mode() -> &'static str {
+    if std::env::var_os("KAFKA_SASL_USERNAME").is_some()
+        || std::env::var_os("KAFKA_SASL_PASSWORD").is_some()
+        || std::env::var_os("KAFKA_SASL_MECHANISM").is_some()
+    {
+        "sasl"
+    } else {
+        "plaintext"
+    }
+}
+
+fn redact_bootstrap_server(server: &str) -> String {
+    let trimmed = server.trim();
+    if let Some((_, host)) = trimmed.rsplit_once('@') {
+        format!("redacted@{host}")
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn redacted_bootstrap_servers(servers: &[String]) -> Value {
+    json!(
+        servers
+            .iter()
+            .map(|server| redact_bootstrap_server(server))
+            .collect::<Vec<_>>()
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_kafka_broker_proof_row(
+    scenario_id: &str,
+    broker_version: &str,
+    connection_uri_redacted: Value,
+    topic_or_stream: &str,
+    message_count: usize,
+    ack_count: usize,
+    consumer_lag: i64,
+    reconnect_count: usize,
+    cancellation_point: &str,
+    expected_result: &str,
+    actual_result: &str,
+    unsupported_reason: &str,
+    verdict: &str,
+    first_failure: &str,
+) {
+    println!(
+        "{}",
+        json!({
+            "bead_id": KAFKA_BROKER_PARITY_BEAD_ID,
+            "broker_kind": "kafka",
+            "broker_version": broker_version,
+            "scenario_id": scenario_id,
+            "feature_flags": kafka_broker_proof_features(),
+            "connection_uri_redacted": connection_uri_redacted,
+            "auth_mode": kafka_auth_mode(),
+            "topic_or_stream": topic_or_stream,
+            "message_count": message_count,
+            "ack_count": ack_count,
+            "consumer_lag": consumer_lag,
+            "reconnect_count": reconnect_count,
+            "cancellation_point": cancellation_point,
+            "expected_result": expected_result,
+            "actual_result": actual_result,
+            "artifact_path": kafka_broker_proof_artifact_path(),
+            "unsupported_reason": unsupported_reason,
+            "verdict": verdict,
+            "first_failure": first_failure
+        })
+    );
+}
+
+#[test]
+fn kafka_broker_parity_default_feature_gate_logs_required_fields() {
+    let config = ProducerConfig::new(vec!["localhost:9092".to_string()]).require_kafka_feature();
+    let result = config.validate();
+
+    #[cfg(feature = "kafka")]
+    let (actual_result, verdict, first_failure) = if result.is_ok() {
+        (
+            "kafka feature enabled; real broker lane must run separately",
+            "pass",
+            "",
+        )
+    } else {
+        (
+            "kafka feature enabled but feature requirement validation failed",
+            "fail",
+            "feature requirement rejected with kafka feature enabled",
+        )
+    };
+
+    #[cfg(not(feature = "kafka"))]
+    let (actual_result, verdict, first_failure) = match result {
+        Err(KafkaError::FeatureDisabled) => (
+            "default build rejects real Kafka requirement with FeatureDisabled",
+            "pass",
+            "",
+        ),
+        Ok(()) => (
+            "default build accepted real Kafka requirement",
+            "fail",
+            "default build must fail closed for required Kafka feature",
+        ),
+        Err(_) => (
+            "default build rejected real Kafka requirement with unexpected error",
+            "fail",
+            "unexpected error kind for missing kafka feature",
+        ),
+    };
+
+    emit_kafka_broker_proof_row(
+        "kafka-default-feature-gate",
+        "n/a",
+        redacted_bootstrap_servers(&config.bootstrap_servers),
+        "",
+        0,
+        0,
+        0,
+        0,
+        "feature-gate",
+        "default build fails closed for real Kafka broker requirement",
+        actual_result,
+        "",
+        verdict,
+        first_failure,
+    );
+
+    assert_eq!(verdict, "pass");
+}
+
+#[derive(Debug)]
+struct KafkaBrokerProofOutcome {
+    message_count: usize,
+    ack_count: usize,
+    consumer_lag: i64,
+}
+
+async fn run_kafka_broker_parity_roundtrip(
+    cx: &asupersync::cx::Cx,
+    bootstrap_servers: Vec<String>,
+    topic: &str,
+) -> Result<KafkaBrokerProofOutcome, String> {
+    let producer_config = ProducerConfig::new(bootstrap_servers.clone())
+        .client_id("asupersync-kafka-parity-producer")
+        .acks(Acks::All)
+        .enable_idempotence(true)
+        .retries(3)
+        .allow_insecure_transport_for_testing(true)
+        .require_kafka_feature();
+    let producer = KafkaProducer::new(producer_config).map_err(|error| error.to_string())?;
+
+    let group_id = format!("asupersync-kafka-parity-{}", fastrand::u32(..));
+    let consumer_config = ConsumerConfig::new(bootstrap_servers, &group_id)
+        .client_id("asupersync-kafka-parity-consumer")
+        .auto_offset_reset(AutoOffsetReset::Earliest)
+        .enable_auto_commit(false)
+        .max_poll_records(1)
+        .force_real_kafka(true)
+        .allow_insecure_transport_for_testing(true);
+    let consumer = KafkaConsumer::new(consumer_config).map_err(|error| error.to_string())?;
+
+    let result: Result<KafkaBrokerProofOutcome, String> = async {
+        consumer
+            .subscribe(cx, &[topic])
+            .await
+            .map_err(|error| error.to_string())?;
+        consumer
+            .rebalance(cx, &[TopicPartitionOffset::new(topic, 0, 0)])
+            .await
+            .map_err(|error| error.to_string())?;
+
+        let key = b"asupersync-kafka-proof-key".to_vec();
+        let payload = b"asupersync-kafka-proof-payload".to_vec();
+        let metadata = producer
+            .send(cx, topic, Some(&key), &payload, Some(0))
+            .await
+            .map_err(|error| error.to_string())?;
+        producer
+            .flush(cx, Duration::from_secs(10))
+            .await
+            .map_err(|error| error.to_string())?;
+
+        let poll_deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let mut received = None;
+        while std::time::Instant::now() < poll_deadline {
+            if let Some(record) = consumer
+                .poll(cx, Duration::from_secs(1))
+                .await
+                .map_err(|error| error.to_string())?
+                && record.topic == topic
+                && record.key.as_deref() == Some(key.as_slice())
+                && record.payload == payload
+            {
+                received = Some(record);
+                break;
+            }
+        }
+
+        let record = received.ok_or_else(|| {
+            "timed out waiting for matching record from real Kafka broker".to_string()
+        })?;
+        consumer
+            .commit_offsets(
+                cx,
+                &[TopicPartitionOffset::new(
+                    record.topic.clone(),
+                    record.partition,
+                    record.offset + 1,
+                )],
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+
+        let committed = consumer
+            .committed_offset(&record.topic, record.partition)
+            .ok_or_else(|| "committed offset not visible after commit".to_string())?;
+        let consumer_lag = metadata.offset.saturating_add(1).saturating_sub(committed);
+
+        Ok(KafkaBrokerProofOutcome {
+            message_count: 1,
+            ack_count: usize::from(metadata.offset >= 0),
+            consumer_lag,
+        })
+    }
+    .await;
+
+    let consumer_close = consumer.close(cx).await.map_err(|error| error.to_string());
+    let producer_close = producer
+        .close(cx, Duration::from_secs(10))
+        .await
+        .map_err(|error| error.to_string());
+
+    let outcome = result?;
+    consumer_close?;
+    producer_close?;
+
+    Ok(outcome)
+}
+
+#[test]
+fn kafka_broker_parity_real_broker_proof_row() {
+    let config = RealBrokerConfig::new();
+    let redacted_servers = redacted_bootstrap_servers(&config.bootstrap_servers);
+    let topic = unique_topic("asupersync-kafka-parity");
+
+    if !config.enabled {
+        let unsupported_reason = config
+            .reason
+            .as_deref()
+            .unwrap_or("real Kafka broker unavailable");
+        emit_kafka_broker_proof_row(
+            "kafka-producer-consumer-roundtrip",
+            "unavailable",
+            redacted_servers,
+            &topic,
+            0,
+            0,
+            0,
+            0,
+            "broker-availability",
+            "real broker producer send, consumer receive, explicit offset commit, and cleanup",
+            "deterministic skip because broker configuration is unavailable",
+            unsupported_reason,
+            "skip",
+            "",
+        );
+        return;
+    }
+
+    let outcome_slot = Arc::new(Mutex::new(None));
+    let result_slot = Arc::clone(&outcome_slot);
+    let bootstrap_servers = config.bootstrap_servers.clone();
+    let topic_for_test = topic.clone();
+
+    run_test_with_cx(|cx| async move {
+        let outcome =
+            run_kafka_broker_parity_roundtrip(&cx, bootstrap_servers, &topic_for_test).await;
+        *result_slot.lock().expect("outcome slot poisoned") = Some(outcome);
+    });
+
+    let outcome = outcome_slot
+        .lock()
+        .expect("outcome slot poisoned")
+        .take()
+        .expect("Kafka broker proof did not record an outcome");
+
+    match outcome {
+        Ok(outcome) => emit_kafka_broker_proof_row(
+            "kafka-producer-consumer-roundtrip",
+            "unknown",
+            redacted_servers,
+            &topic,
+            outcome.message_count,
+            outcome.ack_count,
+            outcome.consumer_lag,
+            0,
+            "producer-consumer-cleanup",
+            "real broker producer send, consumer receive, explicit offset commit, and cleanup",
+            "message reached broker and was consumed with explicit offset commit",
+            "",
+            "pass",
+            "",
+        ),
+        Err(error) => {
+            emit_kafka_broker_proof_row(
+                "kafka-producer-consumer-roundtrip",
+                "unknown",
+                redacted_servers,
+                &topic,
+                0,
+                0,
+                0,
+                0,
+                "producer-consumer-cleanup",
+                "real broker producer send, consumer receive, explicit offset commit, and cleanup",
+                "real broker proof failed",
+                "",
+                "fail",
+                &error,
+            );
+            panic!("Kafka broker parity proof failed: {error}");
+        }
+    }
 }
 
 #[test]
@@ -863,14 +1205,15 @@ fn test_real_broker_payment_message_delivery() {
         let producer = KafkaProducer::new(producer_config).unwrap();
 
         // Consumer with strict ordering requirements
-        let consumer_config = ConsumerConfig::new(config.bootstrap_servers.clone())
-            .group_id("payment-consumer-group")
-            .auto_offset_reset(AutoOffsetReset::Earliest)
-            .enable_auto_commit(false) // Manual commit for payment processing
-            .max_poll_records(1); // One payment at a time
+        let consumer_config =
+            ConsumerConfig::new(config.bootstrap_servers.clone(), "payment-consumer-group")
+                .auto_offset_reset(AutoOffsetReset::Earliest)
+                .enable_auto_commit(false) // Manual commit for payment processing
+                .max_poll_records(1)
+                .force_real_kafka(true); // One payment at a time
 
         let consumer = KafkaConsumer::new(consumer_config).unwrap();
-        consumer.subscribe(&[&payment_topic]).unwrap();
+        consumer.subscribe(&cx, &[&payment_topic]).await.unwrap();
 
         log.phase("send_payment_messages");
 
@@ -907,51 +1250,42 @@ fn test_real_broker_payment_message_delivery() {
         let poll_start = std::time::Instant::now();
 
         while received_messages.len() < payment_messages.len() && poll_start.elapsed() < timeout {
-            if let Some(records) = consumer
+            if let Some(record) = consumer
                 .poll(&cx, Duration::from_millis(1000))
                 .await
                 .unwrap()
             {
-                for record in records {
-                    // Payment processing simulation: verify message integrity
-                    let key = String::from_utf8(record.key.unwrap_or_default()).unwrap();
-                    let payload = String::from_utf8(record.value).unwrap();
-                    let payment: serde_json::Value = serde_json::from_str(&payload).unwrap();
+                // Payment processing simulation: verify message integrity
+                let key = record.key.clone().unwrap_or_default();
+                let payload = record.payload.clone();
+                let payment: serde_json::Value = serde_json::from_slice(&payload).unwrap();
 
-                    // Verify payment message structure
-                    assert!(payment["user_id"].is_string(), "Payment must have user_id");
-                    assert!(
-                        payment["amount_cents"].is_u64(),
-                        "Payment must have amount in cents"
-                    );
-                    assert!(
-                        payment["transaction_id"].is_string(),
-                        "Payment must have transaction_id"
-                    );
-                    assert!(
-                        payment["timestamp"].is_string(),
-                        "Payment must have timestamp"
-                    );
+                // Verify payment message structure
+                assert!(payment["user_id"].is_string(), "Payment must have user_id");
+                assert!(
+                    payment["amount_cents"].is_u64(),
+                    "Payment must have amount in cents"
+                );
+                assert!(
+                    payment["transaction_id"].is_string(),
+                    "Payment must have transaction_id"
+                );
+                assert!(
+                    payment["timestamp"].is_string(),
+                    "Payment must have timestamp"
+                );
 
-                    received_messages.push((key, payload));
+                received_messages.push((key, payload));
 
-                    // Manual commit after processing (like real payment system)
-                    let offset = TopicPartitionOffset {
-                        topic: record.topic.clone(),
-                        partition: record.partition,
-                        offset: record.offset + 1, // Next offset to read
-                    };
-                    consumer.commit_offset(&cx, &[offset]).await.unwrap();
+                // Manual commit after processing (like real payment system)
+                let offset = TopicPartitionOffset::new(
+                    record.topic.clone(),
+                    record.partition,
+                    record.offset + 1,
+                );
+                consumer.commit_offsets(&cx, &[offset]).await.unwrap();
 
-                    log.kafka_operation(
-                        "payment_processed",
-                        None,
-                        Some(&format!(
-                            "user={}, amount={}",
-                            payment["user_id"], payment["amount_cents"]
-                        )),
-                    );
-                }
+                log.kafka_operation("payment_processed", None, None);
             }
         }
 
