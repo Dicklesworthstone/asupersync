@@ -5,17 +5,17 @@
 #   bash scripts/kafka_broker_parity_proof_runner.sh [output-dir]
 #
 # Default output:
-#   target/kafka-broker-parity-proof/asupersync-0xbecl/{run.log,scenario_rows.jsonl,run_report.json}
+#   target/kafka-broker-parity-proof/$ASUPERSYNC_KAFKA_BROKER_PARITY_BEAD_ID/{run.log,scenario_rows.jsonl,run_report.json}
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-OUT_DIR="${1:-$PROJECT_DIR/target/kafka-broker-parity-proof/asupersync-0xbecl}"
+BEAD_ID="${ASUPERSYNC_KAFKA_BROKER_PARITY_BEAD_ID:-asupersync-0xbecl}"
+OUT_DIR="${1:-$PROJECT_DIR/target/kafka-broker-parity-proof/$BEAD_ID}"
 LOG_FILE="$OUT_DIR/run.log"
 ROWS_FILE="$OUT_DIR/scenario_rows.jsonl"
 REPORT_FILE="$OUT_DIR/run_report.json"
-BEAD_ID="asupersync-0xbecl"
 
 EXPECTED_SCENARIOS=(
   "kafka-default-feature-gate"
@@ -106,6 +106,7 @@ DEFAULT_CMD=(
   CARGO_PROFILE_TEST_DEBUG=0
   "RUSTFLAGS=-C debuginfo=0"
   "ASUPERSYNC_KAFKA_BROKER_PARITY_PROOF_DIR=$OUT_DIR"
+  "ASUPERSYNC_KAFKA_BROKER_PARITY_BEAD_ID=$BEAD_ID"
   cargo test -p asupersync
   --target-dir "$DEFAULT_TARGET_DIR"
   --test kafka_real_broker
@@ -130,6 +131,7 @@ KAFKA_CMD=(
   CARGO_PROFILE_TEST_DEBUG=0
   "RUSTFLAGS=-C debuginfo=0"
   "ASUPERSYNC_KAFKA_BROKER_PARITY_PROOF_DIR=$OUT_DIR"
+  "ASUPERSYNC_KAFKA_BROKER_PARITY_BEAD_ID=$BEAD_ID"
   cargo test -p asupersync
   --target-dir "$KAFKA_TARGET_DIR"
   --test kafka_real_broker
@@ -148,7 +150,15 @@ TEST_STATUS=0
 run_lane default-feature-gate "${DEFAULT_CMD[@]}" || TEST_STATUS=1
 run_lane kafka-broker-proof "${KAFKA_CMD[@]}" || TEST_STATUS=1
 
-sed -n 's/^.*\({.*"bead_id":"asupersync-0xbecl".*}\).*$/\1/p' "$LOG_FILE" > "$ROWS_FILE" || true
+jq -Rr --arg bead_id "$BEAD_ID" '
+  def event_object:
+    (fromjson? // empty),
+    (capture("(?<json>\\{.*\\})")? | .json | fromjson? // empty);
+  event_object
+  | objects
+  | select(.bead_id? == $bead_id)
+  | @json
+' "$LOG_FILE" > "$ROWS_FILE" || true
 
 MISSING_SCENARIOS=()
 for scenario in "${EXPECTED_SCENARIOS[@]}"; do

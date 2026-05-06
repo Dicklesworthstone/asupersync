@@ -21,8 +21,6 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-const KAFKA_BROKER_PARITY_BEAD_ID: &str = "asupersync-0xbecl";
-
 /// Real-broker test configuration
 struct RealBrokerConfig {
     bootstrap_servers: Vec<String>,
@@ -346,8 +344,17 @@ fn unique_topic(base: &str) -> String {
 }
 
 fn kafka_broker_proof_artifact_path() -> String {
-    std::env::var("ASUPERSYNC_KAFKA_BROKER_PARITY_PROOF_DIR")
-        .unwrap_or_else(|_| "target/kafka-broker-parity-proof/asupersync-0xbecl".to_string())
+    std::env::var("ASUPERSYNC_KAFKA_BROKER_PARITY_PROOF_DIR").unwrap_or_else(|_| {
+        format!(
+            "target/kafka-broker-parity-proof/{}",
+            kafka_broker_parity_bead_id()
+        )
+    })
+}
+
+fn kafka_broker_parity_bead_id() -> String {
+    std::env::var("ASUPERSYNC_KAFKA_BROKER_PARITY_BEAD_ID")
+        .unwrap_or_else(|_| "asupersync-0xbecl".to_string())
 }
 
 fn kafka_broker_proof_features() -> Value {
@@ -406,7 +413,7 @@ fn emit_kafka_broker_proof_row(
     println!(
         "{}",
         json!({
-            "bead_id": KAFKA_BROKER_PARITY_BEAD_ID,
+            "bead_id": kafka_broker_parity_bead_id(),
             "broker_kind": "kafka",
             "broker_version": broker_version,
             "scenario_id": scenario_id,
