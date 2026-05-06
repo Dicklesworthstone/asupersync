@@ -179,17 +179,20 @@
     {
       "scenario_id": "CSM-SMOKE-MEMBRANE",
       "description": "Validate membrane invariants and sandbox model",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa072 cargo test --test controller_sandbox_contract membrane -- --nocapture"
+      "test_filter": "membrane",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_controller_sandbox_CSM_SMOKE_MEMBRANE cargo test -p asupersync --test controller_sandbox_contract --features test-internals membrane -- --nocapture"
     },
     {
       "scenario_id": "CSM-SMOKE-RESOURCE",
       "description": "Validate resource caps and enforcement",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa072 cargo test --test controller_sandbox_contract resource -- --nocapture"
+      "test_filter": "resource",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_controller_sandbox_CSM_SMOKE_RESOURCE cargo test -p asupersync --test controller_sandbox_contract --features test-internals resource -- --nocapture"
     },
     {
       "scenario_id": "CSM-SMOKE-ADVERSARIAL",
       "description": "Validate adversarial scenarios and expected verdicts",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa072 cargo test --test controller_sandbox_contract adversarial -- --nocapture"
+      "test_filter": "adversarial",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_controller_sandbox_CSM_SMOKE_ADVERSARIAL cargo test -p asupersync --test controller_sandbox_contract --features test-internals adversarial -- --nocapture"
     }
   ],
   "downstream_beads": [

@@ -67,7 +67,7 @@ This contract defines the sandbox membrane for controller execution: capability-
 ## Validation
 
 ```bash
-rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa072 cargo test --test controller_sandbox_contract -- --nocapture
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_controller_sandbox cargo test -p asupersync --test controller_sandbox_contract --features test-internals -- --nocapture
 ```
 
 ## Cross-References

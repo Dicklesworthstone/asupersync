@@ -54,6 +54,21 @@ fn doc_references_bead_id() {
     );
 }
 
+#[test]
+fn doc_validation_command_is_rch_scoped() {
+    let doc = load_doc();
+    for token in [
+        "rch exec --",
+        "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/",
+        "cargo test -p asupersync --test controller_sandbox_contract --features test-internals",
+    ] {
+        assert!(
+            doc.contains(token),
+            "doc validation command must contain: {token}"
+        );
+    }
+}
+
 // ── Artifact stability ─────────────────────────────────────────────
 
 #[test]
@@ -401,16 +416,45 @@ fn smoke_scenarios_are_rch_routed() {
     for scenario in scenarios {
         let sid = scenario["scenario_id"].as_str().unwrap();
         let cmd = scenario["command"].as_str().unwrap();
-        assert!(cmd.starts_with("rch exec"), "{sid}: must be rch-routed");
+        assert!(cmd.contains("RCH_BIN"), "{sid}: must use configurable rch");
+        assert!(cmd.contains("exec --"), "{sid}: must use rch exec");
+        assert!(
+            cmd.contains("CARGO_TARGET_DIR=${TMPDIR:-/tmp}/"),
+            "{sid}: must use TMPDIR-aware target dir"
+        );
+        assert!(
+            cmd.contains("cargo test -p asupersync"),
+            "{sid}: must scope cargo test to asupersync"
+        );
+        assert!(
+            scenario["test_filter"]
+                .as_str()
+                .is_some_and(|filter| !filter.is_empty()),
+            "{sid}: must pin a test filter"
+        );
     }
 }
 
 #[test]
 fn runner_script_exists_and_declares_modes() {
     let runner = load_runner();
-    for mode in &["--list", "--dry-run", "--execute", "--scenario"] {
-        assert!(runner.contains(mode), "runner must support {mode}");
+    for token in [
+        "--list",
+        "--dry-run",
+        "--execute",
+        "--scenario",
+        "RCH_BIN",
+        "local fallback",
+        "validation_passed",
+        "controller-sandbox-smoke-bundle-v1",
+        "controller-sandbox-smoke-run-report-v1",
+    ] {
+        assert!(runner.contains(token), "runner missing token: {token}");
     }
+    assert!(
+        !runner.contains("eval "),
+        "runner must avoid string-based eval execution"
+    );
 }
 
 // ── Functional: capability enforcement ──────────────────────────────
