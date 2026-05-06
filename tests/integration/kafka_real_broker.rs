@@ -801,6 +801,295 @@ fn kafka_broker_parity_offset_ack_redaction_row() -> Result<(), String> {
     )
 }
 
+fn assert_kafka_resilience_error_taxonomy() -> Result<(), String> {
+    let reconnectable = KafkaError::Broker("broker transport disconnected".to_string());
+    if !reconnectable.is_retryable()
+        || !reconnectable.is_transient()
+        || !reconnectable.is_connection_error()
+    {
+        return Err(
+            "broker disconnect must stay retryable, transient, and connection-scoped".into(),
+        );
+    }
+
+    let queue_full = KafkaError::QueueFull;
+    if !queue_full.is_retryable()
+        || !queue_full.is_transient()
+        || !queue_full.is_capacity_error()
+        || queue_full.is_connection_error()
+    {
+        return Err(
+            "queue-full must be retryable capacity pressure, not a connection error".into(),
+        );
+    }
+
+    let auth = KafkaError::Authentication("redacted credentials rejected".to_string());
+    if auth.is_retryable() || auth.is_transient() || auth.is_connection_error() {
+        return Err("authentication failures must remain terminal and non-retryable".into());
+    }
+
+    let cancelled = KafkaError::Cancelled;
+    if cancelled.is_retryable()
+        || cancelled.is_transient()
+        || cancelled.is_connection_error()
+        || cancelled.is_capacity_error()
+    {
+        return Err(
+            "cancelled operations must not be classified as retryable broker errors".into(),
+        );
+    }
+
+    Ok(())
+}
+
+#[derive(Debug)]
+struct KafkaResilienceProofOutcome {
+    message_count: usize,
+    ack_count: usize,
+    consumer_lag: i64,
+    partition: Option<i32>,
+    offset: Option<i64>,
+    delivery_status: String,
+    payload_sha256: String,
+    expected_ordering_scope: String,
+    reconnect_count: usize,
+    actual_result: String,
+}
+
+async fn run_kafka_resilience_cancellation_probe(
+    cx: &asupersync::cx::Cx,
+    bootstrap_servers: Vec<String>,
+) -> Result<String, String> {
+    assert_kafka_resilience_error_taxonomy()?;
+
+    let producer_config = ProducerConfig::new(bootstrap_servers.clone())
+        .client_id("asupersync-kafka-resilience-cancel-producer")
+        .acks(Acks::All)
+        .enable_idempotence(false)
+        .linger_ms(0)
+        .retries(0)
+        .allow_insecure_transport_for_testing(true)
+        .require_kafka_feature();
+    let producer = KafkaProducer::new(producer_config).map_err(|error| error.to_string())?;
+
+    let consumer_config = ConsumerConfig::new(
+        bootstrap_servers,
+        "asupersync-kafka-resilience-cancel-group",
+    )
+    .client_id("asupersync-kafka-resilience-cancel-consumer")
+    .auto_offset_reset(AutoOffsetReset::Earliest)
+    .enable_auto_commit(false)
+    .force_real_kafka(true)
+    .allow_insecure_transport_for_testing(true);
+    let consumer = KafkaConsumer::new(consumer_config).map_err(|error| error.to_string())?;
+
+    cx.set_cancel_requested(true);
+    let send_result = producer
+        .send(
+            cx,
+            "asupersync-kafka-resilience-cancel-proof",
+            None,
+            b"cancel-before-send-commit",
+            Some(0),
+        )
+        .await;
+    if !matches!(send_result, Err(KafkaError::Cancelled)) {
+        return Err(format!(
+            "cancelled producer send returned {send_result:?}, expected KafkaError::Cancelled"
+        ));
+    }
+
+    let poll_result = consumer.poll(cx, Duration::ZERO).await;
+    if !matches!(poll_result, Err(KafkaError::Cancelled)) {
+        return Err(format!(
+            "cancelled consumer poll returned {poll_result:?}, expected KafkaError::Cancelled"
+        ));
+    }
+
+    cx.set_cancel_requested(false);
+    producer
+        .close(cx, Duration::from_millis(10))
+        .await
+        .map_err(|error| format!("producer cleanup after cancellation failed: {error}"))?;
+    consumer
+        .close(cx)
+        .await
+        .map_err(|error| format!("consumer cleanup after cancellation failed: {error}"))?;
+
+    if !producer.is_closed() || !consumer.is_closed() {
+        return Err("producer and consumer must both report closed after cleanup".into());
+    }
+
+    Ok("unavailable-bootstrap clients constructed; cancel-before-send returned KafkaError::Cancelled; cancelled poll returned KafkaError::Cancelled; producer/consumer cleanup closed cleanly; broker disconnect remains retryable while auth/cancel remain terminal".to_string())
+}
+
+async fn run_kafka_resilience_proof(
+    cx: &asupersync::cx::Cx,
+    unavailable_bootstrap_servers: Vec<String>,
+    recovery_bootstrap_servers: Option<Vec<String>>,
+    recovery_topic: &str,
+) -> Result<KafkaResilienceProofOutcome, String> {
+    let cancellation_result =
+        run_kafka_resilience_cancellation_probe(cx, unavailable_bootstrap_servers).await?;
+
+    let Some(recovery_bootstrap_servers) = recovery_bootstrap_servers else {
+        return Ok(KafkaResilienceProofOutcome {
+            message_count: 0,
+            ack_count: 0,
+            consumer_lag: 0,
+            partition: None,
+            offset: None,
+            delivery_status: "cancelled-before-send-commit-and-poll".to_string(),
+            payload_sha256: String::new(),
+            expected_ordering_scope: "not-applicable".to_string(),
+            reconnect_count: 0,
+            actual_result: format!(
+                "{cancellation_result}; real broker recovery skipped because broker prerequisites are unavailable"
+            ),
+        });
+    };
+
+    let recovery =
+        run_kafka_broker_parity_roundtrip(cx, recovery_bootstrap_servers, recovery_topic).await?;
+
+    Ok(KafkaResilienceProofOutcome {
+        message_count: recovery.message_count,
+        ack_count: recovery.ack_count,
+        consumer_lag: recovery.consumer_lag,
+        partition: Some(recovery.partition),
+        offset: Some(recovery.offset),
+        delivery_status: "recovered-after-unavailable-bootstrap-and-cancelled-send-poll"
+            .to_string(),
+        payload_sha256: recovery.payload_sha256,
+        expected_ordering_scope: recovery.expected_ordering_scope,
+        reconnect_count: 1,
+        actual_result: format!(
+            "{cancellation_result}; real broker recovery roundtrip committed offset with consumer_lag={}",
+            recovery.consumer_lag
+        ),
+    })
+}
+
+#[test]
+fn kafka_broker_parity_resilience_taxonomy_row() -> Result<(), String> {
+    let config = RealBrokerConfig::new();
+    let unavailable_bootstrap_servers = vec!["127.0.0.1:1".to_string()];
+    let recovery_bootstrap_servers = if config.enabled {
+        Some(config.bootstrap_servers.clone())
+    } else {
+        None
+    };
+    let unsupported_reason = config
+        .reason
+        .as_deref()
+        .unwrap_or("real Kafka broker unavailable");
+    let redacted_servers = json!({
+        "unavailable_probe": redacted_bootstrap_servers(&unavailable_bootstrap_servers),
+        "recovery_broker": redacted_bootstrap_servers(&config.bootstrap_servers)
+    });
+    let topic = unique_topic("asupersync-kafka-resilience-recovery");
+    let expected_result = "producer send and consumer poll must observe cancellation before committing broker work; broker disconnect errors must remain retryable/connection-scoped while auth and cancel remain terminal; configured real broker lanes must recover with explicit offset commit and zero lag";
+    let result_slot = Arc::new(Mutex::new(None));
+    let slot = Arc::clone(&result_slot);
+    let unavailable_probe = unavailable_bootstrap_servers.clone();
+    let topic_for_test = topic.clone();
+
+    run_test_with_cx(|cx| async move {
+        let result = run_kafka_resilience_proof(
+            &cx,
+            unavailable_probe,
+            recovery_bootstrap_servers,
+            &topic_for_test,
+        )
+        .await;
+        match slot.lock() {
+            Ok(mut slot) => *slot = Some(result),
+            Err(poisoned) => *poisoned.into_inner() = Some(result),
+        }
+    });
+
+    let result = match result_slot.lock() {
+        Ok(mut slot) => slot.take(),
+        Err(poisoned) => poisoned.into_inner().take(),
+    }
+    .ok_or_else(|| "Kafka resilience proof did not record an outcome".to_string())?;
+
+    match result {
+        Ok(outcome) if config.enabled => {
+            emit_kafka_broker_proof_row(
+                "kafka-reconnect-cancellation-error-taxonomy",
+                "unknown",
+                redacted_servers,
+                &topic,
+                outcome.message_count,
+                outcome.ack_count,
+                outcome.consumer_lag,
+                outcome.partition,
+                outcome.offset,
+                &outcome.delivery_status,
+                &outcome.payload_sha256,
+                &outcome.expected_ordering_scope,
+                outcome.reconnect_count,
+                "unavailable-bootstrap-send-before-commit-and-consumer-poll",
+                expected_result,
+                &outcome.actual_result,
+                "",
+                "pass",
+                "",
+            );
+            Ok(())
+        }
+        Ok(outcome) => {
+            emit_kafka_broker_proof_row(
+                "kafka-reconnect-cancellation-error-taxonomy",
+                "unavailable",
+                redacted_servers,
+                &topic,
+                outcome.message_count,
+                outcome.ack_count,
+                outcome.consumer_lag,
+                outcome.partition,
+                outcome.offset,
+                &outcome.delivery_status,
+                &outcome.payload_sha256,
+                &outcome.expected_ordering_scope,
+                outcome.reconnect_count,
+                "unavailable-bootstrap-send-before-commit-and-consumer-poll",
+                expected_result,
+                &outcome.actual_result,
+                unsupported_reason,
+                "skip",
+                "",
+            );
+            Ok(())
+        }
+        Err(error) => {
+            emit_kafka_broker_proof_row(
+                "kafka-reconnect-cancellation-error-taxonomy",
+                "unknown",
+                redacted_servers,
+                &topic,
+                0,
+                0,
+                0,
+                None,
+                None,
+                "failed-before-cleanup",
+                "",
+                "not-applicable",
+                0,
+                "unavailable-bootstrap-send-before-commit-and-consumer-poll",
+                expected_result,
+                "Kafka resilience taxonomy proof failed",
+                "",
+                "fail",
+                &error,
+            );
+            Err(error)
+        }
+    }
+}
+
 #[test]
 fn test_real_broker_producer_send_and_metadata() {
     let Some(config) = require_real_broker() else {

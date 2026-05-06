@@ -26,6 +26,15 @@ esac
 if [ "$BEAD_ID" = "asupersync-0xbecl.2" ]; then
   INCLUDE_OFFSET_ACK_PROOF=true
 fi
+INCLUDE_RESILIENCE_PROOF=false
+case "${ASUPERSYNC_KAFKA_BROKER_PARITY_INCLUDE_RESILIENCE_PROOF:-}" in
+  1 | true | TRUE | yes | YES | on | ON)
+    INCLUDE_RESILIENCE_PROOF=true
+    ;;
+esac
+if [ "$BEAD_ID" = "asupersync-0xbecl.3" ]; then
+  INCLUDE_RESILIENCE_PROOF=true
+fi
 
 EXPECTED_SCENARIOS=(
   "kafka-default-feature-gate"
@@ -33,6 +42,9 @@ EXPECTED_SCENARIOS=(
 )
 if [ "$INCLUDE_OFFSET_ACK_PROOF" = true ]; then
   EXPECTED_SCENARIOS+=("kafka-producer-consumer-offset-ack-redaction")
+fi
+if [ "$INCLUDE_RESILIENCE_PROOF" = true ]; then
+  EXPECTED_SCENARIOS+=("kafka-reconnect-cancellation-error-taxonomy")
 fi
 
 REQUIRED_FIELDS=(
@@ -110,6 +122,7 @@ GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || printf 'unknown')"
 DEFAULT_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_asupersync_kafka_broker_parity_default"
 KAFKA_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_asupersync_kafka_broker_parity_kafka"
 OFFSET_ACK_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_asupersync_kafka_broker_parity_offset_ack"
+RESILIENCE_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_asupersync_kafka_broker_parity_resilience"
 
 DEFAULT_CMD=(
   env
@@ -186,10 +199,36 @@ OFFSET_ACK_CMD=(
   --test-threads=1
 )
 
+RESILIENCE_CMD=(
+  env
+  -u
+  CARGO_TARGET_DIR
+  RCH_FORCE_REMOTE=1
+  RCH_QUEUE_WHEN_BUSY=1
+  RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=900
+  RCH_DAEMON_RESPONSE_TIMEOUT_SECS=900
+  rch exec --
+  env
+  CARGO_INCREMENTAL=0
+  CARGO_PROFILE_TEST_DEBUG=0
+  "RUSTFLAGS=-C debuginfo=0"
+  "ASUPERSYNC_KAFKA_BROKER_PARITY_PROOF_DIR=$OUT_DIR"
+  "ASUPERSYNC_KAFKA_BROKER_PARITY_BEAD_ID=$BEAD_ID"
+  cargo test -p asupersync
+  --target-dir "$RESILIENCE_TARGET_DIR"
+  --test kafka_real_broker
+  --features "test-internals,kafka"
+  kafka_broker_parity_resilience_taxonomy_row
+  --
+  --nocapture
+  --test-threads=1
+)
+
 log "bead_id=$BEAD_ID"
 log "output_dir=$OUT_DIR"
 log "git_sha=$GIT_SHA"
 log "include_offset_ack_proof=$INCLUDE_OFFSET_ACK_PROOF"
+log "include_resilience_proof=$INCLUDE_RESILIENCE_PROOF"
 
 TEST_STATUS=0
 run_lane default-feature-gate "${DEFAULT_CMD[@]}" || TEST_STATUS=1
@@ -197,11 +236,19 @@ run_lane kafka-broker-proof "${KAFKA_CMD[@]}" || TEST_STATUS=1
 if [ "$INCLUDE_OFFSET_ACK_PROOF" = true ]; then
   run_lane kafka-offset-ack-redaction-proof "${OFFSET_ACK_CMD[@]}" || TEST_STATUS=1
 fi
+if [ "$INCLUDE_RESILIENCE_PROOF" = true ]; then
+  run_lane kafka-resilience-proof "${RESILIENCE_CMD[@]}" || TEST_STATUS=1
+fi
 
 jq -Rr --arg bead_id "$BEAD_ID" '
   def event_object:
-    (fromjson? // empty),
-    (capture("(?<json>\\{.*\\})")? | .json | fromjson? // empty);
+    . as $line
+    | (try ($line | fromjson) catch null) as $direct
+    | if $direct != null then
+        $direct
+      else
+        (try ($line | capture("(?<json>\\{.*\\})").json | fromjson) catch empty)
+      end;
   event_object
   | objects
   | select(.bead_id? == $bead_id)
@@ -265,12 +312,51 @@ if [ -s "$ROWS_FILE" ]; then
         )
     ]
   ' "$ROWS_FILE")"
+  INVALID_RESILIENCE_ROWS_JSON="$(jq -s '
+    [
+      .[]
+      | select(.scenario_id == "kafka-reconnect-cancellation-error-taxonomy")
+      | select(
+          (
+            .verdict == "pass"
+            and (
+              .delivery_status != "recovered-after-unavailable-bootstrap-and-cancelled-send-poll"
+              or .cancellation_point != "unavailable-bootstrap-send-before-commit-and-consumer-poll"
+              or (.reconnect_count | type) != "number"
+              or .reconnect_count < 1
+              or .message_count < 1
+              or .ack_count < 1
+              or .consumer_lag != 0
+              or .unsupported_reason != ""
+              or .first_failure != ""
+            )
+          )
+          or (
+            .verdict == "skip"
+            and (
+              .delivery_status != "cancelled-before-send-commit-and-poll"
+              or .cancellation_point != "unavailable-bootstrap-send-before-commit-and-consumer-poll"
+              or (.reconnect_count | type) != "number"
+              or .reconnect_count != 0
+              or .message_count != 0
+              or .ack_count != 0
+              or .consumer_lag != 0
+              or (.unsupported_reason | type) != "string"
+              or .unsupported_reason == ""
+              or .first_failure != ""
+            )
+          )
+          or (.verdict != "pass" and .verdict != "skip")
+        )
+    ]
+  ' "$ROWS_FILE")"
 else
   ROWS_JSON="[]"
   DRIFTS_JSON="[]"
   SKIPS_JSON="[]"
   MISSING_FIELDS_JSON="[]"
   INVALID_OFFSET_ACK_ROWS_JSON="[]"
+  INVALID_RESILIENCE_ROWS_JSON="[]"
 fi
 
 ROW_COUNT="$(wc -l < "$ROWS_FILE" | tr -d ' ')"
@@ -280,6 +366,7 @@ if [ "$TEST_STATUS" -eq 0 ] \
   && [ "$(jq 'length' <<<"$DRIFTS_JSON")" -eq 0 ] \
   && [ "$(jq 'length' <<<"$MISSING_FIELDS_JSON")" -eq 0 ] \
   && [ "$(jq 'length' <<<"$INVALID_OFFSET_ACK_ROWS_JSON")" -eq 0 ] \
+  && [ "$(jq 'length' <<<"$INVALID_RESILIENCE_ROWS_JSON")" -eq 0 ] \
   && [ "$ROW_COUNT" -eq "${#EXPECTED_SCENARIOS[@]}" ]; then
   VALIDATION_PASSED=true
 fi
@@ -301,6 +388,7 @@ jq -n \
   --argjson missing_scenarios "$MISSING_JSON" \
   --argjson missing_fields "$MISSING_FIELDS_JSON" \
   --argjson invalid_offset_ack_rows "$INVALID_OFFSET_ACK_ROWS_JSON" \
+  --argjson invalid_resilience_rows "$INVALID_RESILIENCE_ROWS_JSON" \
   --argjson rows "$ROWS_JSON" \
   --argjson drifts "$DRIFTS_JSON" \
   --argjson skips "$SKIPS_JSON" \
@@ -321,6 +409,7 @@ jq -n \
     missing_scenarios: $missing_scenarios,
     missing_fields: $missing_fields,
     invalid_offset_ack_rows: $invalid_offset_ack_rows,
+    invalid_resilience_rows: $invalid_resilience_rows,
     drifts: $drifts,
     skips: $skips,
     rows: $rows
