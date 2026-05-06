@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Contract tests for Tokio ecosystem capability inventory baseline (2oh2u.1.1.*).
 
 #![allow(missing_docs)]
@@ -471,7 +469,7 @@ fn t4_transport_invariants_are_contract_enforced() {
         "connection guard must reject appdata sends before 1-RTT"
     );
     assert!(
-        connection.contains("packet send requires non-closed connection state"),
+        connection.contains("packet send requires non-draining, non-closed connection state"),
         "connection guard must reject sends after close"
     );
     assert!(
