@@ -1,5 +1,3 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! Authority flow audit contract invariants (AA-07.3).
 
 #![allow(missing_docs)]
