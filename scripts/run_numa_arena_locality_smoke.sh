@@ -216,23 +216,35 @@ run_once() {
     local tail_timeout_seconds="${NUMA_ARENA_LOCALITY_RCH_TIMEOUT_SECONDS:-300}"
     local poll_seconds=0
     local command_exit_code=-1
-    local rch_invocation
-
-    printf -v rch_invocation '%q' "$RCH_BIN"
-    local command="
-        ${rch_invocation} exec -- env \
-        CARGO_INCREMENTAL=0 \
-        CARGO_TARGET_DIR=${target_dir} \
-        ASUPERSYNC_NUMA_ARENA_LOCALITY_CONTRACT_PATH=${ARTIFACT} \
-        ASUPERSYNC_NUMA_ARENA_LOCALITY_SCENARIO=${SCENARIO} \
-        ASUPERSYNC_NUMA_ARENA_LOCALITY_REPORT_PATH=${report_path} \
-        cargo test -p asupersync --test numa_arena_locality_contract numa_arena_locality_smoke_contract_emits_report --features test-internals -- --nocapture
-    "
+    local -a command_args=(
+        "$RCH_BIN"
+        exec
+        --
+        env
+        "CARGO_INCREMENTAL=0"
+        "CARGO_PROFILE_TEST_DEBUG=0"
+        "RUSTFLAGS=-D warnings -C debuginfo=0"
+        "CARGO_TARGET_DIR=${target_dir}"
+        "ASUPERSYNC_NUMA_ARENA_LOCALITY_CONTRACT_PATH=${ARTIFACT}"
+        "ASUPERSYNC_NUMA_ARENA_LOCALITY_SCENARIO=${SCENARIO}"
+        "ASUPERSYNC_NUMA_ARENA_LOCALITY_REPORT_PATH=${report_path}"
+        cargo
+        test
+        -p
+        asupersync
+        --test
+        numa_arena_locality_contract
+        numa_arena_locality_smoke_contract_emits_report
+        --features
+        test-internals
+        --
+        --nocapture
+    )
 
     RUN_ONCE_EARLY_SUCCESS=0
     (
         cd "$PROJECT_ROOT"
-        bash -lc "$command"
+        "${command_args[@]}"
     ) >"$log_path" 2>&1 &
     local command_pid=$!
 
@@ -419,7 +431,7 @@ fi
 ENDED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 write_bundle_manifest \
     "$BUNDLE_MANIFEST_PATH" \
-    "${RCH_BIN} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_numa_arena_locality_<run> ASUPERSYNC_NUMA_ARENA_LOCALITY_CONTRACT_PATH=${ARTIFACT} ASUPERSYNC_NUMA_ARENA_LOCALITY_SCENARIO=${SCENARIO} ASUPERSYNC_NUMA_ARENA_LOCALITY_REPORT_PATH=<report> cargo test -p asupersync --test numa_arena_locality_contract numa_arena_locality_smoke_contract_emits_report --features test-internals -- --nocapture" \
+    "${RCH_BIN} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_numa_arena_locality_<run> ASUPERSYNC_NUMA_ARENA_LOCALITY_CONTRACT_PATH=${ARTIFACT} ASUPERSYNC_NUMA_ARENA_LOCALITY_SCENARIO=${SCENARIO} ASUPERSYNC_NUMA_ARENA_LOCALITY_REPORT_PATH=<report> cargo test -p asupersync --test numa_arena_locality_contract numa_arena_locality_smoke_contract_emits_report --features test-internals -- --nocapture" \
     "$COMMAND_EXIT_CODE" \
     "$SCRIPT_EXIT_CODE" \
     "$VALIDATION_PASSED" \
