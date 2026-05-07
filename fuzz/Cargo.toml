@@ -968,6 +968,16 @@ test = false
 doc = false
 bench = false
 
+# Symbol cancel races fuzz target - testing-fuzzing for cancel/symbol_cancel.rs
+# Tests token-id allocation under wraparound, race between cancel() and child(),
+# and drain ordering across nested scopes using metamorphic testing principles
+[[bin]]
+name = "symbol_cancel_races"
+path = "fuzz_targets/symbol_cancel_races.rs"
+test = false
+doc = false
+bench = false
+
 [[bin]]
 name = "fuzz_intrusive_heap_operations"
 path = "fuzz_targets/intrusive_heap_operations.rs"
