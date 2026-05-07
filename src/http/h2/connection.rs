@@ -3817,6 +3817,90 @@ mod tests {
         assert_eq!(err.code, ErrorCode::StreamClosed);
     }
 
+    /// br-asupersync-8peajk — RFC 9113 §7 enumerates 14 HTTP/2 error
+    /// codes (0x0..=0xd). Connection::reset_stream(stream_id, code) MUST
+    /// emit exactly one RST_STREAM frame with that stream_id and that
+    /// error_code; the on-wire u32 mapping is part of the spec contract.
+    /// The pre-existing reset_stream test only covers Cancel; this
+    /// truth-table pins the remaining 13 codes so a future refactor in
+    /// PendingOp::RstStream cannot silently filter or remap them.
+    #[test]
+    fn reset_stream_emits_rfc_9113_section_7_error_codes() {
+        // Each row is (RFC §7 wire u32, ErrorCode variant, RFC name).
+        // Sourced from RFC 9113 §7 (Error Codes) and RFC 7540 §11.4.
+        let codes: &[(u32, ErrorCode, &str)] = &[
+            (0x0, ErrorCode::NoError, "NO_ERROR"),
+            (0x1, ErrorCode::ProtocolError, "PROTOCOL_ERROR"),
+            (0x2, ErrorCode::InternalError, "INTERNAL_ERROR"),
+            (0x3, ErrorCode::FlowControlError, "FLOW_CONTROL_ERROR"),
+            (0x4, ErrorCode::SettingsTimeout, "SETTINGS_TIMEOUT"),
+            (0x5, ErrorCode::StreamClosed, "STREAM_CLOSED"),
+            (0x6, ErrorCode::FrameSizeError, "FRAME_SIZE_ERROR"),
+            (0x7, ErrorCode::RefusedStream, "REFUSED_STREAM"),
+            (0x8, ErrorCode::Cancel, "CANCEL"),
+            (0x9, ErrorCode::CompressionError, "COMPRESSION_ERROR"),
+            (0xa, ErrorCode::ConnectError, "CONNECT_ERROR"),
+            (0xb, ErrorCode::EnhanceYourCalm, "ENHANCE_YOUR_CALM"),
+            (0xc, ErrorCode::InadequateSecurity, "INADEQUATE_SECURITY"),
+            (0xd, ErrorCode::Http11Required, "HTTP_1_1_REQUIRED"),
+        ];
+
+        for (wire_u32, code, name) in codes.iter().copied() {
+            // Wire-value invariant: ErrorCode → u32 must match RFC §7.
+            assert_eq!(
+                u32::from(code),
+                wire_u32,
+                "RFC 9113 §7: {name} on-wire value must be 0x{wire_u32:x}, got 0x{:x}",
+                u32::from(code),
+            );
+            // Round-trip through from_u32 — peers send the u32, we must
+            // recognise it.
+            assert_eq!(
+                ErrorCode::from_u32(wire_u32),
+                code,
+                "RFC 9113 §7: from_u32(0x{wire_u32:x}) must round-trip to {name}",
+            );
+
+            // Spin up a fresh client connection so reset_stream operates
+            // on a real (locally-initiated) open stream.
+            let mut conn = Connection::client(Settings::client());
+            conn.state = ConnectionState::Open;
+            let request_headers = vec![
+                Header::new(":method", "GET"),
+                Header::new(":path", "/"),
+                Header::new(":scheme", "https"),
+                Header::new(":authority", "example.com"),
+            ];
+            let stream_id = conn.open_stream(request_headers, false).expect("open stream");
+            // Drain the queued HEADERS so next_frame returns the RST_STREAM.
+            match conn.next_frame().expect("expected request HEADERS") {
+                Frame::Headers(h) => assert_eq!(h.stream_id, stream_id),
+                other => panic!("expected HEADERS frame, got {other:?}"),
+            }
+
+            conn.reset_stream(stream_id, code);
+
+            match conn.next_frame().expect("reset_stream must queue exactly one RST_STREAM") {
+                Frame::RstStream(rst) => {
+                    assert_eq!(
+                        rst.stream_id, stream_id,
+                        "RST_STREAM stream_id must match the reset target ({name})",
+                    );
+                    assert_eq!(
+                        rst.error_code, code,
+                        "RST_STREAM error_code must round-trip {name} unchanged \
+                         (regression guard for PendingOp::RstStream)",
+                    );
+                }
+                other => panic!("{name}: expected RST_STREAM, got {other:?}"),
+            }
+            assert!(
+                conn.next_frame().is_none(),
+                "{name}: reset_stream must emit exactly one RST_STREAM",
+            );
+        }
+    }
+
     #[test]
     fn test_reset_stream_drops_queued_outbound_data() {
         let mut conn = Connection::client(Settings::client());
