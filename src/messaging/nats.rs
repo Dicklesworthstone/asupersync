@@ -1004,6 +1004,46 @@ pub fn fuzz_validate_nats_subscription_pattern(pattern: &str) -> Result<(), Stri
 
 #[cfg(feature = "test-internals")]
 #[doc(hidden)]
+pub fn fuzz_parse_nats_jwt_claims(
+    jwt: &str,
+) -> Result<(String, Option<String>, Option<String>, Option<i64>), String> {
+    parse_nats_jwt_claims(jwt)
+        .map(|claims| {
+            (
+                claims.subject,
+                claims.issuer,
+                claims.name,
+                claims.expires_at,
+            )
+        })
+        .map_err(|err| err.to_string())
+}
+
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_parse_nats_creds(creds: &str) -> Result<(String, String), String> {
+    parse_nats_creds(creds).map_err(|err| err.to_string())
+}
+
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_load_nats_user_nkey(seed: &str) -> Result<String, String> {
+    load_user_nkey(seed)
+        .map(|key_pair| key_pair.public_key())
+        .map_err(|err| err.to_string())
+}
+
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_deterministic_nats_user_seed(byte: u8) -> String {
+    KeyPair::new_from_raw(KeyPairType::User, [byte; 32])
+        .expect("deterministic user seed")
+        .seed()
+        .expect("seed encoding")
+}
+
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
 pub const fn fuzz_nats_subject_max_bytes() -> usize {
     MAX_NATS_SUBJECT_BYTES
 }
