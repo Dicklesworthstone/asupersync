@@ -5,11 +5,27 @@
 //! of the input space while checking relationships between outputs.
 
 #[cfg(test)]
-use crate::obligation::ledger::{ObligationLedger, LedgerStats, ObligationToken};
+use crate::obligation::ledger::{LedgerStats, ObligationLedger, ObligationToken};
 #[cfg(test)]
-use crate::record::{ObligationKind, ObligationAbortReason};
+use crate::record::{ObligationAbortReason, ObligationKind};
 #[cfg(test)]
 use crate::types::{RegionId, TaskId, Time};
+
+#[cfg(test)]
+#[inline]
+fn tid(n: u32) -> TaskId {
+    // Helper: TaskId/RegionId expose `new_for_test(index, generation)`
+    // (src/types/id.rs:297, 109) — there is no `new(u64)` constructor.
+    // The metamorphic relations only need distinct IDs, so generation 0
+    // suffices.
+    TaskId::new_for_test(n, 0)
+}
+
+#[cfg(test)]
+#[inline]
+fn rid(n: u32) -> RegionId {
+    RegionId::new_for_test(n, 0)
+}
 
 #[cfg(test)]
 /// Represents a scheduled operation with its timing
@@ -23,10 +39,7 @@ pub enum ScheduledOp {
         time: Time,
     },
     /// Commit a previously acquired token (by acquire index)
-    CommitByIndex {
-        acquire_index: usize,
-        time: Time,
-    },
+    CommitByIndex { acquire_index: usize, time: Time },
     /// Abort a previously acquired token (by acquire index)
     AbortByIndex {
         acquire_index: usize,
@@ -34,9 +47,7 @@ pub enum ScheduledOp {
         time: Time,
     },
     /// Mark a region as finalized (closed)
-    FinalizeRegion {
-        region: RegionId,
-    },
+    FinalizeRegion { region: RegionId },
 }
 
 #[cfg(test)]
@@ -64,18 +75,40 @@ impl ExecutionContext {
 
         for (idx, op) in ops.iter().enumerate() {
             match op {
-                ScheduledOp::Acquire { kind, task, region, time } => {
+                ScheduledOp::Acquire {
+                    kind,
+                    task,
+                    region,
+                    time,
+                } => {
                     let token = self.ledger.acquire(*kind, *task, *region, *time);
                     self.acquired_tokens[idx] = Some(token);
                 }
-                ScheduledOp::CommitByIndex { acquire_index, time } => {
-                    if let Some(Some(token)) = self.acquired_tokens.get(*acquire_index) {
-                        let _ = self.ledger.commit(*token, *time);
+                ScheduledOp::CommitByIndex {
+                    acquire_index,
+                    time,
+                } => {
+                    // ObligationToken is intentionally !Copy/!Clone (linear
+                    // by design — see src/obligation/ledger.rs:108), so we
+                    // must move the token out of the Option via `take()`
+                    // rather than dereference it. After commit, the slot
+                    // is left as None so a duplicate CommitByIndex /
+                    // AbortByIndex on the same index becomes a no-op.
+                    if let Some(slot) = self.acquired_tokens.get_mut(*acquire_index) {
+                        if let Some(token) = slot.take() {
+                            let _ = self.ledger.commit(token, *time);
+                        }
                     }
                 }
-                ScheduledOp::AbortByIndex { acquire_index, reason, time } => {
-                    if let Some(Some(token)) = self.acquired_tokens.get(*acquire_index) {
-                        let _ = self.ledger.abort(*token, *time, reason.clone());
+                ScheduledOp::AbortByIndex {
+                    acquire_index,
+                    reason,
+                    time,
+                } => {
+                    if let Some(slot) = self.acquired_tokens.get_mut(*acquire_index) {
+                        if let Some(token) = slot.take() {
+                            let _ = self.ledger.abort(token, *time, reason.clone());
+                        }
                     }
                 }
                 ScheduledOp::FinalizeRegion { region } => {
@@ -107,14 +140,14 @@ mod metamorphic_tests {
         let ops = vec![
             ScheduledOp::Acquire {
                 kind: ObligationKind::SendPermit,
-                task: TaskId::new(1),
-                region: RegionId::new(1),
+                task: tid(1),
+                region: rid(1),
                 time: Time::from_nanos(1000),
             },
             ScheduledOp::Acquire {
                 kind: ObligationKind::Ack,
-                task: TaskId::new(2),
-                region: RegionId::new(1),
+                task: tid(2),
+                region: rid(1),
                 time: Time::from_nanos(1500),
             },
             ScheduledOp::CommitByIndex {
@@ -149,14 +182,14 @@ mod metamorphic_tests {
         let ops1 = vec![
             ScheduledOp::Acquire {
                 kind: ObligationKind::SendPermit,
-                task: TaskId::new(1),
-                region: RegionId::new(1),
+                task: tid(1),
+                region: rid(1),
                 time: Time::from_nanos(1000),
             },
             ScheduledOp::Acquire {
                 kind: ObligationKind::Ack,
-                task: TaskId::new(2),
-                region: RegionId::new(2),
+                task: tid(2),
+                region: rid(2),
                 time: Time::from_nanos(1500),
             },
         ];
@@ -165,14 +198,14 @@ mod metamorphic_tests {
         let ops2 = vec![
             ScheduledOp::Acquire {
                 kind: ObligationKind::Ack,
-                task: TaskId::new(2),
-                region: RegionId::new(2),
+                task: tid(2),
+                region: rid(2),
                 time: Time::from_nanos(1500),
             },
             ScheduledOp::Acquire {
                 kind: ObligationKind::SendPermit,
-                task: TaskId::new(1),
-                region: RegionId::new(1),
+                task: tid(1),
+                region: rid(1),
                 time: Time::from_nanos(1000),
             },
         ];
@@ -185,19 +218,15 @@ mod metamorphic_tests {
 
         // Relation: final counts should be invariant under reordering
         assert_eq!(
-            stats1.total_acquired,
-            stats2.total_acquired,
+            stats1.total_acquired, stats2.total_acquired,
             "Total acquired changed under reordering: {} -> {}",
-            stats1.total_acquired,
-            stats2.total_acquired
+            stats1.total_acquired, stats2.total_acquired
         );
 
         assert_eq!(
-            stats1.pending,
-            stats2.pending,
+            stats1.pending, stats2.pending,
             "Pending count changed under reordering: {} -> {}",
-            stats1.pending,
-            stats2.pending
+            stats1.pending, stats2.pending
         );
     }
 
@@ -208,8 +237,8 @@ mod metamorphic_tests {
         let region1_ops = vec![
             ScheduledOp::Acquire {
                 kind: ObligationKind::SendPermit,
-                task: TaskId::new(1),
-                region: RegionId::new(1000),
+                task: tid(1),
+                region: rid(1000),
                 time: Time::from_nanos(1000),
             },
             ScheduledOp::CommitByIndex {
@@ -218,14 +247,12 @@ mod metamorphic_tests {
             },
         ];
 
-        let region2_ops = vec![
-            ScheduledOp::Acquire {
-                kind: ObligationKind::Ack,
-                task: TaskId::new(2),
-                region: RegionId::new(2000),
-                time: Time::from_nanos(1500),
-            },
-        ];
+        let region2_ops = vec![ScheduledOp::Acquire {
+            kind: ObligationKind::Ack,
+            task: tid(2),
+            region: rid(2000),
+            time: Time::from_nanos(1500),
+        }];
 
         // Execute regions separately
         let mut ctx1 = ExecutionContext::new();
@@ -268,14 +295,14 @@ mod metamorphic_tests {
         let ops = vec![
             ScheduledOp::Acquire {
                 kind: ObligationKind::SendPermit,
-                task: TaskId::new(1),
-                region: RegionId::new(1),
+                task: tid(1),
+                region: rid(1),
                 time: Time::from_nanos(1000),
             },
             ScheduledOp::Acquire {
                 kind: ObligationKind::Ack,
-                task: TaskId::new(2),
-                region: RegionId::new(1),
+                task: tid(2),
+                region: rid(1),
                 time: Time::from_nanos(1500),
             },
             ScheduledOp::CommitByIndex {
@@ -293,14 +320,13 @@ mod metamorphic_tests {
         let stats = ctx.execute(&ops);
 
         // Every acquired obligation should be in exactly one final state
-        let total_final_states = stats.total_committed + stats.total_aborted + stats.total_leaked + stats.pending;
+        let total_final_states =
+            stats.total_committed + stats.total_aborted + stats.total_leaked + stats.pending;
 
         assert_eq!(
-            stats.total_acquired,
-            total_final_states,
+            stats.total_acquired, total_final_states,
             "STATE TRANSITION UNIQUENESS VIOLATION: acquired={}, final_states={}",
-            stats.total_acquired,
-            total_final_states
+            stats.total_acquired, total_final_states
         );
     }
 
@@ -311,8 +337,8 @@ mod metamorphic_tests {
         let ops_original = vec![
             ScheduledOp::Acquire {
                 kind: ObligationKind::Lease,
-                task: TaskId::new(1),
-                region: RegionId::new(1),
+                task: tid(1),
+                region: rid(1),
                 time: Time::from_nanos(1000),
             },
             ScheduledOp::CommitByIndex {
@@ -325,8 +351,8 @@ mod metamorphic_tests {
         let ops_scaled = vec![
             ScheduledOp::Acquire {
                 kind: ObligationKind::Lease,
-                task: TaskId::new(1),
-                region: RegionId::new(1),
+                task: tid(1),
+                region: rid(1),
                 time: Time::from_nanos(10000),
             },
             ScheduledOp::CommitByIndex {
@@ -343,19 +369,15 @@ mod metamorphic_tests {
 
         // Relation: scaling time shouldn't affect final obligation counts
         assert_eq!(
-            stats_original.total_acquired,
-            stats_scaled.total_acquired,
+            stats_original.total_acquired, stats_scaled.total_acquired,
             "Time scaling changed acquired count: {} -> {}",
-            stats_original.total_acquired,
-            stats_scaled.total_acquired
+            stats_original.total_acquired, stats_scaled.total_acquired
         );
 
         assert_eq!(
-            stats_original.total_committed,
-            stats_scaled.total_committed,
+            stats_original.total_committed, stats_scaled.total_committed,
             "Time scaling changed commit count: {} -> {}",
-            stats_original.total_committed,
-            stats_scaled.total_committed
+            stats_original.total_committed, stats_scaled.total_committed
         );
     }
 
@@ -366,8 +388,8 @@ mod metamorphic_tests {
         let ops_original = vec![
             ScheduledOp::Acquire {
                 kind: ObligationKind::SendPermit,
-                task: TaskId::new(1),
-                region: RegionId::new(1),
+                task: tid(1),
+                region: rid(1),
                 time: Time::from_nanos(1000),
             },
             ScheduledOp::CommitByIndex {
@@ -391,19 +413,15 @@ mod metamorphic_tests {
 
         // Relation: duplicate resolves should not change final counts
         assert_eq!(
-            stats_original.total_committed,
-            stats_doubled.total_committed,
+            stats_original.total_committed, stats_doubled.total_committed,
             "Double resolve changed commit count: {} -> {}",
-            stats_original.total_committed,
-            stats_doubled.total_committed
+            stats_original.total_committed, stats_doubled.total_committed
         );
 
         assert_eq!(
-            stats_original.total_aborted,
-            stats_doubled.total_aborted,
+            stats_original.total_aborted, stats_doubled.total_aborted,
             "Double resolve changed abort count: {} -> {}",
-            stats_original.total_aborted,
-            stats_doubled.total_aborted
+            stats_original.total_aborted, stats_doubled.total_aborted
         );
     }
 
@@ -413,8 +431,8 @@ mod metamorphic_tests {
         let ops = vec![
             ScheduledOp::Acquire {
                 kind: ObligationKind::SendPermit,
-                task: TaskId::new(1),
-                region: RegionId::new(1),
+                task: tid(1),
+                region: rid(1),
                 time: Time::from_nanos(1000),
             },
             ScheduledOp::CommitByIndex {
@@ -432,7 +450,8 @@ mod metamorphic_tests {
         assert_eq!(stats.pending, 0);
 
         // Conservation law
-        let total = stats.total_committed + stats.total_aborted + stats.total_leaked + stats.pending;
+        let total =
+            stats.total_committed + stats.total_aborted + stats.total_leaked + stats.pending;
         assert_eq!(stats.total_acquired, total);
     }
 }
