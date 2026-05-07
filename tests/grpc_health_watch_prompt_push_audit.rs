@@ -10,6 +10,7 @@
 //!
 //! Audit chain (verified at the public API surface):
 //!
+//! ```text
 //!   1. `HealthWatchStream::poll_next` (health.rs:716-725) calls
 //!      `poll_next_with_hook` (health.rs:671-707), which:
 //!      (a) emits the initial status on the first poll,
@@ -42,6 +43,7 @@
 //!      alongside the named-service key — so a watcher of "" sees
 //!      every named-service change too. Pinned so a regression
 //!      that dropped this propagation is caught.
+//! ```
 //!
 //! Verdict: **SOUND**. Status changes are pushed via direct
 //! waker.wake() within the same critical section as the
@@ -50,6 +52,8 @@
 //! threshold in the operator's question).
 //!
 //! A regression that:
+//!
+//! ```text
 //!   - relied on a polling loop (instead of waker.wake())
 //!   - debounced the wake (e.g. coalesced N changes into 1
 //!     scheduled wake)
@@ -59,6 +63,7 @@
 //!     observe the stale version and decide nothing changed)
 //!   - dropped the empty-string "" propagation
 //! would all be caught here.
+//! ```
 
 use asupersync::grpc::health::{
     HealthCheckResponse, HealthService, HealthWatchStream, ServingStatus,
