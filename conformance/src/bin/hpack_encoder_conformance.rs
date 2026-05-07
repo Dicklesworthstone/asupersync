@@ -172,7 +172,10 @@ fn print_test_summary(report: &asupersync_conformance::HpackEncoderComplianceRep
     eprintln!("│                                      │");
 
     if report.summary.failed == 0 {
-        eprintln!("│  ✅ ALL TESTS PASSED                 │");
+        eprintln!(
+            "│  {}  │",
+            final_status_line(report.summary.skipped, report.summary.expected_failures)
+        );
         eprintln!(
             "│  🎯 Compliance: {:.1}%                 │",
             report.summary.compliance_score * 100.0
@@ -211,4 +214,32 @@ fn print_test_summary(report: &asupersync_conformance::HpackEncoderComplianceRep
     );
     eprintln!("│                                      │");
     eprintln!("╰──────────────────────────────────────╯");
+}
+
+fn final_status_line(skipped_count: usize, expected_failure_count: usize) -> String {
+    if skipped_count == 0 && expected_failure_count == 0 {
+        "✅ ALL TESTS PASSED".to_string()
+    } else {
+        format!(
+            "⚠️  NO FAILURES; PARTIAL COVERAGE ({skipped_count} skipped, {expected_failure_count} expected failures)"
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn final_status_does_not_claim_all_passed_for_partial_coverage() {
+        let status = final_status_line(1, 0);
+
+        assert!(status.contains("NO FAILURES; PARTIAL COVERAGE"));
+        assert!(!status.contains("ALL TESTS PASSED"));
+    }
+
+    #[test]
+    fn final_status_claims_all_passed_only_for_full_green_results() {
+        assert_eq!(final_status_line(0, 0), "✅ ALL TESTS PASSED");
+    }
 }
