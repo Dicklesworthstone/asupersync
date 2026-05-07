@@ -622,6 +622,14 @@ impl RecoverableCapsule {
 
         Some(contributors)
     }
+
+    #[must_use]
+    fn earliest_sequence(&self) -> Option<u64> {
+        self.coverage
+            .values()
+            .flat_map(|ranges| ranges.iter().map(|range| range.start()))
+            .min()
+    }
 }
 
 /// Concrete delivery path chosen for a request.
@@ -1812,7 +1820,7 @@ impl FabricConsumer {
             return Err(FabricConsumerError::NoQueuedPullRequests);
         };
         let request = queued.request.clone();
-        let Some(window) = self.resolve_pull_window(&request, available_tail)? else {
+        let Some(window) = self.resolve_pull_window(&request, available_tail, capsule)? else {
             if request.no_wait {
                 return Err(FabricConsumerError::NoDataAvailable {
                     demand_class: request.demand_class,
@@ -2147,12 +2155,14 @@ impl FabricConsumer {
         &self,
         request: &PullRequest,
         available_tail: u64,
+        capsule: &RecoverableCapsule,
     ) -> Result<Option<SequenceWindow>, FabricConsumerError> {
         let batch = request.effective_batch_size()?;
         if available_tail == 0 {
             return Ok(None);
         }
 
+        let available_head = capsule.earliest_sequence().unwrap_or(1);
         let next_unacked = self.state.ack_floor.saturating_add(1).max(1);
         let resolve = match request.demand_class {
             ConsumerDemandClass::Tail => {
@@ -2176,7 +2186,7 @@ impl FabricConsumer {
                 }
             }
             ConsumerDemandClass::Replay => {
-                let start = self.replay_start_sequence(available_tail);
+                let start = self.replay_start_sequence(available_head, available_tail);
                 if start > available_tail {
                     None
                 } else {
@@ -2194,11 +2204,15 @@ impl FabricConsumer {
         }
     }
 
-    fn replay_start_sequence(&self, available_tail: u64) -> u64 {
+    fn replay_start_sequence(&self, available_head: u64, available_tail: u64) -> u64 {
         match self.config.deliver_policy {
-            DeliverPolicy::All => 1,
+            DeliverPolicy::All => available_head.max(1),
             DeliverPolicy::New => available_tail.saturating_add(1),
-            DeliverPolicy::ByStartSequence(sequence) => sequence.max(1),
+            DeliverPolicy::ByStartSequence(sequence) => sequence.max(available_head).max(1),
+            // Recoverable capsules do not currently retain publish timestamps, so
+            // time-anchored local replay must conservatively start from the
+            // earliest retained sequence instead of guessing a later offset.
+            DeliverPolicy::ByStartTime(_) => available_head.max(1),
             DeliverPolicy::Last | DeliverPolicy::LastPerSubject => available_tail.max(1),
         }
     }
@@ -4523,6 +4537,76 @@ mod tests {
         assert_eq!(
             second.window,
             SequenceWindow::new(1, 2).expect("replay window")
+        );
+    }
+
+    #[test]
+    fn fabric_consumer_replay_clamps_by_start_sequence_to_earliest_retained_window() {
+        let cell = test_cell();
+        let mut consumer = FabricConsumer::new(
+            &cell,
+            FabricConsumerConfig {
+                deliver_policy: DeliverPolicy::ByStartSequence(2),
+                ..FabricConsumerConfig::default()
+            },
+        )
+        .expect("consumer");
+        let capsule = RecoverableCapsule::default().with_window(
+            NodeId::new("node-a"),
+            SequenceWindow::new(10, 12).expect("window"),
+        );
+
+        consumer.switch_mode(ConsumerDispatchMode::Pull);
+        consumer
+            .queue_pull_request(PullRequest::new(2, ConsumerDemandClass::Replay).expect("replay"))
+            .expect("queue replay");
+
+        let delivery = match consumer
+            .dispatch_next_pull(12, &capsule, None)
+            .expect("dispatch replay")
+        {
+            PullDispatchOutcome::Scheduled(delivery) => *delivery,
+            PullDispatchOutcome::Waiting(_) => panic!("replay request should schedule"),
+        };
+
+        assert_eq!(
+            delivery.window,
+            SequenceWindow::new(10, 11).expect("clamped replay window")
+        );
+    }
+
+    #[test]
+    fn fabric_consumer_replay_by_start_time_uses_earliest_retained_window() {
+        let cell = test_cell();
+        let mut consumer = FabricConsumer::new(
+            &cell,
+            FabricConsumerConfig {
+                deliver_policy: DeliverPolicy::ByStartTime(std::time::UNIX_EPOCH),
+                ..FabricConsumerConfig::default()
+            },
+        )
+        .expect("consumer");
+        let capsule = RecoverableCapsule::default().with_window(
+            NodeId::new("node-a"),
+            SequenceWindow::new(10, 12).expect("window"),
+        );
+
+        consumer.switch_mode(ConsumerDispatchMode::Pull);
+        consumer
+            .queue_pull_request(PullRequest::new(2, ConsumerDemandClass::Replay).expect("replay"))
+            .expect("queue replay");
+
+        let delivery = match consumer
+            .dispatch_next_pull(12, &capsule, None)
+            .expect("dispatch replay")
+        {
+            PullDispatchOutcome::Scheduled(delivery) => *delivery,
+            PullDispatchOutcome::Waiting(_) => panic!("replay request should schedule"),
+        };
+
+        assert_eq!(
+            delivery.window,
+            SequenceWindow::new(10, 11).expect("time-anchored replay window")
         );
     }
 
