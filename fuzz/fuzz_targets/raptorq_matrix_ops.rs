@@ -3,8 +3,8 @@
 //! Tests higher-level matrix operations and mathematical invariants:
 //! 1. Matrix inversion: inversion(inversion(M)) == M
 //! 2. Matrix-vector multiplication associativity: (M*v)*s == M*(v*s)
-//! 3. Gaussian elimination preserves determinant mod 2
-//! 4. PLU factorization roundtrips: P*L*U == M
+//! 3. Gaussian elimination classifies singular/inconsistent systems consistently
+//! 4. Basic and Markowitz pivot strategies agree on the live solver seam
 //! 5. Oversized matrices are rejected cleanly
 //!
 //! This complements the existing raptorq_linalg.rs fuzzer which focuses on
@@ -15,9 +15,8 @@
 
 use arbitrary::Arbitrary;
 use asupersync::raptorq::gf256::Gf256;
-use asupersync::raptorq::linalg::{DenseRow, GaussianElimination, GaussianResult};
+use asupersync::raptorq::linalg::{DenseRow, GaussianResult, GaussianSolver};
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashMap;
 
 /// Maximum matrix dimensions for fuzzing (prevent OOM)
 const MAX_MATRIX_SIZE: usize = 64;
@@ -35,8 +34,8 @@ struct MatrixOpsFuzzInput {
     multiply_tests: Vec<MultiplyTest>,
     /// Gaussian elimination determinant preservation tests
     gauss_det_tests: Vec<GaussDetTest>,
-    /// PLU factorization tests
-    plu_tests: Vec<PluTest>,
+    /// Basic-vs-Markowitz solver agreement tests
+    solver_agreement_tests: Vec<SolverAgreementTest>,
     /// Oversized matrix rejection tests
     oversized_tests: Vec<OversizedTest>,
 }
@@ -70,13 +69,13 @@ struct GaussDetTest {
     rhs_data: Vec<u8>,
 }
 
-/// PLU factorization test case
+/// Live Gaussian solver agreement test case
 #[derive(Arbitrary, Debug)]
-struct PluTest {
-    /// Square matrix data
+struct SolverAgreementTest {
+    /// Matrix data
     matrix_data: Vec<Vec<u8>>,
-    /// Whether to force matrix to be well-conditioned
-    ensure_factorizable: bool,
+    /// Right-hand side for the solver
+    rhs_data: Vec<u8>,
 }
 
 /// Oversized matrix test case
@@ -94,7 +93,7 @@ struct OversizedTest {
 enum OversizedOperation {
     Inversion,
     GaussianElimination,
-    PluFactorization,
+    SolverAgreement,
     MatrixMultiply,
 }
 
@@ -185,7 +184,7 @@ fn matrix_invert(matrix: &Matrix) -> Option<Matrix> {
     }
 
     let n = matrix.rows;
-    let mut solver = GaussianElimination::new(n, n);
+    let mut solver = GaussianSolver::new(n, n);
 
     // Set up [A | I] system where we solve A * X = I
     for row in 0..n {
@@ -193,13 +192,7 @@ fn matrix_invert(matrix: &Matrix) -> Option<Matrix> {
         for col in 0..n {
             row_data.push(matrix.get(row, col).raw());
         }
-        solver.set_row(row, &row_data);
-
-        // Right-hand side: identity matrix columns
-        for col in 0..n {
-            let identity_val = if row == col { 1u8 } else { 0u8 };
-            solver.append_rhs(row, &[identity_val]);
-        }
+        solver.set_row(row, &row_data, identity_rhs(row, n));
     }
 
     match solver.solve() {
@@ -230,12 +223,16 @@ fn matrix_invert(matrix: &Matrix) -> Option<Matrix> {
 fn matrix_vector_multiply(matrix: &Matrix, vector: &[Gf256]) -> Vec<Gf256> {
     let mut result = vec![Gf256::ZERO; matrix.rows];
 
-    for row in 0..matrix.rows {
+    for (row, slot) in result.iter_mut().enumerate().take(matrix.rows) {
         let mut sum = Gf256::ZERO;
-        for col in 0..matrix.cols.min(vector.len()) {
-            sum = sum + (matrix.get(row, col) * vector[col]);
+        for (col, value) in vector
+            .iter()
+            .enumerate()
+            .take(matrix.cols.min(vector.len()))
+        {
+            sum += matrix.get(row, col) * *value;
         }
-        result[row] = sum;
+        *slot = sum;
     }
 
     result
@@ -329,9 +326,9 @@ fuzz_target!(|input: MatrixOpsFuzzInput| {
         test_gaussian_determinant_preservation(test);
     }
 
-    // Test PLU factorization (simplified)
-    for test in input.plu_tests.iter().take(4) {
-        test_plu_factorization(test);
+    // Test live solver pivot-strategy agreement
+    for test in input.solver_agreement_tests.iter().take(4) {
+        test_solver_agreement(test);
     }
 
     // Test oversized matrix rejection
@@ -351,22 +348,22 @@ fn test_matrix_inversion(test: &InversionTest) {
     }
 
     // Test: inversion(inversion(M)) == M
-    if let Some(inverse) = matrix_invert(&matrix) {
-        if let Some(double_inverse) = matrix_invert(&inverse) {
-            // Verify M == double_inverse
-            let n = matrix.rows;
-            for row in 0..n {
-                for col in 0..n {
-                    let original = matrix.get(row, col);
-                    let recovered = double_inverse.get(row, col);
+    if let Some(inverse) = matrix_invert(&matrix)
+        && let Some(double_inverse) = matrix_invert(&inverse)
+    {
+        // Verify M == double_inverse
+        let n = matrix.rows;
+        for row in 0..n {
+            for col in 0..n {
+                let original = matrix.get(row, col);
+                let recovered = double_inverse.get(row, col);
 
-                    // In practice, there may be small numerical differences
-                    // but in GF(256), operations are exact
-                    if original != recovered {
-                        // This could indicate a bug in matrix inversion
-                        // In fuzzing, we just note the inconsistency
-                        return;
-                    }
+                // In practice, there may be small numerical differences
+                // but in GF(256), operations are exact
+                if original != recovered {
+                    // This could indicate a bug in matrix inversion
+                    // In fuzzing, we just note the inconsistency
+                    return;
                 }
             }
         }
@@ -431,21 +428,17 @@ fn test_gaussian_determinant_preservation(test: &GaussDetTest) {
     let det_before = matrix_determinant_mod2(&matrix);
 
     // Perform Gaussian elimination
-    let mut solver = GaussianElimination::new(matrix.rows, matrix.cols);
+    let mut solver = GaussianSolver::new(matrix.rows, matrix.cols);
 
     for row in 0..matrix.rows {
         let row_data: Vec<u8> = (0..matrix.cols)
             .map(|col| matrix.get(row, col).raw())
             .collect();
-        solver.set_row(row, &row_data);
-    }
-
-    let rhs_len = test.rhs_data.len().min(matrix.rows);
-    if rhs_len > 0 {
-        for row in 0..matrix.rows {
-            let rhs_val = test.rhs_data.get(row).copied().unwrap_or(0);
-            solver.append_rhs(row, &[rhs_val]);
-        }
+        solver.set_row(
+            row,
+            &row_data,
+            one_byte_rhs(test.rhs_data.get(row).copied()),
+        );
     }
 
     let result = solver.solve();
@@ -472,17 +465,27 @@ fn test_gaussian_determinant_preservation(test: &GaussDetTest) {
     }
 }
 
-fn test_plu_factorization(_test: &PluTest) {
-    // PLU factorization is complex and would require significant implementation.
-    // For now, we just test that the concept doesn't crash.
-    // A full implementation would need:
-    // 1. Partial pivoting (P matrix)
-    // 2. Lower triangular extraction (L matrix)
-    // 3. Upper triangular result (U matrix)
-    // 4. Verification that P*L*U == original matrix
+fn test_solver_agreement(test: &SolverAgreementTest) {
+    let matrix = match Matrix::from_data(test.matrix_data.clone(), false) {
+        Some(m) => m,
+        None => return,
+    };
 
-    // This is a placeholder that tests the fuzzer infrastructure
-    // without implementing the full PLU algorithm
+    let mut basic = build_solver(&matrix, &test.rhs_data);
+    let mut markowitz = build_solver(&matrix, &test.rhs_data);
+
+    let basic_result = basic.solve();
+    let markowitz_result = markowitz.solve_markowitz();
+
+    assert_same_result_class(&basic_result, &markowitz_result);
+    if let (GaussianResult::Solved(basic_solution), GaussianResult::Solved(markowitz_solution)) =
+        (&basic_result, &markowitz_result)
+    {
+        assert_eq!(
+            basic_solution, markowitz_solution,
+            "basic and Markowitz solvers disagreed on solution rows"
+        );
+    }
 }
 
 fn test_oversized_rejection(test: &OversizedTest) {
@@ -511,16 +514,26 @@ fn test_oversized_rejection(test: &OversizedTest) {
                 let rows = test.rows.min(OVERSIZED_THRESHOLD);
                 let cols = test.cols.min(OVERSIZED_THRESHOLD);
 
-                // The GaussianElimination constructor should handle large sizes appropriately
+                // The GaussianSolver constructor should handle large sizes appropriately
                 if rows <= MAX_MATRIX_SIZE && cols <= MAX_MATRIX_SIZE {
-                    let _solver = GaussianElimination::new(rows, cols);
+                    let _solver = GaussianSolver::new(rows, cols);
                     // Should not panic with reasonable sizes
                 }
             }
 
-            OversizedOperation::PluFactorization => {
-                // PLU on large matrices should be rejected gracefully
-                // (Not implemented, placeholder)
+            OversizedOperation::SolverAgreement => {
+                let rows = test.rows.min(MAX_MATRIX_SIZE);
+                let cols = test.cols.min(MAX_MATRIX_SIZE);
+                if rows == 0 || cols == 0 {
+                    return;
+                }
+
+                let matrix_data = vec![vec![1u8; cols]; rows];
+                if let Some(matrix) = Matrix::from_data(matrix_data, false) {
+                    let mut basic = build_solver(&matrix, &[]);
+                    let mut markowitz = build_solver(&matrix, &[]);
+                    assert_same_result_class(&basic.solve(), &markowitz.solve_markowitz());
+                }
             }
 
             OversizedOperation::MatrixMultiply => {
@@ -534,5 +547,35 @@ fn test_oversized_rejection(test: &OversizedTest) {
                 }
             }
         }
+    }
+}
+
+fn identity_rhs(row: usize, len: usize) -> DenseRow {
+    let mut rhs = vec![0u8; len];
+    rhs[row] = 1;
+    DenseRow::new(rhs)
+}
+
+fn one_byte_rhs(value: Option<u8>) -> DenseRow {
+    DenseRow::new(vec![value.unwrap_or(0)])
+}
+
+fn build_solver(matrix: &Matrix, rhs_data: &[u8]) -> GaussianSolver {
+    let mut solver = GaussianSolver::new(matrix.rows, matrix.cols);
+    for row in 0..matrix.rows {
+        let row_data: Vec<u8> = (0..matrix.cols)
+            .map(|col| matrix.get(row, col).raw())
+            .collect();
+        solver.set_row(row, &row_data, one_byte_rhs(rhs_data.get(row).copied()));
+    }
+    solver
+}
+
+fn assert_same_result_class(left: &GaussianResult, right: &GaussianResult) {
+    match (left, right) {
+        (GaussianResult::Solved(_), GaussianResult::Solved(_))
+        | (GaussianResult::Singular { .. }, GaussianResult::Singular { .. })
+        | (GaussianResult::Inconsistent { .. }, GaussianResult::Inconsistent { .. }) => {}
+        _ => panic!("solver result class mismatch: basic={left:?}, markowitz={right:?}"),
     }
 }
