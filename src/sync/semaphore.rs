@@ -34,6 +34,7 @@ use std::task::{Context, Poll, Waker};
 
 use crate::cx::Cx;
 use crate::obligation::graded::{ObligationToken, SemaphorePermitKind};
+use crate::sync::lock_ordering::{self, LockRank};
 
 /// Error returned when semaphore acquisition fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +86,10 @@ pub struct Semaphore {
     closed_shadow: AtomicBool,
     /// Maximum permits (initial count).
     max_permits: usize,
+    /// Human-readable name for lock ordering (e.g., "tasks", "regions").
+    name: &'static str,
+    /// Lock rank for deadlock prevention.
+    rank: Option<LockRank>,
 }
 
 #[derive(Debug)]
@@ -222,8 +227,10 @@ struct WaiterHandle {
 impl Semaphore {
     /// Creates a new semaphore with the given number of permits.
     #[inline]
+    /// Creates a new semaphore with the given permits and name for lock ordering.
     #[must_use]
-    pub fn new(permits: usize) -> Self {
+    pub fn with_name(name: &'static str, permits: usize) -> Self {
+        let rank = LockRank::from_name(name);
         Self {
             state: ParkingMutex::new(SemaphoreState {
                 permits,
@@ -236,7 +243,18 @@ impl Semaphore {
             permits_shadow: AtomicUsize::new(permits),
             closed_shadow: AtomicBool::new(false),
             max_permits: permits,
+            name,
+            rank,
         }
+    }
+
+    /// Creates a new semaphore with the given permits using default naming.
+    ///
+    /// Note: For proper deadlock prevention, prefer `with_name()` to specify
+    /// the semaphore's role in the lock hierarchy (e.g., "tasks", "regions").
+    #[must_use]
+    pub fn new(permits: usize) -> Self {
+        Self::with_name("unknown", permits)
     }
 
     /// Returns the number of currently available permits.
@@ -299,6 +317,11 @@ impl Semaphore {
     pub fn try_acquire(&self, count: usize) -> Result<SemaphorePermit<'_>, TryAcquireError> {
         assert!(count > 0, "cannot acquire 0 permits");
 
+        // Check lock ordering before acquisition (debug builds only)
+        if let Some(rank) = self.rank {
+            lock_ordering::check_acquire(self.name, rank);
+        }
+
         let mut state = self.state.lock();
         let result = if state.closed {
             Err(TryAcquireError)
@@ -312,6 +335,12 @@ impl Semaphore {
             // benign try_acquire miss — the real count is protected by the lock.
             // On ARM this avoids a store-release barrier per acquisition.
             self.permits_shadow.store(state.permits, Ordering::Relaxed);
+
+            // Record lock acquisition for ordering tracking
+            if let Some(rank) = self.rank {
+                lock_ordering::record_acquire(rank);
+            }
+
             Ok(SemaphorePermit {
                 // br-asupersync-13jmt3: static description avoids the
                 // per-acquire String allocation. The permit count is
@@ -427,10 +456,20 @@ impl<'a> Future for AcquireFuture<'a, '_> {
         });
 
         if is_next_in_line && state.permits >= self.count {
+            // Check lock ordering before acquisition (debug builds only)
+            if let Some(rank) = self.semaphore.rank {
+                lock_ordering::check_acquire(self.semaphore.name, rank);
+            }
+
             state.permits -= self.count;
             self.semaphore
                 .permits_shadow
                 .store(state.permits, Ordering::Relaxed);
+
+            // Record lock acquisition for ordering tracking
+            if let Some(rank) = self.semaphore.rank {
+                lock_ordering::record_acquire(rank);
+            }
 
             // Optimization: Since we verified we are next in line, we are either
             // at the front of the queue or the queue is empty. We can just pop
@@ -548,6 +587,12 @@ impl Drop for SemaphorePermit<'_> {
         if self.count > 0 {
             self.semaphore.add_permits(self.count);
         }
+
+        // Record lock release for ordering tracking
+        if let Some(rank) = self.semaphore.rank {
+            lock_ordering::record_release(rank);
+        }
+
         // Ordinary RAII drop is the normal release path for semaphore permits.
     }
 }
@@ -656,6 +701,11 @@ impl Drop for OwnedSemaphorePermit {
         if self.count > 0 {
             self.semaphore.add_permits(self.count);
         }
+
+        // Record lock release for ordering tracking
+        if let Some(rank) = self.semaphore.rank {
+            lock_ordering::record_release(rank);
+        }
     }
 }
 
@@ -762,10 +812,20 @@ impl Future for OwnedAcquireFuture {
         });
 
         if is_next_in_line && state.permits >= this.count {
+            // Check lock ordering before acquisition (debug builds only)
+            if let Some(rank) = this.semaphore.rank {
+                lock_ordering::check_acquire(this.semaphore.name, rank);
+            }
+
             state.permits -= this.count;
             this.semaphore
                 .permits_shadow
                 .store(state.permits, Ordering::Relaxed);
+
+            // Record lock acquisition for ordering tracking
+            if let Some(rank) = this.semaphore.rank {
+                lock_ordering::record_acquire(rank);
+            }
 
             // Optimization: O(1) removal instead of O(N) retain
             if let Some(waiter) = this.waiter {

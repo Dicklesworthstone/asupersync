@@ -338,9 +338,10 @@ fn rng_hinted_pop_uses_deterministic_tie_break_index() {
 mod behavioral {
     use asupersync::runtime::scheduler::priority::Scheduler;
     use asupersync::types::{TaskId, Time};
+    use asupersync::util::ArenaIndex;
 
     fn task(n: u64) -> TaskId {
-        TaskId::from_arena_index(n as usize)
+        TaskId::from_arena(ArenaIndex::new(n as u32, 1))
     }
 
     #[test]

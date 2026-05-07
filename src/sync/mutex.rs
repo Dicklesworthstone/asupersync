@@ -37,6 +37,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Waker};
 
 use crate::cx::Cx;
+use crate::sync::lock_ordering::{self, LockRank};
 use crate::time::Sleep;
 use crate::types::Time;
 
@@ -97,6 +98,10 @@ pub struct Mutex<T> {
     poisoned: AtomicBool,
     /// Internal state for fairness and locking.
     state: ParkingMutex<MutexState>,
+    /// Human-readable name for lock ordering (e.g., "tasks", "regions").
+    name: &'static str,
+    /// Lock rank for deadlock prevention.
+    rank: Option<LockRank>,
 }
 
 // Safety: Mutex is Send/Sync if T is Send.
@@ -267,10 +272,11 @@ impl WaiterChain {
 }
 
 impl<T> Mutex<T> {
-    /// Creates a new mutex in an unlocked state.
+    /// Creates a new mutex in an unlocked state with the given name for lock ordering.
     #[inline]
     #[must_use]
-    pub fn new(value: T) -> Self {
+    pub fn with_name(name: &'static str, value: T) -> Self {
+        let rank = LockRank::from_name(name);
         Self {
             data: UnsafeCell::new(value),
             poisoned: AtomicBool::new(false),
@@ -279,7 +285,19 @@ impl<T> Mutex<T> {
                 waiters: WaiterChain::new(),
                 granted_waiter: None,
             }),
+            name,
+            rank,
         }
+    }
+
+    /// Creates a new mutex in an unlocked state with default naming.
+    ///
+    /// Note: For proper deadlock prevention, prefer `with_name()` to specify
+    /// the mutex's role in the lock hierarchy (e.g., "tasks", "regions").
+    #[inline]
+    #[must_use]
+    pub fn new(value: T) -> Self {
+        Self::with_name("unknown", value)
     }
 
     /// Returns true if the mutex is poisoned.
@@ -360,6 +378,11 @@ impl<T> Mutex<T> {
     /// ```
     #[inline]
     pub fn try_lock(&self) -> Result<MutexGuard<'_, T>, TryLockError> {
+        // Check lock ordering before acquisition (debug builds only)
+        if let Some(rank) = self.rank {
+            lock_ordering::check_acquire(self.name, rank);
+        }
+
         let mut state = self.state.lock();
         if self.is_poisoned() {
             return Err(TryLockError::Poisoned);
@@ -370,6 +393,11 @@ impl<T> Mutex<T> {
 
         state.locked = true;
         drop(state);
+
+        // Record lock acquisition for ordering tracking
+        if let Some(rank) = self.rank {
+            lock_ordering::record_acquire(rank);
+        }
 
         Ok(MutexGuard { mutex: self })
     }
@@ -568,10 +596,21 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
         if let Some(waiter_id) = self.waiter_id {
             if state.granted_waiter == Some(waiter_id) {
                 if !state.locked {
+                    // Check lock ordering before acquisition (debug builds only)
+                    if let Some(rank) = self.mutex.rank {
+                        lock_ordering::check_acquire(self.mutex.name, rank);
+                    }
+
                     state.granted_waiter = None;
                     state.locked = true;
                     self.waiter_id = None;
                     self.completed = true;
+
+                    // Record lock acquisition for ordering tracking
+                    if let Some(rank) = self.mutex.rank {
+                        lock_ordering::record_acquire(rank);
+                    }
+
                     return Poll::Ready(Ok(MutexGuard { mutex: self.mutex }));
                 }
 
@@ -588,9 +627,20 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
         }
 
         if !state.locked && state.granted_waiter.is_none() && self.waiter_id.is_none() {
+            // Check lock ordering before acquisition (debug builds only)
+            if let Some(rank) = self.mutex.rank {
+                lock_ordering::check_acquire(self.mutex.name, rank);
+            }
+
             // Acquire lock immediately only when nobody else already owns the turn.
             state.locked = true;
             self.completed = true;
+
+            // Record lock acquisition for ordering tracking
+            if let Some(rank) = self.mutex.rank {
+                lock_ordering::record_acquire(rank);
+            }
+
             return Poll::Ready(Ok(MutexGuard { mutex: self.mutex }));
         }
 
@@ -675,6 +725,11 @@ impl<T> Drop for MutexGuard<'_, T> {
             self.mutex.poison();
         }
         self.mutex.unlock();
+
+        // Record lock release for ordering tracking
+        if let Some(rank) = self.mutex.rank {
+            lock_ordering::record_release(rank);
+        }
     }
 }
 
@@ -759,6 +814,11 @@ impl<T, U: ?Sized> Drop for MappedMutexGuard<'_, T, U> {
             self.mutex.poison();
         }
         self.mutex.unlock();
+
+        // Record lock release for ordering tracking
+        if let Some(rank) = self.mutex.rank {
+            lock_ordering::record_release(rank);
+        }
     }
 }
 
@@ -822,6 +882,11 @@ impl<T> OwnedMutexGuard<T> {
     /// Tries to acquire the mutex without waiting.
     #[inline]
     pub fn try_lock(mutex: Arc<Mutex<T>>) -> Result<Self, TryLockError> {
+        // Check lock ordering before acquisition (debug builds only)
+        if let Some(rank) = mutex.rank {
+            lock_ordering::check_acquire(mutex.name, rank);
+        }
+
         {
             let mut state = mutex.state.lock();
             if mutex.is_poisoned() {
@@ -832,6 +897,12 @@ impl<T> OwnedMutexGuard<T> {
             }
             state.locked = true;
         }
+
+        // Record lock acquisition for ordering tracking
+        if let Some(rank) = mutex.rank {
+            lock_ordering::record_acquire(rank);
+        }
+
         Ok(Self { mutex })
     }
 
@@ -894,6 +965,11 @@ impl<T> Drop for OwnedMutexGuard<T> {
             self.mutex.poison();
         }
         self.mutex.unlock();
+
+        // Record lock release for ordering tracking
+        if let Some(rank) = self.mutex.rank {
+            lock_ordering::record_release(rank);
+        }
     }
 }
 
@@ -938,6 +1014,11 @@ impl<T, U: ?Sized> Drop for OwnedMappedMutexGuard<T, U> {
             self.mutex.poison();
         }
         self.mutex.unlock();
+
+        // Record lock release for ordering tracking
+        if let Some(rank) = self.mutex.rank {
+            lock_ordering::record_release(rank);
+        }
     }
 }
 
