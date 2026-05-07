@@ -1,0 +1,447 @@
+{
+  "contract_version": "proof-lane-manifest-v1",
+  "bead_id": "asupersync-aj7lx3.1",
+  "created_date": "2026-05-07",
+  "description": "Canonical rch-routed proof-command manifest for production, feature, fuzz, broad validation, rustdoc, and formal proof lanes.",
+  "source_of_truth": {
+    "manifest": "artifacts/proof_lane_manifest_v1.json",
+    "contract_test": "tests/proof_lane_manifest_contract.rs",
+    "cargo_manifest": "Cargo.toml",
+    "agent_instructions": "AGENTS.md",
+    "readme": "README.md"
+  },
+  "command_policy": {
+    "all_commands_must_start_with": "rch exec -- ",
+    "cpu_intensive_validation_must_use_rch": true,
+    "formal_lean_build_must_not_shell_wrap": true,
+    "broad_validation_is_frontier_evidence_not_local_change_proof": true
+  },
+  "required_guarantee_ids": [
+    "default-production-tokio-free",
+    "metrics-production-tokio-free",
+    "fuzz-tokio-quarantine",
+    "workspace-tokio-audit",
+    "feature-gated-native-surfaces",
+    "fuzz-manifest-smoke",
+    "lib-test-frontier",
+    "all-target-compile-frontier",
+    "clippy-frontier",
+    "rustfmt-frontier",
+    "rustdoc-api-frontier",
+    "formal-lean-core-invariants",
+    "proof-lane-manifest-verifier"
+  ],
+  "lanes": [
+    {
+      "lane_id": "default-production-tokio-tree",
+      "kind": "dependency_graph",
+      "command": "rch exec -- cargo tree -e normal -p asupersync -i tokio",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "default-production-tokio-free"
+      ],
+      "covers": "Default production normal dependency graph has no tokio edge.",
+      "explicit_not_covered": "Workspace, dev-dependency, fuzz, conformance, and asupersync-tokio-compat graphs are outside this production proof.",
+      "expected_signal": "warning: nothing to print.",
+      "source_paths": [
+        "Cargo.toml",
+        "artifacts/no_tokio_feature_boundary_contract_v1.json",
+        "tests/no_tokio_feature_boundary_contract.rs"
+      ],
+      "common_unrelated_blockers": [
+        "Cargo.lock or dependency graph drift from unrelated feature work"
+      ],
+      "escalation_notes": "Any tokio path here is a production regression; file or update a blocker bead with the full cargo-tree path."
+    },
+    {
+      "lane_id": "metrics-production-tokio-tree",
+      "kind": "dependency_graph",
+      "command": "rch exec -- cargo tree -e normal -p asupersync --features metrics -i tokio",
+      "package": "asupersync",
+      "feature_flags": [
+        "metrics"
+      ],
+      "guarantee_ids": [
+        "metrics-production-tokio-free"
+      ],
+      "covers": "Optional metrics production normal dependency graph has no tokio edge.",
+      "explicit_not_covered": "The fuzz feature deliberately enables OTLP generated messages through tonic/tokio and is not covered by this lane.",
+      "expected_signal": "warning: nothing to print.",
+      "source_paths": [
+        "Cargo.toml",
+        "artifacts/no_tokio_feature_boundary_contract_v1.json",
+        "tests/no_tokio_feature_boundary_contract.rs"
+      ],
+      "common_unrelated_blockers": [
+        "opentelemetry or opentelemetry_sdk feature drift",
+        "accidental metrics dependency on opentelemetry-proto"
+      ],
+      "escalation_notes": "Treat any tokio edge as a metrics production regression and capture the feature path."
+    },
+    {
+      "lane_id": "fuzz-tokio-quarantine-tree",
+      "kind": "dependency_graph",
+      "command": "rch exec -- cargo tree -e normal -p asupersync --features fuzz -i tokio",
+      "package": "asupersync",
+      "feature_flags": [
+        "fuzz"
+      ],
+      "guarantee_ids": [
+        "fuzz-tokio-quarantine"
+      ],
+      "covers": "The fuzz-only OTLP helper graph is expected to expose the quarantined opentelemetry-proto to tonic/tokio path.",
+      "explicit_not_covered": "This is not a production-consumer proof and must not be used to weaken default or metrics no-tokio claims.",
+      "expected_signal": "dependency path containing opentelemetry-proto, tonic or tonic-prost, and tokio",
+      "source_paths": [
+        "Cargo.toml",
+        "artifacts/no_tokio_feature_boundary_contract_v1.json",
+        "tests/no_tokio_feature_boundary_contract.rs"
+      ],
+      "common_unrelated_blockers": [
+        "fuzz feature dependency churn"
+      ],
+      "escalation_notes": "If the path disappears, update the quarantine contract; if it appears in default or metrics lanes, file a production blocker."
+    },
+    {
+      "lane_id": "workspace-normal-tokio-audit",
+      "kind": "dependency_graph",
+      "command": "rch exec -- cargo tree -e normal --workspace -i tokio",
+      "package": "workspace",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "workspace-tokio-audit"
+      ],
+      "covers": "Workspace normal graph audit names expected scoped tokio edges in satellite crates and test/reference surfaces.",
+      "explicit_not_covered": "Not a default production proof; expected tokio edges are allowed when documented as scoped carve-outs.",
+      "expected_signal": "tokio paths are limited to documented workspace carve-outs",
+      "source_paths": [
+        "AGENTS.md",
+        "README.md",
+        "Cargo.toml"
+      ],
+      "common_unrelated_blockers": [
+        "new workspace member enables tokio without documentation"
+      ],
+      "escalation_notes": "Compare output against AGENTS documented carve-outs before filing a regression."
+    },
+    {
+      "lane_id": "native-feature-smoke",
+      "kind": "compile_frontier",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_native_feature_smoke CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --no-default-features --features tls,sqlite,postgres,mysql,quic,http3,compression,tracing-integration",
+      "package": "asupersync",
+      "feature_flags": [
+        "tls",
+        "sqlite",
+        "postgres",
+        "mysql",
+        "quic",
+        "http3",
+        "compression",
+        "tracing-integration"
+      ],
+      "guarantee_ids": [
+        "feature-gated-native-surfaces"
+      ],
+      "covers": "Representative native optional runtime surfaces parse and typecheck together without default test helpers.",
+      "explicit_not_covered": "Does not prove external service behavior, broker availability, TLS trust roots, or every feature permutation.",
+      "expected_signal": "cargo check exits 0 or records the first unrelated compile frontier blocker",
+      "source_paths": [
+        "Cargo.toml",
+        "src/lib.rs"
+      ],
+      "common_unrelated_blockers": [
+        "feature-specific compile drift",
+        "native dependency availability on remote workers"
+      ],
+      "escalation_notes": "If this fails before touched files compile, capture the first file/error as a validation frontier blocker."
+    },
+    {
+      "lane_id": "fuzz-manifest-smoke",
+      "kind": "compile_frontier",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fuzz_manifest_smoke CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check --manifest-path fuzz/Cargo.toml",
+      "package": "fuzz",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "fuzz-manifest-smoke"
+      ],
+      "covers": "The fuzz manifest and registered fuzz targets typecheck as a cargo-fuzz workspace.",
+      "explicit_not_covered": "Does not run coverage-guided campaigns, sanitizers, or individual crash reproductions.",
+      "expected_signal": "cargo check exits 0 or records the first fuzz target compile blocker",
+      "source_paths": [
+        "fuzz/Cargo.toml",
+        "fuzz/fuzz_targets"
+      ],
+      "common_unrelated_blockers": [
+        "peer-dirty fuzz target",
+        "shared fuzz/Cargo.toml registration conflict"
+      ],
+      "escalation_notes": "For one-target work, pair this broad lane with a narrower --bin target proof if the manifest is blocked elsewhere."
+    },
+    {
+      "lane_id": "lib-tests",
+      "kind": "test_frontier",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lib_tests CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --lib --features test-internals -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [
+        "test-internals"
+      ],
+      "guarantee_ids": [
+        "lib-test-frontier"
+      ],
+      "covers": "Runtime crate unit-test frontier including inline module tests and test-internals helpers.",
+      "explicit_not_covered": "Integration tests, conformance crate, fuzz targets, examples, and benches are outside this lane.",
+      "expected_signal": "lib tests pass or the first failing compile/test frontier is recorded",
+      "source_paths": [
+        "src/lib.rs",
+        "Cargo.toml"
+      ],
+      "common_unrelated_blockers": [
+        "audit test compile drift",
+        "peer-dirty lib module",
+        "warning wall promoted by RUSTFLAGS"
+      ],
+      "escalation_notes": "Do not claim all-target health from this lane; use it as scoped lib-frontier evidence."
+    },
+    {
+      "lane_id": "all-targets-check",
+      "kind": "compile_frontier",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --all-targets",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "all-target-compile-frontier"
+      ],
+      "covers": "The runtime crate's lib, bins, tests, examples, and benches compile under the selected default feature profile.",
+      "explicit_not_covered": "Workspace satellite crates, fuzz manifest, clippy lints, runtime behavior, and feature combinations are separate lanes.",
+      "expected_signal": "cargo check exits 0 or records the first unrelated all-target blocker",
+      "source_paths": [
+        "Cargo.toml",
+        "src/lib.rs",
+        "tests"
+      ],
+      "common_unrelated_blockers": [
+        "unrelated test compile drift",
+        "peer-staged conformance or audit files",
+        "feature-gated test missing cfg"
+      ],
+      "escalation_notes": "If blocked outside touched files, cite exact file/error and use a narrower supplemental proof for local changes."
+    },
+    {
+      "lane_id": "clippy-all-targets",
+      "kind": "lint_frontier",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_clippy_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --all-targets -- -D warnings",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "clippy-frontier"
+      ],
+      "covers": "Clippy warning-deny frontier for the runtime crate all-target profile.",
+      "explicit_not_covered": "Does not prove behavior, dependency graph policy, fuzz campaigns, or formal semantics.",
+      "expected_signal": "clippy exits 0 or records the first lint frontier blocker",
+      "source_paths": [
+        "Cargo.toml",
+        "src",
+        "tests"
+      ],
+      "common_unrelated_blockers": [
+        "warning debt in unrelated audit modules",
+        "peer-dirty tests"
+      ],
+      "escalation_notes": "Preserve first lint file/error in Beads or validation-frontier records; avoid widening from unrelated lint debt."
+    },
+    {
+      "lane_id": "rustfmt-check",
+      "kind": "format_frontier",
+      "command": "rch exec -- cargo fmt --check",
+      "package": "workspace",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "rustfmt-frontier"
+      ],
+      "covers": "Workspace rustfmt formatting frontier.",
+      "explicit_not_covered": "Does not compile or run tests; standalone Rust files may still need explicit --edition checks.",
+      "expected_signal": "rustfmt exits 0 or prints exact formatting diffs",
+      "source_paths": [
+        "Cargo.toml"
+      ],
+      "common_unrelated_blockers": [
+        "peer-dirty formatting changes"
+      ],
+      "escalation_notes": "For narrow standalone files, include an explicit rustfmt --edition 2024 supplemental proof."
+    },
+    {
+      "lane_id": "rustdoc-api",
+      "kind": "documentation_frontier",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rustdoc_api CARGO_INCREMENTAL=0 RUSTDOCFLAGS='-D warnings' cargo doc -p asupersync --no-deps --features test-internals",
+      "package": "asupersync",
+      "feature_flags": [
+        "test-internals"
+      ],
+      "guarantee_ids": [
+        "rustdoc-api-frontier"
+      ],
+      "covers": "Runtime crate public API documentation and doctest-visible examples build without dependency docs.",
+      "explicit_not_covered": "Does not run integration tests, conformance runners, or docs for every workspace member.",
+      "expected_signal": "cargo doc exits 0 or records the first rustdoc warning/error",
+      "source_paths": [
+        "src/lib.rs",
+        "README.md"
+      ],
+      "common_unrelated_blockers": [
+        "rustdoc warning in unrelated public API",
+        "feature-gated doc cfg drift"
+      ],
+      "escalation_notes": "For method-level rustdoc work, cite the method-specific proof separately if this broad lane is blocked."
+    },
+    {
+      "lane_id": "formal-lean-build",
+      "kind": "formal_frontier",
+      "command": "rch exec -- lake --dir formal/lean build",
+      "package": "formal/lean",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "formal-lean-core-invariants"
+      ],
+      "covers": "Lean checks the formal core invariant project recorded in the formal proof posture contract.",
+      "explicit_not_covered": "Does not prove every adapter, protocol implementation, backend, or distributed transport lane.",
+      "expected_signal": "Build completed successfully",
+      "source_paths": [
+        "formal/lean/Asupersync.lean",
+        "formal/lean/lakefile.lean",
+        "artifacts/formal_proof_posture_contract_v1.json",
+        "tests/formal_proof_posture_contract.rs"
+      ],
+      "common_unrelated_blockers": [
+        "Lean toolchain or lake cache availability on worker"
+      ],
+      "escalation_notes": "Keep this command direct; do not shell-wrap through bash or cd."
+    },
+    {
+      "lane_id": "proof-lane-manifest-contract",
+      "kind": "artifact_contract",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "proof-lane-manifest-verifier"
+      ],
+      "covers": "This manifest is machine-checked for command shape, guarantee coverage, feature freshness, path freshness, and docs pointers.",
+      "explicit_not_covered": "Does not execute every lane command; it verifies that the manifest remains internally complete and repo-fresh.",
+      "expected_signal": "proof_lane_manifest_contract tests pass",
+      "source_paths": [
+        "artifacts/proof_lane_manifest_v1.json",
+        "tests/proof_lane_manifest_contract.rs",
+        "Cargo.toml",
+        "AGENTS.md",
+        "README.md"
+      ],
+      "common_unrelated_blockers": [
+        "manifest references a removed file",
+        "feature name drift in Cargo.toml"
+      ],
+      "escalation_notes": "This is the minimum proof for edits to the manifest itself."
+    }
+  ],
+  "guarantees": [
+    {
+      "guarantee_id": "default-production-tokio-free",
+      "description": "Default asupersync production normal dependency graph has no tokio edge.",
+      "lane_ids": [
+        "default-production-tokio-tree"
+      ]
+    },
+    {
+      "guarantee_id": "metrics-production-tokio-free",
+      "description": "Metrics production normal dependency graph has no tokio edge.",
+      "lane_ids": [
+        "metrics-production-tokio-tree"
+      ]
+    },
+    {
+      "guarantee_id": "fuzz-tokio-quarantine",
+      "description": "Fuzz-only OTLP generated-message tokio edge is quarantined and documented.",
+      "lane_ids": [
+        "fuzz-tokio-quarantine-tree"
+      ]
+    },
+    {
+      "guarantee_id": "workspace-tokio-audit",
+      "description": "Workspace normal graph tokio edges are audited as scoped carve-outs rather than production regressions.",
+      "lane_ids": [
+        "workspace-normal-tokio-audit"
+      ]
+    },
+    {
+      "guarantee_id": "feature-gated-native-surfaces",
+      "description": "Representative native optional surfaces have a canonical compile-frontier command.",
+      "lane_ids": [
+        "native-feature-smoke"
+      ]
+    },
+    {
+      "guarantee_id": "fuzz-manifest-smoke",
+      "description": "Fuzz manifest and registered targets have a canonical smoke command.",
+      "lane_ids": [
+        "fuzz-manifest-smoke"
+      ]
+    },
+    {
+      "guarantee_id": "lib-test-frontier",
+      "description": "Runtime crate lib-test frontier has a canonical rch command.",
+      "lane_ids": [
+        "lib-tests"
+      ]
+    },
+    {
+      "guarantee_id": "all-target-compile-frontier",
+      "description": "Runtime crate all-target compile frontier has a canonical rch command.",
+      "lane_ids": [
+        "all-targets-check"
+      ]
+    },
+    {
+      "guarantee_id": "clippy-frontier",
+      "description": "Runtime crate all-target clippy warning-deny frontier has a canonical rch command.",
+      "lane_ids": [
+        "clippy-all-targets"
+      ]
+    },
+    {
+      "guarantee_id": "rustfmt-frontier",
+      "description": "Workspace rustfmt frontier has a canonical rch command.",
+      "lane_ids": [
+        "rustfmt-check"
+      ]
+    },
+    {
+      "guarantee_id": "rustdoc-api-frontier",
+      "description": "Runtime crate rustdoc API frontier has a canonical rch command.",
+      "lane_ids": [
+        "rustdoc-api"
+      ]
+    },
+    {
+      "guarantee_id": "formal-lean-core-invariants",
+      "description": "Lean core-invariant proof build has a canonical direct rch command.",
+      "lane_ids": [
+        "formal-lean-build"
+      ]
+    },
+    {
+      "guarantee_id": "proof-lane-manifest-verifier",
+      "description": "The proof-lane manifest has a canonical verifier command.",
+      "lane_ids": [
+        "proof-lane-manifest-contract"
+      ]
+    }
+  ],
+  "documentation_contract": {
+    "docs_must_reference_manifest": [
+      "README.md",
+      "AGENTS.md"
+    ],
+    "required_marker": "artifacts/proof_lane_manifest_v1.json",
+    "verifier_marker": "tests/proof_lane_manifest_contract.rs"
+  }
+}
