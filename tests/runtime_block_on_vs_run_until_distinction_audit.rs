@@ -421,7 +421,6 @@ fn block_on_documented_as_production_future_driver() {
 // ── Behavioral pins ─────────────────────────────────────
 
 use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
@@ -437,12 +436,10 @@ impl Wake for NullWake {
 struct MockRuntime;
 
 impl MockRuntime {
-    fn block_on<F: Future>(&self, mut future: F) -> F::Output {
+    fn block_on<F: Future>(&self, future: F) -> F::Output {
         let waker = Waker::from(Arc::new(NullWake));
         let mut cx = Context::from_waker(&waker);
-        // Safety: the future is local; pinning to stack
-        // for the duration of the call.
-        let mut pinned = unsafe { Pin::new_unchecked(&mut future) };
+        let mut pinned = std::pin::pin!(future);
         loop {
             match pinned.as_mut().poll(&mut cx) {
                 Poll::Ready(out) => return out,

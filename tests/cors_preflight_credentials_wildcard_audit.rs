@@ -10,26 +10,17 @@
 //! The server MUST reject this by NOT setting any Access-Control-Allow-Origin header,
 //! causing the browser to block the request. This prevents credential reflection attacks.
 
-use asupersync::web::middleware::{CorsMiddleware, CorsPolicy, FnHandler};
-use asupersync::web::{Request, StatusCode};
+use asupersync::web::middleware::{CorsMiddleware, CorsPolicy};
+use asupersync::web::{FnHandler, Handler, StatusCode};
+use asupersync::web::extract::Request;
 
-fn ok_handler(_req: Request) -> asupersync::web::Response {
-    asupersync::web::Response::ok("test response")
+fn ok_handler() -> asupersync::web::Response {
+    asupersync::web::Response::new(StatusCode::OK, "test response")
 }
 
 #[test]
 fn cors_preflight_wildcard_credentials_security_audit() {
     println!("=== CORS PREFLIGHT WILDCARD + CREDENTIALS AUDIT ===");
-
-    // Test Case 1: Preflight with forbidden wildcard + credentials combination
-    let policy = CorsPolicy {
-        allow_credentials: true,
-        ..CorsPolicy::default() // allow_origin: Any (wildcard *)
-    };
-
-    // Suppress debug assertion in release mode testing
-    #[cfg(not(debug_assertions))]
-    let middleware = CorsMiddleware::new(FnHandler::new(ok_handler), policy);
 
     #[cfg(debug_assertions)]
     {
@@ -40,6 +31,15 @@ fn cors_preflight_wildcard_credentials_security_audit() {
 
     #[cfg(not(debug_assertions))]
     {
+        // Test Case 1: Preflight with forbidden wildcard + credentials combination
+        let policy = CorsPolicy {
+            allow_credentials: true,
+            ..CorsPolicy::default() // allow_origin: Any (wildcard *)
+        };
+
+        // Suppress debug assertion in release mode testing
+        let middleware = CorsMiddleware::new(FnHandler::new(ok_handler), policy);
+
         // Valid preflight OPTIONS request asking for credentials with wildcard policy
         let preflight_request = Request::new("OPTIONS", "/api/data")
             .with_header("Origin", "https://attacker.example")

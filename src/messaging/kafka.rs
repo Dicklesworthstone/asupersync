@@ -611,7 +611,7 @@ struct StubBroker {
 #[cfg(not(feature = "kafka"))]
 static STUB_BROKER: OnceLock<StubBroker> = OnceLock::new();
 
-#[cfg(all(not(feature = "kafka"), test))]
+#[cfg(all(not(feature = "kafka"), feature = "test-internals"))]
 static STUB_BROKER_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[cfg(not(feature = "kafka"))]
@@ -638,7 +638,8 @@ pub(crate) fn stub_broker_notify() -> &'static Notify {
 }
 
 #[cfg(not(feature = "kafka"))]
-pub(crate) fn stub_broker_end_offset(topic: &str, partition: i32) -> i64 {
+/// Return the current end offset for a stub broker topic partition.
+pub fn stub_broker_end_offset(topic: &str, partition: i32) -> i64 {
     let state = stub_broker().state.lock();
     state
         .partitions
@@ -731,27 +732,30 @@ fn stub_broker_publish_batch(records: Vec<StubBrokerRecord>) -> Vec<RecordMetada
     metadata
 }
 
-#[cfg(all(not(feature = "kafka"), test))]
-pub(crate) fn reset_stub_broker_for_tests() {
+#[cfg(all(not(feature = "kafka"), feature = "test-internals"))]
+/// Reset the fallback stub broker state used by integration tests.
+pub fn reset_stub_broker_for_tests() {
     if let Some(broker) = STUB_BROKER.get() {
         broker.state.lock().partitions.clear();
         broker.notify.notify_waiters();
     }
 }
 
-#[cfg(all(not(feature = "kafka"), test))]
+#[cfg(all(not(feature = "kafka"), feature = "test-internals"))]
 #[allow(dead_code)] // Guard held for test serialization — not read, just held
-pub(crate) struct StubBrokerTestGuard(parking_lot::MutexGuard<'static, ()>);
+/// Test guard that serializes access to the process-global stub broker.
+pub struct StubBrokerTestGuard(parking_lot::MutexGuard<'static, ()>);
 
-#[cfg(all(not(feature = "kafka"), test))]
+#[cfg(all(not(feature = "kafka"), feature = "test-internals"))]
 impl Drop for StubBrokerTestGuard {
     fn drop(&mut self) {
         reset_stub_broker_for_tests();
     }
 }
 
-#[cfg(all(not(feature = "kafka"), test))]
-pub(crate) fn lock_stub_broker_for_tests() -> StubBrokerTestGuard {
+#[cfg(all(not(feature = "kafka"), feature = "test-internals"))]
+/// Acquire exclusive test access to the fallback stub broker and clear it.
+pub fn lock_stub_broker_for_tests() -> StubBrokerTestGuard {
     let lock = STUB_BROKER_TEST_LOCK.get_or_init(|| Mutex::new(()));
     let guard = lock.lock();
 

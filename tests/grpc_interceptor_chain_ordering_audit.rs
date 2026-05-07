@@ -502,6 +502,13 @@ mod behavioral {
                 self.log.lock().unwrap().push(format!("req:{}", self.tag));
                 Err(Status::internal("planned failure"))
             }
+
+            fn intercept_response(
+                &self,
+                _resp: &mut asupersync::grpc::streaming::Response<Bytes>,
+            ) -> Result<(), Status> {
+                Ok(())
+            }
         }
 
         struct LoggingInterceptor {
@@ -513,6 +520,14 @@ mod behavioral {
                 self.log.lock().unwrap().push(format!("req:{}", self.tag));
                 Ok(())
             }
+
+            fn intercept_response(
+                &self,
+                _resp: &mut asupersync::grpc::streaming::Response<Bytes>,
+            ) -> Result<(), Status> {
+                Ok(())
+            }
+
             fn intercept_error_with_request(
                 &self,
                 _request: &Request<Bytes>,

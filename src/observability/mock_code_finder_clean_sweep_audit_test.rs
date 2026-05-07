@@ -70,7 +70,8 @@ mod mock_code_finder_audit {
             .expect("ripgrep should be available");
 
         // Filter out test files and test functions
-        let non_test_unreachable: Vec<&str> = String::from_utf8_lossy(&output.stdout)
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let non_test_unreachable: Vec<&str> = stdout
             .lines()
             .filter(|line| !line.contains("test") && !line.contains("#[cfg(test)]"))
             .collect();
@@ -90,7 +91,8 @@ mod mock_code_finder_audit {
             .output()
             .expect("ripgrep should be available");
 
-        let panic_lines: Vec<&str> = String::from_utf8_lossy(&output.stdout)
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let panic_lines: Vec<&str> = stdout
             .lines()
             .filter(|line| !line.contains("test"))
             .collect();
@@ -148,7 +150,8 @@ mod mock_code_finder_audit {
             .expect("ripgrep should be available");
 
         // Filter out test vectors that include 501 as a test case
-        let non_test_501: Vec<&str> = String::from_utf8_lossy(&output.stdout)
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let non_test_501: Vec<&str> = stdout
             .lines()
             .filter(|line| {
                 !line.contains("test") &&

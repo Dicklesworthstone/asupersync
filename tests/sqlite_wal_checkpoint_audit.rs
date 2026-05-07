@@ -1,3 +1,5 @@
+#![cfg(feature = "sqlite")]
+
 //! Audit test for SQLite WAL mode checkpoint behavior on crash recovery.
 //!
 //! SQLite WAL mode requirement: "All committed transactions are durable and
@@ -7,14 +9,18 @@
 //! in WAL mode, the WAL frames must be recoverable on next database open.
 //! Data loss indicates missing checkpoint discipline.
 
-use asupersync::database::{SqliteConnection, SqliteError, SqliteValue};
-use asupersync::types::{CancelReason, Outcome};
+use asupersync::database::{SqliteConnection, SqliteValue};
+use asupersync::types::{Budget, Outcome, RegionId, TaskId};
+use asupersync::util::ArenaIndex;
 use std::fs;
-use std::path::PathBuf;
 use tempfile::tempdir;
 
 fn create_test_cx() -> asupersync::cx::Cx {
-    asupersync::cx::Cx::root()
+    asupersync::cx::Cx::new(
+        RegionId::from_arena(ArenaIndex::new(0, 0)),
+        TaskId::from_arena(ArenaIndex::new(0, 0)),
+        Budget::INFINITE,
+    )
 }
 
 #[tokio::test]
