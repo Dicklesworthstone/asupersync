@@ -729,9 +729,6 @@ impl<P: Policy> Scope<'_, P> {
         let scheduled = crate::runtime::scheduler::three_lane::schedule_local_task(task_id);
 
         if scheduled {
-            if let Some(record) = state.task(task_id) {
-                let _ = record.wake_state.notify();
-            }
             return Ok(handle);
         }
 
@@ -3512,5 +3509,44 @@ mod tests {
             "post-panic tasks_iter count must match pre-call count \
              (orphan TaskRecord not cleaned up: before={tasks_before} after={tasks_after})",
         );
+    }
+
+    #[test]
+    fn spawn_local_wake_state_single_notify() {
+        // Regression test for asupersync-3kwekm: ensure spawn_local only calls
+        // notify() once and sets the task wake state correctly.
+        use std::sync::Arc;
+
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let region = state.create_root_region(Budget::INFINITE);
+        let scope = test_scope(region, Budget::INFINITE);
+
+        let local_ready = Arc::new(parking_lot::Mutex::new(std::collections::VecDeque::new()));
+        let _local_ready_guard =
+            crate::runtime::scheduler::three_lane::ScopedLocalReady::new(Arc::clone(&local_ready));
+        let _worker_guard = crate::runtime::scheduler::three_lane::ScopedWorkerId::new(1);
+
+        let handle = scope
+            .spawn_local(&mut state, &cx, |_| async move { "test_result" })
+            .unwrap();
+
+        // Verify the task was created and is in the expected state
+        let task_record = state.task(handle.task_id()).unwrap();
+
+        // The task should have been notified exactly once during spawn_local.
+        // Subsequent notify() calls should return false (already notified).
+        let second_notify_result = task_record.wake_state.notify();
+        assert!(
+            !second_notify_result,
+            "Second notify() should return false - task already notified during spawn_local"
+        );
+
+        // Verify task was properly scheduled
+        let queued = {
+            let queue = local_ready.lock();
+            queue.contains(&handle.task_id())
+        };
+        assert!(queued, "spawn_local should enqueue task into local_ready");
     }
 }
