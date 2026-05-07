@@ -9,6 +9,7 @@
 //! - Tests types.rs Method::from_bytes() and method parsing logic
 
 use arbitrary::{Arbitrary, Unstructured};
+use asupersync::http::h1::types::Method as RuntimeMethod;
 use libfuzzer_sys::fuzz_target;
 
 /// Test case for HTTP method case sensitivity
@@ -180,9 +181,9 @@ pub struct ValidationConfig {
     pub reject_non_ascii: bool,
 }
 
-/// Mock HTTP method parser for testing
+/// HTTP method parser harness backed by the runtime parser.
 #[derive(Debug)]
-pub struct MockMethodParser {
+pub struct H1MethodParser {
     pub case_config: CaseConfig,
     pub validation_config: ValidationConfig,
     pub violations: Vec<CaseSensitivityViolation>,
@@ -217,6 +218,23 @@ pub enum StandardMethod {
     Options,
     Trace,
     Patch,
+}
+
+impl From<RuntimeMethod> for ParsedMethod {
+    fn from(method: RuntimeMethod) -> Self {
+        match method {
+            RuntimeMethod::Get => Self::Standard(StandardMethod::Get),
+            RuntimeMethod::Head => Self::Standard(StandardMethod::Head),
+            RuntimeMethod::Post => Self::Standard(StandardMethod::Post),
+            RuntimeMethod::Put => Self::Standard(StandardMethod::Put),
+            RuntimeMethod::Delete => Self::Standard(StandardMethod::Delete),
+            RuntimeMethod::Connect => Self::Standard(StandardMethod::Connect),
+            RuntimeMethod::Options => Self::Standard(StandardMethod::Options),
+            RuntimeMethod::Trace => Self::Standard(StandardMethod::Trace),
+            RuntimeMethod::Patch => Self::Standard(StandardMethod::Patch),
+            RuntimeMethod::Extension(method) => Self::Extension(method),
+        }
+    }
 }
 
 /// Method parsing errors
@@ -275,7 +293,7 @@ pub enum ViolationSeverity {
     Low,      // Minor parsing inconsistency
 }
 
-impl MockMethodParser {
+impl H1MethodParser {
     pub fn new(case_config: CaseConfig, validation_config: ValidationConfig) -> Self {
         Self {
             case_config,
@@ -300,7 +318,7 @@ impl MockMethodParser {
         }
 
         // Validate results against expectations
-        self.validate_case_sensitivity_behavior(&test_case, &all_results, &mut case_violations);
+        self.validate_case_sensitivity_behavior(test_case, &all_results, &mut case_violations);
 
         // Calculate compliance score
         let rfc_compliance_score = self.calculate_rfc_compliance();
@@ -496,8 +514,7 @@ impl MockMethodParser {
         method_bytes: &[u8],
         violations: &mut Vec<CaseViolation>,
     ) -> MethodParsingResult {
-        // Simulate the actual Method::from_bytes logic
-        let parsed_method = self.mock_method_from_bytes(method_bytes);
+        let parsed_method = self.runtime_method_from_bytes(method_bytes);
         let parsing_error = self.validate_method_bytes(method_bytes);
 
         // Check for case sensitivity violations
@@ -519,30 +536,9 @@ impl MockMethodParser {
         }
     }
 
-    /// Mock implementation of Method::from_bytes
-    fn mock_method_from_bytes(&self, src: &[u8]) -> Option<ParsedMethod> {
-        match src {
-            b"GET" => Some(ParsedMethod::Standard(StandardMethod::Get)),
-            b"HEAD" => Some(ParsedMethod::Standard(StandardMethod::Head)),
-            b"POST" => Some(ParsedMethod::Standard(StandardMethod::Post)),
-            b"PUT" => Some(ParsedMethod::Standard(StandardMethod::Put)),
-            b"DELETE" => Some(ParsedMethod::Standard(StandardMethod::Delete)),
-            b"CONNECT" => Some(ParsedMethod::Standard(StandardMethod::Connect)),
-            b"OPTIONS" => Some(ParsedMethod::Standard(StandardMethod::Options)),
-            b"TRACE" => Some(ParsedMethod::Standard(StandardMethod::Trace)),
-            b"PATCH" => Some(ParsedMethod::Standard(StandardMethod::Patch)),
-            other => {
-                if let Ok(s) = std::str::from_utf8(other) {
-                    if self.is_valid_token(s) {
-                        Some(ParsedMethod::Extension(s.to_owned()))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            }
-        }
+    /// Parse with the real HTTP/1 method parser used by request decoding.
+    fn runtime_method_from_bytes(&self, src: &[u8]) -> Option<ParsedMethod> {
+        RuntimeMethod::from_bytes(src).map(ParsedMethod::from)
     }
 
     /// Validate method bytes for common errors
@@ -669,11 +665,6 @@ impl MockMethodParser {
                 // Other scenarios have different validation logic
             }
         }
-    }
-
-    /// RFC 9110 token validation (simplified)
-    fn is_valid_token(&self, s: &str) -> bool {
-        !s.is_empty() && s.chars().all(|c| self.is_valid_token_char(c as u8))
     }
 
     /// Check if character is valid in HTTP token
@@ -828,7 +819,7 @@ fuzz_target!(|data: &[u8]| {
     };
 
     // Create method parser
-    let mut parser = MockMethodParser::new(
+    let mut parser = H1MethodParser::new(
         test_case.case_config.clone(),
         test_case.validation_config.clone(),
     );
@@ -845,26 +836,24 @@ fuzz_target!(|data: &[u8]| {
 
 /// Test standard method case sensitivity
 fn test_standard_method_case_sensitivity(test_case: &MethodCaseSensitivityTestCase) {
-    let parser = MockMethodParser::new(
+    let parser = H1MethodParser::new(
         test_case.case_config.clone(),
         test_case.validation_config.clone(),
     );
 
     // Test that "GET" is recognized but "get" is not
-    let get_upper = parser.mock_method_from_bytes(b"GET");
-    let get_lower = parser.mock_method_from_bytes(b"get");
+    let get_upper = parser.runtime_method_from_bytes(b"GET");
+    let get_lower = parser.runtime_method_from_bytes(b"get");
 
-    match (get_upper, get_lower) {
-        (Some(ParsedMethod::Standard(StandardMethod::Get)), Some(ParsedMethod::Extension(_))) => {
-            // Correct behavior - case sensitive
-        }
-        (Some(ParsedMethod::Standard(StandardMethod::Get)), None) => {
-            // Also correct - lowercase rejected entirely
-        }
-        _ => {
-            // Unexpected behavior - might be case insensitive
-        }
-    }
+    assert_eq!(
+        get_upper,
+        Some(ParsedMethod::Standard(StandardMethod::Get)),
+        "exact uppercase GET must parse as the standard GET method"
+    );
+    assert!(
+        !matches!(get_lower, Some(ParsedMethod::Standard(StandardMethod::Get))),
+        "lowercase get must not parse as the standard GET method"
+    );
 }
 
 /// Test extension method case preservation
@@ -873,7 +862,7 @@ fn test_extension_method_case_preservation(test_case: &MethodCaseSensitivityTest
         return;
     }
 
-    let parser = MockMethodParser::new(
+    let parser = H1MethodParser::new(
         test_case.case_config.clone(),
         test_case.validation_config.clone(),
     );
@@ -883,7 +872,7 @@ fn test_extension_method_case_preservation(test_case: &MethodCaseSensitivityTest
 
     for method in test_methods {
         if let Some(ParsedMethod::Extension(parsed)) =
-            parser.mock_method_from_bytes(method.as_bytes())
+            parser.runtime_method_from_bytes(method.as_bytes())
         {
             assert_eq!(parsed, method, "Extension method case not preserved");
         }
@@ -892,7 +881,7 @@ fn test_extension_method_case_preservation(test_case: &MethodCaseSensitivityTest
 
 /// Test method smuggling prevention via case differences
 fn test_method_smuggling_prevention(test_case: &MethodCaseSensitivityTestCase) {
-    let parser = MockMethodParser::new(
+    let parser = H1MethodParser::new(
         test_case.case_config.clone(),
         test_case.validation_config.clone(),
     );
@@ -909,28 +898,18 @@ fn test_method_smuggling_prevention(test_case: &MethodCaseSensitivityTestCase) {
     ];
 
     for (attempt, expected) in smuggling_attempts {
-        let result = parser.mock_method_from_bytes(attempt.as_bytes());
+        let result = parser.runtime_method_from_bytes(attempt.as_bytes());
 
         if attempt == expected {
-            // Exact match should be recognized as standard
-            match result {
-                Some(ParsedMethod::Standard(_)) => {
-                    // Correct behavior
-                }
-                _ => {
-                    // Unexpected - standard method not recognized
-                }
-            }
+            assert!(
+                matches!(result, Some(ParsedMethod::Standard(_))),
+                "exact standard method {attempt:?} must parse as a standard method"
+            );
         } else {
-            // Case mismatch should NOT be recognized as standard method
-            match result {
-                Some(ParsedMethod::Standard(_)) => {
-                    // Violation - case insensitive matching
-                }
-                Some(ParsedMethod::Extension(_)) | Some(ParsedMethod::Invalid) | None => {
-                    // Correct behavior - case sensitivity enforced
-                }
-            }
+            assert!(
+                !matches!(result, Some(ParsedMethod::Standard(_))),
+                "case variant {attempt:?} must not parse as canonical {expected:?}"
+            );
         }
     }
 }
@@ -941,7 +920,7 @@ fn test_invalid_character_rejection(test_case: &MethodCaseSensitivityTestCase) {
         return;
     }
 
-    let parser = MockMethodParser::new(
+    let parser = H1MethodParser::new(
         test_case.case_config.clone(),
         test_case.validation_config.clone(),
     );
@@ -959,16 +938,10 @@ fn test_invalid_character_rejection(test_case: &MethodCaseSensitivityTestCase) {
     ];
 
     for invalid_method in invalid_methods {
-        let result = parser.mock_method_from_bytes(invalid_method);
-
-        // Should be rejected
-        match result {
-            None => {
-                // Correct - invalid method rejected
-            }
-            Some(_) => {
-                // Violation - invalid method accepted
-            }
-        }
+        let result = parser.runtime_method_from_bytes(invalid_method);
+        assert!(
+            result.is_none(),
+            "invalid method bytes {invalid_method:?} must be rejected"
+        );
     }
 }
