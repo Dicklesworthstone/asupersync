@@ -205,8 +205,29 @@ RUN_LOG_PATH="${RUN_DIR}/run.log"
 REPORT_PATH="${ARTIFACT_ROOT}/resource_monitor_platform_gap_report.json"
 MANIFEST_PATH="${RUN_DIR}/bundle_manifest.json"
 RUN_REPORT_PATH="${RUN_DIR}/run_report.json"
-printf -v RCH_INVOCATION '%q' "$RCH_BIN"
-COMMAND="${RCH_INVOCATION} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_resource_monitor_platform_gap ASUPERSYNC_RESOURCE_MONITOR_PLATFORM_GAP_REPORT=1 cargo test -p asupersync --lib m4oxsk_resource_monitor_platform_gap_smoke_emits_operator_report --features test-internals -- --nocapture"
+COMMAND_ARGS=(
+    "$RCH_BIN"
+    exec
+    --
+    env
+    "CARGO_INCREMENTAL=0"
+    "CARGO_PROFILE_TEST_DEBUG=0"
+    "RUSTFLAGS=-D warnings -C debuginfo=0"
+    "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_resource_monitor_platform_gap"
+    "ASUPERSYNC_RESOURCE_MONITOR_PLATFORM_GAP_REPORT=1"
+    cargo
+    test
+    -p
+    asupersync
+    --lib
+    m4oxsk_resource_monitor_platform_gap_smoke_emits_operator_report
+    --features
+    test-internals
+    --
+    --nocapture
+)
+printf -v COMMAND '%q ' "${COMMAND_ARGS[@]}"
+COMMAND="${COMMAND% }"
 RCH_TIMEOUT_SECONDS="${RESOURCE_MONITOR_PLATFORM_GAP_RCH_TIMEOUT_SECONDS:-900}"
 
 mkdir -p "$RUN_DIR" "$ARTIFACT_ROOT"
@@ -236,7 +257,10 @@ if [ "$MODE" = "dry-run" ]; then
     MESSAGE="dry run emitted host-template manifest"
 else
     set +e
-    timeout "${RCH_TIMEOUT_SECONDS}s" bash -lc "$COMMAND" >"$RUN_LOG_PATH" 2>&1
+    (
+        cd "$PROJECT_ROOT"
+        timeout "${RCH_TIMEOUT_SECONDS}s" "${COMMAND_ARGS[@]}"
+    ) >"$RUN_LOG_PATH" 2>&1
     COMMAND_EXIT_CODE=$?
     set -e
 
