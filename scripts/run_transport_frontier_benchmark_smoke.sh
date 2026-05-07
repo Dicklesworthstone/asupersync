@@ -20,6 +20,8 @@ OUTPUT_ROOT="${AA08_OUTPUT_ROOT:-target/transport-frontier-benchmark-smoke}"
 MODE=""
 SCENARIO=""
 RUN_ALL=false
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_WRAPPER_TIMEOUT="${RCH_WRAPPER_TIMEOUT:-600}"
 
 usage() {
   echo "Usage: $0 --list | --all (--dry-run | --execute) | --scenario <ID> (--dry-run | --execute)"
@@ -40,6 +42,10 @@ done
 [[ -z "$MODE" ]] && usage
 
 if [[ "$MODE" == "list" ]]; then
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "error: jq is required"
+    exit 1
+  fi
   echo "=== Transport Frontier Benchmark Smoke Scenarios ==="
   jq -r '.smoke_scenarios[] | "  \(.scenario_id) [\(.workload_id)] -> \(.validation_surface): \(.description)"' "$ARTIFACT"
   exit 0
@@ -55,6 +61,25 @@ if [[ "$RUN_ALL" == false && -z "$SCENARIO" ]]; then
   exit 1
 fi
 
+require_tools() {
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "error: jq is required"
+    exit 1
+  fi
+  if [[ "$MODE" == "execute" ]] && ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+    echo "error: rch binary not found: $RCH_BIN"
+    exit 127
+  fi
+  if [[ "$MODE" == "execute" ]] && ! command -v timeout >/dev/null 2>&1; then
+    echo "error: timeout is required"
+    exit 127
+  fi
+}
+
+shell_join() {
+  printf '%q ' "$@"
+}
+
 scenario_field() {
   local sid="$1"
   local field="$2"
@@ -64,6 +89,33 @@ scenario_field() {
 scenario_focus_dimensions() {
   local sid="$1"
   jq -c --arg sid "$sid" '.smoke_scenarios[] | select(.scenario_id == $sid) | (.focus_dimension_ids // [])' "$ARTIFACT"
+}
+
+build_command_argv() {
+  local sid="$1"
+  local test_binary="$2"
+  local test_filter="$3"
+  local safe_sid
+
+  if [[ -z "$test_filter" || "$test_filter" == "null" ]]; then
+    echo "error: scenario $sid missing test_filter"
+    exit 1
+  fi
+
+  safe_sid="${sid//[^A-Za-z0-9_]/_}"
+  COMMAND_ARGV=(
+    "$RCH_BIN" exec --
+    env
+    CARGO_INCREMENTAL=0
+    CARGO_PROFILE_TEST_DEBUG=0
+    "RUSTFLAGS=-C debuginfo=0"
+    "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_transport_frontier_${safe_sid}"
+    cargo test -p asupersync
+  )
+  if [[ -n "$test_binary" && "$test_binary" != "null" ]]; then
+    COMMAND_ARGV+=(--test "$test_binary")
+  fi
+  COMMAND_ARGV+=(--features test-internals "$test_filter" -- --nocapture)
 }
 
 write_bundle() {
@@ -94,11 +146,13 @@ write_bundle() {
     --arg timestamp "$timestamp" \
     --arg artifact_path "$ARTIFACT" \
     --arg runner_script "$RUNNER_SCRIPT" \
+    --arg rch_binary "$RCH_BIN" \
     --arg bundle_manifest_path "$bundle_path" \
     --arg planned_run_log_path "$run_log_path" \
     --arg planned_run_report_path "$run_report_path" \
     --argjson focus_dimension_ids "$focus_dimensions" \
     --argjson rch_routed "$rch_routed" \
+    --argjson rch_required true \
     '{
       schema: $schema,
       scenario_id: $scenario_id,
@@ -112,6 +166,8 @@ write_bundle() {
       timestamp: $timestamp,
       artifact_path: $artifact_path,
       runner_script: $runner_script,
+      rch_required: $rch_required,
+      rch_binary: $rch_binary,
       bundle_manifest_path: $bundle_manifest_path,
       planned_run_log_path: $planned_run_log_path,
       planned_run_report_path: $planned_run_report_path,
@@ -136,6 +192,11 @@ write_report() {
   local started_at="${14}"
   local finished_at="${15}"
   local exit_code="${16}"
+  local validation_passed=false
+
+  if [[ "$exit_code" == "0" ]]; then
+    validation_passed=true
+  fi
 
   jq -n \
     --arg schema "transport-frontier-benchmark-smoke-run-report-v1" \
@@ -148,6 +209,7 @@ write_report() {
     --arg command "$command" \
     --arg artifact_path "$ARTIFACT" \
     --arg runner_script "$RUNNER_SCRIPT" \
+    --arg rch_binary "$RCH_BIN" \
     --arg bundle_manifest_path "$bundle_path" \
     --arg run_log_path "$run_log_path" \
     --arg run_report_path "$run_report_path" \
@@ -157,6 +219,8 @@ write_report() {
     --argjson focus_dimension_ids "$focus_dimensions" \
     --argjson exit_code "$exit_code" \
     --argjson rch_routed "$rch_routed" \
+    --argjson rch_required true \
+    --argjson validation_passed "$validation_passed" \
     '{
       schema: $schema,
       scenario_id: $scenario_id,
@@ -169,11 +233,14 @@ write_report() {
       command: $command,
       artifact_path: $artifact_path,
       runner_script: $runner_script,
+      rch_required: $rch_required,
+      rch_binary: $rch_binary,
       bundle_manifest_path: $bundle_manifest_path,
       run_log_path: $run_log_path,
       run_report_path: $run_report_path,
       output_dir: $output_dir,
       rch_routed: $rch_routed,
+      validation_passed: $validation_passed,
       started_at: $started_at,
       finished_at: $finished_at,
       exit_code: $exit_code
@@ -202,6 +269,7 @@ append_summary_entry() {
     --arg workload_id "$workload_id" \
     --arg validation_surface "$validation_surface" \
     --arg command "$command" \
+    --arg rch_binary "$RCH_BIN" \
     --arg output_dir "$outdir" \
     --arg bundle_manifest_path "$bundle_path" \
     --arg run_log_path "$run_log_path" \
@@ -210,6 +278,8 @@ append_summary_entry() {
     --argjson focus_dimension_ids "$focus_dimensions" \
     --argjson exit_code "$exit_code_json" \
     --argjson rch_routed "$rch_routed" \
+    --argjson rch_required true \
+    --argjson validation_passed "$([[ "$status" == "planned" || "$status" == "passed" ]] && printf true || printf false)" \
     '{
       scenario_id: $scenario_id,
       description: $description,
@@ -217,13 +287,16 @@ append_summary_entry() {
       validation_surface: $validation_surface,
       focus_dimension_ids: $focus_dimension_ids,
       command: $command,
+      rch_required: $rch_required,
+      rch_binary: $rch_binary,
       output_dir: $output_dir,
       bundle_manifest_path: $bundle_manifest_path,
       run_log_path: $run_log_path,
       run_report_path: $run_report_path,
       status: $status,
       exit_code: $exit_code,
-      rch_routed: $rch_routed
+      rch_routed: $rch_routed,
+      validation_passed: $validation_passed
     }' >> "$summary_entries_path"
 }
 
@@ -235,8 +308,12 @@ run_single_scenario() {
   local summary_entries_path="${5:-}"
   local description workload_id validation_surface focus_dimensions command outdir bundle_path
   local run_log_path run_report_path rch_routed exit_code finished_at status exit_code_json
+  local test_filter test_binary
+  declare -a COMMAND_ARGV
 
   command=$(scenario_field "$sid" '.command')
+  test_filter=$(scenario_field "$sid" '.test_filter // empty')
+  test_binary=$(scenario_field "$sid" '.test_binary // empty')
   description=$(scenario_field "$sid" '.description')
   workload_id=$(scenario_field "$sid" '.workload_id')
   validation_surface=$(scenario_field "$sid" '.validation_surface')
@@ -246,15 +323,14 @@ run_single_scenario() {
     echo "error: unknown scenario $sid"
     exit 1
   fi
+  build_command_argv "$sid" "$test_binary" "$test_filter"
+  command="$(shell_join "${COMMAND_ARGV[@]}")"
 
   outdir="$run_root/$sid"
   bundle_path="$outdir/bundle_manifest.json"
   run_log_path="$outdir/run.log"
   run_report_path="$outdir/run_report.json"
-  rch_routed=false
-  if [[ "$command" == *"rch exec --"* ]]; then
-    rch_routed=true
-  fi
+  rch_routed=true
   mkdir -p "$outdir"
 
   write_bundle \
@@ -320,7 +396,11 @@ run_single_scenario() {
   echo "  command: $command"
 
   exit_code=0
-  eval "$command" > "$run_log_path" 2>&1 || exit_code=$?
+  timeout "$RCH_WRAPPER_TIMEOUT" "${COMMAND_ARGV[@]}" > "$run_log_path" 2>&1 || exit_code=$?
+  if grep -Eiq 'local fallback|fallback to local|executing locally' "$run_log_path"; then
+    printf '\nerror: rch local fallback detected; refusing local cargo execution\n' >> "$run_log_path"
+    exit_code=86
+  fi
   finished_at="${AA08_FINISHED_AT:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 
   write_report \
@@ -379,6 +459,7 @@ RUN_ID="${AA08_RUN_ID:-run_$(date +%Y%m%d_%H%M%S)}"
 STARTED_AT="${AA08_TIMESTAMP:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 RUN_ROOT="$OUTPUT_ROOT/$RUN_ID"
 mkdir -p "$RUN_ROOT"
+require_tools
 
 if [[ "$RUN_ALL" == true ]]; then
   SUMMARY_PATH="$RUN_ROOT/summary.json"
@@ -399,7 +480,7 @@ if [[ "$RUN_ALL" == true ]]; then
       fi
     fi
     command=$(scenario_field "$sid" '.command')
-    if [[ "$command" != *"rch exec --"* ]]; then
+    if [[ "$command" != *"exec --"* ]]; then
       ALL_RCH_ROUTED=false
     fi
   done < <(jq -r '.smoke_scenarios[].scenario_id' "$ARTIFACT")
@@ -425,6 +506,7 @@ if [[ "$RUN_ALL" == true ]]; then
     --arg mode "$MODE" \
     --arg artifact_path "$ARTIFACT" \
     --arg runner_script "$RUNNER_SCRIPT" \
+    --arg rch_binary "$RCH_BIN" \
     --arg output_dir "$RUN_ROOT" \
     --arg summary_path "$SUMMARY_PATH" \
     --arg started_at "$STARTED_AT" \
@@ -433,6 +515,8 @@ if [[ "$RUN_ALL" == true ]]; then
     --argjson scenario_count "$SCENARIO_COUNT" \
     --argjson scenario_ids "$SCENARIO_IDS" \
     --argjson all_rch_routed "$ALL_RCH_ROUTED" \
+    --argjson rch_required true \
+    --argjson validation_passed "$([[ "$MODE" == "dry-run" || "$SUITE_EXIT_CODE" -eq 0 ]] && printf true || printf false)" \
     --argjson suite_exit_code "$SUITE_EXIT_CODE_JSON" \
     --argjson scenarios "$SCENARIOS" \
     '{
@@ -441,6 +525,8 @@ if [[ "$RUN_ALL" == true ]]; then
       mode: $mode,
       artifact_path: $artifact_path,
       runner_script: $runner_script,
+      rch_required: $rch_required,
+      rch_binary: $rch_binary,
       output_dir: $output_dir,
       summary_path: $summary_path,
       started_at: $started_at,
@@ -449,11 +535,10 @@ if [[ "$RUN_ALL" == true ]]; then
       scenario_count: $scenario_count,
       scenario_ids: $scenario_ids,
       all_rch_routed: $all_rch_routed,
+      validation_passed: $validation_passed,
       suite_exit_code: $suite_exit_code,
       scenarios: $scenarios
     }' > "$SUMMARY_PATH"
-
-  rm -f "$SUMMARY_ENTRIES_PATH"
 
   echo "[${MODE}] summary: $SUMMARY_PATH"
   exit "$SUITE_EXIT_CODE"

@@ -208,7 +208,7 @@ Validation-prep smoke slices now include:
 Focused invariant test command (routed through `rch`):
 
 ```bash
-rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa081 cargo test --test transport_frontier_benchmark_contract -- --nocapture
+${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_transport_frontier_contract cargo test -p asupersync --test transport_frontier_benchmark_contract --features test-internals -- --nocapture
 ```
 
 ## Cross-References

@@ -218,7 +218,9 @@
       "workload_id": "TW-MULTIPATH",
       "validation_surface": "tests/transport_frontier_benchmark_contract.rs::workload_vocabulary_has_expected_ids",
       "focus_dimension_ids": ["operator-visibility"],
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa081 cargo test --test transport_frontier_benchmark_contract workload -- --nocapture"
+      "test_binary": "transport_frontier_benchmark_contract",
+      "test_filter": "workload",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_transport_frontier_AA08_SMOKE_WORKLOAD_VOCAB cargo test -p asupersync --test transport_frontier_benchmark_contract --features test-internals workload -- --nocapture"
     },
     {
       "scenario_id": "AA08-SMOKE-BENCHMARK-DIMS",
@@ -226,7 +228,9 @@
       "workload_id": "TW-MULTIPATH",
       "validation_surface": "tests/transport_frontier_benchmark_contract.rs::benchmark_dimensions_have_expected_ids",
       "focus_dimension_ids": ["operator-visibility"],
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa081 cargo test --test transport_frontier_benchmark_contract dimension -- --nocapture"
+      "test_binary": "transport_frontier_benchmark_contract",
+      "test_filter": "dimension",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_transport_frontier_AA08_SMOKE_BENCHMARK_DIMS cargo test -p asupersync --test transport_frontier_benchmark_contract --features test-internals dimension -- --nocapture"
     },
     {
       "scenario_id": "AA08-SMOKE-EXPERIMENTS",
@@ -234,7 +238,9 @@
       "workload_id": "TW-MULTIPATH",
       "validation_surface": "tests/transport_frontier_benchmark_contract.rs::experiment_catalog_has_expected_ids",
       "focus_dimension_ids": ["operator-visibility"],
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa081 cargo test --test transport_frontier_benchmark_contract experiment -- --nocapture"
+      "test_binary": "transport_frontier_benchmark_contract",
+      "test_filter": "experiment",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_transport_frontier_AA08_SMOKE_EXPERIMENTS cargo test -p asupersync --test transport_frontier_benchmark_contract --features test-internals experiment -- --nocapture"
     },
     {
       "scenario_id": "AA08-SMOKE-SIM-NETWORK",
@@ -242,7 +248,9 @@
       "workload_id": "TW-FAIRNESS",
       "validation_surface": "tests/transport_frontier_benchmark_contract.rs::sim_network_fully_connected_creates_paths",
       "focus_dimension_ids": ["fairness", "operator-visibility"],
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa081 cargo test --test transport_frontier_benchmark_contract sim_network -- --nocapture"
+      "test_binary": "transport_frontier_benchmark_contract",
+      "test_filter": "sim_network",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_transport_frontier_AA08_SMOKE_SIM_NETWORK cargo test -p asupersync --test transport_frontier_benchmark_contract --features test-internals sim_network -- --nocapture"
     },
     {
       "scenario_id": "AA08-SMOKE-FAIRNESS-FLOW-BALANCE",
@@ -250,7 +258,9 @@
       "workload_id": "TW-FAIRNESS",
       "validation_surface": "src/transport/tests.rs::test_transport_workload_tw_fairness_round_robin_balance",
       "focus_dimension_ids": ["fairness", "operator-visibility"],
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa081 cargo test transport_workload_tw_fairness_round_robin_balance -- --nocapture"
+      "test_binary": null,
+      "test_filter": "transport_workload_tw_fairness_round_robin_balance",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_transport_frontier_AA08_SMOKE_FAIRNESS_FLOW_BALANCE cargo test -p asupersync --features test-internals transport_workload_tw_fairness_round_robin_balance -- --nocapture"
     },
     {
       "scenario_id": "AA08-SMOKE-HANDOFF-FALLBACK",
@@ -258,7 +268,9 @@
       "workload_id": "TW-HANDOFF",
       "validation_surface": "src/transport/aggregator.rs::tests::test_path_set_primary_only_exposes_conservative_fallback",
       "focus_dimension_ids": ["failure-handling", "operator-visibility"],
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa081 cargo test test_path_set_primary_only_exposes_conservative_fallback -- --nocapture"
+      "test_binary": null,
+      "test_filter": "test_path_set_primary_only_exposes_conservative_fallback",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_transport_frontier_AA08_SMOKE_HANDOFF_FALLBACK cargo test -p asupersync --features test-internals test_path_set_primary_only_exposes_conservative_fallback -- --nocapture"
     },
     {
       "scenario_id": "AA08-SMOKE-OVERLOAD-SIGNAL",
@@ -266,7 +278,9 @@
       "workload_id": "TW-OVERLOAD",
       "validation_surface": "tests/transport_frontier_benchmark_contract.rs::symbol_dispatcher_overload_rejected_deterministically",
       "focus_dimension_ids": ["failure-handling", "operator-visibility"],
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa081 cargo test --test transport_frontier_benchmark_contract symbol_dispatcher_overload_rejected_deterministically -- --nocapture"
+      "test_binary": "transport_frontier_benchmark_contract",
+      "test_filter": "symbol_dispatcher_overload_rejected_deterministically",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_transport_frontier_AA08_SMOKE_OVERLOAD_SIGNAL cargo test -p asupersync --test transport_frontier_benchmark_contract --features test-internals symbol_dispatcher_overload_rejected_deterministically -- --nocapture"
     },
     {
       "scenario_id": "AA08-SMOKE-OPERATOR-VISIBILITY",
@@ -274,7 +288,9 @@
       "workload_id": "TW-MULTIPATH",
       "validation_surface": "tests/transport_frontier_benchmark_contract.rs::runner_dry_run_emits_replay_metadata_bundle",
       "focus_dimension_ids": ["operator-visibility"],
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa081 cargo test --test transport_frontier_benchmark_contract runner_dry_run_emits_replay_metadata_bundle -- --nocapture"
+      "test_binary": "transport_frontier_benchmark_contract",
+      "test_filter": "runner_dry_run_emits_replay_metadata_bundle",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_transport_frontier_AA08_SMOKE_OPERATOR_VISIBILITY cargo test -p asupersync --test transport_frontier_benchmark_contract --features test-internals runner_dry_run_emits_replay_metadata_bundle -- --nocapture"
     }
   ],
   "downstream_beads": [

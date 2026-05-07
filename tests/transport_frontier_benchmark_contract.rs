@@ -93,10 +93,16 @@ fn doc_references_artifact_runner_and_test() {
 fn doc_reproduction_command_uses_rch() {
     let doc = load_doc();
     assert!(
-        doc.contains(
-            "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa081 cargo test --test transport_frontier_benchmark_contract -- --nocapture"
-        ),
+        doc.contains("${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0"),
         "doc must route heavy validation through rch"
+    );
+    assert!(
+        doc.contains("CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_transport_frontier_contract"),
+        "doc must use a TMPDIR-aware target dir"
+    );
+    assert!(
+        doc.contains("cargo test -p asupersync --test transport_frontier_benchmark_contract"),
+        "doc must scope the cargo proof to asupersync"
     );
 }
 
@@ -603,7 +609,25 @@ fn smoke_scenarios_are_rch_routed() {
     for scenario in scenarios {
         let sid = scenario["scenario_id"].as_str().unwrap();
         let cmd = scenario["command"].as_str().unwrap();
-        assert!(cmd.contains("rch exec --"), "scenario {sid} must use rch");
+        assert!(
+            cmd.contains("RCH_BIN"),
+            "scenario {sid} must use configurable rch"
+        );
+        assert!(cmd.contains("exec --"), "scenario {sid} must use rch exec");
+        assert!(
+            cmd.contains("CARGO_TARGET_DIR=${TMPDIR:-/tmp}/"),
+            "scenario {sid} must use a TMPDIR-aware target dir"
+        );
+        assert!(
+            cmd.contains("cargo test -p asupersync"),
+            "scenario {sid} must scope cargo test to asupersync"
+        );
+        assert!(
+            scenario["test_filter"]
+                .as_str()
+                .is_some_and(|filter| !filter.is_empty()),
+            "scenario {sid} must pin a test filter"
+        );
     }
 }
 
@@ -618,6 +642,8 @@ fn smoke_scenarios_include_validation_metadata() {
             "workload_id",
             "validation_surface",
             "focus_dimension_ids",
+            "test_binary",
+            "test_filter",
             "command",
         ] {
             assert!(
@@ -707,9 +733,18 @@ fn runner_script_exists_and_declares_modes() {
         "AA08_TIMESTAMP",
         "AA08_FINISHED_AT",
         "AA08_OUTPUT_ROOT",
+        "RCH_BIN",
+        "RCH_WRAPPER_TIMEOUT",
+        "timeout",
+        "local fallback",
+        "validation_passed",
     ] {
         assert!(script.contains(token), "runner missing token: {token}");
     }
+    assert!(
+        !script.contains("eval "),
+        "runner must avoid string-based eval execution"
+    );
 }
 
 #[test]
@@ -896,7 +931,9 @@ fn runner_all_execute_emits_suite_summary_with_reports() {
                 "workload_id": "TW-MULTIPATH",
                 "validation_surface": "tests::runner_all_execute_emits_suite_summary_with_reports",
                 "focus_dimension_ids": ["operator-visibility"],
-                "command": "printf 'scenario-one\\n'"
+                "test_binary": null,
+                "test_filter": "runner_execute_path_one",
+                "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_transport_frontier_AA08_TEST_ONE cargo test -p asupersync runner_execute_path_one -- --nocapture"
             },
             {
                 "scenario_id": "AA08-TEST-TWO",
@@ -904,7 +941,9 @@ fn runner_all_execute_emits_suite_summary_with_reports() {
                 "workload_id": "TW-HANDOFF",
                 "validation_surface": "tests::runner_all_execute_emits_suite_summary_with_reports",
                 "focus_dimension_ids": ["failure-handling"],
-                "command": "printf 'scenario-two\\n'"
+                "test_binary": null,
+                "test_filter": "runner_execute_path_two",
+                "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_transport_frontier_AA08_TEST_TWO cargo test -p asupersync runner_execute_path_two -- --nocapture"
             }
         ]
     });
@@ -924,6 +963,7 @@ fn runner_all_execute_emits_suite_summary_with_reports() {
         .env("AA08_TIMESTAMP", "2026-03-08T00:00:00Z")
         .env("AA08_FINISHED_AT", "2026-03-08T00:00:05Z")
         .env("AA08_OUTPUT_ROOT", output_root.path())
+        .env("RCH_BIN", "/bin/true")
         .status()
         .expect("run all execute script");
     assert!(status.success(), "all execute script should succeed");
@@ -937,7 +977,7 @@ fn runner_all_execute_emits_suite_summary_with_reports() {
     assert_eq!(summary["mode"].as_str(), Some("execute"));
     assert_eq!(summary["status"].as_str(), Some("passed"));
     assert_eq!(summary["suite_exit_code"].as_i64(), Some(0));
-    assert_eq!(summary["all_rch_routed"].as_bool(), Some(false));
+    assert_eq!(summary["all_rch_routed"].as_bool(), Some(true));
     assert_eq!(summary["scenario_count"].as_u64(), Some(2));
 
     let scenarios = summary["scenarios"]
