@@ -2299,20 +2299,25 @@ pub struct RedisClient {
 
 impl fmt::Debug for RedisClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Snapshot every locked field BEFORE the .field chain. Rust extends
+        // each `.lock()` MutexGuard temporary to the end of the enclosing
+        // statement, so calling `self.resp3_push_backlog.lock()` twice in a
+        // single `.field(..).field(..)` chain would self-deadlock under
+        // parking_lot::Mutex's non-re-entrant semantics on the very first
+        // `format!("{:?}", client)` (asupersync-mc0lgn).
+        let known_slot_mappings = self.slot_map.lock().len();
+        let (pending_resp3_pushes, resp3_push_dropped) = {
+            let backlog = self.resp3_push_backlog.lock();
+            (backlog.pending.len(), backlog.dropped)
+        };
         f.debug_struct("RedisClient")
             .field("host", &self.config.host)
             .field("port", &self.config.port)
             .field("database", &self.config.database)
             .field("has_password", &self.config.password.is_some())
-            .field("known_slot_mappings", &self.slot_map.lock().len())
-            .field(
-                "pending_resp3_pushes",
-                &self.resp3_push_backlog.lock().pending.len(),
-            )
-            .field(
-                "resp3_push_dropped",
-                &self.resp3_push_backlog.lock().dropped,
-            )
+            .field("known_slot_mappings", &known_slot_mappings)
+            .field("pending_resp3_pushes", &pending_resp3_pushes)
+            .field("resp3_push_dropped", &resp3_push_dropped)
             .finish_non_exhaustive()
     }
 }
@@ -5806,6 +5811,64 @@ mod tests {
             .collect();
         let expected: Vec<Vec<u8>> = expected.iter().map(|arg| arg.to_vec()).collect();
         assert_eq!(actual, expected, "unexpected RESP command");
+    }
+
+    /// Regression for asupersync-mc0lgn: `RedisClient::fmt` previously called
+    /// `self.resp3_push_backlog.lock()` twice in a single `.field` chain.
+    /// Rust extends every `.lock()` MutexGuard temporary to the end of the
+    /// enclosing statement, and `parking_lot::Mutex` is non-re-entrant, so
+    /// the second `.lock()` self-deadlocked the formatting thread on the
+    /// first guard it had already taken. Any caller emitting
+    /// `format!("{:?}", client)` (tracing, panic message, assert_eq) would
+    /// hang.
+    ///
+    /// Run the format call on a worker thread guarded by a join timeout —
+    /// if the deadlock returns, the test fails fast with a diagnostic
+    /// instead of hanging the test runner.
+    #[test]
+    fn redis_client_debug_fmt_does_not_self_deadlock_mc0lgn() {
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::Duration;
+
+        let client = pooled_client_without_acquire();
+
+        // Pre-populate both inner mutexes so every `.field` reaches a real
+        // lock acquisition rather than short-circuiting on a default state.
+        client
+            .slot_map
+            .lock()
+            .insert(42, "127.0.0.1:6379".to_string());
+        {
+            let mut backlog = client.resp3_push_backlog.lock();
+            backlog.dropped = 7;
+        }
+
+        let (tx, rx) = mpsc::channel::<String>();
+        let format_thread = thread::Builder::new()
+            .name("redis-debug-format-mc0lgn".into())
+            .spawn(move || {
+                let rendered = format!("{client:?}");
+                let _ = tx.send(rendered);
+            })
+            .expect("spawn debug-format worker");
+
+        let rendered = rx.recv_timeout(Duration::from_secs(2)).expect(
+            "RedisClient Debug must not self-deadlock on parking_lot \
+                 re-entrancy; if this times out the second \
+                 resp3_push_backlog.lock() in the .field chain has come \
+                 back",
+        );
+        format_thread.join().expect("format worker thread");
+
+        assert!(
+            rendered.contains("known_slot_mappings: 1"),
+            "rendered Debug should reflect the slot_map snapshot, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("resp3_push_dropped: 7"),
+            "rendered Debug should reflect the backlog snapshot, got: {rendered}"
+        );
     }
 
     #[test]
