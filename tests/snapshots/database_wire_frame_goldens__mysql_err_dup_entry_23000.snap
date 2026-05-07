@@ -1,0 +1,9 @@
+---
+source: tests/database_wire_frame_goldens.rs
+expression: err
+---
+Server {
+    code: 1062,
+    sql_state: "23000",
+    message: "Duplicate entry 'x' for key 'PRIMARY'",
+}

@@ -1,0 +1,12 @@
+---
+source: tests/database_wire_frame_goldens.rs
+expression: "(\n            \"input_hex\",\n            body.iter().map(|b| format!(\"{b:02x}\")).collect::<Vec<_>>().join(\" \"),\n            \"affected_rows\",\n            affected_rows,\n            \"status_flags_hex\",\n            format!(\"0x{status_flags:04x}\"),\n        )"
+---
+(
+    "input_hex",
+    "00 00 00 02 00 00 00",
+    "affected_rows",
+    0,
+    "status_flags_hex",
+    "0x0002",
+)
