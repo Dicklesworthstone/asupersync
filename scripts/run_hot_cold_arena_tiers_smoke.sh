@@ -244,27 +244,41 @@ run_once() {
     local poll_seconds=0
     local command_exit_code=-1
     local had_errexit=0
-    local rch_invocation
+    local -a command_args=()
 
     case $- in
         *e*) had_errexit=1 ;;
     esac
 
-    printf -v rch_invocation '%q' "$RCH_BIN"
-    local command="
-        ${rch_invocation} exec -- env \
-        CARGO_INCREMENTAL=0 \
-        CARGO_TARGET_DIR=${target_dir} \
-        ASUPERSYNC_HOT_COLD_ARENA_CONTRACT_PATH=${ARTIFACT} \
-        ASUPERSYNC_HOT_COLD_ARENA_SCENARIO=${SCENARIO} \
-        ASUPERSYNC_HOT_COLD_ARENA_REPORT_PATH=${report_path} \
-        cargo test -p asupersync --test hot_cold_arena_tiers hot_cold_arena_tiers_smoke_contract_emits_operator_report --features test-internals -- --nocapture
-    "
+    command_args=(
+        "$RCH_BIN"
+        exec
+        --
+        env
+        "CARGO_INCREMENTAL=0"
+        "CARGO_PROFILE_TEST_DEBUG=0"
+        "RUSTFLAGS=-D warnings -C debuginfo=0"
+        "CARGO_TARGET_DIR=${target_dir}"
+        "ASUPERSYNC_HOT_COLD_ARENA_CONTRACT_PATH=${ARTIFACT}"
+        "ASUPERSYNC_HOT_COLD_ARENA_SCENARIO=${SCENARIO}"
+        "ASUPERSYNC_HOT_COLD_ARENA_REPORT_PATH=${report_path}"
+        cargo
+        test
+        -p
+        asupersync
+        --test
+        hot_cold_arena_tiers
+        hot_cold_arena_tiers_smoke_contract_emits_operator_report
+        --features
+        test-internals
+        --
+        --nocapture
+    )
 
     RUN_ONCE_EARLY_SUCCESS=0
     (
         cd "$PROJECT_ROOT"
-        bash -lc "$command"
+        "${command_args[@]}"
     ) >"$log_path" 2>&1 &
     local command_pid=$!
 
@@ -404,7 +418,7 @@ REPORT_PATH_REPEAT_2="${ARTIFACT_DIR}/hot_cold_arena_tiers_report_repeat_2.json"
 mkdir -p "$RUN_DIR" "$ARTIFACT_DIR"
 HOST_FINGERPRINT_JSON="$(host_fingerprint_json)"
 
-COMMAND_STRING="${RCH_BIN} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_hot_cold_arena_<run> ASUPERSYNC_HOT_COLD_ARENA_CONTRACT_PATH=${ARTIFACT} ASUPERSYNC_HOT_COLD_ARENA_SCENARIO=${SCENARIO} ASUPERSYNC_HOT_COLD_ARENA_REPORT_PATH=<report> cargo test -p asupersync --test hot_cold_arena_tiers hot_cold_arena_tiers_smoke_contract_emits_operator_report --features test-internals -- --nocapture"
+COMMAND_STRING="${RCH_BIN} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_hot_cold_arena_<run> ASUPERSYNC_HOT_COLD_ARENA_CONTRACT_PATH=${ARTIFACT} ASUPERSYNC_HOT_COLD_ARENA_SCENARIO=${SCENARIO} ASUPERSYNC_HOT_COLD_ARENA_REPORT_PATH=<report> cargo test -p asupersync --test hot_cold_arena_tiers hot_cold_arena_tiers_smoke_contract_emits_operator_report --features test-internals -- --nocapture"
 
 ACTUAL_REPORT_PROJECTION_JSON='null'
 ACTUAL_REPORT_PROJECTION_REPEAT_2_JSON='null'
