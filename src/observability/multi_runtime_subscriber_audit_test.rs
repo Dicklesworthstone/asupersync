@@ -242,7 +242,7 @@ fn audit_process_global_subscriber_pollution() {
 /// **REQUIREMENT**: Each runtime must have independent tracing output.
 #[test]
 fn audit_per_runtime_subscriber_isolation_fix() {
-    use crate::test_utils::{RuntimeSubscriberHandle, init_runtime_logging};
+    use crate::test_utils::init_runtime_logging;
     use crate::tracing_compat::info;
 
     println!("✅ AUDIT: Per-runtime subscriber isolation FIX verification");
