@@ -193,23 +193,30 @@ impl SymbolCancelToken {
         state: &CancelTokenState,
         panic_payload: Box<dyn std::any::Any + Send>,
     ) {
+        // Always increment the counter first - this is the most critical operation
+        // and least likely to panic (atomic operation on existing memory)
         state.listener_panic_count.fetch_add(1, Ordering::Relaxed);
+
+        // Protect tracing operations from double-panic by wrapping in catch_unwind
         #[cfg(feature = "tracing-integration")]
         {
-            let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
-                (*s).to_string()
-            } else if let Some(s) = panic_payload.downcast_ref::<String>() {
-                s.clone()
-            } else {
-                "<non-string panic payload>".to_string()
-            };
-            tracing::warn!(
-                object_id = ?state.object_id,
-                token_id = state.token_id,
-                panic = %panic_msg,
-                "cancel listener panicked during on_cancel — caught and logged \
-                 instead of silently swallowed (br-asupersync-mzamuo)"
-            );
+            let _trace_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                    (*s).to_string()
+                } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "<non-string panic payload>".to_string()
+                };
+                tracing::warn!(
+                    object_id = ?state.object_id,
+                    token_id = state.token_id,
+                    panic = %panic_msg,
+                    "cancel listener panicked during on_cancel — caught and logged \
+                     instead of silently swallowed (br-asupersync-mzamuo)"
+                );
+            }));
+            // If tracing itself panics, silently continue - we've already recorded the count
         }
         #[cfg(not(feature = "tracing-integration"))]
         {
@@ -2018,8 +2025,10 @@ mod tests {
                     "hops": message.hops(),
                 });
                 tracing::info!(event = %event, "symbol_cancel_lab_checkpoint");
-                checkpoints.lock().unwrap().push(event);
-                messages.lock().unwrap().push(message);
+                {
+                    checkpoints.lock().unwrap().push(event);
+                    messages.lock().unwrap().push(message);
+                }  // Drop mutex guards before yield
                 yield_now().await;
                 Ok(1)
             }
