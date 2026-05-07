@@ -39,6 +39,125 @@ Notes:
 
 ---
 
+## Tokio Migration Playbook
+
+Use the native Asupersync modules first when your stack fits the built-in
+runtime, HTTP, web, gRPC, or database surfaces. Reach for
+`asupersync-tokio-compat` only at the boundary where a dependency is hard-wired
+to Tokio or hyper runtime traits.
+
+Compat crate feature gates and the entrypoints they expose:
+
+| Feature | Use when | Entry points |
+|---|---|---|
+| `hyper-bridge` | `hyper`, `hyper-util`, `reqwest`, `tonic`, or any client/server path that wants hyper runtime traits | `hyper_bridge::AsupersyncExecutor`, `hyper_bridge::AsupersyncTimer` |
+| `tokio-io` | A crate needs Tokio `AsyncRead` / `AsyncWrite` or hyper runtime I/O traits | `io::TokioIo<T>`, `io::AsupersyncIo<T>` |
+| `tower-bridge` | You need to run tower middleware inside Asupersync or expose an Asupersync service to tower | `tower_bridge::FromTower<S>`, `tower_bridge::IntoTower<S>` |
+| `full` | You need all three bridge families together | all of the above |
+
+Rules of thumb:
+
+- Prefer native `src/web/` and `src/grpc/` when you control the application
+  surface. The compat crate is for interoperability, not for replacing
+  Asupersync's `Cx`-first model.
+- Keep `Cx` explicit across every boundary. The compat layer is designed so the
+  call site still owns region lifetime, cancellation, and capability narrowing.
+- Treat adapters as edge infrastructure. Do not add Tokio dependencies to the
+  core `asupersync` crate or to examples that are meant to show the native
+  runtime surface.
+
+### hyper, reqwest, tonic, and hyper-based clients
+
+When a client or server stack expects hyper runtime traits, wire three pieces:
+an executor, a timer, and a compatible I/O wrapper.
+
+```ignore
+use asupersync_tokio_compat::hyper_bridge::{AsupersyncExecutor, AsupersyncTimer};
+use asupersync_tokio_compat::io::TokioIo;
+
+let executor = AsupersyncExecutor::with_spawn_fn(|future| {
+    // Route adapter-spawned work into the owning region.
+    let _ = future;
+});
+let timer = AsupersyncTimer::new();
+
+let asupersync_stream = /* asupersync::net::TcpStream or TLS stream */;
+let io = TokioIo::new(asupersync_stream);
+
+let builder = hyper::server::conn::http1::Builder::new().timer(timer);
+let _ = (executor, io, builder);
+```
+
+Use this pattern for libraries that sit on hyper's runtime traits, including
+`reqwest`-style client transport, tonic's hyper transport path, and direct
+hyper connection builders.
+
+### tower and axum-style middleware stacks
+
+Use `FromTower<S>` when you want to keep a tower middleware/service stack but
+call it from Asupersync code with an explicit `&Cx`. Use `IntoTower<S>` when an
+Asupersync service must be presented as a `tower::Service`.
+
+```ignore
+use asupersync_tokio_compat::tower_bridge::FromTower;
+
+let tower_service = tower::ServiceBuilder::new()
+    .service(my_tower_service);
+
+let bridge = FromTower::new(tower_service);
+let response = bridge.call(&cx, request).await?;
+```
+
+This is the right bridge for `tower`, `tower-http`, and middleware-heavy
+stacks. If you are migrating an `axum` application, prefer moving handlers and
+request state to Asupersync's native web surface over time, and keep the tower
+bridge only for the layers you cannot retire immediately.
+
+### Tokio runtime-context and I/O shims
+
+Some libraries do not need a full hyper bridge; they only need Tokio task
+context or Tokio I/O traits. For those cases, use the narrower runtime and I/O
+adapters.
+
+```ignore
+use asupersync_tokio_compat::runtime::with_tokio_context;
+
+let result = with_tokio_context(&cx, || async {
+    tokio_locked_client.call().await
+}).await;
+```
+
+`with_tokio_context` and `AsupersyncRuntime::new(&cx).enter(...)` keep `Cx`
+installed while the wrapped code runs, and the I/O adapters let you translate
+streams in either direction:
+
+- `TokioIo<T>`: Asupersync stream -> Tokio/hyper traits
+- `AsupersyncIo<T>`: Tokio stream -> Asupersync traits
+
+Use the narrowest bridge that satisfies the dependency. If a library only needs
+I/O trait compatibility, do not also bring in the hyper or tower bridges.
+
+### Suggested migration order
+
+1. Replace top-level `tokio::spawn`, timers, and channels with native
+   Asupersync equivalents in your application code.
+2. Keep third-party Tokio-locked crates behind the compat boundary, not spread
+   through the core of the application.
+3. Migrate HTTP/web/gRPC surfaces to native Asupersync modules when practical,
+   leaving only truly external crates on the compat path.
+4. Re-run the no-Tokio production graph checks on the core crate once the
+   boundary is in place:
+
+```bash
+rch exec -- cargo tree -e normal -p asupersync -i tokio
+rch exec -- cargo tree -e normal -p asupersync --features metrics -i tokio
+```
+
+These commands should still print `warning: nothing to print.` The compat crate
+is an opt-in satellite, not part of the default production graph.
+
+---
+
 ## Wave2 Capability Smoke Recipes
 
 These recipes are the public entry points for the promoted Wave2 capability

@@ -456,6 +456,14 @@ It maps common Tokio ecosystem crates to the corresponding Asupersync modules.
 
 This map is about capability coverage, not API compatibility. Asupersync intentionally uses a different model centered on `Cx`, regions, explicit cancellation, and deterministic replay.
 
+If you do need Tokio-locked dependencies at the boundary, use the migration
+playbook in [`docs/integration.md`](./docs/integration.md#tokio-migration-playbook).
+That guide maps the live `asupersync-tokio-compat` entrypoints to common
+stacks: hyper/reqwest/tonic transport, tower/axum middleware, and narrower
+Tokio runtime-context or I/O shims. The intended order is native Asupersync
+first, compat adapters only where a third-party crate still requires Tokio
+traits.
+
 The reactor export contract is narrower than the directory listing suggests: `runtime::reactor` exports `EpollReactor` on Linux, `IoUringReactor` on Linux only (real with `io-uring`, intentional `Unsupported` without it), `KqueueReactor` on BSD-family targets, `IocpReactor` on Windows, `BrowserReactor` on `wasm32`, and `LabReactor` for deterministic testing. Historical files such as `src/runtime/reactor/uring.rs` and `src/runtime/reactor/macos.rs` are not part of the live export graph.
 
 Interest-flag parity is also narrower than the shared `Interest` bitflag type suggests: Linux `EpollReactor` supports the full shipped readiness/mode surface used by the native runtime, `KqueueReactor` rejects `Interest::DISPATCH` and `Interest::PRIORITY`, and `IocpReactor` currently accepts only `READABLE` / `WRITABLE`. Treat Linux `epoll` plus optional `io_uring` as the primary production path, with BSD and Windows reactors available but intentionally narrower today.
