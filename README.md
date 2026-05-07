@@ -350,6 +350,8 @@ Why it helps: shutdown and fail-fast behavior can be audited with explicit confi
 
 Asupersync treats the task wait-for graph as a dynamic signal. The monitor tracks the Fiedler trajectory (algebraic connectivity), spectral gap/radius, and a nonparametric indicator stack (autocorrelation, variance ratio, flicker, skewness, Kendall tau, Spearman rho, Hoeffding's D, distance correlation), then calibrates forward risk with split conformal bounds and an anytime-valid deterioration e-process.
 
+Status: implemented as an observability diagnostic over the live task wait graph. It is an early-warning signal, not a proof of trapped-cycle deadlock by itself.
+
 Why it helps: structural degradation is detected before hard deadlock/disconnect events, with calibrated thresholds and continuously valid evidence rather than brittle one-off alarms.
 
 ### DPOR-Style Schedule Exploration (Mazurkiewicz Traces, Foata Fingerprints)
@@ -1086,7 +1088,16 @@ See [`asupersync_v4_formal_semantics.md`](./asupersync_v4_formal_semantics.md) f
 
 ## "Alien Artifact" Quality Algorithms
 
-Asupersync is intentionally "math-forward": it uses advanced math and theory-grade CS where it buys real guarantees (determinism, cancel-correctness, bounded cleanup, and reproducible concurrency debugging). This is not aspirational; the mechanisms below are implemented in the codebase today.
+Asupersync is intentionally "math-forward": it uses advanced math and theory-grade CS where it buys real guarantees (determinism, cancel-correctness, bounded cleanup, and reproducible concurrency debugging). The mechanisms below exist in the codebase today, but their support posture is not uniform:
+
+| Mechanism | Current status |
+|-----------|----------------|
+| EXP3/Hedge scheduler control | Implemented runtime scheduling control surface |
+| Martingale drain certificates | Implemented cancellation progress diagnostics |
+| Spectral wait-graph health | Implemented observability diagnostic; advisory early warning, not a standalone deadlock proof |
+| Mazurkiewicz/Foata trace canonicalization and DPOR | Implemented lab/trace exploration machinery |
+| Persistent homology trace scoring | Implemented lab exploration prototype; used to prioritize interesting schedules, not a production runtime gate |
+| Sheaf-style saga consistency and TLA+ export | Implemented analysis/export surfaces for verification workflows |
 
 ### Online Control of Cancel Preemption (EXP3/Hedge)
 
@@ -1099,6 +1110,8 @@ Asupersync is intentionally "math-forward": it uses advanced math and theory-gra
 ### Spectral Bifurcation Warnings on the Wait Graph
 
 `src/observability/spectral_health.rs` computes Laplacian-spectrum diagnostics and an early-warning severity model (`none/watch/warning/critical`) over the live wait graph. It combines spectral trend analysis, nonparametric dependence tests, split-conformal next-step bounds, and an anytime-valid e-process, so structural degradation can be detected with calibrated confidence before hard failures.
+
+Status: production-facing observability path. The classification is intentionally advisory: zero or falling spectral connectivity is a topology signal, while explicit trapped-cycle evidence remains a separate deadlock proof.
 
 ### Mazurkiewicz Trace Monoid + Foata Normal Form (DPOR Equivalence Classes)
 
@@ -1125,6 +1138,8 @@ Payoff: systematic interleaving exploration that targets truly different behavio
 ### Persistent Homology of Trace Commutation Complexes (GF(2) Boundary Reduction)
 
 Schedule exploration is prioritized using topological signals from a square cell complex built out of commuting diamonds: edges are causality edges, squares represent valid commutations, and Betti numbers/persistence quantify "non-trivial scheduling freedom". The implementation uses deterministic GF(2) bitset linear algebra and boundary-matrix reduction. See `src/trace/boundary.rs`, `src/trace/gf2.rs`, and `src/trace/scoring.rs`.
+
+Status: implemented lab exploration prototype. It feeds `TopologyExplorer` novelty scoring for deterministic schedule search; it is not a production scheduler policy, release gate, or runtime health alarm.
 
 Payoff: an evidence-ledger, structure-aware notion of "interesting schedules" that tends to surface rare concurrency behaviors earlier.
 
