@@ -17,7 +17,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde::{Deserialize, Serialize};
 use std::fmt::Write;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 // =========================================================================
@@ -235,10 +235,26 @@ fn write_minimal_criterion_output(root: &Path) {
     .expect("write sample.json");
 }
 
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
+}
+
+fn write_executable_script(path: &Path, body: &str) {
+    fs::write(path, body).expect("write executable script");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(path).expect("script metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).expect("chmod script");
+    }
+}
+
 fn run_capture_baseline_with_command(arg_name: &str, arg_value: &str) -> std::process::Output {
     let temp = tempfile::tempdir().expect("tempdir");
     write_minimal_criterion_output(temp.path());
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/capture_baseline.sh");
+    let script = repo_root().join("scripts/capture_baseline.sh");
     Command::new("bash")
         .arg(script)
         .arg("--run")
@@ -338,7 +354,7 @@ fn capture_baseline_quoted_command_runner_ignores_login_shell_profiles() {
     )
     .expect("write .bash_profile");
 
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/capture_baseline.sh");
+    let script = repo_root().join("scripts/capture_baseline.sh");
     let output = Command::new("bash")
         .arg(script)
         .arg("--run")
@@ -364,6 +380,176 @@ fn capture_baseline_quoted_command_runner_ignores_login_shell_profiles() {
     assert!(
         stdout.contains("\nalpha beta\n"),
         "command output should still be present without login-shell noise: {stdout}"
+    );
+}
+
+#[test]
+fn capture_baseline_default_run_requires_rch() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_criterion_output(temp.path());
+    let missing_rch = temp.path().join("missing-rch");
+    let script = repo_root().join("scripts/capture_baseline.sh");
+    let output = Command::new("bash")
+        .arg(script)
+        .arg("--run")
+        .env("CRITERION_DIR", temp.path().join("criterion"))
+        .env("RCH_BIN", &missing_rch)
+        .output()
+        .expect("run capture_baseline.sh");
+
+    assert!(
+        !output.status.success(),
+        "capture_baseline should fail closed without rch"
+    );
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be utf8");
+    assert!(
+        stderr.contains("RCH_BIN"),
+        "stderr should name the missing rch contract: {stderr}"
+    );
+    assert!(
+        stderr.contains("refusing local cargo bench fallback"),
+        "stderr should explain the fail-closed benchmark policy: {stderr}"
+    );
+}
+
+#[test]
+fn capture_baseline_default_run_uses_rch_override() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_minimal_criterion_output(temp.path());
+    let fake_log = temp.path().join("fake-rch.log");
+    let fake_rch = temp.path().join("fake-rch");
+    let save_dir = temp.path().join("baselines");
+    write_executable_script(
+        &fake_rch,
+        &format!(
+            "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' \"$@\" > {}\n",
+            fake_log.display()
+        ),
+    );
+
+    let script = repo_root().join("scripts/capture_baseline.sh");
+    let output = Command::new("bash")
+        .arg(script)
+        .arg("--smoke")
+        .arg("--save")
+        .arg(&save_dir)
+        .env("CRITERION_DIR", temp.path().join("criterion"))
+        .env("RCH_BIN", &fake_rch)
+        .output()
+        .expect("run capture_baseline.sh");
+
+    assert!(
+        output.status.success(),
+        "capture_baseline should succeed with fake rch: status={:?}, stderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let argv = fs::read_to_string(&fake_log).expect("read fake rch log");
+    for token in ["exec", "--", "cargo", "bench", "--bench", "phase0_baseline"] {
+        assert!(
+            argv.contains(token),
+            "default run path must invoke rch-wrapped bench token `{token}`: {argv}"
+        );
+    }
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
+    let start_line = stdout
+        .lines()
+        .find(|line| line.contains("\"profiling_run_start\""))
+        .expect("start event line");
+    let end_line = stdout
+        .lines()
+        .find(|line| line.contains("\"profiling_run_end\""))
+        .expect("end event line");
+    let start: serde_json::Value =
+        serde_json::from_str(start_line).expect("start event must be valid json");
+    let end: serde_json::Value =
+        serde_json::from_str(end_line).expect("end event must be valid json");
+
+    for event in [&start, &end] {
+        let command = event["command"]
+            .as_str()
+            .expect("command field should be present");
+        assert!(
+            command.contains("exec -- cargo bench --bench phase0_baseline"),
+            "run events must record the rch-wrapped bench command: {command}"
+        );
+    }
+
+    let smoke_report = fs::read_dir(&save_dir)
+        .expect("read save dir")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("smoke_report_") && name.ends_with(".json"))
+        })
+        .expect("smoke report path");
+    let smoke_report_json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(smoke_report).expect("read smoke report"))
+            .expect("parse smoke report");
+    let smoke_command = smoke_report_json["command"]
+        .as_str()
+        .expect("smoke report command field should be present");
+    assert!(
+        smoke_command.contains("exec -- cargo bench --bench phase0_baseline"),
+        "smoke report must record the rch-wrapped bench command: {smoke_command}"
+    );
+}
+
+#[test]
+fn run_perf_e2e_list_succeeds_without_rch() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let missing_rch = temp.path().join("missing-rch");
+    let script = repo_root().join("scripts/run_perf_e2e.sh");
+    let output = Command::new("bash")
+        .arg(script)
+        .arg("--list")
+        .env("RCH_BIN", &missing_rch)
+        .output()
+        .expect("run run_perf_e2e.sh --list");
+
+    assert!(
+        output.status.success(),
+        "run_perf_e2e --list should not require rch: status={:?}, stderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf8");
+    assert!(
+        stdout.contains("phase0_baseline") && stdout.contains("scheduler_benchmark"),
+        "list output should still enumerate benchmark suites: {stdout}"
+    );
+}
+
+#[test]
+fn run_perf_e2e_requires_rch_for_benchmark_execution() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let missing_rch = temp.path().join("missing-rch");
+    let script = repo_root().join("scripts/run_perf_e2e.sh");
+    let output = Command::new("bash")
+        .arg(script)
+        .arg("--bench")
+        .arg("phase0_baseline")
+        .arg("--no-compare")
+        .env("RCH_BIN", &missing_rch)
+        .output()
+        .expect("run run_perf_e2e.sh");
+
+    assert!(
+        !output.status.success(),
+        "run_perf_e2e should fail closed without rch"
+    );
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be utf8");
+    assert!(
+        stderr.contains("RCH_BIN"),
+        "stderr should name the missing rch contract: {stderr}"
+    );
+    assert!(
+        stderr.contains("refusing local cargo bench fallback"),
+        "stderr should explain the fail-closed benchmark policy: {stderr}"
     );
 }
 

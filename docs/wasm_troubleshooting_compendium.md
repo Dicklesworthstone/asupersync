@@ -444,7 +444,7 @@ python3 scripts/check_perf_regression.py \
   --budgets .github/wasm_perf_budgets.json \
   --profile core-min
 
-rch exec -- ./scripts/run_perf_e2e.sh \
+RCH_BIN=rch ./scripts/run_perf_e2e.sh \
   --bench phase0_baseline \
   --bench scheduler_benchmark \
   --seed 42 \

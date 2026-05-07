@@ -10,7 +10,9 @@
 # Reads target/criterion/*/new/estimates.json and produces a single JSON
 # baseline file with mean/median/p95/p99 for each benchmark.
 #
-# Prerequisites: jq. If using --run/--smoke, cargo bench will be invoked.
+# Prerequisites: jq. If using --run/--smoke without --cmd/--cmd-b64, benchmark
+# execution requires rch via RCH_BIN and will fail closed rather than running a
+# local cargo bench fallback.
 
 set -euo pipefail
 
@@ -25,6 +27,7 @@ CMD_B64=""
 RUN_CMD=0
 SMOKE=0
 SMOKE_SEED=""
+RCH_BIN="${RCH_BIN:-rch}"
 
 usage() {
     cat <<'USAGE'
@@ -49,6 +52,13 @@ Examples:
   ./scripts/capture_baseline.sh --run --save baselines/
   ./scripts/capture_baseline.sh --smoke --seed 3735928559 --save baselines/
 USAGE
+}
+
+require_rch_for_default_benchmark_run() {
+    if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+        echo "ERROR: benchmark execution requires RCH_BIN ('$RCH_BIN') to resolve to a working rch executable; refusing local cargo bench fallback." >&2
+        exit 1
+    fi
 }
 
 while [[ $# -gt 0 ]]; do
@@ -78,7 +88,7 @@ if [[ -n "$CMD_B64" ]]; then
 fi
 
 if [[ -z "$CMD_STRING" ]]; then
-    CMD=(cargo bench --bench phase0_baseline)
+    CMD=("$RCH_BIN" exec -- cargo bench --bench phase0_baseline)
 fi
 
 if ! command -v jq &>/dev/null; then
@@ -102,6 +112,10 @@ fi
 if [[ "$RUN_CMD" -eq 1 ]]; then
     if [[ -n "$SMOKE_SEED" ]]; then
         export ASUPERSYNC_SEED="$SMOKE_SEED"
+    fi
+
+    if [[ -z "$CMD_STRING" ]]; then
+        require_rch_for_default_benchmark_run
     fi
 
     RUN_SEED="${ASUPERSYNC_SEED:-}"

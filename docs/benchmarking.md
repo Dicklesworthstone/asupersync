@@ -43,6 +43,10 @@ Example baseline + smoke capture:
 ./scripts/capture_baseline.sh --smoke --seed 3735928559 --save baselines/
 ```
 
+The helper script above requires `rch` to be reachable via `RCH_BIN`
+(default: `rch` on `PATH`) for benchmark execution. It now fails closed rather
+than silently running a local `cargo bench` fallback.
+
 ### Smoke Report Schema (artifact manifest)
 
 The smoke report produced by `--smoke` is the canonical artifact manifest for
@@ -52,7 +56,7 @@ available):
 ```json
 {
   "generated_at": "2026-02-03T19:00:00Z",
-  "command": "cargo bench --bench phase0_baseline",
+  "command": "rch exec -- cargo bench --bench phase0_baseline",
   "seed": "3735928559",
   "criterion_dir": "target/criterion",
   "baseline_path": "baselines/baseline_20260203_190000.json",
@@ -234,6 +238,10 @@ run a smoke capture end-to-end with structured metadata.
 ./scripts/capture_baseline.sh --smoke --seed 3735928559 --save baselines/
 ```
 
+`--run` / `--smoke` require `rch` via `RCH_BIN` for the default benchmark path.
+Read-only capture / compare flows that only parse existing Criterion output do
+not need `rch`.
+
 The smoke report is stored as `baselines/smoke_report_<timestamp>.json` and
 captures env, command, seed, git SHA, and a `config` block (criterion dir,
 save dir, comparison settings).
@@ -261,7 +269,7 @@ save dir, comparison settings).
 ```json
 {
   "generated_at": "2026-02-03T19:00:00Z",
-  "command": "cargo bench --bench phase0_baseline",
+  "command": "rch exec -- cargo bench --bench phase0_baseline",
   "seed": "3735928559",
   "criterion_dir": "target/criterion",
   "baseline_path": "baselines/baseline_20260203_190000.json",
@@ -540,6 +548,9 @@ For multi-benchmark runs with structured artifacts, use:
 ./scripts/run_perf_e2e.sh --compare baselines/baseline_latest.json
 ./scripts/run_perf_e2e.sh --save-baseline baselines/
 ```
+
+`run_perf_e2e.sh` is also fail-closed for benchmark execution: it requires a
+working `rch` via `RCH_BIN` and keeps `--list` as the no-`rch` discovery path.
 
 Artifacts are written under `target/perf-results/` with:
 - `report.json` containing run metadata, bench exit codes, compare output, and system info

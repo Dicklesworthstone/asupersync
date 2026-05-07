@@ -16,7 +16,8 @@
 #   PERF_TIMEOUT       - per-bench timeout seconds (default: 0 = no timeout)
 #   PERF_BENCH_ARGS    - extra args passed to cargo bench (default: "-- --noplot")
 #   ASUPERSYNC_SEED    - deterministic seed (if benchmark uses it)
-#   RCH_BIN            - remote compilation helper executable (default: rch)
+#   RCH_BIN            - remote compilation helper executable (default: rch,
+#                        required for benchmark execution)
 
 set -euo pipefail
 
@@ -56,14 +57,6 @@ MAX_REGRESSION_PCT="10"
 BENCH_ARGS_STR="${PERF_BENCH_ARGS:-"-- --noplot"}"
 NO_COMPARE=0
 
-RUN_WITH_RCH=1
-RUN_WITH_RCH_BOOL="true"
-if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
-    RUN_WITH_RCH=0
-    RUN_WITH_RCH_BOOL="false"
-    echo "warning: '$RCH_BIN' not found; falling back to local cargo execution for this run" >&2
-fi
-
 usage() {
     cat <<'USAGE'
 Usage: ./scripts/run_perf_e2e.sh [options]
@@ -81,6 +74,13 @@ Options:
   --seed <value>                 Set ASUPERSYNC_SEED for benches
   -h, --help                     Show help
 USAGE
+}
+
+require_rch_for_benchmark_execution() {
+    if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+        echo "ERROR: benchmark execution requires RCH_BIN ('$RCH_BIN') to resolve to a working rch executable; refusing local cargo bench fallback." >&2
+        exit 1
+    fi
 }
 
 while [[ $# -gt 0 ]]; do
@@ -120,6 +120,9 @@ done
 if [[ ${#BENCHES[@]} -eq 0 ]]; then
     BENCHES=("${DEFAULT_BENCHES[@]}")
 fi
+
+require_rch_for_benchmark_execution
+RUN_WITH_RCH_BOOL="true"
 
 BASELINE_LATEST="${BASELINE_DIR}/baseline_latest.json"
 if [[ -z "$COMPARE_PATH" && "$NO_COMPARE" -eq 0 && -f "$BASELINE_LATEST" ]]; then
@@ -184,7 +187,7 @@ echo "  Timeout:           ${TIMEOUT_SEC}s per bench"
 echo "  Seed:              ${ASUPERSYNC_SEED:-<unset>}"
 echo "  Workload:          ${WORKLOAD_ID}"
 echo "  Profile:           ${RUNTIME_PROFILE}"
-echo "  RCH mode:          $([[ "$RUN_WITH_RCH" -eq 1 ]] && echo enabled || echo disabled)"
+echo "  RCH mode:          enabled"
 echo ""
 
 emit_gate_event \
@@ -210,11 +213,7 @@ append_result() {
 for bench in "${BENCHES[@]}"; do
     log_file="${LOG_DIR}/${bench}_${TIMESTAMP}.log"
     bench_repro_command="${RUN_REPRO_COMMAND} --bench ${bench}"
-    if [[ "$RUN_WITH_RCH" -eq 1 ]]; then
-        cmd=("$RCH_BIN" exec -- cargo bench --bench "$bench")
-    else
-        cmd=(cargo bench --bench "$bench")
-    fi
+    cmd=("$RCH_BIN" exec -- cargo bench --bench "$bench")
     if [[ ${#BENCH_ARGS[@]} -gt 0 ]]; then
         cmd+=("${BENCH_ARGS[@]}")
         bench_repro_command="${bench_repro_command} --bench-args '${BENCH_ARGS_STR}'"

@@ -193,7 +193,7 @@ Mandatory evidence bundle before promoting or re-enabling an optional lane:
 4. `python3 scripts/check_perf_regression.py --budgets .github/wasm_perf_budgets.json --profile core-min`
    producing `artifacts/wasm_perf_regression_report.json` and
    `artifacts/wasm_perf_gate_events.ndjson`,
-5. `rch exec -- ./scripts/run_perf_e2e.sh --bench phase0_baseline --bench scheduler_benchmark --seed 42 --metric p95_ns`
+5. `RCH_BIN=rch ./scripts/run_perf_e2e.sh --bench phase0_baseline --bench scheduler_benchmark --seed 42 --metric p95_ns`
    or the surface-specific benchmark corpus repro command for the candidate,
 6. `rch exec -- bash ./scripts/run_nightly_stress_soak.sh --ci --suites cancellation_stress,scheduler_fairness --timeout 3600`
    with `target/nightly-stress/<run_id>/trend_report.json`,
