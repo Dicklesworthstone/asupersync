@@ -2,14 +2,14 @@
 //!
 //! Tests malformed MySQL wire protocol packets to ensure robust parsing:
 //! 1. Packet length field (24-bit LE) + sequence ID correctly parsed
-//! 2. Oversized packets rejected (>16MB-1)
-//! 3. Command phase packet types (COM_QUERY, COM_PREPARE, etc.) dispatched
-//! 4. Result set column count encoding validation
-//! 5. EOF/OK packet discrimination by length
+//! 2. Maximum packet length boundary handled through the real header decoder
+//! 3. Command phase packet shapes remain valid MySQL packets
+//! 4. Result set column-count length encoding flows through the OK-packet parser
+//! 5. EOF/OK/error packet discrimination reaches the real parser seams
 //!
 //! # Attack vectors tested:
 //! - Malformed packet headers (corrupted length, invalid sequence)
-//! - Oversized packet length values beyond MAX_PACKET_SIZE
+//! - Maximum-size packet headers
 //! - Invalid command byte values in command phase packets
 //! - Column count integer encoding boundary conditions
 //! - Ambiguous EOF/OK packet structures
@@ -22,6 +22,11 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
+use asupersync::database::MySqlError;
+use asupersync::database::mysql::{
+    ToSql, fuzz_build_stmt_execute_packet, fuzz_decode_packet_header,
+    fuzz_parse_data_row_or_terminator, fuzz_parse_error_packet, fuzz_parse_ok_packet_fields,
+};
 use libfuzzer_sys::fuzz_target;
 
 /// Maximum input size to prevent memory exhaustion during fuzzing.
@@ -55,7 +60,7 @@ enum FuzzScenario {
         /// Expected sequence number for validation.
         expected_sequence: u8,
     },
-    /// Test command phase packet dispatch.
+    /// Test command phase packet shape.
     CommandPhase {
         /// Command byte (COM_QUERY, COM_PREPARE, etc.).
         command: u8,
@@ -72,9 +77,9 @@ enum FuzzScenario {
         /// Packet data that may be EOF (0xFE, len<9) or OK (0x00).
         packet_data: Vec<u8>,
     },
-    /// Test oversized packet rejection.
-    OversizedPacket {
-        /// Length field that may exceed MAX_PACKET_SIZE.
+    /// Test maximum packet-length boundary.
+    PacketLengthBoundary {
+        /// 24-bit length field.
         length_bytes: [u8; 3],
         /// Sequence byte.
         sequence: u8,
@@ -82,6 +87,8 @@ enum FuzzScenario {
 }
 
 fuzz_target!(|data: &[u8]| {
+    test_fixed_real_seam_regressions();
+
     // Guard against excessively large inputs
     if data.len() > MAX_INPUT_SIZE {
         return;
@@ -114,53 +121,33 @@ fn test_scenario(scenario: FuzzScenario) {
         FuzzScenario::EofOkDiscrimination { packet_data } => {
             test_eof_ok_discrimination(packet_data);
         }
-        FuzzScenario::OversizedPacket {
+        FuzzScenario::PacketLengthBoundary {
             length_bytes,
             sequence,
         } => {
-            test_oversized_packet_rejection(length_bytes, sequence);
+            test_packet_length_boundary(length_bytes, sequence);
         }
     }
 }
 
 /// Test packet header parsing (Assertion 1: 24-bit LE length + sequence ID).
 fn test_packet_header_parsing(header: [u8; 4], expected_sequence: u8) {
-    // Decode 24-bit little-endian length
-    let length = u32::from(header[0]) | (u32::from(header[1]) << 8) | (u32::from(header[2]) << 16);
-    let sequence = header[3];
+    let length = packet_length(header);
+    let result = fuzz_decode_packet_header(header, expected_sequence);
 
-    // Test length field bounds (should be ≤ MAX_PACKET_SIZE)
-    let length_valid = length <= MAX_PACKET_SIZE;
-
-    // Test sequence validation
-    let sequence_valid = sequence == expected_sequence;
-
-    // Protocol should reject invalid combinations
-    let should_accept = length_valid && sequence_valid;
-
-    // Simulate decode_packet_header behavior
-    let decode_result = decode_packet_header_mock(header, expected_sequence);
-
-    match (should_accept, decode_result) {
-        (true, Ok(_)) => {
-            // Valid packet accepted - this is correct
-        }
-        (false, Err(_)) => {
-            // Invalid packet rejected - this is correct
-        }
-        (true, Err(_)) => {
-            // Valid packet rejected - potential bug, but may be due to other constraints
-        }
-        (false, Ok(_)) => {
-            // Invalid packet accepted - this would be a bug
-            // But we don't panic in fuzzing, just note the issue
-        }
+    if header[3] == expected_sequence {
+        let (decoded_len, decoded_seq) =
+            result.expect("valid 24-bit MySQL packet header must decode");
+        assert_eq!(decoded_len, length);
+        assert_eq!(decoded_seq, expected_sequence);
+        assert!(decoded_len <= MAX_PACKET_SIZE);
+    } else {
+        expect_protocol_err(result, "sequence mismatch");
     }
 }
 
-/// Test command phase packet dispatch (Assertion 3: COM_* dispatch).
+/// Test command phase packet shape (Assertion 3: COM_* packet framing).
 fn test_command_dispatch(command: u8, payload: Vec<u8>) {
-    // Known command types that should be recognized
     let known_commands = [
         command::COM_QUIT,
         command::COM_INIT_DB,
@@ -172,50 +159,36 @@ fn test_command_dispatch(command: u8, payload: Vec<u8>) {
         command::COM_STMT_CLOSE,
     ];
 
-    let is_known = known_commands.contains(&command);
+    let payload_len = payload.len().saturating_add(1);
+    if payload_len > MAX_PACKET_SIZE as usize {
+        return;
+    }
 
-    // Test command validation - unknown commands should be handled gracefully
-    match command {
-        command::COM_QUERY | command::COM_STMT_PREPARE => {
-            // These commands require payload
-            if !payload.is_empty() {
-                // Payload present - should be processable
-                test_query_like_command(command, &payload);
-            }
-        }
-        command::COM_PING | command::COM_QUIT => {
-            // These commands typically have no payload
-            test_simple_command(command);
-        }
-        _ => {
-            // Unknown or other commands - should not crash
-            test_unknown_command(command, &payload);
-        }
+    let header = packet_header(payload_len as u32, 0);
+    let (decoded_len, decoded_seq) =
+        fuzz_decode_packet_header(header, 0).expect("framed command packet must decode");
+    assert_eq!(decoded_len as usize, payload_len);
+    assert_eq!(decoded_seq, 0);
+
+    let mut command_payload = Vec::with_capacity(payload_len);
+    command_payload.push(command);
+    command_payload.extend_from_slice(&payload);
+
+    if known_commands.contains(&command) {
+        exercise_payload_parsers(&command_payload);
+    } else {
+        let _ = fuzz_parse_error_packet(&command_payload);
     }
 }
 
-/// Test column count parsing (Assertion 4: result set column count encoding).
+/// Test column count parsing (Assertion 4: result set column-count length encoding).
 fn test_column_count_parsing(encoded_count: Vec<u8>) {
     if encoded_count.is_empty() {
         return;
     }
 
-    // Parse as length-encoded integer (MySQL lenenc format)
-    let parse_result = parse_lenenc_int(&encoded_count);
-
-    match parse_result {
-        Ok(count) => {
-            // Parsed successfully - validate reasonable bounds
-            // MySQL should reject excessive column counts
-            const MAX_REASONABLE_COLUMNS: u64 = 16_384;
-            if count > MAX_REASONABLE_COLUMNS {
-                // This should typically be rejected by the protocol implementation
-            }
-        }
-        Err(_) => {
-            // Parse failed - this is expected for malformed data
-        }
-    }
+    let packet = ok_packet_with_affected_rows(&encoded_count);
+    let _ = fuzz_parse_ok_packet_fields(&packet);
 }
 
 /// Test EOF vs OK packet discrimination (Assertion 5: discrimination by length).
@@ -224,148 +197,155 @@ fn test_eof_ok_discrimination(packet_data: Vec<u8>) {
         return;
     }
 
-    // EOF packet: first byte 0xFE, length < 9
-    let is_eof_like = packet_data[0] == 0xFE && packet_data.len() < 9;
+    let terminator_result = fuzz_parse_data_row_or_terminator(&packet_data, &[], true);
 
-    // OK packet: first byte 0x00
-    let is_ok_like = packet_data[0] == 0x00;
-
-    // Test packet classification
-    if is_eof_like {
-        // Should be classified as EOF
-        test_eof_packet_structure(&packet_data);
-    } else if is_ok_like {
-        // Should be classified as OK
-        test_ok_packet_structure(&packet_data);
-    } else {
-        // Neither EOF nor OK - should be handled appropriately
-        test_other_packet_type(&packet_data);
+    if packet_data[0] == 0xFE && packet_data.len() < 9 {
+        assert!(matches!(terminator_result, Ok(None)));
+    }
+    if packet_data[0] == 0x00 {
+        let _ = fuzz_parse_ok_packet_fields(&packet_data);
+    }
+    if packet_data[0] == 0xFF {
+        let _ = fuzz_parse_error_packet(&packet_data);
     }
 }
 
-/// Test oversized packet rejection (Assertion 2: oversized packets rejected).
-fn test_oversized_packet_rejection(length_bytes: [u8; 3], sequence: u8) {
-    // Reconstruct 24-bit length
+/// Test maximum packet length boundary (Assertion 2: 24-bit packet lengths).
+fn test_packet_length_boundary(length_bytes: [u8; 3], sequence: u8) {
     let length = u32::from(length_bytes[0])
         | (u32::from(length_bytes[1]) << 8)
         | (u32::from(length_bytes[2]) << 16);
-
     let header = [length_bytes[0], length_bytes[1], length_bytes[2], sequence];
 
-    // Oversized packets should be rejected
-    if length > MAX_PACKET_SIZE {
-        let result = decode_packet_header_mock(header, sequence);
-        // Should return error for oversized packets
-        assert!(result.is_err(), "Oversized packet should be rejected");
-    }
+    let (decoded_len, decoded_seq) =
+        fuzz_decode_packet_header(header, sequence).expect("24-bit packet length must decode");
+    assert_eq!(decoded_len, length);
+    assert_eq!(decoded_seq, sequence);
+    assert!(decoded_len <= MAX_PACKET_SIZE);
 }
 
 /// Test raw packet data for edge cases.
 fn test_raw_packet_data(data: &[u8]) {
-    // Test with insufficient data for header
     if data.len() < PACKET_HEADER_SIZE {
-        // Should handle gracefully without panicking
-        let _ = try_parse_incomplete_header(data);
         return;
     }
 
-    // Test with valid header but potentially malformed payload
     let header: [u8; 4] = data[0..4].try_into().unwrap();
     let payload = &data[4..];
+    let (declared_len, _) =
+        fuzz_decode_packet_header(header, header[3]).expect("raw packet header must decode");
 
-    let length = u32::from(header[0]) | (u32::from(header[1]) << 8) | (u32::from(header[2]) << 16);
-
-    // If payload is shorter than declared length, it should be handled gracefully
-    if (payload.len() as u32) < length {
-        test_incomplete_packet(header, payload);
+    if payload.len() >= declared_len as usize {
+        exercise_payload_parsers(&payload[..declared_len as usize]);
+    } else {
+        exercise_payload_parsers(payload);
     }
 }
 
-// Mock implementations for testing (these simulate the actual MySQL parser behavior)
-
-fn decode_packet_header_mock(header: [u8; 4], expected_seq: u8) -> Result<(u32, u8), String> {
-    let len = u32::from(header[0]) | (u32::from(header[1]) << 8) | (u32::from(header[2]) << 16);
-    let seq = header[3];
-
-    if seq != expected_seq {
-        return Err(format!(
-            "sequence mismatch: expected {}, got {}",
-            expected_seq, seq
-        ));
-    }
-
-    if len > MAX_PACKET_SIZE {
-        return Err(format!("packet length {} exceeds maximum", len));
-    }
-
-    Ok((len, seq))
+fn packet_length(header: [u8; 4]) -> u32 {
+    u32::from(header[0]) | (u32::from(header[1]) << 8) | (u32::from(header[2]) << 16)
 }
 
-fn parse_lenenc_int(data: &[u8]) -> Result<u64, String> {
-    if data.is_empty() {
-        return Err("empty data".to_string());
-    }
+fn packet_header(length: u32, sequence: u8) -> [u8; 4] {
+    [
+        (length & 0xFF) as u8,
+        ((length >> 8) & 0xFF) as u8,
+        ((length >> 16) & 0xFF) as u8,
+        sequence,
+    ]
+}
 
-    match data[0] {
-        0..=250 => Ok(data[0] as u64),
-        0xFC => {
-            if data.len() < 3 {
-                return Err("insufficient data for 2-byte lenenc".to_string());
-            }
-            Ok(u64::from(data[1]) | (u64::from(data[2]) << 8))
+fn ok_packet_with_affected_rows(encoded_affected_rows: &[u8]) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(encoded_affected_rows.len() + 6);
+    packet.push(0x00);
+    packet.extend_from_slice(encoded_affected_rows);
+    packet.push(0x00);
+    packet.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+    packet
+}
+
+fn exercise_payload_parsers(payload: &[u8]) {
+    match payload.first() {
+        Some(0x00) => {
+            let _ = fuzz_parse_ok_packet_fields(payload);
+            let _ = fuzz_parse_data_row_or_terminator(payload, &[], true);
         }
-        0xFD => {
-            if data.len() < 4 {
-                return Err("insufficient data for 3-byte lenenc".to_string());
-            }
-            Ok(u64::from(data[1]) | (u64::from(data[2]) << 8) | (u64::from(data[3]) << 16))
+        Some(0xFE) => {
+            let _ = fuzz_parse_data_row_or_terminator(payload, &[], true);
         }
-        0xFE => {
-            if data.len() < 9 {
-                return Err("insufficient data for 8-byte lenenc".to_string());
-            }
-            let mut result = 0u64;
-            for i in 0..8 {
-                result |= (data[1 + i] as u64) << (i * 8);
-            }
-            Ok(result)
+        Some(0xFF) => {
+            let _ = fuzz_parse_error_packet(payload);
         }
-        0xFF => Err("reserved lenenc value".to_string()),
+        Some(_) => {
+            let _ = fuzz_parse_data_row_or_terminator(payload, &[], false);
+        }
+        None => {}
     }
 }
 
-fn test_query_like_command(_command: u8, _payload: &[u8]) {
-    // Simulate processing of query-like commands
-    // In the real implementation, this would parse SQL or prepared statement data
+fn expect_protocol_err<T>(result: Result<T, MySqlError>, expected: &str) {
+    match result {
+        Err(MySqlError::Protocol(message)) => {
+            assert!(
+                message.contains(expected),
+                "protocol error {message:?} did not contain {expected:?}"
+            );
+        }
+        Err(other) => panic!("expected protocol error, got {other:?}"),
+        Ok(_) => panic!("expected protocol error"),
+    }
 }
 
-fn test_simple_command(_command: u8) {
-    // Simulate processing of simple commands (ping, quit, etc.)
-}
+fn test_fixed_real_seam_regressions() {
+    let (len, seq) = fuzz_decode_packet_header([0xFF, 0xFF, 0xFF, 0x07], 0x07)
+        .expect("maximum 24-bit packet length must decode");
+    assert_eq!(len, MAX_PACKET_SIZE);
+    assert_eq!(seq, 0x07);
 
-fn test_unknown_command(_command: u8, _payload: &[u8]) {
-    // Unknown commands should be handled without crashing
-}
+    expect_protocol_err(
+        fuzz_decode_packet_header([0x01, 0x00, 0x00, 0x02], 0x01),
+        "sequence mismatch",
+    );
 
-fn test_eof_packet_structure(_packet: &[u8]) {
-    // Test EOF packet parsing
-    // EOF packets have specific structure: 0xFE + warning_count (2 bytes) + status_flags (2 bytes)
-}
+    let single_byte_ok = ok_packet_with_affected_rows(&[0xFA]);
+    let (affected_rows, status_flags) =
+        fuzz_parse_ok_packet_fields(&single_byte_ok).expect("single-byte lenenc OK packet");
+    assert_eq!(affected_rows, 250);
+    assert_eq!(status_flags, 0);
 
-fn test_ok_packet_structure(_packet: &[u8]) {
-    // Test OK packet parsing
-    // OK packets: 0x00 + affected_rows (lenenc) + last_insert_id (lenenc) + status_flags (2) + warning_count (2) + info
-}
+    let two_byte_ok = ok_packet_with_affected_rows(&[0xFC, 0x00, 0x01]);
+    let (affected_rows, status_flags) =
+        fuzz_parse_ok_packet_fields(&two_byte_ok).expect("two-byte lenenc OK packet");
+    assert_eq!(affected_rows, 256);
+    assert_eq!(status_flags, 0);
 
-fn test_other_packet_type(_packet: &[u8]) {
-    // Handle other packet types (error packets, etc.)
-}
+    assert!(
+        fuzz_parse_ok_packet_fields(&ok_packet_with_affected_rows(&[0xFF])).is_err(),
+        "reserved length-encoded prefix must be rejected by the real parser"
+    );
 
-fn try_parse_incomplete_header(_data: &[u8]) -> Result<(), String> {
-    // Simulate handling of incomplete headers
-    Err("incomplete header".to_string())
-}
+    assert!(matches!(
+        fuzz_parse_data_row_or_terminator(&[0xFE, 0x00, 0x00, 0x00, 0x00], &[], true),
+        Ok(None)
+    ));
 
-fn test_incomplete_packet(_header: [u8; 4], _payload: &[u8]) {
-    // Test handling of packets where payload is shorter than declared length
+    match fuzz_parse_error_packet(&[0xFF, 0x48, 0x04, b'#', b'H', b'Y', b'0', b'0', b'0']) {
+        MySqlError::Server {
+            code, sql_state, ..
+        } => {
+            assert_eq!(code, 0x0448);
+            assert_eq!(sql_state, "HY000");
+        }
+        other => panic!("expected server error packet, got {other:?}"),
+    }
+
+    let params: [&dyn ToSql; 0] = [];
+    let packet = fuzz_build_stmt_execute_packet(0xAABB_CCDD, &params)
+        .expect("empty COM_STMT_EXECUTE packet must build");
+    let header: [u8; 4] = packet[0..4].try_into().unwrap();
+    let (payload_len, packet_seq) =
+        fuzz_decode_packet_header(header, 0).expect("built statement packet header must decode");
+    assert_eq!(payload_len as usize, packet.len() - PACKET_HEADER_SIZE);
+    assert_eq!(packet_seq, 0);
+    assert_eq!(packet[PACKET_HEADER_SIZE], command::COM_STMT_EXECUTE);
 }
