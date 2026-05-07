@@ -2599,6 +2599,206 @@ mod tests {
         }
     }
 
+    // ── Σ-state replay determinism conformance ──────────────────────────
+    // Spec contract (lab.replay): two runs of the same closure with the same
+    // seed and worker_count MUST produce bit-identical schedule certificates,
+    // step counts, and trace event sequences. The certificate hash is the
+    // observable Σ-state fingerprint; trace events are the witness sequence.
+    // These tests cover the riskier scenarios (panic cleanup, multi-region
+    // cancel cascade, mixed cancel + panic) that the simpler "single task"
+    // and "two tasks" tests do not exercise.
+
+    /// Σ-state replay determinism: a panicking task must clean up identically
+    /// across two runs. The CatchUnwind wrapper turns the panic into
+    /// `Outcome::Panicked`; the trace events emitted by region cleanup must be
+    /// identical on both runs.
+    #[test]
+    fn replay_panic_cleanup_deterministic() {
+        use crate::types::Budget;
+        let validation = validate_replay(0xa11ce, 1, |runtime| {
+            let region = runtime.state.create_root_region(Budget::INFINITE);
+            let (panicker, _) = runtime
+                .state
+                .create_task(region, Budget::INFINITE, async {
+                    panic!("conformance panic-cleanup probe");
+                })
+                .expect("panicker");
+            let (sibling, _) = runtime
+                .state
+                .create_task(region, Budget::INFINITE, async { 7_u32 })
+                .expect("sibling");
+            {
+                let mut sched = runtime.scheduler.lock();
+                sched.schedule(panicker, 0);
+                sched.schedule(sibling, 0);
+            }
+            runtime.run_until_quiescent();
+        });
+
+        assert!(
+            validation.is_valid(),
+            "Panic-cleanup replay diverged: {validation}",
+        );
+    }
+
+    /// Σ-state replay determinism: a region tree with a mid-flight cancel
+    /// cascade. Cancellation propagates parent → child via
+    /// `cancel_request`, generating ordered trace events for region transitions
+    /// and task cancels. The certificate, step count, and trace must match
+    /// across replays.
+    #[test]
+    fn replay_multi_region_cancel_cascade_deterministic() {
+        use crate::types::{Budget, CancelReason};
+        let validation = validate_replay(0xc4cebb1e, 1, |runtime| {
+            let root = runtime.state.create_root_region(Budget::INFINITE);
+            let child_a = runtime
+                .state
+                .create_child_region(root, Budget::INFINITE)
+                .expect("child a");
+            let child_b = runtime
+                .state
+                .create_child_region(root, Budget::INFINITE)
+                .expect("child b");
+            let child_c = runtime
+                .state
+                .create_child_region(root, Budget::INFINITE)
+                .expect("child c");
+
+            for region in [child_a, child_b, child_c] {
+                for i in 0..2 {
+                    let (task, _) = runtime
+                        .state
+                        .create_task(region, Budget::INFINITE, async move { i })
+                        .expect("task");
+                    runtime.scheduler.lock().schedule(task, 0);
+                }
+            }
+
+            let cancel_targets = runtime.state.cancel_request(
+                child_b,
+                &CancelReason::user("conformance partial cancel"),
+                None,
+            );
+            {
+                let mut sched = runtime.scheduler.lock();
+                for (task, priority) in cancel_targets {
+                    sched.schedule_cancel(task, priority);
+                }
+            }
+
+            runtime.run_until_quiescent();
+        });
+
+        assert!(
+            validation.is_valid(),
+            "Multi-region cancel cascade replay diverged: {validation}",
+        );
+    }
+
+    /// Σ-state replay determinism: cancel cascade interleaved with a
+    /// panicking task. The panic CatchUnwind path and the cancel propagation
+    /// path share state; the union must still replay deterministically.
+    #[test]
+    fn replay_panic_during_cancel_cascade_deterministic() {
+        use crate::types::{Budget, CancelReason};
+        let validation = validate_replay(0xdeadc0de, 1, |runtime| {
+            let root = runtime.state.create_root_region(Budget::INFINITE);
+            let doomed = runtime
+                .state
+                .create_child_region(root, Budget::INFINITE)
+                .expect("doomed region");
+
+            let (panicker, _) = runtime
+                .state
+                .create_task(doomed, Budget::INFINITE, async {
+                    panic!("panic during cancel cascade");
+                })
+                .expect("panicker");
+            let (sleeper, _) = runtime
+                .state
+                .create_task(doomed, Budget::INFINITE, async { 1_u8 })
+                .expect("sleeper");
+            let (root_task, _) = runtime
+                .state
+                .create_task(root, Budget::INFINITE, async { 2_u8 })
+                .expect("root_task");
+            {
+                let mut sched = runtime.scheduler.lock();
+                sched.schedule(panicker, 0);
+                sched.schedule(sleeper, 0);
+                sched.schedule(root_task, 0);
+            }
+
+            let cancel_targets = runtime.state.cancel_request(
+                doomed,
+                &CancelReason::user("doomed subtree cancel"),
+                None,
+            );
+            {
+                let mut sched = runtime.scheduler.lock();
+                for (task, priority) in cancel_targets {
+                    sched.schedule_cancel(task, priority);
+                }
+            }
+
+            runtime.run_until_quiescent();
+        });
+
+        assert!(
+            validation.is_valid(),
+            "Panic-during-cancel-cascade replay diverged: {validation}",
+        );
+    }
+
+    /// Replay determinism must hold across many seeds for the multi-region
+    /// cancel cascade scenario. A single-seed pass can miss a Σ-state path
+    /// only reached on certain dispatch orderings.
+    #[test]
+    fn replay_multi_region_cancel_cascade_deterministic_across_seeds() {
+        use crate::types::{Budget, CancelReason};
+        let seeds: Vec<u64> = (0..16).map(|i| 0xc4cebb1e ^ (i * 0x9E37_79B9)).collect();
+        let results = validate_replay_multi(&seeds, 1, |runtime| {
+            let root = runtime.state.create_root_region(Budget::INFINITE);
+            let child_a = runtime
+                .state
+                .create_child_region(root, Budget::INFINITE)
+                .expect("child a");
+            let child_b = runtime
+                .state
+                .create_child_region(root, Budget::INFINITE)
+                .expect("child b");
+            for region in [child_a, child_b] {
+                for i in 0..3 {
+                    let (task, _) = runtime
+                        .state
+                        .create_task(region, Budget::INFINITE, async move { i })
+                        .expect("task");
+                    runtime.scheduler.lock().schedule(task, 0);
+                }
+            }
+            let targets = runtime.state.cancel_request(
+                child_a,
+                &CancelReason::user("conformance multi-seed cancel"),
+                None,
+            );
+            {
+                let mut sched = runtime.scheduler.lock();
+                for (task, priority) in targets {
+                    sched.schedule_cancel(task, priority);
+                }
+            }
+            runtime.run_until_quiescent();
+        });
+
+        for (i, v) in results.iter().enumerate() {
+            assert!(
+                v.is_valid(),
+                "Multi-region cancel cascade diverged at seed {:#x}: {v}",
+                seeds[i],
+            );
+        }
+    }
+
     #[test]
     fn replay_validation_display_ok() {
         let v = ReplayValidation {
