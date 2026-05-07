@@ -136,9 +136,7 @@
 //:     INCORRECT answer per the operator's framing),
 //! would all be caught by the structural pins below.
 
-use std::future::Future;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 
@@ -548,16 +546,6 @@ fn behavior_polled_after_completion_returns_err_deterministically() {
              return Err deterministically. Repoll behavior \
              may be UB or random.",
         );
-    }
-}
-
-// Anchor the test to the production path by also using the
-// production Select directly with futures::future::ready.
-struct AlwaysReady<T: Copy>(T);
-impl<T: Copy + 'static> Future for AlwaysReady<T> {
-    type Output = T;
-    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<T> {
-        Poll::Ready(self.0)
     }
 }
 
