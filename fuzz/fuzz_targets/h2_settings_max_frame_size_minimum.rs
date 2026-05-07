@@ -1,551 +1,306 @@
-//! Fuzzing target for HTTP/2 SETTINGS_MAX_FRAME_SIZE minimum validation vulnerabilities.
-//!
-//! Tests RFC 9113 compliance for SETTINGS_MAX_FRAME_SIZE values below the required
-//! minimum of 16,384 octets. According to RFC 9113 §6.5.2, values below this
-//! minimum MUST be treated as a connection error.
-//!
-//! Vulnerability areas:
-//! 1. Accepting frame size values below RFC minimum (16,384 bytes)
-//! 2. Integer underflow in frame size arithmetic
-//! 3. Buffer allocation with invalid size parameters
-//! 4. State consistency when invalid frame sizes are processed
-
 #![no_main]
 
-use arbitrary::Arbitrary;
+use arbitrary::{Arbitrary, Unstructured};
+use asupersync::bytes::{Bytes, BytesMut};
+use asupersync::http::h2::frame::{
+    FrameHeader, FrameType, MAX_FRAME_SIZE, MIN_MAX_FRAME_SIZE, Setting,
+    SettingsFrame as H2SettingsFrame, settings_flags,
+};
+use asupersync::http::h2::{ErrorCode, H2Error};
 use libfuzzer_sys::fuzz_target;
 
-/// RFC 9113 constants for SETTINGS_MAX_FRAME_SIZE
-const RFC_MIN_FRAME_SIZE: u32 = 16_384; // 2^14 octets
-const RFC_MAX_FRAME_SIZE: u32 = 16_777_215; // 2^24 - 1 octets
-const RFC_DEFAULT_FRAME_SIZE: u32 = 16_384;
+const MAX_FRAMES_PER_INPUT: usize = 32;
+const MAX_SETTINGS_PER_SIDE: usize = 32;
+const MAX_TRAILING_BYTES: usize = 5;
+const MAX_BOUNDARY_PROBES: usize = 32;
+const MAX_FRAME_SIZE_SETTING_ID: u16 = 0x5;
+const KNOWN_SETTING_IDS: [u16; 6] = [0x1, 0x2, 0x3, 0x4, 0x5, 0x6];
 
-/// Mock validator implementing correct RFC 9113 SETTINGS_MAX_FRAME_SIZE validation.
-#[derive(Debug, Clone)]
-pub struct MockSettingsValidator {
-    /// Current max frame size setting
-    current_max_frame_size: u32,
-    /// Validation mode: strict RFC compliance vs loose acceptance
-    validation_mode: ValidationMode,
-    /// Statistics for analysis
-    stats: ValidationStats,
+#[derive(Arbitrary, Debug)]
+struct FuzzInput {
+    frames: Vec<FuzzSettingsFrame>,
+    boundary_values: Vec<FrameSizeValue>,
 }
 
-/// Validation mode for testing different compliance levels
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ValidationMode {
-    /// Strict RFC 9113 compliance - reject invalid values
-    Strict,
-    /// Loose mode - accept some invalid values (mimics vulnerable implementation)
-    Loose,
+#[derive(Arbitrary, Debug, Clone)]
+struct FuzzSettingsFrame {
+    flags: u8,
+    stream_id: u32,
+    prefix_settings: Vec<SettingParameter>,
+    max_frame_size_value: FrameSizeValue,
+    suffix_settings: Vec<SettingParameter>,
+    trailing_payload_bytes: Vec<u8>,
 }
 
-/// Statistics tracked during validation testing
-#[derive(Debug, Clone, Default)]
-pub struct ValidationStats {
-    /// Total validation attempts
-    pub validation_count: u32,
-    /// Values below RFC minimum that were rejected
-    pub below_minimum_rejected: u32,
-    /// Values below RFC minimum that were accepted (should be 0 in strict mode)
-    pub below_minimum_accepted: u32,
-    /// Values above RFC maximum that were rejected
-    pub above_maximum_rejected: u32,
-    /// Values in valid range that were accepted
-    pub valid_range_accepted: u32,
-    /// Zero values encountered
-    pub zero_values: u32,
-    /// Extremely small values (1-1023)
-    pub tiny_values: u32,
-    /// Values just below minimum (1024-16383)
-    pub near_minimum_values: u32,
+#[derive(Arbitrary, Debug, Clone)]
+struct SettingParameter {
+    id: u16,
+    value: u32,
 }
 
-/// Result of validating a SETTINGS_MAX_FRAME_SIZE value
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ValidationResult {
-    /// Value accepted and applied
-    Accepted { old_value: u32, new_value: u32 },
-    /// Value rejected due to being below minimum
-    RejectedBelowMinimum { value: u32, minimum: u32 },
-    /// Value rejected due to being above maximum
-    RejectedAboveMaximum { value: u32, maximum: u32 },
-    /// Value rejected for other reasons (zero, etc.)
-    RejectedInvalid { value: u32, reason: String },
+#[derive(Arbitrary, Debug, Clone)]
+enum FrameSizeValue {
+    Minimum,
+    MinimumMinus(u16),
+    MinimumPlus(u32),
+    Maximum,
+    MaximumMinus(u32),
+    MaximumPlus(u32),
+    Zero,
+    One,
+    HalfMinimum,
+    Arbitrary(u32),
+    SaturatingProduct(u32, u32),
+    SaturatingDifference(u32, u32),
+    PowerOfTwo(u8),
+    BitMask(u32),
 }
 
-/// Test scenario for SETTINGS_MAX_FRAME_SIZE validation
-#[derive(Debug, Clone, Arbitrary)]
-pub struct MaxFrameSizeScenario {
-    /// Sequence of frame size values to test
-    pub frame_size_sequence: Vec<FrameSizeTestCase>,
-    /// Initial frame size (should be valid)
-    pub initial_frame_size: u32,
-    /// Whether to test extreme edge cases
-    pub test_extreme_cases: bool,
-    /// Maximum number of operations to prevent infinite loops
-    pub max_operations: u16,
-}
+fuzz_target!(|data: &[u8]| {
+    let mut u = Unstructured::new(data);
+    let input: FuzzInput = match u.arbitrary() {
+        Ok(input) => input,
+        Err(_) => return,
+    };
 
-/// Individual test case for a frame size value
-#[derive(Debug, Clone, Arbitrary)]
-pub struct FrameSizeTestCase {
-    /// The frame size value to test
-    pub frame_size_value: FrameSizeValue,
-    /// Expected behavior in strict mode
-    pub expected_strict_result: Option<bool>, // Some(true) = should accept, Some(false) = should reject, None = either
-    /// When to apply this test case
-    pub test_sequence: u8,
-}
-
-/// Different categories of frame size values for focused testing
-#[derive(Debug, Clone, Arbitrary)]
-pub enum FrameSizeValue {
-    /// Exact RFC values
-    RfcValue(RfcFrameSize),
-    /// Boundary values around the minimum
-    BoundaryValue(BoundaryFrameSize),
-    /// Arbitrary values for broader testing
-    ArbitraryValue(u32),
-    /// Computed values based on operations
-    ComputedValue(ComputedFrameSize),
-}
-
-/// RFC-defined frame size values
-#[derive(Debug, Clone, Arbitrary)]
-pub enum RfcFrameSize {
-    Minimum,           // 16384
-    Maximum,           // 16777215
-    Default,           // 16384
-    AboveMaximum(u32), // > 16777215
-    BelowMinimum(u32), // < 16384
-}
-
-/// Boundary values for edge case testing
-#[derive(Debug, Clone, Arbitrary)]
-pub enum BoundaryFrameSize {
-    Zero,               // 0
-    One,                // 1
-    MinimumMinus1,      // 16383
-    MinimumPlus1,       // 16385
-    MaximumMinus1,      // 16777214
-    MaximumPlus1,       // 16777216
-    PowerOfTwo(u8),     // 2^n where n < 14 or n > 24
-    AlmostMinimum(u16), // 16384 - offset where offset in [1, 1000]
-}
-
-/// Computed frame size values
-#[derive(Debug, Clone, Arbitrary)]
-pub enum ComputedFrameSize {
-    /// Multiply by factor (test overflow)
-    MultiplyBy(u32, u32),
-    /// Subtract value (test underflow)
-    SubtractFrom(u32, u32),
-    /// Bitwise operations
-    BitwiseOp(u32, BitwiseOperation),
-}
-
-/// Bitwise operations for computed values
-#[derive(Debug, Clone, Arbitrary)]
-pub enum BitwiseOperation {
-    LeftShift(u8),
-    RightShift(u8),
-    And(u32),
-    Or(u32),
-    Xor(u32),
-}
-
-impl MockSettingsValidator {
-    pub fn new(mode: ValidationMode) -> Self {
-        Self {
-            current_max_frame_size: RFC_DEFAULT_FRAME_SIZE,
-            validation_mode: mode,
-            stats: ValidationStats::default(),
-        }
+    if input.frames.len() > MAX_FRAMES_PER_INPUT {
+        return;
     }
 
-    /// Validate and apply a SETTINGS_MAX_FRAME_SIZE value
-    pub fn validate_max_frame_size(&mut self, value: u32) -> ValidationResult {
-        self.stats.validation_count += 1;
-
-        // Track value categories for analysis
-        match value {
-            0 => self.stats.zero_values += 1,
-            1..=1023 => self.stats.tiny_values += 1,
-            1024..=16383 => self.stats.near_minimum_values += 1,
-            _ => {}
+    for frame in &input.frames {
+        if frame.prefix_settings.len() > MAX_SETTINGS_PER_SIDE
+            || frame.suffix_settings.len() > MAX_SETTINGS_PER_SIDE
+        {
+            continue;
         }
-
-        let old_value = self.current_max_frame_size;
-
-        match self.validation_mode {
-            ValidationMode::Strict => self.validate_strict(value, old_value),
-            ValidationMode::Loose => self.validate_loose(value, old_value),
-        }
+        exercise_frame(frame);
     }
 
-    /// Strict RFC 9113 compliant validation
-    fn validate_strict(&mut self, value: u32, old_value: u32) -> ValidationResult {
-        // RFC 9113 §6.5.2: Values below 2^14 (16384) MUST be treated as connection error
-        if value < RFC_MIN_FRAME_SIZE {
-            self.stats.below_minimum_rejected += 1;
-            return ValidationResult::RejectedBelowMinimum {
-                value,
-                minimum: RFC_MIN_FRAME_SIZE,
-            };
-        }
-
-        // RFC 9113 §6.5.2: Values above 2^24-1 MUST be treated as connection error
-        if value > RFC_MAX_FRAME_SIZE {
-            self.stats.above_maximum_rejected += 1;
-            return ValidationResult::RejectedAboveMaximum {
-                value,
-                maximum: RFC_MAX_FRAME_SIZE,
-            };
-        }
-
-        // Valid range - accept and update
-        self.stats.valid_range_accepted += 1;
-        self.current_max_frame_size = value;
-        ValidationResult::Accepted {
-            old_value,
-            new_value: value,
-        }
+    for value in input.boundary_values.iter().take(MAX_BOUNDARY_PROBES) {
+        exercise_single_max_frame_size(value.to_u32());
     }
-
-    /// Loose validation that mimics vulnerable implementation
-    fn validate_loose(&mut self, value: u32, old_value: u32) -> ValidationResult {
-        // Simulate current vulnerable behavior: just accept most values without validation
-        // This mimics the `let _ = size;` behavior in the current implementation
-
-        // Only reject obviously invalid values
-        if value == 0 {
-            return ValidationResult::RejectedInvalid {
-                value,
-                reason: "Zero frame size not allowed".to_string(),
-            };
-        }
-
-        // Accept values below minimum (this is the vulnerability!)
-        if value < RFC_MIN_FRAME_SIZE {
-            self.stats.below_minimum_accepted += 1;
-        } else {
-            self.stats.valid_range_accepted += 1;
-        }
-
-        // Update frame size regardless of RFC compliance
-        self.current_max_frame_size = value;
-        ValidationResult::Accepted {
-            old_value,
-            new_value: value,
-        }
-    }
-
-    /// Get current frame size
-    pub fn current_frame_size(&self) -> u32 {
-        self.current_max_frame_size
-    }
-
-    /// Get validation statistics
-    pub fn stats(&self) -> &ValidationStats {
-        &self.stats
-    }
-
-    /// Reset to defaults
-    pub fn reset(&mut self) {
-        self.current_max_frame_size = RFC_DEFAULT_FRAME_SIZE;
-        self.stats = ValidationStats::default();
-    }
-}
+});
 
 impl FrameSizeValue {
-    pub fn to_u32(&self) -> u32 {
+    fn to_u32(&self) -> u32 {
         match self {
-            FrameSizeValue::RfcValue(rfc) => rfc.to_u32(),
-            FrameSizeValue::BoundaryValue(boundary) => boundary.to_u32(),
-            FrameSizeValue::ArbitraryValue(value) => *value,
-            FrameSizeValue::ComputedValue(computed) => computed.to_u32(),
-        }
-    }
-}
-
-impl RfcFrameSize {
-    pub fn to_u32(&self) -> u32 {
-        match self {
-            RfcFrameSize::Minimum => RFC_MIN_FRAME_SIZE,
-            RfcFrameSize::Maximum => RFC_MAX_FRAME_SIZE,
-            RfcFrameSize::Default => RFC_DEFAULT_FRAME_SIZE,
-            RfcFrameSize::AboveMaximum(offset) => RFC_MAX_FRAME_SIZE.saturating_add(*offset),
-            RfcFrameSize::BelowMinimum(value) => (*value).min(RFC_MIN_FRAME_SIZE - 1),
-        }
-    }
-}
-
-impl BoundaryFrameSize {
-    pub fn to_u32(&self) -> u32 {
-        match self {
-            BoundaryFrameSize::Zero => 0,
-            BoundaryFrameSize::One => 1,
-            BoundaryFrameSize::MinimumMinus1 => RFC_MIN_FRAME_SIZE - 1,
-            BoundaryFrameSize::MinimumPlus1 => RFC_MIN_FRAME_SIZE + 1,
-            BoundaryFrameSize::MaximumMinus1 => RFC_MAX_FRAME_SIZE - 1,
-            BoundaryFrameSize::MaximumPlus1 => RFC_MAX_FRAME_SIZE + 1,
-            BoundaryFrameSize::PowerOfTwo(n) => {
-                if *n < 32 {
-                    1u32 << n
+            Self::Minimum => MIN_MAX_FRAME_SIZE,
+            Self::MinimumMinus(offset) => {
+                MIN_MAX_FRAME_SIZE.saturating_sub(u32::from(*offset).saturating_add(1))
+            }
+            Self::MinimumPlus(offset) => MIN_MAX_FRAME_SIZE.saturating_add(*offset),
+            Self::Maximum => MAX_FRAME_SIZE,
+            Self::MaximumMinus(offset) => MAX_FRAME_SIZE.saturating_sub(*offset),
+            Self::MaximumPlus(offset) => MAX_FRAME_SIZE.saturating_add(offset.saturating_add(1)),
+            Self::Zero => 0,
+            Self::One => 1,
+            Self::HalfMinimum => MIN_MAX_FRAME_SIZE / 2,
+            Self::Arbitrary(value) | Self::BitMask(value) => *value,
+            Self::SaturatingProduct(lhs, rhs) => lhs.saturating_mul(*rhs),
+            Self::SaturatingDifference(lhs, rhs) => lhs.saturating_sub(*rhs),
+            Self::PowerOfTwo(exp) => {
+                if *exp < 32 {
+                    1u32 << u32::from(*exp)
                 } else {
                     u32::MAX
                 }
             }
-            BoundaryFrameSize::AlmostMinimum(offset) => {
-                RFC_MIN_FRAME_SIZE.saturating_sub(*offset as u32)
-            }
         }
     }
 }
 
-impl ComputedFrameSize {
-    pub fn to_u32(&self) -> u32 {
-        match self {
-            ComputedFrameSize::MultiplyBy(a, b) => a.saturating_mul(*b),
-            ComputedFrameSize::SubtractFrom(a, b) => a.saturating_sub(*b),
-            ComputedFrameSize::BitwiseOp(value, op) => op.apply(*value),
-        }
-    }
-}
+fn exercise_frame(frame: &FuzzSettingsFrame) {
+    let wire = build_settings_frame_wire(frame);
+    let mut src = BytesMut::from(wire);
+    let header = FrameHeader::parse(&mut src).expect("generated SETTINGS header is complete");
+    let payload = src.freeze();
+    assert_eq!(header.frame_type, FrameType::Settings as u8);
+    assert_eq!(header.length as usize, payload.len());
 
-impl BitwiseOperation {
-    pub fn apply(&self, value: u32) -> u32 {
-        match self {
-            BitwiseOperation::LeftShift(n) => value.wrapping_shl(*n as u32),
-            BitwiseOperation::RightShift(n) => value.wrapping_shr(*n as u32),
-            BitwiseOperation::And(mask) => value & mask,
-            BitwiseOperation::Or(mask) => value | mask,
-            BitwiseOperation::Xor(mask) => value ^ mask,
-        }
-    }
-}
-
-/// Test specific RFC violation scenarios
-fn test_rfc_minimum_violations() {
-    let mut strict_validator = MockSettingsValidator::new(ValidationMode::Strict);
-    let mut loose_validator = MockSettingsValidator::new(ValidationMode::Loose);
-
-    // Test values below RFC minimum
-    let test_values = [
-        0,     // Zero
-        1,     // Minimal
-        1023,  // Small
-        8192,  // Half minimum
-        16383, // Just below minimum
-        16384, // Exactly minimum (should accept)
-        16385, // Just above minimum (should accept)
-    ];
-
-    for &value in &test_values {
-        let strict_result = strict_validator.validate_max_frame_size(value);
-        let loose_result = loose_validator.validate_max_frame_size(value);
-
-        // Values below minimum should be rejected in strict mode
-        if value < RFC_MIN_FRAME_SIZE {
-            assert!(
-                matches!(strict_result, ValidationResult::RejectedBelowMinimum { .. }),
-                "Strict mode should reject value {} (below minimum {})",
-                value,
-                RFC_MIN_FRAME_SIZE
-            );
-
-            // Loose mode demonstrates the vulnerability by accepting invalid values
-            if value > 0 {
-                assert!(
-                    matches!(loose_result, ValidationResult::Accepted { .. }),
-                    "Loose mode incorrectly accepts value {} (below minimum)",
-                    value
-                );
-            }
-        }
-    }
-}
-
-/// Test edge cases around minimum frame size
-fn test_minimum_boundary_conditions() {
-    let mut validator = MockSettingsValidator::new(ValidationMode::Strict);
-
-    // Test boundary conditions
-    let boundaries = [
-        (RFC_MIN_FRAME_SIZE - 1000, false), // Well below
-        (RFC_MIN_FRAME_SIZE - 1, false),    // Just below
-        (RFC_MIN_FRAME_SIZE, true),         // Exactly minimum
-        (RFC_MIN_FRAME_SIZE + 1, true),     // Just above
-    ];
-
-    for (value, should_accept) in boundaries {
-        validator.reset();
-        let result = validator.validate_max_frame_size(value);
-
-        if should_accept {
-            assert!(
-                matches!(result, ValidationResult::Accepted { .. }),
-                "Should accept valid frame size {}",
-                value
-            );
-        } else {
-            assert!(
-                matches!(result, ValidationResult::RejectedBelowMinimum { .. }),
-                "Should reject frame size {} (below minimum)",
-                value
-            );
-        }
-    }
-}
-
-/// Test arithmetic operations that could lead to underflow
-fn test_underflow_scenarios() {
-    let mut validator = MockSettingsValidator::new(ValidationMode::Strict);
-
-    // Test values that could cause underflow in frame size calculations
-    let underflow_candidates = [
-        0,                      // Zero
-        1,                      // Minimal positive
-        RFC_MIN_FRAME_SIZE / 2, // Half the minimum
-        u32::MAX,               // Maximum possible (overflow risk)
-    ];
-
-    for &value in &underflow_candidates {
-        validator.reset();
-        let result = validator.validate_max_frame_size(value);
-
-        // Ensure no panic or undefined behavior
-        match result {
-            ValidationResult::Accepted { .. } => {
-                assert!(
-                    value >= RFC_MIN_FRAME_SIZE && value <= RFC_MAX_FRAME_SIZE,
-                    "Should only accept values in valid range"
-                );
-            }
-            ValidationResult::RejectedBelowMinimum { .. } => {
-                assert!(
-                    value < RFC_MIN_FRAME_SIZE,
-                    "Should only reject values below minimum"
-                );
-            }
-            ValidationResult::RejectedAboveMaximum { .. } => {
-                assert!(
-                    value > RFC_MAX_FRAME_SIZE,
-                    "Should only reject values above maximum"
-                );
-            }
-            ValidationResult::RejectedInvalid { .. } => {
-                // Other rejection reasons are valid
-            }
-        }
-    }
-}
-
-fuzz_target!(|scenario: MaxFrameSizeScenario| {
-    // Limit operations to prevent timeouts
-    let max_ops = scenario.max_operations.min(500);
-    let limited_sequence: Vec<FrameSizeTestCase> = scenario
-        .frame_size_sequence
-        .into_iter()
-        .take(max_ops as usize)
-        .collect();
-
-    if limited_sequence.is_empty() {
+    let result = H2SettingsFrame::parse(&header, &payload);
+    if let Some(code) = expected_error_code(&header, &payload) {
+        assert_error_code(result, code);
         return;
     }
 
-    // Test with both strict (RFC compliant) and loose (vulnerable) validators
-    let mut strict_validator = MockSettingsValidator::new(ValidationMode::Strict);
-    let mut loose_validator = MockSettingsValidator::new(ValidationMode::Loose);
-
-    // Set initial frame size if provided and valid
-    let initial_size = if scenario.initial_frame_size >= RFC_MIN_FRAME_SIZE
-        && scenario.initial_frame_size <= RFC_MAX_FRAME_SIZE
-    {
-        scenario.initial_frame_size
+    let parsed = result.expect("valid SETTINGS frame should parse");
+    assert_eq!(parsed.ack, header.has_flag(settings_flags::ACK));
+    if parsed.ack {
+        assert!(parsed.settings.is_empty());
     } else {
-        RFC_DEFAULT_FRAME_SIZE
+        assert_known_settings_match_payload(&payload, &parsed);
+        assert_parsed_max_frame_sizes_are_in_range(&parsed);
+    }
+
+    let reparsed = encode_then_parse(&parsed);
+    assert_eq!(reparsed.ack, parsed.ack);
+    assert_eq!(reparsed.settings, parsed.settings);
+}
+
+fn exercise_single_max_frame_size(value: u32) {
+    let frame = FuzzSettingsFrame {
+        flags: 0,
+        stream_id: 0,
+        prefix_settings: Vec::new(),
+        max_frame_size_value: FrameSizeValue::Arbitrary(value),
+        suffix_settings: Vec::new(),
+        trailing_payload_bytes: Vec::new(),
+    };
+    let wire = build_settings_frame_wire(&frame);
+    let mut src = BytesMut::from(wire);
+    let header = FrameHeader::parse(&mut src).expect("generated SETTINGS header is complete");
+    let payload = src.freeze();
+    let result = H2SettingsFrame::parse(&header, &payload);
+
+    if !(MIN_MAX_FRAME_SIZE..=MAX_FRAME_SIZE).contains(&value) {
+        assert_error_code(result, ErrorCode::ProtocolError);
+        return;
+    }
+
+    let parsed = result.expect("valid SETTINGS_MAX_FRAME_SIZE should parse");
+    assert_eq!(parsed.settings, vec![Setting::MaxFrameSize(value)]);
+    assert_parsed_max_frame_sizes_are_in_range(&parsed);
+}
+
+fn build_settings_frame_wire(frame: &FuzzSettingsFrame) -> Vec<u8> {
+    let payload = build_settings_payload(frame);
+    let header = FrameHeader {
+        length: payload.len() as u32,
+        frame_type: FrameType::Settings as u8,
+        flags: frame.flags,
+        stream_id: frame.stream_id & 0x7fff_ffff,
     };
 
-    strict_validator.validate_max_frame_size(initial_size);
-    loose_validator.validate_max_frame_size(initial_size);
+    let mut wire = BytesMut::new();
+    header.write(&mut wire);
+    wire.extend_from_slice(&payload);
+    wire.to_vec()
+}
 
-    // Process the frame size sequence
-    for test_case in &limited_sequence {
-        let frame_size = test_case.frame_size_value.to_u32();
-
-        let strict_result = strict_validator.validate_max_frame_size(frame_size);
-        let loose_result = loose_validator.validate_max_frame_size(frame_size);
-
-        // Verify strict validator follows RFC 9113 rules
-        match strict_result {
-            ValidationResult::Accepted { new_value, .. } => {
-                assert!(
-                    new_value >= RFC_MIN_FRAME_SIZE,
-                    "Strict validator accepted frame size {} below minimum {}",
-                    new_value,
-                    RFC_MIN_FRAME_SIZE
-                );
-                assert!(
-                    new_value <= RFC_MAX_FRAME_SIZE,
-                    "Strict validator accepted frame size {} above maximum {}",
-                    new_value,
-                    RFC_MAX_FRAME_SIZE
-                );
-            }
-            ValidationResult::RejectedBelowMinimum { value, minimum } => {
-                assert!(value < minimum);
-                assert_eq!(minimum, RFC_MIN_FRAME_SIZE);
-            }
-            ValidationResult::RejectedAboveMaximum { value, maximum } => {
-                assert!(value > maximum);
-                assert_eq!(maximum, RFC_MAX_FRAME_SIZE);
-            }
-            ValidationResult::RejectedInvalid { .. } => {
-                // Other rejection reasons are valid
-            }
-        }
-
-        // Demonstrate vulnerability: loose validator accepts invalid values
-        if frame_size > 0 && frame_size < RFC_MIN_FRAME_SIZE {
-            match loose_result {
-                ValidationResult::Accepted { .. } => {
-                    // This demonstrates the vulnerability - accepting values below RFC minimum
-                    eprintln!(
-                        "VULNERABILITY: Loose validator accepted frame size {} below minimum {}",
-                        frame_size, RFC_MIN_FRAME_SIZE
-                    );
-                }
-                _ => {
-                    // Some values might still be rejected for other reasons
-                }
-            }
-        }
-    }
-
-    // Analyze final statistics
-    let strict_stats = strict_validator.stats();
-    let loose_stats = loose_validator.stats();
-
-    // Strict validator should never accept values below minimum
-    assert_eq!(
-        strict_stats.below_minimum_accepted, 0,
-        "Strict validator should never accept values below minimum"
+fn build_settings_payload(frame: &FuzzSettingsFrame) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(
+        (frame.prefix_settings.len() + 1 + frame.suffix_settings.len()) * 6 + MAX_TRAILING_BYTES,
     );
+    for setting in &frame.prefix_settings {
+        append_setting(&mut payload, setting.id, setting.value);
+    }
+    append_setting(
+        &mut payload,
+        MAX_FRAME_SIZE_SETTING_ID,
+        frame.max_frame_size_value.to_u32(),
+    );
+    for setting in &frame.suffix_settings {
+        append_setting(&mut payload, setting.id, setting.value);
+    }
+    payload.extend(
+        frame
+            .trailing_payload_bytes
+            .iter()
+            .take(MAX_TRAILING_BYTES)
+            .copied(),
+    );
+    payload
+}
 
-    // Loose validator demonstrates vulnerability by accepting some invalid values
-    if loose_stats.below_minimum_accepted > 0 {
-        eprintln!(
-            "VULNERABILITY CONFIRMED: Loose validator accepted {} values below RFC minimum",
-            loose_stats.below_minimum_accepted
-        );
+fn append_setting(payload: &mut Vec<u8>, id: u16, value: u32) {
+    payload.extend_from_slice(&id.to_be_bytes());
+    payload.extend_from_slice(&value.to_be_bytes());
+}
+
+fn expected_error_code(header: &FrameHeader, payload: &Bytes) -> Option<ErrorCode> {
+    if header.stream_id != 0 {
+        return Some(ErrorCode::ProtocolError);
     }
 
-    // Run targeted tests periodically
-    if scenario.test_extreme_cases && limited_sequence.len() == 1 {
-        test_rfc_minimum_violations();
-        test_minimum_boundary_conditions();
-        test_underflow_scenarios();
+    if header.has_flag(settings_flags::ACK) && !payload.is_empty() {
+        return Some(ErrorCode::FrameSizeError);
     }
-});
+
+    if !payload.len().is_multiple_of(6) {
+        return Some(ErrorCode::FrameSizeError);
+    }
+
+    first_live_setting_error(payload)
+}
+
+fn first_live_setting_error(payload: &Bytes) -> Option<ErrorCode> {
+    for chunk in payload.chunks_exact(6) {
+        let id = u16::from_be_bytes([chunk[0], chunk[1]]);
+        let value = u32::from_be_bytes([chunk[2], chunk[3], chunk[4], chunk[5]]);
+        match id {
+            0x2 if value > 1 => return Some(ErrorCode::ProtocolError),
+            0x4 if value > 0x7fff_ffff => return Some(ErrorCode::FlowControlError),
+            0x5 if !(MIN_MAX_FRAME_SIZE..=MAX_FRAME_SIZE).contains(&value) => {
+                return Some(ErrorCode::ProtocolError);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn assert_known_settings_match_payload(payload: &Bytes, parsed: &H2SettingsFrame) {
+    let expected = expected_known_settings(payload);
+    assert_eq!(parsed.settings, expected);
+    assert_eq!(
+        parsed.settings.len(),
+        payload.chunks_exact(6).count() - unknown_setting_count(payload)
+    );
+    assert!(
+        parsed
+            .settings
+            .iter()
+            .all(|setting| KNOWN_SETTING_IDS.contains(&setting.id()))
+    );
+}
+
+fn expected_known_settings(payload: &Bytes) -> Vec<Setting> {
+    payload
+        .chunks_exact(6)
+        .filter_map(|chunk| {
+            let id = u16::from_be_bytes([chunk[0], chunk[1]]);
+            let value = u32::from_be_bytes([chunk[2], chunk[3], chunk[4], chunk[5]]);
+            Setting::from_id_value(id, value)
+        })
+        .collect()
+}
+
+fn unknown_setting_count(payload: &Bytes) -> usize {
+    payload
+        .chunks_exact(6)
+        .filter(|chunk| {
+            let id = u16::from_be_bytes([chunk[0], chunk[1]]);
+            !KNOWN_SETTING_IDS.contains(&id)
+        })
+        .count()
+}
+
+fn assert_parsed_max_frame_sizes_are_in_range(parsed: &H2SettingsFrame) {
+    for setting in &parsed.settings {
+        if let Setting::MaxFrameSize(value) = *setting {
+            assert!(
+                (MIN_MAX_FRAME_SIZE..=MAX_FRAME_SIZE).contains(&value),
+                "parsed SETTINGS_MAX_FRAME_SIZE must stay within RFC range"
+            );
+        }
+    }
+}
+
+fn assert_error_code(result: Result<H2SettingsFrame, H2Error>, expected: ErrorCode) {
+    match result {
+        Ok(frame) => panic!("expected {expected:?}, parsed SETTINGS frame: {frame:?}"),
+        Err(err) => assert_eq!(err.code, expected, "unexpected SETTINGS parse error: {err}"),
+    }
+}
+
+fn encode_then_parse(frame: &H2SettingsFrame) -> H2SettingsFrame {
+    let mut encoded = BytesMut::new();
+    frame
+        .encode(&mut encoded)
+        .expect("accepted SETTINGS encodes");
+    let header = FrameHeader::parse(&mut encoded).expect("encoded SETTINGS header parses");
+    assert_eq!(header.frame_type, FrameType::Settings as u8);
+    let payload = encoded.freeze();
+    assert_eq!(header.length as usize, payload.len());
+    H2SettingsFrame::parse(&header, &payload).expect("encoded SETTINGS parses")
+}
