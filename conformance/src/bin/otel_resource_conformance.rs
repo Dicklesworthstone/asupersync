@@ -73,11 +73,13 @@ fn main() {
     let verbose = matches.get_flag("verbose");
 
     match test_name.as_str() {
-        "basic-detection" => exit_if_failed(run_basic_detection_test(verbose)),
-        "env-vars" => exit_if_failed(run_env_vars_test(verbose)),
-        "hostname" => exit_if_failed(run_hostname_test(verbose)),
-        "service-detection" => exit_if_failed(run_service_detection_test(verbose)),
-        "comprehensive" => exit_if_failed(run_comprehensive_test(verbose)),
+        "basic-detection" => exit_if_not_pass("basic-detection", run_basic_detection_test(verbose)),
+        "env-vars" => exit_if_not_pass("env-vars", run_env_vars_test(verbose)),
+        "hostname" => exit_if_not_pass("hostname", run_hostname_test(verbose)),
+        "service-detection" => {
+            exit_if_not_pass("service-detection", run_service_detection_test(verbose))
+        }
+        "comprehensive" => exit_if_not_pass("comprehensive", run_comprehensive_test(verbose)),
         "report" => {
             generate_compliance_report();
             return;
@@ -90,11 +92,23 @@ fn main() {
     }
 }
 
-fn exit_if_failed(result: ConformanceTestResult) {
-    if let ConformanceTestResult::Fail { reason } = result {
-        eprintln!("Conformance test failed: {reason}");
-        std::process::exit(1);
+fn exit_if_not_pass(test_name: &str, result: ConformanceTestResult) {
+    let exit_code = exit_code_for_result(&result);
+    if exit_code == 0 {
+        return;
     }
+
+    match result {
+        ConformanceTestResult::Fail { reason } => {
+            eprintln!("{test_name}: FAIL - {reason}");
+        }
+        ConformanceTestResult::ExpectedFailure { reason } => {
+            eprintln!("{test_name}: XFAIL - {reason}");
+        }
+        ConformanceTestResult::Pass => {}
+    }
+
+    std::process::exit(exit_code);
 }
 
 fn run_all_tests(verbose: bool) {
@@ -142,9 +156,38 @@ fn run_all_tests(verbose: bool) {
         (passed as f32 / total as f32) * 100.0
     );
 
-    if failed > 0 {
+    println!("\n{}", final_status_line(total, failed, xfail));
+
+    if exit_code_for_summary(total, failed, xfail) != 0 {
         println!("\nDifferences documented in DISCREPANCIES.md");
-        std::process::exit(1);
+        std::process::exit(exit_code_for_summary(total, failed, xfail));
+    }
+}
+
+fn exit_code_for_result(result: &ConformanceTestResult) -> i32 {
+    match result {
+        ConformanceTestResult::Pass => 0,
+        ConformanceTestResult::Fail { .. } | ConformanceTestResult::ExpectedFailure { .. } => 1,
+    }
+}
+
+fn exit_code_for_summary(total: usize, failed: usize, expected_failures: usize) -> i32 {
+    if total == 0 || failed > 0 || expected_failures > 0 {
+        1
+    } else {
+        0
+    }
+}
+
+fn final_status_line(total: usize, failed: usize, expected_failures: usize) -> String {
+    if total == 0 {
+        "NO TESTS EXECUTED".to_string()
+    } else if failed > 0 {
+        format!("FAILURES PRESENT ({failed} failed, {expected_failures} expected failures)")
+    } else if expected_failures > 0 {
+        format!("NO FAILURES; PARTIAL COVERAGE ({expected_failures} expected failures)")
+    } else {
+        "ALL TESTS PASSED".to_string()
     }
 }
 
@@ -596,4 +639,36 @@ fn generate_compliance_report() {
     }
     println!("\nRun 'otel_resource_conformance all -v' for detailed test execution.");
     println!("Any differences will be documented in DISCREPANCIES.md");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ConformanceTestResult, exit_code_for_result, exit_code_for_summary, final_status_line,
+    };
+
+    #[test]
+    fn exit_code_is_nonzero_for_expected_failure_results() {
+        let result = ConformanceTestResult::ExpectedFailure {
+            reason: "known divergence".to_string(),
+        };
+
+        assert_eq!(exit_code_for_result(&result), 1);
+    }
+
+    #[test]
+    fn exit_code_is_zero_only_for_clean_summary() {
+        assert_eq!(exit_code_for_summary(5, 0, 0), 0);
+        assert_eq!(exit_code_for_summary(0, 0, 0), 1);
+        assert_eq!(exit_code_for_summary(5, 1, 0), 1);
+        assert_eq!(exit_code_for_summary(5, 0, 1), 1);
+    }
+
+    #[test]
+    fn final_status_line_reports_partial_coverage_for_xfail_only() {
+        let status = final_status_line(5, 0, 1);
+
+        assert!(status.contains("NO FAILURES; PARTIAL COVERAGE"));
+        assert!(!status.contains("ALL TESTS PASSED"));
+    }
 }
