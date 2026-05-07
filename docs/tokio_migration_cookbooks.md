@@ -407,17 +407,145 @@ tokio = { version = "1", features = ["full"] }
 
 // After: asupersync with compat bridge
 [dependencies]
-asupersync = "0.1"
-asupersync-tokio-compat = { version = "0.1", features = ["full"] }
+asupersync = "0.3.1"
+asupersync-tokio-compat = { version = "0.3.1", features = ["full"] }
 ```
 
-### 8.4 Anti-Patterns
+### 8.4 Adapter Examples for Common Tokio-Dependent Crates
+
+Use this track for incremental migration only. Prefer native Asupersync surfaces
+when they already cover the workload; use `asupersync-tokio-compat` when a
+third-party crate is still hard-wired to Tokio traits, hyper runtime traits, or
+Tower service traits.
+
+| Crate family | Preferred path | Adapter path | Required compat features |
+|--------------|----------------|--------------|--------------------------|
+| `reqwest` / hyper clients | `asupersync::http` client/pool surfaces | keep client, wrap call future with `with_tokio_context`; use hyper bridge for custom hyper clients | `hyper-bridge`, `tokio-io` |
+| `axum` / Tower middleware | native `asupersync::web` and `asupersync::service` | wrap Tower stack with `tower_bridge::FromTower` while handlers are being ported | `tower-bridge` |
+| `tonic` clients/servers | native `asupersync::grpc` | wrap unary/stream futures at the boundary; preserve gRPC status/deadline metadata | `hyper-bridge`, `tokio-io`, optionally `tower-bridge` |
+| `sqlx` / Tokio database pools | native `asupersync::database::{postgres,mysql,sqlite}` | keep the pool behind a region-owned adapter and wrap query futures with `with_tokio_context` | `full` if driver also needs hyper/Tower I/O |
+
+#### R7-06: Retain a Tokio-locked HTTP client temporarily
+
+```rust
+use asupersync::Cx;
+use asupersync_tokio_compat::runtime::with_tokio_context;
+
+async fn call_tokio_locked_client(
+    cx: &Cx,
+    client: reqwest::Client,
+    request: reqwest::Request,
+) -> Result<reqwest::Response, ClientError> {
+    with_tokio_context(cx, || async move { client.execute(request).await })
+        .await
+        .ok_or(ClientError::Cancelled)?
+        .map_err(ClientError::Http)
+}
+```
+
+Boundary rule: the adapter receives `&Cx` at the public edge. Do not hide this
+inside a global client singleton; region close must still cancel or drain the
+in-flight request.
+
+#### R7-07: Wrap a Tower middleware stack during router migration
+
+```rust
+use asupersync::Cx;
+use asupersync_tokio_compat::tower_bridge::{BridgeError, FromTower};
+use http::Request;
+
+async fn call_legacy_tower<S, B>(
+    cx: &Cx,
+    service: &FromTower<S, Request<B>>,
+    request: Request<B>,
+) -> Result<S::Response, BridgeError<S::Error>>
+where
+    S: tower::Service<Request<B>> + Send,
+    S::Future: Send,
+    S::Error: Send,
+    B: Send,
+{
+    service.call(cx, request).await
+}
+```
+
+Boundary rule: the `FromTower` bridge polls readiness under an Asupersync
+`Mutex`, installs `Cx` while polling Tower futures, and maps cancellation to
+`BridgeError::Cancelled`. Keep this wrapper at the service edge, not scattered
+through handlers.
+
+#### R7-08: Keep a tonic client while porting service internals
+
+```rust
+use asupersync::Cx;
+use asupersync_tokio_compat::runtime::with_tokio_context;
+
+async fn call_tonic_unary<Req, Resp, F, Fut>(
+    cx: &Cx,
+    request: tonic::Request<Req>,
+    call: F,
+) -> Result<tonic::Response<Resp>, GrpcBoundaryError>
+where
+    F: FnOnce(tonic::Request<Req>) -> Fut,
+    Fut: core::future::Future<Output = Result<tonic::Response<Resp>, tonic::Status>>,
+{
+    with_tokio_context(cx, || call(request))
+        .await
+        .ok_or(GrpcBoundaryError::Cancelled)?
+        .map_err(GrpcBoundaryError::Status)
+}
+```
+
+Boundary rule: copy `grpc-timeout`, auth, and trace metadata before crossing the
+adapter. Cancellation must map to the Asupersync cancellation protocol, not to a
+generic transport error.
+
+#### R7-09: Keep an sqlx pool behind a region-owned boundary
+
+```rust
+use asupersync::Cx;
+use asupersync_tokio_compat::runtime::with_tokio_context;
+
+async fn fetch_user(
+    cx: &Cx,
+    pool: sqlx::PgPool,
+    user_id: i64,
+) -> Result<UserRow, DbBoundaryError> {
+    with_tokio_context(cx, || async move {
+        sqlx::query_as::<_, UserRow>("select id, email from users where id = $1")
+            .bind(user_id)
+            .fetch_one(&pool)
+            .await
+    })
+    .await
+    .ok_or(DbBoundaryError::Cancelled)?
+    .map_err(DbBoundaryError::Sqlx)
+}
+```
+
+Boundary rule: pool acquisition and transaction lifetimes are obligations. A
+cancelled query must release the checked-out connection or abort the transaction
+before the owning region closes.
+
+### 8.5 Adapter Exit Criteria
+
+The adapter bridge should shrink over time. A crate family is ready to leave
+T7 when all of the following are true:
+
+- A native Asupersync surface covers the production use case with equivalent
+  structured logging and error taxonomy.
+- The native path has an executable proof lane (`rch exec -- cargo test ...`)
+  covering cancellation, timeout/deadline propagation, and resource cleanup.
+- The adapter fallback is documented as rollback-only, with a concrete
+  threshold such as latency p99, error rate, or connection/lease leak count.
+
+### 8.6 Anti-Patterns
 
 - AP-T7-01: Running both runtimes with separate thread pools (use bridge)
 - AP-T7-02: Mixing tokio::spawn and asupersync::spawn without coordination
 - AP-T7-03: Not propagating cancellation across runtime boundary
 
-### 8.5 Failure Modes
+### 8.7 Failure Modes
 
 | Failure | Symptom | Mitigation |
 |---------|---------|------------|
@@ -425,14 +553,14 @@ asupersync-tokio-compat = { version = "0.1", features = ["full"] }
 | FM-T7-02 | Timer drift in bridge layer | Use unified time source; test with deterministic clock |
 | FM-T7-03 | Cancel not reaching tokio future | Wrap with CancelAware; verify propagation in tests |
 
-### 8.6 Edge Cases
+### 8.8 Edge Cases
 
 - Tokio crate spawns background task that outlives region
 - Hyper connection pool reuse across cancel boundary
 - Tower middleware state shared between bridge and native services
 - Body stream backpressure across runtime boundary
 
-### 8.7 Rollback Decision Points
+### 8.9 Rollback Decision Points
 
 | Checkpoint | Rollback Criterion | Action |
 |-----------|-------------------|--------|
@@ -440,7 +568,7 @@ asupersync-tokio-compat = { version = "0.1", features = ["full"] }
 | After R7-04 I/O bridge | Throughput < 80% of direct tokio | Optimize or revert |
 | After R7-05 body bridge | Data corruption in body round-trip | Revert immediately |
 
-### 8.8 Evidence
+### 8.10 Evidence
 
 - Support matrix: `docs/tokio_interop_support_matrix.md`
 - Adapter arch: `docs/tokio_adapter_boundary_architecture.md`
@@ -501,4 +629,5 @@ This document is a prerequisite for:
 
 | Date | Author | Change |
 |------|--------|--------|
+| 2026-05-07 | BlackHollow | Added common Tokio-dependent crate adapter examples and current compat feature/version guidance |
 | 2026-03-04 | SapphireHill | Initial creation; 6 domain cookbooks, 30 recipes, failure modes, edge cases, rollback points |
