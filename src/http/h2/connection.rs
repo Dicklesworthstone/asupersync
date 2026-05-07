@@ -4001,6 +4001,75 @@ mod tests {
         assert_eq!(err.code, ErrorCode::ProtocolError);
     }
 
+    /// br-asupersync-pxb77u — RFC 9113 §6.10:
+    ///
+    /// > A CONTINUATION frame MUST be preceded by a HEADERS, PUSH_PROMISE
+    /// > or CONTINUATION frame without the END_HEADERS flag set. A
+    /// > recipient that observes violation of this rule MUST respond with
+    /// > a connection error (Section 5.4.1) of type PROTOCOL_ERROR.
+    ///
+    /// "Connection error" specifically means `stream_id == None` so the
+    /// peer GOAWAYs the whole connection rather than RST_STREAMing one
+    /// stream. The pre-fix recv_continuation path on a stream whose
+    /// headers were already complete returned a stream-level
+    /// `H2Error::stream(...PROTOCOL_ERROR)` which would only RST_STREAM
+    /// the offending stream — non-conformant with §6.10.
+    #[test]
+    fn unsolicited_continuation_after_end_headers_is_connection_error() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+
+        // Complete a HEADERS sequence with END_HEADERS so the stream exists
+        // in the map but the connection is NOT awaiting CONTINUATION.
+        let headers = Frame::Headers(HeadersFrame::new(
+            1,
+            test_request_headers("/done"),
+            false,
+            true,
+        ));
+        conn.process_frame(headers).expect("complete HEADERS");
+        assert!(
+            !conn.is_awaiting_continuation(),
+            "headers with END_HEADERS must clear continuation expectation"
+        );
+
+        // Unsolicited CONTINUATION on the now-complete stream.
+        let cont = Frame::Continuation(ContinuationFrame::new(1, Bytes::new(), true));
+        let err = conn
+            .process_frame(cont)
+            .expect_err("unsolicited CONTINUATION must error");
+        assert_eq!(
+            err.code,
+            ErrorCode::ProtocolError,
+            "RFC 9113 §6.10 requires PROTOCOL_ERROR"
+        );
+        assert_eq!(
+            err.stream_id, None,
+            "RFC 9113 §6.10 requires connection-level error (stream_id == None), \
+             got stream-level error scoped to {:?}: {}",
+            err.stream_id, err.message
+        );
+    }
+
+    /// Sister case: CONTINUATION arrives for a stream that has never seen
+    /// any HEADERS. RFC 9113 §6.10 still mandates a connection error.
+    #[test]
+    fn continuation_for_unknown_stream_is_connection_error() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+
+        let cont = Frame::Continuation(ContinuationFrame::new(7, Bytes::new(), true));
+        let err = conn
+            .process_frame(cont)
+            .expect_err("CONTINUATION on unknown stream must error");
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+        assert_eq!(
+            err.stream_id, None,
+            "RFC 9113 §6.10 requires connection-level error, got stream {:?}",
+            err.stream_id
+        );
+    }
+
     // =========================================================================
     // last_stream_id Tracking Tests (bd-34krf)
     // =========================================================================
