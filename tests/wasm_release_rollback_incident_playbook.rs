@@ -205,4 +205,9 @@ fn publish_workflow_contains_actionable_rollback_controls() {
             "publish workflow missing rollback control token: {token}"
         );
     }
+
+    assert!(
+        !publish.contains("bash -lc \"$cmd\""),
+        "publish workflow rollback must execute npm dist-tag reassignment via direct argv"
+    );
 }

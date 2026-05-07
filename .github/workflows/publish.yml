@@ -747,7 +747,7 @@ jobs:
             pkg_name="$(node -p "require('./${pkg_json}').name")"
             cmd="npm dist-tag add ${pkg_name}@${rollback_version} ${npm_tag}"
             echo "$cmd" | tee -a artifacts/npm/rollback_actions.txt
-            bash -lc "$cmd"
+            npm dist-tag add "${pkg_name}@${rollback_version}" "${npm_tag}"
           done < artifacts/npm/package_json_paths.txt
 
           python3 - <<'PY'
