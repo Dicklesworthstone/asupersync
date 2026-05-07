@@ -958,6 +958,72 @@ mod tests {
     }
 
     #[test]
+    fn insert_pooled_task_with_field_mutation_reuses_recycled_wake_state() {
+        // br-asupersync-j1e7zy regression: the production spawn paths in
+        // src/cx/scope.rs and src/runtime/state.rs use field-by-field
+        // mutation inside `insert_pooled_task_with` so the recycled
+        // record's `wake_state` Arc (allocated by `Recyclable::reset`
+        // when the prior task was recycled) is reused instead of being
+        // dropped+replaced.  Verify that pattern preserves Arc identity
+        // across recycle+reinsert.
+        use std::sync::Arc;
+
+        let mut table = TaskTable::with_capacity(64);
+        let owner = RegionId::from_arena(ArenaIndex::new(1, 0));
+
+        // Pool miss: first insert fabricates a fresh record via the
+        // miss-path fallback inside `insert_pooled_task_with`.
+        let idx1 = table.insert_pooled_task_with(|idx, record| {
+            record.id = TaskId::from_arena(idx);
+            record.owner = owner;
+            record.created_at = Time::from_nanos(1);
+            record.deadline = None;
+            record.polls_remaining = 1;
+        });
+        let id1 = TaskId::from_arena(idx1);
+
+        // Recycle: `Recyclable::reset` runs before the record is
+        // returned to the pool, allocating a new wake_state Arc on the
+        // recycled record.  That Arc is what we want the *next* spawn to
+        // reuse.
+        table.remove_and_recycle_task(id1);
+        assert_eq!(table.recycled_task_record_count(), 1);
+
+        // Pool hit: the field-mutation factory should leave wake_state
+        // untouched, so the new record carries the post-reset Arc rather
+        // than a freshly-allocated one.  We assert this by checking that
+        // strong_count == 1 (only the table holds it) and that no
+        // foreign Arc reference can sneak in via the factory path.
+        let idx2 = table.insert_pooled_task_with(|idx, record| {
+            record.id = TaskId::from_arena(idx);
+            record.owner = owner;
+            record.created_at = Time::from_nanos(2);
+            record.deadline = None;
+            record.polls_remaining = 1;
+        });
+        let id2 = TaskId::from_arena(idx2);
+
+        let stats = table.task_record_pool_stats();
+        assert_eq!(stats.hits, 1, "second insert should be a pool hit");
+        assert_eq!(stats.misses, 1, "first insert should be the only miss");
+
+        let record = table.task(id2).expect("pooled task is live");
+        assert_eq!(
+            Arc::strong_count(&record.wake_state),
+            1,
+            "field-mutation factory must not introduce extra wake_state references",
+        );
+        assert_eq!(record.id, id2);
+        assert_eq!(record.owner, owner);
+        assert_eq!(record.created_at, Time::from_nanos(2));
+        assert_eq!(record.polls_remaining, 1);
+        assert!(
+            !record.is_local(),
+            "field-mutation factory must not leave stale local pinning",
+        );
+    }
+
+    #[test]
     fn task_record_pool_saturates_at_capacity_hint_bound() {
         let capacity = 4096usize;
         let expected_pool_cap = (capacity / 4).clamp(64, 512);

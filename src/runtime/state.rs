@@ -1680,7 +1680,23 @@ impl RuntimeState {
         // Create the TaskRecord
         let now = self.current_runtime_time();
         let idx = self.insert_pooled_task_with(|idx, record| {
-            *record = TaskRecord::new_with_time(TaskId::from_arena(idx), region, budget, now);
+            // br-asupersync-j1e7zy: mutate the recycled record in place
+            // instead of `*record = TaskRecord::new_with_time(...)`. The
+            // assignment form drops the `wake_state` Arc and `waiters`
+            // SmallVec freshly created by `Recyclable::reset` only to
+            // allocate identical replacements, defeating the purpose of
+            // the pool. `Recyclable::reset` (and the miss-path
+            // `TaskRecord::new` fallback) already leave every field at its
+            // default, so we only set the per-task identity and budget.
+            record.id = TaskId::from_arena(idx);
+            record.owner = region;
+            record.created_at = now;
+            record.deadline = budget.deadline;
+            record.polls_remaining = budget.poll_quota;
+            #[cfg(feature = "tracing-integration")]
+            {
+                record.created_instant = crate::time::wall_now();
+            }
         });
         let task_id = TaskId::from_arena(idx);
 
