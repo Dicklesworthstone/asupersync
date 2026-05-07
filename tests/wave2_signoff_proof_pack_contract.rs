@@ -7,6 +7,7 @@ use std::process::Command;
 
 const SIGNOFF_PATH: &str = "artifacts/wave2/wave2_signoff_proof_pack_evidence.json";
 const REGISTRY_PATH: &str = "artifacts/wave2_capability_evidence_registry_v1.json";
+const DIRECT_LEAN_BUILD_COMMAND: &str = "rch exec -- lake --dir formal/lean build";
 
 fn repo_path(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
@@ -214,6 +215,14 @@ fn validate_signoff_artifact(
             {
                 failures.push(format!("{capability_id}:heavy_command_without_rch"));
             }
+            if command.contains("lake build") {
+                if command != DIRECT_LEAN_BUILD_COMMAND {
+                    failures.push(format!("{capability_id}:lean_command_not_direct_argv"));
+                }
+                if command.contains("bash -lc") || command.contains("cd formal/lean") {
+                    failures.push(format!("{capability_id}:lean_command_shell_wrapped"));
+                }
+            }
             let lowered = command.to_ascii_lowercase();
             for marker in ["password=", "token=", "secret=", "bearer "] {
                 if lowered.contains(marker) {
@@ -226,10 +235,7 @@ fn validate_signoff_artifact(
     failures
 }
 
-fn first_row_mut<'a>(
-    value: &'a mut JsonValue,
-    predicate: impl Fn(&JsonValue) -> bool,
-) -> &'a mut JsonValue {
+fn first_row_mut(value: &mut JsonValue, predicate: impl Fn(&JsonValue) -> bool) -> &mut JsonValue {
     value
         .get_mut("signoff_rows")
         .and_then(JsonValue::as_array_mut)

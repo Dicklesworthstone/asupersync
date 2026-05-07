@@ -390,7 +390,7 @@
       "feature_flags": ["test-internals"],
       "source_paths": ["formal/lean/coverage", "artifacts/formal_proof_posture_contract_v1.json", "artifacts/formal_wave2_refinement_coverage_v1.json", "scripts/run_formal_wave2_refinement_coverage.sh", "tests/formal_wave2_refinement_coverage_contract.rs"],
       "unit_proof_commands": ["rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_formal cargo test -p asupersync --test formal_proof_posture_contract --features test-internals -- --nocapture", "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_formal_adapter cargo test -p asupersync --test formal_wave2_refinement_coverage_contract --features test-internals -- --nocapture"],
-      "e2e_proof_commands": ["rch exec -- bash -lc 'cd formal/lean && lake build'", "bash scripts/run_formal_wave2_refinement_coverage.sh"],
+      "e2e_proof_commands": ["rch exec -- lake --dir formal/lean build", "bash scripts/run_formal_wave2_refinement_coverage.sh"],
       "artifact_paths": ["artifacts/formal_proof_posture_contract_v1.json", "artifacts/formal_wave2_refinement_coverage_v1.json"],
       "planned_artifact_paths": [],
       "unsupported_reason": "",

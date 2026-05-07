@@ -1070,7 +1070,7 @@
       ],
       "e2e_proofs": [
         {
-          "command": "rch exec -- bash -lc 'cd formal/lean && lake build'",
+          "command": "rch exec -- lake --dir formal/lean build",
           "status": "passed",
           "observed_result": "Owner closeout reported pass; signoff rechecks script/artifact linkage."
         },

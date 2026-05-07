@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const REGISTRY_PATH: &str = "artifacts/wave2_capability_evidence_registry_v1.json";
+const DIRECT_LEAN_BUILD_COMMAND: &str = "rch exec -- lake --dir formal/lean build";
 
 fn repo_path(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
@@ -321,6 +322,16 @@ fn cargo_backed_commands_are_rch_offloaded_and_sensitive_fields_are_redacted() {
                 assert!(
                     command.contains("rch exec --"),
                     "{capability_id}: cargo/proof-heavy command must use rch: {command}"
+                );
+            }
+            if command.contains("lake build") {
+                assert_eq!(
+                    command, DIRECT_LEAN_BUILD_COMMAND,
+                    "{capability_id}: Lean proof command must use direct lake argv"
+                );
+                assert!(
+                    !command.contains("bash -lc") && !command.contains("cd formal/lean"),
+                    "{capability_id}: Lean proof command must not shell-wrap lake build"
                 );
             }
             for forbidden in ["password=", "token=", "secret=", "bearer "] {
