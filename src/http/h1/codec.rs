@@ -584,6 +584,14 @@ pub fn fuzz_parse_chunk_size_line(line: &[u8]) -> Result<usize, HttpError> {
     parse_chunk_size_line(line)
 }
 
+/// br-asupersync-sbc0pi — Fuzz-target re-exporter for the H1
+/// request-line parser. `#[doc(hidden)]`; only exists for
+/// direct fuzz harness access.
+#[doc(hidden)]
+pub fn fuzz_parse_request_line_bytes(line: &[u8]) -> Result<(Method, String, Version), HttpError> {
+    parse_request_line_bytes(line)
+}
+
 /// Look up a header value (case-insensitive name match).
 #[cfg(test)]
 fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {

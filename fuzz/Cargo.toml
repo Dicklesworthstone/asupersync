@@ -2895,6 +2895,14 @@ test = false
 doc = false
 bench = false
 
+# br-asupersync-sbc0pi — H1 request-line parser fuzz
+[[bin]]
+name = "h1_parse_request_line_bytes"
+path = "fuzz_targets/h1_parse_request_line_bytes.rs"
+test = false
+doc = false
+bench = false
+
 # br-asupersync-zv7n9x — H3 QPACK required-insert-count decoder fuzz
 [[bin]]
 name = "h3_qpack_decode_required_insert_count"

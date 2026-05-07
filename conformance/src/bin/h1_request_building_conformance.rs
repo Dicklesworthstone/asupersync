@@ -110,8 +110,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
     print_test_summary(&report);
 
-    // Exit with appropriate code
-    let exit_code = if report.summary.failed > 0 { 1 } else { 0 };
+    // Exit with appropriate code (fail closed on partial coverage)
+    // Exit non-zero if there are failures, expected failures, or skipped tests (indicating incomplete coverage)
+    let has_failures = report.summary.failed > 0;
+    let has_partial_coverage = report.summary.expected_failures > 0 || report.summary.skipped > 0;
+    let exit_code = if has_failures || has_partial_coverage { 1 } else { 0 };
+
+    if args.verbose && exit_code != 0 {
+        eprintln!("🚨 Exiting with code {} due to:", exit_code);
+        if has_failures {
+            eprintln!("   - {} test failures", report.summary.failed);
+        }
+        if has_partial_coverage {
+            eprintln!("   - Partial coverage: {} expected failures, {} skipped",
+                     report.summary.expected_failures, report.summary.skipped);
+        }
+    }
+
     std::process::exit(exit_code);
 }
 
@@ -176,13 +191,25 @@ fn print_test_summary(report: &asupersync_conformance::RequestBuildingCompliance
     eprintln!("╭─ HTTP/1.1 REQUEST BUILDING CONFORMANCE RESULTS ─╮");
     eprintln!("│                                                  │");
 
-    if report.summary.failed == 0 {
-        eprintln!("│  ✅ ALL TESTS PASSED                             │");
+    let has_failures = report.summary.failed > 0;
+    let has_partial_coverage = report.summary.expected_failures > 0 || report.summary.skipped > 0;
+
+    if !has_failures && !has_partial_coverage {
+        eprintln!("│  ✅ ALL TESTS PASSED - FULL COVERAGE             │");
         eprintln!(
             "│  🎯 Compliance: {:.1}%                            │",
             report.summary.compliance_score * 100.0
         );
-    } else {
+    } else if has_failures && has_partial_coverage {
+        eprintln!(
+            "│  ❌ {} TESTS FAILED + PARTIAL COVERAGE           │",
+            report.summary.failed
+        );
+        eprintln!(
+            "│  📊 Compliance: {:.1}%                           │",
+            report.summary.compliance_score * 100.0
+        );
+    } else if has_failures {
         eprintln!(
             "│  ❌ {} TESTS FAILED                              │",
             report.summary.failed
@@ -190,6 +217,12 @@ fn print_test_summary(report: &asupersync_conformance::RequestBuildingCompliance
         eprintln!(
             "│  📊 Compliance: {:.1}%                           │",
             report.summary.compliance_score * 100.0
+        );
+    } else {
+        eprintln!("│  ⚠️  PARTIAL COVERAGE - NOT ALL TESTS RUN        │");
+        eprintln!(
+            "│  📊 Coverage: {} expected failures, {} skipped    │",
+            report.summary.expected_failures, report.summary.skipped
         );
     }
 
