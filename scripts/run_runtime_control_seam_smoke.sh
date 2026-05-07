@@ -45,6 +45,42 @@ json_escape() {
     printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
+build_command_args() {
+    local command_string="$1"
+    local output_name="$2"
+    local -n output_ref="$output_name"
+    local -a words=()
+    local -a env_assignments=()
+    local -a argv=()
+
+    output_ref=()
+    if [[ -z "$command_string" ]]; then
+        return 0
+    fi
+
+    case "$command_string" in
+        *"'"*|*\"*|*\\*|*'`'*|*'$'*|*';'*|*'&'*|*'|'*|*'<'*|*'>'*)
+            echo "FATAL: comparator command requires shell parsing: ${command_string}" >&2
+            return 1
+            ;;
+    esac
+
+    read -r -a words <<<"$command_string"
+    for word in "${words[@]}"; do
+        if [[ "${#argv[@]}" -eq 0 && "$word" == *=* ]]; then
+            env_assignments+=("$word")
+        else
+            argv+=("$word")
+        fi
+    done
+
+    if [[ "${#env_assignments[@]}" -gt 0 ]]; then
+        output_ref=(env "${env_assignments[@]}" "${argv[@]}")
+    else
+        output_ref=("${argv[@]}")
+    fi
+}
+
 artifact_contract_version() {
     jq -r '.contract_version' "$INVENTORY_ARTIFACT"
 }
@@ -89,11 +125,13 @@ run_seam() {
 
     local seam_name scenario_id baseline_selector rollback_surface
     local comparator_command workload_ids expected_artifacts
+    local -a comparator_args=()
     seam_name="$(jq -r '.seam_name' <<<"$seam_json")"
     scenario_id="$(jq -r '.seam_id' <<<"$seam_json")"
     baseline_selector="$(jq -r '.baseline_selector' <<<"$seam_json")"
     rollback_surface="$(jq -r '.rollback_surface' <<<"$seam_json")"
     comparator_command="$(jq -r '.comparator_smoke_command' <<<"$seam_json")"
+    build_command_args "$comparator_command" comparator_args
     workload_ids="$(jq -c '.workload_ids' <<<"$seam_json")"
     expected_artifacts="$(jq -c '.expected_artifacts' <<<"$seam_json")"
 
@@ -117,7 +155,7 @@ run_seam() {
     else
         set +e
         pushd "$PROJECT_ROOT" >/dev/null
-        bash -lc "$comparator_command" 2>&1 | tee "$log_file"
+        "${comparator_args[@]}" 2>&1 | tee "$log_file"
         rc=${PIPESTATUS[0]}
         popd >/dev/null
         set -e

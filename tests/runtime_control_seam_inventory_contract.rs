@@ -378,3 +378,29 @@ fn runner_script_exists_and_declares_modes() {
         );
     }
 }
+
+#[test]
+fn runner_script_executes_comparator_commands_without_local_shell_wrapper() {
+    let root = repo_root();
+    let script_path = root.join(RUNNER_SCRIPT_PATH);
+    let script = std::fs::read_to_string(&script_path)
+        .expect("failed to read runtime control seam smoke runner script");
+    let forbidden = ["bash", " -lc"].concat();
+
+    assert!(
+        script.contains("build_command_args()"),
+        "runner should convert comparator commands into argv"
+    );
+    assert!(
+        script.contains("env \"${env_assignments[@]}\" \"${argv[@]}\""),
+        "runner should preserve leading VAR=value assignments without a shell"
+    );
+    assert!(
+        script.contains(r#""${comparator_args[@]}" 2>&1 | tee "$log_file""#),
+        "runner should execute comparator argv directly"
+    );
+    assert!(
+        !script.contains(&forbidden),
+        "runner should not execute comparator commands through a local shell"
+    );
+}
