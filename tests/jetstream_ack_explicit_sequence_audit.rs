@@ -9,7 +9,6 @@
 
 use asupersync::messaging::jetstream::{AckPolicy, ConsumerConfig};
 use asupersync::messaging::nats::Message;
-use std::collections::HashMap;
 
 #[test]
 fn test_jetstream_message_parsing_extracts_sequence() {
@@ -29,7 +28,7 @@ fn test_jetstream_message_parsing_extracts_sequence() {
         let msg = Message {
             subject: "test.subject".to_string(),
             payload: vec![],
-            headers: HashMap::new(),
+            headers: None,
             sid: 1,
             reply_to: Some(reply_subject.to_string()),
         };
