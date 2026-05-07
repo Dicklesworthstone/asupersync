@@ -261,6 +261,66 @@ fn runtime_sync_evidence_runner_lists_and_self_tests() {
 }
 
 #[test]
+fn observability_evidence_runner_lists_and_self_tests() {
+    let script = std::fs::read_to_string(repo_path("scripts/run_observability_evidence.sh"))
+        .expect("read observability evidence runner");
+    let forbidden = ["bash", " -lc"].concat();
+    assert!(
+        !script.contains(&forbidden),
+        "observability evidence runner should not execute scenario commands through a local shell"
+    );
+    assert!(
+        script.contains(r#"timeout "$RCH_WRAPPER_TIMEOUT" "$RCH_BIN" exec -- env"#),
+        "rch execution path should use direct argv env commands"
+    );
+    assert!(
+        script.contains("run_local_command_capture()"),
+        "local execution path should use fixed argv commands"
+    );
+
+    let list_output = Command::new("bash")
+        .arg("scripts/run_observability_evidence.sh")
+        .arg("--list")
+        .current_dir(repo_path(""))
+        .output()
+        .expect("list observability evidence runner scenarios");
+
+    assert!(
+        list_output.status.success(),
+        "runner --list failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&list_output.stdout),
+        String::from_utf8_lossy(&list_output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&list_output.stdout);
+    assert!(stdout.contains("OTEL-HISTOGRAM-AGGREGATOR-LIVE"));
+    assert!(stdout.contains("OTEL-TRACE-CONTEXT-PROPAGATION-LIVE"));
+    assert!(stdout.contains("OTEL-EVIDENCE-REDACTION-SELF-TEST-LIVE"));
+    assert!(stdout.contains("aggregate_runner_bead=asupersync-oelvq2"));
+
+    let artifact_root = repo_path("target/mock-code-finder/asupersync-uw9zg9-contract-test")
+        .join(std::process::id().to_string());
+    let self_test_output = Command::new("bash")
+        .arg("scripts/run_observability_evidence.sh")
+        .arg("--self-test")
+        .arg("--artifact-root")
+        .arg(&artifact_root)
+        .current_dir(repo_path(""))
+        .output()
+        .expect("run observability evidence runner self-test");
+
+    assert!(
+        self_test_output.status.success(),
+        "runner --self-test failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&self_test_output.stdout),
+        String::from_utf8_lossy(&self_test_output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&self_test_output.stdout);
+    assert!(stdout.contains("observability evidence runner self-test: pass"));
+    assert!(stdout.contains("observability-self-test.jsonl"));
+    assert!(stdout.contains("observability-self-test.summary.json"));
+}
+
+#[test]
 fn h2_conformance_evidence_runner_lists_and_self_tests() {
     let list_output = Command::new("bash")
         .arg("scripts/run_h2_conformance_evidence.sh")
