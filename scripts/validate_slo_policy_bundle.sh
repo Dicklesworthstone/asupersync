@@ -3,7 +3,8 @@
 #
 # Default mode is a deterministic catalog smoke that writes accepted/rejected
 # fixture rows without invoking cargo. Use --input-jsonl for fail-closed JSONL
-# validation. Pass --execute-rch to run the Rust contract tests through rch.
+# validation, --check-rch-log for local-fallback rejection, and --execute-rch
+# to run the Rust contract tests through rch.
 
 set -euo pipefail
 
@@ -12,12 +13,13 @@ OUTPUT_ROOT="target/slo-policy-bundle"
 RUN_ID="manual"
 INPUT_JSONL=""
 EXECUTE_RCH=0
+CHECK_RCH_LOG=""
 RCH_BIN="${RCH_BIN:-rch}"
 
 usage() {
   cat <<'USAGE'
 Usage:
-  bash scripts/validate_slo_policy_bundle.sh [--artifact PATH] [--output-root DIR] [--run-id ID] [--execute-rch]
+  bash scripts/validate_slo_policy_bundle.sh [--artifact PATH] [--output-root DIR] [--run-id ID] [--check-rch-log PATH] [--execute-rch]
   bash scripts/validate_slo_policy_bundle.sh --input-jsonl PATH
 USAGE
 }
@@ -43,6 +45,10 @@ while [[ $# -gt 0 ]]; do
     --execute-rch)
       EXECUTE_RCH=1
       shift
+      ;;
+    --check-rch-log)
+      CHECK_RCH_LOG="$2"
+      shift 2
       ;;
     -h|--help)
       usage
@@ -147,12 +153,18 @@ required = {
     "proof_report_statuses",
     "proof_report_issue_kinds",
     "proof_report_gate",
+    "runtime_enforcement_bead_id",
+    "runtime_enforcement_report_schema_version",
+    "runtime_enforcement_statuses",
+    "runtime_enforcement_issue_kinds",
+    "runtime_enforcement_contract",
     "required_bundle_fields",
     "gate_contract",
     "scenarios",
     "compiler_scenarios",
     "lab_replay_scenarios",
     "proof_report_scenarios",
+    "runtime_enforcement_scenarios",
     "e2e_script",
     "required_log_fields",
     "proof_commands",
@@ -213,6 +225,33 @@ expected_proof_report_issue_kinds = {
     "non_passing_status",
     "oversized_field",
 }
+expected_runtime_enforcement_statuses = {
+    "pass",
+    "degraded",
+    "no_win",
+    "blocked",
+    "stale_evidence",
+    "unsupported",
+    "malformed",
+}
+expected_runtime_enforcement_issue_kinds = {
+    "application_invalid",
+    "cancelled",
+    "queue_wait_exceeded",
+    "memory_pressure_exceeded",
+    "fd_pressure_exceeded",
+    "timer_queue_exceeded",
+    "unsupported_optional_work_class",
+    "optional_work_brownout",
+    "no_win_fallback",
+    "stale_profile_hash",
+    "missing_rch_command",
+    "missing_no_win_receipt",
+    "redaction_failure",
+    "secret_like_material",
+    "malformed_report",
+    "local_rch_fallback",
+}
 required_bundle_fields = {
     "schema_version",
     "policy_id",
@@ -256,6 +295,12 @@ if set(artifact.get("proof_report_statuses") or []) != expected_proof_report_sta
     validation_errors.append({"kind": "missing_required_field", "field": "proof_report_statuses"})
 if set(artifact.get("proof_report_issue_kinds") or []) != expected_proof_report_issue_kinds:
     validation_errors.append({"kind": "missing_required_field", "field": "proof_report_issue_kinds"})
+if artifact.get("runtime_enforcement_report_schema_version") != "slo-runtime-enforcement-proof-report-v1":
+    validation_errors.append({"kind": "unsupported_schema_version", "field": "runtime_enforcement_report_schema_version"})
+if set(artifact.get("runtime_enforcement_statuses") or []) != expected_runtime_enforcement_statuses:
+    validation_errors.append({"kind": "missing_required_field", "field": "runtime_enforcement_statuses"})
+if set(artifact.get("runtime_enforcement_issue_kinds") or []) != expected_runtime_enforcement_issue_kinds:
+    validation_errors.append({"kind": "missing_required_field", "field": "runtime_enforcement_issue_kinds"})
 proof_report_gate = artifact.get("proof_report_gate") or {}
 if set(proof_report_gate.get("accepted_statuses") or []) != {"pass", "degraded", "no_win"}:
     validation_errors.append({"kind": "missing_required_field", "field": "proof_report_gate.accepted_statuses"})
@@ -503,9 +548,80 @@ for proof_scenario in artifact.get("proof_report_scenarios") or []:
         validation_errors.append({"kind": "missing_required_field", "field": scenario_id, "missing": event_missing})
     events.append(event)
 
+runtime_enforcement_statuses_seen = set()
+runtime_enforcement_count = 0
+for runtime_scenario in artifact.get("runtime_enforcement_scenarios") or []:
+    scenario_id = runtime_scenario.get("scenario_id")
+    if not scenario_id:
+        validation_errors.append({"kind": "missing_required_field", "field": "runtime_enforcement_scenario_id"})
+        continue
+    expected = runtime_scenario.get("expected") or {}
+    status = expected.get("status")
+    accepted = bool(expected.get("accepted", False))
+    success = bool(expected.get("success", False))
+    issue_kinds = list(expected.get("issue_kinds") or [])
+    proof_command = runtime_scenario.get("proof_command") or ""
+    redaction = runtime_scenario.get("redaction") or {}
+    runtime_enforcement_statuses_seen.add(status)
+    runtime_enforcement_count += 1
+    if status not in expected_runtime_enforcement_statuses:
+        validation_errors.append({"kind": "unsupported_schema_version", "field": scenario_id})
+    unknown_issues = sorted(set(issue_kinds) - expected_runtime_enforcement_issue_kinds)
+    if unknown_issues:
+        validation_errors.append({"kind": "unsupported_schema_version", "field": scenario_id, "unknown_issues": unknown_issues})
+    if "rch exec" not in proof_command:
+        validation_errors.append({"kind": "missing_rch_command", "field": f"{scenario_id}.proof_command"})
+    if not redaction.get("passed", False):
+        validation_errors.append({"kind": "redaction_failure", "field": f"{scenario_id}.redaction"})
+    if "secret" in proof_command.lower() or "token" in proof_command.lower():
+        validation_errors.append({"kind": "secret_like_material", "field": f"{scenario_id}.proof_command"})
+    if success and status != "pass":
+        validation_errors.append({"kind": "missing_required_field", "field": f"{scenario_id}.success"})
+    if accepted and status not in {"pass", "degraded", "no_win"}:
+        validation_errors.append({"kind": "missing_required_field", "field": f"{scenario_id}.accepted"})
+    if status == "no_win" and not expected.get("fallback_reason"):
+        validation_errors.append({"kind": "missing_no_win_receipt", "field": scenario_id})
+    if status == "stale_evidence" and "stale_profile_hash" not in issue_kinds:
+        validation_errors.append({"kind": "stale_profile_hash", "field": scenario_id})
+    if status == "malformed" and "malformed_report" not in issue_kinds:
+        validation_errors.append({"kind": "malformed_report", "field": scenario_id})
+
+    event = {
+        "scenario_id": scenario_id,
+        "bead_id": artifact.get("runtime_enforcement_bead_id", artifact.get("bead_id", "")),
+        "accepted": accepted,
+        "issue_kinds": issue_kinds,
+        "policy_id": runtime_scenario.get("policy_id", ""),
+        "artifact_path": str(artifact_path),
+        "runtime_enforcement_status": status,
+        "runtime_admission_status": expected.get("runtime_admission_status"),
+        "lab_replay_status": expected.get("lab_replay_status"),
+        "admitted_work_units": expected.get("admitted_work_units", 0),
+        "rejected_work_units": expected.get("rejected_work_units", 0),
+        "optional_work_units_browned_out": expected.get("optional_work_units_browned_out", 0),
+        "cleanup_deadline_misses": expected.get("cleanup_deadline_misses", 0),
+        "fallback_reason": expected.get("fallback_reason"),
+        "proof_command": proof_command,
+        "proof_command_source": runtime_scenario.get("proof_command_source", ""),
+        "redaction_policy_id": redaction.get("policy_id", ""),
+    }
+    event_missing = sorted(field for field in required_log_fields if field not in event)
+    if event_missing:
+        validation_errors.append({"kind": "missing_required_field", "field": scenario_id, "missing": event_missing})
+    events.append(event)
+
 missing_proof_statuses = sorted(expected_proof_report_statuses - proof_report_statuses_seen)
 if missing_proof_statuses:
     validation_errors.append({"kind": "missing_required_field", "field": "proof_report_scenarios", "missing": missing_proof_statuses})
+missing_runtime_enforcement_statuses = sorted(
+    expected_runtime_enforcement_statuses - runtime_enforcement_statuses_seen
+)
+if missing_runtime_enforcement_statuses:
+    validation_errors.append({
+        "kind": "missing_required_field",
+        "field": "runtime_enforcement_scenarios",
+        "missing": missing_runtime_enforcement_statuses,
+    })
 
 log_path.write_text("".join(json.dumps(event, sort_keys=True) + "\n" for event in events))
 
@@ -519,6 +635,7 @@ report = {
     "rejected_count": rejected_count,
     "malformed_count": malformed_count,
     "proof_report_count": proof_report_count,
+    "runtime_enforcement_count": runtime_enforcement_count,
     "events_log": str(log_path),
     "validation_errors": validation_errors,
 }
@@ -526,6 +643,14 @@ report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
 print(json.dumps(report, sort_keys=True))
 raise SystemExit(0 if not validation_errors else 1)
 PY
+
+if [[ -n "$CHECK_RCH_LOG" ]]; then
+  if grep -Eiq 'local fallback|fallback to local|executing locally' "$CHECK_RCH_LOG"; then
+    printf '{"accepted":false,"issue_kinds":["local_rch_fallback"],"path":%s}\n' \
+      "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$CHECK_RCH_LOG")" >&2
+    exit 86
+  fi
+fi
 
 if [[ "$EXECUTE_RCH" -eq 1 ]]; then
   if ! command -v "$RCH_BIN" >/dev/null 2>&1; then

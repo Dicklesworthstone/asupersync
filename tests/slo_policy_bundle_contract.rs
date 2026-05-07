@@ -358,6 +358,45 @@ fn proof_report_issue_tags() -> BTreeSet<String> {
     .collect()
 }
 
+fn runtime_enforcement_status_tags() -> BTreeSet<String> {
+    [
+        "pass",
+        "degraded",
+        "no_win",
+        "blocked",
+        "stale_evidence",
+        "unsupported",
+        "malformed",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+fn runtime_enforcement_issue_tags() -> BTreeSet<String> {
+    [
+        "application_invalid",
+        "cancelled",
+        "queue_wait_exceeded",
+        "memory_pressure_exceeded",
+        "fd_pressure_exceeded",
+        "timer_queue_exceeded",
+        "unsupported_optional_work_class",
+        "optional_work_brownout",
+        "no_win_fallback",
+        "stale_profile_hash",
+        "missing_rch_command",
+        "missing_no_win_receipt",
+        "redaction_failure",
+        "secret_like_material",
+        "malformed_report",
+        "local_rch_fallback",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
 fn runtime_application_decision_tags() -> BTreeSet<String> {
     [
         SloRuntimePolicyDecision::Admit,
@@ -996,6 +1035,28 @@ fn artifact_catalog_matches_rust_tags_and_required_fields() {
         .iter()
         .map(|value| value.as_str().expect("proof report issue").to_string())
         .collect::<BTreeSet<_>>();
+    let artifact_runtime_enforcement_statuses = artifact["runtime_enforcement_statuses"]
+        .as_array()
+        .expect("runtime enforcement statuses")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("runtime enforcement status")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    let artifact_runtime_enforcement_issues = artifact["runtime_enforcement_issue_kinds"]
+        .as_array()
+        .expect("runtime enforcement issue kinds")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("runtime enforcement issue")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
     let artifact_runtime_application_decisions = artifact["runtime_application_decisions"]
         .as_array()
         .expect("runtime application decisions")
@@ -1053,6 +1114,14 @@ fn artifact_catalog_matches_rust_tags_and_required_fields() {
     assert_eq!(artifact_proof_report_statuses, proof_report_status_tags());
     assert_eq!(artifact_proof_report_issues, proof_report_issue_tags());
     assert_eq!(
+        artifact_runtime_enforcement_statuses,
+        runtime_enforcement_status_tags()
+    );
+    assert_eq!(
+        artifact_runtime_enforcement_issues,
+        runtime_enforcement_issue_tags()
+    );
+    assert_eq!(
         artifact_runtime_application_decisions,
         runtime_application_decision_tags()
     );
@@ -1079,6 +1148,10 @@ fn artifact_catalog_matches_rust_tags_and_required_fields() {
     assert_eq!(
         artifact["proof_report_schema_version"].as_str(),
         Some(SLO_POLICY_PROOF_REPORT_SCHEMA_VERSION)
+    );
+    assert_eq!(
+        artifact["runtime_enforcement_report_schema_version"].as_str(),
+        Some("slo-runtime-enforcement-proof-report-v1")
     );
     assert_eq!(
         artifact["runtime_application_schema_version"].as_str(),
@@ -2187,6 +2260,89 @@ fn proof_report_artifact_scenarios_match_rust_gate() {
 }
 
 #[test]
+fn runtime_enforcement_artifact_scenarios_cover_runner_contract() {
+    let artifact = contract();
+    let allowed_issues = runtime_enforcement_issue_tags();
+    let mut statuses_seen = BTreeSet::new();
+    let scenarios = artifact["runtime_enforcement_scenarios"]
+        .as_array()
+        .expect("runtime enforcement scenarios");
+    for scenario in scenarios {
+        let scenario_id = scenario["scenario_id"]
+            .as_str()
+            .expect("scenario id is string");
+        let expected = &scenario["expected"];
+        let status = expected["status"]
+            .as_str()
+            .expect("runtime enforcement status");
+        statuses_seen.insert(status.to_string());
+        assert!(
+            runtime_enforcement_status_tags().contains(status),
+            "scenario {scenario_id} has known status"
+        );
+        assert!(
+            scenario["proof_command"]
+                .as_str()
+                .expect("proof command")
+                .contains("rch exec"),
+            "scenario {scenario_id} keeps rch provenance"
+        );
+        assert_eq!(
+            scenario["redaction"]["passed"].as_bool(),
+            Some(true),
+            "scenario {scenario_id} redaction gate"
+        );
+        let issues = expected["issue_kinds"]
+            .as_array()
+            .expect("issue kinds")
+            .iter()
+            .map(|value| value.as_str().expect("issue kind").to_string())
+            .collect::<BTreeSet<_>>();
+        assert!(
+            issues.is_subset(&allowed_issues),
+            "scenario {scenario_id} issue set {issues:?}"
+        );
+        if status == "no_win" {
+            assert_eq!(
+                expected["fallback_reason"].as_str(),
+                Some("objectives-conflict-with-pressure"),
+                "scenario {scenario_id} no-win receipt"
+            );
+        }
+        if status == "stale_evidence" {
+            assert!(
+                issues.contains("stale_profile_hash"),
+                "scenario {scenario_id} stale evidence is explicit"
+            );
+        }
+        if status == "malformed" {
+            assert!(
+                issues.contains("malformed_report"),
+                "scenario {scenario_id} malformed report is explicit"
+            );
+        }
+    }
+    assert_eq!(statuses_seen, runtime_enforcement_status_tags());
+
+    let required_fields = artifact["runtime_enforcement_contract"]["required_event_fields"]
+        .as_array()
+        .expect("runtime enforcement required event fields")
+        .iter()
+        .map(|value| value.as_str().expect("field").to_string())
+        .collect::<BTreeSet<_>>();
+    for field in [
+        "runtime_enforcement_status",
+        "runtime_admission_status",
+        "lab_replay_status",
+        "proof_command",
+        "proof_command_source",
+        "redaction_policy_id",
+    ] {
+        assert!(required_fields.contains(field), "required field {field}");
+    }
+}
+
+#[test]
 fn script_emits_accepted_rejected_and_malformed_rows() {
     let output_root = "target/slo-policy-bundle-contract-test";
     let run_id = "script-emits";
@@ -2203,7 +2359,9 @@ fn script_emits_accepted_rejected_and_malformed_rows() {
     assert!(status.success(), "script status: {status:?}");
 
     let log_path = format!("{output_root}/{run_id}/slo-policy-bundle-events.ndjson");
+    let report_path = format!("{output_root}/{run_id}/slo-policy-bundle-run.json");
     let rows = std::fs::read_to_string(&log_path).expect("script event log");
+    let report = json_file(&report_path);
     let events = rows
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).expect("event row parses"))
@@ -2238,6 +2396,56 @@ fn script_emits_accepted_rejected_and_malformed_rows() {
             .iter()
             .any(|event| event["proof_report_status"] == "no_win")
     );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["runtime_enforcement_status"] == "pass")
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["runtime_enforcement_status"] == "degraded")
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["runtime_enforcement_status"] == "no_win")
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["runtime_enforcement_status"] == "blocked")
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["runtime_enforcement_status"] == "stale_evidence")
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["runtime_enforcement_status"] == "unsupported")
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event["runtime_enforcement_status"] == "malformed")
+    );
+    assert!(
+        events.iter().any(|event| {
+            event["issue_kinds"]
+                .as_array()
+                .expect("issue kinds")
+                .iter()
+                .any(|kind| kind.as_str() == Some("local_rch_fallback"))
+        }),
+        "runtime enforcement report records local-rch-fallback rejection"
+    );
+    assert_eq!(
+        report["runtime_enforcement_count"].as_u64(),
+        Some(runtime_enforcement_status_tags().len() as u64 + 1),
+        "runtime enforcement report count includes local fallback scenario"
+    );
 
     let input_status = Command::new("bash")
         .args([SCRIPT_PATH, "--input-jsonl", &log_path])
@@ -2247,6 +2455,30 @@ fn script_emits_accepted_rejected_and_malformed_rows() {
         input_status.success(),
         "input jsonl status: {input_status:?}"
     );
+}
+
+#[test]
+fn script_rejects_local_rch_fallback_marker() {
+    let output_root = "target/slo-policy-bundle-contract-test";
+    let run_id = "script-local-rch-fallback";
+    let log_path = format!("{output_root}/{run_id}/rch.log");
+    std::fs::create_dir_all(format!("{output_root}/{run_id}")).expect("create output root");
+    std::fs::write(&log_path, "remote unavailable; executing locally\n")
+        .expect("write local fallback log");
+
+    let status = Command::new("bash")
+        .args([
+            SCRIPT_PATH,
+            "--output-root",
+            output_root,
+            "--run-id",
+            run_id,
+            "--check-rch-log",
+            &log_path,
+        ])
+        .status()
+        .expect("run local fallback validation");
+    assert_eq!(status.code(), Some(86), "local fallback must fail closed");
 }
 
 #[test]

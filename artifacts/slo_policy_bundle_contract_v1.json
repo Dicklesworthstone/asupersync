@@ -78,6 +78,72 @@
     "non_passing_status",
     "oversized_field"
   ],
+  "runtime_enforcement_bead_id": "asupersync-w5n9qp.4",
+  "runtime_enforcement_report_schema_version": "slo-runtime-enforcement-proof-report-v1",
+  "runtime_enforcement_statuses": [
+    "pass",
+    "degraded",
+    "no_win",
+    "blocked",
+    "stale_evidence",
+    "unsupported",
+    "malformed"
+  ],
+  "runtime_enforcement_issue_kinds": [
+    "application_invalid",
+    "cancelled",
+    "queue_wait_exceeded",
+    "memory_pressure_exceeded",
+    "fd_pressure_exceeded",
+    "timer_queue_exceeded",
+    "unsupported_optional_work_class",
+    "optional_work_brownout",
+    "no_win_fallback",
+    "stale_profile_hash",
+    "missing_rch_command",
+    "missing_no_win_receipt",
+    "redaction_failure",
+    "secret_like_material",
+    "malformed_report",
+    "local_rch_fallback"
+  ],
+  "runtime_enforcement_contract": {
+    "mode": "deterministic runtime SLO enforcement proof runner",
+    "source": "scripts/validate_slo_policy_bundle.sh runtime_enforcement_scenarios",
+    "report_schema_version": "slo-runtime-enforcement-proof-report-v1",
+    "status_mapping": {
+      "passed": "pass",
+      "brownout": "degraded",
+      "rejected": "blocked",
+      "no_win": "no_win",
+      "stale_evidence": "stale_evidence",
+      "blocked": "blocked"
+    },
+    "required_event_fields": [
+      "scenario_id",
+      "runtime_enforcement_status",
+      "runtime_admission_status",
+      "lab_replay_status",
+      "admitted_work_units",
+      "rejected_work_units",
+      "optional_work_units_browned_out",
+      "cleanup_deadline_misses",
+      "fallback_reason",
+      "issue_kinds",
+      "proof_command",
+      "proof_command_source",
+      "redaction_policy_id"
+    ],
+    "fail_closed_for": [
+      "stale_profile_hash",
+      "unsupported_optional_work_class",
+      "malformed_report",
+      "local_rch_fallback",
+      "missing_rch_command",
+      "redaction_failure",
+      "secret_like_material"
+    ]
+  },
   "runtime_application_bead_id": "asupersync-w5n9qp.1",
   "runtime_application_schema_version": "slo-runtime-policy-application-v1",
   "runtime_application_decisions": [
@@ -1283,6 +1349,207 @@
       "fixture_document": "{\"schema_version\":\"slo-proof-report-v1\","
     }
   ],
+  "runtime_enforcement_scenarios": [
+    {
+      "scenario_id": "runtime-enforcement-pass",
+      "policy_id": "agent-swarm-standard",
+      "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals lab_runtime_slo_policy_replay_fixtures_cover_required_outcomes -- --nocapture",
+      "proof_command_source": "lab-replay-normal-load",
+      "redaction": {
+        "policy_id": "slo-runtime-enforcement-redaction-v1",
+        "passed": true
+      },
+      "expected": {
+        "status": "pass",
+        "accepted": true,
+        "success": true,
+        "runtime_admission_status": "admitted",
+        "lab_replay_status": "passed",
+        "admitted_work_units": 4,
+        "rejected_work_units": 0,
+        "optional_work_units_browned_out": 0,
+        "cleanup_deadline_misses": 0,
+        "fallback_reason": null,
+        "issue_kinds": []
+      }
+    },
+    {
+      "scenario_id": "runtime-enforcement-degraded-brownout",
+      "policy_id": "agent-swarm-standard",
+      "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals lab_runtime_slo_policy_replay_fixtures_cover_required_outcomes -- --nocapture",
+      "proof_command_source": "lab-replay-optional-brownout",
+      "redaction": {
+        "policy_id": "slo-runtime-enforcement-redaction-v1",
+        "passed": true
+      },
+      "expected": {
+        "status": "degraded",
+        "accepted": true,
+        "success": false,
+        "runtime_admission_status": "brownout",
+        "lab_replay_status": "brownout",
+        "admitted_work_units": 4,
+        "rejected_work_units": 3,
+        "optional_work_units_browned_out": 3,
+        "cleanup_deadline_misses": 0,
+        "fallback_reason": null,
+        "issue_kinds": [
+          "optional_work_brownout"
+        ]
+      }
+    },
+    {
+      "scenario_id": "runtime-enforcement-no-win-fallback",
+      "policy_id": "agent-swarm-standard",
+      "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals lab_runtime_slo_policy_replay_fixtures_cover_required_outcomes -- --nocapture",
+      "proof_command_source": "lab-replay-no-win-fallback",
+      "redaction": {
+        "policy_id": "slo-runtime-enforcement-redaction-v1",
+        "passed": true
+      },
+      "expected": {
+        "status": "no_win",
+        "accepted": true,
+        "success": false,
+        "runtime_admission_status": "no_win",
+        "lab_replay_status": "no_win",
+        "admitted_work_units": 0,
+        "rejected_work_units": 4,
+        "optional_work_units_browned_out": 0,
+        "cleanup_deadline_misses": 0,
+        "fallback_reason": "objectives-conflict-with-pressure",
+        "issue_kinds": [
+          "no_win_fallback"
+        ]
+      }
+    },
+    {
+      "scenario_id": "runtime-enforcement-blocked-overload",
+      "policy_id": "agent-swarm-standard",
+      "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals lab_runtime_slo_policy_replay_fixtures_cover_required_outcomes -- --nocapture",
+      "proof_command_source": "lab-replay-overload",
+      "redaction": {
+        "policy_id": "slo-runtime-enforcement-redaction-v1",
+        "passed": true
+      },
+      "expected": {
+        "status": "blocked",
+        "accepted": false,
+        "success": false,
+        "runtime_admission_status": "rejected",
+        "lab_replay_status": "rejected",
+        "admitted_work_units": 0,
+        "rejected_work_units": 12,
+        "optional_work_units_browned_out": 0,
+        "cleanup_deadline_misses": 0,
+        "fallback_reason": null,
+        "issue_kinds": [
+          "queue_wait_exceeded"
+        ]
+      }
+    },
+    {
+      "scenario_id": "runtime-enforcement-stale-evidence",
+      "policy_id": "agent-swarm-standard",
+      "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals lab_runtime_slo_policy_replay_fixtures_cover_required_outcomes -- --nocapture",
+      "proof_command_source": "lab-replay-stale-profile-hash",
+      "redaction": {
+        "policy_id": "slo-runtime-enforcement-redaction-v1",
+        "passed": true
+      },
+      "expected": {
+        "status": "stale_evidence",
+        "accepted": false,
+        "success": false,
+        "runtime_admission_status": "blocked",
+        "lab_replay_status": "stale_evidence",
+        "admitted_work_units": 0,
+        "rejected_work_units": 4,
+        "optional_work_units_browned_out": 0,
+        "cleanup_deadline_misses": 0,
+        "fallback_reason": null,
+        "issue_kinds": [
+          "application_invalid",
+          "stale_profile_hash"
+        ]
+      }
+    },
+    {
+      "scenario_id": "runtime-enforcement-unsupported-optional-work",
+      "policy_id": "agent-swarm-standard",
+      "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals runtime_slo_admission_evaluation_browns_out_optional_work -- --nocapture",
+      "proof_command_source": "runtime_slo_admission_evaluation_browns_out_optional_work",
+      "redaction": {
+        "policy_id": "slo-runtime-enforcement-redaction-v1",
+        "passed": true
+      },
+      "expected": {
+        "status": "unsupported",
+        "accepted": false,
+        "success": false,
+        "runtime_admission_status": "rejected",
+        "lab_replay_status": null,
+        "admitted_work_units": 0,
+        "rejected_work_units": 1,
+        "optional_work_units_browned_out": 0,
+        "cleanup_deadline_misses": 0,
+        "fallback_reason": null,
+        "issue_kinds": [
+          "unsupported_optional_work_class"
+        ]
+      }
+    },
+    {
+      "scenario_id": "runtime-enforcement-malformed-report",
+      "policy_id": "",
+      "proof_command": "rch exec -- bash scripts/validate_slo_policy_bundle.sh --input-jsonl target/slo-policy-bundle/malformed.ndjson",
+      "proof_command_source": "malformed-runtime-enforcement-row",
+      "redaction": {
+        "policy_id": "slo-runtime-enforcement-redaction-v1",
+        "passed": true
+      },
+      "expected": {
+        "status": "malformed",
+        "accepted": false,
+        "success": false,
+        "runtime_admission_status": null,
+        "lab_replay_status": null,
+        "admitted_work_units": 0,
+        "rejected_work_units": 0,
+        "optional_work_units_browned_out": 0,
+        "cleanup_deadline_misses": 0,
+        "fallback_reason": null,
+        "issue_kinds": [
+          "malformed_report"
+        ]
+      }
+    },
+    {
+      "scenario_id": "runtime-enforcement-local-rch-fallback",
+      "policy_id": "",
+      "proof_command": "rch exec -- bash scripts/validate_slo_policy_bundle.sh --check-rch-log target/slo-policy-bundle/rch.log",
+      "proof_command_source": "check-rch-log-local-fallback",
+      "redaction": {
+        "policy_id": "slo-runtime-enforcement-redaction-v1",
+        "passed": true
+      },
+      "expected": {
+        "status": "blocked",
+        "accepted": false,
+        "success": false,
+        "runtime_admission_status": null,
+        "lab_replay_status": null,
+        "admitted_work_units": 0,
+        "rejected_work_units": 0,
+        "optional_work_units_browned_out": 0,
+        "cleanup_deadline_misses": 0,
+        "fallback_reason": null,
+        "issue_kinds": [
+          "local_rch_fallback"
+        ]
+      }
+    }
+  ],
   "e2e_script": "scripts/validate_slo_policy_bundle.sh",
   "required_log_fields": [
     "scenario_id",
@@ -1295,7 +1562,8 @@
   "proof_commands": [
     "python3 -m json.tool artifacts/slo_policy_bundle_contract_v1.json >/dev/null",
     "bash -n scripts/validate_slo_policy_bundle.sh",
-    "bash scripts/validate_slo_policy_bundle.sh --output-root target/slo-policy-bundle --run-id asupersync-bgtplc.4",
+    "bash scripts/validate_slo_policy_bundle.sh --output-root target/slo-policy-bundle --run-id asupersync-w5n9qp.4",
+    "bash scripts/validate_slo_policy_bundle.sh --output-root target/slo-policy-bundle --run-id asupersync-w5n9qp.4 --check-rch-log target/slo-policy-bundle/rch.log",
     "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals runtime_slo_policy_application -- --nocapture",
     "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals runtime_slo_admission_evaluation -- --nocapture",
     "rch exec -- rustfmt --edition 2024 --check src/types/slo_policy.rs src/types/mod.rs tests/slo_policy_bundle_contract.rs",
