@@ -12,7 +12,7 @@ use asupersync::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, ReadBuf};
 use asupersync::net;
 use asupersync::runtime::RuntimeBuilder;
 use common::*;
-use conformance::{
+use asupersync::conformance::{
     AsyncFile, BroadcastReceiver, BroadcastRecvError, BroadcastSender, MpscReceiver, MpscSender,
     OneshotSender, RunConfig, RuntimeInterface, TcpListener, TcpStream, TimeoutError, UdpSocket,
     WatchReceiver, WatchRecvError, WatchSender, render_console_summary, run_conformance_suite,
@@ -194,14 +194,14 @@ impl<T> Drop for OneshotReceiverWrapper<T> {
 }
 
 impl<T: Send + 'static> Future for OneshotReceiverWrapper<T> {
-    type Output = Result<T, conformance::OneshotRecvError>;
+    type Output = Result<T, OneshotRecvError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
         match this.receiver.try_recv() {
             Ok(value) => Poll::Ready(Ok(value)),
             Err(asupersync::channel::oneshot::TryRecvError::Closed) => {
-                Poll::Ready(Err(conformance::OneshotRecvError))
+                Poll::Ready(Err(OneshotRecvError))
             }
             Err(asupersync::channel::oneshot::TryRecvError::Empty) => {
                 // Re-schedule to poll again; avoid creating and immediately dropping

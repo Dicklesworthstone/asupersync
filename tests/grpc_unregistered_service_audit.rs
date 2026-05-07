@@ -112,7 +112,7 @@ fn test_status_unimplemented_creates_correct_grpc_status() {
 fn test_various_grpc_status_codes() {
     // Verify that gRPC status codes map correctly (not HTTP codes)
     let test_cases = vec![
-        (Status::ok("success"), Code::Ok, 0),
+        (Status::ok(), Code::Ok, 0),
         (Status::cancelled("cancelled"), Code::Cancelled, 1),
         (
             Status::invalid_argument("invalid"),

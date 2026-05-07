@@ -9,9 +9,8 @@
 //! message reception.
 
 use asupersync::messaging::redis::{
-    PubSubEvent, PubSubMessage, PubSubSubscriptionKind, RedisPubSub,
+    PubSubEvent, PubSubSubscriptionKind, RedisPubSub, RespValue, parse_pubsub_event_for_fuzz,
 };
-use asupersync::messaging::resp::RespValue;
 
 #[test]
 fn redis_subscribe_psubscribe_wire_protocol_discrimination_audit() {
@@ -25,7 +24,7 @@ fn redis_subscribe_psubscribe_wire_protocol_discrimination_audit() {
         RespValue::BulkString(Some(b"test payload".to_vec())),
     ]));
 
-    let subscribe_event = RedisPubSub::parse_event(subscribe_response)
+    let subscribe_event = parse_pubsub_event_for_fuzz(subscribe_response)
         .expect("SUBSCRIBE message should parse correctly");
 
     match subscribe_event {
@@ -53,7 +52,7 @@ fn redis_subscribe_psubscribe_wire_protocol_discrimination_audit() {
         RespValue::BulkString(Some(b"pattern payload".to_vec())),
     ]));
 
-    let psubscribe_event = RedisPubSub::parse_event(psubscribe_response)
+    let psubscribe_event = parse_pubsub_event_for_fuzz(psubscribe_response)
         .expect("PSUBSCRIBE pmessage should parse correctly");
 
     match psubscribe_event {
@@ -90,7 +89,7 @@ fn redis_subscribe_psubscribe_acknowledgment_discrimination_audit() {
     ]));
 
     let subscribe_ack_event =
-        RedisPubSub::parse_event(subscribe_ack).expect("SUBSCRIBE ack should parse correctly");
+        parse_pubsub_event_for_fuzz(subscribe_ack).expect("SUBSCRIBE ack should parse correctly");
 
     match subscribe_ack_event {
         PubSubEvent::Subscription {
@@ -118,7 +117,7 @@ fn redis_subscribe_psubscribe_acknowledgment_discrimination_audit() {
     ]));
 
     let psubscribe_ack_event =
-        RedisPubSub::parse_event(psubscribe_ack).expect("PSUBSCRIBE ack should parse correctly");
+        parse_pubsub_event_for_fuzz(psubscribe_ack).expect("PSUBSCRIBE ack should parse correctly");
 
     match psubscribe_ack_event {
         PubSubEvent::Subscription {
@@ -155,7 +154,7 @@ fn redis_subscribe_psubscribe_unsubscribe_discrimination_audit() {
     ]));
 
     let unsubscribe_event =
-        RedisPubSub::parse_event(unsubscribe_ack).expect("UNSUBSCRIBE ack should parse correctly");
+        parse_pubsub_event_for_fuzz(unsubscribe_ack).expect("UNSUBSCRIBE ack should parse correctly");
 
     match unsubscribe_event {
         PubSubEvent::Subscription {
@@ -185,7 +184,7 @@ fn redis_subscribe_psubscribe_unsubscribe_discrimination_audit() {
         RespValue::Integer(0),
     ]));
 
-    let punsubscribe_event = RedisPubSub::parse_event(punsubscribe_ack)
+    let punsubscribe_event = parse_pubsub_event_for_fuzz(punsubscribe_ack)
         .expect("PUNSUBSCRIBE ack should parse correctly");
 
     match punsubscribe_event {
