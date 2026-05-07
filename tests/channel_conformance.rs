@@ -12,10 +12,11 @@ use asupersync::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, ReadBuf};
 use asupersync::net;
 use asupersync::runtime::RuntimeBuilder;
 use common::*;
-use asupersync::conformance::{
+use conformance::{
     AsyncFile, BroadcastReceiver, BroadcastRecvError, BroadcastSender, MpscReceiver, MpscSender,
-    OneshotSender, RunConfig, RuntimeInterface, TcpListener, TcpStream, TimeoutError, UdpSocket,
-    WatchReceiver, WatchRecvError, WatchSender, render_console_summary, run_conformance_suite,
+    OneshotRecvError, OneshotSender, RunConfig, RuntimeInterface, TcpListener, TcpStream,
+    TimeoutError, UdpSocket, WatchReceiver, WatchRecvError, WatchSender, render_console_summary,
+    run_conformance_suite,
 };
 use futures_lite::future;
 use parking_lot::Mutex;

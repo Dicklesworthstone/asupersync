@@ -10,7 +10,6 @@
 
 use asupersync::messaging::kafka::{KafkaProducer, ProducerConfig};
 use asupersync::test_utils::run_test_with_cx;
-use std::time::Duration;
 
 #[cfg(not(feature = "kafka"))]
 #[test]
@@ -19,20 +18,20 @@ fn test_stub_broker_enables_idempotence_config() {
 
     let _broker = lock_stub_broker_for_tests();
 
-    // Verify that idempotence can be configured
-    let config = ProducerConfig {
-        enable_idempotence: true,
-        retries: 3,
-        ..Default::default()
-    };
+    // Verify that idempotence can be configured (use builder — struct has a
+    // private field for the insecure-transport opt-in).
+    let config = ProducerConfig::default()
+        .enable_idempotence(true)
+        .retries(3);
 
     assert!(config.enable_idempotence);
 
     let producer = KafkaProducer::new(config).unwrap();
-    println!("✓ Producer created with enable_idempotence=true");
+    let _ = producer; // keep alive for the duration of the test
+    // Producer was created with enable_idempotence=true.
 
     // But the underlying StubBroker doesn't implement idempotence!
-    println!("✗ DEFECT: StubBroker has no deduplication logic");
+    // (DEFECT: StubBroker has no deduplication logic.)
 }
 
 #[cfg(not(feature = "kafka"))]
@@ -43,10 +42,9 @@ fn demonstrate_stub_broker_accepts_duplicates() {
     let _broker = lock_stub_broker_for_tests();
 
     run_test_with_cx(|cx| async move {
-        let producer = KafkaProducer::new(ProducerConfig {
-            enable_idempotence: true, // Claims to be idempotent
-            ..Default::default()
-        })
+        let producer = KafkaProducer::new(
+            ProducerConfig::default().enable_idempotence(true), // Claims to be idempotent
+        )
         .unwrap();
 
         let topic = "idempotence-test";
@@ -65,17 +63,6 @@ fn demonstrate_stub_broker_accepts_duplicates() {
         assert_eq!(metadata1.offset, 0);
         assert_eq!(metadata2.offset, 1); // Should be 0 if deduplicated!
         assert_eq!(stub_broker_end_offset(topic, 0), 2); // Should be 1!
-
-        println!("✗ CRITICAL: Duplicate messages not deduplicated");
-        println!("  Message 1 offset: {}", metadata1.offset);
-        println!(
-            "  Message 2 offset: {} (should equal message 1)",
-            metadata2.offset
-        );
-        println!(
-            "  Total messages: {} (should be 1)",
-            stub_broker_end_offset(topic, 0)
-        );
     });
 }
 
@@ -88,18 +75,18 @@ fn demonstrate_missing_producer_id_tracking() {
 
     run_test_with_cx(|cx| async move {
         // Create two producers with idempotence enabled
-        let producer1 = KafkaProducer::new(ProducerConfig {
-            enable_idempotence: true,
-            client_id: Some("producer-1".into()),
-            ..Default::default()
-        })
+        let producer1 = KafkaProducer::new(
+            ProducerConfig::default()
+                .enable_idempotence(true)
+                .client_id("producer-1"),
+        )
         .unwrap();
 
-        let producer2 = KafkaProducer::new(ProducerConfig {
-            enable_idempotence: true,
-            client_id: Some("producer-2".into()),
-            ..Default::default()
-        })
+        let producer2 = KafkaProducer::new(
+            ProducerConfig::default()
+                .enable_idempotence(true)
+                .client_id("producer-2"),
+        )
         .unwrap();
 
         let topic = "producer-id-test";
@@ -118,9 +105,9 @@ fn demonstrate_missing_producer_id_tracking() {
             .await
             .unwrap();
 
-        println!("✗ DEFECT: No producer ID separation in StubBroker");
-        println!("  Real Kafka would assign different producer IDs");
-        println!("  StubBroker treats all producers identically");
+        // DEFECT: No producer ID separation in StubBroker — real Kafka would
+        // assign different producer IDs, but StubBroker treats all producers
+        // identically.
     });
 }
 

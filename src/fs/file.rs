@@ -158,7 +158,8 @@ impl File {
                     Seek::seek(file_mut, pos)
                 }
             }
-        }).await
+        })
+        .await
     }
 
     /// Gets the current stream position.
@@ -173,7 +174,8 @@ impl File {
                     Seek::stream_position(file_mut)
                 }
             }
-        }).await
+        })
+        .await
     }
 
     /// Rewinds the stream to the beginning.
@@ -188,7 +190,8 @@ impl File {
                     Seek::rewind(file_mut)
                 }
             }
-        }).await
+        })
+        .await
     }
 }
 
@@ -237,6 +240,7 @@ impl AsyncWrite for File {
     }
 }
 
+#[allow(unsafe_code)] // Arc<File> mutable-FD access; see SAFETY comment inside.
 impl AsyncSeek for File {
     fn poll_seek(
         self: Pin<&mut Self>,

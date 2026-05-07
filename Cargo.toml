@@ -302,7 +302,7 @@ ring = { version = "0.17", optional = true }
 [dev-dependencies]
 proptest = "1.10"
 criterion = { version = "0.8", features = ["html_reports"] }
-# conformance = { package = "asupersync-conformance", version = "0.3.1", path = "conformance" }
+conformance = { package = "asupersync-conformance", version = "0.3.1", path = "conformance", default-features = false }
 tempfile = "3.25"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
