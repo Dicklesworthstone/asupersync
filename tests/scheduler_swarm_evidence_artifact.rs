@@ -865,6 +865,38 @@ fn scheduler_recommend_smoke_runner_dry_run_emits_template_bundle_contract() {
 }
 
 #[test]
+fn scheduler_recommend_smoke_runner_executes_commands_without_local_shell_wrapper() {
+    let script = std::fs::read_to_string("scripts/run_scheduler_recommend_smoke.sh")
+        .expect("scheduler recommend smoke runner should load");
+    let forbidden = ["bash", " -lc"].concat();
+
+    assert!(
+        script.contains("split_command_words()"),
+        "runner should split artifact command strings into argv"
+    );
+    assert!(
+        script.contains("COMMAND_ARGS=("),
+        "runner should store the offline tuner invocation as argv"
+    );
+    assert!(
+        script.contains(r#""${COMMAND_ARGS[@]}" 2>&1 | tee -a "$LOG_FILE""#),
+        "offline tuner should execute without a local shell wrapper"
+    );
+    assert!(
+        script.contains(r#""${command_args[@]}" 2>&1 | tee -a "$LOG_FILE""#),
+        "runtime capture should execute without a local shell wrapper"
+    );
+    assert!(
+        script.contains(r#"printf -v COMMAND '%q ' "${COMMAND_ARGS[@]}""#),
+        "runner should retain shell-escaped command provenance"
+    );
+    assert!(
+        !script.contains(&forbidden),
+        "runner should not use a local shell wrapper for proof commands"
+    );
+}
+
+#[test]
 fn scheduler_recommend_smoke_runner_execute_emits_config_snapshot_and_verdict() {
     let root = repo_root();
     let output_root = tempfile::tempdir().expect("tempdir");

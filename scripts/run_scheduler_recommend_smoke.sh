@@ -54,6 +54,26 @@ list_scenarios() {
     jq -r '.smoke_scenarios[] | "  \(.scenario_id) [\(.scenario_class // "deterministic_lab_safe")/\(.execution_policy // "execute_or_dry_run")]: \(.description)"' "$ARTIFACT"
 }
 
+split_command_words() {
+    local command_string="$1"
+    local output_name="$2"
+    local -n output_ref="$output_name"
+
+    output_ref=()
+    if [[ -z "$command_string" ]]; then
+        return 0
+    fi
+
+    case "$command_string" in
+        *"'"*|*\"*|*\\*|*'`'*|*'$'*|*';'*|*'&'*|*'|'*|*'<'*|*'>'*)
+            echo "FATAL: command string requires shell parsing: ${command_string}" >&2
+            return 1
+            ;;
+    esac
+
+    read -r -a output_ref <<<"$command_string"
+}
+
 host_fingerprint_json() {
     local host="unknown"
     local os="unknown"
@@ -473,13 +493,18 @@ REPORT_FILE="${RUN_DIR}/scheduler_report.json"
 LOG_FILE="${RUN_DIR}/run.log"
 BUNDLE_MANIFEST="${RUN_DIR}/bundle_manifest.json"
 RUN_REPORT="${RUN_DIR}/run_report.json"
-COMMAND="${COMMAND_PREFIX} --evidence-file ${EVIDENCE_FILE} --output-file ${REPORT_FILE}"
+COMMAND_ARGS=()
+split_command_words "$COMMAND_PREFIX" COMMAND_ARGS
+COMMAND_ARGS+=(--evidence-file "$EVIDENCE_FILE" --output-file "$REPORT_FILE")
+printf -v COMMAND '%q ' "${COMMAND_ARGS[@]}"
+COMMAND="${COMMAND%" "}"
 
 mkdir -p "$RUN_DIR"
 
 capture_evidence() {
     local mode="$1"
     local command="$2"
+    local command_args=()
     local exit_code=0
 
     case "$mode" in
@@ -493,10 +518,11 @@ capture_evidence() {
                 return 1
             fi
             printf 'CAPTURE_COMMAND %s\n' "$command" >>"$LOG_FILE"
+            split_command_words "$command" command_args
             set +e
             pushd "$PROJECT_ROOT" >/dev/null
             ASUPERSYNC_SCHEDULER_EVIDENCE_CAPTURE_PATH="$EVIDENCE_FILE" \
-                bash -lc "$command" 2>&1 | tee -a "$LOG_FILE"
+                "${command_args[@]}" 2>&1 | tee -a "$LOG_FILE"
             exit_code=${PIPESTATUS[0]}
             popd >/dev/null
             set -e
@@ -568,7 +594,7 @@ elif [[ "$EXECUTION_POLICY" == "dry_run_only" ]]; then
 else
     set +e
     pushd "$PROJECT_ROOT" >/dev/null
-    bash -lc "$COMMAND" 2>&1 | tee -a "$LOG_FILE"
+    "${COMMAND_ARGS[@]}" 2>&1 | tee -a "$LOG_FILE"
     COMMAND_EXIT_CODE=${PIPESTATUS[0]}
     popd >/dev/null
     set -e
