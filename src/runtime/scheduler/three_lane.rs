@@ -3,16 +3,71 @@
 //! This scheduler coordinates multiple worker threads while maintaining
 //! strict priority ordering: cancel > timed > ready.
 //!
-//! # Cancel-lane preemption with bounded fairness (bd-17uu)
+//! # Scheduler fairness contract (bd-17uu, br-asupersync-kznrvh)
 //!
-//! The cancel lane has strict preemption over timed and ready lanes, but a
-//! fairness mechanism prevents starvation of lower-priority work.
+//! The cancel lane has strict preemption over timed and ready lanes, but the
+//! scheduler's fairness claims are deliberately worker-local and dispatch-step
+//! based. They are not wall-clock latency claims and they are not a global
+//! total-order proof across all workers.
 //!
-//! ## Invariant
+//! ## Vocabulary
 //!
-//! **Fairness bound**: If the ready or timed lane has pending work, that work
-//! is dispatched after at most `cancel_streak_limit` consecutive cancel-lane
-//! dispatches (or `2 * cancel_streak_limit` under `DrainObligations`/`DrainRegions`).
+//! For a worker `w`, let `D_w(k)` be the `k`th successful return of
+//! `next_task()` for that worker, and let `lane(D_w(k))` be one of:
+//!
+//! - `C`: cancel lane dispatch
+//! - `T`: timed/deadline dispatch
+//! - `R`: ready/local-ready/global-ready dispatch
+//! - `S`: ready work obtained by stealing from another worker
+//!
+//! A lane is **eligible** at step `k` only if a task in that lane is visible to
+//! this worker at the relevant probe point. For example, a timed task is
+//! eligible only when its deadline is due; a `local_ready` task is eligible only
+//! to its owner worker; and a task hidden behind an externally held queue lock
+//! is not counted as eligible until the lock can be acquired by the scheduler
+//! path that owns that queue.
+//!
+//! Let:
+//!
+//! - `L_c` be the current base cancel-streak limit.
+//! - `E_c(k)` be the effective cancel limit at step `k`: `L_c` normally, or
+//!   `2 * L_c` while the governor suggests `DrainObligations` or
+//!   `DrainRegions`.
+//! - `L_t` be the timed-lane fairness limit.
+//! - `L_s` be the fast-queue stolen-work fairness limit.
+//!
+//! ## Dispatch bounds
+//!
+//! **Cancel preemption fairness.** If non-cancel work (`T`, `R`, or `S`) is
+//! eligible for worker `w` and remains eligible, then after at most `E_c(k)`
+//! consecutive `C` dispatches, worker `w` attempts non-cancel work before
+//! accepting more cancel work. Equivalently, within the next `E_c(k) + 1`
+//! successful dispatch opportunities for that worker, either a non-cancel task
+//! is dispatched or non-cancel eligibility disappeared before the fairness
+//! gate could observe it.
+//!
+//! **Timed-lane fairness.** Under `MeetDeadlines`, if ready work (`R` or `S`)
+//! is eligible and remains eligible while due timed work is also available,
+//! worker `w` attempts ready work after at most `L_t` consecutive timed
+//! dispatches.
+//!
+//! **Stolen-work fairness.** If owner-local ready-heap work is eligible while
+//! the fast queue contains stolen ready work, worker `w` gives owner-local work
+//! a probe after at most `L_s` consecutive fast-queue dispatches. The
+//! non-stealable `local_ready` deque is stronger: it is checked before the
+//! fast queue on every ready phase.
+//!
+//! ## Explicit non-goals
+//!
+//! - These are dispatch-step bounds, not wall-clock or CPU-time bounds. A
+//!   dispatched task can still run until the runtime poll budget or the task's
+//!   own cooperative yield point.
+//! - The contract does not claim a global priority total order across workers.
+//!   Work stealing operates on ready work only, and owner-local `!Send` work is
+//!   intentionally invisible to other workers.
+//! - Adaptive cancel-streak mode may change `L_c` at epoch boundaries. Runtime
+//!   certificates therefore record both the base limit and the maximum observed
+//!   effective limit.
 //!
 //! ## Proof sketch (per-worker, single-threaded scheduling loop)
 //!
@@ -21,12 +76,13 @@
 //!    when the cancel lane is empty).
 //!
 //! 2. In `next_task()`, the cancel lane is only consulted when
-//!    `cancel_streak < cancel_streak_limit`. Once the limit is reached, the
+//!    `cancel_streak < E_c(k)`. Once the effective limit is reached, the
 //!    scheduler falls through to timed, ready, and steal.
 //!
-//! 3. If timed or ready work is pending when cancel_streak hits the limit,
-//!    that work is dispatched next, resetting cancel_streak to 0. Cancel work
-//!    resumes on the following call to `next_task()`.
+//! 3. If eligible timed, ready, or stealable ready work is still visible when
+//!    `cancel_streak` hits the limit, that work is dispatched next, resetting
+//!    `cancel_streak` to 0. Cancel work resumes on the following call to
+//!    `next_task()`.
 //!
 //! 4. If no timed/ready/steal work is available when the limit is hit, a
 //!    fallback path allows one more cancel dispatch with cancel_streak reset
@@ -36,17 +92,18 @@
 //! 5. On backoff/park (no work found), cancel_streak resets to 0. This
 //!    prevents stale counters from deferring cancel work after an idle period.
 //!
-//! **Corollary**: Under sustained cancel injection, the ready lane observes a
-//! dispatch slot at least every `cancel_streak_limit + 1` scheduling steps,
-//! giving a worst-case ready-lane stall of O(cancel_streak_limit) dispatch
-//! cycles per worker.
+//! **Corollary**: Under sustained cancel injection and sustained non-cancel
+//! eligibility, non-cancel work receives a worker-local dispatch opportunity at
+//! least every `E_c(k) + 1` scheduling steps, giving a worst-case non-cancel
+//! stall of O(`E_c`) dispatch cycles per worker.
 //!
 //! ## Cross-worker note
 //!
-//! Fairness is enforced per-worker. Global fairness follows from each worker
-//! independently bounding its cancel streak. Work stealing operates only on
-//! the ready lane, so a worker whose ready lane is starved by cancel work
-//! will not have its ready tasks stolen.
+//! Fairness is enforced per-worker. Cluster-wide fairness is the conjunction of
+//! these worker-local bounds over the workers that can actually observe the
+//! eligible work. Work stealing operates only on ready work, so it composes
+//! with the cancel/timed fairness bounds as load sharing, not as a proof of
+//! global priority order.
 
 use crate::cancel::progress_certificate::{DrainPhase, ProgressCertificate};
 use crate::obligation::lyapunov::{
@@ -3319,12 +3376,16 @@ pub struct StarvationStats {
     pub latest_priority_inversion: Option<PriorityInversionSummary>,
 }
 
-/// Deterministic witness for cancel-lane fairness guarantees.
+/// Deterministic witness for the worker-local cancel-lane fairness contract.
 ///
 /// This compiles the runtime fairness argument into an auditable artifact:
-/// if `invariant_holds()` is true, then observed dispatches respected the
-/// effective cancel-streak bound and ready/timed work received a slot within
-/// `ready_stall_bound_steps()`.
+/// if `invariant_holds()` is true, then observed dispatches for one worker
+/// respected the maximum effective cancel-streak bound recorded in this
+/// certificate.
+///
+/// This is an observed dispatch-step certificate. It does not prove wall-clock
+/// latency, bounded task poll duration, or global priority ordering across
+/// workers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreemptionFairnessCertificate {
     /// Worker-local baseline cancel streak limit `L`.
@@ -3362,10 +3423,11 @@ pub struct PreemptionFairnessCertificate {
 }
 
 impl PreemptionFairnessCertificate {
-    /// Returns the worst-case bound on non-cancel dispatch stall (in steps).
+    /// Returns the worker-local non-cancel dispatch-opportunity bound.
     ///
-    /// Under this run's observed policy envelope, ready/timed dispatch gets a
-    /// scheduling opportunity within `effective_limit + 1` steps.
+    /// Under this run's observed policy envelope, sustained eligible
+    /// ready/timed/stealable-ready work gets a scheduling opportunity within
+    /// `effective_limit + 1` successful dispatch steps by the same worker.
     #[must_use]
     pub fn ready_stall_bound_steps(&self) -> usize {
         self.effective_limit.saturating_add(1)
@@ -15314,7 +15376,7 @@ mod tests {
 
         // Create specific deadline-ordering scenario with 5 tasks + 1 cancel
         let mut task_details = BTreeMap::new();
-        let current_time = Time::from_nanos(1000_000_000_000); // Fixed timestamp for deterministic snapshots
+        let current_time = Time::from_nanos(1_000_000_000_000); // Fixed timestamp for deterministic snapshots
 
         // Task 1: High priority, far deadline (ready lane)
         let task1 = TaskId::new_for_test(1, 1);
