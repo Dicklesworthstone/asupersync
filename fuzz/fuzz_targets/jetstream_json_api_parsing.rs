@@ -1,104 +1,105 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
-
-/// Fuzz target for JetStream JSON API parsing robustness.
-///
-/// This target tests the robustness of JetStream message and response parsing:
-/// - `parse_stream_info()`: Parses stream configuration and state JSON
-/// - `parse_pub_ack()`: Parses publish acknowledgment responses
-/// - `parse_api_error()`: Parses API error responses
-/// - `extract_json_string_simple()`: Simple JSON field extraction
-/// - `extract_json_u64()`: JSON number field extraction
-/// - `parse_js_message()`: Parses JetStream message metadata from subjects
-///
-/// The fuzzer generates malformed, edge case, and malicious JSON payloads
-/// to verify parsers are robust against untrusted server responses.
 use asupersync::messaging::jetstream::{
-    Consumer, JetStreamContext, extract_json_string_simple, extract_json_u64,
+    FuzzJsAckMetadata, JsError, fuzz_parse_api_error, fuzz_parse_js_message, fuzz_parse_pub_ack,
+    fuzz_parse_stream_info,
 };
-use asupersync::messaging::nats::{Message, NatsClient};
+use asupersync::messaging::nats::Message;
+use libfuzzer_sys::fuzz_target;
 use std::str;
 
-/// Test JetStream JSON parsing through public APIs.
-///
-/// Note: The actual parsing functions are private to JetStreamContext/Consumer,
-/// so we focus on the publicly accessible helper functions and test through
-/// mock Message creation for parse_js_message via Consumer methods.
-fn test_jetstream_api_robustness(json_data: &str) {
-    // Test if we can create a NatsClient for testing
-    // Since we can't easily create real connections in a fuzz target,
-    // we focus on the helper functions that are directly accessible
+const MAX_INPUT_LEN: usize = 100_000;
 
-    // Test extract_json_string_simple
-    let test_fields = [
-        "name",
-        "stream",
-        "subject",
-        "error",
-        "description",
-        "consumer",
-        "durable_name",
-        "deliver_subject",
-        "config",
+fn parse_reply_subject(reply_subject: &str, payload: &[u8]) -> Option<FuzzJsAckMetadata> {
+    fuzz_parse_js_message(Message {
+        subject: "fuzz.jetstream.payload".to_string(),
+        sid: 1,
+        reply_to: Some(reply_subject.to_string()),
+        headers: None,
+        payload: payload.to_vec(),
+    })
+}
+
+fn observe_jetstream_api_parsers(json_data: &str) {
+    let payload = json_data.as_bytes();
+    let _ = fuzz_parse_stream_info(payload);
+    let _ = fuzz_parse_pub_ack(payload);
+    let _ = fuzz_parse_api_error(json_data);
+}
+
+fn assert_known_json_parser_outputs() {
+    let stream_info = fuzz_parse_stream_info(
+        br#"{"config":{"name":"EVENTS"},"state":{"messages":7,"bytes":42,"first_seq":1,"last_seq":7,"consumer_count":2}}"#,
+    )
+    .expect("valid stream info response should parse");
+    assert_eq!(stream_info.config.name, "EVENTS");
+    assert_eq!(stream_info.state.messages, 7);
+    assert_eq!(stream_info.state.bytes, 42);
+    assert_eq!(stream_info.state.first_seq, 1);
+    assert_eq!(stream_info.state.last_seq, 7);
+    assert_eq!(stream_info.state.consumer_count, 2);
+
+    let pub_ack = fuzz_parse_pub_ack(br#"{"stream":"ORDERS","seq":123,"duplicate":true}"#)
+        .expect("valid pub ack response should parse");
+    assert_eq!(pub_ack.stream, "ORDERS");
+    assert_eq!(pub_ack.seq, 123);
+    assert!(pub_ack.duplicate);
+
+    let api_error = fuzz_parse_api_error(
+        r#"{"error":{"code":404,"err_code":10059,"description":"stream not found"}}"#,
+    );
+    assert!(matches!(
+        api_error,
+        JsError::StreamNotFound(description) if description == "stream not found"
+    ));
+}
+
+fn assert_known_ack_subject_outputs(payload: &[u8]) {
+    let valid_cases = [
+        ("$JS.ACK.stream.consumer.1.100.50.1234567890.5", 1, 100),
+        (
+            "$JS.ACK.stream.with.dots.consumer.with.dots.3.42.21.9999999.0",
+            3,
+            42,
+        ),
+        ("$JS.ACK...4.2.3.4.5", 4, 2),
     ];
 
-    for field in &test_fields {
-        let _result = extract_json_string_simple(json_data, field);
+    for (reply_subject, delivered, sequence) in valid_cases {
+        let parsed = parse_reply_subject(reply_subject, payload)
+            .expect("valid JetStream ACK reply subject should parse");
+        assert_eq!(parsed.delivered, delivered);
+        assert_eq!(parsed.sequence, sequence);
+        assert_eq!(parsed.payload_len, payload.len());
     }
 
-    // Test extract_json_u64
-    let numeric_fields = [
-        "seq",
-        "stream_seq",
-        "consumer_seq",
-        "delivered",
-        "ack_floor",
-        "num_pending",
-        "num_redelivered",
-        "code",
+    let invalid_cases = [
+        "",
+        "$JS.ACK",
+        "$JS.ACK.stream.consumer.1.100.50.1234567890",
+        "$JS.ACK.stream.consumer.not-delivered.100.50.1234567890.5",
+        "$JS.ACK.stream.consumer.1.not-sequence.50.1234567890.5",
+        "$JS.NAK.stream.consumer.1.100.50.1234567890.5",
     ];
 
-    for field in &numeric_fields {
-        let _result = extract_json_u64(json_data, field);
+    for reply_subject in invalid_cases {
+        assert!(parse_reply_subject(reply_subject, payload).is_none());
     }
 }
 
-/// Test parse_js_message via Consumer with various Message patterns.
-///
-/// Note: parse_js_message is a private method on Consumer, but we can
-/// test similar patterns that would exercise the parsing logic.
-fn test_js_message_parsing(subject_data: &str) {
-    // Create mock Message objects to test the JetStream message parsing patterns
-    let test_patterns = [
-        // Standard JetStream ACK reply subjects
-        format!("$JS.ACK.stream.consumer.1.100.50.1234567890.5"),
-        format!("$JS.ACK.{}.consumer.1.100.50.1234567890.5", subject_data),
-        format!("$JS.ACK.stream.{}.1.100.50.1234567890.5", subject_data),
-        // Dotted stream/consumer names (regression case)
-        format!("$JS.ACK.stream.with.dots.consumer.with.dots.1.42.21.9999999.0"),
-        // Malformed patterns
-        format!("$JS.ACK.{}", subject_data),
-        format!("$JS.ACK"),
-        format!("$JS.{}", subject_data),
-        format!("{}", subject_data),
-        // Edge cases
-        format!("$JS.ACK...1.2.3.4.5"), // empty stream/consumer
-        format!("$JS.ACK.s.c.{}.2.3.4.5", subject_data), // subject_data as numeric field
+fn observe_ack_subject_variants(subject_data: &str, payload: &[u8]) {
+    let reply_subjects = [
+        "$JS.ACK.stream.consumer.1.100.50.1234567890.5".to_string(),
+        format!("$JS.ACK.{subject_data}.consumer.1.100.50.1234567890.5"),
+        format!("$JS.ACK.stream.{subject_data}.2.101.51.1234567891.6"),
+        "$JS.ACK.stream.with.dots.consumer.with.dots.3.42.21.9999999.0".to_string(),
+        format!("$JS.ACK.{subject_data}"),
+        format!("$JS.{subject_data}"),
+        subject_data.to_string(),
     ];
 
-    for reply_subject in &test_patterns {
-        let mock_message = Message {
-            subject: format!("test.{}", subject_data),
-            sid: 1,
-            reply_to: Some(reply_subject.clone()),
-            payload: subject_data.as_bytes().to_vec(),
-        };
-
-        // Test that parse_js_message doesn't crash (indirectly through Consumer methods)
-        // Since Consumer::parse_js_message is private, we can't call it directly
-        // But the fuzzer will exercise similar parsing logic
-        let _ = &mock_message; // Use the message to avoid unused variable warning
+    for reply_subject in reply_subjects {
+        let _ = parse_reply_subject(&reply_subject, payload);
     }
 }
 
@@ -126,9 +127,9 @@ fn test_malformed_json(base_data: &[u8]) {
             format!("{{\"size\":{}}}", u64::MAX),
             format!("{{\"count\":{}}}", i64::MIN),
             // Special float values
-            format!("{{\"rate\":{}}}", "NaN"),
-            format!("{{\"timeout\":{}}}", "Infinity"),
-            format!("{{\"delay\":{}}}", "-Infinity"),
+            "{\"rate\":NaN}".to_string(),
+            "{\"timeout\":Infinity}".to_string(),
+            "{\"delay\":-Infinity}".to_string(),
             // Unicode and escapes
             format!("{{\"subject\":\"{}\\u0000\"}}", base_str),
             format!("{{\"data\":\"{}\\uFFFF\"}}", base_str),
@@ -157,14 +158,16 @@ fn test_malformed_json(base_data: &[u8]) {
         ];
 
         for payload in &malformed_payloads {
-            test_jetstream_api_robustness(payload);
+            observe_jetstream_api_parsers(payload);
         }
     }
 }
 
 /// Test edge cases with specific problematic JSON patterns.
 fn test_json_edge_cases() {
-    let edge_case_payloads = vec![
+    assert_known_json_parser_outputs();
+
+    let edge_case_payloads = [
         // Empty and whitespace
         "",
         "{}",
@@ -196,24 +199,30 @@ fn test_json_edge_cases() {
         r#"{"type":"io.nats.jetstream.api.v1.pub_ack","stream":"ORDERS","seq":1234567}"#,
         r#"{"error":{"code":404,"err_code":10059,"description":"stream not found"}}"#,
         // Malicious attempts
-        "x".repeat(100000),                                  // very long
-        "{}".repeat(50000),                                  // many objects
-        "[".repeat(10000) + &"]".repeat(10000),              // deep arrays
-        format!("{{\"overflow\":{}}}", "9".repeat(1000)),    // huge number
-        "{\"a\":".repeat(1000) + "null" + &"}".repeat(1000), // deep nesting
-        // Encoding edge cases
         r#"{"utf8":"Hello 世界"}"#,
         r#"{"emoji":"🚀📡🌟"}"#,
         r#"{"control":"\u0000\u001F\u007F"}"#,
         r#"{"highcode":"\uFFFF\uFFFE\uD800\uDFFF"}"#,
     ];
 
-    for payload in &edge_case_payloads {
-        test_jetstream_api_robustness(payload);
+    for payload in edge_case_payloads {
+        observe_jetstream_api_parsers(payload);
+    }
+
+    let generated_edge_case_payloads = [
+        "x".repeat(100_000),
+        "{}".repeat(50_000),
+        "[".repeat(10_000) + &"]".repeat(10_000),
+        format!("{{\"overflow\":{}}}", "9".repeat(1_000)),
+        "{\"a\":".repeat(1_000) + "null" + &"}".repeat(1_000),
+    ];
+
+    for payload in &generated_edge_case_payloads {
+        observe_jetstream_api_parsers(payload);
     }
 
     // Test subject parsing edge cases
-    let subject_edge_cases = vec![
+    let subject_edge_cases = [
         "",
         ".",
         "..",
@@ -236,15 +245,15 @@ fn test_json_edge_cases() {
         "\t\nwhitespace\r",
     ];
 
-    for subject in &subject_edge_cases {
-        test_js_message_parsing(subject);
+    for subject in subject_edge_cases {
+        observe_ack_subject_variants(subject, subject.as_bytes());
     }
 }
 
 /// Test protocol compliance with real-world patterns.
 fn test_protocol_patterns() {
     // Test various JetStream API patterns
-    let api_patterns = vec![
+    let api_patterns = [
         // Stream operations
         (
             "$JS.API.STREAM.CREATE.EVENTS",
@@ -257,7 +266,7 @@ fn test_protocol_patterns() {
             "$JS.API.STREAM.PURGE.EVENTS",
             r#"{"filter":"events.old.*"}"#,
         ),
-        // Consumer operations
+        // Durable subscription operations
         (
             "$JS.API.CONSUMER.CREATE.EVENTS.PROCESSOR",
             r#"{"durable_name":"processor","deliver_subject":"process.>"}"#,
@@ -272,26 +281,28 @@ fn test_protocol_patterns() {
         ),
     ];
 
-    for (subject, payload) in &api_patterns {
-        test_js_message_parsing(subject);
-        test_jetstream_api_robustness(payload);
+    for (subject, payload) in api_patterns {
+        observe_ack_subject_variants(subject, payload.as_bytes());
+        observe_jetstream_api_parsers(payload);
     }
 }
 
 fuzz_target!(|data: &[u8]| {
     // Limit input size to prevent timeouts
-    if data.len() > 100_000 {
+    if data.len() > MAX_INPUT_LEN {
         return;
     }
 
+    assert_known_ack_subject_outputs(data);
+
     // Test 1: Parse as JSON API response
     if let Ok(json_str) = str::from_utf8(data) {
-        test_jetstream_api_robustness(json_str);
+        observe_jetstream_api_parsers(json_str);
     }
 
     // Test 2: Parse as subject string
     if let Ok(subject_str) = str::from_utf8(data) {
-        test_js_message_parsing(subject_str);
+        observe_ack_subject_variants(subject_str, data);
     }
 
     // Test 3: Generate malformed JSON based on input
@@ -310,40 +321,41 @@ fuzz_target!(|data: &[u8]| {
                 let partial = &data[..chunk_size];
 
                 if let Ok(partial_str) = str::from_utf8(partial) {
-                    test_jetstream_api_robustness(partial_str);
-                    test_js_message_parsing(partial_str);
+                    observe_jetstream_api_parsers(partial_str);
+                    observe_ack_subject_variants(partial_str, partial);
                 }
             }
         }
     }
 
     // Test 7: Concatenation tests (test JSON arrays/sequences)
-    if let Ok(base_str) = str::from_utf8(data) {
-        if !base_str.is_empty() && base_str.len() < 1000 {
-            // Test JSON array format
-            let array_json = format!("[{},{}]", base_str, base_str);
-            test_jetstream_api_robustness(&array_json);
+    if let Ok(base_str) = str::from_utf8(data)
+        && !base_str.is_empty()
+        && base_str.len() < 1000
+    {
+        // Test JSON array format
+        let array_json = format!("[{},{}]", base_str, base_str);
+        observe_jetstream_api_parsers(&array_json);
 
-            // Test concatenated objects
-            let concat_json = format!("{}{}", base_str, base_str);
-            test_jetstream_api_robustness(&concat_json);
+        // Test concatenated objects
+        let concat_json = format!("{}{}", base_str, base_str);
+        observe_jetstream_api_parsers(&concat_json);
 
-            // Test newline-delimited JSON (NDJSON)
-            let ndjson = format!("{}\n{}\n{}", base_str, base_str, base_str);
-            test_jetstream_api_robustness(&ndjson);
-        }
+        // Test newline-delimited JSON (NDJSON)
+        let ndjson = format!("{}\n{}\n{}", base_str, base_str, base_str);
+        observe_jetstream_api_parsers(&ndjson);
     }
 
     // Test 8: Binary data interpretation
     if data.len() <= 1000 {
         // Test with lossy UTF-8 conversion
         let lossy_string = String::from_utf8_lossy(data);
-        test_jetstream_api_robustness(&lossy_string);
-        test_js_message_parsing(&lossy_string);
+        observe_jetstream_api_parsers(&lossy_string);
+        observe_ack_subject_variants(&lossy_string, data);
 
         // Test Latin-1 interpretation
         let latin1_string: String = data.iter().map(|&b| b as char).collect();
-        test_jetstream_api_robustness(&latin1_string);
+        observe_jetstream_api_parsers(&latin1_string);
     }
 
     // Test 9: Stress test with extreme field values
@@ -363,7 +375,7 @@ fuzz_target!(|data: &[u8]| {
         ];
 
         for test_json in &numeric_tests {
-            test_jetstream_api_robustness(test_json);
+            observe_jetstream_api_parsers(test_json);
         }
 
         // Test string field extremes
@@ -378,7 +390,7 @@ fuzz_target!(|data: &[u8]| {
         ];
 
         for test_json in &string_tests {
-            test_jetstream_api_robustness(test_json);
+            observe_jetstream_api_parsers(test_json);
         }
     }
 
@@ -391,17 +403,17 @@ fuzz_target!(|data: &[u8]| {
             .copied()
             .collect::<Vec<_>>();
         if let Ok(bom_string) = String::from_utf8(with_bom) {
-            test_jetstream_api_robustness(&bom_string);
+            observe_jetstream_api_parsers(&bom_string);
         }
 
         // Test as potential UTF-16
-        if data.len() % 2 == 0 {
+        if data.len().is_multiple_of(2) {
             let utf16_units: Vec<u16> = data
                 .chunks_exact(2)
                 .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
                 .collect();
             if let Ok(utf16_string) = String::from_utf16(&utf16_units) {
-                test_js_message_parsing(&utf16_string);
+                observe_ack_subject_variants(&utf16_string, data);
             }
         }
     }
