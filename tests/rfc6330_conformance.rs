@@ -1,23 +1,18 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
 //! RFC 6330 conformance test harness for RaptorQ implementation.
 //!
-//! This module provides comprehensive conformance testing against RFC 6330
-//! specification requirements, focusing on areas not covered by existing roundtrip tests:
-//!
-//! 1. **Vector Tests**: Core RFC 6330 functions against reference values
-//! 2. **Intermediate Symbol Generation**: Systematic encoding intermediate steps
-//! 3. **Repair Packet Recovery**: Edge cases in repair symbol computation
+//! This module provides a compact integration-level RFC 6330 check against the
+//! live RaptorQ seams. It complements the larger golden and fixture-driven
+//! suites elsewhere in the tree with a small, report-producing smoke harness.
 //!
 //! # Coverage Matrix
 //!
 //! | RFC Section | Function | Test Count | Status |
 //! |-------------|----------|------------|--------|
-//! | 5.3.5.1 | rand(y,i,m) | 50+ | ✓ |
-//! | 5.3.5.2 | deg(v) | 20+ | ✓ |
-//! | 5.3.5.3 | tuple(k,x) | 30+ | ✓ |
-//! | 5.4.2.1 | Intermediate symbols | 10+ | ✓ |
-//! | 5.4.2.2 | Repair symbols | 15+ | ✓ |
+//! | 5.3.5.1 | rand(y,i,m) | Representative golden vectors | ✓ |
+//! | 5.3.5.2 | deg(v) | Boundary golden vectors | ✓ |
+//! | 5.3.5.3 | tuple(J,W,P,X) | Representative golden vectors | ✓ |
+//! | 5.4.2.1 | Intermediate symbols | Determinism + shape | ✓ |
+//! | 5.4.2.2 | Repair symbols | Bounds + determinism | ✓ |
 //!
 //! # Test Pattern
 //!
@@ -28,8 +23,10 @@
 
 #![allow(missing_docs)]
 
-use asupersync::raptorq::rfc6330::{deg, next_prime_ge, rand, repair_indices_for_esi, tuple};
-use asupersync::raptorq::systematic::SystematicEncoder;
+use asupersync::raptorq::{
+    rfc6330::{LtTuple, deg, next_prime_ge, rand, repair_indices_for_esi, tuple},
+    systematic::{SystematicEncoder, SystematicParams},
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -78,42 +75,40 @@ struct GoldenVector<Input, Expected> {
 /// RFC 6330 Section 5.3.5.1 specifies: "The rand() function MUST produce
 /// deterministic pseudorandom values based on the lookup tables V0-V3."
 const RAND_VECTORS: &[GoldenVector<(u32, u8, u32), u32>] = &[
-    // Values computed from our implementation - these become the reference
-    // The key requirement is determinism and consistency with the RFC tables
     GoldenVector {
         id: "RFC6330-5.3.5.1-001",
         rfc_section: "5.3.5.1",
-        description: "rand determinism test case 1",
+        description: "RFC golden vector: zero seed, byte modulus",
         input: (0, 0, 256),
-        expected: 0, // Will be computed during first run
+        expected: 25,
     },
     GoldenVector {
         id: "RFC6330-5.3.5.1-002",
         rfc_section: "5.3.5.1",
-        description: "rand determinism test case 2",
-        input: (1, 1, 256),
-        expected: 0, // Will be computed during first run
+        description: "RFC golden vector: low seed, byte modulus",
+        input: (1, 0, 256),
+        expected: 214,
     },
     GoldenVector {
         id: "RFC6330-5.3.5.1-003",
         rfc_section: "5.3.5.1",
-        description: "rand with large y value",
-        input: (65536, 5, 1000),
-        expected: 0,
+        description: "RFC golden vector: mixed seed, decimal modulus",
+        input: (42, 1, 100),
+        expected: 34,
     },
     GoldenVector {
         id: "RFC6330-5.3.5.1-004",
         rfc_section: "5.3.5.1",
-        description: "rand edge case: i=255 (max byte)",
-        input: (12345, 255, 512),
-        expected: 0,
+        description: "RFC golden vector: large seed, decimal modulus",
+        input: (0xDEAD_BEEF, 0, 1000),
+        expected: 326,
     },
     GoldenVector {
         id: "RFC6330-5.3.5.1-005",
         rfc_section: "5.3.5.1",
-        description: "rand edge case: m=1 (trivial modulus)",
-        input: (999999, 100, 1),
-        expected: 0, // Must be 0 since result is modulo 1
+        description: "RFC golden vector: mid seed, 16-bit modulus",
+        input: (12_345, 1, 65_536),
+        expected: 18_106,
     },
 ];
 
@@ -129,30 +124,58 @@ const DEG_VECTORS: &[GoldenVector<u32, usize>] = &[
     GoldenVector {
         id: "RFC6330-5.3.5.2-001",
         rfc_section: "5.3.5.2",
-        description: "deg function boundary: v=0",
+        description: "degree-1 lower boundary",
         input: 0,
-        expected: 1, // First range always returns degree 1
+        expected: 1,
     },
     GoldenVector {
         id: "RFC6330-5.3.5.2-002",
         rfc_section: "5.3.5.2",
-        description: "deg function within first range",
-        input: 5000,
+        description: "degree-1 upper boundary",
+        input: 5_242,
         expected: 1,
     },
     GoldenVector {
         id: "RFC6330-5.3.5.2-003",
         rfc_section: "5.3.5.2",
-        description: "deg function second range boundary",
-        input: 10241,
+        description: "degree-2 lower boundary",
+        input: 5_243,
         expected: 2,
     },
     GoldenVector {
         id: "RFC6330-5.3.5.2-004",
         rfc_section: "5.3.5.2",
-        description: "deg function upper boundary test",
-        input: 1048575, // Max 20-bit value
-        expected: 40,
+        description: "degree-2 upper boundary",
+        input: 529_530,
+        expected: 2,
+    },
+    GoldenVector {
+        id: "RFC6330-5.3.5.2-005",
+        rfc_section: "5.3.5.2",
+        description: "degree-3 lower boundary",
+        input: 529_531,
+        expected: 3,
+    },
+    GoldenVector {
+        id: "RFC6330-5.3.5.2-006",
+        rfc_section: "5.3.5.2",
+        description: "degree-4 lower boundary",
+        input: 704_294,
+        expected: 4,
+    },
+    GoldenVector {
+        id: "RFC6330-5.3.5.2-007",
+        rfc_section: "5.3.5.2",
+        description: "degree-30 lower boundary",
+        input: 1_017_662,
+        expected: 30,
+    },
+    GoldenVector {
+        id: "RFC6330-5.3.5.2-008",
+        rfc_section: "5.3.5.2",
+        description: "maximum 20-bit sample",
+        input: 1_048_575,
+        expected: 30,
     },
 ];
 
@@ -162,29 +185,75 @@ const DEG_VECTORS: &[GoldenVector<u32, usize>] = &[
 
 /// Test the RFC 6330 tuple() function for LT code parameter generation.
 ///
-/// RFC 6330 Section 5.3.5.3 specifies: "The tuple() function MUST generate
-/// (d, a, b) parameters for LT encoding equations deterministically."
-const TUPLE_VECTORS: &[GoldenVector<(usize, u32), (usize, usize, usize)>] = &[
-    GoldenVector {
+/// RFC 6330 Section 5.3.5.3 specifies the full `(d, a, b, d1, a1, b1)` tuple
+/// and the derived intermediate-symbol schedule for a given `(J, W, P, X)`.
+#[derive(Debug, Clone)]
+struct TupleGoldenVector {
+    id: &'static str,
+    rfc_section: &'static str,
+    description: &'static str,
+    systematic_index: usize,
+    lt_width: usize,
+    pi_count: usize,
+    encoding_symbol_id: u32,
+    expected_tuple: LtTuple,
+    expected_indices: &'static [usize],
+}
+
+const TUPLE_VECTORS: &[TupleGoldenVector] = &[
+    TupleGoldenVector {
         id: "RFC6330-5.3.5.3-001",
         rfc_section: "5.3.5.3",
-        description: "tuple function basic test case",
-        input: (10, 0),
-        expected: (0, 0, 0), // Will be computed during first run
+        description: "K=10 parameter space, X=0",
+        systematic_index: 254,
+        lt_width: 17,
+        pi_count: 10,
+        encoding_symbol_id: 0,
+        expected_tuple: LtTuple {
+            d: 2,
+            a: 4,
+            b: 9,
+            d1: 2,
+            a1: 5,
+            b1: 1,
+        },
+        expected_indices: &[9, 13, 18, 23],
     },
-    GoldenVector {
+    TupleGoldenVector {
         id: "RFC6330-5.3.5.3-002",
         rfc_section: "5.3.5.3",
-        description: "tuple function with x=1",
-        input: (10, 1),
-        expected: (0, 0, 0),
+        description: "K=10 parameter space, X=1",
+        systematic_index: 254,
+        lt_width: 17,
+        pi_count: 10,
+        encoding_symbol_id: 1,
+        expected_tuple: LtTuple {
+            d: 7,
+            a: 6,
+            b: 12,
+            d1: 2,
+            a1: 1,
+            b1: 3,
+        },
+        expected_indices: &[12, 1, 7, 13, 2, 8, 14, 20, 21],
     },
-    GoldenVector {
+    TupleGoldenVector {
         id: "RFC6330-5.3.5.3-003",
         rfc_section: "5.3.5.3",
-        description: "tuple function larger k",
-        input: (100, 42),
-        expected: (0, 0, 0),
+        description: "K=100 parameter space, X=200",
+        systematic_index: 562,
+        lt_width: 113,
+        pi_count: 15,
+        encoding_symbol_id: 200,
+        expected_tuple: LtTuple {
+            d: 2,
+            a: 109,
+            b: 107,
+            d1: 3,
+            a1: 15,
+            b1: 7,
+        },
+        expected_indices: &[107, 103, 120, 118, 116],
     },
 ];
 
@@ -196,9 +265,9 @@ const TUPLE_VECTORS: &[GoldenVector<(usize, u32), (usize, usize, usize)>] = &[
 pub fn run_rfc6330_conformance() -> Vec<ConformanceResult> {
     let mut results = Vec::new();
 
-    // Test rand() function vectors with determinism focus
+    // Test rand() function vectors against RFC-derived goldens
     for vector in RAND_VECTORS {
-        let result = test_rand_function_determinism(vector);
+        let result = test_rand_function(vector);
         results.push(result);
     }
 
@@ -210,7 +279,7 @@ pub fn run_rfc6330_conformance() -> Vec<ConformanceResult> {
 
     // Test tuple() function vectors
     for vector in TUPLE_VECTORS {
-        let result = test_tuple_function_determinism(vector);
+        let result = test_tuple_function(vector);
         results.push(result);
     }
 
@@ -223,15 +292,12 @@ pub fn run_rfc6330_conformance() -> Vec<ConformanceResult> {
     results
 }
 
-fn test_rand_function_determinism(vector: &GoldenVector<(u32, u8, u32), u32>) -> ConformanceResult {
+fn test_rand_function(vector: &GoldenVector<(u32, u8, u32), u32>) -> ConformanceResult {
     let (y, i, m) = vector.input;
 
-    // Key requirement: determinism. Call multiple times and ensure consistency
-    let result1 = rand(y, i, m);
-    let result2 = rand(y, i, m);
-    let result3 = rand(y, i, m);
+    let actual = rand(y, i, m);
 
-    let verdict = if result1 == result2 && result2 == result3 {
+    let verdict = if actual == vector.expected {
         TestVerdict::Pass
     } else {
         TestVerdict::Fail
@@ -242,14 +308,9 @@ fn test_rand_function_determinism(vector: &GoldenVector<(u32, u8, u32), u32>) ->
         rfc_section: vector.rfc_section.to_string(),
         requirement_level: RequirementLevel::Must,
         verdict: verdict.clone(),
-        description: format!(
-            "{}: rand({}, {}, {}) determinism",
-            vector.description, y, i, m
-        ),
+        description: format!("{}: rand({}, {}, {})", vector.description, y, i, m),
         error_details: if verdict == TestVerdict::Fail {
-            Some(format!(
-                "Non-deterministic: {result1} != {result2} != {result3}"
-            ))
+            Some(format!("Expected {}, got {}", vector.expected, actual))
         } else {
             None
         },
@@ -282,32 +343,47 @@ fn test_deg_function(vector: &GoldenVector<u32, usize>) -> ConformanceResult {
     }
 }
 
-fn test_tuple_function_determinism(
-    vector: &GoldenVector<(usize, u32), (usize, usize, usize)>,
-) -> ConformanceResult {
-    let (k, x) = vector.input;
-    let w = next_prime_ge(k);
-    let p = k.max(4); // Reasonable pi_count, must be > 0
-    let p1 = next_prime_ge(p);
+fn test_tuple_function(vector: &TupleGoldenVector) -> ConformanceResult {
+    let p1 = next_prime_ge(vector.pi_count);
+    let actual_tuple = tuple(
+        vector.systematic_index,
+        vector.lt_width,
+        vector.pi_count,
+        p1,
+        vector.encoding_symbol_id,
+    );
+    let actual_indices = repair_indices_for_esi(
+        vector.systematic_index,
+        vector.lt_width,
+        vector.pi_count,
+        vector.encoding_symbol_id,
+    );
 
-    // Test determinism: multiple calls should produce identical results
-    let result1 = tuple(k, w, p, p1, x);
-    let result2 = tuple(k, w, p, p1, x);
-
-    let verdict = if result1.d == result2.d && result1.a == result2.a && result1.b == result2.b {
-        TestVerdict::Pass
-    } else {
-        TestVerdict::Fail
-    };
+    let verdict =
+        if actual_tuple == vector.expected_tuple && actual_indices == vector.expected_indices {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
 
     ConformanceResult {
         test_id: vector.id.to_string(),
         rfc_section: vector.rfc_section.to_string(),
         requirement_level: RequirementLevel::Must,
         verdict: verdict.clone(),
-        description: format!("{}: tuple({}, {}) determinism", vector.description, k, x),
+        description: format!(
+            "{}: tuple(J={}, W={}, P={}, X={})",
+            vector.description,
+            vector.systematic_index,
+            vector.lt_width,
+            vector.pi_count,
+            vector.encoding_symbol_id
+        ),
         error_details: if verdict == TestVerdict::Fail {
-            Some("Non-deterministic tuple results".to_string())
+            Some(format!(
+                "Expected tuple {:?} and indices {:?}, got tuple {:?} and indices {:?}",
+                vector.expected_tuple, vector.expected_indices, actual_tuple, actual_indices
+            ))
         } else {
             None
         },
@@ -328,7 +404,6 @@ fn test_intermediate_symbol_generation() -> Vec<ConformanceResult> {
         vec![9, 10, 11, 12],
         vec![13, 14, 15, 16],
     ];
-    let _k = 4; // Number of source symbols for this test
     let symbol_size = 4;
     let seed = 12345u64;
 
@@ -408,31 +483,61 @@ fn test_repair_recovery_edge_cases() -> Vec<ConformanceResult> {
 
     // Edge case tests for repair symbol index generation
     let test_cases = [
-        (4, 0, "First repair symbol (ESI=K)"),
-        (4, 100, "Mid-range repair ESI"),
-        (16, 0, "Larger K, first repair"),
-        (16, 1000, "Larger K, high ESI"),
-        (100, 500, "Large K, moderate ESI"),
+        (4usize, 0u32, "Small source block, low encoding symbol id"),
+        (
+            4usize,
+            100u32,
+            "Small source block, high encoding symbol id",
+        ),
+        (
+            16usize,
+            16u32,
+            "Medium source block, repair-range encoding symbol id",
+        ),
+        (
+            16usize,
+            1_000u32,
+            "Medium source block, high encoding symbol id",
+        ),
+        (
+            100usize,
+            500u32,
+            "Large source block, mid-range encoding symbol id",
+        ),
     ];
 
-    for (test_idx, (k, esi_offset, description)) in test_cases.iter().enumerate() {
-        let esi = *k as u32 + esi_offset;
-        let w = next_prime_ge(*k);
-        let p = (*k).max(4);
+    for (test_idx, (source_symbols, encoding_symbol_id, description)) in
+        test_cases.iter().enumerate()
+    {
+        let params = if let Ok(params) = SystematicParams::try_for_source_block(*source_symbols, 4)
+        {
+            params
+        } else {
+            results.push(ConformanceResult {
+                test_id: format!("RFC6330-5.4.2.2-SETUP-{test_idx:03}"),
+                rfc_section: "5.4.2.2".to_string(),
+                requirement_level: RequirementLevel::Must,
+                verdict: TestVerdict::Fail,
+                description: format!("Repair schedule setup for K={source_symbols}"),
+                error_details: Some("Systematic parameter derivation failed".to_string()),
+            });
+            continue;
+        };
 
         // Test repair indices generation
-        let indices = repair_indices_for_esi(*k, w, p, esi);
+        let indices = repair_indices_for_esi(params.j, params.w, params.p, *encoding_symbol_id);
 
         // Validate that repair indices are within bounds
-        let bounds_valid = indices.iter().all(|&idx| idx < *k);
+        let bounds_valid = indices.iter().all(|&idx| idx < params.w + params.p);
 
         // Validate uniqueness
         let mut sorted_indices = indices.clone();
         sorted_indices.sort_unstable();
         sorted_indices.dedup();
         let uniqueness_valid = sorted_indices.len() == indices.len();
+        let non_empty_valid = !indices.is_empty();
 
-        let valid = bounds_valid && uniqueness_valid;
+        let valid = bounds_valid && uniqueness_valid && non_empty_valid;
         let verdict = if valid {
             TestVerdict::Pass
         } else {
@@ -453,9 +558,16 @@ fn test_repair_recovery_edge_cases() -> Vec<ConformanceResult> {
                 if !uniqueness_valid {
                     errors.push("repair indices not unique".to_string());
                 }
+                if !non_empty_valid {
+                    errors.push("repair index schedule is empty".to_string());
+                }
                 Some(format!(
-                    "Invalid repair indices: {:?}. Errors: {}",
+                    "Invalid repair indices: {:?} for J={}, W={}, P={}, X={}. Errors: {}",
                     indices,
+                    params.j,
+                    params.w,
+                    params.p,
+                    encoding_symbol_id,
                     errors.join(", ")
                 ))
             } else {
@@ -464,8 +576,8 @@ fn test_repair_recovery_edge_cases() -> Vec<ConformanceResult> {
         });
 
         // Test repair equation determinism
-        let indices1 = repair_indices_for_esi(*k, w, p, esi);
-        let indices2 = repair_indices_for_esi(*k, w, p, esi);
+        let indices1 = repair_indices_for_esi(params.j, params.w, params.p, *encoding_symbol_id);
+        let indices2 = repair_indices_for_esi(params.j, params.w, params.p, *encoding_symbol_id);
 
         let deterministic = indices1 == indices2;
 
@@ -478,7 +590,7 @@ fn test_repair_recovery_edge_cases() -> Vec<ConformanceResult> {
             } else {
                 TestVerdict::Fail
             },
-            description: format!("Repair equation ESI={esi} determinism"),
+            description: format!("Repair equation X={encoding_symbol_id} determinism"),
             error_details: if deterministic {
                 None
             } else {
