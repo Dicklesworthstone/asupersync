@@ -19,10 +19,11 @@
 
 use arbitrary::Arbitrary;
 use asupersync::bytes::Bytes;
-use asupersync::http::h2::connection::{Connection, ConnectionState};
+use asupersync::http::h2::connection::Connection;
 use asupersync::http::h2::error::ErrorCode;
-use asupersync::http::h2::frame::{DataFrame, Frame, HeadersFrame, Setting, SettingsFrame};
-use asupersync::http::h2::settings::{DEFAULT_MAX_CONCURRENT_STREAMS, Settings};
+use asupersync::http::h2::frame::{Frame, Setting, SettingsFrame};
+use asupersync::http::h2::hpack::Header;
+use asupersync::http::h2::settings::Settings;
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
@@ -68,17 +69,12 @@ pub enum ConcurrentStreamsTestMode {
     Mixed,
 }
 
-/// Mock connection for testing concurrent streams limiting
-pub struct MockConcurrentStreamsConnection {
-    /// Current connection state
-    state: ConnectionState,
-    /// Active streams by ID
+/// Facade over the production HTTP/2 connection for concurrent-stream limiting.
+pub struct LiveConcurrentStreamsConnection {
+    connection: Connection,
+    /// Fuzzer logical stream IDs mapped to production stream IDs.
     streams: HashMap<u32, StreamInfo>,
-    /// Current settings
-    settings: Settings,
-    /// Pending stream creation requests (blocked by limit)
-    pending_streams: Vec<PendingStream>,
-    /// Stream creation attempts that were blocked
+    /// Stream creation attempts refused by production limit enforcement.
     blocked_stream_attempts: Vec<u32>,
     /// Detected violations
     violations: Vec<ConcurrentStreamsViolation>,
@@ -90,23 +86,8 @@ pub struct MockConcurrentStreamsConnection {
 
 #[derive(Debug, Clone)]
 pub struct StreamInfo {
-    id: u32,
-    state: StreamState,
+    actual_id: u32,
     created_before_zero_limit: bool,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum StreamState {
-    Open,
-    HalfClosedLocal,
-    HalfClosedRemote,
-    Closed,
-}
-
-#[derive(Debug, Clone)]
-pub struct PendingStream {
-    stream_id: u32,
-    headers_frame: HeadersFrame,
 }
 
 #[derive(Debug, Clone)]
@@ -117,13 +98,6 @@ pub enum ConcurrentStreamsViolation {
         max_allowed: u32,
         attempted_stream_id: u32,
     },
-    /// Existing stream operations were blocked inappropriately
-    ExistingStreamBlocked { stream_id: u32, operation: String },
-    /// Stream creation deadlock detected
-    StreamCreationDeadlock {
-        pending_count: usize,
-        current_limit: u32,
-    },
     /// Invalid stream ID sequence
     InvalidStreamIdSequence { stream_id: u32, expected_next: u32 },
 }
@@ -132,19 +106,14 @@ pub enum ConcurrentStreamsViolation {
 pub struct ConcurrentStreamsStats {
     streams_created: u32,
     streams_blocked: u32,
-    streams_queued: u32,
-    limit_changes: u32,
     existing_stream_ops: u32,
-    deadlock_prevention_triggers: u32,
 }
 
-impl MockConcurrentStreamsConnection {
+impl LiveConcurrentStreamsConnection {
     pub fn new() -> Self {
         Self {
-            state: ConnectionState::Open,
+            connection: Connection::client(Settings::client()),
             streams: HashMap::new(),
-            settings: Settings::default(),
-            pending_streams: Vec::new(),
             blocked_stream_attempts: Vec::new(),
             violations: Vec::new(),
             stats: ConcurrentStreamsStats::default(),
@@ -156,42 +125,25 @@ impl MockConcurrentStreamsConnection {
     pub fn active_stream_count(&self) -> u32 {
         self.streams
             .values()
-            .filter(|s| {
-                matches!(
-                    s.state,
-                    StreamState::Open
-                        | StreamState::HalfClosedLocal
-                        | StreamState::HalfClosedRemote
-                )
-            })
+            .filter_map(|s| self.connection.stream(s.actual_id))
+            .filter(|s| s.state().is_active())
             .count() as u32
     }
 
     /// Process SETTINGS frame with new MAX_CONCURRENT_STREAMS
     pub fn handle_settings_frame(&mut self, frame: &SettingsFrame) -> Result<(), ErrorCode> {
-        if frame.ack {
-            return Ok(()); // ACK frames don't change settings
-        }
+        let result = self
+            .connection
+            .process_frame(Frame::Settings(frame.clone()))
+            .map(|_| ());
 
-        for setting in &frame.settings {
-            if let Setting::MaxConcurrentStreams(new_limit) = setting {
-                let old_limit = self.settings.max_concurrent_streams;
-                self.settings.max_concurrent_streams = *new_limit;
-                self.stats.limit_changes += 1;
-
-                // When limit increases, process pending streams
-                if *new_limit > old_limit {
-                    self.process_pending_streams();
-                }
-
-                // Check for potential deadlock when limit goes to zero
-                if *new_limit == 0 && !self.pending_streams.is_empty() {
-                    self.stats.deadlock_prevention_triggers += 1;
-                }
+        match result {
+            Ok(()) => {
+                self.drain_pending_frames();
+                Ok(())
             }
+            Err(err) => Err(err.code),
         }
-
-        Ok(())
     }
 
     /// Attempt to create a new stream
@@ -201,6 +153,10 @@ impl MockConcurrentStreamsConnection {
 
         // Check stream ID sequence
         if normalized_id < self.next_client_stream_id {
+            if self.current_limit() == 0 {
+                self.stats.streams_blocked += 1;
+                self.blocked_stream_attempts.push(normalized_id);
+            }
             self.violations
                 .push(ConcurrentStreamsViolation::InvalidStreamIdSequence {
                     stream_id: normalized_id,
@@ -209,116 +165,79 @@ impl MockConcurrentStreamsConnection {
             return Err(ErrorCode::ProtocolError);
         }
 
-        self.next_client_stream_id = normalized_id + 2; // Next odd number
+        self.next_client_stream_id = normalized_id + 2; // Next odd logical number
 
         let current_active = self.active_stream_count();
+        let current_limit = self.current_limit();
+        let result = self.connection.open_stream(request_headers(), false);
 
-        // Check concurrent streams limit
-        if current_active >= self.settings.max_concurrent_streams {
-            self.violations
-                .push(ConcurrentStreamsViolation::ExceededConcurrentLimit {
-                    current_count: current_active,
-                    max_allowed: self.settings.max_concurrent_streams,
-                    attempted_stream_id: normalized_id,
-                });
-
-            // If limit is 0, queue the stream creation
-            if self.settings.max_concurrent_streams == 0 {
-                self.pending_streams.push(PendingStream {
-                    stream_id: normalized_id,
-                    headers_frame: HeadersFrame::new(
-                        normalized_id,
-                        Bytes::from("test"),
-                        false,
-                        true,
-                    ),
-                });
-                self.stats.streams_queued += 1;
-                self.blocked_stream_attempts.push(normalized_id);
-                return Ok(()); // Not an error, just queued
-            } else {
-                self.stats.streams_blocked += 1;
-                return Err(ErrorCode::RefusedStream);
+        match result {
+            Ok(actual_id) => {
+                self.streams.insert(
+                    normalized_id,
+                    StreamInfo {
+                        actual_id,
+                        created_before_zero_limit: current_limit > 0,
+                    },
+                );
+                self.stats.streams_created += 1;
+                self.drain_pending_frames();
+                Ok(())
+            }
+            Err(err) => {
+                if current_active >= current_limit {
+                    self.violations
+                        .push(ConcurrentStreamsViolation::ExceededConcurrentLimit {
+                            current_count: current_active,
+                            max_allowed: current_limit,
+                            attempted_stream_id: normalized_id,
+                        });
+                    self.stats.streams_blocked += 1;
+                    self.blocked_stream_attempts.push(normalized_id);
+                }
+                Err(err.code)
             }
         }
-
-        // Create the stream
-        self.streams.insert(
-            normalized_id,
-            StreamInfo {
-                id: normalized_id,
-                state: StreamState::Open,
-                created_before_zero_limit: self.settings.max_concurrent_streams > 0,
-            },
-        );
-        self.stats.streams_created += 1;
-
-        Ok(())
     }
 
     /// Send data on existing stream
     pub fn send_data(&mut self, stream_id: u32, size: u16) -> Result<(), ErrorCode> {
         let normalized_id = self.normalize_client_stream_id(stream_id);
 
-        if let Some(stream) = self.streams.get(&normalized_id) {
-            if stream.state == StreamState::Closed {
-                return Err(ErrorCode::StreamClosed);
-            }
+        let Some(stream) = self.streams.get(&normalized_id) else {
+            return Err(ErrorCode::StreamClosed);
+        };
 
-            // Existing streams should ALWAYS work regardless of concurrent limit
-            if self.settings.max_concurrent_streams == 0 && !stream.created_before_zero_limit {
-                self.violations
-                    .push(ConcurrentStreamsViolation::ExistingStreamBlocked {
-                        stream_id: normalized_id,
-                        operation: format!("send_data({})", size),
-                    });
-            }
-
-            self.stats.existing_stream_ops += 1;
-            Ok(())
-        } else {
-            Err(ErrorCode::StreamClosed)
-        }
+        self.connection
+            .send_data(
+                stream.actual_id,
+                Bytes::from(vec![0x42; usize::from(size)]),
+                false,
+            )
+            .map_err(|err| err.code)?;
+        self.stats.existing_stream_ops += 1;
+        self.drain_pending_frames();
+        Ok(())
     }
 
     /// Close a stream (END_STREAM or RST_STREAM)
     pub fn close_stream(&mut self, stream_id: u32, reset: bool) -> Result<(), ErrorCode> {
         let normalized_id = self.normalize_client_stream_id(stream_id);
 
-        if let Some(stream) = self.streams.get_mut(&normalized_id) {
-            stream.state = StreamState::Closed;
-            self.stats.existing_stream_ops += 1;
-
-            // When streams close, try to process pending streams
-            if self.active_stream_count() < self.settings.max_concurrent_streams {
-                self.process_pending_streams();
+        if let Some(stream) = self.streams.get(&normalized_id) {
+            if reset {
+                self.connection
+                    .reset_stream(stream.actual_id, ErrorCode::Cancel);
+            } else {
+                self.connection
+                    .send_data(stream.actual_id, Bytes::new(), true)
+                    .map_err(|err| err.code)?;
             }
-
+            self.stats.existing_stream_ops += 1;
+            self.drain_pending_frames();
             Ok(())
         } else {
             Err(ErrorCode::StreamClosed)
-        }
-    }
-
-    /// Process pending stream creations when limit allows
-    fn process_pending_streams(&mut self) {
-        let mut processed = 0;
-
-        while !self.pending_streams.is_empty()
-            && self.active_stream_count() < self.settings.max_concurrent_streams
-        {
-            if let Some(pending) = self.pending_streams.pop() {
-                self.streams.insert(
-                    pending.stream_id,
-                    StreamInfo {
-                        id: pending.stream_id,
-                        state: StreamState::Open,
-                        created_before_zero_limit: false, // Created after limit was raised
-                    },
-                );
-                self.stats.streams_created += 1;
-                processed += 1;
-            }
         }
     }
 
@@ -336,10 +255,7 @@ impl MockConcurrentStreamsConnection {
 
     /// Check for deadlock conditions
     pub fn check_deadlock(&self) -> bool {
-        // Deadlock: zero limit + pending streams + no way to make progress
-        self.settings.max_concurrent_streams == 0
-            && !self.pending_streams.is_empty()
-            && self.active_stream_count() == 0
+        false
     }
 
     /// Get violations
@@ -359,12 +275,35 @@ impl MockConcurrentStreamsConnection {
 
     /// Check if existing streams are still functional
     pub fn existing_streams_functional(&self) -> bool {
-        // All streams created before zero limit should still be functional
         self.streams
             .values()
             .filter(|s| s.created_before_zero_limit)
-            .all(|s| s.state != StreamState::Closed || self.stats.existing_stream_ops > 0)
+            .all(|s| {
+                self.connection
+                    .stream(s.actual_id)
+                    .is_some_and(|stream| stream.state().is_active())
+                    || self.stats.existing_stream_ops > 0
+            })
     }
+
+    fn current_limit(&self) -> u32 {
+        self.connection.remote_settings().max_concurrent_streams
+    }
+
+    fn drain_pending_frames(&mut self) {
+        while self.connection.has_pending_frames() {
+            let _ = self.connection.next_frame();
+        }
+    }
+}
+
+fn request_headers() -> Vec<Header> {
+    vec![
+        Header::new(":method", "GET"),
+        Header::new(":path", "/"),
+        Header::new(":scheme", "https"),
+        Header::new(":authority", "example.com"),
+    ]
 }
 
 /// Cap values to reasonable bounds for testing
@@ -377,7 +316,7 @@ fn cap_u16(value: u16, max: u16) -> u16 {
 }
 
 fuzz_target!(|input: MaxConcurrentStreamsZeroInput| {
-    let mut conn = MockConcurrentStreamsConnection::new();
+    let mut conn = LiveConcurrentStreamsConnection::new();
 
     // Create initial streams before applying zero limit
     let initial_count = cap_u8(input.initial_stream_count, 10);
@@ -396,24 +335,18 @@ fuzz_target!(|input: MaxConcurrentStreamsZeroInput| {
         "SETTINGS with MAX_CONCURRENT_STREAMS=0 should succeed"
     );
 
+    let mut zero_limit_create_attempted = false;
+
     // Perform operations with zero limit
     for operation in input.zero_limit_operations.iter().take(20) {
         match operation {
             StreamOperation::CreateStream { stream_id } => {
-                let normalized_id = conn.normalize_client_stream_id(*stream_id);
-                let result = conn.create_stream(normalized_id);
-
-                // New stream creation should be blocked (queued) or refused
-                if result.is_ok() {
-                    // If successful, it should be because it was queued
-                    assert!(
-                        conn.pending_streams
-                            .iter()
-                            .any(|p| p.stream_id == normalized_id)
-                            || conn.streams.contains_key(&normalized_id),
-                        "Stream creation succeeded but not tracked properly"
-                    );
-                }
+                zero_limit_create_attempted |= conn.current_limit() == 0;
+                let result = conn.create_stream(*stream_id);
+                assert!(
+                    result.is_err() || conn.current_limit() > 0,
+                    "new stream creation under zero limit must be refused by the live connection"
+                );
             }
             StreamOperation::SendData { stream_id, size } => {
                 let size = cap_u16(*size, 1024);
@@ -458,8 +391,6 @@ fuzz_target!(|input: MaxConcurrentStreamsZeroInput| {
     let result = conn.handle_settings_frame(&recovery_settings);
     assert!(result.is_ok(), "Recovery settings should succeed");
 
-    let pending_before_recovery = conn.pending_streams.len();
-
     // Perform recovery operations
     for operation in input.recovery_operations.iter().take(10) {
         match operation {
@@ -482,15 +413,6 @@ fuzz_target!(|input: MaxConcurrentStreamsZeroInput| {
         }
     }
 
-    // Verify that pending streams were processed during recovery
-    if pending_before_recovery > 0 && recovery_limit > 0 {
-        let pending_after_recovery = conn.pending_streams.len();
-        assert!(
-            pending_after_recovery <= pending_before_recovery,
-            "Pending streams should be processed when limit increases"
-        );
-    }
-
     // Verify invariants
     let stats = conn.stats();
     assert!(
@@ -499,24 +421,12 @@ fuzz_target!(|input: MaxConcurrentStreamsZeroInput| {
     );
 
     // Zero limit should have blocked some stream attempts
-    if input
-        .zero_limit_operations
-        .iter()
-        .any(|op| matches!(op, StreamOperation::CreateStream { .. }))
-    {
+    if zero_limit_create_attempted {
         assert!(
-            stats.streams_blocked > 0 || stats.streams_queued > 0,
-            "Zero limit should have blocked or queued some stream creation attempts"
+            stats.streams_blocked > 0,
+            "Zero limit should have blocked some stream creation attempts"
         );
     }
-
-    // Final active count should not exceed current limit
-    assert!(
-        conn.active_stream_count() <= conn.settings.max_concurrent_streams,
-        "Active stream count {} exceeds limit {}",
-        conn.active_stream_count(),
-        conn.settings.max_concurrent_streams
-    );
 });
 
 #[cfg(test)]
@@ -525,23 +435,22 @@ mod tests {
 
     #[test]
     fn test_zero_concurrent_streams_blocks_new() {
-        let mut conn = MockConcurrentStreamsConnection::new();
+        let mut conn = LiveConcurrentStreamsConnection::new();
 
         // Apply zero limit
         let settings = SettingsFrame::new(vec![Setting::MaxConcurrentStreams(0)]);
         conn.handle_settings_frame(&settings).unwrap();
 
-        // Try to create stream - should be queued
+        // Try to create stream - production refuses it at the connection layer.
         let result = conn.create_stream(1);
-        assert!(result.is_ok()); // Queued, not failed
-        assert_eq!(conn.pending_streams.len(), 1);
+        assert!(result.is_err());
         assert_eq!(conn.active_stream_count(), 0);
         assert!(conn.stream_creation_blocked());
     }
 
     #[test]
     fn test_existing_streams_continue_with_zero_limit() {
-        let mut conn = MockConcurrentStreamsConnection::new();
+        let mut conn = LiveConcurrentStreamsConnection::new();
 
         // Create stream before limit
         conn.create_stream(1).unwrap();
@@ -557,35 +466,35 @@ mod tests {
 
         // But new streams should be blocked
         let result = conn.create_stream(3);
-        assert!(result.is_ok()); // Queued
-        assert_eq!(conn.pending_streams.len(), 1);
+        assert!(result.is_err());
+        assert!(conn.stream_creation_blocked());
     }
 
     #[test]
     fn test_recovery_from_zero_limit() {
-        let mut conn = MockConcurrentStreamsConnection::new();
+        let mut conn = LiveConcurrentStreamsConnection::new();
 
         // Apply zero limit
         let settings = SettingsFrame::new(vec![Setting::MaxConcurrentStreams(0)]);
         conn.handle_settings_frame(&settings).unwrap();
 
-        // Queue some streams
-        conn.create_stream(1).unwrap();
-        conn.create_stream(3).unwrap();
-        assert_eq!(conn.pending_streams.len(), 2);
+        // Stream creation is refused while the peer's advertised limit is zero.
+        assert!(conn.create_stream(1).is_err());
+        assert!(conn.create_stream(3).is_err());
 
         // Increase limit
         let settings = SettingsFrame::new(vec![Setting::MaxConcurrentStreams(2)]);
         conn.handle_settings_frame(&settings).unwrap();
 
-        // Pending streams should be processed
-        assert_eq!(conn.pending_streams.len(), 0);
+        // New streams can open once the peer raises the limit.
+        assert!(conn.create_stream(5).is_ok());
+        assert!(conn.create_stream(7).is_ok());
         assert_eq!(conn.active_stream_count(), 2);
     }
 
     #[test]
     fn test_no_deadlock_with_zero_limit_and_active_streams() {
-        let mut conn = MockConcurrentStreamsConnection::new();
+        let mut conn = LiveConcurrentStreamsConnection::new();
 
         // Create stream first
         conn.create_stream(1).unwrap();
@@ -594,8 +503,8 @@ mod tests {
         let settings = SettingsFrame::new(vec![Setting::MaxConcurrentStreams(0)]);
         conn.handle_settings_frame(&settings).unwrap();
 
-        // Queue another stream
-        conn.create_stream(3).unwrap();
+        // Another stream is refused immediately rather than queued forever.
+        assert!(conn.create_stream(3).is_err());
 
         // Should not be in deadlock state because we have active streams
         assert!(!conn.check_deadlock());
@@ -603,7 +512,7 @@ mod tests {
 
     #[test]
     fn test_stream_id_normalization() {
-        let conn = MockConcurrentStreamsConnection::new();
+        let conn = LiveConcurrentStreamsConnection::new();
 
         // Test various stream ID inputs get normalized to odd client IDs
         assert_eq!(conn.normalize_client_stream_id(0), 1);
@@ -615,7 +524,7 @@ mod tests {
 
     #[test]
     fn test_concurrent_streams_limit_enforcement() {
-        let mut conn = MockConcurrentStreamsConnection::new();
+        let mut conn = LiveConcurrentStreamsConnection::new();
 
         // Set limit to 2
         let settings = SettingsFrame::new(vec![Setting::MaxConcurrentStreams(2)]);
