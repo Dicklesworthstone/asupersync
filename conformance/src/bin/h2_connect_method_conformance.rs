@@ -159,9 +159,30 @@ fn generate_summary_output(
         }
     }
 
+    if report.summary.skipped > 0 {
+        output.push_str("\nSKIPPED:\n");
+        for result in &report.results {
+            if result.verdict == asupersync_conformance::ConnectMethodTestVerdict::Skipped {
+                output.push_str(&format!(
+                    "  ⏭️  {}: {}\n",
+                    result.case_id,
+                    result.error.as_deref().unwrap_or("No skip reason recorded")
+                ));
+            }
+        }
+    }
+
     // Tunnel establishment analysis
     output.push_str("\nTUNNEL ESTABLISHMENT ANALYSIS:\n");
     for result in &report.results {
+        if result.verdict == asupersync_conformance::ConnectMethodTestVerdict::Skipped {
+            output.push_str(&format!(
+                "  ⏭️  {}: skipped ({}ms)\n",
+                result.case_id, result.test_duration_ms
+            ));
+            continue;
+        }
+
         let asupersync_status = if result.asupersync_tunnel_established {
             "✅"
         } else {
@@ -186,10 +207,16 @@ fn print_test_summary(report: &asupersync_conformance::ConnectMethodComplianceRe
     eprintln!("╭─ HTTP/2 CONNECT METHOD HANDLING CONFORMANCE RESULTS ─╮");
     eprintln!("│                                                       │");
 
-    if report.summary.failed == 0 {
+    if report.summary.failed == 0 && report.summary.skipped == 0 {
         eprintln!("│  ✅ ALL TESTS PASSED                                  │");
         eprintln!(
             "│  🎯 Compliance: {:.1}%                                │",
+            report.summary.compliance_score * 100.0
+        );
+    } else if report.summary.failed == 0 {
+        eprintln!("│  ⏭️  NO FAILURES; COVERAGE SKIPPED                    │");
+        eprintln!(
+            "│  📊 Compliance: {:.1}%                                │",
             report.summary.compliance_score * 100.0
         );
     } else {

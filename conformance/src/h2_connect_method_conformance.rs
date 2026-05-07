@@ -6,7 +6,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::time::Duration;
 
 /// Test verdict for CONNECT method conformance cases.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -254,6 +253,11 @@ impl ConnectMethodConformanceTester {
         let h2_result = self.test_connect_with_h2(test_case).await;
 
         let duration = start_time.elapsed();
+        let test_duration_ms = duration.as_millis() as u64;
+
+        if let Some(error) = backend_unwired_error(&asupersync_result, &h2_result) {
+            return Self::skipped_backend_result(test_case, error, test_duration_ms);
+        }
 
         match (asupersync_result, h2_result) {
             (Ok((asupersync_status, asupersync_tunnel)), Ok((h2_status, h2_tunnel))) => {
@@ -287,7 +291,7 @@ impl ConnectMethodConformanceTester {
                     h2_tunnel_established: h2_tunnel,
                     response_status_match,
                     tunnel_behavior_match,
-                    test_duration_ms: duration.as_millis() as u64,
+                    test_duration_ms,
                 }
             }
             (Err(e), _) | (_, Err(e)) => ConnectMethodTestResult {
@@ -300,8 +304,27 @@ impl ConnectMethodConformanceTester {
                 h2_tunnel_established: false,
                 response_status_match: false,
                 tunnel_behavior_match: false,
-                test_duration_ms: duration.as_millis() as u64,
+                test_duration_ms,
             },
+        }
+    }
+
+    fn skipped_backend_result(
+        test_case: &ConnectMethodConformanceCase,
+        error: String,
+        test_duration_ms: u64,
+    ) -> ConnectMethodTestResult {
+        ConnectMethodTestResult {
+            case_id: test_case.id.clone(),
+            verdict: ConnectMethodTestVerdict::Skipped,
+            error: Some(error),
+            asupersync_response_status: None,
+            h2_response_status: None,
+            asupersync_tunnel_established: false,
+            h2_tunnel_established: false,
+            response_status_match: false,
+            tunnel_behavior_match: false,
+            test_duration_ms,
         }
     }
 
@@ -310,26 +333,10 @@ impl ConnectMethodConformanceTester {
         &self,
         test_case: &ConnectMethodConformanceCase,
     ) -> Result<(u16, bool), String> {
-        // This is a placeholder implementation
-        // In a real conformance test, this would:
-        // 1. Start an HTTP/2 server using asupersync
-        // 2. Send a CONNECT request with the specified authority
-        // 3. Check the response status code
-        // 4. If 200, attempt to send test data through the tunnel
-        // 5. Return (status_code, tunnel_established)
-
-        // Simulate expected behavior based on test case
-        let status = test_case.expected_response_status.unwrap_or(200);
-        let tunnel = test_case.should_establish_tunnel && status == 200;
-
-        // Add some realistic variation based on authority
-        if test_case.connect_request.authority.contains("blocked") {
-            Ok((403, false))
-        } else if test_case.connect_request.authority.contains("invalid") {
-            Ok((400, false))
-        } else {
-            Ok((status, tunnel))
-        }
+        Err(format!(
+            "asupersync HTTP/2 CONNECT backend not wired; refusing to synthesize placeholder result for {}",
+            test_case.id
+        ))
     }
 
     /// Test CONNECT method with h2 reference implementation.
@@ -337,26 +344,10 @@ impl ConnectMethodConformanceTester {
         &self,
         test_case: &ConnectMethodConformanceCase,
     ) -> Result<(u16, bool), String> {
-        // This is a placeholder implementation
-        // In a real conformance test, this would:
-        // 1. Start an HTTP/2 server using h2
-        // 2. Send a CONNECT request with the specified authority
-        // 3. Check the response status code
-        // 4. If 200, attempt to send test data through the tunnel
-        // 5. Return (status_code, tunnel_established)
-
-        // Simulate reference implementation behavior
-        let status = test_case.expected_response_status.unwrap_or(200);
-        let tunnel = test_case.should_establish_tunnel && status == 200;
-
-        // Reference implementation should behave consistently
-        if test_case.connect_request.authority.contains("blocked") {
-            Ok((403, false))
-        } else if test_case.connect_request.authority.contains("invalid") {
-            Ok((400, false))
-        } else {
-            Ok((status, tunnel))
-        }
+        Err(format!(
+            "h2 HTTP/2 CONNECT backend not wired; refusing to synthesize placeholder result for {}",
+            test_case.id
+        ))
     }
 
     /// Compute summary statistics from test results.
@@ -482,6 +473,24 @@ impl ConnectMethodConformanceTester {
             }
         }
 
+        md.push_str("\n## Skipped Tests\n\n");
+        let skipped_tests: Vec<_> = report
+            .results
+            .iter()
+            .filter(|r| r.verdict == ConnectMethodTestVerdict::Skipped)
+            .collect();
+
+        if skipped_tests.is_empty() {
+            md.push_str("No tests were skipped.\n\n");
+        } else {
+            for result in skipped_tests {
+                md.push_str(&format!("### {}\n\n", result.case_id));
+                if let Some(error) = &result.error {
+                    md.push_str(&format!("**Reason:** {}\n\n", error));
+                }
+            }
+        }
+
         md.push_str("---\n");
         md.push_str(&format!(
             "*Generated by asupersync conformance tester at {}*\n",
@@ -489,5 +498,79 @@ impl ConnectMethodConformanceTester {
         ));
 
         md
+    }
+}
+
+fn backend_unwired_error(
+    asupersync_result: &Result<(u16, bool), String>,
+    h2_result: &Result<(u16, bool), String>,
+) -> Option<String> {
+    let mut errors = Vec::new();
+
+    if let Err(error) = asupersync_result
+        && is_backend_unwired(error)
+    {
+        errors.push(error.as_str());
+    }
+
+    if let Err(error) = h2_result
+        && is_backend_unwired(error)
+    {
+        errors.push(error.as_str());
+    }
+
+    if errors.is_empty() {
+        None
+    } else {
+        Some(errors.join("; "))
+    }
+}
+
+fn is_backend_unwired(error: &str) -> bool {
+    error.contains("backend not wired") && error.contains("refusing to synthesize")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn connect_harness_does_not_report_placeholder_passes() {
+        let mut tester = ConnectMethodConformanceTester::new();
+        let total_cases = tester.test_cases.len();
+
+        let report = tester.run_all_tests().await;
+
+        assert_eq!(report.summary.total, total_cases);
+        assert_eq!(report.summary.passed, 0);
+        assert_eq!(report.summary.failed, 0);
+        assert_eq!(report.summary.expected_failures, 0);
+        assert_eq!(report.summary.skipped, total_cases);
+        assert_eq!(report.summary.compliance_score, 0.0);
+        assert!(
+            report
+                .results
+                .iter()
+                .all(|result| result.verdict == ConnectMethodTestVerdict::Skipped)
+        );
+        assert!(report.results.iter().all(|result| {
+            result
+                .error
+                .as_deref()
+                .is_some_and(|error| is_backend_unwired(error))
+        }));
+    }
+
+    #[tokio::test]
+    async fn markdown_report_explains_skipped_unwired_backends() {
+        let mut tester = ConnectMethodConformanceTester::new();
+        let report = tester.run_all_tests().await;
+
+        let markdown = tester.generate_markdown_report(&report);
+
+        assert!(markdown.contains("## Skipped Tests"));
+        assert!(markdown.contains("asupersync HTTP/2 CONNECT backend not wired"));
+        assert!(markdown.contains("h2 HTTP/2 CONNECT backend not wired"));
+        assert!(markdown.contains("refusing to synthesize placeholder result"));
     }
 }
