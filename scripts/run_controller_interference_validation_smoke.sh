@@ -14,6 +14,7 @@ RUN_DIR="${OUTPUT_ROOT}/run_${TIMESTAMP}"
 LIST_ONLY=0
 DRY_RUN=1
 COMMAND_TIMEOUT_SECONDS="${CIV_SMOKE_TIMEOUT_SECONDS:-120}"
+RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
 
 declare -a SELECTED_SCENARIOS=()
 
@@ -41,6 +42,9 @@ require_tools() {
     fi
     if [ ! -f "$CONTRACT_ARTIFACT" ]; then
         echo "FATAL: contract artifact missing at ${CONTRACT_ARTIFACT}" >&2; exit 1
+    fi
+    if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+        echo "FATAL: rch is required and was not found/executable at: ${RCH_BIN}" >&2; exit 1
     fi
     if [[ "$DRY_RUN" -eq 0 ]] && ! command -v timeout >/dev/null 2>&1; then
         echo "FATAL: timeout is required for --execute mode" >&2; exit 1
@@ -81,13 +85,44 @@ append_result() {
 run_scenario() {
     local sid="$1" scenario_json description command scenario_dir log_file summary_file started_ts ended_ts status
     local env_fingerprint active_controller_set shared_telemetry_fields knob_writes fallback_activation_counts decision_trace compose_verdict operator_explanation
-    local required_log_markers_json missing_log_markers_json command_exit_code final_exit_code timeout_observed rch_remote_success_observed markers_ok
+    local required_log_markers_json missing_log_markers_json command_exit_code final_exit_code timeout_observed rch_remote_success_observed markers_ok scenario_filter
     local -a required_log_markers=()
     local -a missing_log_markers=()
+    local -a command_args=()
     scenario_json="$(load_scenario_json "$sid")"
     [[ -z "$scenario_json" ]] && { echo "FATAL: unknown scenario: $sid" >&2; return 1; }
     description="$(jq -r '.description' <<<"$scenario_json")"
-    command="$(jq -r '.command' <<<"$scenario_json")"
+    case "$sid" in
+        CIV-SMOKE-INTERFERENCE) scenario_filter="interference" ;;
+        CIV-SMOKE-TIMESCALE) scenario_filter="timescale" ;;
+        CIV-SMOKE-FALLBACK) scenario_filter="fallback" ;;
+        CIV-SMOKE-SEQUENTIAL) scenario_filter="sequential" ;;
+        *)
+            echo "FATAL: unsupported scenario command mapping for ${sid}" >&2
+            return 1
+            ;;
+    esac
+    command_args=(
+        "$RCH_BIN"
+        exec
+        --
+        env
+        "CARGO_INCREMENTAL=0"
+        "CARGO_PROFILE_TEST_DEBUG=0"
+        "RUSTFLAGS=-D warnings -C debuginfo=0"
+        "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_controller_interference_validation"
+        cargo
+        test
+        -p
+        asupersync
+        --test
+        controller_interference_validation_contract
+        "$scenario_filter"
+        --
+        --nocapture
+    )
+    printf -v command '%q ' "${command_args[@]}"
+    command="${command% }"
     required_log_markers_json="$(jq -c '.required_log_markers // []' <<<"$scenario_json")"
     mapfile -t required_log_markers < <(jq -r '.required_log_markers[]? // empty' <<<"$scenario_json")
     env_fingerprint="$(jq -c '.env_fingerprint // {}' <<<"$scenario_json")"
@@ -110,7 +145,14 @@ run_scenario() {
     if [[ "$DRY_RUN" -eq 1 ]]; then
         printf 'DRY_RUN scenario=%s\n' "$sid" >"$log_file"; status="dry_run"
     else
-        timeout --kill-after=10s "${COMMAND_TIMEOUT_SECONDS}s" bash -lc "$command" >"$log_file" 2>&1 || command_exit_code=$?
+        (
+            cd "$PROJECT_ROOT"
+            timeout --kill-after=10s "${COMMAND_TIMEOUT_SECONDS}s" "${command_args[@]}"
+        ) >"$log_file" 2>&1 || command_exit_code=$?
+        if grep -Eq '^\[RCH\] local \(|falling back to local' "$log_file" 2>/dev/null; then
+            command_exit_code=86
+            printf 'FATAL: rch local fallback detected; refusing local cargo execution\n' >>"$log_file"
+        fi
         if [[ "$command_exit_code" -eq 124 || "$command_exit_code" -eq 125 || "$command_exit_code" -eq 137 || "$command_exit_code" -eq 143 ]]; then
             timeout_observed=true
         fi
