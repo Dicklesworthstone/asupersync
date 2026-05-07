@@ -5363,3 +5363,10 @@ path = "fuzz_targets/h2_request_pseudo_path_with_percent_encoding.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "scheduler_state_snapshot"
+path = "fuzz_targets/scheduler_state_snapshot.rs"
+test = false
+doc = false
+bench = false
