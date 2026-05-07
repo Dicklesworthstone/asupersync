@@ -3908,6 +3908,17 @@ test = false
 doc = false
 bench = false
 
+# Semaphore acquire-with-cancel race condition fuzzer
+# Tests critical race conditions in async semaphore acquire with cancellation.
+# Validates no permit leaks when acquire futures are dropped mid-flight,
+# waiter queue integrity under cancellation, and proper wakeup delivery.
+[[bin]]
+name = "semaphore_acquire_cancel"
+path = "fuzz_targets/semaphore_acquire_cancel.rs"
+test = false
+doc = false
+bench = false
+
 # Tick #153 — Notify spurious wakeup fuzzer
 # Tests arbitrary spurious wake patterns to ensure Notified futures
 # only complete when actually notified, not from spurious wakes.
