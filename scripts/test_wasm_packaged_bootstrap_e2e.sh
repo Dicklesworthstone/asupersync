@@ -421,6 +421,47 @@ STEP_HINTS=(
     "Validate clean shutdown with leak-free unmount and cancellation drain."
 )
 
+run_step_command() {
+    local step_id="$1"
+    local target_dir="$2"
+    local log_path="$3"
+
+    case "${step_id}" in
+        packaged_module_load)
+            timeout "${STEP_TIMEOUT}" \
+                "${RCH_BIN}" exec -- env "CARGO_TARGET_DIR=${target_dir}" \
+                cargo test --test wasm_js_exports_coverage_contract \
+                browser_core_exports_have_conditional_root_with_three_conditions -- --nocapture \
+                >"${log_path}" 2>&1
+            ;;
+        bootstrap_to_runtime_ready)
+            timeout "${STEP_TIMEOUT}" \
+                "${RCH_BIN}" exec -- env "CARGO_TARGET_DIR=${target_dir}" \
+                cargo test --test nextjs_bootstrap_harness \
+                ssr_to_hydration_bootstrap_flow_is_deterministic -- --nocapture \
+                >"${log_path}" 2>&1
+            ;;
+        reload_remount_cycle)
+            timeout "${STEP_TIMEOUT}" \
+                "${RCH_BIN}" exec -- env "CARGO_TARGET_DIR=${target_dir}" \
+                cargo test --test nextjs_bootstrap_harness \
+                nextjs_reference_template_deployment_flow_is_deterministic -- --nocapture \
+                >"${log_path}" 2>&1
+            ;;
+        clean_shutdown)
+            timeout "${STEP_TIMEOUT}" \
+                "${RCH_BIN}" exec -- env "CARGO_TARGET_DIR=${target_dir}" \
+                cargo test --test react_wasm_strictmode_harness \
+                strict_mode_double_invocation_is_leak_free_and_cancel_correct -- --nocapture \
+                >"${log_path}" 2>&1
+            ;;
+        *)
+            echo "FATAL: unknown bootstrap step: ${step_id}" >"${log_path}"
+            return 2
+            ;;
+    esac
+}
+
 RUN_STARTED_TS="$(now_iso_millis)"
 RUN_START_EPOCH="$(date +%s)"
 EXIT_CODE=0
@@ -459,7 +500,7 @@ for idx in "${!STEP_IDS[@]}"; do
     step_command_base="${STEP_COMMANDS[$idx]}"
     step_hint="${STEP_HINTS[$idx]}"
     step_target_dir="${TMPDIR:-/tmp}/rch-wasm-packaged-bootstrap-${RUN_ID}-${step_id}"
-    step_command="${RCH_BIN} exec -- env CARGO_TARGET_DIR=${step_target_dir} bash -lc \"${step_command_base}\""
+    step_command="${RCH_BIN} exec -- env CARGO_TARGET_DIR=${step_target_dir} ${step_command_base}"
     step_log="${RUN_DIR}/${step_id}.log"
     step_started="$(now_iso_millis)"
     step_start_epoch="$(date +%s)"
@@ -485,9 +526,7 @@ for idx in "${!STEP_IDS[@]}"; do
         } > "${step_log}"
     else
         set +e
-        timeout "${STEP_TIMEOUT}" \
-            "${RCH_BIN}" exec -- env "CARGO_TARGET_DIR=${step_target_dir}" bash -lc "${step_command_base}" \
-            >"${step_log}" 2>&1
+        run_step_command "${step_id}" "${step_target_dir}" "${step_log}"
         step_rc=$?
         set -e
     fi

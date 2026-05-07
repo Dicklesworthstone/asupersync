@@ -225,12 +225,28 @@ fn runner_script_uses_rch_for_all_step_commands() {
         "step command wrapper must route through rch"
     );
     assert!(
-        script.contains("\"${RCH_BIN}\" exec -- env \"CARGO_TARGET_DIR=${step_target_dir}\" bash -lc \"${step_command_base}\""),
-        "step execution must call rch directly instead of wrapping the rch command in a local shell"
+        script.contains(
+            "step_command=\"${RCH_BIN} exec -- env CARGO_TARGET_DIR=${step_target_dir} ${step_command_base}\""
+        ),
+        "step command provenance must render direct argv shape"
     );
     assert!(
-        !script.contains("bash -lc \"${step_command}\""),
+        script.contains("run_step_command()"),
+        "step execution must use the fixed argv dispatcher"
+    );
+    assert!(
+        script.contains("\"${RCH_BIN}\" exec -- env \"CARGO_TARGET_DIR=${target_dir}\""),
+        "step execution must call rch directly with argv"
+    );
+    let forbidden = ["bash", " -lc"].concat();
+    let rendered_command_wrapper = ["bash", " -lc \"${step_command}\""].concat();
+    assert!(
+        !script.contains(&rendered_command_wrapper),
         "runner must not execute the rendered rch command string through a local shell"
+    );
+    assert!(
+        !script.contains(&forbidden),
+        "runner must not execute step commands through a shell wrapper"
     );
     assert!(
         script.contains("step_target_dir=\"${TMPDIR:-/tmp}/"),
