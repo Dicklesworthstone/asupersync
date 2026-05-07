@@ -76,3 +76,5 @@ mod barrier_metamorphic;
 mod mutex_deadlock_test;
 #[cfg(test)]
 mod mutex_metamorphic;
+#[cfg(test)]
+mod mock_code_finder_clean_sweep_audit_test;
