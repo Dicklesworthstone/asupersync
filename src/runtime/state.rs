@@ -90,7 +90,7 @@ pub struct ReadBiasedRegionSnapshotStats {
     pub writes_since_last_read: usize,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct ReadBiasedDrainingRegionSnapshot {
     enabled: AtomicBool,
     valid: AtomicBool,
@@ -104,6 +104,24 @@ struct ReadBiasedDrainingRegionSnapshot {
     writer_adjustments: AtomicU64,
     writer_adjustment_ns: AtomicU64,
     fallback_scan_ns: AtomicU64,
+}
+
+impl Default for ReadBiasedDrainingRegionSnapshot {
+    fn default() -> Self {
+        Self {
+            enabled: AtomicBool::new(true),  // Enable cache by default for performance
+            valid: AtomicBool::new(false),   // Invalid initially until first scan
+            cached_count: AtomicUsize::new(0),
+            writes_since_last_read: AtomicUsize::new(0),
+            cache_hits: AtomicU64::new(0),
+            fallback_scans: AtomicU64::new(0),
+            invalidations: AtomicU64::new(0),
+            write_heavy_fallbacks: AtomicU64::new(0),
+            writer_adjustments: AtomicU64::new(0),
+            writer_adjustment_ns: AtomicU64::new(0),
+            fallback_scan_ns: AtomicU64::new(0),
+        }
+    }
 }
 
 impl ReadBiasedDrainingRegionSnapshot {
@@ -13104,5 +13122,44 @@ mod tests {
         }
 
         crate::test_complete!("read_biased_region_snapshot_smoke_contract_emits_report");
+    }
+
+    #[test]
+    fn read_biased_region_snapshot_enabled_by_default() {
+        init_test("read_biased_region_snapshot_enabled_by_default");
+
+        // Create a new runtime state - cache should be enabled by default
+        let state = RuntimeState::new();
+        crate::assert_with_log!(
+            state.read_biased_region_snapshot_enabled(),
+            "read-biased region snapshot cache should be enabled by default for performance",
+            true,
+            state.read_biased_region_snapshot_enabled()
+        );
+
+        // Verify that state snapshot uses the cache (not just scanning)
+        let snapshot = crate::obligation::lyapunov::StateSnapshot::from_runtime_state(&state);
+        let stats = state.read_biased_region_snapshot_stats();
+
+        // After one snapshot, we should have one fallback scan (to populate cache)
+        // but cache should be valid for subsequent calls
+        crate::assert_with_log!(
+            stats.fallback_scans >= 1,
+            "first snapshot should trigger fallback scan to populate cache",
+            1,
+            stats.fallback_scans
+        );
+
+        // Second snapshot should hit the cache
+        let _snapshot2 = crate::obligation::lyapunov::StateSnapshot::from_runtime_state(&state);
+        let stats2 = state.read_biased_region_snapshot_stats();
+        crate::assert_with_log!(
+            stats2.cache_hits >= 1,
+            "second snapshot should hit the cache",
+            1,
+            stats2.cache_hits
+        );
+
+        crate::test_complete!("read_biased_region_snapshot_enabled_by_default");
     }
 }
