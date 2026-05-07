@@ -9,6 +9,7 @@ const FORMAL_README_PATH: &str = "formal/README.md";
 const INVARIANT_INVENTORY_PATH: &str = "formal/lean/coverage/invariant_status_inventory.json";
 const LEAN_PATH: &str = "formal/lean/Asupersync.lean";
 const README_PATH: &str = "README.md";
+const DIRECT_LEAN_BUILD_COMMAND: &str = "rch exec -- lake --dir formal/lean build";
 
 fn repo_path(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
@@ -204,9 +205,11 @@ fn proof_tiers_keep_scope_limits_explicit() {
         .get("command")
         .and_then(JsonValue::as_str)
         .expect("verification command string");
-    assert_eq!(
-        command,
-        "rch exec -- bash -lc 'cd formal/lean && lake build'"
+    assert_eq!(command, DIRECT_LEAN_BUILD_COMMAND);
+    let forbidden_wrapper = ["bash", " -lc"].concat();
+    assert!(
+        !command.contains(&forbidden_wrapper),
+        "formal proof posture command must not shell-wrap lake build"
     );
     assert_eq!(
         verification.get("result").and_then(JsonValue::as_str),
@@ -484,7 +487,7 @@ fn docs_describe_checked_core_invariants_without_stale_scaffold_claims() {
         );
     }
     for required in [
-        "rch exec -- bash -lc 'cd formal/lean && lake build'",
+        DIRECT_LEAN_BUILD_COMMAND,
         "all six Asupersync non-negotiable invariants as `fully_proven`",
     ] {
         assert!(

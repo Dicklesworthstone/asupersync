@@ -11,7 +11,7 @@ The Lean project under `formal/lean/` is build-checked, not merely a planning
 stub. The canonical proof command for this repository is:
 
 ```bash
-rch exec -- bash -lc 'cd formal/lean && lake build'
+rch exec -- lake --dir formal/lean build
 ```
 
 The current machine-readable inventory
@@ -65,7 +65,7 @@ The Lean project is self-contained under `formal/lean/` and does not affect the 
 crate or Cargo builds. Use `rch` for repository validation:
 
 ```bash
-rch exec -- bash -lc 'cd formal/lean && lake build'
+rch exec -- lake --dir formal/lean build
 ```
 
 Local interactive proof work may still enter the directory and run `lake build`,

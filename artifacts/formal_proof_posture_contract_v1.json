@@ -21,7 +21,7 @@
     ]
   },
   "toolchain_verification": {
-    "command": "rch exec -- bash -lc 'cd formal/lean && lake build'",
+    "command": "rch exec -- lake --dir formal/lean build",
     "result": "passed",
     "observed_signal": "Build completed successfully (3 jobs).",
     "warning_policy": "Lean lint warnings are tracked as cleanup debt, not proof failures."
