@@ -322,7 +322,9 @@ fn test_mixed_priority_promotion_idempotence() {
     // Ensure target task is scheduled before lower priority ready tasks
     if let (Some(target_pos), Some(low_prio_pos)) = (
         single_sequence.iter().position(|&t| t == target_task.0),
-        single_sequence.iter().position(|&t| t == TaskId::new_for_test(1001, 0)),
+        single_sequence
+            .iter()
+            .position(|&t| t == TaskId::new_for_test(1001, 0)),
     ) {
         assert!(
             target_pos < low_prio_pos,

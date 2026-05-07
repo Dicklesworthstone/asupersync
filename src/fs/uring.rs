@@ -1332,7 +1332,8 @@ mod tests {
 
             let file = IoUringFile::open(&path).unwrap();
 
-            file.submit_unknown_nop_for_test(UNKNOWN_CQE_USER_DATA).unwrap();
+            file.submit_unknown_nop_for_test(UNKNOWN_CQE_USER_DATA)
+                .unwrap();
 
             let mut buf = [0u8; 5];
             let n = file.read(&mut buf).await.unwrap();
@@ -1361,7 +1362,8 @@ mod tests {
             )
             .unwrap();
 
-            file.submit_unknown_nop_for_test(UNKNOWN_CQE_USER_DATA).unwrap();
+            file.submit_unknown_nop_for_test(UNKNOWN_CQE_USER_DATA)
+                .unwrap();
 
             let n = file.write(b"hello").await.unwrap();
             crate::assert_with_log!(n == 5, "write length", 5usize, n);
@@ -1391,7 +1393,8 @@ mod tests {
 
             let file = IoUringFile::open_with_flags(&path, libc::O_RDWR, 0).unwrap();
 
-            file.submit_unknown_nop_for_test(UNKNOWN_CQE_USER_DATA).unwrap();
+            file.submit_unknown_nop_for_test(UNKNOWN_CQE_USER_DATA)
+                .unwrap();
 
             file.sync_all().await.unwrap();
             drop(file);

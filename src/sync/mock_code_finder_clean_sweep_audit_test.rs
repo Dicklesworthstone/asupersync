@@ -107,9 +107,9 @@ mod mock_code_finder_audit {
         for line in &panic_lines {
             // Verify no panic contains "not implemented" or similar stub messages
             assert!(
-                !line.to_lowercase().contains("not implemented") &&
-                !line.to_lowercase().contains("unimplemented") &&
-                !line.to_lowercase().contains("todo"),
+                !line.to_lowercase().contains("not implemented")
+                    && !line.to_lowercase().contains("unimplemented")
+                    && !line.to_lowercase().contains("todo"),
                 "Found potential implementation stub panic: {}",
                 line
             );
@@ -144,7 +144,13 @@ mod mock_code_finder_audit {
     #[test]
     fn audit_sleep_calls_are_test_coordination() {
         let output = Command::new("rg")
-            .args(&["-n", "sleep\\(|thread::sleep", "src/sync/", "--type", "rust"])
+            .args(&[
+                "-n",
+                "sleep\\(|thread::sleep",
+                "src/sync/",
+                "--type",
+                "rust",
+            ])
             .output()
             .expect("ripgrep should be available");
 
@@ -153,9 +159,9 @@ mod mock_code_finder_audit {
         let non_test_sleep: Vec<&str> = stdout_str
             .lines()
             .filter(|line| {
-                !line.contains("test") &&
-                !line.contains("#[cfg(test)]") &&
-                !line.contains("mod test")
+                !line.contains("test")
+                    && !line.contains("#[cfg(test)]")
+                    && !line.contains("mod test")
             })
             .collect();
 
@@ -170,7 +176,13 @@ mod mock_code_finder_audit {
     #[test]
     fn audit_no_todo_fixme_comments() {
         let output = Command::new("rg")
-            .args(&["-n", "TODO|FIXME|HACK|XXX|STUB|PLACEHOLDER", "src/sync/", "--type", "rust"])
+            .args(&[
+                "-n",
+                "TODO|FIXME|HACK|XXX|STUB|PLACEHOLDER",
+                "src/sync/",
+                "--type",
+                "rust",
+            ])
             .output()
             .expect("ripgrep should be available");
 

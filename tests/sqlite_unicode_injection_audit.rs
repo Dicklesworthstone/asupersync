@@ -11,8 +11,8 @@ use asupersync::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
 use asupersync::cx::Cx;
 use asupersync::database::{SqliteConnection, SqliteRow, SqliteValue};
 use asupersync::test_utils::init_test_logging;
-use asupersync::util::ArenaIndex;
 use asupersync::types::{Budget, RegionId, TaskId};
+use asupersync::util::ArenaIndex;
 
 fn create_test_cx() -> Cx {
     Cx::new(

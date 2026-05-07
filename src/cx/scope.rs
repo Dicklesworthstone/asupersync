@@ -99,8 +99,8 @@
 use crate::channel::oneshot;
 use crate::combinator::{Either, Select};
 use crate::cx::{Cx, cap};
-use crate::record::task::TaskState;
 use crate::record::AdmissionError;
+use crate::record::task::TaskState;
 use crate::runtime::task_handle::{JoinError, TaskHandle};
 use crate::runtime::{RegionCreateError, RuntimeState, SpawnError, StoredTask};
 use crate::tracing_compat::{debug, debug_span};
@@ -400,8 +400,16 @@ impl<P: Policy> Scope<'_, P> {
             record.set_cx(child_cx_full.clone());
         }
 
-        // Capture child_cx for result sending
-        let cx_for_send = child_cx_full;
+        // br-asupersync-qg5th0: result delivery through `tx.send_blocking`
+        // (no Cx) instead of `tx.send(&cx_for_send, ...)`. The wrapped
+        // future runs under the task's own Cx, which gets cancelled on
+        // `handle.abort()` or region cancel. Routing the deliver-result
+        // step through that same Cx caused `tx.send` to fail with
+        // `SendError::Cancelled` exactly when the task explicitly
+        // observed cancellation and tried to return its
+        // cancellation-aware payload (e.g. `"cancelled"`). Without the
+        // Cx-cancel check the post-completion delivery is unconditional,
+        // which is what consumers of `TaskHandle::join` expect.
 
         // Instantiate the future with the child context.
         // We use a guard to rollback task creation if the factory panics.
@@ -446,16 +454,13 @@ impl<P: Policy> Scope<'_, P> {
             let result_result = CatchUnwind { inner: future }.await;
             match result_result {
                 Ok(result) => {
-                    let _ = tx.send(&cx_for_send, Ok(result));
+                    let _ = tx.send_blocking(Ok(result));
                     crate::types::Outcome::Ok(())
                 }
                 Err(payload) => {
                     let msg = payload_to_string(&payload);
                     let panic_payload = PanicPayload::new(msg);
-                    let _ = tx.send(
-                        &cx_for_send,
-                        Err(JoinError::Panicked(panic_payload.clone())),
-                    );
+                    let _ = tx.send_blocking(Err(JoinError::Panicked(panic_payload.clone())));
                     crate::types::Outcome::Panicked(panic_payload)
                 }
             }
@@ -645,8 +650,9 @@ impl<P: Policy> Scope<'_, P> {
             record.set_cx(child_cx_full.clone());
         }
 
-        // Capture child_cx for result sending
-        let cx_for_send = child_cx_full;
+        // br-asupersync-qg5th0: see comment on the `spawn` sibling above —
+        // result delivery uses `result_tx.send_blocking` so a cancelled
+        // task can still publish its cancellation-aware payload.
 
         // Instantiate the future with the child context.
         // We use a guard to rollback task creation if the factory panics.
@@ -687,16 +693,14 @@ impl<P: Policy> Scope<'_, P> {
             let result_result = CatchUnwind { inner: future }.await;
             match result_result {
                 Ok(result) => {
-                    let _ = result_tx.send(&cx_for_send, Ok(result));
+                    let _ = result_tx.send_blocking(Ok(result));
                     crate::types::Outcome::Ok(())
                 }
                 Err(payload) => {
                     let msg = payload_to_string(&payload);
                     let panic_payload = PanicPayload::new(msg);
-                    let _ = result_tx.send(
-                        &cx_for_send,
-                        Err(JoinError::Panicked(panic_payload.clone())),
-                    );
+                    let _ =
+                        result_tx.send_blocking(Err(JoinError::Panicked(panic_payload.clone())));
                     crate::types::Outcome::Panicked(panic_payload)
                 }
             }
@@ -811,8 +815,9 @@ impl<P: Policy> Scope<'_, P> {
             record.set_cx(child_cx_full.clone());
         }
 
-        // Capture child_cx for result sending
-        let cx_for_send = child_cx_full;
+        // br-asupersync-qg5th0: see comment on the `spawn` sibling above —
+        // result delivery uses `tx.send_blocking` so a cancelled blocking
+        // task can still publish its cancellation-aware payload.
 
         // For Phase 0, we run blocking code as an async task
         // In Phase 1+, this would spawn on a blocking thread pool
@@ -822,16 +827,13 @@ impl<P: Policy> Scope<'_, P> {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(child_cx)));
             match result {
                 Ok(res) => {
-                    let _ = tx.send(&cx_for_send, Ok(res));
+                    let _ = tx.send_blocking(Ok(res));
                     crate::types::Outcome::Ok(())
                 }
                 Err(payload) => {
                     let msg = payload_to_string(&payload);
                     let panic_payload = PanicPayload::new(msg);
-                    let _ = tx.send(
-                        &cx_for_send,
-                        Err(JoinError::Panicked(panic_payload.clone())),
-                    );
+                    let _ = tx.send_blocking(Err(JoinError::Panicked(panic_payload.clone())));
                     crate::types::Outcome::Panicked(panic_payload)
                 }
             }
@@ -911,13 +913,31 @@ impl<P: Policy> Scope<'_, P> {
                 // was scheduled. The matching TaskRecord is orphaned in
                 // `TaskState::Created` — no executor will ever poll it, so
                 // `region.task_count()` stays > 0 and `advance_region_state`
-                // loops forever in Closing. Rip out any such Created-state
+                // loops forever in Closing. Rip out any such never-polled
                 // records bound to this child region so the region can reach
                 // Finalizing and the surrounding close future can complete.
+                //
+                // br-asupersync-qg5th0: the `cancel_request` call above
+                // transitions every region task from `Created` into
+                // `CancelRequested { .. }` before this filter runs, so
+                // matching on `Created` alone misses orphans whose state
+                // was just bumped by the cancel pass. An unpolled task can
+                // only ever reach `Created` or `CancelRequested` — anything
+                // beyond requires the task to have been polled at least
+                // once (which means `cancel_request` reached the executor,
+                // which means the StoredTask was scheduled, which is
+                // exactly what an orphan is not). Match both variants so
+                // the orphan reap is robust to the cancel pass that
+                // immediately precedes it.
                 let orphan_task_ids: Vec<TaskId> = state
                     .tasks_iter()
                     .filter_map(|(_, t)| {
-                        if t.owner == child_region && matches!(t.state, TaskState::Created) {
+                        if t.owner == child_region
+                            && matches!(
+                                t.state,
+                                TaskState::Created | TaskState::CancelRequested { .. }
+                            )
+                        {
                             Some(t.id)
                         } else {
                             None

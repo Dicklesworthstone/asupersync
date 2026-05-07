@@ -383,8 +383,7 @@ mod behavioral {
             "panic must produce 500 status",
         );
         assert_eq!(
-            &*resp.body,
-            b"Internal Server Error",
+            &*resp.body, b"Internal Server Error",
             "body must be the fixed canned string — the panic \
              message MUST NOT appear here (information leakage)",
         );

@@ -10,9 +10,9 @@
 //! The server MUST reject this by NOT setting any Access-Control-Allow-Origin header,
 //! causing the browser to block the request. This prevents credential reflection attacks.
 
+use asupersync::web::extract::Request;
 use asupersync::web::middleware::{CorsMiddleware, CorsPolicy};
 use asupersync::web::{FnHandler, Handler, StatusCode};
-use asupersync::web::extract::Request;
 
 fn ok_handler() -> asupersync::web::Response {
     asupersync::web::Response::new(StatusCode::OK, "test response")

@@ -153,8 +153,8 @@ fn redis_subscribe_psubscribe_unsubscribe_discrimination_audit() {
         RespValue::Integer(0),
     ]));
 
-    let unsubscribe_event =
-        parse_pubsub_event_for_fuzz(unsubscribe_ack).expect("UNSUBSCRIBE ack should parse correctly");
+    let unsubscribe_event = parse_pubsub_event_for_fuzz(unsubscribe_ack)
+        .expect("UNSUBSCRIBE ack should parse correctly");
 
     match unsubscribe_event {
         PubSubEvent::Subscription {

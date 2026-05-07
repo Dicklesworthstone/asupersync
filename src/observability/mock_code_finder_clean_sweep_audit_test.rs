@@ -35,7 +35,13 @@ mod mock_code_finder_audit {
     #[test]
     fn audit_no_unimplemented_macros() {
         let output = Command::new("rg")
-            .args(&["-n", "unimplemented!", "src/observability/", "--type", "rust"])
+            .args(&[
+                "-n",
+                "unimplemented!",
+                "src/observability/",
+                "--type",
+                "rust",
+            ])
             .output()
             .expect("ripgrep should be available");
 
@@ -105,9 +111,9 @@ mod mock_code_finder_audit {
         for line in &panic_lines {
             // Verify no panic contains "not implemented" or similar stub messages
             assert!(
-                !line.to_lowercase().contains("not implemented") &&
-                !line.to_lowercase().contains("unimplemented") &&
-                !line.to_lowercase().contains("todo"),
+                !line.to_lowercase().contains("not implemented")
+                    && !line.to_lowercase().contains("unimplemented")
+                    && !line.to_lowercase().contains("todo"),
                 "Found potential implementation stub panic: {}",
                 line
             );
@@ -128,7 +134,13 @@ mod mock_code_finder_audit {
         // for when metrics are disabled. Empty function bodies are correct.
 
         let output = Command::new("rg")
-            .args(&["-n", "struct NoOpMetrics", "src/observability/", "--type", "rust"])
+            .args(&[
+                "-n",
+                "struct NoOpMetrics",
+                "src/observability/",
+                "--type",
+                "rust",
+            ])
             .output()
             .expect("ripgrep should be available");
 
@@ -145,7 +157,13 @@ mod mock_code_finder_audit {
     #[test]
     fn audit_no_501_not_implemented_responses() {
         let output = Command::new("rg")
-            .args(&["-n", "501.*[Nn]ot [Ii]mplemented", "src/observability/", "--type", "rust"])
+            .args(&[
+                "-n",
+                "501.*[Nn]ot [Ii]mplemented",
+                "src/observability/",
+                "--type",
+                "rust",
+            ])
             .output()
             .expect("ripgrep should be available");
 
@@ -154,10 +172,10 @@ mod mock_code_finder_audit {
         let non_test_501: Vec<&str> = stdout
             .lines()
             .filter(|line| {
-                !line.contains("test") &&
-                !line.contains("vec!") &&
-                !line.contains("codes =") &&
-                !line.contains("[")
+                !line.contains("test")
+                    && !line.contains("vec!")
+                    && !line.contains("codes =")
+                    && !line.contains("[")
             })
             .collect();
 

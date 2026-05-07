@@ -193,7 +193,7 @@ impl LocalQueue {
     /// - Combined queue+presence operations under single lock
     /// - Relaxed atomic ordering for better performance
     /// - Minimal lock hold time with strategic early release
-    #[inline(always)]
+    #[inline]
     pub fn push(&self, task: TaskId) {
         let mut inner = self.inner.lock();
         inner.queue.push(task);
@@ -219,7 +219,7 @@ impl LocalQueue {
     /// br-asupersync-34fz4v: Optimized TLS fast path:
     /// - Relaxed ordering for local queue updates
     /// - Force inline for critical scheduling path
-    #[inline(always)]
+    #[inline]
     fn schedule_local_push(&self, task: TaskId) -> bool {
         self.tasks.with_tasks_arena_mut(|arena| {
             if arena.get(task.arena_index()).is_none() {
@@ -246,7 +246,7 @@ impl LocalQueue {
     /// - Precise memory reservations to avoid reallocations
     /// - Single atomic update for entire batch
     /// - Relaxed ordering for local operations
-    #[inline(always)]
+    #[inline]
     pub fn push_many(&self, tasks: &[TaskId]) {
         if tasks.is_empty() {
             return;
@@ -275,7 +275,7 @@ impl LocalQueue {
     /// - Early return for empty queue using fast atomic check
     /// - Combined pop+presence operations under single lock
     /// - Relaxed atomic ordering for better performance
-    #[inline(always)]
+    #[inline]
     #[must_use]
     pub fn pop(&self) -> Option<TaskId> {
         // Fast path: if queue is likely empty, avoid locking entirely
@@ -306,7 +306,7 @@ impl LocalQueue {
     /// br-asupersync-34fz4v: Optimized for hotpath performance:
     /// - Relaxed ordering for lower overhead (backoff loops don't need strict ordering)
     /// - Force inline for zero-cost abstraction
-    #[inline(always)]
+    #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.cached_len.load(Ordering::Relaxed) == 0
@@ -322,7 +322,7 @@ impl LocalQueue {
     /// br-asupersync-34fz4v: Optimized for hotpath performance:
     /// - Relaxed ordering for lower overhead (most callers don't need strict ordering)
     /// - Force inline for zero-cost abstraction
-    #[inline(always)]
+    #[inline]
     #[must_use]
     pub fn len(&self) -> usize {
         self.cached_len.load(Ordering::Relaxed)

@@ -476,21 +476,26 @@ fn parse_header_line_bounds(line_bytes: &[u8]) -> Result<(usize, usize, usize), 
     Ok((colon, value_start, value_end))
 }
 
-/// br-asupersync-135g0e: returns `true` for header field names that RFC 9110
-/// §6.5.1 forbids in the trailer section. The list is conservative — it
+/// br-asupersync-135g0e + br-asupersync-ko0gde: returns `true` for header
+/// field names that RFC 9110 §6.5.2 forbids in the trailer section. The list
 /// covers framing, routing, request-modifier, authentication, payload-
 /// processing, and cache-control fields that an intermediary might rely on
 /// when forwarding the message. Comparison is case-insensitive per RFC 9110
 /// §5.1 ("field names are case-insensitive").
 fn is_forbidden_trailer(name: &str) -> bool {
-    // Sorted alphabetically for review. Keep in sync with RFC 9110 §6.5.1
-    // and the related security guidance in §17.13.
+    // Sorted alphabetically for review. Keep in sync with RFC 9110 §6.5.2's
+    // restricted-fields table and the related security guidance in §17.13.
     const FORBIDDEN: &[&str] = &[
         // Authentication / authorization.
         "authorization",
         // Cache control.
         "age",
         "cache-control",
+        // Hop-by-hop framing fields explicitly listed in RFC 9110 §6.5.2.
+        // A coalescing proxy that treats trailers as headers could otherwise
+        // honour a smuggled `Connection: x-secret` and strip x-secret on
+        // the next hop, or terminate the connection unexpectedly.
+        "connection",
         // Payload processing & message framing.
         "content-encoding",
         "content-length",
@@ -504,11 +509,16 @@ fn is_forbidden_trailer(name: &str) -> bool {
         "expires",
         // Routing.
         "host",
+        // Legacy hop-by-hop framing — same semantics as Connection.
+        "keep-alive",
         // Request modifiers.
         "max-forwards",
         "pragma",
         "proxy-authenticate",
         "proxy-authorization",
+        // Not in RFC 9110's table but ubiquitous on the wire and routinely
+        // honoured as hop-state by proxies; share Connection's risk profile.
+        "proxy-connection",
         "range",
         "retry-after",
         "set-cookie",
@@ -1528,7 +1538,10 @@ mod tests {
     #[test]
     fn decode_chunked_rejects_forbidden_trailers() {
         // Each entry is a forbidden trailer name. `decode_one` must reach
-        // chunked-trailer parsing and return BadHeader.
+        // chunked-trailer parsing and return BadHeader. The set covers
+        // RFC 9110 §6.5.2's restricted-fields table plus the legacy
+        // hop-by-hop fields (Keep-Alive, Proxy-Connection) that share the
+        // same framing-critical semantics.
         let forbidden = [
             "Content-Length",
             "Transfer-Encoding",
@@ -1552,6 +1565,19 @@ mod tests {
             "Proxy-Authenticate",
             "WWW-Authenticate",
             "Upgrade",
+            // br-asupersync-ko0gde: hop-by-hop fields explicitly listed in
+            // RFC 9110 §6.5.2's restricted-fields table. A trailer
+            // `Connection: x-secret` could be coalesced into a downstream
+            // proxy's header set and used as a request-smuggling primitive
+            // (the proxy would then strip `x-secret` on the next hop).
+            "Connection",
+            "connection",
+            "Keep-Alive",
+            "keep-alive",
+            // Not standardized but implemented by widely deployed proxies;
+            // shares the same framing semantics as Connection.
+            "Proxy-Connection",
+            "proxy-connection",
         ];
         for name in forbidden {
             let raw = format!(

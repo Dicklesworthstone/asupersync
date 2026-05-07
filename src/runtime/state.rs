@@ -109,8 +109,8 @@ struct ReadBiasedDrainingRegionSnapshot {
 impl Default for ReadBiasedDrainingRegionSnapshot {
     fn default() -> Self {
         Self {
-            enabled: AtomicBool::new(true),  // Enable cache by default for performance
-            valid: AtomicBool::new(false),   // Invalid initially until first scan
+            enabled: AtomicBool::new(true), // Enable cache by default for performance
+            valid: AtomicBool::new(false),  // Invalid initially until first scan
             cached_count: AtomicUsize::new(0),
             writes_since_last_read: AtomicUsize::new(0),
             cache_hits: AtomicU64::new(0),

@@ -116,7 +116,8 @@ mod h1_h2_conformance_tests {
         assert!(
             headers_equivalent(&h1_equivalent, &h2_map),
             "H1 and H2 should produce equivalent HeaderMaps for simple header\nH1: {:#?}\nH2: {:#?}",
-            h1_equivalent, h2_map
+            h1_equivalent,
+            h2_map
         );
     }
 
@@ -125,7 +126,7 @@ mod h1_h2_conformance_tests {
         // H1 with mixed case (should normalize to lowercase)
         let h1_equivalent = create_h1_equivalent_map(&[
             ("content-type", "application/json"),
-            ("accept-encoding", "gzip")
+            ("accept-encoding", "gzip"),
         ]);
 
         // H2 with lowercase names (standard)
@@ -149,10 +150,8 @@ mod h1_h2_conformance_tests {
     #[test]
     fn multiple_headers_same_name() {
         // Multiple Set-Cookie headers (should preserve both)
-        let h1_equivalent = create_h1_equivalent_map(&[
-            ("set-cookie", "session=123"),
-            ("set-cookie", "csrf=456")
-        ]);
+        let h1_equivalent =
+            create_h1_equivalent_map(&[("set-cookie", "session=123"), ("set-cookie", "csrf=456")]);
 
         let mut wire_bytes = Vec::new();
         wire_bytes.extend(encode_literal_header("set-cookie", "session=123"));
@@ -185,9 +184,8 @@ mod h1_h2_conformance_tests {
     #[test]
     fn special_character_preservation() {
         // Test header values with special characters
-        let h1_equivalent = create_h1_equivalent_map(&[
-            ("authorization", "Bearer token123!@#$%^&*()")
-        ]);
+        let h1_equivalent =
+            create_h1_equivalent_map(&[("authorization", "Bearer token123!@#$%^&*()")]);
 
         let wire_bytes = encode_literal_header("authorization", "Bearer token123!@#$%^&*()");
 
@@ -242,8 +240,10 @@ mod integration_tests {
         let map1 = create_h1_equivalent_map(&[("Content-Type", "text/html")]);
         let map2 = create_h1_equivalent_map(&[("content-type", "text/html")]);
 
-        assert!(headers_equivalent(&map1, &map2),
-                "Case differences should not affect equivalence");
+        assert!(
+            headers_equivalent(&map1, &map2),
+            "Case differences should not affect equivalence"
+        );
     }
 }
 

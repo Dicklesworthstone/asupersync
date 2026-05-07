@@ -6192,8 +6192,16 @@ mod tests {
         }
 
         // Verify neither waker has been called yet
-        assert_eq!(sender_wake_count.load(Ordering::SeqCst), 0, "sender should not be woken yet");
-        assert_eq!(receiver_wake_count.load(Ordering::SeqCst), 0, "receiver should not be woken yet");
+        assert_eq!(
+            sender_wake_count.load(Ordering::SeqCst),
+            0,
+            "sender should not be woken yet"
+        );
+        assert_eq!(
+            receiver_wake_count.load(Ordering::SeqCst),
+            0,
+            "receiver should not be woken yet"
+        );
 
         // Drop the receiver - this should wake the sender's poll_closed but not interfere
         // with receiver waker identity system
@@ -6210,7 +6218,10 @@ mod tests {
             );
         }
 
-        assert!(sender_wake_count.load(Ordering::SeqCst) > 0, "sender waker should have been called");
+        assert!(
+            sender_wake_count.load(Ordering::SeqCst) > 0,
+            "sender waker should have been called"
+        );
 
         crate::test_complete!("sender_poll_closed_waker_isolation");
     }
