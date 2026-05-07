@@ -123,6 +123,25 @@ fn unified_runner_supports_suite_filter() {
     }
 }
 
+#[test]
+fn unified_runner_uses_explicit_suite_dispatch() {
+    let script = load_runner();
+    let forbidden = ["ev", "al \"$cmd\""].concat();
+
+    assert!(
+        !script.contains(&forbidden),
+        "Runner must not execute suite command metadata through a shell string"
+    );
+    assert!(
+        script.contains("run_suite_command()"),
+        "Runner must expose an explicit suite dispatcher"
+    );
+    assert!(
+        script.contains("run_suite_command \"$suite\""),
+        "Runner must route suite execution through explicit dispatch"
+    );
+}
+
 // ─── Report schema ──────────────────────────────────────────────
 
 #[test]

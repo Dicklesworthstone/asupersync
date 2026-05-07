@@ -142,6 +142,38 @@ SUITE_REQUIRED[logging_schema]=true
 SUITE_REQUIRED[lean_build]=false    # Requires Lean toolchain
 SUITE_REQUIRED[tla_check]=false     # Requires TLC
 
+run_suite_command() {
+  local suite="$1"
+
+  case "$suite" in
+    docs)
+      cargo test --test semantic_docs_lint --test semantic_docs_rule_mapping_lint
+      ;;
+    golden)
+      cargo test --test semantic_golden_fixture_validation
+      ;;
+    lean_validation)
+      cargo test --test semantic_lean_regression
+      ;;
+    tla_validation)
+      cargo test --test semantic_tla_scenarios
+      ;;
+    logging_schema)
+      cargo test --test semantic_log_schema_validation --test semantic_witness_replay_e2e
+      ;;
+    lean_build)
+      scripts/run_lean_regression.sh --json
+      ;;
+    tla_check)
+      scripts/run_tla_scenarios.sh --json
+      ;;
+    *)
+      echo "ERROR: Unknown suite command: $suite" >&2
+      return 2
+      ;;
+  esac
+}
+
 # Profile-based suite selection
 case "$PROFILE" in
   smoke)
@@ -350,7 +382,7 @@ for suite in $SUITES; do
 
   suite_output=""
   suite_exit=0
-  suite_output=$(cd "$PROJECT_ROOT" && eval "$cmd" 2>&1) || suite_exit=$?
+  suite_output=$(cd "$PROJECT_ROOT" && run_suite_command "$suite" 2>&1) || suite_exit=$?
 
   SUITE_END=$(date +%s)
   SUITE_DURATION=$((SUITE_END - SUITE_START))
