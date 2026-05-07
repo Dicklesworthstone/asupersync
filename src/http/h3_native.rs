@@ -10933,12 +10933,14 @@ mod tests {
         let result = qpack_decode_request_field_section(&wire, H3QpackMode::StaticOnly, None);
         assert!(result.is_ok(), "decode should succeed without limit");
 
-        // Test that decode succeeds with high limit (total size ~1016 bytes)
+        // RFC 9114 §4.2.2 size = sum(name.len()+value.len()+32) per field.
+        // 3 static (:method GET=42, :scheme https=44, :path /=38) + literal
+        // (x-large-header(14)+"a"*1000+32 = 1046) = 1170 bytes.
         let result = qpack_decode_request_field_section_with_limit(
             &wire,
             H3QpackMode::StaticOnly,
             None,
-            Some(1100),
+            Some(1200),
         );
         assert!(result.is_ok(), "decode should succeed with high limit");
 
