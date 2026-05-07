@@ -47,7 +47,8 @@
       "source_paths": [
         "Cargo.toml",
         "artifacts/no_tokio_feature_boundary_contract_v1.json",
-        "tests/no_tokio_feature_boundary_contract.rs"
+        "tests/no_tokio_feature_boundary_contract.rs",
+        "tests/no_tokio_production_feature_graph_regression.rs"
       ],
       "common_unrelated_blockers": [
         "Cargo.lock or dependency graph drift from unrelated feature work"
@@ -71,7 +72,8 @@
       "source_paths": [
         "Cargo.toml",
         "artifacts/no_tokio_feature_boundary_contract_v1.json",
-        "tests/no_tokio_feature_boundary_contract.rs"
+        "tests/no_tokio_feature_boundary_contract.rs",
+        "tests/no_tokio_production_feature_graph_regression.rs"
       ],
       "common_unrelated_blockers": [
         "opentelemetry or opentelemetry_sdk feature drift",
