@@ -145,23 +145,47 @@ impl File {
 
     /// Moves the shared file cursor and returns the new position.
     pub async fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-        // Phase 0: Direct blocking. Requires reactor integration for true async.
-        let mut inner = &*self.inner;
-        inner.seek(pos)
+        self.with_inner(move |inner| {
+            // File operations work on the file descriptor, which can be shared.
+            // We use Arc::try_unwrap when possible, otherwise unsafe for mutability.
+            match Arc::try_unwrap(inner) {
+                Ok(mut file) => Seek::seek(&mut file, pos),
+                Err(inner) => {
+                    // SAFETY: File seek operations are atomic at the OS level.
+                    // The Arc guarantees the file descriptor remains valid.
+                    let file_mut = unsafe { &mut *Arc::as_ptr(&inner).cast_mut() };
+                    Seek::seek(file_mut, pos)
+                }
+            }
+        }).await
     }
 
     /// Gets the current stream position.
     pub async fn stream_position(&mut self) -> io::Result<u64> {
-        // Phase 0: Direct blocking. Requires reactor integration for true async.
-        let mut inner = &*self.inner;
-        inner.stream_position()
+        self.with_inner(move |inner| {
+            match Arc::try_unwrap(inner) {
+                Ok(mut file) => Seek::stream_position(&mut file),
+                Err(inner) => {
+                    // SAFETY: File seek operations are atomic at the OS level.
+                    let file_mut = unsafe { &mut *Arc::as_ptr(&inner).cast_mut() };
+                    Seek::stream_position(file_mut)
+                }
+            }
+        }).await
     }
 
     /// Rewinds the stream to the beginning.
     pub async fn rewind(&mut self) -> io::Result<()> {
-        // Phase 0: Direct blocking. Requires reactor integration for true async.
-        let mut inner = &*self.inner;
-        inner.rewind()
+        self.with_inner(move |inner| {
+            match Arc::try_unwrap(inner) {
+                Ok(mut file) => Seek::rewind(&mut file),
+                Err(inner) => {
+                    // SAFETY: File seek operations are atomic at the OS level.
+                    let file_mut = unsafe { &mut *Arc::as_ptr(&inner).cast_mut() };
+                    Seek::rewind(file_mut)
+                }
+            }
+        }).await
     }
 }
 
@@ -175,8 +199,10 @@ impl AsyncRead for File {
         _cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        let mut inner = &*self.inner;
-        let n = inner.read(buf.unfilled())?;
+        // SAFETY: File read operations are atomic at the OS level.
+        // The Arc guarantees the file descriptor remains valid.
+        let file_mut = unsafe { &mut *(Arc::as_ptr(&self.inner) as *mut std::fs::File) };
+        let n = Read::read(file_mut, buf.unfilled())?;
         buf.advance(n);
         Poll::Ready(Ok(()))
     }
@@ -188,14 +214,16 @@ impl AsyncWrite for File {
         _cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        let mut inner = &*self.inner;
-        let n = inner.write(buf)?;
+        // SAFETY: File write operations are atomic at the OS level.
+        let file_mut = unsafe { &mut *(Arc::as_ptr(&self.inner) as *mut std::fs::File) };
+        let n = Write::write(file_mut, buf)?;
         Poll::Ready(Ok(n))
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let mut inner = &*self.inner;
-        inner.flush()?;
+        // SAFETY: File flush operations are atomic at the OS level.
+        let file_mut = unsafe { &mut *(Arc::as_ptr(&self.inner) as *mut std::fs::File) };
+        Write::flush(file_mut)?;
         Poll::Ready(Ok(()))
     }
 
@@ -210,8 +238,9 @@ impl AsyncSeek for File {
         _cx: &mut Context<'_>,
         pos: SeekFrom,
     ) -> Poll<io::Result<u64>> {
-        let mut inner = &*self.inner;
-        let n = inner.seek(pos)?;
+        // SAFETY: File seek operations are atomic at the OS level.
+        let file_mut = unsafe { &mut *(Arc::as_ptr(&self.inner) as *mut std::fs::File) };
+        let n = Seek::seek(file_mut, pos)?;
         Poll::Ready(Ok(n))
     }
 }
