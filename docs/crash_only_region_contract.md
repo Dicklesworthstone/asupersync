@@ -91,7 +91,7 @@ Four-phase protocol for restarting a crashed region without full runtime restart
 ## Validation
 
 ```bash
-rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa091 cargo test --test crash_only_region_contract -- --nocapture
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_crash_only_region cargo test -p asupersync --test crash_only_region_contract --features test-internals -- --nocapture
 ```
 
 ## Cross-References

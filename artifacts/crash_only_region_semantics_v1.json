@@ -225,17 +225,20 @@
     {
       "scenario_id": "COR-SMOKE-STATE-MACHINE",
       "description": "Validate crash state machine transitions and invariants",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa091 cargo test --test crash_only_region_contract state -- --nocapture"
+      "test_filter": "state",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_crash_only_region_COR_SMOKE_STATE_MACHINE cargo test -p asupersync --test crash_only_region_contract --features test-internals state -- --nocapture"
     },
     {
       "scenario_id": "COR-SMOKE-JOURNAL",
       "description": "Validate journal format, entry types, and ordering rules",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa091 cargo test --test crash_only_region_contract journal -- --nocapture"
+      "test_filter": "journal",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_crash_only_region_COR_SMOKE_JOURNAL cargo test -p asupersync --test crash_only_region_contract --features test-internals journal -- --nocapture"
     },
     {
       "scenario_id": "COR-SMOKE-MICROREBOOT",
       "description": "Validate microreboot protocol phases, budget, and cancellation interaction",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa091 cargo test --test crash_only_region_contract microreboot -- --nocapture"
+      "test_filter": "microreboot",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_crash_only_region_COR_SMOKE_MICROREBOOT cargo test -p asupersync --test crash_only_region_contract --features test-internals microreboot -- --nocapture"
     }
   ],
   "downstream_beads": [
