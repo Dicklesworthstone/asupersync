@@ -4,13 +4,11 @@
 //! whitespace, embedded NUL, CRLF in unexpected places.
 //!
 //! Invariants asserted:
-//!   * No panic on any byte sequence, including empty input.
+//!   * Parser panics, if any, surface directly to libFuzzer.
 //!   * Parser returns Result; on overflow / malformed it returns
 //!     `HttpError`, not a wrapped value.
 
 #![no_main]
-
-use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use asupersync::http::h1::codec::fuzz_parse_chunk_size_line;
 use libfuzzer_sys::fuzz_target;
@@ -22,12 +20,7 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    let r = catch_unwind(AssertUnwindSafe(|| fuzz_parse_chunk_size_line(data)));
-    assert!(
-        r.is_ok(),
-        "parse_chunk_size_line panicked on {} bytes",
-        data.len()
-    );
+    let _ = fuzz_parse_chunk_size_line(data);
 
     // Boundary candidates: well-formed hex sizes.
     for candidate in &[
@@ -41,7 +34,6 @@ fuzz_target!(|data: &[u8]| {
         b"".as_ref(),
         b"xyz\r\n".as_ref(), // not hex
     ] {
-        let r = catch_unwind(AssertUnwindSafe(|| fuzz_parse_chunk_size_line(candidate)));
-        assert!(r.is_ok(), "panicked on canonical input {candidate:?}");
+        let _ = fuzz_parse_chunk_size_line(candidate);
     }
 });
