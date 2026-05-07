@@ -1922,9 +1922,7 @@ mod tests {
             resp.set_cookies
         );
         assert!(
-            resp.set_cookies
-                .iter()
-                .any(|c| c.contains("session_id=")),
+            resp.set_cookies.iter().any(|c| c.contains("session_id=")),
             "session cookie must still be emitted alongside CSRF; got {:?}",
             resp.set_cookies
         );

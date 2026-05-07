@@ -211,8 +211,7 @@ impl Response {
     /// `set_header`, so CR/LF/NUL/control bytes can never split the
     /// header.
     pub fn append_set_cookie(&mut self, value: impl Into<String>) {
-        self.set_cookies
-            .push(sanitize_header_value(value.into()));
+        self.set_cookies.push(sanitize_header_value(value.into()));
     }
 
     /// Insert or replace a header while canonicalizing the stored name.

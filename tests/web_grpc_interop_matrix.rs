@@ -1266,7 +1266,7 @@ fn t61_life_01_session_middleware_full_lifecycle() {
     // First request: creates session.
     let resp1 = mw.call(Request::new("GET", "/"));
     assert_eq!(std::str::from_utf8(&resp1.body).unwrap(), "count=1");
-    let cookie1 = resp1.headers.get("set-cookie").unwrap().clone();
+    let cookie1 = resp1.set_cookies.first().unwrap().clone();
     assert!(cookie1.contains("sid="));
 
     // Extract session ID.

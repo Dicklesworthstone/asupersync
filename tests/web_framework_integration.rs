@@ -1212,7 +1212,7 @@ fn integration_session_basic() {
     assert_eq!(std::str::from_utf8(&resp.body).unwrap(), "session-ok");
 
     // Check that a set-cookie header was emitted
-    let set_cookie = resp.headers.get("set-cookie");
+    let set_cookie = resp.set_cookies.first();
     assert!(
         set_cookie.is_some(),
         "expected set-cookie header for new session"

@@ -606,8 +606,8 @@ mod tests {
         assert_eq!(resp.status, StatusCode::OK);
         assert!(!resp.headers.contains_key("content-encoding"));
         assert_eq!(
-            resp.headers.get("set-cookie"),
-            Some(&"session=secret; HttpOnly; Secure".to_string())
+            resp.set_cookies.first().map(String::as_str),
+            Some("session=secret; HttpOnly; Secure")
         );
         assert!(vary_contains(&resp, "accept-encoding"));
     }
