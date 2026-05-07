@@ -1,5 +1,3 @@
-#![allow(unsafe_code)]
-
 //! Audit + regression test for `Select` combinator fairness
 //! when both arms are ready simultaneously.
 //!
