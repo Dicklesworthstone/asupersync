@@ -133,6 +133,7 @@ struct OneShotInner<T> {
     /// Whether a permit is currently outstanding.
     permit_outstanding: bool,
     /// The waker to notify when a value is sent or the channel is closed.
+    /// Used by receiver futures with coordinated waiter identity system.
     waker: Option<Waker>,
     /// Monotonic waiter identity for the registered waker.
     ///
@@ -141,6 +142,9 @@ struct OneShotInner<T> {
     waker_id: Option<u64>,
     /// Next waiter identity to assign.
     next_waiter_id: u64,
+    /// The waker to notify sender when receiver is dropped.
+    /// Used by Sender::poll_closed, separate from receiver waker system.
+    sender_waker: Option<Waker>,
 }
 
 impl<T> OneShotInner<T> {
@@ -154,6 +158,7 @@ impl<T> OneShotInner<T> {
             waker: None,
             waker_id: None,
             next_waiter_id: 0,
+            sender_waker: None,
         }
     }
 
@@ -340,8 +345,9 @@ impl<T> Sender<T> {
             return std::task::Poll::Ready(());
         }
 
-        // Receiver still alive, register waker for notification when it drops
-        inner.waker = Some(cx.waker().clone());
+        // Receiver still alive, register sender waker for notification when it drops.
+        // Use separate sender_waker to avoid interfering with receiver's waker identity system.
+        inner.sender_waker = Some(cx.waker().clone());
         std::task::Poll::Pending
     }
 }
@@ -799,14 +805,21 @@ impl<T> Receiver<T> {
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        let _value = {
+        let (sender_waker, _value) = {
             let mut inner = self.inner.lock();
             inner.receiver_dropped = true;
             // Clear any pending recv waker so a dropped receiver does not
             // retain executor task state indefinitely.
             inner.clear_waker();
-            inner.value.take()
+            // Take sender waker to notify poll_closed waiters
+            let sender_waker = inner.sender_waker.take();
+            let value = inner.value.take();
+            (sender_waker, value)
         };
+        // Wake sender waker outside lock to avoid deadlock
+        if let Some(waker) = sender_waker {
+            waker.wake();
+        }
     }
 }
 
@@ -6129,6 +6142,77 @@ mod tests {
         crate::test_complete!(
             "audit_try_recv_unpopulated_future_send_interaction_value_preservation"
         );
+    }
+
+    #[test]
+    fn sender_poll_closed_waker_isolation() {
+        //! Test that Sender::poll_closed uses separate waker and doesn't
+        //! interfere with receiver waker identity system. This prevents
+        //! waker races where sender poll_closed could overwrite receiver
+        //! wakers and cause lost wakeups.
+
+        init_test("sender_poll_closed_waker_isolation");
+        let cx = test_cx();
+
+        let (mut tx, mut rx) = channel::<i32>();
+
+        // Set up tracking for waker calls using existing TestWaker
+        let sender_wake_count = Arc::new(AtomicUsize::new(0));
+        let receiver_wake_count = Arc::new(AtomicUsize::new(0));
+
+        // Create custom wakers to track when each gets called
+        let sender_waker = std::task::Waker::from(Arc::new(TestWaker {
+            wake_count: Arc::clone(&sender_wake_count),
+        }));
+
+        let receiver_waker = std::task::Waker::from(Arc::new(TestWaker {
+            wake_count: Arc::clone(&receiver_wake_count),
+        }));
+
+        // Start receiver recv (this should register receiver waker)
+        let recv_future = rx.recv(&cx);
+        let mut recv_future = Box::pin(recv_future);
+        {
+            let mut recv_ctx = std::task::Context::from_waker(&receiver_waker);
+            let poll_result = recv_future.as_mut().poll(&mut recv_ctx);
+            assert!(
+                matches!(poll_result, Poll::Pending),
+                "recv should be pending initially"
+            );
+        }
+
+        // Poll sender closed (this should register sender waker without interfering)
+        {
+            let mut sender_ctx = std::task::Context::from_waker(&sender_waker);
+            let poll_result = tx.poll_closed(&mut sender_ctx);
+            assert!(
+                matches!(poll_result, Poll::Pending),
+                "poll_closed should be pending while receiver alive"
+            );
+        }
+
+        // Verify neither waker has been called yet
+        assert_eq!(sender_wake_count.load(Ordering::SeqCst), 0, "sender should not be woken yet");
+        assert_eq!(receiver_wake_count.load(Ordering::SeqCst), 0, "receiver should not be woken yet");
+
+        // Drop the receiver - this should wake the sender's poll_closed but not interfere
+        // with receiver waker identity system
+        drop(recv_future);
+        drop(rx);
+
+        // Sender poll_closed should now be ready and sender waker should have been called
+        {
+            let mut sender_ctx = std::task::Context::from_waker(&sender_waker);
+            let poll_result = tx.poll_closed(&mut sender_ctx);
+            assert!(
+                matches!(poll_result, Poll::Ready(())),
+                "poll_closed should be ready after receiver drop"
+            );
+        }
+
+        assert!(sender_wake_count.load(Ordering::SeqCst) > 0, "sender waker should have been called");
+
+        crate::test_complete!("sender_poll_closed_waker_isolation");
     }
 
     #[test]
