@@ -498,6 +498,82 @@ impl ResponseBuildingConformanceTester {
             compliance_score,
         }
     }
+
+    /// Generate a markdown report from the compliance results.
+    pub fn generate_markdown_report(&self, report: &ResponseBuildingComplianceReport) -> String {
+        let mut output = String::new();
+
+        output.push_str("# HTTP/1.1 Response Building Conformance Report\n\n");
+        output.push_str(&format!("**Test Run ID:** {}\n", report.test_run_id));
+        output.push_str(&format!("**Timestamp:** {}\n", report.timestamp));
+        output.push_str(&format!("**Total Test Cases:** {}\n\n", report.total_cases));
+
+        output.push_str("## Summary\n\n");
+        output.push_str(&format!(
+            "- ✅ **Passed:** {} tests\n",
+            report.summary.passed
+        ));
+        output.push_str(&format!(
+            "- ❌ **Failed:** {} tests\n",
+            report.summary.failed
+        ));
+        output.push_str(&format!(
+            "- ⚠️  **Expected Failures:** {} tests\n",
+            report.summary.expected_failures
+        ));
+        output.push_str(&format!(
+            "- ⏭️  **Skipped:** {} tests\n",
+            report.summary.skipped
+        ));
+        output.push_str(&format!(
+            "- 🎯 **Compliance Score:** {:.1}%\n\n",
+            report.summary.compliance_score * 100.0
+        ));
+
+        if report.summary.failed > 0 {
+            output.push_str("## Failed Test Cases\n\n");
+            for result in &report.results {
+                if result.verdict == ResponseBuildingTestVerdict::Fail {
+                    output.push_str(&format!("### {}\n", result.case_id));
+                    if let Some(error) = &result.error {
+                        output.push_str(&format!("**Error:** {}\n", error));
+                    }
+                    output.push_str(&format!("**Bytes match:** {}\n", result.bytes_match));
+                    output.push_str(&format!(
+                        "**Asupersync output:** {} bytes\n",
+                        result.asupersync_size
+                    ));
+                    output.push_str(&format!(
+                        "**Hyper simulation:** {} bytes\n\n",
+                        result.hyper_size
+                    ));
+                }
+            }
+        }
+
+        output.push_str("## All Test Results\n\n");
+        output.push_str(
+            "| Case ID | Verdict | Bytes Match | Asupersync Size | Hyper Size | Error |\n",
+        );
+        output.push_str(
+            "|---------|---------|-------------|-----------------|------------|-------|\n",
+        );
+
+        for result in &report.results {
+            let error_str = result.error.as_deref().unwrap_or("-");
+            output.push_str(&format!(
+                "| {} | {} | {} | {} | {} | {} |\n",
+                result.case_id,
+                result.verdict,
+                result.bytes_match,
+                result.asupersync_size,
+                result.hyper_size,
+                error_str
+            ));
+        }
+
+        output
+    }
 }
 
 impl Default for ResponseBuildingConformanceTester {
