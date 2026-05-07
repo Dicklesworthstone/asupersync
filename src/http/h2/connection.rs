@@ -588,16 +588,27 @@ impl Connection {
             ));
         }
 
-        // Check for CONTINUATION requirement
-        if let Some(expected_stream) = self.continuation_stream_id {
-            match &frame {
-                Frame::Continuation(cont) if cont.stream_id == expected_stream => {
-                    // Valid continuation, process below
-                }
-                _ => {
-                    return Err(H2Error::protocol("expected CONTINUATION frame"));
-                }
+        // RFC 9113 §6.10: CONTINUATION frame sequencing. Either side of the
+        // boundary is a connection-level PROTOCOL_ERROR.
+        match (&frame, self.continuation_stream_id) {
+            // Mid-sequence: only CONTINUATION on the expected stream is
+            // valid; anything else (including CONTINUATION on a different
+            // stream) terminates the connection.
+            (Frame::Continuation(cont), Some(expected)) if cont.stream_id == expected => {}
+            (_, Some(_)) => {
+                return Err(H2Error::protocol("expected CONTINUATION frame"));
             }
+            // br-asupersync-pxb77u: outside a sequence, CONTINUATION is
+            // forbidden. Pre-fix paths returned a stream-level
+            // PROTOCOL_ERROR via stream.recv_continuation when the stream
+            // existed but headers were complete — non-conformant with
+            // §6.10's connection-error mandate.
+            (Frame::Continuation(_), None) => {
+                return Err(H2Error::protocol(
+                    "CONTINUATION without preceding HEADERS/PUSH_PROMISE (RFC 9113 §6.10)",
+                ));
+            }
+            (_, None) => {}
         }
 
         // br-asupersync-lcvdj0: RFC 9113 §3.4 / §3.5 — the first frame
