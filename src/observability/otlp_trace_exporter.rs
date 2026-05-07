@@ -232,7 +232,6 @@ pub struct BoundedExportQueue<T> {
     queue: ArrayQueue<T>,
     capacity: usize,
     dropped_count: AtomicU64,
-    overflow_lock: Mutex<()>,
 }
 
 impl<T> BoundedExportQueue<T> {
@@ -242,44 +241,25 @@ impl<T> BoundedExportQueue<T> {
             queue: ArrayQueue::new(capacity),
             capacity,
             dropped_count: AtomicU64::new(0),
-            overflow_lock: Mutex::new(()),
         }
     }
 
     /// Enqueue an item, dropping the oldest if capacity is exceeded.
     /// Returns the dropped item when load shedding occurs.
     ///
-    /// **FAST PATH**: The common non-full case remains lock-free.
-    /// **OVERLOAD PATH**: When full, a narrow overflow mutex serializes the
-    /// replacement so exactly one oldest item is evicted per successful enqueue.
+    /// **LOCK-FREE**: Delegates to `ArrayQueue::force_push`, which atomically
+    /// replaces the oldest entry when the buffer is full. An earlier
+    /// implementation (br-asupersync-eup06n) used a manual pop+push protected
+    /// by a Mutex; that lock only serialized overflow callers against each
+    /// other, so concurrent fast-path producers could refill the slot opened
+    /// by the overflow path's pop and panic the "overflow replacement must
+    /// succeed" assertion under load.
     pub fn enqueue(&self, item: T) -> Option<T> {
-        match self.queue.push(item) {
-            Ok(()) => None,
-            Err(returned_item) => {
-                let _overflow_guard = self.overflow_lock.lock();
-
-                match self.queue.push(returned_item) {
-                    Ok(()) => None,
-                    Err(returned_item) => {
-                        let dropped_item = self.queue.pop();
-                        if let Some(dropped_item) = dropped_item {
-                            self.dropped_count.fetch_add(1, Ordering::Relaxed);
-                            assert!(
-                                self.queue.push(returned_item).is_ok(),
-                                "overflow replacement must succeed"
-                            );
-                            Some(dropped_item)
-                        } else {
-                            assert!(
-                                self.queue.push(returned_item).is_ok(),
-                                "push must succeed after transient full queue clears"
-                            );
-                            None
-                        }
-                    }
-                }
-            }
+        let dropped = self.queue.force_push(item);
+        if dropped.is_some() {
+            self.dropped_count.fetch_add(1, Ordering::Relaxed);
         }
+        dropped
     }
 
     /// Dequeue the oldest item.
@@ -1017,5 +997,52 @@ mod tests {
         assert_eq!(exported[1].batch_id, 3, "second exported should be batch 3");
 
         println!("✅ FIFO ORDER AUDIT PASSED - Correct processing order maintained");
+    }
+
+    /// br-asupersync-eup06n: regression test for the multi-producer overflow
+    /// race. Many concurrent producers + a tiny capacity used to trip the
+    /// `assert!(...push.is_ok(), "overflow replacement must succeed")` panic
+    /// on a saturated queue. With `force_push` the enqueue must always make
+    /// progress without panicking, and the dropped count must equal
+    /// (total_pushes - capacity).
+    #[test]
+    fn enqueue_does_not_panic_under_concurrent_overload() {
+        use std::sync::Arc;
+        use std::thread;
+
+        const CAPACITY: usize = 8;
+        const PRODUCERS: usize = 16;
+        const PER_PRODUCER: usize = 4096;
+
+        let queue: Arc<BoundedExportQueue<u64>> = Arc::new(BoundedExportQueue::new(CAPACITY));
+
+        let mut handles = Vec::with_capacity(PRODUCERS);
+        for producer in 0..PRODUCERS {
+            let queue = Arc::clone(&queue);
+            handles.push(thread::spawn(move || {
+                let base = (producer as u64) * (PER_PRODUCER as u64);
+                for offset in 0..PER_PRODUCER {
+                    let _ = queue.enqueue(base + offset as u64);
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("producer must not panic");
+        }
+
+        let dropped = queue.dropped_count();
+        let len = queue.len();
+        let total = (PRODUCERS * PER_PRODUCER) as u64;
+        assert_eq!(
+            dropped + len as u64,
+            total,
+            "every push must either land in the queue or be counted as dropped",
+        );
+        assert!(len <= CAPACITY, "queue must respect capacity");
+        assert_eq!(
+            dropped,
+            total - len as u64,
+            "dropped count must equal total minus retained",
+        );
     }
 }
