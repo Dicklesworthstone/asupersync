@@ -182,8 +182,31 @@ mkdir -p "$RUN_DIR"
 HOST_FINGERPRINT_JSON="$(host_fingerprint_json)"
 STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-printf -v RCH_INVOCATION '%q' "$RCH_BIN"
-COMMAND="${RCH_INVOCATION} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_host_profile_planner ASUPERSYNC_HOST_PROFILE_PLANNER_CONTRACT_PATH=${ARTIFACT} ASUPERSYNC_HOST_PROFILE_PLANNER_SCENARIO=${SCENARIO} ASUPERSYNC_HOST_PROFILE_PLANNER_REPORT_PATH=${SCENARIO_REPORT_PATH} cargo test -p asupersync --test host_profile_planner_contract host_profile_planner_smoke_contract_emits_report --features test-internals -- --nocapture"
+RCH_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_host_profile_planner"
+COMMAND_ARGS=(
+    "$RCH_BIN"
+    exec
+    --
+    env
+    CARGO_INCREMENTAL=0
+    "CARGO_TARGET_DIR=${RCH_TARGET_DIR}"
+    "ASUPERSYNC_HOST_PROFILE_PLANNER_CONTRACT_PATH=${ARTIFACT}"
+    "ASUPERSYNC_HOST_PROFILE_PLANNER_SCENARIO=${SCENARIO}"
+    "ASUPERSYNC_HOST_PROFILE_PLANNER_REPORT_PATH=${SCENARIO_REPORT_PATH}"
+    cargo
+    test
+    -p
+    asupersync
+    --test
+    host_profile_planner_contract
+    host_profile_planner_smoke_contract_emits_report
+    --features
+    test-internals
+    --
+    --nocapture
+)
+printf -v COMMAND '%q ' "${COMMAND_ARGS[@]}"
+COMMAND="${COMMAND%" "}"
 
 COMMAND_EXIT_CODE=0
 SCRIPT_EXIT_CODE=0
@@ -198,7 +221,7 @@ if [ "$MODE" = "dry-run" ]; then
     VALIDATION_PASSED=true
     MESSAGE="dry run emitted manifests only"
 else
-    if timeout "${RCH_TAIL_TIMEOUT_SECONDS}s" bash -lc "$COMMAND" >"$RUN_LOG_PATH" 2>&1; then
+    if timeout "${RCH_TAIL_TIMEOUT_SECONDS}s" "${COMMAND_ARGS[@]}" >"$RUN_LOG_PATH" 2>&1; then
         COMMAND_EXIT_CODE=0
         MESSAGE="rch proof command completed"
     else

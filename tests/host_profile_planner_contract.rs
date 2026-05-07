@@ -188,9 +188,7 @@ fn load_contract() -> HostProfilePlannerContract {
     }
 }
 
-fn selected_scenario<'a>(
-    contract: &'a HostProfilePlannerContract,
-) -> &'a HostProfilePlannerScenario {
+fn selected_scenario(contract: &HostProfilePlannerContract) -> &HostProfilePlannerScenario {
     let selected = std::env::var("ASUPERSYNC_HOST_PROFILE_PLANNER_SCENARIO")
         .unwrap_or_else(|_| DEFAULT_SCENARIO_ID.to_string());
     contract
@@ -692,13 +690,12 @@ fn host_profile_arena_temperature_override_takes_precedence() {
         plan.final_bundle.arena_temperature_policy,
         ArenaTemperaturePolicy::Unified
     );
-    let override_sources = plan
+    let has_arena_temperature_override = plan
         .config_diff
         .iter()
         .filter(|entry| entry.source == HostProfileConfigDiffSource::ManualOverride)
-        .map(|entry| entry.field_path.clone())
-        .collect::<Vec<_>>();
-    assert!(override_sources.contains(&"arena_temperature_policy".to_string()));
+        .any(|entry| entry.field_path == "arena_temperature_policy");
+    assert!(has_arena_temperature_override);
 }
 
 #[test]
@@ -954,6 +951,34 @@ fn host_profile_when_not_to_use_explanations_are_rendered() {
         plan.when_not_to_use
             .iter()
             .any(|line| line.contains("64-core / 256 GiB") || line.contains("64 cores"))
+    );
+}
+
+#[test]
+fn host_profile_planner_runner_executes_rch_without_local_shell_wrapper() {
+    let script = fs::read_to_string("scripts/run_host_profile_planner_smoke.sh")
+        .expect("host profile planner smoke runner should load");
+    let forbidden = ["bash -lc ", "\"$COMMAND\""].concat();
+
+    assert!(
+        script.contains("COMMAND_ARGS=("),
+        "runner must build the rch proof as argv"
+    );
+    assert!(
+        script.contains(r#"timeout "${RCH_TAIL_TIMEOUT_SECONDS}s" "${COMMAND_ARGS[@]}""#),
+        "runner must execute rch argv directly"
+    );
+    assert!(
+        !script.contains(&forbidden),
+        "runner must not execute the rendered rch command through a local shell"
+    );
+    assert!(
+        script.contains(r#"printf -v COMMAND '%q ' "${COMMAND_ARGS[@]}""#),
+        "runner must keep a shell-escaped reproduction command in reports"
+    );
+    assert!(
+        script.contains(r#"RCH_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_host_profile_planner""#),
+        "runner target dir must honor TMPDIR"
     );
 }
 
