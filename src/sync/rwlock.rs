@@ -75,6 +75,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Waker};
 
 use crate::cx::Cx;
+use crate::sync::lock_ordering::{self, LockRank};
 
 /// br-asupersync-4j40bb: bound on consecutive writers served from the queue
 /// while readers are also queued. After this many writer hand-offs in a row,
@@ -204,21 +205,38 @@ pub struct RwLock<T> {
     state: ParkingMutex<State>,
     data: UnsafeCell<T>,
     poisoned: AtomicBool,
+    /// Human-readable name for lock ordering (e.g., "tasks", "regions").
+    name: &'static str,
+    /// Lock rank for deadlock prevention.
+    rank: Option<LockRank>,
 }
 
 unsafe impl<T: Send> Send for RwLock<T> {}
 unsafe impl<T: Send + Sync> Sync for RwLock<T> {}
 
 impl<T> RwLock<T> {
-    /// Creates a new lock containing the given value.
+    /// Creates a new lock with the given value and name for lock ordering.
     #[inline]
     #[must_use]
-    pub fn new(value: T) -> Self {
+    pub fn with_name(name: &'static str, value: T) -> Self {
+        let rank = LockRank::from_name(name);
         Self {
             state: ParkingMutex::new(State::default()),
             data: UnsafeCell::new(value),
             poisoned: AtomicBool::new(false),
+            name,
+            rank,
         }
+    }
+
+    /// Creates a new lock containing the given value with default naming.
+    ///
+    /// Note: For proper deadlock prevention, prefer `with_name()` to specify
+    /// the lock's role in the lock hierarchy (e.g., "tasks", "regions").
+    #[inline]
+    #[must_use]
+    pub fn new(value: T) -> Self {
+        Self::with_name("unknown", value)
     }
 
     /// Consumes the lock and returns the inner value.
@@ -298,6 +316,11 @@ impl<T> RwLock<T> {
 
     #[inline]
     fn try_acquire_read_state(&self) -> Result<(), TryReadError> {
+        // Check lock ordering before acquisition (debug builds only)
+        if let Some(rank) = self.rank {
+            lock_ordering::check_acquire(self.name, rank);
+        }
+
         let mut state = self.state.lock();
         if self.is_poisoned() {
             return Err(TryReadError::Poisoned);
@@ -309,11 +332,22 @@ impl<T> RwLock<T> {
 
         state.readers += 1;
         drop(state);
+
+        // Record lock acquisition for ordering tracking
+        if let Some(rank) = self.rank {
+            lock_ordering::record_acquire(rank);
+        }
+
         Ok(())
     }
 
     #[inline]
     fn try_acquire_write_state(&self) -> Result<(), TryWriteError> {
+        // Check lock ordering before acquisition (debug builds only)
+        if let Some(rank) = self.rank {
+            lock_ordering::check_acquire(self.name, rank);
+        }
+
         let mut state = self.state.lock();
         if self.is_poisoned() {
             return Err(TryWriteError::Poisoned);
@@ -325,6 +359,12 @@ impl<T> RwLock<T> {
 
         state.writer_active = true;
         drop(state);
+
+        // Record lock acquisition for ordering tracking
+        if let Some(rank) = self.rank {
+            lock_ordering::record_acquire(rank);
+        }
+
         Ok(())
     }
 
@@ -658,6 +698,12 @@ impl<'a, T> Future for ReadFuture<'a, '_, T> {
             }
             // Dequeued - we were pre-granted the lock by release_writer!
             // `state.readers` was already incremented for us.
+
+            // Record lock acquisition for ordering tracking
+            if let Some(rank) = this.lock.rank {
+                lock_ordering::record_acquire(rank);
+            }
+
             this.waiter_id = None;
             drop(state);
             this.completed = true;
@@ -665,8 +711,19 @@ impl<'a, T> Future for ReadFuture<'a, '_, T> {
         }
 
         if !state.writer_active && state.writer_waiters == 0 {
+            // Check lock ordering before acquisition (debug builds only)
+            if let Some(rank) = this.lock.rank {
+                lock_ordering::check_acquire(this.lock.name, rank);
+            }
+
             state.readers += 1;
             drop(state);
+
+            // Record lock acquisition for ordering tracking
+            if let Some(rank) = this.lock.rank {
+                lock_ordering::record_acquire(rank);
+            }
+
             this.completed = true;
             return Poll::Ready(Ok(RwLockReadGuard { lock: this.lock }));
         }
@@ -738,6 +795,12 @@ impl<'a, T> Future for WriteFuture<'a, '_, T> {
                 return Poll::Pending;
             }
             // Dequeued - we were pre-granted the lock!
+
+            // Record lock acquisition for ordering tracking
+            if let Some(rank) = this.lock.rank {
+                lock_ordering::record_acquire(rank);
+            }
+
             this.waiter_id = None;
             if this.counted {
                 state.writer_waiters = state.writer_waiters.saturating_sub(1);
@@ -752,12 +815,23 @@ impl<'a, T> Future for WriteFuture<'a, '_, T> {
             !state.writer_active && state.readers == 0 && state.writer_queue.is_empty();
 
         if can_acquire {
+            // Check lock ordering before acquisition (debug builds only)
+            if let Some(rank) = this.lock.rank {
+                lock_ordering::check_acquire(this.lock.name, rank);
+            }
+
             state.writer_active = true;
             if this.counted {
                 state.writer_waiters = state.writer_waiters.saturating_sub(1);
                 this.counted = false;
             }
             drop(state);
+
+            // Record lock acquisition for ordering tracking
+            if let Some(rank) = this.lock.rank {
+                lock_ordering::record_acquire(rank);
+            }
+
             this.completed = true;
             return Poll::Ready(Ok(RwLockWriteGuard { lock: this.lock }));
         }
@@ -809,6 +883,11 @@ impl<T> Drop for RwLockReadGuard<'_, T> {
     #[inline]
     fn drop(&mut self) {
         self.lock.release_reader();
+
+        // Record lock release for ordering tracking
+        if let Some(rank) = self.lock.rank {
+            lock_ordering::record_release(rank);
+        }
     }
 }
 
@@ -852,6 +931,11 @@ impl<T> Drop for RwLockWriteGuard<'_, T> {
             self.lock.poisoned.store(true, Ordering::Release);
         }
         self.lock.release_writer();
+
+        // Record lock release for ordering tracking
+        if let Some(rank) = self.lock.rank {
+            lock_ordering::record_release(rank);
+        }
     }
 }
 
@@ -957,6 +1041,11 @@ impl<T> Drop for OwnedRwLockReadGuard<T> {
     #[inline]
     fn drop(&mut self) {
         self.lock.release_reader();
+
+        // Record lock release for ordering tracking
+        if let Some(rank) = self.lock.rank {
+            lock_ordering::record_release(rank);
+        }
     }
 }
 
@@ -1023,6 +1112,11 @@ impl<T> Drop for OwnedRwLockWriteGuard<T> {
             self.lock.poisoned.store(true, Ordering::Release);
         }
         self.lock.release_writer();
+
+        // Record lock release for ordering tracking
+        if let Some(rank) = self.lock.rank {
+            lock_ordering::record_release(rank);
+        }
     }
 }
 
