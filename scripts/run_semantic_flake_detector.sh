@@ -102,26 +102,82 @@ fi
 mkdir -p "$REPORT_DIR"
 : > "$EVENTS_FILE"
 
-RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
-USE_RCH=false
-if [ -x "$RCH_BIN" ]; then
-  USE_RCH=true
-fi
-
-declare -A SUITE_CMD
+RCH_BIN="${RCH_BIN:-rch}"
 declare -A SUITE_WITNESS
 declare -A SUITE_SCENARIO
-declare -A SUITE_REPLAY_CMD
 
-SUITE_CMD[witness_seed_equivalence]="cargo test --test semantic_witness_replay_e2e e2e_w7_1_seed_equivalence -- --nocapture"
 SUITE_WITNESS[witness_seed_equivalence]="W7.1"
 SUITE_SCENARIO[witness_seed_equivalence]="W7.1"
-SUITE_REPLAY_CMD[witness_seed_equivalence]="cargo test --test semantic_witness_replay_e2e e2e_w7_1_seed_equivalence -- --nocapture"
 
-SUITE_CMD[cross_seed_replay]="cargo test --test replay_e2e_suite cross_seed_replay_suite -- --nocapture"
 SUITE_WITNESS[cross_seed_replay]="W7.1"
 SUITE_SCENARIO[cross_seed_replay]="cross-seed-replay"
-SUITE_REPLAY_CMD[cross_seed_replay]="cargo test --test replay_e2e_suite cross_seed_replay_suite -- --nocapture"
+
+if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+  echo "ERROR: rch is required and was not found at: $RCH_BIN" >&2
+  exit 2
+fi
+
+render_command() {
+  local rendered
+  printf -v rendered '%q ' "$@"
+  printf '%s' "${rendered% }"
+}
+
+build_suite_command_argv() {
+  local suite="$1"
+  local output_name="$2"
+  local -n output_ref="$output_name"
+  local safe_suite="${suite//[^A-Za-z0-9_]/_}"
+
+  case "$suite" in
+    witness_seed_equivalence)
+      output_ref=(
+        "$RCH_BIN"
+        exec
+        --
+        env
+        "CARGO_INCREMENTAL=0"
+        "CARGO_PROFILE_TEST_DEBUG=0"
+        "RUSTFLAGS=-D warnings -C debuginfo=0"
+        "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_flake_${safe_suite}"
+        cargo
+        test
+        -p
+        asupersync
+        --test
+        semantic_witness_replay_e2e
+        e2e_w7_1_seed_equivalence
+        --
+        --nocapture
+      )
+      ;;
+    cross_seed_replay)
+      output_ref=(
+        "$RCH_BIN"
+        exec
+        --
+        env
+        "CARGO_INCREMENTAL=0"
+        "CARGO_PROFILE_TEST_DEBUG=0"
+        "RUSTFLAGS=-D warnings -C debuginfo=0"
+        "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_flake_${safe_suite}"
+        cargo
+        test
+        -p
+        asupersync
+        --test
+        replay_e2e_suite
+        cross_seed_replay_suite
+        --
+        --nocapture
+      )
+      ;;
+    *)
+      echo "ERROR: unsupported suite '$suite'" >&2
+      exit 2
+      ;;
+  esac
+}
 
 SUITES=("witness_seed_equivalence" "cross_seed_replay")
 
@@ -159,11 +215,13 @@ echo "=== SEM-12.15 deterministic replay flake detector ==="
 echo "Run ID: $RUN_ID"
 echo "Iterations per suite: $ITERATIONS"
 echo "Report dir: $REPORT_DIR"
-echo "Offload mode: $([ "$USE_RCH" = true ] && echo "rch" || echo "local")"
+echo "Offload mode: rch"
 echo ""
 
 for suite in "${SUITES[@]}"; do
-  cmd="${SUITE_CMD[$suite]}"
+  declare -a cmd_argv=()
+  build_suite_command_argv "$suite" cmd_argv
+  cmd="$(render_command "${cmd_argv[@]}")"
   scenario_id="${SUITE_SCENARIO[$suite]}"
   suite_dir="$REPORT_DIR/$suite"
   mkdir -p "$suite_dir"
@@ -187,18 +245,10 @@ for suite in "${SUITES[@]}"; do
     log_file="$suite_dir/run_${i}.log"
     start_ns="$(date +%s%N)"
 
-    if [ "$USE_RCH" = true ]; then
-      if "$RCH_BIN" exec -- bash -lc "$cmd" >"$log_file" 2>&1; then
-        exit_code=0
-      else
-        exit_code=$?
-      fi
+    if "${cmd_argv[@]}" >"$log_file" 2>&1; then
+      exit_code=0
     else
-      if bash -lc "$cmd" >"$log_file" 2>&1; then
-        exit_code=0
-      else
-        exit_code=$?
-      fi
+      exit_code=$?
     fi
 
     end_ns="$(date +%s%N)"
@@ -258,7 +308,7 @@ for suite in "${SUITES[@]}"; do
       --arg evidence_class "CI" \
       --arg scenario_id "$scenario_id" \
       --arg verdict "$status" \
-      --arg repro_command "${SUITE_REPLAY_CMD[$suite]}" \
+      --arg repro_command "$cmd" \
       --arg witness_id "${SUITE_WITNESS[$suite]}" \
       --argjson seq "$i" \
       --argjson timestamp_ns "$end_ns" \
@@ -355,8 +405,8 @@ for suite in "${SUITES[@]}"; do
     --arg suite "$suite" \
     --arg witness_id "${SUITE_WITNESS[$suite]}" \
     --arg scenario_id "${SUITE_SCENARIO[$suite]}" \
-    --arg command "${SUITE_CMD[$suite]}" \
-    --arg replay_command "${SUITE_REPLAY_CMD[$suite]}" \
+    --arg command "$cmd" \
+    --arg replay_command "$cmd" \
     --arg status_trace "${STATUS_TRACE[$suite]}" \
     --argjson passes "${PASS_COUNT[$suite]}" \
     --argjson failures "${FAIL_COUNT[$suite]}" \
