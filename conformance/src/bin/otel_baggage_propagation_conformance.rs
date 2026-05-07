@@ -18,19 +18,10 @@ enum ConformanceTestResult {
     ExpectedFailure { reason: String },
 }
 
-/// Test metadata for conformance tracking
-#[derive(Debug)]
-struct ConformanceCase {
-    name: &'static str,
-    description: &'static str,
-    requirement_level: RequirementLevel,
-}
-
 #[derive(Debug, PartialEq)]
 enum RequirementLevel {
     Must,   // W3C baggage spec MUST clause
     Should, // W3C baggage spec SHOULD clause
-    May,    // W3C baggage spec MAY clause
 }
 
 /// Test cases for baggage propagation conformance
@@ -108,15 +99,40 @@ fn main() {
     let verbose = matches.get_flag("verbose");
 
     match test_name.as_str() {
-        "basic-baggage-headers" => run_basic_baggage_headers_test(verbose),
-        "baggage-with-metadata" => run_baggage_with_metadata_test(verbose),
-        "multiple-baggage-entries" => run_multiple_baggage_entries_test(verbose),
-        "url-encoding-handling" => run_url_encoding_handling_test(verbose),
-        "size-limits-truncation" => run_size_limits_truncation_test(verbose),
-        "invalid-character-handling" => run_invalid_character_handling_test(verbose),
-        "empty-values-handling" => run_empty_values_handling_test(verbose),
-        "baggage-roundtrip" => run_baggage_roundtrip_test(verbose),
-        "w3c-header-format" => run_w3c_header_format_test(verbose),
+        "basic-baggage-headers" => exit_if_not_pass(
+            "basic-baggage-headers",
+            run_basic_baggage_headers_test(verbose),
+        ),
+        "baggage-with-metadata" => exit_if_not_pass(
+            "baggage-with-metadata",
+            run_baggage_with_metadata_test(verbose),
+        ),
+        "multiple-baggage-entries" => exit_if_not_pass(
+            "multiple-baggage-entries",
+            run_multiple_baggage_entries_test(verbose),
+        ),
+        "url-encoding-handling" => exit_if_not_pass(
+            "url-encoding-handling",
+            run_url_encoding_handling_test(verbose),
+        ),
+        "size-limits-truncation" => exit_if_not_pass(
+            "size-limits-truncation",
+            run_size_limits_truncation_test(verbose),
+        ),
+        "invalid-character-handling" => exit_if_not_pass(
+            "invalid-character-handling",
+            run_invalid_character_handling_test(verbose),
+        ),
+        "empty-values-handling" => exit_if_not_pass(
+            "empty-values-handling",
+            run_empty_values_handling_test(verbose),
+        ),
+        "baggage-roundtrip" => {
+            exit_if_not_pass("baggage-roundtrip", run_baggage_roundtrip_test(verbose))
+        }
+        "w3c-header-format" => {
+            exit_if_not_pass("w3c-header-format", run_w3c_header_format_test(verbose))
+        }
         "report" => {
             generate_compliance_report();
             return;
@@ -127,6 +143,25 @@ fn main() {
             std::process::exit(1);
         }
     }
+}
+
+fn exit_if_not_pass(test_name: &str, result: ConformanceTestResult) {
+    let exit_code = exit_code_for_result(&result);
+    if exit_code == 0 {
+        return;
+    }
+
+    match result {
+        ConformanceTestResult::Fail { reason } => {
+            eprintln!("{test_name}: FAIL - {reason}");
+        }
+        ConformanceTestResult::ExpectedFailure { reason } => {
+            eprintln!("{test_name}: XFAIL - {reason}");
+        }
+        ConformanceTestResult::Pass => {}
+    }
+
+    std::process::exit(exit_code);
 }
 
 fn run_all_tests(verbose: bool) {
@@ -320,7 +355,7 @@ fn run_all_tests(verbose: bool) {
 
         let result = run_baggage_propagation_conformance_test(test_case, verbose);
 
-        match result {
+        match &result {
             ConformanceTestResult::Pass => {
                 passed += 1;
                 println!("✅ PASS");
@@ -345,7 +380,7 @@ fn run_all_tests(verbose: bool) {
         eprintln!(
             "{{\"test\":\"{}\",\"status\":\"{}\",\"level\":\"{:?}\"}}",
             test_case.name,
-            match result {
+            match &result {
                 ConformanceTestResult::Pass => "PASS",
                 ConformanceTestResult::Fail { .. } => "FAIL",
                 ConformanceTestResult::ExpectedFailure { .. } => "XFAIL",
@@ -372,12 +407,40 @@ fn run_all_tests(verbose: bool) {
     println!("│  🎯 Score: {:.1}%                   │", score);
     println!("└─────────────────────────────────────┘");
 
-    if failed > 0 {
-        eprintln!("\n❌ {} conformance tests failed", failed);
-        std::process::exit(1);
+    println!("\n{}", final_status_line(total, failed, xfail));
+
+    if exit_code_for_summary(total, failed, xfail) != 0 {
+        eprintln!("\nDifferences documented in DISCREPANCIES.md");
+        std::process::exit(exit_code_for_summary(total, failed, xfail));
     } else {
-        println!("\n✅ ALL TESTS PASSED - Baggage propagation is conformant");
         println!("🎯 W3C baggage header output matches opentelemetry-sdk exactly");
+    }
+}
+
+fn exit_code_for_result(result: &ConformanceTestResult) -> i32 {
+    match result {
+        ConformanceTestResult::Pass => 0,
+        ConformanceTestResult::Fail { .. } | ConformanceTestResult::ExpectedFailure { .. } => 1,
+    }
+}
+
+fn exit_code_for_summary(total: usize, failed: usize, expected_failures: usize) -> i32 {
+    if total == 0 || failed > 0 || expected_failures > 0 {
+        1
+    } else {
+        0
+    }
+}
+
+fn final_status_line(total: usize, failed: usize, expected_failures: usize) -> String {
+    if total == 0 {
+        "NO TESTS EXECUTED".to_string()
+    } else if failed > 0 {
+        format!("FAILURES PRESENT ({failed} failed, {expected_failures} expected failures)")
+    } else if expected_failures > 0 {
+        format!("NO FAILURES; PARTIAL COVERAGE ({expected_failures} expected failures)")
+    } else {
+        "✅ ALL TESTS PASSED - Baggage propagation is conformant".to_string()
     }
 }
 
@@ -441,7 +504,7 @@ fn generate_our_baggage_header(
     // Create context with baggage
     let mut context = Context::current();
     for entry in &test_case.baggage_entries {
-        let metadata = entry
+        let _metadata = entry
             .metadata
             .as_ref()
             .map(|m| BaggageMetadata::from(m.as_str()));
@@ -723,4 +786,46 @@ fn generate_compliance_report() {
     println!(
         "✅ **CONFORMANT** - Baggage propagation produces identical W3C baggage header vs opentelemetry"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ConformanceTestResult, exit_code_for_result, exit_code_for_summary, final_status_line,
+    };
+
+    #[test]
+    fn exit_code_is_nonzero_for_expected_failure_results() {
+        let result = ConformanceTestResult::ExpectedFailure {
+            reason: "known divergence".to_string(),
+        };
+
+        assert_eq!(exit_code_for_result(&result), 1);
+    }
+
+    #[test]
+    fn exit_code_is_zero_only_for_clean_summary() {
+        assert_eq!(exit_code_for_summary(9, 0, 0), 0);
+        assert_eq!(exit_code_for_summary(0, 0, 0), 1);
+        assert_eq!(exit_code_for_summary(9, 1, 0), 1);
+        assert_eq!(exit_code_for_summary(9, 0, 1), 1);
+    }
+
+    #[test]
+    fn final_status_line_reports_partial_coverage_for_xfail_only() {
+        let status = final_status_line(9, 0, 1);
+
+        assert!(status.contains("NO FAILURES; PARTIAL COVERAGE"));
+        assert!(!status.contains("ALL TESTS PASSED"));
+    }
+
+    #[test]
+    fn final_status_line_reports_zero_coverage() {
+        assert_eq!(final_status_line(0, 0, 0), "NO TESTS EXECUTED");
+    }
+
+    #[test]
+    fn final_status_line_reports_true_all_pass() {
+        assert!(final_status_line(9, 0, 0).contains("ALL TESTS PASSED"));
+    }
 }

@@ -6,7 +6,7 @@
 use asupersync::observability::otel::otlp_request_builder::{
     OTEL_SCHEMA_URL, OTEL_SCOPE_NAME, OTEL_SCOPE_VERSION, traces_request,
 };
-use asupersync::observability::otel::span_semantics::{SpanEvent, TestSpan};
+use asupersync::observability::otel::span_semantics::TestSpan;
 use clap::{Arg, Command};
 use opentelemetry::trace::{
     SpanContext, SpanId, SpanKind, Status, TraceFlags, TraceId, TraceState,
@@ -16,11 +16,9 @@ use opentelemetry_proto::tonic::common::v1::{AnyValue, InstrumentationScope, Key
 use opentelemetry_proto::tonic::resource::v1::Resource;
 use opentelemetry_proto::tonic::trace::v1::{
     ResourceSpans, ScopeSpans, Span as ProtoSpan, Status as ProtoStatus,
-    span::{Event as SpanEvent, SpanKind as ProtoSpanKind},
+    span::{Event as ProtoSpanEvent, SpanKind as ProtoSpanKind},
     status::StatusCode as ProtoStatusCode,
 };
-use opentelemetry_sdk::trace::{Config, TracerProvider as SdkTracerProvider};
-use prost::Message;
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -32,19 +30,10 @@ enum ConformanceTestResult {
     ExpectedFailure { reason: String },
 }
 
-/// Test metadata for conformance tracking
-#[derive(Debug)]
-struct ConformanceCase {
-    name: &'static str,
-    description: &'static str,
-    requirement_level: RequirementLevel,
-}
-
 #[derive(Debug, PartialEq)]
 enum RequirementLevel {
     Must,   // OpenTelemetry spec MUST clause
     Should, // OpenTelemetry spec SHOULD clause
-    May,    // OpenTelemetry spec MAY clause
 }
 
 /// Test cases for Span Status conformance
@@ -112,12 +101,28 @@ fn main() {
     let verbose = matches.get_flag("verbose");
 
     match test_name.as_str() {
-        "basic-status-codes" => run_basic_status_codes_test(verbose),
-        "status-with-messages" => run_status_with_messages_test(verbose),
-        "status-transitions" => run_status_transitions_test(verbose),
-        "error-status-scenarios" => run_error_status_scenarios_test(verbose),
-        "unset-status-default" => run_unset_status_default_test(verbose),
-        "status-protobuf-serialization" => run_status_protobuf_serialization_test(verbose),
+        "basic-status-codes" => {
+            exit_if_not_pass("basic-status-codes", run_basic_status_codes_test(verbose))
+        }
+        "status-with-messages" => exit_if_not_pass(
+            "status-with-messages",
+            run_status_with_messages_test(verbose),
+        ),
+        "status-transitions" => {
+            exit_if_not_pass("status-transitions", run_status_transitions_test(verbose))
+        }
+        "error-status-scenarios" => exit_if_not_pass(
+            "error-status-scenarios",
+            run_error_status_scenarios_test(verbose),
+        ),
+        "unset-status-default" => exit_if_not_pass(
+            "unset-status-default",
+            run_unset_status_default_test(verbose),
+        ),
+        "status-protobuf-serialization" => exit_if_not_pass(
+            "status-protobuf-serialization",
+            run_status_protobuf_serialization_test(verbose),
+        ),
         "report" => {
             generate_compliance_report();
             return;
@@ -128,6 +133,25 @@ fn main() {
             std::process::exit(1);
         }
     }
+}
+
+fn exit_if_not_pass(test_name: &str, result: ConformanceTestResult) {
+    let exit_code = exit_code_for_result(&result);
+    if exit_code == 0 {
+        return;
+    }
+
+    match result {
+        ConformanceTestResult::Fail { reason } => {
+            eprintln!("{test_name}: FAIL - {reason}");
+        }
+        ConformanceTestResult::ExpectedFailure { reason } => {
+            eprintln!("{test_name}: XFAIL - {reason}");
+        }
+        ConformanceTestResult::Pass => {}
+    }
+
+    std::process::exit(exit_code);
 }
 
 fn run_all_tests(verbose: bool) {
@@ -220,7 +244,7 @@ fn run_all_tests(verbose: bool) {
 
         let result = run_span_status_conformance_test(test_case, verbose);
 
-        match result {
+        match &result {
             ConformanceTestResult::Pass => {
                 passed += 1;
                 println!("✅ PASS");
@@ -245,7 +269,7 @@ fn run_all_tests(verbose: bool) {
         eprintln!(
             "{{\"test\":\"{}\",\"status\":\"{}\",\"level\":\"{:?}\"}}",
             test_case.name,
-            match result {
+            match &result {
                 ConformanceTestResult::Pass => "PASS",
                 ConformanceTestResult::Fail { .. } => "FAIL",
                 ConformanceTestResult::ExpectedFailure { .. } => "XFAIL",
@@ -272,12 +296,40 @@ fn run_all_tests(verbose: bool) {
     println!("│  🎯 Score: {:.1}%                   │", score);
     println!("└─────────────────────────────────────┘");
 
-    if failed > 0 {
-        eprintln!("\n❌ {} conformance tests failed", failed);
-        std::process::exit(1);
+    println!("\n{}", final_status_line(total, failed, xfail));
+
+    if exit_code_for_summary(total, failed, xfail) != 0 {
+        eprintln!("\nDifferences documented in DISCREPANCIES.md");
+        std::process::exit(exit_code_for_summary(total, failed, xfail));
     } else {
-        println!("\n✅ ALL TESTS PASSED - Span Status setting is conformant");
         println!("🎯 OTLP/Trace status field matches opentelemetry-sdk exactly");
+    }
+}
+
+fn exit_code_for_result(result: &ConformanceTestResult) -> i32 {
+    match result {
+        ConformanceTestResult::Pass => 0,
+        ConformanceTestResult::Fail { .. } | ConformanceTestResult::ExpectedFailure { .. } => 1,
+    }
+}
+
+fn exit_code_for_summary(total: usize, failed: usize, expected_failures: usize) -> i32 {
+    if total == 0 || failed > 0 || expected_failures > 0 {
+        1
+    } else {
+        0
+    }
+}
+
+fn final_status_line(total: usize, failed: usize, expected_failures: usize) -> String {
+    if total == 0 {
+        "NO TESTS EXECUTED".to_string()
+    } else if failed > 0 {
+        format!("FAILURES PRESENT ({failed} failed, {expected_failures} expected failures)")
+    } else if expected_failures > 0 {
+        format!("NO FAILURES; PARTIAL COVERAGE ({expected_failures} expected failures)")
+    } else {
+        "✅ ALL TESTS PASSED - Span Status setting is conformant".to_string()
     }
 }
 
@@ -336,7 +388,8 @@ fn generate_our_otlp_traces_request(
             let span_id = SpanId::from_bytes(input.span_id);
             let trace_flags = TraceFlags::default();
             let trace_state = TraceState::default();
-            let span_context = SpanContext::new(trace_id, span_id, trace_flags, false, trace_state);
+            let span_context =
+                SpanContext::new(trace_id, span_id, trace_flags, false, trace_state.clone());
 
             // Create parent context if provided
             let parent_context = input.parent_span_id.map(|parent_id| {
@@ -350,41 +403,24 @@ fn generate_our_otlp_traces_request(
                 )
             });
 
-            // Convert attributes to HashMap
-            let attributes: HashMap<String, String> = input.attributes.iter().cloned().collect();
-            let attribute_values = HashMap::new(); // Empty for now
+            let mut span = TestSpan::new(&input.name, input.span_kind.clone());
+            span.context = span_context;
+            span.start_time = input.start_time;
+            span.end_time = Some(input.end_time);
+            span.parent_context = parent_context;
+            span.set_status(input.status.clone());
 
-            // Convert events
-            let events: Vec<SpanEvent> = input
-                .events
-                .iter()
-                .map(|e| {
-                    let event_attributes: HashMap<String, String> =
-                        e.attributes.iter().cloned().collect();
-                    SpanEvent {
-                        name: e.name.clone(),
-                        timestamp: e.timestamp,
-                        attributes: event_attributes,
-                    }
-                })
-                .collect();
-
-            TestSpan {
-                context: span_context,
-                name: input.name.clone(),
-                kind: input.span_kind,
-                start_time: input.start_time,
-                end_time: Some(input.end_time),
-                attributes,
-                attribute_values,
-                events,
-                status: input.status.clone(),
-                parent_context,
-                baggage: HashMap::new(),
-                max_attributes: 128,
-                max_events: 128,
-                max_attribute_length: None,
+            for (key, value) in &input.attributes {
+                span.set_attribute(key, value);
             }
+
+            for event in &input.events {
+                let attributes: HashMap<String, String> =
+                    event.attributes.iter().cloned().collect();
+                span.add_event(&event.name, attributes);
+            }
+
+            span
         })
         .collect();
 
@@ -433,7 +469,7 @@ fn generate_reference_otlp_traces_request(
                     }
                 }).collect(),
                 events: input.events.iter().map(|e| {
-                    SpanEvent {
+                    ProtoSpanEvent {
                         time_unix_nano: e.timestamp
                             .duration_since(UNIX_EPOCH)
                             .unwrap()
@@ -460,6 +496,7 @@ fn generate_reference_otlp_traces_request(
                 }),
                 dropped_links_count: 0,
                 flags: 0,
+                trace_state: String::new(),
                 links: vec![],
             }
         })
@@ -489,6 +526,7 @@ fn generate_reference_otlp_traces_request(
                 }),
             }],
             dropped_attributes_count: 0,
+            entity_refs: vec![],
         }),
         scope_spans: vec![scope_spans],
         schema_url: OTEL_SCHEMA_URL.to_string(),
@@ -551,13 +589,13 @@ fn compare_status_fields(
             }
             (Some(our), None) => {
                 return Err(format!(
-                    "Span[{}] '{}': Our status present ({}/'{}'}, reference has none",
+                    "Span[{}] '{}': Our status present ({}/'{}'), reference has none",
                     i, our_span.name, our.code, our.message
                 ));
             }
             (None, Some(reference)) => {
                 return Err(format!(
-                    "Span[{}] '{}': Reference status present ({}/'{}'}, our has none",
+                    "Span[{}] '{}': Reference status present ({}/'{}'), our has none",
                     i, our_span.name, reference.code, reference.message
                 ));
             }
@@ -597,7 +635,7 @@ fn status_to_message(status: &Status) -> String {
     match status {
         Status::Unset => String::new(),
         Status::Ok => String::new(),
-        Status::Error { description } => description.clone(),
+        Status::Error { description } => description.to_string(),
     }
 }
 
@@ -737,4 +775,46 @@ fn generate_compliance_report() {
     println!(
         "✅ **CONFORMANT** - Span Status setting produces identical OTLP/Trace status field vs opentelemetry"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ConformanceTestResult, exit_code_for_result, exit_code_for_summary, final_status_line,
+    };
+
+    #[test]
+    fn exit_code_is_nonzero_for_expected_failure_results() {
+        let result = ConformanceTestResult::ExpectedFailure {
+            reason: "known divergence".to_string(),
+        };
+
+        assert_eq!(exit_code_for_result(&result), 1);
+    }
+
+    #[test]
+    fn exit_code_is_zero_only_for_clean_summary() {
+        assert_eq!(exit_code_for_summary(5, 0, 0), 0);
+        assert_eq!(exit_code_for_summary(0, 0, 0), 1);
+        assert_eq!(exit_code_for_summary(5, 1, 0), 1);
+        assert_eq!(exit_code_for_summary(5, 0, 1), 1);
+    }
+
+    #[test]
+    fn final_status_line_reports_partial_coverage_for_xfail_only() {
+        let status = final_status_line(5, 0, 1);
+
+        assert!(status.contains("NO FAILURES; PARTIAL COVERAGE"));
+        assert!(!status.contains("ALL TESTS PASSED"));
+    }
+
+    #[test]
+    fn final_status_line_reports_zero_coverage() {
+        assert_eq!(final_status_line(0, 0, 0), "NO TESTS EXECUTED");
+    }
+
+    #[test]
+    fn final_status_line_reports_true_all_pass() {
+        assert!(final_status_line(5, 0, 0).contains("ALL TESTS PASSED"));
+    }
 }
