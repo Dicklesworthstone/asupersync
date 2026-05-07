@@ -23,7 +23,7 @@
 #![allow(clippy::pedantic, clippy::nursery, clippy::print_stderr)]
 
 use asupersync::cx::Cx;
-use asupersync::messaging::nats::{Message, NatsClient};
+use asupersync::messaging::nats::{Message, NatsClient, NatsConfig, NatsError};
 use asupersync::runtime::RuntimeBuilder;
 use asupersync::time::timeout;
 
@@ -554,5 +554,91 @@ fn nats_real_queue_group_single_delivery() {
     );
     assert_eq!(delivered[0].payload, payload);
     assert_eq!(delivered[0].subject, subject);
+    log.end("pass");
+}
+
+/// `request` against a subject with no subscribers must surface the server's
+/// `NATS/1.0 503 No Responders` status header as `NatsError::Server` rather
+/// than silently timing out.
+///
+/// asupersync advertises `headers:true` and `no_responders:true` in CONNECT
+/// (src/messaging/nats.rs:1389-1393), so a 2.x+ `nats-server` answers any
+/// inbox-style request to an unsubscribed subject with an HMSG status frame.
+/// The HMSG parser changes from br-asupersync-6xjxd7 made
+/// `reply_status_error` accept both the inline-status-line form
+/// (`NATS/1.0 503 No Responders\r\n\r\n`) and the separate-`Status:`-header
+/// form. Both unit tests for the parser use mock TCP listeners; this is the
+/// roundtrip proof that asupersync's `NatsClient::request` correctly drives
+/// the no-responders path against an actual `nats-server`.
+#[test]
+fn nats_real_request_no_responders_surfaces_503_status_error() {
+    let cfg = RealNatsConfig::from_env();
+    if skip_if_disabled(
+        &cfg,
+        "nats_real_request_no_responders_surfaces_503_status_error",
+    ) {
+        return;
+    }
+
+    let log = NatsTestLogger::new(
+        "nats_real",
+        "nats_real_request_no_responders_surfaces_503_status_error",
+    );
+    let local_server = start_local_nats_server(&cfg, &log).expect("start local nats-server");
+    let active_url = active_nats_url(&cfg, local_server.as_ref());
+    // No responder is ever registered for this subject — the request must
+    // surface the 503 from the server, not time out.
+    let subject = unique_subject("no-responders");
+    let payload = b"unanswered-request".to_vec();
+
+    log.phase("connect_and_request");
+    let url = active_url.clone();
+    let subject_for_request = subject.clone();
+    let result = spawn_runtime_task("nats-real-no-responders-requester", async move {
+        let cx = Cx::current().expect("runtime task context");
+        // Tight per-request timeout: the server replies with 503 immediately,
+        // so 2s is generous. If we ever fall off the no-responders path the
+        // test fails fast with NatsError::Io(TimedOut) rather than hanging.
+        let mut client = NatsClient::connect_with_config(
+            &cx,
+            NatsConfig {
+                request_timeout: Duration::from_secs(2),
+                ..NatsConfig::from_url(&url).expect("parse NATS URL")
+            },
+        )
+        .await
+        .expect("connect requester");
+        let outcome = client.request(&cx, &subject_for_request, &payload).await;
+        let _ = client.close(&cx).await;
+        outcome
+    })
+    .join()
+    .expect("requester thread");
+
+    log.phase("assert_status_error");
+    let err = match result {
+        Ok(message) => panic!(
+            "request to unsubscribed subject {subject} unexpectedly succeeded with reply on {} ({} bytes)",
+            message.subject,
+            message.payload.len()
+        ),
+        Err(err) => err,
+    };
+
+    let server_message = match err {
+        NatsError::Server(message) => message,
+        other => panic!("expected NatsError::Server with no-responders status info, got {other:?}"),
+    };
+
+    assert!(
+        server_message.contains("503"),
+        "server error must surface the 503 status code, got {server_message:?}"
+    );
+    let lc = server_message.to_ascii_lowercase();
+    assert!(
+        lc.contains("no responders") || lc.contains("noresponders"),
+        "server error must surface the 'No Responders' description, got {server_message:?}"
+    );
+
     log.end("pass");
 }
