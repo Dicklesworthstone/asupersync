@@ -78,14 +78,17 @@ fn main() {
     println!("Skipped: {skipped_count}");
     println!("Expected failures: {expected_failure_count}");
 
-    if fail_count > 0 {
-        std::process::exit(1);
-    }
-
     println!(
         "{}",
         final_status_line(skipped_count, expected_failure_count)
     );
+
+    std::process::exit(exit_code(
+        results.len(),
+        fail_count,
+        skipped_count,
+        expected_failure_count,
+    ));
 }
 
 fn final_status_line(skipped_count: usize, expected_failure_count: usize) -> String {
@@ -95,6 +98,19 @@ fn final_status_line(skipped_count: usize, expected_failure_count: usize) -> Str
         format!(
             "NO FAILURES; PARTIAL COVERAGE ({skipped_count} skipped, {expected_failure_count} expected failures)"
         )
+    }
+}
+
+fn exit_code(
+    total_count: usize,
+    fail_count: usize,
+    skipped_count: usize,
+    expected_failure_count: usize,
+) -> i32 {
+    if fail_count > 0 || total_count == 0 || skipped_count > 0 || expected_failure_count > 0 {
+        1
+    } else {
+        0
     }
 }
 
@@ -160,6 +176,40 @@ mod tests {
     #[test]
     fn final_status_claims_all_passed_only_for_full_green_results() {
         assert_eq!(final_status_line(0, 0), "ALL TESTS PASSED");
+    }
+
+    #[test]
+    fn exit_code_is_nonzero_for_partial_coverage() {
+        let harness = QuicConnectionMigrationConformanceHarness::new();
+        let results = harness.run_all_tests();
+        let fail_count = results
+            .iter()
+            .filter(|result| result.verdict == TestVerdict::Fail)
+            .count();
+        let skipped_count = results
+            .iter()
+            .filter(|result| result.verdict == TestVerdict::Skipped)
+            .count();
+        let expected_failure_count = results
+            .iter()
+            .filter(|result| result.verdict == TestVerdict::ExpectedFailure)
+            .count();
+
+        assert_eq!(
+            exit_code(
+                results.len(),
+                fail_count,
+                skipped_count,
+                expected_failure_count,
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn exit_code_is_zero_only_for_full_pass_coverage() {
+        assert_eq!(exit_code(1, 0, 0, 0), 0);
+        assert_eq!(exit_code(0, 0, 0, 0), 1);
     }
 
     #[test]
