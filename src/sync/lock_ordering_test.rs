@@ -195,13 +195,12 @@ mod tests {
         let config_rwlock = Arc::new(RwLock::with_name("config_cache", 1));
 
         // First acquire tasks lock (rank 40)
-        let _tasks_read_guard = futures::executor::block_on(async {
-            tasks_rwlock.read(&cx).await.unwrap()
-        });
+        let _tasks_read_guard =
+            futures_lite::future::block_on(async { tasks_rwlock.read(&cx).await.unwrap() });
 
         // This should panic - trying to acquire config (rank 10) after tasks (rank 40)
         // violates the E(10) -> D(20) -> B(30) -> A(40) -> C(50) hierarchy
-        let _config_read_guard = futures::executor::block_on(async {
+        let _config_read_guard = futures_lite::future::block_on(async {
             config_rwlock.read(&cx).await.unwrap() // Should panic due to ordering violation
         });
     }
@@ -219,12 +218,11 @@ mod tests {
         let regions_rwlock = Arc::new(RwLock::with_name("regions_table", 0));
 
         // First acquire obligations lock (rank 50)
-        let _obligations_write_guard = futures::executor::block_on(async {
-            obligations_rwlock.write(&cx).await.unwrap()
-        });
+        let _obligations_write_guard =
+            futures_lite::future::block_on(async { obligations_rwlock.write(&cx).await.unwrap() });
 
         // This should panic - trying to acquire regions (rank 30) after obligations (rank 50)
-        let _regions_write_guard = futures::executor::block_on(async {
+        let _regions_write_guard = futures_lite::future::block_on(async {
             regions_rwlock.write(&cx).await.unwrap() // Should panic due to ordering violation
         });
     }
