@@ -1214,8 +1214,14 @@ impl<T> Future for OwnedReadFuture<'_, T> {
             }
             // Dequeued - we were pre-granted the lock by release_writer!
             // `state.readers` was already incremented for us.
-            drop(state);
+
+            // Record lock acquisition for ordering tracking
+            if let Some(rank) = this.lock.rank {
+                lock_ordering::record_acquire(rank);
+            }
+
             this.waiter_id = None;
+            drop(state);
             this.completed = true;
             return Poll::Ready(Ok(OwnedRwLockReadGuard {
                 lock: Arc::clone(&this.lock),
@@ -1223,8 +1229,19 @@ impl<T> Future for OwnedReadFuture<'_, T> {
         }
 
         if !state.writer_active && state.writer_waiters == 0 {
+            // Check lock ordering before acquisition (debug builds only)
+            if let Some(rank) = this.lock.rank {
+                lock_ordering::check_acquire(this.lock.name, rank);
+            }
+
             state.readers += 1;
             drop(state);
+
+            // Record lock acquisition for ordering tracking
+            if let Some(rank) = this.lock.rank {
+                lock_ordering::record_acquire(rank);
+            }
+
             this.completed = true;
             return Poll::Ready(Ok(OwnedRwLockReadGuard {
                 lock: Arc::clone(&this.lock),
@@ -1299,12 +1316,18 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
                 return Poll::Pending;
             }
             // Dequeued - we were pre-granted the lock!
+
+            // Record lock acquisition for ordering tracking
+            if let Some(rank) = this.lock.rank {
+                lock_ordering::record_acquire(rank);
+            }
+
+            this.waiter_id = None;
             if this.counted {
                 state.writer_waiters = state.writer_waiters.saturating_sub(1);
+                this.counted = false;
             }
             drop(state);
-            this.waiter_id = None;
-            this.counted = false;
             this.completed = true;
             return Poll::Ready(Ok(OwnedRwLockWriteGuard {
                 lock: Arc::clone(&this.lock),
@@ -1315,12 +1338,23 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
             !state.writer_active && state.readers == 0 && state.writer_queue.is_empty();
 
         if can_acquire {
+            // Check lock ordering before acquisition (debug builds only)
+            if let Some(rank) = this.lock.rank {
+                lock_ordering::check_acquire(this.lock.name, rank);
+            }
+
             state.writer_active = true;
             if this.counted {
                 state.writer_waiters = state.writer_waiters.saturating_sub(1);
+                this.counted = false;
             }
             drop(state);
-            this.counted = false;
+
+            // Record lock acquisition for ordering tracking
+            if let Some(rank) = this.lock.rank {
+                lock_ordering::record_acquire(rank);
+            }
+
             this.completed = true;
             return Poll::Ready(Ok(OwnedRwLockWriteGuard {
                 lock: Arc::clone(&this.lock),

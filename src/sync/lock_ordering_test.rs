@@ -3,6 +3,10 @@
 #[cfg(test)]
 mod tests {
     use super::super::contended_mutex::ContendedMutex;
+    use super::super::rwlock::RwLock;
+    use crate::cx::Cx;
+    use crate::types::{Budget, RegionId, TaskId};
+    use crate::util::ArenaIndex;
     use std::sync::Arc;
     use std::thread;
 
@@ -165,5 +169,63 @@ mod tests {
         // Unknown names
         assert_eq!(LockRank::from_name("unknown_lock"), None);
         assert_eq!(LockRank::from_name(""), None);
+    }
+
+    /// Helper function for RwLock tests
+    fn test_cx() -> Cx {
+        Cx::new(
+            RegionId::from_arena(ArenaIndex::new(0, 0)),
+            TaskId::from_arena(ArenaIndex::new(0, 0)),
+            Budget::INFINITE,
+        )
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "Lock ordering violation")]
+    fn test_rwlock_owned_futures_respect_lock_ordering() {
+        //! Regression test for asupersync-vm1044: RwLock owned futures bypass lock ordering checks.
+        //! This test verifies that OwnedRwLockReadGuard and OwnedRwLockWriteGuard properly enforce
+        //! the lock ordering hierarchy and don't bypass check_acquire() calls.
+
+        let cx = test_cx();
+
+        // Create locks with different ranks: tasks (40) and config (10)
+        let tasks_rwlock = Arc::new(RwLock::with_name("tasks_scheduler", 42));
+        let config_rwlock = Arc::new(RwLock::with_name("config_cache", 1));
+
+        // First acquire tasks lock (rank 40)
+        let _tasks_read_guard = futures::executor::block_on(async {
+            tasks_rwlock.read(&cx).await.unwrap()
+        });
+
+        // This should panic - trying to acquire config (rank 10) after tasks (rank 40)
+        // violates the E(10) -> D(20) -> B(30) -> A(40) -> C(50) hierarchy
+        let _config_read_guard = futures::executor::block_on(async {
+            config_rwlock.read(&cx).await.unwrap() // Should panic due to ordering violation
+        });
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "Lock ordering violation")]
+    fn test_rwlock_owned_write_futures_respect_lock_ordering() {
+        //! Regression test for asupersync-vm1044: Ensure OwnedWriteFuture also respects lock ordering.
+
+        let cx = test_cx();
+
+        // Create locks with different ranks: obligations (50) and regions (30)
+        let obligations_rwlock = Arc::new(RwLock::with_name("obligations_ledger", 0));
+        let regions_rwlock = Arc::new(RwLock::with_name("regions_table", 0));
+
+        // First acquire obligations lock (rank 50)
+        let _obligations_write_guard = futures::executor::block_on(async {
+            obligations_rwlock.write(&cx).await.unwrap()
+        });
+
+        // This should panic - trying to acquire regions (rank 30) after obligations (rank 50)
+        let _regions_write_guard = futures::executor::block_on(async {
+            regions_rwlock.write(&cx).await.unwrap() // Should panic due to ordering violation
+        });
     }
 }
