@@ -7,12 +7,22 @@
 //! ATTACK VECTOR: If SQLite normalizes Unicode before binding, an attacker could
 //! use visually similar Unicode characters to bypass SQL injection filters.
 
-use asupersync::conformance::{LabRuntimeTarget, TestConfig};
+use asupersync::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
 use asupersync::cx::Cx;
 use asupersync::database::{SqliteConnection, SqliteRow, SqliteValue};
 use asupersync::test_utils::init_test_logging;
-use asupersync::types::Outcome;
+use asupersync::util::ArenaIndex;
+use asupersync::types::{Budget, RegionId, TaskId};
 
+fn create_test_cx() -> Cx {
+    Cx::new(
+        RegionId::from_arena(ArenaIndex::new(0, 0)),
+        TaskId::from_arena(ArenaIndex::new(0, 0)),
+        Budget::INFINITE,
+    )
+}
+
+#[cfg(feature = "sqlite")]
 #[test]
 fn unicode_normalization_injection_audit() {
     init_test_logging();
@@ -302,6 +312,7 @@ fn unicode_normalization_injection_audit() {
     });
 }
 
+#[cfg(feature = "sqlite")]
 #[test]
 fn unicode_sql_construction_vulnerability_demo() {
     // EDUCATIONAL: Demonstrate why string concatenation WOULD be vulnerable
@@ -323,6 +334,7 @@ fn unicode_sql_construction_vulnerability_demo() {
     println!("✓ Parameter binding treats them as literal string values, not SQL");
 }
 
+#[cfg(feature = "sqlite")]
 #[test]
 fn verify_text_storage_preserves_bytes() {
     // Verify that SQLite TEXT storage preserves exact Unicode byte sequences
