@@ -4034,7 +4034,11 @@ mod tests {
         );
 
         // Unsolicited CONTINUATION on the now-complete stream.
-        let cont = Frame::Continuation(ContinuationFrame::new(1, Bytes::new(), true));
+        let cont = Frame::Continuation(ContinuationFrame {
+            stream_id: 1,
+            header_block: Bytes::new(),
+            end_headers: true,
+        });
         let err = conn
             .process_frame(cont)
             .expect_err("unsolicited CONTINUATION must error");
@@ -4058,7 +4062,11 @@ mod tests {
         let mut conn = Connection::server(Settings::default());
         conn.state = ConnectionState::Open;
 
-        let cont = Frame::Continuation(ContinuationFrame::new(7, Bytes::new(), true));
+        let cont = Frame::Continuation(ContinuationFrame {
+            stream_id: 7,
+            header_block: Bytes::new(),
+            end_headers: true,
+        });
         let err = conn
             .process_frame(cont)
             .expect_err("CONTINUATION on unknown stream must error");
