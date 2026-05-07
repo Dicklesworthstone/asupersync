@@ -9,6 +9,7 @@ TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 RUN_DIR="${OUTPUT_ROOT}/run_${TIMESTAMP}"
 LIST_ONLY=0
 DRY_RUN=1
+RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
 
 declare -a SELECTED_SCENARIOS=()
 
@@ -35,6 +36,13 @@ require_tools() {
     fi
 }
 
+require_execute_tools() {
+    if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+        echo "FATAL: rch is required and was not found/executable at: ${RCH_BIN}" >&2
+        exit 1
+    fi
+}
+
 json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 contract_version() { jq -r '.contract_version' "$CONTRACT_ARTIFACT"; }
 bundle_schema_version() { jq -r '.runner_bundle_schema_version' "$CONTRACT_ARTIFACT"; }
@@ -54,20 +62,52 @@ append_result() {
     if [[ -z "$RESULTS_JSON" ]]; then RESULTS_JSON="$1"; else RESULTS_JSON="${RESULTS_JSON},$1"; fi
 }
 
+scenario_test_filter() {
+    case "$1" in
+        CRV-SMOKE-SOAK) printf 'soak' ;;
+        CRV-SMOKE-FAULT) printf 'fault' ;;
+        CRV-SMOKE-METRICS) printf 'metric' ;;
+        *) return 1 ;;
+    esac
+}
+
 run_scenario() {
-    local sid="$1" scenario_json description command scenario_dir log_file summary_file started_ts ended_ts status rc
+    local sid="$1" scenario_json description command scenario_dir log_file summary_file started_ts ended_ts status rc test_filter
+    local -a command_args
     scenario_json="$(load_scenario_json "$sid")"
     [[ -z "$scenario_json" ]] && { echo "FATAL: unknown scenario: $sid" >&2; return 1; }
     description="$(jq -r '.description' <<<"$scenario_json")"
-    command="$(jq -r '.command' <<<"$scenario_json")"
+    test_filter="$(scenario_test_filter "$sid")" || { echo "FATAL: no argv mapping for scenario: $sid" >&2; return 1; }
+    command_args=(
+        "$RCH_BIN"
+        exec
+        --
+        env
+        "CARGO_INCREMENTAL=0"
+        "RUSTFLAGS=-D warnings"
+        "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_crash_recovery_validation"
+        cargo
+        test
+        --test
+        crash_recovery_validation_contract
+        "$test_filter"
+        --
+        --nocapture
+    )
+    printf -v command '%q ' "${command_args[@]}"
+    command="${command% }"
     scenario_dir="${RUN_DIR}/${sid}"; log_file="${scenario_dir}/run.log"; summary_file="${scenario_dir}/bundle_manifest.json"
     mkdir -p "$scenario_dir"
     started_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo ">>> Running scenario ${sid}"
     if [[ "$DRY_RUN" -eq 1 ]]; then
-        printf 'DRY_RUN scenario=%s\n' "$sid" >"$log_file"; rc=0; status="dry_run"
+        printf 'DRY_RUN scenario=%s command=%s\n' "$sid" "$command" >"$log_file"; rc=0; status="dry_run"
     else
-        rc=0; eval "$command" >"$log_file" 2>&1 || rc=$?
+        rc=0
+        (
+            cd "$PROJECT_ROOT"
+            "${command_args[@]}"
+        ) >"$log_file" 2>&1 || rc=$?
         status="$( [[ "$rc" -eq 0 ]] && printf "passed" || printf "failed" )"
     fi
     ended_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -77,6 +117,7 @@ run_scenario() {
   "contract_version": "$(json_escape "$(contract_version)")",
   "scenario_id": "$(json_escape "$sid")",
   "description": "$(json_escape "$description")",
+  "command": "$(json_escape "$command")",
   "status": "$(json_escape "$status")",
   "exit_code": ${rc},
   "started_ts": "$(json_escape "$started_ts")",
@@ -101,6 +142,7 @@ done
 
 require_tools
 if [[ "$LIST_ONLY" -eq 1 ]]; then list_scenarios; exit 0; fi
+require_execute_tools
 if [[ "${#SELECTED_SCENARIOS[@]}" -eq 0 ]]; then
     mapfile -t SELECTED_SCENARIOS < <(jq -r '.smoke_scenarios[].scenario_id' "$CONTRACT_ARTIFACT")
 fi
