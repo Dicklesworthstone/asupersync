@@ -127,9 +127,9 @@ fn strip_prefix_already_rejects_empty_segments_at_boundary() {
 #[cfg(feature = "test-internals")]
 mod behavioral {
     use asupersync::web::extract::Request;
-    use asupersync::web::handler::{FnHandler, Handler};
+    use asupersync::web::handler::FnHandler;
     use asupersync::web::response::{Response, StatusCode};
-    use asupersync::web::router::Router;
+    use asupersync::web::router::{Router, get};
 
     fn ok_handler() -> FnHandler<fn() -> Response> {
         fn handler() -> Response {
@@ -140,7 +140,7 @@ mod behavioral {
 
     fn dispatch(router: &Router, method: &str, path: &str) -> Response {
         let req = Request::new(method, path);
-        router.call(req)
+        router.handle(req)
     }
 
     #[test]
@@ -148,8 +148,7 @@ mod behavioral {
         // Pin (b) AUDIT-CRITICAL: '/users//foo' against
         // '/users/:id' must NOT match. Pre-fix, this matched
         // with :id='foo' — a path-confusion attack surface.
-        let mut router = Router::new();
-        router.get("/users/:id", ok_handler());
+        let router = Router::new().route("/users/:id", get(ok_handler()));
 
         let resp = dispatch(&router, "GET", "/users//foo");
         assert_ne!(
@@ -173,8 +172,7 @@ mod behavioral {
     #[test]
     fn double_slash_at_end_does_not_match_param_route() {
         // Pin: trailing `//` is also rejected.
-        let mut router = Router::new();
-        router.get("/users/:id", ok_handler());
+        let router = Router::new().route("/users/:id", get(ok_handler()));
 
         let resp = dispatch(&router, "GET", "/users/foo//");
         assert_ne!(
@@ -193,8 +191,7 @@ mod behavioral {
         // leading `//` specially in absolute URI references —
         // it introduces an authority component. In a path-only
         // request line it's malformed.)
-        let mut router = Router::new();
-        router.get("/users", ok_handler());
+        let router = Router::new().route("/users", get(ok_handler()));
 
         let resp = dispatch(&router, "GET", "//users");
         assert_ne!(
@@ -211,8 +208,7 @@ mod behavioral {
         // Pin: '///' contains '//' and so is also rejected.
         // (Defense-in-depth: not just exactly-double, any run
         // of consecutive slashes.)
-        let mut router = Router::new();
-        router.get("/users/:id", ok_handler());
+        let router = Router::new().route("/users/:id", get(ok_handler()));
 
         let resp = dispatch(&router, "GET", "/users///foo");
         assert_ne!(resp.status, StatusCode::OK);
@@ -223,8 +219,7 @@ mod behavioral {
         // Pin: the fix doesn't break the happy path. A regression
         // that over-broadly rejected paths would catastrophically
         // break every parameterized route.
-        let mut router = Router::new();
-        router.get("/users/:id", ok_handler());
+        let router = Router::new().route("/users/:id", get(ok_handler()));
 
         let resp = dispatch(&router, "GET", "/users/foo");
         assert_eq!(
@@ -242,8 +237,7 @@ mod behavioral {
         // Pin: '/users/foo/' (single trailing slash) is still
         // matched against '/users/:id'. The fix only rejects
         // '//', not single trailing slash.
-        let mut router = Router::new();
-        router.get("/users/:id", ok_handler());
+        let router = Router::new().route("/users/:id", get(ok_handler()));
 
         let resp = dispatch(&router, "GET", "/users/foo/");
         assert_eq!(
@@ -263,8 +257,7 @@ mod behavioral {
         // would leave 2 segments != 4, AND even though the
         // worst-case (c) failure mode would set :uid="" :pid=""
         // — neither happens.
-        let mut router = Router::new();
-        router.get("/users/:uid/posts/:pid", ok_handler());
+        let router = Router::new().route("/users/:uid/posts/:pid", get(ok_handler()));
 
         // Empty :uid via leading '//'.
         let resp = dispatch(&router, "GET", "/users//posts/123");
@@ -288,8 +281,7 @@ mod behavioral {
         // (no params) is also rejected — for consistency. A
         // regression that scoped the guard to "only param
         // routes" would let static-route requests bypass.
-        let mut router = Router::new();
-        router.get("/health/status", ok_handler());
+        let router = Router::new().route("/health/status", get(ok_handler()));
 
         let resp = dispatch(&router, "GET", "/health//status");
         assert_ne!(
@@ -311,8 +303,7 @@ mod behavioral {
         // entirely). This test makes the absence behaviorally
         // obvious — even if a future code path tries to capture
         // an empty segment, the early return prevents it.
-        let mut router = Router::new();
-        router.get("/items/:id", ok_handler());
+        let router = Router::new().route("/items/:id", get(ok_handler()));
 
         // An exotic path: encoded slash literal (not double-
         // slash). The router does NOT decode %2F before
