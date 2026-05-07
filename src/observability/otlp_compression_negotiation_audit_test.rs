@@ -20,7 +20,6 @@
 #![allow(dead_code)]
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 /// Mock compression configuration for testing negotiation behavior.
 #[derive(Debug, Clone)]

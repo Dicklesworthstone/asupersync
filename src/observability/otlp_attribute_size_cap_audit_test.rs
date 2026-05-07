@@ -14,7 +14,7 @@
 
 #![cfg(test)]
 
-use crate::observability::otlp_trace_exporter::{OtlpSpan, SpanBatch};
+use crate::observability::otlp_trace_exporter::OtlpSpan;
 use std::time::Instant;
 
 /// **AUDIT TEST**: Verify OTLP span attribute values are truncated per §2.5.3.

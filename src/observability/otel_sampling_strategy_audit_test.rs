@@ -18,7 +18,7 @@
 use crate::observability::otlp_trace_exporter::{
     LoadSheddingTraceExporter, MockOtlpHttpExporter, OtlpSpan, SpanBatch, TraceExporter,
 };
-use crate::observability::w3c_trace_context::{TraceFlags, W3CTraceContext, extract_from_http};
+use crate::observability::w3c_trace_context::extract_from_http;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 

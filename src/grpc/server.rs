@@ -4962,7 +4962,7 @@ mod tests {
     /// cancellation paths.
     mod grpc_streaming_trailer_emission_audit {
         use super::*;
-        use crate::grpc::{Code, Metadata, MetadataValue, Status};
+        use crate::grpc::{Code, Metadata, Status};
         use crate::http::h2::frame::{DataFrame, HeadersFrame};
 
         /// AUDIT: Verify gRPC status trailer ordering requirement understanding

@@ -4870,7 +4870,6 @@ mod tests {
     /// Tests the property that window updates maintain consistency according to RFC 9113
     /// flow control semantics. Addresses the oracle problem by verifying relationships
     /// between inputs/outputs rather than exact output values.
-
     mod flow_control_metamorphic_tests {
         use super::*;
         use proptest::prelude::*;

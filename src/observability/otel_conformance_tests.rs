@@ -36070,7 +36070,7 @@ mod otlp_122_tests {
         const MAX_SIZE: usize = 10 * 1024 * 1024;
 
         // Scenario 1: Many small attributes (should be fine individually)
-        let many_small_total = 1000 * 1024; // 1000 attributes of 1KB each = 1MB total
+        let _many_small_total = 1000 * 1024; // 1000 attributes of 1KB each = 1MB total
         for i in 0..10 {
             let small_attr_size = 1024; // 1KB each
             assert!(
@@ -36760,7 +36760,7 @@ mod otlp_122_tests {
     }
 
     /// Validate that bytes are encoded as binary, not base64
-    fn validate_bytes_encoding(bytes: &[u8], attr_name: &str) -> BytesEncodingResult {
+    fn validate_bytes_encoding(bytes: &[u8], _attr_name: &str) -> BytesEncodingResult {
         // In a real OTLP implementation, this would check the actual wire format
         // For this test, we simulate the key properties:
 
@@ -36768,7 +36768,7 @@ mod otlp_122_tests {
         let is_binary_encoding = true; // Assume proper binary encoding
 
         // 2. Base64 encoding would increase size by ~33% and be string-typed
-        let base64_would_increase_size = bytes.len() * 4 / 3 + 4; // Base64 overhead
+        let _base64_would_increase_size = bytes.len() * 4 / 3 + 4; // Base64 overhead
         let is_base64_string = false; // Should NOT be base64
 
         // 3. Binary encoding size should match original (no base64 overhead)
@@ -37390,7 +37390,7 @@ mod otlp_122_tests {
     /// Validate encoding of flat key-value list
     fn validate_kvlist_encoding_flat(
         kvpairs: &[(String, String)],
-        attr_name: &str,
+        _attr_name: &str,
     ) -> KvlistEncodingResult {
         KvlistEncodingResult {
             is_properly_encoded: true, // Flat kvlists should always encode properly
@@ -37403,7 +37403,7 @@ mod otlp_122_tests {
     /// Validate encoding of nested key-value list
     fn validate_kvlist_encoding_nested(
         nested_pairs: &[(String, Otlp130NestedValue)],
-        attr_name: &str,
+        _attr_name: &str,
     ) -> KvlistEncodingResult {
         let depth = calculate_kvlist_depth(nested_pairs);
         let total_pairs = count_total_pairs(nested_pairs);
@@ -37478,7 +37478,7 @@ mod otlp_122_tests {
 
     /// Simulate encoding/decoding cycle for flat kvlist
     fn simulate_kvlist_encoding_cycle_flat(
-        kvpairs: &[(String, String)],
+        _kvpairs: &[(String, String)],
     ) -> KvlistEncodingCycleResult {
         // Simulate the requirement: flat kvlists should preserve perfectly
         KvlistEncodingCycleResult {

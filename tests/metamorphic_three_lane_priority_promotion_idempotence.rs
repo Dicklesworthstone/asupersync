@@ -61,7 +61,7 @@ impl PromotionIdempotenceHarness {
         // Create initial tasks for testing
         let mut initial_tasks = Vec::new();
         for i in 0..num_initial_tasks {
-            let task_id = TaskId::new(i as u64 + 1000); // Use high IDs to avoid conflicts
+            let task_id = TaskId::new_for_test(i as u64 + 1000); // Use high IDs to avoid conflicts
             initial_tasks.push(task_id);
         }
 
@@ -138,13 +138,13 @@ impl Arbitrary for PromotionScenario {
             .prop_map(|(ready_raw, cancel_raw, target_raw, num_promotions)| {
                 let ready_tasks = ready_raw
                     .into_iter()
-                    .map(|(id, prio)| (TaskId::new(id), prio))
+                    .map(|(id, prio)| (TaskId::new_for_test(id), prio))
                     .collect();
                 let cancel_tasks = cancel_raw
                     .into_iter()
-                    .map(|(id, prio)| (TaskId::new(id), prio))
+                    .map(|(id, prio)| (TaskId::new_for_test(id), prio))
                     .collect();
-                let target_task = (TaskId::new(target_raw.0), target_raw.1);
+                let target_task = (TaskId::new_for_test(target_raw.0), target_raw.1);
 
                 PromotionScenario {
                     ready_tasks,
@@ -294,11 +294,11 @@ fn test_mixed_priority_promotion_idempotence() {
 
     // Test scenario: multiple tasks with different priorities
     let ready_tasks = vec![
-        (TaskId::new(1001), 10), // Low priority
-        (TaskId::new(1002), 50), // Medium priority
-        (TaskId::new(1003), 90), // High priority
+        (TaskId::new_for_test(1001, 0), 10), // Low priority
+        (TaskId::new_for_test(1002, 0), 50), // Medium priority
+        (TaskId::new_for_test(1003, 0), 90), // High priority
     ];
-    let target_task = (TaskId::new(2001), 75); // Medium-high priority
+    let target_task = (TaskId::new_for_test(2001, 0), 75); // Medium-high priority
 
     // Single promotion
     harness.reset_scheduler_state();
@@ -322,7 +322,7 @@ fn test_mixed_priority_promotion_idempotence() {
     // Ensure target task is scheduled before lower priority ready tasks
     if let (Some(target_pos), Some(low_prio_pos)) = (
         single_sequence.iter().position(|&t| t == target_task.0),
-        single_sequence.iter().position(|&t| t == TaskId::new(1001)),
+        single_sequence.iter().position(|&t| t == TaskId::new_for_test(1001, 0)),
     ) {
         assert!(
             target_pos < low_prio_pos,

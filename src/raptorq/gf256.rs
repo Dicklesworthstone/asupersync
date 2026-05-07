@@ -5251,7 +5251,7 @@ mod tests {
 
         for seed in seeds {
             for len in lengths {
-                let original = deterministic_bytes(seed, len, 0xC011_EC7);
+                let original = deterministic_bytes(seed, len, 0x0C01_1EC7);
                 let src = deterministic_bytes(seed, len, 0xADD0_4D17);
                 for scalar in scalars {
                     let context = failure_context(

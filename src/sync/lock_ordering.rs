@@ -65,7 +65,7 @@ impl LockRank {
 /// Only compiled in debug builds.
 #[cfg(debug_assertions)]
 thread_local! {
-    static HELD_RANKS: RefCell<BTreeSet<LockRank>> = RefCell::new(BTreeSet::new());
+    static HELD_RANKS: RefCell<BTreeSet<LockRank>> = const { RefCell::new(BTreeSet::new()) };
 }
 
 /// Check if acquiring a lock of the given rank would violate ordering.
@@ -79,15 +79,16 @@ pub fn check_acquire(lock_name: &str, rank: LockRank) {
 
             // Check if we're trying to acquire a rank lower than any currently held
             if let Some(&highest_held) = held_ref.iter().last() {
-                if rank < highest_held {
-                    panic!(
-                        "DEADLOCK PREVENTION: Lock ordering violation!\n\
-                        Attempted to acquire '{}' (rank {:?}) while holding locks of rank {:?}.\n\
-                        Correct order: Config -> Instrumentation -> Regions -> Tasks -> Obligations\n\
-                        This violates the asupersync lock hierarchy and could cause deadlocks.",
-                        lock_name, rank, highest_held
-                    );
-                }
+                assert!(
+                    rank >= highest_held,
+                    "DEADLOCK PREVENTION: Lock ordering violation!\n\
+                    Attempted to acquire '{}' (rank {:?}) while holding locks of rank {:?}.\n\
+                    Correct order: Config -> Instrumentation -> Regions -> Tasks -> Obligations\n\
+                    This violates the asupersync lock hierarchy and could cause deadlocks.",
+                    lock_name,
+                    rank,
+                    highest_held
+                );
             }
         });
     }

@@ -19,7 +19,6 @@
 #![cfg(test)]
 #![allow(dead_code)]
 
-use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Mock span with SystemTime-based timing (current defective implementation).
