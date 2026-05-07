@@ -11,6 +11,10 @@
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 
+use asupersync_conformance::{
+    PriorityComplianceReport, PriorityComplianceSummary, PriorityTestVerdict,
+};
+
 #[derive(Parser)]
 #[command(name = "h2_priority_conformance")]
 #[command(about = "HTTP/2 PRIORITY frame conformance tester")]
@@ -109,12 +113,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     print_test_summary(&report);
 
     // Exit with appropriate code
-    let exit_code = if report.summary.failed > 0 { 1 } else { 0 };
-    std::process::exit(exit_code);
+    std::process::exit(exit_code(&report));
 }
 
 /// Generate a concise summary output
-fn generate_summary_output(report: &asupersync_conformance::PriorityComplianceReport) -> String {
+fn generate_summary_output(report: &PriorityComplianceReport) -> String {
     let mut output = String::new();
 
     output.push_str("HTTP/2 PRIORITY FRAME CONFORMANCE SUMMARY\n");
@@ -141,7 +144,7 @@ fn generate_summary_output(report: &asupersync_conformance::PriorityComplianceRe
     if report.summary.failed > 0 {
         output.push_str("\nFAILURES:\n");
         for result in &report.results {
-            if result.verdict == asupersync_conformance::PriorityTestVerdict::Fail {
+            if result.verdict == PriorityTestVerdict::Fail {
                 output.push_str(&format!(
                     "  ❌ {}: {}\n",
                     result.case_id,
@@ -161,12 +164,15 @@ fn generate_summary_output(report: &asupersync_conformance::PriorityComplianceRe
 }
 
 /// Print colorized test summary to stderr
-fn print_test_summary(report: &asupersync_conformance::PriorityComplianceReport) {
+fn print_test_summary(report: &PriorityComplianceReport) {
     eprintln!("╭─ HTTP/2 PRIORITY CONFORMANCE RESULTS ─╮");
     eprintln!("│                                        │");
 
     if report.summary.failed == 0 {
-        eprintln!("│  ✅ ALL TESTS PASSED                   │");
+        eprintln!(
+            "│  {}  │",
+            final_status_line(report.summary.skipped, report.summary.expected_failures)
+        );
         eprintln!(
             "│  🎯 Compliance: {:.1}%                  │",
             report.summary.compliance_score * 100.0
@@ -205,4 +211,97 @@ fn print_test_summary(report: &asupersync_conformance::PriorityComplianceReport)
     );
     eprintln!("│                                        │");
     eprintln!("╰────────────────────────────────────────╯");
+}
+
+fn final_status_line(skipped_count: usize, expected_failure_count: usize) -> String {
+    if skipped_count == 0 && expected_failure_count == 0 {
+        "✅ ALL TESTS PASSED".to_string()
+    } else {
+        format!(
+            "⚠️  NO FAILURES; PARTIAL COVERAGE ({skipped_count} skipped, {expected_failure_count} expected failures)"
+        )
+    }
+}
+
+fn has_incomplete_coverage(report: &PriorityComplianceReport) -> bool {
+    report.total_cases == 0 || report.summary.skipped > 0 || report.summary.expected_failures > 0
+}
+
+fn exit_code(report: &PriorityComplianceReport) -> i32 {
+    if report.summary.failed > 0 || has_incomplete_coverage(report) {
+        1
+    } else {
+        0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn synthetic_report(
+        total_cases: usize,
+        failed: usize,
+        expected_failures: usize,
+        skipped: usize,
+    ) -> PriorityComplianceReport {
+        PriorityComplianceReport {
+            test_run_id: "synthetic".to_string(),
+            timestamp: chrono::Utc::now(),
+            total_cases,
+            results: Vec::new(),
+            summary: PriorityComplianceSummary {
+                total_cases,
+                passed: total_cases
+                    .saturating_sub(failed)
+                    .saturating_sub(expected_failures)
+                    .saturating_sub(skipped),
+                failed,
+                expected_failures,
+                skipped,
+                compliance_score: 0.0,
+            },
+        }
+    }
+
+    #[test]
+    fn final_status_does_not_claim_all_passed_for_partial_coverage() {
+        let status = final_status_line(1, 0);
+
+        assert!(status.contains("NO FAILURES; PARTIAL COVERAGE"));
+        assert!(!status.contains("ALL TESTS PASSED"));
+    }
+
+    #[test]
+    fn final_status_claims_all_passed_only_for_full_green_results() {
+        assert_eq!(final_status_line(0, 0), "✅ ALL TESTS PASSED");
+    }
+
+    #[test]
+    fn exit_code_is_nonzero_for_expected_failures() {
+        let report = synthetic_report(8, 0, 1, 0);
+
+        assert_eq!(exit_code(&report), 1);
+    }
+
+    #[test]
+    fn exit_code_is_nonzero_for_skipped_coverage() {
+        let report = synthetic_report(8, 0, 0, 1);
+
+        assert_eq!(exit_code(&report), 1);
+    }
+
+    #[test]
+    fn exit_code_is_nonzero_for_zero_case_reports() {
+        let report = synthetic_report(0, 0, 0, 0);
+
+        assert_eq!(exit_code(&report), 1);
+    }
+
+    #[test]
+    fn exit_code_is_zero_for_full_pass_coverage() {
+        let report = synthetic_report(8, 0, 0, 0);
+
+        assert_eq!(exit_code(&report), 0);
+    }
 }
