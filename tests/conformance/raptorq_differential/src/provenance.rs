@@ -367,7 +367,16 @@ impl ProvenanceTracker {
             dependency_type: DependencyType::Binary,
         });
 
-        // TODO: Parse command to detect additional dependencies
+        if let Some(command_binary) = command_binary_hint(&generation_info.command) {
+            if command_binary != generation_info.reference_implementation {
+                dependencies.push(Dependency {
+                    name: command_binary,
+                    version: "unknown".to_string(),
+                    source: "generation-command".to_string(),
+                    dependency_type: DependencyType::Binary,
+                });
+            }
+        }
 
         Ok(dependencies)
     }
@@ -378,17 +387,13 @@ impl ProvenanceTracker {
         &self,
         generation_info: &GenerationInfo,
     ) -> bool {
-        // This would check if the reference implementation is still available
-        // For now, just return true as a placeholder
-        true
+        binary_available(&generation_info.reference_implementation)
     }
 
     #[allow(dead_code)]
 
-    fn check_dependencies(&self, _dependencies: &[Dependency]) -> Result<bool, ProvenanceError> {
-        // This would check if all dependencies are satisfied
-        // For now, just return true as a placeholder
-        Ok(true)
+    fn check_dependencies(&self, dependencies: &[Dependency]) -> Result<bool, ProvenanceError> {
+        Ok(dependencies.iter().all(dependency_available))
     }
 
     #[allow(dead_code)]
@@ -411,6 +416,59 @@ impl ProvenanceTracker {
             }
         }
     }
+}
+
+fn dependency_available(dep: &Dependency) -> bool {
+    match dep.dependency_type {
+        DependencyType::Binary => {
+            binary_available(&dep.name)
+                || (dep.source != "external"
+                    && dep.source != "generation-command"
+                    && binary_available(&dep.source))
+        }
+        DependencyType::Repository => Path::new(&dep.source).exists(),
+        DependencyType::Library | DependencyType::PythonPackage | DependencyType::SystemPackage => {
+            false
+        }
+    }
+}
+
+fn binary_available(binary: &str) -> bool {
+    if binary.trim().is_empty() {
+        return false;
+    }
+
+    let binary_path = Path::new(binary);
+    if binary_path.is_absolute() || binary.contains('/') || binary.contains('\\') {
+        return binary_path.is_file();
+    }
+
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+        .any(|dir| dir.join(binary).is_file())
+}
+
+fn command_binary_hint(command: &str) -> Option<String> {
+    command
+        .split_whitespace()
+        .map(|token| token.trim_matches(|c| c == '"' || c == '\''))
+        .find(|token| !token.is_empty() && !looks_like_env_assignment(token))
+        .map(str::to_string)
+}
+
+fn looks_like_env_assignment(token: &str) -> bool {
+    let Some((name, _value)) = token.split_once('=') else {
+        return false;
+    };
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .next()
+            .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
 }
 
 /// Generates a unique fixture ID from a path
@@ -563,6 +621,66 @@ mod tests {
 
     #[test]
     #[allow(dead_code)]
+    fn test_reference_availability_fails_closed_for_missing_binary() {
+        let temp_dir = TempDir::new().unwrap();
+        let tracker = ProvenanceTracker::new(temp_dir.path());
+        let generation = test_generation_info("definitely-missing-asupersync-reference-binary");
+
+        assert!(!tracker.check_reference_implementation_availability(&generation));
+    }
+
+    #[test]
+    #[allow(dead_code)]
+    fn test_reference_availability_accepts_existing_binary_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let tracker = ProvenanceTracker::new(temp_dir.path());
+        let current_exe = std::env::current_exe().unwrap();
+        let generation = test_generation_info(current_exe.to_str().unwrap());
+
+        assert!(tracker.check_reference_implementation_availability(&generation));
+    }
+
+    #[test]
+    #[allow(dead_code)]
+    fn test_dependency_check_requires_available_binary() {
+        let temp_dir = TempDir::new().unwrap();
+        let tracker = ProvenanceTracker::new(temp_dir.path());
+        let current_exe = std::env::current_exe().unwrap();
+        let deps = vec![
+            Dependency {
+                name: current_exe.to_string_lossy().to_string(),
+                version: "current".to_string(),
+                source: "external".to_string(),
+                dependency_type: DependencyType::Binary,
+            },
+            Dependency {
+                name: "definitely-missing-asupersync-dependency".to_string(),
+                version: "missing".to_string(),
+                source: "external".to_string(),
+                dependency_type: DependencyType::Binary,
+            },
+        ];
+
+        assert!(!tracker.check_dependencies(&deps).unwrap());
+        assert!(tracker.check_dependencies(&deps[..1]).unwrap());
+    }
+
+    #[test]
+    #[allow(dead_code)]
+    fn test_detect_dependencies_includes_generation_command_binary() {
+        let temp_dir = TempDir::new().unwrap();
+        let tracker = ProvenanceTracker::new(temp_dir.path());
+        let mut generation = test_generation_info("libraptorq");
+        generation.command = "RUST_LOG=debug python -m raptorq_fixture".to_string();
+
+        let deps = tracker.detect_dependencies(&generation).unwrap();
+
+        assert!(deps.iter().any(|dep| dep.name == "libraptorq"));
+        assert!(deps.iter().any(|dep| dep.name == "python"));
+    }
+
+    #[test]
+    #[allow(dead_code)]
     fn test_fixture_checksums() {
         let input = b"test input";
         let output = b"test output";
@@ -588,5 +706,18 @@ mod tests {
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
         assert_eq!(calculate_md5(b"abc"), "900150983cd24fb0d6963f7d28e17f72");
+    }
+
+    fn test_generation_info(reference_implementation: &str) -> GenerationInfo {
+        GenerationInfo {
+            reference_implementation: reference_implementation.to_string(),
+            reference_version: "test".to_string(),
+            command: reference_implementation.to_string(),
+            working_directory: ".".to_string(),
+            environment: HashMap::new(),
+            timestamp: "2026-05-07T00:00:00Z".to_string(),
+            framework_commit: None,
+            platform: get_current_platform_info(),
+        }
     }
 }
