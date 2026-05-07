@@ -56,6 +56,8 @@ pub mod histogram_conformance;
 pub mod level;
 pub mod metrics;
 #[cfg(test)]
+pub mod mock_code_finder_clean_sweep_audit_test;
+#[cfg(test)]
 pub mod multi_runtime_subscriber_audit_test;
 pub mod obligation_tracker;
 #[cfg(feature = "metrics")]
