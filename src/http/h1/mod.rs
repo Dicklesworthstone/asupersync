@@ -28,6 +28,10 @@ mod request_line_tests;
 
 pub use client::{ClientIncomingBody, ClientStreamingResponse, Http1Client, Http1ClientCodec};
 pub use codec::{Http1Codec, HttpError};
+
+// Export for conformance testing
+#[cfg(test)]
+pub use codec::parse_header_line_test as parse_header_line;
 pub use http_client::{
     ClientError, HttpClient, HttpClientBuilder, HttpClientConfig, ParsedUrl, RedirectPolicy,
 };

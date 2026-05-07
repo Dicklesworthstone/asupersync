@@ -104,7 +104,7 @@ mod h1_h2_conformance_tests {
         let h1_equivalent = create_h1_equivalent_map(&[("content-type", "text/html")]);
 
         // H2 HPACK encoding
-        let mut wire_bytes = encode_literal_header("content-type", "text/html");
+        let wire_bytes = encode_literal_header("content-type", "text/html");
         let mut decoder = HpackDecoder::new();
         let mut h2_bytes = Bytes::from(wire_bytes);
 
@@ -214,14 +214,14 @@ mod integration_tests {
     fn header_map_operations() {
         let mut map = HeaderMap::new();
         map.insert(
-            HeaderName::from_string("content-type".to_string()),
+            HeaderName::from_string("content-type"),
             HeaderValue::from_string("text/plain".to_string()),
         );
 
         assert_eq!(map.len(), 1);
         assert!(!map.is_empty());
 
-        let value = map.get(&HeaderName::from_string("content-type".to_string()));
+        let value = map.get(&HeaderName::from_string("content-type"));
         assert!(value.is_some());
     }
 

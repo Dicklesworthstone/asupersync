@@ -551,6 +551,12 @@ pub(super) fn parse_header_line(line: &str) -> Result<(String, String), HttpErro
     Ok((name.to_owned(), value.to_owned()))
 }
 
+/// Test-specific export of parse_header_line for conformance testing.
+#[cfg(test)]
+pub fn parse_header_line_test(line: &str) -> Result<(String, String), HttpError> {
+    parse_header_line(line)
+}
+
 pub(super) fn validate_header_field(name: &str, value: &str) -> Result<(), HttpError> {
     if name.contains('\r') || name.contains('\n') {
         return Err(HttpError::InvalidHeaderName);
