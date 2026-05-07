@@ -886,6 +886,137 @@ impl SloRuntimePolicyApplicationValidation {
     }
 }
 
+/// Runtime admission request evidence supplied explicitly by the caller.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SloRuntimeAdmissionRequest {
+    /// Stable request or work-unit identifier.
+    pub request_id: String,
+    /// Number of work units represented by this request.
+    pub work_units: u64,
+    /// Optional work class, if this request is degradable optional work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optional_work_class: Option<String>,
+    /// Current queue wait estimate in milliseconds.
+    pub queue_wait_ms: u64,
+    /// Current memory pressure in basis points.
+    pub memory_basis_points: u16,
+    /// Current file-descriptor pressure in basis points.
+    pub fd_basis_points: u16,
+    /// Current timer queue depth.
+    pub timer_queue_depth: u64,
+    /// Whether cancellation was already requested while admission was pending.
+    pub cancel_requested: bool,
+}
+
+/// Runtime admission outcome status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum SloRuntimeAdmissionStatus {
+    /// Core work was admitted.
+    Admitted,
+    /// Work was rejected at the admission boundary.
+    Rejected,
+    /// Optional work was browned out before core work was rejected.
+    Brownout,
+    /// The request was routed to a no-win fallback receipt.
+    NoWin,
+    /// Admission was blocked by invalid or stale policy evidence.
+    Blocked,
+}
+
+impl SloRuntimeAdmissionStatus {
+    /// Return the stable artifact tag.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Admitted => "admitted",
+            Self::Rejected => "rejected",
+            Self::Brownout => "brownout",
+            Self::NoWin => "no_win",
+            Self::Blocked => "blocked",
+        }
+    }
+}
+
+/// Runtime admission issue/outcome reason vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum SloRuntimeAdmissionIssueKind {
+    /// The runtime policy application failed validation.
+    ApplicationInvalid,
+    /// Admission was cancelled before work was started.
+    Cancelled,
+    /// Queue wait exceeded the compiled threshold.
+    QueueWaitExceeded,
+    /// Memory pressure exceeded the compiled hard threshold.
+    MemoryPressureExceeded,
+    /// File-descriptor pressure exceeded the compiled hard threshold.
+    FdPressureExceeded,
+    /// Timer queue depth exceeded the compiled threshold.
+    TimerQueueExceeded,
+    /// Optional work class was not declared by the compiled policy.
+    UnsupportedOptionalWorkClass,
+    /// Optional work was browned out.
+    OptionalWorkBrownout,
+    /// No-win fallback receipt was selected.
+    NoWinFallback,
+}
+
+impl SloRuntimeAdmissionIssueKind {
+    /// Return the stable artifact tag.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ApplicationInvalid => "application_invalid",
+            Self::Cancelled => "cancelled",
+            Self::QueueWaitExceeded => "queue_wait_exceeded",
+            Self::MemoryPressureExceeded => "memory_pressure_exceeded",
+            Self::FdPressureExceeded => "fd_pressure_exceeded",
+            Self::TimerQueueExceeded => "timer_queue_exceeded",
+            Self::UnsupportedOptionalWorkClass => "unsupported_optional_work_class",
+            Self::OptionalWorkBrownout => "optional_work_brownout",
+            Self::NoWinFallback => "no_win_fallback",
+        }
+    }
+}
+
+/// Deterministic runtime admission/brownout/no-win evidence row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SloRuntimeAdmissionOutcome {
+    /// Stable request or work-unit identifier.
+    pub request_id: String,
+    /// Admission outcome status.
+    pub status: SloRuntimeAdmissionStatus,
+    /// Source policy identifier.
+    pub policy_id: String,
+    /// Workload class covered by the policy application.
+    pub workload_class: SloWorkloadClass,
+    /// Runtime policy decision that drove this outcome.
+    pub decision: SloRuntimePolicyDecision,
+    /// Optional work class, if evaluated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optional_work_class: Option<String>,
+    /// Optional work action, if evaluated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optional_work_decision: Option<SloRuntimeOptionalWorkDecision>,
+    /// Fallback reason, when status is `no_win`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
+    /// Declared profile hash attached to the policy application.
+    pub profile_hash: String,
+    /// Exact rch-routed proof command attached to the application.
+    pub proof_command: String,
+    /// Cleanup/runtime budget projection used for admitted work.
+    pub budget: SloCompiledBudget,
+    /// Number of work units admitted.
+    pub admitted_work_units: u64,
+    /// Number of work units rejected, browned out, blocked, or routed away.
+    pub rejected_work_units: u64,
+    /// Machine-readable issue/outcome reason tags.
+    #[serde(default)]
+    pub issue_kinds: Vec<SloRuntimeAdmissionIssueKind>,
+}
+
 impl SloRuntimePolicyApplication {
     /// Build a runtime application payload from a compiled policy output.
     #[must_use]
@@ -1023,6 +1154,173 @@ impl SloRuntimePolicyApplication {
             policy_id: self.policy_id.clone(),
             compiled_output_id: self.compiled_output_id.clone(),
             issues,
+        }
+    }
+
+    /// Evaluate a runtime admission request against this explicit policy application.
+    #[must_use]
+    pub fn evaluate_admission(
+        &self,
+        request: &SloRuntimeAdmissionRequest,
+    ) -> SloRuntimeAdmissionOutcome {
+        let validation = self.validate();
+        if !validation.accepted {
+            return self.admission_outcome(
+                request,
+                SloRuntimeAdmissionStatus::Blocked,
+                None,
+                None,
+                vec![SloRuntimeAdmissionIssueKind::ApplicationInvalid],
+                0,
+            );
+        }
+
+        if request.cancel_requested {
+            return self.admission_outcome(
+                request,
+                SloRuntimeAdmissionStatus::Rejected,
+                None,
+                None,
+                vec![SloRuntimeAdmissionIssueKind::Cancelled],
+                0,
+            );
+        }
+
+        if self.decision == SloRuntimePolicyDecision::NoWin {
+            let fallback_reason = self
+                .no_win_fallback
+                .as_ref()
+                .map(|fallback| fallback.fallback_reason.clone());
+            return self.admission_outcome(
+                request,
+                SloRuntimeAdmissionStatus::NoWin,
+                None,
+                fallback_reason,
+                vec![SloRuntimeAdmissionIssueKind::NoWinFallback],
+                0,
+            );
+        }
+
+        if self.decision == SloRuntimePolicyDecision::Reject {
+            return self.admission_outcome(
+                request,
+                SloRuntimeAdmissionStatus::Rejected,
+                None,
+                None,
+                vec![SloRuntimeAdmissionIssueKind::ApplicationInvalid],
+                0,
+            );
+        }
+
+        let hard_rejection = self.hard_rejection_issue(request);
+        if let Some(issue) = hard_rejection {
+            return self.admission_outcome(
+                request,
+                SloRuntimeAdmissionStatus::Rejected,
+                None,
+                None,
+                vec![issue],
+                0,
+            );
+        }
+
+        if let Some(optional_class) = &request.optional_work_class {
+            let optional_work = self
+                .optional_work_decisions
+                .iter()
+                .find(|work| work.class_id == *optional_class);
+            let Some(optional_work) = optional_work else {
+                return self.admission_outcome(
+                    request,
+                    SloRuntimeAdmissionStatus::Rejected,
+                    None,
+                    None,
+                    vec![SloRuntimeAdmissionIssueKind::UnsupportedOptionalWorkClass],
+                    0,
+                );
+            };
+            if optional_work.decision == SloRuntimeOptionalWorkDecision::Brownout
+                || self.soft_brownout_pressure(request)
+            {
+                return self.admission_outcome(
+                    request,
+                    SloRuntimeAdmissionStatus::Brownout,
+                    Some(SloRuntimeOptionalWorkDecision::Brownout),
+                    None,
+                    vec![SloRuntimeAdmissionIssueKind::OptionalWorkBrownout],
+                    0,
+                );
+            }
+            return self.admission_outcome(
+                request,
+                SloRuntimeAdmissionStatus::Admitted,
+                Some(SloRuntimeOptionalWorkDecision::Run),
+                None,
+                Vec::new(),
+                request.work_units,
+            );
+        }
+
+        self.admission_outcome(
+            request,
+            SloRuntimeAdmissionStatus::Admitted,
+            None,
+            None,
+            Vec::new(),
+            request.work_units,
+        )
+    }
+
+    fn hard_rejection_issue(
+        &self,
+        request: &SloRuntimeAdmissionRequest,
+    ) -> Option<SloRuntimeAdmissionIssueKind> {
+        if request.queue_wait_ms > self.admission.queue_wait_threshold_ms {
+            return Some(SloRuntimeAdmissionIssueKind::QueueWaitExceeded);
+        }
+        if request.memory_basis_points > self.admission.memory_hard_basis_points {
+            return Some(SloRuntimeAdmissionIssueKind::MemoryPressureExceeded);
+        }
+        if request.fd_basis_points > self.admission.fd_hard_basis_points {
+            return Some(SloRuntimeAdmissionIssueKind::FdPressureExceeded);
+        }
+        if request.timer_queue_depth > self.admission.timer_queue_depth {
+            return Some(SloRuntimeAdmissionIssueKind::TimerQueueExceeded);
+        }
+        None
+    }
+
+    fn soft_brownout_pressure(&self, request: &SloRuntimeAdmissionRequest) -> bool {
+        request.memory_basis_points >= self.admission.memory_soft_basis_points
+            || request.fd_basis_points >= self.admission.fd_soft_basis_points
+            || request.timer_queue_depth >= self.admission.timer_queue_depth
+            || request.queue_wait_ms >= self.admission.queue_wait_threshold_ms
+    }
+
+    fn admission_outcome(
+        &self,
+        request: &SloRuntimeAdmissionRequest,
+        status: SloRuntimeAdmissionStatus,
+        optional_work_decision: Option<SloRuntimeOptionalWorkDecision>,
+        fallback_reason: Option<String>,
+        issue_kinds: Vec<SloRuntimeAdmissionIssueKind>,
+        admitted_work_units: u64,
+    ) -> SloRuntimeAdmissionOutcome {
+        SloRuntimeAdmissionOutcome {
+            request_id: request.request_id.clone(),
+            status,
+            policy_id: self.policy_id.clone(),
+            workload_class: self.workload_class.clone(),
+            decision: self.decision,
+            optional_work_class: request.optional_work_class.clone(),
+            optional_work_decision,
+            fallback_reason,
+            profile_hash: self.provenance.profile_hash.clone(),
+            proof_command: self.proof_command.command.clone(),
+            budget: self.budget.clone(),
+            admitted_work_units,
+            rejected_work_units: request.work_units.saturating_sub(admitted_work_units),
+            issue_kinds,
         }
     }
 

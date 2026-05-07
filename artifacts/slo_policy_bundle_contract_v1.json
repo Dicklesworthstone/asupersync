@@ -130,6 +130,60 @@
       "secret_like_material"
     ]
   },
+  "runtime_admission_statuses": [
+    "admitted",
+    "rejected",
+    "brownout",
+    "no_win",
+    "blocked"
+  ],
+  "runtime_admission_issue_kinds": [
+    "application_invalid",
+    "cancelled",
+    "queue_wait_exceeded",
+    "memory_pressure_exceeded",
+    "fd_pressure_exceeded",
+    "timer_queue_exceeded",
+    "unsupported_optional_work_class",
+    "optional_work_brownout",
+    "no_win_fallback"
+  ],
+  "runtime_admission_contract": {
+    "mode": "explicit evidence runtime admission and brownout evaluation",
+    "source": "SloRuntimePolicyApplication::evaluate_admission",
+    "application_schema_version": "slo-runtime-policy-application-v1",
+    "inputs": [
+      "request_id",
+      "work_units",
+      "optional_work_class",
+      "queue_wait_ms",
+      "memory_basis_points",
+      "fd_basis_points",
+      "timer_queue_depth",
+      "cancel_requested"
+    ],
+    "evidence_fields": [
+      "policy_id",
+      "workload_class",
+      "decision",
+      "optional_work_class",
+      "fallback_reason",
+      "profile_hash",
+      "proof_command",
+      "admitted_work_units",
+      "rejected_work_units",
+      "issue_kinds"
+    ],
+    "fail_closed_for": [
+      "application_invalid",
+      "cancelled",
+      "queue_wait_exceeded",
+      "memory_pressure_exceeded",
+      "fd_pressure_exceeded",
+      "timer_queue_exceeded",
+      "unsupported_optional_work_class"
+    ]
+  },
   "proof_report_gate": {
     "mode": "opt-in deterministic direct-main gate",
     "accepted_statuses": [
@@ -1199,6 +1253,7 @@
     "bash -n scripts/validate_slo_policy_bundle.sh",
     "bash scripts/validate_slo_policy_bundle.sh --output-root target/slo-policy-bundle --run-id asupersync-bgtplc.4",
     "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals runtime_slo_policy_application -- --nocapture",
+    "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals runtime_slo_admission_evaluation -- --nocapture",
     "rch exec -- rustfmt --edition 2024 --check src/types/slo_policy.rs src/types/mod.rs tests/slo_policy_bundle_contract.rs",
     "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_report CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture",
     "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_report_check CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo check -p asupersync --test slo_policy_bundle_contract --features test-internals",

@@ -11,6 +11,7 @@ use asupersync::types::{
     SloPolicyRedaction, SloPolicyValidationIssueKind, SloPolicyValidationReport, SloProofCommand,
     SloProofNoWinReceipt, SloProofReport, SloProofReportIssueKind, SloProofReportProvenance,
     SloProofReportRow, SloProofReportStatus, SloResourcePressureThresholds,
+    SloRuntimeAdmissionIssueKind, SloRuntimeAdmissionRequest, SloRuntimeAdmissionStatus,
     SloRuntimeOptionalWorkDecision, SloRuntimePolicyApplication,
     SloRuntimePolicyApplicationIssueKind, SloRuntimePolicyDecision, SloWorkloadClass,
     slo_proof_report_status_counts, validate_slo_policy_bundle_json,
@@ -383,6 +384,36 @@ fn runtime_application_issue_tags() -> BTreeSet<String> {
     .collect()
 }
 
+fn runtime_admission_status_tags() -> BTreeSet<String> {
+    [
+        SloRuntimeAdmissionStatus::Admitted,
+        SloRuntimeAdmissionStatus::Rejected,
+        SloRuntimeAdmissionStatus::Brownout,
+        SloRuntimeAdmissionStatus::NoWin,
+        SloRuntimeAdmissionStatus::Blocked,
+    ]
+    .into_iter()
+    .map(|status| status.as_str().to_string())
+    .collect()
+}
+
+fn runtime_admission_issue_tags() -> BTreeSet<String> {
+    [
+        SloRuntimeAdmissionIssueKind::ApplicationInvalid,
+        SloRuntimeAdmissionIssueKind::Cancelled,
+        SloRuntimeAdmissionIssueKind::QueueWaitExceeded,
+        SloRuntimeAdmissionIssueKind::MemoryPressureExceeded,
+        SloRuntimeAdmissionIssueKind::FdPressureExceeded,
+        SloRuntimeAdmissionIssueKind::TimerQueueExceeded,
+        SloRuntimeAdmissionIssueKind::UnsupportedOptionalWorkClass,
+        SloRuntimeAdmissionIssueKind::OptionalWorkBrownout,
+        SloRuntimeAdmissionIssueKind::NoWinFallback,
+    ]
+    .into_iter()
+    .map(|kind| kind.as_str().to_string())
+    .collect()
+}
+
 fn valid_proof_report(status: SloProofReportStatus) -> SloProofReport {
     let summary = match status {
         SloProofReportStatus::Pass => "SLO proof passed with complete rch evidence",
@@ -465,6 +496,23 @@ fn valid_runtime_application() -> SloRuntimePolicyApplication {
             passed: true,
         },
     )
+}
+
+fn runtime_request(
+    request_id: &str,
+    work_units: u64,
+    optional_work_class: Option<&str>,
+) -> SloRuntimeAdmissionRequest {
+    SloRuntimeAdmissionRequest {
+        request_id: request_id.to_string(),
+        work_units,
+        optional_work_class: optional_work_class.map(str::to_string),
+        queue_wait_ms: 20,
+        memory_basis_points: 6_500,
+        fd_basis_points: 5_900,
+        timer_queue_depth: 12_000,
+        cancel_requested: false,
+    }
 }
 
 fn expected_issue_tags(scenario_value: &Value) -> BTreeSet<String> {
@@ -831,6 +879,23 @@ fn artifact_catalog_matches_rust_tags_and_required_fields() {
                 .to_string()
         })
         .collect::<BTreeSet<_>>();
+    let artifact_runtime_admission_statuses = artifact["runtime_admission_statuses"]
+        .as_array()
+        .expect("runtime admission statuses")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("runtime admission status")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    let artifact_runtime_admission_issues = artifact["runtime_admission_issue_kinds"]
+        .as_array()
+        .expect("runtime admission issue kinds")
+        .iter()
+        .map(|value| value.as_str().expect("runtime admission issue").to_string())
+        .collect::<BTreeSet<_>>();
     let required_fields = artifact["required_bundle_fields"]
         .as_array()
         .expect("required bundle fields")
@@ -857,6 +922,14 @@ fn artifact_catalog_matches_rust_tags_and_required_fields() {
     assert_eq!(
         artifact_runtime_application_issues,
         runtime_application_issue_tags()
+    );
+    assert_eq!(
+        artifact_runtime_admission_statuses,
+        runtime_admission_status_tags()
+    );
+    assert_eq!(
+        artifact_runtime_admission_issues,
+        runtime_admission_issue_tags()
     );
     assert_eq!(
         artifact["compiler_schema_version"].as_str(),
@@ -898,6 +971,18 @@ fn artifact_catalog_matches_rust_tags_and_required_fields() {
             required.as_str()
         );
     }
+    let admission_contract = &artifact["runtime_admission_contract"];
+    assert_eq!(
+        admission_contract["application_schema_version"].as_str(),
+        Some(SLO_POLICY_RUNTIME_APPLICATION_SCHEMA_VERSION)
+    );
+    assert!(
+        admission_contract["evidence_fields"]
+            .as_array()
+            .expect("admission evidence fields")
+            .iter()
+            .any(|value| value.as_str() == Some("proof_command"))
+    );
     assert_eq!(
         artifact["policy_bundle_schema_version"].as_u64(),
         Some(u64::from(SLO_POLICY_BUNDLE_SCHEMA_VERSION))
@@ -1308,6 +1393,146 @@ fn runtime_slo_policy_application_fail_closed_required_modes() {
         validate_slo_runtime_policy_application_json("{\"schema_version\":\"slo-runtime\",");
     assert!(!malformed.accepted);
     assert!(malformed.contains_issue(SloRuntimePolicyApplicationIssueKind::MalformedApplication));
+}
+
+#[test]
+fn runtime_slo_admission_evaluation_admits_core_work_with_policy_evidence() {
+    let application = valid_runtime_application();
+    let request = runtime_request("core-work", 4, None);
+    let outcome = application.evaluate_admission(&request);
+
+    assert_eq!(outcome.status, SloRuntimeAdmissionStatus::Admitted);
+    assert_eq!(outcome.decision, SloRuntimePolicyDecision::Admit);
+    assert_eq!(outcome.policy_id, "agent-swarm-standard");
+    assert_eq!(outcome.workload_class, SloWorkloadClass::AgentSwarm);
+    assert_eq!(outcome.profile_hash, profile_hash('a'));
+    assert!(outcome.proof_command.contains("rch exec --"));
+    assert_eq!(outcome.admitted_work_units, 4);
+    assert_eq!(outcome.rejected_work_units, 0);
+    assert!(outcome.issue_kinds.is_empty());
+    assert_eq!(outcome.budget.cleanup_deadline_ms, 300);
+}
+
+#[test]
+fn runtime_slo_admission_evaluation_rejects_hard_pressure() {
+    let application = valid_runtime_application();
+
+    let mut queue = runtime_request("queue-pressure", 4, None);
+    queue.queue_wait_ms = application.admission.queue_wait_threshold_ms + 1;
+    let queue_outcome = application.evaluate_admission(&queue);
+    assert_eq!(queue_outcome.status, SloRuntimeAdmissionStatus::Rejected);
+    assert_eq!(queue_outcome.admitted_work_units, 0);
+    assert_eq!(queue_outcome.rejected_work_units, 4);
+    assert_eq!(
+        queue_outcome.issue_kinds,
+        vec![SloRuntimeAdmissionIssueKind::QueueWaitExceeded]
+    );
+
+    let mut memory = runtime_request("memory-pressure", 2, None);
+    memory.memory_basis_points = application.admission.memory_hard_basis_points + 1;
+    let memory_outcome = application.evaluate_admission(&memory);
+    assert_eq!(memory_outcome.status, SloRuntimeAdmissionStatus::Rejected);
+    assert_eq!(
+        memory_outcome.issue_kinds,
+        vec![SloRuntimeAdmissionIssueKind::MemoryPressureExceeded]
+    );
+}
+
+#[test]
+fn runtime_slo_admission_evaluation_browns_out_optional_work() {
+    let application = valid_runtime_application();
+    let mut request = runtime_request("optional-index-refresh", 3, Some("index_refresh"));
+    request.memory_basis_points = application.admission.memory_soft_basis_points;
+
+    let outcome = application.evaluate_admission(&request);
+    assert_eq!(outcome.status, SloRuntimeAdmissionStatus::Brownout);
+    assert_eq!(
+        outcome.optional_work_decision,
+        Some(SloRuntimeOptionalWorkDecision::Brownout)
+    );
+    assert_eq!(
+        outcome.optional_work_class.as_deref(),
+        Some("index_refresh")
+    );
+    assert_eq!(outcome.admitted_work_units, 0);
+    assert_eq!(outcome.rejected_work_units, 3);
+    assert_eq!(
+        outcome.issue_kinds,
+        vec![SloRuntimeAdmissionIssueKind::OptionalWorkBrownout]
+    );
+
+    let unsupported = runtime_request("unknown-optional", 1, Some("unknown_optional"));
+    let unsupported_outcome = application.evaluate_admission(&unsupported);
+    assert_eq!(
+        unsupported_outcome.issue_kinds,
+        vec![SloRuntimeAdmissionIssueKind::UnsupportedOptionalWorkClass]
+    );
+}
+
+#[test]
+fn runtime_slo_admission_evaluation_routes_no_win_fallback() {
+    let mut evidence = valid_capacity_evidence();
+    evidence.memory_basis_points = 9_500;
+    let compiled = valid_bundle().compile_for_budget_admission(Some(&evidence));
+    let application = SloRuntimePolicyApplication::from_compiled_policy(
+        &compiled,
+        SloWorkloadClass::AgentSwarm,
+        Some(profile_hash('a')),
+        SloProofCommand {
+            label: "runtime-slo-policy-application".to_string(),
+            command: SloRuntimePolicyApplication::render_application_proof_command(
+                "runtime_slo_policy_application",
+            ),
+        },
+        SloPolicyRedaction {
+            policy_id: "slo-runtime-application-redaction-v1".to_string(),
+            passed: true,
+        },
+    );
+    let request = runtime_request("no-win-core", 4, None);
+    let outcome = application.evaluate_admission(&request);
+
+    assert_eq!(outcome.status, SloRuntimeAdmissionStatus::NoWin);
+    assert_eq!(outcome.decision, SloRuntimePolicyDecision::NoWin);
+    assert_eq!(outcome.admitted_work_units, 0);
+    assert_eq!(outcome.rejected_work_units, 4);
+    assert_eq!(
+        outcome.fallback_reason.as_deref(),
+        Some("objectives-conflict-with-pressure")
+    );
+    assert_eq!(
+        outcome.issue_kinds,
+        vec![SloRuntimeAdmissionIssueKind::NoWinFallback]
+    );
+}
+
+#[test]
+fn runtime_slo_admission_evaluation_blocks_stale_or_cancelled_requests() {
+    let mut stale = valid_runtime_application();
+    stale.provenance.observed_profile_hash = Some(profile_hash('b'));
+    let stale_outcome = stale.evaluate_admission(&runtime_request("stale-policy", 2, None));
+    assert_eq!(stale_outcome.status, SloRuntimeAdmissionStatus::Blocked);
+    assert_eq!(stale_outcome.admitted_work_units, 0);
+    assert_eq!(stale_outcome.rejected_work_units, 2);
+    assert_eq!(
+        stale_outcome.issue_kinds,
+        vec![SloRuntimeAdmissionIssueKind::ApplicationInvalid]
+    );
+
+    let application = valid_runtime_application();
+    let mut cancelled = runtime_request("cancelled-before-admission", 2, None);
+    cancelled.cancel_requested = true;
+    let cancelled_outcome = application.evaluate_admission(&cancelled);
+    assert_eq!(
+        cancelled_outcome.status,
+        SloRuntimeAdmissionStatus::Rejected
+    );
+    assert_eq!(cancelled_outcome.admitted_work_units, 0);
+    assert_eq!(cancelled_outcome.rejected_work_units, 2);
+    assert_eq!(
+        cancelled_outcome.issue_kinds,
+        vec![SloRuntimeAdmissionIssueKind::Cancelled]
+    );
 }
 
 #[test]
