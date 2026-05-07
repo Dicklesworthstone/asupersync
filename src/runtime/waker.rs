@@ -7,9 +7,9 @@
 
 use crate::tracing_compat::trace;
 use crate::types::TaskId;
-use crate::util::DetHashSet;
+use crate::util::{DetHashMap, DetHashSet};
 use parking_lot::Mutex;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::task::{Wake, Waker};
 
 #[cfg(feature = "waker-profiling")]
@@ -26,7 +26,7 @@ mod waker_allocation_hotpaths_test;
 ///
 /// Tracks what caused a task to be woken, enabling causality analysis
 /// in tracing output.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WakeSource {
     /// Woken by a timer expiry.
     Timer,
@@ -55,6 +55,14 @@ impl WakeSource {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct WakerKey {
+    task: TaskId,
+    source: WakeSource,
+}
+
+const WAKER_CACHE_PRUNE_THRESHOLD: usize = 4096;
+
 /// Shared state for the waker system.
 #[derive(Debug, Default)]
 pub struct WakerState {
@@ -64,6 +72,11 @@ pub struct WakerState {
     /// deterministic build hasher to avoid ambient hash seeding and sort at
     /// drain time so the returned order is replay-stable.
     woken: Mutex<DetHashSet<TaskId>>,
+    /// Weak cache of live task wakers keyed by task and wake source.
+    ///
+    /// Repeated `waker_for*` calls for an already-live waker can clone the
+    /// existing allocation. Weak entries avoid extending waker lifetimes.
+    waker_cache: Mutex<DetHashMap<WakerKey, Weak<TaskWaker>>>,
 }
 
 impl WakerState {
@@ -88,14 +101,27 @@ impl WakerState {
     #[inline]
     #[must_use]
     pub fn waker_for_source(self: &Arc<Self>, task: TaskId, source: WakeSource) -> Waker {
+        let key = WakerKey { task, source };
+        let mut cache = self.waker_cache.lock();
+        if let Some(existing) = cache.get(&key).and_then(Weak::upgrade) {
+            return Waker::from(existing);
+        }
+
         #[cfg(feature = "waker-profiling")]
         profile!(waker_profiling::profile_waker_allocation);
 
-        Waker::from(Arc::new(TaskWaker {
+        if cache.len() >= WAKER_CACHE_PRUNE_THRESHOLD {
+            cache.retain(|_, waker| waker.strong_count() > 0);
+        }
+
+        let waker = Arc::new(TaskWaker {
             state: Arc::clone(self),
             task,
             source,
-        }))
+        });
+        cache.insert(key, Arc::downgrade(&waker));
+
+        Waker::from(waker)
     }
 
     /// Drains all woken tasks.
@@ -250,6 +276,41 @@ mod tests {
             second
         );
         crate::test_complete!("wake_after_drain_requeues_task");
+    }
+
+    #[test]
+    fn repeated_waker_requests_reuse_live_task_waker() {
+        init_test("repeated_waker_requests_reuse_live_task_waker");
+        let state = Arc::new(WakerState::new());
+
+        let first = state.waker_for(task(7));
+        let second = state.waker_for(task(7));
+        crate::assert_with_log!(
+            first.will_wake(&second),
+            "same task/source should reuse live task waker allocation",
+            true,
+            first.will_wake(&second)
+        );
+
+        let timer = state.waker_for_source(task(7), WakeSource::Timer);
+        crate::assert_with_log!(
+            !first.will_wake(&timer),
+            "different wake source keeps distinct attribution",
+            true,
+            !first.will_wake(&timer)
+        );
+
+        first.wake_by_ref();
+        second.wake_by_ref();
+        timer.wake_by_ref();
+        let woken = state.drain_woken();
+        crate::assert_with_log!(
+            woken == vec![task(7)],
+            "reused and attributed wakers still dedup by task",
+            vec![task(7)],
+            woken
+        );
+        crate::test_complete!("repeated_waker_requests_reuse_live_task_waker");
     }
 
     #[test]
