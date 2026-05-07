@@ -383,8 +383,8 @@ for idx in "${!STEP_IDS[@]}"; do
     step_phase="${STEP_PHASES[$idx]}"
     step_command_base="${STEP_COMMANDS[$idx]}"
     step_hint="${STEP_HINTS[$idx]}"
-    step_target_dir="/tmp/rch-wasm-packaged-cancellation-${RUN_ID}-${step_id}"
-    step_command="${RCH_BIN} exec -- env CARGO_TARGET_DIR=${step_target_dir} ${step_command_base}"
+    step_target_dir="${TMPDIR:-/tmp}/rch-wasm-packaged-cancellation-${RUN_ID}-${step_id}"
+    step_command="${RCH_BIN} exec -- env CARGO_TARGET_DIR=${step_target_dir} bash -lc \"${step_command_base}\""
     step_log="${RUN_DIR}/${step_id}.log"
     step_started="$(now_iso_millis)"
     step_start_epoch="$(date +%s)"
@@ -410,7 +410,9 @@ for idx in "${!STEP_IDS[@]}"; do
         } > "${step_log}"
     else
         set +e
-        timeout "${STEP_TIMEOUT}" bash -lc "${step_command}" >"${step_log}" 2>&1
+        timeout "${STEP_TIMEOUT}" \
+            "${RCH_BIN}" exec -- env "CARGO_TARGET_DIR=${step_target_dir}" bash -lc "${step_command_base}" \
+            >"${step_log}" 2>&1
         step_rc=$?
         set -e
     fi

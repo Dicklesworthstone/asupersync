@@ -447,8 +447,8 @@ for idx in "${!STEP_IDS[@]}"; do
     evidence_ids_csv="${STEP_EVIDENCE_IDS[$idx]:-L8-REPRO-COMMAND}"
 
     target_dir_step="${step_id//[^a-zA-Z0-9]/_}"
-    target_dir="/tmp/rch-wasm-cross-${TIMESTAMP}-${target_dir_step}"
-    command="${RCH_BIN} exec -- env CARGO_TARGET_DIR=${target_dir} ${command_base}"
+    target_dir="${TMPDIR:-/tmp}/rch-wasm-cross-${TIMESTAMP}-${target_dir_step}"
+    command="${RCH_BIN} exec -- env CARGO_TARGET_DIR=${target_dir} bash -lc \"${command_base}\""
     step_log="${ARTIFACT_DIR}/${step_id}.log"
 
     FRAMEWORKS_COVERED+=("${framework}")
@@ -512,7 +512,9 @@ for idx in "${!STEP_IDS[@]}"; do
         printf '[dry-run] %s\n' "${command}" >"${step_log}"
         step_rc=0
     else
-        timeout "${STEP_TIMEOUT}" bash -lc "${command}" >"${step_log}" 2>&1
+        timeout "${STEP_TIMEOUT}" \
+            "${RCH_BIN}" exec -- env "CARGO_TARGET_DIR=${target_dir}" bash -lc "${command_base}" \
+            >"${step_log}" 2>&1
         step_rc=$?
     fi
     set -e

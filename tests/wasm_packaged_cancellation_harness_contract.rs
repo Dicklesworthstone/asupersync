@@ -214,6 +214,18 @@ fn runner_script_routes_all_steps_through_rch() {
         script.contains("step_command=\"${RCH_BIN} exec --"),
         "step command wrapper must route through rch"
     );
+    assert!(
+        script.contains("\"${RCH_BIN}\" exec -- env \"CARGO_TARGET_DIR=${step_target_dir}\" bash -lc \"${step_command_base}\""),
+        "step execution must call rch directly instead of wrapping the rch command in a local shell"
+    );
+    assert!(
+        !script.contains("bash -lc \"${step_command}\""),
+        "runner must not execute the rendered rch command string through a local shell"
+    );
+    assert!(
+        script.contains("step_target_dir=\"${TMPDIR:-/tmp}/"),
+        "step target dirs must honor TMPDIR"
+    );
 }
 
 #[test]

@@ -349,6 +349,25 @@ fn wasm_cross_framework_runner_emits_browser_matrix_contract_fields() {
 }
 
 #[test]
+fn wasm_cross_framework_runner_executes_rch_without_local_shell_wrapper() {
+    let content = fs::read_to_string("scripts/test_wasm_cross_framework_e2e.sh")
+        .expect("read wasm cross-framework e2e runner script");
+
+    assert!(
+        content.contains("\"${RCH_BIN}\" exec -- env \"CARGO_TARGET_DIR=${target_dir}\" bash -lc \"${command_base}\""),
+        "cross-framework runner must invoke rch directly instead of shell-wrapping the rendered command"
+    );
+    assert!(
+        !content.contains("bash -lc \"${command}\""),
+        "cross-framework runner must not execute the rendered rch command string through a local shell"
+    );
+    assert!(
+        content.contains("target_dir=\"${TMPDIR:-/tmp}/"),
+        "cross-framework runner target dirs must honor TMPDIR"
+    );
+}
+
+#[test]
 fn wasm_packaged_bootstrap_runner_emits_required_bundle_contract_tokens() {
     let content = fs::read_to_string("scripts/test_wasm_packaged_bootstrap_e2e.sh")
         .expect("read wasm packaged bootstrap e2e runner script");
