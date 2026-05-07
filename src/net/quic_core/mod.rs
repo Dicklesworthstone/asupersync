@@ -393,6 +393,34 @@ impl TransportParameters {
         }
         Ok(tp)
     }
+
+    /// Compute the effective `max_idle_timeout` for a connection per
+    /// RFC 9000 §10.1.
+    ///
+    /// > Each endpoint advertises a max_idle_timeout, but the effective
+    /// > value at an endpoint is computed as the minimum of the two
+    /// > advertised values (or the sole advertised value, if only one
+    /// > endpoint advertises a non-zero value).
+    ///
+    /// Per RFC 9000 §18.2, a `max_idle_timeout` of `0` means "no
+    /// advertised limit"; the field default is also `0`. This helper
+    /// treats `None` and `Some(0)` identically — both are "no advertised
+    /// timeout" — so the return value is `None` when neither side has
+    /// committed to a finite limit, and `Some(min)` otherwise.
+    ///
+    /// br-asupersync-4gvuyo: callers were hand-rolling this min() and
+    /// repeatedly getting the zero-vs-None semantics wrong; centralize
+    /// the rule and assert it with the truth-table test in this module.
+    #[must_use]
+    pub fn effective_max_idle_timeout(local: &Self, peer: &Self) -> Option<u64> {
+        let local_finite = local.max_idle_timeout.filter(|&v| v != 0);
+        let peer_finite = peer.max_idle_timeout.filter(|&v| v != 0);
+        match (local_finite, peer_finite) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) | (None, Some(a)) => Some(a),
+            (None, None) => None,
+        }
+    }
 }
 
 /// Encode a QUIC varint into `out`.
@@ -2133,6 +2161,48 @@ mod tests {
             assert_ne!(
                 handshake_reconstructed, application_reconstructed,
                 "Handshake and application spaces should reconstruct differently"
+            );
+        }
+    }
+
+    /// br-asupersync-4gvuyo — RFC 9000 §10.1 truth table for the
+    /// effective `max_idle_timeout`. Per §18.2, `0` means "no advertised
+    /// limit"; `None` (parameter absent) is treated identically.
+    ///
+    /// Source: <https://www.rfc-editor.org/rfc/rfc9000.html#section-10.1>
+    #[test]
+    fn effective_max_idle_timeout_matches_rfc_9000_section_10_1() {
+        fn tp(timeout: Option<u64>) -> TransportParameters {
+            TransportParameters {
+                max_idle_timeout: timeout,
+                ..TransportParameters::default()
+            }
+        }
+
+        // (local, peer, expected effective)
+        let cases: &[(Option<u64>, Option<u64>, Option<u64>, &str)] = &[
+            // Both advertise non-zero → min wins.
+            (Some(30_000), Some(10_000), Some(10_000), "min(30k, 10k) = 10k"),
+            (Some(10_000), Some(30_000), Some(10_000), "min(10k, 30k) = 10k (commutative)"),
+            (Some(15_000), Some(15_000), Some(15_000), "equal advertised values"),
+            // Sole non-zero advertisement carries.
+            (Some(20_000), None, Some(20_000), "only local advertises"),
+            (None, Some(25_000), Some(25_000), "only peer advertises"),
+            (Some(20_000), Some(0), Some(20_000), "peer 0 == no peer advertisement"),
+            (Some(0), Some(25_000), Some(25_000), "local 0 == no local advertisement"),
+            // Neither advertises a finite limit.
+            (None, None, None, "neither advertises"),
+            (Some(0), Some(0), None, "both zero == both unadvertised"),
+            (Some(0), None, None, "local zero, peer absent"),
+            (None, Some(0), None, "local absent, peer zero"),
+        ];
+
+        for (local, peer, expected, label) in cases.iter().copied() {
+            let actual =
+                TransportParameters::effective_max_idle_timeout(&tp(local), &tp(peer));
+            assert_eq!(
+                actual, expected,
+                "RFC 9000 §10.1: local={local:?}, peer={peer:?} → expected {expected:?} ({label}); got {actual:?}"
             );
         }
     }
