@@ -429,6 +429,23 @@ append_step_row() {
     printf '%s\n' "$row_json" >> "${STEP_NDJSON}"
 }
 
+run_step_command() {
+    local command_base="$1"
+    local target_dir="$2"
+    local log_path="$3"
+    local -a command_args=()
+
+    read -r -a command_args <<< "${command_base}"
+    if [[ "${#command_args[@]}" -eq 0 ]]; then
+        echo "FATAL: empty step command" >"${log_path}"
+        return 2
+    fi
+
+    timeout "${STEP_TIMEOUT}" \
+        "${RCH_BIN}" exec -- env "CARGO_TARGET_DIR=${target_dir}" "${command_args[@]}" \
+        >"${log_path}" 2>&1
+}
+
 EXIT_CODE=0
 FAILED_STEP_IDS=()
 FRAMEWORKS_COVERED=()
@@ -448,7 +465,7 @@ for idx in "${!STEP_IDS[@]}"; do
 
     target_dir_step="${step_id//[^a-zA-Z0-9]/_}"
     target_dir="${TMPDIR:-/tmp}/rch-wasm-cross-${TIMESTAMP}-${target_dir_step}"
-    command="${RCH_BIN} exec -- env CARGO_TARGET_DIR=${target_dir} bash -lc \"${command_base}\""
+    command="${RCH_BIN} exec -- env CARGO_TARGET_DIR=${target_dir} ${command_base}"
     step_log="${ARTIFACT_DIR}/${step_id}.log"
 
     FRAMEWORKS_COVERED+=("${framework}")
@@ -512,9 +529,7 @@ for idx in "${!STEP_IDS[@]}"; do
         printf '[dry-run] %s\n' "${command}" >"${step_log}"
         step_rc=0
     else
-        timeout "${STEP_TIMEOUT}" \
-            "${RCH_BIN}" exec -- env "CARGO_TARGET_DIR=${target_dir}" bash -lc "${command_base}" \
-            >"${step_log}" 2>&1
+        run_step_command "${command_base}" "${target_dir}" "${step_log}"
         step_rc=$?
     fi
     set -e

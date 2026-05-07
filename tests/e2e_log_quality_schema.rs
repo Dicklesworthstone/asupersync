@@ -354,12 +354,35 @@ fn wasm_cross_framework_runner_executes_rch_without_local_shell_wrapper() {
         .expect("read wasm cross-framework e2e runner script");
 
     assert!(
-        content.contains("\"${RCH_BIN}\" exec -- env \"CARGO_TARGET_DIR=${target_dir}\" bash -lc \"${command_base}\""),
-        "cross-framework runner must invoke rch directly instead of shell-wrapping the rendered command"
+        content.contains(
+            "command=\"${RCH_BIN} exec -- env CARGO_TARGET_DIR=${target_dir} ${command_base}\""
+        ),
+        "cross-framework runner must render direct argv command provenance"
     );
     assert!(
-        !content.contains("bash -lc \"${command}\""),
+        content.contains("run_step_command()"),
+        "cross-framework runner must execute steps through the argv dispatcher"
+    );
+    assert!(
+        content.contains(
+            "\"${RCH_BIN}\" exec -- env \"CARGO_TARGET_DIR=${target_dir}\" \"${command_args[@]}\""
+        ),
+        "cross-framework runner must invoke rch directly with argv"
+    );
+    let rendered_command_wrapper = ["bash", " -lc \"${command}\""].concat();
+    let step_command_wrapper = ["bash", " -lc \"${command_base}\""].concat();
+    let forbidden = ["bash", " -lc"].concat();
+    assert!(
+        !content.contains(&rendered_command_wrapper),
         "cross-framework runner must not execute the rendered rch command string through a local shell"
+    );
+    assert!(
+        !content.contains(&step_command_wrapper),
+        "cross-framework runner must not execute step commands through a shell wrapper"
+    );
+    assert!(
+        !content.contains(&forbidden),
+        "cross-framework runner must not retain shell wrappers"
     );
     assert!(
         content.contains("target_dir=\"${TMPDIR:-/tmp}/"),
