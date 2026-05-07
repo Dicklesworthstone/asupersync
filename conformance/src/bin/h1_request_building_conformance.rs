@@ -113,8 +113,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Exit with appropriate code (fail closed on partial coverage)
     // Exit non-zero if there are failures, expected failures, or skipped tests (indicating incomplete coverage)
     let has_failures = report.summary.failed > 0;
-    let has_partial_coverage = report.summary.expected_failures > 0 || report.summary.skipped > 0;
-    let exit_code = if has_failures || has_partial_coverage { 1 } else { 0 };
+    let has_partial_coverage = has_incomplete_coverage(&report);
+    let exit_code = exit_code(&report);
 
     if args.verbose && exit_code != 0 {
         eprintln!("🚨 Exiting with code {} due to:", exit_code);
@@ -122,8 +122,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("   - {} test failures", report.summary.failed);
         }
         if has_partial_coverage {
-            eprintln!("   - Partial coverage: {} expected failures, {} skipped",
-                     report.summary.expected_failures, report.summary.skipped);
+            eprintln!(
+                "   - Partial coverage: {} expected failures, {} skipped",
+                report.summary.expected_failures, report.summary.skipped
+            );
         }
     }
 
@@ -192,34 +194,31 @@ fn print_test_summary(report: &asupersync_conformance::RequestBuildingCompliance
     eprintln!("│                                                  │");
 
     let has_failures = report.summary.failed > 0;
-    let has_partial_coverage = report.summary.expected_failures > 0 || report.summary.skipped > 0;
+    let has_partial_coverage = has_incomplete_coverage(report);
+    let status_line = final_status_line(
+        report.summary.failed,
+        report.summary.skipped,
+        report.summary.expected_failures,
+    );
+
+    eprintln!("│  {:<46}│", status_line);
 
     if !has_failures && !has_partial_coverage {
-        eprintln!("│  ✅ ALL TESTS PASSED - FULL COVERAGE             │");
         eprintln!(
             "│  🎯 Compliance: {:.1}%                            │",
             report.summary.compliance_score * 100.0
         );
     } else if has_failures && has_partial_coverage {
         eprintln!(
-            "│  ❌ {} TESTS FAILED + PARTIAL COVERAGE           │",
-            report.summary.failed
-        );
-        eprintln!(
             "│  📊 Compliance: {:.1}%                           │",
             report.summary.compliance_score * 100.0
         );
     } else if has_failures {
         eprintln!(
-            "│  ❌ {} TESTS FAILED                              │",
-            report.summary.failed
-        );
-        eprintln!(
             "│  📊 Compliance: {:.1}%                           │",
             report.summary.compliance_score * 100.0
         );
     } else {
-        eprintln!("│  ⚠️  PARTIAL COVERAGE - NOT ALL TESTS RUN        │");
         eprintln!(
             "│  📊 Coverage: {} expected failures, {} skipped    │",
             report.summary.expected_failures, report.summary.skipped
@@ -249,4 +248,121 @@ fn print_test_summary(report: &asupersync_conformance::RequestBuildingCompliance
     );
     eprintln!("│                                                  │");
     eprintln!("╰──────────────────────────────────────────────────╯");
+}
+
+fn has_incomplete_coverage(
+    report: &asupersync_conformance::RequestBuildingComplianceReport,
+) -> bool {
+    report.total_cases == 0 || report.summary.expected_failures > 0 || report.summary.skipped > 0
+}
+
+fn exit_code(report: &asupersync_conformance::RequestBuildingComplianceReport) -> i32 {
+    if report.summary.failed > 0 || has_incomplete_coverage(report) {
+        1
+    } else {
+        0
+    }
+}
+
+fn final_status_line(failed: usize, skipped: usize, expected_failures: usize) -> String {
+    let has_partial_coverage = skipped > 0 || expected_failures > 0;
+
+    if failed == 0 && !has_partial_coverage {
+        "✅ ALL TESTS PASSED - FULL COVERAGE".to_string()
+    } else if failed > 0 && has_partial_coverage {
+        format!("❌ {failed} TESTS FAILED + PARTIAL COVERAGE")
+    } else if failed > 0 {
+        format!("❌ {failed} TESTS FAILED")
+    } else {
+        "⚠️  PARTIAL COVERAGE - NOT ALL TESTS RUN".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use asupersync_conformance::RequestBuildingComplianceSummary;
+
+    fn synthetic_report(
+        total_cases: usize,
+        failed: usize,
+        expected_failures: usize,
+        skipped: usize,
+    ) -> asupersync_conformance::RequestBuildingComplianceReport {
+        asupersync_conformance::RequestBuildingComplianceReport {
+            test_run_id: "synthetic".to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            total_cases,
+            results: Vec::new(),
+            summary: RequestBuildingComplianceSummary {
+                passed: total_cases
+                    .saturating_sub(failed)
+                    .saturating_sub(expected_failures)
+                    .saturating_sub(skipped),
+                failed,
+                expected_failures,
+                skipped,
+                total: total_cases,
+                compliance_score: 0.0,
+            },
+        }
+    }
+
+    #[test]
+    fn exit_code_is_nonzero_for_expected_failures() {
+        let report = synthetic_report(8, 0, 1, 0);
+
+        assert_eq!(exit_code(&report), 1);
+    }
+
+    #[test]
+    fn exit_code_is_nonzero_for_skipped_coverage() {
+        let report = synthetic_report(8, 0, 0, 1);
+
+        assert_eq!(exit_code(&report), 1);
+    }
+
+    #[test]
+    fn exit_code_is_nonzero_for_zero_case_reports() {
+        let report = synthetic_report(0, 0, 0, 0);
+
+        assert_eq!(exit_code(&report), 1);
+    }
+
+    #[test]
+    fn exit_code_is_nonzero_for_failures() {
+        let report = synthetic_report(8, 1, 0, 0);
+
+        assert_eq!(exit_code(&report), 1);
+    }
+
+    #[test]
+    fn exit_code_is_zero_for_full_pass_coverage() {
+        let report = synthetic_report(8, 0, 0, 0);
+
+        assert_eq!(exit_code(&report), 0);
+    }
+
+    #[test]
+    fn incomplete_coverage_is_true_for_zero_case_reports() {
+        let report = synthetic_report(0, 0, 0, 0);
+
+        assert!(has_incomplete_coverage(&report));
+    }
+
+    #[test]
+    fn final_status_line_does_not_claim_full_coverage_for_partial_results() {
+        let status = final_status_line(0, 1, 0);
+
+        assert!(status.contains("PARTIAL COVERAGE"));
+        assert!(!status.contains("ALL TESTS PASSED"));
+    }
+
+    #[test]
+    fn final_status_line_claims_full_coverage_only_for_full_green_results() {
+        assert_eq!(
+            final_status_line(0, 0, 0),
+            "✅ ALL TESTS PASSED - FULL COVERAGE"
+        );
+    }
 }
