@@ -1,10 +1,10 @@
 //! HTTP/1.1 client response parsing fuzz target.
 //!
 //! Fuzzes malformed HTTP/1.1 responses to test critical client parsing invariants:
-//! 1. Status code validation (100-599 range per RFC 7231)
+//! 1. Status code validation (three-digit 100-999 range per RFC 9110)
 //! 2. Reason-phrase CRLF termination requirements
 //! 3. Header name token grammar compliance per RFC 7230
-//! 4. Header value visible-ASCII validation
+//! 4. Header value field-byte validation
 //! 5. Content-Length overflow protection and bounds checking
 //!
 //! # Attack Vectors Tested
@@ -25,14 +25,14 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
+use asupersync::bytes::BytesMut;
+use asupersync::codec::Decoder;
+use asupersync::http::h1::{Http1ClientCodec, HttpError, Response};
 use libfuzzer_sys::fuzz_target;
-use std::io::Cursor;
-
-use asupersync::http::h1::client::{ClientDecodeState, Http1ClientCodec};
-use asupersync::http::h1::types::{HeaderMap, HttpError, StatusCode};
 
 /// Maximum input size to prevent memory exhaustion during fuzzing.
 const MAX_FUZZ_SIZE: usize = 64_000;
+const MAX_BODY_SIZE: u64 = 16 * 1024 * 1024;
 
 /// HTTP/1.1 client response fuzzing scenarios covering critical parsing paths.
 #[derive(Arbitrary, Debug, Clone)]
@@ -125,6 +125,8 @@ fuzz_target!(|data: &[u8]| {
     if data.len() > MAX_FUZZ_SIZE {
         return;
     }
+
+    assert_known_client_response_outputs();
 
     // Try to parse as structured scenario
     if let Ok(scenario) = arbitrary::Unstructured::new(data).arbitrary::<HttpClientFuzzScenario>() {
@@ -221,16 +223,13 @@ fn test_status_line_parsing(
         suffix
     );
 
-    let mut codec = Http1ClientCodec::new();
-    let mut buf = status_line.into_bytes();
-
-    match codec.decode(&mut Cursor::new(&mut buf)) {
+    match decode_response_bytes(status_line.as_bytes()) {
         Ok(Some(response)) => {
-            // Assertion 1: Status code must be in valid range
-            let status = response.status();
+            // Assertion 1: Status code must be a three-digit RFC 9110 value.
+            let status = response.status;
             assert!(
-                status >= 100 && status <= 599,
-                "Invalid status code {} outside range 100-599",
+                (100..=999).contains(&status),
+                "Invalid status code {} outside range 100-999",
                 status
             );
 
@@ -241,12 +240,7 @@ fn test_status_line_parsing(
             // Incomplete response - acceptable
         }
         Err(_) => {
-            // Parse error - acceptable for malformed input
-            // But verify that valid status codes don't cause errors
-            if status_code >= 100 && status_code <= 599 && include_crlf && suffix.is_empty() {
-                // This should parse successfully for well-formed input
-                validate_parse_error_is_justified(&status_line);
-            }
+            // Parse error - acceptable for malformed input.
         }
     }
 }
@@ -262,7 +256,7 @@ fn test_header_parsing(
     let name_str = String::from_utf8_lossy(&header_name);
     let value_str = String::from_utf8_lossy(&header_value);
 
-    let mut response = format!("HTTP/1.1 200 OK\r\n");
+    let mut response = "HTTP/1.1 200 OK\r\n".to_string();
     if !status_line.is_empty() {
         response = format!("{}\r\n", status_line);
     }
@@ -277,20 +271,15 @@ fn test_header_parsing(
     }
     response.push_str("\r\n"); // End headers
 
-    let mut codec = Http1ClientCodec::new();
-    let mut buf = response.into_bytes();
-
-    match codec.decode(&mut Cursor::new(&mut buf)) {
+    match decode_response_bytes(response.as_bytes()) {
         Ok(Some(parsed_response)) => {
-            let headers = parsed_response.headers();
-
             // Assertion 3: Header names must follow token grammar
-            for (name, _value) in headers.iter() {
-                validate_header_name_token_grammar(name.as_str());
+            for (name, _value) in &parsed_response.headers {
+                validate_header_name_token_grammar(name);
             }
 
-            // Assertion 4: Header values must be visible-ASCII
-            for (_name, value) in headers.iter() {
+            // Assertion 4: Header values must follow HTTP field-value byte rules.
+            for (_name, value) in &parsed_response.headers {
                 validate_header_value_visible_ascii(value.as_bytes());
             }
         }
@@ -298,10 +287,7 @@ fn test_header_parsing(
             // Incomplete response
         }
         Err(_) => {
-            // Parse error - validate it's justified
-            if is_valid_token(&header_name) && is_visible_ascii(&header_value) && proper_crlf {
-                validate_parse_error_is_justified(&String::from_utf8_lossy(&header_name));
-            }
+            // Parse error - acceptable for malformed fuzz input.
         }
     }
 }
@@ -328,22 +314,20 @@ fn test_content_length_parsing(
     response.push_str("\r\n");
     response.extend(String::from_utf8_lossy(&body_data).chars());
 
-    let mut codec = Http1ClientCodec::new();
-    let mut buf = response.into_bytes();
-
-    match codec.decode(&mut Cursor::new(&mut buf)) {
+    match decode_response_bytes(response.as_bytes()) {
         Ok(Some(parsed_response)) => {
             // Assertion 5: Oversized Content-Length must be rejected
-            if let Some(cl_header) = parsed_response.headers().get("content-length") {
-                validate_content_length_bounds(cl_header.to_str().unwrap_or(""));
+            if !status_has_no_body(parsed_response.status)
+                && let Some(cl_header) = header_value(&parsed_response.headers, "content-length")
+            {
+                validate_content_length_bounds(cl_header);
             }
         }
         Ok(None) => {
             // Incomplete response
         }
-        Err(err) => {
-            // Parse error - verify oversized Content-Length causes appropriate error
-            validate_content_length_error(&content_length, &err);
+        Err(_) => {
+            // Parse error - acceptable for malformed fuzz input.
         }
     }
 }
@@ -383,11 +367,8 @@ fn test_body_parsing(
         response.extend(String::from_utf8_lossy(&body_data).chars());
     }
 
-    let mut codec = Http1ClientCodec::new();
-    let mut buf = response.into_bytes();
-
     // Test that parsing doesn't panic or cause undefined behavior
-    let _result = codec.decode(&mut Cursor::new(&mut buf));
+    let _ = decode_response_bytes(response.as_bytes());
 }
 
 /// Test header injection attacks
@@ -410,13 +391,10 @@ fn test_header_injection(
 
     let response = format!("HTTP/1.1 200 OK\r\n{}: {}\r\n\r\n", final_name, final_value);
 
-    let mut codec = Http1ClientCodec::new();
-    let mut buf = response.into_bytes();
-
-    match codec.decode(&mut Cursor::new(&mut buf)) {
+    match decode_response_bytes(response.as_bytes()) {
         Ok(Some(parsed_response)) => {
             // Verify no header injection succeeded
-            validate_no_header_injection(parsed_response.headers(), &injection_payload);
+            validate_no_header_injection(&parsed_response.headers, &injection_payload);
         }
         Ok(None) => {
             // Incomplete response
@@ -425,6 +403,42 @@ fn test_header_injection(
             // Parse error - acceptable for injection attempts
         }
     }
+}
+
+fn decode_response_bytes(input: &[u8]) -> Result<Option<Response>, HttpError> {
+    let mut codec = Http1ClientCodec::new();
+    let mut buf = BytesMut::from(input);
+    codec.decode(&mut buf)
+}
+
+fn assert_known_client_response_outputs() {
+    let response = decode_response_bytes(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello")
+        .expect("valid response should decode")
+        .expect("complete response should be returned");
+    assert_eq!(response.status, 200);
+    assert_eq!(response.reason, "OK");
+    assert_eq!(response.body, b"hello");
+
+    assert!(matches!(
+        decode_response_bytes(b"HTTP/1.1 99 Nope\r\n\r\n"),
+        Err(HttpError::BadRequestLine)
+    ));
+    assert!(matches!(
+        decode_response_bytes(b"HTTP/1.1 1000 Nope\r\n\r\n"),
+        Err(HttpError::BadRequestLine)
+    ));
+    assert!(matches!(
+        decode_response_bytes(b"HTTP/1.1 200 OK\r\nBad Name: x\r\n\r\n"),
+        Err(HttpError::InvalidHeaderName)
+    ));
+    assert!(matches!(
+        decode_response_bytes(b"HTTP/1.1 200 OK\r\nX-Test: bad\0value\r\n\r\n"),
+        Err(HttpError::InvalidHeaderValue)
+    ));
+    assert!(matches!(
+        decode_response_bytes(b"HTTP/1.1 200 OK\r\nContent-Length: 16777217\r\n\r\n"),
+        Err(HttpError::BodyTooLarge)
+    ));
 }
 
 /// Helper: Validate reason phrase CRLF termination
@@ -449,12 +463,12 @@ fn validate_header_name_token_grammar(name: &str) {
     }
 }
 
-/// Helper: Validate header value is visible-ASCII
+/// Helper: Validate header value follows HTTP field-value byte rules.
 fn validate_header_value_visible_ascii(value: &[u8]) {
     for &byte in value {
         assert!(
-            is_visible_ascii_byte(byte),
-            "Non-visible-ASCII byte 0x{:02X} in header value",
+            is_valid_header_value_byte(byte),
+            "Invalid HTTP header field-value byte 0x{:02X}",
             byte
         );
     }
@@ -465,74 +479,56 @@ fn validate_content_length_bounds(cl_str: &str) {
     if let Ok(cl_value) = cl_str.parse::<u64>() {
         // Ensure no overflow and reasonable bounds
         assert!(
-            cl_value <= 1024 * 1024 * 1024,
+            cl_value <= MAX_BODY_SIZE,
             "Content-Length {} exceeds maximum safe size",
             cl_value
         );
     }
 }
 
-/// Helper: Validate Content-Length error handling
-fn validate_content_length_error(cl_str: &str, _err: &HttpError) {
-    // If Content-Length is clearly oversized, error is justified
-    if let Ok(cl_value) = cl_str.parse::<u64>() {
-        if cl_value > 1024 * 1024 * 1024 {
-            // Expected to fail - oversized
-            return;
-        }
-    }
-
-    // Check for malformed number
-    if cl_str.parse::<u64>().is_err() && !cl_str.is_empty() {
-        // Expected to fail - malformed
-        return;
-    }
-}
-
-/// Helper: Check if byte sequence forms valid token
-fn is_valid_token(bytes: &[u8]) -> bool {
-    !bytes.is_empty() && bytes.iter().all(|&b| is_token_byte(b))
-}
-
-/// Helper: Check if byte sequence is visible-ASCII
-fn is_visible_ascii(bytes: &[u8]) -> bool {
-    bytes.iter().all(|&b| is_visible_ascii_byte(b))
-}
-
 /// Helper: Check if character is valid in HTTP token
 fn is_token_char(ch: char) -> bool {
-    match ch {
-        'A'..='Z' | 'a'..='z' | '0'..='9' => true,
-        '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' | '-' | '.' | '^' | '_' | '`' | '|'
-        | '~' => true,
-        _ => false,
-    }
+    matches!(
+        ch,
+        'A'..='Z'
+            | 'a'..='z'
+            | '0'..='9'
+            | '!'
+            | '#'
+            | '$'
+            | '%'
+            | '&'
+            | '\''
+            | '*'
+            | '+'
+            | '-'
+            | '.'
+            | '^'
+            | '_'
+            | '`'
+            | '|'
+            | '~'
+    )
 }
 
-/// Helper: Check if byte is valid in HTTP token
-fn is_token_byte(byte: u8) -> bool {
-    match byte {
-        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' => true,
-        b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'-' | b'.' | b'^' | b'_'
-        | b'`' | b'|' | b'~' => true,
-        _ => false,
-    }
+/// Helper: Check if byte is valid in an HTTP field value.
+fn is_valid_header_value_byte(byte: u8) -> bool {
+    byte == b'\t' || byte == b' ' || (0x21..=0x7E).contains(&byte) || byte >= 0x80
 }
 
-/// Helper: Check if byte is visible-ASCII (0x21-0x7E)
-fn is_visible_ascii_byte(byte: u8) -> bool {
-    byte >= 0x21 && byte <= 0x7E
+fn status_has_no_body(status: u16) -> bool {
+    (100..=199).contains(&status) || matches!(status, 204 | 304)
 }
 
-/// Helper: Validate parse error is justified
-fn validate_parse_error_is_justified(input: &str) {
-    // For well-formed input, parse errors should be rare
-    // This is a placeholder for more sophisticated validation
-    let _ = input;
+fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
 }
 
 /// Helper: Validate no header injection occurred
-fn validate_no_header_injection(headers: &HeaderMap, injection_payload: &[u8]) {
+fn validate_no_header_injection(headers: &[(String, String)], injection_payload: &[u8]) {
     let injection_str = String::from_utf8_lossy(injection_payload);
 
     // Check that injection patterns didn't create additional headers
@@ -540,7 +536,7 @@ fn validate_no_header_injection(headers: &HeaderMap, injection_payload: &[u8]) {
         // CRLF injection attempt - verify it didn't succeed
         for (_name, value) in headers.iter() {
             assert!(
-                !value.to_str().unwrap_or("").contains("\r\n"),
+                !value.contains("\r\n"),
                 "CRLF injection succeeded in header value"
             );
         }
@@ -549,10 +545,8 @@ fn validate_no_header_injection(headers: &HeaderMap, injection_payload: &[u8]) {
 
 /// Test raw data as HTTP response parsing
 fn test_raw_response_parsing(input: &[u8]) {
-    let mut codec = Http1ClientCodec::new();
-
     // Test that parsing arbitrary input doesn't cause crashes
-    let _result = codec.decode(&mut Cursor::new(&input.to_vec()));
+    let _ = decode_response_bytes(input);
 
     // Test with common HTTP prefixes
     if input.len() > 4 {
@@ -561,7 +555,7 @@ fn test_raw_response_parsing(input: &[u8]) {
         for prefix in &prefixes {
             let mut test_input = prefix.to_vec();
             test_input.extend_from_slice(input);
-            let _result = codec.decode(&mut Cursor::new(&test_input));
+            let _ = decode_response_bytes(&test_input);
         }
     }
 }
