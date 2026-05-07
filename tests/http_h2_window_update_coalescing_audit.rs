@@ -7,22 +7,45 @@
 //! IMPLEMENTATION ANALYSIS: Our implementation correctly implements coalescing:
 //! - Stream-level: WINDOW_UPDATE sent when window drops below 25% (quarter-window)
 //! - Connection-level: WINDOW_UPDATE sent when window drops below 50% (half-window)
+//!
 //! This is SOUND and follows RFC 7540 recommendations.
 
-use asupersync::bytes::Bytes;
-use asupersync::http::h2::connection::{Connection, ConnectionState};
-use asupersync::http::h2::frame::{DataFrame, Frame, HeadersFrame, WindowUpdateFrame};
+use asupersync::bytes::{Bytes, BytesMut};
+use asupersync::http::h2::connection::Connection;
+use asupersync::http::h2::frame::{DataFrame, Frame, HeadersFrame, SettingsFrame};
 use asupersync::http::h2::settings::Settings;
+use asupersync::http::h2::{Header, HpackEncoder};
 
 const DEFAULT_WINDOW_SIZE: u32 = 65535;
 
+fn open_server_connection() -> Connection {
+    let mut conn = Connection::server(Settings::default());
+    conn.process_frame(Frame::Settings(SettingsFrame::new(Vec::new())))
+        .expect("initial SETTINGS frame should open server connection");
+    conn
+}
+
+fn request_headers(stream_id: u32) -> Frame {
+    let mut encoder = HpackEncoder::new();
+    let mut encoded = BytesMut::new();
+    encoder.encode(
+        &[
+            Header::new(":method", "GET"),
+            Header::new(":path", "/flow-control"),
+            Header::new(":scheme", "https"),
+            Header::new(":authority", "example.com"),
+        ],
+        &mut encoded,
+    );
+    Frame::Headers(HeadersFrame::new(stream_id, encoded.freeze(), false, true))
+}
+
 #[test]
 fn test_stream_window_update_coalescing_quarter_threshold() {
-    let mut conn = Connection::server(Settings::default());
-    conn.state = ConnectionState::Open;
+    let mut conn = open_server_connection();
 
     // Open a stream via HEADERS
-    let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
+    let headers = request_headers(1);
     conn.process_frame(headers).expect("process headers");
 
     // Consume data just below the 25% threshold - should NOT trigger WINDOW_UPDATE
@@ -77,11 +100,10 @@ fn test_stream_window_update_coalescing_quarter_threshold() {
 
 #[test]
 fn test_connection_window_update_coalescing_half_threshold() {
-    let mut conn = Connection::server(Settings::default());
-    conn.state = ConnectionState::Open;
+    let mut conn = open_server_connection();
 
     // Open a stream
-    let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
+    let headers = request_headers(1);
     conn.process_frame(headers).expect("process headers");
 
     // Consume data just below the 50% connection threshold - should NOT trigger connection WINDOW_UPDATE
@@ -135,11 +157,10 @@ fn test_connection_window_update_coalescing_half_threshold() {
 
 #[test]
 fn test_no_eager_window_updates_on_small_reads() {
-    let mut conn = Connection::server(Settings::default());
-    conn.state = ConnectionState::Open;
+    let mut conn = open_server_connection();
 
     // Open a stream
-    let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
+    let headers = request_headers(1);
     conn.process_frame(headers).expect("process headers");
 
     // Send many small data frames (simulating small reads)
@@ -150,7 +171,7 @@ fn test_no_eager_window_updates_on_small_reads() {
         let data = Bytes::from(vec![0u8; bytes_per_read]);
         let frame = Frame::Data(DataFrame::new(1, data, false));
         conn.process_frame(frame)
-            .expect(&format!("process small read {}", i + 1));
+            .unwrap_or_else(|_| panic!("process small read {}", i + 1));
 
         // Check for WINDOW_UPDATEs after each small read
         let mut frames_after_read = Vec::new();
@@ -194,11 +215,10 @@ fn test_no_eager_window_updates_on_small_reads() {
 
 #[test]
 fn test_window_update_restores_full_capacity() {
-    let mut conn = Connection::server(Settings::default());
-    conn.state = ConnectionState::Open;
+    let mut conn = open_server_connection();
 
     // Open a stream
-    let headers = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
+    let headers = request_headers(1);
     conn.process_frame(headers).expect("process headers");
 
     // Consume enough to trigger stream WINDOW_UPDATE (below 25% threshold)
