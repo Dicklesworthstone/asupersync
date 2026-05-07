@@ -30,6 +30,8 @@
 
 mod barrier;
 mod contended_mutex;
+mod lock_ordering;
+mod lock_ordering_test;
 mod mutex;
 mod notify;
 #[cfg(test)]

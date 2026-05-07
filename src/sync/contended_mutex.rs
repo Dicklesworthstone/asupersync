@@ -48,6 +48,7 @@ pub struct LockMetricsSnapshot {
 #[cfg(feature = "lock-metrics")]
 mod inner {
     use super::LockMetricsSnapshot;
+    use crate::sync::lock_ordering::{self, LockRank};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{LockResult, Mutex, MutexGuard, PoisonError};
     use std::time::Instant;
@@ -83,20 +84,28 @@ mod inner {
         inner: Mutex<T>,
         metrics: Metrics,
         name: &'static str,
+        rank: Option<LockRank>,
     }
 
     impl<T> ContendedMutex<T> {
         /// Creates a new instrumented mutex with the given name and value.
         pub fn new(name: &'static str, value: T) -> Self {
+            let rank = LockRank::from_name(name);
             Self {
                 inner: Mutex::new(value),
                 metrics: Metrics::default(),
                 name,
+                rank,
             }
         }
 
         /// Acquires the mutex, tracking contention metrics.
         pub fn lock(&self) -> LockResult<ContendedMutexGuard<'_, T>> {
+            // Check lock ordering before acquisition (debug builds only)
+            if let Some(rank) = self.rank {
+                lock_ordering::check_acquire(self.name, rank);
+            }
+
             let start = Instant::now();
 
             let (result, contended) = match self.inner.try_lock() {
@@ -115,16 +124,23 @@ mod inner {
                 self.metrics.contentions.fetch_add(1, Ordering::Relaxed);
             }
 
+            // Record lock acquisition for ordering tracking
+            if let Some(rank) = self.rank {
+                lock_ordering::record_acquire(rank);
+            }
+
             match result {
                 Ok(guard) => Ok(ContendedMutexGuard {
                     guard: Some(guard),
                     acquired_at: Instant::now(),
                     metrics: &self.metrics,
+                    rank: self.rank,
                 }),
                 Err(poison) => Err(PoisonError::new(ContendedMutexGuard {
                     guard: Some(poison.into_inner()),
                     acquired_at: Instant::now(),
                     metrics: &self.metrics,
+                    rank: self.rank,
                 })),
             }
         }
@@ -136,11 +152,18 @@ mod inner {
         {
             match self.inner.try_lock() {
                 Ok(guard) => {
+                    // Check and record lock ordering for successful try_lock
+                    if let Some(rank) = self.rank {
+                        lock_ordering::check_acquire(self.name, rank);
+                        lock_ordering::record_acquire(rank);
+                    }
+
                     self.metrics.acquisitions.fetch_add(1, Ordering::Relaxed);
                     Ok(ContendedMutexGuard {
                         guard: Some(guard),
                         acquired_at: Instant::now(),
                         metrics: &self.metrics,
+                        rank: self.rank,
                     })
                 }
                 Err(std::sync::TryLockError::WouldBlock) => {
@@ -193,6 +216,7 @@ mod inner {
         guard: Option<MutexGuard<'a, T>>,
         acquired_at: Instant,
         metrics: &'a Metrics,
+        rank: Option<LockRank>,
     }
 
     impl<T> std::ops::Deref for ContendedMutexGuard<'_, T> {
@@ -215,6 +239,11 @@ mod inner {
             // to minimize the critical section length.
             drop(self.guard.take());
 
+            // Record lock release for ordering tracking
+            if let Some(rank) = self.rank {
+                lock_ordering::record_release(rank);
+            }
+
             self.metrics.hold_ns.fetch_add(hold_ns, Ordering::Relaxed);
             Metrics::update_max(&self.metrics.max_hold_ns, hold_ns);
         }
@@ -234,6 +263,7 @@ mod inner {
 #[cfg(not(feature = "lock-metrics"))]
 mod inner {
     use super::LockMetricsSnapshot;
+    use crate::sync::lock_ordering::{self, LockRank};
     use std::sync::{LockResult, Mutex, MutexGuard, PoisonError};
 
     /// Zero-cost mutex wrapper (metrics disabled).
@@ -241,26 +271,50 @@ mod inner {
     pub struct ContendedMutex<T> {
         inner: Mutex<T>,
         name: &'static str,
+        rank: Option<LockRank>,
     }
 
     impl<T> ContendedMutex<T> {
         /// Creates a new mutex with the given name and value.
         #[inline]
         pub fn new(name: &'static str, value: T) -> Self {
+            let rank = LockRank::from_name(name);
             Self {
                 inner: Mutex::new(value),
                 name,
+                rank,
             }
         }
 
         /// Acquires the mutex (no instrumentation).
         #[inline]
         pub fn lock(&self) -> LockResult<ContendedMutexGuard<'_, T>> {
+            // Check lock ordering before acquisition (debug builds only)
+            if let Some(rank) = self.rank {
+                lock_ordering::check_acquire(self.name, rank);
+            }
+
             match self.inner.lock() {
-                Ok(guard) => Ok(ContendedMutexGuard { guard }),
-                Err(poison) => Err(PoisonError::new(ContendedMutexGuard {
-                    guard: poison.into_inner(),
-                })),
+                Ok(guard) => {
+                    // Record lock acquisition for ordering tracking
+                    if let Some(rank) = self.rank {
+                        lock_ordering::record_acquire(rank);
+                    }
+                    Ok(ContendedMutexGuard {
+                        guard,
+                        rank: self.rank,
+                    })
+                }
+                Err(poison) => {
+                    // Record lock acquisition even for poisoned mutex
+                    if let Some(rank) = self.rank {
+                        lock_ordering::record_acquire(rank);
+                    }
+                    Err(PoisonError::new(ContendedMutexGuard {
+                        guard: poison.into_inner(),
+                        rank: self.rank,
+                    }))
+                }
             }
         }
 
@@ -270,13 +324,24 @@ mod inner {
         ) -> Result<ContendedMutexGuard<'_, T>, std::sync::TryLockError<ContendedMutexGuard<'_, T>>>
         {
             match self.inner.try_lock() {
-                Ok(guard) => Ok(ContendedMutexGuard { guard }),
+                Ok(guard) => {
+                    // Check and record lock ordering for successful try_lock
+                    if let Some(rank) = self.rank {
+                        lock_ordering::check_acquire(self.name, rank);
+                        lock_ordering::record_acquire(rank);
+                    }
+                    Ok(ContendedMutexGuard {
+                        guard,
+                        rank: self.rank,
+                    })
+                }
                 Err(std::sync::TryLockError::WouldBlock) => {
                     Err(std::sync::TryLockError::WouldBlock)
                 }
                 Err(std::sync::TryLockError::Poisoned(poison)) => Err(
                     std::sync::TryLockError::Poisoned(PoisonError::new(ContendedMutexGuard {
                         guard: poison.into_inner(),
+                        rank: self.rank,
                     })),
                 ),
             }
@@ -302,6 +367,7 @@ mod inner {
     /// Zero-cost guard wrapper (metrics disabled).
     pub struct ContendedMutexGuard<'a, T> {
         guard: MutexGuard<'a, T>,
+        rank: Option<LockRank>,
     }
 
     impl<T> std::ops::Deref for ContendedMutexGuard<'_, T> {
@@ -316,6 +382,15 @@ mod inner {
         #[inline]
         fn deref_mut(&mut self) -> &mut T {
             &mut self.guard
+        }
+    }
+
+    impl<T> Drop for ContendedMutexGuard<'_, T> {
+        fn drop(&mut self) {
+            // Record lock release for ordering tracking
+            if let Some(rank) = self.rank {
+                lock_ordering::record_release(rank);
+            }
         }
     }
 
