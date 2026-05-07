@@ -67,6 +67,7 @@ mod leak_check;
 pub mod ledger;
 pub mod lyapunov;
 pub mod marking;
+pub mod metamorphic_tests;
 pub mod no_aliasing_proof;
 pub mod no_leak_proof;
 pub mod recovery;
