@@ -82,7 +82,20 @@ fn main() {
         std::process::exit(1);
     }
 
-    println!("ALL TESTS PASSED");
+    println!(
+        "{}",
+        final_status_line(skipped_count, expected_failure_count)
+    );
+}
+
+fn final_status_line(skipped_count: usize, expected_failure_count: usize) -> String {
+    if skipped_count == 0 && expected_failure_count == 0 {
+        "ALL TESTS PASSED".to_string()
+    } else {
+        format!(
+            "NO FAILURES; PARTIAL COVERAGE ({skipped_count} skipped, {expected_failure_count} expected failures)"
+        )
+    }
 }
 
 #[cfg(test)]
@@ -118,6 +131,35 @@ mod tests {
                 .iter()
                 .any(|result| result.evidence_quality() == "unsupported_boundary")
         );
+    }
+
+    #[test]
+    fn final_status_does_not_claim_all_passed_for_partial_coverage() {
+        let harness = QuicConnectionMigrationConformanceHarness::new();
+        let results = harness.run_all_tests();
+        let skipped_count = results
+            .iter()
+            .filter(|result| result.verdict == TestVerdict::Skipped)
+            .count();
+        let expected_failure_count = results
+            .iter()
+            .filter(|result| result.verdict == TestVerdict::ExpectedFailure)
+            .count();
+
+        assert!(
+            skipped_count + expected_failure_count > 0,
+            "fixture must keep at least one unsupported-boundary result"
+        );
+
+        let status = final_status_line(skipped_count, expected_failure_count);
+
+        assert!(status.starts_with("NO FAILURES; PARTIAL COVERAGE"));
+        assert!(!status.contains("ALL TESTS PASSED"));
+    }
+
+    #[test]
+    fn final_status_claims_all_passed_only_for_full_green_results() {
+        assert_eq!(final_status_line(0, 0), "ALL TESTS PASSED");
     }
 
     #[test]
