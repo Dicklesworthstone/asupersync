@@ -2492,7 +2492,7 @@ pub fn fuzz_validate_response_frame(data: &[u8]) -> Result<(), String> {
     let response_length = i32::from_be_bytes([data[4], data[5], data[6], data[7]]);
 
     // Validate correlation ID is reasonable
-    if correlation_id < 0 || correlation_id > 1_000_000 {
+    if !(0..=1_000_000).contains(&correlation_id) {
         return Err(format!("invalid correlation_id: {correlation_id}"));
     }
 

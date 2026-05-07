@@ -100,7 +100,7 @@ use crate::channel::oneshot;
 use crate::combinator::{Either, Select};
 use crate::cx::{Cx, cap};
 use crate::record::task::TaskState;
-use crate::record::{AdmissionError, TaskRecord};
+use crate::record::AdmissionError;
 use crate::runtime::task_handle::{JoinError, TaskHandle};
 use crate::runtime::{RegionCreateError, RuntimeState, SpawnError, StoredTask};
 use crate::tracing_compat::{debug, debug_span};
@@ -1489,9 +1489,26 @@ impl<P: Policy> Scope<'_, P> {
             .timer_driver()
             .map_or(state.now, crate::time::TimerDriverHandle::now);
 
+        let region = self.region;
+        let budget = self.budget;
         let idx = state.insert_pooled_task_with(|idx, record| {
-            *record =
-                TaskRecord::new_with_time(TaskId::from_arena(idx), self.region, self.budget, now);
+            // br-asupersync-j1e7zy: mutate the recycled record in place.
+            // A previous version did `*record = TaskRecord::new_with_time(...)`,
+            // which dropped the freshly-recycled `wake_state` Arc + `waiters`
+            // SmallVec only to allocate replacements — making pool hits more
+            // expensive than pool misses. `insert_pooled_task_with` (and
+            // `Recyclable::reset` for `TaskRecord`) leave every other field at
+            // its default, so we only need to overwrite the per-task identity
+            // and budget fields.
+            record.id = TaskId::from_arena(idx);
+            record.owner = region;
+            record.created_at = now;
+            record.deadline = budget.deadline;
+            record.polls_remaining = budget.poll_quota;
+            #[cfg(feature = "tracing-integration")]
+            {
+                record.created_instant = crate::time::wall_now();
+            }
         });
         let task_id = TaskId::from_arena(idx);
 

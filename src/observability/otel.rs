@@ -103,20 +103,12 @@ pub struct MetricsConfig {
 }
 
 /// Configuration for OTLP trace span privacy filtering.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SpanConfig {
     /// Span attributes to always drop before OTLP serialization (e.g., user.email, api.key).
     /// **Privacy Protection**: These attributes are removed before protobuf encoding
     /// to prevent sensitive data from reaching the collector.
     pub drop_attributes: Vec<String>,
-}
-
-impl Default for SpanConfig {
-    fn default() -> Self {
-        Self {
-            drop_attributes: Vec::new(),
-        }
-    }
 }
 
 impl SpanConfig {
@@ -1898,7 +1890,7 @@ fn classify_otlp_http_response(status: u16, headers: &[(String, String)]) -> Res
             let retry_after = parse_otlp_retry_after(headers);
             Err(OtlpError::retryable(status, retry_after))
         }
-        502 | 503 | 504 => {
+        502..=504 => {
             // Retryable server errors per OTLP spec.
             let retry_after = parse_otlp_retry_after(headers);
             Err(OtlpError::retryable(status, retry_after))
@@ -1908,8 +1900,7 @@ fn classify_otlp_http_response(status: u16, headers: &[(String, String)]) -> Res
             let allowed_methods = headers
                 .iter()
                 .find(|(name, _)| name.eq_ignore_ascii_case("allow"))
-                .map(|(_, value)| value.clone())
-                .unwrap_or_else(|| "unknown".to_string());
+                .map_or_else(|| "unknown".to_string(), |(_, value)| value.clone());
 
             Err(OtlpError::non_retryable(format!(
                 "OTLP Method Not Allowed (405) - configuration error. Allowed methods: {allowed_methods} - batch dropped",
@@ -7489,7 +7480,7 @@ pub mod otlp_request_builder {
                         attributes: proto_labels(labels),
                         start_time_unix_nano: batch_sequence * 1_000 + 1,
                         time_unix_nano: batch_sequence * 1_000 + 2,
-                        value: Some(number_data_point::Value::AsInt(*value as i64)),
+                        value: Some(number_data_point::Value::AsInt((*value).cast_signed())),
                         ..Default::default()
                     }],
                 })),
@@ -7788,7 +7779,7 @@ mod otlp_wire_format_tests {
                         attributes: proto_labels(labels),
                         start_time_unix_nano: batch_sequence * 1_000 + 1,
                         time_unix_nano: batch_sequence * 1_000 + 2,
-                        value: Some(number_data_point::Value::AsInt(*value as i64)),
+                        value: Some(number_data_point::Value::AsInt((*value).cast_signed())),
                         ..Default::default()
                     }],
                 })),
