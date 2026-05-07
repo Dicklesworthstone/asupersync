@@ -712,3 +712,130 @@ fn outcome_label<T>(out: &Outcome<T, PgError>) -> &'static str {
         Outcome::Panicked(_) => "panicked",
     }
 }
+
+/// Real-PG roundtrip pinning the LISTEN/NOTIFY *encoder* contract while
+/// the receive path is fixed in a follow-up (asupersync-c8fvo3).
+///
+/// `PgConnection::handle_notification_response` (src/database/postgres.rs:3271)
+/// parses `NotificationResponseFields` and immediately discards them
+/// with `let _fields = …`, and there is no public API to drain queued
+/// notifications. So an asupersync `LISTEN` followed by a separately-
+/// connected `NOTIFY` cannot be observed from asupersync today.
+///
+/// Until that gap is closed, this test pins the half that DOES work:
+///   * `LISTEN events` from connection A succeeds against a real PG
+///     and is observable in `pg_listening_channels()` (server-side
+///     truth, not local mirror state).
+///   * `NOTIFY events` from connection B succeeds (no encoder error,
+///     no SQLSTATE leak from validation regressions).
+///
+/// When asupersync-c8fvo3 lands a public receive API, this test should
+/// be extended to also assert that connection A observes a
+/// `PgNotification { channel: "events", payload: "hello", process_id: <B's> }`.
+#[test]
+fn pg_real_listen_in_pg_stat_and_notify_succeeds_from_separate_connection_c8fvo3() {
+    let cfg = RealPgConfig::from_env();
+    if skip_if_disabled(
+        &cfg,
+        "pg_real_listen_in_pg_stat_and_notify_succeeds_from_separate_connection_c8fvo3",
+    ) {
+        return;
+    }
+    let log = PgTestLogger::new(
+        "postgres_real",
+        "pg_real_listen_in_pg_stat_and_notify_succeeds_from_separate_connection_c8fvo3",
+    );
+
+    run_test_with_cx(|cx| async move {
+        // A unique channel name so concurrent runs of this test don't see
+        // each other's `pg_listening_channels()` rows. PG NOTIFY channel
+        // names are case-folded unquoted SQL identifiers, so keep the
+        // alphabet to lowercase + digits.
+        let channel = format!(
+            "asupersync_c8fvo3_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        );
+
+        log.phase("listener_connect");
+        let mut listener = unwrap_pg(
+            PgConnection::connect(&cx, &cfg.url).await,
+            &log,
+            "listener_connect",
+        );
+
+        log.phase("listener_listen");
+        match listener.listen(&cx, &channel).await {
+            Outcome::Ok(()) => {}
+            other => {
+                log.line("listen_error", &[("variant", outcome_label(&other))]);
+                log.end("fail");
+                panic!("LISTEN {channel} failed: {other:?}");
+            }
+        }
+
+        // Server-side proof: PG itself reports the channel is in the
+        // listener's subscription set. This cannot be faked by our
+        // client because it queries pg_listening_channels() function
+        // which reads server-managed state for the current backend.
+        log.phase("verify_pg_listening_channels");
+        let rows = unwrap_pg(
+            listener
+                .query_unchecked(&cx, "SELECT pg_listening_channels() AS ch")
+                .await,
+            &log,
+            "pg_listening_channels",
+        );
+        let observed: Vec<String> = rows
+            .iter()
+            .filter_map(|row| row.get_str("ch").ok().map(str::to_string))
+            .collect();
+        log.line("listening_channels", &[("observed", &observed.join(","))]);
+        assert!(
+            observed.iter().any(|c| c == &channel),
+            "PG must report '{channel}' in pg_listening_channels() for the listener \
+             backend; observed {observed:?}"
+        );
+
+        log.phase("notifier_connect_and_notify");
+        let mut notifier = unwrap_pg(
+            PgConnection::connect(&cx, &cfg.url).await,
+            &log,
+            "notifier_connect",
+        );
+        match notifier.notify(&cx, &channel, "hello").await {
+            Outcome::Ok(()) => {}
+            other => {
+                log.line("notify_error", &[("variant", outcome_label(&other))]);
+                log.end("fail");
+                panic!("NOTIFY {channel} 'hello' failed: {other:?}");
+            }
+        }
+
+        // Until asupersync-c8fvo3 lands a public receive API, we cannot
+        // observe the NotificationResponse on the listener side from
+        // asupersync. The test stops here; the encoder + LISTEN
+        // round-trip is the regression net for the half that works.
+        log.line(
+            "receive_path_pending",
+            &[
+                ("bead", "asupersync-c8fvo3"),
+                (
+                    "reason",
+                    "PgConnection::handle_notification_response discards parsed fields; \
+                     no public receive API yet",
+                ),
+            ],
+        );
+
+        log.phase("cleanup");
+        match listener.unlisten(&cx, &channel).await {
+            Outcome::Ok(()) => {}
+            other => panic!("UNLISTEN {channel} failed: {other:?}"),
+        }
+
+        log.end("pass");
+    });
+}
