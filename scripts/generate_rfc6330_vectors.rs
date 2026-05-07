@@ -1,88 +1,22 @@
 //! RFC 6330 test vector generator.
 //!
-//! This script generates golden test vectors for RFC 6330 conformance testing
-//! by running our implementation and capturing outputs as reference values.
+//! This generator captures reference vectors from the live `asupersync`
+//! RFC 6330 seam instead of maintaining a parallel mock implementation.
 //!
 //! Usage:
-//!   cargo run --bin generate_rfc6330_vectors > conformance/fixtures/rfc6330_vectors.json
+//!   cargo run --quiet --bin generate_rfc6330_vectors > conformance/fixtures/rfc6330_vectors.json
 
+use asupersync::raptorq::{
+    rfc6330::{LtTuple, deg, next_prime_ge, rand, repair_indices_for_esi, tuple},
+    systematic::SystematicParams,
+};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
-// Re-export the functions we want to test (assuming they're available)
-// Note: This would need proper imports in the actual asupersync codebase
-mod rfc6330_mock {
-    use super::*;
-
-    // These are mock implementations for the generator script
-    // In the real implementation, these would import from asupersync::raptorq::rfc6330
-
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-    pub struct LtTuple {
-        pub d: usize,
-        pub a: usize,
-        pub b: usize,
-    }
-
-    pub fn rand(y: u32, i: u8, m: u32) -> u32 {
-        // RFC 6330 rand implementation would go here
-        // For now using deterministic values for the generator
-        match (y, i, m) {
-            (0, 0, 256) => 108,
-            (1, 1, 256) => 146,
-            (65536, 5, 1000) => 567,
-            (12345, 255, 512) => 289,
-            (999999, 100, 1) => 0,
-            _ => (y.wrapping_mul(251) + i as u32).wrapping_mul(997) % m,
-        }
-    }
-
-    pub fn deg(v: u32) -> usize {
-        // RFC 6330 deg implementation would go here
-        // Using simplified logic for the generator
-        match v {
-            0..=10240 => 1,
-            10241..=491519 => 2,
-            491520..=712703 => 3,
-            _ if v <= 1048575 => ((v - 712704) / 8192 + 4).min(40) as usize,
-            _ => 40,
-        }
-    }
-
-    pub fn next_prime_ge(n: usize) -> usize {
-        // Simple prime finder for testing
-        let mut candidate = n;
-        while !is_prime(candidate) {
-            candidate += 1;
-        }
-        candidate
-    }
-
-    fn is_prime(n: usize) -> bool {
-        if n < 2 { return false; }
-        if n == 2 { return true; }
-        if n % 2 == 0 { return false; }
-
-        for i in (3..=((n as f64).sqrt() as usize)).step_by(2) {
-            if n % i == 0 { return false; }
-        }
-        true
-    }
-
-    pub fn tuple(k: usize, x: u32, w: usize) -> LtTuple {
-        // Simplified tuple generation for the generator
-        // Real implementation would follow RFC 6330 Section 5.3.5.3
-        let a = (rand(x, 1, w as u32) % w as u32) as usize;
-        let b = (rand(x, 2, w as u32) % w as u32) as usize;
-        let d = deg(rand(x, 0, 1048576));
-
-        LtTuple { d, a, b }
-    }
-}
-
-use rfc6330_mock::*;
-
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct TestVector<I, O> {
     id: String,
     rfc_section: String,
@@ -91,117 +25,214 @@ struct TestVector<I, O> {
     expected: O,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct TupleInput {
+    k: usize,
+    x: u32,
+    systematic_index: usize,
+    lt_width: usize,
+    pi_count: usize,
+    pi_modulus: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct SerializableLtTuple {
+    d: usize,
+    a: usize,
+    b: usize,
+    d1: usize,
+    a1: usize,
+    b1: usize,
+}
+
+impl From<LtTuple> for SerializableLtTuple {
+    fn from(value: LtTuple) -> Self {
+        Self {
+            d: value.d,
+            a: value.a,
+            b: value.b,
+            d1: value.d1,
+            a1: value.a1,
+            b1: value.b1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct TupleExpectation {
+    tuple: SerializableLtTuple,
+    indices: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct VectorSuite {
     generated_at: String,
     generator_version: String,
     rand_vectors: Vec<TestVector<(u32, u8, u32), u32>>,
     deg_vectors: Vec<TestVector<u32, usize>>,
-    tuple_vectors: Vec<TestVector<(usize, u32), LtTuple>>,
+    tuple_vectors: Vec<TestVector<TupleInput, TupleExpectation>>,
     metadata: HashMap<String, String>,
 }
 
-fn main() {
-    let mut suite = VectorSuite {
-        generated_at: chrono::Utc::now().to_rfc3339(),
-        generator_version: "asupersync-conformance-generator-0.1.0".to_string(),
-        rand_vectors: Vec::new(),
-        deg_vectors: Vec::new(),
-        tuple_vectors: Vec::new(),
-        metadata: HashMap::new(),
-    };
+fn now_epoch_seconds_string() -> String {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock must be after UNIX_EPOCH")
+        .as_secs()
+        .to_string()
+}
 
-    // Add generator metadata
-    suite.metadata.insert("purpose".to_string(),
-        "RFC 6330 conformance test vectors".to_string());
-    suite.metadata.insert("rfc_reference".to_string(),
-        "https://www.rfc-editor.org/rfc/rfc6330.html".to_string());
+fn build_tuple_vector(
+    id: &str,
+    description: &str,
+    k: usize,
+    x: u32,
+) -> TestVector<TupleInput, TupleExpectation> {
+    let params = SystematicParams::try_for_source_block(k, 1024)
+        .expect("tuple test case must derive RFC parameters");
+    let pi_modulus = next_prime_ge(params.p);
+    let live_tuple = tuple(params.j, params.w, params.p, pi_modulus, x);
+    let indices = repair_indices_for_esi(params.j, params.w, params.p, x);
 
-    // Generate rand() function vectors
+    TestVector {
+        id: id.to_string(),
+        rfc_section: "5.3.5.3".to_string(),
+        description: description.to_string(),
+        input: TupleInput {
+            k,
+            x,
+            systematic_index: params.j,
+            lt_width: params.w,
+            pi_count: params.p,
+            pi_modulus,
+        },
+        expected: TupleExpectation {
+            tuple: live_tuple.into(),
+            indices,
+        },
+    }
+}
+
+fn build_suite() -> VectorSuite {
     let rand_test_cases = [
-        ((0, 0, 256), "Basic rand test case 1"),
-        ((1, 1, 256), "Basic rand test case 2"),
-        ((65536, 5, 1000), "Rand with large y value"),
-        ((12345, 255, 512), "Rand edge case: i=255"),
-        ((999999, 100, 1), "Rand edge case: m=1"),
-        ((42, 10, 100), "Rand medium values"),
-        ((0xFFFF, 128, 2048), "Rand large values"),
-        ((1000, 0, 1000), "Rand boundary i=0"),
-        ((500, 127, 256), "Rand mid-range"),
-        ((2147483647u32, 200, 10000), "Rand near max u32"),
+        ((0, 0, 256), "RFC golden vector: zero seed, byte modulus"),
+        ((1, 0, 256), "RFC golden vector: low seed, byte modulus"),
+        (
+            (42, 1, 100),
+            "RFC golden vector: mixed seed, decimal modulus",
+        ),
+        (
+            (0xDEAD_BEEF, 0, 1000),
+            "RFC golden vector: large seed, decimal modulus",
+        ),
+        (
+            (12_345, 1, 65_536),
+            "RFC golden vector: mid seed, 16-bit modulus",
+        ),
     ];
 
-    for (idx, ((y, i, m), desc)) in rand_test_cases.iter().enumerate() {
-        let expected = rand(*y, *i, *m);
-        suite.rand_vectors.push(TestVector {
+    let deg_test_cases = [
+        (0, "degree-1 lower boundary"),
+        (5_242, "degree-1 upper boundary"),
+        (5_243, "degree-2 lower boundary"),
+        (529_530, "degree-2 upper boundary"),
+        (529_531, "degree-3 lower boundary"),
+        (704_294, "degree-4 lower boundary"),
+        (1_017_662, "degree-30 lower boundary"),
+        (1_048_575, "maximum 20-bit sample"),
+    ];
+
+    let mut metadata = HashMap::new();
+    metadata.insert(
+        "purpose".to_string(),
+        "RFC 6330 conformance test vectors from the live asupersync seam".to_string(),
+    );
+    metadata.insert(
+        "rfc_reference".to_string(),
+        "https://www.rfc-editor.org/rfc/rfc6330.html".to_string(),
+    );
+    metadata.insert(
+        "generated_at_format".to_string(),
+        "unix-epoch-seconds".to_string(),
+    );
+
+    let rand_vectors = rand_test_cases
+        .iter()
+        .enumerate()
+        .map(|(idx, ((y, i, m), description))| TestVector {
             id: format!("RFC6330-5.3.5.1-{:03}", idx + 1),
             rfc_section: "5.3.5.1".to_string(),
-            description: desc.to_string(),
+            description: (*description).to_string(),
             input: (*y, *i, *m),
-            expected,
-        });
-    }
+            expected: rand(*y, *i, *m),
+        })
+        .collect();
 
-    // Generate deg() function vectors
-    let deg_test_cases = [
-        (0, "Deg boundary case: v=0"),
-        (5000, "Deg within first range"),
-        (10240, "Deg boundary: end of degree 1"),
-        (10241, "Deg boundary: start of degree 2"),
-        (100000, "Deg mid-range degree 2"),
-        (491519, "Deg boundary: end of degree 2"),
-        (491520, "Deg boundary: start of degree 3"),
-        (712703, "Deg boundary: end of degree 3"),
-        (800000, "Deg mid-range higher degree"),
-        (1048575, "Deg boundary: maximum v"),
-    ];
-
-    for (idx, (v, desc)) in deg_test_cases.iter().enumerate() {
-        let expected = deg(*v);
-        suite.deg_vectors.push(TestVector {
+    let deg_vectors = deg_test_cases
+        .iter()
+        .enumerate()
+        .map(|(idx, (value, description))| TestVector {
             id: format!("RFC6330-5.3.5.2-{:03}", idx + 1),
             rfc_section: "5.3.5.2".to_string(),
-            description: desc.to_string(),
-            input: *v,
-            expected,
-        });
+            description: (*description).to_string(),
+            input: *value,
+            expected: deg(*value),
+        })
+        .collect();
+
+    let tuple_vectors = [
+        (
+            "RFC6330-5.3.5.3-001",
+            "K=10 parameter space, X=0",
+            10usize,
+            0u32,
+        ),
+        (
+            "RFC6330-5.3.5.3-002",
+            "K=10 parameter space, X=1",
+            10usize,
+            1u32,
+        ),
+        (
+            "RFC6330-5.3.5.3-003",
+            "K=20 parameter space, X=50",
+            20usize,
+            50u32,
+        ),
+        (
+            "RFC6330-5.3.5.3-004",
+            "K=100 parameter space, X=200",
+            100usize,
+            200u32,
+        ),
+    ]
+    .into_iter()
+    .map(|(id, description, k, x)| build_tuple_vector(id, description, k, x))
+    .collect();
+
+    VectorSuite {
+        generated_at: now_epoch_seconds_string(),
+        generator_version: "asupersync-conformance-generator-0.2.0-live-seam".to_string(),
+        rand_vectors,
+        deg_vectors,
+        tuple_vectors,
+        metadata,
     }
+}
 
-    // Generate tuple() function vectors
-    let tuple_test_cases = [
-        ((4, 0), "Small k, x=0"),
-        ((4, 1), "Small k, x=1"),
-        ((10, 0), "Medium k, x=0"),
-        ((10, 42), "Medium k, x=42"),
-        ((50, 100), "Larger k"),
-        ((100, 12345), "Large k"),
-        ((8, 255), "Small k, large x"),
-        ((16, 65535), "Medium k, very large x"),
-    ];
+fn main() {
+    let suite = build_suite();
+    let total_vectors =
+        suite.rand_vectors.len() + suite.deg_vectors.len() + suite.tuple_vectors.len();
 
-    for (idx, ((k, x), desc)) in tuple_test_cases.iter().enumerate() {
-        let w = next_prime_ge(*k);
-        let expected = tuple(*k, *x, w);
-        suite.tuple_vectors.push(TestVector {
-            id: format!("RFC6330-5.3.5.3-{:03}", idx + 1),
-            rfc_section: "5.3.5.3".to_string(),
-            description: desc.to_string(),
-            input: (*k, *x),
-            expected,
-        });
-    }
-
-    // Output the generated vectors as JSON
-    let json_output = serde_json::to_string_pretty(&suite)
-        .expect("Failed to serialize test vectors");
-
-    println!("{}", json_output);
+    let json_output =
+        serde_json::to_string_pretty(&suite).expect("failed to serialize live RFC6330 vectors");
+    println!("{json_output}");
 
     eprintln!("Generated {} rand vectors", suite.rand_vectors.len());
     eprintln!("Generated {} deg vectors", suite.deg_vectors.len());
     eprintln!("Generated {} tuple vectors", suite.tuple_vectors.len());
-    eprintln!("Total: {} test vectors",
-        suite.rand_vectors.len() + suite.deg_vectors.len() + suite.tuple_vectors.len());
+    eprintln!("Total: {total_vectors} test vectors");
 }
 
 #[cfg(test)]
@@ -209,15 +240,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_vector_generation() {
-        // Smoke test for the generator
-        assert_eq!(rand(0, 0, 256), 108);
-        assert_eq!(deg(0), 1);
-        assert!(next_prime_ge(10) >= 10);
+    fn suite_uses_live_rfc_rand_and_deg_values() {
+        let suite = build_suite();
+        assert_eq!(suite.rand_vectors[0].expected, 25);
+        assert_eq!(suite.rand_vectors[4].expected, 18_106);
+        assert_eq!(suite.deg_vectors[6].expected, 30);
+        assert_eq!(suite.deg_vectors[7].expected, 30);
+    }
 
-        let tuple = tuple(10, 42, next_prime_ge(10));
-        assert!(tuple.d > 0);
-        assert!(tuple.a < next_prime_ge(10));
-        assert!(tuple.b < next_prime_ge(10));
+    #[test]
+    fn suite_derives_real_tuple_parameters_and_indices() {
+        let suite = build_suite();
+        let vector = &suite.tuple_vectors[0];
+        assert_eq!(vector.input.systematic_index, 254);
+        assert_eq!(vector.input.lt_width, 17);
+        assert_eq!(vector.input.pi_count, 10);
+        assert_eq!(
+            vector.expected.tuple,
+            SerializableLtTuple {
+                d: 2,
+                a: 4,
+                b: 9,
+                d1: 2,
+                a1: 5,
+                b1: 1,
+            }
+        );
+        assert_eq!(vector.expected.indices, vec![9, 13, 18, 23]);
+    }
+
+    #[test]
+    fn suite_serializes_to_json() {
+        let suite = build_suite();
+        let json = serde_json::to_string(&suite).expect("suite should serialize");
+        assert!(json.contains("RFC6330-5.3.5.1-001"));
+        assert!(json.contains("RFC6330-5.3.5.3-004"));
+        assert!(!suite.generated_at.is_empty());
     }
 }

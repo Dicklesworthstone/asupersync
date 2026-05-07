@@ -133,6 +133,10 @@ name = "offline_tuner"
 path = "src/bin/offline_tuner.rs"
 required-features = ["cli", "simd-intrinsics"]
 
+[[bin]]
+name = "generate_rfc6330_vectors"
+path = "scripts/generate_rfc6330_vectors.rs"
+
 [dependencies]
 # Phase 0: prefer std/core; avoid bringing in executors/runtimes.
 # Dependencies added here must preserve determinism in the lab runtime.
