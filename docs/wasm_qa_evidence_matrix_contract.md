@@ -279,7 +279,10 @@ ${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTF
 ${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_cfg_matrix cargo test -p asupersync --test wasm_cfg_compile_invariants --features test-internals wasm_profile_matrix_compile_closure_holds -- --ignored --nocapture
 ${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_cfg_native cargo test -p asupersync --test wasm_cfg_compile_invariants --features test-internals native_all_targets_backstop_holds -- --ignored --nocapture
 python3 scripts/run_browser_onboarding_checks.py --scenario worker --dry-run --out-dir artifacts/onboarding_vnext
-${RCH_BIN:-rch} exec -- bash -lc 'set -euo pipefail; cargo test -p asupersync --test wasm_browser_feasibility_matrix -- --nocapture; cargo test -p asupersync --test wasm_js_exports_coverage_contract -- --nocapture; cargo test -p asupersync --test wasm_rust_browser_example_contract -- --nocapture; cargo test -p asupersync --test wasm_pilot_observability_contract -- --nocapture'
+${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_browser_feasibility_matrix cargo test -p asupersync --test wasm_browser_feasibility_matrix -- --nocapture
+${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_js_exports_coverage_contract cargo test -p asupersync --test wasm_js_exports_coverage_contract -- --nocapture
+${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_rust_browser_example_contract cargo test -p asupersync --test wasm_rust_browser_example_contract -- --nocapture
+${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_pilot_observability_contract cargo test -p asupersync --test wasm_pilot_observability_contract -- --nocapture
 ```
 
 ## Cross-References

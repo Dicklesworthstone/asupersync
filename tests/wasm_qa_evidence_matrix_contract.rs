@@ -40,6 +40,35 @@ fn load_ci_matrix_policy() -> Value {
     serde_json::from_str(&raw).expect("failed to parse ci matrix policy")
 }
 
+fn assert_direct_vnext_replay_command(replay_command: &str, context: &str) {
+    let forbidden_wrapper = ["bash", " -lc"].concat();
+    assert!(
+        !replay_command.contains(&forbidden_wrapper),
+        "{context} replay command must not shell-wrap the cargo proof bundle"
+    );
+
+    for token in [
+        "run_browser_onboarding_checks.py --scenario worker --dry-run --out-dir artifacts/onboarding_vnext",
+        "rch exec -- env",
+        "CARGO_INCREMENTAL=0",
+        "CARGO_PROFILE_TEST_DEBUG=0",
+        "RUSTFLAGS='-C debuginfo=0'",
+        "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_browser_feasibility_matrix",
+        "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_js_exports_coverage_contract",
+        "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_rust_browser_example_contract",
+        "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_pilot_observability_contract",
+        "wasm_browser_feasibility_matrix",
+        "wasm_js_exports_coverage_contract",
+        "wasm_rust_browser_example_contract",
+        "wasm_pilot_observability_contract",
+    ] {
+        assert!(
+            replay_command.contains(token),
+            "{context} replay command missing token: {token}"
+        );
+    }
+}
+
 fn repo_relative_or_absolute(path: &str) -> PathBuf {
     let path = PathBuf::from(path);
     if path.is_absolute() {
@@ -336,19 +365,7 @@ fn artifact_certification_lane_matches_vnext_ci_contract() {
     let replay_command = lane["replay_command"]
         .as_str()
         .expect("replay_command must be string");
-    for token in [
-        "run_browser_onboarding_checks.py --scenario worker --dry-run --out-dir artifacts/onboarding_vnext",
-        "rch exec -- bash -lc",
-        "wasm_browser_feasibility_matrix",
-        "wasm_js_exports_coverage_contract",
-        "wasm_rust_browser_example_contract",
-        "wasm_pilot_observability_contract",
-    ] {
-        assert!(
-            replay_command.contains(token),
-            "vNext certification replay command missing token: {token}"
-        );
-    }
+    assert_direct_vnext_replay_command(replay_command, "vNext certification");
 }
 
 // -- Evidence layer catalog --
@@ -604,16 +621,21 @@ fn retention_policy_declares_hot_warm_cold_classes() {
 // -- Smoke runner and scenarios --
 
 #[test]
-fn smoke_scenarios_are_rch_routed() {
+fn smoke_scenarios_are_rch_routed_or_explicit_dry_run_delegates() {
     let artifact = load_artifact();
     let scenarios = artifact["smoke_scenarios"].as_array().expect("array");
     assert!(!scenarios.is_empty());
     for scenario in scenarios {
         let sid = scenario["scenario_id"].as_str().unwrap();
         let cmd = scenario["command"].as_str().unwrap();
+        let direct_dry_run_delegate = sid == "WASM-QA-SMOKE-PACKAGED-CANCELLATION"
+            && cmd.contains("bash scripts/build_browser_core_artifacts.sh prod")
+            && cmd.contains("WASM_PACKAGED_CANCELLATION_DRY_RUN=1")
+            && cmd.contains("RCH_BIN=/bin/true")
+            && cmd.contains("bash scripts/test_wasm_packaged_cancellation_e2e.sh");
         assert!(
-            cmd.contains("${RCH_BIN:-rch} exec --"),
-            "scenario {sid} must use the RCH_BIN placeholder"
+            cmd.contains("${RCH_BIN:-rch} exec --") || direct_dry_run_delegate,
+            "scenario {sid} must use the RCH_BIN placeholder or an explicit dry-run delegate"
         );
     }
 }
@@ -994,6 +1016,19 @@ fn ci_workflow_runs_aggregate_dry_run_and_uploads_aggregate_artifacts() {
 #[test]
 fn ci_workflow_runs_vnext_surface_certification_and_uploads_artifact() {
     let workflow = load_ci_workflow();
+    let step_start = workflow
+        .find("WASM browser vNext surface certification")
+        .expect("workflow must contain vNext certification step");
+    let upload_start = workflow[step_start..]
+        .find("Upload WASM browser vNext surface certification artifacts")
+        .expect("workflow must upload vNext certification artifacts");
+    let step_body = &workflow[step_start..step_start + upload_start];
+    let forbidden_wrapper = ["bash", " -lc"].concat();
+    assert!(
+        !step_body.contains(&forbidden_wrapper),
+        "vNext certification step must not shell-wrap the cargo proof bundle"
+    );
+
     for token in [
         "WASM browser vNext surface certification",
         "python3 scripts/run_browser_onboarding_checks.py \\",
@@ -1001,10 +1036,17 @@ fn ci_workflow_runs_vnext_surface_certification_and_uploads_artifact() {
         "--out-dir artifacts/onboarding_vnext",
         "RCH_BIN=\"${HOME}/.local/bin/rch\"",
         "rch is required for WASM browser vNext surface certification",
-        "cargo test -p asupersync --test wasm_browser_feasibility_matrix -- --nocapture",
-        "cargo test -p asupersync --test wasm_js_exports_coverage_contract -- --nocapture",
-        "cargo test -p asupersync --test wasm_rust_browser_example_contract -- --nocapture",
-        "cargo test -p asupersync --test wasm_pilot_observability_contract -- --nocapture",
+        "run_vnext_certification_test()",
+        "\"$RCH_BIN\" exec -- env \\",
+        "CARGO_INCREMENTAL=0 \\",
+        "CARGO_PROFILE_TEST_DEBUG=0 \\",
+        "RUSTFLAGS=\"-C debuginfo=0\" \\",
+        "CARGO_TARGET_DIR=\"$target_dir\" \\",
+        "cargo test -p asupersync --test \"$test_target\" -- --nocapture \\",
+        "run_vnext_certification_test wasm_browser_feasibility_matrix",
+        "run_vnext_certification_test wasm_js_exports_coverage_contract",
+        "run_vnext_certification_test wasm_rust_browser_example_contract",
+        "run_vnext_certification_test wasm_pilot_observability_contract",
         "artifacts/wasm_browser_vnext_surface_summary.json",
         "artifacts/wasm_browser_vnext_surface_test.log",
         "Upload WASM browser vNext surface certification artifacts",
@@ -1126,19 +1168,7 @@ fn ci_matrix_policy_tracks_vnext_surface_certification_lane() {
     let replay_command = lane["replay_command"]
         .as_str()
         .expect("replay_command must be string");
-    for token in [
-        "run_browser_onboarding_checks.py --scenario worker --dry-run --out-dir artifacts/onboarding_vnext",
-        "rch exec -- bash -lc",
-        "wasm_browser_feasibility_matrix",
-        "wasm_js_exports_coverage_contract",
-        "wasm_rust_browser_example_contract",
-        "wasm_pilot_observability_contract",
-    ] {
-        assert!(
-            replay_command.contains(token),
-            "vNext surface lane replay command missing token: {token}"
-        );
-    }
+    assert_direct_vnext_replay_command(replay_command, "vNext surface lane");
 
     let failure_taxonomy: BTreeSet<&str> = lane["failure_taxonomy"]
         .as_array()

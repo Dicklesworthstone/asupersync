@@ -361,7 +361,24 @@ jobs:
             echo "rch is required for WASM browser vNext surface certification" >&2
             exit 1
           fi
-          "$RCH_BIN" exec -- bash -lc 'set -euo pipefail; cargo test -p asupersync --test wasm_browser_feasibility_matrix -- --nocapture; cargo test -p asupersync --test wasm_js_exports_coverage_contract -- --nocapture; cargo test -p asupersync --test wasm_rust_browser_example_contract -- --nocapture; cargo test -p asupersync --test wasm_pilot_observability_contract -- --nocapture' | tee artifacts/wasm_browser_vnext_surface_test.log
+          : > artifacts/wasm_browser_vnext_surface_test.log
+
+          run_vnext_certification_test() {
+            local test_target="$1"
+            local target_dir="${TMPDIR:-/tmp}/rch_target_${test_target}"
+            "$RCH_BIN" exec -- env \
+              CARGO_INCREMENTAL=0 \
+              CARGO_PROFILE_TEST_DEBUG=0 \
+              RUSTFLAGS="-C debuginfo=0" \
+              CARGO_TARGET_DIR="$target_dir" \
+              cargo test -p asupersync --test "$test_target" -- --nocapture \
+              | tee -a artifacts/wasm_browser_vnext_surface_test.log
+          }
+
+          run_vnext_certification_test wasm_browser_feasibility_matrix
+          run_vnext_certification_test wasm_js_exports_coverage_contract
+          run_vnext_certification_test wasm_rust_browser_example_contract
+          run_vnext_certification_test wasm_pilot_observability_contract
           python3 - <<'PY'
           import json
           from pathlib import Path
@@ -404,7 +421,7 @@ jobs:
                       "support_level": "guarded_preview_only",
                   },
               ],
-              "replay_command": "python3 scripts/run_browser_onboarding_checks.py --scenario worker --dry-run --out-dir artifacts/onboarding_vnext && rch exec -- bash -lc 'set -euo pipefail; cargo test -p asupersync --test wasm_browser_feasibility_matrix -- --nocapture; cargo test -p asupersync --test wasm_js_exports_coverage_contract -- --nocapture; cargo test -p asupersync --test wasm_rust_browser_example_contract -- --nocapture; cargo test -p asupersync --test wasm_pilot_observability_contract -- --nocapture'",
+              "replay_command": "python3 scripts/run_browser_onboarding_checks.py --scenario worker --dry-run --out-dir artifacts/onboarding_vnext && rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_browser_feasibility_matrix cargo test -p asupersync --test wasm_browser_feasibility_matrix -- --nocapture && rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_js_exports_coverage_contract cargo test -p asupersync --test wasm_js_exports_coverage_contract -- --nocapture && rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_rust_browser_example_contract cargo test -p asupersync --test wasm_rust_browser_example_contract -- --nocapture && rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_pilot_observability_contract cargo test -p asupersync --test wasm_pilot_observability_contract -- --nocapture",
           }
           Path("artifacts/wasm_browser_vnext_surface_summary.json").write_text(
               json.dumps(summary, indent=2) + "\n", encoding="utf-8"
