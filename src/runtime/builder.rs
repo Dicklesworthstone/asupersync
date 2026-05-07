@@ -3701,8 +3701,14 @@ impl RuntimeInner {
         host_services: &dyn RuntimeHostServices,
     ) -> (Self, Vec<ThreeLaneWorker>) {
         // Runtime currently instantiates the unified RuntimeState path.
-        // ShardedState exists behind migration work, but there is not yet a
-        // RuntimeConfig layout switch wired here (see bd-2f7uj runbook).
+        // ShardedState exists at src/runtime/sharded_state.rs (1556 lines)
+        // and is exercised via tests/metamorphic/sharded_state.rs, but it
+        // is not yet reachable from `Runtime::new` — the production path
+        // hard-codes the unified backing store. Tracking and acceptance
+        // criteria for wiring `RuntimeConfig::runtime_state_shape` and a
+        // `RuntimeBuilder::with_sharded_state(bool)` switch live in
+        // br-asupersync-8fuxnt. The previous comment here cited a
+        // dangling `bd-2f7uj` runbook ID that never resolved to a bead.
         let runtime_state = Self::initialize_runtime_state(
             &config,
             reactor,
