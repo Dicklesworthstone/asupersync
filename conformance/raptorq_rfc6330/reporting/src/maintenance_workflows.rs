@@ -3,21 +3,21 @@
 //! Implements automated fixture maintenance, reference implementation version
 //! tracking, and workflow automation for long-term conformance testing maintenance.
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use serde::{Deserialize, Serialize};
 
 /// Reference implementation version information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReferenceVersion {
-    pub name: String,                    // e.g., "raptorq-go"
-    pub version: String,                 // e.g., "v1.2.3"
-    pub commit_hash: String,             // Git commit hash
-    pub last_updated: String,            // ISO timestamp
-    pub fixture_directory: PathBuf,      // Where fixtures are stored
-    pub generation_command: String,      // Command to regenerate fixtures
+    pub name: String,                       // e.g., "raptorq-go"
+    pub version: String,                    // e.g., "v1.2.3"
+    pub commit_hash: String,                // Git commit hash
+    pub last_updated: String,               // ISO timestamp
+    pub fixture_directory: PathBuf,         // Where fixtures are stored
+    pub generation_command: String,         // Command to regenerate fixtures
     pub validation_command: Option<String>, // Command to validate fixtures
 }
 
@@ -50,7 +50,13 @@ impl ReferenceVersion {
 
         // Get latest tag version
         if let Ok(output) = Command::new("git")
-            .args(&["-C", &repo_path.to_string_lossy(), "describe", "--tags", "--abbrev=0"])
+            .args(&[
+                "-C",
+                &repo_path.to_string_lossy(),
+                "describe",
+                "--tags",
+                "--abbrev=0",
+            ])
             .output()
         {
             if output.status.success() {
@@ -81,7 +87,10 @@ impl ReferenceVersion {
     }
 
     /// Generate fixtures using the configured command
-    pub fn generate_fixtures(&self, dry_run: bool) -> Result<FixtureGenerationResult, std::io::Error> {
+    pub fn generate_fixtures(
+        &self,
+        dry_run: bool,
+    ) -> Result<FixtureGenerationResult, std::io::Error> {
         if dry_run {
             return Ok(FixtureGenerationResult {
                 success: true,
@@ -113,8 +122,8 @@ impl ReferenceVersion {
 
         let duration = start.elapsed();
         let success = output.status.success();
-        let output_str = String::from_utf8_lossy(&output.stdout).to_string() +
-            &String::from_utf8_lossy(&output.stderr);
+        let output_str = String::from_utf8_lossy(&output.stdout).to_string()
+            + &String::from_utf8_lossy(&output.stderr);
 
         // List generated files
         let files_generated = if success {
@@ -157,8 +166,8 @@ impl ReferenceVersion {
         };
 
         let success = output.status.success();
-        let output_str = String::from_utf8_lossy(&output.stdout).to_string() +
-            &String::from_utf8_lossy(&output.stderr);
+        let output_str = String::from_utf8_lossy(&output.stdout).to_string()
+            + &String::from_utf8_lossy(&output.stderr);
 
         // Parse validation issues (simplified - would need more sophisticated parsing)
         let issues = if !success {
@@ -215,21 +224,21 @@ pub struct FixtureValidationResult {
 /// Configuration for maintenance workflows
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MaintenanceConfig {
-    pub auto_regenerate: bool,           // Automatically regenerate fixtures
-    pub validation_required: bool,       // Require validation before accepting fixtures
-    pub backup_old_fixtures: bool,       // Backup fixtures before regeneration
-    pub notification_enabled: bool,      // Send notifications on changes
-    pub max_fixture_age_days: u64,       // Maximum age before flagging for review
+    pub auto_regenerate: bool,      // Automatically regenerate fixtures
+    pub validation_required: bool,  // Require validation before accepting fixtures
+    pub backup_old_fixtures: bool,  // Backup fixtures before regeneration
+    pub notification_enabled: bool, // Send notifications on changes
+    pub max_fixture_age_days: u64,  // Maximum age before flagging for review
 }
 
 impl Default for MaintenanceConfig {
     fn default() -> Self {
         Self {
-            auto_regenerate: false,        // Conservative default - manual control
-            validation_required: true,     // Always validate
-            backup_old_fixtures: true,     // Safety first
-            notification_enabled: false,   // Avoid spam
-            max_fixture_age_days: 30,     // Monthly review cycle
+            auto_regenerate: false,      // Conservative default - manual control
+            validation_required: true,   // Always validate
+            backup_old_fixtures: true,   // Safety first
+            notification_enabled: false, // Avoid spam
+            max_fixture_age_days: 30,    // Monthly review cycle
         }
     }
 }
@@ -274,7 +283,7 @@ impl MaintenanceManager {
             }
 
             // Check fixture age
-            if let Ok(age_days) = self.calculate_fixture_age(&reference.fixture_directory) {
+            if let Ok(age_days) = Self::calculate_fixture_age(&reference.fixture_directory) {
                 if age_days > self.config.max_fixture_age_days {
                     actions.push(MaintenanceAction::ReviewRequired {
                         reference_name: name.clone(),
@@ -288,9 +297,16 @@ impl MaintenanceManager {
     }
 
     /// Execute maintenance action
-    pub fn execute_action(&self, action: MaintenanceAction, dry_run: bool) -> Result<MaintenanceResult, std::io::Error> {
+    pub fn execute_action(
+        &self,
+        action: MaintenanceAction,
+        dry_run: bool,
+    ) -> Result<MaintenanceResult, std::io::Error> {
         match action {
-            MaintenanceAction::RegenerateFixtures { reference_name, reason } => {
+            MaintenanceAction::RegenerateFixtures {
+                reference_name,
+                reason,
+            } => {
                 let Some(reference) = self.reference_versions.get(&reference_name) else {
                     return Ok(MaintenanceResult::Error {
                         action_type: "regenerate".to_string(),
@@ -314,13 +330,20 @@ impl MaintenanceManager {
                                         if val_result.success {
                                             Ok(MaintenanceResult::Success {
                                                 action_type: "regenerate".to_string(),
-                                                message: format!("Generated and validated {} fixtures", gen_result.files_generated.len()),
-                                                details: format!("Command: {}\nOutput: {}", gen_result.command, gen_result.output),
+                                                message: format!(
+                                                    "Generated and validated {} fixtures",
+                                                    gen_result.files_generated.len()
+                                                ),
+                                                details: format!(
+                                                    "Reason: {}\nCommand: {}\nOutput: {}",
+                                                    reason, gen_result.command, gen_result.output
+                                                ),
                                             })
                                         } else {
                                             Ok(MaintenanceResult::Warning {
                                                 action_type: "regenerate".to_string(),
-                                                message: "Fixtures generated but validation failed".to_string(),
+                                                message: "Fixtures generated but validation failed"
+                                                    .to_string(),
                                                 details: val_result.output,
                                             })
                                         }
@@ -333,7 +356,10 @@ impl MaintenanceManager {
                             } else {
                                 Ok(MaintenanceResult::Success {
                                     action_type: "regenerate".to_string(),
-                                    message: format!("Generated {} fixtures", gen_result.files_generated.len()),
+                                    message: format!(
+                                        "Generated {} fixtures",
+                                        gen_result.files_generated.len()
+                                    ),
                                     details: gen_result.output,
                                 })
                             }
@@ -351,18 +377,19 @@ impl MaintenanceManager {
                 }
             }
 
-            MaintenanceAction::ReviewRequired { reference_name, reason } => {
-                Ok(MaintenanceResult::Warning {
-                    action_type: "review".to_string(),
-                    message: format!("Review required for '{}': {}", reference_name, reason),
-                    details: "Manual review and action needed".to_string(),
-                })
-            }
+            MaintenanceAction::ReviewRequired {
+                reference_name,
+                reason,
+            } => Ok(MaintenanceResult::Warning {
+                action_type: "review".to_string(),
+                message: format!("Review required for '{}': {}", reference_name, reason),
+                details: "Manual review and action needed".to_string(),
+            }),
         }
     }
 
     /// Calculate age of fixtures in days
-    fn calculate_fixture_age(&self, fixture_dir: &Path) -> Result<u64, std::io::Error> {
+    fn calculate_fixture_age(fixture_dir: &Path) -> Result<u64, std::io::Error> {
         if !fixture_dir.exists() {
             return Ok(u64::MAX); // Very old if missing
         }
@@ -379,8 +406,11 @@ impl MaintenanceManager {
             }
         }
 
-        let duration = std::time::SystemTime::now().duration_since(newest_time)
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "Time calculation error"))?;
+        let duration = std::time::SystemTime::now()
+            .duration_since(newest_time)
+            .map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::Other, "Time calculation error")
+            })?;
 
         Ok(duration.as_secs() / 86400) // Convert to days
     }
@@ -410,18 +440,33 @@ impl MaintenanceManager {
     }
 
     /// Generate maintenance report
-    pub fn generate_maintenance_report(&self) -> String {
+    pub fn generate_maintenance_report(&mut self) -> String {
         let mut report = String::new();
 
         report.push_str("# Conformance Fixture Maintenance Report\n\n");
-        report.push_str(&format!("**Generated:** {}\n\n", chrono::Utc::now().to_rfc3339()));
+        report.push_str(&format!(
+            "**Generated:** {}\n\n",
+            chrono::Utc::now().to_rfc3339()
+        ));
 
         // Configuration
         report.push_str("## Configuration\n\n");
-        report.push_str(&format!("- **Auto Regenerate**: {}\n", self.config.auto_regenerate));
-        report.push_str(&format!("- **Validation Required**: {}\n", self.config.validation_required));
-        report.push_str(&format!("- **Backup Old Fixtures**: {}\n", self.config.backup_old_fixtures));
-        report.push_str(&format!("- **Max Fixture Age**: {} days\n\n", self.config.max_fixture_age_days));
+        report.push_str(&format!(
+            "- **Auto Regenerate**: {}\n",
+            self.config.auto_regenerate
+        ));
+        report.push_str(&format!(
+            "- **Validation Required**: {}\n",
+            self.config.validation_required
+        ));
+        report.push_str(&format!(
+            "- **Backup Old Fixtures**: {}\n",
+            self.config.backup_old_fixtures
+        ));
+        report.push_str(&format!(
+            "- **Max Fixture Age**: {} days\n\n",
+            self.config.max_fixture_age_days
+        ));
 
         // Reference implementations
         report.push_str("## Reference Implementations\n\n");
@@ -430,8 +475,7 @@ impl MaintenanceManager {
 
         for (name, reference) in &self.reference_versions {
             let status = if reference.fixture_directory.exists() {
-                let age = self.calculate_fixture_age(&reference.fixture_directory)
-                    .unwrap_or(999);
+                let age = Self::calculate_fixture_age(&reference.fixture_directory).unwrap_or(999);
 
                 if age > self.config.max_fixture_age_days {
                     format!("⚠️ {} days old", age)
@@ -446,7 +490,11 @@ impl MaintenanceManager {
                 "| {} | {} | {} | {} | {} |\n",
                 name,
                 reference.version,
-                reference.last_updated.split('T').next().unwrap_or("unknown"),
+                reference
+                    .last_updated
+                    .split('T')
+                    .next()
+                    .unwrap_or("unknown"),
                 reference.fixture_directory.display(),
                 status
             ));
@@ -459,16 +507,29 @@ impl MaintenanceManager {
             report.push_str("## Recommended Actions\n\n");
             for action in actions {
                 match action {
-                    MaintenanceAction::RegenerateFixtures { reference_name, reason } => {
-                        report.push_str(&format!("- 🔄 **Regenerate fixtures** for '{}': {}\n", reference_name, reason));
+                    MaintenanceAction::RegenerateFixtures {
+                        reference_name,
+                        reason,
+                    } => {
+                        report.push_str(&format!(
+                            "- 🔄 **Regenerate fixtures** for '{}': {}\n",
+                            reference_name, reason
+                        ));
                     }
-                    MaintenanceAction::ReviewRequired { reference_name, reason } => {
-                        report.push_str(&format!("- 👀 **Review required** for '{}': {}\n", reference_name, reason));
+                    MaintenanceAction::ReviewRequired {
+                        reference_name,
+                        reason,
+                    } => {
+                        report.push_str(&format!(
+                            "- 👀 **Review required** for '{}': {}\n",
+                            reference_name, reason
+                        ));
                     }
                 }
             }
         } else {
-            report.push_str("## Status\n\n✅ All fixtures are current and no actions required.\n\n");
+            report
+                .push_str("## Status\n\n✅ All fixtures are current and no actions required.\n\n");
         }
 
         report
@@ -525,10 +586,8 @@ mod tests {
     #[test]
     fn test_reference_version_creation() {
         let temp_dir = TempDir::new().unwrap();
-        let reference = ReferenceVersion::new(
-            "test-ref".to_string(),
-            temp_dir.path().to_path_buf()
-        );
+        let reference =
+            ReferenceVersion::new("test-ref".to_string(), temp_dir.path().to_path_buf());
 
         assert_eq!(reference.name, "test-ref");
         assert_eq!(reference.fixture_directory, temp_dir.path());
@@ -537,10 +596,8 @@ mod tests {
     #[test]
     fn test_needs_regeneration() {
         let temp_dir = TempDir::new().unwrap();
-        let reference = ReferenceVersion::new(
-            "test-ref".to_string(),
-            temp_dir.path().to_path_buf()
-        );
+        let reference =
+            ReferenceVersion::new("test-ref".to_string(), temp_dir.path().to_path_buf());
 
         // Empty directory should need regeneration
         assert!(reference.needs_regeneration());
@@ -556,10 +613,7 @@ mod tests {
         let config = MaintenanceConfig::default();
         let mut manager = MaintenanceManager::new(config, temp_dir.path().to_path_buf());
 
-        let reference = ReferenceVersion::new(
-            "test-ref".to_string(),
-            PathBuf::from("empty-dir")
-        );
+        let reference = ReferenceVersion::new("test-ref".to_string(), PathBuf::from("empty-dir"));
         manager.add_reference("test".to_string(), reference);
 
         let actions = manager.check_for_updates();
