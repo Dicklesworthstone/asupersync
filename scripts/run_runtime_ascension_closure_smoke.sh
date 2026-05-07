@@ -10,6 +10,7 @@ RUN_DIR="${OUTPUT_ROOT}/run_${TIMESTAMP}"
 INVOKED_FROM="$(pwd)"
 LIST_ONLY=0
 DRY_RUN=1
+RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
 
 declare -a SELECTED_SCENARIOS=()
 
@@ -34,6 +35,13 @@ require_tools() {
     fi
     if [[ ! -f "${CONTRACT_ARTIFACT}" ]]; then
         echo "FATAL: contract artifact missing at ${CONTRACT_ARTIFACT}" >&2
+        exit 1
+    fi
+}
+
+require_execute_tools() {
+    if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+        echo "FATAL: rch is required and was not found/executable at: ${RCH_BIN}" >&2
         exit 1
     fi
 }
@@ -74,6 +82,29 @@ append_result() {
     fi
 }
 
+scenario_command_args() {
+    local sid="$1"
+    local target_dir="${TMPDIR:-/tmp}/rch_target_runtime_ascension_closure"
+
+    case "$sid" in
+        RACP-SMOKE-PACKET)
+            printf '%s\0' "$RCH_BIN" exec -- env CARGO_INCREMENTAL=0 "RUSTFLAGS=-D warnings" "CARGO_TARGET_DIR=${target_dir}" cargo test --test runtime_ascension_closure_packet_contract packet -- --nocapture
+            ;;
+        RACP-SMOKE-DEMOS)
+            printf '%s\0' "$RCH_BIN" exec -- env CARGO_INCREMENTAL=0 "RUSTFLAGS=-D warnings" "CARGO_TARGET_DIR=${target_dir}" cargo test --test runtime_ascension_closure_packet_contract demo -- --nocapture
+            ;;
+        RACP-SMOKE-TRANSPORT)
+            printf '%s\0' "$RCH_BIN" exec -- env CARGO_INCREMENTAL=0 "RUSTFLAGS=-D warnings" "CARGO_TARGET_DIR=${target_dir}" cargo test --test transport_frontier_benchmark_contract -- --nocapture
+            ;;
+        RACP-SMOKE-DOCTRINE)
+            printf '%s\0' "$RCH_BIN" exec -- env CARGO_INCREMENTAL=0 "RUSTFLAGS=-D warnings" "CARGO_TARGET_DIR=${target_dir}" cargo test --test runtime_ascension_closure_packet_contract launch -- --nocapture
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 run_scenario() {
     local sid="$1"
     local scenario_json
@@ -87,6 +118,7 @@ run_scenario() {
     local ended_ts
     local status
     local rc
+    local -a command_args
 
     scenario_json="$(load_scenario_json "$sid")"
     if [[ -z "$scenario_json" ]]; then
@@ -95,7 +127,16 @@ run_scenario() {
     fi
 
     description="$(jq -r '.description' <<<"$scenario_json")"
-    command="$(jq -r '.command' <<<"$scenario_json")"
+    mapfile -d '' -t command_args < <(scenario_command_args "$sid") || {
+        echo "FATAL: no argv mapping for scenario: $sid" >&2
+        return 1
+    }
+    if [[ "${#command_args[@]}" -eq 0 ]]; then
+        echo "FATAL: no argv mapping for scenario: $sid" >&2
+        return 1
+    fi
+    printf -v command '%q ' "${command_args[@]}"
+    command="${command% }"
     command_workdir="${PROJECT_ROOT}"
     scenario_dir="${RUN_DIR}/${sid}"
     log_file="${scenario_dir}/run.log"
@@ -105,14 +146,14 @@ run_scenario() {
 
     echo ">>> Running scenario ${sid}"
     if [[ "$DRY_RUN" -eq 1 ]]; then
-        printf 'DRY_RUN scenario=%s\n' "$sid" >"$log_file"
+        printf 'DRY_RUN scenario=%s command=%s\n' "$sid" "$command" >"$log_file"
         rc=0
         status="dry_run"
     else
         rc=0
         (
             cd "$command_workdir"
-            eval "$command"
+            "${command_args[@]}"
         ) >"$log_file" 2>&1 || rc=$?
         if [[ "$rc" -eq 0 ]]; then
             status="passed"
@@ -184,6 +225,7 @@ if [[ "$LIST_ONLY" -eq 1 ]]; then
     list_scenarios
     exit 0
 fi
+require_execute_tools
 
 if [[ "${#SELECTED_SCENARIOS[@]}" -eq 0 ]]; then
     mapfile -t SELECTED_SCENARIOS < <(jq -r '.smoke_scenarios[].scenario_id' "$CONTRACT_ARTIFACT")
