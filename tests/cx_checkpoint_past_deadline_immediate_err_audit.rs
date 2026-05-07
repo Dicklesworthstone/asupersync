@@ -139,6 +139,7 @@
 //!     deadline-exhaustion (subsequent checkpoints would
 //!     not see the cancel state — task continues
 //!     proceeding past deadline),
+//!
 //! would all be caught by the structural pins below.
 
 use std::path::PathBuf;
@@ -235,8 +236,7 @@ fn checkpoint_fast_path_falls_through_when_exhausted_is_some() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
@@ -265,8 +265,7 @@ fn checkpoint_slow_path_publishes_deadline_self_cancel_with_release() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
@@ -296,8 +295,7 @@ fn checkpoint_slow_path_strengthens_existing_reason_on_deadline_exhaustion() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
@@ -363,8 +361,7 @@ fn checkpoint_slow_path_runs_same_call_no_yield_for_past_deadline() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[pos..safe_end];
 
@@ -409,8 +406,7 @@ fn budget_exhaustion_emits_evidence_for_deadline_observability() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
