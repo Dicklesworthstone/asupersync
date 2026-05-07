@@ -958,6 +958,16 @@ test = false
 doc = false
 bench = false
 
+# Obligation concurrent races fuzz target - Round 4 /testing-fuzzing
+# Tests token-id wraparound, commit/abort interleaved with cancel propagation,
+# and ledger reset under concurrent abort_by_id operations using metamorphic testing
+[[bin]]
+name = "obligation_concurrent_races"
+path = "fuzz_targets/obligation_concurrent_races.rs"
+test = false
+doc = false
+bench = false
+
 [[bin]]
 name = "fuzz_intrusive_heap_operations"
 path = "fuzz_targets/intrusive_heap_operations.rs"
