@@ -2716,6 +2716,26 @@ impl RuntimeBuilder {
             entropy_source,
             host_services,
         } = self;
+        // br-asupersync-8fuxnt: Sharded shape is API-reachable but not
+        // yet routed through ThreeLaneScheduler. Reject at build time
+        // with a message that names the tracking bead so callers see the
+        // exact next-step requirement instead of silently falling back.
+        if matches!(
+            config.runtime_state_shape,
+            crate::runtime::config::RuntimeStateShape::Sharded
+        ) {
+            return Err(Error::new(crate::error::ErrorKind::ConfigError).with_message(
+                "RuntimeBuilder::with_sharded_state(true) is gated pending the \
+                 scheduler-side integration tracked in br-asupersync-8fuxnt. \
+                 ThreeLaneScheduler::new_with_options currently takes \
+                 `&Arc<ContendedMutex<RuntimeState>>` and must accept an \
+                 `&Arc<ShardedState>` constructor (or a trait abstraction over \
+                 both) before this shape can be wired through Runtime::new. \
+                 The unified backing path (default `RuntimeStateShape::Unified`) \
+                 remains fully supported."
+                    .to_string(),
+            ));
+        }
         Runtime::with_config_and_platform(
             config,
             reactor,
@@ -2863,6 +2883,25 @@ impl RuntimeBuilder {
     #[must_use]
     pub fn with_entropy_source(mut self, source: Arc<dyn EntropySource>) -> Self {
         self.entropy_source = Some(source);
+        self
+    }
+
+    /// Selects the runtime backing-state shape (Unified vs Sharded).
+    ///
+    /// br-asupersync-8fuxnt: opting in to
+    /// [`RuntimeStateShape::Sharded`] is currently gated at
+    /// [`Self::build()`] pending the scheduler-side wire-up. Calling
+    /// `with_sharded_state(true)` and then `build()` will return a
+    /// `ConfigError` whose message names this bead. The setter exists
+    /// today so consumers can target the API surface; behavior flips on
+    /// once the scheduler accepts an `&Arc<ShardedState>` constructor.
+    #[must_use]
+    pub fn with_sharded_state(mut self, enabled: bool) -> Self {
+        self.config.runtime_state_shape = if enabled {
+            crate::runtime::config::RuntimeStateShape::Sharded
+        } else {
+            crate::runtime::config::RuntimeStateShape::Unified
+        };
         self
     }
 
@@ -3700,15 +3739,16 @@ impl RuntimeInner {
         entropy_source: Option<Arc<dyn EntropySource>>,
         host_services: &dyn RuntimeHostServices,
     ) -> (Self, Vec<ThreeLaneWorker>) {
-        // Runtime currently instantiates the unified RuntimeState path.
-        // ShardedState exists at src/runtime/sharded_state.rs (1556 lines)
-        // and is exercised via tests/metamorphic/sharded_state.rs, but it
-        // is not yet reachable from `Runtime::new` — the production path
-        // hard-codes the unified backing store. Tracking and acceptance
-        // criteria for wiring `RuntimeConfig::runtime_state_shape` and a
-        // `RuntimeBuilder::with_sharded_state(bool)` switch live in
-        // br-asupersync-8fuxnt. The previous comment here cited a
-        // dangling `bd-2f7uj` runbook ID that never resolved to a bead.
+        // br-asupersync-8fuxnt: RuntimeConfig::runtime_state_shape and
+        // RuntimeBuilder::with_sharded_state(bool) are now wired (config.rs
+        // + builder::build above), but Runtime::new still hard-codes the
+        // unified RuntimeState path because ThreeLaneScheduler::new_with_options
+        // takes `&Arc<ContendedMutex<RuntimeState>>`. Selecting `Sharded`
+        // returns a ConfigError at build() time with a pointer to the
+        // tracking bead so callers see the concrete next blocker:
+        // ThreeLaneScheduler must accept `&Arc<ShardedState>` (or a trait
+        // abstraction over both backing types) before this branch can
+        // route to `ShardedState::new(...)`.
         let runtime_state = Self::initialize_runtime_state(
             &config,
             reactor,
@@ -6469,6 +6509,70 @@ worker_threads = 16
         assert!(
             state.read_biased_region_snapshot_enabled(),
             "builder config should enable the cached draining-region snapshot path"
+        );
+    }
+
+    #[test]
+    fn runtime_state_shape_defaults_to_unified() {
+        init_test_logging();
+
+        let config = RuntimeConfig::default();
+        assert_eq!(
+            config.runtime_state_shape,
+            crate::runtime::config::RuntimeStateShape::Unified,
+            "br-asupersync-8fuxnt: default backing-state shape must remain \
+             Unified to preserve all pre-bead behavior"
+        );
+    }
+
+    #[test]
+    fn with_sharded_state_setter_flips_shape_in_config() {
+        init_test_logging();
+
+        let builder_unified = RuntimeBuilder::new();
+        assert_eq!(
+            builder_unified.config.runtime_state_shape,
+            crate::runtime::config::RuntimeStateShape::Unified,
+            "fresh RuntimeBuilder must start in Unified shape"
+        );
+
+        let builder_sharded = RuntimeBuilder::new().with_sharded_state(true);
+        assert_eq!(
+            builder_sharded.config.runtime_state_shape,
+            crate::runtime::config::RuntimeStateShape::Sharded,
+            "with_sharded_state(true) must flip the config shape to Sharded"
+        );
+
+        let builder_back_to_unified = RuntimeBuilder::new()
+            .with_sharded_state(true)
+            .with_sharded_state(false);
+        assert_eq!(
+            builder_back_to_unified.config.runtime_state_shape,
+            crate::runtime::config::RuntimeStateShape::Unified,
+            "with_sharded_state(false) must flip back to Unified"
+        );
+    }
+
+    #[test]
+    fn build_with_sharded_state_returns_config_error_pointing_at_tracking_bead() {
+        init_test_logging();
+
+        let result = RuntimeBuilder::new().with_sharded_state(true).build();
+        let err = result.expect_err(
+            "br-asupersync-8fuxnt: RuntimeBuilder::with_sharded_state(true) \
+             must return an error at build() time until the scheduler-side \
+             integration lands",
+        );
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("br-asupersync-8fuxnt"),
+            "rejection message must name the tracking bead so callers see \
+             the concrete next-step requirement; got: {msg}"
+        );
+        assert!(
+            msg.contains("ThreeLaneScheduler"),
+            "rejection message must name the specific blocker \
+             (ThreeLaneScheduler signature); got: {msg}"
         );
     }
 }
