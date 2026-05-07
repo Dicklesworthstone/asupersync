@@ -895,6 +895,9 @@ fn lean_smoke_gate_is_pr_scoped_and_profile_driven() {
         ".artifact_bundle.directory // empty",
         ".artifact_bundle.retention_days // empty",
         "Run Lean smoke profile commands",
+        "run_lean_profile_command",
+        "Unsupported Lean profile command",
+        "cargo test --test lean_preservation_constructor_total",
         "Upload Lean smoke artifacts",
         "steps.lean_smoke_contract.outputs.artifact_name",
         "steps.lean_smoke_contract.outputs.artifact_dir",
@@ -904,6 +907,10 @@ fn lean_smoke_gate_is_pr_scoped_and_profile_driven() {
             "ci workflow must include `{required_snippet}` in lean-smoke gate contract"
         );
     }
+    assert!(
+        !CI_WORKFLOW_YML.contains("bash -lc \"$cmd\""),
+        "Lean profile gates must execute known profile commands via explicit argv"
+    );
 }
 
 #[test]
@@ -927,6 +934,9 @@ fn lean_full_gate_emits_repro_bundle_and_routing_contract() {
         "governance_phase_exit_review_json",
         "governance_decision_required_fields_json",
         "decision_record_required_fields",
+        "run_lean_profile_command",
+        "Unsupported Lean profile command",
+        "ubs --only=rust --diff .",
         "steps.lean_full_contract.outputs.manifest_schema_path",
         "steps.lean_full_contract.outputs.repro_bundle_manifest",
         "steps.lean_full_contract.outputs.repro_script",
@@ -941,4 +951,8 @@ fn lean_full_gate_emits_repro_bundle_and_routing_contract() {
             "ci workflow must include `{required_snippet}` in lean-full gate contract"
         );
     }
+    assert!(
+        !CI_WORKFLOW_YML.contains("bash -lc \"$cmd\""),
+        "Lean profile gates must execute known profile commands via explicit argv"
+    );
 }

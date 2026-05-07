@@ -864,9 +864,52 @@ jobs:
 
           printf '%s\n' "${smoke_commands[@]}" > "$artifact_dir/commands.txt"
 
+          run_lean_profile_command() {
+            local cmd="$1"
+            case "$cmd" in
+              "cargo fmt --check")
+                cargo fmt --check
+                ;;
+              "cargo check --all-targets")
+                cargo check --all-targets
+                ;;
+              "cargo clippy --all-targets -- -D warnings")
+                cargo clippy --all-targets -- -D warnings
+                ;;
+              "cargo test")
+                cargo test
+                ;;
+              "cargo test --test lean_preservation_constructor_total")
+                cargo test --test lean_preservation_constructor_total
+                ;;
+              "cargo test --test lean_theorem_rule_traceability")
+                cargo test --test lean_theorem_rule_traceability
+                ;;
+              "cargo test --test lean_theorem_surface_inventory")
+                cargo test --test lean_theorem_surface_inventory
+                ;;
+              "cargo test --test lean_gap_risk_sequencing_plan")
+                cargo test --test lean_gap_risk_sequencing_plan
+                ;;
+              "cargo test --test lean_invariant_status_inventory")
+                cargo test --test lean_invariant_status_inventory
+                ;;
+              "cargo test --test lean_baseline_report")
+                cargo test --test lean_baseline_report
+                ;;
+              "ubs --only=rust --diff .")
+                ubs --only=rust --diff .
+                ;;
+              *)
+                echo "::error::Unsupported Lean profile command: $cmd"
+                return 2
+                ;;
+            esac
+          }
+
           for cmd in "${smoke_commands[@]}"; do
             echo ">>> $cmd"
-            if ! bash -lc "$cmd"; then
+            if ! run_lean_profile_command "$cmd"; then
               printf '%s\n' "$cmd" > "$artifact_dir/failed_command.txt"
               exit 1
             fi
@@ -1191,9 +1234,52 @@ jobs:
           run_status="success"
           : > "$artifact_dir/run.log"
 
+          run_lean_profile_command() {
+            local cmd="$1"
+            case "$cmd" in
+              "cargo fmt --check")
+                cargo fmt --check
+                ;;
+              "cargo check --all-targets")
+                cargo check --all-targets
+                ;;
+              "cargo clippy --all-targets -- -D warnings")
+                cargo clippy --all-targets -- -D warnings
+                ;;
+              "cargo test")
+                cargo test
+                ;;
+              "cargo test --test lean_preservation_constructor_total")
+                cargo test --test lean_preservation_constructor_total
+                ;;
+              "cargo test --test lean_theorem_rule_traceability")
+                cargo test --test lean_theorem_rule_traceability
+                ;;
+              "cargo test --test lean_theorem_surface_inventory")
+                cargo test --test lean_theorem_surface_inventory
+                ;;
+              "cargo test --test lean_gap_risk_sequencing_plan")
+                cargo test --test lean_gap_risk_sequencing_plan
+                ;;
+              "cargo test --test lean_invariant_status_inventory")
+                cargo test --test lean_invariant_status_inventory
+                ;;
+              "cargo test --test lean_baseline_report")
+                cargo test --test lean_baseline_report
+                ;;
+              "ubs --only=rust --diff .")
+                ubs --only=rust --diff .
+                ;;
+              *)
+                echo "::error::Unsupported Lean profile command: $cmd"
+                return 2
+                ;;
+            esac
+          }
+
           for cmd in "${full_commands[@]}"; do
             echo ">>> $cmd" | tee -a "$artifact_dir/run.log"
-            if ! bash -lc "$cmd" >> "$artifact_dir/run.log" 2>&1; then
+            if ! run_lean_profile_command "$cmd" >> "$artifact_dir/run.log" 2>&1; then
               printf '%s\n' "$cmd" > "$artifact_dir/failed_command.txt"
               run_status="failure"
               break
