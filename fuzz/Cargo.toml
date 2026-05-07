@@ -5226,6 +5226,14 @@ path = "fuzz_targets/h2_priority_zero_dependency.rs"
 test = false
 doc = false
 
+# br-asupersync-u3xx8w — narrow PriorityFrame::parse round-trip + invariants
+[[bin]]
+name = "h2_priority_frame_parse_roundtrip"
+path = "fuzz_targets/h2_priority_frame_parse_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
 [[bin]]
 name = "h2_settings_zero_max_concurrent"
 path = "fuzz_targets/h2_settings_zero_max_concurrent.rs"
@@ -5378,6 +5386,26 @@ bench = false
 [[bin]]
 name = "scheduler_state_snapshot"
 path = "fuzz_targets/scheduler_state_snapshot.rs"
+test = false
+doc = false
+bench = false
+
+# io_uring CQE ordering inversion and kernel buffer mapping aliasing fuzzer
+# Tests vulnerabilities in src/fs/uring.rs completion queue entry ordering,
+# buffer aliasing between overlapping operations, and ring submission overflow
+[[bin]]
+name = "fs_uring_cqe_ordering_inversion"
+path = "fuzz_targets/fs_uring_cqe_ordering_inversion.rs"
+test = false
+doc = false
+bench = false
+
+# I/O buffer boundary violations and cancellation edge case fuzzer  
+# Tests vulnerabilities in src/io/ buffer bounds checking, copy operation
+# cancellation drain logic, and cross-operation buffer contamination
+[[bin]]
+name = "io_buffer_boundary_violations"
+path = "fuzz_targets/io_buffer_boundary_violations.rs"
 test = false
 doc = false
 bench = false
