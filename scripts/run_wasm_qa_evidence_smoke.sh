@@ -16,6 +16,7 @@ set -euo pipefail
 
 ARTIFACT="artifacts/wasm_qa_evidence_matrix_v1.json"
 RCH_BIN="${RCH_BIN:-rch}"
+RCH_WRAPPER_TIMEOUT="${RCH_WRAPPER_TIMEOUT:-600}"
 MODE=""
 SCENARIO=""
 RUN_ALL=0
@@ -52,6 +53,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -z "$MODE" ]] && usage
+
+if ! command -v jq >/dev/null 2>&1; then
+  echo "error: jq is required" >&2
+  exit 1
+fi
 
 BUNDLE_SCHEMA=$(jq -r '.runner_bundle_schema_version // "wasm-qa-evidence-smoke-bundle-v1"' "$ARTIFACT")
 REPORT_SCHEMA=$(jq -r '.runner_report_schema_version // "wasm-qa-evidence-smoke-run-report-v1"' "$ARTIFACT")
@@ -101,11 +107,121 @@ load_scenario() {
   fi
 }
 
-resolve_command_template() {
-  local command="$1"
-  command="${command//\$\{RCH_BIN:-rch\}/$RCH_BIN}"
-  command="${command//\$\{RCH_BIN\}/$RCH_BIN}"
-  printf '%s' "$command"
+shell_join() {
+  printf '%q ' "$@"
+}
+
+build_command_argv() {
+  local sid="$1"
+  local safe_sid="${sid//[^A-Za-z0-9_]/_}"
+
+  case "$sid" in
+    WASM-QA-SMOKE-LAYERS)
+      COMMAND_ARGV=(
+        "$RCH_BIN" exec --
+        env
+        CARGO_INCREMENTAL=0
+        CARGO_PROFILE_TEST_DEBUG=0
+        "RUSTFLAGS=-C debuginfo=0"
+        "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_qa_${safe_sid}"
+        cargo test -p asupersync --test wasm_qa_evidence_matrix_contract --features test-internals
+        layer -- --nocapture
+      )
+      ;;
+    WASM-QA-SMOKE-PROFILES)
+      COMMAND_ARGV=(
+        "$RCH_BIN" exec --
+        env
+        CARGO_INCREMENTAL=0
+        CARGO_PROFILE_TEST_DEBUG=0
+        "RUSTFLAGS=-C debuginfo=0"
+        "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_qa_${safe_sid}"
+        cargo test -p asupersync --test wasm_qa_evidence_matrix_contract --features test-internals
+        profile -- --nocapture
+      )
+      ;;
+    WASM-QA-SMOKE-EVIDENCE)
+      COMMAND_ARGV=(
+        "$RCH_BIN" exec --
+        env
+        CARGO_INCREMENTAL=0
+        CARGO_PROFILE_TEST_DEBUG=0
+        "RUSTFLAGS=-C debuginfo=0"
+        "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_qa_${safe_sid}"
+        cargo test -p asupersync --test wasm_qa_evidence_matrix_contract --features test-internals
+        evidence -- --nocapture
+      )
+      ;;
+    WASM-QA-SMOKE-CFG-MATRIX)
+      COMMAND_ARGV=(
+        "$RCH_BIN" exec --
+        env
+        CARGO_INCREMENTAL=0
+        CARGO_PROFILE_TEST_DEBUG=0
+        "RUSTFLAGS=-C debuginfo=0"
+        "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_cfg_${safe_sid}"
+        cargo test -p asupersync --test wasm_cfg_compile_invariants --features test-internals
+        wasm_profile_matrix_compile_closure_holds -- --ignored --nocapture
+      )
+      ;;
+    WASM-QA-SMOKE-NATIVE-BACKSTOP)
+      COMMAND_ARGV=(
+        "$RCH_BIN" exec --
+        env
+        CARGO_INCREMENTAL=0
+        CARGO_PROFILE_TEST_DEBUG=0
+        "RUSTFLAGS=-C debuginfo=0"
+        "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_cfg_${safe_sid}"
+        cargo test -p asupersync --test wasm_cfg_compile_invariants --features test-internals
+        native_all_targets_backstop_holds -- --ignored --nocapture
+      )
+      ;;
+    WASM-QA-SMOKE-PACKAGED-BOOTSTRAP)
+      COMMAND_ARGV=(
+        "$RCH_BIN" exec --
+        env
+        HARNESS_PROFILE=packaged_bootstrap
+        HARNESS_DRY_RUN=1
+        RCH_BIN=/bin/true
+        FAULT_MATRIX_MODE=reduced
+        bash scripts/test_wasm_cross_framework_e2e.sh
+      )
+      ;;
+    WASM-QA-SMOKE-PACKAGED-CANCELLATION)
+      COMMAND_ARGV=(
+        "$RCH_BIN" exec --
+        bash -lc
+        "set -euo pipefail; bash scripts/build_browser_core_artifacts.sh prod; env WASM_PACKAGED_CANCELLATION_DRY_RUN=1 WASM_PERF_PROFILE=core-min RCH_BIN=/bin/true bash scripts/test_wasm_packaged_cancellation_e2e.sh"
+      )
+      ;;
+    WASM-QA-SMOKE-HOST-BRIDGE)
+      COMMAND_ARGV=(
+        "$RCH_BIN" exec --
+        env
+        HARNESS_PROFILE=host_bridge
+        HARNESS_DRY_RUN=1
+        RCH_BIN=/bin/true
+        FAULT_MATRIX_MODE=reduced
+        bash scripts/test_wasm_cross_framework_e2e.sh
+      )
+      ;;
+    WASM-QA-SMOKE-CROSS-BROWSER)
+      COMMAND_ARGV=(
+        "$RCH_BIN" exec --
+        env
+        HARNESS_PROFILE=full
+        HARNESS_DRY_RUN=1
+        RCH_BIN=/bin/true
+        FAULT_MATRIX_MODE=reduced
+        BROWSER_MATRIX=chromium-headless,firefox-headless,webkit-headless
+        bash scripts/test_wasm_cross_framework_e2e.sh
+      )
+      ;;
+    *)
+      echo "error: unsupported scenario command mapping: $sid" >&2
+      exit 1
+      ;;
+  esac
 }
 
 if [[ "$MODE" == "list" ]]; then
@@ -122,6 +238,16 @@ fi
 if [[ "$RUN_ALL" -eq 0 && -z "$SCENARIO" ]]; then
   echo "error: --scenario required with --dry-run/--execute" >&2
   exit 1
+fi
+
+if [[ "$MODE" == "execute" ]] && ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+  echo "error: rch binary not found: $RCH_BIN" >&2
+  exit 127
+fi
+
+if [[ "$MODE" == "execute" ]] && ! command -v timeout >/dev/null 2>&1; then
+  echo "error: timeout is required" >&2
+  exit 127
 fi
 
 emit_event() {
@@ -320,8 +446,11 @@ run_scenario_bundle() {
   local RUN_REPORT_PATH="$OUTDIR/run_report.json"
   local RUN_LOG_PATH="$OUTDIR/run.log"
   local EVENTS_PATH="$OUTDIR/events.ndjson"
+  declare -a COMMAND_ARGV
 
   load_scenario "$SCENARIO"
+  build_command_argv "$SCENARIO"
+  COMMAND="$(shell_join "${COMMAND_ARGV[@]}")"
   mkdir -p "$OUTDIR"
   : > "$EVENTS_PATH"
 
@@ -345,9 +474,11 @@ run_scenario_bundle() {
 
   emit_event "scenario_start" "blocked" -1 "" "warm" "$(retention_until_utc warm)"
   local EXITCODE=0
-  local EXEC_COMMAND
-  EXEC_COMMAND="$(resolve_command_template "$COMMAND")"
-  eval "$EXEC_COMMAND" > "$RUN_LOG_PATH" 2>&1 || EXITCODE=$?
+  timeout "$RCH_WRAPPER_TIMEOUT" "${COMMAND_ARGV[@]}" > "$RUN_LOG_PATH" 2>&1 || EXITCODE=$?
+  if grep -Eiq 'local fallback|fallback to local|executing locally' "$RUN_LOG_PATH"; then
+    printf '\nerror: rch local fallback detected; refusing local cargo execution\n' >> "$RUN_LOG_PATH"
+    EXITCODE=86
+  fi
 
   local VERDICT="pass"
   local FAILURE_REASON=""
@@ -465,9 +596,11 @@ fi
 RUN_ID="${RUN_ID_OVERRIDE:-run_$(date +%Y%m%d_%H%M%S)}"
 OUTDIR="${SINGLE_ROOT}/${RUN_ID}/${SCENARIO}"
 load_scenario "$SCENARIO"
+declare -a COMMAND_ARGV
+build_command_argv "$SCENARIO"
 echo "=== Executing $SCENARIO ==="
 echo "  $DESCRIPTION"
-echo "  command: $(resolve_command_template "$COMMAND")"
+echo "  command: $(shell_join "${COMMAND_ARGV[@]}")"
 
 set +e
 scenario_result="$(run_scenario_bundle "$RUN_ID" "$SCENARIO" "$OUTDIR" "$MODE")"

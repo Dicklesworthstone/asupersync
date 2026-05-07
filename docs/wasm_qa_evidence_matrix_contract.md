@@ -275,9 +275,9 @@ bash ./scripts/run_all_e2e.sh --suite wasm-qa-evidence-smoke
 Focused invariant test command (routed through `rch`):
 
 ```bash
-${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-qa cargo test --test wasm_qa_evidence_matrix_contract -- --nocapture
-${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-cfg cargo test --test wasm_cfg_compile_invariants wasm_profile_matrix_compile_closure_holds -- --ignored --nocapture
-${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-cfg cargo test --test wasm_cfg_compile_invariants native_all_targets_backstop_holds -- --ignored --nocapture
+${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_qa_contract cargo test -p asupersync --test wasm_qa_evidence_matrix_contract --features test-internals -- --nocapture
+${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_cfg_matrix cargo test -p asupersync --test wasm_cfg_compile_invariants --features test-internals wasm_profile_matrix_compile_closure_holds -- --ignored --nocapture
+${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_cfg_native cargo test -p asupersync --test wasm_cfg_compile_invariants --features test-internals native_all_targets_backstop_holds -- --ignored --nocapture
 python3 scripts/run_browser_onboarding_checks.py --scenario worker --dry-run --out-dir artifacts/onboarding_vnext
 ${RCH_BIN:-rch} exec -- bash -lc 'set -euo pipefail; cargo test -p asupersync --test wasm_browser_feasibility_matrix -- --nocapture; cargo test -p asupersync --test wasm_js_exports_coverage_contract -- --nocapture; cargo test -p asupersync --test wasm_rust_browser_example_contract -- --nocapture; cargo test -p asupersync --test wasm_pilot_observability_contract -- --nocapture'
 ```

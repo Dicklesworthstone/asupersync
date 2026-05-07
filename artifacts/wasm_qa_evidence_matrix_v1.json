@@ -232,27 +232,27 @@
     {
       "scenario_id": "WASM-QA-SMOKE-LAYERS",
       "description": "Verify evidence layer catalog completeness and structure",
-      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-qa cargo test --test wasm_qa_evidence_matrix_contract layer -- --nocapture"
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_qa_WASM_QA_SMOKE_LAYERS cargo test -p asupersync --test wasm_qa_evidence_matrix_contract --features test-internals layer -- --nocapture"
     },
     {
       "scenario_id": "WASM-QA-SMOKE-PROFILES",
       "description": "Verify wasm profile catalog and cfg-gated file existence",
-      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-qa cargo test --test wasm_qa_evidence_matrix_contract profile -- --nocapture"
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_qa_WASM_QA_SMOKE_PROFILES cargo test -p asupersync --test wasm_qa_evidence_matrix_contract --features test-internals profile -- --nocapture"
     },
     {
       "scenario_id": "WASM-QA-SMOKE-EVIDENCE",
       "description": "Verify evidence item IDs are unique and well-formed",
-      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-qa cargo test --test wasm_qa_evidence_matrix_contract evidence -- --nocapture"
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_qa_WASM_QA_SMOKE_EVIDENCE cargo test -p asupersync --test wasm_qa_evidence_matrix_contract --features test-internals evidence -- --nocapture"
     },
     {
       "scenario_id": "WASM-QA-SMOKE-CFG-MATRIX",
       "description": "Run the ignored wasm profile compile-closure harness across the canonical browser matrix",
-      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-cfg cargo test --test wasm_cfg_compile_invariants wasm_profile_matrix_compile_closure_holds -- --ignored --nocapture"
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_cfg_WASM_QA_SMOKE_CFG_MATRIX cargo test -p asupersync --test wasm_cfg_compile_invariants --features test-internals wasm_profile_matrix_compile_closure_holds -- --ignored --nocapture"
     },
     {
       "scenario_id": "WASM-QA-SMOKE-NATIVE-BACKSTOP",
       "description": "Run the ignored native all-targets backstop after wasm cfg-gating changes",
-      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-cfg cargo test --test wasm_cfg_compile_invariants native_all_targets_backstop_holds -- --ignored --nocapture"
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_cfg_WASM_QA_SMOKE_NATIVE_BACKSTOP cargo test -p asupersync --test wasm_cfg_compile_invariants --features test-internals native_all_targets_backstop_holds -- --ignored --nocapture"
     },
     {
       "scenario_id": "WASM-QA-SMOKE-PACKAGED-BOOTSTRAP",

@@ -157,10 +157,16 @@ fn doc_references_artifact_runner_and_test() {
 fn doc_reproduction_command_uses_rch() {
     let doc = load_doc();
     assert!(
-        doc.contains(
-            "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-wasm-qa cargo test --test wasm_qa_evidence_matrix_contract -- --nocapture"
-        ),
+        doc.contains("${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0"),
         "doc must route heavy validation through rch"
+    );
+    assert!(
+        doc.contains("CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_qa_contract"),
+        "doc must use a TMPDIR-aware target dir"
+    );
+    assert!(
+        doc.contains("cargo test -p asupersync --test wasm_qa_evidence_matrix_contract"),
+        "doc must scope the cargo proof to asupersync"
     );
 }
 
@@ -168,8 +174,8 @@ fn doc_reproduction_command_uses_rch() {
 fn doc_references_cfg_compile_harness_commands() {
     let doc = load_doc();
     for command in [
-        "cargo test --test wasm_cfg_compile_invariants wasm_profile_matrix_compile_closure_holds -- --ignored --nocapture",
-        "cargo test --test wasm_cfg_compile_invariants native_all_targets_backstop_holds -- --ignored --nocapture",
+        "cargo test -p asupersync --test wasm_cfg_compile_invariants --features test-internals wasm_profile_matrix_compile_closure_holds -- --ignored --nocapture",
+        "cargo test -p asupersync --test wasm_cfg_compile_invariants --features test-internals native_all_targets_backstop_holds -- --ignored --nocapture",
     ] {
         assert!(
             doc.contains(command),
@@ -773,9 +779,16 @@ fn runner_script_exists_and_declares_modes() {
         "target/e2e-results/wasm_qa_evidence_smoke",
         "retention_class",
         "retention_until_utc",
+        "RCH_WRAPPER_TIMEOUT",
+        "timeout",
+        "local fallback",
     ] {
         assert!(script.contains(token), "runner missing token: {token}");
     }
+    assert!(
+        !script.contains("eval "),
+        "runner must avoid string-based eval execution"
+    );
 }
 
 #[test]
@@ -930,11 +943,15 @@ fn runner_execute_mode_honors_rch_bin_override() {
         "--",
         "env",
         "CARGO_INCREMENTAL=0",
-        "CARGO_TARGET_DIR=/tmp/rch-codex-wasm-qa",
+        "CARGO_TARGET_DIR=/tmp/rch_target_wasm_qa_WASM_QA_SMOKE_LAYERS",
         "cargo",
         "test",
+        "-p",
+        "asupersync",
         "--test",
         "wasm_qa_evidence_matrix_contract",
+        "--features",
+        "test-internals",
         "layer",
         "--nocapture",
     ] {
