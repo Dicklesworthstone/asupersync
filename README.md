@@ -1581,19 +1581,23 @@ The checked signoff for this split is [`artifacts/phase6_methodology_gate_enforc
 
 ### SLO Policy Proof Loop
 
-The SLO-to-budget lane is an opt-in direct-main proof loop for operator policy changes. It is grounded in the live schema and verifier, not a separate docs-only process:
+The SLO-to-runtime lane is an opt-in direct-main proof loop for operator policy changes. It is grounded in the live schema, runtime application seam, deterministic replay evidence, and proof runner; it is not a separate docs-only process and it is not a blanket production enforcement claim outside the explicit SLO application/admission seam.
 
 - Canonical artifact: [`artifacts/slo_policy_bundle_contract_v1.json`](./artifacts/slo_policy_bundle_contract_v1.json)
-- Runtime API surface: [`src/types/slo_policy.rs`](./src/types/slo_policy.rs), exported through `SLO_POLICY_BUNDLE_SCHEMA_VERSION`, `SLO_POLICY_COMPILER_SCHEMA_VERSION`, `SLO_POLICY_PROOF_REPORT_SCHEMA_VERSION`, `validate_slo_policy_bundle_json`, and `validate_slo_proof_report_json`
+- Runtime API surface: [`src/types/slo_policy.rs`](./src/types/slo_policy.rs), exported through `SLO_POLICY_BUNDLE_SCHEMA_VERSION`, `SLO_POLICY_COMPILER_SCHEMA_VERSION`, `SLO_POLICY_PROOF_REPORT_SCHEMA_VERSION`, `SLO_POLICY_RUNTIME_APPLICATION_SCHEMA_VERSION`, `validate_slo_policy_bundle_json`, `validate_slo_proof_report_json`, and `validate_slo_runtime_policy_application_json`
 - Contract test: [`tests/slo_policy_bundle_contract.rs`](./tests/slo_policy_bundle_contract.rs)
 - Operator script: [`scripts/validate_slo_policy_bundle.sh`](./scripts/validate_slo_policy_bundle.sh)
 
-The artifact covers the policy bundle schema, compiler output, LabRuntime replay evidence, and proof-report gate in one JSON contract. The compiler schema is `slo-budget-admission-compiler-v1`, the replay contract is `slo-lab-replay-contract-v1`, and the proof-report schema is `slo-proof-report-v1`. The proof report preserves `pass`, `fail`, `blocked`, `degraded`, `no_win`, `unsupported`, and `stale_evidence` as separate outcomes. The opt-in gate accepts only issue-free `pass`, `degraded`, and `no_win` reports. Only `pass` is counted as full success. Malformed reports, missing `rch exec` commands, stale profile hashes, missing no-win receipts, redaction failures, secret-like material, unsupported schema versions, and missing required fields fail closed.
+The artifact covers the policy bundle schema, compiler output, runtime application contract, LabRuntime replay evidence, proof-report gate, and runtime enforcement report in one JSON contract. The compiler schema is `slo-budget-admission-compiler-v1`, the runtime application schema is `slo-runtime-policy-application-v1`, the replay contract is `slo-lab-replay-contract-v1`, the proof-report schema is `slo-proof-report-v1`, and the runtime enforcement report schema is `slo-runtime-enforcement-proof-report-v1`.
+
+The runtime enforcement report preserves `pass`, `degraded`, `no_win`, `blocked`, `stale_evidence`, `unsupported`, and `malformed` as separate outcomes. `pass` means admitted runtime work completed under the compiled policy. `degraded` means optional work browned out before violating the objective. `no_win` means the explicit no-win fallback receipt was selected. `blocked`, `stale_evidence`, `unsupported`, and `malformed` are fail-closed operator outcomes. Runtime JSONL rows emitted by `scripts/validate_slo_policy_bundle.sh` include `runtime_enforcement_status`, `runtime_admission_status`, `lab_replay_status`, admitted/rejected work counts, optional work browned out, cleanup deadline misses, `fallback_reason`, `issue_kinds`, `proof_command`, `proof_command_source`, and `redaction_policy_id`.
+
+The proof report still preserves `pass`, `fail`, `blocked`, `degraded`, `no_win`, `unsupported`, and `stale_evidence` as separate gate outcomes. The opt-in gate accepts only issue-free `pass`, `degraded`, and `no_win` reports. Only `pass` is counted as full success. Malformed reports, missing `rch exec` commands, stale profile hashes, missing no-win receipts, redaction failures, secret-like material, unsupported schema versions, missing required fields, and local `rch` fallback markers checked with `--check-rch-log` fail closed.
 
 The direct-main proof command for this lane is:
 
 ```bash
-rch exec -- bash scripts/validate_slo_policy_bundle.sh --output-root target/slo-policy-bundle --run-id asupersync-bgtplc.5
+rch exec -- bash scripts/validate_slo_policy_bundle.sh --output-root target/slo-policy-bundle --run-id asupersync-w5n9qp.5
 ```
 
 Rust proof for artifact/API/doc consistency stays scoped to the touched crate:

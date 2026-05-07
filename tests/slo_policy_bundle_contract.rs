@@ -1229,7 +1229,7 @@ fn readme_and_operator_docs_track_slo_artifact_and_exports() {
         "## Gate Definitions",
     );
     let gate_command =
-        SloProofReport::render_ci_gate_command("target/slo-policy-bundle", "asupersync-bgtplc.5");
+        SloProofReport::render_ci_gate_command("target/slo-policy-bundle", "asupersync-w5n9qp.5");
 
     for (label, section) in [
         ("README", readme_section),
@@ -1243,17 +1243,31 @@ fn readme_and_operator_docs_track_slo_artifact_and_exports() {
             "SLO_POLICY_BUNDLE_SCHEMA_VERSION",
             "SLO_POLICY_COMPILER_SCHEMA_VERSION",
             "SLO_POLICY_PROOF_REPORT_SCHEMA_VERSION",
+            "SLO_POLICY_RUNTIME_APPLICATION_SCHEMA_VERSION",
             "validate_slo_policy_bundle_json",
             "validate_slo_proof_report_json",
+            "validate_slo_runtime_policy_application_json",
             artifact["compiler_schema_version"]
                 .as_str()
                 .expect("compiler schema"),
+            artifact["runtime_application_schema_version"]
+                .as_str()
+                .expect("runtime application schema"),
             artifact["lab_replay_contract_version"]
                 .as_str()
                 .expect("lab replay contract"),
             artifact["proof_report_schema_version"]
                 .as_str()
                 .expect("proof report schema"),
+            artifact["runtime_enforcement_report_schema_version"]
+                .as_str()
+                .expect("runtime enforcement report schema"),
+            "runtime_enforcement_status",
+            "runtime_admission_status",
+            "lab_replay_status",
+            "proof_command_source",
+            "redaction_policy_id",
+            "--check-rch-log",
             "direct-main",
             "rch exec --",
             &gate_command,
@@ -1270,12 +1284,25 @@ fn readme_and_operator_docs_track_slo_artifact_and_exports() {
             assert!(section.contains(status), "{label} missing status {status}");
         }
 
+        for status in artifact["runtime_enforcement_statuses"]
+            .as_array()
+            .expect("runtime enforcement statuses")
+            .iter()
+            .map(|value| value.as_str().expect("runtime enforcement status"))
+        {
+            assert!(
+                section.contains(status),
+                "{label} missing runtime enforcement status {status}"
+            );
+        }
+
         for rejected in [
             "Malformed reports",
             "stale profile hashes",
             "missing no-win receipts",
             "redaction failures",
             "secret-like material",
+            "local `rch` fallback markers",
         ] {
             assert!(section.contains(rejected), "{label} missing {rejected}");
         }
@@ -1283,6 +1310,10 @@ fn readme_and_operator_docs_track_slo_artifact_and_exports() {
         assert!(
             !section.contains("master"),
             "{label} SLO section must describe direct-main workflow without branch drift"
+        );
+        assert!(
+            !section.contains("branch"),
+            "{label} SLO section must not use unsupported branch workflow language"
         );
     }
 }
