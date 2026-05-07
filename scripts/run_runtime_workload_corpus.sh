@@ -13,6 +13,7 @@ SYNTHESIZE_COORDINATION_PACK=0
 COORDINATION_BUNDLE=""
 COORDINATION_FIXTURE_ID=""
 COORDINATION_GENERATED_AT="${WORKLOAD_CORPUS_GENERATED_AT:-2026-05-05T05:00:00Z}"
+RCH_BIN="${RCH_BIN:-rch}"
 
 declare -a SELECTED_WORKLOADS=()
 
@@ -57,6 +58,159 @@ require_coordination_contract() {
 
 json_escape() {
     printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+render_command() {
+    local rendered
+    printf -v rendered '%q ' "$@"
+    printf '%s' "${rendered% }"
+}
+
+build_workload_command_argv() {
+    local workload_id="$1"
+    local output_name="$2"
+    local -n output_ref="$output_name"
+    local synth_root="target/workload-corpus"
+
+    case "$workload_id" in
+        AA01-WL-CPU-001)
+            output_ref=(
+                env
+                "WORKLOAD_ID=${workload_id}"
+                "RUNTIME_PROFILE=bench-release"
+                "WORKLOAD_CONFIG_REF=scripts/run_perf_e2e.sh::phase0_baseline,scheduler_benchmark"
+                "ASUPERSYNC_SEED=0xAA010201"
+                "RCH_BIN=${RCH_BIN}"
+                bash
+                ./scripts/run_perf_e2e.sh
+                --bench
+                phase0_baseline
+                --bench
+                scheduler_benchmark
+                --no-compare
+            )
+            ;;
+        AA01-WL-CANCEL-001)
+            output_ref=(
+                env
+                "WORKLOAD_ID=${workload_id}"
+                "RUNTIME_PROFILE=lab-deterministic"
+                "WORKLOAD_CONFIG_REF=tests/cancellation_stress_e2e.rs::cancel_storm_single_region"
+                "TEST_SEED=0xAA010202"
+                "ASUPERSYNC_SEED=0xAA010202"
+                "${RCH_BIN}"
+                exec
+                --
+                cargo
+                test
+                --test
+                cancellation_stress_e2e
+                cancel_storm_single_region
+                --
+                --nocapture
+            )
+            ;;
+        AA01-WL-IO-001)
+            output_ref=(
+                env
+                "WORKLOAD_ID=${workload_id}"
+                "RUNTIME_PROFILE=native-e2e"
+                "WORKLOAD_CONFIG_REF=scripts/test_transport_e2e.sh::e2e_transport/all_features"
+                "TEST_SEED=0xAA010203"
+                "RCH_BIN=${RCH_BIN}"
+                bash
+                ./scripts/test_transport_e2e.sh
+            )
+            ;;
+        AA01-WL-BURST-001)
+            output_ref=(
+                env
+                "WORKLOAD_ID=${workload_id}"
+                "RUNTIME_PROFILE=native-e2e"
+                "WORKLOAD_CONFIG_REF=scripts/test_scheduler_wakeup_e2e.sh::scheduler_backoff+scheduler_lane_fairness+stress_tests"
+                "TEST_SEED=0xAA010204"
+                "SKIP_LOOM=1"
+                "RCH_BIN=${RCH_BIN}"
+                bash
+                ./scripts/test_scheduler_wakeup_e2e.sh
+            )
+            ;;
+        AA01-WL-TIMER-001)
+            output_ref=(
+                env
+                "WORKLOAD_ID=${workload_id}"
+                "RUNTIME_PROFILE=lab-deterministic"
+                "WORKLOAD_CONFIG_REF=tests/time_e2e.rs::test_timer_wheel_basic_operations"
+                "TEST_SEED=0xAA010205"
+                "ASUPERSYNC_SEED=0xAA010205"
+                "${RCH_BIN}"
+                exec
+                --
+                cargo
+                test
+                --test
+                time_e2e
+                test_timer_wheel_basic_operations
+                --
+                --nocapture
+            )
+            ;;
+        AA01-WL-FANIO-001)
+            output_ref=(
+                env
+                "WORKLOAD_ID=${workload_id}"
+                "RUNTIME_PROFILE=native-e2e"
+                "WORKLOAD_CONFIG_REF=scripts/test_messaging_e2e.sh::e2e_messaging/all_features"
+                "TEST_SEED=0xAA010206"
+                "RCH_BIN=${RCH_BIN}"
+                bash
+                ./scripts/test_messaging_e2e.sh
+            )
+            ;;
+        AA01-WL-DIST-001)
+            output_ref=(
+                env
+                "WORKLOAD_ID=${workload_id}"
+                "RUNTIME_PROFILE=distributed-shadow"
+                "WORKLOAD_CONFIG_REF=scripts/test_distributed_e2e.sh::e2e_distributed+distributed_trace_remote_invariants"
+                "TEST_SEED=0xAA010207"
+                "RCH_BIN=${RCH_BIN}"
+                bash
+                ./scripts/test_distributed_e2e.sh
+            )
+            ;;
+        AA01-WL-IO-HTTP-EX1)
+            output_ref=(
+                env
+                "WORKLOAD_ID=${workload_id}"
+                "RUNTIME_PROFILE=native-e2e"
+                "WORKLOAD_CONFIG_REF=scripts/test_http_e2e.sh::http_e2e/all_features"
+                "TEST_SEED=0xAA010208"
+                "RCH_BIN=${RCH_BIN}"
+                bash
+                ./scripts/test_http_e2e.sh
+            )
+            ;;
+        ASWARM-WL-LOCK-001|ASWARM-WL-RCH-001|ASWARM-WL-DIRTY-001|ASWARM-WL-ARTIFACT-001|ASWARM-WL-FANOUT-001|ASWARM-WL-STALE-001|ASWARM-WL-LATENCY-001)
+            output_ref=(
+                env
+                "RCH_BIN=${RCH_BIN}"
+                bash
+                ./scripts/run_runtime_workload_corpus.sh
+                --synthesize-coordination-pack
+                --coordination-fixture-id
+                accepted-all-families
+                --output-root
+                "${synth_root}"
+                --generated-at
+                2026-05-05T05:00:00Z
+            )
+            ;;
+        *)
+            echo "FATAL: unsupported workload command mapping for ${workload_id}" >&2
+            return 1
+            ;;
+    esac
 }
 
 load_workload_json() {
@@ -358,7 +512,8 @@ run_workload() {
     fi
 
     local family scenario_id regime runtime_profile seed config_ref entrypoint_kind
-    local entry_command replay_command expected_artifacts expected_evidence
+    local entry_command replay_command expected_artifacts expected_evidence rendered_command
+    local -a command_args=()
     family="$(jq -r '.family' <<<"$workload_json")"
     scenario_id="$(jq -r '.scenario_id' <<<"$workload_json")"
     regime="$(jq -r '.regime' <<<"$workload_json")"
@@ -370,6 +525,8 @@ run_workload() {
     replay_command="$(jq -r '.replay_command' <<<"$workload_json")"
     expected_artifacts="$(jq -c '.expected_artifacts' <<<"$workload_json")"
     expected_evidence="$(jq -c '.expected_evidence' <<<"$workload_json")"
+    build_workload_command_argv "$workload_id" command_args
+    rendered_command="$(render_command "${command_args[@]}")"
 
     local workload_dir="${RUN_DIR}/${workload_id}"
     local log_file="${workload_dir}/run.log"
@@ -393,11 +550,11 @@ run_workload() {
     echo "    regime: ${regime}"
     echo "    profile: ${runtime_profile}"
     echo "    seed: ${seed}"
-    echo "    command: ${entry_command}"
+    echo "    command: ${rendered_command}"
 
     set +e
     pushd "$PROJECT_ROOT" >/dev/null
-    bash -lc "$entry_command" 2>&1 | tee "$log_file"
+    "${command_args[@]}" 2>&1 | tee "$log_file"
     rc=${PIPESTATUS[0]}
     popd >/dev/null
     set -e
@@ -422,7 +579,7 @@ run_workload() {
   "entrypoint_kind": "$(json_escape "$entrypoint_kind")",
   "artifact_path": "$(json_escape "$summary_file")",
   "run_log_path": "$(json_escape "$log_file")",
-  "entry_command": "$(json_escape "$entry_command")",
+  "entry_command": "$(json_escape "$rendered_command")",
   "replay_command": "$(json_escape "$replay_command")",
   "status": "$(json_escape "$status")",
   "exit_code": ${rc},
