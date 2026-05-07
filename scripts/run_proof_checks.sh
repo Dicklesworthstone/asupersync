@@ -148,7 +148,7 @@ run_check_optional "TLA+ bounded model check" "tla-model" \
 
 if command -v lake &>/dev/null; then
     run_check "Lean proof build" "lean-proofs" \
-        bash -c "cd formal/lean && lake build"
+        lake --dir formal/lean build
 else
     echo "=== [skip] Lean proof build (lake not installed) ==="
     echo "  Install elan/lean4 to enable: curl -sSf https://raw.githubusercontent.com/leanprover/elan/main/elan-init.sh | sh"

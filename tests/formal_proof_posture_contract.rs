@@ -8,7 +8,9 @@ const CONTRACT_PATH: &str = "artifacts/formal_proof_posture_contract_v1.json";
 const FORMAL_README_PATH: &str = "formal/README.md";
 const INVARIANT_INVENTORY_PATH: &str = "formal/lean/coverage/invariant_status_inventory.json";
 const LEAN_PATH: &str = "formal/lean/Asupersync.lean";
+const PROOF_CHECKS_SCRIPT_PATH: &str = "scripts/run_proof_checks.sh";
 const README_PATH: &str = "README.md";
+const DIRECT_LEAN_BUILD_ARGS: &str = "lake --dir formal/lean build";
 const DIRECT_LEAN_BUILD_COMMAND: &str = "rch exec -- lake --dir formal/lean build";
 
 fn repo_path(relative: &str) -> PathBuf {
@@ -198,6 +200,7 @@ fn each_non_negotiable_invariant_is_fully_proven_and_linked() {
 #[test]
 fn proof_tiers_keep_scope_limits_explicit() {
     let contract = json_file(CONTRACT_PATH);
+    let proof_checks_script = read_repo_file(PROOF_CHECKS_SCRIPT_PATH);
     let verification = contract
         .get("toolchain_verification")
         .expect("toolchain_verification object");
@@ -210,6 +213,18 @@ fn proof_tiers_keep_scope_limits_explicit() {
     assert!(
         !command.contains(&forbidden_wrapper),
         "formal proof posture command must not shell-wrap lake build"
+    );
+    assert!(
+        proof_checks_script.contains(DIRECT_LEAN_BUILD_ARGS),
+        "{PROOF_CHECKS_SCRIPT_PATH} must route Lean proof builds through direct lake argv"
+    );
+    assert!(
+        !proof_checks_script.contains("cd formal/lean && lake build"),
+        "{PROOF_CHECKS_SCRIPT_PATH} must not shell-wrap lake build through cd"
+    );
+    assert!(
+        !proof_checks_script.contains("bash -c"),
+        "{PROOF_CHECKS_SCRIPT_PATH} must not route Lean proof builds through bash -c"
     );
     assert_eq!(
         verification.get("result").and_then(JsonValue::as_str),
