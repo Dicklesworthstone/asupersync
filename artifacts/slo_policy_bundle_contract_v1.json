@@ -75,6 +75,61 @@
     "non_passing_status",
     "oversized_field"
   ],
+  "runtime_application_bead_id": "asupersync-w5n9qp.1",
+  "runtime_application_schema_version": "slo-runtime-policy-application-v1",
+  "runtime_application_decisions": [
+    "admit",
+    "brownout",
+    "reject",
+    "no_win",
+    "blocked"
+  ],
+  "runtime_application_optional_work_decisions": [
+    "run",
+    "brownout"
+  ],
+  "runtime_application_issue_kinds": [
+    "malformed_application",
+    "unsupported_schema_version",
+    "missing_required_field",
+    "missing_rch_command",
+    "stale_profile_hash",
+    "unsupported_workload_class",
+    "missing_compiled_output",
+    "missing_no_win_receipt",
+    "redaction_failure",
+    "secret_like_material",
+    "oversized_field"
+  ],
+  "runtime_application_contract": {
+    "mode": "deterministic fail-closed runtime application of compiled policy outputs",
+    "source": "SloRuntimePolicyApplication::from_compiled_policy",
+    "compiler_schema_version": "slo-budget-admission-compiler-v1",
+    "proof_command_rendering": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals runtime_slo_policy_application -- --nocapture",
+    "required_fields": [
+      "schema_version",
+      "compiler_schema_version",
+      "policy_id",
+      "compiled_output_id",
+      "compiled_status",
+      "workload_class",
+      "decision",
+      "budget",
+      "admission",
+      "provenance",
+      "proof_command",
+      "redaction"
+    ],
+    "fail_closed_for": [
+      "stale_profile_hash",
+      "unsupported_workload_class",
+      "missing_compiled_output",
+      "missing_no_win_receipt",
+      "missing_rch_command",
+      "redaction_failure",
+      "secret_like_material"
+    ]
+  },
   "proof_report_gate": {
     "mode": "opt-in deterministic direct-main gate",
     "accepted_statuses": [
@@ -1143,6 +1198,7 @@
     "python3 -m json.tool artifacts/slo_policy_bundle_contract_v1.json >/dev/null",
     "bash -n scripts/validate_slo_policy_bundle.sh",
     "bash scripts/validate_slo_policy_bundle.sh --output-root target/slo-policy-bundle --run-id asupersync-bgtplc.4",
+    "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals runtime_slo_policy_application -- --nocapture",
     "rch exec -- rustfmt --edition 2024 --check src/types/slo_policy.rs src/types/mod.rs tests/slo_policy_bundle_contract.rs",
     "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_report CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture",
     "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_report_check CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo check -p asupersync --test slo_policy_bundle_contract --features test-internals",

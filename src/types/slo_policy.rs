@@ -18,6 +18,9 @@ pub const SLO_POLICY_COMPILER_SCHEMA_VERSION: &str = "slo-budget-admission-compi
 /// Current operator proof report contract for SLO policy compilation and replay evidence.
 pub const SLO_POLICY_PROOF_REPORT_SCHEMA_VERSION: &str = "slo-proof-report-v1";
 
+/// Current runtime application contract for compiled SLO policies.
+pub const SLO_POLICY_RUNTIME_APPLICATION_SCHEMA_VERSION: &str = "slo-runtime-policy-application-v1";
+
 const MAX_ID_BYTES: usize = 128;
 const MAX_FIELD_BYTES: usize = 1024;
 const MAX_PATH_BYTES: usize = 512;
@@ -649,6 +652,543 @@ impl SloCompiledPolicy {
     #[must_use]
     pub const fn is_executable(&self) -> bool {
         matches!(self.status, SloCompiledPolicyStatus::Compiled)
+    }
+}
+
+/// Runtime-facing decision produced by applying a compiled SLO policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum SloRuntimePolicyDecision {
+    /// Admit core work under the compiled budget/admission projection.
+    Admit,
+    /// Admit core work only after optional work is browned out.
+    Brownout,
+    /// Reject the work at the admission boundary.
+    Reject,
+    /// Route work to an explicit no-win fallback receipt.
+    NoWin,
+    /// Refuse to apply policy because the compiled output is not executable.
+    Blocked,
+}
+
+impl SloRuntimePolicyDecision {
+    /// Return the stable artifact tag.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Admit => "admit",
+            Self::Brownout => "brownout",
+            Self::Reject => "reject",
+            Self::NoWin => "no_win",
+            Self::Blocked => "blocked",
+        }
+    }
+
+    /// Return `true` when this is a complete runtime decision.
+    #[must_use]
+    pub const fn is_complete(self) -> bool {
+        matches!(
+            self,
+            Self::Admit | Self::Brownout | Self::Reject | Self::NoWin
+        )
+    }
+}
+
+/// Runtime action for one optional-work class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum SloRuntimeOptionalWorkDecision {
+    /// Optional work may run normally.
+    Run,
+    /// Optional work is browned out before core work is rejected.
+    Brownout,
+}
+
+impl SloRuntimeOptionalWorkDecision {
+    /// Return the stable artifact tag.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Run => "run",
+            Self::Brownout => "brownout",
+        }
+    }
+}
+
+/// Runtime application row for one optional-work class.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SloRuntimeOptionalWorkApplication {
+    /// Optional work class identifier.
+    pub class_id: String,
+    /// Lower values brown out first.
+    pub brownout_priority: u8,
+    /// Brownout stage inherited from the compiled policy.
+    pub stage: SloCompiledBrownoutStage,
+    /// Runtime action for this optional work class.
+    pub decision: SloRuntimeOptionalWorkDecision,
+    /// Human-readable degradation step.
+    pub degradation_step: String,
+}
+
+/// Provenance carried into a runtime SLO policy application decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SloRuntimePolicyApplicationProvenance {
+    /// Fingerprint of the source policy bundle.
+    pub policy_fingerprint: u64,
+    /// Fingerprint of capacity evidence, if supplied to the compiler.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_evidence_fingerprint: Option<u64>,
+    /// Profile identifier carried from the compiled policy.
+    pub profile_id: String,
+    /// Declared profile hash in `sha256:<64 lowercase hex>` form.
+    pub profile_hash: String,
+    /// Observed profile hash at the runtime application boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_profile_hash: Option<String>,
+    /// Target commit or source revision.
+    pub target_commit: String,
+    /// Related Beads issue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub related_bead_id: Option<String>,
+}
+
+/// Runtime-facing application of one compiled SLO policy output.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SloRuntimePolicyApplication {
+    /// Runtime application schema version.
+    pub schema_version: String,
+    /// Compiler schema version consumed by this application.
+    pub compiler_schema_version: String,
+    /// Source policy identifier.
+    pub policy_id: String,
+    /// Stable compiled policy output identifier.
+    pub compiled_output_id: String,
+    /// Compiled policy status.
+    pub compiled_status: SloCompiledPolicyStatus,
+    /// Runtime workload class selected by the caller.
+    pub workload_class: SloWorkloadClass,
+    /// Runtime decision made from the compiled policy.
+    pub decision: SloRuntimePolicyDecision,
+    /// Budget projection supplied to admission/runtime seams.
+    pub budget: SloCompiledBudget,
+    /// Admission projection supplied to runtime seams.
+    pub admission: SloCompiledAdmission,
+    /// Optional-work decisions supplied to brownout seams.
+    #[serde(default)]
+    pub optional_work_decisions: Vec<SloRuntimeOptionalWorkApplication>,
+    /// No-win fallback receipt, required for `no_win` decisions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_win_fallback: Option<SloCompiledNoWinReceipt>,
+    /// Provenance and freshness evidence.
+    pub provenance: SloRuntimePolicyApplicationProvenance,
+    /// Exact proof command for this application contract.
+    pub proof_command: SloProofCommand,
+    /// Redaction status.
+    pub redaction: SloPolicyRedaction,
+    /// Additional deterministic metadata scanned for sensitive material.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, Value>,
+}
+
+/// Runtime application fail-closed issue vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum SloRuntimePolicyApplicationIssueKind {
+    /// The application JSON did not parse.
+    MalformedApplication,
+    /// The runtime application or compiler schema version is unsupported.
+    UnsupportedSchemaVersion,
+    /// A required field is missing or empty.
+    MissingRequiredField,
+    /// A proof command omitted the required `rch exec` routing.
+    MissingRchCommand,
+    /// Declared and observed profile hashes do not match.
+    StaleProfileHash,
+    /// Workload class is outside the supported runtime vocabulary.
+    UnsupportedWorkloadClass,
+    /// Compiled policy output is missing or blocked.
+    MissingCompiledOutput,
+    /// A no-win decision omitted the required fallback receipt.
+    MissingNoWinReceipt,
+    /// Redaction failed.
+    RedactionFailure,
+    /// Secret-like material was found in metadata or command fields.
+    SecretLikeMaterial,
+    /// Text field exceeds deterministic size limits.
+    OversizedField,
+}
+
+impl SloRuntimePolicyApplicationIssueKind {
+    /// Return the stable artifact tag.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MalformedApplication => "malformed_application",
+            Self::UnsupportedSchemaVersion => "unsupported_schema_version",
+            Self::MissingRequiredField => "missing_required_field",
+            Self::MissingRchCommand => "missing_rch_command",
+            Self::StaleProfileHash => "stale_profile_hash",
+            Self::UnsupportedWorkloadClass => "unsupported_workload_class",
+            Self::MissingCompiledOutput => "missing_compiled_output",
+            Self::MissingNoWinReceipt => "missing_no_win_receipt",
+            Self::RedactionFailure => "redaction_failure",
+            Self::SecretLikeMaterial => "secret_like_material",
+            Self::OversizedField => "oversized_field",
+        }
+    }
+}
+
+/// One runtime policy application validation issue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SloRuntimePolicyApplicationIssue {
+    /// Issue class.
+    pub kind: SloRuntimePolicyApplicationIssueKind,
+    /// Field associated with the issue.
+    pub field: String,
+    /// Human-readable explanation.
+    pub message: String,
+}
+
+impl SloRuntimePolicyApplicationIssue {
+    fn new(
+        kind: SloRuntimePolicyApplicationIssueKind,
+        field: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind,
+            field: field.into(),
+            message: message.into(),
+        }
+    }
+}
+
+/// Fail-closed runtime policy application validation result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SloRuntimePolicyApplicationValidation {
+    /// Whether the runtime application can drive admission/brownout/no-win seams.
+    pub accepted: bool,
+    /// Runtime decision observed in the application.
+    pub decision: SloRuntimePolicyDecision,
+    /// Source policy identifier.
+    pub policy_id: String,
+    /// Stable compiled output identifier.
+    pub compiled_output_id: String,
+    /// Validation issues.
+    pub issues: Vec<SloRuntimePolicyApplicationIssue>,
+}
+
+impl SloRuntimePolicyApplicationValidation {
+    /// Return `true` if any issue has the supplied kind.
+    #[must_use]
+    pub fn contains_issue(&self, kind: SloRuntimePolicyApplicationIssueKind) -> bool {
+        self.issues.iter().any(|issue| issue.kind == kind)
+    }
+}
+
+impl SloRuntimePolicyApplication {
+    /// Build a runtime application payload from a compiled policy output.
+    #[must_use]
+    pub fn from_compiled_policy(
+        compiled: &SloCompiledPolicy,
+        workload_class: SloWorkloadClass,
+        observed_profile_hash: Option<String>,
+        proof_command: SloProofCommand,
+        redaction: SloPolicyRedaction,
+    ) -> Self {
+        let decision = runtime_decision_for_compiled_policy(compiled);
+        let optional_work_decisions = compiled
+            .brownout_order
+            .iter()
+            .map(|step| SloRuntimeOptionalWorkApplication {
+                class_id: step.class_id.clone(),
+                brownout_priority: step.brownout_priority,
+                stage: step.stage,
+                decision: optional_work_decision_for_runtime_decision(decision),
+                degradation_step: step.degradation_step.clone(),
+            })
+            .collect();
+
+        Self {
+            schema_version: SLO_POLICY_RUNTIME_APPLICATION_SCHEMA_VERSION.to_string(),
+            compiler_schema_version: compiled.compiler_schema_version.clone(),
+            policy_id: compiled.policy_id.clone(),
+            compiled_output_id: compiled.output_id.clone(),
+            compiled_status: compiled.status,
+            workload_class,
+            decision,
+            budget: compiled.budget.clone(),
+            admission: compiled.admission.clone(),
+            optional_work_decisions,
+            no_win_fallback: compiled.no_win_fallback.clone(),
+            provenance: SloRuntimePolicyApplicationProvenance {
+                policy_fingerprint: compiled.provenance.policy_fingerprint,
+                capacity_evidence_fingerprint: compiled.provenance.capacity_evidence_fingerprint,
+                profile_id: compiled.provenance.profile_id.clone(),
+                profile_hash: compiled.provenance.profile_hash.clone(),
+                observed_profile_hash,
+                target_commit: compiled.provenance.target_commit.clone(),
+                related_bead_id: compiled.provenance.related_bead_id.clone(),
+            },
+            proof_command,
+            redaction,
+            metadata: BTreeMap::new(),
+        }
+    }
+
+    /// Parse a runtime policy application from JSON.
+    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(json)
+    }
+
+    /// Serialize this application to deterministic pretty JSON.
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+
+    /// Render the targeted proof command for runtime application contract tests.
+    #[must_use]
+    pub fn render_application_proof_command(test_filter: &str) -> String {
+        let filter = if test_filter.is_empty() {
+            "runtime_slo_policy_application"
+        } else {
+            test_filter
+        };
+        format!(
+            "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals {filter} -- --nocapture"
+        )
+    }
+
+    /// Validate this runtime application with fail-closed semantics.
+    #[must_use]
+    pub fn validate(&self) -> SloRuntimePolicyApplicationValidation {
+        let mut issues = Vec::new();
+        if self.schema_version != SLO_POLICY_RUNTIME_APPLICATION_SCHEMA_VERSION {
+            issues.push(SloRuntimePolicyApplicationIssue::new(
+                SloRuntimePolicyApplicationIssueKind::UnsupportedSchemaVersion,
+                "schema_version",
+                format!(
+                    "unsupported runtime application schema {}, expected {SLO_POLICY_RUNTIME_APPLICATION_SCHEMA_VERSION}",
+                    self.schema_version
+                ),
+            ));
+        }
+        if self.compiler_schema_version != SLO_POLICY_COMPILER_SCHEMA_VERSION {
+            issues.push(SloRuntimePolicyApplicationIssue::new(
+                SloRuntimePolicyApplicationIssueKind::UnsupportedSchemaVersion,
+                "compiler_schema_version",
+                format!(
+                    "unsupported compiler schema {}, expected {SLO_POLICY_COMPILER_SCHEMA_VERSION}",
+                    self.compiler_schema_version
+                ),
+            ));
+        }
+        validate_runtime_required_text("policy_id", &self.policy_id, MAX_ID_BYTES, &mut issues);
+        validate_runtime_required_text(
+            "compiled_output_id",
+            &self.compiled_output_id,
+            MAX_FIELD_BYTES,
+            &mut issues,
+        );
+        if self.workload_class.is_unsupported() {
+            issues.push(SloRuntimePolicyApplicationIssue::new(
+                SloRuntimePolicyApplicationIssueKind::UnsupportedWorkloadClass,
+                "workload_class",
+                format!(
+                    "unsupported workload class {}",
+                    self.workload_class.as_str()
+                ),
+            ));
+        }
+        if self.compiled_output_id.is_empty()
+            || self.compiled_status == SloCompiledPolicyStatus::Blocked
+            || self.decision == SloRuntimePolicyDecision::Blocked
+        {
+            issues.push(SloRuntimePolicyApplicationIssue::new(
+                SloRuntimePolicyApplicationIssueKind::MissingCompiledOutput,
+                "compiled_output_id",
+                "compiled policy output is missing or blocked",
+            ));
+        }
+        self.validate_runtime_provenance(&mut issues);
+        self.validate_runtime_optional_work(&mut issues);
+        self.validate_runtime_no_win_receipt(&mut issues);
+        self.validate_runtime_proof_command(&mut issues);
+        self.validate_runtime_redaction(&mut issues);
+        scan_runtime_json_map("metadata", &self.metadata, &mut issues);
+
+        SloRuntimePolicyApplicationValidation {
+            accepted: self.decision.is_complete() && issues.is_empty(),
+            decision: self.decision,
+            policy_id: self.policy_id.clone(),
+            compiled_output_id: self.compiled_output_id.clone(),
+            issues,
+        }
+    }
+
+    fn validate_runtime_provenance(&self, issues: &mut Vec<SloRuntimePolicyApplicationIssue>) {
+        validate_runtime_required_text(
+            "provenance.profile_id",
+            &self.provenance.profile_id,
+            MAX_ID_BYTES,
+            issues,
+        );
+        validate_runtime_content_hash(
+            "provenance.profile_hash",
+            &self.provenance.profile_hash,
+            issues,
+        );
+        let Some(observed) = &self.provenance.observed_profile_hash else {
+            issues.push(SloRuntimePolicyApplicationIssue::new(
+                SloRuntimePolicyApplicationIssueKind::StaleProfileHash,
+                "provenance.observed_profile_hash",
+                "runtime application requires observed profile hash freshness evidence",
+            ));
+            return;
+        };
+        validate_runtime_content_hash("provenance.observed_profile_hash", observed, issues);
+        if observed != &self.provenance.profile_hash {
+            issues.push(SloRuntimePolicyApplicationIssue::new(
+                SloRuntimePolicyApplicationIssueKind::StaleProfileHash,
+                "provenance.observed_profile_hash",
+                "observed profile hash does not match declared profile hash",
+            ));
+        }
+        validate_runtime_required_text(
+            "provenance.target_commit",
+            &self.provenance.target_commit,
+            MAX_FIELD_BYTES,
+            issues,
+        );
+        if let Some(bead) = &self.provenance.related_bead_id {
+            validate_runtime_text_size("provenance.related_bead_id", bead, MAX_ID_BYTES, issues);
+        }
+    }
+
+    fn validate_runtime_optional_work(&self, issues: &mut Vec<SloRuntimePolicyApplicationIssue>) {
+        let mut seen = BTreeSet::new();
+        for (index, work) in self.optional_work_decisions.iter().enumerate() {
+            let prefix = format!("optional_work_decisions[{index}]");
+            validate_runtime_required_text(
+                format!("{prefix}.class_id"),
+                &work.class_id,
+                MAX_ID_BYTES,
+                issues,
+            );
+            validate_runtime_required_text(
+                format!("{prefix}.degradation_step"),
+                &work.degradation_step,
+                MAX_FIELD_BYTES,
+                issues,
+            );
+            if !work.class_id.is_empty() && !seen.insert(work.class_id.as_str()) {
+                issues.push(SloRuntimePolicyApplicationIssue::new(
+                    SloRuntimePolicyApplicationIssueKind::MissingRequiredField,
+                    format!("{prefix}.class_id"),
+                    format!("duplicate optional work class {}", work.class_id),
+                ));
+            }
+        }
+    }
+
+    fn validate_runtime_no_win_receipt(&self, issues: &mut Vec<SloRuntimePolicyApplicationIssue>) {
+        if self.compiled_status != SloCompiledPolicyStatus::NoWin
+            && self.decision != SloRuntimePolicyDecision::NoWin
+        {
+            return;
+        }
+        let Some(receipt) = &self.no_win_fallback else {
+            issues.push(SloRuntimePolicyApplicationIssue::new(
+                SloRuntimePolicyApplicationIssueKind::MissingNoWinReceipt,
+                "no_win_fallback",
+                "no-win runtime applications must include a fallback receipt",
+            ));
+            return;
+        };
+        validate_runtime_required_text(
+            "no_win_fallback.fallback_profile",
+            &receipt.fallback_profile,
+            MAX_ID_BYTES,
+            issues,
+        );
+        validate_runtime_required_text(
+            "no_win_fallback.fallback_reason",
+            &receipt.fallback_reason,
+            MAX_FIELD_BYTES,
+            issues,
+        );
+        validate_runtime_required_text(
+            "no_win_fallback.proof_command",
+            &receipt.proof_command,
+            MAX_FIELD_BYTES,
+            issues,
+        );
+        if !receipt.proof_command.contains("rch exec") {
+            issues.push(SloRuntimePolicyApplicationIssue::new(
+                SloRuntimePolicyApplicationIssueKind::MissingRchCommand,
+                "no_win_fallback.proof_command",
+                "no-win receipt proof command must be routed through rch exec",
+            ));
+        }
+    }
+
+    fn validate_runtime_proof_command(&self, issues: &mut Vec<SloRuntimePolicyApplicationIssue>) {
+        validate_runtime_required_text(
+            "proof_command.label",
+            &self.proof_command.label,
+            MAX_ID_BYTES,
+            issues,
+        );
+        validate_runtime_required_text(
+            "proof_command.command",
+            &self.proof_command.command,
+            MAX_FIELD_BYTES,
+            issues,
+        );
+        if !self.proof_command.command.contains("rch exec") {
+            issues.push(SloRuntimePolicyApplicationIssue::new(
+                SloRuntimePolicyApplicationIssueKind::MissingRchCommand,
+                "proof_command.command",
+                "runtime application proof command must be routed through rch exec",
+            ));
+        }
+    }
+
+    fn validate_runtime_redaction(&self, issues: &mut Vec<SloRuntimePolicyApplicationIssue>) {
+        validate_runtime_required_text(
+            "redaction.policy_id",
+            &self.redaction.policy_id,
+            MAX_ID_BYTES,
+            issues,
+        );
+        if !self.redaction.passed {
+            issues.push(SloRuntimePolicyApplicationIssue::new(
+                SloRuntimePolicyApplicationIssueKind::RedactionFailure,
+                "redaction.passed",
+                "runtime application redaction pass must be true",
+            ));
+        }
+    }
+}
+
+/// Parse and validate a runtime policy application JSON document.
+#[must_use]
+pub fn validate_slo_runtime_policy_application_json(
+    json: &str,
+) -> SloRuntimePolicyApplicationValidation {
+    match serde_json::from_str::<SloRuntimePolicyApplication>(json) {
+        Ok(application) => application.validate(),
+        Err(error) => SloRuntimePolicyApplicationValidation {
+            accepted: false,
+            decision: SloRuntimePolicyDecision::Blocked,
+            policy_id: String::new(),
+            compiled_output_id: String::new(),
+            issues: vec![SloRuntimePolicyApplicationIssue::new(
+                SloRuntimePolicyApplicationIssueKind::MalformedApplication,
+                "$",
+                format!("SLO runtime policy application JSON did not parse: {error}"),
+            )],
+        },
     }
 }
 
@@ -1799,6 +2339,143 @@ pub fn validate_slo_policy_bundle_json(json: &str) -> SloPolicyValidationReport 
                 format!("SLO policy bundle JSON did not parse: {error}"),
             )],
         },
+    }
+}
+
+fn runtime_decision_for_compiled_policy(compiled: &SloCompiledPolicy) -> SloRuntimePolicyDecision {
+    match compiled.status {
+        SloCompiledPolicyStatus::Compiled => match compiled.admission.decision {
+            SloCompiledAdmissionDecision::Admit => SloRuntimePolicyDecision::Admit,
+            SloCompiledAdmissionDecision::Brownout => SloRuntimePolicyDecision::Brownout,
+            SloCompiledAdmissionDecision::NoWin => SloRuntimePolicyDecision::NoWin,
+            SloCompiledAdmissionDecision::Blocked => SloRuntimePolicyDecision::Blocked,
+        },
+        SloCompiledPolicyStatus::NoWin => SloRuntimePolicyDecision::NoWin,
+        SloCompiledPolicyStatus::Blocked => SloRuntimePolicyDecision::Blocked,
+    }
+}
+
+fn optional_work_decision_for_runtime_decision(
+    decision: SloRuntimePolicyDecision,
+) -> SloRuntimeOptionalWorkDecision {
+    match decision {
+        SloRuntimePolicyDecision::Admit | SloRuntimePolicyDecision::Blocked => {
+            SloRuntimeOptionalWorkDecision::Run
+        }
+        SloRuntimePolicyDecision::Brownout
+        | SloRuntimePolicyDecision::Reject
+        | SloRuntimePolicyDecision::NoWin => SloRuntimeOptionalWorkDecision::Brownout,
+    }
+}
+
+fn validate_runtime_required_text(
+    field: impl Into<String>,
+    value: &str,
+    max_bytes: usize,
+    issues: &mut Vec<SloRuntimePolicyApplicationIssue>,
+) {
+    let field = field.into();
+    if value.is_empty() {
+        issues.push(SloRuntimePolicyApplicationIssue::new(
+            SloRuntimePolicyApplicationIssueKind::MissingRequiredField,
+            field.clone(),
+            "required field must not be empty",
+        ));
+    }
+    validate_runtime_text_size(&field, value, max_bytes, issues);
+    if value_is_secret_like(value) {
+        issues.push(SloRuntimePolicyApplicationIssue::new(
+            SloRuntimePolicyApplicationIssueKind::SecretLikeMaterial,
+            field,
+            "text field contains secret-like material",
+        ));
+    }
+}
+
+fn validate_runtime_text_size(
+    field: impl Into<String>,
+    value: &str,
+    max_bytes: usize,
+    issues: &mut Vec<SloRuntimePolicyApplicationIssue>,
+) {
+    let field = field.into();
+    if value.len() > max_bytes {
+        issues.push(SloRuntimePolicyApplicationIssue::new(
+            SloRuntimePolicyApplicationIssueKind::OversizedField,
+            field,
+            format!("field is {} bytes, limit is {max_bytes}", value.len()),
+        ));
+    }
+}
+
+fn validate_runtime_content_hash(
+    field: impl Into<String>,
+    value: &str,
+    issues: &mut Vec<SloRuntimePolicyApplicationIssue>,
+) {
+    let field = field.into();
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        issues.push(SloRuntimePolicyApplicationIssue::new(
+            SloRuntimePolicyApplicationIssueKind::StaleProfileHash,
+            field,
+            "profile hash must use sha256:<64 lowercase hex> format",
+        ));
+        return;
+    };
+    if hex.len() != SHA256_HEX_LEN || !hex.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')) {
+        issues.push(SloRuntimePolicyApplicationIssue::new(
+            SloRuntimePolicyApplicationIssueKind::StaleProfileHash,
+            field,
+            "profile hash must use sha256:<64 lowercase hex> format",
+        ));
+    }
+}
+
+fn scan_runtime_json_map(
+    prefix: &str,
+    map: &BTreeMap<String, Value>,
+    issues: &mut Vec<SloRuntimePolicyApplicationIssue>,
+) {
+    for (key, value) in map {
+        scan_runtime_json_value(&format!("{prefix}.{key}"), key, value, issues);
+    }
+}
+
+fn scan_runtime_json_value(
+    field: &str,
+    key: &str,
+    value: &Value,
+    issues: &mut Vec<SloRuntimePolicyApplicationIssue>,
+) {
+    if key_is_secret_like(key) {
+        issues.push(SloRuntimePolicyApplicationIssue::new(
+            SloRuntimePolicyApplicationIssueKind::SecretLikeMaterial,
+            field,
+            "secret-like metadata key is not allowed",
+        ));
+    }
+    match value {
+        Value::String(text) => {
+            validate_runtime_text_size(field, text, MAX_FIELD_BYTES, issues);
+            if value_is_secret_like(text) {
+                issues.push(SloRuntimePolicyApplicationIssue::new(
+                    SloRuntimePolicyApplicationIssueKind::SecretLikeMaterial,
+                    field,
+                    "secret-like metadata value is not allowed",
+                ));
+            }
+        }
+        Value::Array(values) => {
+            for (index, item) in values.iter().enumerate() {
+                scan_runtime_json_value(&format!("{field}[{index}]"), key, item, issues);
+            }
+        }
+        Value::Object(object) => {
+            for (child_key, child) in object {
+                scan_runtime_json_value(&format!("{field}.{child_key}"), child_key, child, issues);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
 }
 

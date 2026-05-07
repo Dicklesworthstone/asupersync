@@ -4,14 +4,17 @@ use asupersync::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
 use asupersync::runtime::yield_now;
 use asupersync::types::{
     Budget, Outcome, SLO_POLICY_BUNDLE_SCHEMA_VERSION, SLO_POLICY_COMPILER_SCHEMA_VERSION,
-    SLO_POLICY_PROOF_REPORT_SCHEMA_VERSION, SloCompiledAdmissionDecision, SloCompiledPolicy,
-    SloCompiledPolicyStatus, SloLatencyObjective, SloLatencyUnit, SloNoWinFallback,
-    SloOptionalWorkClass, SloPolicyBundle, SloPolicyCapacityEvidence, SloPolicyCompilerBlockerKind,
-    SloPolicyProvenance, SloPolicyRedaction, SloPolicyValidationIssueKind,
-    SloPolicyValidationReport, SloProofCommand, SloProofNoWinReceipt, SloProofReport,
-    SloProofReportIssueKind, SloProofReportProvenance, SloProofReportRow, SloProofReportStatus,
-    SloResourcePressureThresholds, SloWorkloadClass, slo_proof_report_status_counts,
-    validate_slo_policy_bundle_json, validate_slo_proof_report_json,
+    SLO_POLICY_PROOF_REPORT_SCHEMA_VERSION, SLO_POLICY_RUNTIME_APPLICATION_SCHEMA_VERSION,
+    SloCompiledAdmissionDecision, SloCompiledPolicy, SloCompiledPolicyStatus, SloLatencyObjective,
+    SloLatencyUnit, SloNoWinFallback, SloOptionalWorkClass, SloPolicyBundle,
+    SloPolicyCapacityEvidence, SloPolicyCompilerBlockerKind, SloPolicyProvenance,
+    SloPolicyRedaction, SloPolicyValidationIssueKind, SloPolicyValidationReport, SloProofCommand,
+    SloProofNoWinReceipt, SloProofReport, SloProofReportIssueKind, SloProofReportProvenance,
+    SloProofReportRow, SloProofReportStatus, SloResourcePressureThresholds,
+    SloRuntimeOptionalWorkDecision, SloRuntimePolicyApplication,
+    SloRuntimePolicyApplicationIssueKind, SloRuntimePolicyDecision, SloWorkloadClass,
+    slo_proof_report_status_counts, validate_slo_policy_bundle_json,
+    validate_slo_proof_report_json, validate_slo_runtime_policy_application_json,
 };
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -338,6 +341,48 @@ fn proof_report_issue_tags() -> BTreeSet<String> {
     .collect()
 }
 
+fn runtime_application_decision_tags() -> BTreeSet<String> {
+    [
+        SloRuntimePolicyDecision::Admit,
+        SloRuntimePolicyDecision::Brownout,
+        SloRuntimePolicyDecision::Reject,
+        SloRuntimePolicyDecision::NoWin,
+        SloRuntimePolicyDecision::Blocked,
+    ]
+    .into_iter()
+    .map(|decision| decision.as_str().to_string())
+    .collect()
+}
+
+fn runtime_optional_work_decision_tags() -> BTreeSet<String> {
+    [
+        SloRuntimeOptionalWorkDecision::Run,
+        SloRuntimeOptionalWorkDecision::Brownout,
+    ]
+    .into_iter()
+    .map(|decision| decision.as_str().to_string())
+    .collect()
+}
+
+fn runtime_application_issue_tags() -> BTreeSet<String> {
+    [
+        SloRuntimePolicyApplicationIssueKind::MalformedApplication,
+        SloRuntimePolicyApplicationIssueKind::UnsupportedSchemaVersion,
+        SloRuntimePolicyApplicationIssueKind::MissingRequiredField,
+        SloRuntimePolicyApplicationIssueKind::MissingRchCommand,
+        SloRuntimePolicyApplicationIssueKind::StaleProfileHash,
+        SloRuntimePolicyApplicationIssueKind::UnsupportedWorkloadClass,
+        SloRuntimePolicyApplicationIssueKind::MissingCompiledOutput,
+        SloRuntimePolicyApplicationIssueKind::MissingNoWinReceipt,
+        SloRuntimePolicyApplicationIssueKind::RedactionFailure,
+        SloRuntimePolicyApplicationIssueKind::SecretLikeMaterial,
+        SloRuntimePolicyApplicationIssueKind::OversizedField,
+    ]
+    .into_iter()
+    .map(|kind| kind.as_str().to_string())
+    .collect()
+}
+
 fn valid_proof_report(status: SloProofReportStatus) -> SloProofReport {
     let summary = match status {
         SloProofReportStatus::Pass => "SLO proof passed with complete rch evidence",
@@ -401,6 +446,25 @@ fn proof_report_issue_set(report: &SloProofReport) -> BTreeSet<String> {
         .iter()
         .map(|issue| issue.kind.as_str().to_string())
         .collect()
+}
+
+fn valid_runtime_application() -> SloRuntimePolicyApplication {
+    let compiled = valid_bundle().compile_for_budget_admission(Some(&valid_capacity_evidence()));
+    SloRuntimePolicyApplication::from_compiled_policy(
+        &compiled,
+        SloWorkloadClass::AgentSwarm,
+        Some(profile_hash('a')),
+        SloProofCommand {
+            label: "runtime-slo-policy-application".to_string(),
+            command: SloRuntimePolicyApplication::render_application_proof_command(
+                "runtime_slo_policy_application",
+            ),
+        },
+        SloPolicyRedaction {
+            policy_id: "slo-runtime-application-redaction-v1".to_string(),
+            passed: true,
+        },
+    )
 }
 
 fn expected_issue_tags(scenario_value: &Value) -> BTreeSet<String> {
@@ -743,6 +807,30 @@ fn artifact_catalog_matches_rust_tags_and_required_fields() {
         .iter()
         .map(|value| value.as_str().expect("proof report issue").to_string())
         .collect::<BTreeSet<_>>();
+    let artifact_runtime_application_decisions = artifact["runtime_application_decisions"]
+        .as_array()
+        .expect("runtime application decisions")
+        .iter()
+        .map(|value| value.as_str().expect("runtime decision").to_string())
+        .collect::<BTreeSet<_>>();
+    let artifact_runtime_optional_work_decisions =
+        artifact["runtime_application_optional_work_decisions"]
+            .as_array()
+            .expect("runtime optional work decisions")
+            .iter()
+            .map(|value| value.as_str().expect("optional work decision").to_string())
+            .collect::<BTreeSet<_>>();
+    let artifact_runtime_application_issues = artifact["runtime_application_issue_kinds"]
+        .as_array()
+        .expect("runtime application issue kinds")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("runtime application issue")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
     let required_fields = artifact["required_bundle_fields"]
         .as_array()
         .expect("required bundle fields")
@@ -759,6 +847,18 @@ fn artifact_catalog_matches_rust_tags_and_required_fields() {
     assert_eq!(artifact_proof_report_statuses, proof_report_status_tags());
     assert_eq!(artifact_proof_report_issues, proof_report_issue_tags());
     assert_eq!(
+        artifact_runtime_application_decisions,
+        runtime_application_decision_tags()
+    );
+    assert_eq!(
+        artifact_runtime_optional_work_decisions,
+        runtime_optional_work_decision_tags()
+    );
+    assert_eq!(
+        artifact_runtime_application_issues,
+        runtime_application_issue_tags()
+    );
+    assert_eq!(
         artifact["compiler_schema_version"].as_str(),
         Some(SLO_POLICY_COMPILER_SCHEMA_VERSION)
     );
@@ -766,6 +866,38 @@ fn artifact_catalog_matches_rust_tags_and_required_fields() {
         artifact["proof_report_schema_version"].as_str(),
         Some(SLO_POLICY_PROOF_REPORT_SCHEMA_VERSION)
     );
+    assert_eq!(
+        artifact["runtime_application_schema_version"].as_str(),
+        Some(SLO_POLICY_RUNTIME_APPLICATION_SCHEMA_VERSION)
+    );
+    assert_eq!(
+        artifact["runtime_application_contract"]["compiler_schema_version"].as_str(),
+        Some(SLO_POLICY_COMPILER_SCHEMA_VERSION)
+    );
+    let runtime_command = artifact["runtime_application_contract"]["proof_command_rendering"]
+        .as_str()
+        .expect("runtime proof command rendering");
+    assert!(runtime_command.contains("rch exec --"));
+    assert!(runtime_command.contains("runtime_slo_policy_application"));
+    let runtime_fail_closed = artifact["runtime_application_contract"]["fail_closed_for"]
+        .as_array()
+        .expect("runtime fail-closed issue list")
+        .iter()
+        .map(|value| value.as_str().expect("runtime issue").to_string())
+        .collect::<BTreeSet<_>>();
+    for required in [
+        SloRuntimePolicyApplicationIssueKind::StaleProfileHash,
+        SloRuntimePolicyApplicationIssueKind::UnsupportedWorkloadClass,
+        SloRuntimePolicyApplicationIssueKind::MissingCompiledOutput,
+        SloRuntimePolicyApplicationIssueKind::MissingNoWinReceipt,
+        SloRuntimePolicyApplicationIssueKind::MissingRchCommand,
+    ] {
+        assert!(
+            runtime_fail_closed.contains(required.as_str()),
+            "runtime contract missing fail-closed issue {}",
+            required.as_str()
+        );
+    }
     assert_eq!(
         artifact["policy_bundle_schema_version"].as_u64(),
         Some(u64::from(SLO_POLICY_BUNDLE_SCHEMA_VERSION))
@@ -986,6 +1118,196 @@ fn compiler_blocks_missing_evidence_and_conflicting_fallbacks() {
         compiled_blocker_tags(&compiled)
             .contains(SloPolicyCompilerBlockerKind::ConflictingFallbackDeclaration.as_str())
     );
+}
+
+#[test]
+fn runtime_slo_policy_application_serializes_validates_and_renders_command() {
+    let application = valid_runtime_application();
+    let validation = application.validate();
+    assert!(
+        validation.accepted,
+        "runtime application validation: {validation:?}"
+    );
+    assert_eq!(validation.decision, SloRuntimePolicyDecision::Admit);
+    assert!(validation.issues.is_empty());
+    assert_eq!(
+        application.schema_version,
+        SLO_POLICY_RUNTIME_APPLICATION_SCHEMA_VERSION
+    );
+    assert_eq!(
+        application.compiler_schema_version,
+        SLO_POLICY_COMPILER_SCHEMA_VERSION
+    );
+    assert_eq!(application.budget.to_budget().priority, 208);
+    assert_eq!(
+        application
+            .optional_work_decisions
+            .iter()
+            .map(|work| work.decision)
+            .collect::<Vec<_>>(),
+        vec![
+            SloRuntimeOptionalWorkDecision::Run,
+            SloRuntimeOptionalWorkDecision::Run
+        ]
+    );
+
+    let json = application
+        .to_json()
+        .expect("runtime application serializes");
+    assert!(json.contains("\"schema_version\": \"slo-runtime-policy-application-v1\""));
+    assert!(json.contains("\"decision\": \"admit\""));
+    let reparsed =
+        SloRuntimePolicyApplication::from_json(&json).expect("runtime application reparses");
+    assert_eq!(application, reparsed);
+    assert!(validate_slo_runtime_policy_application_json(&json).accepted);
+
+    let command =
+        SloRuntimePolicyApplication::render_application_proof_command("runtime_slo_policy");
+    assert!(command.starts_with("rch exec -- cargo test -p asupersync"));
+    assert!(command.contains("--test slo_policy_bundle_contract"));
+    assert!(command.contains("runtime_slo_policy"));
+}
+
+#[test]
+fn runtime_slo_policy_application_preserves_brownout_and_no_win_decisions() {
+    let mut brownout_compiled =
+        valid_bundle().compile_for_budget_admission(Some(&valid_capacity_evidence()));
+    brownout_compiled.admission.decision = SloCompiledAdmissionDecision::Brownout;
+    let brownout = SloRuntimePolicyApplication::from_compiled_policy(
+        &brownout_compiled,
+        SloWorkloadClass::AgentSwarm,
+        Some(profile_hash('a')),
+        SloProofCommand {
+            label: "runtime-slo-policy-application".to_string(),
+            command: SloRuntimePolicyApplication::render_application_proof_command(
+                "runtime_slo_policy_application",
+            ),
+        },
+        SloPolicyRedaction {
+            policy_id: "slo-runtime-application-redaction-v1".to_string(),
+            passed: true,
+        },
+    );
+    assert_eq!(brownout.decision, SloRuntimePolicyDecision::Brownout);
+    assert!(brownout.validate().accepted);
+    assert!(
+        brownout
+            .optional_work_decisions
+            .iter()
+            .all(|work| work.decision == SloRuntimeOptionalWorkDecision::Brownout)
+    );
+
+    let mut no_win_evidence = valid_capacity_evidence();
+    no_win_evidence.memory_basis_points = 9_500;
+    let no_win_compiled = valid_bundle().compile_for_budget_admission(Some(&no_win_evidence));
+    let no_win = SloRuntimePolicyApplication::from_compiled_policy(
+        &no_win_compiled,
+        SloWorkloadClass::AgentSwarm,
+        Some(profile_hash('a')),
+        SloProofCommand {
+            label: "runtime-slo-policy-application".to_string(),
+            command: SloRuntimePolicyApplication::render_application_proof_command(
+                "runtime_slo_policy_application",
+            ),
+        },
+        SloPolicyRedaction {
+            policy_id: "slo-runtime-application-redaction-v1".to_string(),
+            passed: true,
+        },
+    );
+    assert_eq!(no_win.decision, SloRuntimePolicyDecision::NoWin);
+    assert_eq!(no_win.compiled_status, SloCompiledPolicyStatus::NoWin);
+    assert!(no_win.no_win_fallback.is_some());
+    assert!(no_win.validate().accepted);
+}
+
+#[test]
+fn runtime_slo_policy_application_fail_closed_required_modes() {
+    let mut stale = valid_runtime_application();
+    stale.provenance.observed_profile_hash = Some(profile_hash('b'));
+    let stale_validation = stale.validate();
+    assert!(!stale_validation.accepted);
+    assert!(
+        stale_validation.contains_issue(SloRuntimePolicyApplicationIssueKind::StaleProfileHash)
+    );
+
+    let mut unsupported = valid_runtime_application();
+    unsupported.workload_class = SloWorkloadClass::Unsupported("space_station".to_string());
+    assert!(
+        unsupported
+            .validate()
+            .contains_issue(SloRuntimePolicyApplicationIssueKind::UnsupportedWorkloadClass)
+    );
+
+    let mut missing_compiled = valid_runtime_application();
+    missing_compiled.compiled_status = SloCompiledPolicyStatus::Blocked;
+    missing_compiled.decision = SloRuntimePolicyDecision::Blocked;
+    assert!(
+        missing_compiled
+            .validate()
+            .contains_issue(SloRuntimePolicyApplicationIssueKind::MissingCompiledOutput)
+    );
+    let mut empty_output_id = valid_runtime_application();
+    empty_output_id.compiled_output_id.clear();
+    assert!(
+        empty_output_id
+            .validate()
+            .contains_issue(SloRuntimePolicyApplicationIssueKind::MissingCompiledOutput)
+    );
+
+    let mut no_win_evidence = valid_capacity_evidence();
+    no_win_evidence.memory_basis_points = 9_500;
+    let no_win_compiled = valid_bundle().compile_for_budget_admission(Some(&no_win_evidence));
+    let mut missing_no_win = SloRuntimePolicyApplication::from_compiled_policy(
+        &no_win_compiled,
+        SloWorkloadClass::AgentSwarm,
+        Some(profile_hash('a')),
+        SloProofCommand {
+            label: "runtime-slo-policy-application".to_string(),
+            command: SloRuntimePolicyApplication::render_application_proof_command(
+                "runtime_slo_policy_application",
+            ),
+        },
+        SloPolicyRedaction {
+            policy_id: "slo-runtime-application-redaction-v1".to_string(),
+            passed: true,
+        },
+    );
+    missing_no_win.no_win_fallback = None;
+    assert!(
+        missing_no_win
+            .validate()
+            .contains_issue(SloRuntimePolicyApplicationIssueKind::MissingNoWinReceipt)
+    );
+
+    let mut missing_rch = valid_runtime_application();
+    missing_rch.proof_command.command =
+        "cargo test -p asupersync --test slo_policy_bundle_contract".to_string();
+    assert!(
+        missing_rch
+            .validate()
+            .contains_issue(SloRuntimePolicyApplicationIssueKind::MissingRchCommand)
+    );
+
+    let mut redaction = valid_runtime_application();
+    redaction.redaction.passed = false;
+    redaction.metadata.insert(
+        "api_token".to_string(),
+        Value::String("sk-redacted-runtime".to_string()),
+    );
+    let redaction_validation = redaction.validate();
+    assert!(
+        redaction_validation.contains_issue(SloRuntimePolicyApplicationIssueKind::RedactionFailure)
+    );
+    assert!(
+        redaction_validation
+            .contains_issue(SloRuntimePolicyApplicationIssueKind::SecretLikeMaterial)
+    );
+
+    let malformed =
+        validate_slo_runtime_policy_application_json("{\"schema_version\":\"slo-runtime\",");
+    assert!(!malformed.accepted);
+    assert!(malformed.contains_issue(SloRuntimePolicyApplicationIssueKind::MalformedApplication));
 }
 
 #[test]
