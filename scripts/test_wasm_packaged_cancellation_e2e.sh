@@ -346,6 +346,47 @@ STEP_HINTS=(
     "Validate that shutdown cancellation still resolves obligations before close."
 )
 
+run_step_command() {
+    local step_id="$1"
+    local target_dir="$2"
+    local log_path="$3"
+
+    case "${step_id}" in
+        cancelled_bootstrap_retry_recovery)
+            timeout "${STEP_TIMEOUT}" \
+                "${RCH_BIN}" exec -- env "CARGO_TARGET_DIR=${target_dir}" \
+                cargo test --test nextjs_bootstrap_harness \
+                cancelled_bootstrap_supports_retryable_recovery_path -- --nocapture \
+                >"${log_path}" 2>&1
+            ;;
+        render_restart_loser_drain)
+            timeout "${STEP_TIMEOUT}" \
+                "${RCH_BIN}" exec -- env "CARGO_TARGET_DIR=${target_dir}" \
+                cargo test --test react_wasm_strictmode_harness \
+                concurrent_render_restart_pattern_cancels_and_drains_losers -- --nocapture \
+                >"${log_path}" 2>&1
+            ;;
+        nested_cancel_cascade_quiescence)
+            timeout "${STEP_TIMEOUT}" \
+                "${RCH_BIN}" exec -- env "CARGO_TARGET_DIR=${target_dir}" \
+                cargo test --test close_quiescence_regression \
+                browser_nested_cancel_cascade_reaches_quiescence -- --nocapture \
+                >"${log_path}" 2>&1
+            ;;
+        shutdown_obligation_cleanup)
+            timeout "${STEP_TIMEOUT}" \
+                "${RCH_BIN}" exec -- env "CARGO_TARGET_DIR=${target_dir}" \
+                cargo test --test cancel_obligation_invariants \
+                shutdown_cancel_still_resolves_obligations -- --nocapture \
+                >"${log_path}" 2>&1
+            ;;
+        *)
+            echo "FATAL: unknown cancellation step: ${step_id}" >"${log_path}"
+            return 2
+            ;;
+    esac
+}
+
 RUN_STARTED_TS="$(now_iso_millis)"
 RUN_START_EPOCH="$(date +%s)"
 EXIT_CODE=0
@@ -384,7 +425,7 @@ for idx in "${!STEP_IDS[@]}"; do
     step_command_base="${STEP_COMMANDS[$idx]}"
     step_hint="${STEP_HINTS[$idx]}"
     step_target_dir="${TMPDIR:-/tmp}/rch-wasm-packaged-cancellation-${RUN_ID}-${step_id}"
-    step_command="${RCH_BIN} exec -- env CARGO_TARGET_DIR=${step_target_dir} bash -lc \"${step_command_base}\""
+    step_command="${RCH_BIN} exec -- env CARGO_TARGET_DIR=${step_target_dir} ${step_command_base}"
     step_log="${RUN_DIR}/${step_id}.log"
     step_started="$(now_iso_millis)"
     step_start_epoch="$(date +%s)"
@@ -410,9 +451,7 @@ for idx in "${!STEP_IDS[@]}"; do
         } > "${step_log}"
     else
         set +e
-        timeout "${STEP_TIMEOUT}" \
-            "${RCH_BIN}" exec -- env "CARGO_TARGET_DIR=${step_target_dir}" bash -lc "${step_command_base}" \
-            >"${step_log}" 2>&1
+        run_step_command "${step_id}" "${step_target_dir}" "${step_log}"
         step_rc=$?
         set -e
     fi
