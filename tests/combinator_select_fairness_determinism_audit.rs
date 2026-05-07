@@ -1,3 +1,5 @@
+#![allow(unsafe_code)]
+
 //! Audit + regression test for `Select` combinator fairness
 //! when both arms are ready simultaneously.
 //!
@@ -137,7 +139,8 @@
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+use std::sync::Arc;
+use std::task::{Context, Poll, Wake, Waker};
 
 fn read(rel: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
@@ -429,13 +432,13 @@ fn loser_drain_warning_documented_on_select_struct() {
 //     both start left-biased (deterministic per-instance).
 
 fn dummy_waker() -> Waker {
-    fn no_op(_: *const ()) {}
-    fn clone_no_op(_: *const ()) -> RawWaker {
-        RawWaker::new(std::ptr::null(), &VTABLE)
+    struct NoOpWake;
+
+    impl Wake for NoOpWake {
+        fn wake(self: Arc<Self>) {}
     }
-    static VTABLE: RawWakerVTable = RawWakerVTable::new(clone_no_op, no_op, no_op, no_op);
-    let raw = RawWaker::new(std::ptr::null(), &VTABLE);
-    unsafe { Waker::from_raw(raw) }
+
+    Waker::from(Arc::new(NoOpWake))
 }
 
 /// Tiny mock of the Select pattern with the same alternation

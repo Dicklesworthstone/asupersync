@@ -1,3 +1,5 @@
+#![cfg(feature = "postgres")]
+
 //! Audit test for PostgreSQL prepared statement cache behavior.
 //!
 //! PostgreSQL wire protocol requirement: "When a statement is prepared once and
