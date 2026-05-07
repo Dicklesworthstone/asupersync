@@ -227,9 +227,7 @@ fn load_contract() -> AdaptiveBatchSizingContract {
     }
 }
 
-fn selected_scenario<'a>(
-    contract: &'a AdaptiveBatchSizingContract,
-) -> &'a AdaptiveBatchSizingScenario {
+fn selected_scenario(contract: &AdaptiveBatchSizingContract) -> &AdaptiveBatchSizingScenario {
     if let Ok(selected) = std::env::var(SCENARIO_ENV) {
         contract
             .smoke_scenarios
@@ -239,6 +237,34 @@ fn selected_scenario<'a>(
     } else {
         &contract.smoke_scenarios[0]
     }
+}
+
+#[test]
+fn adaptive_batch_sizing_runner_executes_rch_without_local_shell_wrapper() {
+    let script = fs::read_to_string("scripts/run_adaptive_batch_sizing_smoke.sh")
+        .expect("adaptive batch sizing smoke runner should load");
+    let forbidden = ["bash -lc ", "\"$COMMAND\""].concat();
+
+    assert!(
+        script.contains("COMMAND_ARGS=("),
+        "runner must build the rch proof as argv"
+    );
+    assert!(
+        script.contains(r#""${COMMAND_ARGS[@]}" >"$RUN_LOG_PATH" 2>&1 &"#),
+        "runner must execute rch argv directly"
+    );
+    assert!(
+        !script.contains(&forbidden),
+        "runner must not execute the rendered rch command through a local shell"
+    );
+    assert!(
+        script.contains(r#"printf -v COMMAND '%q ' "${COMMAND_ARGS[@]}""#),
+        "runner must keep a shell-escaped reproduction command in reports"
+    );
+    assert!(
+        script.contains(r#"RCH_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_adaptive_batch_sizing""#),
+        "runner target dir must honor TMPDIR"
+    );
 }
 
 fn reason_label(reason: AdaptiveBatchDecisionReason) -> &'static str {
@@ -478,8 +504,11 @@ fn build_projection(
     let wake_to_run_p999_improvement_ns = fixed
         .wake_to_run_p999_ns
         .saturating_sub(adaptive.wake_to_run_p999_ns);
+    let fixed_shared_ready_touches = i64::try_from(fixed.shared_ready_touches).unwrap_or(i64::MAX);
+    let adaptive_shared_ready_touches =
+        i64::try_from(adaptive.shared_ready_touches).unwrap_or(i64::MAX);
     let shared_ready_touches_delta =
-        fixed.shared_ready_touches as i64 - adaptive.shared_ready_touches as i64;
+        fixed_shared_ready_touches.saturating_sub(adaptive_shared_ready_touches);
     let no_win_trigger = wake_to_run_p99_improvement_ns < 20_000
         || wake_to_run_p999_improvement_ns < 20_000
         || shared_ready_touches_delta <= 0;
@@ -763,17 +792,7 @@ fn adaptive_batch_cancel_floor_records_conservative_reason() {
             scenario_id: "cancel-floor-test".to_string(),
             description: "contract-level cancel-floor replay".to_string(),
             workload_seed: 0,
-            fixture: AdaptiveBatchSizingFixture {
-                producer_count: fixture.producer_count,
-                tasks_per_producer: fixture.tasks_per_producer,
-                priority: fixture.priority,
-                fixed_batch_size: fixture.fixed_batch_size,
-                combiner_max_in_flight: fixture.combiner_max_in_flight,
-                combiner_claim_failures: fixture.combiner_claim_failures,
-                cancel_task_count: fixture.cancel_task_count,
-                cancel_streak_limit: fixture.cancel_streak_limit,
-                adaptive_profile: fixture.adaptive_profile,
-            },
+            fixture,
             expected_winner_profile: "fixed".to_string(),
             safe_fallback_profile: "fixed".to_string(),
             expected_report_projection: None,
