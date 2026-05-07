@@ -15,52 +15,48 @@
 //! - Frame parsing with exact size matches
 
 use arbitrary::Arbitrary;
+use asupersync::bytes::{BufMut, BytesMut};
+use asupersync::codec::Decoder;
+use asupersync::http::h2::error::ErrorCode;
+use asupersync::http::h2::frame::{
+    DEFAULT_MAX_FRAME_SIZE, FrameHeader, FrameType, MAX_FRAME_SIZE, MIN_MAX_FRAME_SIZE, Setting,
+    data_flags,
+};
+use asupersync::http::h2::{Frame, FrameCodec, H2Error, Settings};
 use libfuzzer_sys::fuzz_target;
 
-/// HTTP/2 frame type identifiers
-const DATA_TYPE: u8 = 0x0;
-const SETTINGS_TYPE: u8 = 0x4;
+const SETTINGS_MAX_FRAME_SIZE_ID: u16 = 0x5;
+const MAX_FUZZ_CASES: usize = 32;
+const MAX_GENERATED_FRAME_PAYLOAD: u32 = 64 * 1024;
 
-/// HTTP/2 SETTINGS parameter identifiers (RFC 7540 §6.5.2)
-const SETTINGS_HEADER_TABLE_SIZE: u16 = 0x1;
-const SETTINGS_ENABLE_PUSH: u16 = 0x2;
-const SETTINGS_MAX_CONCURRENT_STREAMS: u16 = 0x3;
-const SETTINGS_INITIAL_WINDOW_SIZE: u16 = 0x4;
-const SETTINGS_MAX_FRAME_SIZE: u16 = 0x5;
-const SETTINGS_MAX_HEADER_LIST_SIZE: u16 = 0x6;
-
-/// HTTP/2 frame flags
-const END_STREAM_FLAG: u8 = 0x1;
-const PADDED_FLAG: u8 = 0x8;
-const SETTINGS_ACK_FLAG: u8 = 0x1;
-
-/// RFC 7540 §6.5.2: SETTINGS_MAX_FRAME_SIZE valid range
-const MIN_MAX_FRAME_SIZE: u32 = 16384; // 2^14
-const MAX_MAX_FRAME_SIZE: u32 = 16777215; // 2^24 - 1
-
-/// Default SETTINGS_MAX_FRAME_SIZE value
-const DEFAULT_MAX_FRAME_SIZE: u32 = 16384;
-
-/// Mock parser for HTTP/2 frame size validation
 #[derive(Debug)]
-struct MockH2MaxFrameSizeParser {
-    max_frame_size: u32,
-    connection_established: bool,
+struct LiveH2DataFrameDecoder {
+    codec: FrameCodec,
+    settings: Settings,
 }
 
-/// Result types for parsing
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 enum ParseResult {
-    /// Settings frame processed successfully
-    SettingsProcessed { max_frame_size: u32 },
-    /// DATA frame processed successfully
-    DataFrameProcessed { stream_id: u32, payload_size: u32 },
-    /// Frame size error
-    FrameSizeError(String),
-    /// Protocol error
-    ProtocolError(String),
-    /// Frame processed (other frame types)
+    SettingsProcessed {
+        max_frame_size: u32,
+    },
+    DataFrameProcessed {
+        stream_id: u32,
+        payload_size: u32,
+        data_len: usize,
+        end_stream: bool,
+    },
+    FrameSizeError,
+    ProtocolError(ErrorCode),
     FrameProcessed,
+    SkippedLargeAcceptedCandidate {
+        payload_size: u32,
+        max_frame_size: u32,
+    },
+    InvalidWireLength {
+        payload_size: Option<u32>,
+    },
+    PendingIncomplete,
 }
 
 /// Input for fuzz testing
@@ -96,48 +92,41 @@ struct FrameSizeTest {
     update_max_frame_size: Option<u32>,
 }
 
-impl MockH2MaxFrameSizeParser {
+impl LiveH2DataFrameDecoder {
     fn new() -> Self {
-        Self {
-            max_frame_size: DEFAULT_MAX_FRAME_SIZE,
-            connection_established: false,
-        }
+        let settings = Settings::default();
+        let mut codec = FrameCodec::new();
+        codec.set_max_frame_size(settings.max_frame_size);
+        Self { codec, settings }
     }
 
-    /// Process SETTINGS frame with MAX_FRAME_SIZE
-    fn process_settings(&mut self, settings: &[(u16, u32)]) -> Result<ParseResult, String> {
-        for &(setting_id, value) in settings {
-            match setting_id {
-                SETTINGS_MAX_FRAME_SIZE => {
-                    // RFC 7540 §6.5.2: Valid range is 2^14 to 2^24-1
-                    if value < MIN_MAX_FRAME_SIZE || value > MAX_MAX_FRAME_SIZE {
-                        return Err(format!(
-                            "PROTOCOL_ERROR: SETTINGS_MAX_FRAME_SIZE {} out of valid range [{}, {}]",
-                            value, MIN_MAX_FRAME_SIZE, MAX_MAX_FRAME_SIZE
-                        ));
+    fn process_settings(&mut self, settings: &[(u16, u32)]) -> ParseResult {
+        let mut wire = encode_settings_frame(settings);
+        match self.codec.decode(&mut wire) {
+            Ok(Some(Frame::Settings(frame))) => {
+                let mut changed_max_frame_size = false;
+                for setting in frame.settings {
+                    changed_max_frame_size |= matches!(setting, Setting::MaxFrameSize(_));
+                    if let Err(err) = self.settings.apply(setting) {
+                        return ParseResult::from_error(err);
                     }
+                }
 
-                    self.max_frame_size = value;
-                    return Ok(ParseResult::SettingsProcessed {
-                        max_frame_size: value,
-                    });
-                }
-                SETTINGS_HEADER_TABLE_SIZE
-                | SETTINGS_ENABLE_PUSH
-                | SETTINGS_MAX_CONCURRENT_STREAMS
-                | SETTINGS_INITIAL_WINDOW_SIZE
-                | SETTINGS_MAX_HEADER_LIST_SIZE => {
-                    // Other settings - ignore for this test
-                }
-                _ => {
-                    // Unknown setting - ignore per RFC 7540 §6.5
+                self.codec.set_max_frame_size(self.settings.max_frame_size);
+                if changed_max_frame_size {
+                    ParseResult::SettingsProcessed {
+                        max_frame_size: self.settings.max_frame_size,
+                    }
+                } else {
+                    ParseResult::FrameProcessed
                 }
             }
+            Ok(Some(other)) => panic!("encoded SETTINGS decoded as {other:?}"),
+            Ok(None) => ParseResult::PendingIncomplete,
+            Err(err) => ParseResult::from_error(err),
         }
-        Ok(ParseResult::FrameProcessed)
     }
 
-    /// Process DATA frame with size validation
     fn process_data_frame(
         &mut self,
         stream_id: u32,
@@ -146,300 +135,325 @@ impl MockH2MaxFrameSizeParser {
         padding_size: u8,
         end_stream: bool,
     ) -> ParseResult {
-        // Stream ID 0 is invalid for DATA frames
-        if stream_id == 0 {
-            return ParseResult::ProtocolError("DATA frame with stream_id=0".to_string());
-        }
-
-        // Calculate total frame payload size
-        let total_payload_size = if padded {
-            // Padded DATA frame: 1 byte for pad_length + payload + padding
-            1 + payload_size + padding_size as u32
-        } else {
-            payload_size
+        let Some(total_payload_size) =
+            declared_data_payload_size(payload_size, padded, padding_size)
+        else {
+            return ParseResult::InvalidWireLength { payload_size: None };
         };
 
-        // Validate against current MAX_FRAME_SIZE setting
-        if total_payload_size > self.max_frame_size {
-            return ParseResult::FrameSizeError(format!(
-                "FRAME_SIZE_ERROR: DATA frame payload {} exceeds MAX_FRAME_SIZE {}",
-                total_payload_size, self.max_frame_size
-            ));
+        if total_payload_size > MAX_FRAME_SIZE {
+            return ParseResult::InvalidWireLength {
+                payload_size: Some(total_payload_size),
+            };
         }
 
-        // If padded, validate padding
-        if padded {
-            if padding_size as u32 >= payload_size && payload_size > 0 {
-                return ParseResult::ProtocolError(
-                    "PROTOCOL_ERROR: Padding larger than payload".to_string(),
-                );
-            }
+        if total_payload_size <= self.settings.max_frame_size
+            && total_payload_size > MAX_GENERATED_FRAME_PAYLOAD
+        {
+            return ParseResult::SkippedLargeAcceptedCandidate {
+                payload_size: total_payload_size,
+                max_frame_size: self.settings.max_frame_size,
+            };
         }
 
-        ParseResult::DataFrameProcessed {
+        let include_payload = total_payload_size <= self.settings.max_frame_size;
+        let mut wire = encode_data_frame(
             stream_id,
-            payload_size: total_payload_size,
+            payload_size,
+            padded,
+            padding_size,
+            end_stream,
+            include_payload,
+        );
+
+        match self.codec.decode(&mut wire) {
+            Ok(Some(Frame::Data(frame))) => ParseResult::DataFrameProcessed {
+                stream_id: frame.stream_id,
+                payload_size: total_payload_size,
+                data_len: frame.data.len(),
+                end_stream: frame.end_stream,
+            },
+            Ok(Some(other)) => panic!("encoded DATA decoded as {other:?}"),
+            Ok(None) => ParseResult::PendingIncomplete,
+            Err(err) => ParseResult::from_error(err),
         }
     }
 }
 
-/// Encode DATA frame
+impl ParseResult {
+    fn from_error(err: H2Error) -> Self {
+        match err.code {
+            ErrorCode::FrameSizeError => Self::FrameSizeError,
+            code => Self::ProtocolError(code),
+        }
+    }
+}
+
+fn declared_data_payload_size(payload_size: u32, padded: bool, padding_size: u8) -> Option<u32> {
+    if padded {
+        1u32.checked_add(payload_size)?
+            .checked_add(u32::from(padding_size))
+    } else {
+        Some(payload_size)
+    }
+}
+
 fn encode_data_frame(
     stream_id: u32,
-    payload: &[u8],
+    payload_size: u32,
     padded: bool,
     padding_size: u8,
     end_stream: bool,
-) -> Vec<u8> {
-    let mut frame = Vec::new();
+    include_payload: bool,
+) -> BytesMut {
+    let total_payload_len = declared_data_payload_size(payload_size, padded, padding_size)
+        .expect("DATA frame payload length must fit u32 before constructing wire bytes");
+
+    let mut frame = BytesMut::new();
     let mut flags = 0u8;
-
     if end_stream {
-        flags |= END_STREAM_FLAG;
+        flags |= data_flags::END_STREAM;
     }
     if padded {
-        flags |= PADDED_FLAG;
+        flags |= data_flags::PADDED;
     }
 
-    let total_payload_len = if padded {
-        1 + payload.len() + padding_size as usize // pad_length + payload + padding
-    } else {
-        payload.len()
-    };
+    write_frame_header(
+        total_payload_len,
+        FrameType::Data as u8,
+        flags,
+        stream_id,
+        &mut frame,
+    );
 
-    // Frame header (9 bytes)
-    frame.extend_from_slice(&(total_payload_len as u32).to_be_bytes()[1..4]); // Length (24 bits)
-    frame.push(DATA_TYPE); // Type
-    frame.push(flags); // Flags
-    frame.extend_from_slice(&stream_id.to_be_bytes()); // Stream ID
-
-    // Payload
-    if padded {
-        frame.push(padding_size); // Pad length
+    if !include_payload {
+        return frame;
     }
-    frame.extend_from_slice(payload); // Data payload
+
     if padded {
-        frame.extend(vec![0u8; padding_size as usize]); // Padding bytes
+        frame.put_u8(padding_size);
+    }
+    frame.resize(frame.len() + payload_size as usize, 0x42);
+    if padded {
+        frame.resize(frame.len() + usize::from(padding_size), 0);
     }
 
     frame
 }
 
-/// Encode SETTINGS frame
-fn encode_settings_frame(settings: &[(u16, u32)]) -> Vec<u8> {
-    let payload_len = settings.len() * 6; // Each setting is 6 bytes
-    let mut frame = Vec::new();
-
-    // Frame header (9 bytes)
-    frame.extend_from_slice(&(payload_len as u32).to_be_bytes()[1..4]); // Length (24 bits)
-    frame.push(SETTINGS_TYPE); // Type
-    frame.push(0); // Flags (no ACK)
-    frame.extend_from_slice(&0u32.to_be_bytes()); // Stream ID (0 for SETTINGS)
-
-    // Settings payload
+fn encode_settings_frame(settings: &[(u16, u32)]) -> BytesMut {
+    let mut frame = BytesMut::new();
+    let payload_len =
+        u32::try_from(settings.len() * 6).expect("SETTINGS fuzz payload length must fit u32");
+    write_frame_header(payload_len, FrameType::Settings as u8, 0, 0, &mut frame);
     for &(setting_id, value) in settings {
-        frame.extend_from_slice(&setting_id.to_be_bytes());
-        frame.extend_from_slice(&value.to_be_bytes());
+        frame.put_u16(setting_id);
+        frame.put_u32(value);
     }
-
     frame
 }
 
-/// Process the input through our mock parser
 fn process_input(input: &H2DataPayloadMaxInput) -> Vec<ParseResult> {
-    let mut parser = MockH2MaxFrameSizeParser::new();
+    let mut decoder = LiveH2DataFrameDecoder::new();
     let mut results = Vec::new();
 
-    // Set initial MAX_FRAME_SIZE if specified
     if let Some(initial_size) = input.initial_max_frame_size {
-        let settings = vec![(SETTINGS_MAX_FRAME_SIZE, initial_size)];
-        match parser.process_settings(&settings) {
-            Ok(result) => results.push(result),
-            Err(e) => results.push(ParseResult::ProtocolError(e)),
-        }
+        results.push(decoder.process_settings(&[(SETTINGS_MAX_FRAME_SIZE_ID, initial_size)]));
     }
 
-    // Process test cases
-    for test in &input.test_cases {
-        // Update MAX_FRAME_SIZE if requested
+    for test in input.test_cases.iter().take(MAX_FUZZ_CASES) {
         if let Some(new_size) = test.update_max_frame_size {
-            let settings = vec![(SETTINGS_MAX_FRAME_SIZE, new_size)];
-            match parser.process_settings(&settings) {
-                Ok(result) => results.push(result),
-                Err(e) => results.push(ParseResult::ProtocolError(e)),
-            }
+            results.push(decoder.process_settings(&[(SETTINGS_MAX_FRAME_SIZE_ID, new_size)]));
         }
-
-        // Test the DATA frame
-        let result = parser.process_data_frame(
+        results.push(decoder.process_data_frame(
             test.stream_id,
             test.payload_size,
             test.padded,
             test.padding_size,
             test.end_stream,
-        );
-        results.push(result);
+        ));
     }
 
     results
 }
 
+fn write_frame_header(length: u32, frame_type: u8, flags: u8, stream_id: u32, dst: &mut BytesMut) {
+    FrameHeader {
+        length,
+        frame_type,
+        flags,
+        stream_id,
+    }
+    .write(dst);
+}
+
 fuzz_target!(|input: H2DataPayloadMaxInput| {
-    // Skip empty inputs
     if input.test_cases.is_empty() {
         return;
     }
 
     let results = process_input(&input);
+    assert_input_invariants(&input, &results);
+    exercise_boundary_conditions();
+    exercise_padded_boundary_conditions();
+});
 
-    // Test key invariants
-    let mut current_max_frame_size = input
-        .initial_max_frame_size
-        .unwrap_or(DEFAULT_MAX_FRAME_SIZE);
+fn assert_input_invariants(input: &H2DataPayloadMaxInput, results: &[ParseResult]) {
+    let mut current_max_frame_size = DEFAULT_MAX_FRAME_SIZE;
+    let mut result_index = 0;
 
-    for (i, test) in input.test_cases.iter().enumerate() {
-        // Update current max frame size if changed
-        if let Some(new_size) = test.update_max_frame_size {
-            if new_size >= MIN_MAX_FRAME_SIZE && new_size <= MAX_MAX_FRAME_SIZE {
-                current_max_frame_size = new_size;
-            }
-        }
-
-        // Find the corresponding result (accounting for possible SETTINGS updates)
-        let result_index = if test.update_max_frame_size.is_some() {
-            i * 2 + 1 // Skip the SETTINGS result
-        } else {
-            i
-        } + if input.initial_max_frame_size.is_some() {
-            1
-        } else {
-            0
-        };
-
-        if let Some(result) = results.get(result_index) {
-            // Calculate expected total payload size
-            let total_payload_size = if test.padded {
-                1 + test.payload_size + test.padding_size as u32
-            } else {
-                test.payload_size
-            };
-
-            match result {
-                ParseResult::DataFrameProcessed { payload_size, .. } => {
-                    // Frame was accepted - verify it was within limits
-                    assert!(
-                        total_payload_size <= current_max_frame_size,
-                        "Parser accepted frame {} bytes > MAX_FRAME_SIZE {}",
-                        total_payload_size,
-                        current_max_frame_size
-                    );
-                    assert_eq!(*payload_size, total_payload_size);
-                }
-                ParseResult::FrameSizeError(_) => {
-                    // Frame was rejected - verify it exceeded limits
-                    assert!(
-                        total_payload_size > current_max_frame_size,
-                        "Parser rejected frame {} bytes <= MAX_FRAME_SIZE {}",
-                        total_payload_size,
-                        current_max_frame_size
-                    );
-                }
-                ParseResult::ProtocolError(_) => {
-                    // Protocol errors are acceptable for malformed frames
-                }
-                _ => {
-                    // Other results are unexpected for DATA frames
-                    panic!("Unexpected result for DATA frame: {:?}", result);
-                }
-            }
-        }
+    if input.initial_max_frame_size.is_some() {
+        update_expected_max_frame_size(&mut current_max_frame_size, &results[result_index]);
+        result_index += 1;
     }
 
-    // Test specific boundary conditions
+    for test in input.test_cases.iter().take(MAX_FUZZ_CASES) {
+        if test.update_max_frame_size.is_some() {
+            update_expected_max_frame_size(&mut current_max_frame_size, &results[result_index]);
+            result_index += 1;
+        }
+
+        let result = &results[result_index];
+        result_index += 1;
+
+        let total_payload_size =
+            declared_data_payload_size(test.payload_size, test.padded, test.padding_size);
+        assert_data_result_invariant(
+            result,
+            total_payload_size,
+            current_max_frame_size,
+            test.stream_id,
+            test.payload_size,
+            test.end_stream,
+        );
+    }
+}
+
+fn update_expected_max_frame_size(current: &mut u32, result: &ParseResult) {
+    if let ParseResult::SettingsProcessed { max_frame_size } = result {
+        *current = *max_frame_size;
+    }
+}
+
+fn assert_data_result_invariant(
+    result: &ParseResult,
+    total_payload_size: Option<u32>,
+    current_max_frame_size: u32,
+    stream_id: u32,
+    data_len: u32,
+    end_stream: bool,
+) {
+    match result {
+        ParseResult::DataFrameProcessed {
+            stream_id: decoded_stream_id,
+            payload_size,
+            data_len: decoded_data_len,
+            end_stream: decoded_end_stream,
+        } => {
+            let expected_payload_size =
+                total_payload_size.expect("decoded DATA frame must have a representable length");
+            assert!(
+                expected_payload_size <= current_max_frame_size,
+                "live codec accepted frame {expected_payload_size} bytes above MAX_FRAME_SIZE {current_max_frame_size}"
+            );
+            assert_eq!(*decoded_stream_id, stream_id & 0x7fff_ffff);
+            assert_eq!(*payload_size, expected_payload_size);
+            assert_eq!(*decoded_data_len, data_len as usize);
+            assert_eq!(*decoded_end_stream, end_stream);
+        }
+        ParseResult::FrameSizeError => {
+            let expected_payload_size =
+                total_payload_size.expect("frame-size errors require a representable length");
+            assert!(
+                expected_payload_size > current_max_frame_size,
+                "live codec rejected frame {expected_payload_size} bytes at or below MAX_FRAME_SIZE {current_max_frame_size}"
+            );
+        }
+        ParseResult::SkippedLargeAcceptedCandidate {
+            payload_size,
+            max_frame_size,
+        } => {
+            assert!(*payload_size <= *max_frame_size);
+            assert!(*payload_size > MAX_GENERATED_FRAME_PAYLOAD);
+        }
+        ParseResult::InvalidWireLength { payload_size } => {
+            if let Some(payload_size) = payload_size {
+                assert!(*payload_size > MAX_FRAME_SIZE);
+            } else {
+                assert!(total_payload_size.is_none());
+            }
+        }
+        ParseResult::ProtocolError(_) => {}
+        ParseResult::PendingIncomplete
+        | ParseResult::SettingsProcessed { .. }
+        | ParseResult::FrameProcessed => panic!("unexpected DATA result: {result:?}"),
+    }
+}
+
+fn exercise_boundary_conditions() {
     let boundary_tests = [
-        (DEFAULT_MAX_FRAME_SIZE, DEFAULT_MAX_FRAME_SIZE), // Exactly at default limit
-        (DEFAULT_MAX_FRAME_SIZE, DEFAULT_MAX_FRAME_SIZE - 1), // Just below default limit
-        (DEFAULT_MAX_FRAME_SIZE, DEFAULT_MAX_FRAME_SIZE + 1), // Just above default limit
-        (32768, 32768),                                   // Exactly at custom limit
-        (32768, 32767),                                   // Just below custom limit
-        (32768, 32769),                                   // Just above custom limit
-        (MAX_MAX_FRAME_SIZE, MAX_MAX_FRAME_SIZE),         // At maximum possible limit
-        (MIN_MAX_FRAME_SIZE, MIN_MAX_FRAME_SIZE),         // At minimum possible limit
+        (DEFAULT_MAX_FRAME_SIZE, DEFAULT_MAX_FRAME_SIZE, true),
+        (DEFAULT_MAX_FRAME_SIZE, DEFAULT_MAX_FRAME_SIZE - 1, true),
+        (DEFAULT_MAX_FRAME_SIZE, DEFAULT_MAX_FRAME_SIZE + 1, false),
+        (32_768, 32_768, true),
+        (32_768, 32_767, true),
+        (32_768, 32_769, false),
+        (MIN_MAX_FRAME_SIZE, MIN_MAX_FRAME_SIZE, true),
     ];
 
-    for (max_frame_size, payload_size) in boundary_tests {
-        let mut parser = MockH2MaxFrameSizeParser::new();
+    for (max_frame_size, payload_size, should_pass) in boundary_tests {
+        let mut decoder = LiveH2DataFrameDecoder::new();
+        assert!(matches!(
+            decoder.process_settings(&[(SETTINGS_MAX_FRAME_SIZE_ID, max_frame_size)]),
+            ParseResult::SettingsProcessed { .. }
+        ));
 
-        // Set MAX_FRAME_SIZE
-        let settings = vec![(SETTINGS_MAX_FRAME_SIZE, max_frame_size)];
-        if parser.process_settings(&settings).is_err() {
-            continue; // Skip invalid MAX_FRAME_SIZE values
-        }
-
-        // Test DATA frame
-        let result = parser.process_data_frame(1, payload_size, false, 0, false);
-
-        if payload_size <= max_frame_size {
-            // Should be accepted
-            assert!(
-                matches!(result, ParseResult::DataFrameProcessed { .. }),
-                "Frame with payload {} should be accepted (limit {}), got: {:?}",
-                payload_size,
-                max_frame_size,
-                result
-            );
-        } else {
-            // Should be rejected
-            assert!(
-                matches!(result, ParseResult::FrameSizeError(_)),
-                "Frame with payload {} should be rejected (limit {}), got: {:?}",
-                payload_size,
-                max_frame_size,
-                result
-            );
-        }
+        let result = decoder.process_data_frame(1, payload_size, false, 0, false);
+        assert_boundary_result(&result, should_pass, payload_size, max_frame_size);
     }
+}
 
-    // Test padded frame boundary conditions
+fn exercise_padded_boundary_conditions() {
     let padded_tests = [
-        (16384, 16383, 0, true),   // Padded: 1 + 16383 + 0 = 16384 (exactly at limit)
-        (16384, 16382, 1, true),   // Padded: 1 + 16382 + 1 = 16384 (exactly at limit)
-        (16384, 16384, 0, false),  // Padded: 1 + 16384 + 0 = 16385 (exceeds limit)
-        (16384, 16300, 80, true),  // Padded: 1 + 16300 + 80 = 16381 (within limit)
-        (16384, 16300, 85, false), // Padded: 1 + 16300 + 85 = 16386 (exceeds limit)
+        (16_384, 16_383, 0, true),
+        (16_384, 16_382, 1, true),
+        (16_384, 16_384, 0, false),
+        (16_384, 16_300, 80, true),
+        (16_384, 16_300, 85, false),
     ];
 
     for (max_frame_size, payload_size, padding_size, should_pass) in padded_tests {
-        let mut parser = MockH2MaxFrameSizeParser::new();
+        let mut decoder = LiveH2DataFrameDecoder::new();
+        assert!(matches!(
+            decoder.process_settings(&[(SETTINGS_MAX_FRAME_SIZE_ID, max_frame_size)]),
+            ParseResult::SettingsProcessed { .. }
+        ));
 
-        // Set MAX_FRAME_SIZE
-        let settings = vec![(SETTINGS_MAX_FRAME_SIZE, max_frame_size)];
-        parser.process_settings(&settings).unwrap();
-
-        // Test padded DATA frame
-        let result = parser.process_data_frame(1, payload_size, true, padding_size, false);
-
-        if should_pass {
-            assert!(
-                matches!(result, ParseResult::DataFrameProcessed { .. }),
-                "Padded frame (payload={}, padding={}) should be accepted (limit={}), got: {:?}",
-                payload_size,
-                padding_size,
-                max_frame_size,
-                result
-            );
-        } else {
-            assert!(
-                matches!(result, ParseResult::FrameSizeError(_)),
-                "Padded frame (payload={}, padding={}) should be rejected (limit={}), got: {:?}",
-                payload_size,
-                padding_size,
-                max_frame_size,
-                result
-            );
-        }
+        let result = decoder.process_data_frame(1, payload_size, true, padding_size, false);
+        let total_payload_size = declared_data_payload_size(payload_size, true, padding_size)
+            .expect("padded boundary values fit u32");
+        assert_boundary_result(&result, should_pass, total_payload_size, max_frame_size);
     }
-});
+}
+
+fn assert_boundary_result(
+    result: &ParseResult,
+    should_pass: bool,
+    payload_size: u32,
+    max_frame_size: u32,
+) {
+    if should_pass {
+        assert!(
+            matches!(result, ParseResult::DataFrameProcessed { .. }),
+            "frame with payload {payload_size} should be accepted at limit {max_frame_size}, got {result:?}"
+        );
+    } else {
+        assert!(
+            matches!(result, ParseResult::FrameSizeError),
+            "frame with payload {payload_size} should be rejected at limit {max_frame_size}, got {result:?}"
+        );
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -447,10 +461,8 @@ mod tests {
 
     #[test]
     fn test_data_frame_at_default_max() {
-        let mut parser = MockH2MaxFrameSizeParser::new();
-
-        // Test DATA frame with payload exactly at default MAX_FRAME_SIZE
-        let result = parser.process_data_frame(1, DEFAULT_MAX_FRAME_SIZE, false, 0, false);
+        let mut decoder = LiveH2DataFrameDecoder::new();
+        let result = decoder.process_data_frame(1, DEFAULT_MAX_FRAME_SIZE, false, 0, false);
 
         match result {
             ParseResult::DataFrameProcessed { payload_size, .. } => {
@@ -462,87 +474,75 @@ mod tests {
 
     #[test]
     fn test_data_frame_above_max() {
-        let mut parser = MockH2MaxFrameSizeParser::new();
-
-        // Test DATA frame with payload above MAX_FRAME_SIZE
-        let result = parser.process_data_frame(1, DEFAULT_MAX_FRAME_SIZE + 1, false, 0, false);
-
-        match result {
-            ParseResult::FrameSizeError(msg) => {
-                assert!(msg.contains("FRAME_SIZE_ERROR"));
-                assert!(msg.contains(&(DEFAULT_MAX_FRAME_SIZE + 1).to_string()));
-            }
-            other => panic!("Expected frame size error, got: {:?}", other),
-        }
+        let mut decoder = LiveH2DataFrameDecoder::new();
+        let result = decoder.process_data_frame(1, DEFAULT_MAX_FRAME_SIZE + 1, false, 0, false);
+        assert!(matches!(result, ParseResult::FrameSizeError));
     }
 
     #[test]
     fn test_custom_max_frame_size() {
-        let mut parser = MockH2MaxFrameSizeParser::new();
+        let mut decoder = LiveH2DataFrameDecoder::new();
+        let custom_size = 32_768;
+        assert!(matches!(
+            decoder.process_settings(&[(SETTINGS_MAX_FRAME_SIZE_ID, custom_size)]),
+            ParseResult::SettingsProcessed { .. }
+        ));
 
-        // Set custom MAX_FRAME_SIZE
-        let custom_size = 32768;
-        let settings = vec![(SETTINGS_MAX_FRAME_SIZE, custom_size)];
-        parser.process_settings(&settings).unwrap();
-
-        // Test frame exactly at custom limit
-        let result = parser.process_data_frame(1, custom_size, false, 0, false);
+        let result = decoder.process_data_frame(1, custom_size, false, 0, false);
         assert!(matches!(result, ParseResult::DataFrameProcessed { .. }));
 
-        // Test frame above custom limit
-        let result = parser.process_data_frame(1, custom_size + 1, false, 0, false);
-        assert!(matches!(result, ParseResult::FrameSizeError(_)));
+        let result = decoder.process_data_frame(1, custom_size + 1, false, 0, false);
+        assert!(matches!(result, ParseResult::FrameSizeError));
     }
 
     #[test]
     fn test_padded_data_frame_boundary() {
-        let mut parser = MockH2MaxFrameSizeParser::new();
-
-        // Test padded DATA frame at boundary
-        // 1 (pad_length) + 16382 (payload) + 1 (padding) = 16384 (exactly at limit)
-        let result = parser.process_data_frame(1, 16382, true, 1, false);
+        let mut decoder = LiveH2DataFrameDecoder::new();
+        let result = decoder.process_data_frame(1, 16_382, true, 1, false);
 
         match result {
             ParseResult::DataFrameProcessed { payload_size, .. } => {
-                assert_eq!(payload_size, 16384); // Total frame payload size
+                assert_eq!(payload_size, 16_384);
             }
             other => panic!("Expected padded frame accepted, got: {:?}", other),
         }
 
-        // Test padded DATA frame over boundary
-        // 1 (pad_length) + 16383 (payload) + 1 (padding) = 16385 (exceeds limit)
-        let result = parser.process_data_frame(1, 16383, true, 1, false);
-        assert!(matches!(result, ParseResult::FrameSizeError(_)));
+        let result = decoder.process_data_frame(1, 16_383, true, 1, false);
+        assert!(matches!(result, ParseResult::FrameSizeError));
     }
 
     #[test]
     fn test_invalid_max_frame_size_settings() {
-        let mut parser = MockH2MaxFrameSizeParser::new();
+        let mut decoder = LiveH2DataFrameDecoder::new();
 
-        // Test below minimum
-        let settings = vec![(SETTINGS_MAX_FRAME_SIZE, MIN_MAX_FRAME_SIZE - 1)];
-        let result = parser.process_settings(&settings);
-        assert!(result.is_err());
+        let result =
+            decoder.process_settings(&[(SETTINGS_MAX_FRAME_SIZE_ID, MIN_MAX_FRAME_SIZE - 1)]);
+        assert!(matches!(
+            result,
+            ParseResult::ProtocolError(ErrorCode::ProtocolError)
+        ));
 
-        // Test above maximum
-        let settings = vec![(SETTINGS_MAX_FRAME_SIZE, MAX_MAX_FRAME_SIZE + 1)];
-        let result = parser.process_settings(&settings);
-        assert!(result.is_err());
+        let result = decoder.process_settings(&[(SETTINGS_MAX_FRAME_SIZE_ID, MAX_FRAME_SIZE + 1)]);
+        assert!(matches!(
+            result,
+            ParseResult::ProtocolError(ErrorCode::ProtocolError)
+        ));
 
-        // Test valid boundaries
-        let settings = vec![(SETTINGS_MAX_FRAME_SIZE, MIN_MAX_FRAME_SIZE)];
-        assert!(parser.process_settings(&settings).is_ok());
+        assert!(matches!(
+            decoder.process_settings(&[(SETTINGS_MAX_FRAME_SIZE_ID, MIN_MAX_FRAME_SIZE)]),
+            ParseResult::SettingsProcessed { .. }
+        ));
 
-        let settings = vec![(SETTINGS_MAX_FRAME_SIZE, MAX_MAX_FRAME_SIZE)];
-        assert!(parser.process_settings(&settings).is_ok());
+        assert!(matches!(
+            decoder.process_settings(&[(SETTINGS_MAX_FRAME_SIZE_ID, MAX_FRAME_SIZE)]),
+            ParseResult::SettingsProcessed { .. }
+        ));
     }
 
     #[test]
     fn test_zero_payload_data_frame() {
-        let mut parser = MockH2MaxFrameSizeParser::new();
-
-        // Zero-length DATA frame should be accepted
-        let result = parser.process_data_frame(1, 0, false, 0, false);
+        let mut decoder = LiveH2DataFrameDecoder::new();
+        let result = decoder.process_data_frame(1, 0, false, 0, false);
         match result {
             ParseResult::DataFrameProcessed { payload_size, .. } => {
                 assert_eq!(payload_size, 0);
@@ -553,57 +553,49 @@ mod tests {
 
     #[test]
     fn test_data_frame_encoding() {
-        let payload = vec![0x42; 1000];
-        let frame = encode_data_frame(1, &payload, false, 0, true);
+        let frame = encode_data_frame(1, 1_000, false, 0, true, true);
 
-        // Check frame header
-        assert_eq!(frame[3], DATA_TYPE);
-        assert_eq!(frame[4], END_STREAM_FLAG);
+        assert_eq!(frame[3], FrameType::Data as u8);
+        assert_eq!(frame[4], data_flags::END_STREAM);
         assert_eq!(
             u32::from_be_bytes([frame[5], frame[6], frame[7], frame[8]]),
             1
         );
-
-        // Check payload
-        assert_eq!(&frame[9..], &payload);
+        assert_eq!(frame.len() - 9, 1_000);
+        assert!(frame[9..].iter().all(|byte| *byte == 0x42));
     }
 
     #[test]
     fn test_padded_data_frame_encoding() {
-        let payload = vec![0x42; 100];
         let padding_size = 10;
-        let frame = encode_data_frame(1, &payload, true, padding_size, false);
+        let frame = encode_data_frame(1, 100, true, padding_size, false, true);
 
-        // Check total frame size
-        let expected_total = 1 + payload.len() + padding_size as usize;
-        assert_eq!(frame.len() - 9, expected_total); // Subtract header size
+        let expected_total = 1 + 100 + usize::from(padding_size);
+        assert_eq!(frame.len() - 9, expected_total);
 
-        // Check pad length byte
         assert_eq!(frame[9], padding_size);
-
-        // Check payload
-        assert_eq!(&frame[10..10 + payload.len()], &payload);
-
-        // Check padding (should be zeros)
-        for &byte in &frame[10 + payload.len()..] {
-            assert_eq!(byte, 0);
-        }
+        assert!(frame[10..110].iter().all(|byte| *byte == 0x42));
+        assert!(frame[110..].iter().all(|byte| *byte == 0));
     }
 
     #[test]
     fn test_maximum_possible_frame_size() {
-        let mut parser = MockH2MaxFrameSizeParser::new();
+        let mut decoder = LiveH2DataFrameDecoder::new();
+        assert!(matches!(
+            decoder.process_settings(&[(SETTINGS_MAX_FRAME_SIZE_ID, MAX_FRAME_SIZE)]),
+            ParseResult::SettingsProcessed { .. }
+        ));
 
-        // Set to maximum possible MAX_FRAME_SIZE
-        let settings = vec![(SETTINGS_MAX_FRAME_SIZE, MAX_MAX_FRAME_SIZE)];
-        parser.process_settings(&settings).unwrap();
+        let result = decoder.process_data_frame(1, MAX_FRAME_SIZE, false, 0, false);
+        assert!(matches!(
+            result,
+            ParseResult::SkippedLargeAcceptedCandidate {
+                payload_size: MAX_FRAME_SIZE,
+                max_frame_size: MAX_FRAME_SIZE
+            }
+        ));
 
-        // Test frame at maximum limit
-        let result = parser.process_data_frame(1, MAX_MAX_FRAME_SIZE, false, 0, false);
-        assert!(matches!(result, ParseResult::DataFrameProcessed { .. }));
-
-        // Test frame above maximum limit (should be impossible in practice)
-        let result = parser.process_data_frame(1, MAX_MAX_FRAME_SIZE + 1, false, 0, false);
-        assert!(matches!(result, ParseResult::FrameSizeError(_)));
+        let result = decoder.process_data_frame(1, MAX_FRAME_SIZE + 1, false, 0, false);
+        assert!(matches!(result, ParseResult::InvalidWireLength { .. }));
     }
 }
