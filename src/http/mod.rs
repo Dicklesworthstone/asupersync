@@ -22,6 +22,11 @@ pub mod body;
 pub mod compress;
 pub mod h1;
 pub mod h2;
+
+// Conformance tests for H1 vs H2 header decoder equivalence
+#[cfg(test)]
+mod h1_h2_header_conformance_test;
+
 /// Native HTTP/3 API surface (T4.1).
 ///
 /// This module intentionally exports Tokio-free HTTP/3 primitives from
