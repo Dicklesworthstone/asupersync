@@ -383,8 +383,8 @@ mod behavioral {
             "panic must produce 500 status",
         );
         assert_eq!(
-            resp.body,
-            &b"Internal Server Error"[..],
+            &*resp.body,
+            b"Internal Server Error",
             "body must be the fixed canned string — the panic \
              message MUST NOT appear here (information leakage)",
         );
@@ -436,7 +436,7 @@ mod behavioral {
         let resp = middleware.call(req);
 
         assert_eq!(resp.status, StatusCode::OK);
-        assert_eq!(resp.body, &b"ok"[..]);
+        assert_eq!(&*resp.body, b"ok");
     }
 
     #[test]
