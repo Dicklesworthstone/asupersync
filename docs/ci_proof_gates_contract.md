@@ -100,6 +100,39 @@ rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_docs CARG
 
 Every gate failure emits an exact rerun command for reproduction.
 
+## Validation Frontier Ledger
+
+Broad proof commands stop for two very different reasons: the owned slice failed locally, or shared-main/coordination debt blocked a broader lane before it reached the owned slice. The canonical schema for recording that distinction is `artifacts/validation_frontier_ledger_schema_v1.json`, and the contract/parser-fixture verifier is `tests/validation_frontier_ledger_contract.rs`.
+
+Ledger rows are meant to be pasted into bead close reasons and Agent Mail updates instead of claiming broad green proof from a proxy command. Each row records:
+
+1. The intended proof or coordination command.
+2. The touched files that motivated the attempt.
+3. The normalized decision: `pass`, `blocked-external`, or `failed-local`.
+4. The first failing crate or coordination surface, target, file, line, and error class.
+5. The likely owner or bead when known.
+6. The narrower supplemental proof that still covered the local change.
+
+Close reasons should cite the frontier row directly. The minimum paste-ready shape is:
+
+- `blocked-external` or `failed-local`
+- intended command
+- first blocker file and line
+- error class plus short summary
+- supplemental proof command
+
+Example:
+
+```text
+blocked-external: intended `rch exec -- cargo test --test combinator_select_fairness_determinism_audit -- --nocapture`; stopped at `src/sync/semaphore.rs:37` (`rustc_compile_error`, unused imports); supplemental proof `rch exec -- rustfmt --edition 2024 --check tests/combinator_select_fairness_determinism_audit.rs`.
+```
+
+Validation for the ledger contract is also `rch`-scoped:
+
+```bash
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_validation_frontier_ledger cargo test -p asupersync --test validation_frontier_ledger_contract -- --nocapture
+```
+
 ## Validation
 
 ```bash
@@ -109,6 +142,7 @@ rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C deb
 ## Cross-References
 
 - `artifacts/ci_proof_gates_v1.json`
+- `artifacts/validation_frontier_ledger_schema_v1.json` -- Broad-proof blocker schema and closeout citation format
 - `artifacts/claim_evidence_graph_v1.json` -- Claim/evidence graph
 - `artifacts/capability_token_model_v1.json` -- Revocation integrity
 - `artifacts/crash_recovery_validation_v1.json` -- Reproducibility

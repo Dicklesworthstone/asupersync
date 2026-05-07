@@ -1,0 +1,232 @@
+{
+  "contract_version": "validation-frontier-ledger-v1",
+  "bead_id": "asupersync-aj7lx3.3",
+  "description": "Schema and fixture corpus for recording exact validation frontiers when broad proof commands stop in unrelated blockers.",
+  "record_schema_version": "validation-frontier-record-v1",
+  "decision_classes": [
+    {
+      "decision": "pass",
+      "meaning": "The intended proof command completed and is the primary validation claim."
+    },
+    {
+      "decision": "blocked-external",
+      "meaning": "The intended proof command or commit path stopped in an unrelated external blocker; cite the blocker and the narrower supplemental proof."
+    },
+    {
+      "decision": "failed-local",
+      "meaning": "The intended proof command stopped in a blocker caused by the owned slice itself."
+    }
+  ],
+  "error_classes": [
+    {
+      "error_class": "rustc_compile_error",
+      "surface": "cargo check or cargo test",
+      "ownership_expectation": "Route to the file owner or local bead when the touched slice caused the compile stop."
+    },
+    {
+      "error_class": "clippy_lint_wall",
+      "surface": "cargo clippy",
+      "ownership_expectation": "Treat unrelated lint debt as an external blocker unless the touched slice introduced it."
+    },
+    {
+      "error_class": "file_reservation_conflict",
+      "surface": "agent-mail reservation",
+      "ownership_expectation": "Treat as external coordination blocker; cite the holding agent and expiry."
+    },
+    {
+      "error_class": "peer_dirty_index_conflict",
+      "surface": "shared git index",
+      "ownership_expectation": "Treat as external shared-main blocker; cite the staged peer paths before committing."
+    }
+  ],
+  "record_fields": [
+    {
+      "name": "command",
+      "type": "string",
+      "description": "The intended proof or coordination command that was attempted."
+    },
+    {
+      "name": "timestamp",
+      "type": "string",
+      "description": "RFC 3339 timestamp for the attempt."
+    },
+    {
+      "name": "touched_files",
+      "type": "string[]",
+      "description": "Owned files that motivated the validation attempt."
+    },
+    {
+      "name": "decision",
+      "type": "enum(pass|blocked-external|failed-local)",
+      "description": "How the result should be cited in a close reason."
+    },
+    {
+      "name": "error_class",
+      "type": "string",
+      "description": "Normalized blocker classification."
+    },
+    {
+      "name": "first_failure.crate_or_surface",
+      "type": "string",
+      "description": "The first crate or coordination surface that stopped the attempt."
+    },
+    {
+      "name": "first_failure.target",
+      "type": "string",
+      "description": "The first failing cargo target or coordination target."
+    },
+    {
+      "name": "first_failure.file",
+      "type": "string",
+      "description": "The first failing file or path."
+    },
+    {
+      "name": "first_failure.line",
+      "type": "integer",
+      "description": "Line number for code blockers; 0 for coordination-only blockers."
+    },
+    {
+      "name": "likely_owner",
+      "type": "string",
+      "description": "Best current ownership hint, including 'local_change' or external agent names."
+    },
+    {
+      "name": "likely_bead",
+      "type": "string|null",
+      "description": "Best current bead hint when known."
+    },
+    {
+      "name": "supplemental_proof_command",
+      "type": "string",
+      "description": "The narrower proof that still covered the local change."
+    },
+    {
+      "name": "summary",
+      "type": "string",
+      "description": "Short blocker summary that can be pasted directly into a close reason."
+    }
+  ],
+  "close_reason_template": {
+    "required_fields": [
+      "decision",
+      "command",
+      "first_failure.file",
+      "first_failure.line",
+      "error_class",
+      "summary",
+      "supplemental_proof_command"
+    ],
+    "example": "blocked-external: intended `rch exec -- cargo test --test combinator_select_fairness_determinism_audit -- --nocapture`; stopped at `src/sync/semaphore.rs:37` (`rustc_compile_error`, unused imports) while touching `tests/combinator_select_fairness_determinism_audit.rs`; supplemental proof `rch exec -- rustfmt --edition 2024 --check tests/combinator_select_fairness_determinism_audit.rs`."
+  },
+  "redaction_rules": [
+    "Do not include home-directory paths or bearer tokens.",
+    "Prefer repo-relative file paths and exact rustc/clippy error summaries.",
+    "Record local fallback markers explicitly instead of hiding them."
+  ],
+  "fixtures": [
+    {
+      "fixture_id": "VF-RUSTC-COMPILE-STOP",
+      "source_kind": "rustc_output",
+      "command": "rch exec -- cargo check -p asupersync --lib",
+      "timestamp": "2026-05-07T08:34:15Z",
+      "touched_files": [
+        "src/messaging/consumer.rs",
+        "fuzz/fuzz_targets/namespace_kernel.rs"
+      ],
+      "supplemental_proof_command": "rch exec -- rustfmt --edition 2024 --check src/messaging/consumer.rs fuzz/fuzz_targets/namespace_kernel.rs",
+      "snippet": "error[E0004]: non-exhaustive patterns: `DeliverPolicy::ByStartTime(_)` not covered\n  --> src/messaging/consumer.rs:2198:11\n   |\n2198 |     match deliver_policy {\n   |           ^^^^^^^^^^^^^^ pattern `DeliverPolicy::ByStartTime(_)` not covered\n   |\nerror: could not compile `asupersync` (lib) due to 1 previous error\n",
+      "expected_record": {
+        "decision": "failed-local",
+        "error_class": "rustc_compile_error",
+        "first_failure": {
+          "crate_or_surface": "asupersync",
+          "target": "lib",
+          "file": "src/messaging/consumer.rs",
+          "line": 2198
+        },
+        "likely_owner": "local_change",
+        "likely_bead": "asupersync-cu6cfw",
+        "summary": "non-exhaustive patterns: `DeliverPolicy::ByStartTime(_)` not covered"
+      }
+    },
+    {
+      "fixture_id": "VF-CLIPPY-LINT-WALL",
+      "source_kind": "clippy_output",
+      "command": "rch exec -- cargo clippy -p asupersync-conformance --bin otel_resource_conformance -- -D warnings",
+      "timestamp": "2026-05-07T08:07:53Z",
+      "touched_files": [
+        "conformance/src/bin/otel_resource_conformance.rs"
+      ],
+      "supplemental_proof_command": "rch exec -- cargo test -p asupersync-conformance --bin otel_resource_conformance -- --nocapture",
+      "snippet": "error: this function has too many arguments (8/7)\n   --> src/observability/otel.rs:114:1\n    |\n114 | fn build_pipeline(...) {\n    | ^^^^^^^^^^^^^^^^^^^^^^\n    |\n    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#too_many_arguments\n    = note: `-D clippy::too-many-arguments` implied by `-D warnings`\nerror: could not compile `asupersync` (lib) due to 1 previous error\n",
+      "expected_record": {
+        "decision": "blocked-external",
+        "error_class": "clippy_lint_wall",
+        "first_failure": {
+          "crate_or_surface": "asupersync",
+          "target": "lib",
+          "file": "src/observability/otel.rs",
+          "line": 114
+        },
+        "likely_owner": "shared-main external blocker",
+        "likely_bead": null,
+        "summary": "this function has too many arguments (8/7)"
+      }
+    },
+    {
+      "fixture_id": "VF-FILE-RESERVATION-CONFLICT",
+      "source_kind": "file_reservation_conflict",
+      "command": "file_reservation_paths(project_key=\"/data/projects/asupersync\", agent_name=\"BoldHill\", paths=[\"README.md\"], ttl_seconds=3600, exclusive=true)",
+      "timestamp": "2026-05-07T08:38:04Z",
+      "touched_files": [
+        "README.md"
+      ],
+      "supplemental_proof_command": "br show asupersync-aj7lx3.1 --json",
+      "likely_bead_hint": "asupersync-aj7lx3.1",
+      "snippet": "{\"granted\":[],\"conflicts\":[{\"path\":\"README.md\",\"holders\":[{\"agent\":\"SunnyHollow\",\"path_pattern\":\"README.md\",\"exclusive\":true,\"expires_ts\":\"2026-05-07T09:36:30.647793Z\"}]}]}",
+      "expected_record": {
+        "decision": "blocked-external",
+        "error_class": "file_reservation_conflict",
+        "first_failure": {
+          "crate_or_surface": "agent-mail",
+          "target": "reservation",
+          "file": "README.md",
+          "line": 0
+        },
+        "likely_owner": "SunnyHollow",
+        "likely_bead": "asupersync-aj7lx3.1",
+        "summary": "exclusive reservation held by SunnyHollow until 2026-05-07T09:36:30.647793Z"
+      }
+    },
+    {
+      "fixture_id": "VF-PEER-DIRTY-INDEX",
+      "source_kind": "peer_dirty_index",
+      "command": "git diff --cached --name-only",
+      "timestamp": "2026-05-07T08:20:11Z",
+      "touched_files": [
+        "tests/combinator_select_fairness_determinism_audit.rs"
+      ],
+      "supplemental_proof_command": "git restore --staged .beads/issues.jsonl fuzz/fuzz_targets/raptorq_codec_symbol_corruption.rs && git diff --cached --name-only",
+      "snippet": ".beads/issues.jsonl\nfuzz/fuzz_targets/raptorq_codec_symbol_corruption.rs\n",
+      "expected_record": {
+        "decision": "blocked-external",
+        "error_class": "peer_dirty_index_conflict",
+        "first_failure": {
+          "crate_or_surface": "git",
+          "target": "staged-index",
+          "file": ".beads/issues.jsonl",
+          "line": 0
+        },
+        "likely_owner": "shared-main peer dirt",
+        "likely_bead": null,
+        "summary": "unrelated staged paths present before commit"
+      }
+    }
+  ],
+  "contract_tests": [
+    "tests/validation_frontier_ledger_contract.rs"
+  ],
+  "docs": [
+    "docs/ci_proof_gates_contract.md"
+  ]
+}
