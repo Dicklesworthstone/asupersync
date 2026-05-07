@@ -147,8 +147,8 @@
 //! would all be caught by the structural pins below.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 fn read(rel: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
@@ -181,8 +181,7 @@ fn region_with_budget_runner_borrows_pinned_fut_for_await() {
     let source = read("src/cx/scope.rs");
 
     assert!(
-        source.contains("let runner = RegionRunner {")
-            && source.contains("fut: pinned_fut,"),
+        source.contains("let runner = RegionRunner {") && source.contains("fut: pinned_fut,"),
         "REGRESSION: RegionRunner construction changed. If \
          it consumes pinned_fut by value, the user future \
          may be dropped earlier — different drop ordering.",
@@ -218,14 +217,14 @@ fn region_with_budget_cleanup_runs_before_function_return() {
     // Cleanup ordering: runner.await → outcome match →
     // cancel_request → begin_close → RegionCloseFuture.await
     // → Ok(outcome).
-    let runner_idx = body.find("let (result, state) = runner.await;")
+    let runner_idx = body
+        .find("let (result, state) = runner.await;")
         .expect("runner.await");
-    let cleanup_idx = body.find("match &outcome {")
-        .expect("outcome match");
-    let close_await_idx = body.find("RegionCloseFuture { state: notify }.await;")
+    let cleanup_idx = body.find("match &outcome {").expect("outcome match");
+    let close_await_idx = body
+        .find("RegionCloseFuture { state: notify }.await;")
         .expect("RegionCloseFuture.await");
-    let return_idx = body.find("Ok(outcome)\n    }")
-        .expect("Ok(outcome) return");
+    let return_idx = body.find("Ok(outcome)\n    }").expect("Ok(outcome) return");
 
     assert!(
         runner_idx < cleanup_idx,
@@ -298,9 +297,11 @@ fn region_with_budget_pins_pinned_fut_after_factory_succeeds() {
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
-    let factory_panic_idx = body.find("std::panic::resume_unwind(payload);")
+    let factory_panic_idx = body
+        .find("std::panic::resume_unwind(payload);")
         .expect("factory panic resume_unwind");
-    let pin_idx = body.find("let pinned_fut = std::pin::pin!(CatchUnwind { inner: fut });")
+    let pin_idx = body
+        .find("let pinned_fut = std::pin::pin!(CatchUnwind { inner: fut });")
         .expect("pin! macro");
 
     assert!(
@@ -324,9 +325,7 @@ fn catch_unwind_holds_inner_future_until_dropped() {
 
     let struct_marker = "pub(crate) struct CatchUnwind<F> {";
     let start = source.find(struct_marker).expect("CatchUnwind struct");
-    let body_end = source[start..]
-        .find("\n}\n")
-        .expect("CatchUnwind close");
+    let body_end = source[start..].find("\n}\n").expect("CatchUnwind close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -375,7 +374,9 @@ fn region_close_future_await_blocks_until_quiescence() {
     let source = read("src/cx/scope.rs");
 
     let struct_marker = "struct RegionCloseFuture {";
-    let start = source.find(struct_marker).expect("RegionCloseFuture struct");
+    let start = source
+        .find(struct_marker)
+        .expect("RegionCloseFuture struct");
     let body_end = source[start..]
         .find("\n}\n")
         .expect("RegionCloseFuture close");
@@ -405,8 +406,7 @@ fn region_close_future_poll_returns_ready_when_state_closed() {
     let body = &source[start..next_impl];
 
     assert!(
-        body.contains("if state.closed {")
-            && body.contains("Poll::Ready(())"),
+        body.contains("if state.closed {") && body.contains("Poll::Ready(())"),
         "REGRESSION: RegionCloseFuture::poll no longer \
          checks state.closed for Ready. Either the await \
          returns prematurely or it never returns — both \
@@ -468,7 +468,10 @@ impl Drop for DropCounter {
     }
 }
 
-fn function_with_drop_counter_local(drop_count: Arc<AtomicU32>, drop_count_at_return: Arc<AtomicU32>) -> u32 {
+fn function_with_drop_counter_local(
+    drop_count: Arc<AtomicU32>,
+    drop_count_at_return: Arc<AtomicU32>,
+) -> u32 {
     let _local = DropCounter {
         drop_count: Arc::clone(&drop_count),
     };

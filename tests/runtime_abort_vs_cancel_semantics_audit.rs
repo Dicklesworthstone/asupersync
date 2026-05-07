@@ -196,9 +196,7 @@ fn task_handle_abort_default_reason_is_user_kind_not_force_kill() {
 
     let fn_marker = "pub fn abort(&self) {";
     let start = source.find(fn_marker).expect("abort fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("abort close");
+    let body_end = source[start..].find("\n    }\n").expect("abort close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -212,11 +210,7 @@ fn task_handle_abort_default_reason_is_user_kind_not_force_kill() {
 
     // Forbid hard-kill kinds.
     let cancel_kinds = read("src/types/cancel.rs");
-    let suspect_force_kinds = [
-        "ForceKill,",
-        "HardAbort,",
-        "Force,",
-    ];
+    let suspect_force_kinds = ["ForceKill,", "HardAbort,", "Force,"];
     for pat in &suspect_force_kinds {
         assert!(
             !cancel_kinds.contains(pat),
@@ -289,10 +283,7 @@ fn no_unsafe_thread_termination_in_abort_or_cancel_paths() {
     // forbids unsafe code; any pthread_cancel /
     // process::abort / TerminateThread call would be a
     // soundness hazard.
-    for rel in &[
-        "src/runtime/task_handle.rs",
-        "src/cx/cx.rs",
-    ] {
+    for rel in &["src/runtime/task_handle.rs", "src/cx/cx.rs"] {
         let source = read(rel);
         let suspect_force_paths = [
             "libc::pthread_cancel",

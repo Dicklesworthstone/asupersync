@@ -339,7 +339,8 @@ fn payload_to_string_extracts_str_or_string_payload_for_panic_message() {
     // — debugging panic causes is degraded.
     let source = read("src/cx/scope.rs");
 
-    let fn_marker = "pub(crate) fn payload_to_string(payload: &Box<dyn std::any::Any + Send>) -> String {";
+    let fn_marker =
+        "pub(crate) fn payload_to_string(payload: &Box<dyn std::any::Any + Send>) -> String {";
     let start = source.find(fn_marker).expect("payload_to_string fn");
     let body_end = source[start..]
         .find("\n}\n")
@@ -347,8 +348,7 @@ fn payload_to_string_extracts_str_or_string_payload_for_panic_message() {
     let body = &source[start..start + body_end];
 
     assert!(
-        body.contains(".downcast_ref::<&str>()")
-            && body.contains(".downcast_ref::<String>()"),
+        body.contains(".downcast_ref::<&str>()") && body.contains(".downcast_ref::<String>()"),
         "REGRESSION: payload_to_string no longer downcasts \
          to &str + String. Panic messages from these \
          common payload types are lost — operators see \

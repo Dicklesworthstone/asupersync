@@ -145,9 +145,7 @@ fn task_handle_abort_publishes_cancel_state_does_not_block() {
 
     let fn_marker = "pub fn abort(&self) {";
     let start = source.find(fn_marker).expect("abort fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("abort close");
+    let body_end = source[start..].find("\n    }\n").expect("abort close");
     let body = &source[start..start + body_end];
 
     // The body is a one-liner that delegates to
@@ -161,11 +159,7 @@ fn task_handle_abort_publishes_cancel_state_does_not_block() {
     );
 
     // Forbid synchronous-block patterns.
-    let suspect_blocking = [
-        "loop {",
-        "while !is_finished",
-        "block_on",
-    ];
+    let suspect_blocking = ["loop {", "while !is_finished", "block_on"];
     for pat in &suspect_blocking {
         assert!(
             !body.contains(pat),
@@ -243,7 +237,9 @@ fn is_finished_checks_terminal_consumed_or_receiver_ready_or_closed() {
     let body = &source[start..start + body_end];
 
     assert!(
-        body.contains("self.terminal_consumed || self.receiver.is_ready() || self.receiver.is_closed()"),
+        body.contains(
+            "self.terminal_consumed || self.receiver.is_ready() || self.receiver.is_closed()"
+        ),
         "REGRESSION: is_finished body changed. Either it \
          now over-reports finished (e.g., returns true on \
          abort regardless of result channel — lies to \
@@ -412,9 +408,7 @@ fn task_handle_uses_weak_handle_to_avoid_keeping_inner_alive() {
 
     let struct_marker = "pub struct TaskHandle<T> {";
     let start = source.find(struct_marker).expect("TaskHandle struct");
-    let body_end = source[start..]
-        .find("\n}\n")
-        .expect("TaskHandle close");
+    let body_end = source[start..].find("\n}\n").expect("TaskHandle close");
     let body = &source[start..start + body_end];
 
     assert!(

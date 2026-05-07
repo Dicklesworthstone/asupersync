@@ -357,7 +357,9 @@ fn ledger_stats_pending_field_drives_pending_count() {
     let source = read("src/obligation/ledger.rs");
 
     let acquire_marker = "pub fn acquire_with_context(";
-    let pos = source.find(acquire_marker).expect("acquire_with_context fn");
+    let pos = source
+        .find(acquire_marker)
+        .expect("acquire_with_context fn");
     let body_window = &source[pos..pos + 2500];
 
     assert!(
@@ -376,7 +378,8 @@ fn invariant_no_obligation_leaks_documented_in_agents_md() {
     let source = read("AGENTS.md");
 
     assert!(
-        source.contains("No obligation leaks") || source.contains("no obligation leaks")
+        source.contains("No obligation leaks")
+            || source.contains("no obligation leaks")
             || source.contains("**No obligation leaks:**"),
         "REGRESSION: AGENTS.md no longer documents the \
          no-obligation-leaks invariant.",

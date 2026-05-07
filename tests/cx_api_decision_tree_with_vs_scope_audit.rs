@@ -180,9 +180,7 @@ fn cx_scope_exists_and_returns_scope_static_no_new_region() {
     // The body must NOT call create_child_region.
     let fn_marker = "pub fn scope(&self) -> crate::cx::Scope<'static> {";
     let start = source.find(fn_marker).expect("Cx::scope fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("Cx::scope close");
+    let body_end = source[start..].find("\n    }\n").expect("Cx::scope close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -261,8 +259,7 @@ fn cx_masked_docstring_documents_cancel_protocol_mask_semantics() {
 
     assert!(
         preceding.contains("Executes a closure with cancellation masked")
-            && (preceding.contains("checkpoint() will return Ok") ||
-                preceding.contains("masked")),
+            && (preceding.contains("checkpoint() will return Ok") || preceding.contains("masked")),
         "REGRESSION: Cx::masked docstring no longer \
          documents the cancel-defer semantic. Users may \
          confuse it with abort-suppression or other \
@@ -300,8 +297,7 @@ fn scope_region_docstring_documents_await_quiescence_contract() {
 
     assert!(
         preceding.contains("RegionCreateError")
-            || preceding.contains("region")
-            && preceding.contains("close sequence")
+            || preceding.contains("region") && preceding.contains("close sequence")
             || preceding.contains("quiescence"),
         "REGRESSION: Scope::region docstring no longer \
          documents the contract. Users may misuse — \

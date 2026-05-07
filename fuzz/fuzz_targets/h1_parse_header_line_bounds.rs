@@ -5,16 +5,12 @@
 //! RFC 7230), oversized lines.
 //!
 //! Invariants:
-//!   * No panic on any byte sequence (header-line is on the parse
-//!     hot path of every HTTP/1 request — a panic here is a
-//!     remote DoS).
+//!   * Parser panics, if any, surface directly to libFuzzer.
 //!   * Parser returns Result; the (name_end, value_start, value_end)
 //!     triple, when Ok, must satisfy
 //!     name_end <= value_start <= value_end <= line.len().
 
 #![no_main]
-
-use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use asupersync::http::h1::codec::fuzz_parse_header_line_bounds;
 use libfuzzer_sys::fuzz_target;
@@ -26,21 +22,7 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    let r = catch_unwind(AssertUnwindSafe(|| fuzz_parse_header_line_bounds(data)));
-    assert!(
-        r.is_ok(),
-        "parse_header_line_bounds panicked on {} bytes",
-        data.len()
-    );
-
-    if let Ok(Ok((name_end, value_start, value_end))) = r {
-        assert!(
-            name_end <= value_start && value_start <= value_end && value_end <= data.len(),
-            "parse_header_line_bounds returned inconsistent indices: \
-             name_end={name_end}, value_start={value_start}, value_end={value_end}, len={}",
-            data.len()
-        );
-    }
+    assert_consistent_bounds(data);
 
     // Stress: append boundary suffixes to the random input.
     for suffix in &[b": value".as_ref(), b":\r\n".as_ref(), b"\r\n\r\n".as_ref()] {
@@ -49,9 +31,17 @@ fuzz_target!(|data: &[u8]| {
         if combined.len() > MAX_INPUT_LEN {
             continue;
         }
-        let r = catch_unwind(AssertUnwindSafe(|| {
-            fuzz_parse_header_line_bounds(&combined)
-        }));
-        assert!(r.is_ok());
+        assert_consistent_bounds(&combined);
     }
 });
+
+fn assert_consistent_bounds(line: &[u8]) {
+    if let Ok((name_end, value_start, value_end)) = fuzz_parse_header_line_bounds(line) {
+        assert!(
+            name_end <= value_start && value_start <= value_end && value_end <= line.len(),
+            "parse_header_line_bounds returned inconsistent indices: \
+             name_end={name_end}, value_start={value_start}, value_end={value_end}, len={}",
+            line.len()
+        );
+    }
+}

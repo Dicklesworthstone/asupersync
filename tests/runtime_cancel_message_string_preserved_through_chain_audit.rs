@@ -147,9 +147,7 @@ fn cancel_reason_with_message_setter_preserves_string() {
     // Body assigns to message field — no transformation.
     let fn_marker = "pub fn with_message(mut self, message: &'static str) -> Self {";
     let pos = source.find(fn_marker).expect("with_message fn");
-    let body_end = source[pos..]
-        .find("\n    }\n")
-        .expect("with_message close");
+    let body_end = source[pos..].find("\n    }\n").expect("with_message close");
     let body = &source[pos..pos + body_end];
 
     assert!(
@@ -159,11 +157,7 @@ fn cancel_reason_with_message_setter_preserves_string() {
     );
 
     // No string transformation: no .truncate(), no [..N], etc.
-    let suspect_transforms = [
-        ".truncate(",
-        "&message[..",
-        ".chars().take(",
-    ];
+    let suspect_transforms = [".truncate(", "&message[..", ".chars().take("];
     for pat in &suspect_transforms {
         assert!(
             !body.contains(pat),
@@ -186,9 +180,7 @@ fn cancel_reason_user_constructor_takes_message() {
 
     let fn_marker = "pub fn user(message: &'static str) -> Self {";
     let pos = source.find(fn_marker).expect("user fn");
-    let body_end = source[pos..]
-        .find("\n    }\n")
-        .expect("user close");
+    let body_end = source[pos..].find("\n    }\n").expect("user close");
     let body = &source[pos..pos + body_end];
 
     assert!(
@@ -506,8 +498,8 @@ fn build_chain_with_message(
     for window in region_ids.windows(2) {
         let parent_id = window[0];
         let parent_reason = reasons.last().unwrap().clone();
-        let child = CancelReason::parent_cancelled(parent_id)
-            .with_cause_limited(parent_reason, max_depth);
+        let child =
+            CancelReason::parent_cancelled(parent_id).with_cause_limited(parent_reason, max_depth);
         reasons.push(child);
     }
 
@@ -661,7 +653,11 @@ fn behavioral_task_level_carrier_preserves_message_for_user_cx_lookup() {
     let leaf_task = MockTask::new();
     leaf_task.install_cancel_reason(chain[2].clone());
 
-    for (label, task) in [("root", &root_task), ("mid", &mid_task), ("leaf", &leaf_task)] {
+    for (label, task) in [
+        ("root", &root_task),
+        ("mid", &mid_task),
+        ("leaf", &leaf_task),
+    ] {
         assert_eq!(
             task.user_observes_message().as_deref(),
             Some("operator-initiated abort"),

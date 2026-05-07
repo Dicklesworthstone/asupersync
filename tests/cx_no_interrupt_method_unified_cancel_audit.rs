@@ -182,7 +182,9 @@ fn cx_cancel_with_exists_with_kind_and_message() {
     let source = read("src/cx/cx.rs");
 
     assert!(
-        source.contains("pub fn cancel_with(&self, kind: CancelKind, message: Option<&'static str>) {"),
+        source.contains(
+            "pub fn cancel_with(&self, kind: CancelKind, message: Option<&'static str>) {"
+        ),
         "REGRESSION: Cx::cancel_with signature is gone or \
          changed. The canonical attribution-rich cancel \
          path is broken.",
@@ -333,8 +335,7 @@ fn cancel_with_documents_unified_protocol() {
     // add `interrupt` as a "different" thing.
     let source = read("src/cx/cx.rs");
 
-    let fn_marker =
-        "pub fn cancel_with(&self, kind: CancelKind, message: Option<&'static str>) {";
+    let fn_marker = "pub fn cancel_with(&self, kind: CancelKind, message: Option<&'static str>) {";
     let pos = source.find(fn_marker).expect("cancel_with fn");
     let preceding = &source[pos.saturating_sub(2500)..pos];
 

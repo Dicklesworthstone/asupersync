@@ -265,8 +265,7 @@ fn join_future_drop_checks_receiver_finished_before_stamping_abort() {
     let body = &source[start..start + body_end];
 
     assert!(
-        body.contains("if self.inner.receiver_finished() {")
-            && body.contains("return;"),
+        body.contains("if self.inner.receiver_finished() {") && body.contains("return;"),
         "REGRESSION: JoinFuture::Drop no longer checks \
          receiver_finished. A late-drop after the result \
          landed would silently overwrite the success \
@@ -379,7 +378,9 @@ fn task_handle_is_finished_predicate_for_drop_safety_check() {
     );
 
     assert!(
-        source.contains("self.terminal_consumed || self.receiver.is_ready() || self.receiver.is_closed()"),
+        source.contains(
+            "self.terminal_consumed || self.receiver.is_ready() || self.receiver.is_closed()"
+        ),
         "REGRESSION: is_finished body changed. The three \
          conditions (terminal_consumed, receiver ready, \
          receiver closed) collectively detect any \
@@ -397,9 +398,7 @@ fn task_handle_struct_holds_weak_inner_to_avoid_keeping_task_alive() {
 
     let struct_marker = "pub struct TaskHandle<T> {";
     let start = source.find(struct_marker).expect("TaskHandle struct");
-    let body_end = source[start..]
-        .find("\n}\n")
-        .expect("TaskHandle close");
+    let body_end = source[start..].find("\n}\n").expect("TaskHandle close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -421,9 +420,7 @@ fn join_future_struct_has_terminal_state_drop_abort_defused_drop_reason_fields()
 
     let struct_marker = "pub struct JoinFuture<'a, T> {";
     let start = source.find(struct_marker).expect("JoinFuture struct");
-    let body_end = source[start..]
-        .find("\n}\n")
-        .expect("JoinFuture close");
+    let body_end = source[start..].find("\n}\n").expect("JoinFuture close");
     let body = &source[start..start + body_end];
 
     assert!(

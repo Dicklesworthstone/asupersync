@@ -390,7 +390,10 @@ fn no_method_named_detached_or_orphan_anywhere_in_cx_runtime_paths() {
     // browser bindings have detach() for Web API channels
     // — those are unrelated and skipped.
     let mut files = Vec::new();
-    collect_rs_files(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/cx"), &mut files);
+    collect_rs_files(
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/cx"),
+        &mut files,
+    );
     collect_rs_files(
         &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/runtime"),
         &mut files,

@@ -110,9 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
     print_test_summary(&report);
 
-    // Exit with appropriate code
-    let exit_code = if report.summary.failed > 0 { 1 } else { 0 };
-    std::process::exit(exit_code);
+    std::process::exit(exit_code(&report));
 }
 
 /// Generate a concise summary output
@@ -251,9 +249,48 @@ fn final_status_line(skipped_count: usize, expected_failure_count: usize) -> Str
     }
 }
 
+fn has_incomplete_coverage(
+    report: &asupersync_conformance::ExpectContinueComplianceReport,
+) -> bool {
+    report.total_cases == 0 || report.summary.skipped > 0 || report.summary.expected_failures > 0
+}
+
+fn exit_code(report: &asupersync_conformance::ExpectContinueComplianceReport) -> i32 {
+    if report.summary.failed > 0 || has_incomplete_coverage(report) {
+        1
+    } else {
+        0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn synthetic_report(
+        total_cases: usize,
+        failed: usize,
+        expected_failures: usize,
+        skipped: usize,
+    ) -> asupersync_conformance::ExpectContinueComplianceReport {
+        asupersync_conformance::ExpectContinueComplianceReport {
+            test_run_id: "synthetic".to_string(),
+            timestamp: "2026-05-07T00:00:00Z".to_string(),
+            total_cases,
+            results: Vec::new(),
+            summary: asupersync_conformance::ExpectContinueComplianceSummary {
+                passed: total_cases
+                    .saturating_sub(failed)
+                    .saturating_sub(expected_failures)
+                    .saturating_sub(skipped),
+                failed,
+                expected_failures,
+                skipped,
+                total: total_cases,
+                compliance_score: 0.0,
+            },
+        }
+    }
 
     #[test]
     fn final_status_does_not_claim_all_passed_for_partial_coverage() {
@@ -266,5 +303,33 @@ mod tests {
     #[test]
     fn final_status_claims_all_passed_only_for_full_green_results() {
         assert_eq!(final_status_line(0, 0), "✅ ALL TESTS PASSED");
+    }
+
+    #[test]
+    fn exit_code_is_nonzero_for_expected_failures() {
+        let report = synthetic_report(5, 0, 1, 0);
+
+        assert_eq!(exit_code(&report), 1);
+    }
+
+    #[test]
+    fn exit_code_is_nonzero_for_skipped_coverage() {
+        let report = synthetic_report(5, 0, 0, 1);
+
+        assert_eq!(exit_code(&report), 1);
+    }
+
+    #[test]
+    fn exit_code_is_nonzero_for_zero_case_reports() {
+        let report = synthetic_report(0, 0, 0, 0);
+
+        assert_eq!(exit_code(&report), 1);
+    }
+
+    #[test]
+    fn exit_code_is_zero_only_for_full_pass_coverage() {
+        let report = synthetic_report(5, 0, 0, 0);
+
+        assert_eq!(exit_code(&report), 0);
     }
 }

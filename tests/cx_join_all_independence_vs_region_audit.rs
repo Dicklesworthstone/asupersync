@@ -157,9 +157,7 @@ fn join_all_uses_per_handle_join_future_via_iter_mut_map() {
 
     let fn_marker = "pub async fn join_all<T>(";
     let start = source.find(fn_marker).expect("join_all fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("join_all close");
+    let body_end = source[start..].find("\n    }\n").expect("join_all close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -180,9 +178,7 @@ fn join_all_sequential_await_loop_preserves_per_task_results() {
 
     let fn_marker = "pub async fn join_all<T>(";
     let start = source.find(fn_marker).expect("join_all fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("join_all close");
+    let body_end = source[start..].find("\n    }\n").expect("join_all close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -204,9 +200,7 @@ fn join_all_does_not_call_abort_on_sibling_handles_on_panic() {
 
     let fn_marker = "pub async fn join_all<T>(";
     let start = source.find(fn_marker).expect("join_all fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("join_all close");
+    let body_end = source[start..].find("\n    }\n").expect("join_all close");
     let body = &source[start..start + body_end];
 
     let suspect_cancel_on_failure = [
@@ -234,9 +228,7 @@ fn join_all_does_not_break_loop_on_first_error_for_full_drain() {
 
     let fn_marker = "pub async fn join_all<T>(";
     let start = source.find(fn_marker).expect("join_all fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("join_all close");
+    let body_end = source[start..].find("\n    }\n").expect("join_all close");
     let body = &source[start..start + body_end];
 
     // Look for early-break / early-return inside the loop.
@@ -307,9 +299,7 @@ fn join_all_results_vec_capacity_matches_input_handles_for_one_to_one_mapping() 
 
     let fn_marker = "pub async fn join_all<T>(";
     let start = source.find(fn_marker).expect("join_all fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("join_all close");
+    let body_end = source[start..].find("\n    }\n").expect("join_all close");
     let body = &source[start..start + body_end];
 
     assert!(

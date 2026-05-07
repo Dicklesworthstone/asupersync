@@ -154,8 +154,7 @@ fn cancel_request_root_region_gets_exact_original_reason() {
     let body_window = &source[pos..pos + 4000];
 
     assert!(
-        body_window.contains("if rid == region_id {")
-            && body_window.contains("reason.clone()"),
+        body_window.contains("if rid == region_id {") && body_window.contains("reason.clone()"),
         "REGRESSION: cancel_request no longer assigns the \
          exact original reason (reason.clone()) to the \
          root region. Information stripping introduced.",
@@ -243,7 +242,8 @@ fn cancel_request_recovers_from_missing_parent_with_self_rooted_placeholder() {
     let body_window = &source[pos..pos + 5000];
 
     assert!(
-        body_window.contains("CancelReason::with_origin(CancelKind::ParentCancelled, parent_id, now)"),
+        body_window
+            .contains("CancelReason::with_origin(CancelKind::ParentCancelled, parent_id, now)"),
         "REGRESSION: missing-parent fallback no longer \
          synthesizes a self-rooted ParentCancelled \
          placeholder. The chain-break detection signal \
@@ -494,8 +494,7 @@ fn build_propagation_chain(
 
 #[test]
 fn behavioral_root_region_gets_exact_original_reason() {
-    let original = CancelReason::new(CancelKind::Deadline, 1)
-        .with_message("budget exhausted");
+    let original = CancelReason::new(CancelKind::Deadline, 1).with_message("budget exhausted");
     let chain = build_propagation_chain(original.clone(), &[1, 2, 3], 16);
 
     let root_record = &chain[0];
@@ -510,8 +509,7 @@ fn behavioral_root_region_gets_exact_original_reason() {
 
 #[test]
 fn behavioral_descendant_root_cause_returns_original() {
-    let original = CancelReason::new(CancelKind::Deadline, 1)
-        .with_message("budget exhausted");
+    let original = CancelReason::new(CancelKind::Deadline, 1).with_message("budget exhausted");
     let chain = build_propagation_chain(original.clone(), &[1, 2, 3, 4], 16);
 
     // Last in chain is the deepest descendant.
@@ -521,7 +519,8 @@ fn behavioral_descendant_root_cause_returns_original() {
     // root_cause walks back to the original.
     let recovered = deepest.root_cause();
     assert_eq!(
-        recovered.kind, CancelKind::Deadline,
+        recovered.kind,
+        CancelKind::Deadline,
         "REGRESSION: root_cause did not return the original \
          Deadline kind from a 3-level descendant. Info \
          loss.",
@@ -545,8 +544,7 @@ fn behavioral_chain_depth_grows_with_descendants() {
 
 #[test]
 fn behavioral_chain_walker_enumerates_full_attribution_path() {
-    let original = CancelReason::new(CancelKind::Deadline, 1)
-        .with_message("phase boundary");
+    let original = CancelReason::new(CancelKind::Deadline, 1).with_message("phase boundary");
     let chain = build_propagation_chain(original, &[1, 2, 3], 16);
 
     let deepest = &chain[2];
@@ -602,10 +600,7 @@ fn behavioral_immediate_parent_reason_accessible_via_cause() {
 
     // Grandchild's cause should be the child's reason.
     let grandchild = &chain[2];
-    let immediate_parent = grandchild
-        .cause
-        .as_deref()
-        .expect("grandchild has cause");
+    let immediate_parent = grandchild.cause.as_deref().expect("grandchild has cause");
 
     assert_eq!(immediate_parent.kind, CancelKind::ParentCancelled);
     // The "child" reason was constructed with parent_id=1
@@ -614,10 +609,7 @@ fn behavioral_immediate_parent_reason_accessible_via_cause() {
     assert_eq!(immediate_parent.origin_region, 1);
 
     // And one step deeper: the root (Deadline).
-    let grandparent = immediate_parent
-        .cause
-        .as_deref()
-        .expect("child has cause");
+    let grandparent = immediate_parent.cause.as_deref().expect("child has cause");
     assert_eq!(grandparent.kind, CancelKind::Deadline);
     assert_eq!(grandparent.origin_region, 1);
 }

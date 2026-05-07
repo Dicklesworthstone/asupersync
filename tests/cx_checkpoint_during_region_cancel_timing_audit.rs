@@ -227,8 +227,7 @@ fn checkpoint_slow_path_returns_err_via_check_cancel_from_values() {
     // when cancel_requested && mask_depth == 0.
     assert!(
         source.contains("fn check_cancel_from_values(")
-            && source
-                .contains("Err(crate::error::Error::new(crate::error::ErrorKind::Cancelled))"),
+            && source.contains("Err(crate::error::Error::new(crate::error::ErrorKind::Cancelled))"),
         "REGRESSION: check_cancel_from_values no longer \
          emits Err(Cancelled). Cancel-correctness is broken.",
     );
@@ -262,9 +261,7 @@ fn checkpoint_slow_path_record_at_is_internal_bookkeeping_not_user_work() {
     // record_at is purely internal field updates — no I/O,
     // no callbacks, no user-observable side effects.
     let record_at_marker = "pub fn record_at(&mut self, at: Time) {";
-    let ra_pos = context_source
-        .find(record_at_marker)
-        .expect("record_at fn");
+    let ra_pos = context_source.find(record_at_marker).expect("record_at fn");
     let ra_window = &context_source[ra_pos..ra_pos + 300];
 
     assert!(
@@ -340,7 +337,8 @@ fn checkpoint_masked_path_returns_ok_documented() {
     assert!(
         body_window.contains("if cancel_requested {")
             && body_window.contains("if mask_depth == 0 {")
-            && body_window.contains("Err(crate::error::Error::new(crate::error::ErrorKind::Cancelled))")
+            && body_window
+                .contains("Err(crate::error::Error::new(crate::error::ErrorKind::Cancelled))")
             && body_window.contains("Ok(())"),
         "REGRESSION: check_cancel_from_values no longer has \
          the cancel_requested + mask_depth==0 → Err / mask \
@@ -357,9 +355,9 @@ fn checkpoint_unit_test_pins_cancel_returns_err() {
     let source = read("src/cx/cx.rs");
 
     assert!(
-        source.contains("fn checkpoint_with_cancel()") &&
-        source.contains("cx.set_cancel_requested(true);") &&
-        source.contains("assert!(cx.checkpoint().is_err());"),
+        source.contains("fn checkpoint_with_cancel()")
+            && source.contains("cx.set_cancel_requested(true);")
+            && source.contains("assert!(cx.checkpoint().is_err());"),
         "REGRESSION: the checkpoint_with_cancel inline test \
          is gone. The basic cancel-observation contract is \
          no longer guarded.",
@@ -636,8 +634,8 @@ fn behavioral_user_work_after_checkpoint_skipped_on_err() {
 
 #[test]
 fn behavioral_acquire_release_visibility_across_threads() {
-    use std::thread;
     use std::sync::Barrier;
+    use std::thread;
 
     // Spawn a canceller thread that issues cancel via
     // Release store; the worker thread observes via Acquire

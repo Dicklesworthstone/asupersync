@@ -117,7 +117,8 @@ fn yield_now_first_poll_returns_pending_with_self_wake() {
     // the task re-enters the runqueue, (c) return Pending.
     let source = read("src/runtime/yield_now.rs");
 
-    let poll_marker = "fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
+    let poll_marker =
+        "fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
     let pos = source.find(poll_marker).expect("YieldNow::poll");
     let body_end = source[pos..]
         .find("\n    }\n")
@@ -126,7 +127,9 @@ fn yield_now_first_poll_returns_pending_with_self_wake() {
 
     // The else branch (first poll) must set yielded=true,
     // call wake_by_ref, return Pending.
-    let else_pos = body.find("} else {").expect("else branch in YieldNow::poll");
+    let else_pos = body
+        .find("} else {")
+        .expect("else branch in YieldNow::poll");
     let else_body = &body[else_pos..];
 
     assert!(
@@ -161,7 +164,8 @@ fn yield_now_second_poll_returns_ready_no_extra_wake() {
     // completed=true, returns Ready(()).
     let source = read("src/runtime/yield_now.rs");
 
-    let poll_marker = "fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
+    let poll_marker =
+        "fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
     let pos = source.find(poll_marker).expect("YieldNow::poll");
     let body_end = source[pos..]
         .find("\n    }\n")
@@ -317,14 +321,10 @@ struct CoopWaker {
 
 impl Wake for CoopWaker {
     fn wake(self: Arc<Self>) {
-        self.executor
-            .woken
-            .with(|w| w.push(self.id));
+        self.executor.woken.with(|w| w.push(self.id));
     }
     fn wake_by_ref(self: &Arc<Self>) {
-        self.executor
-            .woken
-            .with(|w| w.push(self.id));
+        self.executor.woken.with(|w| w.push(self.id));
     }
 }
 

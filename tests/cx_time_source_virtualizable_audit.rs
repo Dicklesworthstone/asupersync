@@ -137,9 +137,7 @@ fn time_source_trait_exists_with_now_method() {
 
     let trait_marker = "pub trait TimeSource: Send + Sync {";
     let pos = source.find(trait_marker).expect("TimeSource trait");
-    let body_end = source[pos..]
-        .find("\n}\n")
-        .expect("TimeSource trait close");
+    let body_end = source[pos..].find("\n}\n").expect("TimeSource trait close");
     let body = &source[pos..pos + body_end];
 
     assert!(
@@ -167,9 +165,7 @@ fn wall_clock_implements_time_source_for_production() {
     // EVERYWHERE, virtualization isn't possible.
     let impl_marker = "impl TimeSource for WallClock {";
     let pos = source.find(impl_marker).expect("WallClock impl");
-    let body_end = source[pos..]
-        .find("\n}\n")
-        .expect("WallClock impl close");
+    let body_end = source[pos..].find("\n}\n").expect("WallClock impl close");
     let body = &source[pos..pos + body_end];
 
     assert!(
@@ -240,8 +236,7 @@ fn cx_now_routes_through_timer_driver_not_instant_now() {
     let body_window = &source[pos..pos + 600];
 
     assert!(
-        body_window.contains("self.handles")
-            && body_window.contains(".timer_driver"),
+        body_window.contains("self.handles") && body_window.contains(".timer_driver"),
         "REGRESSION: Cx::now no longer reads from \
          handles.timer_driver. Lab tests can no longer \
          observe virtual time through Cx::now.",
@@ -321,9 +316,7 @@ fn cx_timer_driver_respects_capability_mask() {
 
     let fn_marker = "pub fn timer_driver(&self) -> Option<TimerDriverHandle>";
     let pos = source.find(fn_marker).expect("timer_driver fn");
-    let body_end = source[pos..]
-        .find("\n    }\n")
-        .expect("timer_driver close");
+    let body_end = source[pos..].find("\n    }\n").expect("timer_driver close");
     let body = &source[pos..pos + body_end];
 
     assert!(

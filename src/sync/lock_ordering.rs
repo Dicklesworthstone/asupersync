@@ -49,6 +49,7 @@ impl LockRank {
     }
 
     /// Get the name of this rank for error messages.
+    #[allow(dead_code)]
     pub fn name(self) -> &'static str {
         match self {
             LockRank::Config => "Config",
@@ -134,6 +135,7 @@ pub fn record_release(rank: LockRank) {
 /// Get the currently held lock ranks for debugging.
 /// Only available in debug builds.
 #[cfg(debug_assertions)]
+#[allow(dead_code)]
 pub fn current_held_ranks() -> Vec<LockRank> {
     HELD_RANKS.with(|held| held.borrow().iter().copied().collect())
 }

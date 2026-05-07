@@ -228,9 +228,7 @@ fn race_drains_loser_via_loser_handle_join_for_no_orphan_guarantee() {
 
     // Both Either::Left and Either::Right arms must call
     // loser.join(cx).await.
-    let loser_join_count = body
-        .matches(".join(cx).await;")
-        .count();
+    let loser_join_count = body.matches(".join(cx).await;").count();
     assert!(
         loser_join_count >= 2,
         "REGRESSION: race no longer awaits loser join in \
@@ -249,8 +247,7 @@ fn race_loser_attribution_is_distinct_cancel_kind_for_observability() {
     let source = read("src/types/cancel.rs");
 
     assert!(
-        source.contains("race_loser => RaceLost;")
-            || source.contains("race_lost => RaceLost;"),
+        source.contains("race_loser => RaceLost;") || source.contains("race_lost => RaceLost;"),
         "REGRESSION: race_loser() / race_lost() constructor \
          no longer maps to RaceLost variant. Race-loss \
          attribution conflated with other cancel causes.",
@@ -396,10 +393,7 @@ fn race_does_not_use_select_drain_pattern_that_skips_loser_join() {
     // Find the Either::Left arm. After best_effort_poll
     // (block_on edge case), there must NOT be an "else
     // skip drain" path.
-    let suspect_skip = [
-        "// skip drain",
-        "// drain not needed",
-    ];
+    let suspect_skip = ["// skip drain", "// drain not needed"];
     for pat in &suspect_skip {
         assert!(
             !body.contains(pat),

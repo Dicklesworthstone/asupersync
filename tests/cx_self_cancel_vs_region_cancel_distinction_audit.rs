@@ -194,9 +194,9 @@ fn scope_cancel_method_does_not_exist() {
 
     // Scope's impl block.
     assert!(
-        !source.contains("    pub fn cancel(&self)") &&
-        !source.contains("    pub fn cancel(&mut self)") &&
-        !source.contains("    pub async fn cancel("),
+        !source.contains("    pub fn cancel(&self)")
+            && !source.contains("    pub fn cancel(&mut self)")
+            && !source.contains("    pub async fn cancel("),
         "REGRESSION: Scope now has a cancel() method. \
          Region cancel needs RuntimeState — exposing it on \
          Scope either smuggles in a hidden RuntimeState ref \
@@ -229,8 +229,7 @@ fn cancel_with_only_mutates_self_inner_not_region_tree() {
     // — ONE CxInner. It does NOT walk the region tree.
     let source = read("src/cx/cx.rs");
 
-    let fn_marker =
-        "pub fn cancel_with(&self, kind: CancelKind, message: Option<&'static str>) {";
+    let fn_marker = "pub fn cancel_with(&self, kind: CancelKind, message: Option<&'static str>) {";
     let pos = source.find(fn_marker).expect("cancel_with fn");
     let body_window = &source[pos..pos + 1500];
 
@@ -292,8 +291,7 @@ fn cancel_request_returns_vec_of_affected_tasks() {
     let source = read("src/runtime/state.rs");
 
     assert!(
-        source.contains("pub fn cancel_request(") &&
-        source.contains("-> Vec<(TaskId, u8)> {"),
+        source.contains("pub fn cancel_request(") && source.contains("-> Vec<(TaskId, u8)> {"),
         "REGRESSION: cancel_request return type changed. \
          Either the affected-task list is no longer \
          exposed or the priority hint is gone.",
@@ -367,8 +365,8 @@ fn cancel_with_inline_test_pins_per_cx_self_cancel() {
     let source = read("src/cx/cx.rs");
 
     assert!(
-        source.contains("fn cancel_with_sets_reason()") ||
-        source.contains("fn cancel_with_no_message()"),
+        source.contains("fn cancel_with_sets_reason()")
+            || source.contains("fn cancel_with_no_message()"),
         "REGRESSION: cancel_with inline tests are gone. \
          The self-cancel-on-Cx contract is no longer \
          guarded.",
@@ -593,8 +591,7 @@ fn behavioral_self_cancel_and_region_cancel_have_different_scopes() {
 
     // The two scopes are different.
     assert_ne!(
-        post_self_cancel,
-        post_region_cancel,
+        post_self_cancel, post_region_cancel,
         "REGRESSION: self-cancel and region-cancel \
          produced identical observable effects. The \
          distinction is broken.",

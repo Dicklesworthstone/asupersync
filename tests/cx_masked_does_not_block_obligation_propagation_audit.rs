@@ -186,11 +186,7 @@ fn obligation_module_does_not_consult_mask_depth() {
         ];
         for pat in &suspect_patterns {
             if content.contains(pat) {
-                violations.push(format!(
-                    "{}: contains `{}`",
-                    path.display(),
-                    pat
-                ));
+                violations.push(format!("{}: contains `{}`", path.display(), pat));
             }
         }
     }
@@ -213,9 +209,7 @@ fn masked_increments_only_mask_depth_field() {
 
     let fn_marker = "pub fn masked<F, R>(&self, f: F) -> R";
     let pos = source.find(fn_marker).expect("masked fn");
-    let body_end = source[pos..]
-        .find("\n    }\n")
-        .expect("masked fn close");
+    let body_end = source[pos..].find("\n    }\n").expect("masked fn close");
     let body = &source[pos..pos + body_end];
 
     assert!(
@@ -249,9 +243,7 @@ fn mask_guard_drop_only_decrements_mask_depth() {
 
     let drop_marker = "impl Drop for MaskGuard<'_> {";
     let pos = source.find(drop_marker).expect("MaskGuard Drop impl");
-    let body_end = source[pos..]
-        .find("\n}\n")
-        .expect("MaskGuard Drop close");
+    let body_end = source[pos..].find("\n}\n").expect("MaskGuard Drop close");
     let body = &source[pos..pos + body_end];
 
     assert!(
@@ -261,12 +253,7 @@ fn mask_guard_drop_only_decrements_mask_depth() {
          saturating_sub on mask_depth.",
     );
 
-    let suspect_calls = [
-        "obligation",
-        "ledger",
-        "commit",
-        "abort_obligation",
-    ];
+    let suspect_calls = ["obligation", "ledger", "commit", "abort_obligation"];
     for pat in &suspect_calls {
         assert!(
             !body.contains(pat),
@@ -347,11 +334,7 @@ fn no_alternate_ledger_keyed_by_mask() {
         ];
         for pat in &suspect_decls {
             if content.contains(pat) {
-                violations.push(format!(
-                    "{}: contains `{}`",
-                    path.display(),
-                    pat
-                ));
+                violations.push(format!("{}: contains `{}`", path.display(), pat));
             }
         }
     }
@@ -461,7 +444,10 @@ impl MockLedger {
     fn issue(&self) -> MockObligationToken {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let token = MockObligationToken(id);
-        self.status.lock().unwrap().insert(token, ObligationStatus::Issued);
+        self.status
+            .lock()
+            .unwrap()
+            .insert(token, ObligationStatus::Issued);
         token
     }
 
@@ -644,9 +630,15 @@ fn behavioral_nested_mask_does_not_partition_obligations() {
 
     // All three obligations are observable to the outer
     // scope.
-    assert_eq!(cx.ledger.status(t_outer_pre), Some(ObligationStatus::Issued));
+    assert_eq!(
+        cx.ledger.status(t_outer_pre),
+        Some(ObligationStatus::Issued)
+    );
     assert_eq!(cx.ledger.status(t_inner), Some(ObligationStatus::Issued));
-    assert_eq!(cx.ledger.status(t_outer_post), Some(ObligationStatus::Issued));
+    assert_eq!(
+        cx.ledger.status(t_outer_post),
+        Some(ObligationStatus::Issued)
+    );
 
     assert_eq!(
         cx.ledger.count_issued(),

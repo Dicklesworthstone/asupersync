@@ -193,8 +193,7 @@ fn sleep_main_poll_delegates_to_poll_with_time() {
     // audit.
     let source = read("src/time/sleep.rs");
 
-    let fn_marker =
-        "fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
+    let fn_marker = "fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
     let pos = source.find(fn_marker).expect("Future::poll");
     let body_window = &source[pos..pos + 1500];
 
@@ -215,8 +214,7 @@ fn sleep_ready_branch_cancels_timer_handle_if_any() {
     // signalled by a fired timer.
     let source = read("src/time/sleep.rs");
 
-    let fn_marker =
-        "fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
+    let fn_marker = "fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
     let pos = source.find(fn_marker).expect("Future::poll");
     let body_window = &source[pos..pos + 2500];
 
@@ -237,8 +235,7 @@ fn sleep_ready_branch_runs_before_pending_branch_setup() {
     // a `match`.
     let source = read("src/time/sleep.rs");
 
-    let fn_marker =
-        "fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
+    let fn_marker = "fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
     let pos = source.find(fn_marker).expect("Future::poll");
     let body_window = &source[pos..pos + 4000];
 

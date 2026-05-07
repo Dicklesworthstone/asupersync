@@ -125,9 +125,7 @@ fn tls_slot_is_asupersync_specific_namespace() {
     let source = read("src/runtime/builder.rs");
 
     assert!(
-        source.contains(
-            "static CURRENT_RUNTIME_HANDLE: RefCell<Option<RuntimeHandle>>"
-        ),
+        source.contains("static CURRENT_RUNTIME_HANDLE: RefCell<Option<RuntimeHandle>>"),
         "REGRESSION: CURRENT_RUNTIME_HANDLE TLS slot is \
          gone or no longer typed Option<RuntimeHandle>. \
          Cross-runtime namespace isolation is broken.",
@@ -182,11 +180,7 @@ fn current_handle_returns_option_no_panic_path() {
     );
 
     // Must NOT panic.
-    let panic_paths = [
-        "panic!(",
-        ".expect(",
-        ".unwrap()",
-    ];
+    let panic_paths = ["panic!(", ".expect(", ".unwrap()"];
     for pat in &panic_paths {
         assert!(
             !body.contains(pat),
@@ -242,7 +236,8 @@ fn no_panic_or_unwrap_on_cross_runtime_path() {
     let body = &source[pos..pos + body_end];
 
     assert!(
-        !body.contains("panic!") && !body.contains("\"wrong runtime\"")
+        !body.contains("panic!")
+            && !body.contains("\"wrong runtime\"")
             && !body.contains("\"tokio\""),
         "REGRESSION: current_handle now panics with a \
          runtime-mismatch message. The fail-soft contract \
@@ -266,11 +261,7 @@ fn no_invalid_handle_construction_path() {
     let body = &source[pos..pos + body_end];
 
     // Must NOT use unsafe or transmute.
-    let suspect_unsafe = [
-        "unsafe ",
-        "transmute(",
-        "from_raw(",
-    ];
+    let suspect_unsafe = ["unsafe ", "transmute(", "from_raw("];
     for pat in &suspect_unsafe {
         assert!(
             !body.contains(pat),
@@ -296,7 +287,8 @@ fn handle_uses_arc_strong_ref_for_lifetime_safety() {
 
     assert!(
         source.contains("RuntimeHandle::strong(Arc::clone(&self.inner))")
-            || source.contains("Arc<Runtime") || source.contains("Arc<RuntimeInner>"),
+            || source.contains("Arc<Runtime")
+            || source.contains("Arc<RuntimeInner>"),
         "REGRESSION: RuntimeHandle no longer wraps Arc<Runtime>. \
          Use-after-free risk if a current_handle clone \
          outlives the runtime.",

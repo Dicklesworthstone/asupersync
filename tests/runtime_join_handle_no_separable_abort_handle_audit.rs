@@ -140,10 +140,7 @@ fn abort_handle_method_does_not_exist_in_src() {
             continue;
         };
         if content.contains("fn abort_handle") {
-            violations.push(format!(
-                "{}: contains `fn abort_handle`",
-                path.display()
-            ));
+            violations.push(format!("{}: contains `fn abort_handle`", path.display()));
         }
     }
 
@@ -179,11 +176,7 @@ fn abort_handle_type_does_not_exist_in_src() {
         ];
         for decl in &suspect_decls {
             if content.contains(decl) {
-                violations.push(format!(
-                    "{}: contains `{}`",
-                    path.display(),
-                    decl
-                ));
+                violations.push(format!("{}: contains `{}`", path.display(), decl));
             }
         }
     }
@@ -331,10 +324,7 @@ fn task_handle_holds_weak_for_multi_handle_safety() {
     );
 
     // Strong-only patterns are wrong here.
-    let strong_only_patterns = [
-        "self.inner.write()",
-        "self.inner.read()",
-    ];
+    let strong_only_patterns = ["self.inner.write()", "self.inner.read()"];
     for pat in &strong_only_patterns {
         assert!(
             !body.contains(pat),
@@ -386,8 +376,7 @@ fn cancel_flow_documented_in_builder_or_task_handle() {
     let task_handle = read("src/runtime/task_handle.rs");
 
     assert!(
-        task_handle.contains("This is a request")
-            && task_handle.contains("checkpoint"),
+        task_handle.contains("This is a request") && task_handle.contains("checkpoint"),
         "REGRESSION: TaskHandle::abort no longer documents \
          the request/checkpoint protocol. Future maintainers \
          may add an abort_handle expecting tokio-style \

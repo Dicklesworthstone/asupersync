@@ -664,7 +664,7 @@ impl MySqlRowStream<'_> {
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
-                    .unwrap_or_else(|| CancelReason::user("cancelled"))
+                    .unwrap_or_else(|| CancelReason::user("cancelled")),
             );
         }
 
@@ -688,7 +688,11 @@ impl MySqlRowStream<'_> {
                 _ => {
                     if let (Some(cols), Some(indices)) = (&self.columns, &self.column_indices) {
                         // Try to parse as data row or terminator
-                        match MySqlConnection::parse_data_row_or_terminator(&data, cols, self.deprecate_eof) {
+                        match MySqlConnection::parse_data_row_or_terminator(
+                            &data,
+                            cols,
+                            self.deprecate_eof,
+                        ) {
                             Ok(Some(values)) => {
                                 // This is a data row - return it
                                 self.pending_row_count += 1;
@@ -701,17 +705,20 @@ impl MySqlRowStream<'_> {
                             Ok(None) => {
                                 // This is a terminator (EOF/OK) - stream complete
                                 self.finished = true;
-                                self.connection.inner.status_flags = match MySqlConnection::parse_result_set_terminator_status_flags(&data) {
-                                    Ok(flags) => flags,
-                                    Err(_) => self.connection.inner.status_flags, // Keep existing flags on parse error
-                                };
+                                self.connection.inner.status_flags =
+                                    match MySqlConnection::parse_result_set_terminator_status_flags(
+                                        &data,
+                                    ) {
+                                        Ok(flags) => flags,
+                                        Err(_) => self.connection.inner.status_flags, // Keep existing flags on parse error
+                                    };
                                 return Outcome::Ok(None);
                             }
                             Err(e) => return Outcome::Err(e),
                         }
                     } else {
                         return Outcome::Err(MySqlError::Protocol(
-                            "Streaming query received row data without column metadata".to_string()
+                            "Streaming query received row data without column metadata".to_string(),
                         ));
                     }
                 }
@@ -2146,7 +2153,7 @@ impl MySqlConnection {
         let requested_lowercase = requested.to_lowercase();
         let normalized_requested = match requested_lowercase.as_str() {
             "utf8mb4" => "utf8mb4",
-            "utf8" => "utf8",  // Ambiguous - could mean utf8mb3 or utf8mb4
+            "utf8" => "utf8", // Ambiguous - could mean utf8mb3 or utf8mb4
             "utf8mb3" => "utf8",
             "latin1" => "latin1",
             other => other,
@@ -2155,9 +2162,7 @@ impl MySqlConnection {
         // Compatibility check
         match (normalized_requested, server_charset_name) {
             // Exact matches are OK
-            ("utf8mb4", "utf8mb4") |
-            ("utf8", "utf8") |
-            ("latin1", "latin1") => Ok(()),
+            ("utf8mb4", "utf8mb4") | ("utf8", "utf8") | ("latin1", "latin1") => Ok(()),
 
             // utf8mb3 (server) cannot support utf8mb4 (requested) - DATA CORRUPTION RISK
             ("utf8mb4", "utf8") => Err(MySqlError::InvalidParameter(format!(
@@ -6877,9 +6882,9 @@ mod tests {
             stream.write_all(&ok.bytes).expect("write auth OK packet");
             stream.flush().expect("flush auth OK packet");
 
-            let err = stream
-                .read_exact(&mut header)
-                .expect_err("charset validation during handshake must not trigger post-auth COM_QUERY");
+            let err = stream.read_exact(&mut header).expect_err(
+                "charset validation during handshake must not trigger post-auth COM_QUERY",
+            );
             assert!(
                 matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut),
                 "expected timeout waiting for forbidden post-auth query, got {err:?}"
@@ -6898,7 +6903,9 @@ mod tests {
         match outcome {
             Outcome::Ok(_conn) => {}
             other => {
-                panic!("expected connect success with charset validation during handshake, got {other:?}")
+                panic!(
+                    "expected connect success with charset validation during handshake, got {other:?}"
+                )
             }
         }
 
@@ -8625,7 +8632,9 @@ mod tests {
         // This compilation test verifies the streaming API exists
         let _: fn(&'_ mut MySqlConnection, &Cx, &str) -> _ = MySqlConnection::query_stream;
 
-        eprintln!("{{\"defect\":\"MYSQL_QUERY_RESULT_STREAMING\",\"status\":\"FIXED\",\"method\":\"query_stream\",\"memory\":\"O(1)_per_row\",\"api\":\"MySqlRowStream\"}}");
+        eprintln!(
+            "{{\"defect\":\"MYSQL_QUERY_RESULT_STREAMING\",\"status\":\"FIXED\",\"method\":\"query_stream\",\"memory\":\"O(1)_per_row\",\"api\":\"MySqlRowStream\"}}"
+        );
 
         // REGRESSION VERIFICATION POINTS (all met by current implementation):
         // ✅ 1. Memory usage bounded to single row + network buffer (MySqlRowStream design)
@@ -8640,8 +8649,12 @@ mod tests {
 
         // Memory improvement validation
         assert_eq!(conn.inner.max_result_rows, DEFAULT_MAX_RESULT_ROWS); // Collection limit still applies to Vec methods
-        let memory_improvement = "Fixed: 1M row query now uses <1KB per row instead of 500MB+ total";
-        eprintln!("{{\"regression_test\":\"PASSED\",\"memory_model\":\"O(1)_per_row\",\"improvement\":\"{}\"}}", memory_improvement);
+        let memory_improvement =
+            "Fixed: 1M row query now uses <1KB per row instead of 500MB+ total";
+        eprintln!(
+            "{{\"regression_test\":\"PASSED\",\"memory_model\":\"O(1)_per_row\",\"improvement\":\"{}\"}}",
+            memory_improvement
+        );
     }
 
     #[test]

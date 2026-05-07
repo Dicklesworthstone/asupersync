@@ -203,11 +203,7 @@ fn builder_join_handle_has_no_abort_method() {
         .expect("JoinHandle impl close");
     let impl_body = &source[pos..impl_end];
 
-    let suspect_methods = [
-        "fn abort(",
-        "fn abort_on_drop(",
-        "fn cancel(",
-    ];
+    let suspect_methods = ["fn abort(", "fn abort_on_drop(", "fn cancel("];
     for pat in &suspect_methods {
         assert!(
             !impl_body.contains(pat),
@@ -269,9 +265,7 @@ fn join_future_has_drop_impl_that_aborts() {
 
     let impl_marker = "impl<T> Drop for JoinFuture<'_, T> {";
     let pos = source.find(impl_marker).expect("JoinFuture Drop impl");
-    let body_end = source[pos..]
-        .find("\n}\n")
-        .expect("JoinFuture Drop close");
+    let body_end = source[pos..].find("\n}\n").expect("JoinFuture Drop close");
     let body = &source[pos..pos + body_end];
 
     assert!(
@@ -321,8 +315,8 @@ fn join_future_drop_uses_drop_reason_when_present() {
     let body = &source[pos..pos + 1500];
 
     assert!(
-        body.contains("if let Some(reason) = self.drop_reason.take()") &&
-        body.contains("CancelReason::user(\"abort\")"),
+        body.contains("if let Some(reason) = self.drop_reason.take()")
+            && body.contains("CancelReason::user(\"abort\")"),
         "REGRESSION: JoinFuture::Drop reason precedence is \
          broken. The drop_reason vs default-\"abort\" \
          distinction has drifted.",

@@ -92,16 +92,19 @@ fn audit_handshake_does_not_advertise_local_infile_capability() {
 
         // Read client's Handshake Response
         let mut header = [0u8; 4];
-        stream.read_exact(&mut header).expect("read response header");
+        stream
+            .read_exact(&mut header)
+            .expect("read response header");
 
         let length = u32::from_le_bytes([header[0], header[1], header[2], 0]);
         let mut payload = vec![0u8; length as usize];
-        stream.read_exact(&mut payload).expect("read response payload");
+        stream
+            .read_exact(&mut payload)
+            .expect("read response payload");
 
         // AUDIT: Verify client capabilities exclude LOCAL FILES
-        let client_caps = u32::from_le_bytes(
-            payload[0..4].try_into().expect("client capability bytes")
-        );
+        let client_caps =
+            u32::from_le_bytes(payload[0..4].try_into().expect("client capability bytes"));
 
         assert_eq!(
             client_caps & capability::CLIENT_LOCAL_FILES,
@@ -132,7 +135,7 @@ fn audit_handshake_does_not_advertise_local_infile_capability() {
             in_transaction: false,
             server_version: String::new(),
             needs_rollback: false,
-            max_result_rows: super::1_000_000,
+            max_result_rows: super::DEFAULT_MAX_RESULT_ROWS,
             prepared_statement_epoch: 0,
             query_in_flight: AtomicBool::new(false),
         },
@@ -171,12 +174,14 @@ fn audit_server_local_infile_request_rejection() {
         stream.read_exact(&mut header).expect("read query header");
         let length = u32::from_le_bytes([header[0], header[1], header[2], 0]);
         let mut _payload = vec![0u8; length as usize];
-        stream.read_exact(&mut _payload).expect("read query payload");
+        stream
+            .read_exact(&mut _payload)
+            .expect("read query payload");
 
         // Send malicious LOAD DATA LOCAL INFILE request
         let mut response = PacketBuffer::new();
-        response.write_byte(0xFB);  // LOAD DATA LOCAL INFILE packet type
-        response.write_bytes(b"/etc/passwd");  // Malicious file path
+        response.write_byte(0xFB); // LOAD DATA LOCAL INFILE packet type
+        response.write_bytes(b"/etc/passwd"); // Malicious file path
 
         let mut packet = PacketBuffer::new();
         packet.set_sequence(1);
@@ -203,7 +208,7 @@ fn audit_server_local_infile_request_rejection() {
             in_transaction: false,
             server_version: String::new(),
             needs_rollback: false,
-            max_result_rows: super::1_000_000,
+            max_result_rows: super::DEFAULT_MAX_RESULT_ROWS,
             prepared_statement_epoch: 0,
             query_in_flight: AtomicBool::new(false),
         },
@@ -253,15 +258,15 @@ fn audit_server_local_infile_request_rejection() {
 fn audit_local_infile_rejection_comprehensive_paths() {
     // AUDIT: Test rejection works for various malicious file paths
     let malicious_paths = [
-        b"/etc/passwd",              // Unix system file
-        b"/etc/shadow",              // Unix password file
-        b"C:\\windows\\system32\\config\\SAM",  // Windows SAM file
-        b"../../../etc/passwd",      // Directory traversal
-        b"/proc/self/environ",       // Process environment
-        b"/home/user/.ssh/id_rsa",   // SSH private key
-        b"/var/log/mysql/mysql.log", // MySQL logs
-        b"",                         // Empty path
-        b"/tmp/does-not-exist.txt", // Non-existent file
+        b"/etc/passwd",                        // Unix system file
+        b"/etc/shadow",                        // Unix password file
+        b"C:\\windows\\system32\\config\\SAM", // Windows SAM file
+        b"../../../etc/passwd",                // Directory traversal
+        b"/proc/self/environ",                 // Process environment
+        b"/home/user/.ssh/id_rsa",             // SSH private key
+        b"/var/log/mysql/mysql.log",           // MySQL logs
+        b"",                                   // Empty path
+        b"/tmp/does-not-exist.txt",            // Non-existent file
     ];
 
     for (i, path) in malicious_paths.iter().enumerate() {
@@ -280,7 +285,9 @@ fn audit_local_infile_rejection_comprehensive_paths() {
             stream.read_exact(&mut header).expect("read query header");
             let length = u32::from_le_bytes([header[0], header[1], header[2], 0]);
             let mut _payload = vec![0u8; length as usize];
-            stream.read_exact(&mut _payload).expect("read query payload");
+            stream
+                .read_exact(&mut _payload)
+                .expect("read query payload");
 
             // Send LOAD DATA LOCAL INFILE with malicious path
             let mut response = PacketBuffer::new();
@@ -292,7 +299,9 @@ fn audit_local_infile_rejection_comprehensive_paths() {
             packet.buf = response.buf;
             let packet = packet.build_packet();
 
-            stream.write_all(&packet.bytes).expect("write LOCAL INFILE request");
+            stream
+                .write_all(&packet.bytes)
+                .expect("write LOCAL INFILE request");
             stream.flush().expect("flush LOCAL INFILE request");
         });
 
@@ -309,7 +318,7 @@ fn audit_local_infile_rejection_comprehensive_paths() {
                 in_transaction: false,
                 server_version: String::new(),
                 needs_rollback: false,
-                max_result_rows: super::1_000_000,
+                max_result_rows: super::DEFAULT_MAX_RESULT_ROWS,
                 prepared_statement_epoch: 0,
                 query_in_flight: AtomicBool::new(false),
             },
@@ -353,7 +362,7 @@ fn create_initial_handshake_packet() -> MySqlPacket {
     let caps_low = (capability::CLIENT_PROTOCOL_41
         | capability::CLIENT_SECURE_CONNECTION
         | capability::CLIENT_PLUGIN_AUTH
-        | capability::CLIENT_LOCAL_FILES) as u16;  // Server advertises LOCAL_FILES
+        | capability::CLIENT_LOCAL_FILES) as u16; // Server advertises LOCAL_FILES
     handshake.write_bytes(&caps_low.to_le_bytes());
     // Character set (1 byte)
     handshake.write_byte(45);

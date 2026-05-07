@@ -150,11 +150,7 @@ fn cx_scope_with_timeout_method_does_not_exist() {
         ];
         for pat in &suspect_decls {
             if content.contains(pat) {
-                violations.push(format!(
-                    "{}: contains `{}`",
-                    path.display(),
-                    pat
-                ));
+                violations.push(format!("{}: contains `{}`", path.display(), pat));
             }
         }
     }
@@ -174,7 +170,9 @@ fn route_a_cx_scope_with_budget_exists() {
     let source = read("src/cx/cx.rs");
 
     assert!(
-        source.contains("pub fn scope_with_budget(&self, budget: Budget) -> crate::cx::Scope<'static> {"),
+        source.contains(
+            "pub fn scope_with_budget(&self, budget: Budget) -> crate::cx::Scope<'static> {"
+        ),
         "REGRESSION: Cx::scope_with_budget gone — Route A \
          (Budget-shaped timeout) is broken.",
     );
@@ -185,7 +183,9 @@ fn route_b_time_timeout_function_exists() {
     let source = read("src/time/timeout_future.rs");
 
     assert!(
-        source.contains("pub fn timeout<F>(now: Time, duration: Duration, future: F) -> TimeoutFuture<F> {"),
+        source.contains(
+            "pub fn timeout<F>(now: Time, duration: Duration, future: F) -> TimeoutFuture<F> {"
+        ),
         "REGRESSION: time::timeout function gone — Route B \
          (wrap-a-future timeout) is broken.",
     );
@@ -261,8 +261,7 @@ fn timed_result_has_completed_and_timed_out_variants() {
     let source = read("src/combinator/timeout.rs");
 
     assert!(
-        source.contains("TimedResult::Completed(") &&
-        source.contains("TimedResult::TimedOut("),
+        source.contains("TimedResult::Completed(") && source.contains("TimedResult::TimedOut("),
         "REGRESSION: TimedResult variants Completed / \
          TimedOut gone. Caller cannot distinguish the two \
          outcomes.",
@@ -293,8 +292,7 @@ fn make_timed_result_preserves_terminal_outcomes() {
     );
 
     assert!(
-        body.contains("Outcome::Cancelled(_) =>") &&
-        body.contains("TimedResult::TimedOut("),
+        body.contains("Outcome::Cancelled(_) =>") && body.contains("TimedResult::TimedOut("),
         "REGRESSION: make_timed_result no longer maps \
          Cancelled → TimedOut. The timeout-attribution \
          path is broken.",
@@ -317,7 +315,9 @@ fn law_timeout_min_documented_for_nested_composition() {
     );
 
     assert!(
-        source.contains("pub const fn effective_deadline(requested: Time, existing: Option<Time>) -> Time {"),
+        source.contains(
+            "pub const fn effective_deadline(requested: Time, existing: Option<Time>) -> Time {"
+        ),
         "REGRESSION: effective_deadline function gone. \
          Cannot enforce min(outer, inner) deadline.",
     );
@@ -377,9 +377,7 @@ fn mock_make_timed_result<T, E>(
         return MockTimedResult::Completed(outcome);
     }
     match outcome {
-        MockOutcome::Ok(_) | MockOutcome::Err(_) => {
-            MockTimedResult::Completed(outcome)
-        }
+        MockOutcome::Ok(_) | MockOutcome::Err(_) => MockTimedResult::Completed(outcome),
         MockOutcome::Cancelled => MockTimedResult::TimedOut,
     }
 }
@@ -440,10 +438,7 @@ fn behavioral_route_b_terminal_outcome_preserved_past_deadline() {
          Data-loss vector on timeout.",
     );
 
-    let r2 = mock_make_timed_result::<u32, &'static str>(
-        MockOutcome::Err("oops"),
-        false,
-    );
+    let r2 = mock_make_timed_result::<u32, &'static str>(MockOutcome::Err("oops"), false);
     assert_eq!(
         r2,
         MockTimedResult::Completed(MockOutcome::Err("oops")),

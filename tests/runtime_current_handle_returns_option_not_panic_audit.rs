@@ -342,8 +342,7 @@ fn caller_pattern_expect_inside_block_on_documented() {
     let preceding = &source[pos.saturating_sub(2500)..pos];
 
     assert!(
-        preceding.contains(".expect(\"inside block_on\")")
-            || preceding.contains(".expect("),
+        preceding.contains(".expect(\"inside block_on\")") || preceding.contains(".expect("),
         "REGRESSION: the docstring example showing \
          caller-controlled .expect() panic policy is gone. \
          Users no longer have an idiomatic guide for the \

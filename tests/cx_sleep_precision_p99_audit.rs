@@ -124,10 +124,10 @@ fn timer_wheel_level_resolutions_are_cascaded_powers_of_slots_per_level() {
     let source = read("src/time/wheel.rs");
 
     let array_marker = "const LEVEL_RESOLUTIONS_NS: [u64; LEVEL_COUNT] = [";
-    let start = source.find(array_marker).expect("LEVEL_RESOLUTIONS_NS array");
-    let body_end = source[start..]
-        .find("];")
-        .expect("array close");
+    let start = source
+        .find(array_marker)
+        .expect("LEVEL_RESOLUTIONS_NS array");
+    let body_end = source[start..].find("];").expect("array close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -150,9 +150,7 @@ fn timer_wheel_advance_to_skips_empty_ticks_for_o_active_pump_cost() {
 
     let fn_marker = "fn advance_to(&mut self, target_tick: u64) {";
     let start = source.find(fn_marker).expect("advance_to fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("advance_to close");
+    let body_end = source[start..].find("\n    }\n").expect("advance_to close");
     let body = &source[start..start + body_end];
 
     assert!(

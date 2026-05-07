@@ -264,10 +264,7 @@ fn run_until_is_only_on_lab_not_production_runtime() {
     // exist on production RuntimeHandle/Runtime.
     let source = read("src/runtime/builder.rs");
 
-    let suspect_methods = [
-        "pub fn run_until_quiescent(",
-        "pub fn run_until_idle(",
-    ];
+    let suspect_methods = ["pub fn run_until_quiescent(", "pub fn run_until_idle("];
     for pat in &suspect_methods {
         assert!(
             !source.contains(pat),
@@ -376,7 +373,8 @@ fn no_doc_alias_blurring_block_on_with_run_until() {
                 // method. We're checking it isn't applied
                 // to the OTHER method.
                 let block_on_method = content.contains("pub fn block_on<F: Future>");
-                let run_until_method = content.contains("pub fn run_until_quiescent(&mut self) -> u64");
+                let run_until_method =
+                    content.contains("pub fn run_until_quiescent(&mut self) -> u64");
 
                 if alias.contains("block_on") && !block_on_method {
                     violations.push(format!(

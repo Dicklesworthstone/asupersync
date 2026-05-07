@@ -139,15 +139,13 @@ fn sleep_poll_priority_order_is_bound_then_getter_then_ambient_then_wall() {
     // configured a virtual driver.
     let source = read("src/time/sleep.rs");
 
-    let fn_marker =
-        "fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
+    let fn_marker = "fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
     let pos = source.find(fn_marker).expect("Sleep::poll fn");
     let body_window = &source[pos..pos + 2000];
 
     // Tier 1: bound_timer_driver first.
     assert!(
-        body_window
-            .contains("if let Some(timer) = self.bound_timer_driver.as_ref() {"),
+        body_window.contains("if let Some(timer) = self.bound_timer_driver.as_ref() {"),
         "REGRESSION: Sleep::poll no longer checks \
          bound_timer_driver first. Tests that explicitly \
          bind a driver may not get their virtual time.",
@@ -195,8 +193,7 @@ fn sleep_ambient_driver_resolution_uses_cx_current_timer_driver() {
     // up the lab's VirtualClock-backed driver.
     let source = read("src/time/sleep.rs");
 
-    let fn_marker =
-        "fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
+    let fn_marker = "fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
     let pos = source.find(fn_marker).expect("Sleep::poll fn");
     let body_window = &source[pos..pos + 1000];
 
@@ -255,8 +252,7 @@ fn sleep_timer_register_uses_self_deadline_not_recomputed_from_wall() {
     // does NOT re-derive from a wall clock.
     let source = read("src/time/sleep.rs");
 
-    let fn_marker =
-        "fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
+    let fn_marker = "fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
     let pos = source.find(fn_marker).expect("Sleep::poll fn");
     let body_window = &source[pos..pos + 5000];
 
@@ -354,8 +350,7 @@ fn sleep_pending_path_registers_with_ambient_lab_driver() {
     // separate wall-clock-driven thread.
     let source = read("src/time/sleep.rs");
 
-    let fn_marker =
-        "fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
+    let fn_marker = "fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
     let pos = source.find(fn_marker).expect("Sleep::poll fn");
     let body_window = &source[pos..pos + 5000];
 
@@ -406,7 +401,9 @@ fn sleep_does_not_call_wall_clock_in_construction_paths() {
 
     let new_marker = "pub fn new(deadline: Time) -> Self {";
     let new_pos = source.find(new_marker).expect("Sleep::new fn");
-    let new_body_end = source[new_pos..].find("\n    }\n").expect("Sleep::new close");
+    let new_body_end = source[new_pos..]
+        .find("\n    }\n")
+        .expect("Sleep::new close");
     let new_body = &source[new_pos..new_pos + new_body_end];
 
     let suspect_wall_calls = [
@@ -539,8 +536,7 @@ impl MockTimerDriver {
         self.source.now()
     }
     fn register(&self, deadline: MockTime, waker: Waker, ready: Arc<AtomicBool>) {
-        self.pending
-            .with(|v| v.push((deadline, waker, ready)));
+        self.pending.with(|v| v.push((deadline, waker, ready)));
         self.fire_due();
     }
     fn fire_due(&self) {
@@ -618,21 +614,14 @@ impl Future for MockSleep {
 
         // Register with whichever driver is preferred.
         if !self.polled.swap(true, Ordering::Relaxed) {
-            let driver = self
-                .bound_driver
-                .as_ref()
-                .or(self.ambient_driver.as_ref());
+            let driver = self.bound_driver.as_ref().or(self.ambient_driver.as_ref());
             if let Some(d) = driver {
                 d.register(self.deadline, cx.waker().clone(), Arc::clone(&self.ready));
             }
         }
 
         // After registration, fire any due timers.
-        if let Some(d) = self
-            .bound_driver
-            .as_ref()
-            .or(self.ambient_driver.as_ref())
-        {
+        if let Some(d) = self.bound_driver.as_ref().or(self.ambient_driver.as_ref()) {
             d.fire_due();
         }
 
@@ -647,9 +636,7 @@ impl Future for MockSleep {
 #[test]
 fn behavioral_sleep_under_virtual_clock_is_deterministic() {
     let virt = Arc::new(MockVirtualClock::new());
-    let driver = Arc::new(MockTimerDriver::new(
-        virt.clone() as Arc<dyn MockTimeSource>,
-    ));
+    let driver = Arc::new(MockTimerDriver::new(virt.clone() as Arc<dyn MockTimeSource>));
 
     let mut s = MockSleep::new_after(None, Some(Arc::clone(&driver)), Duration::from_millis(100));
 
@@ -681,9 +668,7 @@ fn behavioral_sleep_does_not_consult_wall_clock_when_virtual_driver_present() {
     // observes virtual time, NOT the wall clock value
     // (which we set absurdly large in MockWallClock).
     let virt = Arc::new(MockVirtualClock::new());
-    let driver = Arc::new(MockTimerDriver::new(
-        virt.clone() as Arc<dyn MockTimeSource>,
-    ));
+    let driver = Arc::new(MockTimerDriver::new(virt.clone() as Arc<dyn MockTimeSource>));
 
     let s = MockSleep::new_after(None, Some(Arc::clone(&driver)), Duration::from_millis(50));
 
@@ -701,9 +686,7 @@ fn behavioral_sleep_does_not_consult_wall_clock_when_virtual_driver_present() {
 fn behavioral_advance_to_exact_deadline_makes_sleep_ready() {
     // Boundary case: now == deadline triggers Ready.
     let virt = Arc::new(MockVirtualClock::new());
-    let driver = Arc::new(MockTimerDriver::new(
-        virt.clone() as Arc<dyn MockTimeSource>,
-    ));
+    let driver = Arc::new(MockTimerDriver::new(virt.clone() as Arc<dyn MockTimeSource>));
 
     let mut s = MockSleep::new_after(None, Some(Arc::clone(&driver)), Duration::from_nanos(500));
     assert_eq!(s.deadline.0, 500);
@@ -731,14 +714,9 @@ fn behavioral_sleep_replay_is_deterministic_under_same_advances() {
     // sequence. Determinism property.
     fn run() -> Vec<&'static str> {
         let virt = Arc::new(MockVirtualClock::new());
-        let driver = Arc::new(MockTimerDriver::new(
-            virt.clone() as Arc<dyn MockTimeSource>,
-        ));
-        let mut s = MockSleep::new_after(
-            None,
-            Some(Arc::clone(&driver)),
-            Duration::from_millis(10),
-        );
+        let driver = Arc::new(MockTimerDriver::new(virt.clone() as Arc<dyn MockTimeSource>));
+        let mut s =
+            MockSleep::new_after(None, Some(Arc::clone(&driver)), Duration::from_millis(10));
         let waker = Waker::from(Arc::new(NullWake));
         let mut ctx = Context::from_waker(&waker);
         let mut pinned = unsafe { Pin::new_unchecked(&mut s) };
@@ -778,13 +756,13 @@ fn behavioral_bound_driver_takes_priority_over_ambient() {
     let bound_clock = Arc::new(MockVirtualClock::new());
     bound_clock.advance(1_000_000); // bound clock at 1ms
     let bound_driver = Arc::new(MockTimerDriver::new(
-        bound_clock.clone() as Arc<dyn MockTimeSource>,
+        bound_clock.clone() as Arc<dyn MockTimeSource>
     ));
 
     let ambient_clock = Arc::new(MockVirtualClock::new());
     ambient_clock.advance(50_000_000_000); // ambient at 50s
     let ambient_driver = Arc::new(MockTimerDriver::new(
-        ambient_clock.clone() as Arc<dyn MockTimeSource>,
+        ambient_clock.clone() as Arc<dyn MockTimeSource>
     ));
 
     let s = MockSleep::new_after(

@@ -173,9 +173,7 @@ fn current_cx_guard_pops_via_try_with_for_teardown_safety() {
 
     let drop_marker = "impl Drop for CurrentCxGuard {";
     let pos = source.find(drop_marker).expect("CurrentCxGuard Drop impl");
-    let body_end = source[pos..]
-        .find("\n}\n")
-        .expect("Drop impl close");
+    let body_end = source[pos..].find("\n}\n").expect("Drop impl close");
     let body = &source[pos..pos + body_end];
 
     assert!(
@@ -201,9 +199,7 @@ fn cx_current_walks_stack_and_returns_innermost() {
 
     let fn_marker = "pub fn current() -> Option<Self> {";
     let pos = source.find(fn_marker).expect("Cx::current fn");
-    let body_end = source[pos..]
-        .find("\n    }\n")
-        .expect("Cx::current close");
+    let body_end = source[pos..].find("\n    }\n").expect("Cx::current close");
     let body = &source[pos..pos + body_end];
 
     assert!(
@@ -227,9 +223,7 @@ fn cx_current_uses_try_with_for_teardown_safety() {
 
     let fn_marker = "pub fn current() -> Option<Self> {";
     let pos = source.find(fn_marker).expect("Cx::current fn");
-    let body_end = source[pos..]
-        .find("\n    }\n")
-        .expect("Cx::current close");
+    let body_end = source[pos..].find("\n    }\n").expect("Cx::current close");
     let body = &source[pos..pos + body_end];
 
     // The call site is split across lines:
@@ -307,11 +301,7 @@ fn cx_struct_uses_arc_for_per_task_shared_state() {
     // so it survives thread migration intact.
     let source = read("src/cx/cx.rs");
 
-    let suspect_field_patterns = [
-        "inner: Arc<",
-        "observability: Arc<",
-        "handles: Arc<",
-    ];
+    let suspect_field_patterns = ["inner: Arc<", "observability: Arc<", "handles: Arc<"];
     for pat in &suspect_field_patterns {
         assert!(
             source.contains(pat),

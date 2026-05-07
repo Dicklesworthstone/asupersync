@@ -295,7 +295,9 @@ fn checkpoint_emits_deadline_cancel_kind_on_expiry() {
     let source = read("src/cx/cx.rs");
 
     let fn_marker = "fn checkpoint_budget_exhaustion(";
-    let pos = source.find(fn_marker).expect("checkpoint_budget_exhaustion fn");
+    let pos = source
+        .find(fn_marker)
+        .expect("checkpoint_budget_exhaustion fn");
     let body_window = &source[pos..pos + 2500];
 
     assert!(
@@ -306,7 +308,8 @@ fn checkpoint_emits_deadline_cancel_kind_on_expiry() {
     );
 
     assert!(
-        body_window.contains("budget.is_past_deadline(now)") || body_window.contains("is_past_deadline("),
+        body_window.contains("budget.is_past_deadline(now)")
+            || body_window.contains("is_past_deadline("),
         "REGRESSION: checkpoint no longer checks \
          is_past_deadline. Deadline expiry won't trigger.",
     );
@@ -434,8 +437,10 @@ fn unified_cancel_design_documented() {
     let source = read("src/types/outcome.rs");
 
     assert!(
-        source.contains("Cancelled") &&
-        (source.contains("four-valued") || source.contains("4-valued") || source.contains("4 variants")),
+        source.contains("Cancelled")
+            && (source.contains("four-valued")
+                || source.contains("4-valued")
+                || source.contains("4 variants")),
         "REGRESSION: four-valued Outcome / unified-cancel \
          design no longer documented in outcome.rs.",
     );
@@ -644,7 +649,10 @@ fn behavioral_layered_design_deadline_to_outcome_cancelled() {
     // Layer G: region outcome is Cancelled with the
     // original kind preserved.
     let outcome: MockOutcome<u32, ()> = MockOutcome::Cancelled(cancel_reason.kind);
-    assert!(matches!(outcome, MockOutcome::Cancelled(CancelKind::Deadline)));
+    assert!(matches!(
+        outcome,
+        MockOutcome::Cancelled(CancelKind::Deadline)
+    ));
 }
 
 #[test]

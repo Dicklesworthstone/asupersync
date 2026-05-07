@@ -145,8 +145,7 @@ fn postgres_query_unchecked_checkpoints_at_entry() {
 fn postgres_row_stream_next_checkpoints_per_call() {
     let source = read("src/database/postgres.rs");
 
-    let fn_marker =
-        "pub async fn next(&mut self, cx: &Cx) -> Outcome<Option<PgRow>, PgError> {";
+    let fn_marker = "pub async fn next(&mut self, cx: &Cx) -> Outcome<Option<PgRow>, PgError> {";
     let pos = source.find(fn_marker).expect("RowStream::next fn");
     let body = &source[pos..pos + 800];
 
@@ -174,9 +173,7 @@ fn sqlite_query_unchecked_checkpoints_at_entry_twice() {
     let pos = source.find(fn_marker).expect("sqlite query_unchecked fn");
     let body = &source[pos..pos + 1200];
 
-    let count = body
-        .matches("if cx.checkpoint().is_err() {")
-        .count();
+    let count = body.matches("if cx.checkpoint().is_err() {").count();
     assert!(
         count >= 2,
         "REGRESSION: sqlite::query_unchecked has fewer than \

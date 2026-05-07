@@ -121,7 +121,9 @@ fn cx_scope_with_budget_api_exists() {
     let source = read("src/cx/cx.rs");
 
     assert!(
-        source.contains("pub fn scope_with_budget(&self, budget: Budget) -> crate::cx::Scope<'static> {"),
+        source.contains(
+            "pub fn scope_with_budget(&self, budget: Budget) -> crate::cx::Scope<'static> {"
+        ),
         "REGRESSION: Cx::scope_with_budget API is gone. \
          The Phase-0 budget-tightened scope handle is broken.",
     );
@@ -158,7 +160,8 @@ fn scope_with_budget_clamps_child_to_parent() {
     // must clamp the child budget to parent's.
     let source = read("src/cx/cx.rs");
 
-    let fn_marker = "pub fn scope_with_budget(&self, budget: Budget) -> crate::cx::Scope<'static> {";
+    let fn_marker =
+        "pub fn scope_with_budget(&self, budget: Budget) -> crate::cx::Scope<'static> {";
     let pos = source.find(fn_marker).expect("scope_with_budget fn");
     let body_window = &source[pos..pos + 4500];
 
@@ -186,10 +189,10 @@ fn checkpoint_detects_budget_exhaustion_with_three_kinds() {
     let source = read("src/cx/cx.rs");
 
     let fn_marker = "fn checkpoint_budget_exhaustion(";
-    let pos = source.find(fn_marker).expect("checkpoint_budget_exhaustion fn");
-    let body_end = source[pos..]
-        .find("\n    }\n")
-        .expect("fn close");
+    let pos = source
+        .find(fn_marker)
+        .expect("checkpoint_budget_exhaustion fn");
+    let body_end = source[pos..].find("\n    }\n").expect("fn close");
     let body = &source[pos..pos + body_end];
 
     assert!(
@@ -244,9 +247,7 @@ fn checkpoint_returns_cancelled_error_kind_on_exhaustion() {
 
     let fn_marker = "fn check_cancel_from_values(";
     let pos = source.find(fn_marker).expect("check_cancel_from_values fn");
-    let body_end = source[pos..]
-        .find("\n    }\n")
-        .expect("fn close");
+    let body_end = source[pos..].find("\n    }\n").expect("fn close");
     let body = &source[pos..pos + body_end];
 
     assert!(

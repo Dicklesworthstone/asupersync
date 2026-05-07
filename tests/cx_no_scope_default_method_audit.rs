@@ -145,11 +145,7 @@ fn scope_default_method_does_not_exist_in_src() {
         ];
         for decl in &suspect_decls {
             if content.contains(decl) {
-                violations.push(format!(
-                    "{}: contains `{}`",
-                    path.display(),
-                    decl
-                ));
+                violations.push(format!("{}: contains `{}`", path.display(), decl));
             }
         }
     }
@@ -179,10 +175,7 @@ fn scope_default_function_does_not_exist_anywhere() {
                 continue;
             };
             if content.contains("scope_default") {
-                violations.push(format!(
-                    "{}: contains `scope_default`",
-                    path.display()
-                ));
+                violations.push(format!("{}: contains `scope_default`", path.display()));
             }
         }
     }
@@ -243,9 +236,7 @@ fn cx_scope_does_not_allocate_a_new_region() {
 
     let fn_marker = "pub fn scope(&self) -> crate::cx::Scope<'static> {";
     let pos = source.find(fn_marker).expect("Cx::scope fn");
-    let body_end = source[pos..]
-        .find("\n    }\n")
-        .expect("Cx::scope close");
+    let body_end = source[pos..].find("\n    }\n").expect("Cx::scope close");
     let body = &source[pos..pos + body_end];
 
     let suspect_calls = [
@@ -325,11 +316,7 @@ fn no_runtime_default_region_helper_exists() {
         ];
         for pat in &suspect_helpers {
             if content.contains(pat) {
-                violations.push(format!(
-                    "{}: contains `{}`",
-                    path.display(),
-                    pat
-                ));
+                violations.push(format!("{}: contains `{}`", path.display(), pat));
             }
         }
     }
@@ -447,12 +434,10 @@ impl Scope {
     /// The canonical async region allocator. Caller must
     /// supply state, cx, AND policy — there is no default
     /// variant.
-    fn region(
-        _state: &RuntimeState,
-        _cx: &Cx,
-        policy: &RegionPolicy,
-    ) -> Self {
-        Self { label: policy.label }
+    fn region(_state: &RuntimeState, _cx: &Cx, policy: &RegionPolicy) -> Self {
+        Self {
+            label: policy.label,
+        }
     }
 }
 

@@ -118,9 +118,7 @@ fn sleep_function_delegates_to_sleep_after() {
     // Verify the body is exactly the delegation.
     let fn_marker = "pub fn sleep(now: Time, duration: Duration) -> Sleep {";
     let pos = source.find(fn_marker).expect("sleep fn");
-    let body_end = source[pos..]
-        .find("\n}\n")
-        .expect("sleep fn close");
+    let body_end = source[pos..].find("\n}\n").expect("sleep fn close");
     let body = &source[pos..pos + body_end];
 
     assert!(
@@ -131,10 +129,7 @@ fn sleep_function_delegates_to_sleep_after() {
 
     // Body should NOT independently call Sleep::new (which
     // would suggest divergent construction).
-    let direct_new_call = body
-        .lines()
-        .filter(|l| l.contains("Sleep::new("))
-        .count();
+    let direct_new_call = body.lines().filter(|l| l.contains("Sleep::new(")).count();
     assert_eq!(
         direct_new_call, 0,
         "REGRESSION: `sleep` body now calls `Sleep::new` \
@@ -158,9 +153,7 @@ fn sleep_until_function_delegates_to_sleep_new() {
 
     let fn_marker = "pub fn sleep_until(deadline: Time) -> Sleep {";
     let pos = source.find(fn_marker).expect("sleep_until fn");
-    let body_end = source[pos..]
-        .find("\n}\n")
-        .expect("sleep_until fn close");
+    let body_end = source[pos..].find("\n}\n").expect("sleep_until fn close");
     let body = &source[pos..pos + body_end];
 
     assert!(
@@ -186,8 +179,7 @@ fn sleep_after_constructor_delegates_to_sleep_new() {
     let body = &source[pos..pos + body_end];
 
     assert!(
-        body.contains("now.saturating_add_nanos(")
-            && body.contains("Self::new(deadline)"),
+        body.contains("now.saturating_add_nanos(") && body.contains("Self::new(deadline)"),
         "REGRESSION: `Sleep::after` no longer computes \
          deadline via saturating_add_nanos and delegates to \
          `Self::new`. Either overflow safety or convergence \
@@ -304,8 +296,7 @@ fn sleep_poll_registers_timer_using_self_deadline() {
     let source = read("src/time/sleep.rs");
 
     assert!(
-        source.contains("let handle = timer.register(")
-            && source.contains("self.deadline,"),
+        source.contains("let handle = timer.register(") && source.contains("self.deadline,"),
         "REGRESSION: `Sleep::poll` no longer registers using \
          `self.deadline`. Timer-wheel entries from `sleep` \
          vs `sleep_until` paths may diverge.",
@@ -323,9 +314,7 @@ fn sleep_struct_has_single_deadline_field_no_duration_field() {
     // Exactly one `deadline: Time,` field on the Sleep struct.
     let struct_marker = "pub struct Sleep {";
     let pos = source.find(struct_marker).expect("Sleep struct");
-    let struct_end = source[pos..]
-        .find("\n}\n")
-        .expect("Sleep struct close");
+    let struct_end = source[pos..].find("\n}\n").expect("Sleep struct close");
     let struct_body = &source[pos..pos + struct_end];
 
     assert!(

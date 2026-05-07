@@ -186,9 +186,7 @@ fn scope_does_not_increment_mask_depth() {
 
     let fn_marker = "pub fn scope(&self) -> crate::cx::Scope<'static> {";
     let pos = source.find(fn_marker).expect("scope fn");
-    let body_end = source[pos..]
-        .find("\n    }\n")
-        .expect("scope fn close");
+    let body_end = source[pos..].find("\n    }\n").expect("scope fn close");
     let body = &source[pos..pos + body_end];
 
     assert!(
@@ -215,9 +213,7 @@ fn scope_returns_handle_bound_to_current_region() {
 
     let fn_marker = "pub fn scope(&self) -> crate::cx::Scope<'static> {";
     let pos = source.find(fn_marker).expect("scope fn");
-    let body_end = source[pos..]
-        .find("\n    }\n")
-        .expect("scope fn close");
+    let body_end = source[pos..].find("\n    }\n").expect("scope fn close");
     let body = &source[pos..pos + body_end];
 
     assert!(

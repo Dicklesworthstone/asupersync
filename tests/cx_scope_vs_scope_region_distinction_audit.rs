@@ -135,9 +135,7 @@ fn cx_scope_is_synchronous_returns_scope_static() {
     // create_child_region.
     let fn_marker = "pub fn scope(&self) -> crate::cx::Scope<'static> {";
     let start = source.find(fn_marker).expect("Cx::scope fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("Cx::scope close");
+    let body_end = source[start..].find("\n    }\n").expect("Cx::scope close");
     let body = &source[start..start + body_end];
 
     assert!(
@@ -158,16 +156,10 @@ fn cx_scope_does_not_allocate_a_new_region() {
 
     let fn_marker = "pub fn scope(&self) -> crate::cx::Scope<'static> {";
     let start = source.find(fn_marker).expect("Cx::scope fn");
-    let body_end = source[start..]
-        .find("\n    }\n")
-        .expect("Cx::scope close");
+    let body_end = source[start..].find("\n    }\n").expect("Cx::scope close");
     let body = &source[start..start + body_end];
 
-    let suspect_alloc = [
-        "create_child_region",
-        ".regions.insert",
-        "Arena::insert",
-    ];
+    let suspect_alloc = ["create_child_region", ".regions.insert", "Arena::insert"];
     for pat in &suspect_alloc {
         assert!(
             !body.contains(pat),

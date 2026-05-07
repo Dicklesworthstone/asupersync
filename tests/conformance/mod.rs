@@ -51,11 +51,21 @@ pub mod hpack_table_size;
 // pub mod h2_stream_state_machine_rfc7540;
 pub mod h3_rfc9114;
 // pub mod hpack_metamorphic;
+pub mod broadcast;
 pub mod cancel_dag_determinism;
+pub mod consistent_hash_ring;
 pub mod dns_message;
+pub mod grpc_deadline;
+pub mod grpc_health;
+pub mod grpc_max_message_size;
+pub mod grpc_message_framing;
+pub mod grpc_status_mapping;
+pub mod grpc_trailer_forwarding_rfc9113;
+pub mod grpc_web_frame_format;
 pub mod hpack_rfc7541;
 pub mod kafka_offsets;
 pub mod kafka_record_batch_v2;
+pub mod kqueue_bsd_events;
 #[cfg(feature = "mysql")]
 pub mod mysql_auth_switch;
 pub mod mysql_stmt_prepare_execute;
@@ -69,27 +79,17 @@ pub mod postgres_copy;
 pub mod postgres_extended_query;
 #[cfg(feature = "postgres")]
 pub mod postgres_logical_replication;
-pub mod quic_retry_rfc9000;
-pub mod race_loser_drain_metamorphic;
-pub mod tls_0rtt_replay_rfc8446;
-pub mod trace_replay_idempotency_metamorphic;
-#[cfg(feature = "sqlite")]
-pub mod sqlite_prepared_statements;
-pub mod broadcast;
-pub mod consistent_hash_ring;
-pub mod grpc_deadline;
-pub mod grpc_health;
-pub mod grpc_max_message_size;
-pub mod grpc_message_framing;
-pub mod grpc_status_mapping;
-pub mod grpc_trailer_forwarding_rfc9113;
-pub mod grpc_web_frame_format;
-pub mod kqueue_bsd_events;
 #[cfg(feature = "quic")]
 pub mod quic_connection_migration_rfc9000;
+pub mod quic_retry_rfc9000;
+pub mod race_loser_drain_metamorphic;
+#[cfg(feature = "sqlite")]
+pub mod sqlite_prepared_statements;
 pub mod tcp_accept;
 pub mod timeout_deadline_harness;
 pub mod timeout_deadline_reference;
+pub mod tls_0rtt_replay_rfc8446;
+pub mod trace_replay_idempotency_metamorphic;
 pub mod websocket_extension_negotiation_rfc6455;
 // The legacy sibling file `websocket_rfc6455.rs` is preserved on disk, but the
 // live suite is the directory module below. Use an explicit path to avoid Rust's

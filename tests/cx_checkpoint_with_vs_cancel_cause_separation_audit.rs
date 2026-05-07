@@ -193,8 +193,7 @@ fn checkpoint_with_records_message_into_checkpoint_state() {
     // CancelReason. This separation is the design property.
     let source = read("src/cx/cx.rs");
 
-    let fn_marker =
-        "pub fn checkpoint_with(&self, msg: impl Into<String>) -> Result<(), crate::error::Error> {";
+    let fn_marker = "pub fn checkpoint_with(&self, msg: impl Into<String>) -> Result<(), crate::error::Error> {";
     let pos = source.find(fn_marker).expect("checkpoint_with fn");
     let body_window = &source[pos..pos + 2500];
 
@@ -218,8 +217,7 @@ fn checkpoint_with_does_not_pollute_cancel_reason_with_user_message() {
     // like a cancel cause.
     let source = read("src/cx/cx.rs");
 
-    let fn_marker =
-        "pub fn checkpoint_with(&self, msg: impl Into<String>) -> Result<(), crate::error::Error> {";
+    let fn_marker = "pub fn checkpoint_with(&self, msg: impl Into<String>) -> Result<(), crate::error::Error> {";
     let pos = source.find(fn_marker).expect("checkpoint_with fn");
     let body_window = &source[pos..pos + 2500];
 
@@ -242,8 +240,9 @@ fn cancel_with_attribution_api_exists() {
     let source = read("src/cx/cx.rs");
 
     assert!(
-        source
-            .contains("pub fn cancel_with(&self, kind: CancelKind, message: Option<&'static str>) {"),
+        source.contains(
+            "pub fn cancel_with(&self, kind: CancelKind, message: Option<&'static str>) {"
+        ),
         "REGRESSION: Cx::cancel_with signature gone or \
          changed. Cancel-attribution channel broken.",
     );
@@ -255,8 +254,7 @@ fn cancel_with_records_message_into_cancel_reason() {
     // the message via with_message.
     let source = read("src/cx/cx.rs");
 
-    let fn_marker =
-        "pub fn cancel_with(&self, kind: CancelKind, message: Option<&'static str>) {";
+    let fn_marker = "pub fn cancel_with(&self, kind: CancelKind, message: Option<&'static str>) {";
     let pos = source.find(fn_marker).expect("cancel_with fn");
     let body_window = &source[pos..pos + 1500];
 
@@ -311,8 +309,7 @@ fn checkpoint_state_has_last_message_field_for_progress() {
     let source = read("src/types/task_context.rs");
 
     assert!(
-        source.contains("last_message")
-            && source.contains("Option<String>"),
+        source.contains("last_message") && source.contains("Option<String>"),
         "REGRESSION: CheckpointState::last_message field \
          appears to be gone or no longer Option<String>. \
          The progress-message channel has lost its \
@@ -325,9 +322,7 @@ fn checkpoint_state_record_with_message_at_records_into_last_message() {
     let source = read("src/types/task_context.rs");
 
     assert!(
-        source.contains(
-            "pub fn record_with_message_at(&mut self, message: String, at: Time) {"
-        ),
+        source.contains("pub fn record_with_message_at(&mut self, message: String, at: Time) {"),
         "REGRESSION: CheckpointState::record_with_message_at \
          signature changed. The progress-message recorder \
          is broken.",

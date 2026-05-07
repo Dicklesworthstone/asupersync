@@ -219,8 +219,8 @@ fn outcome_panicked_documented_in_module() {
     let source = read("src/types/outcome.rs");
 
     assert!(
-        source.contains("Task panicked (unrecoverable failure)") ||
-        source.contains("Panicked - the operation panicked")
+        source.contains("Task panicked (unrecoverable failure)")
+            || source.contains("Panicked - the operation panicked")
             || source.contains("Panicked(_)"),
         "REGRESSION: Outcome::Panicked module-level doc is \
          gone. Future readers may misinterpret the variant.",

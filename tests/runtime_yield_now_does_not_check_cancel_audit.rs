@@ -234,7 +234,8 @@ fn yield_now_poll_body_is_pure_two_poll_yield_no_cancel_check() {
     // completed flag). NO cancel check, NO Cx access.
     let source = read("src/runtime/yield_now.rs");
 
-    let fn_marker = "fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
+    let fn_marker =
+        "fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {";
     let start = source.find(fn_marker).expect("YieldNow::poll fn");
     let body_end = source[start..]
         .find("\n    }\n")
@@ -251,18 +252,13 @@ fn yield_now_poll_body_is_pure_two_poll_yield_no_cancel_check() {
     );
 
     assert!(
-        body.contains("Poll::Ready(())")
-            && body.contains("Poll::Pending"),
+        body.contains("Poll::Ready(())") && body.contains("Poll::Pending"),
         "REGRESSION: YieldNow::poll no longer alternates \
          Pending → Ready. The two-poll contract is broken.",
     );
 
     // Forbid cancel-check patterns in the poll body.
-    let suspect_cancel_check = [
-        ".fast_cancel.load(",
-        "if cancel_requested",
-        "Cx::current()",
-    ];
+    let suspect_cancel_check = [".fast_cancel.load(", "if cancel_requested", "Cx::current()"];
     for pat in &suspect_cancel_check {
         assert!(
             !body.contains(pat),
