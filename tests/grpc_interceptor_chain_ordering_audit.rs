@@ -335,8 +335,8 @@ fn layer_push_appends_to_back_of_vec() {
 mod behavioral {
     use asupersync::bytes::Bytes;
     use asupersync::grpc::Status;
-    use asupersync::grpc::interceptor::Interceptor;
-    use asupersync::grpc::interceptor::{FnInterceptor, InterceptorLayer};
+    use asupersync::grpc::interceptor::InterceptorLayer;
+    use asupersync::grpc::server::Interceptor;
     use asupersync::grpc::streaming::Request;
     use std::sync::{Arc, Mutex};
 
