@@ -57,6 +57,12 @@ pub struct TaskTable {
     /// Indexed by `TaskPhase` enum values 0..5.
     #[allow(dead_code)]
     phase_counts: [usize; LIVE_PHASE_COUNT],
+    /// Incremental total of all non-terminal task phases.
+    ///
+    /// This is the read-mostly value consumed by `RuntimeState::live_task_count`
+    /// and `StateSnapshot::from_runtime_state`. Keeping it beside
+    /// `phase_counts` avoids summing the buckets on every governor snapshot.
+    live_task_count: usize,
     /// Sum of all deadlines (in nanoseconds) for live tasks that have a
     /// non-infinite deadline. Combined with virtual-time `now`, allows O(1)
     /// estimation of deadline pressure.
@@ -93,6 +99,7 @@ impl TaskTable {
             task_record_pool: RecyclingPool::new(256), // Pool up to 256 recycled TaskRecords
             task_record_pool_stats: TaskRecordPoolStats::default(),
             phase_counts: [0; LIVE_PHASE_COUNT],
+            live_task_count: 0,
             deadline_sum_ns: 0,
             tasks_with_deadline: 0,
         }
@@ -124,6 +131,7 @@ impl TaskTable {
             task_record_pool: RecyclingPool::new(pool_limit),
             task_record_pool_stats: TaskRecordPoolStats::default(),
             phase_counts: [0; LIVE_PHASE_COUNT],
+            live_task_count: 0,
             deadline_sum_ns: 0,
             tasks_with_deadline: 0,
         }
@@ -200,12 +208,14 @@ impl TaskTable {
         let old_idx = old_phase as usize;
         if old_idx < LIVE_PHASE_COUNT {
             self.phase_counts[old_idx] = self.phase_counts[old_idx].saturating_sub(1);
+            self.live_task_count = self.live_task_count.saturating_sub(1);
         }
 
         // Increment new phase counter if it is live
         let new_idx = new_phase as usize;
         if new_idx < LIVE_PHASE_COUNT {
             self.phase_counts[new_idx] = self.phase_counts[new_idx].saturating_add(1);
+            self.live_task_count = self.live_task_count.saturating_add(1);
         }
     }
 
@@ -215,6 +225,7 @@ impl TaskTable {
         let idx = phase as usize;
         if idx < LIVE_PHASE_COUNT {
             self.phase_counts[idx] = self.phase_counts[idx].saturating_add(1);
+            self.live_task_count = self.live_task_count.saturating_add(1);
         }
         if let Some(d) = deadline {
             self.deadline_sum_ns = self
@@ -230,6 +241,7 @@ impl TaskTable {
         let idx = phase as usize;
         if idx < LIVE_PHASE_COUNT {
             self.phase_counts[idx] = self.phase_counts[idx].saturating_sub(1);
+            self.live_task_count = self.live_task_count.saturating_sub(1);
         }
         if let Some(d) = deadline {
             self.deadline_sum_ns = self
@@ -572,7 +584,12 @@ impl TaskTable {
     #[must_use]
     #[inline]
     pub fn live_task_count(&self) -> usize {
-        self.phase_counts.iter().sum()
+        debug_assert_eq!(
+            self.live_task_count,
+            self.phase_counts.iter().sum::<usize>(),
+            "live task scalar drifted from phase buckets"
+        );
+        self.live_task_count
     }
 
     /// Returns the number of stored futures.
@@ -618,13 +635,17 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
-    use crate::types::{Budget, RegionId, Time};
+    use crate::types::{Budget, Outcome, RegionId, Time};
 
     #[inline]
     fn make_task_record(owner: RegionId) -> TaskRecord {
         // Use placeholder TaskId (0,0) - will be updated after insertion
         let placeholder = TaskId::from_arena(ArenaIndex::new(0, 0));
         TaskRecord::new(placeholder, owner, Budget::INFINITE)
+    }
+
+    fn live_phase_sum(table: &TaskTable) -> usize {
+        table.phase_counts.iter().sum()
     }
 
     #[test]
@@ -669,6 +690,32 @@ mod tests {
 
         table.remove_task(TaskId::from_arena(idx1));
         assert_eq!(table.live_task_count(), 1);
+    }
+
+    #[test]
+    fn live_task_count_scalar_tracks_phase_bucket_sum() {
+        let mut table = TaskTable::new();
+        let owner = RegionId::from_arena(ArenaIndex::new(1, 0));
+
+        let idx1 = table.insert_task(make_task_record(owner));
+        let idx2 = table.insert_task(make_task_record(owner));
+        let task1 = TaskId::from_arena(idx1);
+        let task2 = TaskId::from_arena(idx2);
+        assert_eq!(table.live_task_count(), live_phase_sum(&table));
+
+        table.update_task(task1, |record| {
+            record.start_running();
+        });
+        assert_eq!(table.live_task_count(), live_phase_sum(&table));
+
+        table.update_task(task1, |record| {
+            record.complete(Outcome::Ok(()));
+        });
+        assert_eq!(table.live_task_count(), live_phase_sum(&table));
+
+        table.remove_task(task2);
+        assert_eq!(table.live_task_count(), live_phase_sum(&table));
+        assert_eq!(table.live_task_count(), 0);
     }
 
     #[test]
