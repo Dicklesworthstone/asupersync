@@ -99,6 +99,14 @@ fn fixture_cases_require_nonzero_exit_and_actionable_diagnostics() {
                 .is_some_and(|s: &str| !s.trim().is_empty()),
             "fixture {fixture_id} must include a command"
         );
+
+        let command = case["command"].as_str().expect("command should be string");
+        for disallowed in ["&&", "||", ";", "|", "<", ">", "$(", "`", "\"", "'"] {
+            assert!(
+                !command.contains(disallowed),
+                "fixture {fixture_id} command must stay direct-argv compatible: {command}"
+            );
+        }
     }
 }
 
@@ -121,5 +129,17 @@ fn harness_script_references_catalog_and_report_schema() {
     assert!(
         script.contains("--light"),
         "harness script should support lightweight deterministic mode"
+    );
+    assert!(
+        script.contains("checkout-index --all --force"),
+        "harness script should materialize snapshot workspaces without git worktrees"
+    );
+    assert!(
+        !script.contains("worktree add"),
+        "harness script must not register git worktrees"
+    );
+    assert!(
+        !script.contains("bash -lc"),
+        "harness script must not execute fixture commands through bash -lc"
     );
 }

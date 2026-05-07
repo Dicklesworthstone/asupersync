@@ -11,6 +11,7 @@
 #   - Runs all fixture cases from tests/fixtures/semantic_guardrail_mismatch/fixtures.json
 #   - Uses rch for heavy runner cases when available
 #   - Writes artifacts under target/semantic-guardrail-fixtures/<run-id>
+#   - Materializes a HEAD snapshot workspace per case without registering git worktrees
 #
 # Environment:
 #   - SEM_GUARDRAIL_ARTIFACT_ROOT: override artifact root directory.
@@ -35,7 +36,7 @@ Options:
   --light                 Skip heavy fixture cases (runner/cargo-backed cases).
   --fixture-id <id>       Run only one fixture id.
   --no-rch                Disable rch even for heavy cases.
-  --keep-workdirs         Keep per-case working directories for forensic inspection.
+  --keep-workdirs         Compatibility no-op; snapshot workspaces are retained under the run dir.
   -h, --help              Show this help.
 
 Environment:
@@ -75,7 +76,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Worktree checkouts can trigger beads daemon sync noise; keep fixture runs local.
+# Fixture runs must stay local and must not register worktrees against shared main.
 export BEADS_NO_DAEMON=1
 
 if ! command -v jq >/dev/null 2>&1; then
@@ -100,7 +101,7 @@ fi
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN_DIR="$ARTIFACT_ROOT/$RUN_ID"
 LOG_DIR="$RUN_DIR/logs"
-WORK_DIR="$RUN_DIR/worktrees"
+WORK_DIR="$RUN_DIR/workspaces"
 mkdir -p "$LOG_DIR" "$WORK_DIR"
 
 REPORT_NDJSON="$RUN_DIR/case_reports.ndjson"
@@ -108,6 +109,40 @@ REPORT_JSON="$RUN_DIR/summary.json"
 
 ensure_artifact_dirs() {
     mkdir -p "$RUN_DIR" "$LOG_DIR" "$WORK_DIR"
+}
+
+prepare_case_workspace() {
+    local case_workspace="$1"
+    local case_index="$2"
+
+    mkdir -p "$case_workspace" "$(dirname "$case_index")"
+    : >"$case_index"
+    GIT_INDEX_FILE="$case_index" git -C "$PROJECT_ROOT" read-tree HEAD
+    GIT_INDEX_FILE="$case_index" GIT_WORK_TREE="$case_workspace" \
+        git -C "$PROJECT_ROOT" checkout-index --all --force
+}
+
+parse_command_args() {
+    local command_str="$1"
+
+    if [[ -z "$command_str" || "$command_str" == *$'\n'* ]]; then
+        echo "FATAL: unsupported empty or multi-line fixture command: $command_str" >&2
+        return 1
+    fi
+
+    case "$command_str" in
+        *'&&'*|*'||'*|*';'*|*'|'*|*'<'*|*'>'*|*'$('*|*'`'*|*'"'*|*"'"*)
+            echo "FATAL: unsupported shell syntax in fixture command: $command_str" >&2
+            return 1
+            ;;
+    esac
+
+    COMMAND_ARGS=()
+    read -r -a COMMAND_ARGS <<<"$command_str"
+    if [[ ${#COMMAND_ARGS[@]} -eq 0 ]]; then
+        echo "FATAL: failed to parse fixture command: $command_str" >&2
+        return 1
+    fi
 }
 
 if [[ -n "$FIXTURE_FILTER" ]]; then
@@ -156,11 +191,8 @@ for case_id in "${CASE_IDS[@]}"; do
     fi
 
     case_workspace="$WORK_DIR/$case_id"
-    mkdir -p "$WORK_DIR"
-    if [[ -d "$case_workspace" ]]; then
-        git -C "$PROJECT_ROOT" worktree remove --force "$case_workspace" >/dev/null 2>&1 || true
-    fi
-    git -C "$PROJECT_ROOT" worktree add --detach "$case_workspace" HEAD >/dev/null 2>&1
+    case_index="$RUN_DIR/indexes/${case_id}.index"
+    prepare_case_workspace "$case_workspace" "$case_index"
 
     mutation_op="$(jq -r --arg id "$case_id" '.cases[] | select(.fixture_id == $id) | .mutation.operation' "$FIXTURE_FILE")"
     mutation_file_rel="$(jq -r --arg id "$case_id" '.cases[] | select(.fixture_id == $id) | .mutation.file' "$FIXTURE_FILE")"
@@ -177,7 +209,6 @@ for case_id in "${CASE_IDS[@]}"; do
             '{fixture_id:$fixture_id,surface:$surface,purpose:$purpose,status:"failed",reason:"mutation_file_missing",mutation_file:$file,exit_code:null,expected_exit:null,diagnostic_checks:[]}' \
             >> "$REPORT_NDJSON"
         fail_count=$((fail_count + 1))
-        git -C "$PROJECT_ROOT" worktree remove --force "$case_workspace" >/dev/null 2>&1 || true
         continue
     fi
 
@@ -196,7 +227,6 @@ for case_id in "${CASE_IDS[@]}"; do
                     '{fixture_id:$fixture_id,surface:$surface,purpose:$purpose,status:"failed",reason:"find_token_missing",mutation_file:$file,exit_code:null,expected_exit:null,diagnostic_checks:[]}' \
                     >> "$REPORT_NDJSON"
                 fail_count=$((fail_count + 1))
-                git -C "$PROJECT_ROOT" worktree remove --force "$case_workspace" >/dev/null 2>&1 || true
                 continue
             fi
             FIND_TEXT="$find_text" REPLACE_TEXT="$replace_text" perl -0pi -e 's/\Q$ENV{FIND_TEXT}\E/$ENV{REPLACE_TEXT}/' "$mutation_file"
@@ -216,13 +246,24 @@ for case_id in "${CASE_IDS[@]}"; do
                 '{fixture_id:$fixture_id,surface:$surface,purpose:$purpose,status:"failed",reason:"unsupported_mutation_op",mutation_op:$op,exit_code:null,expected_exit:null,diagnostic_checks:[]}' \
                 >> "$REPORT_NDJSON"
             fail_count=$((fail_count + 1))
-            git -C "$PROJECT_ROOT" worktree remove --force "$case_workspace" >/dev/null 2>&1 || true
             continue
             ;;
     esac
 
     command_str="$(jq -r --arg id "$case_id" '.cases[] | select(.fixture_id == $id) | .command' "$FIXTURE_FILE")"
     expected_exit="$(jq -r --arg id "$case_id" '.cases[] | select(.fixture_id == $id) | .expected_exit' "$FIXTURE_FILE")"
+    if ! parse_command_args "$command_str"; then
+        printf '[FAIL] %s (%s): unsupported fixture command syntax\n' "$case_id" "$surface"
+        jq -n \
+            --arg fixture_id "$case_id" \
+            --arg surface "$surface" \
+            --arg purpose "$purpose" \
+            --arg command "$command_str" \
+            '{fixture_id:$fixture_id,surface:$surface,purpose:$purpose,status:"failed",reason:"unsupported_command_syntax",command:$command,exit_code:null,expected_exit:null,diagnostic_checks:[]}' \
+            >> "$REPORT_NDJSON"
+        fail_count=$((fail_count + 1))
+        continue
+    fi
 
     log_file="$LOG_DIR/${case_id}.log"
     mkdir -p "$(dirname "$log_file")"
@@ -235,12 +276,19 @@ for case_id in "${CASE_IDS[@]}"; do
     rc=0
     if [[ "$run_with_rch" == "true" ]]; then
         set +e
-        (cd "$case_workspace" && rch exec -- bash -lc "$command_str") >"$log_file" 2>&1
+        (cd "$case_workspace" && rch exec -- "${COMMAND_ARGS[@]}") >"$log_file" 2>&1
         rc=$?
         set -e
     else
         set +e
-        (cd "$case_workspace" && bash -lc "$command_str") >"$log_file" 2>&1
+        (
+            cd "$case_workspace" && \
+            env \
+                GIT_DIR="$PROJECT_ROOT/.git" \
+                GIT_WORK_TREE="$case_workspace" \
+                GIT_INDEX_FILE="$case_index" \
+                "${COMMAND_ARGS[@]}"
+        ) >"$log_file" 2>&1
         rc=$?
         set -e
     fi
@@ -314,10 +362,6 @@ for case_id in "${CASE_IDS[@]}"; do
             missing_diagnostics:$missing_diagnostics,
             log_file:$log_file
         }' >> "$REPORT_NDJSON"
-
-    if [[ "$KEEP_WORKDIRS" != "true" ]]; then
-        git -C "$PROJECT_ROOT" worktree remove --force "$case_workspace" >/dev/null 2>&1 || true
-    fi
 done
 
 status="pass"
