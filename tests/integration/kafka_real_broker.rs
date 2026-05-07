@@ -1725,3 +1725,158 @@ fn test_real_broker_payment_message_delivery() {
         log.test_end("pass");
     });
 }
+
+/// Real-Kafka roundtrip: prove `KafkaConsumer::close()` is NOT a commit
+/// barrier. The current implementation
+/// (`src/messaging/kafka_consumer.rs:1383`) calls `consumer.unsubscribe()` +
+/// `consumer.unassign()` and clears every local mirror of `committed_offsets`
+/// / `positions` — but never invokes `commit_offsets`. A consumer that
+/// polls messages and updates positions but skips the explicit
+/// `commit_offsets` before `close()` therefore loses its progress: the
+/// broker side has no record, and the next consumer in the same
+/// `group_id` re-reads everything (`AutoOffsetReset::Earliest`) or skips
+/// it (`AutoOffsetReset::Latest`). Either way is unsafe for at-least-once
+/// pipelines unless the caller commits explicitly.
+///
+/// asupersync-z9ka3u: this test pins the contract by demonstrating the
+/// re-read against a real broker. Producer writes N messages, consumer A
+/// (group G) consumes all N WITHOUT commit, calls `close()`. Consumer B
+/// (same group G, `AutoOffsetReset::Earliest`) subscribes and is
+/// asserted to re-read all N messages — proving the broker still sees
+/// G's committed offset at the pre-A baseline (typically 0).
+///
+/// If a future change makes `close()` auto-commit, this test will FAIL
+/// (B will see 0 messages). That failure is then the signal to update
+/// the contract: either re-document `close()` as a commit barrier or
+/// add a `force_uncommitted: true` opt-in for callers who want the
+/// current "discard pending positions" semantics.
+#[test]
+fn test_real_broker_close_without_commit_loses_positions() {
+    let Some(config) = require_real_broker() else {
+        return;
+    };
+
+    let log = KafkaTestLogger::new("real_broker_close_without_commit_z9ka3u");
+
+    run_test_with_cx(|cx| async move {
+        let topic = unique_topic("close-without-commit-z9ka3u");
+        // Single shared group_id across consumers A and B — they're the same
+        // logical reader, just split across a graceful-shutdown boundary.
+        let group_id = format!("test-group-z9ka3u-{}", fastrand::u32(..));
+        let factory = KafkaMessageFactory::new();
+
+        log.phase("setup_producer");
+        let producer_config =
+            ProducerConfig::new(config.bootstrap_servers.clone()).client_id("z9ka3u-producer");
+        let producer = KafkaProducer::new(producer_config).expect("producer config");
+
+        log.phase("produce_3_messages");
+        let test_messages = factory.create_batch_messages(3, &topic);
+        for (msg_topic, key, payload) in &test_messages {
+            let metadata = producer
+                .send(&cx, msg_topic, Some(key), payload, None)
+                .await
+                .expect("send");
+            log.kafka_operation("send", Some(&metadata), None);
+        }
+        producer
+            .flush(&cx, Duration::from_secs(10))
+            .await
+            .expect("producer flush");
+
+        log.phase("consumer_A_subscribe_poll_close_without_commit");
+        let consumer_a_config = ConsumerConfig::new(config.bootstrap_servers.clone(), &group_id)
+            .client_id("z9ka3u-consumer-A")
+            .auto_offset_reset(AutoOffsetReset::Earliest)
+            .enable_auto_commit(false)
+            .force_real_kafka(true);
+        let consumer_a = KafkaConsumer::new(consumer_a_config).expect("consumer A config");
+
+        let topics: Vec<&str> = test_messages
+            .iter()
+            .map(|(t, _, _)| t.as_str())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        consumer_a
+            .subscribe(&cx, &topics)
+            .await
+            .expect("A subscribe");
+
+        let mut polled_a = 0usize;
+        let poll_deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while polled_a < test_messages.len() && std::time::Instant::now() < poll_deadline {
+            if let Some(record) = consumer_a
+                .poll(&cx, Duration::from_secs(1))
+                .await
+                .expect("A poll")
+            {
+                log.kafka_operation("poll_A", None, None);
+                let _ = record;
+                polled_a += 1;
+            }
+        }
+        assert_eq!(
+            polled_a,
+            test_messages.len(),
+            "consumer A should poll all {} messages from the real broker",
+            test_messages.len()
+        );
+
+        // CRITICAL STEP: close() WITHOUT commit_offsets. This is the
+        // exact production hazard — graceful shutdown that forgot the
+        // commit barrier. The broker still has G's offset at the
+        // pre-subscription baseline.
+        consumer_a.close(&cx).await.expect("A close");
+
+        log.phase("consumer_B_subscribes_with_same_group_id");
+        let consumer_b_config = ConsumerConfig::new(config.bootstrap_servers.clone(), &group_id)
+            .client_id("z9ka3u-consumer-B")
+            .auto_offset_reset(AutoOffsetReset::Earliest)
+            .enable_auto_commit(false)
+            .force_real_kafka(true);
+        let consumer_b = KafkaConsumer::new(consumer_b_config).expect("consumer B config");
+        consumer_b
+            .subscribe(&cx, &topics)
+            .await
+            .expect("B subscribe");
+
+        let mut polled_b = 0usize;
+        let poll_deadline_b = std::time::Instant::now() + Duration::from_secs(30);
+        while polled_b < test_messages.len() && std::time::Instant::now() < poll_deadline_b {
+            if let Some(record) = consumer_b
+                .poll(&cx, Duration::from_secs(1))
+                .await
+                .expect("B poll")
+            {
+                log.kafka_operation("poll_B_replay", None, None);
+                let _ = record;
+                polled_b += 1;
+            }
+        }
+
+        // The contract being pinned: B re-reads A's messages because A
+        // never committed. If a future patch makes close() commit
+        // automatically, this assert will fail with polled_b == 0 and
+        // surface the contract change for review.
+        assert_eq!(
+            polled_b,
+            test_messages.len(),
+            "consumer B (same group {group_id}) must re-read all {} messages because \
+             consumer A's close() did NOT commit pending positions; observed only {} replays. \
+             If this fails with 0 replays, close() may have started auto-committing — review \
+             src/messaging/kafka_consumer.rs:1383 and update the contract docstring.",
+            test_messages.len(),
+            polled_b
+        );
+
+        log.phase("cleanup");
+        consumer_b.close(&cx).await.expect("B close");
+        producer
+            .close(&cx, Duration::from_secs(5))
+            .await
+            .expect("producer close");
+
+        log.test_end("pass");
+    });
+}
