@@ -275,6 +275,43 @@ impl Status {
     pub fn is_ok(&self) -> bool {
         self.code == Code::Ok
     }
+
+    /// Map an HTTP/2 `RST_STREAM` error code to a gRPC `Status` per the
+    /// gRPC-over-HTTP/2 protocol specification.
+    ///
+    /// br-asupersync-q01vh5: the canonical 14-row mapping comes from
+    /// <https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md>
+    /// ("Responses (HTTP/2) ... RST_STREAM"). Pre-fix the only mapping in
+    /// the codebase was the test helper `grpc_go_rst_stream_status` in
+    /// `src/grpc/streaming.rs`, which omitted the spec-mandated
+    /// `ENHANCE_YOUR_CALM → RESOURCE_EXHAUSTED` and
+    /// `INADEQUATE_SECURITY → PERMISSION_DENIED` mappings.
+    #[must_use]
+    pub fn from_h2_rst_stream_code(code: crate::http::h2::error::ErrorCode) -> Self {
+        use crate::http::h2::error::ErrorCode;
+        let grpc_code = match code {
+            ErrorCode::Cancel => Code::Cancelled,
+            ErrorCode::RefusedStream => Code::Unavailable,
+            ErrorCode::EnhanceYourCalm => Code::ResourceExhausted,
+            ErrorCode::InadequateSecurity => Code::PermissionDenied,
+            // Per gRPC spec, all other RST_STREAM codes map to INTERNAL.
+            // STREAM_CLOSED has "no mapping" in the spec because the stream
+            // is already gone, but if it surfaces to a caller we must still
+            // produce a Status — INTERNAL is the safest non-retryable
+            // signal that something framing-level went wrong.
+            ErrorCode::NoError
+            | ErrorCode::ProtocolError
+            | ErrorCode::InternalError
+            | ErrorCode::FlowControlError
+            | ErrorCode::SettingsTimeout
+            | ErrorCode::StreamClosed
+            | ErrorCode::FrameSizeError
+            | ErrorCode::CompressionError
+            | ErrorCode::ConnectError
+            | ErrorCode::Http11Required => Code::Internal,
+        };
+        Self::new(grpc_code, format!("Received RST_STREAM with code {code}"))
+    }
 }
 
 impl fmt::Display for Status {
@@ -1446,5 +1483,55 @@ mod tests {
         }
 
         crate::test_complete!("test_grpc_error_status_conversion");
+    }
+
+    /// br-asupersync-q01vh5 — full mapping table from the gRPC HTTP/2
+    /// protocol spec. Every HTTP/2 RST_STREAM error code MUST produce
+    /// the gRPC status code listed in
+    /// <https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md>.
+    ///
+    /// Pre-fix the only mapping in the codebase was the 3-row test
+    /// helper `grpc_go_rst_stream_status`, missing the spec-mandated
+    /// rows for ENHANCE_YOUR_CALM and INADEQUATE_SECURITY.
+    #[test]
+    fn from_h2_rst_stream_code_matches_grpc_http2_spec() {
+        use crate::http::h2::error::ErrorCode;
+
+        // (rst_code, expected gRPC code, expected token in message)
+        let cases: &[(ErrorCode, Code, &str)] = &[
+            (ErrorCode::NoError, Code::Internal, "NO_ERROR"),
+            (ErrorCode::ProtocolError, Code::Internal, "PROTOCOL_ERROR"),
+            (ErrorCode::InternalError, Code::Internal, "INTERNAL_ERROR"),
+            (ErrorCode::FlowControlError, Code::Internal, "FLOW_CONTROL_ERROR"),
+            (ErrorCode::SettingsTimeout, Code::Internal, "SETTINGS_TIMEOUT"),
+            (ErrorCode::StreamClosed, Code::Internal, "STREAM_CLOSED"),
+            (ErrorCode::FrameSizeError, Code::Internal, "FRAME_SIZE_ERROR"),
+            (ErrorCode::RefusedStream, Code::Unavailable, "REFUSED_STREAM"),
+            (ErrorCode::Cancel, Code::Cancelled, "CANCEL"),
+            (ErrorCode::CompressionError, Code::Internal, "COMPRESSION_ERROR"),
+            (ErrorCode::ConnectError, Code::Internal, "CONNECT_ERROR"),
+            (ErrorCode::EnhanceYourCalm, Code::ResourceExhausted, "ENHANCE_YOUR_CALM"),
+            (ErrorCode::InadequateSecurity, Code::PermissionDenied, "INADEQUATE_SECURITY"),
+            (ErrorCode::Http11Required, Code::Internal, "HTTP_1_1_REQUIRED"),
+        ];
+
+        for (rst_code, expected_code, expected_token) in cases.iter().copied() {
+            let status = Status::from_h2_rst_stream_code(rst_code);
+            assert_eq!(
+                status.code(),
+                expected_code,
+                "RST_STREAM {} (0x{:x}) must map to gRPC code {:?}, got {:?}",
+                expected_token,
+                u32::from(rst_code),
+                expected_code,
+                status.code()
+            );
+            assert!(
+                status.message().contains(expected_token),
+                "Status message for RST_STREAM {} should mention the wire name; got {:?}",
+                expected_token,
+                status.message()
+            );
+        }
     }
 }
