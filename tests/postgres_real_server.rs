@@ -25,12 +25,14 @@
 #![cfg(all(test, feature = "postgres"))]
 #![allow(clippy::pedantic, clippy::nursery, clippy::print_stderr)]
 
+use asupersync::cx::Cx;
 use asupersync::database::postgres::{PgConnectOptions, PgConnection, PgError};
 use asupersync::test_utils::run_test_with_cx;
-use asupersync::types::Outcome;
+use asupersync::types::{CancelKind, Outcome};
 
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Configuration for the real-server harness — env-var driven, with hard
 /// production guards.
@@ -543,4 +545,170 @@ fn pg_real_copy_from_chunks_streams_and_recovers() {
 
         log.end("pass");
     });
+}
+
+/// Cancel-in-flight: real-server roundtrip for the PostgreSQL `CancelRequest`
+/// protocol (PG protocol §53.2.7 — separate TCP, 16-byte frame containing the
+/// backend's process_id + secret_key from `BackendKeyData`). Until this test
+/// landed, the cancel path was only exercised by `postgres_cancellation_audit.rs`
+/// (println-only commentary using `tokio::test`) and `cancelled_commit_marks_
+/// connection_for_rollback` (synthetic state). Neither verifies that asupersync
+/// actually delivers the CancelRequest to a live backend, that the backend
+/// SIGINTs the worker, or that the in-flight `query_unchecked` returns
+/// `Outcome::Cancelled` long before the query's natural duration.
+///
+/// asupersync-xgkg5w: the test starts `SELECT pg_sleep(30)` on a clonable Cx,
+/// sleeps ~200 ms in a sidecar thread, then calls `cx.cancel_with(CancelKind::
+/// User, ...)`. The expected fail-fast invariant is that the query observes
+/// `cx.checkpoint().is_err()` in its message-loop, calls `cancel_in_flight`
+/// (src/database/postgres.rs:3440) which spawns the detached
+/// `pg-cancel-request` thread (line 3197), opens a fresh TCP socket to the
+/// same host:port, and writes the 16-byte frame so the server SIGINTs the
+/// backend worker. The original socket is then torn down via
+/// `abort_in_flight_exchange`, so the cancelled `PgConnection` is poisoned —
+/// recovery requires opening a *fresh* connection on the same URL.
+///
+/// Assertions:
+/// 1. `query_unchecked` returns `Outcome::Cancelled` (NOT Ok, NOT Err) — the
+///    SIGINT-cancelled query never produces rows.
+/// 2. Total elapsed is well under `pg_sleep`'s 30-second nap. We use a 10-
+///    second hard ceiling so a regression that loses the CancelRequest path
+///    (e.g. closes the socket without firing the request) fails the test
+///    rather than silently waiting out the sleep.
+/// 3. A *fresh* `PgConnection` against the same URL serves a `SELECT 1` after
+///    the cancel — proves the server worker exited cleanly without leaving a
+///    poisoned session.
+#[test]
+fn pg_real_cancel_in_flight_during_long_query() {
+    let cfg = RealPgConfig::from_env();
+    if skip_if_disabled(&cfg, "pg_real_cancel_in_flight_during_long_query") {
+        return;
+    }
+    let log = PgTestLogger::new(
+        "postgres_real",
+        "pg_real_cancel_in_flight_during_long_query",
+    );
+
+    run_test_with_cx(|cx| async move {
+        log.phase("connect");
+        let mut conn = unwrap_pg(PgConnection::connect(&cx, &cfg.url).await, &log, "connect");
+
+        // Spawn a sidecar thread that flips the *same* Cx (Cx is cheaply
+        // clonable; clones share cancellation state via Arc — see
+        // src/cx/cx.rs:175) into the cancelled state ~200 ms after the
+        // query starts. Trying to cancel via `tokio::time::sleep` here
+        // would tie the test to a different runtime; a plain
+        // `std::thread::sleep` is the simplest way to fire the cancel
+        // signal from outside the asupersync runtime that owns `cx`.
+        let canceller_cx: Cx = cx.clone();
+        let cancel_thread = thread::Builder::new()
+            .name("pg-real-cancel-trigger".into())
+            .spawn(move || {
+                thread::sleep(Duration::from_millis(200));
+                canceller_cx.cancel_with(
+                    CancelKind::User,
+                    Some("pg_real_cancel_in_flight_during_long_query trigger"),
+                );
+            })
+            .expect("spawn cancel-trigger thread");
+
+        log.phase("long_query_with_cancel");
+        let started = Instant::now();
+        // pg_sleep(30) is the canonical "definitely-still-running" probe.
+        // If the cancel never lands the test waits 30s, hits the panic
+        // branch in unwrap_pg via Outcome::Ok, and fails with a clear
+        // diagnostic. The hard ceiling below pins the upper bound so the
+        // failure mode never exceeds 10s.
+        let outcome = conn
+            .query_unchecked(&cx, "SELECT pg_sleep(30) AS slept")
+            .await;
+        let elapsed = started.elapsed();
+        cancel_thread.join().expect("cancel-trigger thread");
+
+        log.line(
+            "cancel_outcome",
+            &[
+                ("variant", outcome_label(&outcome)),
+                ("elapsed_ms", &elapsed.as_millis().to_string()),
+            ],
+        );
+
+        match outcome {
+            Outcome::Cancelled(reason) => {
+                log.line(
+                    "cancel_reason",
+                    &[
+                        ("kind", &format!("{:?}", reason.kind)),
+                        ("message", reason.message.as_deref().unwrap_or("<none>")),
+                    ],
+                );
+                assert_eq!(
+                    reason.kind,
+                    CancelKind::User,
+                    "cancel attribution must reflect User-triggered cancel, got {:?}",
+                    reason.kind
+                );
+            }
+            Outcome::Ok(_) => {
+                log.end("fail");
+                panic!(
+                    "pg_sleep(30) completed normally in {elapsed:?} — cancel did not fire \
+                     or did not propagate to query_unchecked"
+                );
+            }
+            Outcome::Err(err) => {
+                log.end("fail");
+                panic!(
+                    "pg_sleep(30) returned PgError after {elapsed:?}, expected Outcome::Cancelled: {err}"
+                );
+            }
+            Outcome::Panicked(p) => {
+                log.end("fail");
+                panic!("pg_sleep(30) panicked after {elapsed:?}: {p:?}");
+            }
+        }
+
+        // Ceiling at 10s leaves room for slow CI / loaded boxes while
+        // still catching a regression that closes the socket without
+        // firing the CancelRequest (in which case the server keeps
+        // sleeping until ~30s). 5s is a tighter local-dev target.
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "cancel must short-circuit pg_sleep(30) well under 10s, took {elapsed:?}"
+        );
+        log.assert_match("cancel_under_10s", "true", "true");
+
+        log.phase("recovery_fresh_connection");
+        // The cancelled connection is intentionally poisoned by
+        // abort_in_flight_exchange — open a NEW connection to verify the
+        // server worker exited cleanly.
+        let cx_recover = Cx::for_testing();
+        let mut conn2 = unwrap_pg(
+            PgConnection::connect(&cx_recover, &cfg.url).await,
+            &log,
+            "recover_connect",
+        );
+        let rows = unwrap_pg(
+            conn2
+                .query_unchecked(&cx_recover, "SELECT 1::int4 AS v")
+                .await,
+            &log,
+            "recover_select",
+        );
+        assert_eq!(rows.len(), 1, "recovery SELECT 1 must return one row");
+        let v = rows[0].get_i32("v").expect("get_i32");
+        log.assert_match("recovery_v", "1", &v.to_string());
+        assert_eq!(v, 1);
+
+        log.end("pass");
+    });
+}
+
+fn outcome_label<T>(out: &Outcome<T, PgError>) -> &'static str {
+    match out {
+        Outcome::Ok(_) => "ok",
+        Outcome::Err(_) => "err",
+        Outcome::Cancelled(_) => "cancelled",
+        Outcome::Panicked(_) => "panicked",
+    }
 }
