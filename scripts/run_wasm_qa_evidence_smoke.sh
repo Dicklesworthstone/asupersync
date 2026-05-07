@@ -108,12 +108,15 @@ load_scenario() {
 }
 
 shell_join() {
-  printf '%q ' "$@"
+  local rendered
+  printf -v rendered '%q ' "$@"
+  printf '%s' "${rendered% }"
 }
 
 build_command_argv() {
   local sid="$1"
   local safe_sid="${sid//[^A-Za-z0-9_]/_}"
+  PRE_COMMAND_ARGV=()
 
   case "$sid" in
     WASM-QA-SMOKE-LAYERS)
@@ -188,10 +191,15 @@ build_command_argv() {
       )
       ;;
     WASM-QA-SMOKE-PACKAGED-CANCELLATION)
+      PRE_COMMAND_ARGV=(
+        bash scripts/build_browser_core_artifacts.sh prod
+      )
       COMMAND_ARGV=(
-        "$RCH_BIN" exec --
-        bash -lc
-        "set -euo pipefail; bash scripts/build_browser_core_artifacts.sh prod; env WASM_PACKAGED_CANCELLATION_DRY_RUN=1 WASM_PERF_PROFILE=core-min RCH_BIN=/bin/true bash scripts/test_wasm_packaged_cancellation_e2e.sh"
+        env
+        WASM_PACKAGED_CANCELLATION_DRY_RUN=1
+        WASM_PERF_PROFILE=core-min
+        RCH_BIN=/bin/true
+        bash scripts/test_wasm_packaged_cancellation_e2e.sh
       )
       ;;
     WASM-QA-SMOKE-HOST-BRIDGE)
@@ -447,10 +455,14 @@ run_scenario_bundle() {
   local RUN_LOG_PATH="$OUTDIR/run.log"
   local EVENTS_PATH="$OUTDIR/events.ndjson"
   declare -a COMMAND_ARGV
+  declare -a PRE_COMMAND_ARGV
 
   load_scenario "$SCENARIO"
   build_command_argv "$SCENARIO"
   COMMAND="$(shell_join "${COMMAND_ARGV[@]}")"
+  if [[ "${#PRE_COMMAND_ARGV[@]}" -gt 0 ]]; then
+    COMMAND="$(shell_join "${PRE_COMMAND_ARGV[@]}") && ${COMMAND}"
+  fi
   mkdir -p "$OUTDIR"
   : > "$EVENTS_PATH"
 
@@ -474,7 +486,13 @@ run_scenario_bundle() {
 
   emit_event "scenario_start" "blocked" -1 "" "warm" "$(retention_until_utc warm)"
   local EXITCODE=0
-  timeout "$RCH_WRAPPER_TIMEOUT" "${COMMAND_ARGV[@]}" > "$RUN_LOG_PATH" 2>&1 || EXITCODE=$?
+  : > "$RUN_LOG_PATH"
+  if [[ "${#PRE_COMMAND_ARGV[@]}" -gt 0 ]]; then
+    timeout "$RCH_WRAPPER_TIMEOUT" "${PRE_COMMAND_ARGV[@]}" > "$RUN_LOG_PATH" 2>&1 || EXITCODE=$?
+  fi
+  if [[ "$EXITCODE" -eq 0 ]]; then
+    timeout "$RCH_WRAPPER_TIMEOUT" "${COMMAND_ARGV[@]}" >> "$RUN_LOG_PATH" 2>&1 || EXITCODE=$?
+  fi
   if grep -Eiq 'local fallback|fallback to local|executing locally' "$RUN_LOG_PATH"; then
     printf '\nerror: rch local fallback detected; refusing local cargo execution\n' >> "$RUN_LOG_PATH"
     EXITCODE=86
@@ -597,10 +615,15 @@ RUN_ID="${RUN_ID_OVERRIDE:-run_$(date +%Y%m%d_%H%M%S)}"
 OUTDIR="${SINGLE_ROOT}/${RUN_ID}/${SCENARIO}"
 load_scenario "$SCENARIO"
 declare -a COMMAND_ARGV
+declare -a PRE_COMMAND_ARGV
 build_command_argv "$SCENARIO"
 echo "=== Executing $SCENARIO ==="
 echo "  $DESCRIPTION"
-echo "  command: $(shell_join "${COMMAND_ARGV[@]}")"
+if [[ "${#PRE_COMMAND_ARGV[@]}" -gt 0 ]]; then
+  echo "  command: $(shell_join "${PRE_COMMAND_ARGV[@]}") && $(shell_join "${COMMAND_ARGV[@]}")"
+else
+  echo "  command: $(shell_join "${COMMAND_ARGV[@]}")"
+fi
 
 set +e
 scenario_result="$(run_scenario_bundle "$RUN_ID" "$SCENARIO" "$OUTDIR" "$MODE")"

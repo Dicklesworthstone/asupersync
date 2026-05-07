@@ -262,7 +262,7 @@
     {
       "scenario_id": "WASM-QA-SMOKE-PACKAGED-CANCELLATION",
       "description": "Run packaged cancellation/quiescence harness in dry-run mode and verify schema-style WASM E2E bundle emission",
-      "command": "${RCH_BIN:-rch} exec -- bash -lc 'set -euo pipefail; bash scripts/build_browser_core_artifacts.sh prod; env WASM_PACKAGED_CANCELLATION_DRY_RUN=1 WASM_PERF_PROFILE=core-min RCH_BIN=/bin/true bash scripts/test_wasm_packaged_cancellation_e2e.sh'"
+      "command": "bash scripts/build_browser_core_artifacts.sh prod && env WASM_PACKAGED_CANCELLATION_DRY_RUN=1 WASM_PERF_PROFILE=core-min RCH_BIN=/bin/true bash scripts/test_wasm_packaged_cancellation_e2e.sh"
     },
     {
       "scenario_id": "WASM-QA-SMOKE-HOST-BRIDGE",
