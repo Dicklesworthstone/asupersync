@@ -134,6 +134,21 @@ pub struct Response {
     pub status: StatusCode,
     /// Response headers.
     pub headers: HashMap<String, String>,
+    /// Set-Cookie response header lines, one per cookie.
+    ///
+    /// br-asupersync-ehtkns: `Set-Cookie` is the canonical multi-valued
+    /// response header — each cookie must ship as its own header line.
+    /// Storing it in `headers` (a single-value `HashMap`) silently
+    /// overwrote earlier cookies whenever a second one was set, e.g.
+    /// when `SessionMiddleware` set the session cookie after a handler
+    /// had already set a CSRF / remember-me cookie. All Set-Cookie
+    /// entries now live here; wire-format writers must emit one
+    /// `Set-Cookie:` line per entry. The public API funnels Set-Cookie
+    /// values into this vector via [`Response::append_set_cookie`] (and
+    /// transparently from [`Response::set_header`] when the name is
+    /// `set-cookie`), so existing call sites cannot accidentally lose
+    /// cookies.
+    pub set_cookies: Vec<String>,
     /// Response body.
     pub body: Bytes,
 }
@@ -145,6 +160,7 @@ impl Response {
         Self {
             status,
             headers: HashMap::with_capacity(4),
+            set_cookies: Vec::new(),
             body: body.into(),
         }
     }
@@ -156,8 +172,15 @@ impl Response {
     }
 
     /// Returns a header value using HTTP's case-insensitive matching rules.
+    ///
+    /// For `set-cookie`, returns the FIRST entry of [`Self::set_cookies`]
+    /// (callers needing every cookie should iterate `set_cookies` directly,
+    /// since `Set-Cookie` is canonically multi-valued).
     #[must_use]
     pub fn header_value(&self, name: &str) -> Option<&str> {
+        if name.eq_ignore_ascii_case("set-cookie") {
+            return self.set_cookies.first().map(String::as_str);
+        }
         if let Some(value) = self.headers.get(name) {
             return Some(value.as_str());
         }
@@ -172,7 +195,24 @@ impl Response {
     /// Returns `true` when the response contains the named header.
     #[must_use]
     pub fn has_header(&self, name: &str) -> bool {
+        if name.eq_ignore_ascii_case("set-cookie") {
+            return !self.set_cookies.is_empty();
+        }
         self.header_value(name).is_some()
+    }
+
+    /// Append a `Set-Cookie` response header line.
+    ///
+    /// br-asupersync-ehtkns: the explicit, append-only API for cookies.
+    /// Each call adds a separate `Set-Cookie:` line on the wire, so
+    /// composed middleware (session, CSRF, remember-me, flash) can each
+    /// ship their own cookie without clobbering the others. The value
+    /// is sanitized through [`sanitize_header_value`] for parity with
+    /// `set_header`, so CR/LF/NUL/control bytes can never split the
+    /// header.
+    pub fn append_set_cookie(&mut self, value: impl Into<String>) {
+        self.set_cookies
+            .push(sanitize_header_value(value.into()));
     }
 
     /// Insert or replace a header while canonicalizing the stored name.
@@ -181,8 +221,18 @@ impl Response {
     /// to prevent race conditions where multiple headers with case-variant names
     /// could exist simultaneously. Both names and values are sanitized using
     /// consistent logic to prevent injection attacks.
+    ///
+    /// br-asupersync-ehtkns: when `name` is `set-cookie`, the call is
+    /// transparently routed to [`Self::append_set_cookie`] so multiple
+    /// composed middleware layers each get to emit their own cookie
+    /// instead of overwriting one another. To remove all previously
+    /// queued cookies, clear [`Self::set_cookies`] explicitly.
     pub fn set_header(&mut self, name: impl Into<String>, value: impl Into<String>) {
         let normalized = sanitize_header_name(name.into()).to_ascii_lowercase();
+        if normalized == "set-cookie" {
+            self.append_set_cookie(value.into());
+            return;
+        }
         let sanitized_value = sanitize_header_value(value.into());
 
         // Atomic removal of all case-variant keys - collect AND remove in the
@@ -199,7 +249,18 @@ impl Response {
     /// br-asupersync-n5b94b: TOCTOU FIX - atomic header processing to prevent
     /// race conditions. The name is sanitized using consistent validation that
     /// matches header value sanitization.
+    ///
+    /// br-asupersync-ehtkns: when `name` is `set-cookie`, appends the
+    /// default value only when no cookies are currently queued. Use
+    /// [`Self::append_set_cookie`] to add additional cookies regardless
+    /// of state.
     pub fn ensure_header(&mut self, name: &str, default_value: impl Into<String>) {
+        if name.eq_ignore_ascii_case("set-cookie") {
+            if self.set_cookies.is_empty() {
+                self.append_set_cookie(default_value.into());
+            }
+            return;
+        }
         let normalized = sanitize_header_name(name.to_owned()).to_ascii_lowercase();
 
         // Atomic check-and-set: find existing value or use default, then
@@ -219,7 +280,19 @@ impl Response {
     }
 
     /// Remove a header using HTTP's case-insensitive matching rules.
+    ///
+    /// br-asupersync-ehtkns: when `name` is `set-cookie`, drains all
+    /// queued cookies from [`Self::set_cookies`] and returns the first
+    /// one (preserving the legacy single-value return shape).
     pub fn remove_header(&mut self, name: &str) -> Option<String> {
+        if name.eq_ignore_ascii_case("set-cookie") {
+            if self.set_cookies.is_empty() {
+                return None;
+            }
+            let first = self.set_cookies.remove(0);
+            self.set_cookies.clear();
+            return Some(first);
+        }
         let normalized = name.to_ascii_lowercase();
         let mut matching_keys: Vec<String> = self
             .headers
@@ -1187,6 +1260,56 @@ mod tests {
         let mut resp = Response::empty(StatusCode::OK);
         resp.set_header("x-test", "normal-value");
         assert_eq!(resp.headers.get("x-test").unwrap(), "normal-value");
+    }
+
+    /// br-asupersync-ehtkns: Set-Cookie is multi-valued; calling
+    /// `set_header("set-cookie", X)` (or `.header()`) twice must
+    /// preserve BOTH cookies. Before the fix, the HashMap-backed
+    /// header store silently dropped the first cookie, which let
+    /// SessionMiddleware overwrite handler-emitted CSRF / remember-me
+    /// cookies.
+    #[test]
+    fn set_cookie_appends_instead_of_overwriting() {
+        let mut resp = Response::empty(StatusCode::OK);
+        resp.set_header("set-cookie", "csrf=abc123; HttpOnly");
+        resp.set_header("set-cookie", "session=def456; HttpOnly; Secure");
+        assert_eq!(resp.set_cookies.len(), 2, "both cookies must survive");
+        assert_eq!(resp.set_cookies[0], "csrf=abc123; HttpOnly");
+        assert_eq!(resp.set_cookies[1], "session=def456; HttpOnly; Secure");
+        // Set-Cookie is NOT routed into the regular headers map.
+        assert!(!resp.headers.contains_key("set-cookie"));
+        // Case-insensitive header lookup still surfaces the first cookie
+        // for backward compatibility with single-cookie callers.
+        assert_eq!(
+            resp.header_value("Set-Cookie"),
+            Some("csrf=abc123; HttpOnly"),
+        );
+        assert!(resp.has_header("set-cookie"));
+    }
+
+    /// br-asupersync-ehtkns: append_set_cookie still strips CR/LF
+    /// from the cookie line so a malicious cookie value cannot smuggle
+    /// a second header onto the wire.
+    #[test]
+    fn append_set_cookie_strips_crlf_from_value() {
+        let mut resp = Response::empty(StatusCode::OK);
+        resp.append_set_cookie("session=abc\r\nX-Injected: yes");
+        assert_eq!(resp.set_cookies.len(), 1);
+        assert!(!resp.set_cookies[0].contains('\r'));
+        assert!(!resp.set_cookies[0].contains('\n'));
+    }
+
+    /// br-asupersync-ehtkns: removing the Set-Cookie header drains
+    /// every queued cookie and surfaces the first as the legacy
+    /// single-value return.
+    #[test]
+    fn remove_set_cookie_drains_all_queued_cookies() {
+        let mut resp = Response::empty(StatusCode::OK);
+        resp.append_set_cookie("a=1");
+        resp.append_set_cookie("b=2");
+        let dropped = resp.remove_header("Set-Cookie");
+        assert_eq!(dropped.as_deref(), Some("a=1"));
+        assert!(resp.set_cookies.is_empty(), "no cookies should remain");
     }
 
     #[test]

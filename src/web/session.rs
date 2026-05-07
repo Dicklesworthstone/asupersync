@@ -833,6 +833,10 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
         }
 
         // 7. Set cookie on modified sessions, or expire if cleared.
+        //    br-asupersync-ehtkns: append rather than set so any
+        //    Set-Cookie the inner handler emitted (CSRF cookie,
+        //    remember-me, post-login flash) survives the middleware
+        //    layer instead of being overwritten by the session cookie.
         if session_cleared {
             if !is_new {
                 // Expire the cookie so the browser deletes it.
@@ -842,11 +846,11 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
                 let mut expire_config = self.config.clone();
                 expire_config.max_age = Some(0);
                 let cookie_val = set_cookie_header(&self.config.cookie_name, "", &expire_config);
-                resp.set_header("set-cookie", cookie_val);
+                resp.append_set_cookie(cookie_val);
             }
         } else if session_data.is_modified() || regenerate_requested {
             let cookie_val = set_cookie_header(&self.config.cookie_name, &session_id, &self.config);
-            resp.set_header("set-cookie", cookie_val);
+            resp.append_set_cookie(cookie_val);
         }
 
         resp
@@ -1302,8 +1306,8 @@ mod tests {
         let resp = handler.call(req);
 
         assert_eq!(resp.status, StatusCode::OK);
-        assert!(resp.headers.contains_key("set-cookie"));
-        let cookie = resp.headers.get("set-cookie").unwrap();
+        assert!(!resp.set_cookies.is_empty());
+        let cookie = resp.set_cookies.first().unwrap();
         assert!(cookie.contains("session_id="));
         assert_eq!(store.len(), 1);
     }
@@ -1317,7 +1321,7 @@ mod tests {
         // First request — creates session.
         let req1 = Request::new("GET", "/");
         let resp1 = handler.call(req1);
-        let cookie_header = resp1.headers.get("set-cookie").unwrap().clone();
+        let cookie_header = resp1.set_cookies.first().unwrap().clone();
 
         // Extract session ID from Set-Cookie.
         let session_id = cookie_header
@@ -1348,7 +1352,7 @@ mod tests {
             .insert("cookie".to_string(), "session_id=bad!".to_string());
         let resp = handler.call(req);
 
-        assert!(resp.headers.contains_key("set-cookie"));
+        assert!(!resp.set_cookies.is_empty());
         assert_eq!(store.len(), 1);
     }
 
@@ -1367,7 +1371,7 @@ mod tests {
         let resp = handler.call(req);
 
         // The response must set a NEW session cookie, not reuse the attacker's ID.
-        let cookie = resp.headers.get("set-cookie").unwrap();
+        let cookie = resp.set_cookies.first().unwrap();
         assert!(
             !cookie.contains(fake_id),
             "must not reuse attacker-supplied ID"
@@ -1502,7 +1506,7 @@ mod tests {
             "session_id=abcdef01234567890abcdef012345678".to_string(),
         );
         let resp = handler.call(req);
-        let cookie = resp.headers.get("set-cookie").unwrap();
+        let cookie = resp.set_cookies.first().unwrap();
         assert!(
             cookie.contains("Max-Age=0"),
             "cookie must be expired on clear"
@@ -1862,7 +1866,7 @@ mod tests {
         // logic; a NEW session was minted under a fresh ID and
         // saved. Net store size is 1, but the entry under the
         // ORIGINAL ID is gone.
-        let cookie_header = resp.headers.get("set-cookie").expect("Set-Cookie present");
+        let cookie_header = resp.set_cookies.first().expect("Set-Cookie present");
         let new_id = extract_set_cookie_id(cookie_header);
         assert_ne!(new_id, original_id, "ID must rotate");
         assert_eq!(store.len(), 1, "exactly one entry under the new ID");
@@ -1871,5 +1875,58 @@ mod tests {
             "original session must be deleted after rotation"
         );
         assert!(store.load(new_id).is_some(), "new session must be present");
+    }
+
+    /// br-asupersync-ehtkns regression: a handler that emits its own
+    /// `Set-Cookie` (e.g. a CSRF or remember-me cookie) MUST keep that
+    /// cookie in the wire response after `SessionMiddleware` later
+    /// emits the session cookie. Pre-fix, `set_header("set-cookie", _)`
+    /// stored the value in `Response::headers: HashMap<String, String>`,
+    /// so the middleware silently overwrote whatever the inner handler
+    /// produced. Both cookies must now ride out as separate entries in
+    /// `Response::set_cookies`.
+    #[test]
+    fn middleware_preserves_inner_handler_set_cookie() {
+        struct CsrfEmittingHandler;
+        impl Handler for CsrfEmittingHandler {
+            fn call(&self, _req: Request) -> Response {
+                let mut resp = Response::new(StatusCode::OK, b"ok".to_vec());
+                // Inner handler emits its own cookie via the canonical API.
+                resp.append_set_cookie("csrf_token=abc123; HttpOnly; Path=/");
+                resp
+            }
+        }
+
+        let store = MemoryStore::new();
+        let layer = SessionLayer::new(store);
+        let handler = layer.wrap(CsrfEmittingHandler);
+
+        let req = Request::new("GET", "/");
+        let resp = handler.call(req);
+
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(
+            resp.set_cookies.len(),
+            2,
+            "expected BOTH the handler's CSRF cookie and the middleware's session cookie; \
+             pre-fix the HashMap-backed header store collapsed them to one. \
+             Got: {:?}",
+            resp.set_cookies
+        );
+        assert!(
+            resp.set_cookies
+                .iter()
+                .any(|c| c.contains("csrf_token=abc123")),
+            "inner handler's CSRF cookie must survive the middleware layer; \
+             got {:?}",
+            resp.set_cookies
+        );
+        assert!(
+            resp.set_cookies
+                .iter()
+                .any(|c| c.contains("session_id=")),
+            "session cookie must still be emitted alongside CSRF; got {:?}",
+            resp.set_cookies
+        );
     }
 }
