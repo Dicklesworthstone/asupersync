@@ -257,6 +257,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "mysql_stmt_execute_packet"
+path = "fuzz_targets/mysql_stmt_execute_packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "mysql_handshake_protocol_41"
 path = "fuzz_targets/mysql_handshake_protocol_41.rs"
 test = false
