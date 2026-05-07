@@ -89,7 +89,7 @@ Every gate failure emits an exact rerun command for reproduction.
 ## Validation
 
 ```bash
-rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa102 cargo test --test ci_proof_gates_contract -- --nocapture
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_ci_proof_gates cargo test -p asupersync --test ci_proof_gates_contract --features test-internals -- --nocapture
 ```
 
 ## Cross-References

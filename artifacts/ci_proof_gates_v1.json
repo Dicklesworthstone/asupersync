@@ -131,17 +131,20 @@
     {
       "scenario_id": "CPG-SMOKE-GATES",
       "description": "Validate gate definitions, severity levels, and failure actions",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa102 cargo test --test ci_proof_gates_contract gate -- --nocapture"
+      "test_filter": "gate",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_ci_proof_gates_CPG_SMOKE_GATES cargo test -p asupersync --test ci_proof_gates_contract --features test-internals gate -- --nocapture"
     },
     {
       "scenario_id": "CPG-SMOKE-READINESS",
       "description": "Validate readiness computation model and thresholds",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa102 cargo test --test ci_proof_gates_contract readiness -- --nocapture"
+      "test_filter": "readiness",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_ci_proof_gates_CPG_SMOKE_READINESS cargo test -p asupersync --test ci_proof_gates_contract --features test-internals readiness -- --nocapture"
     },
     {
       "scenario_id": "CPG-SMOKE-RERUN",
       "description": "Validate rerun command template and gate actionability",
-      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa102 cargo test --test ci_proof_gates_contract rerun -- --nocapture"
+      "test_filter": "rerun",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_ci_proof_gates_CPG_SMOKE_RERUN cargo test -p asupersync --test ci_proof_gates_contract --features test-internals rerun -- --nocapture"
     }
   ],
   "downstream_beads": [
