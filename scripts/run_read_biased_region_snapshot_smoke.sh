@@ -300,8 +300,27 @@ OPERATOR_NOTES_JSON="$(jq -c '.operator_notes' <<<"$SCENARIO_JSON")"
 EXPECTED_REPORT_PROJECTION_JSON="$(jq -c '.expected_report_projection' <<<"$SCENARIO_JSON")"
 HOST_FINGERPRINT_JSON="$(host_fingerprint_json)"
 
-printf -v RCH_INVOCATION '%q' "$RCH_BIN"
-COMMAND="${RCH_INVOCATION} exec -- env ASUPERSYNC_READ_BIASED_REGION_SNAPSHOT_CONTRACT_PATH=${ARTIFACT} ASUPERSYNC_READ_BIASED_REGION_SNAPSHOT_SCENARIO=${SCENARIO} ASUPERSYNC_READ_BIASED_REGION_SNAPSHOT_REPORT_PATH=${SCENARIO_REPORT_PATH} cargo test -p asupersync --lib read_biased_region_snapshot_smoke_contract_emits_report --features test-internals -- --nocapture"
+COMMAND_ARGS=(
+    "$RCH_BIN"
+    exec
+    --
+    env
+    "ASUPERSYNC_READ_BIASED_REGION_SNAPSHOT_CONTRACT_PATH=${ARTIFACT}"
+    "ASUPERSYNC_READ_BIASED_REGION_SNAPSHOT_SCENARIO=${SCENARIO}"
+    "ASUPERSYNC_READ_BIASED_REGION_SNAPSHOT_REPORT_PATH=${SCENARIO_REPORT_PATH}"
+    cargo
+    test
+    -p
+    asupersync
+    --lib
+    read_biased_region_snapshot_smoke_contract_emits_report
+    --features
+    test-internals
+    --
+    --nocapture
+)
+printf -v COMMAND '%q ' "${COMMAND_ARGS[@]}"
+COMMAND="${COMMAND% }"
 
 STARTED_TS="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 COMMAND_EXIT_CODE=0
@@ -314,7 +333,10 @@ ACTUAL_REPORT_PROJECTION_JSON='null'
 if [ "$MODE" = "execute" ]; then
     COMMAND_EXIT_CODE=-1
     set +e
-    eval "$COMMAND" >"$RUN_LOG_PATH" 2>&1 &
+    (
+        cd "$PROJECT_ROOT"
+        "${COMMAND_ARGS[@]}"
+    ) >"$RUN_LOG_PATH" 2>&1 &
     COMMAND_PID=$!
     set -e
 
@@ -370,6 +392,9 @@ if [ "$MODE" = "execute" ]; then
         MESSAGE="read-biased snapshot proof passed and emitted latency/correctness/fallback evidence"
     else
         SCRIPT_EXIT_CODE=$COMMAND_EXIT_CODE
+        if [ "$SCRIPT_EXIT_CODE" -eq 0 ]; then
+            SCRIPT_EXIT_CODE=1
+        fi
         VALIDATION_PASSED=false
         STATUS="failed"
         if [ "$COMMAND_EXIT_CODE" -eq 86 ]; then
@@ -410,7 +435,7 @@ write_run_report \
     "$MESSAGE"
 
 if [ "$STATUS" = "failed" ]; then
-    exit "$COMMAND_EXIT_CODE"
+    exit "$SCRIPT_EXIT_CODE"
 fi
 
 printf 'bundle_manifest=%s\n' "$BUNDLE_MANIFEST_PATH"
