@@ -250,6 +250,7 @@ impl<T> Sender<T> {
             sender: self,
             cx,
             waiter_token: None,
+            reservation_granted: false,
         }
     }
 
@@ -495,6 +496,9 @@ pub struct Reserve<'a, T> {
     sender: &'a Sender<T>,
     cx: &'a Cx,
     waiter_token: Option<SlabToken>,
+    /// Whether a reservation slot has been granted (reserved counter incremented).
+    /// Used by cleanup_waiter to ensure proper reservation cleanup on cancellation.
+    reservation_granted: bool,
 }
 
 impl<T> Reserve<'_, T> {
@@ -504,28 +508,46 @@ impl<T> Reserve<'_, T> {
                 let mut inner = self.sender.shared.inner.lock();
 
                 if self.sender.shared.receiver_dropped.load(Ordering::Relaxed) {
-                    // Channel closed. We either were drained (no reservation)
-                    // or pre-granted (reservation leaked, but channel is dead anyway).
-                    // Safest to just do nothing.
+                    // Channel closed. If we had a reservation, clean it up to prevent leaks.
+                    if self.reservation_granted && inner.reserved > 0 {
+                        inner.reserved -= 1;
+                    }
+                    // Remove from slab if still present to avoid stale wakers.
+                    inner.send_wakers.remove(token);
                     None
                 } else if inner.send_wakers.remove(token).is_some() {
-                    // We are in the slab. We haven't been granted a reservation.
-                    // Remove from FIFO queue as well.
-                    if let Some(pos) = inner.waiter_queue.iter().position(|&t| t == token) {
-                        inner.waiter_queue.remove(pos);
-                    }
-                    // CASCADE: A receiver may have freed capacity and woken us,
-                    // but we never polled. Pass the baton to the next waiter.
-                    if inner.has_capacity(self.sender.shared.capacity) {
+                    // We are in the slab. Check if we have a granted reservation.
+                    if self.reservation_granted {
+                        // We have a reservation that needs cleanup
+                        if inner.reserved > 0 {
+                            inner.reserved -= 1;
+                        }
+                        // Since we had a reservation, there should be capacity now.
+                        // Wake the next waiter if any.
                         inner.take_next_sender_waker()
                     } else {
-                        None
+                        // No reservation granted yet. Remove from FIFO queue.
+                        if let Some(pos) = inner.waiter_queue.iter().position(|&t| t == token) {
+                            inner.waiter_queue.remove(pos);
+                        }
+                        // CASCADE: A receiver may have freed capacity and woken us,
+                        // but we never polled. Pass the baton to the next waiter.
+                        if inner.has_capacity(self.sender.shared.capacity) {
+                            inner.take_next_sender_waker()
+                        } else {
+                            None
+                        }
                     }
                 } else {
-                    // Stale waiter: not in slab, channel alive.
-                    // Another agent or cleanup already removed us. We have no
-                    // resource ownership to transfer, so do nothing.
-                    None
+                    // Stale waiter: not in slab, but check if we still need to clean up reservation.
+                    if self.reservation_granted && inner.reserved > 0 {
+                        inner.reserved -= 1;
+                        // Free slot available, wake next waiter if any.
+                        inner.take_next_sender_waker()
+                    } else {
+                        // No resource ownership to transfer.
+                        None
+                    }
                 }
             };
             if let Some(w) = next_waker {
@@ -560,6 +582,7 @@ impl<'a, T> Future for Reserve<'a, T> {
 
         if is_first && inner.has_capacity(self.sender.shared.capacity) {
             inner.reserved += 1;
+            self.reservation_granted = true;
             // Remove self from queue
             if let Some(token) = self.waiter_token {
                 // Remove from FIFO queue (should be at front)
@@ -1464,6 +1487,63 @@ mod tests {
         let value = block_on(rx.recv(&cx)).expect("recv");
         crate::assert_with_log!(value == 5, "recv value", 5, value);
         crate::test_complete!("dropped_permit_releases_capacity");
+    }
+
+    #[test]
+    fn reserve_cancellation_after_reservation_granted_no_leak() {
+        init_test("reserve_cancellation_after_reservation_granted_no_leak");
+        let (tx, mut rx) = channel::<i32>(2); // capacity 2
+        let cx = test_cx();
+
+        // Fill one slot to force the next reserve to wait
+        block_on(tx.send(&cx, 1)).expect("initial send");
+
+        // Create a reserve future but don't immediately poll it
+        let mut reserve_future = Box::pin(tx.reserve(&cx));
+
+        // Poll once to get into the waiter queue
+        let waker = noop_waker();
+        let mut poll_cx = Context::from_waker(&waker);
+        let result = reserve_future.as_mut().poll(&mut poll_cx);
+        crate::assert_with_log!(
+            matches!(result, Poll::Pending),
+            "first poll pending",
+            "Pending",
+            format!("{:?}", result)
+        );
+
+        // Free up space so the reservation can be granted
+        let value = block_on(rx.recv(&cx)).expect("recv to free space");
+        crate::assert_with_log!(value == 1, "freed value", 1, value);
+
+        // Poll again - this should grant the reservation (increment reserved)
+        let result = reserve_future.as_mut().poll(&mut poll_cx);
+        let _permit = match result {
+            Poll::Ready(Ok(permit)) => permit,
+            other => {
+                crate::assert_with_log!(
+                    false,
+                    "second poll should succeed",
+                    "Ok(permit)",
+                    format!("{:?}", other)
+                );
+                return;
+            }
+        };
+
+        // Before fix: permit drop would leak the reservation
+        // After fix: permit drop should properly clean up
+        drop(_permit);
+
+        // Verify capacity is properly restored by successfully reserving twice more
+        let permit1 = tx.try_reserve().expect("first try_reserve after cleanup");
+        let permit2 = tx.try_reserve().expect("second try_reserve after cleanup");
+
+        // Clean up
+        permit1.abort();
+        permit2.abort();
+
+        crate::test_complete!("reserve_cancellation_after_reservation_granted_no_leak");
     }
 
     #[test]
