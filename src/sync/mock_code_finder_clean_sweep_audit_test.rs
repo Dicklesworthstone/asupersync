@@ -72,7 +72,8 @@ mod mock_code_finder_audit {
             .expect("ripgrep should be available");
 
         // Filter out test files and test functions
-        let non_test_unreachable: Vec<&str> = String::from_utf8_lossy(&output.stdout)
+        let stdout_str = String::from_utf8_lossy(&output.stdout);
+        let non_test_unreachable: Vec<&str> = stdout_str
             .lines()
             .filter(|line| !line.contains("test") && !line.contains("#[cfg(test)]"))
             .collect();
@@ -92,7 +93,8 @@ mod mock_code_finder_audit {
             .output()
             .expect("ripgrep should be available");
 
-        let panic_lines: Vec<&str> = String::from_utf8_lossy(&output.stdout)
+        let stdout_str = String::from_utf8_lossy(&output.stdout);
+        let panic_lines: Vec<&str> = stdout_str
             .lines()
             .filter(|line| !line.contains("test"))
             .collect();
@@ -147,7 +149,8 @@ mod mock_code_finder_audit {
             .expect("ripgrep should be available");
 
         // All sleep calls should be in test code for timing coordination
-        let non_test_sleep: Vec<&str> = String::from_utf8_lossy(&output.stdout)
+        let stdout_str = String::from_utf8_lossy(&output.stdout);
+        let non_test_sleep: Vec<&str> = stdout_str
             .lines()
             .filter(|line| {
                 !line.contains("test") &&
@@ -172,7 +175,8 @@ mod mock_code_finder_audit {
             .expect("ripgrep should be available");
 
         // Filter out variable names that happen to contain these words
-        let todo_comments: Vec<&str> = String::from_utf8_lossy(&output.stdout)
+        let stdout_str = String::from_utf8_lossy(&output.stdout);
+        let todo_comments: Vec<&str> = stdout_str
             .lines()
             .filter(|line| {
                 // Exclude variable names like TEST_ATTEMPTS
