@@ -9,6 +9,12 @@
     "agent_instructions": "AGENTS.md#toolchain-rust--cargo",
     "contract_test": "tests/no_tokio_feature_boundary_contract.rs"
   },
+  "regression_verifier": {
+    "bead_id": "asupersync-aj7lx3.2",
+    "test": "production_cargo_tree_commands_fail_if_tokio_enters_default_or_metrics_graphs",
+    "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_no_tokio_feature_boundary CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test no_tokio_feature_boundary_contract --features test-internals -- --nocapture",
+    "diagnostics": "On failure the verifier prints profile, feature args, cargo-tree command, exit status, stdout, and stderr."
+  },
   "production_guarantees": [
     {
       "profile": "default-production",

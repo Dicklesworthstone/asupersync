@@ -3,6 +3,7 @@
 use serde_json::Value as JsonValue;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use toml::Value as TomlValue;
 
 const AGENTS_PATH: &str = "AGENTS.md";
@@ -52,6 +53,27 @@ fn json_string_set(value: &JsonValue, key: &str) -> BTreeSet<String> {
                 .to_string()
         })
         .collect()
+}
+
+fn json_string_field<'a>(value: &'a JsonValue, key: &str) -> &'a str {
+    value
+        .get(key)
+        .and_then(JsonValue::as_str)
+        .unwrap_or_else(|| panic!("{key} must be a string"))
+}
+
+fn cargo_args_from_rch_command(command: &str) -> Vec<&str> {
+    let cargo_command = command
+        .strip_prefix("rch exec -- cargo ")
+        .unwrap_or_else(|| panic!("proof command must start with `rch exec -- cargo `: {command}"));
+    cargo_command.split_whitespace().collect()
+}
+
+fn no_tokio_signal_present(output: &str, expected_signal: &str) -> bool {
+    output.contains(expected_signal)
+        || output.contains("nothing depends on")
+        || output.contains("no matches found")
+        || output.contains("not found in the graph")
 }
 
 #[test]
@@ -137,6 +159,29 @@ fn boundary_contract_records_default_metrics_and_fuzz_proofs() {
         Some("asupersync-rcktok")
     );
 
+    let verifier = contract
+        .get("regression_verifier")
+        .expect("regression_verifier object");
+    assert_eq!(
+        verifier.get("bead_id").and_then(JsonValue::as_str),
+        Some("asupersync-aj7lx3.2")
+    );
+    assert_eq!(
+        verifier.get("test").and_then(JsonValue::as_str),
+        Some("production_cargo_tree_commands_fail_if_tokio_enters_default_or_metrics_graphs")
+    );
+    assert!(
+        json_string_field(verifier, "command").starts_with("rch exec -- "),
+        "regression verifier command must be rch-routed"
+    );
+    let diagnostics = json_string_field(verifier, "diagnostics");
+    for required in ["profile", "feature args", "stdout", "stderr"] {
+        assert!(
+            diagnostics.contains(required),
+            "diagnostics must mention {required}"
+        );
+    }
+
     let guarantees = contract
         .get("production_guarantees")
         .and_then(JsonValue::as_array)
@@ -179,6 +224,74 @@ fn boundary_contract_records_default_metrics_and_fuzz_proofs() {
     let fragments = json_string_set(fuzz, "expected_path_fragments");
     for required in ["opentelemetry-proto", "tonic", "tonic-prost", "tokio"] {
         assert!(fragments.contains(required), "missing {required}");
+    }
+}
+
+#[test]
+fn production_cargo_tree_commands_fail_if_tokio_enters_default_or_metrics_graphs() {
+    let contract = contract();
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let guarantees = contract
+        .get("production_guarantees")
+        .and_then(JsonValue::as_array)
+        .expect("production_guarantees array");
+
+    for guarantee in guarantees {
+        let profile = json_string_field(guarantee, "profile");
+        let feature_args = json_string_field(guarantee, "feature_args");
+        let proof_command = json_string_field(guarantee, "proof_command");
+        let expected_signal = json_string_field(guarantee, "expected_signal");
+        let args = cargo_args_from_rch_command(proof_command);
+        assert_eq!(
+            args.first().copied(),
+            Some("tree"),
+            "{profile}: proof command must invoke cargo tree"
+        );
+
+        let output = Command::new(&cargo)
+            .args(&args)
+            .env("CARGO_TERM_COLOR", "never")
+            .output()
+            .unwrap_or_else(|err| {
+                panic!(
+                    "{profile}: failed to run `{cargo} {}`: {err}",
+                    args.join(" ")
+                )
+            });
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let combined = format!("stdout:\n{stdout}\nstderr:\n{stderr}");
+        let clean_signal = no_tokio_signal_present(&combined, expected_signal);
+
+        assert!(
+            output.status.success() || clean_signal,
+            "{profile}: cargo tree command failed without a no-Tokio signal\n\
+             feature args: {feature_args}\n\
+             command: {proof_command}\n\
+             status: {}\n\
+             {combined}",
+            output.status
+        );
+        assert!(
+            clean_signal,
+            "{profile}: expected no-Tokio signal `{expected_signal}` from production graph\n\
+             feature args: {feature_args}\n\
+             command: {proof_command}\n\
+             status: {}\n\
+             {combined}",
+            output.status
+        );
+        assert!(
+            !stdout
+                .lines()
+                .any(|line| line.trim_start().starts_with("tokio v")),
+            "{profile}: tokio is present in the production normal dependency graph\n\
+             feature args: {feature_args}\n\
+             command: {proof_command}\n\
+             status: {}\n\
+             {combined}",
+            output.status
+        );
     }
 }
 
