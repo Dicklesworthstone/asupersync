@@ -183,7 +183,15 @@ expected_compiler_blocker_kinds = {
     "unsupported_workload_class",
     "conflicting_fallback_declaration",
 }
-expected_lab_replay_statuses = {"passed", "brownout", "no_win", "blocked"}
+expected_lab_replay_statuses = {
+    "passed",
+    "brownout",
+    "rejected",
+    "no_win",
+    "stale_evidence",
+    "cancelled",
+    "blocked",
+}
 expected_proof_report_statuses = {
     "pass",
     "fail",
@@ -372,7 +380,15 @@ for replay_scenario in artifact.get("lab_replay_scenarios") or []:
     if replay_status not in expected_lab_replay_statuses:
         validation_errors.append({"kind": "unsupported_schema_version", "field": scenario_id})
     replay_statuses_seen.add(replay_status)
-    unknown_issues = sorted(set(issue_kinds) - expected_issue_kinds - expected_compiler_blocker_kinds)
+    runtime_application_issues = set(artifact.get("runtime_application_issue_kinds") or [])
+    runtime_admission_issues = set(artifact.get("runtime_admission_issue_kinds") or [])
+    unknown_issues = sorted(
+        set(issue_kinds)
+        - expected_issue_kinds
+        - expected_compiler_blocker_kinds
+        - runtime_application_issues
+        - runtime_admission_issues
+    )
     if unknown_issues:
         validation_errors.append({"kind": "unsupported_schema_version", "field": scenario_id, "unknown_issues": unknown_issues})
     proof_command = replay_scenario.get("proof_command") or ""

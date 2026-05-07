@@ -44,12 +44,15 @@
     "unsupported_workload_class",
     "conflicting_fallback_declaration"
   ],
-  "lab_replay_bead_id": "asupersync-bgtplc.3",
+  "lab_replay_bead_id": "asupersync-w5n9qp.3",
   "lab_replay_contract_version": "slo-lab-replay-contract-v1",
   "lab_replay_statuses": [
     "passed",
     "brownout",
+    "rejected",
     "no_win",
+    "stale_evidence",
+    "cancelled",
     "blocked"
   ],
   "proof_report_bead_id": "asupersync-bgtplc.4",
@@ -831,13 +834,15 @@
       "seed": 1358954498,
       "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture",
       "expected": {
-        "replay_status": "passed",
-        "admitted_work_units": 8,
-        "rejected_work_units": 4,
+        "replay_status": "rejected",
+        "admitted_work_units": 0,
+        "rejected_work_units": 12,
         "optional_work_units_browned_out": 0,
         "cleanup_deadline_misses": 0,
         "fallback_reason": null,
-        "issue_kinds": []
+        "issue_kinds": [
+          "queue_wait_exceeded"
+        ]
       }
     },
     {
@@ -863,11 +868,13 @@
       "expected": {
         "replay_status": "brownout",
         "admitted_work_units": 4,
-        "rejected_work_units": 0,
+        "rejected_work_units": 3,
         "optional_work_units_browned_out": 3,
         "cleanup_deadline_misses": 0,
         "fallback_reason": null,
-        "issue_kinds": []
+        "issue_kinds": [
+          "optional_work_brownout"
+        ]
       }
     },
     {
@@ -882,7 +889,44 @@
         "optional_work_units_browned_out": 0,
         "cleanup_deadline_misses": 0,
         "fallback_reason": "objectives-conflict-with-pressure",
-        "issue_kinds": []
+        "issue_kinds": [
+          "no_win_fallback"
+        ]
+      }
+    },
+    {
+      "scenario_id": "lab-replay-stale-profile-hash",
+      "policy_id": "agent-swarm-standard",
+      "seed": 1358954502,
+      "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture",
+      "expected": {
+        "replay_status": "stale_evidence",
+        "admitted_work_units": 0,
+        "rejected_work_units": 4,
+        "optional_work_units_browned_out": 0,
+        "cleanup_deadline_misses": 0,
+        "fallback_reason": null,
+        "issue_kinds": [
+          "application_invalid",
+          "stale_profile_hash"
+        ]
+      }
+    },
+    {
+      "scenario_id": "lab-replay-cancelled-admission",
+      "policy_id": "agent-swarm-standard",
+      "seed": 1358954503,
+      "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture",
+      "expected": {
+        "replay_status": "cancelled",
+        "admitted_work_units": 0,
+        "rejected_work_units": 4,
+        "optional_work_units_browned_out": 0,
+        "cleanup_deadline_misses": 0,
+        "fallback_reason": null,
+        "issue_kinds": [
+          "cancelled"
+        ]
       }
     },
     {

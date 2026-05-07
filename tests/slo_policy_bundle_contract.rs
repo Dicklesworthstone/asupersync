@@ -5,17 +5,18 @@ use asupersync::runtime::yield_now;
 use asupersync::types::{
     Budget, Outcome, SLO_POLICY_BUNDLE_SCHEMA_VERSION, SLO_POLICY_COMPILER_SCHEMA_VERSION,
     SLO_POLICY_PROOF_REPORT_SCHEMA_VERSION, SLO_POLICY_RUNTIME_APPLICATION_SCHEMA_VERSION,
-    SloCompiledAdmissionDecision, SloCompiledPolicy, SloCompiledPolicyStatus, SloLatencyObjective,
-    SloLatencyUnit, SloNoWinFallback, SloOptionalWorkClass, SloPolicyBundle,
-    SloPolicyCapacityEvidence, SloPolicyCompilerBlockerKind, SloPolicyProvenance,
-    SloPolicyRedaction, SloPolicyValidationIssueKind, SloPolicyValidationReport, SloProofCommand,
-    SloProofNoWinReceipt, SloProofReport, SloProofReportIssueKind, SloProofReportProvenance,
-    SloProofReportRow, SloProofReportStatus, SloResourcePressureThresholds,
-    SloRuntimeAdmissionIssueKind, SloRuntimeAdmissionRequest, SloRuntimeAdmissionStatus,
+    SloCompiledAdmissionDecision, SloCompiledPolicyStatus, SloLatencyObjective, SloLatencyUnit,
+    SloNoWinFallback, SloOptionalWorkClass, SloPolicyBundle, SloPolicyCapacityEvidence,
+    SloPolicyCompilerBlockerKind, SloPolicyProvenance, SloPolicyRedaction,
+    SloPolicyValidationIssueKind, SloPolicyValidationReport, SloProofCommand, SloProofNoWinReceipt,
+    SloProofReport, SloProofReportIssueKind, SloProofReportProvenance, SloProofReportRow,
+    SloProofReportStatus, SloResourcePressureThresholds, SloRuntimeAdmissionIssueKind,
+    SloRuntimeAdmissionOutcome, SloRuntimeAdmissionRequest, SloRuntimeAdmissionStatus,
     SloRuntimeOptionalWorkDecision, SloRuntimePolicyApplication,
-    SloRuntimePolicyApplicationIssueKind, SloRuntimePolicyDecision, SloWorkloadClass,
-    slo_proof_report_status_counts, validate_slo_policy_bundle_json,
-    validate_slo_proof_report_json, validate_slo_runtime_policy_application_json,
+    SloRuntimePolicyApplicationIssueKind, SloRuntimePolicyApplicationValidation,
+    SloRuntimePolicyDecision, SloWorkloadClass, slo_proof_report_status_counts,
+    validate_slo_policy_bundle_json, validate_slo_proof_report_json,
+    validate_slo_runtime_policy_application_json,
 };
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -154,8 +155,15 @@ struct LabReplayFixture {
     capacity_evidence: Option<SloPolicyCapacityEvidence>,
     work_units: u64,
     optional_work_units: u64,
+    optional_work_class: Option<&'static str>,
     cleanup_work_ms: u64,
     proof_command: &'static str,
+    observed_profile_hash: Option<String>,
+    queue_wait_ms: u64,
+    memory_basis_points: u16,
+    fd_basis_points: u16,
+    timer_queue_depth: u64,
+    cancel_requested: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -245,10 +253,18 @@ fn compiler_blocker_tags() -> BTreeSet<String> {
 }
 
 fn lab_replay_status_tags() -> BTreeSet<String> {
-    ["passed", "brownout", "no_win", "blocked"]
-        .into_iter()
-        .map(str::to_string)
-        .collect()
+    [
+        "passed",
+        "brownout",
+        "rejected",
+        "no_win",
+        "stale_evidence",
+        "cancelled",
+        "blocked",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }
 
 fn compiled_blocker_tags(compiled: &asupersync::types::SloCompiledPolicy) -> BTreeSet<String> {
@@ -532,6 +548,15 @@ fn replay_fixture(
     optional_work_units: u64,
     cleanup_work_ms: u64,
 ) -> LabReplayFixture {
+    let memory_basis_points = capacity_evidence
+        .as_ref()
+        .map_or(6_500, |evidence| evidence.memory_basis_points);
+    let fd_basis_points = capacity_evidence
+        .as_ref()
+        .map_or(5_900, |evidence| evidence.fd_basis_points);
+    let timer_queue_depth = capacity_evidence
+        .as_ref()
+        .map_or(12_000, |evidence| evidence.timer_queue_depth);
     LabReplayFixture {
         scenario_id,
         seed,
@@ -540,8 +565,15 @@ fn replay_fixture(
         capacity_evidence,
         work_units,
         optional_work_units,
+        optional_work_class: None,
         cleanup_work_ms,
         proof_command: "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture",
+        observed_profile_hash: Some(profile_hash('a')),
+        queue_wait_ms: 20,
+        memory_basis_points,
+        fd_basis_points,
+        timer_queue_depth,
+        cancel_requested: false,
     }
 }
 
@@ -554,8 +586,15 @@ fn malformed_replay_fixture() -> LabReplayFixture {
         capacity_evidence: None,
         work_units: 3,
         optional_work_units: 1,
+        optional_work_class: None,
         cleanup_work_ms: 0,
         proof_command: "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture",
+        observed_profile_hash: None,
+        queue_wait_ms: 20,
+        memory_basis_points: 6_500,
+        fd_basis_points: 5_900,
+        timer_queue_depth: 12_000,
+        cancel_requested: false,
     }
 }
 
@@ -568,10 +607,50 @@ fn lab_replay_fixtures() -> Vec<LabReplayFixture> {
     let cleanup_pressure = valid_capacity_evidence();
 
     let mut brownout = valid_capacity_evidence();
-    brownout.memory_basis_points = 8_200;
+    brownout.memory_basis_points = 8_500;
 
     let mut no_win = valid_capacity_evidence();
     no_win.memory_basis_points = 9_500;
+
+    let mut overload_fixture = replay_fixture(
+        "lab-replay-overload",
+        0x5100_0002,
+        Some(overload),
+        12,
+        0,
+        120,
+    );
+    overload_fixture.queue_wait_ms = 81;
+
+    let mut optional_brownout_fixture = replay_fixture(
+        "lab-replay-optional-brownout",
+        0x5100_0004,
+        Some(brownout),
+        4,
+        3,
+        120,
+    );
+    optional_brownout_fixture.optional_work_class = Some("index_refresh");
+
+    let mut stale_fixture = replay_fixture(
+        "lab-replay-stale-profile-hash",
+        0x5100_0006,
+        Some(valid_capacity_evidence()),
+        4,
+        0,
+        120,
+    );
+    stale_fixture.observed_profile_hash = Some(profile_hash('b'));
+
+    let mut cancelled_fixture = replay_fixture(
+        "lab-replay-cancelled-admission",
+        0x5100_0007,
+        Some(valid_capacity_evidence()),
+        4,
+        0,
+        120,
+    );
+    cancelled_fixture.cancel_requested = true;
 
     vec![
         replay_fixture(
@@ -582,14 +661,7 @@ fn lab_replay_fixtures() -> Vec<LabReplayFixture> {
             0,
             120,
         ),
-        replay_fixture(
-            "lab-replay-overload",
-            0x5100_0002,
-            Some(overload),
-            12,
-            0,
-            120,
-        ),
+        overload_fixture,
         replay_fixture(
             "lab-replay-cleanup-deadline-pressure",
             0x5100_0003,
@@ -598,14 +670,7 @@ fn lab_replay_fixtures() -> Vec<LabReplayFixture> {
             0,
             400,
         ),
-        replay_fixture(
-            "lab-replay-optional-brownout",
-            0x5100_0004,
-            Some(brownout),
-            4,
-            3,
-            120,
-        ),
+        optional_brownout_fixture,
         replay_fixture(
             "lab-replay-no-win-fallback",
             0x5100_0005,
@@ -614,6 +679,8 @@ fn lab_replay_fixtures() -> Vec<LabReplayFixture> {
             2,
             120,
         ),
+        stale_fixture,
+        cancelled_fixture,
         malformed_replay_fixture(),
     ]
 }
@@ -678,53 +745,80 @@ async fn run_lab_replay_core(fixture: LabReplayFixture) -> LabReplayCoreOutcome 
         };
     }
 
-    let bundle = fixture.bundle.expect("replay fixture has bundle");
+    let bundle = fixture.bundle.as_ref().expect("replay fixture has bundle");
     let compiled = bundle.compile_for_budget_admission(fixture.capacity_evidence.as_ref());
     let compiler_status = compiled.status.as_str().to_string();
-    let capacity_limit = replay_capacity_limit(&compiled);
-    let admitted_work_units = if compiled.is_executable() {
-        fixture.work_units.min(capacity_limit)
-    } else {
-        0
-    };
-    let rejected_work_units = fixture.work_units.saturating_sub(admitted_work_units);
-    let optional_work_units_browned_out = if should_brownout_optional_work(&compiled) {
-        fixture.optional_work_units
-    } else {
-        0
-    };
-    let cleanup_deadline_misses = u64::from(
-        compiled.is_executable() && fixture.cleanup_work_ms > compiled.budget.cleanup_deadline_ms,
+    let application = SloRuntimePolicyApplication::from_compiled_policy(
+        &compiled,
+        SloWorkloadClass::AgentSwarm,
+        fixture.observed_profile_hash.clone(),
+        SloProofCommand {
+            label: "lab-runtime-slo-replay".to_string(),
+            command: fixture.proof_command.to_string(),
+        },
+        SloPolicyRedaction {
+            policy_id: "slo-lab-runtime-replay-redaction-v1".to_string(),
+            passed: true,
+        },
     );
-    let fallback_reason = compiled
-        .no_win_fallback
-        .as_ref()
-        .map(|fallback| fallback.fallback_reason.clone());
-    let issue_kinds = compiled_blocker_tags(&compiled).into_iter().collect();
-    let replay_status = if !compiled.blockers.is_empty() {
-        "blocked"
-    } else if compiled.status == SloCompiledPolicyStatus::NoWin {
-        "no_win"
-    } else if optional_work_units_browned_out > 0 {
-        "brownout"
-    } else {
-        "passed"
+    let validation = application.validate();
+    let core_request =
+        replay_admission_request(&fixture, fixture.work_units, None, fixture.cancel_requested);
+    let core_outcome = application.evaluate_admission(&core_request);
+    let mut issue_kinds = BTreeSet::new();
+    collect_replay_issue_kinds(&validation, &core_outcome, &mut issue_kinds);
+
+    let mut replay_status = replay_status_for_admission(&validation, &core_outcome);
+    let mut admitted_work_units = core_outcome.admitted_work_units;
+    let mut rejected_work_units = core_outcome.rejected_work_units;
+    let mut optional_work_units_browned_out = 0;
+    let mut fallback_reason = core_outcome.fallback_reason.clone();
+
+    if core_outcome.status == SloRuntimeAdmissionStatus::Admitted && fixture.optional_work_units > 0
+    {
+        let optional_request = replay_admission_request(
+            &fixture,
+            fixture.optional_work_units,
+            fixture.optional_work_class,
+            false,
+        );
+        let optional_outcome = application.evaluate_admission(&optional_request);
+        collect_replay_issue_kinds(&validation, &optional_outcome, &mut issue_kinds);
+        admitted_work_units =
+            admitted_work_units.saturating_add(optional_outcome.admitted_work_units);
+        rejected_work_units =
+            rejected_work_units.saturating_add(optional_outcome.rejected_work_units);
+        if optional_outcome.status == SloRuntimeAdmissionStatus::Brownout {
+            optional_work_units_browned_out = optional_outcome.rejected_work_units;
+            replay_status = "brownout".to_string();
+        } else if optional_outcome.status != SloRuntimeAdmissionStatus::Admitted {
+            replay_status = replay_status_for_admission(&validation, &optional_outcome);
+            fallback_reason.clone_from(&optional_outcome.fallback_reason);
+        }
     }
-    .to_string();
+
+    let cleanup_deadline_misses = u64::from(
+        core_outcome.status == SloRuntimeAdmissionStatus::Admitted
+            && fixture.cleanup_work_ms > core_outcome.budget.cleanup_deadline_ms,
+    );
     let completed_work_units =
-        run_admitted_replay_tasks(admitted_work_units, compiled.budget.to_budget()).await;
+        run_admitted_replay_tasks(admitted_work_units, core_outcome.budget.to_budget()).await;
     assert_eq!(
         completed_work_units, admitted_work_units,
         "all admitted replay units should complete"
     );
-    let virtual_elapsed_ms = admitted_work_units
-        .saturating_mul(2)
-        .saturating_add(optional_work_units_browned_out)
-        .saturating_add(
-            fixture
-                .cleanup_work_ms
-                .min(compiled.budget.cleanup_deadline_ms),
-        );
+    let virtual_elapsed_ms = if admitted_work_units == 0 {
+        0
+    } else {
+        admitted_work_units
+            .saturating_mul(2)
+            .saturating_add(optional_work_units_browned_out)
+            .saturating_add(
+                fixture
+                    .cleanup_work_ms
+                    .min(core_outcome.budget.cleanup_deadline_ms),
+            )
+    };
 
     LabReplayCoreOutcome {
         replay_status,
@@ -734,9 +828,72 @@ async fn run_lab_replay_core(fixture: LabReplayFixture) -> LabReplayCoreOutcome 
         optional_work_units_browned_out,
         cleanup_deadline_misses,
         fallback_reason,
-        issue_kinds,
+        issue_kinds: issue_kinds.into_iter().collect(),
         virtual_elapsed_ms,
     }
+}
+
+fn replay_admission_request(
+    fixture: &LabReplayFixture,
+    work_units: u64,
+    optional_work_class: Option<&str>,
+    cancel_requested: bool,
+) -> SloRuntimeAdmissionRequest {
+    SloRuntimeAdmissionRequest {
+        request_id: format!("{}-{work_units}", fixture.scenario_id),
+        work_units,
+        optional_work_class: optional_work_class.map(str::to_string),
+        queue_wait_ms: fixture.queue_wait_ms,
+        memory_basis_points: fixture.memory_basis_points,
+        fd_basis_points: fixture.fd_basis_points,
+        timer_queue_depth: fixture.timer_queue_depth,
+        cancel_requested,
+    }
+}
+
+fn collect_replay_issue_kinds(
+    validation: &SloRuntimePolicyApplicationValidation,
+    outcome: &SloRuntimeAdmissionOutcome,
+    issue_kinds: &mut BTreeSet<String>,
+) {
+    issue_kinds.extend(
+        outcome
+            .issue_kinds
+            .iter()
+            .map(|issue| issue.as_str().to_string()),
+    );
+    if !validation.accepted {
+        issue_kinds.extend(
+            validation
+                .issues
+                .iter()
+                .map(|issue| issue.kind.as_str().to_string()),
+        );
+    }
+}
+
+fn replay_status_for_admission(
+    validation: &SloRuntimePolicyApplicationValidation,
+    outcome: &SloRuntimeAdmissionOutcome,
+) -> String {
+    if validation.contains_issue(SloRuntimePolicyApplicationIssueKind::StaleProfileHash) {
+        return "stale_evidence".to_string();
+    }
+    match outcome.status {
+        SloRuntimeAdmissionStatus::Admitted => "passed",
+        SloRuntimeAdmissionStatus::Rejected
+            if outcome
+                .issue_kinds
+                .contains(&SloRuntimeAdmissionIssueKind::Cancelled) =>
+        {
+            "cancelled"
+        }
+        SloRuntimeAdmissionStatus::Rejected => "rejected",
+        SloRuntimeAdmissionStatus::Brownout => "brownout",
+        SloRuntimeAdmissionStatus::NoWin => "no_win",
+        SloRuntimeAdmissionStatus::Blocked => "blocked",
+    }
+    .to_string()
 }
 
 async fn run_admitted_replay_tasks(work_units: u64, budget: Budget) -> u64 {
@@ -771,22 +928,6 @@ async fn run_admitted_replay_tasks(work_units: u64, budget: Budget) -> u64 {
         "completion counter matches awaited tasks"
     );
     completed
-}
-
-fn replay_capacity_limit(compiled: &SloCompiledPolicy) -> u64 {
-    (compiled.admission.queue_wait_threshold_ms / 10).max(1)
-}
-
-fn should_brownout_optional_work(compiled: &SloCompiledPolicy) -> bool {
-    let Some(memory) = compiled.admission.evidence_memory_basis_points else {
-        return false;
-    };
-    compiled.is_executable()
-        && memory
-            >= compiled
-                .admission
-                .memory_soft_basis_points
-                .saturating_sub(500)
 }
 
 #[test]
@@ -1840,7 +1981,19 @@ fn lab_runtime_slo_policy_replay_fixtures_cover_required_outcomes() {
         evidence_by_id["lab-replay-normal-load"].admitted_work_units,
         4
     );
-    assert_eq!(evidence_by_id["lab-replay-overload"].rejected_work_units, 4);
+    assert_eq!(
+        evidence_by_id["lab-replay-overload"].replay_status,
+        "rejected"
+    );
+    assert_eq!(evidence_by_id["lab-replay-overload"].admitted_work_units, 0);
+    assert_eq!(
+        evidence_by_id["lab-replay-overload"].rejected_work_units,
+        12
+    );
+    assert_eq!(
+        evidence_by_id["lab-replay-overload"].issue_kinds,
+        vec!["queue_wait_exceeded".to_string()]
+    );
     assert_eq!(
         evidence_by_id["lab-replay-cleanup-deadline-pressure"].cleanup_deadline_misses,
         1
@@ -1854,6 +2007,14 @@ fn lab_runtime_slo_policy_replay_fixtures_cover_required_outcomes() {
         3
     );
     assert_eq!(
+        evidence_by_id["lab-replay-optional-brownout"].rejected_work_units,
+        3
+    );
+    assert_eq!(
+        evidence_by_id["lab-replay-optional-brownout"].issue_kinds,
+        vec!["optional_work_brownout".to_string()]
+    );
+    assert_eq!(
         evidence_by_id["lab-replay-no-win-fallback"].replay_status,
         "no_win"
     );
@@ -1862,6 +2023,29 @@ fn lab_runtime_slo_policy_replay_fixtures_cover_required_outcomes() {
             .fallback_reason
             .as_deref(),
         Some("objectives-conflict-with-pressure")
+    );
+    assert_eq!(
+        evidence_by_id["lab-replay-no-win-fallback"].issue_kinds,
+        vec!["no_win_fallback".to_string()]
+    );
+    assert_eq!(
+        evidence_by_id["lab-replay-stale-profile-hash"].replay_status,
+        "stale_evidence"
+    );
+    assert_eq!(
+        evidence_by_id["lab-replay-stale-profile-hash"].issue_kinds,
+        vec![
+            "application_invalid".to_string(),
+            "stale_profile_hash".to_string()
+        ]
+    );
+    assert_eq!(
+        evidence_by_id["lab-replay-cancelled-admission"].replay_status,
+        "cancelled"
+    );
+    assert_eq!(
+        evidence_by_id["lab-replay-cancelled-admission"].issue_kinds,
+        vec!["cancelled".to_string()]
     );
     assert_eq!(
         evidence_by_id["lab-replay-malformed-policy"].issue_kinds,
