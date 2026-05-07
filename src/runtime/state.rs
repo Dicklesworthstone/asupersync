@@ -3836,6 +3836,10 @@ impl RuntimeState {
                             }
                             self.record_finalizer_close(region_id);
 
+                            // Mark region as finalized in obligation table to prevent
+                            // drop-late obligation commits/aborts after region close
+                            self.obligations.mark_region_finalized(region_id);
+
                             // Emit RegionCloseComplete trace event (pairs
                             // with RegionCloseBegin emitted in cancel_request).
                             let now = self.current_runtime_time();

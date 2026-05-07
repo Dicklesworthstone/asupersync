@@ -10,6 +10,7 @@ use crate::types::{ObligationId, RegionId, TaskId, Time};
 use crate::util::{Arena, ArenaIndex};
 use smallvec::SmallVec;
 use std::backtrace::Backtrace;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 type HolderIds = SmallVec<[ObligationId; 4]>;
@@ -127,6 +128,12 @@ pub struct ObligationTable {
     /// scanning the arena. `u128` is wide enough that a billion-obligation,
     /// century-long runtime still fits.
     pending_reserved_at_sum_ns: u128,
+    /// Regions that have been finalized and should reject further obligation operations.
+    ///
+    /// This implements the region finalization fence pattern from ObligationLedger
+    /// to prevent drop-late commit/abort after region close. Obligations for
+    /// finalized regions are rejected with RegionFinalized error.
+    finalized_regions: BTreeSet<RegionId>,
 }
 
 /// Stable index for `ObligationKind` in the per-kind counter array.
@@ -157,6 +164,7 @@ impl ObligationTable {
             cached_pending: 0,
             pending_by_kind: [0; OBLIGATION_KIND_COUNT],
             pending_reserved_at_sum_ns: 0,
+            finalized_regions: BTreeSet::new(),
         }
     }
 
@@ -172,6 +180,7 @@ impl ObligationTable {
             cached_pending: 0,
             pending_by_kind: [0; OBLIGATION_KIND_COUNT],
             pending_reserved_at_sum_ns: 0,
+            finalized_regions: BTreeSet::new(),
         }
     }
 
@@ -461,13 +470,26 @@ impl ObligationTable {
         obligation: ObligationId,
         now: Time,
     ) -> Result<ObligationCommitInfo, Error> {
-        let record = self
-            .obligations
-            .get_mut(obligation.arena_index())
-            .ok_or_else(|| {
-                Error::new(ErrorKind::ObligationAlreadyResolved)
-                    .with_message("obligation not found")
-            })?;
+        // First check if obligation exists and get region for finalization check
+        let region = {
+            let record = self
+                .obligations
+                .get(obligation.arena_index())
+                .ok_or_else(|| {
+                    Error::new(ErrorKind::ObligationAlreadyResolved)
+                        .with_message("obligation not found")
+                })?;
+            record.region
+        };
+
+        // Region finalization fence: reject commits after region close
+        if self.is_region_finalized(region) {
+            return Err(Error::new(ErrorKind::RegionFinalized)
+                .with_message("cannot commit obligation: region has been finalized"));
+        }
+
+        // Now get mutable reference for the actual commit
+        let record = self.obligations.get_mut(obligation.arena_index()).unwrap();
 
         if !record.is_pending() {
             return Err(Error::new(ErrorKind::ObligationAlreadyResolved));
@@ -500,13 +522,26 @@ impl ObligationTable {
         now: Time,
         reason: ObligationAbortReason,
     ) -> Result<ObligationAbortInfo, Error> {
-        let record = self
-            .obligations
-            .get_mut(obligation.arena_index())
-            .ok_or_else(|| {
-                Error::new(ErrorKind::ObligationAlreadyResolved)
-                    .with_message("obligation not found")
-            })?;
+        // First check if obligation exists and get region for finalization check
+        let region = {
+            let record = self
+                .obligations
+                .get(obligation.arena_index())
+                .ok_or_else(|| {
+                    Error::new(ErrorKind::ObligationAlreadyResolved)
+                        .with_message("obligation not found")
+                })?;
+            record.region
+        };
+
+        // Region finalization fence: reject aborts after region close
+        if self.is_region_finalized(region) {
+            return Err(Error::new(ErrorKind::RegionFinalized)
+                .with_message("cannot abort obligation: region has been finalized"));
+        }
+
+        // Now get mutable reference for the actual abort
+        let record = self.obligations.get_mut(obligation.arena_index()).unwrap();
 
         if !record.is_pending() {
             return Err(Error::new(ErrorKind::ObligationAlreadyResolved));
@@ -672,6 +707,24 @@ impl ObligationTable {
     pub fn pending_reserved_at_sum_ns(&self) -> u128 {
         self.debug_assert_pending_counters_match();
         self.pending_reserved_at_sum_ns
+    }
+
+    /// Marks a region as finalized to prevent further obligation operations.
+    ///
+    /// After this call, all `commit()` and `abort()` operations for obligations
+    /// belonging to this region will fail with `ErrorKind::RegionFinalized`.
+    /// This implements the region finalization fence to ensure structured
+    /// concurrency invariants: no obligation mutations after region close.
+    ///
+    /// Idempotent - calling multiple times on the same region is safe.
+    pub fn mark_region_finalized(&mut self, region: RegionId) {
+        self.finalized_regions.insert(region);
+    }
+
+    /// Returns `true` if the given region has been marked as finalized.
+    #[must_use]
+    pub fn is_region_finalized(&self, region: RegionId) -> bool {
+        self.finalized_regions.contains(&region)
     }
 
     /// Collects IDs of pending obligations held by a specific task.
@@ -1380,5 +1433,124 @@ mod tests {
         table.cached_pending = 0;
 
         table.debug_assert_pending_counters_match();
+    }
+
+    #[test]
+    fn region_finalization_fence_prevents_commit_after_finalization() {
+        let mut table = ObligationTable::new();
+        let task = test_task_id(1);
+        let region = test_region_id(42);
+
+        // Create an obligation
+        let obligation_id = make_obligation(&mut table, ObligationKind::SendPermit, task, region);
+
+        // Should be able to commit before finalization
+        assert!(!table.is_region_finalized(region));
+
+        // Finalize the region
+        table.mark_region_finalized(region);
+        assert!(table.is_region_finalized(region));
+
+        // Attempt to commit after finalization should fail
+        let result = table.commit(obligation_id, Time::from_nanos(100));
+        assert!(result.is_err());
+        if let Err(error) = result {
+            assert_eq!(error.kind(), ErrorKind::RegionFinalized);
+            assert!(
+                error
+                    .message()
+                    .unwrap()
+                    .contains("cannot commit obligation: region has been finalized")
+            );
+        }
+
+        // Obligation should still be pending since commit failed
+        let record = table.get(obligation_id.arena_index()).unwrap();
+        assert!(record.is_pending());
+    }
+
+    #[test]
+    fn region_finalization_fence_prevents_abort_after_finalization() {
+        let mut table = ObligationTable::new();
+        let task = test_task_id(1);
+        let region = test_region_id(42);
+
+        // Create an obligation
+        let obligation_id = make_obligation(&mut table, ObligationKind::Ack, task, region);
+
+        // Finalize the region
+        table.mark_region_finalized(region);
+
+        // Attempt to abort after finalization should fail
+        let result = table.abort(
+            obligation_id,
+            Time::from_nanos(100),
+            ObligationAbortReason::Cancel,
+        );
+        assert!(result.is_err());
+        if let Err(error) = result {
+            assert_eq!(error.kind(), ErrorKind::RegionFinalized);
+            assert!(
+                error
+                    .message()
+                    .unwrap()
+                    .contains("cannot abort obligation: region has been finalized")
+            );
+        }
+
+        // Obligation should still be pending since abort failed
+        let record = table.get(obligation_id.arena_index()).unwrap();
+        assert!(record.is_pending());
+    }
+
+    #[test]
+    fn region_finalization_fence_allows_operations_on_non_finalized_regions() {
+        let mut table = ObligationTable::new();
+        let task = test_task_id(1);
+        let finalized_region = test_region_id(42);
+        let active_region = test_region_id(99);
+
+        // Create obligations in both regions
+        let finalized_obligation = make_obligation(
+            &mut table,
+            ObligationKind::SendPermit,
+            task,
+            finalized_region,
+        );
+        let active_obligation =
+            make_obligation(&mut table, ObligationKind::Ack, task, active_region);
+
+        // Finalize only one region
+        table.mark_region_finalized(finalized_region);
+
+        // Operations on finalized region should fail
+        assert!(
+            table
+                .commit(finalized_obligation, Time::from_nanos(100))
+                .is_err()
+        );
+
+        // Operations on non-finalized region should succeed
+        assert!(
+            table
+                .commit(active_obligation, Time::from_nanos(100))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn region_finalization_is_idempotent() {
+        let mut table = ObligationTable::new();
+        let region = test_region_id(42);
+
+        // Mark region finalized multiple times
+        table.mark_region_finalized(region);
+        assert!(table.is_region_finalized(region));
+
+        table.mark_region_finalized(region);
+        assert!(table.is_region_finalized(region));
+
+        table.mark_region_finalized(region);
+        assert!(table.is_region_finalized(region));
     }
 }

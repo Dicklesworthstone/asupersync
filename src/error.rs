@@ -70,6 +70,8 @@ pub enum ErrorKind {
     ObligationLeak,
     /// Tried to resolve an already-resolved obligation.
     ObligationAlreadyResolved,
+    /// Tried to resolve an obligation after its region was finalized.
+    RegionFinalized,
 
     // === Regions / ownership ===
     /// Region is already closed.
@@ -159,7 +161,9 @@ impl ErrorKind {
                 ErrorCategory::Budget
             }
             Self::ChannelClosed | Self::ChannelFull | Self::ChannelEmpty => ErrorCategory::Channel,
-            Self::ObligationLeak | Self::ObligationAlreadyResolved => ErrorCategory::Obligation,
+            Self::ObligationLeak | Self::ObligationAlreadyResolved | Self::RegionFinalized => {
+                ErrorCategory::Obligation
+            }
             Self::RegionClosed | Self::TaskNotOwned | Self::AdmissionDenied => {
                 ErrorCategory::Region
             }
@@ -214,6 +218,7 @@ impl ErrorKind {
             | Self::ChannelClosed
             | Self::ObligationLeak
             | Self::ObligationAlreadyResolved
+            | Self::RegionFinalized
             | Self::RegionClosed
             | Self::InvalidEncodingParams
             | Self::DataTooLarge
@@ -294,6 +299,7 @@ impl ErrorKind {
             // Escalate - serious problem, should cancel related work
             Self::ObligationLeak
             | Self::ObligationAlreadyResolved
+            | Self::RegionFinalized
             | Self::Internal
             | Self::InvalidStateTransition => RecoveryAction::Escalate,
 
