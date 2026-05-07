@@ -15,6 +15,7 @@ RUN_DIR="${OUTPUT_ROOT}/run_${TIMESTAMP}"
 LIST_ONLY=0
 DRY_RUN=1
 COMMAND_TIMEOUT_SECONDS="${DECISION_PLANE_SMOKE_TIMEOUT_SECONDS:-120}"
+RCH_BIN="${RCH_BIN:-rch}"
 
 declare -a SELECTED_SCENARIOS=()
 
@@ -44,6 +45,10 @@ require_tools() {
     fi
     if [ ! -f "$CONTRACT_ARTIFACT" ]; then
         echo "FATAL: contract artifact missing at ${CONTRACT_ARTIFACT}" >&2
+        exit 1
+    fi
+    if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+        echo "FATAL: rch is required and was not found at: ${RCH_BIN}" >&2
         exit 1
     fi
     if [[ "$DRY_RUN" -eq 0 ]] && ! command -v timeout >/dev/null 2>&1; then
@@ -133,6 +138,66 @@ append_result() {
     fi
 }
 
+build_command_args() {
+    local sid="$1"
+    local output_name="$2"
+    local -n output_ref="$output_name"
+    local safe_sid="${sid//[^A-Za-z0-9_]/_}"
+    local scenario_filter
+    local -a extra_env=()
+
+    case "$sid" in
+        AA023-SMOKE-TRANSITIONS)
+            scenario_filter="transition"
+            ;;
+        AA023-SMOKE-ROLLBACKS)
+            scenario_filter="rollback"
+            ;;
+        AA023-SMOKE-EVIDENCE)
+            scenario_filter="evidence"
+            ;;
+        AA023-SMOKE-CONTROLLER-LEDGER)
+            scenario_filter="controller_snapshot_ledger"
+            extra_env=(
+                "ASUPERSYNC_CONTROLLER_LEDGER_STDOUT=1"
+                "ASUPERSYNC_CONTROLLER_LEDGER_PLANNER_ROWS_STDOUT=1"
+            )
+            ;;
+        AA023-SMOKE-CONTROLLER-INTERFERENCE)
+            scenario_filter="controller_interference"
+            extra_env=(
+                "ASUPERSYNC_CONTROLLER_INTERFERENCE_MATRIX_STDOUT=1"
+                "ASUPERSYNC_CONTROLLER_INTERFERENCE_REPORT_STDOUT=1"
+            )
+            ;;
+        *)
+            echo "FATAL: unsupported scenario command mapping: ${sid}" >&2
+            return 1
+            ;;
+    esac
+
+    output_ref=(
+        "$RCH_BIN"
+        exec
+        --
+        env
+        "CARGO_INCREMENTAL=0"
+        "CARGO_PROFILE_TEST_DEBUG=0"
+        "RUSTFLAGS=-D warnings -C debuginfo=0"
+        "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_decision_plane_validation_${safe_sid}"
+        "${extra_env[@]}"
+        cargo
+        test
+        -p
+        asupersync
+        --test
+        decision_plane_validation_contract
+        "$scenario_filter"
+        --
+        --nocapture
+    )
+}
+
 manifest_path_value() {
     local path="$1"
     if [[ "$path" == "${PROJECT_ROOT}/"* ]]; then
@@ -167,11 +232,14 @@ run_scenario() {
     local description command expected_artifacts required_log_markers_json
     local -a required_log_markers=()
     local -a missing_log_markers=()
+    local -a command_args=()
     description="$(jq -r '.description' <<<"$scenario_json")"
-    command="$(jq -r '.command' <<<"$scenario_json")"
     expected_artifacts="$(jq -c '.expected_artifacts // []' <<<"$scenario_json")"
     required_log_markers_json="$(jq -c '.required_log_markers // []' <<<"$scenario_json")"
     mapfile -t required_log_markers < <(jq -r '.required_log_markers[]? // empty' <<<"$scenario_json")
+    build_command_args "$sid" command_args
+    printf -v command '%q ' "${command_args[@]}"
+    command="${command% }"
 
     local scenario_dir="${RUN_DIR}/${sid}"
     local log_file="${scenario_dir}/run.log"
@@ -181,7 +249,6 @@ run_scenario() {
     local planner_rows_artifact="${artifact_mirror_dir}/controller_snapshot_planner_rows.json"
     local controller_interference_matrix_artifact="${artifact_mirror_dir}/controller_interference_matrix.json"
     local controller_interference_report_artifact="${artifact_mirror_dir}/controller_interference_report.json"
-    local command_for_execution="$command"
     local started_ts ended_ts status rc command_exit_code final_exit_code
     local timeout_observed rch_remote_success_observed markers_ok missing_log_markers_json
 
@@ -202,12 +269,14 @@ run_scenario() {
         printf 'DRY_RUN scenario=%s\n' "$sid" | tee "$log_file" >/dev/null
         status="dry_run"
     else
-        if [[ "$sid" == "AA023-SMOKE-CONTROLLER-LEDGER" ]]; then
-            command_for_execution="${command/rch exec -- env /rch exec -- env ASUPERSYNC_CONTROLLER_LEDGER_STDOUT=1 ASUPERSYNC_CONTROLLER_LEDGER_PLANNER_ROWS_STDOUT=1 }"
-        elif [[ "$sid" == "AA023-SMOKE-CONTROLLER-INTERFERENCE" ]]; then
-            command_for_execution="${command/rch exec -- env /rch exec -- env ASUPERSYNC_CONTROLLER_INTERFERENCE_MATRIX_STDOUT=1 ASUPERSYNC_CONTROLLER_INTERFERENCE_REPORT_STDOUT=1 }"
+        (
+            cd "$PROJECT_ROOT"
+            timeout --kill-after=10s "${COMMAND_TIMEOUT_SECONDS}s" "${command_args[@]}"
+        ) > "$log_file" 2>&1 || command_exit_code=$?
+        if grep -Eq '^\[RCH\] local \(|falling back to local' "$log_file" 2>/dev/null; then
+            command_exit_code=86
+            printf 'FATAL: rch local fallback detected; refusing local cargo execution\n' >>"$log_file"
         fi
-        timeout --kill-after=10s "${COMMAND_TIMEOUT_SECONDS}s" bash -lc "$command_for_execution" > "$log_file" 2>&1 || command_exit_code=$?
         if [[ "$command_exit_code" -eq 124 || "$command_exit_code" -eq 125 || "$command_exit_code" -eq 137 || "$command_exit_code" -eq 143 ]]; then
             timeout_observed=true
         fi
