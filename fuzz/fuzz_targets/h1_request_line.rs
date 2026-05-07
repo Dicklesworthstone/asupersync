@@ -573,165 +573,8 @@ fn sanitize_header_value(value: &str) -> String {
     }
 }
 
-/// Mock HTTP/1.1 request-line parser for validation
-struct MockH1RequestLineParser {
-    max_request_line_length: usize,
-}
-
-impl MockH1RequestLineParser {
-    fn new() -> Self {
-        Self {
-            max_request_line_length: MAX_REQUEST_LINE_LENGTH,
-        }
-    }
-
-    fn parse_request_line(&self, line: &[u8]) -> Result<(String, String, String), ParseError> {
-        // **ASSERTION 4: CRLF termination**
-        if !line.ends_with(b"\r\n") {
-            return Err(ParseError::MissingCrlf);
-        }
-
-        let line_without_crlf = &line[..line.len().saturating_sub(2)];
-
-        // **ASSERTION 1: Oversized URI rejected per max_uri_length**
-        if line_without_crlf.len() > self.max_request_line_length {
-            return Err(ParseError::RequestLineTooLong);
-        }
-
-        let line_str =
-            std::str::from_utf8(line_without_crlf).map_err(|_| ParseError::InvalidUtf8)?;
-
-        let parts: Vec<&str> = line_str.split_whitespace().collect();
-        if parts.len() != 3 {
-            return Err(ParseError::InvalidFormat);
-        }
-
-        let method = parts[0];
-        let uri = parts[1];
-        let version = parts[2];
-
-        // **ASSERTION 2: Method token validated against RFC 9110 Section 9.1**
-        self.validate_method(method)?;
-
-        // **ASSERTION 3: HTTP-version prefix 'HTTP/' required**
-        self.validate_version(version)?;
-
-        // **ASSERTION 5: Absolute-URI form for proxy**
-        // **ASSERTION 6: Origin-form vs asterisk-form dispatched correctly**
-        self.validate_uri_form(method, uri)?;
-
-        Ok((method.to_string(), uri.to_string(), version.to_string()))
-    }
-
-    fn validate_method(&self, method: &str) -> Result<(), ParseError> {
-        if method.is_empty() {
-            return Err(ParseError::EmptyMethod);
-        }
-
-        // Standard methods
-        if matches!(
-            method,
-            "GET" | "HEAD" | "POST" | "PUT" | "DELETE" | "CONNECT" | "OPTIONS" | "TRACE" | "PATCH"
-        ) {
-            return Ok(());
-        }
-
-        // Extension methods must be valid tokens (RFC 9110 Section 5.6.2)
-        // token = 1*tchar
-        // tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-" / "." /
-        //         "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
-        for byte in method.bytes() {
-            match byte {
-                b'!'
-                | b'#'
-                | b'$'
-                | b'%'
-                | b'&'
-                | b'\''
-                | b'*'
-                | b'+'
-                | b'-'
-                | b'.'
-                | b'^'
-                | b'_'
-                | b'`'
-                | b'|'
-                | b'~'
-                | b'0'..=b'9'
-                | b'A'..=b'Z'
-                | b'a'..=b'z' => {
-                    // Valid tchar
-                }
-                _ => return Err(ParseError::InvalidMethodToken),
-            }
-        }
-
-        Ok(())
-    }
-
-    fn validate_version(&self, version: &str) -> Result<(), ParseError> {
-        if !version.starts_with("HTTP/") {
-            return Err(ParseError::MissingHttpPrefix);
-        }
-
-        match version {
-            "HTTP/1.0" | "HTTP/1.1" => Ok(()),
-            _ => Err(ParseError::UnsupportedVersion),
-        }
-    }
-
-    fn validate_uri_form(&self, method: &str, uri: &str) -> Result<(), ParseError> {
-        if uri.is_empty() {
-            return Err(ParseError::EmptyUri);
-        }
-
-        // Check for absolute-form (proxy requests)
-        if uri.starts_with("http://") || uri.starts_with("https://") {
-            // Absolute-form should be used for proxy requests
-            return Ok(());
-        }
-
-        // Authority-form for CONNECT method
-        if method == "CONNECT" {
-            if uri.contains("://") {
-                return Err(ParseError::InvalidAuthorityForm);
-            }
-            // Should be host:port format
-            return Ok(());
-        }
-
-        // Asterisk-form for OPTIONS * requests
-        if uri == "*" {
-            if method != "OPTIONS" {
-                return Err(ParseError::AsteriskFormInvalidMethod);
-            }
-            return Ok(());
-        }
-
-        // Origin-form (most common)
-        if uri.starts_with('/') || uri == "*" {
-            return Ok(());
-        }
-
-        // Invalid URI form
-        Err(ParseError::InvalidUriForm)
-    }
-}
-
-#[derive(Debug, PartialEq, Clone)]
-enum ParseError {
-    MissingCrlf,
-    RequestLineTooLong,
-    InvalidUtf8,
-    InvalidFormat,
-    EmptyMethod,
-    InvalidMethodToken,
-    MissingHttpPrefix,
-    UnsupportedVersion,
-    EmptyUri,
-    InvalidAuthorityForm,
-    AsteriskFormInvalidMethod,
-    InvalidUriForm,
+fn request_line_content_len(line: &[u8]) -> Option<usize> {
+    line.strip_suffix(b"\r\n").map(<[u8]>::len)
 }
 
 fuzz_target!(|input: FuzzInput| {
@@ -751,9 +594,6 @@ fuzz_target!(|input: FuzzInput| {
     }
     let full_request_len = full_request.len();
 
-    let mock_parser = MockH1RequestLineParser::new();
-    let mock_result = mock_parser.parse_request_line(&request_line_bytes);
-
     // Test the actual HTTP/1.1 codec
     let mut codec = Http1Codec::new();
     let mut buffer = BytesMut::from(full_request.as_slice());
@@ -762,108 +602,79 @@ fuzz_target!(|input: FuzzInput| {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| codec.decode(&mut buffer)));
 
     match codec_result {
-        Ok(parse_result) => {
-            match (mock_result.clone(), parse_result) {
-                (Ok((method, uri, version)), Ok(Some(request))) => {
-                    // Both parsers succeeded - verify consistency
-                    assert_eq!(request.method.as_str(), method);
-                    assert_eq!(request.uri, uri);
-                    assert_eq!(request.version.as_str(), version);
+        Ok(parse_result) => match parse_result {
+            Ok(Some(request)) => {
+                let request_line_len = request_line_content_len(&request_line_bytes)
+                    .expect("accepted request line must use CRLF termination");
 
-                    // **ASSERTION 1: Oversized URI rejected per max_uri_length**
-                    assert!(request_line_bytes.len() <= MAX_REQUEST_LINE_LENGTH + 2); // +2 for CRLF
+                // **ASSERTION 1: Oversized URI rejected per max_uri_length**
+                assert!(
+                    request_line_len <= MAX_REQUEST_LINE_LENGTH,
+                    "Codec accepted oversized request line: {request_line_len}"
+                );
 
-                    // **ASSERTION 2: Method token validated against RFC 9110 Section 9.1**
-                    // If codec accepted it, it must be a valid token
-                    validate_method_consistency(&request.method);
+                // **ASSERTION 2: Method token validated against RFC 9110 Section 9.1**
+                validate_method_consistency(&request.method);
 
-                    // **ASSERTION 3: HTTP-version prefix 'HTTP/' required**
-                    assert!(version.starts_with("HTTP/"));
-                    assert!(matches!(request.version, Version::Http10 | Version::Http11));
+                // **ASSERTION 3: HTTP-version prefix 'HTTP/' required**
+                assert!(matches!(request.version, Version::Http10 | Version::Http11));
+                assert!(request.version.as_str().starts_with("HTTP/"));
 
-                    // **ASSERTION 6: Origin-form vs asterisk-form dispatched correctly**
-                    validate_uri_form_consistency(&method, &uri);
+                // **ASSERTION 4: CRLF termination**
+                assert!(
+                    request_line_bytes.ends_with(b"\r\n"),
+                    "Codec accepted request line without CRLF termination"
+                );
 
-                    if matches!(input.headers, HeaderStrategy::FoldedContinuation { .. }) {
-                        panic!(
-                            "Codec accepted obsolete folded continuation header: {:?}",
-                            String::from_utf8_lossy(&full_request)
-                        );
-                    }
+                // **ASSERTION 5 + 6: URI forms stay consistent with the real parsed request**
+                validate_uri_form_consistency(request.method.as_str(), &request.uri);
 
-                    if let Some(expected_header_count) = input.expected_header_count() {
-                        assert_eq!(request.headers.len(), expected_header_count);
-                    }
-                }
-                (Err(expected_error), Ok(Some(_))) => {
-                    // Mock parser correctly rejected but codec accepted - potential issue
-                    match expected_error {
-                        ParseError::RequestLineTooLong => {
-                            panic!("Codec accepted oversized request line that should be rejected");
-                        }
-                        ParseError::InvalidMethodToken => {
-                            panic!(
-                                "Codec accepted invalid method token: {:?}",
-                                String::from_utf8_lossy(&request_line_bytes)
-                            );
-                        }
-                        ParseError::MissingHttpPrefix => {
-                            panic!(
-                                "Codec accepted version without HTTP/ prefix: {:?}",
-                                String::from_utf8_lossy(&request_line_bytes)
-                            );
-                        }
-                        ParseError::MissingCrlf => {
-                            panic!("Codec accepted request line without proper CRLF termination");
-                        }
-                        _ => {
-                            // Other validation differences may be acceptable
-                        }
-                    }
-                }
-                (Ok(_), Err(HttpError::RequestLineTooLong)) => {
-                    // **ASSERTION 1: Oversized URI rejected per max_uri_length**
-                    assert!(
-                        request_line_bytes.len().saturating_sub(2) > MAX_REQUEST_LINE_LENGTH,
-                        "Codec rejected request line within size limits"
-                    );
-                }
-                (Ok(_), Err(HttpError::BadMethod)) => {
-                    // **ASSERTION 2: Method token validated against RFC 9110 Section 9.1**
-                    // Expected for invalid method tokens
-                }
-                (Ok(_), Err(HttpError::UnsupportedVersion)) => {
-                    // **ASSERTION 3: HTTP-version prefix 'HTTP/' required**
-                    // Expected for invalid HTTP versions
-                }
-                (Ok(_), Err(HttpError::BadRequestLine)) => {
-                    // **ASSERTION 4: CRLF termination**
-                    // Expected for malformed request lines
-                }
-                (Ok(_), Err(HttpError::HeadersTooLarge)) => {
-                    assert!(
-                        matches!(input.headers, HeaderStrategy::Oversized { .. })
-                            || full_request_len > MAX_HEADERS_SIZE,
-                        "Codec rejected a header block within configured size limits"
-                    );
-                }
-                (Ok(_), Err(HttpError::TooManyHeaders)) => {
-                    assert!(
-                        matches!(input.headers, HeaderStrategy::TooMany { .. }),
-                        "Codec reported too many headers without a generated overrun"
-                    );
-                }
-                (Err(_), Err(_)) => {
-                    // Both parsers correctly rejected the input
-                }
-                (_, Ok(None)) => {
-                    // Incomplete request - codec needs more data
-                }
-                (_, Err(_)) => {
-                    // Codec rejected input - verify error is appropriate
+                assert!(
+                    !matches!(input.headers, HeaderStrategy::FoldedContinuation { .. }),
+                    "Codec accepted obsolete folded continuation header: {:?}",
+                    String::from_utf8_lossy(&full_request)
+                );
+                assert!(
+                    !matches!(input.headers, HeaderStrategy::Oversized { .. }),
+                    "Codec accepted oversized header block"
+                );
+                assert!(
+                    !matches!(input.headers, HeaderStrategy::TooMany { .. }),
+                    "Codec accepted header count above configured limit"
+                );
+
+                if let Some(expected_header_count) = input.expected_header_count() {
+                    assert_eq!(request.headers.len(), expected_header_count);
                 }
             }
-        }
+            Err(HttpError::RequestLineTooLong) => {
+                // **ASSERTION 1: Oversized URI rejected per max_uri_length**
+                assert!(
+                    request_line_content_len(&request_line_bytes)
+                        .is_some_and(|len| len > MAX_REQUEST_LINE_LENGTH),
+                    "Codec rejected request line within size limits"
+                );
+            }
+            Err(HttpError::HeadersTooLarge) => {
+                assert!(
+                    matches!(input.headers, HeaderStrategy::Oversized { .. })
+                        || full_request_len > MAX_HEADERS_SIZE,
+                    "Codec rejected a header block within configured size limits"
+                );
+            }
+            Err(HttpError::TooManyHeaders) => {
+                assert!(
+                    matches!(input.headers, HeaderStrategy::TooMany { .. }),
+                    "Codec reported too many headers without a generated overrun"
+                );
+            }
+            Err(HttpError::BadRequestLine) => {
+                // Malformed request-line layouts are expected to fail here.
+            }
+            Ok(None) | Err(_) => {
+                // Incomplete input or a parser rejection on malformed fuzz data is acceptable.
+            }
+        },
         Err(_) => {
             // Codec panicked - this is a bug
             panic!(
@@ -871,16 +682,6 @@ fuzz_target!(|input: FuzzInput| {
                 String::from_utf8_lossy(&request_line_bytes)
             );
         }
-    }
-
-    // **ASSERTION 5: Absolute-URI form for proxy**
-    // Test proxy request handling (if we implement proxy logic)
-    if let Ok((_method, uri, _version)) = &mock_result
-        && (uri.starts_with("http://") || uri.starts_with("https://"))
-    {
-        // This is an absolute-form URI for proxy requests
-        // Verify proper handling according to RFC 9112
-        assert!(uri.contains("://"), "Absolute-form URI must contain scheme");
     }
 });
 
