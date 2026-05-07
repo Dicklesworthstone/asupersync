@@ -12,7 +12,7 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
-asupersync = { path = "..", features = ["compression", "tls", "metrics", "tracing-integration", "test-internals", "trace-compression", "io-uring", "simd-intrinsics", "fuzz", "mysql", "postgres"] }
+asupersync = { path = "..", features = ["compression", "tls", "metrics", "tracing-integration", "test-internals", "trace-compression", "io-uring", "simd-intrinsics", "fuzz", "mysql", "postgres", "messaging-fabric"] }
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 libc = "0.2"
@@ -2482,6 +2482,13 @@ bench = false
 [[bin]]
 name = "subject_pattern_parser"
 path = "fuzz_targets/subject_pattern_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "namespace_kernel"
+path = "fuzz_targets/namespace_kernel.rs"
 test = false
 doc = false
 bench = false
