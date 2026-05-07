@@ -2,8 +2,11 @@
 #![allow(clippy::all)]
 //! Provenance tracking for differential test fixtures.
 
+use md5::Md5;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -200,7 +203,10 @@ impl ProvenanceTracker {
 
     /// Loads provenance information for a fixture
     #[allow(dead_code)]
-    pub fn load_fixture_provenance(&self, fixture_id: &str) -> Result<FixtureProvenance, ProvenanceError> {
+    pub fn load_fixture_provenance(
+        &self,
+        fixture_id: &str,
+    ) -> Result<FixtureProvenance, ProvenanceError> {
         let provenance_path = self.get_provenance_path(fixture_id);
 
         if !provenance_path.exists() {
@@ -231,9 +237,17 @@ impl ProvenanceTracker {
                 match fs::read_to_string(&path) {
                     Ok(content) => match serde_json::from_str::<FixtureProvenance>(&content) {
                         Ok(provenance) => entries.push(provenance),
-                        Err(e) => eprintln!("Warning: Failed to parse provenance file {}: {}", path.display(), e),
+                        Err(e) => eprintln!(
+                            "Warning: Failed to parse provenance file {}: {}",
+                            path.display(),
+                            e
+                        ),
                     },
-                    Err(e) => eprintln!("Warning: Failed to read provenance file {}: {}", path.display(), e),
+                    Err(e) => eprintln!(
+                        "Warning: Failed to read provenance file {}: {}",
+                        path.display(),
+                        e
+                    ),
                 }
             }
         }
@@ -247,7 +261,8 @@ impl ProvenanceTracker {
         let provenance = self.load_fixture_provenance(fixture_id)?;
 
         // Check if reference implementation is still available
-        let ref_impl_available = self.check_reference_implementation_availability(&provenance.generation_info);
+        let ref_impl_available =
+            self.check_reference_implementation_availability(&provenance.generation_info);
 
         // Check if dependencies are satisfied
         let dependencies_satisfied = self.check_dependencies(&provenance.dependencies)?;
@@ -257,7 +272,10 @@ impl ProvenanceTracker {
 
     /// Generates a regeneration script for a fixture
     #[allow(dead_code)]
-    pub fn generate_regeneration_script(&self, fixture_id: &str) -> Result<String, ProvenanceError> {
+    pub fn generate_regeneration_script(
+        &self,
+        fixture_id: &str,
+    ) -> Result<String, ProvenanceError> {
         let provenance = self.load_fixture_provenance(fixture_id)?;
 
         let mut script = String::new();
@@ -279,7 +297,10 @@ impl ProvenanceTracker {
         }
 
         script.push_str("\n# Change to working directory\n");
-        script.push_str(&format!("cd \"{}\"\n", provenance.generation_info.working_directory));
+        script.push_str(&format!(
+            "cd \"{}\"\n",
+            provenance.generation_info.working_directory
+        ));
 
         script.push_str("\n# Execute generation command\n");
         script.push_str(&provenance.generation_info.command);
@@ -293,24 +314,33 @@ impl ProvenanceTracker {
     #[allow(dead_code)]
 
     fn make_relative_path(&self, absolute_path: &Path) -> Result<PathBuf, ProvenanceError> {
-        absolute_path.strip_prefix(&self.base_dir)
+        absolute_path
+            .strip_prefix(&self.base_dir)
             .map(|p| p.to_path_buf())
-            .map_err(|_| ProvenanceError::InvalidData(format!(
-                "Path {} is not under base directory {}",
-                absolute_path.display(),
-                self.base_dir.display()
-            )))
+            .map_err(|_| {
+                ProvenanceError::InvalidData(format!(
+                    "Path {} is not under base directory {}",
+                    absolute_path.display(),
+                    self.base_dir.display()
+                ))
+            })
     }
 
     #[allow(dead_code)]
 
     fn get_provenance_path(&self, fixture_id: &str) -> PathBuf {
-        self.base_dir.join("provenance").join(format!("{}.json", fixture_id))
+        self.base_dir
+            .join("provenance")
+            .join(format!("{}.json", fixture_id))
     }
 
     #[allow(dead_code)]
 
-    fn save_provenance(&self, path: &Path, provenance: &FixtureProvenance) -> Result<(), ProvenanceError> {
+    fn save_provenance(
+        &self,
+        path: &Path,
+        provenance: &FixtureProvenance,
+    ) -> Result<(), ProvenanceError> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -323,7 +353,10 @@ impl ProvenanceTracker {
 
     #[allow(dead_code)]
 
-    fn detect_dependencies(&self, generation_info: &GenerationInfo) -> Result<Vec<Dependency>, ProvenanceError> {
+    fn detect_dependencies(
+        &self,
+        generation_info: &GenerationInfo,
+    ) -> Result<Vec<Dependency>, ProvenanceError> {
         let mut dependencies = Vec::new();
 
         // Add reference implementation as a dependency
@@ -341,7 +374,10 @@ impl ProvenanceTracker {
 
     #[allow(dead_code)]
 
-    fn check_reference_implementation_availability(&self, generation_info: &GenerationInfo) -> bool {
+    fn check_reference_implementation_availability(
+        &self,
+        generation_info: &GenerationInfo,
+    ) -> bool {
         // This would check if the reference implementation is still available
         // For now, just return true as a placeholder
         true
@@ -359,11 +395,20 @@ impl ProvenanceTracker {
 
     fn generate_dependency_install_command(&self, dep: &Dependency) -> String {
         match dep.dependency_type {
-            DependencyType::Binary => format!("# Install binary: {} (version {})", dep.name, dep.version),
-            DependencyType::Library => format!("# Install library: {} (version {})", dep.name, dep.version),
+            DependencyType::Binary => {
+                format!("# Install binary: {} (version {})", dep.name, dep.version)
+            }
+            DependencyType::Library => {
+                format!("# Install library: {} (version {})", dep.name, dep.version)
+            }
             DependencyType::PythonPackage => format!("pip install {}=={}", dep.name, dep.version),
-            DependencyType::SystemPackage => format!("# Install system package: {} (version {})", dep.name, dep.version),
-            DependencyType::Repository => format!("git clone {} # version {}", dep.source, dep.version),
+            DependencyType::SystemPackage => format!(
+                "# Install system package: {} (version {})",
+                dep.name, dep.version
+            ),
+            DependencyType::Repository => {
+                format!("git clone {} # version {}", dep.source, dep.version)
+            }
         }
     }
 }
@@ -372,7 +417,7 @@ impl ProvenanceTracker {
 #[allow(dead_code)]
 fn generate_fixture_id(path: &Path) -> String {
     let path_str = path.to_string_lossy();
-    format!("{:x}", md5_hash(path_str.as_bytes()))
+    calculate_md5(path_str.as_bytes())
 }
 
 /// Gets current platform information
@@ -444,23 +489,27 @@ fn get_platform_details() -> HashMap<String, String> {
     details
 }
 
-// Hash calculation functions (simplified for this implementation)
 #[allow(dead_code)]
 fn calculate_sha256(data: &[u8]) -> String {
-    format!("{:x}", md5_hash(data)) // Using MD5 as placeholder for SHA256
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hex_encode(&hasher.finalize())
 }
 
 #[allow(dead_code)]
 
 fn calculate_md5(data: &[u8]) -> String {
-    format!("{:x}", md5_hash(data))
+    let mut hasher = Md5::new();
+    hasher.update(data);
+    hex_encode(&hasher.finalize())
 }
 
-#[allow(dead_code)]
-
-fn md5_hash(data: &[u8]) -> u128 {
-    // Simplified hash function for testing
-    data.iter().map(|&b| b as u128).sum()
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut out, "{byte:02x}").expect("write to String cannot fail");
+    }
+    out
 }
 
 #[cfg(test)]
@@ -517,16 +566,27 @@ mod tests {
     fn test_fixture_checksums() {
         let input = b"test input";
         let output = b"test output";
+        let fixture_data = [input.as_slice(), output.as_slice()].concat();
 
         let checksums = FixtureChecksums {
             input_sha256: calculate_sha256(input),
             output_sha256: calculate_sha256(output),
-            fixture_md5: calculate_md5(&[input, output].concat()),
+            fixture_md5: calculate_md5(&fixture_data),
         };
 
         assert!(!checksums.input_sha256.is_empty());
         assert!(!checksums.output_sha256.is_empty());
         assert!(!checksums.fixture_md5.is_empty());
         assert_ne!(checksums.input_sha256, checksums.output_sha256);
+    }
+
+    #[test]
+    #[allow(dead_code)]
+    fn test_hashes_match_standard_vectors() {
+        assert_eq!(
+            calculate_sha256(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(calculate_md5(b"abc"), "900150983cd24fb0d6963f7d28e17f72");
     }
 }

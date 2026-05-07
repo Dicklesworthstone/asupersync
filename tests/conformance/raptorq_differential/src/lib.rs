@@ -20,41 +20,39 @@
 //! use raptorq_differential::*;
 //!
 //! // Load and run differential tests
-//! let harness = DifferentialHarness::new("tests/fixtures");
+//! let harness = DifferentialHarness::new("tests/fixtures").unwrap();
 //! let results = harness.run_all_tests().unwrap();
 //!
-//! // Generate new fixtures from reference implementation
-//! let generator = FixtureGenerator::new();
-//! generator.generate_reference_fixtures("path/to/reference").unwrap();
+//! // Inspect recorded fixture provenance
+//! let tracker = ProvenanceTracker::new("tests/fixtures");
+//! let provenance_entries = tracker.list_all_provenance().unwrap();
 //! ```
 
-pub mod reference_integration;
-pub mod fixture_loader;
 pub mod differential_tests;
+pub mod fixture_loader;
 pub mod provenance;
+pub mod reference_integration;
 
 // Re-export main types for convenience
-pub use reference_integration::{
-    ReferenceImplementation, ReferenceOutput, ReferenceError, ImplementationInfo,
-};
-pub use fixture_loader::{
-    FixtureLoader, FixtureSet, FixtureEntry, FixtureMetadata, FixtureError,
-};
 pub use differential_tests::{
-    DifferentialHarness, DifferentialTest, DifferentialResult, ComparisonStats,
-    TestSuite, TestCase, TestParameters,
+    ComparisonStats, DifferentialHarness, DifferentialResult, DifferentialTest, TestCase,
+    TestParameters, TestSuite,
 };
-pub use provenance::{
-    ProvenanceTracker, GenerationInfo, FixtureProvenance, ProvenanceError,
+pub use fixture_loader::{FixtureEntry, FixtureError, FixtureLoader, FixtureMetadata, FixtureSet};
+pub use provenance::{FixtureProvenance, GenerationInfo, ProvenanceError, ProvenanceTracker};
+pub use reference_integration::{
+    ImplementationInfo, ReferenceError, ReferenceImplementation, ReferenceOutput,
 };
 
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 use std::collections::HashMap;
+use std::path::Path;
 
 /// Main entry point for running the complete differential test suite
 #[allow(dead_code)]
-pub fn run_differential_suite<P: AsRef<Path>>(fixture_dir: P) -> Result<DifferentialSuiteResults, DifferentialSuiteError> {
+pub fn run_differential_suite<P: AsRef<Path>>(
+    fixture_dir: P,
+) -> Result<DifferentialSuiteResults, DifferentialSuiteError> {
     let harness = DifferentialHarness::new(fixture_dir)?;
     let results = harness.run_all_tests()?;
 
@@ -121,7 +119,11 @@ impl DifferentialSuiteResults {
             self.comparison_stats.total_bytes_compared,
             self.comparison_stats.total_mismatches,
             self.comparison_stats.average_comparison_time,
-            if self.is_success() { "✅ ALL TESTS PASSED" } else { "❌ SOME TESTS FAILED" }
+            if self.is_success() {
+                "✅ ALL TESTS PASSED"
+            } else {
+                "❌ SOME TESTS FAILED"
+            }
         )
     }
 }
@@ -149,6 +151,9 @@ pub enum DifferentialSuiteError {
 pub enum DifferentialHarnessError {
     #[error("Configuration error: {0}")]
     Configuration(String),
+
+    #[error("Fixture loading failed: {0}")]
+    FixtureLoading(#[from] FixtureError),
 
     #[error("Reference implementation not found: {0}")]
     ReferenceNotFound(String),
@@ -193,9 +198,11 @@ impl Default for DifferentialConfig {
 #[allow(dead_code)]
 pub fn run_single_test<P: AsRef<Path>>(
     fixture_path: P,
-    our_implementation_result: &[u8]
+    our_implementation_result: &[u8],
 ) -> Result<bool, DifferentialSuiteError> {
-    let loader = FixtureLoader::new();
+    let fixture_path = fixture_path.as_ref();
+    let fixture_dir = fixture_path.parent().unwrap_or_else(|| Path::new("."));
+    let loader = FixtureLoader::new(fixture_dir)?;
     let fixture = loader.load_fixture(fixture_path)?;
 
     let matches = fixture.reference_output == our_implementation_result;
@@ -215,7 +222,8 @@ pub fn run_single_test<P: AsRef<Path>>(
 /// Finds the first byte position where two byte arrays differ
 #[allow(dead_code)]
 fn find_first_mismatch(expected: &[u8], actual: &[u8]) -> Option<usize> {
-    expected.iter()
+    expected
+        .iter()
         .zip(actual.iter())
         .enumerate()
         .find_map(|(i, (a, b))| if a != b { Some(i) } else { None })

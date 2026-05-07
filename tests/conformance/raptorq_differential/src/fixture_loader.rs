@@ -2,8 +2,11 @@
 #![allow(clippy::all)]
 //! Fixture loading and management for differential testing.
 
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -103,7 +106,10 @@ impl FixtureLoader {
         let fixture_dir = fixture_dir.as_ref().to_path_buf();
 
         if !fixture_dir.exists() {
-            return Err(FixtureError::NotFound(format!("Fixture directory not found: {}", fixture_dir.display())));
+            return Err(FixtureError::NotFound(format!(
+                "Fixture directory not found: {}",
+                fixture_dir.display()
+            )));
         }
 
         Ok(Self { fixture_dir })
@@ -136,7 +142,10 @@ impl FixtureLoader {
 
     /// Loads a single fixture from file
     #[allow(dead_code)]
-    pub fn load_fixture<P: AsRef<Path>>(&self, fixture_path: P) -> Result<FixtureEntry, FixtureError> {
+    pub fn load_fixture<P: AsRef<Path>>(
+        &self,
+        fixture_path: P,
+    ) -> Result<FixtureEntry, FixtureError> {
         let path = fixture_path.as_ref();
 
         if !path.exists() {
@@ -147,11 +156,17 @@ impl FixtureLoader {
         let fixture_data: SerializedFixture = serde_json::from_str(&content)?;
 
         // Decode base64 data
-        let reference_output = base64::decode(&fixture_data.reference_output_base64)
-            .map_err(|e| FixtureError::InvalidFormat(format!("Invalid base64 in reference_output: {}", e)))?;
+        let reference_output = BASE64
+            .decode(&fixture_data.reference_output_base64)
+            .map_err(|e| {
+                FixtureError::InvalidFormat(format!("Invalid base64 in reference_output: {}", e))
+            })?;
 
-        let test_input = base64::decode(&fixture_data.test_input_base64)
-            .map_err(|e| FixtureError::InvalidFormat(format!("Invalid base64 in test_input: {}", e)))?;
+        let test_input = BASE64
+            .decode(&fixture_data.test_input_base64)
+            .map_err(|e| {
+                FixtureError::InvalidFormat(format!("Invalid base64 in test_input: {}", e))
+            })?;
 
         // Verify hashes
         let input_hash = calculate_hash(&test_input);
@@ -190,7 +205,8 @@ impl FixtureLoader {
             serde_json::from_str(&content)?
         } else {
             FixtureSetMetadata {
-                set_name: set_path.file_name()
+                set_name: set_path
+                    .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("unknown")
                     .to_string(),
@@ -224,11 +240,15 @@ impl FixtureLoader {
 
     /// Saves a fixture to file
     #[allow(dead_code)]
-    pub fn save_fixture<P: AsRef<Path>>(&self, fixture_path: P, fixture: &FixtureEntry) -> Result<(), FixtureError> {
+    pub fn save_fixture<P: AsRef<Path>>(
+        &self,
+        fixture_path: P,
+        fixture: &FixtureEntry,
+    ) -> Result<(), FixtureError> {
         let serialized = SerializedFixture {
             metadata: fixture.metadata.clone(),
-            reference_output_base64: base64::encode(&fixture.reference_output),
-            test_input_base64: base64::encode(&fixture.test_input),
+            reference_output_base64: BASE64.encode(&fixture.reference_output),
+            test_input_base64: BASE64.encode(&fixture.test_input),
         };
 
         let json = serde_json::to_string_pretty(&serialized)?;
@@ -300,11 +320,9 @@ impl ValidationReport {
 #[allow(dead_code)]
 fn calculate_hash(data: &[u8]) -> String {
     use sha2::{Digest, Sha256};
-    use std::fmt::Write;
     let mut hasher = Sha256::new();
     hasher.update(data);
     let digest = hasher.finalize();
-    // sha2 0.11 / digest 0.11: finalize output no longer implements LowerHex.
     let mut out = String::with_capacity(digest.len() * 2);
     for byte in digest.as_slice() {
         write!(&mut out, "{byte:02x}").expect("write to String cannot fail");
@@ -315,8 +333,8 @@ fn calculate_hash(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use std::fs;
+    use tempfile::TempDir;
 
     #[test]
     #[allow(dead_code)]
@@ -410,50 +428,11 @@ mod tests {
         let loaded_fixture = loader.load_fixture(&fixture_path).unwrap();
 
         // Compare
-        assert_eq!(fixture.metadata.test_name, loaded_fixture.metadata.test_name);
+        assert_eq!(
+            fixture.metadata.test_name,
+            loaded_fixture.metadata.test_name
+        );
         assert_eq!(fixture.reference_output, loaded_fixture.reference_output);
         assert_eq!(fixture.test_input, loaded_fixture.test_input);
-    }
-}
-
-// Add missing base64 and sha2 dependencies for compilation
-#[cfg(not(test))]
-mod base64 {
-    #[allow(dead_code)]
-    pub fn encode(_data: &[u8]) -> String {
-        "mock_base64".to_string()
-    }
-
-    #[allow(dead_code)]
-
-    pub fn decode(_data: &str) -> Result<Vec<u8>, &'static str> {
-        Ok(vec![0x42; 64])
-    }
-}
-
-#[cfg(not(test))]
-mod sha2 {
-    pub trait Digest {
-        #[allow(dead_code)]
-        fn update(&mut self, data: &[u8]);
-        #[allow(dead_code)]
-        fn finalize(self) -> [u8; 32];
-    }
-
-    #[allow(dead_code)]
-    pub struct Sha256;
-
-    #[allow(dead_code)]
-
-    impl Sha256 {
-        #[allow(dead_code)]
-        pub fn new() -> Self { Self }
-    }
-
-    impl Digest for Sha256 {
-        #[allow(dead_code)]
-        fn update(&mut self, _data: &[u8]) {}
-        #[allow(dead_code)]
-        fn finalize(self) -> [u8; 32] { [0; 32] }
     }
 }
