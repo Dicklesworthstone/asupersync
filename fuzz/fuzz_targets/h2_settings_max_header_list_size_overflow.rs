@@ -7,7 +7,6 @@ use asupersync::http::h2::error::ErrorCode;
 use asupersync::http::h2::frame::{Frame, HeadersFrame, Setting, SettingsFrame};
 use asupersync::http::h2::settings::Settings;
 use libfuzzer_sys::fuzz_target;
-use std::panic::{AssertUnwindSafe, catch_unwind};
 
 const MAX_HEADER_LIST_SIZE_2_31: u32 = 0x8000_0000;
 const MAX_PARTIAL_VALUE_BYTES: usize = 64;
@@ -59,8 +58,7 @@ fuzz_target!(|input: MaxHeaderListOverflowInput| {
         true,
     ));
 
-    let result = catch_unwind(AssertUnwindSafe(|| conn.process_frame(headers)));
-    let Err(err) = result.expect("oversized 2^31+ HEADERS block must not panic") else {
+    let Err(err) = conn.process_frame(headers) else {
         panic!("oversized 2^31+ HEADERS block must fail closed");
     };
     assert_eq!(
