@@ -1,7 +1,7 @@
 # Asupersync v4 Formal Semantics ↔ Implementation Refinement Map
 
 **Source spec:** `asupersync_v4_formal_semantics.md` (root, dated 2026-03-02; supersedes the older `docs/` copy).
-**Last cross-checked:** 2026-04-24 (commit `4982c3c93`).
+**Last cross-checked:** 2026-05-07 (commit `ae3fb37a9`).
 **Methodology:** for each small-step rule and invariant in the spec, locate the canonical Rust implementation, the lab oracle that witnesses it (when one exists), and any divergence or gap. Gaps are filed as new beads.
 
 The "Status" column uses:
@@ -51,6 +51,21 @@ Every cited file path is a real file at HEAD. Line numbers were verified at comm
 | `ENQUEUE` | `ThreeLaneScheduler::enqueue` family in `src/runtime/scheduler/three_lane.rs`; lane chosen by current `TaskState` | `src/lab/oracle/priority_inversion.rs` | Implemented |
 | `SCHEDULE-STEP` / `pick_next` | `ThreeLaneScheduler::next_task` in `src/runtime/scheduler/three_lane.rs` (modes `MeetDeadlines` / `DrainObligations` / `DrainRegions` / `NoPreference`); cancel-streak guard at `cancel_streak < cancel_streak_limit` | `tests/scheduler_lane_fairness.rs`, `tests/cancel_lane_fairness_bounds.rs` | Implemented |
 | Bounded fairness lemma | `cancel_streak_limit` field (line ~1503) + fairness-yield counters; `effective_limit` doubles under Drain* | same as above | Implemented |
+
+#### Work-stealing composition lemma
+
+`ThreeLaneScheduler::next_task` composes work stealing with the three-lane scheduler by making stealing a ready-lane fallback, not an independent priority source. The refinement obligation for `asupersync-l81yrd` is:
+
+> If a worker returns a task through `try_steal`, then no dispatchable cancel/timed task was selected by that worker's earlier priority phases, and the stolen task is ready-lane work.
+
+The implementation witnesses that obligation as follows:
+
+- `next_task` runs timer maintenance, governor suggestion, global cancel/timed probes, local cancel/timed probes, and all local/global ready fast paths before Phase 4 calls `try_steal`. Phase 5 fallback cancel is reached only after stealing fails and only when the cancel streak limit had previously deferred cancel work.
+- `try_steal` steals only ready work. Fast-queue steals use `LocalQueue::steal`, whose scan skips task records marked local; heap steals call `PriorityScheduler::steal_ready_batch_into`, not cancel/timed pop methods. Debug assertions reject stolen `!Send` local tasks in both paths.
+- Batch remainders stay in ready-lane structures on the thief: either the thief's local `PriorityScheduler` when local ready work is already present, or the thief's `fast_queue` otherwise. `try_phase3_ready_work` caps consecutive `fast_queue` dispatches with `fast_queue_fairness_limit` and then checks local ready work before more stolen ready work.
+- Therefore work stealing preserves global lane ordering (`cancel` / due `timed` before stolen `ready`) and preserves work conservation/no-local-steal invariants. It is not a strict total-priority proof across all ready tasks on all workers: stolen batch remainders may precede local ready work for a bounded `fast_queue_fairness_limit` prefix, with inversion telemetry recorded by `record_ready_priority_inversion`.
+
+Current witnesses: `tests/scheduler_lane_fairness.rs::test_steal_only_from_ready_lane_deterministic`, `src/runtime/scheduler/local_queue.rs` tests `thief_steal_is_fifo`, `steal_skips_local_tasks`, `steal_batch_skips_local_without_reordering_owner_tasks`, and `task_table_backed_steal_skips_local_tasks`, plus the multi-worker fairness regression in `src/runtime/scheduler/three_lane.rs::test_work_stealer_fairness_defect`.
 
 ### 3.1 Task lifecycle
 
