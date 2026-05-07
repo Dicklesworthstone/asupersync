@@ -109,9 +109,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
     print_test_summary(&report);
 
-    // Exit with appropriate code
-    let exit_code = if report.summary.failed > 0 { 1 } else { 0 };
-    std::process::exit(exit_code);
+    // Fail closed when reference coverage is partial or absent.
+    std::process::exit(exit_code(&report));
 }
 
 /// Generate a concise summary output
@@ -226,9 +225,46 @@ fn final_status_line(skipped_count: usize, expected_failure_count: usize) -> Str
     }
 }
 
+fn has_incomplete_coverage(report: &asupersync_conformance::HpackEncoderComplianceReport) -> bool {
+    report.total_cases == 0 || report.summary.skipped > 0 || report.summary.expected_failures > 0
+}
+
+fn exit_code(report: &asupersync_conformance::HpackEncoderComplianceReport) -> i32 {
+    if report.summary.failed > 0 || has_incomplete_coverage(report) {
+        1
+    } else {
+        0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn synthetic_report(
+        total_cases: usize,
+        failed: usize,
+        expected_failures: usize,
+        skipped: usize,
+    ) -> asupersync_conformance::HpackEncoderComplianceReport {
+        asupersync_conformance::HpackEncoderComplianceReport {
+            test_run_id: "synthetic".to_string(),
+            timestamp: "2026-05-07T00:00:00Z".to_string(),
+            total_cases,
+            results: Vec::new(),
+            summary: asupersync_conformance::HpackEncoderComplianceSummary {
+                passed: total_cases
+                    .saturating_sub(failed)
+                    .saturating_sub(expected_failures)
+                    .saturating_sub(skipped),
+                failed,
+                expected_failures,
+                skipped,
+                total: total_cases,
+                compliance_score: 0.0,
+            },
+        }
+    }
 
     #[test]
     fn final_status_does_not_claim_all_passed_for_partial_coverage() {
@@ -241,5 +277,38 @@ mod tests {
     #[test]
     fn final_status_claims_all_passed_only_for_full_green_results() {
         assert_eq!(final_status_line(0, 0), "✅ ALL TESTS PASSED");
+    }
+
+    #[tokio::test]
+    async fn default_suite_still_has_reference_gaps() {
+        let mut tester = asupersync_conformance::HpackEncoderConformanceTester::new();
+        let report = tester.run_all_tests().await;
+
+        assert_eq!(report.summary.failed, 0);
+        assert!(
+            report.summary.skipped > 0,
+            "default HPACK suite should still expose missing h2 golden coverage"
+        );
+    }
+
+    #[test]
+    fn exit_code_is_nonzero_for_partial_skipped_coverage() {
+        let report = synthetic_report(9, 0, 0, 8);
+
+        assert_eq!(exit_code(&report), 1);
+    }
+
+    #[test]
+    fn exit_code_is_nonzero_for_zero_case_reports() {
+        let report = synthetic_report(0, 0, 0, 0);
+
+        assert_eq!(exit_code(&report), 1);
+    }
+
+    #[test]
+    fn exit_code_is_zero_for_full_pass_coverage() {
+        let report = synthetic_report(1, 0, 0, 0);
+
+        assert_eq!(exit_code(&report), 0);
     }
 }
