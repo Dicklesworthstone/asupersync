@@ -277,8 +277,30 @@ mkdir -p "$RUN_DIR"
 HOST_FINGERPRINT_JSON="$(host_fingerprint_json)"
 STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-printf -v RCH_INVOCATION '%q' "$RCH_BIN"
-COMMAND="${RCH_INVOCATION} exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\${TMPDIR:-/tmp}/rch_target_runtime_capacity_hints ASUPERSYNC_RUNTIME_CAPACITY_HINTS_CONTRACT_PATH=${ARTIFACT} ASUPERSYNC_RUNTIME_CAPACITY_HINTS_SCENARIO_ID=${SCENARIO} ASUPERSYNC_RUNTIME_CAPACITY_HINTS_REPORT_PATH=${SCENARIO_REPORT_PATH} cargo test -p asupersync --test runtime_capacity_hints_contract runtime_capacity_hints_smoke_contract_emits_report -- --nocapture"
+COMMAND_ARGS=(
+    "$RCH_BIN"
+    exec
+    --
+    env
+    "CARGO_INCREMENTAL=0"
+    "CARGO_PROFILE_TEST_DEBUG=0"
+    "RUSTFLAGS=-D warnings -C debuginfo=0"
+    "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_capacity_hints"
+    "ASUPERSYNC_RUNTIME_CAPACITY_HINTS_CONTRACT_PATH=${ARTIFACT}"
+    "ASUPERSYNC_RUNTIME_CAPACITY_HINTS_SCENARIO_ID=${SCENARIO}"
+    "ASUPERSYNC_RUNTIME_CAPACITY_HINTS_REPORT_PATH=${SCENARIO_REPORT_PATH}"
+    cargo
+    test
+    -p
+    asupersync
+    --test
+    runtime_capacity_hints_contract
+    runtime_capacity_hints_smoke_contract_emits_report
+    --
+    --nocapture
+)
+printf -v COMMAND '%q ' "${COMMAND_ARGS[@]}"
+COMMAND="${COMMAND% }"
 
 COMMAND_EXIT_CODE=0
 SCRIPT_EXIT_CODE=0
@@ -296,7 +318,10 @@ else
     COMMAND_EXIT_CODE=-1
     EARLY_SUCCESS=0
     set +e
-    bash -lc "$COMMAND" >"$RUN_LOG_PATH" 2>&1 &
+    (
+        cd "$PROJECT_ROOT"
+        "${COMMAND_ARGS[@]}"
+    ) >"$RUN_LOG_PATH" 2>&1 &
     COMMAND_PID=$!
     set -e
 
