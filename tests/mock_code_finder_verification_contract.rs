@@ -201,6 +201,23 @@ fn rfc6330_evidence_runner_lists_and_self_tests() {
 
 #[test]
 fn runtime_sync_evidence_runner_lists_and_self_tests() {
+    let script =
+        std::fs::read_to_string(repo_path("scripts/run_runtime_sync_invariant_evidence.sh"))
+            .expect("read runtime/sync evidence runner");
+    let forbidden = ["bash", " -lc"].concat();
+    assert!(
+        !script.contains(&forbidden),
+        "runtime/sync evidence runner should not execute scenario commands through a local shell"
+    );
+    assert!(
+        script.contains(r#"bash "$0" --internal-oneshot-scan"#),
+        "oneshot source scan should execute directly through the runner"
+    );
+    assert!(
+        script.contains("run_local_command_capture()"),
+        "local execution path should use fixed argv commands"
+    );
+
     let list_output = Command::new("bash")
         .arg("scripts/run_runtime_sync_invariant_evidence.sh")
         .arg("--list")

@@ -313,6 +313,58 @@ run_rch_command_capture() {
     esac
 }
 
+run_local_command_capture() {
+    local scenario_id="$1"
+    local stdout_path="$2"
+    local stderr_path="$3"
+    local target_dir="${TMPDIR:-/tmp}/rch_target_asupersync_a5d34a_runtime_sync"
+
+    case "$scenario_id" in
+        RUNTIME-SCHEDULER-SHUTDOWN-BOUNDARY-LIVE)
+            env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
+                CARGO_TARGET_DIR="$target_dir" \
+                cargo test -p asupersync --lib scheduler_shutdown -- --nocapture \
+                > "$stdout_path" 2> "$stderr_path"
+            ;;
+        RUNTIME-FINALIZER-QUIESCENCE-LIVE)
+            env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
+                CARGO_TARGET_DIR="$target_dir" \
+                cargo test -p asupersync --lib cancel_drain_finalize_nested_regions -- --nocapture \
+                > "$stdout_path" 2> "$stderr_path"
+            ;;
+        RUNTIME-FINALIZER-DRAIN-SOURCE-LIVE)
+            env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
+                CARGO_TARGET_DIR="$target_dir" \
+                cargo test -p asupersync --lib \
+                drain_ready_async_finalizers_runs_async_cleanup_even_with_zero_task_limit -- --nocapture \
+                > "$stdout_path" 2> "$stderr_path"
+            ;;
+        RUNTIME-OBLIGATION-CANCEL-DRAIN-FINALIZE-LIVE)
+            env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
+                CARGO_TARGET_DIR="$target_dir" \
+                cargo test -p asupersync --lib \
+                multiple_tasks_obligations_cancel_drain_finalize -- --nocapture \
+                > "$stdout_path" 2> "$stderr_path"
+            ;;
+        SYNC-RWLOCK-UPGRADE-CANCEL-LIVE)
+            env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
+                CARGO_TARGET_DIR="$target_dir" \
+                cargo test -p asupersync --lib audit_rwlock_no_read_to_write_upgrade -- --nocapture \
+                > "$stdout_path" 2> "$stderr_path"
+            ;;
+        SYNC-RWLOCK-WRITER-FAIRNESS-LIVE)
+            env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS="-C debuginfo=0" \
+                CARGO_TARGET_DIR="$target_dir" \
+                cargo test -p asupersync --lib audit_rwlock_writer_starvation_prevention -- --nocapture \
+                > "$stdout_path" 2> "$stderr_path"
+            ;;
+        *)
+            echo "unknown local scenario: $scenario_id" >&2
+            return 1
+            ;;
+    esac
+}
+
 run_command_capture() {
     local scenario_id="$1"
     local stdout_path="$2"
@@ -321,11 +373,11 @@ run_command_capture() {
 
     command="$(scenario_command "$scenario_id")"
     if [[ "$scenario_id" == "CHANNEL-ONESHOT-TRIPWIRE-SCAN-LIVE" ]]; then
-        bash -lc "$command" > "$stdout_path" 2> "$stderr_path"
+        bash "$0" --internal-oneshot-scan > "$stdout_path" 2> "$stderr_path"
     elif [[ "$USE_RCH" -eq 1 ]]; then
         run_rch_command_capture "$scenario_id" "$stdout_path" "$stderr_path"
     else
-        bash -lc "$command" > "$stdout_path" 2> "$stderr_path"
+        run_local_command_capture "$scenario_id" "$stdout_path" "$stderr_path"
     fi
 }
 
