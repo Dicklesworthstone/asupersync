@@ -1,11 +1,12 @@
 #![allow(missing_docs)]
 
 use serde_json::Value as JsonValue;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const SIGNOFF_PATH: &str = "artifacts/reality_check_gap_closure_signoff_v1.json";
+const DIRECT_FORMAL_LEAN_BUILD_COMMAND: &str = "rch exec -- lake --dir formal/lean build";
 
 fn repo_path(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
@@ -114,7 +115,7 @@ fn signoff_artifact_has_stable_schema_and_required_gap_rows() {
             ("gap_rows", rows.len().to_string()),
             ("support_classes", support_classes.len().to_string()),
             ("verdict", "pass".to_string()),
-            ("first_failure", "".to_string()),
+            ("first_failure", String::new()),
         ],
     );
 }
@@ -212,7 +213,7 @@ fn dependency_and_graph_diagnostics_record_br_degradation_and_jsonl_fallback() {
                     .to_string(),
             ),
             ("verdict", "pass".to_string()),
-            ("first_failure", "".to_string()),
+            ("first_failure", String::new()),
         ],
     );
 }
@@ -222,12 +223,12 @@ fn every_fully_closed_gap_has_commit_artifacts_passing_proof_and_residual_risk_f
     let signoff = signoff();
     let mut proof_command_count = 0usize;
     let mut stale_closed_count = 0usize;
-    let mut rows_by_id = BTreeMap::new();
+    let mut rows_by_id = BTreeSet::new();
 
     for row in array(&signoff, "gap_rows") {
         let gap_id = nonempty_string(row, "gap_id");
         assert!(
-            rows_by_id.insert(gap_id.to_string(), ()).is_none(),
+            rows_by_id.insert(gap_id.to_string()),
             "duplicate gap row {gap_id}"
         );
         let commit = nonempty_string(row, "commit");
@@ -280,12 +281,31 @@ fn every_fully_closed_gap_has_commit_artifacts_passing_proof_and_residual_risk_f
         );
         proof_command_count += proof_commands.len();
         for command in proof_commands {
-            nonempty_string(command, "command");
+            let proof_command = nonempty_string(command, "command");
+            assert!(
+                proof_command.starts_with("rch exec -- ")
+                    || proof_command == "bash scripts/scan_stubs.sh"
+                    || proof_command.contains(" bash scripts/run_reality_check_docs_evidence.sh"),
+                "{gap_id}: proof command should be rch-backed or the dedicated docs/stub e2e script: {proof_command}"
+            );
+            assert!(
+                !proof_command.contains("bash -lc"),
+                "{gap_id}: proof command must not shell-wrap proof execution: {proof_command}"
+            );
             nonempty_string(command, "observed_signal");
             assert_eq!(
                 command.get("status").and_then(JsonValue::as_str),
                 Some("passed"),
                 "{gap_id}: proof command must pass"
+            );
+        }
+        if gap_id == "formal-proof-posture" {
+            assert!(
+                proof_commands
+                    .iter()
+                    .any(|command| command["command"].as_str()
+                        == Some(DIRECT_FORMAL_LEAN_BUILD_COMMAND)),
+                "{gap_id}: formal Lean proof command must use direct lake argv"
             );
         }
 
@@ -324,7 +344,7 @@ fn every_fully_closed_gap_has_commit_artifacts_passing_proof_and_residual_risk_f
             ("proof_command_count", proof_command_count.to_string()),
             ("stale_closed_bead_count", stale_closed_count.to_string()),
             ("verdict", "pass".to_string()),
-            ("first_failure", "".to_string()),
+            ("first_failure", String::new()),
         ],
     );
 }
@@ -381,7 +401,7 @@ fn no_tokio_rerun_and_signoff_invariants_are_recorded() {
                     .to_string(),
             ),
             ("verdict", "pass".to_string()),
-            ("first_failure", "".to_string()),
+            ("first_failure", String::new()),
         ],
     );
 }
@@ -420,7 +440,7 @@ fn e2e_signoff_script_contract_logs_required_fields() {
                 array(e2e, "required_top_level_fields").len().to_string(),
             ),
             ("verdict", "pass".to_string()),
-            ("first_failure", "".to_string()),
+            ("first_failure", String::new()),
         ],
     );
 }

@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 const CONTRACT_PATH: &str = "artifacts/reality_check_docs_contract_v1.json";
+const DIRECT_FORMAL_LEAN_BUILD_COMMAND: &str = "rch exec -- lake --dir formal/lean build";
 
 fn repo_path(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
@@ -146,7 +147,7 @@ fn docs_contract_names_all_public_docs_artifacts_and_support_classes() {
                 array(&contract, "support_classes_seen").len().to_string(),
             ),
             ("verdict", "pass".to_string()),
-            ("first_failure", "".to_string()),
+            ("first_failure", String::new()),
         ],
     );
 }
@@ -175,7 +176,7 @@ fn public_docs_have_required_markers_and_no_stale_claims() {
                 ("required_count", array(row, "required").len().to_string()),
                 ("forbidden_count", array(row, "forbidden").len().to_string()),
                 ("verdict", "pass".to_string()),
-                ("first_failure", "".to_string()),
+                ("first_failure", String::new()),
             ],
         );
     }
@@ -205,7 +206,7 @@ fn browser_support_class_vocabulary_is_cross_doc_consistent() {
                     array(row, "docs_required").len().to_string(),
                 ),
                 ("verdict", "pass".to_string()),
-                ("first_failure", "".to_string()),
+                ("first_failure", String::new()),
             ],
         );
     }
@@ -254,7 +255,7 @@ fn deferred_surfaces_have_artifacts_owner_beads_or_explicit_non_promotion_ration
                     array(row, "doc_markers").len().to_string(),
                 ),
                 ("verdict", "pass".to_string()),
-                ("first_failure", "".to_string()),
+                ("first_failure", String::new()),
             ],
         );
     }
@@ -303,6 +304,18 @@ fn closed_reality_check_beads_record_exact_commits_evidence_files_and_commands()
                 command.starts_with("rch exec -- ") || command == "bash scripts/scan_stubs.sh",
                 "{bead_id}: validation command should be rch-backed or the dedicated docs/stub e2e script: {command}"
             );
+            assert!(
+                !command.contains("bash -lc"),
+                "{bead_id}: validation command must not shell-wrap proof execution: {command}"
+            );
+        }
+        if bead_id == "asupersync-rckfrm" {
+            assert!(
+                validation_commands
+                    .iter()
+                    .any(|command| command.as_str() == Some(DIRECT_FORMAL_LEAN_BUILD_COMMAND)),
+                "{bead_id}: formal Lean proof command must use direct lake argv"
+            );
         }
 
         log_contract_event(
@@ -313,7 +326,7 @@ fn closed_reality_check_beads_record_exact_commits_evidence_files_and_commands()
                 ("evidence_files", evidence_files.len().to_string()),
                 ("validation_commands", validation_commands.len().to_string()),
                 ("verdict", "pass".to_string()),
-                ("first_failure", "".to_string()),
+                ("first_failure", String::new()),
             ],
         );
     }
@@ -350,7 +363,7 @@ fn e2e_docs_script_contract_logs_required_fields() {
             ),
             ("artifact_path", artifact_path.to_string()),
             ("verdict", "pass".to_string()),
-            ("first_failure", "".to_string()),
+            ("first_failure", String::new()),
         ],
     );
 }

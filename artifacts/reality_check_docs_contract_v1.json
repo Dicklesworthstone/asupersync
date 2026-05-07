@@ -88,13 +88,13 @@
           "path": "docs/integration.md",
           "markers": [
             "Direct-runtime feasible but not yet shipped",
-            "service/shared worker direct runtime"
+            "service/shared-worker direct runtime"
           ]
         },
         {
           "path": "docs/WASM.md",
           "markers": [
-            "Direct-runtime feasible but not yet shipped",
+            "broker/coordinator-only",
             "service_worker_direct_runtime_not_shipped"
           ]
         }
@@ -150,9 +150,9 @@
         "artifacts/conformance_registry_contract_v1.json",
         "default static-only QPACK",
         "opt-in dynamic QPACK field-section",
-        "no full QPACK encoder/decoder instruction-stream parity",
-        "virtual/lab remote lifecycle proof shipped",
-        "production network backend execution remains adapter responsibility",
+        "not a claim of h3/quinn drop-in parity or full QUIC deployment parity",
+        "production TCP loopback RemoteRuntime lifecycle proof shipped",
+        "stable production wire format remain adapter-scoped",
         "Lean-checked core invariants cover the six non-negotiable runtime invariants",
         "The optional `metrics` feature also has no normal-edge dependency on tokio",
         "The `fuzz` feature is intentionally outside this guarantee",
@@ -181,8 +181,8 @@
         "Bridge-only",
         "Impossible / unsupported",
         "artifacts/http3_qpack_support_matrix_v1.json",
-        "virtual transport",
-        "adapter responsibility"
+        "transport-agnostic contract",
+        "adapter-specific responsibilities"
       ],
       "forbidden": [
         "transport-backed remote lifecycle still in progress"
@@ -193,10 +193,10 @@
       "required": [
         "Direct-runtime supported",
         "Guarded direct-runtime support",
-        "Direct-runtime feasible but not yet shipped",
+        "direct-runtime feasible but not yet shipped",
         "bridge-only",
         "Impossible for direct browser runtime",
-        "Explicitly deferred; do not market as a Browser Edition API until a future bead creates and links a promotion contract",
+        "Other substrate-only capabilities (Rust layer complete, no public JS/TS API)",
         "Tracked by `asupersync-3ak5y`"
       ],
       "forbidden": [
@@ -223,15 +223,15 @@
       "support_class": "not-advertised-deferred",
       "artifact": "artifacts/http3_qpack_support_matrix_v1.json",
       "owner_bead": "",
-      "intentional_explanation": "The matrix explicitly refuses to advertise full QPACK instruction-stream parity or blocked-stream scheduling.",
+      "intentional_explanation": "The matrix explicitly refuses to advertise h3/quinn drop-in parity, full QUIC deployment parity, or default dynamic QPACK enablement.",
       "doc_markers": [
         {
           "path": "README.md",
-          "marker": "no full QPACK encoder/decoder instruction-stream parity"
+          "marker": "not a claim of h3/quinn drop-in parity or full QUIC deployment parity"
         },
         {
           "path": "docs/integration.md",
-          "marker": "there is no full QPACK encoder/decoder instruction-stream parity"
+          "marker": "not a claim of h3/quinn drop-in parity"
         }
       ]
     },
@@ -244,41 +244,41 @@
       "doc_markers": [
         {
           "path": "README.md",
-          "marker": "Service worker / shared worker direct runtime"
+          "marker": "service/shared-worker direct runtime"
         },
         {
           "path": "docs/integration.md",
-          "marker": "service/shared worker direct runtime"
+          "marker": "service/shared-worker direct runtime"
         },
         {
           "path": "docs/WASM.md",
-          "marker": "Service-worker or shared-worker direct runtime"
+          "marker": "service-worker or shared-worker direct runtime"
         }
       ]
     },
     {
       "surface_id": "browser-native-messaging-public-sdk",
-      "support_class": "direct-runtime-feasible-not-yet-shipped",
+      "support_class": "guarded-direct-runtime-support",
       "artifact": "artifacts/wasm_browser_support_boundary_contract_v1.json",
       "owner_bead": "",
-      "intentional_explanation": "The Rust/browser substrate exists, but the public Browser Edition packages intentionally do not export MessageChannel/BroadcastChannel APIs yet.",
+      "intentional_explanation": "The Rust/browser substrate and public Browser Edition helpers are guarded by explicit browser-native capability checks.",
       "doc_markers": [
         {
           "path": "docs/WASM.md",
-          "marker": "Browser-native messaging surfaces (`MessageChannel`, `MessagePort`, `BroadcastChannel`) | Direct-runtime feasible but not yet shipped as public Browser Edition APIs"
+          "marker": "Browser-native messaging surfaces (`MessageChannel`, `MessagePort`, `BroadcastChannel`) | Guarded public Browser Edition helpers"
         }
       ]
     },
     {
       "surface_id": "browser-stream-public-sdk",
-      "support_class": "documented-deferred-surface",
+      "support_class": "guarded-direct-runtime-support",
       "artifact": "docs/WASM.md",
       "owner_bead": "",
-      "intentional_explanation": "WHATWG stream bridge is real Rust substrate with no public JS/TS API; docs now forbid marketing it until a future bead creates a promotion contract.",
+      "intentional_explanation": "Browser-native WHATWG stream helpers are public package helpers guarded by explicit stream capability checks; the Rust AsyncRead/AsyncWrite browser-core ABI remains substrate-only.",
       "doc_markers": [
         {
           "path": "docs/WASM.md",
-          "marker": "Explicitly deferred; do not market as a Browser Edition API until a future bead creates and links a promotion contract"
+          "marker": "WHATWG `ReadableStream` / `WritableStream` browser-native helpers | Guarded public Browser Edition helpers"
         }
       ]
     },
@@ -421,7 +421,7 @@
         "formal/lean/coverage/invariant_status_inventory.json"
       ],
       "validation_commands": [
-        "rch exec -- bash -lc 'cd formal/lean && lake build'",
+        "rch exec -- lake --dir formal/lean build",
         "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch_target_asupersync_rckfrm_contract cargo test -p asupersync --test formal_proof_posture_contract --features test-internals -- --nocapture"
       ]
     }

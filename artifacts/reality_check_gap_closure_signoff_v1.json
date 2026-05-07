@@ -301,7 +301,7 @@
       "stale_closed_tracker_repair": true,
       "proof_commands": [
         {
-          "command": "rch exec -- bash -lc 'cd formal/lean && lake build'",
+          "command": "rch exec -- lake --dir formal/lean build",
           "status": "passed",
           "observed_signal": "Lean build completed successfully with existing lint warnings only"
         },
