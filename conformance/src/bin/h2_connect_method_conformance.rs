@@ -110,9 +110,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
     print_test_summary(&report);
 
-    // Exit with appropriate code
-    let exit_code = if report.summary.failed > 0 { 1 } else { 0 };
-    std::process::exit(exit_code);
+    // Fail closed when the harness produced no executable coverage.
+    std::process::exit(exit_code(&report));
 }
 
 /// Generate a concise summary output
@@ -207,16 +206,13 @@ fn print_test_summary(report: &asupersync_conformance::ConnectMethodComplianceRe
     eprintln!("╭─ HTTP/2 CONNECT METHOD HANDLING CONFORMANCE RESULTS ─╮");
     eprintln!("│                                                       │");
 
-    if report.summary.failed == 0 && report.summary.skipped == 0 {
-        eprintln!("│  ✅ ALL TESTS PASSED                                  │");
+    if report.summary.failed == 0 {
+        eprintln!(
+            "│  {}  │",
+            final_status_line(report.summary.skipped, report.summary.expected_failures)
+        );
         eprintln!(
             "│  🎯 Compliance: {:.1}%                                │",
-            report.summary.compliance_score * 100.0
-        );
-    } else if report.summary.failed == 0 {
-        eprintln!("│  ⏭️  NO FAILURES; COVERAGE SKIPPED                    │");
-        eprintln!(
-            "│  📊 Compliance: {:.1}%                                │",
             report.summary.compliance_score * 100.0
         );
     } else {
@@ -253,4 +249,89 @@ fn print_test_summary(report: &asupersync_conformance::ConnectMethodComplianceRe
     );
     eprintln!("│                                                       │");
     eprintln!("╰───────────────────────────────────────────────────────╯");
+}
+
+fn has_no_executable_coverage(
+    report: &asupersync_conformance::ConnectMethodComplianceReport,
+) -> bool {
+    report.total_cases == 0 || report.summary.skipped == report.total_cases
+}
+
+fn exit_code(report: &asupersync_conformance::ConnectMethodComplianceReport) -> i32 {
+    if report.summary.failed > 0 || has_no_executable_coverage(report) {
+        1
+    } else {
+        0
+    }
+}
+
+fn final_status_line(skipped_count: usize, expected_failure_count: usize) -> String {
+    if skipped_count == 0 && expected_failure_count == 0 {
+        "✅ ALL TESTS PASSED".to_string()
+    } else if skipped_count > 0 && expected_failure_count == 0 {
+        format!("⏭️  NO EXECUTABLE COVERAGE ({skipped_count} skipped)")
+    } else {
+        format!(
+            "⚠️  NO FAILURES; PARTIAL COVERAGE ({skipped_count} skipped, {expected_failure_count} expected failures)"
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn synthetic_report(
+        total_cases: usize,
+        failed: usize,
+        expected_failures: usize,
+        skipped: usize,
+    ) -> asupersync_conformance::ConnectMethodComplianceReport {
+        asupersync_conformance::ConnectMethodComplianceReport {
+            test_run_id: "synthetic".to_string(),
+            timestamp: "2026-05-07T00:00:00Z".to_string(),
+            total_cases,
+            results: Vec::new(),
+            summary: asupersync_conformance::ConnectMethodComplianceSummary {
+                passed: total_cases
+                    .saturating_sub(failed)
+                    .saturating_sub(expected_failures)
+                    .saturating_sub(skipped),
+                failed,
+                expected_failures,
+                skipped,
+                total: total_cases,
+                compliance_score: 0.0,
+            },
+        }
+    }
+
+    #[test]
+    fn final_status_does_not_claim_all_passed_for_all_skipped_coverage() {
+        let status = final_status_line(4, 0);
+
+        assert!(status.contains("NO EXECUTABLE COVERAGE"));
+        assert!(!status.contains("ALL TESTS PASSED"));
+    }
+
+    #[test]
+    fn exit_code_is_nonzero_when_all_coverage_is_skipped() {
+        let report = synthetic_report(4, 0, 0, 4);
+
+        assert_eq!(exit_code(&report), 1);
+    }
+
+    #[test]
+    fn exit_code_is_nonzero_when_zero_cases_are_reported() {
+        let report = synthetic_report(0, 0, 0, 0);
+
+        assert_eq!(exit_code(&report), 1);
+    }
+
+    #[test]
+    fn exit_code_is_zero_for_full_pass_coverage() {
+        let report = synthetic_report(4, 0, 0, 0);
+
+        assert_eq!(exit_code(&report), 0);
+    }
 }
