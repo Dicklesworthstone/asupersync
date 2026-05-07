@@ -1,3 +1,4 @@
+#![allow(unsafe_code)]
 //! Audit + regression test for `Scope::spawn()` handling of
 //! large-state-machine futures.
 //!

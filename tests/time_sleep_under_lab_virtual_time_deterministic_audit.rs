@@ -1,3 +1,4 @@
+#![allow(unsafe_code)]
 //! Audit + regression test for `Sleep` virtual-time
 //! determinism under LabRuntime.
 //!

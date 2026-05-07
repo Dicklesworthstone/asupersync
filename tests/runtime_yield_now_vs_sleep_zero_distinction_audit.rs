@@ -1,3 +1,4 @@
+#![allow(unsafe_code)]
 //! Audit + regression test for `yield_now()` vs
 //! `Sleep::after(now, Duration::ZERO)` distinguishability.
 //!
