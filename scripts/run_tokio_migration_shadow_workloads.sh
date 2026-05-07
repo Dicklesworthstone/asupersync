@@ -4,6 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 CONTRACT="${PROJECT_ROOT}/artifacts/tokio_migration_shadow_workload_contract_v1.json"
+SMOKE_RUNNER="${PROJECT_ROOT}/scripts/run_tokio_migration_shadow_workload_smoke.sh"
+RUNNER_SCHEMA_VERSION="tokio-migration-shadow-workload-bulk-run-report-v1"
 
 LIST_ONLY=0
 MODE="dry-run"
@@ -21,8 +23,8 @@ Usage: ./scripts/run_tokio_migration_shadow_workloads.sh [options]
 Options:
   --list                         List scenario IDs and exit
   --scenario <id>                Run one scenario (repeatable)
-  --dry-run                      Emit deterministic reports without rch proofs
-  --execute                      Run rch proofs, then emit deterministic reports
+  --dry-run                      Emit deterministic aggregate reports without validation runs
+  --execute                      Run the deterministic shadow smoke runner per scenario, then emit aggregate reports
   --output-root <path>           Override local report root
   --scale <small-mode|real-host-template>
   --seed <0xhex>                 Override deterministic seed in emitted reports
@@ -33,18 +35,18 @@ EOF
 
 require_tools() {
     local missing=0
-    for tool in jq date uname hostname getconf awk timeout grep; do
+    for tool in jq date uname hostname getconf awk timeout bash; do
         if ! command -v "$tool" >/dev/null 2>&1; then
             echo "FATAL: missing required tool: $tool" >&2
             missing=1
         fi
     done
-    if [ "$MODE" = "execute" ] && ! command -v rch >/dev/null 2>&1; then
-        echo "FATAL: rch is required for --execute mode" >&2
-        missing=1
-    fi
     if [ ! -f "$CONTRACT" ]; then
         echo "FATAL: workload contract missing at ${CONTRACT}" >&2
+        missing=1
+    fi
+    if [ ! -f "$SMOKE_RUNNER" ]; then
+        echo "FATAL: shadow smoke runner missing at ${SMOKE_RUNNER}" >&2
         missing=1
     fi
     if [ "$missing" -ne 0 ]; then
@@ -90,33 +92,131 @@ host_fingerprint_json() {
         }'
 }
 
-validation_commands_json() {
-    jq -c '.runner_execute_validation_commands' "$CONTRACT"
+render_command() {
+    local rendered=()
+    local arg
+    for arg in "$@"; do
+        printf -v arg '%q' "$arg"
+        rendered+=("$arg")
+    done
+    local IFS=' '
+    printf '%s' "${rendered[*]}"
+}
+
+smoke_scale_mode() {
+    case "$SCALE_MODE" in
+        small-mode)
+            printf 'small'
+            ;;
+        real-host-template)
+            printf 'real-host-template'
+            ;;
+        *)
+            echo "FATAL: unsupported scale mode ${SCALE_MODE}" >&2
+            exit 1
+            ;;
+    esac
+}
+
+smoke_runtime_side() {
+    case "$RUNTIME_SIDE_FILTER" in
+        both)
+            printf 'both'
+            ;;
+        asupersync)
+            printf 'asupersync'
+            ;;
+        tokio-reference-boundary)
+            printf 'tokio-reference'
+            ;;
+        *)
+            echo "FATAL: unsupported runtime side ${RUNTIME_SIDE_FILTER}" >&2
+            exit 1
+            ;;
+    esac
+}
+
+build_validation_command_args() {
+    local scenario_id="$1"
+    local smoke_run_id="${RUN_ID}_${scenario_id}"
+    local smoke_output_root="${RUN_DIR}/shadow_smoke_outputs"
+
+    COMMAND_ARGS=(
+        env
+        "TOKIO_MIGRATION_SHADOW_RUN_ID=${smoke_run_id}"
+        bash
+        "$SMOKE_RUNNER"
+        --execute
+        --scenario
+        "$scenario_id"
+        --output-root
+        "$smoke_output_root"
+        --scale
+        "$(smoke_scale_mode)"
+        --runtime-side
+        "$(smoke_runtime_side)"
+    )
 }
 
 run_validation_command() {
-    local command="$1"
-    local log_path="$2"
+    local log_path="$1"
+    shift
     local timeout_seconds="${TOKIO_MIGRATION_SHADOW_RCH_TIMEOUT_SECONDS:-300}"
 
-    if timeout "${timeout_seconds}s" bash -lc "$command" >"$log_path" 2>&1; then
-        return 0
-    fi
-
-    local rc=$?
-    if [ "$rc" -eq 124 ] && grep -q 'Remote command finished: exit=0' "$log_path"; then
-        return 0
-    fi
-    return "$rc"
+    timeout "${timeout_seconds}s" "$@" >"$log_path" 2>&1
 }
 
 selected_runtime_sides_json() {
     case "$RUNTIME_SIDE_FILTER" in
         both)
-            jq -c '.runner_runtime_sides' "$CONTRACT"
+            jq -nc '["tokio-reference-boundary","asupersync"]'
             ;;
         asupersync|tokio-reference-boundary)
             jq -nc --arg side "$RUNTIME_SIDE_FILTER" '[$side]'
+            ;;
+        *)
+            echo "FATAL: unsupported runtime side ${RUNTIME_SIDE_FILTER}" >&2
+            exit 1
+            ;;
+    esac
+}
+
+derive_worker_count() {
+    local task_count="$1"
+    local derived floor cap
+    derived=$((task_count / 16))
+    case "$SCALE_MODE" in
+        small-mode)
+            floor=1
+            cap=64
+            ;;
+        real-host-template)
+            floor=64
+            cap=256
+            ;;
+        *)
+            echo "FATAL: unsupported scale mode ${SCALE_MODE}" >&2
+            exit 1
+            ;;
+    esac
+    if [ "$derived" -lt "$floor" ]; then
+        derived="$floor"
+    elif [ "$derived" -gt "$cap" ]; then
+        derived="$cap"
+    fi
+    printf '%s' "$derived"
+}
+
+report_clock_mode() {
+    case "$RUNTIME_SIDE_FILTER" in
+        both)
+            printf 'shadow-comparison-mixed-runtime-sides'
+            ;;
+        asupersync)
+            printf 'deterministic-virtual-contract'
+            ;;
+        tokio-reference-boundary)
+            printf 'canonical-tokio-boundary-contract'
             ;;
         *)
             echo "FATAL: unsupported runtime side ${RUNTIME_SIDE_FILTER}" >&2
@@ -129,6 +229,7 @@ emit_scenario_report() {
     local scenario="$1"
     local run_dir="$2"
     local command_status="$3"
+    local validation_commands_json="$4"
 
     local scenario_id scenario_class tokio_idiom seed scale_json task_count channel_count
     local worker_count channel_capacity clock_mode first_injection report_path runtime_sides_json
@@ -146,16 +247,16 @@ emit_scenario_report() {
         channel_count="$(jq -r '.real_host_template_channels' <<<"$scale_json")"
     fi
 
-    worker_count="$(jq -r --arg mode "$SCALE_MODE" '.runner_scale_modes[$mode].worker_count' "$CONTRACT")"
-    channel_capacity="$(jq -r --arg mode "$SCALE_MODE" '.runner_scale_modes[$mode].channel_capacity' "$CONTRACT")"
-    clock_mode="$(jq -r --arg mode "$SCALE_MODE" '.runner_scale_modes[$mode].virtual_or_wall_clock_mode' "$CONTRACT")"
+    worker_count="$(derive_worker_count "$task_count")"
+    channel_capacity="$channel_count"
+    clock_mode="$(report_clock_mode)"
     first_injection="$(jq -r '.cancellation_injection_points[0]' <<<"$scenario")"
     runtime_sides_json="$(selected_runtime_sides_json)"
     report_path="${run_dir}/${scenario_id}/shadow_workload_report.json"
     mkdir -p "$(dirname "$report_path")"
 
     jq -n \
-        --arg schema_version "$(jq -r '.runner_schema_version' "$CONTRACT")" \
+        --arg schema_version "$RUNNER_SCHEMA_VERSION" \
         --arg contract_version "$(jq -r '.contract_version' "$CONTRACT")" \
         --arg scenario_id "$scenario_id" \
         --arg scenario_class "$scenario_class" \
@@ -174,7 +275,7 @@ emit_scenario_report() {
         --argjson scenario "$scenario" \
         --argjson runtime_sides "$runtime_sides_json" \
         --argjson host_fingerprint "$(host_fingerprint_json)" \
-        --argjson validation_commands "$(validation_commands_json)" \
+        --argjson validation_commands "$validation_commands_json" \
         '{
             schema_version: $schema_version,
             contract_version: $contract_version,
@@ -198,7 +299,7 @@ emit_scenario_report() {
                 task_count: $task_count,
                 channel_capacity: $channel_capacity,
                 cancellation_injection_point: $first_injection,
-                virtual_or_wall_clock_mode: $clock_mode,
+                virtual_or_wall_clock_mode: (if . == "tokio-reference-boundary" then "canonical-tokio-boundary-contract" else "deterministic-virtual-contract" end),
                 artifact_paths: [$report_path],
                 final_verdict: (if $command_status == "passed" then "passed" else "blocked" end)
             })),
@@ -301,25 +402,7 @@ mkdir -p "$RUN_DIR"
 
 COMMAND_STATUS="passed"
 VALIDATION_RESULTS_JSON="[]"
-if [ "$MODE" = "execute" ]; then
-    COMMAND_RESULTS=()
-    mapfile -t COMMANDS < <(jq -r '.runner_execute_validation_commands[]' "$CONTRACT")
-    for index in "${!COMMANDS[@]}"; do
-        command="${COMMANDS[$index]}"
-        log_path="${RUN_DIR}/validation_${index}.log"
-        status="passed"
-        if ! run_validation_command "$command" "$log_path"; then
-            status="failed"
-            COMMAND_STATUS="failed"
-        fi
-        COMMAND_RESULTS+=("$(jq -nc \
-            --arg command "$command" \
-            --arg log_path "$log_path" \
-            --arg status "$status" \
-            '{command: $command, log_path: $log_path, status: $status}')")
-    done
-    VALIDATION_RESULTS_JSON="$(printf '%s\n' "${COMMAND_RESULTS[@]}" | jq -sc '.')"
-fi
+declare -a COMMAND_RESULTS=()
 
 RESULTS_JSON=""
 for scenario_id in "${SELECTED_SCENARIOS[@]}"; do
@@ -328,7 +411,27 @@ for scenario_id in "${SELECTED_SCENARIOS[@]}"; do
         echo "FATAL: unknown scenario id ${scenario_id}" >&2
         exit 1
     fi
-    report="$(emit_scenario_report "$SCENARIO_JSON" "$RUN_DIR" "$COMMAND_STATUS")"
+
+    build_validation_command_args "$scenario_id"
+    validation_command="$(render_command "${COMMAND_ARGS[@]}")"
+    validation_commands_json="$(jq -nc --arg command "$validation_command" '[$command]')"
+    scenario_status="passed"
+
+    if [ "$MODE" = "execute" ]; then
+        log_path="${RUN_DIR}/validation_${scenario_id}.log"
+        if ! run_validation_command "$log_path" "${COMMAND_ARGS[@]}"; then
+            scenario_status="failed"
+            COMMAND_STATUS="failed"
+        fi
+        COMMAND_RESULTS+=("$(jq -nc \
+            --arg scenario_id "$scenario_id" \
+            --arg command "$validation_command" \
+            --arg log_path "$log_path" \
+            --arg status "$scenario_status" \
+            '{scenario_id: $scenario_id, command: $command, log_path: $log_path, status: $status}')")
+    fi
+
+    report="$(emit_scenario_report "$SCENARIO_JSON" "$RUN_DIR" "$scenario_status" "$validation_commands_json")"
     if [ -z "$RESULTS_JSON" ]; then
         RESULTS_JSON="$report"
     else
@@ -336,9 +439,13 @@ for scenario_id in "${SELECTED_SCENARIOS[@]}"; do
     fi
 done
 
+if [ "${#COMMAND_RESULTS[@]}" -gt 0 ]; then
+    VALIDATION_RESULTS_JSON="$(printf '%s\n' "${COMMAND_RESULTS[@]}" | jq -sc '.')"
+fi
+
 RUN_REPORT="${RUN_DIR}/run_report.json"
 jq -n \
-    --arg schema_version "$(jq -r '.runner_schema_version' "$CONTRACT")" \
+    --arg schema_version "$RUNNER_SCHEMA_VERSION" \
     --arg contract_version "$(jq -r '.contract_version' "$CONTRACT")" \
     --arg mode "$MODE" \
     --arg scale_mode "$SCALE_MODE" \
