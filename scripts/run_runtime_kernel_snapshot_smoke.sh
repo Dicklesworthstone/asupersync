@@ -13,6 +13,7 @@ TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 RUN_DIR="${OUTPUT_ROOT}/run_${TIMESTAMP}"
 LIST_ONLY=0
 DRY_RUN=1
+RCH_BIN="${RCH_BIN:-rch}"
 
 declare -a SELECTED_SCENARIOS=()
 
@@ -33,6 +34,10 @@ USAGE
 require_tools() {
     if ! command -v jq >/dev/null 2>&1; then
         echo "FATAL: jq is required for runtime-kernel snapshot smoke runner" >&2
+        exit 1
+    fi
+    if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+        echo "FATAL: rch is required and was not found at: ${RCH_BIN}" >&2
         exit 1
     fi
     if [ ! -f "$CONTRACT_ARTIFACT" ]; then
@@ -87,10 +92,48 @@ run_scenario() {
         return 1
     fi
 
-    local intent command expected_artifacts
+    local intent command expected_artifacts test_filter
+    local -a command_args=()
     intent="$(jq -r '.intent' <<<"$scenario_json")"
-    command="$(jq -r '.command' <<<"$scenario_json")"
     expected_artifacts="$(jq -c '.expected_artifacts' <<<"$scenario_json")"
+    case "$scenario_id" in
+        AA02-SMOKE-SNAPSHOT-SERIALIZATION)
+            test_filter="runtime::kernel::tests::snapshot_serialization_roundtrip"
+            ;;
+        AA02-SMOKE-REGISTRATION-VALIDATION)
+            test_filter="runtime::kernel::tests::reject_unsupported_fields"
+            ;;
+        AA02-SMOKE-BUDGET-COUNTERS)
+            test_filter="runtime::kernel::tests::decision_budget_enforcement"
+            ;;
+        AA02-SMOKE-LOG-CONTRACT)
+            test_filter="runtime::kernel::tests::log_sink_receives_registration_event"
+            ;;
+        *)
+            echo "FATAL: unsupported scenario id: ${scenario_id}" >&2
+            return 1
+            ;;
+    esac
+    command_args=(
+        "$RCH_BIN"
+        exec
+        --
+        env
+        "CARGO_INCREMENTAL=0"
+        "CARGO_PROFILE_TEST_DEBUG=0"
+        "RUSTFLAGS=-D warnings -C debuginfo=0"
+        "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_kernel_snapshot_smoke"
+        cargo
+        test
+        -p
+        asupersync
+        --lib
+        "$test_filter"
+        --
+        --nocapture
+    )
+    printf -v command '%q ' "${command_args[@]}"
+    command="${command% }"
 
     local scenario_dir="${RUN_DIR}/${scenario_id}"
     local log_file="${scenario_dir}/run.log"
@@ -111,7 +154,7 @@ run_scenario() {
     else
         set +e
         pushd "$PROJECT_ROOT" >/dev/null
-        bash -lc "$command" 2>&1 | tee "$log_file"
+        "${command_args[@]}" 2>&1 | tee "$log_file"
         rc=${PIPESTATUS[0]}
         popd >/dev/null
         set -e
