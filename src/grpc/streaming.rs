@@ -912,13 +912,10 @@ mod tests {
     }
 
     fn grpc_go_rst_stream_status(code: ErrorCode) -> Status {
-        match code {
-            ErrorCode::Cancel => Status::cancelled(format!("Received RST_STREAM with code {code}")),
-            ErrorCode::RefusedStream => {
-                Status::unavailable(format!("Received RST_STREAM with code {code}"))
-            }
-            _ => Status::internal(format!("Received RST_STREAM with code {code}")),
-        }
+        // br-asupersync-q01vh5: delegate to the canonical 14-row mapping in
+        // `Status::from_h2_rst_stream_code` so the differential vs grpc-go
+        // tests below also exercise ENHANCE_YOUR_CALM / INADEQUATE_SECURITY.
+        Status::from_h2_rst_stream_code(code)
     }
 
     const EXACT_CLIENT_HALF_CLOSE_RCH_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_dl5tdd_half_close cargo test -p asupersync --lib conformance_client_streaming_half_close -- --nocapture";
