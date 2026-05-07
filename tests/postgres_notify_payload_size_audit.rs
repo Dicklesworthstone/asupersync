@@ -14,9 +14,6 @@
 
 #[cfg(test)]
 mod postgres_notify_payload_audit {
-    use crate::database::postgres::PgError;
-    use crate::types::Outcome;
-
     // Test using the same pattern as existing PostgreSQL tests
     #[test]
     fn notify_payload_8000_byte_limit_audit() {
