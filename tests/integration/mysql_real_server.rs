@@ -478,3 +478,235 @@ fn mysql_real_read_only_transaction_rejects_mutation() {
         log.end("pass");
     });
 }
+
+/// Abandoned-transaction recovery: dropping a `MySqlTransaction` without
+/// calling `commit` or `rollback` is the exact path a Rust panic unwind
+/// follows through `with_mysql_transaction`'s body. The Drop impl
+/// (src/database/mysql.rs:4839) calls `poison_for_rollback`, setting
+/// `needs_rollback = true` on the underlying connection. The next async
+/// operation must call `drain_abandoned_transaction` (line 3893), send
+/// `COM_QUERY ROLLBACK`, parse OK, clear `needs_rollback`, and let the
+/// caller's query proceed against a clean session.
+///
+/// asupersync-llwouh: today this drain path is verified only through
+/// unit tests against synthetic packet state. There is no roundtrip
+/// against a real MySQL server proving that:
+///   * a real `BEGIN; INSERT; <drop tx>; SELECT` does NOT see the
+///     inserted row (the implicit ROLLBACK runs against the live
+///     server, not just our internal flag),
+///   * the connection is genuinely reusable for further reads and
+///     writes after the drain,
+///   * MySQL itself agrees the transaction was aborted (a fresh
+///     `SELECT @@in_transaction` returns 0).
+///
+/// This is the canonical safety net for panic-unwind correctness: if
+/// the Drop poison logic regresses, partial writes from a panicked
+/// transaction body would silently commit on the next query (because
+/// `needs_rollback` would never get set, and the open server-side
+/// transaction would auto-commit on connection close-with-implicit-
+/// commit modes, or worse, leak into the next caller's query in pool
+/// reuse). A real-server test is the only way to catch that.
+#[test]
+fn mysql_real_dropped_transaction_drains_rollback_on_next_op() {
+    let cfg = RealMySqlConfig::from_env();
+    if skip_if_disabled(
+        &cfg,
+        "mysql_real_dropped_transaction_drains_rollback_on_next_op",
+    ) {
+        return;
+    }
+
+    let log = MySqlTestLogger::new(
+        "mysql_real",
+        "mysql_real_dropped_transaction_drains_rollback_on_next_op",
+    );
+
+    run_test_with_cx(|cx| async move {
+        log.phase("connect");
+        let mut conn = unwrap_mysql(
+            MySqlConnection::connect(&cx, &cfg.url).await,
+            "connect",
+            &log,
+        );
+
+        // TEMPORARY tables are session-local and auto-drop on connection
+        // close, so this test leaves no schema state behind even if it
+        // panics or is killed mid-flight.
+        log.phase("create_temp_table");
+        unwrap_mysql(
+            conn.execute_unchecked(
+                &cx,
+                "CREATE TEMPORARY TABLE asupersync_llwouh_drop_rollback \
+                 (id INT PRIMARY KEY, payload VARCHAR(64) NOT NULL) ENGINE=InnoDB",
+            )
+            .await,
+            "create_temp_table",
+            &log,
+        );
+
+        log.phase("baseline_in_transaction_off");
+        let baseline = unwrap_mysql(
+            conn.query_unchecked(&cx, "SELECT @@in_transaction AS in_txn")
+                .await,
+            "baseline_in_transaction",
+            &log,
+        );
+        let baseline_in_txn = baseline[0].get_i64("in_txn").expect("baseline in_txn");
+        log.line(
+            "assertion",
+            &[
+                ("field", "baseline_in_txn".to_string()),
+                ("expected", "0".to_string()),
+                ("actual", baseline_in_txn.to_string()),
+            ],
+        );
+        assert_eq!(
+            baseline_in_txn, 0,
+            "fresh connection must not be inside a transaction"
+        );
+
+        // Open a transaction, insert a row, then deliberately drop the
+        // MySqlTransaction without commit/rollback. This is the exact
+        // shape of the unwind path: between the begin().await and the
+        // commit/rollback call, a panic would drop `tx` mid-stack — and
+        // the test simulates that by letting the inner block end while
+        // tx is still in scope, then dropping it manually.
+        log.phase("begin_insert_drop");
+        let drop_returned_at_ms;
+        {
+            let mut tx = unwrap_mysql(conn.begin(&cx).await, "begin", &log);
+            unwrap_mysql(
+                tx.execute_unchecked(
+                    &cx,
+                    "INSERT INTO asupersync_llwouh_drop_rollback \
+                     (id, payload) VALUES (1, 'abandoned-via-drop')",
+                )
+                .await,
+                "insert_inside_tx",
+                &log,
+            );
+            // Drop without commit/rollback. The Drop impl on
+            // MySqlTransaction calls poison_for_rollback() which sets
+            // needs_rollback=true on the underlying connection.
+            drop(tx);
+            drop_returned_at_ms = log_elapsed_ms(&log);
+        }
+        log.line("tx_dropped", &[("at_ms", drop_returned_at_ms.to_string())]);
+
+        // First op after the drop is the one that must drain. We use
+        // the row count itself as the assertion: if the implicit
+        // ROLLBACK fires, count is 0; if the drain regressed and the
+        // connection silently committed (or leaked the open tx into
+        // this query), count would be 1.
+        log.phase("first_op_after_drop_drains_rollback");
+        let drained = unwrap_mysql(
+            conn.query_unchecked(
+                &cx,
+                "SELECT COUNT(*) AS cnt FROM asupersync_llwouh_drop_rollback",
+            )
+            .await,
+            "post_drop_count",
+            &log,
+        );
+        let count_after_drop = drained[0].get_i64("cnt").expect("post_drop_count");
+        log.line(
+            "assertion",
+            &[
+                ("field", "post_drop_count".to_string()),
+                ("expected", "0".to_string()),
+                ("actual", count_after_drop.to_string()),
+            ],
+        );
+        assert_eq!(
+            count_after_drop, 0,
+            "implicit ROLLBACK must hide the INSERT performed inside the dropped \
+             transaction; got {count_after_drop} (regression indicates the Drop \
+             poison path is not draining)"
+        );
+
+        // Server-side proof: MySQL itself must agree the connection is
+        // out of the transaction. @@in_transaction is server-side state,
+        // not anything our wire codec can fake.
+        log.phase("server_side_in_transaction_off");
+        let post_drain = unwrap_mysql(
+            conn.query_unchecked(&cx, "SELECT @@in_transaction AS in_txn")
+                .await,
+            "post_drain_in_transaction",
+            &log,
+        );
+        let post_drain_in_txn = post_drain[0].get_i64("in_txn").expect("post_drain in_txn");
+        log.line(
+            "assertion",
+            &[
+                ("field", "post_drain_in_txn".to_string()),
+                ("expected", "0".to_string()),
+                ("actual", post_drain_in_txn.to_string()),
+            ],
+        );
+        assert_eq!(
+            post_drain_in_txn, 0,
+            "after drain, MySQL must report the connection is no longer \
+             inside a transaction; got @@in_transaction={post_drain_in_txn}"
+        );
+
+        // Connection must remain genuinely usable: write, then read.
+        log.phase("write_after_drop");
+        let affected = unwrap_mysql(
+            conn.execute_unchecked(
+                &cx,
+                "INSERT INTO asupersync_llwouh_drop_rollback \
+                 (id, payload) VALUES (2, 'after-drop')",
+            )
+            .await,
+            "post_drop_insert",
+            &log,
+        );
+        log.line(
+            "assertion",
+            &[
+                ("field", "post_drop_insert_affected".to_string()),
+                ("expected", "1".to_string()),
+                ("actual", affected.to_string()),
+            ],
+        );
+        assert_eq!(affected, 1, "post-drain INSERT must succeed");
+
+        log.phase("read_after_drop");
+        let final_rows = unwrap_mysql(
+            conn.query_unchecked(
+                &cx,
+                "SELECT id, payload FROM asupersync_llwouh_drop_rollback ORDER BY id",
+            )
+            .await,
+            "post_drop_select",
+            &log,
+        );
+        assert_eq!(
+            final_rows.len(),
+            1,
+            "only the post-drop INSERT must be visible; got {} rows",
+            final_rows.len()
+        );
+        let id = final_rows[0].get_i64("id").expect("id");
+        log.line(
+            "assertion",
+            &[
+                ("field", "final_id".to_string()),
+                ("expected", "2".to_string()),
+                ("actual", id.to_string()),
+            ],
+        );
+        assert_eq!(
+            id, 2,
+            "visible row must be the post-drop INSERT, not the abandoned one"
+        );
+
+        log.phase("close");
+        conn.close().await.expect("close");
+        log.end("pass");
+    });
+}
+
+fn log_elapsed_ms(log: &MySqlTestLogger) -> u128 {
+    log.start.elapsed().as_millis()
+}
