@@ -180,10 +180,10 @@ Snapshot comparison uses field-by-field equality:
 
 ```bash
 # Run visual regression harness tests
-rch exec -- cargo test --test doctor_visual_regression_harness --features cli -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_doctor_visual_docs cargo test --test doctor_visual_regression_harness --features cli -- --nocapture
 
 # Run existing scenario coverage smoke
-rch exec -- cargo test --test doctor_analyzer_fixture_harness --features cli -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_doctor_visual_docs cargo test --test doctor_analyzer_fixture_harness --features cli -- --nocapture
 ```
 
 ---

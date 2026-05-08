@@ -83,10 +83,10 @@ Conflict escalation (e.g., flow/event mismatch) always escalates to `critical`.
 Validation commands:
 
 ```bash
-rch exec -- cargo test --test doctor_logging_quality_validators -- --nocapture
-rch exec -- cargo check --all-targets
-rch exec -- cargo clippy --all-targets -- -D warnings
-cargo fmt --check
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_doctor_logging_docs cargo test --test doctor_logging_quality_validators -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_doctor_logging_docs cargo check --all-targets
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_doctor_logging_docs cargo clippy --all-targets -- -D warnings
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_doctor_logging_docs cargo fmt --check
 ```
 
 ## Cross-References

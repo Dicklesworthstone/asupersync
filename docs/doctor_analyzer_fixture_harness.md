@@ -54,7 +54,7 @@ Fields:
 Use CLI feature-enabled test execution:
 
 ```bash
-rch exec -- cargo test -p asupersync --features cli --test doctor_analyzer_fixture_harness -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_doctor_analyzer_docs cargo test -p asupersync --features cli --test doctor_analyzer_fixture_harness -- --nocapture
 ```
 
 ## Promotion Workflow

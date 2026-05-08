@@ -107,5 +107,5 @@ Deterministic unit coverage includes:
 rch exec -- env CARGO_TARGET_DIR=target/rch_chartreuse_2b4jj_2_7 cargo test -p asupersync --lib advanced_observability -- --nocapture
 rch exec -- env CARGO_TARGET_DIR=target/rch_chartreuse_2b4jj_2_7 cargo check --all-targets
 rch exec -- env CARGO_TARGET_DIR=target/rch_chartreuse_2b4jj_2_7 cargo clippy --all-targets -- -D warnings
-rch exec -- cargo fmt --check
+rch exec -- env CARGO_TARGET_DIR=target/rch_chartreuse_2b4jj_2_7 cargo fmt --check
 ```

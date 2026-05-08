@@ -100,10 +100,10 @@ Each run produces three artifacts:
 ## CI Integration
 
 ```bash
-rch exec -- cargo test --test doctor_stress_soak_diagnostics -- --nocapture
-rch exec -- cargo check --all-targets
-rch exec -- cargo clippy --all-targets -- -D warnings
-cargo fmt --check
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_doctor_stress_docs cargo test --test doctor_stress_soak_diagnostics -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_doctor_stress_docs cargo check --all-targets
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_doctor_stress_docs cargo clippy --all-targets -- -D warnings
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_doctor_stress_docs cargo fmt --check
 ```
 
 E2E runner:

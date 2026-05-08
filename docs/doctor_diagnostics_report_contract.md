@@ -151,7 +151,7 @@ CI gate expectations for this matrix:
 
 1. `TEST_SEED=5150 RCH_BIN=~/.local/bin/rch bash scripts/test_doctor_advanced_provenance_e2e.sh`
 2. `TEST_SEED=4242 RCH_BIN=~/.local/bin/rch bash scripts/test_doctor_frankensuite_export_e2e.sh`
-3. `rch exec -- cargo test -p asupersync --features cli --test doctor_advanced_provenance_contract`
+3. `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_doctor_diagnostics_docs cargo test -p asupersync --features cli --test doctor_advanced_provenance_contract`
 
 ## Consumer Guidance
 

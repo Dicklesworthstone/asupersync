@@ -193,7 +193,7 @@ rejected → (end)
 
 ```bash
 # Run remediation visual regression tests
-cargo test --test doctor_remediation_visual_regression --features cli -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_doctor_remediation_visual_docs cargo test --test doctor_remediation_visual_regression --features cli -- --nocapture
 ```
 
 ---

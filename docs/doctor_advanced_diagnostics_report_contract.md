@@ -103,5 +103,5 @@ rch exec -- env CARGO_TARGET_DIR=target/rch_stormydune_2b4jj_5_9 cargo test -p a
 TEST_SEED=5150 RCH_BIN=~/.local/bin/rch bash scripts/test_doctor_advanced_provenance_e2e.sh
 rch exec -- env CARGO_TARGET_DIR=target/rch_chartreuse_2b4jj_5_8 cargo check --all-targets
 rch exec -- env CARGO_TARGET_DIR=target/rch_chartreuse_2b4jj_5_8 cargo clippy --all-targets -- -D warnings
-cargo fmt --check
+rch exec -- env CARGO_TARGET_DIR=target/rch_chartreuse_2b4jj_5_8 cargo fmt --check
 ```

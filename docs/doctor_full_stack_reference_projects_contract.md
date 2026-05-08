@@ -191,11 +191,11 @@ Artifact root:
 
 Required quality gates:
 
-1. `rch exec -- cargo test --features cli --test doctor_full_stack_reference_project_matrix -- --nocapture`
+1. `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_doctor_full_stack_docs cargo test --features cli --test doctor_full_stack_reference_project_matrix -- --nocapture`
 2. `PROFILE_MODE=all ./scripts/test_doctor_full_stack_reference_projects_e2e.sh`
-3. `rch exec -- cargo fmt --check`
-4. `rch exec -- cargo check --all-targets`
-5. `rch exec -- cargo clippy --all-targets -- -D warnings`
+3. `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_doctor_full_stack_docs cargo fmt --check`
+4. `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_doctor_full_stack_docs cargo check --all-targets`
+5. `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_doctor_full_stack_docs cargo clippy --all-targets -- -D warnings`
 
 If unrelated pre-existing failures block global linting, they must be recorded
 with file paths and not misattributed to this bead.

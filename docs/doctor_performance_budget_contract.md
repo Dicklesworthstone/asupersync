@@ -212,10 +212,10 @@ Performance gates are invoked through the execution adapter with `prefer_remote:
 
 ```bash
 # Run performance gate validation
-cargo test --test doctor_performance_budget_gates --features cli -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_doctor_performance_docs cargo test --test doctor_performance_budget_gates --features cli -- --nocapture
 
 # Run via rch for heavy workloads
-rch exec 'cargo test --test doctor_performance_budget_gates --features cli -- --nocapture'
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_doctor_performance_docs cargo test --test doctor_performance_budget_gates --features cli -- --nocapture
 ```
 
 ### 6.2 Artifact Retention
@@ -260,10 +260,10 @@ Gate report artifacts follow the visual harness retention policy:
 
 ```bash
 # Run performance budget gate tests
-cargo test --test doctor_performance_budget_gates --features cli -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_doctor_performance_docs cargo test --test doctor_performance_budget_gates --features cli -- --nocapture
 
 # Run visual regression harness (dependency)
-cargo test --test doctor_visual_regression_harness --features cli -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_doctor_performance_docs cargo test --test doctor_visual_regression_harness --features cli -- --nocapture
 ```
 
 ---
