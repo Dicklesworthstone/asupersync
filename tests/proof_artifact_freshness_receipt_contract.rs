@@ -61,6 +61,26 @@ fn first_row(receipt: &Value) -> &Value {
         .expect("fixture should have at least one row")
 }
 
+fn assert_output_matches_full_golden(input_fixture: &str, expected_fixture: &str) {
+    let output = run_receipt_with_repo_path(input_fixture, "/repo");
+    assert!(
+        output.status.success(),
+        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = String::from_utf8(output.stdout).expect("receipt stdout is utf-8");
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt output JSON");
+    let expected = fixture_text(expected_fixture);
+    let expected_json: Value =
+        serde_json::from_str(&expected).expect("expected receipt output JSON");
+
+    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
+    assert_eq!(actual, expected);
+}
+
 #[test]
 fn script_exists_and_help_is_non_mutating() {
     assert!(
@@ -94,23 +114,7 @@ fn current_clean_artifact_is_citeable() {
 
 #[test]
 fn current_clean_matches_full_output_golden() {
-    let output = run_receipt_with_repo_path("current_clean.json", "/repo");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let actual = String::from_utf8(output.stdout).expect("receipt stdout is utf-8");
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt output JSON");
-    let expected = fixture_text("current_clean_expected.json");
-    let expected_json: Value =
-        serde_json::from_str(&expected).expect("expected receipt output JSON");
-
-    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
-    assert_eq!(actual, expected);
+    assert_output_matches_full_golden("current_clean.json", "current_clean_expected.json");
 }
 
 #[test]
@@ -134,23 +138,7 @@ fn superseded_head_is_suppressed_even_when_status_passed() {
 
 #[test]
 fn superseded_head_matches_full_output_golden() {
-    let output = run_receipt_with_repo_path("superseded_head.json", "/repo");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let actual = String::from_utf8(output.stdout).expect("receipt stdout is utf-8");
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt output JSON");
-    let expected = fixture_text("superseded_head_expected.json");
-    let expected_json: Value =
-        serde_json::from_str(&expected).expect("expected receipt output JSON");
-
-    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
-    assert_eq!(actual, expected);
+    assert_output_matches_full_golden("superseded_head.json", "superseded_head_expected.json");
 }
 
 #[test]
@@ -168,23 +156,7 @@ fn non_main_artifact_branch_is_wrong_branch() {
 
 #[test]
 fn wrong_branch_matches_full_output_golden() {
-    let output = run_receipt_with_repo_path("wrong_branch.json", "/repo");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let actual = String::from_utf8(output.stdout).expect("receipt stdout is utf-8");
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt output JSON");
-    let expected = fixture_text("wrong_branch_expected.json");
-    let expected_json: Value =
-        serde_json::from_str(&expected).expect("expected receipt output JSON");
-
-    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
-    assert_eq!(actual, expected);
+    assert_output_matches_full_golden("wrong_branch.json", "wrong_branch_expected.json");
 }
 
 #[test]
@@ -206,23 +178,10 @@ fn dirty_peer_surface_overlap_requires_rerun() {
 
 #[test]
 fn dirty_surface_overlap_matches_full_output_golden() {
-    let output = run_receipt_with_repo_path("dirty_surface_overlap.json", "/repo");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+    assert_output_matches_full_golden(
+        "dirty_surface_overlap.json",
+        "dirty_surface_overlap_expected.json",
     );
-
-    let actual = String::from_utf8(output.stdout).expect("receipt stdout is utf-8");
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt output JSON");
-    let expected = fixture_text("dirty_surface_overlap_expected.json");
-    let expected_json: Value =
-        serde_json::from_str(&expected).expect("expected receipt output JSON");
-
-    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
-    assert_eq!(actual, expected);
 }
 
 #[test]
@@ -237,23 +196,7 @@ fn missing_git_sha_is_unverifiable() {
 
 #[test]
 fn missing_head_matches_full_output_golden() {
-    let output = run_receipt_with_repo_path("missing_head.json", "/repo");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let actual = String::from_utf8(output.stdout).expect("receipt stdout is utf-8");
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt output JSON");
-    let expected = fixture_text("missing_head_expected.json");
-    let expected_json: Value =
-        serde_json::from_str(&expected).expect("expected receipt output JSON");
-
-    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
-    assert_eq!(actual, expected);
+    assert_output_matches_full_golden("missing_head.json", "missing_head_expected.json");
 }
 
 #[test]
@@ -267,23 +210,10 @@ fn missing_touched_files_is_unverifiable_surface() {
 
 #[test]
 fn missing_touched_files_matches_full_output_golden() {
-    let output = run_receipt_with_repo_path("missing_touched_files.json", "/repo");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+    assert_output_matches_full_golden(
+        "missing_touched_files.json",
+        "missing_touched_files_expected.json",
     );
-
-    let actual = String::from_utf8(output.stdout).expect("receipt stdout is utf-8");
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt output JSON");
-    let expected = fixture_text("missing_touched_files_expected.json");
-    let expected_json: Value =
-        serde_json::from_str(&expected).expect("expected receipt output JSON");
-
-    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
-    assert_eq!(actual, expected);
 }
 
 #[test]
