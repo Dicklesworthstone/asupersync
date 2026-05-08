@@ -77,8 +77,14 @@ fn assert_output_matches_full_golden(input_fixture: &str, expected_fixture: &str
     let expected_json: Value =
         serde_json::from_str(&expected).expect("expected receipt output JSON");
 
-    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
-    assert_eq!(actual, expected);
+    assert_eq!(
+        actual_json, expected_json,
+        "parsed proof artifact freshness receipt JSON drifted for {input_fixture} -> {expected_fixture}"
+    );
+    assert_eq!(
+        actual, expected,
+        "proof artifact freshness receipt text drifted for {input_fixture} -> {expected_fixture}"
+    );
 }
 
 #[test]
