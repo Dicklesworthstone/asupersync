@@ -60,8 +60,14 @@ fn assert_registry_output_matches_golden(input_fixture: &str, expected_fixture: 
     let actual_json: Value = serde_json::from_str(&actual).expect("actual registry output is JSON");
     let expected_json: Value =
         serde_json::from_str(&expected).expect("expected registry output is JSON");
-    assert_eq!(actual_json, expected_json, "registry golden JSON drifted");
-    assert_eq!(actual, expected, "registry golden text drifted");
+    assert_eq!(
+        actual_json, expected_json,
+        "registry golden JSON drifted for {input_fixture} -> {expected_fixture}"
+    );
+    assert_eq!(
+        actual, expected,
+        "registry golden text drifted for {input_fixture} -> {expected_fixture}"
+    );
 }
 
 fn coverage_record<'a>(receipt: &'a Value, id: &str) -> &'a Value {
