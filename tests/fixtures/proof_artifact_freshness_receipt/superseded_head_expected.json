@@ -1,0 +1,60 @@
+{
+  "agent": "TopazGoose",
+  "artifact_errors": [],
+  "current_branch": "main",
+  "current_date": "2026-05-08",
+  "current_head_sha": "2222222222222222222222222222222222222222",
+  "generated_at": "2026-05-08T05:20:00Z",
+  "repo_path": "/repo",
+  "rows": [
+    {
+      "artifact_path": "artifacts/proof/superseded-head.json",
+      "classification": "superseded-head",
+      "command": "rch exec -- cargo test --test stale_in_progress_receipt_contract -- --nocapture",
+      "decision": "suppress-as-stale",
+      "evidence": {
+        "artifact_git_branch": "main",
+        "artifact_git_sha": "1111111111111111111111111111111111111111",
+        "current_branch": "main",
+        "current_head_sha": "2222222222222222222222222222222222222222",
+        "dirty_overlap_count": 0,
+        "dirty_overlaps": []
+      },
+      "generated_at": "2026-05-08T05:08:00Z",
+      "reason": "artifact git SHA does not match current HEAD",
+      "remediation": {
+        "next_steps": [
+          "rerun the proof command on current main HEAD"
+        ],
+        "operator_note": "Suppress this artifact as stale before reporting a green lane.",
+        "rerun_command": "rch exec -- cargo test --test stale_in_progress_receipt_contract -- --nocapture"
+      },
+      "safe_to_cite": false,
+      "status": "pass",
+      "touched_files": [
+        "scripts/stale_in_progress_receipt.py",
+        "tests/stale_in_progress_receipt_contract.rs"
+      ]
+    }
+  ],
+  "safety": {
+    "beads_mutated": false,
+    "branch_or_worktree_operations": false,
+    "cargo_executed": false,
+    "destructive_commands_executed": false,
+    "executed_commands": [],
+    "mutating_commands_executed": false,
+    "non_mutating": true
+  },
+  "schema_version": "proof-artifact-freshness-receipt-v1",
+  "summary": {
+    "by_classification": {
+      "superseded-head": 1
+    },
+    "rerun_required": 0,
+    "safe_to_cite": 0,
+    "suppressed": 1,
+    "total": 1,
+    "unverifiable": 0
+  }
+}
