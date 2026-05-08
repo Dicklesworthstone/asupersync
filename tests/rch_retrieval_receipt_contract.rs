@@ -10,6 +10,7 @@ use std::process::{Command, Output};
 const SCRIPT_PATH: &str = "scripts/rch_retrieval_receipt.py";
 const FIXTURE_ROOT: &str = "tests/fixtures/rch_retrieval_receipt";
 const GENERATED_AT: &str = "2026-05-08T05:10:00Z";
+const RECEIPT_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rch_retrieval_receipt_docs cargo test --test proof_runner_contract -- --nocapture";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -30,7 +31,7 @@ fn run_receipt_with_args(
         .arg("--log")
         .arg(repo_root().join(FIXTURE_ROOT).join(fixture))
         .arg("--command")
-        .arg("rch exec -- cargo test --test proof_runner_contract -- --nocapture")
+        .arg(RECEIPT_COMMAND)
         .arg("--generated-at")
         .arg(GENERATED_AT)
         .arg("--output")
@@ -96,6 +97,18 @@ fn assert_json_text_eq(actual: &str, expected: &str, expected_fixture: &str, dri
         "parsed rch retrieval receipt JSON drifted from {expected_fixture}; {drift_message}"
     );
     assert_eq!(actual, expected, "{drift_message}");
+}
+
+#[test]
+fn receipt_command_routes_cargo_through_target_dir() {
+    let stale_command = concat!(
+        "rch exec -- ",
+        "cargo test --test proof_runner_contract -- --nocapture"
+    );
+
+    assert!(RECEIPT_COMMAND.starts_with("rch exec -- env "));
+    assert!(RECEIPT_COMMAND.contains("CARGO_TARGET_DIR="));
+    assert!(!RECEIPT_COMMAND.contains(stale_command));
 }
 
 #[test]

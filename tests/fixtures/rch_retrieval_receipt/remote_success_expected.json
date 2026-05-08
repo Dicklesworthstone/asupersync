@@ -29,7 +29,7 @@
     "within_budget": null
   },
   "classification": "remote_success",
-  "command": "rch exec -- cargo test --test proof_runner_contract -- --nocapture",
+  "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rch_retrieval_receipt_docs cargo test --test proof_runner_contract -- --nocapture",
   "current_date": "2026-05-08",
   "decision": "passed",
   "forbidden_actions": {
