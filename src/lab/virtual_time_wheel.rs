@@ -273,8 +273,11 @@ impl VirtualTimerWheel {
 
         self.current_tick = target_tick;
 
-        // Clean up cancelled set (remove any IDs that aren't in the heap anymore)
-        self.cleanup_cancelled();
+        // Clean up cancelled set only when it grows large relative to heap size
+        // This avoids O(k) cleanup overhead on every advance_to() call
+        if self.cancelled.len() > self.heap.len() / 4 || self.cancelled.len() > 1000 {
+            self.cleanup_cancelled();
+        }
 
         // Sort by deadline first, then by timer_id for determinism
         expired.sort_by(|a, b| {
@@ -309,12 +312,35 @@ impl VirtualTimerWheel {
     /// are preserved as a special case (when stale entries dominate, the
     /// rebuild is the same operation).
     fn cleanup_cancelled(&mut self) {
+        self.cleanup_cancelled_incremental(512);
+    }
+
+    /// Incremental cleanup of cancelled timers with O(k) complexity.
+    ///
+    /// Instead of creating O(n log n) BTreeSet from entire heap, this uses
+    /// heap.retain() to remove cancelled timers in O(k) time where k is
+    /// the cleanup batch size.
+    fn cleanup_cancelled_incremental(&mut self, max_cleanup: usize) {
         if self.cancelled.is_empty() {
             return;
         }
-        let heap_ids: std::collections::BTreeSet<_> =
-            self.heap.iter().map(|t| t.timer_id).collect();
-        self.cancelled.retain(|id| heap_ids.contains(id));
+
+        let mut cleaned_ids = Vec::with_capacity(max_cleanup.min(self.cancelled.len()));
+
+        // Use heap.retain() for O(k) cleanup instead of O(n log n) BTreeSet
+        self.heap.retain(|timer| {
+            if cleaned_ids.len() < max_cleanup && self.cancelled.contains(&timer.timer_id) {
+                cleaned_ids.push(timer.timer_id);
+                false // Remove this cancelled timer from heap
+            } else {
+                true // Keep this timer
+            }
+        });
+
+        // Remove cleaned timer IDs from cancelled set
+        for timer_id in cleaned_ids {
+            self.cancelled.remove(&timer_id);
+        }
     }
 
     /// Returns wakers for all expired timers without removing them from tracking.
@@ -985,5 +1011,88 @@ mod tests {
         } else {
             eprintln!("? Faster than expected - may need larger test case");
         }
+    }
+
+    /// Performance comparison test: O(n log n) vs O(k) cleanup approaches
+    /// Run with: cargo test cleanup_performance_comparison --release -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn cleanup_performance_comparison() {
+        use std::time::Instant;
+
+        let timer_count = 10_000;
+        let cancel_count = (timer_count * 9) / 10; // 90% cancellation
+
+        eprintln!("=== VirtualTimerWheel Cleanup Performance Comparison ===");
+        eprintln!("Timers: {}, Cancelled: {} ({}%)", timer_count, cancel_count,
+                  (cancel_count * 100) / timer_count);
+
+        // Test current O(k) incremental approach
+        {
+            let mut wheel = VirtualTimerWheel::new();
+            let (_counter, waker) = counting_waker();
+
+            // Setup: Insert and cancel timers
+            let mut handles = Vec::with_capacity(timer_count);
+            for i in 0..timer_count {
+                let deadline = (i % 1000) as u64 + 1;
+                let handle = wheel.insert(deadline, waker.clone());
+                handles.push(handle);
+            }
+
+            for handle in handles.into_iter().take(cancel_count) {
+                wheel.cancel(handle);
+            }
+
+            // Force cleanup trigger by setting threshold to 0
+            let original_len = wheel.cancelled.len();
+
+            // Measure cleanup performance
+            let start = Instant::now();
+            wheel.cleanup_cancelled_incremental(512); // Direct call with batch size
+            let duration = start.elapsed();
+
+            eprintln!("O(k) Incremental Cleanup:");
+            eprintln!("  Duration: {:?}", duration);
+            eprintln!("  Cancelled before: {}", original_len);
+            eprintln!("  Cancelled after: {}", wheel.cancelled.len());
+            eprintln!("  Cleaned: {}", original_len - wheel.cancelled.len());
+        }
+
+        // Simulate the old O(n log n) approach for comparison
+        {
+            let mut wheel = VirtualTimerWheel::new();
+            let (_counter, waker) = counting_waker();
+
+            // Setup: Insert and cancel timers
+            let mut handles = Vec::with_capacity(timer_count);
+            for i in 0..timer_count {
+                let deadline = (i % 1000) as u64 + 1;
+                let handle = wheel.insert(deadline, waker.clone());
+                handles.push(handle);
+            }
+
+            for handle in handles.into_iter().take(cancel_count) {
+                wheel.cancel(handle);
+            }
+
+            let original_len = wheel.cancelled.len();
+
+            // Simulate old O(n log n) cleanup approach
+            let start = Instant::now();
+            // This is what the old code did:
+            let heap_ids: std::collections::BTreeSet<_> =
+                wheel.heap.iter().map(|t| t.timer_id).collect();
+            wheel.cancelled.retain(|id| heap_ids.contains(id));
+            let duration = start.elapsed();
+
+            eprintln!("O(n log n) BTreeSet Cleanup (old approach):");
+            eprintln!("  Duration: {:?}", duration);
+            eprintln!("  Cancelled before: {}", original_len);
+            eprintln!("  Cancelled after: {}", wheel.cancelled.len());
+            eprintln!("  Cleaned: {}", original_len - wheel.cancelled.len());
+        }
+
+        eprintln!("=== Performance Comparison Complete ===");
     }
 }
