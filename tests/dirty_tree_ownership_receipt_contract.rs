@@ -137,6 +137,17 @@ fn self_reservation_allows_pathspec_staging() {
 }
 
 #[test]
+fn self_reservation_matches_full_output_golden() {
+    let actual_text = receipt_stdout("self_reservation.json");
+    let expected_text = fixture_text("self_reservation_expected.json");
+    let actual_json: Value = serde_json::from_str(&actual_text).expect("actual receipt JSON");
+    let expected_json: Value = serde_json::from_str(&expected_text).expect("expected receipt JSON");
+
+    assert_eq!(actual_json, expected_json);
+    assert_eq!(actual_text, expected_text);
+}
+
+#[test]
 fn mixed_staged_index_requires_path_limited_commit_boundary() {
     let receipt = receipt_json("mixed_staged_index.json");
     let boundary = &receipt["commit_boundary"];
