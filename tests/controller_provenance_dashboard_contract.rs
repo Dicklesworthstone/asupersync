@@ -99,7 +99,7 @@ fn base_rows() -> Vec<ControllerProvenanceDashboardRow> {
             ControllerProvenanceEvidenceKind::LatencyCertificate,
             "artifacts/runtime_latency_budget_certificate_v1.json",
             ControllerProvenanceCommandClass::RchCargoTest,
-            "timeout 900 rch exec -- cargo test -p asupersync --test runtime_capacity_hints_contract --features test-internals",
+            "timeout 900 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_controller_provenance_latency cargo test -p asupersync --test runtime_capacity_hints_contract --features test-internals",
         ),
         row(
             "mean_field_capacity_plan",
@@ -198,7 +198,7 @@ fn base_rows() -> Vec<ControllerProvenanceDashboardRow> {
             ControllerProvenanceEvidenceKind::SourceEvidence,
             "artifacts/formal_proof_posture_contract_v1.json",
             ControllerProvenanceCommandClass::RchCargoTest,
-            "timeout 900 rch exec -- cargo test -p asupersync --test session_type_obligations --features test-internals",
+            "timeout 900 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_controller_provenance_session cargo test -p asupersync --test session_type_obligations --features test-internals",
         ),
     ];
     for row in &mut rows {
@@ -300,6 +300,29 @@ fn controller_provenance_dashboard_accepts_complete_child_provenance() {
         CONTROLLER_PROVENANCE_DASHBOARD_SCHEMA_VERSION
     );
     assert_eq!(report.dashboard_digest_sha256.len(), 64);
+}
+
+#[test]
+fn controller_provenance_dashboard_rch_rows_use_target_dirs() {
+    let rows = base_rows()
+        .into_iter()
+        .filter(|row| row.command_class == ControllerProvenanceCommandClass::RchCargoTest)
+        .collect::<Vec<_>>();
+
+    assert_eq!(rows.len(), 2, "expected exactly two RCH cargo replay rows");
+    for row in rows {
+        assert!(
+            row.replay_command
+                .contains("rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/"),
+            "RCH cargo row must set a target dir: {}",
+            row.replay_command
+        );
+        assert!(
+            !row.replay_command.contains("rch exec -- cargo "),
+            "RCH cargo row must not use stale bare routing: {}",
+            row.replay_command
+        );
+    }
 }
 
 #[test]
