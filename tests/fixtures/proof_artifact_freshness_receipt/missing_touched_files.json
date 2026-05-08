@@ -1,0 +1,19 @@
+{
+  "repo": {
+    "head_sha": "2222222222222222222222222222222222222222",
+    "branch": "main"
+  },
+  "artifacts": [
+    {
+      "artifact_path": "artifacts/proof/missing-touched-files.json",
+      "git_sha": "2222222222222222222222222222222222222222",
+      "git_branch": "main",
+      "command": "rch exec -- cargo clippy -p asupersync --lib -- -D warnings",
+      "status": "pass",
+      "generated_at": "2026-05-08T05:18:00Z"
+    }
+  ],
+  "dirty_tree": {
+    "entries": []
+  }
+}

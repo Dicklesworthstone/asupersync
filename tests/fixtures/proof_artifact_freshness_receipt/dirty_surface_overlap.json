@@ -1,0 +1,29 @@
+{
+  "repo": {
+    "head_sha": "2222222222222222222222222222222222222222",
+    "branch": "main"
+  },
+  "artifacts": [
+    {
+      "artifact_path": "artifacts/proof/proof-status-marker.json",
+      "git_sha": "2222222222222222222222222222222222222222",
+      "git_branch": "main",
+      "command": "rch exec -- cargo test -p asupersync --test proof_status_snapshot_contract -- --nocapture",
+      "touched_files": [
+        "tests/proof_status_snapshot_contract.rs"
+      ],
+      "status": "pass",
+      "generated_at": "2026-05-08T05:16:00Z"
+    }
+  ],
+  "dirty_tree": {
+    "entries": [
+      {
+        "status": " M",
+        "path": "tests/proof_status_snapshot_contract.rs",
+        "classification": "peer-owned",
+        "owner": "CoralGorge"
+      }
+    ]
+  }
+}

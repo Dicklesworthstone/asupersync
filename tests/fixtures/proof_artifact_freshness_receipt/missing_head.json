@@ -1,0 +1,21 @@
+{
+  "repo": {
+    "head_sha": "2222222222222222222222222222222222222222",
+    "branch": "main"
+  },
+  "artifacts": [
+    {
+      "artifact_path": "artifacts/proof/missing-head.json",
+      "git_branch": "main",
+      "command": "rch exec -- cargo check -p asupersync --lib",
+      "touched_files": [
+        "src/runtime/state.rs"
+      ],
+      "status": "pass",
+      "generated_at": "2026-05-08T05:17:00Z"
+    }
+  ],
+  "dirty_tree": {
+    "entries": []
+  }
+}
