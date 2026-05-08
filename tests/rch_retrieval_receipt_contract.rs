@@ -81,15 +81,20 @@ fn assert_output_matches_golden(output: Output, expected_fixture: &str, drift_me
     let actual = receipt_text_from_output(output);
     let expected = fixture_text(expected_fixture);
 
-    assert_json_text_eq(&actual, &expected, drift_message);
+    assert_json_text_eq(&actual, &expected, expected_fixture, drift_message);
 }
 
-fn assert_json_text_eq(actual: &str, expected: &str, drift_message: &str) {
-    let actual_json: Value = serde_json::from_str(actual).expect("actual receipt output JSON");
-    let expected_json: Value =
-        serde_json::from_str(expected).expect("expected receipt output JSON");
+fn assert_json_text_eq(actual: &str, expected: &str, expected_fixture: &str, drift_message: &str) {
+    let actual_json: Value = serde_json::from_str(actual)
+        .unwrap_or_else(|err| panic!("actual receipt output JSON for {expected_fixture}: {err}"));
+    let expected_json: Value = serde_json::from_str(expected).unwrap_or_else(|err| {
+        panic!("expected receipt fixture {expected_fixture} must be JSON: {err}")
+    });
 
-    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
+    assert_eq!(
+        actual_json, expected_json,
+        "parsed rch retrieval receipt JSON drifted from {expected_fixture}; {drift_message}"
+    );
     assert_eq!(actual, expected, "{drift_message}");
 }
 
