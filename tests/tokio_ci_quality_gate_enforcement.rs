@@ -164,6 +164,16 @@ fn doc_requires_rch_exec_for_heavy_checks() {
         "document must require rch exec for heavy validation"
     );
     for token in [
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_ci_quality_gate_docs cargo check --all-targets",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_ci_quality_gate_docs cargo clippy --all-targets -- -D warnings",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_ci_quality_gate_docs cargo fmt --check",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_ci_quality_gate_docs cargo test --test tokio_executable_conformance_contracts -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_ci_quality_gate_docs cargo test --test tokio_cancellation_drain_fuzz_race_campaigns -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_ci_quality_gate_docs cargo test --test tokio_ci_quality_gate_enforcement -- --nocapture",
+    ] {
+        assert!(doc.contains(token), "missing runner command token: {token}");
+    }
+    for stale in [
         "rch exec -- cargo check --all-targets",
         "rch exec -- cargo clippy --all-targets -- -D warnings",
         "rch exec -- cargo fmt --check",
@@ -171,7 +181,10 @@ fn doc_requires_rch_exec_for_heavy_checks() {
         "rch exec -- cargo test --test tokio_cancellation_drain_fuzz_race_campaigns -- --nocapture",
         "rch exec -- cargo test --test tokio_ci_quality_gate_enforcement -- --nocapture",
     ] {
-        assert!(doc.contains(token), "missing runner command token: {token}");
+        assert!(
+            !doc.contains(stale),
+            "document must not reintroduce bare rch cargo routing: {stale}"
+        );
     }
 }
 
@@ -244,14 +257,25 @@ fn doc_defines_t87_perf_alarm_artifacts_and_commands() {
         "budget_id",
         "thread_id",
         "first_failing_commit",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_ci_quality_gate_docs cargo bench --bench scheduler_benchmark",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_ci_quality_gate_docs cargo bench --bench reactor_benchmark",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_ci_quality_gate_docs cargo bench --bench protocol_benchmark",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_ci_quality_gate_docs cargo test --test perf_regression_gates -- --nocapture",
+    ] {
+        assert!(
+            doc.contains(token),
+            "missing T8.7 alarm/runner token: {token}"
+        );
+    }
+    for stale in [
         "rch exec -- cargo bench --bench scheduler_benchmark",
         "rch exec -- cargo bench --bench reactor_benchmark",
         "rch exec -- cargo bench --bench protocol_benchmark",
         "rch exec -- cargo test --test perf_regression_gates -- --nocapture",
     ] {
         assert!(
-            doc.contains(token),
-            "missing T8.7 alarm/runner token: {token}"
+            !doc.contains(stale),
+            "document must not reintroduce bare T8.7 rch cargo routing: {stale}"
         );
     }
 }
