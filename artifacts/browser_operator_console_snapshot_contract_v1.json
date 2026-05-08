@@ -1,0 +1,160 @@
+{
+  "contract_version": "browser-operator-console-snapshot-contract-v1",
+  "bead_id": "asupersync-eubg99",
+  "purpose": "Source-owned browser operator console snapshot contract for compact runtime views that do not imply native-only support.",
+  "source_of_truth": {
+    "model": "asupersync-browser-core/src/types.rs",
+    "contract": "artifacts/browser_operator_console_snapshot_contract_v1.json",
+    "verifier": "tests/browser_operator_console_snapshot_contract.rs"
+  },
+  "schema": {
+    "runtime_payload_schema": "browser-operator-snapshot-v1",
+    "required_top_level_fields": [
+      "schema_version",
+      "kind",
+      "runtime",
+      "regions",
+      "tasks",
+      "channels",
+      "budgets",
+      "pressure",
+      "proof_status",
+      "unsupported_native_fields"
+    ],
+    "required_snapshot_kinds": [
+      "empty_runtime",
+      "loaded_runtime",
+      "cancelled_runtime",
+      "pressure_governed_runtime"
+    ],
+    "required_runtime_states": [
+      "running",
+      "cancelling",
+      "backpressured"
+    ],
+    "required_pressure_levels": [
+      "none",
+      "watch",
+      "shed"
+    ]
+  },
+  "source_markers": [
+    {
+      "path": "asupersync-browser-core/src/types.rs",
+      "markers": [
+        "BROWSER_OPERATOR_SNAPSHOT_SCHEMA_VERSION",
+        "pub enum BrowserOperatorSnapshotKind",
+        "pub struct BrowserOperatorConsoleSnapshot",
+        "pub fn browser_operator_snapshot_fixture",
+        "has_fail_closed_native_omissions"
+      ]
+    },
+    {
+      "path": "asupersync-browser-core/src/lib.rs",
+      "markers": [
+        "pub mod types",
+        "static DISPATCHER: RefCell<WasmExportDispatcher>"
+      ]
+    },
+    {
+      "path": "src/types/wasm_abi.rs",
+      "markers": [
+        "pub struct WasmAbiVersion",
+        "pub struct WasmExportDispatcher"
+      ]
+    }
+  ],
+  "fail_closed_policy": {
+    "unsupported_native_fields_must_render": "unsupported_native_only",
+    "unsupported_native_fields": [
+      "native_thread_id",
+      "native_file_descriptor",
+      "host_filesystem_path"
+    ],
+    "unsupported_field_requirements": [
+      "each unsupported_native_fields entry has status unsupported_native_only",
+      "each unsupported_native_fields entry has a nonempty omission_reason",
+      "browser snapshot payloads must not report native-only fields as present",
+      "unsupported native fields are omitted explicitly instead of silently missing"
+    ],
+    "forbidden_claims": [
+      "native thread id available",
+      "native file descriptor available",
+      "host filesystem path available",
+      "full native parity",
+      "all native fields present"
+    ]
+  },
+  "scenario_matrix": [
+    {
+      "kind": "empty_runtime",
+      "runtime_state": "running",
+      "pressure_level": "none",
+      "admission_open": true,
+      "proof_fresh": true,
+      "minimum_regions": 1,
+      "minimum_tasks": 0,
+      "required_unsupported_field_ids": [
+        "native_thread_id",
+        "native_file_descriptor",
+        "host_filesystem_path"
+      ]
+    },
+    {
+      "kind": "loaded_runtime",
+      "runtime_state": "running",
+      "pressure_level": "watch",
+      "admission_open": true,
+      "proof_fresh": true,
+      "minimum_regions": 2,
+      "minimum_tasks": 1,
+      "required_unsupported_field_ids": [
+        "native_thread_id",
+        "native_file_descriptor",
+        "host_filesystem_path"
+      ]
+    },
+    {
+      "kind": "cancelled_runtime",
+      "runtime_state": "cancelling",
+      "pressure_level": "none",
+      "admission_open": false,
+      "proof_fresh": true,
+      "minimum_regions": 1,
+      "minimum_tasks": 1,
+      "required_unsupported_field_ids": [
+        "native_thread_id",
+        "native_file_descriptor",
+        "host_filesystem_path"
+      ]
+    },
+    {
+      "kind": "pressure_governed_runtime",
+      "runtime_state": "backpressured",
+      "pressure_level": "shed",
+      "admission_open": false,
+      "proof_fresh": false,
+      "minimum_regions": 2,
+      "minimum_tasks": 1,
+      "blocked_reason_required": true,
+      "required_unsupported_field_ids": [
+        "native_thread_id",
+        "native_file_descriptor",
+        "host_filesystem_path"
+      ]
+    }
+  ],
+  "markdown_golden": [
+    "| snapshot | runtime_state | pressure | admission | proof | omitted_native_fields |",
+    "|---|---|---|---|---|---|",
+    "| empty_runtime | running | none | open | fresh | 3 |",
+    "| loaded_runtime | running | watch | open | fresh | 3 |",
+    "| cancelled_runtime | cancelling | none | closed | fresh | 3 |",
+    "| pressure_governed_runtime | backpressured | shed | closed | blocked | 3 |"
+  ],
+  "validation_commands": [
+    "rch exec -- python3 -m json.tool artifacts/browser_operator_console_snapshot_contract_v1.json",
+    "rch exec -- rustfmt --edition 2024 --check asupersync-browser-core/src/types.rs tests/browser_operator_console_snapshot_contract.rs",
+    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_browser_operator_console_snapshot_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test browser_operator_console_snapshot_contract --features test-internals -- --nocapture"
+  ]
+}
