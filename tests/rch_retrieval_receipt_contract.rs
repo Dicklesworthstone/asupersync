@@ -149,6 +149,59 @@ fn remote_pass_then_retrieval_timeout_is_split_verdict() {
 }
 
 #[test]
+fn multistage_target_retrieval_timeout_is_not_clean_success() {
+    let receipt = receipt_json_with_args(
+        "multistage_target_timeout.log",
+        Some(124),
+        &[
+            "--proof-lane",
+            "rch-retrieval-budget",
+            "--max-retrieval-ms",
+            "3000",
+            "--max-artifact-files",
+            "2000",
+        ],
+    );
+
+    assert_eq!(
+        receipt["classification"].as_str(),
+        Some("passed_after_retrieval_timeout")
+    );
+    assert_eq!(
+        receipt["decision"].as_str(),
+        Some("pass-with-retrieval-blocker")
+    );
+    assert_eq!(
+        receipt["markers"]["retrieval_stage_count"].as_u64(),
+        Some(2)
+    );
+    assert_eq!(
+        receipt["markers"]["retrieval_completed_count"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        receipt["markers"]["retrieval_completed"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        receipt["markers"]["retrieval_partial"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        receipt["markers"]["retrieval_elapsed_ms"].as_u64(),
+        Some(2826)
+    );
+    assert_eq!(
+        receipt["markers"]["artifact_file_count"].as_u64(),
+        Some(1536)
+    );
+    assert_eq!(
+        receipt["artifact_budget"]["status"].as_str(),
+        Some("retrieval-incomplete")
+    );
+}
+
+#[test]
 fn completed_retrieval_reports_artifact_budget_warnings_by_lane() {
     let receipt = receipt_json_with_args(
         "remote_success.log",

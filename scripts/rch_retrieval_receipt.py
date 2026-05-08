@@ -24,6 +24,7 @@ ARTIFACTS_RETRIEVED_RE = re.compile(
     r"Artifacts retrieved in (?P<elapsed_ms>\d+)ms"
     r"(?: \((?P<file_count>\d+) files, (?P<byte_count>\d+) bytes\))?"
 )
+RETRIEVAL_STAGE_RE = re.compile(r"(?m)^\s*.*Retrieving artifacts from .*$")
 TIMEOUT_RE = re.compile(r"(?i)(timed out|timeout|terminated|signal TERM|exit code -1)")
 
 
@@ -70,9 +71,15 @@ def classify(text: str, wrapper_exit_code: int | None) -> dict[str, Any]:
     remote_exit = last_remote_exit(text)
     remote_success = remote_exit == 0
     remote_failed = (remote_exit is not None and remote_exit != 0) or REMOTE_FAILED_RE.search(text) is not None
-    retrieval_started = "Retrieving build artifacts" in text
-    retrieval_match = ARTIFACTS_RETRIEVED_RE.search(text)
-    retrieval_completed = retrieval_match is not None
+    explicit_retrieval_stage_count = len(RETRIEVAL_STAGE_RE.findall(text))
+    retrieval_matches = list(ARTIFACTS_RETRIEVED_RE.finditer(text))
+    retrieval_completed_count = len(retrieval_matches)
+    retrieval_started = "Retrieving build artifacts" in text or explicit_retrieval_stage_count > 0
+    retrieval_stage_count = explicit_retrieval_stage_count
+    if retrieval_stage_count == 0 and (retrieval_started or retrieval_completed_count > 0):
+        retrieval_stage_count = 1
+    retrieval_completed = retrieval_completed_count > 0 and retrieval_completed_count >= retrieval_stage_count
+    retrieval_partial = retrieval_started and retrieval_completed_count < retrieval_stage_count
     timeout_observed = TIMEOUT_RE.search(text) is not None or wrapper_exit_code in {124, 143, -1}
 
     if local_fallback:
@@ -81,7 +88,7 @@ def classify(text: str, wrapper_exit_code: int | None) -> dict[str, Any]:
     elif remote_failed:
         classification = "remote_failure"
         decision = "failed"
-    elif remote_success and retrieval_started and not retrieval_completed and timeout_observed:
+    elif remote_success and retrieval_partial and timeout_observed:
         classification = "passed_after_retrieval_timeout"
         decision = "pass-with-retrieval-blocker"
     elif remote_success and retrieval_completed:
@@ -97,12 +104,22 @@ def classify(text: str, wrapper_exit_code: int | None) -> dict[str, Any]:
     retrieval_elapsed_ms = None
     artifact_file_count = None
     artifact_bytes = None
-    if retrieval_match:
-        retrieval_elapsed_ms = int(retrieval_match.group("elapsed_ms"))
-        if retrieval_match.group("file_count") is not None:
-            artifact_file_count = int(retrieval_match.group("file_count"))
-        if retrieval_match.group("byte_count") is not None:
-            artifact_bytes = int(retrieval_match.group("byte_count"))
+    if retrieval_matches:
+        retrieval_elapsed_ms = sum(int(match.group("elapsed_ms")) for match in retrieval_matches)
+        file_counts = [
+            int(match.group("file_count"))
+            for match in retrieval_matches
+            if match.group("file_count") is not None
+        ]
+        byte_counts = [
+            int(match.group("byte_count"))
+            for match in retrieval_matches
+            if match.group("byte_count") is not None
+        ]
+        if file_counts:
+            artifact_file_count = sum(file_counts)
+        if byte_counts:
+            artifact_bytes = sum(byte_counts)
 
     return {
         "classification": classification,
@@ -114,6 +131,9 @@ def classify(text: str, wrapper_exit_code: int | None) -> dict[str, Any]:
             "remote_failure": remote_failed,
             "retrieval_started": retrieval_started,
             "retrieval_completed": retrieval_completed,
+            "retrieval_partial": retrieval_partial,
+            "retrieval_stage_count": retrieval_stage_count,
+            "retrieval_completed_count": retrieval_completed_count,
             "retrieval_elapsed_ms": retrieval_elapsed_ms,
             "artifact_file_count": artifact_file_count,
             "artifact_bytes": artifact_bytes,

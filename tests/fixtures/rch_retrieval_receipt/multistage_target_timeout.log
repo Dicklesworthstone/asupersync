@@ -1,0 +1,10 @@
+  2026-05-08T06:03:49.946258Z  INFO rch::hook: Selected worker: vmi1153651 at ubuntu@38.242.134.66 (0 slots, speed 50.0)
+  2026-05-08T06:04:20.393420Z  INFO rch::hook: Executing command remotely: env CARGO_INCREMENTAL=0 cargo test -p asupersync --test rch_retrieval_receipt_contract -- --nocapture
+running 8 tests
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
+  2026-05-08T06:04:42.286069Z  INFO rch::hook: Remote command finished: exit=0 in 21892ms
+  2026-05-08T06:04:42.286457Z  INFO rch::hook: Retrieving build artifacts...
+  2026-05-08T06:04:42.286478Z  INFO rch::transfer: Retrieving artifacts from /data/projects/asupersync on vmi1153651
+  2026-05-08T06:04:45.113476Z  INFO rch::transfer: Artifacts retrieved in 2826ms (1536 files, 356 bytes)
+  2026-05-08T06:04:45.113666Z  INFO rch::transfer: Retrieving artifacts from /data/projects/asupersync/.rch-target on vmi1153651
+timeout: sending signal TERM to command 'rch'
