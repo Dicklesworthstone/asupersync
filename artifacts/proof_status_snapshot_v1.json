@@ -187,7 +187,7 @@
     {
       "claim_id": "conformance-runners",
       "category": "conformance runners",
-      "status": "red_blocked_external",
+      "status": "yellow_frontier",
       "doc_claim_markers": {
         "README.md": [
           "tests/conformance/mod.rs",
@@ -210,20 +210,7 @@
         "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --all-targets",
         "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_clippy_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --all-targets -- -D warnings"
       ],
-      "blocked_frontier": {
-        "fixture_id": "VF-CLIPPY-LINT-WALL",
-        "command": "rch exec -- cargo clippy -p asupersync-conformance --bin otel_resource_conformance -- -D warnings",
-        "decision": "blocked-external",
-        "error_class": "clippy_lint_wall",
-        "first_failure": {
-          "crate_or_surface": "asupersync",
-          "target": "lib",
-          "file": "src/observability/otel.rs",
-          "line": 114
-        },
-        "summary": "this function has too many arguments (8/7)",
-        "supplemental_proof_command": "rch exec -- cargo test -p asupersync-conformance --bin otel_resource_conformance -- --nocapture"
-      },
+      "blocked_frontier": null,
       "notes": "This row demonstrates the required exact red/blocker shape for conformance-adjacent proof stops."
     },
     {

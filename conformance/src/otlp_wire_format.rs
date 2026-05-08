@@ -642,8 +642,6 @@ pub fn otlp_010_span_events_conformance<RT: RuntimeInterface>() -> ConformanceTe
         tags: ["otlp", "span", "events", "trace", "sequence"],
         expected: "Same Event sequence produces identical span events array",
         test: |_rt| {
-            use std::time::{SystemTime, UNIX_EPOCH};
-            use std::collections::HashMap;
 
             let test_sequences = vec![
                 // Basic event sequences
@@ -801,7 +799,7 @@ pub fn otlp_009_periodic_reader_conformance<RT: RuntimeInterface>() -> Conforman
         tags: ["otlp", "periodic", "reader", "export", "batch", "timing"],
         expected: "Same metric stream produces identical export batch timing patterns",
         test: |_rt| {
-            use std::time::{Duration, Instant, SystemTime};
+            use std::time::{Duration, Instant};
             use std::sync::{Arc, Mutex};
             use std::collections::VecDeque;
 
@@ -3717,7 +3715,7 @@ pub fn otlp_014_observable_counter_callback_ordering<RT: RuntimeInterface>() -> 
                 // Test callback ordering with different registration patterns
                 if *counter_count > 1 {
                     let reverse_result = simulate_observable_counter_callbacks_reverse_order(*counter_count);
-                    let original_result = simulate_observable_counter_callbacks(*counter_count);
+                    let _original_result = simulate_observable_counter_callbacks(*counter_count);
 
                     // Different registration order might produce different callback order
                     // but should be consistent across runs
@@ -18359,7 +18357,7 @@ fn simulate_asupersync_meter_scope_deduplication(
         // Create processed meter entry
         let processed_meter = ProcessedMeter {
             name: meter_def.name.clone(),
-            scope_id: scope_id,
+            scope_id,
             scope_name: meter_def.scope_name.clone(),
             scope_version: meter_def.scope_version.clone(),
             scope_attributes: meter_def.scope_attributes.clone(),
@@ -18440,7 +18438,7 @@ fn simulate_opentelemetry_meter_scope_deduplication(
         // Create processed meter entry
         let processed_meter = ProcessedMeter {
             name: meter_def.name.clone(),
-            scope_id: scope_id,
+            scope_id,
             scope_name: meter_def.scope_name.clone(),
             scope_version: meter_def.scope_version.clone(),
             scope_attributes: meter_def.scope_attributes.clone(),
