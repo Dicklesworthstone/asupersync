@@ -54,9 +54,9 @@ Validation/logging gates for each Track-B child:
 
 Suggested verification commands (CPU-heavy commands offloaded with `rch`):
 ```bash
-rch exec -- cargo test --test raptorq_conformance -- --nocapture
-rch exec -- cargo test --test raptorq_perf_invariants -- --nocapture
-rch exec -- cargo test -p asupersync raptorq -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_raptorq_rfc6330_clause_docs cargo test --test raptorq_conformance -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_raptorq_rfc6330_clause_docs cargo test --test raptorq_perf_invariants -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_raptorq_rfc6330_clause_docs cargo test -p asupersync raptorq -- --nocapture
 ```
 
 ## Notes on Explicit Gaps
