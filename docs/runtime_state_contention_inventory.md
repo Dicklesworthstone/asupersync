@@ -164,22 +164,21 @@ E (Config) → D (Instrumentation) → B (Regions) → A (Tasks) → C (Obligati
 Run the contention harness with structured artifacts:
 
 ```bash
-cargo test --test contention_e2e --features lock-metrics -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_state_contention_docs cargo test --test contention_e2e --features lock-metrics -- --nocapture
 ```
 
 Artifacts are written to `target/contention/` when the directory exists or
 `CI=1` is set. You can also force a custom location:
 
 ```bash
-ASUPERSYNC_CONTENTION_ARTIFACTS_DIR=target/contention \
-  cargo test --test contention_e2e --features lock-metrics -- --nocapture
+rch exec -- env ASUPERSYNC_CONTENTION_ARTIFACTS_DIR=target/contention CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_state_contention_docs cargo test --test contention_e2e --features lock-metrics -- --nocapture
 ```
 
 Related E2E tests (structured logs + traces):
 
 ```bash
-cargo test --test runtime_e2e -- --nocapture
-cargo test --test obligation_lifecycle_e2e -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_state_contention_docs cargo test --test runtime_e2e -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_state_contention_docs cargo test --test obligation_lifecycle_e2e -- --nocapture
 ```
 
 4. **A (Tasks)** before C — task completion triggers orphan obligation abort.
@@ -580,16 +579,13 @@ When reviewing sharding PRs, verify:
 Baseline (current unified layout):
 
 ```bash
-ASUPERSYNC_CONTENTION_ARTIFACTS_DIR=target/contention/unified \
-  cargo test --test contention_e2e --features lock-metrics -- --nocapture
+rch exec -- env ASUPERSYNC_CONTENTION_ARTIFACTS_DIR=target/contention/unified CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_state_contention_docs cargo test --test contention_e2e --features lock-metrics -- --nocapture
 ```
 
 Replay determinism sweep (artifact-friendly):
 
 ```bash
-ASUPERSYNC_REPLAY_ARTIFACTS_DIR=target/replay/unified \
-ASUPERSYNC_REPLAY_PARITY_ITERS=1000 \
-cargo test --test replay_e2e_suite deterministic_replay_parity_seed_sweep_1000 -- --nocapture
+rch exec -- env ASUPERSYNC_REPLAY_ARTIFACTS_DIR=target/replay/unified ASUPERSYNC_REPLAY_PARITY_ITERS=1000 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_state_contention_docs cargo test --test replay_e2e_suite deterministic_replay_parity_seed_sweep_1000 -- --nocapture
 ```
 
 After layout toggle lands, run the same commands with the sharded layout
@@ -622,12 +618,12 @@ Rollback triggers:
 ### Validation Checklist (Gate Before Default Flip)
 
 ```bash
-cargo fmt --check
-cargo check --all-targets
-cargo clippy --all-targets -- -D warnings
-cargo test
-cargo test --test contention_e2e --features lock-metrics -- --nocapture
-cargo test --test replay_e2e_suite deterministic_replay_parity_seed_sweep_1000 -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_state_contention_docs cargo fmt --check
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_state_contention_docs cargo check --all-targets
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_state_contention_docs cargo clippy --all-targets -- -D warnings
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_state_contention_docs cargo test
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_state_contention_docs cargo test --test contention_e2e --features lock-metrics -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_state_contention_docs cargo test --test replay_e2e_suite deterministic_replay_parity_seed_sweep_1000 -- --nocapture
 ```
 
 Acceptance signal for flipping default:
