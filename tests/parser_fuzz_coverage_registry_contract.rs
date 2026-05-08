@@ -18,7 +18,7 @@ fn run_registry(fixture: &str) -> Output {
     Command::new("python3")
         .arg(repo_root().join(SCRIPT_PATH))
         .arg("--input")
-        .arg(repo_root().join(FIXTURE_ROOT).join(fixture))
+        .arg(PathBuf::from(FIXTURE_ROOT).join(fixture))
         .arg("--generated-at")
         .arg(GENERATED_AT)
         .arg("--output")
@@ -26,6 +26,11 @@ fn run_registry(fixture: &str) -> Output {
         .current_dir(repo_root())
         .output()
         .expect("run parser fuzz coverage registry helper")
+}
+
+fn fixture_text(fixture: &str) -> String {
+    std::fs::read_to_string(repo_root().join(FIXTURE_ROOT).join(fixture))
+        .unwrap_or_else(|error| panic!("read fixture {fixture}: {error}"))
 }
 
 fn registry_json(fixture: &str) -> Value {
@@ -62,6 +67,26 @@ fn script_exists_and_help_is_non_mutating() {
         .output()
         .expect("run helper --help");
     assert!(output.status.success(), "--help should succeed");
+}
+
+#[test]
+fn covered_registry_matches_full_output_golden() {
+    let output = run_registry("covered_registry.json");
+    assert!(
+        output.status.success(),
+        "registry helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = String::from_utf8(output.stdout).expect("registry stdout is UTF-8");
+    let expected = fixture_text("covered_registry_expected.json");
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual registry output is JSON");
+    let expected_json: Value =
+        serde_json::from_str(&expected).expect("expected registry output is JSON");
+    assert_eq!(actual_json, expected_json, "registry golden JSON drifted");
+    assert_eq!(actual, expected, "registry golden text drifted");
 }
 
 #[test]

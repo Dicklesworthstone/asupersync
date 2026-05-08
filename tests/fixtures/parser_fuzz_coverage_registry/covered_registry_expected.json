@@ -1,0 +1,83 @@
+{
+  "action_items": [],
+  "coverage": [
+    {
+      "evidence": {
+        "covering_targets": [
+          "fuzz_http_h1_codec_split_crlf"
+        ],
+        "exemption_status": "missing",
+        "partial_targets": [],
+        "stale_covering_targets": []
+      },
+      "risk_rank": 3,
+      "status": "covered",
+      "surface": {
+        "category": "http",
+        "id": "http_h1_request_parse",
+        "input_kind": "&[u8]",
+        "path": "src/http/h1/parser.rs",
+        "risk": "high",
+        "symbol": "parse_request",
+        "visibility": "pub"
+      }
+    },
+    {
+      "evidence": {
+        "covering_targets": [
+          "fuzz_redis_resp3_map_parse"
+        ],
+        "exemption_status": "missing",
+        "partial_targets": [],
+        "stale_covering_targets": []
+      },
+      "risk_rank": 4,
+      "status": "covered",
+      "surface": {
+        "category": "redis",
+        "id": "redis_resp_decode",
+        "input_kind": "&[u8]",
+        "path": "src/messaging/redis.rs",
+        "risk": "critical",
+        "symbol": "try_decode_with_limits",
+        "visibility": "pub"
+      }
+    }
+  ],
+  "current_date": "2026-05-08",
+  "forbidden_actions": {
+    "edits_fuzz_manifest": false,
+    "runs_beads_mutation": false,
+    "runs_cargo": false,
+    "runs_destructive_command": false,
+    "runs_git_mutation": false
+  },
+  "generated_at": "2026-05-08T05:45:00Z",
+  "input_schema_version": "parser-fuzz-coverage-input-v1",
+  "missing_coverage": [],
+  "non_mutating": true,
+  "partial_coverage": [],
+  "requirements": {
+    "coverage_uses_active_fuzz_target": true,
+    "every_public_byte_or_string_parser_has_coverage_or_exemption": true,
+    "exemptions_have_reason_and_future_expiry": true,
+    "input_schema_recognized": true,
+    "partial_references_are_not_counted_as_coverage": true
+  },
+  "schema_version": "parser-fuzz-coverage-registry-v1",
+  "source": "tests/fixtures/parser_fuzz_coverage_registry/covered_registry.json",
+  "source_counts": {
+    "exemptions": 0,
+    "fuzz_targets": 2,
+    "parser_surfaces": 2
+  },
+  "summary": {
+    "covered": 2,
+    "exempt": 0,
+    "invalid_exemptions": 0,
+    "missing": 0,
+    "partial": 0,
+    "passes": true,
+    "stale_covering_targets": 0
+  }
+}
