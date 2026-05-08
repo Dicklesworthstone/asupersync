@@ -1,0 +1,17 @@
+---
+source: src/trace/distributed/context.rs
+expression: ctx
+---
+SymbolTraceContext {
+    trace_id: DistTraceId(0000000000000000000000000000002a),
+    parent_span_id: SymbolSpanId(0000000000000000),
+    span_id: SymbolSpanId(00000018f14a78a3),
+    flags: TraceFlags(
+        1,
+    ),
+    origin_region: RegionTag(
+        "test",
+    ),
+    created_at: Time(0ns),
+    baggage: [],
+}

@@ -1,0 +1,7 @@
+---
+source: src/trace/distributed/context.rs
+expression: sampled
+---
+TraceFlags(
+    1,
+)
