@@ -919,9 +919,7 @@ fn main() {
             std::process::exit(ExitCode::sanitize(err.exit_code));
         }
         (Ok(()), Err(flush_err)) => {
-            eprintln!(
-                "Error: failed to flush buffered output to stdout: {flush_err}"
-            );
+            eprintln!("Error: failed to flush buffered output to stdout: {flush_err}");
             std::process::exit(ExitCode::sanitize(ExitCode::RUNTIME_ERROR));
         }
     }

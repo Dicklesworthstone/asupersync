@@ -166,7 +166,7 @@ rch exec -- cargo tree -e features --workspace --invert tokio
 
 This is expected to additionally surface `opentelemetry_sdk` (via the dev-dep `testing` feature -> `rt-tokio` chain), `tokio-stream`, tokio-util/sqlx differential-test edges, satellite crate edges, and the fuzz-only `opentelemetry-proto` generated-message edge.
 
-**Canonical proof-command manifest:** `artifacts/proof_lane_manifest_v1.json`, checked by `tests/proof_lane_manifest_contract.rs`, maps each `rch exec -- ...` proof lane to the guarantee it covers and the surfaces it explicitly does not cover. Use it when deciding whether a green or blocked command is production-graph proof, fuzz smoke evidence, lib/all-target/clippy/rustdoc frontier evidence, or formal Lean proof evidence.
+**Canonical proof-command manifest:** `artifacts/proof_lane_manifest_v1.json`, checked by `tests/proof_lane_manifest_contract.rs`, maps each `rch exec -- ...` proof lane to the guarantee it covers and the surfaces it explicitly does not cover. Use it when deciding whether a green or blocked command is production-graph proof, fuzz smoke evidence, lib/all-target/clippy/rustdoc frontier evidence, or formal Lean proof evidence. The current claim-to-status dashboard lives in `artifacts/proof_status_snapshot_v1.json`, checked by `tests/proof_status_snapshot_contract.rs`, and maps the README/AGENTS proof claims to manifest lanes plus validation-frontier blocker rows.
 
 **Pattern**: All async functions take `&Cx` as first parameter. The `Cx` flows down through structured concurrency scopes.
 

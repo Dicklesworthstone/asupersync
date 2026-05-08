@@ -18,7 +18,7 @@
 #![cfg(feature = "test-internals")]
 
 use asupersync::io::LabIoCap;
-use criterion::{Criterion, criterion_group, criterion_main, BenchmarkId, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Duration;

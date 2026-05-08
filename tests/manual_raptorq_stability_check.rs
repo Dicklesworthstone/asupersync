@@ -37,9 +37,16 @@ fn test_encoder_stability(k: usize, symbol_size: usize, seed: u64, repair_count:
         "K={}, symbol_size={}, seed={:08X}\n\
          RFC6330_params: K'={}, L={}, S={}, H={}, W={}\n\
          repair_symbols:\n{}",
-        k, symbol_size, seed,
-        params.k_prime, params.l, params.s, params.h, params.w,
-        repair_data.iter()
+        k,
+        symbol_size,
+        seed,
+        params.k_prime,
+        params.l,
+        params.s,
+        params.h,
+        params.w,
+        repair_data
+            .iter()
             .map(|(esi, hex)| format!("  ESI_{}: {}", esi, &hex[..16.min(hex.len())]))
             .collect::<Vec<_>>()
             .join("\n")
@@ -58,7 +65,10 @@ fn test_encoder_determinism_validation() {
     println!("=== RaptorQ Encoder Stability Test Results ===");
 
     for (k, symbol_size, seed, repair_count) in test_cases {
-        println!("\n--- Test Case: K={}, symbol_size={}, seed={:08X} ---", k, symbol_size, seed);
+        println!(
+            "\n--- Test Case: K={}, symbol_size={}, seed={:08X} ---",
+            k, symbol_size, seed
+        );
 
         // Run same test multiple times to verify determinism
         let result1 = test_encoder_stability(k, symbol_size, seed, repair_count);
@@ -73,7 +83,10 @@ fn test_encoder_determinism_validation() {
 
         // Test seed sensitivity
         let different_seed_result = test_encoder_stability(k, symbol_size, seed + 1, repair_count);
-        assert_ne!(result1, different_seed_result, "Encoder not sensitive to seed changes!");
+        assert_ne!(
+            result1, different_seed_result,
+            "Encoder not sensitive to seed changes!"
+        );
 
         println!("✓ Determinism and seed sensitivity validated");
     }

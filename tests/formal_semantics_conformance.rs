@@ -17,10 +17,10 @@
 #[macro_use]
 mod common;
 
-use asupersync::conformance::{conformance_test, ConformanceTarget, LabRuntimeTarget, TestConfig};
+use asupersync::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig, conformance_test};
 use asupersync::cx::Cx;
-use asupersync::types::{Budget, CancelReason, CancelKind, Outcome};
 use asupersync::runtime::yield_now;
+use asupersync::types::{Budget, CancelKind, CancelReason, Outcome};
 use common::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -41,60 +41,63 @@ fn init_test(test_name: &str) {
 ///   (∀t ∈ R[r].children: T[t].state = Completed(_)) ∧
 ///   (∀r' ∈ R[r].subregions: R[r'].state = Closed(_)) ∧
 ///   ledger(r) = ∅
-conformance_test!(test_region_close_implies_quiescence, |config: &TestConfig| {
-    init_test("test_region_close_implies_quiescence");
+conformance_test!(
+    test_region_close_implies_quiescence,
+    |config: &TestConfig| {
+        init_test("test_region_close_implies_quiescence");
 
-    let mut runtime = LabRuntimeTarget::create_runtime(config.clone());
+        let mut runtime = LabRuntimeTarget::create_runtime(config.clone());
 
-    LabRuntimeTarget::block_on(&mut runtime, async {
-        let cx = Cx::current().expect("should have context");
+        LabRuntimeTarget::block_on(&mut runtime, async {
+            let cx = Cx::current().expect("should have context");
 
-        // Create a region with child tasks and subregions
-        let parent_region = LabRuntimeTarget::create_region(&cx, Budget::INFINITE);
+            // Create a region with child tasks and subregions
+            let parent_region = LabRuntimeTarget::create_region(&cx, Budget::INFINITE);
 
-        // Spawn multiple tasks in the region
-        let task1 = LabRuntimeTarget::spawn(&cx, Budget::INFINITE, async {
-            yield_now().await;
-            42
+            // Spawn multiple tasks in the region
+            let task1 = LabRuntimeTarget::spawn(&cx, Budget::INFINITE, async {
+                yield_now().await;
+                42
+            });
+
+            let task2 = LabRuntimeTarget::spawn(&cx, Budget::INFINITE, async {
+                yield_now().await;
+                yield_now().await;
+                24
+            });
+
+            // Create a child region
+            let child_region = LabRuntimeTarget::create_region(&cx, Budget::INFINITE);
+
+            // Spawn task in child region
+            let child_task = LabRuntimeTarget::spawn(&cx, Budget::INFINITE, async {
+                yield_now().await;
+                100
+            });
+
+            // Wait for all tasks to complete
+            let result1 = task1.await;
+            let result2 = task2.await;
+            let child_result = child_task.await;
+
+            // Verify results before region closes
+            assert_eq!(result1, Outcome::Ok(42));
+            assert_eq!(result2, Outcome::Ok(24));
+            assert_eq!(child_result, Outcome::Ok(100));
+
+            // Wait for child region to close
+            child_region.await;
+
+            // Parent region should now be quiescent and close
+            parent_region.await;
+
+            // If we reach here without the oracle detecting violations,
+            // the quiescence invariant held
         });
 
-        let task2 = LabRuntimeTarget::spawn(&cx, Budget::INFINITE, async {
-            yield_now().await;
-            yield_now().await;
-            24
-        });
-
-        // Create a child region
-        let child_region = LabRuntimeTarget::create_region(&cx, Budget::INFINITE);
-
-        // Spawn task in child region
-        let child_task = LabRuntimeTarget::spawn(&cx, Budget::INFINITE, async {
-            yield_now().await;
-            100
-        });
-
-        // Wait for all tasks to complete
-        let result1 = task1.await;
-        let result2 = task2.await;
-        let child_result = child_task.await;
-
-        // Verify results before region closes
-        assert_eq!(result1, Outcome::Ok(42));
-        assert_eq!(result2, Outcome::Ok(24));
-        assert_eq!(child_result, Outcome::Ok(100));
-
-        // Wait for child region to close
-        child_region.await;
-
-        // Parent region should now be quiescent and close
-        parent_region.await;
-
-        // If we reach here without the oracle detecting violations,
-        // the quiescence invariant held
-    });
-
-    test_complete!("test_region_close_implies_quiescence");
-});
+        test_complete!("test_region_close_implies_quiescence");
+    }
+);
 
 /// Property test for quiescence with cancellation
 conformance_test!(test_quiescence_with_cancellation, |config: &TestConfig| {
@@ -185,11 +188,16 @@ conformance_test!(test_cancel_idempotence, |config: &TestConfig| {
         match result {
             Outcome::Cancelled(reason) => {
                 // Verify that we got a cancel reason (idempotence preserved semantics)
-                assert!(reason.kind == CancelKind::User ||
-                        reason.kind == CancelKind::Deadline ||
-                        reason.kind == CancelKind::Shutdown);
+                assert!(
+                    reason.kind == CancelKind::User
+                        || reason.kind == CancelKind::Deadline
+                        || reason.kind == CancelKind::Shutdown
+                );
             }
-            other => panic!("Expected cancelled task due to idempotent cancels, got {:?}", other),
+            other => panic!(
+                "Expected cancelled task due to idempotent cancels, got {:?}",
+                other
+            ),
         }
 
         region.await;
@@ -231,7 +239,10 @@ conformance_test!(test_cancel_strengthen_severity, |config: &TestConfig| {
                 // (shutdown has highest severity in the formal semantics)
                 assert_eq!(reason.kind, CancelKind::Shutdown);
             }
-            other => panic!("Expected cancelled task with strengthened reason, got {:?}", other),
+            other => panic!(
+                "Expected cancelled task with strengthened reason, got {:?}",
+                other
+            ),
         }
 
         region.await;
@@ -349,17 +360,17 @@ conformance_test!(test_multiple_losers_all_drained, |config: &TestConfig| {
         LabRuntimeTarget::cancel(&cx, &region, CancelReason::race_lost());
 
         // All losers must be drained to completion
-        let results = vec![
-            loser1.await,
-            loser2.await,
-            loser3.await,
-        ];
+        let results = vec![loser1.await, loser2.await, loser3.await];
 
         for (i, result) in results.iter().enumerate() {
             match result {
                 Outcome::Cancelled(reason) => {
-                    assert_eq!(reason.kind, CancelKind::RaceLost,
-                               "Loser {} should be cancelled with RaceLost", i + 1);
+                    assert_eq!(
+                        reason.kind,
+                        CancelKind::RaceLost,
+                        "Loser {} should be cancelled with RaceLost",
+                        i + 1
+                    );
                 }
                 Outcome::Ok(_) => {
                     // Natural completion before cancel is also valid

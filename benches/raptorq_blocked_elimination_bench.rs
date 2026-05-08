@@ -3,11 +3,15 @@
 //! Measures performance improvement from block-tiled elimination optimization.
 //! Compares against naive O(n³) approach for various matrix sizes.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use asupersync::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::systematic::SystematicEncoder;
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 
-fn create_high_loss_decode_scenario(k: usize, symbol_size: usize, loss_rate: f64) -> (InactivationDecoder, Vec<ReceivedSymbol>) {
+fn create_high_loss_decode_scenario(
+    k: usize,
+    symbol_size: usize,
+    loss_rate: f64,
+) -> (InactivationDecoder, Vec<ReceivedSymbol>) {
     // Generate source symbols
     let mut source_symbols = Vec::with_capacity(k);
     let mut rng_state = 0x12345678u64;
@@ -55,7 +59,9 @@ fn create_high_loss_decode_scenario(k: usize, symbol_size: usize, loss_rate: f64
     let needed_repairs = loss_count + 100;
     for i in 0..needed_repairs {
         let repair_esi = (k + i) as u32;
-        let (cols, coefs) = decoder.repair_equation(repair_esi).expect("repair equation failed");
+        let (cols, coefs) = decoder
+            .repair_equation(repair_esi)
+            .expect("repair equation failed");
         let repair_data = encoder.repair_symbol(repair_esi);
         received_symbols.push(ReceivedSymbol::repair(repair_esi, cols, coefs, repair_data));
     }
@@ -68,10 +74,10 @@ fn bench_blocked_elimination(c: &mut Criterion) {
 
     // Test different K values that stress dense matrix solving
     let test_cases = [
-        (1000, 1316, 0.70),   // 1K symbols, 70% loss
-        (2500, 1316, 0.70),   // 2.5K symbols, 70% loss
-        (5000, 1316, 0.70),   // 5K symbols, 70% loss
-        (7500, 1316, 0.70),   // 7.5K symbols, 70% loss
+        (1000, 1316, 0.70), // 1K symbols, 70% loss
+        (2500, 1316, 0.70), // 2.5K symbols, 70% loss
+        (5000, 1316, 0.70), // 5K symbols, 70% loss
+        (7500, 1316, 0.70), // 7.5K symbols, 70% loss
     ];
 
     for (k, symbol_size, loss_rate) in test_cases {
@@ -85,7 +91,8 @@ fn bench_blocked_elimination(c: &mut Criterion) {
             &(k, symbol_size, loss_rate),
             |b, &(k, symbol_size, loss_rate)| {
                 // Create scenario once, reuse for all iterations
-                let (decoder, received_symbols) = create_high_loss_decode_scenario(k, symbol_size, loss_rate);
+                let (decoder, received_symbols) =
+                    create_high_loss_decode_scenario(k, symbol_size, loss_rate);
 
                 b.iter(|| {
                     let result = black_box(decoder.decode(&received_symbols))
@@ -113,26 +120,27 @@ fn bench_elimination_scaling(c: &mut Criterion) {
     for k in k_values {
         let benchmark_id = BenchmarkId::from_parameter(k);
 
-        group.bench_with_input(
-            benchmark_id,
-            &k,
-            |b, &k| {
-                let (decoder, received_symbols) = create_high_loss_decode_scenario(k, symbol_size, loss_rate);
+        group.bench_with_input(benchmark_id, &k, |b, &k| {
+            let (decoder, received_symbols) =
+                create_high_loss_decode_scenario(k, symbol_size, loss_rate);
 
-                b.iter(|| {
-                    let result = black_box(decoder.decode(&received_symbols))
-                        .expect("decode should succeed");
+            b.iter(|| {
+                let result =
+                    black_box(decoder.decode(&received_symbols)).expect("decode should succeed");
 
-                    // Track elimination work performed
-                    black_box(result.stats.gauss_ops);
-                    black_box(result.stats.inactivated);
-                });
-            },
-        );
+                // Track elimination work performed
+                black_box(result.stats.gauss_ops);
+                black_box(result.stats.inactivated);
+            });
+        });
     }
 
     group.finish();
 }
 
-criterion_group!(benches, bench_blocked_elimination, bench_elimination_scaling);
+criterion_group!(
+    benches,
+    bench_blocked_elimination,
+    bench_elimination_scaling
+);
 criterion_main!(benches);

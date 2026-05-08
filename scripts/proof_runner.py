@@ -319,6 +319,233 @@ class AgentMailChecker:
         return f"{classification} reservation for {pattern} affects {touched_file}"
 
 
+class BuildSlotChecker:
+    """Fixture-backed Agent Mail build-slot admission checker."""
+
+    def __init__(
+        self,
+        project_key: str,
+        agent_name: str = "unknown",
+        build_slot: str = "proof-runner-rch",
+        build_slot_snapshot: Optional[str] = None,
+        skip_build_slot_check: bool = False
+    ):
+        self.project_key = project_key
+        self.agent_name = agent_name
+        self.build_slot = build_slot
+        self.build_slot_snapshot = Path(build_slot_snapshot) if build_slot_snapshot else None
+        self.skip_build_slot_check = skip_build_slot_check
+        self.last_check = {
+            "source": "not_requested",
+            "slot": build_slot,
+            "classifications": [],
+            "release_after_command": None
+        }
+
+    def check_build_slot(
+        self,
+        lane: Dict[str, Any],
+        execute: bool
+    ) -> Tuple[bool, List[Dict[str, Any]]]:
+        """
+        Check build-slot admission for execute mode.
+        Returns (has_conflicts, conflicts_list).
+        """
+        command = lane.get("command", "")
+        if self.skip_build_slot_check or not execute or "rch exec --" not in command:
+            self.last_check = {
+                "source": "not_required",
+                "slot": self.build_slot,
+                "classifications": [],
+                "release_after_command": None
+            }
+            return False, []
+
+        if not self.build_slot_snapshot:
+            conflict = {
+                "slot": self.build_slot,
+                "classification": "unavailable",
+                "holder": "",
+                "expires_ts": "",
+                "summary": "build-slot snapshot unavailable for execute mode"
+            }
+            self.last_check = {
+                "source": "not_configured",
+                "slot": self.build_slot,
+                "classifications": [conflict],
+                "release_after_command": None
+            }
+            return True, [conflict]
+
+        try:
+            snapshot = json.loads(self.build_slot_snapshot.read_text())
+        except Exception as error:
+            conflict = {
+                "slot": self.build_slot,
+                "classification": "unavailable",
+                "holder": "",
+                "expires_ts": "",
+                "summary": f"build-slot snapshot unavailable: {error}"
+            }
+            self.last_check = {
+                "source": "snapshot",
+                "slot": self.build_slot,
+                "classifications": [conflict],
+                "release_after_command": None
+            }
+            return True, [conflict]
+
+        classifications = self._classify_snapshot(snapshot)
+        active_owned = [
+            item for item in classifications
+            if item["classification"] in {"acquired", "renewed", "owned-active"}
+        ]
+        conflicts = [
+            item for item in classifications
+            if item["classification"] in {"peer-active", "unknown-owner", "unavailable"}
+        ]
+
+        release_after_command = None
+        if active_owned:
+            release_after_command = (
+                "release_build_slot("
+                f"project_key={self.project_key!r}, agent_name={self.agent_name!r}, "
+                f"slot={self.build_slot!r})"
+            )
+        elif not conflicts:
+            conflicts = [{
+                "slot": self.build_slot,
+                "classification": "missing-owned-active",
+                "holder": "",
+                "expires_ts": "",
+                "summary": f"no owned active build slot for {self.build_slot}"
+            }]
+
+        self.last_check = {
+            "source": "snapshot",
+            "slot": self.build_slot,
+            "classifications": classifications or conflicts,
+            "release_after_command": release_after_command
+        }
+        return bool(conflicts), conflicts
+
+    def _classify_snapshot(self, snapshot: Any) -> List[Dict[str, Any]]:
+        rows = self._slot_rows(snapshot)
+        classifications = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            slot = self._slot_name(row)
+            if slot and slot != self.build_slot:
+                continue
+            classifications.append(self._classify_row(row))
+        return classifications
+
+    def _slot_rows(self, snapshot: Any) -> List[Dict[str, Any]]:
+        if isinstance(snapshot, list):
+            return [item for item in snapshot if isinstance(item, dict)]
+        if not isinstance(snapshot, dict):
+            return []
+
+        rows: List[Dict[str, Any]] = []
+        for key in ("acquired", "renewed", "released"):
+            value = snapshot.get(key)
+            if isinstance(value, dict):
+                row = dict(value)
+                row.setdefault("state", key)
+                rows.append(row)
+        for key in ("build_slots", "slots", "active_slots", "leases", "granted"):
+            value = snapshot.get(key)
+            if isinstance(value, list):
+                rows.extend(item for item in value if isinstance(item, dict))
+        conflicts = snapshot.get("conflicts")
+        if isinstance(conflicts, list):
+            for conflict in conflicts:
+                if not isinstance(conflict, dict):
+                    continue
+                holders = conflict.get("holders")
+                if isinstance(holders, list) and holders:
+                    for holder in holders:
+                        if isinstance(holder, dict):
+                            row = dict(holder)
+                            row.setdefault("slot", conflict.get("slot", self.build_slot))
+                            row.setdefault("state", "conflict")
+                            rows.append(row)
+                else:
+                    row = dict(conflict)
+                    row.setdefault("state", "conflict")
+                    rows.append(row)
+        return rows
+
+    def _classify_row(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        holder = self._holder_name(row)
+        expires_ts = str(row.get("expires_ts") or row.get("expires_at") or "")
+        state = str(row.get("state") or row.get("status") or row.get("classification") or "")
+        released_ts = row.get("released_ts") or row.get("released_at")
+
+        if released_ts or state == "released":
+            classification = "released"
+        elif self._is_expired(expires_ts):
+            classification = "expired"
+        elif not holder:
+            classification = "unknown-owner"
+        elif holder == self.agent_name and state == "renewed":
+            classification = "renewed"
+        elif holder == self.agent_name and state in {"acquired", "granted"}:
+            classification = "acquired"
+        elif holder == self.agent_name:
+            classification = "owned-active"
+        else:
+            classification = "peer-active"
+
+        return {
+            "slot": self._slot_name(row) or self.build_slot,
+            "classification": classification,
+            "holder": holder or "",
+            "expires_ts": expires_ts,
+            "summary": self._summary(classification, holder, expires_ts)
+        }
+
+    def _slot_name(self, row: Dict[str, Any]) -> str:
+        for key in ("slot", "build_slot", "slot_name", "name"):
+            value = row.get(key)
+            if isinstance(value, str) and value:
+                return value
+        return ""
+
+    def _holder_name(self, row: Dict[str, Any]) -> str:
+        for key in ("agent_name", "agent", "holder", "owner"):
+            value = row.get(key)
+            if isinstance(value, str) and value:
+                return value
+        return ""
+
+    def _is_expired(self, expires_ts: Any) -> bool:
+        if not expires_ts:
+            return False
+        try:
+            timestamp = str(expires_ts).replace("Z", "+00:00")
+            expires_at = datetime.fromisoformat(timestamp)
+        except ValueError:
+            return False
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        return expires_at <= datetime.now(timezone.utc)
+
+    def _summary(self, classification: str, holder: str, expires_ts: str) -> str:
+        if classification in {"acquired", "renewed", "owned-active"}:
+            return f"{classification} build slot held by {holder} until {expires_ts}"
+        if classification == "peer-active":
+            return f"peer-active build slot held by {holder} until {expires_ts}"
+        if classification == "expired":
+            return f"expired build slot no longer grants admission for {self.build_slot}"
+        if classification == "released":
+            return f"released build slot no longer grants admission for {self.build_slot}"
+        if classification == "unknown-owner":
+            return f"unknown-owner build slot blocks {self.build_slot}"
+        return f"{classification} build slot for {self.build_slot}"
+
+
 class ProofRunner:
     """Main proof runner logic."""
 
@@ -327,18 +554,29 @@ class ProofRunner:
         repo_root: str = ".",
         agent_name: str = "unknown",
         reservation_snapshot: Optional[str] = None,
-        skip_dirty_check: bool = False
+        build_slot_snapshot: Optional[str] = None,
+        build_slot: str = "proof-runner-rch",
+        skip_dirty_check: bool = False,
+        skip_build_slot_check: bool = False
     ):
         self.repo_root = Path(repo_root).resolve()
         self.manifest = ProofLaneManifest()
         self.git = GitStatus(repo_root)
         self.agent_mail = AgentMailChecker(str(self.repo_root), agent_name, reservation_snapshot)
+        self.build_slots = BuildSlotChecker(
+            str(self.repo_root),
+            agent_name,
+            build_slot,
+            build_slot_snapshot,
+            skip_build_slot_check
+        )
         self.skip_dirty_check = skip_dirty_check
 
     def analyze_preflight(
         self,
         lane_id: str,
-        touched_files: List[str]
+        touched_files: List[str],
+        execute: bool = False
     ) -> Tuple[bool, ValidationFrontierRecord]:
         """
         Analyze preflight conditions for a proof lane.
@@ -356,6 +594,20 @@ class ProofRunner:
 
         command = lane["command"]
         record = ValidationFrontierRecord(command, touched_files)
+
+        has_slot_conflicts, slot_conflicts = self.build_slots.check_build_slot(lane, execute)
+        if has_slot_conflicts and slot_conflicts:
+            conflict = slot_conflicts[0]
+            supplemental = self._generate_narrow_proof(touched_files, lane)
+            return False, record.as_blocked_external(
+                "build_slot_conflict"
+                if conflict.get("classification") in {"peer-active", "unknown-owner"}
+                else "build_slot_unavailable",
+                f"build-slot:{conflict.get('slot', 'unknown')}",
+                f"build-slot admission blocked ({conflict.get('classification', 'unknown')}): {conflict.get('summary', 'unknown')}",
+                owner=conflict.get("holder", "") or "Agent Mail build-slot admission",
+                supplemental=supplemental
+            )
 
         # Check file reservations before dirty state so explicit peer locks win.
         has_conflicts, conflicts = self.agent_mail.check_file_reservations(touched_files)
@@ -440,15 +692,17 @@ class ProofRunner:
         self,
         lane_id: str,
         touched_files: List[str],
+        execute: bool = False,
         output_format: str = "json"
     ) -> Dict[str, Any]:
         """Run preflight analysis and return results."""
-        can_proceed, record = self.analyze_preflight(lane_id, touched_files)
+        can_proceed, record = self.analyze_preflight(lane_id, touched_files, execute=execute)
 
         result = {
             "preflight_passed": can_proceed,
             "lane_id": lane_id,
             "command_would_run": self.manifest.get_lane(lane_id)["command"] if self.manifest.get_lane(lane_id) else "",
+            "build_slot_check": self.build_slots.last_check,
             "reservation_check": self.agent_mail.last_check,
             "validation_frontier_record": record,
             "recommendation": "proceed" if can_proceed else "use_supplemental"
@@ -531,9 +785,23 @@ def main():
         help="JSON snapshot of Agent Mail file reservations for fixture-backed checks"
     )
     parser.add_argument(
+        "--build-slot-snapshot",
+        help="JSON snapshot of Agent Mail build-slot admission for fixture-backed execute checks"
+    )
+    parser.add_argument(
+        "--build-slot",
+        default="proof-runner-rch",
+        help="Build slot name required for rch-backed execute mode"
+    )
+    parser.add_argument(
         "--skip-dirty-check",
         action="store_true",
         help="Skip git dirty-state checks; intended for reservation classifier fixtures"
+    )
+    parser.add_argument(
+        "--skip-build-slot-check",
+        action="store_true",
+        help="Skip build-slot admission checks; intended only for non-rch fixtures"
     )
 
     args = parser.parse_args()
@@ -542,7 +810,10 @@ def main():
         runner = ProofRunner(
             agent_name=args.agent_name,
             reservation_snapshot=args.reservation_snapshot,
-            skip_dirty_check=args.skip_dirty_check
+            build_slot_snapshot=args.build_slot_snapshot,
+            build_slot=args.build_slot,
+            skip_dirty_check=args.skip_dirty_check,
+            skip_build_slot_check=args.skip_build_slot_check
         )
 
         if args.list_lanes:
@@ -570,7 +841,7 @@ def main():
             parser.error("--lane is required when not using --list-lanes or --suggest-lanes")
 
         # Run preflight analysis
-        result = runner.run_preflight(args.lane, args.touched_files, args.output)
+        result = runner.run_preflight(args.lane, args.touched_files, execute=args.execute, output_format=args.output)
 
         if args.output == "json":
             print(json.dumps(result, indent=2))

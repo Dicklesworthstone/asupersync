@@ -4601,7 +4601,9 @@ mod tests {
         );
 
         server.unregister_connection(&connection_id);
-        crate::test_complete!("test_dispatch_unary_drop_during_handler_releases_stream_registration");
+        crate::test_complete!(
+            "test_dispatch_unary_drop_during_handler_releases_stream_registration"
+        );
     }
 
     #[test]

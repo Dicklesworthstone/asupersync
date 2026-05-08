@@ -9,11 +9,11 @@
 //! cargo build --profile release-perf --bench virtual_time_wheel_cancel_storm
 //! samply record --save-only -o wheel_cancel_storm.json -- ./target/release-perf/deps/virtual_time_wheel_cancel_storm-*
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use asupersync::lab::virtual_time_wheel::VirtualTimerWheel;
-use std::task::{Context, RawWaker, RawWakerVTable, Waker};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, RawWaker, RawWakerVTable, Waker};
 
 /// Lightweight waker for benchmarking (doesn't actually wake anything)
 fn noop_waker() -> Waker {
@@ -118,8 +118,12 @@ fn bench_cancel_storm(c: &mut Criterion) {
 
                         // Verify correctness
                         let expected_remaining = timer_count - cancel_count;
-                        assert!(expired.len() <= expected_remaining,
-                            "Too many timers fired: {} > {}", expired.len(), expected_remaining);
+                        assert!(
+                            expired.len() <= expected_remaining,
+                            "Too many timers fired: {} > {}",
+                            expired.len(),
+                            expected_remaining
+                        );
 
                         black_box(counter.wake_count());
                     },
@@ -260,7 +264,8 @@ fn bench_next_deadline_cancelled_scan(c: &mut Criterion) {
                 // This forces next_deadline() to scan through many cancelled entries
                 for i in 0..timer_count {
                     let handle = wheel.insert(i as u64 + 1, waker.clone());
-                    if i < (timer_count * 9) / 10 { // Cancel 90% of earliest timers
+                    if i < (timer_count * 9) / 10 {
+                        // Cancel 90% of earliest timers
                         wheel.cancel(handle);
                     }
                 }

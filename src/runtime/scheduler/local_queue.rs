@@ -221,22 +221,41 @@ impl LocalQueue {
     /// - Force inline for critical scheduling path
     #[inline]
     fn schedule_local_push(&self, task: TaskId) -> bool {
-        self.tasks.with_tasks_arena_mut(|arena| {
-            if arena.get(task.arena_index()).is_none() {
-                return false;
-            }
-            let mut inner = self.inner.lock();
-            // O(1) HashSet check + insert vs. the legacy O(N)
-            // SmallVec::contains scan.
-            if inner.presence.insert(task) {
-                inner.queue.push(task);
-                let new_len = inner.queue.len();
-                drop(inner);
-                // Use Relaxed ordering for TLS fast path - better performance
-                self.cached_len.store(new_len, Ordering::Relaxed);
-            }
+        // br-asupersync-yvmiat: In production builds, skip the contended state lock
+        // for arena validation. The queue lock alone provides sufficient safety,
+        // and production code should not be pushing invalid TaskIds.
+        #[cfg(debug_assertions)]
+        {
+            self.tasks.with_tasks_arena_mut(|arena| {
+                if arena.get(task.arena_index()).is_none() {
+                    return false;
+                }
+                self.schedule_local_push_unchecked(task);
+                true
+            })
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            self.schedule_local_push_unchecked(task);
             true
-        })
+        }
+    }
+
+    /// Push to local queue without arena validation. Used internally by schedule_local_push.
+    ///
+    /// br-asupersync-yvmiat: Extracted to eliminate duplicate code between debug and production paths.
+    #[inline]
+    fn schedule_local_push_unchecked(&self, task: TaskId) {
+        let mut inner = self.inner.lock();
+        // O(1) HashSet check + insert vs. the legacy O(N)
+        // SmallVec::contains scan.
+        if inner.presence.insert(task) {
+            inner.queue.push(task);
+            let new_len = inner.queue.len();
+            drop(inner);
+            // Use Relaxed ordering for TLS fast path - better performance
+            self.cached_len.store(new_len, Ordering::Relaxed);
+        }
     }
 
     /// Pushes multiple tasks to the local queue under one arena/queue lock.

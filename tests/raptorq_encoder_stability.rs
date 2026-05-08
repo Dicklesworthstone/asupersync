@@ -7,7 +7,7 @@
 //! deterministic for given (source_data, symbol_size, seed) inputs.
 
 use asupersync::raptorq::systematic::SystematicEncoder;
-use insta::{assert_debug_snapshot, Settings};
+use insta::{Settings, assert_debug_snapshot};
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -39,7 +39,12 @@ struct RepairSymbolData {
 
 impl EncoderTestCase {
     const fn new(k: usize, symbol_size: usize, seed: u64, repair_count: usize) -> Self {
-        Self { k, symbol_size, seed, repair_count }
+        Self {
+            k,
+            symbol_size,
+            seed,
+            repair_count,
+        }
     }
 }
 
@@ -162,8 +167,14 @@ fn test_encoder_seed_sensitivity() {
     let output_seed2 = capture_encoder_output(&config_seed2);
 
     // Source symbols should be same (same K, symbol_size)
-    assert_eq!(output_base.source_symbols_hash, output_seed1.source_symbols_hash);
-    assert_eq!(output_base.source_symbols_hash, output_seed2.source_symbols_hash);
+    assert_eq!(
+        output_base.source_symbols_hash,
+        output_seed1.source_symbols_hash
+    );
+    assert_eq!(
+        output_base.source_symbols_hash,
+        output_seed2.source_symbols_hash
+    );
 
     // Repair symbols should differ (different seeds)
     assert_ne!(output_base.repair_symbols, output_seed1.repair_symbols);
@@ -183,7 +194,7 @@ fn test_encoder_parameter_stability() {
         (10, 64),
         (100, 128),
         (1000, 256),
-        (256, 1316),   // Common RaptorQ symbol size
+        (256, 1316), // Common RaptorQ symbol size
         (1024, 1316),
     ];
 
@@ -217,8 +228,7 @@ fn test_encoder_symbol_size_consistency() {
         // Every repair symbol should have exactly symbol_size bytes
         for repair in &output.repair_symbols {
             assert_eq!(
-                repair.symbol_length,
-                symbol_size,
+                repair.symbol_length, symbol_size,
                 "Repair symbol ESI {} has wrong length: {} != {}",
                 repair.esi, repair.symbol_length, symbol_size
             );
@@ -228,7 +238,9 @@ fn test_encoder_symbol_size_consistency() {
                 repair.symbol_data_hex.len(),
                 symbol_size * 2,
                 "Hex encoding length mismatch for ESI {}: {} != {}",
-                repair.esi, repair.symbol_data_hex.len(), symbol_size * 2
+                repair.esi,
+                repair.symbol_data_hex.len(),
+                symbol_size * 2
             );
         }
     }

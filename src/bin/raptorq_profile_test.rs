@@ -18,7 +18,9 @@ fn main() {
 
     println!(
         "Testing K={}, symbol_size={}, loss_fraction={:.1}%",
-        k, symbol_size, loss_fraction * 100.0
+        k,
+        symbol_size,
+        loss_fraction * 100.0
     );
 
     // Generate test data as k symbols of symbol_size bytes each
@@ -137,7 +139,11 @@ fn main() {
         );
     }
 
-    for (i, (original, decoded)) in source_symbols.iter().zip(decoded_symbols.iter()).enumerate() {
+    for (i, (original, decoded)) in source_symbols
+        .iter()
+        .zip(decoded_symbols.iter())
+        .enumerate()
+    {
         if original != decoded {
             panic!("Symbol {} data mismatch!", i);
         }

@@ -989,7 +989,10 @@ mod tests {
         }
 
         // Test next_deadline() hot loop - should scan through 90% cancelled timers
-        eprintln!("Testing next_deadline() with {} cancelled timers to scan...", cancel_count);
+        eprintln!(
+            "Testing next_deadline() with {} cancelled timers to scan...",
+            cancel_count
+        );
         let start = std::time::Instant::now();
         let deadline = wheel.next_deadline();
         let duration = start.elapsed();
@@ -1024,8 +1027,12 @@ mod tests {
         let cancel_count = (timer_count * 9) / 10; // 90% cancellation
 
         eprintln!("=== VirtualTimerWheel Cleanup Performance Comparison ===");
-        eprintln!("Timers: {}, Cancelled: {} ({}%)", timer_count, cancel_count,
-                  (cancel_count * 100) / timer_count);
+        eprintln!(
+            "Timers: {}, Cancelled: {} ({}%)",
+            timer_count,
+            cancel_count,
+            (cancel_count * 100) / timer_count
+        );
 
         // Test current O(k) incremental approach
         {

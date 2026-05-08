@@ -15,8 +15,12 @@ fn main() {
     let loss_rate = 0.70;
     let seed = 0x12345678u64;
 
-    println!("Test parameters: K={}, symbol_size={}, loss_rate={}%",
-        k, symbol_size, loss_rate * 100.0);
+    println!(
+        "Test parameters: K={}, symbol_size={}, loss_rate={}%",
+        k,
+        symbol_size,
+        loss_rate * 100.0
+    );
 
     // Generate source data
     let mut source_symbols = Vec::with_capacity(k);
@@ -66,7 +70,9 @@ fn main() {
     let needed_repairs = loss_count + 50;
     for i in 0..needed_repairs {
         let repair_esi = (k + i) as u32;
-        let (cols, coefs) = decoder.repair_equation(repair_esi).expect("repair equation failed");
+        let (cols, coefs) = decoder
+            .repair_equation(repair_esi)
+            .expect("repair equation failed");
         let repair_data = encoder.repair_symbol(repair_esi);
         received_symbols.push(ReceivedSymbol::repair(repair_esi, cols, coefs, repair_data));
     }
@@ -80,10 +86,10 @@ fn main() {
     let decode_time = decode_start.elapsed();
 
     println!("Decode completed in {:.1}ms", decode_time.as_millis());
-    println!("Decode stats: peeled={}, inactivated={}, gauss_ops={}",
-        decode_result.stats.peeled,
-        decode_result.stats.inactivated,
-        decode_result.stats.gauss_ops);
+    println!(
+        "Decode stats: peeled={}, inactivated={}, gauss_ops={}",
+        decode_result.stats.peeled, decode_result.stats.inactivated, decode_result.stats.gauss_ops
+    );
 
     // Verify correctness
     let mut decoded_flat = Vec::new();
@@ -104,17 +110,24 @@ fn main() {
         if expected != actual {
             mismatches += 1;
             if mismatches <= 5 {
-                println!("Mismatch at byte {}: expected {}, got {}", i, expected, actual);
+                println!(
+                    "Mismatch at byte {}: expected {}, got {}",
+                    i, expected, actual
+                );
             }
         }
     }
 
     if mismatches == 0 {
         println!("✓ SUCCESS: Blocked elimination produces correct results!");
-        println!("✓ Decoded {:.1}MB correctly",
-            (source_flat.len() as f64) / (1024.0 * 1024.0));
-        println!("✓ Throughput: {:.1} MB/s",
-            (source_flat.len() as f64 / (1024.0 * 1024.0)) / decode_time.as_secs_f64());
+        println!(
+            "✓ Decoded {:.1}MB correctly",
+            (source_flat.len() as f64) / (1024.0 * 1024.0)
+        );
+        println!(
+            "✓ Throughput: {:.1} MB/s",
+            (source_flat.len() as f64 / (1024.0 * 1024.0)) / decode_time.as_secs_f64()
+        );
     } else {
         panic!("❌ FAILURE: {} byte mismatches detected!", mismatches);
     }

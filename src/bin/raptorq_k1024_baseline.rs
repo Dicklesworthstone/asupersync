@@ -120,7 +120,11 @@ fn main() {
     assert_eq!(decoded_symbols.len(), k);
 
     // Verify data matches
-    for (i, (original, decoded)) in source_symbols.iter().zip(decoded_symbols.iter()).enumerate() {
+    for (i, (original, decoded)) in source_symbols
+        .iter()
+        .zip(decoded_symbols.iter())
+        .enumerate()
+    {
         if original != decoded {
             panic!("Symbol {} data mismatch!", i);
         }

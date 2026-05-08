@@ -1,0 +1,290 @@
+{
+  "contract_version": "proof-status-snapshot-v1",
+  "bead_id": "asupersync-aj7lx3.5",
+  "created_date": "2026-05-08",
+  "description": "Machine-readable green/red status snapshot that maps README and AGENTS proof claims to canonical proof-lane commands and validation-frontier blocker evidence.",
+  "source_of_truth": {
+    "snapshot": "artifacts/proof_status_snapshot_v1.json",
+    "verifier": "tests/proof_status_snapshot_contract.rs",
+    "proof_lane_manifest": "artifacts/proof_lane_manifest_v1.json",
+    "proof_lane_manifest_verifier": "tests/proof_lane_manifest_contract.rs",
+    "validation_frontier_ledger": "artifacts/validation_frontier_ledger_schema_v1.json",
+    "validation_frontier_verifier": "tests/validation_frontier_ledger_contract.rs",
+    "readme": "README.md",
+    "agent_instructions": "AGENTS.md"
+  },
+  "status_catalog": [
+    {
+      "status": "green",
+      "meaning": "The claim has a canonical rch-routed proof lane and no blocker row attached in this snapshot. Run the listed command for fresh live evidence."
+    },
+    {
+      "status": "yellow_scoped",
+      "meaning": "The claim is intentionally scoped or quarantined; it must not be cited as a broader production proof."
+    },
+    {
+      "status": "yellow_frontier",
+      "meaning": "The claim has a canonical broad frontier command; green output proves only the listed covered surface, and failures must be cited through validation-frontier rows."
+    },
+    {
+      "status": "red_blocked_external",
+      "meaning": "The claim is currently represented by an exact validation-frontier blocker row and should be cited with the attached failure file, line, command, and supplemental proof."
+    }
+  ],
+  "required_claim_categories": [
+    "no-Tokio production graph",
+    "structured concurrency invariants",
+    "cancellation/oracle suite",
+    "scheduler fairness",
+    "fuzz manifest",
+    "conformance runners",
+    "formal Lean posture",
+    "rustdoc/API examples"
+  ],
+  "claim_categories": [
+    {
+      "claim_id": "no-tokio-production-graph",
+      "category": "no-Tokio production graph",
+      "status": "green",
+      "doc_claim_markers": {
+        "README.md": [
+          "default production graph has no normal-edge dependency on tokio",
+          "optional `metrics` feature also has no normal-edge dependency on tokio"
+        ],
+        "AGENTS.md": [
+          "default production runtime crate",
+          "metrics production runtime crate"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "default-production-tokio-free",
+        "metrics-production-tokio-free"
+      ],
+      "manifest_lane_ids": [
+        "default-production-tokio-tree",
+        "metrics-production-tokio-tree"
+      ],
+      "proof_commands": [
+        "rch exec -- cargo tree -e normal -p asupersync -i tokio",
+        "rch exec -- cargo tree -e normal -p asupersync --features metrics -i tokio"
+      ],
+      "blocked_frontier": null,
+      "notes": "Green here is a mapped proof lane, not a fresh execution result."
+    },
+    {
+      "claim_id": "structured-concurrency-invariants",
+      "category": "structured concurrency invariants",
+      "status": "green",
+      "doc_claim_markers": {
+        "README.md": [
+          "checks the six non-negotiable runtime invariants",
+          "structured concurrency single-owner"
+        ],
+        "AGENTS.md": [
+          "Structured concurrency",
+          "Region close = quiescence"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "formal-lean-core-invariants"
+      ],
+      "manifest_lane_ids": [
+        "formal-lean-build"
+      ],
+      "proof_commands": [
+        "rch exec -- lake --dir formal/lean build"
+      ],
+      "blocked_frontier": null,
+      "notes": "This maps only the formal core invariants covered by the Lean project."
+    },
+    {
+      "claim_id": "cancellation-oracle-suite",
+      "category": "cancellation/oracle suite",
+      "status": "yellow_frontier",
+      "doc_claim_markers": {
+        "README.md": [
+          "Cancellation is request",
+          "Lab runtime"
+        ],
+        "AGENTS.md": [
+          "Cancellation is a protocol",
+          "Cancellation protocol"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "lib-test-frontier",
+        "formal-lean-core-invariants"
+      ],
+      "manifest_lane_ids": [
+        "lib-tests",
+        "formal-lean-build"
+      ],
+      "proof_commands": [
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lib_tests CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --lib --features test-internals -- --nocapture",
+        "rch exec -- lake --dir formal/lean build"
+      ],
+      "blocked_frontier": null,
+      "notes": "The lib-test lane is broad frontier evidence; exact blocker rows are required if it stops outside the touched slice."
+    },
+    {
+      "claim_id": "scheduler-fairness",
+      "category": "scheduler fairness",
+      "status": "yellow_frontier",
+      "doc_claim_markers": {
+        "README.md": [
+          "Scheduler behavior is intentionally explicit",
+          "fairness telemetry"
+        ],
+        "AGENTS.md": [
+          "Scheduler fairness",
+          "Performance Requirements"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "lib-test-frontier",
+        "all-target-compile-frontier"
+      ],
+      "manifest_lane_ids": [
+        "lib-tests",
+        "all-targets-check"
+      ],
+      "proof_commands": [
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lib_tests CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --lib --features test-internals -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --all-targets"
+      ],
+      "blocked_frontier": null,
+      "notes": "Fairness behavior needs lane-specific tests or benchmarks for behavioral proof; these are compile/test frontier commands."
+    },
+    {
+      "claim_id": "fuzz-manifest",
+      "category": "fuzz manifest",
+      "status": "yellow_scoped",
+      "doc_claim_markers": {
+        "README.md": [
+          "fuzz smoke",
+          "gen-tonic-messages"
+        ],
+        "AGENTS.md": [
+          "fuzz smoke evidence",
+          "gen-tonic-messages"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "fuzz-manifest-smoke",
+        "fuzz-tokio-quarantine"
+      ],
+      "manifest_lane_ids": [
+        "fuzz-manifest-smoke",
+        "fuzz-tokio-quarantine-tree"
+      ],
+      "proof_commands": [
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fuzz_manifest_smoke CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check --manifest-path fuzz/Cargo.toml",
+        "rch exec -- cargo tree -e normal -p asupersync --features fuzz -i tokio"
+      ],
+      "blocked_frontier": null,
+      "notes": "The tokio edge is expected only in the fuzz quarantine lane and must not weaken production no-Tokio claims."
+    },
+    {
+      "claim_id": "conformance-runners",
+      "category": "conformance runners",
+      "status": "red_blocked_external",
+      "doc_claim_markers": {
+        "README.md": [
+          "tests/conformance/mod.rs",
+          "result lanes are gated"
+        ],
+        "AGENTS.md": [
+          "conformance",
+          "Cross-component conformance suite"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "all-target-compile-frontier",
+        "clippy-frontier"
+      ],
+      "manifest_lane_ids": [
+        "all-targets-check",
+        "clippy-all-targets"
+      ],
+      "proof_commands": [
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --all-targets",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_clippy_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --all-targets -- -D warnings"
+      ],
+      "blocked_frontier": {
+        "fixture_id": "VF-CLIPPY-LINT-WALL",
+        "command": "rch exec -- cargo clippy -p asupersync-conformance --bin otel_resource_conformance -- -D warnings",
+        "decision": "blocked-external",
+        "error_class": "clippy_lint_wall",
+        "first_failure": {
+          "crate_or_surface": "asupersync",
+          "target": "lib",
+          "file": "src/observability/otel.rs",
+          "line": 114
+        },
+        "summary": "this function has too many arguments (8/7)",
+        "supplemental_proof_command": "rch exec -- cargo test -p asupersync-conformance --bin otel_resource_conformance -- --nocapture"
+      },
+      "notes": "This row demonstrates the required exact red/blocker shape for conformance-adjacent proof stops."
+    },
+    {
+      "claim_id": "formal-lean-posture",
+      "category": "formal Lean posture",
+      "status": "green",
+      "doc_claim_markers": {
+        "README.md": [
+          "The proof posture is exact",
+          "canonical proof command is `rch exec -- lake --dir formal/lean build`"
+        ],
+        "AGENTS.md": [
+          "formal Lean proof evidence",
+          "Canonical proof-command manifest"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "formal-lean-core-invariants"
+      ],
+      "manifest_lane_ids": [
+        "formal-lean-build"
+      ],
+      "proof_commands": [
+        "rch exec -- lake --dir formal/lean build"
+      ],
+      "blocked_frontier": null,
+      "notes": "Green is limited to the Lean core-invariant project and does not cover every adapter or protocol implementation."
+    },
+    {
+      "claim_id": "rustdoc-api-examples",
+      "category": "rustdoc/API examples",
+      "status": "yellow_frontier",
+      "doc_claim_markers": {
+        "README.md": [
+          "rustdoc frontier",
+          "public API audit"
+        ],
+        "AGENTS.md": [
+          "rustdoc frontier evidence",
+          "tests/proof_status_snapshot_contract.rs"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "rustdoc-api-frontier"
+      ],
+      "manifest_lane_ids": [
+        "rustdoc-api"
+      ],
+      "proof_commands": [
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rustdoc_api CARGO_INCREMENTAL=0 RUSTDOCFLAGS='-D warnings' cargo doc -p asupersync --no-deps --features test-internals"
+      ],
+      "blocked_frontier": null,
+      "notes": "This is API-doc frontier evidence, not a substitute for integration, conformance, or fuzz lanes."
+    }
+  ],
+  "documentation_contract": {
+    "docs_must_reference_snapshot": [
+      "README.md",
+      "AGENTS.md"
+    ],
+    "required_marker": "artifacts/proof_status_snapshot_v1.json",
+    "verifier_marker": "tests/proof_status_snapshot_contract.rs"
+  }
+}

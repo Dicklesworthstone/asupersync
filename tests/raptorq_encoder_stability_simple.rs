@@ -27,8 +27,14 @@ fn test_encoder_simple_k10() {
     let repair_symbol = encoder.repair_symbol(repair_esi);
 
     // Simple golden capture
-    let output = format!("K={}, symbol_size={}, seed={:08x}, repair_len={}, repair_hex={}",
-        k, symbol_size, seed, repair_symbol.len(), hex::encode(&repair_symbol));
+    let output = format!(
+        "K={}, symbol_size={}, seed={:08x}, repair_len={}, repair_hex={}",
+        k,
+        symbol_size,
+        seed,
+        repair_symbol.len(),
+        hex::encode(&repair_symbol)
+    );
 
     assert_debug_snapshot!("simple_encoder_k10", output);
 }
