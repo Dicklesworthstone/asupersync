@@ -128,7 +128,7 @@
     }
   ],
   "proof_commands": [
-    "rch exec -- cargo test -p asupersync --test proof_console_report_contract -- --nocapture",
-    "rch exec -- cargo test -p asupersync --test proof_lane_manifest_contract --test proof_status_snapshot_contract -- --nocapture"
+    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_console_report_docs cargo test -p asupersync --test proof_console_report_contract -- --nocapture",
+    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_console_report_docs cargo test -p asupersync --test proof_lane_manifest_contract --test proof_status_snapshot_contract -- --nocapture"
   ]
 }
