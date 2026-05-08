@@ -20,7 +20,10 @@ SCHEMA_VERSION = "rch-retrieval-receipt-v1"
 LOCAL_FALLBACK_RE = re.compile(r"(?m)(^\[RCH\] local \(|falling back to local)")
 REMOTE_FINISHED_RE = re.compile(r"Remote command finished: exit=(?P<exit>-?\d+)")
 REMOTE_FAILED_RE = re.compile(r"(?m)^\[RCH\] remote .* failed \(exit (?P<exit>-?\d+)\)")
-ARTIFACTS_RETRIEVED_RE = re.compile(r"Artifacts retrieved in (?P<elapsed_ms>\d+)ms")
+ARTIFACTS_RETRIEVED_RE = re.compile(
+    r"Artifacts retrieved in (?P<elapsed_ms>\d+)ms"
+    r"(?: \((?P<file_count>\d+) files, (?P<byte_count>\d+) bytes\))?"
+)
 TIMEOUT_RE = re.compile(r"(?i)(timed out|timeout|terminated|signal TERM|exit code -1)")
 
 
@@ -92,8 +95,14 @@ def classify(text: str, wrapper_exit_code: int | None) -> dict[str, Any]:
         decision = "unknown"
 
     retrieval_elapsed_ms = None
+    artifact_file_count = None
+    artifact_bytes = None
     if retrieval_match:
         retrieval_elapsed_ms = int(retrieval_match.group("elapsed_ms"))
+        if retrieval_match.group("file_count") is not None:
+            artifact_file_count = int(retrieval_match.group("file_count"))
+        if retrieval_match.group("byte_count") is not None:
+            artifact_bytes = int(retrieval_match.group("byte_count"))
 
     return {
         "classification": classification,
@@ -106,9 +115,111 @@ def classify(text: str, wrapper_exit_code: int | None) -> dict[str, Any]:
             "retrieval_started": retrieval_started,
             "retrieval_completed": retrieval_completed,
             "retrieval_elapsed_ms": retrieval_elapsed_ms,
+            "artifact_file_count": artifact_file_count,
+            "artifact_bytes": artifact_bytes,
             "timeout_observed": timeout_observed,
             "remote_success_line": line_number(text, "Remote command finished: exit=0"),
             "retrieval_started_line": line_number(text, "Retrieving build artifacts"),
+        },
+    }
+
+
+def _budget_violation(
+    metric: str, observed: int | None, limit: int | None
+) -> dict[str, Any] | None:
+    if limit is None:
+        return None
+    if observed is None:
+        return {
+            "metric": metric,
+            "observed": None,
+            "limit": limit,
+            "reason": "missing-observation",
+        }
+    if observed > limit:
+        return {
+            "metric": metric,
+            "observed": observed,
+            "limit": limit,
+            "reason": "over-budget",
+        }
+    return None
+
+
+def artifact_budget(args: argparse.Namespace, markers: dict[str, Any]) -> dict[str, Any]:
+    limits = {
+        "max_retrieval_ms": args.max_retrieval_ms,
+        "max_artifact_files": args.max_artifact_files,
+        "max_artifact_bytes": args.max_artifact_bytes,
+    }
+    observed = {
+        "retrieval_elapsed_ms": markers["retrieval_elapsed_ms"],
+        "artifact_file_count": markers["artifact_file_count"],
+        "artifact_bytes": markers["artifact_bytes"],
+    }
+    configured = any(value is not None for value in limits.values())
+    violations = [
+        violation
+        for violation in [
+            _budget_violation(
+                "retrieval_elapsed_ms",
+                observed["retrieval_elapsed_ms"],
+                limits["max_retrieval_ms"],
+            ),
+            _budget_violation(
+                "artifact_file_count",
+                observed["artifact_file_count"],
+                limits["max_artifact_files"],
+            ),
+            _budget_violation(
+                "artifact_bytes",
+                observed["artifact_bytes"],
+                limits["max_artifact_bytes"],
+            ),
+        ]
+        if violation is not None
+    ]
+
+    if not configured:
+        status = "not-configured"
+        within_budget = None
+    elif markers["retrieval_started"] and not markers["retrieval_completed"]:
+        status = "retrieval-incomplete"
+        within_budget = False
+        violations.append(
+            {
+                "metric": "retrieval_completed",
+                "observed": False,
+                "limit": True,
+                "reason": "retrieval-timeout-or-incomplete",
+            }
+        )
+    elif violations:
+        status = "over-budget"
+        within_budget = False
+    else:
+        status = "within-budget"
+        within_budget = True
+
+    return {
+        "proof_lane": args.proof_lane or "unspecified",
+        "configured": configured,
+        "status": status,
+        "within_budget": within_budget,
+        "limits": limits,
+        "observed": observed,
+        "violations": violations,
+        "rchignore_remediation": {
+            "recommended_patterns": [".rch-*/", ".rch_target*/"],
+            "operator_note": (
+                "Keep per-lane CARGO_TARGET_DIR values under transient rch scratch paths "
+                "or add equivalent bulky artifact directories to .rchignore before rerunning."
+            ),
+            "next_steps": [
+                "use a lane-specific CARGO_TARGET_DIR under ${TMPDIR:-/tmp}/rch_target_<lane>",
+                "exclude transient rch scratch directories from artifact retrieval",
+                "rerun the same focused proof lane after trimming artifact fanout",
+            ],
         },
     }
 
@@ -157,16 +268,22 @@ def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
     text = log_path.read_text(encoding="utf-8", errors="replace")
     generated_at = args.generated_at or utc_now()
     analysis = classify(text, args.wrapper_exit_code)
+    budget = artifact_budget(args, analysis["markers"])
+    decision = analysis["decision"]
+    if analysis["classification"] == "remote_success" and budget["status"] == "over-budget":
+        decision = "passed-with-artifact-budget-warning"
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated_at,
         "current_date": current_date(generated_at),
         "log_path": str(log_path),
         "command": args.command,
+        "proof_lane": args.proof_lane or "unspecified",
         "wrapper_exit_code": args.wrapper_exit_code,
         "classification": analysis["classification"],
-        "decision": analysis["decision"],
+        "decision": decision,
         "markers": analysis["markers"],
+        "artifact_budget": budget,
         "remediation": remediation_for(analysis["classification"]),
         "non_mutating": True,
         "forbidden_actions": {
@@ -182,6 +299,22 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Classify rch artifact retrieval logs")
     parser.add_argument("--log", required=True, help="Path to an rch stdout/stderr log")
     parser.add_argument("--command", default="", help="Proof command represented by the log")
+    parser.add_argument("--proof-lane", default="", help="Stable proof-lane id for budget reporting")
+    parser.add_argument(
+        "--max-retrieval-ms",
+        type=int,
+        help="Warn when artifact retrieval exceeds this duration",
+    )
+    parser.add_argument(
+        "--max-artifact-files",
+        type=int,
+        help="Warn when retrieved artifact file count exceeds this",
+    )
+    parser.add_argument(
+        "--max-artifact-bytes",
+        type=int,
+        help="Warn when retrieved artifact bytes exceed this",
+    )
     parser.add_argument("--generated-at", default="", help="UTC timestamp for deterministic receipts")
     parser.add_argument("--wrapper-exit-code", type=int, help="Local wrapper exit code, if known")
     parser.add_argument("--output", choices=["json"], default="json")

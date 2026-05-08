@@ -15,6 +15,14 @@ fn repo_root() -> PathBuf {
 }
 
 fn run_receipt(fixture: &str, wrapper_exit_code: Option<i32>) -> Output {
+    run_receipt_with_args(fixture, wrapper_exit_code, &[])
+}
+
+fn run_receipt_with_args(
+    fixture: &str,
+    wrapper_exit_code: Option<i32>,
+    extra_args: &[&str],
+) -> Output {
     let mut command = Command::new("python3");
     command
         .arg(repo_root().join(SCRIPT_PATH))
@@ -27,6 +35,7 @@ fn run_receipt(fixture: &str, wrapper_exit_code: Option<i32>) -> Output {
         .arg("--output")
         .arg("json")
         .current_dir(repo_root());
+    command.args(extra_args);
     if let Some(code) = wrapper_exit_code {
         command.arg("--wrapper-exit-code").arg(code.to_string());
     }
@@ -35,6 +44,19 @@ fn run_receipt(fixture: &str, wrapper_exit_code: Option<i32>) -> Output {
 
 fn receipt_json(fixture: &str, wrapper_exit_code: Option<i32>) -> Value {
     let output = run_receipt(fixture, wrapper_exit_code);
+    receipt_from_output(output)
+}
+
+fn receipt_json_with_args(
+    fixture: &str,
+    wrapper_exit_code: Option<i32>,
+    extra_args: &[&str],
+) -> Value {
+    let output = run_receipt_with_args(fixture, wrapper_exit_code, extra_args);
+    receipt_from_output(output)
+}
+
+fn receipt_from_output(output: Output) -> Value {
     assert!(
         output.status.success(),
         "receipt helper failed: {}\nstdout: {}\nstderr: {}",
@@ -81,6 +103,15 @@ fn completed_artifact_retrieval_is_clean_remote_success() {
         receipt["markers"]["retrieval_elapsed_ms"].as_u64(),
         Some(2326)
     );
+    assert_eq!(
+        receipt["markers"]["artifact_file_count"].as_u64(),
+        Some(1271)
+    );
+    assert_eq!(receipt["markers"]["artifact_bytes"].as_u64(), Some(356));
+    assert_eq!(
+        receipt["artifact_budget"]["status"].as_str(),
+        Some("not-configured")
+    );
 }
 
 #[test]
@@ -110,6 +141,108 @@ fn remote_pass_then_retrieval_timeout_is_split_verdict() {
             .as_str()
             .expect("operator note")
             .contains("remote command as passed only when the remote success marker is present")
+    );
+    assert_eq!(
+        receipt["artifact_budget"]["status"].as_str(),
+        Some("not-configured")
+    );
+}
+
+#[test]
+fn completed_retrieval_reports_artifact_budget_warnings_by_lane() {
+    let receipt = receipt_json_with_args(
+        "remote_success.log",
+        None,
+        &[
+            "--proof-lane",
+            "proof-runner-contract",
+            "--max-retrieval-ms",
+            "1000",
+            "--max-artifact-files",
+            "1000",
+            "--max-artifact-bytes",
+            "128",
+        ],
+    );
+
+    assert_eq!(receipt["classification"].as_str(), Some("remote_success"));
+    assert_eq!(
+        receipt["decision"].as_str(),
+        Some("passed-with-artifact-budget-warning")
+    );
+    assert_eq!(
+        receipt["proof_lane"].as_str(),
+        Some("proof-runner-contract")
+    );
+    assert_eq!(
+        receipt["artifact_budget"]["proof_lane"].as_str(),
+        Some("proof-runner-contract")
+    );
+    assert_eq!(
+        receipt["artifact_budget"]["status"].as_str(),
+        Some("over-budget")
+    );
+    assert_eq!(
+        receipt["artifact_budget"]["within_budget"].as_bool(),
+        Some(false)
+    );
+    let violation_metrics: Vec<&str> = receipt["artifact_budget"]["violations"]
+        .as_array()
+        .expect("violations")
+        .iter()
+        .filter_map(|row| row["metric"].as_str())
+        .collect();
+    assert!(violation_metrics.contains(&"retrieval_elapsed_ms"));
+    assert!(violation_metrics.contains(&"artifact_file_count"));
+    assert!(violation_metrics.contains(&"artifact_bytes"));
+    assert!(
+        receipt["artifact_budget"]["rchignore_remediation"]["recommended_patterns"]
+            .as_array()
+            .expect("patterns")
+            .iter()
+            .any(|value| value.as_str() == Some(".rch-*/"))
+    );
+}
+
+#[test]
+fn incomplete_retrieval_reports_budget_blocker_and_rchignore_guidance() {
+    let receipt = receipt_json_with_args(
+        "passed_after_retrieval_timeout.log",
+        Some(124),
+        &[
+            "--proof-lane",
+            "proof-runner-contract",
+            "--max-retrieval-ms",
+            "1000",
+            "--max-artifact-files",
+            "1000",
+        ],
+    );
+
+    assert_eq!(
+        receipt["classification"].as_str(),
+        Some("passed_after_retrieval_timeout")
+    );
+    assert_eq!(
+        receipt["artifact_budget"]["status"].as_str(),
+        Some("retrieval-incomplete")
+    );
+    assert_eq!(
+        receipt["artifact_budget"]["within_budget"].as_bool(),
+        Some(false)
+    );
+    assert!(
+        receipt["artifact_budget"]["violations"]
+            .as_array()
+            .expect("violations")
+            .iter()
+            .any(|row| row["reason"].as_str() == Some("retrieval-timeout-or-incomplete"))
+    );
+    assert!(
+        receipt["artifact_budget"]["rchignore_remediation"]["operator_note"]
+            .as_str()
+            .expect("operator note")
+            .contains("CARGO_TARGET_DIR")
     );
 }
 
