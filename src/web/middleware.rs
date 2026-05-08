@@ -3181,8 +3181,8 @@ mod tests {
         };
         let mw = CorsMiddleware::new(handler, CorsPolicy::default());
 
-        let req = Request::new("OPTIONS", "/cors")
-            .with_header("Access-Control-Request-Method", "POST");
+        let req =
+            Request::new("OPTIONS", "/cors").with_header("Access-Control-Request-Method", "POST");
         let resp = mw.call(req);
 
         assert_eq!(
@@ -3211,8 +3211,7 @@ mod tests {
         };
         let mw = CorsMiddleware::new(handler, CorsPolicy::default());
 
-        let req = Request::new("OPTIONS", "/cors")
-            .with_header("Origin", "https://example.com");
+        let req = Request::new("OPTIONS", "/cors").with_header("Origin", "https://example.com");
         let resp = mw.call(req);
 
         assert_eq!(
@@ -3347,7 +3346,8 @@ mod tests {
             "access-control-request-headers",
         ] {
             assert!(
-                vary.split(',').any(|t| t.trim().eq_ignore_ascii_case(token)),
+                vary.split(',')
+                    .any(|t| t.trim().eq_ignore_ascii_case(token)),
                 "Vary must include {token:?}; got {vary:?}",
             );
         }
@@ -3364,8 +3364,7 @@ mod tests {
             ..CorsPolicy::default()
         };
         let mw = CorsMiddleware::new(FnHandler::new(ok_handler), policy);
-        let req = Request::new("GET", "/cors")
-            .with_header("Origin", "https://example.com");
+        let req = Request::new("GET", "/cors").with_header("Origin", "https://example.com");
         let resp = mw.call(req);
 
         let expose = resp
@@ -3382,8 +3381,7 @@ mod tests {
     #[test]
     fn fetch_3_2_simple_request_omits_expose_headers_when_policy_empty() {
         let mw = CorsMiddleware::new(FnHandler::new(ok_handler), CorsPolicy::default());
-        let req = Request::new("GET", "/cors")
-            .with_header("Origin", "https://example.com");
+        let req = Request::new("GET", "/cors").with_header("Origin", "https://example.com");
         let resp = mw.call(req);
 
         assert!(

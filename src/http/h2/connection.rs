@@ -3871,7 +3871,9 @@ mod tests {
                 Header::new(":scheme", "https"),
                 Header::new(":authority", "example.com"),
             ];
-            let stream_id = conn.open_stream(request_headers, false).expect("open stream");
+            let stream_id = conn
+                .open_stream(request_headers, false)
+                .expect("open stream");
             // Drain the queued HEADERS so next_frame returns the RST_STREAM.
             match conn.next_frame().expect("expected request HEADERS") {
                 Frame::Headers(h) => assert_eq!(h.stream_id, stream_id),
@@ -3880,7 +3882,10 @@ mod tests {
 
             conn.reset_stream(stream_id, code);
 
-            match conn.next_frame().expect("reset_stream must queue exactly one RST_STREAM") {
+            match conn
+                .next_frame()
+                .expect("reset_stream must queue exactly one RST_STREAM")
+            {
                 Frame::RstStream(rst) => {
                     assert_eq!(
                         rst.stream_id, stream_id,
