@@ -236,6 +236,27 @@ fn missing_git_sha_is_unverifiable() {
 }
 
 #[test]
+fn missing_head_matches_full_output_golden() {
+    let output = run_receipt_with_repo_path("missing_head.json", "/repo");
+    assert!(
+        output.status.success(),
+        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = String::from_utf8(output.stdout).expect("receipt stdout is utf-8");
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt output JSON");
+    let expected = fixture_text("missing_head_expected.json");
+    let expected_json: Value =
+        serde_json::from_str(&expected).expect("expected receipt output JSON");
+
+    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
+    assert_eq!(actual, expected);
+}
+
+#[test]
 fn missing_touched_files_is_unverifiable_surface() {
     let receipt = receipt_json("missing_touched_files.json");
     let row = first_row(&receipt);
