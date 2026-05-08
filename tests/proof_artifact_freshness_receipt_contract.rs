@@ -3,6 +3,7 @@
 #![allow(missing_docs)]
 
 use serde_json::Value;
+use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
@@ -15,12 +16,16 @@ fn repo_root() -> PathBuf {
 }
 
 fn run_receipt(fixture: &str) -> Output {
+    run_receipt_with_repo_path(fixture, repo_root().to_string_lossy().as_ref())
+}
+
+fn run_receipt_with_repo_path(fixture: &str, repo_path: &str) -> Output {
     Command::new("python3")
         .arg(repo_root().join(SCRIPT_PATH))
         .arg("--fixture")
         .arg(repo_root().join(FIXTURE_ROOT).join(fixture))
         .arg("--repo-path")
-        .arg(repo_root())
+        .arg(repo_path)
         .arg("--agent")
         .arg("TopazGoose")
         .arg("--generated-at")
@@ -42,6 +47,10 @@ fn receipt_json(fixture: &str) -> Value {
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("receipt output must be JSON")
+}
+
+fn fixture_text(fixture: &str) -> String {
+    fs::read_to_string(repo_root().join(FIXTURE_ROOT).join(fixture)).expect("read fixture text")
 }
 
 fn first_row(receipt: &Value) -> &Value {
@@ -81,6 +90,27 @@ fn current_clean_artifact_is_citeable() {
     assert_eq!(row["decision"].as_str(), Some("cite-as-current"));
     assert_eq!(row["safe_to_cite"].as_bool(), Some(true));
     assert_eq!(receipt["summary"]["safe_to_cite"].as_u64(), Some(1));
+}
+
+#[test]
+fn current_clean_matches_full_output_golden() {
+    let output = run_receipt_with_repo_path("current_clean.json", "/repo");
+    assert!(
+        output.status.success(),
+        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = String::from_utf8(output.stdout).expect("receipt stdout is utf-8");
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt output JSON");
+    let expected = fixture_text("current_clean_expected.json");
+    let expected_json: Value =
+        serde_json::from_str(&expected).expect("expected receipt output JSON");
+
+    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
+    assert_eq!(actual, expected);
 }
 
 #[test]
