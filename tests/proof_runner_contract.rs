@@ -3,7 +3,8 @@
 #![allow(missing_docs)]
 
 use serde_json::Value;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
+use std::io::Write;
 use std::process::{Command, Output};
 
 const SCRIPT_PATH: &str = "scripts/proof_runner.py";
@@ -29,6 +30,19 @@ fn proof_runner_json(args: &[&str]) -> Value {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    serde_json::from_str(&stdout)
+        .unwrap_or_else(|error| panic!("proof runner output not JSON: {error}\noutput: {stdout}"))
+}
+
+fn write_reservation_snapshot(raw: &str) -> tempfile::NamedTempFile {
+    let mut file = tempfile::NamedTempFile::new().expect("create reservation snapshot fixture");
+    file.write_all(raw.as_bytes())
+        .expect("write reservation snapshot fixture");
+    file
+}
+
+fn output_json(output: &Output) -> Value {
     let stdout = String::from_utf8_lossy(&output.stdout);
     serde_json::from_str(&stdout)
         .unwrap_or_else(|error| panic!("proof runner output not JSON: {error}\noutput: {stdout}"))
@@ -150,6 +164,267 @@ fn proof_runner_blocks_unknown_lanes() {
     let record = &result["validation_frontier_record"];
     assert_eq!(record["decision"].as_str(), Some("blocked-external"));
     assert_eq!(record["error_class"].as_str(), Some("unknown_proof_lane"));
+}
+
+#[test]
+fn proof_runner_reports_unavailable_reservation_snapshot() {
+    let snapshot = write_reservation_snapshot("{not-json");
+    let snapshot_path = snapshot.path().to_str().expect("snapshot path utf8");
+    let output = run_proof_runner(&[
+        "--lane",
+        "rustfmt-check",
+        "--touched-files",
+        "scripts/proof_runner.py",
+        "--reservation-snapshot",
+        snapshot_path,
+        "--skip-dirty-check",
+        "--output",
+        "json",
+    ])
+    .expect("proof runner should execute");
+
+    assert_eq!(output.status.code(), Some(1));
+    let result = output_json(&output);
+    let record = &result["validation_frontier_record"];
+    assert_eq!(record["decision"].as_str(), Some("blocked-external"));
+    assert_eq!(
+        record["error_class"].as_str(),
+        Some("file_reservation_conflict")
+    );
+    assert!(
+        record["summary"]
+            .as_str()
+            .expect("summary string")
+            .contains("unavailable"),
+        "malformed reservation snapshot should be reported as unavailable"
+    );
+    assert_eq!(
+        result["reservation_check"]["classifications"][0]["classification"].as_str(),
+        Some("unavailable")
+    );
+}
+
+#[test]
+fn proof_runner_blocks_peer_active_reservation_from_snapshot() {
+    let snapshot = write_reservation_snapshot(
+        r#"{
+          "reservations": [
+            {
+              "path_pattern": "scripts/proof_runner.py",
+              "agent_name": "TopazGoose",
+              "expires_ts": "2999-01-01T00:00:00Z",
+              "exclusive": true
+            }
+          ]
+        }"#,
+    );
+    let snapshot_path = snapshot.path().to_str().expect("snapshot path utf8");
+    let output = run_proof_runner(&[
+        "--lane",
+        "rustfmt-check",
+        "--touched-files",
+        "scripts/proof_runner.py",
+        "--reservation-snapshot",
+        snapshot_path,
+        "--agent-name",
+        "BlackDove",
+        "--skip-dirty-check",
+        "--output",
+        "json",
+    ])
+    .expect("proof runner should execute");
+
+    assert_eq!(output.status.code(), Some(1));
+    let result = output_json(&output);
+    let record = &result["validation_frontier_record"];
+    assert_eq!(
+        record["error_class"].as_str(),
+        Some("file_reservation_conflict")
+    );
+    assert_eq!(
+        result["reservation_check"]["classifications"][0]["classification"].as_str(),
+        Some("peer-active")
+    );
+    assert_eq!(
+        record["first_failure"]["file"].as_str(),
+        Some("scripts/proof_runner.py")
+    );
+}
+
+#[test]
+fn proof_runner_allows_owned_and_expired_reservations() {
+    let snapshot = write_reservation_snapshot(
+        r#"{
+          "reservations": [
+            {
+              "path_pattern": "scripts/proof_runner.py",
+              "agent_name": "BlackDove",
+              "expires_ts": "2999-01-01T00:00:00Z",
+              "exclusive": true
+            },
+            {
+              "path_pattern": "tests/proof_runner_contract.rs",
+              "agent_name": "TopazGoose",
+              "expires_ts": "2000-01-01T00:00:00Z",
+              "exclusive": true
+            }
+          ]
+        }"#,
+    );
+    let snapshot_path = snapshot.path().to_str().expect("snapshot path utf8");
+    let result = proof_runner_json(&[
+        "--lane",
+        "rustfmt-check",
+        "--touched-files",
+        "scripts/proof_runner.py",
+        "tests/proof_runner_contract.rs",
+        "--reservation-snapshot",
+        snapshot_path,
+        "--agent-name",
+        "BlackDove",
+        "--skip-dirty-check",
+        "--output",
+        "json",
+    ]);
+
+    assert_eq!(result["preflight_passed"].as_bool(), Some(true));
+    let classifications: BTreeSet<String> = result["reservation_check"]["classifications"]
+        .as_array()
+        .expect("classifications array")
+        .iter()
+        .map(|item| {
+            item["classification"]
+                .as_str()
+                .expect("classification string")
+                .to_string()
+        })
+        .collect();
+    assert!(classifications.contains("owned-active"));
+    assert!(classifications.contains("expired"));
+}
+
+#[test]
+fn proof_runner_classifies_tracker_only_reservations() {
+    let snapshot = write_reservation_snapshot(
+        r#"{
+          "reservations": [
+            {
+              "path_pattern": ".beads/issues.jsonl",
+              "agent_name": "CopperSpring",
+              "expires_ts": "2999-01-01T00:00:00Z",
+              "exclusive": true
+            }
+          ]
+        }"#,
+    );
+    let snapshot_path = snapshot.path().to_str().expect("snapshot path utf8");
+
+    let unrelated = proof_runner_json(&[
+        "--lane",
+        "rustfmt-check",
+        "--touched-files",
+        "src/lib.rs",
+        "--reservation-snapshot",
+        snapshot_path,
+        "--agent-name",
+        "BlackDove",
+        "--skip-dirty-check",
+        "--output",
+        "json",
+    ]);
+    assert_eq!(unrelated["preflight_passed"].as_bool(), Some(true));
+    assert_eq!(
+        unrelated["reservation_check"]["classifications"]
+            .as_array()
+            .expect("classifications array")
+            .len(),
+        0,
+        "tracker reservations should not affect unrelated touched files"
+    );
+
+    let output = run_proof_runner(&[
+        "--lane",
+        "rustfmt-check",
+        "--touched-files",
+        ".beads/issues.jsonl",
+        "--reservation-snapshot",
+        snapshot_path,
+        "--agent-name",
+        "BlackDove",
+        "--skip-dirty-check",
+        "--output",
+        "json",
+    ])
+    .expect("proof runner should execute");
+
+    assert_eq!(output.status.code(), Some(1));
+    let result = output_json(&output);
+    assert_eq!(
+        result["reservation_check"]["classifications"][0]["classification"].as_str(),
+        Some("tracker-only")
+    );
+}
+
+#[test]
+fn proof_runner_blocks_unknown_owner_reservation() {
+    let snapshot = write_reservation_snapshot(
+        r#"{
+          "reservations": [
+            {
+              "path_pattern": "src/lib.rs",
+              "expires_ts": "2999-01-01T00:00:00Z",
+              "exclusive": true
+            }
+          ]
+        }"#,
+    );
+    let snapshot_path = snapshot.path().to_str().expect("snapshot path utf8");
+    let output = run_proof_runner(&[
+        "--lane",
+        "rustfmt-check",
+        "--touched-files",
+        "src/lib.rs",
+        "--reservation-snapshot",
+        snapshot_path,
+        "--agent-name",
+        "BlackDove",
+        "--skip-dirty-check",
+        "--output",
+        "json",
+    ])
+    .expect("proof runner should execute");
+
+    assert_eq!(output.status.code(), Some(1));
+    let result = output_json(&output);
+    assert_eq!(
+        result["reservation_check"]["classifications"][0]["classification"].as_str(),
+        Some("unknown-owner")
+    );
+}
+
+#[test]
+fn proof_runner_reports_reservation_check_unavailable_when_unconfigured() {
+    let result = proof_runner_json(&[
+        "--lane",
+        "rustfmt-check",
+        "--touched-files",
+        "src/lib.rs",
+        "--skip-dirty-check",
+        "--output",
+        "json",
+    ]);
+
+    assert_eq!(
+        result["reservation_check"]["source"].as_str(),
+        Some("not_configured")
+    );
+    assert_eq!(
+        result["reservation_check"]["classifications"]
+            .as_array()
+            .expect("classifications array")
+            .len(),
+        0
+    );
 }
 
 #[test]

@@ -8,6 +8,7 @@ Compatible with the validation frontier ledger schema.
 """
 
 import argparse
+import fnmatch
 import json
 import subprocess
 import sys
@@ -15,7 +16,6 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
-import tempfile
 
 
 class ProofLaneManifest:
@@ -155,27 +155,185 @@ class GitStatus:
 class AgentMailChecker:
     """Agent Mail reservation checker."""
 
-    def __init__(self, project_key: str):
+    def __init__(
+        self,
+        project_key: str,
+        agent_name: str = "unknown",
+        reservation_snapshot: Optional[str] = None
+    ):
         self.project_key = project_key
+        self.agent_name = agent_name
+        self.reservation_snapshot = Path(reservation_snapshot) if reservation_snapshot else None
+        self.last_check = {
+            "source": "not_configured",
+            "classifications": []
+        }
 
     def check_file_reservations(self, file_paths: List[str]) -> Tuple[bool, List[Dict[str, Any]]]:
         """
         Check if any files have active reservations.
         Returns (has_conflicts, conflicts_list).
         """
-        # For now, return no conflicts since MCP tools may not be available
-        # In a real implementation, this would call MCP Agent Mail tools
-        return False, []
+        if not self.reservation_snapshot:
+            self.last_check = {
+                "source": "not_configured",
+                "classifications": []
+            }
+            return False, []
+
+        try:
+            snapshot = json.loads(self.reservation_snapshot.read_text())
+        except Exception as error:
+            conflict = {
+                "path": str(self.reservation_snapshot),
+                "path_pattern": str(self.reservation_snapshot),
+                "classification": "unavailable",
+                "summary": f"reservation snapshot unavailable: {error}"
+            }
+            self.last_check = {
+                "source": "snapshot",
+                "classifications": [conflict]
+            }
+            return True, [conflict]
+
+        reservations = self._extract_reservations(snapshot)
+        classifications = [
+            self._classify_reservation(reservation, file_paths)
+            for reservation in reservations
+        ]
+        classifications = [item for item in classifications if item is not None]
+        conflicts = [
+            item for item in classifications
+            if item["classification"] in {"peer-active", "tracker-only", "unknown-owner", "unavailable"}
+        ]
+        self.last_check = {
+            "source": "snapshot",
+            "classifications": classifications
+        }
+        return bool(conflicts), conflicts
+
+    def _extract_reservations(self, snapshot: Any) -> List[Dict[str, Any]]:
+        """Extract reservation rows from known snapshot shapes."""
+        if isinstance(snapshot, list):
+            return [item for item in snapshot if isinstance(item, dict)]
+        if not isinstance(snapshot, dict):
+            return []
+        for key in ("reservations", "active_reservations", "granted"):
+            rows = snapshot.get(key)
+            if isinstance(rows, list):
+                return [item for item in rows if isinstance(item, dict)]
+        return []
+
+    def _classify_reservation(
+        self,
+        reservation: Dict[str, Any],
+        file_paths: List[str]
+    ) -> Optional[Dict[str, Any]]:
+        pattern = (
+            reservation.get("path_pattern")
+            or reservation.get("path")
+            or reservation.get("pattern")
+            or reservation.get("glob")
+        )
+        if not pattern:
+            return None
+
+        touched_file = self._first_matching_file(str(pattern), file_paths)
+        if not touched_file:
+            return None
+
+        holder = (
+            reservation.get("agent_name")
+            or reservation.get("holder")
+            or reservation.get("owner")
+            or reservation.get("agent")
+        )
+        expires_ts = reservation.get("expires_ts") or reservation.get("expires_at") or ""
+        released_ts = reservation.get("released_ts") or reservation.get("released_at")
+
+        if released_ts or self._is_expired(expires_ts):
+            classification = "expired"
+        elif not holder:
+            classification = "unknown-owner"
+        elif holder == self.agent_name:
+            classification = "owned-active"
+        elif self._is_tracker_path(touched_file) or self._is_tracker_path(str(pattern)):
+            classification = "tracker-only"
+        else:
+            classification = "peer-active"
+
+        return {
+            "path": touched_file,
+            "path_pattern": str(pattern),
+            "holder": holder or "",
+            "expires_ts": expires_ts,
+            "classification": classification,
+            "summary": self._summary(classification, str(pattern), touched_file, holder, expires_ts)
+        }
+
+    def _first_matching_file(self, pattern: str, file_paths: List[str]) -> Optional[str]:
+        normalized_pattern = pattern.removeprefix("./")
+        for file_path in file_paths:
+            normalized_file = file_path.removeprefix("./")
+            if (
+                normalized_file == normalized_pattern
+                or fnmatch.fnmatchcase(normalized_file, normalized_pattern)
+                or fnmatch.fnmatchcase(normalized_pattern, normalized_file)
+            ):
+                return normalized_file
+        return None
+
+    def _is_expired(self, expires_ts: Any) -> bool:
+        if not expires_ts:
+            return False
+        try:
+            timestamp = str(expires_ts).replace("Z", "+00:00")
+            expires_at = datetime.fromisoformat(timestamp)
+        except ValueError:
+            return False
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        return expires_at <= datetime.now(timezone.utc)
+
+    def _is_tracker_path(self, path: str) -> bool:
+        return path in {".beads/issues.jsonl", ".beads/beads.db"} or path.startswith(".beads/")
+
+    def _summary(
+        self,
+        classification: str,
+        pattern: str,
+        touched_file: str,
+        holder: Optional[str],
+        expires_ts: Any
+    ) -> str:
+        if classification == "owned-active":
+            return f"owned-active reservation covers {touched_file}"
+        if classification == "expired":
+            return f"expired reservation for {pattern} no longer blocks {touched_file}"
+        if classification == "unknown-owner":
+            return f"unknown-owner reservation blocks {touched_file}"
+        if classification == "tracker-only":
+            return f"tracker-only reservation held by {holder} blocks {touched_file} until {expires_ts}"
+        if classification == "peer-active":
+            return f"peer-active reservation held by {holder} blocks {touched_file} until {expires_ts}"
+        return f"{classification} reservation for {pattern} affects {touched_file}"
 
 
 class ProofRunner:
     """Main proof runner logic."""
 
-    def __init__(self, repo_root: str = "."):
+    def __init__(
+        self,
+        repo_root: str = ".",
+        agent_name: str = "unknown",
+        reservation_snapshot: Optional[str] = None,
+        skip_dirty_check: bool = False
+    ):
         self.repo_root = Path(repo_root).resolve()
         self.manifest = ProofLaneManifest()
         self.git = GitStatus(repo_root)
-        self.agent_mail = AgentMailChecker(str(self.repo_root))
+        self.agent_mail = AgentMailChecker(str(self.repo_root), agent_name, reservation_snapshot)
+        self.skip_dirty_check = skip_dirty_check
 
     def analyze_preflight(
         self,
@@ -199,34 +357,7 @@ class ProofRunner:
         command = lane["command"]
         record = ValidationFrontierRecord(command, touched_files)
 
-        # Check for uncommitted changes
-        uncommitted = self.git.get_uncommitted_files()
-        if uncommitted:
-            unrelated_files = [f for f in uncommitted if f not in touched_files]
-            if unrelated_files:
-                # Has unrelated dirty files - suggest narrow proof
-                supplemental = self._generate_narrow_proof(touched_files, lane)
-                return False, record.as_blocked_external(
-                    "peer_dirty_index_conflict",
-                    unrelated_files[0],
-                    f"unrelated dirty files present: {', '.join(unrelated_files[:3])}",
-                    supplemental=supplemental
-                )
-
-        # Check for staged changes from other agents
-        staged = self.git.get_staged_files()
-        if staged:
-            unrelated_staged = [f for f in staged if f not in touched_files]
-            if unrelated_staged:
-                supplemental = self._generate_narrow_proof(touched_files, lane)
-                return False, record.as_blocked_external(
-                    "peer_dirty_index_conflict",
-                    unrelated_staged[0],
-                    f"unrelated staged paths present: {', '.join(unrelated_staged[:3])}",
-                    supplemental=supplemental
-                )
-
-        # Check file reservations (simplified for now)
+        # Check file reservations before dirty state so explicit peer locks win.
         has_conflicts, conflicts = self.agent_mail.check_file_reservations(touched_files)
         if has_conflicts and conflicts:
             conflict = conflicts[0]
@@ -234,9 +365,38 @@ class ProofRunner:
             return False, record.as_blocked_external(
                 "file_reservation_conflict",
                 conflict.get("path", "unknown"),
-                f"reservation conflict: {conflict.get('summary', 'unknown')}",
+                f"reservation conflict ({conflict.get('classification', 'unknown')}): {conflict.get('summary', 'unknown')}",
                 supplemental=supplemental
             )
+
+        # Check for uncommitted changes
+        if not self.skip_dirty_check:
+            uncommitted = self.git.get_uncommitted_files()
+            if uncommitted:
+                unrelated_files = [f for f in uncommitted if f not in touched_files]
+                if unrelated_files:
+                    # Has unrelated dirty files - suggest narrow proof
+                    supplemental = self._generate_narrow_proof(touched_files, lane)
+                    return False, record.as_blocked_external(
+                        "peer_dirty_index_conflict",
+                        unrelated_files[0],
+                        f"unrelated dirty files present: {', '.join(unrelated_files[:3])}",
+                        supplemental=supplemental
+                    )
+
+        # Check for staged changes from other agents
+        if not self.skip_dirty_check:
+            staged = self.git.get_staged_files()
+            if staged:
+                unrelated_staged = [f for f in staged if f not in touched_files]
+                if unrelated_staged:
+                    supplemental = self._generate_narrow_proof(touched_files, lane)
+                    return False, record.as_blocked_external(
+                        "peer_dirty_index_conflict",
+                        unrelated_staged[0],
+                        f"unrelated staged paths present: {', '.join(unrelated_staged[:3])}",
+                        supplemental=supplemental
+                    )
 
         # All checks passed
         supplemental = self._generate_narrow_proof(touched_files, lane)
@@ -289,6 +449,7 @@ class ProofRunner:
             "preflight_passed": can_proceed,
             "lane_id": lane_id,
             "command_would_run": self.manifest.get_lane(lane_id)["command"] if self.manifest.get_lane(lane_id) else "",
+            "reservation_check": self.agent_mail.last_check,
             "validation_frontier_record": record,
             "recommendation": "proceed" if can_proceed else "use_supplemental"
         }
@@ -360,11 +521,29 @@ def main():
         action="store_true",
         help="Actually execute the proof command if preflight passes"
     )
+    parser.add_argument(
+        "--agent-name",
+        default=os.environ.get("AGENT_NAME", "unknown"),
+        help="Agent name used to distinguish owned reservations"
+    )
+    parser.add_argument(
+        "--reservation-snapshot",
+        help="JSON snapshot of Agent Mail file reservations for fixture-backed checks"
+    )
+    parser.add_argument(
+        "--skip-dirty-check",
+        action="store_true",
+        help="Skip git dirty-state checks; intended for reservation classifier fixtures"
+    )
 
     args = parser.parse_args()
 
     try:
-        runner = ProofRunner()
+        runner = ProofRunner(
+            agent_name=args.agent_name,
+            reservation_snapshot=args.reservation_snapshot,
+            skip_dirty_check=args.skip_dirty_check
+        )
 
         if args.list_lanes:
             lanes = runner.manifest.list_lane_ids()
@@ -405,11 +584,7 @@ def main():
                     lane = runner.manifest.get_lane(args.lane)
                     if lane:
                         cmd = lane["command"]
-                        # Remove "rch exec -- " prefix for direct execution
-                        if cmd.startswith("rch exec -- "):
-                            cmd = cmd[12:]
-                        exit_code = os.system(cmd)
-                        return exit_code >> 8  # Convert to standard exit code
+                        return subprocess.call(cmd, shell=True)
             else:
                 record = result["validation_frontier_record"]
                 print(f"❌ Preflight BLOCKED for lane {args.lane}")
