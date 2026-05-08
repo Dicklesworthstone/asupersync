@@ -261,9 +261,9 @@ The board rehearsal run must execute deterministically and preserve artifacts.
 Cargo-heavy commands must use `rch`.
 
 ```bash
-rch exec -- cargo test -p asupersync --test wasm_ga_go_no_go_evidence_packet -- --nocapture
-rch exec -- cargo test -p asupersync --test wasm_release_rollback_incident_playbook -- --nocapture
-rch exec -- cargo test -p asupersync --test wasm_supply_chain_controls -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_ga_go_no_go_docs cargo test -p asupersync --test wasm_ga_go_no_go_evidence_packet -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_ga_go_no_go_docs cargo test -p asupersync --test wasm_release_rollback_incident_playbook -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_ga_go_no_go_docs cargo test -p asupersync --test wasm_supply_chain_controls -- --nocapture
 python3 scripts/check_security_release_gate.py --policy .github/security_release_policy.json --check-deps --dep-policy .github/wasm_dependency_policy.json
 python3 scripts/run_browser_onboarding_checks.py --scenario all
 ```
