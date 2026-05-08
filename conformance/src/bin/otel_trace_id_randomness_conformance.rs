@@ -1,19 +1,22 @@
 //! OpenTelemetry Trace ID Randomness Conformance Test (Tick #144)
 //!
-//! This conformance test verifies that our trace ID generation produces
-//! identical randomness distribution compared to opentelemetry-sdk when
-//! using the same RNG source.
+//! This guard verifies local trace ID generation health and samples
+//! opentelemetry-sdk generation separately. It intentionally fails closed for
+//! SDK parity because the two implementations are sampled from independent live
+//! RNG streams, not a deterministic shared-source reference oracle.
 //!
 //! Key properties tested:
 //! - Statistical uniformity of generated trace IDs
 //! - Uniqueness over large sample sizes
-//! - Comparable distribution health vs opentelemetry-sdk
+//! - Independent distribution health for opentelemetry-sdk samples
 //! - Entropy and randomness quality metrics
 //! - Proper handling of invalid trace ID (all zeros)
 
 use asupersync::observability::w3c_trace_context::TraceId as AsupersyncTraceId;
 use opentelemetry_sdk::trace::{IdGenerator, RandomIdGenerator};
 use std::collections::BTreeSet;
+
+const OTEL_SDK_TRACE_ID_PARITY_UNIMPLEMENTED: &str = "deterministic shared-source opentelemetry-sdk trace ID parity oracle is not wired; refusing independent-RNG conformance claims";
 
 /// Test cases for trace ID randomness conformance
 struct TraceIdRandomnessTestCase {
@@ -125,8 +128,8 @@ impl RandomnessAnalysis {
 }
 
 fn main() {
-    println!("🔍 OpenTelemetry Trace ID Randomness Conformance Test");
-    println!("Verifying same RNG source → identical distribution vs opentelemetry-sdk");
+    println!("🔍 OpenTelemetry Trace ID Randomness Guard");
+    println!("Checking local and SDK trace ID sample health without claiming exact parity");
 
     let test_cases = vec![
         TraceIdRandomnessTestCase {
@@ -169,16 +172,18 @@ fn main() {
         // Test our implementation
         let our_trace_ids = test_our_trace_id_generation(test_case);
 
-        // Test opentelemetry-sdk implementation
+        // Sample opentelemetry-sdk independently. This is a health comparator,
+        // not an exact conformance oracle for asupersync.
         let reference_trace_ids = test_reference_trace_id_generation(test_case);
 
-        // Compare distributions
+        // Check each sample set independently. Do not claim exact distribution
+        // matching from separate live RNG streams.
         if let Err(error) =
-            compare_trace_id_distributions(&our_trace_ids, &reference_trace_ids, test_case)
+            check_trace_id_distribution_health(&our_trace_ids, &reference_trace_ids, test_case)
         {
             failed_tests.push((test_case.name.to_string(), error));
         } else {
-            println!("    ✅ {}", test_case.name);
+            println!("    ✅ {} local/sdk health checks", test_case.name);
         }
     }
 
@@ -187,17 +192,33 @@ fn main() {
     test_trace_id_randomness_properties(&mut failed_tests);
 
     // Report results
-    println!("\n📊 Trace ID Randomness Conformance Test Results");
+    println!("\n📊 Trace ID Randomness Guard Results");
     if failed_tests.is_empty() {
-        println!("✅ ALL TESTS PASSED - Trace ID generation is conformant");
-        println!("🎯 RNG distribution matches opentelemetry-sdk exactly");
+        println!("⚠️  LOCAL HEALTH CHECKS PASSED");
+        println!("{}", final_status_line(failed_tests.len()));
+        std::process::exit(exit_code_for_summary(failed_tests.len()));
     } else {
         println!("❌ {} TESTS FAILED:", failed_tests.len());
         for (test_name, error) in &failed_tests {
             println!("   {} - {}", test_name, error);
         }
-        std::process::exit(1);
+        println!("{}", final_status_line(failed_tests.len()));
+        std::process::exit(exit_code_for_summary(failed_tests.len()));
     }
+}
+
+fn final_status_line(local_failure_count: usize) -> String {
+    if local_failure_count == 0 {
+        format!("REFERENCE UNAVAILABLE - {OTEL_SDK_TRACE_ID_PARITY_UNIMPLEMENTED}")
+    } else {
+        format!(
+            "LOCAL HEALTH CHECK FAILED - {local_failure_count} trace ID sample health checks failed"
+        )
+    }
+}
+
+const fn exit_code_for_summary(_local_failure_count: usize) -> i32 {
+    1
 }
 
 /// Test our trace ID generation implementation
@@ -213,7 +234,7 @@ fn test_our_trace_id_generation(test_case: &TraceIdRandomnessTestCase) -> Vec<Tr
     trace_ids
 }
 
-/// Test reference opentelemetry-sdk trace ID generation
+/// Sample opentelemetry-sdk trace ID generation for independent health checks.
 fn test_reference_trace_id_generation(test_case: &TraceIdRandomnessTestCase) -> Vec<TraceIdData> {
     let generator = RandomIdGenerator::default();
     let mut trace_ids = Vec::with_capacity(test_case.sample_size);
@@ -237,8 +258,8 @@ fn trace_id_hex_to_bytes(hex: &str) -> [u8; 16] {
     bytes
 }
 
-/// Compare trace ID distributions between implementations
-fn compare_trace_id_distributions(
+/// Check independent trace ID sample health for both implementations.
+fn check_trace_id_distribution_health(
     our_trace_ids: &[TraceIdData],
     reference_trace_ids: &[TraceIdData],
     _test_case: &TraceIdRandomnessTestCase,
@@ -462,5 +483,41 @@ mod tests {
 
         let id_data = TraceIdData::new(trace_id);
         assert!(id_data.is_valid());
+    }
+
+    #[test]
+    fn source_no_longer_claims_exact_sdk_randomness_parity() {
+        let source = include_str!("otel_trace_id_randomness_conformance.rs");
+        for forbidden in [
+            concat!(
+                "identical randomness distribution compared to ",
+                "opentelemetry-sdk"
+            ),
+            concat!("same ", "RNG source"),
+            concat!("Trace ID generation is ", "conformant"),
+            concat!("RNG distribution matches ", "opentelemetry-sdk exactly"),
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "source must not claim exact SDK parity from independent RNG samples: {forbidden}"
+            );
+        }
+        assert!(source.contains(OTEL_SDK_TRACE_ID_PARITY_UNIMPLEMENTED));
+    }
+
+    #[test]
+    fn guard_exits_nonzero_when_only_local_health_checks_pass() {
+        assert_eq!(exit_code_for_summary(0), 1);
+        let status = final_status_line(0);
+        assert!(status.contains("REFERENCE UNAVAILABLE"));
+        assert!(status.contains("refusing independent-RNG conformance claims"));
+    }
+
+    #[test]
+    fn guard_exits_nonzero_when_local_health_checks_fail() {
+        assert_eq!(exit_code_for_summary(3), 1);
+        let status = final_status_line(3);
+        assert!(status.contains("LOCAL HEALTH CHECK FAILED"));
+        assert!(status.contains("3 trace ID sample health checks failed"));
     }
 }
