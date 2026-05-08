@@ -43,9 +43,9 @@ When the proof runner blocks broad validation, use the output in your close reas
 If blocked, the output will include a `validation_frontier_record` that you can cite:
 
 ```
-blocked-external: intended `rch exec -- cargo clippy -p asupersync --all-targets -- -D warnings`; 
+blocked-external: intended `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner_docs cargo clippy -p asupersync --all-targets -- -D warnings`;
 stopped at `src/sync/semaphore.rs:37` (`clippy_lint_wall`, unused imports) while touching 
-`src/obligation/ledger.rs`; supplemental proof `rch exec -- cargo check --lib`.
+`src/obligation/ledger.rs`; supplemental proof `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner_docs cargo check --lib`.
 ```
 
 ### 3. Checking File Reservations
@@ -65,9 +65,9 @@ The proof runner returns structured JSON with:
 {
   "preflight_passed": true,
   "lane_id": "rustfmt-check", 
-  "command_would_run": "rch exec -- cargo fmt --check",
+  "command_would_run": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner_docs cargo fmt --check",
   "validation_frontier_record": {
-    "command": "rch exec -- cargo fmt --check",
+    "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner_docs cargo fmt --check",
     "timestamp": "2026-05-07T19:30:00Z",
     "touched_files": ["src/runtime/state.rs"],
     "decision": "pass",
@@ -144,7 +144,7 @@ The proof runner has comprehensive contract tests in `tests/proof_runner_contrac
 
 ```bash
 # Run the proof runner tests
-cargo test proof_runner_contract -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner_docs cargo test proof_runner_contract -- --nocapture
 ```
 
 Tests cover:

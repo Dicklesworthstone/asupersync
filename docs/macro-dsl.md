@@ -253,5 +253,5 @@ Example binaries live in `examples/`:
 Run with:
 
 ```bash
-cargo run --example macros_basic --features proc-macros
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_macro_dsl_docs cargo run --example macros_basic --features proc-macros
 ```

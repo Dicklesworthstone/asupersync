@@ -73,7 +73,7 @@ Build command (example for dev profile):
 
 ```bash
 rustup target add wasm32-unknown-unknown
-cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-dev
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_docs cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-dev
 ```
 
 Native-only features (`cli`, `io-uring`, `tls`, `sqlite`, `postgres`, `mysql`,
@@ -138,8 +138,8 @@ lanes and avoid blending them together:
 | Need | Use | Live-tree evidence |
 |---|---|---|
 | Inspect the truthful browser execution ladder from Rust before deciding how to wire a browser entrypoint | `RuntimeBuilder::inspect_browser_execution_ladder()` or `RuntimeBuilder::inspect_browser_execution_ladder_with_preferred_lane(...)` | `src/runtime/builder.rs`, `tests/wasm_browser_feasibility_matrix.rs` |
-| Prove that the semantic core still closes under browser-safe cfg/profile rules | `rch exec -- cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-<profile>` against `asupersync` | root `Cargo.toml`, `src/lib.rs`, `tests/wasm_browser_feasibility_matrix.rs` |
-| Maintain the Rust-side ABI/package boundary that feeds the JS/TS Browser Edition packages | `rch exec -- cargo check -p asupersync-browser-core --target wasm32-unknown-unknown --no-default-features --features dev`; use `asupersync-wasm` only when you need to keep the retained scaffold honest | `asupersync-browser-core/Cargo.toml`, `asupersync-browser-core/src/lib.rs`, `asupersync-wasm/Cargo.toml`, `asupersync-wasm/src/lib.rs` |
+| Prove that the semantic core still closes under browser-safe cfg/profile rules | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_docs cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-<profile>` against `asupersync` | root `Cargo.toml`, `src/lib.rs`, `tests/wasm_browser_feasibility_matrix.rs` |
+| Maintain the Rust-side ABI/package boundary that feeds the JS/TS Browser Edition packages | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_docs cargo check -p asupersync-browser-core --target wasm32-unknown-unknown --no-default-features --features dev`; use `asupersync-wasm` only when you need to keep the retained scaffold honest | `asupersync-browser-core/Cargo.toml`, `asupersync-browser-core/src/lib.rs`, `asupersync-wasm/Cargo.toml`, `asupersync-wasm/src/lib.rs` |
 | Validate the maintained browser-facing Rust example that the repository actually proves end-to-end | `PATH=/usr/bin:$PATH bash scripts/validate_rust_browser_consumer.sh` | `tests/fixtures/rust-browser-consumer/`, `scripts/validate_rust_browser_consumer.sh`, `tests/wasm_rust_browser_example_contract.rs` |
 | Build a browser app that constructs Browser Edition runtimes directly from external Rust consumer code | Preview public lane | `RuntimeBuilder::browser()` now exposes truthful automatic lane negotiation, explicit lane pinning, and structured fail-closed diagnostics; treat it as a preview dispatcher-backed path rather than broad native-runtime parity |
 

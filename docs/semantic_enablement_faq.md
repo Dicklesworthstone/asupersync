@@ -77,13 +77,13 @@ scripts/run_semantic_verification.sh --profile full --json
 ### Q7: What are the quality gates I must pass before committing?
 
 ```bash
-cargo check --all-targets
-cargo clippy --all-targets -- -D warnings
-cargo fmt --check
-cargo test --lib <module>  # for changed modules
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_enablement_docs cargo check --all-targets
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_enablement_docs cargo clippy --all-targets -- -D warnings
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_enablement_docs cargo fmt --check
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_enablement_docs cargo test --lib <module>  # for changed modules
 ```
 
-For CPU-intensive operations, use `rch exec -- <command>` to offload to remote workers.
+For CPU-intensive operations, use `rch exec -- env CARGO_TARGET_DIR=... <cargo command>` to offload to remote workers.
 
 ### Q8: How do I generate the evidence bundle?
 
@@ -161,9 +161,9 @@ Each verification log entry includes a `repro_command` field with the exact one-
 
 `rch` (Remote Compilation Helper) offloads CPU-intensive builds to remote workers. Use it for:
 ```bash
-rch exec -- cargo test --test <test_name> -- --nocapture
-rch exec -- cargo clippy --all-targets -- -D warnings
-rch exec -- cargo check --all-targets
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_enablement_docs cargo test --test <test_name> -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_enablement_docs cargo clippy --all-targets -- -D warnings
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_enablement_docs cargo check --all-targets
 ```
 
 Use `rch` whenever running full test suites or clippy on the entire codebase.
@@ -236,7 +236,7 @@ bv --robot-triage
 ### Q23: How do I close a bead?
 
 1. Verify all acceptance criteria are met.
-2. Run relevant tests via `rch exec -- cargo test ...`.
+2. Run relevant tests via `rch exec -- env CARGO_TARGET_DIR=... cargo test ...`.
 3. Close the bead: `br close <bead-id> --force`.
 4. Release file reservations.
 5. Send completion message via agent mail.
@@ -251,7 +251,7 @@ bv --robot-triage
 
 1. Run `cargo clean -p <crate>` if you see "compiled by incompatible version of rustc" errors.
 2. If the error is in a file you didn't modify, check if another agent's changes conflict.
-3. Use `rch exec -- cargo check --all-targets` to verify on the remote worker.
+3. Use `rch exec -- env CARGO_TARGET_DIR=... cargo check --all-targets` to verify on the remote worker.
 
 ### Q25: `cargo fmt --check` fails on files I didn't touch
 

@@ -157,26 +157,26 @@ scripts/assemble_evidence_bundle.sh --json --skip-runner --phase 1
 ### Individual gate checks
 ```bash
 # G1: Docs alignment
-cargo test --test semantic_docs_lint --test semantic_docs_rule_mapping_lint
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_gate_docs cargo test --test semantic_docs_lint --test semantic_docs_rule_mapping_lint
 
 # G2: Lean proofs
 scripts/run_lean_regression.sh --json
 
 # G3: TLA+ model checking
 scripts/run_model_check.sh --ci
-cargo test --test semantic_tla_scenarios
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_gate_docs cargo test --test semantic_tla_scenarios
 
 # G4: Runtime conformance
-cargo test --test semantic_golden_fixture_validation
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_gate_docs cargo test --test semantic_golden_fixture_validation
 
 # G5: Property/law tests
-cargo test law_join_assoc law_race_comm law_timeout_min
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_gate_docs cargo test law_join_assoc law_race_comm law_timeout_min
 
 # G6: E2E
-cargo test --test semantic_witness_replay_e2e --test adversarial_witness_corpus
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_gate_docs cargo test --test semantic_witness_replay_e2e --test adversarial_witness_corpus
 
 # G7: Logging
-cargo test --test semantic_log_schema_validation
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_gate_docs cargo test --test semantic_log_schema_validation
 ```
 
 ---

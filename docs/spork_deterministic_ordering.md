@@ -456,15 +456,15 @@ delivery, registry races, or shutdown system messages.
 
 ```bash
 # Reproduce the exact run
-ASUPERSYNC_SEED=<seed> ASUPERSYNC_TEST_ARTIFACTS_DIR=target/test-artifacts \
-  cargo test <test_id> -- --nocapture
+rch exec -- env ASUPERSYNC_SEED=<seed> ASUPERSYNC_TEST_ARTIFACTS_DIR=target/test-artifacts \
+  CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_spork_docs cargo test <test_id> -- --nocapture
 
 # Verify trace format + ordering-related integrity
-cargo run --features cli --bin asupersync -- trace verify --strict \
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_spork_docs cargo run --features cli --bin asupersync -- trace verify --strict \
   target/test-artifacts/trace.async
 
 # Compare against a baseline trace when available
-cargo run --features cli --bin asupersync -- trace diff <baseline_trace> \
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_spork_docs cargo run --features cli --bin asupersync -- trace diff <baseline_trace> \
   target/test-artifacts/trace.async
 ```
 
