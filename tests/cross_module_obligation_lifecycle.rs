@@ -132,11 +132,14 @@ fn hierarchical_cancel_chain_drains_ledger_regions_by_id() {
     );
 
     for (drain_region, drain_at) in [(leaf_region, 11), (child_region, 12), (parent_region, 13)] {
-        for obligation in ledger.pending_ids_for_region(drain_region) {
-            ledger
-                .try_abort_by_id(obligation, at(drain_at), ObligationAbortReason::Cancel)
-                .expect("cancel drain should tolerate ID-based resolution");
-        }
+        let drain = ledger.abort_pending_for_region(
+            drain_region,
+            at(drain_at),
+            ObligationAbortReason::Cancel,
+        );
+        assert_eq!(drain.pending_observed, 1);
+        assert_eq!(drain.aborted, 1);
+        assert!(drain.is_complete());
     }
 
     assert!(ledger.is_region_clean(parent_region));

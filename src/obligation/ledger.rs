@@ -199,6 +199,30 @@ impl LeakCheckResult {
     }
 }
 
+/// Deterministic summary from draining all currently pending obligations in a region.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RegionObligationDrain {
+    /// Pending obligations observed at the start of the drain.
+    pub pending_observed: usize,
+    /// Obligations successfully aborted by the drain.
+    pub aborted: usize,
+    /// Obligations skipped because the owning region is already finalized.
+    pub finalized: usize,
+    /// Obligations that raced with another resolver before the drain reached them.
+    pub already_resolved: usize,
+    /// IDs that disappeared before the drain reached them.
+    pub missing: usize,
+}
+
+impl RegionObligationDrain {
+    /// Returns true if every observed obligation reached a deterministic outcome.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.pending_observed
+            == self.aborted + self.finalized + self.already_resolved + self.missing
+    }
+}
+
 /// The obligation ledger: central registry for obligation lifecycle.
 ///
 /// All obligation acquire/commit/abort operations flow through the ledger.
@@ -741,6 +765,47 @@ impl ObligationLedger {
             .filter(|(_, o)| o.region == region && o.state == ObligationState::Reserved)
             .map(|(id, _)| *id)
             .collect()
+    }
+
+    /// Aborts every obligation pending in `region` at the start of the drain.
+    ///
+    /// This is the cross-module synchronization point for cancellation and
+    /// cleanup paths: callers do not need to recover each original linear token
+    /// or open-code the `pending_ids_for_region` + `try_abort_by_id` sequence.
+    /// The initial ID snapshot is deterministic, so lab/runtime traces are
+    /// stable across equivalent schedules.
+    #[must_use]
+    pub fn abort_pending_for_region(
+        &mut self,
+        region: RegionId,
+        now: Time,
+        reason: ObligationAbortReason,
+    ) -> RegionObligationDrain {
+        let pending = self.pending_ids_for_region(region);
+        let mut summary = RegionObligationDrain {
+            pending_observed: pending.len(),
+            ..RegionObligationDrain::default()
+        };
+
+        if self.finalized_regions.contains(&region) {
+            summary.finalized = pending.len();
+            return summary;
+        }
+
+        for id in pending {
+            match self.try_abort_by_id(id, now, reason) {
+                Ok(_) => summary.aborted += 1,
+                Err(LedgerError::AlreadyResolved { .. }) => summary.already_resolved += 1,
+                Err(LedgerError::NotFound { .. }) => summary.missing += 1,
+                Err(LedgerError::RegionFinalized { .. }) => summary.finalized += 1,
+            }
+        }
+
+        debug_assert!(
+            summary.is_complete(),
+            "region obligation drain summary must account for every observed obligation"
+        );
+        summary
     }
 
     /// Returns true if the region has no pending obligations (quiescence check).
