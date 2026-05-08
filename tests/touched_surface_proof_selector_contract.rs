@@ -164,6 +164,27 @@ fn blocked_direct_lane_is_reported_instead_of_hidden_by_supplemental_green_check
 }
 
 #[test]
+fn blocked_direct_lane_output_matches_full_reviewed_golden() {
+    let output = run_selector("blocked_lane.json");
+    assert!(
+        output.status.success(),
+        "selector helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let expected = fixture_text("blocked_lane_expected.json");
+    serde_json::from_slice::<Value>(&output.stdout).expect("actual selector output must be JSON");
+    serde_json::from_str::<Value>(&expected).expect("golden selector output must be JSON");
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("selector stdout is utf-8"),
+        expected,
+        "blocked_lane selector receipt drifted from the reviewed golden"
+    );
+}
+
+#[test]
 fn lane_source_paths_are_used_as_fallback_when_no_rule_matches() {
     let receipt = selector_json("source_path_fallback.json");
 
