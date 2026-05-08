@@ -65,6 +65,16 @@ fn receipt_text(fixture: &str) -> String {
     String::from_utf8(output.stdout).expect("receipt output must be UTF-8")
 }
 
+fn assert_output_matches_golden(fixture: &str, expected_fixture: &str, drift_message: &str) {
+    let actual = receipt_text(fixture);
+    let expected = fixture_text(expected_fixture);
+
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
+    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
+    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
+    assert_eq!(actual, expected, "{drift_message}");
+}
+
 fn timeline<'a>(receipt: &'a Value) -> &'a Vec<Value> {
     receipt["timeline"]
         .as_array()
@@ -140,13 +150,11 @@ fn mixed_messages_and_commits_become_ordered_timeline() {
 
 #[test]
 fn mixed_timeline_matches_exact_reviewed_golden() {
-    let actual = receipt_text("mixed_claim_ship_block.json");
-    let expected = fixture_text("mixed_claim_ship_block_expected.json");
-
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
-    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
-    assert_eq!(actual_json, expected_json, "mixed timeline JSON drifted");
-    assert_eq!(actual, expected);
+    assert_output_matches_golden(
+        "mixed_claim_ship_block.json",
+        "mixed_claim_ship_block_expected.json",
+        "mixed timeline receipt changed; update the golden only after reviewing claim, ship, block, and reservation ordering semantics",
+    );
 }
 
 #[test]
@@ -196,15 +204,10 @@ fn secrets_urls_and_oversized_bodies_are_redacted() {
 
 #[test]
 fn redaction_and_urls_matches_exact_reviewed_golden() {
-    let actual = receipt_text("redaction_and_urls.json");
-    let expected = fixture_text("redaction_and_urls_expected.json");
-
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
-    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
-    assert_eq!(actual_json, expected_json, "redaction receipt JSON drifted");
-    assert_eq!(
-        actual, expected,
-        "swarm timeline redaction receipt changed; update the golden only after reviewing secret/query redaction and truncation semantics"
+    assert_output_matches_golden(
+        "redaction_and_urls.json",
+        "redaction_and_urls_expected.json",
+        "swarm timeline redaction receipt changed; update the golden only after reviewing secret/query redaction and truncation semantics",
     );
 }
 
@@ -241,18 +244,10 @@ fn duplicate_events_are_coalesced_with_source_refs() {
 
 #[test]
 fn duplicate_events_match_exact_reviewed_golden() {
-    let actual = receipt_text("duplicate_events.json");
-    let expected = fixture_text("duplicate_events_expected.json");
-
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
-    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
-    assert_eq!(
-        actual_json, expected_json,
-        "duplicate-events receipt JSON drifted"
-    );
-    assert_eq!(
-        actual, expected,
-        "swarm timeline duplicate-events receipt changed; update the golden only after reviewing duplicate coalescing and source-ref semantics"
+    assert_output_matches_golden(
+        "duplicate_events.json",
+        "duplicate_events_expected.json",
+        "swarm timeline duplicate-events receipt changed; update the golden only after reviewing duplicate coalescing and source-ref semantics",
     );
 }
 
