@@ -1,0 +1,259 @@
+{
+  "contract_version": "memory-tier-slab-pool-contract-v1",
+  "bead_id": "asupersync-h6pjqb",
+  "status": "contract_guarded",
+  "description": "Fail-closed certification matrix for memory-tier aware runtime records, slab pools, cold evidence retention, and safe fallback behavior on large agent-swarm hosts.",
+  "source_of_truth": {
+    "runtime_capacity_hints": "src/runtime/config.rs",
+    "task_record_pool": "src/runtime/task_table.rs",
+    "arena_allocator": "src/util/arena.rs",
+    "object_pool": "src/util/pool.rs",
+    "trace_storage_profiles": "src/runtime/config.rs",
+    "release_proof_pack": "artifacts/release_proof_pack_contract_v1.json"
+  },
+  "coverage_requirements": {
+    "required_runtime_domains": [
+      "task_records",
+      "region_records",
+      "obligation_records",
+      "trace_evidence",
+      "proof_artifacts"
+    ],
+    "required_memory_tiers": [
+      "hot_runtime_records",
+      "warm_capacity_and_locality_plans",
+      "cold_evidence_artifacts",
+      "safe_heap_fallback"
+    ],
+    "required_fail_closed_states": [
+      "implemented_verified",
+      "contract_guarded",
+      "fallback_only",
+      "template_only"
+    ],
+    "forbidden_green_without_live_proof": [
+      "zero allocation for all records",
+      "large-page cold slabs available",
+      "unbounded retained evidence",
+      "proof artifacts retained without hashes",
+      "NUMA locality always wins"
+    ]
+  },
+  "validation_policy": {
+    "commands_must_cover": [
+      "json_syntax",
+      "contract_rustfmt",
+      "contract_cargo_test"
+    ],
+    "cargo_proofs_must_be_rch_routed": true,
+    "cargo_proofs_must_use_isolated_target_dir": true,
+    "contract_test_target": "memory_tier_slab_pool_contract",
+    "required_feature_flags": [
+      "test-internals"
+    ]
+  },
+  "tier_rows": [
+    {
+      "row_id": "hot_task_record_pool",
+      "runtime_domain": "task_records",
+      "memory_tier": "hot_runtime_records",
+      "operator_verdict": "implemented_verified",
+      "status": "implemented_verified",
+      "source_files": [
+        "src/runtime/task_table.rs",
+        "src/record/task.rs",
+        "src/util/pool.rs",
+        "artifacts/task_record_pool_smoke_contract_v1.json",
+        "tests/task_record_pool_contract.rs"
+      ],
+      "existing_contracts": [
+        "task-record-pool-smoke-contract-v1"
+      ],
+      "required_accounting": [
+        "task_record_pool_capacity",
+        "task_record_pool_hits",
+        "task_record_pool_misses",
+        "task_record_pool_recycled",
+        "task_record_pool_recycle_drops"
+      ],
+      "proof_commands": [
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_task_record_pool_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test task_record_pool_contract --features test-internals -- --nocapture"
+      ],
+      "fail_closed_guards": [
+        "zero-capacity mode must report fallback_only",
+        "pool saturation must report bounded recycle drops",
+        "stale record fields must be reset before reuse"
+      ]
+    },
+    {
+      "row_id": "warm_runtime_capacity_hints",
+      "runtime_domain": "region_records",
+      "memory_tier": "warm_capacity_and_locality_plans",
+      "operator_verdict": "implemented_verified",
+      "status": "implemented_verified",
+      "source_files": [
+        "src/runtime/config.rs",
+        "src/runtime/state.rs",
+        "artifacts/runtime_capacity_hints_smoke_contract_v1.json",
+        "tests/runtime_capacity_hints_contract.rs"
+      ],
+      "existing_contracts": [
+        "runtime-capacity-hints-smoke-contract-v1"
+      ],
+      "required_accounting": [
+        "task_capacity",
+        "region_capacity",
+        "obligation_capacity",
+        "capacity_hint_source"
+      ],
+      "proof_commands": [
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_capacity_hints_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test runtime_capacity_hints_contract --features test-internals -- --nocapture"
+      ],
+      "fail_closed_guards": [
+        "zero hints must fall back to defaults",
+        "oversized hints must saturate deterministically",
+        "runtime state must expose resolved capacities"
+      ]
+    },
+    {
+      "row_id": "warm_numa_arena_locality",
+      "runtime_domain": "obligation_records",
+      "memory_tier": "warm_capacity_and_locality_plans",
+      "operator_verdict": "contract_guarded",
+      "status": "contract_guarded",
+      "source_files": [
+        "src/runtime/config.rs",
+        "artifacts/numa_arena_locality_smoke_contract_v1.json",
+        "tests/numa_arena_locality_contract.rs"
+      ],
+      "existing_contracts": [
+        "numa-arena-locality-smoke-contract-v1"
+      ],
+      "required_accounting": [
+        "worker_cohort_fingerprint",
+        "topology_fixture_hash",
+        "selected_remote_touch_count",
+        "remote_touch_reduction_ratio",
+        "ownership_preserved"
+      ],
+      "proof_commands": [
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_numa_arena_locality_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test numa_arena_locality_contract --features test-internals -- --nocapture"
+      ],
+      "fail_closed_guards": [
+        "low topology confidence must fall back",
+        "balanced touches must report no_win",
+        "template-only real-host rows must not render as pass"
+      ]
+    },
+    {
+      "row_id": "cold_trace_evidence_tiers",
+      "runtime_domain": "trace_evidence",
+      "memory_tier": "cold_evidence_artifacts",
+      "operator_verdict": "contract_guarded",
+      "status": "contract_guarded",
+      "source_files": [
+        "src/runtime/config.rs",
+        "src/trace/recorder.rs",
+        "src/trace/distributed/collector.rs",
+        "artifacts/hot_cold_arena_tiers_smoke_contract_v1.json",
+        "tests/hot_cold_arena_tiers.rs"
+      ],
+      "existing_contracts": [
+        "hot-cold-arena-tiers-smoke-contract-v1"
+      ],
+      "required_accounting": [
+        "trace_storage_profile",
+        "hot_metadata_bytes",
+        "cold_evidence_bytes",
+        "retained_evidence_budget_bytes",
+        "fallback_reason_codes"
+      ],
+      "proof_commands": [
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_hot_cold_arena_tiers_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test hot_cold_arena_tiers --features test-internals -- --nocapture"
+      ],
+      "fail_closed_guards": [
+        "large-page cold slab requests must fall back when unsupported",
+        "stale locality profiles must not select tiered cold evidence",
+        "unified policy must keep all evidence in the safe fallback profile"
+      ]
+    },
+    {
+      "row_id": "cold_proof_artifact_retention",
+      "runtime_domain": "proof_artifacts",
+      "memory_tier": "cold_evidence_artifacts",
+      "operator_verdict": "contract_guarded",
+      "status": "contract_guarded",
+      "source_files": [
+        "scripts/proof_runner.py",
+        "artifacts/release_proof_pack_contract_v1.json",
+        "tests/proof_runner_contract.rs"
+      ],
+      "existing_contracts": [
+        "release-proof-pack-v1"
+      ],
+      "required_accounting": [
+        "source_artifact_sha256",
+        "source_artifact_byte_count",
+        "proof_command_count",
+        "raw_tracker_rows_omitted"
+      ],
+      "proof_commands": [
+        "python3 -m py_compile scripts/proof_runner.py",
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test proof_runner_contract -- --nocapture"
+      ],
+      "fail_closed_guards": [
+        "missing source artifacts must fail closed",
+        "stale artifact hashes must fail closed",
+        "raw tracker rows must not be embedded in proof packs"
+      ]
+    },
+    {
+      "row_id": "safe_heap_fallback",
+      "runtime_domain": "task_records",
+      "memory_tier": "safe_heap_fallback",
+      "operator_verdict": "fallback_only",
+      "status": "fallback_only",
+      "source_files": [
+        "src/util/arena.rs",
+        "src/util/pool.rs",
+        "src/runtime/task_table.rs",
+        "tests/task_record_pool_contract.rs",
+        "tests/hot_cold_arena_tiers.rs"
+      ],
+      "existing_contracts": [
+        "task-record-pool-smoke-contract-v1",
+        "hot-cold-arena-tiers-smoke-contract-v1"
+      ],
+      "required_accounting": [
+        "safe_fallback_profile",
+        "used_safe_fallback",
+        "no_win_trigger",
+        "fallback_reason_codes"
+      ],
+      "proof_commands": [
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_memory_tier_slab_pool_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test memory_tier_slab_pool_contract --features test-internals -- --nocapture"
+      ],
+      "fail_closed_guards": [
+        "fallback rows must never render as ready_for_rch",
+        "no-win scenarios must remain operator-visible",
+        "unsupported large-memory assumptions must stay explicit"
+      ]
+    }
+  ],
+  "validation_commands": [
+    "python3 -m json.tool artifacts/memory_tier_slab_pool_contract_v1.json >/dev/null",
+    "git diff --check -- artifacts/memory_tier_slab_pool_contract_v1.json tests/memory_tier_slab_pool_contract.rs",
+    "rch exec -- rustfmt --edition 2024 --check tests/memory_tier_slab_pool_contract.rs",
+    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_memory_tier_slab_pool_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test memory_tier_slab_pool_contract --features test-internals -- --nocapture"
+  ],
+  "markdown_golden": [
+    "| Row | Domain | Tier | Verdict | Proofs |",
+    "| --- | --- | --- | --- | --- |",
+    "| hot_task_record_pool | task_records | hot_runtime_records | implemented_verified | 1 |",
+    "| warm_runtime_capacity_hints | region_records | warm_capacity_and_locality_plans | implemented_verified | 1 |",
+    "| warm_numa_arena_locality | obligation_records | warm_capacity_and_locality_plans | contract_guarded | 1 |",
+    "| cold_trace_evidence_tiers | trace_evidence | cold_evidence_artifacts | contract_guarded | 1 |",
+    "| cold_proof_artifact_retention | proof_artifacts | cold_evidence_artifacts | contract_guarded | 2 |",
+    "| safe_heap_fallback | task_records | safe_heap_fallback | fallback_only | 1 |"
+  ]
+}
