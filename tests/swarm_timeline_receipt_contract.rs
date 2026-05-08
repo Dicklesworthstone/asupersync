@@ -239,6 +239,23 @@ fn duplicate_events_are_coalesced_with_source_refs() {
 }
 
 #[test]
+fn duplicate_events_match_exact_reviewed_golden() {
+    let actual = receipt_text("duplicate_events.json");
+    let expected = fixture_text("duplicate_events_expected.json");
+
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
+    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
+    assert_eq!(
+        actual_json, expected_json,
+        "duplicate-events receipt JSON drifted"
+    );
+    assert_eq!(
+        actual, expected,
+        "swarm timeline duplicate-events receipt changed; update the golden only after reviewing duplicate coalescing and source-ref semantics"
+    );
+}
+
+#[test]
 fn receipt_declares_non_mutating_safety_contract() {
     let receipt = receipt_json("mixed_claim_ship_block.json");
 

@@ -1,0 +1,77 @@
+{
+  "agent": "CopperSpring",
+  "current_date": "2026-05-08",
+  "generated_at": "2026-05-08T05:30:00Z",
+  "redaction_counts": {
+    "long_token": 0,
+    "secret": 0,
+    "token": 0,
+    "total": 0,
+    "url_query": 0
+  },
+  "repo_path": "/data/projects/asupersync",
+  "safety": {
+    "agent_mail_mutated": false,
+    "beads_mutated": false,
+    "branch_or_worktree_operations": false,
+    "cargo_executed": false,
+    "files_deleted": false,
+    "git_mutated": false,
+    "non_mutating": true
+  },
+  "safety_notes": [
+    "fixture mode reads JSON only",
+    "no Agent Mail acknowledgements, sends, reservations, or Beads updates are performed",
+    "cargo/rch commands are not executed by this helper"
+  ],
+  "schema_version": "swarm-timeline-receipt-v1",
+  "source_counts": {
+    "agent_mail_messages": 2,
+    "duplicates_coalesced": 1,
+    "events_before_coalescing": 3,
+    "git_commits": 1,
+    "timeline_events": 2
+  },
+  "timeline": [
+    {
+      "agent": "CopperSpring",
+      "bead_ids": [
+        "asupersync-aj7lx3.11"
+      ],
+      "created_ts": "2026-05-08T05:20:56Z",
+      "duplicates": 1,
+      "event_id": "b2df8333a09f",
+      "kind": "claim",
+      "source": "agent-mail",
+      "source_refs": [
+        "30",
+        "31"
+      ],
+      "subject": "[asupersync-aj7lx3.11] Starting redacted timeline receipt",
+      "summary": "Claimed asupersync-aj7lx3.11 and reserved scripts/swarm_timeline_receipt.py.",
+      "thread_id": "asupersync-aj7lx3.11",
+      "validation": []
+    },
+    {
+      "agent": "CopperSpring",
+      "bead_ids": [
+        "asupersync-aj7lx3.11"
+      ],
+      "commit": "13b91944eaa1",
+      "created_ts": "2026-05-08T05:41:00Z",
+      "event_id": "4f1b8c9d0cd9",
+      "kind": "ship",
+      "source": "git",
+      "source_refs": [
+        "13b91944eaa1"
+      ],
+      "subject": "[br-asupersync-aj7lx3.11] add timeline receipt",
+      "summary": "Validation: rustfmt passed.",
+      "thread_id": "",
+      "validation": [
+        "Validation: rustfmt passed."
+      ]
+    }
+  ],
+  "unresolved_cues": []
+}
