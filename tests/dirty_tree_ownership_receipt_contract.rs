@@ -240,6 +240,17 @@ fn conflicting_owner_signals_are_explicit() {
 }
 
 #[test]
+fn owner_conflict_matches_full_output_golden() {
+    let actual_text = receipt_stdout("owner_conflict.json");
+    let expected_text = fixture_text("owner_conflict_expected.json");
+    let actual_json: Value = serde_json::from_str(&actual_text).expect("actual receipt JSON");
+    let expected_json: Value = serde_json::from_str(&expected_text).expect("expected receipt JSON");
+
+    assert_eq!(actual_json, expected_json);
+    assert_eq!(actual_text, expected_text);
+}
+
+#[test]
 fn receipt_safety_contract_forbids_execution_and_destructive_commands() {
     let receipt = receipt_json("self_reservation.json");
 
