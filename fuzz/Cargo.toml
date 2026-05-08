@@ -5481,3 +5481,17 @@ path = "fuzz_targets/fuzz_progress_certificate_concurrent.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_isolation_level_from_server_string"
+path = "fuzz_targets/fuzz_isolation_level_from_server_string.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_http_accept_encoding"
+path = "fuzz_targets/fuzz_http_accept_encoding.rs"
+test = false
+doc = false
+bench = false
