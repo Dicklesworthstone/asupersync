@@ -46,10 +46,10 @@
 ### 2.2 Quality Gates (Required Before Every Commit)
 
 ```bash
-cargo check --all-targets
-cargo clippy --all-targets -- -D warnings
-cargo fmt --check
-cargo test --lib <module>  # targeted tests for changed modules
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_maintainer_docs cargo check --all-targets
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_maintainer_docs cargo clippy --all-targets -- -D warnings
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_maintainer_docs cargo fmt --check
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_maintainer_docs cargo test --lib <module>  # targeted tests for changed modules
 ```
 
 ### 2.3 Semantic Change Review Process

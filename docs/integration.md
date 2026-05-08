@@ -433,13 +433,13 @@ Extraction and optionalization rules:
 Deterministic validation bundle for this matrix:
 
 ```bash
-rch exec -- cargo check --target wasm32-unknown-unknown \
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_integration_wasm_docs cargo check --target wasm32-unknown-unknown \
   --no-default-features --features wasm-browser-minimal
 
-rch exec -- cargo check --target wasm32-unknown-unknown \
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_integration_wasm_docs cargo check --target wasm32-unknown-unknown \
   --no-default-features --features wasm-browser-dev
 
-rch exec -- cargo check --target wasm32-unknown-unknown \
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_integration_wasm_docs cargo check --target wasm32-unknown-unknown \
   --no-default-features --features wasm-browser-deterministic
 ```
 
@@ -566,8 +566,8 @@ lane is narrower and should be treated as three separate workflows:
 
 | Goal | Supported today | Canonical command / artifact | Evidence |
 |---|---|---|---|
-| Verify browser-safe semantic-core closure | Yes | `rch exec -- cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-<profile>` | root `Cargo.toml`, `src/lib.rs`, `tests/wasm_browser_feasibility_matrix.rs` |
-| Maintain the Rust-side ABI/package boundary that feeds the JS/TS packages | Yes, for workspace contributors | `rch exec -- cargo check -p asupersync-browser-core --target wasm32-unknown-unknown --no-default-features --features dev`; touch `asupersync-wasm` only when you need to keep the retained scaffold honest | `asupersync-browser-core/` (canonical owner), `asupersync-wasm/` (retained non-canonical scaffold) |
+| Verify browser-safe semantic-core closure | Yes | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_integration_wasm_docs cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-<profile>` | root `Cargo.toml`, `src/lib.rs`, `tests/wasm_browser_feasibility_matrix.rs` |
+| Maintain the Rust-side ABI/package boundary that feeds the JS/TS packages | Yes, for workspace contributors | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_integration_wasm_docs cargo check -p asupersync-browser-core --target wasm32-unknown-unknown --no-default-features --features dev`; touch `asupersync-wasm` only when you need to keep the retained scaffold honest | `asupersync-browser-core/` (canonical owner), `asupersync-wasm/` (retained non-canonical scaffold) |
 | Use the maintained browser-facing Rust example the repository proves end-to-end | Yes, as an in-repo fixture workflow | `PATH=/usr/bin:$PATH bash scripts/validate_rust_browser_consumer.sh` | `tests/fixtures/rust-browser-consumer/`, `tests/wasm_rust_browser_example_contract.rs` |
 | Construct Browser Edition runtimes directly from external Rust consumer code | Preview public lane | `RuntimeBuilder::browser()` for truthful lane negotiation and structured fail-closed diagnostics | `src/runtime/builder.rs`, `tests/fixtures/rust-browser-consumer/`, `tests/wasm_browser_feasibility_matrix.rs` |
 
@@ -701,16 +701,16 @@ Recommended command bundle for doc validation workflows:
 
 ```bash
 # Validate rust docs/test snippets and compile surfaces
-rch exec -- cargo check --all-targets
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_integration_docs cargo check --all-targets
 
 # Enforce lint quality on touched code/doc-adjacent surfaces
-rch exec -- cargo clippy --all-targets -- -D warnings
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_integration_docs cargo clippy --all-targets -- -D warnings
 
 # Validate formatting contract
-rch exec -- cargo fmt --check
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_integration_docs cargo fmt --check
 
 # Verify shipped browser package diagnostics and guidance strings
-rch exec -- cargo test --test wasm_js_exports_coverage_contract -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_integration_docs cargo test --test wasm_js_exports_coverage_contract -- --nocapture
 ```
 
 ### Examples
@@ -1054,8 +1054,8 @@ proof_impact:
     - <test or suite name>
   refinement_or_schema_impact: none|yes
   evidence_commands:
-    - rch exec -- cargo check --all-targets
-    - rch exec -- cargo clippy --all-targets -- -D warnings
+    - rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_integration_docs cargo check --all-targets
+    - rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_integration_docs cargo clippy --all-targets -- -D warnings
   review_artifact_location: <PR body section or attached artifact path>
 ```
 
@@ -1151,10 +1151,10 @@ Deterministic checklist (mark each item `pass`/`fail`/`n/a`):
 Required evidence commands for checklist completion:
 
 ```bash
-rch exec -- cargo check --all-targets
-rch exec -- cargo clippy --all-targets -- -D warnings
-rch exec -- cargo test --test refinement_conformance -- --nocapture
-rch exec -- cargo test --test lean_invariant_theorem_test_link_map -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_integration_docs cargo check --all-targets
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_integration_docs cargo clippy --all-targets -- -D warnings
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_integration_docs cargo test --test refinement_conformance -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_integration_docs cargo test --test lean_invariant_theorem_test_link_map -- --nocapture
 ```
 
 Performance-change review evidence example (bd-2pja4):
@@ -1240,9 +1240,9 @@ proof_guided_optimization:
     - <OPT-* constraint id>
     - <coverage artifact path>
   required_checks:
-    - rch exec -- cargo check --all-targets
-    - rch exec -- cargo clippy --all-targets -- -D warnings
-    - rch exec -- cargo test --test refinement_conformance -- --nocapture
+    - rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_integration_docs cargo check --all-targets
+    - rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_integration_docs cargo clippy --all-targets -- -D warnings
+    - rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_integration_docs cargo test --test refinement_conformance -- --nocapture
   evidence:
     metrics_before: <artifact/link>
     metrics_after: <artifact/link>
@@ -1572,7 +1572,7 @@ registry.unregister("counter")?;
 Runnable minimal end-to-end example:
 
 ```bash
-cargo run --example spork_minimal_supervised_app
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_spork_integration_docs cargo run --example spork_minimal_supervised_app
 ```
 
 This example lives at `examples/spork_minimal_supervised_app.rs` and demonstrates:
@@ -1623,8 +1623,8 @@ Current AA-05.3 validation surfaces:
 
 Direct `rch` rerun commands:
 
-- `rch exec -- cargo test --doc -- --nocapture`
-- `rch exec -- cargo test --test session_type_obligations -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_integration_docs cargo test --doc -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_integration_docs cargo test --test session_type_obligations -- --nocapture`
 
 Troubleshooting rules:
 

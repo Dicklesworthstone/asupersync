@@ -70,10 +70,10 @@ To measure allocation reduction, run with DHAT or similar allocator profiler:
 
 ```bash
 # With DHAT (requires nightly)
-RUSTFLAGS="-Z sanitizer=memory" cargo bench scheduler
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_scheduler_arena_docs RUSTFLAGS="-Z sanitizer=memory" cargo bench scheduler
 
 # With custom allocator tracking
-cargo test --lib scheduler -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_scheduler_arena_docs cargo test --lib scheduler -- --nocapture
 ```
 
 Expected reduction: 90%+ on per-poll allocations (2 → 0 per poll for steady-state tasks).
