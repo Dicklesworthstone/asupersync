@@ -88,14 +88,14 @@ agent environments.
 
 Required command tokens:
 
-- `rch exec -- cargo check --all-targets`
-- `rch exec -- cargo clippy --all-targets -- -D warnings`
-- `rch exec -- cargo fmt --check`
-- `rch exec -- cargo test --test tokio_unit_quality_threshold_contract -- --nocapture`
-- `rch exec -- cargo test --test tokio_io_parity_audit -- --nocapture`
-- `rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix -- --nocapture`
-- `rch exec -- cargo test --test tokio_web_grpc_parity_map -- --nocapture`
-- `rch exec -- cargo test --test tokio_ecosystem_capability_inventory -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_unit_quality_docs cargo check --all-targets`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_unit_quality_docs cargo clippy --all-targets -- -D warnings`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_unit_quality_docs cargo fmt --check`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_unit_quality_docs cargo test --test tokio_unit_quality_threshold_contract -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_unit_quality_docs cargo test --test tokio_io_parity_audit -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_unit_quality_docs cargo test --test tokio_fs_process_signal_parity_matrix -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_unit_quality_docs cargo test --test tokio_web_grpc_parity_map -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_unit_quality_docs cargo test --test tokio_ecosystem_capability_inventory -- --nocapture`
 
 Track unit suites are expected to publish dedicated commands in their own contracts;
 this gate validates their aggregated quality manifests and threshold outcomes.
