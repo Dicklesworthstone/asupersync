@@ -6,8 +6,9 @@
 //! 3. BTreeSet cancelled.remove() during advance_to() iterations
 //!
 //! Usage:
-//! cargo build --profile release-perf --bench virtual_time_wheel_cancel_storm
-//! samply record --save-only -o wheel_cancel_storm.json -- ./target/release-perf/deps/virtual_time_wheel_cancel_storm-*
+//! CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-/tmp/rch_target_wheel_cancel_storm_profile}
+//! rch exec -- env CARGO_TARGET_DIR=$CARGO_TARGET_DIR cargo build --profile release-perf --bench virtual_time_wheel_cancel_storm
+//! samply record --save-only -o wheel_cancel_storm.json -- $CARGO_TARGET_DIR/release-perf/deps/virtual_time_wheel_cancel_storm-*
 
 use asupersync::lab::virtual_time_wheel::VirtualTimerWheel;
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};

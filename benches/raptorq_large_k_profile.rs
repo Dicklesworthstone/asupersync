@@ -4,8 +4,8 @@
 //! **TARGET AREAS**: gf256 multiply, matrix solve step, gap-handling
 //! **METHODOLOGY**: Profile realistic scenarios with K=1024, 2048, 4096 to stress-test hot paths
 //!
-//! Run with: cargo bench --bench raptorq_large_k_profile --features simd-intrinsics
-//! Profile with: samply record --save-only -o raptorq_large_k.json -- cargo bench --bench raptorq_large_k_profile --features simd-intrinsics
+//! Run with: rch exec -- cargo bench --bench raptorq_large_k_profile --features simd-intrinsics
+//! Profile with: rch exec -- samply record --save-only -o raptorq_large_k.json -- cargo bench --bench raptorq_large_k_profile --features simd-intrinsics
 
 #![allow(warnings)]
 #![allow(dead_code)]

@@ -8,7 +8,7 @@
 //! - Cancel preemption latency in browser mode
 //!
 //! Run:
-//!   cargo bench --bench scheduler_browser_bench
+//!   rch exec -- cargo bench --bench scheduler_browser_bench
 //!
 //! These benchmarks complement the general scheduler_benchmark.rs suite
 //! by focusing on the browser event-loop adapter constraints.

@@ -19,7 +19,7 @@
 //!
 //! **Golden checksum registry**: Stored in `artifacts/golden_checksums.json`.
 //! To regenerate after intentional behavioral changes:
-//!   `GOLDEN_UPDATE=1 cargo bench --bench golden_output`
+//!   `rch exec -- env GOLDEN_UPDATE=1 cargo bench --bench golden_output`
 
 #![allow(missing_docs)]
 #![allow(clippy::semicolon_if_nothing_returned)]
