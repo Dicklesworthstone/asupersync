@@ -115,6 +115,55 @@ impl fmt::Display for ObligationAbortReason {
     }
 }
 
+/// Terminal lifecycle transition for an obligation.
+///
+/// This is the shared transition vocabulary used by the runtime record and
+/// ledger. It keeps the state target and abort reason coupled so callers cannot
+/// accidentally record an `Aborted` state without its reason, or attach an abort
+/// reason to a non-abort terminal state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ObligationResolution {
+    /// The obligation was committed successfully.
+    Commit,
+    /// The obligation was aborted for the given reason.
+    Abort(ObligationAbortReason),
+    /// The holder completed without resolving the obligation.
+    Leak,
+}
+
+impl ObligationResolution {
+    /// Returns the terminal state represented by this resolution.
+    #[inline]
+    #[must_use]
+    pub const fn state(self) -> ObligationState {
+        match self {
+            Self::Commit => ObligationState::Committed,
+            Self::Abort(_) => ObligationState::Aborted,
+            Self::Leak => ObligationState::Leaked,
+        }
+    }
+
+    /// Returns the abort reason associated with this resolution, if any.
+    #[inline]
+    #[must_use]
+    pub const fn abort_reason(self) -> Option<ObligationAbortReason> {
+        match self {
+            Self::Abort(reason) => Some(reason),
+            Self::Commit | Self::Leak => None,
+        }
+    }
+}
+
+impl fmt::Display for ObligationResolution {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Commit => f.write_str("commit"),
+            Self::Abort(reason) => write!(f, "abort({reason})"),
+            Self::Leak => f.write_str("leak"),
+        }
+    }
+}
+
 /// The state of an obligation.
 ///
 /// Implements `inv.obligation.linear` (#18): each obligation transitions from
@@ -329,17 +378,55 @@ impl ObligationRecord {
         matches!(self.state, ObligationState::Reserved)
     }
 
-    fn resolve(
-        &mut self,
-        now: Time,
-        state: ObligationState,
-        abort_reason: Option<ObligationAbortReason>,
-    ) -> u64 {
+    fn resolve(&mut self, now: Time, resolution: ObligationResolution) -> u64 {
         assert!(self.is_pending(), "obligation already resolved");
-        self.state = state;
+        self.state = resolution.state();
         self.resolved_at = Some(now);
-        self.abort_reason = abort_reason;
+        self.abort_reason = resolution.abort_reason();
         now.duration_since(self.reserved_at)
+    }
+
+    /// Applies a terminal lifecycle transition and emits the matching trace.
+    ///
+    /// This is crate-visible so the central runtime ledger can use the same
+    /// record transition primitive for token-based, ID-based, and leak paths.
+    ///
+    /// # Panics
+    ///
+    /// Panics if already resolved.
+    pub(crate) fn resolve_with(&mut self, now: Time, resolution: ObligationResolution) -> u64 {
+        let duration_held = self.resolve(now, resolution);
+        match resolution {
+            ObligationResolution::Commit => {
+                info!(
+                    obligation_id = ?self.id,
+                    kind = %self.kind,
+                    duration_held_ns = duration_held,
+                    "obligation committed"
+                );
+            }
+            ObligationResolution::Abort(_) => {
+                info!(
+                    obligation_id = ?self.id,
+                    kind = %self.kind,
+                    abort_reason = ?self.abort_reason,
+                    duration_held_ns = duration_held,
+                    "obligation aborted"
+                );
+            }
+            ObligationResolution::Leak => {
+                error!(
+                    obligation_id = ?self.id,
+                    kind = %self.kind,
+                    holder_task = ?self.holder,
+                    owning_region = ?self.region,
+                    duration_held_ns = duration_held,
+                    description = ?self.description,
+                    "OBLIGATION LEAKED: holder completed without resolving obligation"
+                );
+            }
+        }
+        duration_held
     }
 
     /// Commits the obligation.
@@ -348,14 +435,7 @@ impl ObligationRecord {
     ///
     /// Panics if already resolved.
     pub fn commit(&mut self, now: Time) -> u64 {
-        let duration_held = self.resolve(now, ObligationState::Committed, None);
-        info!(
-            obligation_id = ?self.id,
-            kind = %self.kind,
-            duration_held_ns = duration_held,
-            "obligation committed"
-        );
-        duration_held
+        self.resolve_with(now, ObligationResolution::Commit)
     }
 
     /// Aborts the obligation.
@@ -364,15 +444,7 @@ impl ObligationRecord {
     ///
     /// Panics if already resolved.
     pub fn abort(&mut self, now: Time, reason: ObligationAbortReason) -> u64 {
-        let duration_held = self.resolve(now, ObligationState::Aborted, Some(reason));
-        info!(
-            obligation_id = ?self.id,
-            kind = %self.kind,
-            abort_reason = %reason,
-            duration_held_ns = duration_held,
-            "obligation aborted"
-        );
-        duration_held
+        self.resolve_with(now, ObligationResolution::Abort(reason))
     }
 
     /// Marks the obligation as leaked.
@@ -384,17 +456,7 @@ impl ObligationRecord {
     ///
     /// Panics if already resolved.
     pub fn mark_leaked(&mut self, now: Time) -> u64 {
-        let duration_held = self.resolve(now, ObligationState::Leaked, None);
-        error!(
-            obligation_id = ?self.id,
-            kind = %self.kind,
-            holder_task = ?self.holder,
-            owning_region = ?self.region,
-            duration_held_ns = duration_held,
-            description = ?self.description,
-            "OBLIGATION LEAKED: holder completed without resolving obligation"
-        );
-        duration_held
+        self.resolve_with(now, ObligationResolution::Leak)
     }
 
     /// Returns true if this obligation leaked.
@@ -595,6 +657,51 @@ mod tests {
         );
         crate::assert_with_log!(duration == 3, "duration", 3, duration);
         crate::test_complete!("obligation_lifecycle_leaked");
+    }
+
+    #[test]
+    fn obligation_resolution_couples_state_and_abort_reason() {
+        init_test("obligation_resolution_couples_state_and_abort_reason");
+        crate::assert_with_log!(
+            ObligationResolution::Commit.state() == ObligationState::Committed,
+            "commit state",
+            ObligationState::Committed,
+            ObligationResolution::Commit.state()
+        );
+        crate::assert_with_log!(
+            ObligationResolution::Commit.abort_reason().is_none(),
+            "commit reason",
+            None::<ObligationAbortReason>,
+            ObligationResolution::Commit.abort_reason()
+        );
+
+        let abort = ObligationResolution::Abort(ObligationAbortReason::Cancel);
+        crate::assert_with_log!(
+            abort.state() == ObligationState::Aborted,
+            "abort state",
+            ObligationState::Aborted,
+            abort.state()
+        );
+        crate::assert_with_log!(
+            abort.abort_reason() == Some(ObligationAbortReason::Cancel),
+            "abort reason",
+            Some(ObligationAbortReason::Cancel),
+            abort.abort_reason()
+        );
+
+        crate::assert_with_log!(
+            ObligationResolution::Leak.state() == ObligationState::Leaked,
+            "leak state",
+            ObligationState::Leaked,
+            ObligationResolution::Leak.state()
+        );
+        crate::assert_with_log!(
+            ObligationResolution::Leak.abort_reason().is_none(),
+            "leak reason",
+            None::<ObligationAbortReason>,
+            ObligationResolution::Leak.abort_reason()
+        );
+        crate::test_complete!("obligation_resolution_couples_state_and_abort_reason");
     }
 
     #[test]

@@ -19,7 +19,9 @@ pub use distributed_region::{
 };
 pub use finalizer::{Finalizer, FinalizerEscalation, FinalizerStack};
 pub use obligation::SourceLocation;
-pub use obligation::{ObligationAbortReason, ObligationKind, ObligationRecord, ObligationState};
+pub use obligation::{
+    ObligationAbortReason, ObligationKind, ObligationRecord, ObligationResolution, ObligationState,
+};
 pub use region::{AdmissionError, AdmissionKind, RegionLimits, RegionRecord};
 pub use symbol_obligation_tracker::{
     EpochId, EpochWindow, ObligationGuard, SymbolObligation, SymbolObligationKind,

@@ -56,7 +56,7 @@
 //! // drop(leaked); // PANIC: obligation leaked!
 //! ```
 
-use crate::record::ObligationKind;
+use crate::record::{ObligationKind, ObligationState};
 use std::fmt;
 use std::marker::PhantomData;
 
@@ -78,6 +78,18 @@ impl fmt::Display for Resolution {
         match self {
             Self::Commit => f.write_str("commit"),
             Self::Abort => f.write_str("abort"),
+        }
+    }
+}
+
+impl Resolution {
+    /// Returns the matching runtime obligation record state.
+    #[inline]
+    #[must_use]
+    pub const fn obligation_state(self) -> ObligationState {
+        match self {
+            Self::Commit => ObligationState::Committed,
+            Self::Abort => ObligationState::Aborted,
         }
     }
 }
@@ -243,6 +255,12 @@ impl ResolvedProof {
     #[must_use]
     pub fn resolution(&self) -> Resolution {
         self.resolution
+    }
+
+    /// Returns the matching runtime obligation record state.
+    #[must_use]
+    pub fn obligation_state(&self) -> ObligationState {
+        self.resolution.obligation_state()
     }
 }
 
@@ -1014,6 +1032,13 @@ mod tests {
         let proof = ob.resolve(Resolution::Commit);
         let r = proof.resolution();
         crate::assert_with_log!(r == Resolution::Commit, "resolution", Resolution::Commit, r);
+        let state = proof.obligation_state();
+        crate::assert_with_log!(
+            state == ObligationState::Committed,
+            "record state",
+            ObligationState::Committed,
+            state
+        );
         crate::test_complete!("obligation_commit_clean");
     }
 
@@ -1024,6 +1049,13 @@ mod tests {
         let proof = ob.resolve(Resolution::Abort);
         let r = proof.resolution();
         crate::assert_with_log!(r == Resolution::Abort, "resolution", Resolution::Abort, r);
+        let state = proof.obligation_state();
+        crate::assert_with_log!(
+            state == ObligationState::Aborted,
+            "record state",
+            ObligationState::Aborted,
+            state
+        );
         crate::test_complete!("obligation_abort_clean");
     }
 

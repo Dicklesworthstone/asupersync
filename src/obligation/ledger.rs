@@ -20,7 +20,8 @@
 //! - The cancellation protocol (to abort obligations during drain)
 
 use crate::record::{
-    ObligationAbortReason, ObligationKind, ObligationRecord, ObligationState, SourceLocation,
+    ObligationAbortReason, ObligationKind, ObligationRecord, ObligationResolution, ObligationState,
+    SourceLocation,
 };
 use crate::types::{ObligationId, RegionId, TaskId, Time};
 use crate::util::ArenaIndex;
@@ -271,6 +272,51 @@ impl ObligationLedger {
         record
     }
 
+    fn finish_resolution(&mut self, operation: &'static str, resolution: ObligationResolution) {
+        match resolution {
+            ObligationResolution::Commit => {
+                self.stats.total_committed += 1;
+            }
+            ObligationResolution::Abort(_) => {
+                self.stats.total_aborted += 1;
+            }
+            ObligationResolution::Leak => {
+                self.stats.total_leaked += 1;
+            }
+        }
+        self.resolve_one_pending(operation);
+    }
+
+    fn resolve_token(
+        &mut self,
+        token: &ObligationToken,
+        operation: &'static str,
+        resolution: ObligationResolution,
+        now: Time,
+    ) -> u64 {
+        let duration = {
+            let record = self.record_for_token_mut(token);
+            record.resolve_with(now, resolution)
+        };
+        self.finish_resolution(operation, resolution);
+        duration
+    }
+
+    fn resolve_id(
+        &mut self,
+        id: ObligationId,
+        operation: &'static str,
+        resolution: ObligationResolution,
+        now: Time,
+    ) -> u64 {
+        let duration = {
+            let record = self.pending_record_for_id_mut(id, operation);
+            record.resolve_with(now, resolution)
+        };
+        self.finish_resolution(operation, resolution);
+        duration
+    }
+
     /// Creates an empty ledger.
     #[must_use]
     pub fn new() -> Self {
@@ -518,11 +564,7 @@ impl ObligationLedger {
         if self.finalized_regions.contains(&token.region) {
             return 0;
         }
-        let record = self.record_for_token_mut(&token);
-        let duration = record.commit(now);
-        self.stats.total_committed += 1;
-        self.resolve_one_pending("commit");
-        duration
+        self.resolve_token(&token, "commit", ObligationResolution::Commit, now)
     }
 
     /// Aborts an obligation, consuming the token.
@@ -548,11 +590,7 @@ impl ObligationLedger {
         if self.finalized_regions.contains(&token.region) {
             return 0;
         }
-        let record = self.record_for_token_mut(&token);
-        let duration = record.abort(now, reason);
-        self.stats.total_aborted += 1;
-        self.resolve_one_pending("abort");
-        duration
+        self.resolve_token(&token, "abort", ObligationResolution::Abort(reason), now)
     }
 
     /// Aborts an obligation by ID.
@@ -590,11 +628,7 @@ impl ObligationLedger {
                 return 0;
             }
         }
-        let record = self.pending_record_for_id_mut(id, "abort_by_id");
-        let duration = record.abort(now, reason);
-        self.stats.total_aborted += 1;
-        self.resolve_one_pending("abort_by_id");
-        duration
+        self.resolve_id(id, "abort_by_id", ObligationResolution::Abort(reason), now)
     }
 
     /// Race-tolerant variant of [`Self::abort_by_id`] for drain loops
@@ -647,11 +681,12 @@ impl ObligationLedger {
                 state,
             });
         }
-        let record = self.pending_record_for_id_mut(id, "try_abort_by_id");
-        let duration = record.abort(now, reason);
-        self.stats.total_aborted += 1;
-        self.resolve_one_pending("try_abort_by_id");
-        Ok(duration)
+        Ok(self.resolve_id(
+            id,
+            "try_abort_by_id",
+            ObligationResolution::Abort(reason),
+            now,
+        ))
     }
 
     /// Marks an obligation as leaked (runtime detected the holder completed
@@ -661,11 +696,7 @@ impl ObligationLedger {
     ///
     /// Panics if the obligation was already resolved or does not exist.
     pub fn mark_leaked(&mut self, id: ObligationId, now: Time) -> u64 {
-        let record = self.pending_record_for_id_mut(id, "mark_leaked");
-        let duration = record.mark_leaked(now);
-        self.stats.total_leaked += 1;
-        self.resolve_one_pending("mark_leaked");
-        duration
+        self.resolve_id(id, "mark_leaked", ObligationResolution::Leak, now)
     }
 
     /// Returns the current ledger statistics.
