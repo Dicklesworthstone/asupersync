@@ -1,0 +1,118 @@
+{
+  "accepted_input_contract": {
+    "required_top_level_fields": [
+      "schema_version",
+      "artifact_id",
+      "source_kind",
+      "failure"
+    ],
+    "schema_version": "crashpack-to-repro-input-v1",
+    "supported_source_kinds": [
+      "cargo_test",
+      "fuzz",
+      "proof_runner_blocker",
+      "rch_wrapper_hang_after_remote_exit"
+    ]
+  },
+  "commands": [
+    {
+      "argv": [
+        "rch",
+        "exec",
+        "--",
+        "env",
+        "CARGO_INCREMENTAL=0",
+        "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_crashpack_proof_runner_blocker_console_report_002",
+        "CARGO_PROFILE_TEST_DEBUG=0",
+        "RUSTFLAGS=-C debuginfo=0",
+        "cargo",
+        "test",
+        "-p",
+        "asupersync",
+        "--test",
+        "proof_console_report_contract",
+        "rejects_unknown_rch_outcome_class",
+        "--",
+        "--nocapture"
+      ],
+      "cwd": ".",
+      "direct_main_safe": true,
+      "id": "rerun-proof-runner-blocker",
+      "kind": "proof-runner-blocker-rerun",
+      "reason": "rerun the blocked proof-runner contract lane through rch",
+      "runs_cargo": true,
+      "safety_violations": [],
+      "shell_command": "rch exec -- env CARGO_INCREMENTAL=0 'CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_crashpack_proof_runner_blocker_console_report_002' CARGO_PROFILE_TEST_DEBUG=0 'RUSTFLAGS=-C debuginfo=0' cargo test -p asupersync --test proof_console_report_contract rejects_unknown_rch_outcome_class -- --nocapture",
+      "uses_rch": true
+    }
+  ],
+  "current_date": "2026-05-08",
+  "forbidden_actions": {
+    "runs_agent_mail_mutation": false,
+    "runs_beads_mutation": false,
+    "runs_cargo": false,
+    "runs_destructive_command": false,
+    "runs_git_mutation": false
+  },
+  "generated_at": "2026-05-08T12:00:00Z",
+  "input_schema_version": "crashpack-to-repro-input-v1",
+  "non_mutating": true,
+  "safety": {
+    "cargo_commands_require_rch": true,
+    "direct_main_safe": true,
+    "forbidden_patterns_checked": [
+      "git branch ",
+      "git checkout -b",
+      "git switch -c",
+      "git worktree",
+      "worktree add",
+      "git push origin head:",
+      "git push --set-upstream",
+      "rm -rf",
+      "git reset --hard",
+      "git clean -fd",
+      "/tmp/asupersync-",
+      "/data/projects/asupersync-"
+    ],
+    "target_dirs_require_tmpdir_expansion": true,
+    "violations": []
+  },
+  "schema_version": "crashpack-repro-command-v1",
+  "source": {
+    "artifact_id": "proof-runner-blocker-console-report-002",
+    "bead_id": "asupersync-xeh8m0.5",
+    "first_blocker": "proof console rejected unknown rch outcome class",
+    "source_kind": "proof_runner_blocker",
+    "summary": "proof-runner blocker row captured during operator report contract validation",
+    "touched_files": [
+      "artifacts/proof_console_report_contract_v1.json",
+      "tests/proof_console_report_contract.rs"
+    ]
+  },
+  "summary": {
+    "command_count": 1,
+    "safe_for_direct_main": true,
+    "safety_violation_count": 0
+  },
+  "tool_selection": {
+    "existing_helpers_considered": [
+      {
+        "fit": "partial",
+        "path": "scripts/rch_retrieval_receipt.py",
+        "reason": "classifies rch retrieval logs but does not generate rerun commands from cargo, fuzz, or proof-runner artifacts"
+      },
+      {
+        "fit": "not-an-extension-point",
+        "path": "scripts/swarm_coordination_replay_pack.py",
+        "reason": "validates coordination timelines and closeout evidence, not failure-artifact command synthesis"
+      },
+      {
+        "fit": "not-an-extension-point",
+        "path": "scripts/proof_receipt_inventory.py",
+        "reason": "inventories helper capabilities and duplicate proof surfaces, not crashpack repro commands"
+      }
+    ],
+    "new_tool_file_required": true,
+    "rationale": "existing helpers classify a single proof log, inventory proof helpers, or replay coordination transcripts; none accepts heterogeneous crashpack and failure-artifact schemas and emits normalized repro command JSON"
+  }
+}

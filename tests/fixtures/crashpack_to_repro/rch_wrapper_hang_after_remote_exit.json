@@ -1,0 +1,41 @@
+{
+  "artifact_id": "rch-retrieval-timeout-after-pass-003",
+  "bead_id": "asupersync-xeh8m0.5",
+  "failure": {
+    "first_blocker": "local wrapper timed out while retrieving .rch-target after remote exit=0",
+    "summary": "rch wrapper hang after remote proof success"
+  },
+  "rch": {
+    "log_path": "tests/fixtures/rch_retrieval_receipt/passed_after_retrieval_timeout.log",
+    "original_command_argv": [
+      "rch",
+      "exec",
+      "--",
+      "env",
+      "CARGO_INCREMENTAL=0",
+      "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_web_csrf_audit_frontier",
+      "CARGO_PROFILE_TEST_DEBUG=0",
+      "RUSTFLAGS=-C debuginfo=0",
+      "cargo",
+      "test",
+      "-p",
+      "asupersync",
+      "--test",
+      "web_csrf_validation_audit",
+      "--",
+      "--nocapture"
+    ],
+    "remote_exit_code": 0,
+    "retrieval_classification": "passed_after_retrieval_timeout",
+    "wrapper_exit_code": 124
+  },
+  "repo": {
+    "commit": "fc8b7488a",
+    "cwd": "."
+  },
+  "schema_version": "crashpack-to-repro-input-v1",
+  "source_kind": "rch_wrapper_hang_after_remote_exit",
+  "touched_files": [
+    "tests/web_csrf_validation_audit.rs"
+  ]
+}
