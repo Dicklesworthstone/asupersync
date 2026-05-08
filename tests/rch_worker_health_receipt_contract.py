@@ -64,6 +64,18 @@ class RchWorkerHealthReceiptContract(unittest.TestCase):
         self.assertEqual(receipt["workers"][0]["signals"]["retrieval_timeout"], 1)
         self.assertIn("single artifact retrieval timeout", receipt["workers"][0]["reasons"])
 
+    def test_retrieval_timeout_output_matches_full_reviewed_golden(self) -> None:
+        output = run_receipt_output("single_retrieval_timeout.json")
+        expected = fixture_text("single_retrieval_timeout_expected.json")
+
+        self.assertEqual(
+            output.stdout,
+            expected,
+            "single retrieval timeout rch worker health receipt drifted from the reviewed golden",
+        )
+        json.loads(output.stdout)
+        json.loads(expected)
+
     def test_repeated_remote_failures_are_quarantine_candidates(self) -> None:
         receipt = run_receipt("repeated_remote_failures.json")
 
