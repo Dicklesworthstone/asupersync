@@ -67,7 +67,7 @@
 //! same runtime binary, execution is bit-identical.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 // ---------------------------------------------------------------------------
 // Top-level scenario
@@ -616,6 +616,13 @@ impl Scenario {
     }
 
     fn validate_faults(&self, errors: &mut Vec<ValidationError>) {
+        let participant_names: HashSet<&str> =
+            self.participants.iter().map(|p| p.name.as_str()).collect();
+
+        for (index, fault) in self.faults.iter().enumerate() {
+            Self::validate_fault_args(index, fault, &participant_names, errors);
+        }
+
         for window in self.faults.windows(2) {
             if window[1].at_ms < window[0].at_ms {
                 errors.push(ValidationError {
@@ -627,6 +634,124 @@ impl Scenario {
                 });
             }
         }
+    }
+
+    fn validate_fault_args(
+        fault_index: usize,
+        fault: &FaultEvent,
+        participant_names: &HashSet<&str>,
+        errors: &mut Vec<ValidationError>,
+    ) {
+        match &fault.action {
+            FaultAction::Partition | FaultAction::Heal => {
+                let from =
+                    Self::required_fault_string_arg(fault_index, &fault.args, "from", errors);
+                let to = Self::required_fault_string_arg(fault_index, &fault.args, "to", errors);
+
+                if let (Some(from), Some(to)) = (from, to) {
+                    if from == to {
+                        errors.push(ValidationError {
+                            field: format!("faults[{fault_index}].args.to"),
+                            message: "partition/heal endpoints must be distinct".into(),
+                        });
+                    }
+                    Self::validate_fault_participant_ref(
+                        fault_index,
+                        "from",
+                        from,
+                        participant_names,
+                        errors,
+                    );
+                    Self::validate_fault_participant_ref(
+                        fault_index,
+                        "to",
+                        to,
+                        participant_names,
+                        errors,
+                    );
+                }
+            }
+            FaultAction::HostCrash | FaultAction::HostRestart | FaultAction::ClockReset => {
+                if let Some(host) =
+                    Self::required_fault_string_arg(fault_index, &fault.args, "host", errors)
+                {
+                    Self::validate_fault_participant_ref(
+                        fault_index,
+                        "host",
+                        host,
+                        participant_names,
+                        errors,
+                    );
+                }
+            }
+            FaultAction::ClockSkew => {
+                if let Some(host) =
+                    Self::required_fault_string_arg(fault_index, &fault.args, "host", errors)
+                {
+                    Self::validate_fault_participant_ref(
+                        fault_index,
+                        "host",
+                        host,
+                        participant_names,
+                        errors,
+                    );
+                }
+                Self::required_fault_i64_arg(fault_index, &fault.args, "skew_ms", errors);
+            }
+        }
+    }
+
+    fn required_fault_string_arg<'a>(
+        fault_index: usize,
+        args: &'a BTreeMap<String, serde_json::Value>,
+        key: &str,
+        errors: &mut Vec<ValidationError>,
+    ) -> Option<&'a str> {
+        let value = args
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+
+        if value.is_none() {
+            errors.push(ValidationError {
+                field: format!("faults[{fault_index}].args.{key}"),
+                message: format!("fault action requires non-empty string arg `{key}`"),
+            });
+        }
+
+        value
+    }
+
+    fn required_fault_i64_arg(
+        fault_index: usize,
+        args: &BTreeMap<String, serde_json::Value>,
+        key: &str,
+        errors: &mut Vec<ValidationError>,
+    ) {
+        if args.get(key).and_then(serde_json::Value::as_i64).is_none() {
+            errors.push(ValidationError {
+                field: format!("faults[{fault_index}].args.{key}"),
+                message: format!("fault action requires integer arg `{key}`"),
+            });
+        }
+    }
+
+    fn validate_fault_participant_ref(
+        fault_index: usize,
+        key: &str,
+        value: &str,
+        participant_names: &HashSet<&str>,
+        errors: &mut Vec<ValidationError>,
+    ) {
+        if participant_names.is_empty() || participant_names.contains(value) {
+            return;
+        }
+
+        errors.push(ValidationError {
+            field: format!("faults[{fault_index}].args.{key}"),
+            message: format!("unknown participant `{value}`"),
+        });
     }
 
     fn validate_participants(&self, errors: &mut Vec<ValidationError>) {
@@ -1036,6 +1161,55 @@ mod tests {
         let s: Scenario = serde_json::from_str(json).unwrap();
         let errors = s.validate();
         assert!(errors.iter().any(|e| e.field == "faults"));
+    }
+
+    #[test]
+    fn validate_fault_action_args_fail_closed() {
+        let json = r#"{
+            "id": "x",
+            "faults": [
+                {"at_ms": 1, "action": "partition"},
+                {"at_ms": 2, "action": "host_crash", "args": {"host": ""}},
+                {"at_ms": 3, "action": "clock_skew", "args": {"host": "alice", "skew_ms": "fast"}}
+            ]
+        }"#;
+        let s: Scenario = serde_json::from_str(json).unwrap();
+        let errors = s.validate();
+
+        assert!(errors.iter().any(|e| e.field == "faults[0].args.from"));
+        assert!(errors.iter().any(|e| e.field == "faults[0].args.to"));
+        assert!(errors.iter().any(|e| e.field == "faults[1].args.host"));
+        assert!(errors.iter().any(|e| e.field == "faults[2].args.skew_ms"));
+    }
+
+    #[test]
+    fn validate_fault_args_reference_declared_participants() {
+        let json = r#"{
+            "id": "x",
+            "participants": [
+                {"name": "alice"},
+                {"name": "bob"}
+            ],
+            "faults": [
+                {"at_ms": 1, "action": "partition", "args": {"from": "alice", "to": "mallory"}},
+                {"at_ms": 2, "action": "heal", "args": {"from": "bob", "to": "bob"}},
+                {"at_ms": 3, "action": "clock_reset", "args": {"host": "mallory"}}
+            ]
+        }"#;
+        let s: Scenario = serde_json::from_str(json).unwrap();
+        let errors = s.validate();
+
+        assert!(errors.iter().any(|e| {
+            e.field == "faults[0].args.to" && e.message.contains("unknown participant")
+        }));
+        assert!(
+            errors
+                .iter()
+                .any(|e| { e.field == "faults[1].args.to" && e.message.contains("distinct") })
+        );
+        assert!(errors.iter().any(|e| {
+            e.field == "faults[2].args.host" && e.message.contains("unknown participant")
+        }));
     }
 
     #[test]
