@@ -1,0 +1,63 @@
+{
+  "action_items": [],
+  "coverage": [
+    {
+      "evidence": {
+        "covering_targets": [
+          "fuzz_nats_headers_a",
+          "fuzz_nats_headers_b"
+        ],
+        "exemption_status": "missing",
+        "partial_targets": [],
+        "stale_covering_targets": []
+      },
+      "risk_rank": 2,
+      "status": "covered",
+      "surface": {
+        "category": "nats",
+        "id": "nats_header_parse",
+        "input_kind": "&str",
+        "path": "src/messaging/nats.rs",
+        "risk": "medium",
+        "symbol": "parse_nats_headers",
+        "visibility": "pub"
+      }
+    }
+  ],
+  "current_date": "2026-05-08",
+  "forbidden_actions": {
+    "edits_fuzz_manifest": false,
+    "runs_beads_mutation": false,
+    "runs_cargo": false,
+    "runs_destructive_command": false,
+    "runs_git_mutation": false
+  },
+  "generated_at": "2026-05-08T05:45:00Z",
+  "input_schema_version": "parser-fuzz-coverage-input-v1",
+  "missing_coverage": [],
+  "non_mutating": true,
+  "partial_coverage": [],
+  "requirements": {
+    "coverage_uses_active_fuzz_target": true,
+    "every_public_byte_or_string_parser_has_coverage_or_exemption": true,
+    "exemptions_have_reason_and_future_expiry": true,
+    "input_schema_recognized": true,
+    "partial_references_are_not_counted_as_coverage": true
+  },
+  "schema_version": "parser-fuzz-coverage-registry-v1",
+  "source": "tests/fixtures/parser_fuzz_coverage_registry/duplicate_targets.json",
+  "source_counts": {
+    "exemptions": 0,
+    "fuzz_targets": 2,
+    "parser_surfaces": 1
+  },
+  "summary": {
+    "covered": 1,
+    "exempt": 0,
+    "invalid_exemptions": 0,
+    "missing": 0,
+    "partial": 0,
+    "passes": true,
+    "stale_covering_targets": 0
+  }
+}

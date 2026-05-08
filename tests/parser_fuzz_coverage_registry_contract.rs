@@ -200,6 +200,26 @@ fn duplicate_target_ids_are_coalesced_deterministically() {
 }
 
 #[test]
+fn duplicate_targets_matches_full_output_golden() {
+    let output = run_registry("duplicate_targets.json");
+    assert!(
+        output.status.success(),
+        "registry helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = String::from_utf8(output.stdout).expect("registry stdout is UTF-8");
+    let expected = fixture_text("duplicate_targets_expected.json");
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual registry output is JSON");
+    let expected_json: Value =
+        serde_json::from_str(&expected).expect("expected registry output is JSON");
+    assert_eq!(actual_json, expected_json, "registry golden JSON drifted");
+    assert_eq!(actual, expected, "registry golden text drifted");
+}
+
+#[test]
 fn helper_declares_it_does_not_mutate_repo_or_manifest() {
     let receipt = registry_json("covered_registry.json");
 
