@@ -537,7 +537,7 @@ pub fn browser_operator_snapshot_fixture(
 #[cfg(test)]
 mod tests {
     use super::{
-        BrowserOperatorConsoleSnapshot, BrowserOperatorSnapshotKind,
+        BrowserOperatorConsoleSnapshot, BrowserOperatorRuntimeState, BrowserOperatorSnapshotKind,
         browser_operator_snapshot_fixture, decode_json_payload, decode_optional_consumer_version,
         encode_json_payload,
     };
@@ -643,6 +643,55 @@ mod tests {
         assert_eq!(snapshot.tasks.total, 1);
         assert_eq!(snapshot.pressure.sample_count, 3);
         assert!(snapshot.proof_status.proof_fresh);
+        assert!(snapshot.has_fail_closed_native_omissions());
+    }
+
+    #[test]
+    fn browser_operator_snapshot_from_dispatcher_diagnostics_fails_closed_on_leaked_handles() {
+        let leaked_task = WasmHandleRef {
+            kind: WasmHandleKind::Task,
+            slot: 7,
+            generation: 1,
+            owner_token: 0xFEED_BEEF,
+        };
+        let diagnostics = WasmDispatcherDiagnostics {
+            dispatch_count: 5,
+            memory_report: WasmMemoryReport {
+                live_handles: 3,
+                capacity: 4,
+                free_slots: 1,
+                pinned_count: 1,
+                by_kind: BTreeMap::from([
+                    ("runtime".to_string(), 1),
+                    ("region".to_string(), 1),
+                    ("task".to_string(), 1),
+                ]),
+                by_state: BTreeMap::from([("active".to_string(), 2), ("closed".to_string(), 1)]),
+            },
+            event_count: 5,
+            leaks: vec![leaked_task],
+            producer_version: WasmAbiVersion { major: 1, minor: 0 },
+        };
+
+        let snapshot = BrowserOperatorConsoleSnapshot::from_dispatcher_diagnostics(&diagnostics);
+        assert_eq!(snapshot.kind, BrowserOperatorSnapshotKind::CancelledRuntime);
+        assert_eq!(
+            snapshot.runtime.state,
+            BrowserOperatorRuntimeState::Cancelling
+        );
+        assert_eq!(snapshot.runtime.logical_tick, 5);
+        assert_eq!(snapshot.tasks.cancelled, 1);
+        assert_eq!(snapshot.tasks.cleanup_pending, 1);
+        assert!(!snapshot.pressure.admission_open);
+        assert!(!snapshot.proof_status.proof_fresh);
+        assert_eq!(snapshot.proof_status.proof_lane, None);
+        assert!(
+            snapshot
+                .proof_status
+                .blocked_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("unreleased closed handles"))
+        );
         assert!(snapshot.has_fail_closed_native_omissions());
     }
 }

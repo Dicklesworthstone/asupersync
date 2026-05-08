@@ -210,6 +210,57 @@ fn live_export_is_wired_to_dispatcher_diagnostics() {
 }
 
 #[test]
+fn live_dispatcher_leaks_fail_closed_to_cancelled_snapshot() {
+    let contract = contract();
+    let policy = &contract["live_dispatcher_fail_closed_policy"];
+    assert_eq!(string(policy, "leak_snapshot_kind"), "cancelled_runtime");
+    assert_eq!(string(policy, "runtime_state"), "cancelling");
+    assert!(!bool_field(policy, "admission_open"));
+    assert!(!bool_field(policy, "proof_fresh"));
+    assert!(bool_field(policy, "proof_lane_must_be_absent"));
+
+    let model = read_repo_file(MODEL_PATH);
+    let source_test = string(policy, "source_test");
+    let blocked_reason = string(policy, "blocked_reason_contains");
+    assert!(
+        model.contains(source_test),
+        "model tests must include live dispatcher leak policy test {source_test}"
+    );
+    assert!(
+        model.contains("BrowserOperatorSnapshotKind::CancelledRuntime"),
+        "leaked dispatcher diagnostics must project cancelled runtime kind"
+    );
+    assert!(
+        model.contains("BrowserOperatorRuntimeState::Cancelling"),
+        "leaked dispatcher diagnostics must project cancelling runtime state"
+    );
+    assert!(
+        model.contains("admission_open: !has_leaks"),
+        "leaked dispatcher diagnostics must close admission"
+    );
+    assert!(
+        model.contains("let proof_lane = (!has_leaks).then"),
+        "leaked dispatcher diagnostics must omit proof lane"
+    );
+    assert!(
+        model.contains("proof_fresh: !has_leaks"),
+        "leaked dispatcher diagnostics must clear proof freshness"
+    );
+    assert!(
+        model.contains(blocked_reason),
+        "leaked dispatcher diagnostics must expose blocked cleanup reason"
+    );
+
+    let commands = array(&contract, "validation_commands");
+    assert!(
+        commands.iter().any(|command| command
+            .as_str()
+            .is_some_and(|command| command.contains(source_test))),
+        "validation commands must include the live dispatcher leak policy test"
+    );
+}
+
+#[test]
 fn scenario_matrix_covers_core_browser_console_states() {
     let contract = contract();
     let expected_kinds = string_set(&contract["schema"], "required_snapshot_kinds");
