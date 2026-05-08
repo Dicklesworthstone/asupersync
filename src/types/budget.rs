@@ -593,6 +593,323 @@ impl Budget {
     }
 }
 
+/// Resource dimension covered by a [`CapabilityBudget`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityBudgetDimension {
+    /// Resident memory in bytes.
+    MemoryBytes,
+    /// Abstract CPU units.
+    CpuUnits,
+    /// I/O bytes.
+    IoBytes,
+    /// Cleanup budget used by drain/finalizer paths.
+    Cleanup,
+    /// Bytes emitted as proof, trace, or evidence artifacts.
+    ArtifactBytes,
+}
+
+impl CapabilityBudgetDimension {
+    /// Stable lower-case identifier for logs and reports.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MemoryBytes => "memory_bytes",
+            Self::CpuUnits => "cpu_units",
+            Self::IoBytes => "io_bytes",
+            Self::Cleanup => "cleanup",
+            Self::ArtifactBytes => "artifact_bytes",
+        }
+    }
+}
+
+/// Required resource dimensions for fail-closed capability-budget admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CapabilityBudgetRequirements {
+    /// Require a memory envelope.
+    pub memory_bytes: bool,
+    /// Require a CPU envelope.
+    pub cpu_units: bool,
+    /// Require an I/O envelope.
+    pub io_bytes: bool,
+    /// Require a cleanup envelope.
+    pub cleanup: bool,
+    /// Require an artifact-emission envelope.
+    pub artifact_bytes: bool,
+}
+
+impl CapabilityBudgetRequirements {
+    /// No resource dimensions are required.
+    pub const NONE: Self = Self {
+        memory_bytes: false,
+        cpu_units: false,
+        io_bytes: false,
+        cleanup: false,
+        artifact_bytes: false,
+    };
+
+    /// Creates an empty requirement set.
+    #[inline]
+    #[must_use]
+    pub const fn new() -> Self {
+        Self::NONE
+    }
+
+    /// Requires a memory envelope.
+    #[inline]
+    #[must_use]
+    pub const fn require_memory_bytes(mut self) -> Self {
+        self.memory_bytes = true;
+        self
+    }
+
+    /// Requires a CPU envelope.
+    #[inline]
+    #[must_use]
+    pub const fn require_cpu_units(mut self) -> Self {
+        self.cpu_units = true;
+        self
+    }
+
+    /// Requires an I/O envelope.
+    #[inline]
+    #[must_use]
+    pub const fn require_io_bytes(mut self) -> Self {
+        self.io_bytes = true;
+        self
+    }
+
+    /// Requires a cleanup envelope.
+    #[inline]
+    #[must_use]
+    pub const fn require_cleanup(mut self) -> Self {
+        self.cleanup = true;
+        self
+    }
+
+    /// Requires an artifact-emission envelope.
+    #[inline]
+    #[must_use]
+    pub const fn require_artifact_bytes(mut self) -> Self {
+        self.artifact_bytes = true;
+        self
+    }
+}
+
+/// Fail-closed refusal for capability-budget planning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityBudgetRefusal {
+    /// A required resource dimension had no inherited or child-supplied limit.
+    MissingRequired(CapabilityBudgetDimension),
+    /// A required resource dimension was present but already exhausted.
+    Exhausted(CapabilityBudgetDimension),
+}
+
+impl fmt::Display for CapabilityBudgetRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingRequired(dimension) => {
+                write!(
+                    f,
+                    "required capability budget missing: {}",
+                    dimension.as_str()
+                )
+            }
+            Self::Exhausted(dimension) => {
+                write!(f, "capability budget exhausted: {}", dimension.as_str())
+            }
+        }
+    }
+}
+
+impl std::error::Error for CapabilityBudgetRefusal {}
+
+/// Explicit resource envelope carried by capability contexts and regions.
+///
+/// `None` means no explicit envelope for that dimension. Admission can still
+/// fail closed by requiring dimensions with [`CapabilityBudgetRequirements`].
+/// Child envelopes inherit parent limits and can only tighten them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CapabilityBudget {
+    /// Resident memory envelope in bytes.
+    pub memory_bytes: Option<u64>,
+    /// Abstract CPU unit envelope.
+    pub cpu_units: Option<u64>,
+    /// I/O byte envelope.
+    pub io_bytes: Option<u64>,
+    /// Cleanup/drain budget envelope.
+    pub cleanup_budget: Option<Budget>,
+    /// Artifact-emission byte envelope.
+    pub artifact_bytes: Option<u64>,
+}
+
+impl CapabilityBudget {
+    /// No explicit resource envelopes.
+    pub const UNSPECIFIED: Self = Self {
+        memory_bytes: None,
+        cpu_units: None,
+        io_bytes: None,
+        cleanup_budget: None,
+        artifact_bytes: None,
+    };
+
+    /// Creates an empty capability budget.
+    #[inline]
+    #[must_use]
+    pub const fn new() -> Self {
+        Self::UNSPECIFIED
+    }
+
+    /// Sets the memory envelope in bytes.
+    #[inline]
+    #[must_use]
+    pub const fn with_memory_bytes(mut self, bytes: u64) -> Self {
+        self.memory_bytes = Some(bytes);
+        self
+    }
+
+    /// Sets the CPU envelope in abstract units.
+    #[inline]
+    #[must_use]
+    pub const fn with_cpu_units(mut self, units: u64) -> Self {
+        self.cpu_units = Some(units);
+        self
+    }
+
+    /// Sets the I/O envelope in bytes.
+    #[inline]
+    #[must_use]
+    pub const fn with_io_bytes(mut self, bytes: u64) -> Self {
+        self.io_bytes = Some(bytes);
+        self
+    }
+
+    /// Sets the cleanup/drain budget envelope.
+    #[inline]
+    #[must_use]
+    pub const fn with_cleanup_budget(mut self, budget: Budget) -> Self {
+        self.cleanup_budget = Some(budget);
+        self
+    }
+
+    /// Sets the artifact-emission envelope in bytes.
+    #[inline]
+    #[must_use]
+    pub const fn with_artifact_bytes(mut self, bytes: u64) -> Self {
+        self.artifact_bytes = Some(bytes);
+        self
+    }
+
+    /// Combines parent and child capability budgets, keeping the tightest
+    /// envelope for each resource dimension.
+    #[inline]
+    #[must_use]
+    pub fn meet(self, child: Self) -> Self {
+        Self {
+            memory_bytes: meet_optional_u64(self.memory_bytes, child.memory_bytes),
+            cpu_units: meet_optional_u64(self.cpu_units, child.cpu_units),
+            io_bytes: meet_optional_u64(self.io_bytes, child.io_bytes),
+            cleanup_budget: match (self.cleanup_budget, child.cleanup_budget) {
+                (Some(parent), Some(child)) => Some(parent.meet(child)),
+                (budget @ Some(_), None) | (None, budget @ Some(_)) => budget,
+                (None, None) => None,
+            },
+            artifact_bytes: meet_optional_u64(self.artifact_bytes, child.artifact_bytes),
+        }
+    }
+
+    /// Computes the effective child envelope and rejects if required dimensions
+    /// are absent or exhausted.
+    ///
+    /// Use this before admitting a region/task group that needs explicit
+    /// resource envelopes. On success the returned budget is the value to carry
+    /// forward in the child `Cx` or region record.
+    #[inline]
+    pub fn plan_child(
+        self,
+        child: Self,
+        requirements: CapabilityBudgetRequirements,
+    ) -> Result<Self, CapabilityBudgetRefusal> {
+        let effective = self.meet(child);
+        effective.validate(requirements)?;
+        Ok(effective)
+    }
+
+    /// Validates this budget against required resource dimensions.
+    #[inline]
+    pub fn validate(
+        self,
+        requirements: CapabilityBudgetRequirements,
+    ) -> Result<(), CapabilityBudgetRefusal> {
+        validate_required_u64(
+            CapabilityBudgetDimension::MemoryBytes,
+            self.memory_bytes,
+            requirements.memory_bytes,
+        )?;
+        validate_required_u64(
+            CapabilityBudgetDimension::CpuUnits,
+            self.cpu_units,
+            requirements.cpu_units,
+        )?;
+        validate_required_u64(
+            CapabilityBudgetDimension::IoBytes,
+            self.io_bytes,
+            requirements.io_bytes,
+        )?;
+        validate_required_cleanup(self.cleanup_budget, requirements.cleanup)?;
+        validate_required_u64(
+            CapabilityBudgetDimension::ArtifactBytes,
+            self.artifact_bytes,
+            requirements.artifact_bytes,
+        )
+    }
+}
+
+#[inline]
+const fn meet_optional_u64(parent: Option<u64>, child: Option<u64>) -> Option<u64> {
+    match (parent, child) {
+        (Some(parent), Some(child)) => Some(if parent < child { parent } else { child }),
+        (value @ Some(_), None) | (None, value @ Some(_)) => value,
+        (None, None) => None,
+    }
+}
+
+#[inline]
+fn validate_required_u64(
+    dimension: CapabilityBudgetDimension,
+    value: Option<u64>,
+    required: bool,
+) -> Result<(), CapabilityBudgetRefusal> {
+    if !required {
+        return Ok(());
+    }
+
+    match value {
+        None => Err(CapabilityBudgetRefusal::MissingRequired(dimension)),
+        Some(0) => Err(CapabilityBudgetRefusal::Exhausted(dimension)),
+        Some(_) => Ok(()),
+    }
+}
+
+#[inline]
+fn validate_required_cleanup(
+    budget: Option<Budget>,
+    required: bool,
+) -> Result<(), CapabilityBudgetRefusal> {
+    if !required {
+        return Ok(());
+    }
+
+    match budget {
+        None => Err(CapabilityBudgetRefusal::MissingRequired(
+            CapabilityBudgetDimension::Cleanup,
+        )),
+        Some(budget) if budget.is_exhausted() => Err(CapabilityBudgetRefusal::Exhausted(
+            CapabilityBudgetDimension::Cleanup,
+        )),
+        Some(_) => Ok(()),
+    }
+}
+
 impl Default for Budget {
     fn default() -> Self {
         Self::new()
@@ -1145,6 +1462,95 @@ mod tests {
         assert_eq!(combined.cost_quota, Some(1000));
         // Priority: max of 50 and 0 = 50
         assert_eq!(combined.priority, 50);
+    }
+
+    // =========================================================================
+    // Capability Budget Planner Tests
+    // =========================================================================
+
+    #[test]
+    fn capability_budget_child_inherits_parent_and_tightens_overrides() {
+        let parent = CapabilityBudget::new()
+            .with_memory_bytes(1_024)
+            .with_cpu_units(100)
+            .with_io_bytes(10_000)
+            .with_cleanup_budget(Budget::new().with_poll_quota(50))
+            .with_artifact_bytes(4_096);
+        let child = CapabilityBudget::new()
+            .with_memory_bytes(2_048)
+            .with_cpu_units(25)
+            .with_io_bytes(1_000)
+            .with_cleanup_budget(Budget::new().with_poll_quota(10));
+
+        let effective = parent.meet(child);
+
+        assert_eq!(effective.memory_bytes, Some(1_024));
+        assert_eq!(effective.cpu_units, Some(25));
+        assert_eq!(effective.io_bytes, Some(1_000));
+        assert_eq!(
+            effective.cleanup_budget.map(|budget| budget.poll_quota),
+            Some(10)
+        );
+        assert_eq!(effective.artifact_bytes, Some(4_096));
+    }
+
+    #[test]
+    fn capability_budget_optional_absent_dimension_admits() {
+        let requirements = CapabilityBudgetRequirements::NONE;
+
+        let effective = CapabilityBudget::new()
+            .plan_child(CapabilityBudget::new(), requirements)
+            .expect("optional absent envelopes should admit");
+
+        assert_eq!(effective, CapabilityBudget::UNSPECIFIED);
+    }
+
+    #[test]
+    fn capability_budget_required_absent_dimension_rejects() {
+        let requirements = CapabilityBudgetRequirements::new().require_memory_bytes();
+
+        let err = CapabilityBudget::new()
+            .plan_child(CapabilityBudget::new(), requirements)
+            .expect_err("required missing memory budget must reject");
+
+        assert_eq!(
+            err,
+            CapabilityBudgetRefusal::MissingRequired(CapabilityBudgetDimension::MemoryBytes)
+        );
+    }
+
+    #[test]
+    fn capability_budget_required_exhausted_dimension_rejects() {
+        let requirements = CapabilityBudgetRequirements::new()
+            .require_cpu_units()
+            .require_cleanup();
+        let parent = CapabilityBudget::new()
+            .with_cpu_units(0)
+            .with_cleanup_budget(Budget::new().with_poll_quota(10));
+
+        let err = parent
+            .plan_child(CapabilityBudget::new(), requirements)
+            .expect_err("required exhausted CPU budget must reject");
+
+        assert_eq!(
+            err,
+            CapabilityBudgetRefusal::Exhausted(CapabilityBudgetDimension::CpuUnits)
+        );
+    }
+
+    #[test]
+    fn capability_budget_required_exhausted_cleanup_rejects() {
+        let requirements = CapabilityBudgetRequirements::new().require_cleanup();
+        let parent = CapabilityBudget::new().with_cleanup_budget(Budget::new().with_poll_quota(0));
+
+        let err = parent
+            .plan_child(CapabilityBudget::new(), requirements)
+            .expect_err("required exhausted cleanup budget must reject");
+
+        assert_eq!(
+            err,
+            CapabilityBudgetRefusal::Exhausted(CapabilityBudgetDimension::Cleanup)
+        );
     }
 
     // =========================================================================

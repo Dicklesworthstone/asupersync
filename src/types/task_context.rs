@@ -1,6 +1,6 @@
 //! Internal state shared between TaskRecord and Cx.
 
-use crate::types::{Budget, CancelReason, RegionId, TaskId, Time};
+use crate::types::{Budget, CancelReason, CapabilityBudget, RegionId, TaskId, Time};
 use std::task::Waker;
 
 /// Maximum nesting depth for `Cx::masked()` sections.
@@ -99,6 +99,8 @@ pub struct CxInner {
     pub budget: Budget,
     /// Baseline budget used for checkpoint accounting.
     pub budget_baseline: Budget,
+    /// Explicit capability/resource envelope carried by this context.
+    pub capability_budget: CapabilityBudget,
     /// Whether cancellation has been requested.
     pub cancel_requested: bool,
     /// The reason for cancellation, if requested.
@@ -136,6 +138,7 @@ impl CxInner {
             task_type: None,
             budget,
             budget_baseline: budget,
+            capability_budget: CapabilityBudget::UNSPECIFIED,
             cancel_requested: false,
             cancel_reason: None,
             cancel_acknowledged: false,
@@ -396,6 +399,12 @@ mod tests {
             "budget_baseline",
             budget,
             cx.budget_baseline
+        );
+        crate::assert_with_log!(
+            cx.capability_budget == CapabilityBudget::UNSPECIFIED,
+            "capability_budget",
+            CapabilityBudget::UNSPECIFIED,
+            cx.capability_budget
         );
         crate::assert_with_log!(
             !cx.cancel_requested,

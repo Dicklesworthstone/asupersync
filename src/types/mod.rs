@@ -27,7 +27,11 @@ pub mod task_context;
 pub mod typed_symbol;
 pub mod wasm_abi;
 
-pub use budget::{Budget, CurveBudget, CurveError, MinPlusCurve, backlog_bound, delay_bound};
+pub use budget::{
+    Budget, CapabilityBudget, CapabilityBudgetDimension, CapabilityBudgetRefusal,
+    CapabilityBudgetRequirements, CurveBudget, CurveError, MinPlusCurve, backlog_bound,
+    delay_bound,
+};
 pub use builder::{BuildError, BuildResult};
 pub use cancel::{
     CancelAttributionConfig, CancelKind, CancelPhase, CancelReason, CancelWitness,

@@ -85,7 +85,8 @@ use crate::trace::distributed::{LogicalClockHandle, LogicalTime};
 use crate::trace::{TraceBufferHandle, TraceEvent};
 use crate::tracing_compat::{debug, error, info, trace, warn};
 use crate::types::{
-    Budget, CancelKind, CancelReason, CxInner, RegionId, SystemPressure, TaskId, Time,
+    Budget, CancelKind, CancelReason, CapabilityBudget, CapabilityBudgetRefusal,
+    CapabilityBudgetRequirements, CxInner, RegionId, SystemPressure, TaskId, Time,
 };
 use crate::util::{EntropySource, OsEntropy};
 use std::cell::RefCell;
@@ -1576,6 +1577,48 @@ impl<Caps> Cx<Caps> {
     #[must_use]
     pub fn budget(&self) -> Budget {
         self.inner.read().budget
+    }
+
+    /// Returns the explicit capability/resource budget carried by this context.
+    #[inline]
+    #[must_use]
+    pub fn capability_budget(&self) -> CapabilityBudget {
+        self.inner.read().capability_budget
+    }
+
+    /// Computes the effective child capability budget without mutating this
+    /// context.
+    ///
+    /// Required dimensions fail closed if no parent or child budget supplies
+    /// them, or if the effective envelope is already exhausted.
+    #[inline]
+    pub fn plan_child_capability_budget(
+        &self,
+        child: CapabilityBudget,
+        requirements: CapabilityBudgetRequirements,
+    ) -> Result<CapabilityBudget, CapabilityBudgetRefusal> {
+        self.inner
+            .read()
+            .capability_budget
+            .plan_child(child, requirements)
+    }
+
+    /// Applies a child capability budget to this context after fail-closed
+    /// validation.
+    ///
+    /// This mutates the shared `CxInner`, so all clones observe the same
+    /// effective envelope. Use [`Self::plan_child_capability_budget`] when a
+    /// caller only needs an admission decision.
+    #[inline]
+    pub fn apply_child_capability_budget(
+        &self,
+        child: CapabilityBudget,
+        requirements: CapabilityBudgetRequirements,
+    ) -> Result<CapabilityBudget, CapabilityBudgetRefusal> {
+        let mut inner = self.inner.write();
+        let effective = inner.capability_budget.plan_child(child, requirements)?;
+        inner.capability_budget = effective;
+        Ok(effective)
     }
 
     /// Returns true if cancellation has been requested.
@@ -3286,6 +3329,7 @@ mod tests {
     #[cfg(feature = "messaging-fabric")]
     use crate::messaging::subject::SubjectPattern;
     use crate::trace::TraceBufferHandle;
+    use crate::types::CapabilityBudgetDimension;
     use crate::util::{ArenaIndex, DetEntropy};
     use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -3964,6 +4008,54 @@ mod tests {
             .expect("cost budget exhaustion must set reason");
         assert_eq!(reason.kind, CancelKind::CostBudget);
         assert!(cx.is_cancel_requested());
+    }
+
+    #[test]
+    fn capability_budget_plan_inherits_and_tightens() {
+        let cx = test_cx();
+        let parent = CapabilityBudget::new()
+            .with_memory_bytes(1_024)
+            .with_io_bytes(4_096)
+            .with_cleanup_budget(Budget::new().with_poll_quota(50));
+        let requirements = CapabilityBudgetRequirements::new()
+            .require_memory_bytes()
+            .require_io_bytes()
+            .require_cleanup();
+
+        cx.apply_child_capability_budget(parent, requirements)
+            .expect("parent capability budget is complete");
+
+        let child = CapabilityBudget::new()
+            .with_memory_bytes(2_048)
+            .with_io_bytes(512)
+            .with_cleanup_budget(Budget::new().with_poll_quota(10));
+        let effective = cx
+            .plan_child_capability_budget(child, requirements)
+            .expect("child should inherit missing required envelopes");
+
+        assert_eq!(effective.memory_bytes, Some(1_024));
+        assert_eq!(effective.io_bytes, Some(512));
+        assert_eq!(
+            effective.cleanup_budget.map(|budget| budget.poll_quota),
+            Some(10)
+        );
+        assert_eq!(cx.capability_budget(), parent);
+    }
+
+    #[test]
+    fn capability_budget_apply_fails_closed_when_required_missing() {
+        let cx = test_cx();
+        let requirements = CapabilityBudgetRequirements::new().require_artifact_bytes();
+
+        let err = cx
+            .apply_child_capability_budget(CapabilityBudget::new(), requirements)
+            .expect_err("missing artifact budget must fail closed");
+
+        assert_eq!(
+            err,
+            CapabilityBudgetRefusal::MissingRequired(CapabilityBudgetDimension::ArtifactBytes)
+        );
+        assert_eq!(cx.capability_budget(), CapabilityBudget::UNSPECIFIED);
     }
 
     #[test]
