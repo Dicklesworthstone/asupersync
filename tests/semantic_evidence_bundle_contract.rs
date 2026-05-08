@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 const FIXTURE_DIR: &str = "tests/fixtures/semantic_evidence_bundle";
 const SCRIPT_PATH: &str = "scripts/build_semantic_evidence_bundle.sh";
@@ -55,6 +55,65 @@ fn build_bundle_from_fixtures() -> Value {
     parsed
 }
 
+fn fixture_json(name: &str) -> Value {
+    let raw = std::fs::read_to_string(fixture_path(name))
+        .unwrap_or_else(|error| panic!("read fixture {name}: {error}"));
+    serde_json::from_str(&raw).unwrap_or_else(|error| panic!("parse fixture {name}: {error}"))
+}
+
+fn scrub_bundle(mut bundle: Value) -> Value {
+    scrub_strings(&mut bundle);
+    bundle["generated_at"] = json!("[generated_at]");
+    bundle
+}
+
+fn scrub_strings(value: &mut Value) {
+    match value {
+        Value::String(text) => {
+            *text = scrub_string(text);
+        }
+        Value::Array(items) => {
+            for item in items {
+                scrub_strings(item);
+            }
+        }
+        Value::Object(fields) => {
+            for value in fields.values_mut() {
+                scrub_strings(value);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
+fn scrub_string(text: &str) -> String {
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let tmp = std::env::temp_dir();
+    let tmp = tmp.to_string_lossy();
+    let scrubbed = text.replace(repo, "$REPO").replace(tmp.as_ref(), "$TMP");
+    collapse_evidence_bundle_temp_names(scrubbed)
+}
+
+fn collapse_evidence_bundle_temp_names(mut text: String) -> String {
+    const MARKER: &str = "semantic_evidence_bundle_";
+    const REPLACEMENT: &str = "semantic_evidence_bundle_[n].json";
+    let mut search_start = 0;
+    while let Some(relative_start) = text[search_start..].find(MARKER) {
+        let start = search_start + relative_start;
+        let mut digit_end = start + MARKER.len();
+        while digit_end < text.len() && text.as_bytes()[digit_end].is_ascii_digit() {
+            digit_end += 1;
+        }
+        if digit_end == start + MARKER.len() || !text[digit_end..].starts_with(".json") {
+            search_start = digit_end;
+            continue;
+        }
+        text.replace_range(start..digit_end + ".json".len(), REPLACEMENT);
+        search_start = start + REPLACEMENT.len();
+    }
+    text
+}
+
 #[test]
 fn bundle_schema_and_traceability_contract() {
     let bundle = build_bundle_from_fixtures();
@@ -74,6 +133,17 @@ fn bundle_schema_and_traceability_contract() {
         bundle["traceability"]["matrix_rule_count"].as_u64(),
         Some(4),
         "fixture matrix should project 4 rules"
+    );
+}
+
+#[test]
+fn bundle_output_matches_scrubbed_golden() {
+    let bundle = build_bundle_from_fixtures();
+
+    assert_eq!(
+        scrub_bundle(bundle),
+        fixture_json("verification_report_sample_expected.json"),
+        "semantic evidence bundle drifted from the reviewed scrubbed golden"
     );
 }
 

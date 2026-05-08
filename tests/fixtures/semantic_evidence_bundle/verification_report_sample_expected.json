@@ -1,0 +1,342 @@
+{
+  "schema_version": "semantic-evidence-bundle-v1",
+  "generated_at": "[generated_at]",
+  "status": "needs_attention",
+  "inputs": {
+    "project_root": "$REPO",
+    "runner_report": "$REPO/tests/fixtures/semantic_evidence_bundle/verification_report_sample.json",
+    "matrix": "$REPO/tests/fixtures/semantic_evidence_bundle/semantic_verification_matrix_sample.md",
+    "readiness_gates": "$REPO/tests/fixtures/semantic_evidence_bundle/semantic_readiness_gates_sample.md"
+  },
+  "runner": {
+    "schema": "semantic-verification-report-v1",
+    "profile": "full",
+    "overall_status": "failed",
+    "report_dir": "$REPO/tests/fixtures/semantic_evidence_bundle/report_artifacts",
+    "suite_status": {
+      "docs": {
+        "status": "passed",
+        "required": true,
+        "duration_s": 2
+      },
+      "golden": {
+        "status": "failed",
+        "required": true,
+        "duration_s": 3
+      },
+      "lean_validation": {
+        "status": "passed",
+        "required": true,
+        "duration_s": 1
+      },
+      "tla_validation": {
+        "status": "passed",
+        "required": true,
+        "duration_s": 1
+      },
+      "logging_schema": {
+        "status": "failed",
+        "required": true,
+        "duration_s": 1
+      },
+      "coverage_gate": {
+        "status": "passed",
+        "required": true,
+        "duration_s": 1
+      }
+    }
+  },
+  "readiness_gates": [
+    {
+      "gate_id": "G1",
+      "title": "Documentation Alignment",
+      "source_file": "$REPO/tests/fixtures/semantic_evidence_bundle/semantic_readiness_gates_sample.md"
+    },
+    {
+      "gate_id": "G2",
+      "title": "LEAN Proof Coverage",
+      "source_file": "$REPO/tests/fixtures/semantic_evidence_bundle/semantic_readiness_gates_sample.md"
+    },
+    {
+      "gate_id": "G7",
+      "title": "Logging and Diagnostics",
+      "source_file": "$REPO/tests/fixtures/semantic_evidence_bundle/semantic_readiness_gates_sample.md"
+    }
+  ],
+  "traceability": {
+    "matrix_rule_count": 4,
+    "rules": [
+      {
+        "domain": "cancellation",
+        "rule_index": 1,
+        "rule_id": "inv.cancel.idempotence",
+        "tier": "HIGH",
+        "status_text": "UT+OC+DOC",
+        "required_classes": [
+          "UT",
+          "PT",
+          "OC",
+          "E2E",
+          "LOG",
+          "DOC"
+        ],
+        "missing_classes": [
+          "PT",
+          "E2E",
+          "LOG"
+        ],
+        "evidence_class_sources": {
+          "UT": "golden",
+          "PT": "golden",
+          "OC": "golden",
+          "E2E": "logging_schema",
+          "LOG": "logging_schema",
+          "DOC": "docs"
+        },
+        "source_file": "$REPO/tests/fixtures/semantic_evidence_bundle/semantic_verification_matrix_sample.md"
+      },
+      {
+        "domain": "cancellation",
+        "rule_index": 2,
+        "rule_id": "rule.cancel.request",
+        "tier": "MED",
+        "status_text": "UT+OC",
+        "required_classes": [
+          "UT",
+          "OC",
+          "LOG",
+          "DOC"
+        ],
+        "missing_classes": [
+          "LOG",
+          "DOC"
+        ],
+        "evidence_class_sources": {
+          "UT": "golden",
+          "OC": "golden",
+          "LOG": "logging_schema",
+          "DOC": "docs"
+        },
+        "source_file": "$REPO/tests/fixtures/semantic_evidence_bundle/semantic_verification_matrix_sample.md"
+      },
+      {
+        "domain": "cancellation",
+        "rule_index": 3,
+        "rule_id": "def.cancel.reason_kinds",
+        "tier": "LOW",
+        "status_text": "UT",
+        "required_classes": [
+          "UT",
+          "DOC"
+        ],
+        "missing_classes": [
+          "DOC"
+        ],
+        "evidence_class_sources": {
+          "UT": "golden",
+          "DOC": "docs"
+        },
+        "source_file": "$REPO/tests/fixtures/semantic_evidence_bundle/semantic_verification_matrix_sample.md"
+      },
+      {
+        "domain": "determinism",
+        "rule_index": 47,
+        "rule_id": "def.determinism.seed_equivalence",
+        "tier": "HIGH",
+        "status_text": "UT+OC+E2E",
+        "required_classes": [
+          "UT",
+          "PT",
+          "OC",
+          "E2E",
+          "LOG",
+          "DOC"
+        ],
+        "missing_classes": [
+          "PT",
+          "LOG",
+          "DOC"
+        ],
+        "evidence_class_sources": {
+          "UT": "golden",
+          "PT": "golden",
+          "OC": "golden",
+          "E2E": "logging_schema",
+          "LOG": "logging_schema",
+          "DOC": "docs"
+        },
+        "source_file": "$REPO/tests/fixtures/semantic_evidence_bundle/semantic_verification_matrix_sample.md"
+      }
+    ]
+  },
+  "missing_evidence": [
+    {
+      "kind": "runner_suite",
+      "owner_bead": "asupersync-3cddg.12.8",
+      "details": {
+        "suite": "golden",
+        "status": "failed",
+        "source_file": "$REPO/tests/fixtures/semantic_evidence_bundle/verification_report_sample.json"
+      }
+    },
+    {
+      "kind": "runner_suite",
+      "owner_bead": "asupersync-3cddg.12.7",
+      "details": {
+        "suite": "logging_schema",
+        "status": "failed",
+        "source_file": "$REPO/tests/fixtures/semantic_evidence_bundle/verification_report_sample.json"
+      }
+    },
+    {
+      "kind": "runner_artifact",
+      "owner_bead": "asupersync-3cddg.12.11",
+      "details": {
+        "artifact": "docs_output.txt",
+        "expected_path": "$REPO/tests/fixtures/semantic_evidence_bundle/report_artifacts/docs_output.txt",
+        "source_file": "$REPO/tests/fixtures/semantic_evidence_bundle/verification_report_sample.json"
+      }
+    },
+    {
+      "kind": "runner_artifact",
+      "owner_bead": "asupersync-3cddg.12.11",
+      "details": {
+        "artifact": "golden_output.txt",
+        "expected_path": "$REPO/tests/fixtures/semantic_evidence_bundle/report_artifacts/golden_output.txt",
+        "source_file": "$REPO/tests/fixtures/semantic_evidence_bundle/verification_report_sample.json"
+      }
+    },
+    {
+      "kind": "matrix_rule_requirement",
+      "owner_bead": "asupersync-3cddg.12.5",
+      "details": {
+        "domain": "cancellation",
+        "rule_id": "inv.cancel.idempotence",
+        "tier": "HIGH",
+        "required_class": "PT",
+        "source_file": "$REPO/tests/fixtures/semantic_evidence_bundle/semantic_verification_matrix_sample.md"
+      }
+    },
+    {
+      "kind": "matrix_rule_requirement",
+      "owner_bead": "asupersync-3cddg.12.6",
+      "details": {
+        "domain": "cancellation",
+        "rule_id": "inv.cancel.idempotence",
+        "tier": "HIGH",
+        "required_class": "E2E",
+        "source_file": "$REPO/tests/fixtures/semantic_evidence_bundle/semantic_verification_matrix_sample.md"
+      }
+    },
+    {
+      "kind": "matrix_rule_requirement",
+      "owner_bead": "asupersync-3cddg.12.7",
+      "details": {
+        "domain": "cancellation",
+        "rule_id": "inv.cancel.idempotence",
+        "tier": "HIGH",
+        "required_class": "LOG",
+        "source_file": "$REPO/tests/fixtures/semantic_evidence_bundle/semantic_verification_matrix_sample.md"
+      }
+    },
+    {
+      "kind": "matrix_rule_requirement",
+      "owner_bead": "asupersync-3cddg.12.7",
+      "details": {
+        "domain": "cancellation",
+        "rule_id": "rule.cancel.request",
+        "tier": "MED",
+        "required_class": "LOG",
+        "source_file": "$REPO/tests/fixtures/semantic_evidence_bundle/semantic_verification_matrix_sample.md"
+      }
+    },
+    {
+      "kind": "matrix_rule_requirement",
+      "owner_bead": "asupersync-3cddg.12.2",
+      "details": {
+        "domain": "cancellation",
+        "rule_id": "rule.cancel.request",
+        "tier": "MED",
+        "required_class": "DOC",
+        "source_file": "$REPO/tests/fixtures/semantic_evidence_bundle/semantic_verification_matrix_sample.md"
+      }
+    },
+    {
+      "kind": "matrix_rule_requirement",
+      "owner_bead": "asupersync-3cddg.12.2",
+      "details": {
+        "domain": "cancellation",
+        "rule_id": "def.cancel.reason_kinds",
+        "tier": "LOW",
+        "required_class": "DOC",
+        "source_file": "$REPO/tests/fixtures/semantic_evidence_bundle/semantic_verification_matrix_sample.md"
+      }
+    },
+    {
+      "kind": "matrix_rule_requirement",
+      "owner_bead": "asupersync-3cddg.12.5",
+      "details": {
+        "domain": "determinism",
+        "rule_id": "def.determinism.seed_equivalence",
+        "tier": "HIGH",
+        "required_class": "PT",
+        "source_file": "$REPO/tests/fixtures/semantic_evidence_bundle/semantic_verification_matrix_sample.md"
+      }
+    },
+    {
+      "kind": "matrix_rule_requirement",
+      "owner_bead": "asupersync-3cddg.12.7",
+      "details": {
+        "domain": "determinism",
+        "rule_id": "def.determinism.seed_equivalence",
+        "tier": "HIGH",
+        "required_class": "LOG",
+        "source_file": "$REPO/tests/fixtures/semantic_evidence_bundle/semantic_verification_matrix_sample.md"
+      }
+    },
+    {
+      "kind": "matrix_rule_requirement",
+      "owner_bead": "asupersync-3cddg.12.2",
+      "details": {
+        "domain": "determinism",
+        "rule_id": "def.determinism.seed_equivalence",
+        "tier": "HIGH",
+        "required_class": "DOC",
+        "source_file": "$REPO/tests/fixtures/semantic_evidence_bundle/semantic_verification_matrix_sample.md"
+      }
+    }
+  ],
+  "missing_evidence_by_owner": [
+    {
+      "owner_bead": "asupersync-3cddg.12.11",
+      "count": 2
+    },
+    {
+      "owner_bead": "asupersync-3cddg.12.2",
+      "count": 3
+    },
+    {
+      "owner_bead": "asupersync-3cddg.12.5",
+      "count": 2
+    },
+    {
+      "owner_bead": "asupersync-3cddg.12.6",
+      "count": 1
+    },
+    {
+      "owner_bead": "asupersync-3cddg.12.7",
+      "count": 4
+    },
+    {
+      "owner_bead": "asupersync-3cddg.12.8",
+      "count": 1
+    }
+  ],
+  "deterministic_rerun": {
+    "supported": true,
+    "commands": [
+      "scripts/run_semantic_verification.sh --profile full --json",
+      "scripts/build_semantic_evidence_bundle.sh --report $REPO/tests/fixtures/semantic_evidence_bundle/verification_report_sample.json --output $TMP/semantic_evidence_bundle_[n].json"
+    ]
+  }
+}
