@@ -50,6 +50,11 @@ fn row_by_id<'a>(receipt: &'a Value, proposal_id: &str) -> &'a Value {
         .expect("proposal id should exist")
 }
 
+fn fixture_text(fixture: &str) -> String {
+    fs::read_to_string(repo_root().join(FIXTURE_ROOT).join(fixture))
+        .unwrap_or_else(|error| panic!("read fixture {fixture}: {error}"))
+}
+
 #[test]
 fn script_exists_and_help_is_non_mutating() {
     assert!(
@@ -151,6 +156,24 @@ fn active_manifest_reservation_blocks_all_proposals_before_manifest_edits() {
         Some("manifest-reservation")
     );
     assert_eq!(receipt["summary"]["waiting_count"].as_u64(), Some(1));
+}
+
+#[test]
+fn manifest_reserved_queue_matches_exact_reviewed_golden() {
+    let output = run_queue("manifest_reserved.json");
+    assert!(
+        output.status.success(),
+        "queue helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actual = String::from_utf8(output.stdout).expect("queue output must be UTF-8");
+    let expected = fixture_text("manifest_reserved_expected.json");
+
+    serde_json::from_str::<Value>(&actual).expect("actual output must be JSON");
+    serde_json::from_str::<Value>(&expected).expect("golden output must be JSON");
+    assert_eq!(actual, expected);
 }
 
 #[test]
