@@ -1,10 +1,10 @@
 //! SEM-10.5 signal-quality gate contract tests.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, ExitStatus};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde_json::{Value, json};
+use serde_json::Value;
 
 const FIXTURE_DIR: &str = "tests/fixtures/semantic_signal_quality";
 const SCRIPT_PATH: &str = "scripts/check_semantic_signal_quality.sh";
@@ -23,7 +23,7 @@ fn unique_output_path(suffix: &str) -> PathBuf {
     std::env::temp_dir().join(format!("semantic_signal_quality_{suffix}_{nanos}.json"))
 }
 
-fn run_signal_quality(dashboard_fixture: &str) -> (std::process::ExitStatus, Value) {
+fn run_signal_quality_output(dashboard_fixture: &str) -> (ExitStatus, String) {
     let output_path = unique_output_path("report");
     let command_output = Command::new("bash")
         .current_dir(env!("CARGO_MANIFEST_DIR"))
@@ -38,10 +38,15 @@ fn run_signal_quality(dashboard_fixture: &str) -> (std::process::ExitStatus, Val
         .expect("failed to execute signal quality script");
 
     let raw = std::fs::read_to_string(&output_path).expect("expected output JSON report");
+    let _ = std::fs::remove_file(output_path);
+    (command_output.status, raw)
+}
+
+fn run_signal_quality(dashboard_fixture: &str) -> (ExitStatus, Value) {
+    let (status, raw) = run_signal_quality_output(dashboard_fixture);
     let parsed: Value =
         serde_json::from_str(&raw).expect("signal quality output must be valid JSON");
-    let _ = std::fs::remove_file(output_path);
-    (command_output.status, parsed)
+    (status, parsed)
 }
 
 fn fixture_json(name: &str) -> Value {
@@ -50,29 +55,62 @@ fn fixture_json(name: &str) -> Value {
     serde_json::from_str(&raw).unwrap_or_else(|error| panic!("parse fixture {name}: {error}"))
 }
 
-fn scrub_report(mut report: Value) -> Value {
-    scrub_strings(&mut report);
-    report["generated_at"] = json!("[generated_at]");
-    report
+fn fixture_text(name: &str) -> String {
+    std::fs::read_to_string(fixture_path(name))
+        .unwrap_or_else(|error| panic!("read fixture {name}: {error}"))
 }
 
-fn scrub_strings(value: &mut Value) {
-    match value {
-        Value::String(text) => {
-            *text = scrub_string(text);
-        }
-        Value::Array(items) => {
-            for item in items {
-                scrub_strings(item);
+fn scrub_report_text(raw: &str) -> String {
+    scrub_generated_at_lines(&scrub_string(raw))
+}
+
+fn scrub_generated_at_lines(text: &str) -> String {
+    let mut scrubbed = String::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("\"generated_at\":") {
+            let indent_len = line.len() - trimmed.len();
+            scrubbed.push_str(&line[..indent_len]);
+            scrubbed.push_str("\"generated_at\": \"[generated_at]\"");
+            if trimmed.ends_with(',') {
+                scrubbed.push(',');
             }
+        } else {
+            scrubbed.push_str(line);
         }
-        Value::Object(fields) => {
-            for value in fields.values_mut() {
-                scrub_strings(value);
-            }
-        }
-        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+        scrubbed.push('\n');
     }
+    if !text.ends_with('\n') {
+        scrubbed.pop();
+    }
+    scrubbed
+}
+
+fn assert_signal_quality_output_matches_golden(
+    dashboard_fixture: &str,
+    expected_fixture: &str,
+    should_succeed: bool,
+) {
+    let (status, raw) = run_signal_quality_output(dashboard_fixture);
+    assert_eq!(
+        status.success(),
+        should_succeed,
+        "{dashboard_fixture} exit status did not match expected success"
+    );
+
+    let actual = scrub_report_text(&raw);
+    let expected = fixture_text(expected_fixture);
+    let actual_json: Value =
+        serde_json::from_str(&actual).expect("scrubbed signal quality output must be JSON");
+    let expected_json = fixture_json(expected_fixture);
+    assert_eq!(
+        actual_json, expected_json,
+        "semantic signal-quality parsed golden drifted"
+    );
+    assert_eq!(
+        actual, expected,
+        "semantic signal-quality reviewed text golden drifted"
+    );
 }
 
 fn scrub_string(text: &str) -> String {
@@ -136,16 +174,10 @@ fn signal_quality_pass_fixture_meets_thresholds() {
 
 #[test]
 fn signal_quality_pass_fixture_matches_scrubbed_golden() {
-    let (status, report) = run_signal_quality("variance_dashboard_pass.json");
-
-    assert!(
-        status.success(),
-        "pass fixture should satisfy thresholds and return success"
-    );
-    assert_eq!(
-        scrub_report(report),
-        fixture_json("variance_dashboard_pass_expected.json"),
-        "semantic signal-quality pass report drifted from the reviewed scrubbed golden"
+    assert_signal_quality_output_matches_golden(
+        "variance_dashboard_pass.json",
+        "variance_dashboard_pass_expected.json",
+        true,
     );
 }
 
@@ -194,15 +226,9 @@ fn signal_quality_fail_fixture_flags_flake_and_false_positive_proxy() {
 
 #[test]
 fn signal_quality_fail_fixture_matches_scrubbed_golden() {
-    let (status, report) = run_signal_quality("variance_dashboard_fail.json");
-
-    assert!(
-        !status.success(),
-        "fail fixture should return non-zero status"
-    );
-    assert_eq!(
-        scrub_report(report),
-        fixture_json("variance_dashboard_fail_expected.json"),
-        "semantic signal-quality fail report drifted from the reviewed scrubbed golden"
+    assert_signal_quality_output_matches_golden(
+        "variance_dashboard_fail.json",
+        "variance_dashboard_fail_expected.json",
+        false,
     );
 }
