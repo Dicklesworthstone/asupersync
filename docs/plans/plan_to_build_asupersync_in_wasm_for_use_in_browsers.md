@@ -172,7 +172,7 @@ Read fully:
 Probe:
 
 ```bash
-rch exec -- cargo check -p asupersync --target wasm32-unknown-unknown --no-default-features
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_plan_docs cargo check -p asupersync --target wasm32-unknown-unknown --no-default-features
 ```
 
 Observed dependency failure chain:
@@ -1047,7 +1047,7 @@ Compiler/profile guardrails:
 Build/repro command contract:
 
 1. Cargo-heavy steps must run through `rch`:
-   - `rch exec -- cargo build -p asupersync --target wasm32-unknown-unknown --profile <profile> --no-default-features --features <feature-set>`
+   - `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_plan_docs cargo build -p asupersync --target wasm32-unknown-unknown --profile <profile> --no-default-features --features <feature-set>`
 2. Post-build optimization command must be artifactized:
    - `wasm-opt <in.wasm> -o <out.wasm> <level-or-pass-set>`
 3. Every variant publish must include exact commands, tool versions, and artifact hash tuple (`raw`, `gzip`, optional `brotli`).
@@ -1255,7 +1255,7 @@ Cadence:
 2. Freeze scope:
    - pause promotions on affected track until rollback decision lands.
 3. Reproduce deterministically:
-   - attach `rch exec -- cargo check --all-targets` / `rch exec -- cargo test` / relevant replay command output as artifact links.
+   - attach `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_plan_docs cargo check --all-targets` / `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_plan_docs cargo test` / relevant replay command output as artifact links.
 4. Execute rollback:
    - revert only the scoped PR/bead set tied to the trigger; do not widen blast radius without a second approval.
 5. Verify rollback target:

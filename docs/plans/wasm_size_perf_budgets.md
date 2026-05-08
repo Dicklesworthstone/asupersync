@@ -121,11 +121,11 @@ Preview wasm compilation command (expected to become green as profile-closure
 work lands):
 
 ```bash
-rch exec -- cargo check -p asupersync \
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_size_perf_docs cargo check -p asupersync \
   --target wasm32-unknown-unknown \
   --no-default-features \
   --features wasm-browser-preview,getrandom/wasm_js
-rch exec -- cargo build -p asupersync \
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_size_perf_docs cargo build -p asupersync \
   --target wasm32-unknown-unknown \
   --release \
   --no-default-features \
@@ -145,7 +145,7 @@ gzip -9 -c target/wasm32-unknown-unknown/release/asupersync.wasm | wc -c
 Recommended benchmark envelope (to be implemented by `umelq.13.2`):
 
 ```bash
-rch exec -- cargo test -p asupersync --test wasm_perf_budget -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_size_perf_docs cargo test -p asupersync --test wasm_perf_budget -- --nocapture
 ```
 
 ## 8.1 Optimization Pipeline Contract (`asupersync-umelq.13.3`)

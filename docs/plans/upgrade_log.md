@@ -155,9 +155,9 @@ None.
 ## Commands Used
 
 ```bash
-cargo update
-cargo fmt
-cargo fmt --check
-rch exec -- cargo check --all-targets --quiet
-rch exec -- cargo clippy --all-targets -- -D warnings
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_upgrade_log_docs cargo update
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_upgrade_log_docs cargo fmt
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_upgrade_log_docs cargo fmt --check
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_upgrade_log_docs cargo check --all-targets --quiet
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_upgrade_log_docs cargo clippy --all-targets -- -D warnings
 ```

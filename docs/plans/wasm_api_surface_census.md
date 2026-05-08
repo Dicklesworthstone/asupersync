@@ -212,7 +212,7 @@ Forbidden/policy-sensitive crates currently present in the resolved tree:
 Command:
 
 ```bash
-rch exec -- cargo check -p asupersync --target wasm32-unknown-unknown --no-default-features
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_api_census_docs cargo check -p asupersync --target wasm32-unknown-unknown --no-default-features
 ```
 
 Observed failure:
@@ -245,10 +245,10 @@ awk '/^pub mod [a-z_]+;/{gsub(";","",$3);print $3}' src/lib.rs
 rg -n -o 'crate::([a-z_]+)' -r '$1' src
 
 # 3) wasm dependency tree
-rch exec -- cargo tree -p asupersync --target wasm32-unknown-unknown -e normal
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_api_census_docs cargo tree -p asupersync --target wasm32-unknown-unknown -e normal
 
 # 4) wasm compile viability
-rch exec -- cargo check -p asupersync --target wasm32-unknown-unknown --no-default-features
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_api_census_docs cargo check -p asupersync --target wasm32-unknown-unknown --no-default-features
 ```
 
 ## 9. Phase Gates, Kill Criteria, and Rollback Triggers (asupersync-umelq.1.3)

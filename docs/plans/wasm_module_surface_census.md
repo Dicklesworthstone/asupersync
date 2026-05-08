@@ -305,10 +305,10 @@ Required evidence per slice:
    any user-visible surface retained in `WS-CORE`.
 3. Reproducible command bundle (use `rch exec -- ...` for cargo-heavy checks):
    ```bash
-   rch exec -- cargo check -p asupersync --target wasm32-unknown-unknown --no-default-features --features wasm-browser-minimal
-   rch exec -- cargo check -p asupersync --target wasm32-unknown-unknown --no-default-features --features wasm-browser-dev
-   rch exec -- cargo check -p asupersync --target wasm32-unknown-unknown --no-default-features --features wasm-browser-prod
-   rch exec -- cargo check -p asupersync --target wasm32-unknown-unknown --no-default-features --features wasm-browser-deterministic
+   rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_module_census_docs cargo check -p asupersync --target wasm32-unknown-unknown --no-default-features --features wasm-browser-minimal
+   rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_module_census_docs cargo check -p asupersync --target wasm32-unknown-unknown --no-default-features --features wasm-browser-dev
+   rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_module_census_docs cargo check -p asupersync --target wasm32-unknown-unknown --no-default-features --features wasm-browser-prod
+   rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_module_census_docs cargo check -p asupersync --target wasm32-unknown-unknown --no-default-features --features wasm-browser-deterministic
    ```
 
 ### 10.6 Handoff to downstream bead
