@@ -4,11 +4,15 @@ use asupersync::types::{
     WasmFetchRequest, WasmHandleKind, WasmHandleRef, WasmScopeEnterRequest, WasmTaskCancelRequest,
     WasmTaskSpawnRequest,
 };
+use asupersync_browser_core::types::{
+    BROWSER_OPERATOR_SNAPSHOT_SCHEMA_VERSION, BrowserOperatorConsoleSnapshot,
+    BrowserOperatorSnapshotKind,
+};
 use asupersync_browser_core::{
-    abi_fingerprint, abi_version, dispatcher_diagnostics_for_tests, fetch_request,
-    reset_dispatcher_for_tests, runtime_close, runtime_create, scope_close, scope_enter,
-    task_cancel, task_join, task_spawn, websocket_cancel, websocket_close, websocket_open,
-    websocket_recv, websocket_send,
+    abi_fingerprint, abi_version, browser_operator_snapshot, dispatcher_diagnostics_for_tests,
+    fetch_request, reset_dispatcher_for_tests, runtime_close, runtime_create, scope_close,
+    scope_enter, task_cancel, task_join, task_spawn, websocket_cancel, websocket_close,
+    websocket_open, websocket_recv, websocket_send,
 };
 
 fn parse_json<T: serde::de::DeserializeOwned>(raw: &str) -> T {
@@ -59,6 +63,70 @@ fn runtime_create_and_close_round_trip() {
             msg.contains("invalid handle") || msg.contains("released") || msg.contains("handle")
         );
     }
+}
+
+#[test]
+fn browser_operator_snapshot_export_projects_live_dispatcher_diagnostics() {
+    reset_dispatcher_for_tests();
+
+    let empty_json = browser_operator_snapshot().expect("empty snapshot succeeds");
+    let empty: BrowserOperatorConsoleSnapshot = parse_json(&empty_json);
+    assert_eq!(
+        empty.schema_version,
+        BROWSER_OPERATOR_SNAPSHOT_SCHEMA_VERSION
+    );
+    assert_eq!(empty.kind, BrowserOperatorSnapshotKind::EmptyRuntime);
+    assert_eq!(empty.runtime.logical_tick, 0);
+    assert_eq!(empty.regions.total, 1);
+    assert_eq!(empty.tasks.total, 0);
+    assert!(empty.has_fail_closed_native_omissions());
+
+    let runtime_json = runtime_create(None).expect("runtime_create succeeds");
+    let runtime: WasmHandleRef = parse_json(&runtime_json);
+    let scope_json = scope_enter(
+        to_json(&WasmScopeEnterRequest {
+            parent: runtime,
+            label: Some("operator-snapshot".to_string()),
+        }),
+        None,
+    )
+    .expect("scope_enter succeeds");
+    let scope: WasmHandleRef = parse_json(&scope_json);
+    let task_json = task_spawn(
+        to_json(&WasmTaskSpawnRequest {
+            scope,
+            label: Some("snapshot-worker".to_string()),
+            cancel_kind: Some("operator".to_string()),
+        }),
+        None,
+    )
+    .expect("task_spawn succeeds");
+
+    let live_json = browser_operator_snapshot().expect("live snapshot succeeds");
+    let live: BrowserOperatorConsoleSnapshot = parse_json(&live_json);
+    assert_eq!(live.kind, BrowserOperatorSnapshotKind::LoadedRuntime);
+    assert_eq!(live.runtime.logical_tick, 3);
+    assert_eq!(live.regions.total, 2);
+    assert_eq!(live.tasks.total, 1);
+    assert!(live.proof_status.proof_fresh);
+    assert_eq!(
+        live.proof_status.proof_lane.as_deref(),
+        Some("browser_operator_snapshot_live_dispatcher")
+    );
+    assert!(live.has_fail_closed_native_omissions());
+
+    let join_input = WasmAbiOutcomeEnvelope::Ok {
+        value: WasmAbiValue::String("done".to_string()),
+    };
+    task_join(task_json, to_json(&join_input), None).expect("task_join succeeds");
+    scope_close(scope_json, None).expect("scope_close succeeds");
+    runtime_close(runtime_json, None).expect("runtime_close succeeds");
+
+    let closed_json = browser_operator_snapshot().expect("closed snapshot succeeds");
+    let closed: BrowserOperatorConsoleSnapshot = parse_json(&closed_json);
+    assert_eq!(closed.kind, BrowserOperatorSnapshotKind::EmptyRuntime);
+    assert_eq!(closed.runtime.logical_tick, 6);
+    assert_eq!(closed.tasks.total, 0);
 }
 
 #[test]

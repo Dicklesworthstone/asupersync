@@ -4,6 +4,7 @@
   "purpose": "Source-owned browser operator console snapshot contract for compact runtime views that do not imply native-only support.",
   "source_of_truth": {
     "model": "asupersync-browser-core/src/types.rs",
+    "export": "asupersync-browser-core/src/exports.rs",
     "contract": "artifacts/browser_operator_console_snapshot_contract_v1.json",
     "verifier": "tests/browser_operator_console_snapshot_contract.rs"
   },
@@ -45,6 +46,7 @@
         "BROWSER_OPERATOR_SNAPSHOT_SCHEMA_VERSION",
         "pub enum BrowserOperatorSnapshotKind",
         "pub struct BrowserOperatorConsoleSnapshot",
+        "from_dispatcher_diagnostics",
         "pub fn browser_operator_snapshot_fixture",
         "has_fail_closed_native_omissions"
       ]
@@ -53,7 +55,24 @@
       "path": "asupersync-browser-core/src/lib.rs",
       "markers": [
         "pub mod types",
-        "static DISPATCHER: RefCell<WasmExportDispatcher>"
+        "static DISPATCHER: RefCell<WasmExportDispatcher>",
+        "browser_operator_snapshot_impl",
+        "BrowserOperatorConsoleSnapshot::from_dispatcher_diagnostics"
+      ]
+    },
+    {
+      "path": "asupersync-browser-core/src/exports.rs",
+      "markers": [
+        "browser_operator_snapshot",
+        "browser_operator_snapshot_impl",
+        "wasm_bindgen(js_name = browser_operator_snapshot)"
+      ]
+    },
+    {
+      "path": "asupersync-browser-core/tests/abi_exports.rs",
+      "markers": [
+        "browser_operator_snapshot_export_projects_live_dispatcher_diagnostics",
+        "browser_operator_snapshot_live_dispatcher"
       ]
     },
     {
@@ -154,7 +173,8 @@
   ],
   "validation_commands": [
     "rch exec -- python3 -m json.tool artifacts/browser_operator_console_snapshot_contract_v1.json",
-    "rch exec -- rustfmt --edition 2024 --check asupersync-browser-core/src/types.rs tests/browser_operator_console_snapshot_contract.rs",
-    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_browser_operator_console_snapshot_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test browser_operator_console_snapshot_contract --features test-internals -- --nocapture"
+    "rch exec -- rustfmt --edition 2024 --check asupersync-browser-core/src/types.rs asupersync-browser-core/src/lib.rs asupersync-browser-core/src/exports.rs asupersync-browser-core/tests/abi_exports.rs tests/browser_operator_console_snapshot_contract.rs",
+    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_browser_operator_console_snapshot_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test browser_operator_console_snapshot_contract --features test-internals -- --nocapture",
+    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_browser_operator_console_snapshot_export CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync-browser-core browser_operator_snapshot_export_projects_live_dispatcher_diagnostics -- --nocapture"
   ]
 }

@@ -7,10 +7,10 @@
 #[cfg(target_arch = "wasm32")]
 use super::into_js_error;
 use super::{
-    abi_fingerprint_impl, abi_version_impl, fetch_request_impl, runtime_close_impl,
-    runtime_create_impl, scope_close_impl, scope_enter_impl, task_cancel_impl, task_join_impl,
-    task_spawn_impl, websocket_cancel_impl, websocket_close_impl, websocket_open_impl,
-    websocket_recv_impl, websocket_send_impl,
+    abi_fingerprint_impl, abi_version_impl, browser_operator_snapshot_impl, fetch_request_impl,
+    runtime_close_impl, runtime_create_impl, scope_close_impl, scope_enter_impl, task_cancel_impl,
+    task_join_impl, task_spawn_impl, websocket_cancel_impl, websocket_close_impl,
+    websocket_open_impl, websocket_recv_impl, websocket_send_impl,
 };
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::{JsValue, prelude::wasm_bindgen};
@@ -26,6 +26,22 @@ pub fn runtime_create(consumer_version_json: Option<String>) -> Result<String, J
 #[cfg(not(target_arch = "wasm32"))]
 pub fn runtime_create(consumer_version_json: Option<String>) -> Result<String, String> {
     runtime_create_impl(consumer_version_json)
+}
+
+/// `browser_operator_snapshot` ABI symbol.
+#[cfg_attr(
+    target_arch = "wasm32",
+    wasm_bindgen(js_name = browser_operator_snapshot)
+)]
+#[cfg(target_arch = "wasm32")]
+pub fn browser_operator_snapshot() -> Result<String, JsValue> {
+    browser_operator_snapshot_impl().map_err(into_js_error)
+}
+
+/// Host adapter for `browser_operator_snapshot`.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn browser_operator_snapshot() -> Result<String, String> {
+    browser_operator_snapshot_impl()
 }
 
 /// `runtime_close` ABI symbol.

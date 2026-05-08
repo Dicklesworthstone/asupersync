@@ -18,13 +18,16 @@ mod exports;
 pub mod types;
 
 pub use exports::{
-    abi_fingerprint, abi_version, fetch_request, runtime_close, runtime_create, scope_close,
-    scope_enter, task_cancel, task_join, task_spawn, websocket_cancel, websocket_close,
-    websocket_open, websocket_recv, websocket_send,
+    abi_fingerprint, abi_version, browser_operator_snapshot, fetch_request, runtime_close,
+    runtime_create, scope_close, scope_enter, task_cancel, task_join, task_spawn, websocket_cancel,
+    websocket_close, websocket_open, websocket_recv, websocket_send,
 };
 
 use crate::error::dispatch_error_json;
-use crate::types::{decode_json_payload, decode_optional_consumer_version, encode_json_payload};
+use crate::types::{
+    BrowserOperatorConsoleSnapshot, decode_json_payload, decode_optional_consumer_version,
+    encode_json_payload,
+};
 #[cfg(not(target_arch = "wasm32"))]
 use asupersync::types::WasmDispatcherDiagnostics;
 use asupersync::types::{
@@ -692,6 +695,15 @@ fn runtime_create_impl(consumer_version_json: Option<String>) -> Result<String, 
     let consumer_version = parse_consumer_version(consumer_version_json)?;
     let handle = with_dispatcher(|dispatcher| dispatcher.runtime_create(consumer_version))?;
     encode_json(&handle, "runtime_create.response")
+}
+
+fn browser_operator_snapshot_impl() -> Result<String, String> {
+    cleanup_released_host_state();
+    let snapshot = DISPATCHER.with(|dispatcher| {
+        let diagnostics = dispatcher.borrow().diagnostic_snapshot();
+        BrowserOperatorConsoleSnapshot::from_dispatcher_diagnostics(&diagnostics)
+    });
+    encode_json(&snapshot, "browser_operator_snapshot.response")
 }
 
 fn runtime_close_impl(

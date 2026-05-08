@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 
 const CONTRACT_PATH: &str = "artifacts/browser_operator_console_snapshot_contract_v1.json";
 const MODEL_PATH: &str = "asupersync-browser-core/src/types.rs";
+const EXPORT_PATH: &str = "asupersync-browser-core/src/exports.rs";
+const ABI_EXPORT_TEST_PATH: &str = "asupersync-browser-core/tests/abi_exports.rs";
 const TEST_PATH: &str = "tests/browser_operator_console_snapshot_contract.rs";
 
 fn repo_path(relative: &str) -> PathBuf {
@@ -114,6 +116,10 @@ fn contract_names_source_model_and_required_snapshot_schema() {
         Some(MODEL_PATH)
     );
     assert_eq!(
+        contract["source_of_truth"]["export"].as_str(),
+        Some(EXPORT_PATH)
+    );
+    assert_eq!(
         contract["source_of_truth"]["contract"].as_str(),
         Some(CONTRACT_PATH)
     );
@@ -171,6 +177,36 @@ fn snapshot_model_is_source_owned_and_names_required_markers() {
             "browser snapshot model must name required field {field:?}"
         );
     }
+}
+
+#[test]
+fn live_export_is_wired_to_dispatcher_diagnostics() {
+    let lib = read_repo_file("asupersync-browser-core/src/lib.rs");
+    let exports = read_repo_file(EXPORT_PATH);
+    let abi_export_tests = read_repo_file(ABI_EXPORT_TEST_PATH);
+    let model = read_repo_file(MODEL_PATH);
+
+    assert!(
+        model.contains("from_dispatcher_diagnostics"),
+        "model must expose dispatcher-diagnostics conversion"
+    );
+    assert!(
+        lib.contains("browser_operator_snapshot_impl"),
+        "lib must define live snapshot implementation"
+    );
+    assert!(
+        lib.contains("BrowserOperatorConsoleSnapshot::from_dispatcher_diagnostics"),
+        "live export must derive from dispatcher diagnostics"
+    );
+    assert!(
+        exports.contains("wasm_bindgen(js_name = browser_operator_snapshot)"),
+        "exports must expose wasm browser_operator_snapshot symbol"
+    );
+    assert!(
+        abi_export_tests
+            .contains("browser_operator_snapshot_export_projects_live_dispatcher_diagnostics"),
+        "host export tests must exercise live snapshot export"
+    );
 }
 
 #[test]
@@ -295,9 +331,9 @@ fn validation_commands_are_rch_routed_and_target_isolated() {
         if command.contains(" cargo test ") {
             assert!(
                 command.contains(
-                    "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_browser_operator_console_snapshot_contract"
+                    "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_browser_operator_console_snapshot_"
                 ),
-                "cargo validation must use the contract-specific target dir: {command}"
+                "cargo validation must use a browser-snapshot-specific target dir: {command}"
             );
         }
     }

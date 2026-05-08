@@ -6,7 +6,7 @@
 //! This module focuses on deterministic payload marshalling for bead
 //! `asupersync-3qv04.2.3`.
 
-use asupersync::types::WasmAbiVersion;
+use asupersync::types::{WasmAbiVersion, WasmDispatcherDiagnostics, WasmHandleKind};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 #[cfg(target_arch = "wasm32")]
@@ -14,6 +14,8 @@ use wasm_bindgen::JsValue;
 
 /// Stable schema identifier for browser operator console snapshots.
 pub const BROWSER_OPERATOR_SNAPSHOT_SCHEMA_VERSION: &str = "browser-operator-snapshot-v1";
+
+const BROWSER_OPERATOR_LIVE_PROOF_LANE: &str = "browser_operator_snapshot_live_dispatcher";
 
 /// Decode a JSON payload string into a typed ABI value.
 pub fn decode_json_payload<T: DeserializeOwned>(raw: &str, field: &str) -> Result<T, String> {
@@ -245,14 +247,99 @@ impl BrowserOperatorConsoleSnapshot {
                 && !field.omission_reason.trim().is_empty()
         })
     }
+
+    /// Build a live browser operator snapshot from wasm dispatcher diagnostics.
+    #[must_use]
+    pub fn from_dispatcher_diagnostics(diagnostics: &WasmDispatcherDiagnostics) -> Self {
+        let runtime_handles = diagnostic_kind_count(diagnostics, "runtime");
+        let region_handles = diagnostic_kind_count(diagnostics, "region");
+        let task_handles = diagnostic_kind_count(diagnostics, "task");
+        let runtime_region_handles = runtime_handles.saturating_add(region_handles);
+        let region_total = runtime_region_handles.max(1);
+        let live_handles = saturating_usize_to_u32(diagnostics.memory_report.live_handles);
+        let cleanup_pending = saturating_usize_to_u32(diagnostics.leaks.len());
+        let region_cleanup = diagnostic_leak_count(diagnostics, WasmHandleKind::Runtime)
+            .saturating_add(diagnostic_leak_count(diagnostics, WasmHandleKind::Region));
+        let minimum_active_regions = u32::from(cleanup_pending == 0);
+        let region_active = runtime_region_handles
+            .saturating_sub(region_cleanup)
+            .max(minimum_active_regions);
+        let task_cleanup = diagnostic_leak_count(diagnostics, WasmHandleKind::Task);
+        let has_leaks = cleanup_pending != 0;
+        let has_work = task_handles != 0 || region_handles != 0 || live_handles > runtime_handles;
+        let kind = if has_leaks {
+            BrowserOperatorSnapshotKind::CancelledRuntime
+        } else if has_work {
+            BrowserOperatorSnapshotKind::LoadedRuntime
+        } else {
+            BrowserOperatorSnapshotKind::EmptyRuntime
+        };
+        let state = if has_leaks {
+            BrowserOperatorRuntimeState::Cancelling
+        } else {
+            BrowserOperatorRuntimeState::Running
+        };
+        let proof_lane = (!has_leaks).then(|| BROWSER_OPERATOR_LIVE_PROOF_LANE.to_string());
+        let blocked_reason = has_leaks.then(|| {
+            "dispatcher diagnostics reported unreleased closed handles; cleanup proof blocked"
+                .to_string()
+        });
+
+        Self {
+            schema_version: BROWSER_OPERATOR_SNAPSHOT_SCHEMA_VERSION.to_string(),
+            kind,
+            runtime: BrowserOperatorRuntimeSummary {
+                runtime_id: "browser-runtime-live".to_string(),
+                state,
+                logical_tick: diagnostics.dispatch_count,
+                direct_runtime_supported: true,
+            },
+            regions: BrowserOperatorCountSummary::new(
+                region_total,
+                region_active,
+                region_cleanup,
+                region_cleanup,
+            ),
+            tasks: BrowserOperatorCountSummary::new(
+                task_handles,
+                task_handles.saturating_sub(task_cleanup),
+                task_cleanup,
+                task_cleanup,
+            ),
+            channels: BrowserOperatorChannelSummary {
+                counts: BrowserOperatorCountSummary::new(0, 0, 0, 0),
+                backlog: 0,
+                waiters: 0,
+                reserved_uncommitted: 0,
+            },
+            budgets: BrowserOperatorBudgetSummary {
+                counts: BrowserOperatorCountSummary::new(
+                    region_total,
+                    region_active,
+                    region_cleanup,
+                    region_cleanup,
+                ),
+                memory_limit_bytes: None,
+                memory_used_bytes: None,
+                cleanup_remaining_ms: None,
+            },
+            pressure: BrowserOperatorPressureSummary {
+                level: BrowserOperatorPressureLevel::None,
+                sample_count: saturating_usize_to_u32(diagnostics.event_count),
+                admission_open: !has_leaks,
+            },
+            proof_status: BrowserOperatorProofSummary {
+                proof_fresh: !has_leaks,
+                proof_lane,
+                blocked_reason,
+            },
+            unsupported_native_fields: unsupported_native_fields(),
+        }
+    }
 }
 
-/// Build a deterministic browser operator snapshot fixture.
-#[must_use]
-pub fn browser_operator_snapshot_fixture(
-    kind: BrowserOperatorSnapshotKind,
-) -> BrowserOperatorConsoleSnapshot {
-    let unsupported_native_fields = vec![
+fn unsupported_native_fields() -> Vec<BrowserOperatorUnsupportedField> {
+    vec![
         BrowserOperatorUnsupportedField {
             field_id: "native_thread_id".to_string(),
             status: BrowserOperatorFieldStatus::UnsupportedNativeOnly,
@@ -269,8 +356,38 @@ pub fn browser_operator_snapshot_fixture(
             status: BrowserOperatorFieldStatus::UnsupportedNativeOnly,
             omission_reason: "browser packages must not imply local filesystem access".to_string(),
         },
-    ];
+    ]
+}
 
+fn saturating_usize_to_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn diagnostic_kind_count(diagnostics: &WasmDispatcherDiagnostics, kind: &str) -> u32 {
+    diagnostics
+        .memory_report
+        .by_kind
+        .get(kind)
+        .copied()
+        .map_or(0, saturating_usize_to_u32)
+}
+
+fn diagnostic_leak_count(diagnostics: &WasmDispatcherDiagnostics, kind: WasmHandleKind) -> u32 {
+    saturating_usize_to_u32(
+        diagnostics
+            .leaks
+            .iter()
+            .filter(|handle| handle.kind == kind)
+            .count(),
+    )
+}
+
+/// Build a deterministic browser operator snapshot fixture.
+#[allow(clippy::too_many_lines)]
+#[must_use]
+pub fn browser_operator_snapshot_fixture(
+    kind: BrowserOperatorSnapshotKind,
+) -> BrowserOperatorConsoleSnapshot {
     match kind {
         BrowserOperatorSnapshotKind::EmptyRuntime => BrowserOperatorConsoleSnapshot {
             schema_version: BROWSER_OPERATOR_SNAPSHOT_SCHEMA_VERSION.to_string(),
@@ -305,7 +422,7 @@ pub fn browser_operator_snapshot_fixture(
                 proof_lane: Some("browser_operator_snapshot_empty".to_string()),
                 blocked_reason: None,
             },
-            unsupported_native_fields,
+            unsupported_native_fields: unsupported_native_fields(),
         },
         BrowserOperatorSnapshotKind::LoadedRuntime => BrowserOperatorConsoleSnapshot {
             schema_version: BROWSER_OPERATOR_SNAPSHOT_SCHEMA_VERSION.to_string(),
@@ -340,7 +457,7 @@ pub fn browser_operator_snapshot_fixture(
                 proof_lane: Some("browser_operator_snapshot_loaded".to_string()),
                 blocked_reason: None,
             },
-            unsupported_native_fields,
+            unsupported_native_fields: unsupported_native_fields(),
         },
         BrowserOperatorSnapshotKind::CancelledRuntime => BrowserOperatorConsoleSnapshot {
             schema_version: BROWSER_OPERATOR_SNAPSHOT_SCHEMA_VERSION.to_string(),
@@ -375,7 +492,7 @@ pub fn browser_operator_snapshot_fixture(
                 proof_lane: Some("browser_operator_snapshot_cancelled".to_string()),
                 blocked_reason: None,
             },
-            unsupported_native_fields,
+            unsupported_native_fields: unsupported_native_fields(),
         },
         BrowserOperatorSnapshotKind::PressureGovernedRuntime => BrowserOperatorConsoleSnapshot {
             schema_version: BROWSER_OPERATOR_SNAPSHOT_SCHEMA_VERSION.to_string(),
@@ -412,7 +529,7 @@ pub fn browser_operator_snapshot_fixture(
                     "pressure-governor proof unavailable in browser snapshot producer".to_string(),
                 ),
             },
-            unsupported_native_fields,
+            unsupported_native_fields: unsupported_native_fields(),
         },
     }
 }
@@ -420,12 +537,16 @@ pub fn browser_operator_snapshot_fixture(
 #[cfg(test)]
 mod tests {
     use super::{
-        BrowserOperatorSnapshotKind, browser_operator_snapshot_fixture, decode_json_payload,
-        decode_optional_consumer_version, encode_json_payload,
+        BrowserOperatorConsoleSnapshot, BrowserOperatorSnapshotKind,
+        browser_operator_snapshot_fixture, decode_json_payload, decode_optional_consumer_version,
+        encode_json_payload,
     };
+    use asupersync::types::wasm_abi::WasmMemoryReport;
     use asupersync::types::{
-        WasmAbiOutcomeEnvelope, WasmAbiValue, WasmAbiVersion, WasmHandleKind, WasmHandleRef,
+        WasmAbiOutcomeEnvelope, WasmAbiValue, WasmAbiVersion, WasmDispatcherDiagnostics,
+        WasmHandleKind, WasmHandleRef,
     };
+    use std::collections::BTreeMap;
 
     #[test]
     fn handle_ref_json_round_trip_holds() {
@@ -492,5 +613,36 @@ mod tests {
                 .expect("decode browser snapshot");
             assert_eq!(snapshot, decoded);
         }
+    }
+
+    #[test]
+    fn browser_operator_snapshot_from_dispatcher_diagnostics_counts_live_handles() {
+        let diagnostics = WasmDispatcherDiagnostics {
+            dispatch_count: 3,
+            memory_report: WasmMemoryReport {
+                live_handles: 3,
+                capacity: 4,
+                free_slots: 1,
+                pinned_count: 1,
+                by_kind: BTreeMap::from([
+                    ("runtime".to_string(), 1),
+                    ("region".to_string(), 1),
+                    ("task".to_string(), 1),
+                ]),
+                by_state: BTreeMap::from([("active".to_string(), 3)]),
+            },
+            event_count: 3,
+            leaks: Vec::new(),
+            producer_version: WasmAbiVersion { major: 1, minor: 0 },
+        };
+
+        let snapshot = BrowserOperatorConsoleSnapshot::from_dispatcher_diagnostics(&diagnostics);
+        assert_eq!(snapshot.kind, BrowserOperatorSnapshotKind::LoadedRuntime);
+        assert_eq!(snapshot.runtime.logical_tick, 3);
+        assert_eq!(snapshot.regions.total, 2);
+        assert_eq!(snapshot.tasks.total, 1);
+        assert_eq!(snapshot.pressure.sample_count, 3);
+        assert!(snapshot.proof_status.proof_fresh);
+        assert!(snapshot.has_fail_closed_native_omissions());
     }
 }
