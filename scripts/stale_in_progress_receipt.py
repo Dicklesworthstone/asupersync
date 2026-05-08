@@ -437,7 +437,12 @@ def classify_issue(
         classification = "needs-human-escalation"
         rationale = "Agent Mail data is unavailable, so freshness cannot be verified"
     elif active_reservation is not None:
-        if holder == assignee or assignee_age is None or assignee_age <= active_after_hours:
+        if holder == assignee and (
+            assignee_age is None
+            or assignee_age <= active_after_hours
+            or (message_age is not None and message_age <= active_after_hours)
+            or (issue_age is not None and issue_age < stale_after_hours)
+        ):
             classification = "fresh-active-peer"
             rationale = "active reservation and peer freshness evidence indicate live work"
         else:
