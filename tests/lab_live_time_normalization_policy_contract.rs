@@ -223,27 +223,47 @@ fn readme_and_testing_surface_time_policy_for_phase2_work() {
         "Phase 2 Differential Policy Docs",
         "docs/lab_live_time_normalization_policy.md",
         "scenario-clock rules",
-        "rch exec -- cargo test --test lab_live_time_normalization_policy_contract -- --nocapture",
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_time_policy cargo test --test lab_live_time_normalization_policy_contract --features test-internals -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_time_policy_contract cargo test --test lab_live_time_normalization_policy_contract -- --nocapture",
     ] {
         assert!(
             testing.contains(token),
             "TESTING guide missing time-normalization policy token: {token}"
         );
     }
+
+    assert!(
+        !testing.contains(
+            "rch exec -- cargo test --test lab_live_time_normalization_policy_contract -- --nocapture"
+        ),
+        "TESTING guide must not reintroduce bare rch cargo routing for the time policy contract"
+    );
 }
 
 #[test]
 fn doc_requires_rch_validation_commands() {
     let doc = load_doc();
     for token in [
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_time_docs cargo fmt --check",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_time_docs cargo check --all-targets",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_time_docs cargo clippy --all-targets -- -D warnings",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_time_docs cargo test --test lab_live_time_normalization_policy_contract -- --nocapture",
+    ] {
+        assert!(
+            doc.contains(token),
+            "document missing validation command: {token}"
+        );
+    }
+
+    for stale in [
         "rch exec -- cargo fmt --check",
         "rch exec -- cargo check --all-targets",
         "rch exec -- cargo clippy --all-targets -- -D warnings",
         "rch exec -- cargo test --test lab_live_time_normalization_policy_contract -- --nocapture",
     ] {
         assert!(
-            doc.contains(token),
-            "document missing validation command: {token}"
+            !doc.contains(stale),
+            "document must not reintroduce bare rch cargo routing: {stale}"
         );
     }
 }
