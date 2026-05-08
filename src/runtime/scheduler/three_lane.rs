@@ -15741,9 +15741,10 @@ mod tests {
 
         let state = Arc::new(ContendedMutex::new("test_state", RuntimeState::new()));
         let mut scheduler = ThreeLaneScheduler::new(2, &state);
+        let default_limit = scheduler.workers[0].cancel_streak_limit;
+        let metrics = &mut scheduler.workers[0].preemption_metrics;
 
         // Test 1: Verify cancel_streak_limit is bounded (not unbounded)
-        let default_limit = scheduler.preemption_metrics.cancel_streak_limit;
         assert!(
             default_limit > 0 && default_limit <= 64,
             "Cancel streak limit must be bounded, got {}. README claims bounded preemption, not unbounded.",
@@ -15751,27 +15752,31 @@ mod tests {
         );
 
         // Test 2: Verify fairness telemetry exists and is trackable
-        let initial_yields = scheduler.preemption_metrics.fairness_yields;
-        let initial_max_streak = scheduler.preemption_metrics.max_cancel_streak;
+        let initial_yields = metrics.fairness_yields;
+        let initial_max_streak = metrics.max_cancel_streak;
 
         // Simulate fairness yield
-        scheduler.preemption_metrics.fairness_yields += 1;
-        scheduler.preemption_metrics.max_cancel_streak =
-            scheduler.preemption_metrics.max_cancel_streak.max(8);
+        metrics.fairness_yields += 1;
+        metrics.max_cancel_streak = metrics.max_cancel_streak.max(8);
 
         assert_eq!(
-            scheduler.preemption_metrics.fairness_yields,
+            metrics.fairness_yields,
             initial_yields + 1,
             "Fairness yields telemetry must track yield events"
         );
 
         assert!(
-            scheduler.preemption_metrics.max_cancel_streak >= 8,
+            metrics.max_cancel_streak >= 8,
             "Max cancel streak telemetry must track observed streaks"
+        );
+        assert_eq!(
+            metrics.max_cancel_streak,
+            initial_max_streak.max(8),
+            "Max cancel streak telemetry must preserve the previous maximum"
         );
 
         // Test 3: Verify fairness counters are accessible for starvation verification
-        let telemetry = scheduler.preemption_metrics.clone();
+        let telemetry = metrics.clone();
         assert!(
             telemetry.fairness_yields < u64::MAX,
             "Fairness yields counter must be readable for starvation analysis"
@@ -15783,8 +15788,11 @@ mod tests {
 
         println!("✓ Scheduler fairness verification completed:");
         println!("  - Cancel streak limit bounded: {}", default_limit);
-        println!("  - Fairness yields tracked: {}", scheduler.preemption_metrics.fairness_yields);
-        println!("  - Max cancel streak tracked: {}", scheduler.preemption_metrics.max_cancel_streak);
+        println!("  - Fairness yields tracked: {}", metrics.fairness_yields);
+        println!(
+            "  - Max cancel streak tracked: {}",
+            metrics.max_cancel_streak
+        );
         println!("  - Telemetry accessible for starvation claim verification");
         println!("  - Verified README fairness claims: bounded preemption + telemetry");
     }

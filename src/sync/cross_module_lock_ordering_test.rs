@@ -6,8 +6,8 @@
 #![cfg(test)]
 
 use super::lock_ordering::{
-    LockModule, LockRank, check_acquire_with_module, record_acquire_with_module,
-    record_release_with_module, clear_held_locks,
+    LockModule, LockRank, check_acquire_with_module, clear_held_locks, record_acquire_with_module,
+    record_release_with_module,
 };
 
 #[test]
@@ -20,11 +20,23 @@ fn test_cross_module_enforcement_example() {
     check_acquire_with_module("runtime_tasks", LockRank::Tasks, LockModule::Runtime);
     record_acquire_with_module("runtime_tasks", LockRank::Tasks, LockModule::Runtime);
 
-    check_acquire_with_module("obligation_ledger", LockRank::Obligations, LockModule::Obligation);
-    record_acquire_with_module("obligation_ledger", LockRank::Obligations, LockModule::Obligation);
+    check_acquire_with_module(
+        "obligation_ledger",
+        LockRank::Obligations,
+        LockModule::Obligation,
+    );
+    record_acquire_with_module(
+        "obligation_ledger",
+        LockRank::Obligations,
+        LockModule::Obligation,
+    );
 
     // Clean up in reverse order
-    record_release_with_module("obligation_ledger", LockRank::Obligations, LockModule::Obligation);
+    record_release_with_module(
+        "obligation_ledger",
+        LockRank::Obligations,
+        LockModule::Obligation,
+    );
     record_release_with_module("runtime_tasks", LockRank::Tasks, LockModule::Runtime);
 }
 
@@ -38,7 +50,11 @@ fn test_cross_module_violation_obligation_while_holding_cancel() {
     record_acquire_with_module("cancel_protocol", LockRank::Tasks, LockModule::Cancel);
 
     // This should panic - trying to acquire Obligation lock while holding Cancel lock
-    check_acquire_with_module("obligation_tracker", LockRank::Obligations, LockModule::Obligation);
+    check_acquire_with_module(
+        "obligation_tracker",
+        LockRank::Obligations,
+        LockModule::Obligation,
+    );
 }
 
 #[test]
@@ -48,7 +64,11 @@ fn test_cross_module_violation_runtime_while_holding_obligation() {
     clear_held_locks();
 
     // Hold an Obligation lock
-    record_acquire_with_module("obligation_state", LockRank::Obligations, LockModule::Obligation);
+    record_acquire_with_module(
+        "obligation_state",
+        LockRank::Obligations,
+        LockModule::Obligation,
+    );
 
     // This should panic - trying to acquire Task lock while holding Obligation lock
     check_acquire_with_module("runtime_scheduler", LockRank::Tasks, LockModule::Runtime);
@@ -57,14 +77,29 @@ fn test_cross_module_violation_runtime_while_holding_obligation() {
 #[test]
 fn test_module_detection_from_names() {
     // Test that the module detection works correctly for different naming patterns
-    assert_eq!(LockModule::from_name("runtime_scheduler_queue"), LockModule::Runtime);
+    assert_eq!(
+        LockModule::from_name("runtime_scheduler_queue"),
+        LockModule::Runtime
+    );
     assert_eq!(LockModule::from_name("sync_mutex_guard"), LockModule::Sync);
     assert_eq!(LockModule::from_name("cx_scope_handle"), LockModule::Cx);
-    assert_eq!(LockModule::from_name("cancel_token_state"), LockModule::Cancel);
-    assert_eq!(LockModule::from_name("obligation_tracker_ledger"), LockModule::Obligation);
-    assert_eq!(LockModule::from_name("channel_mpsc_sender"), LockModule::Channel);
+    assert_eq!(
+        LockModule::from_name("cancel_token_state"),
+        LockModule::Cancel
+    );
+    assert_eq!(
+        LockModule::from_name("obligation_tracker_ledger"),
+        LockModule::Obligation
+    );
+    assert_eq!(
+        LockModule::from_name("channel_mpsc_sender"),
+        LockModule::Channel
+    );
     assert_eq!(LockModule::from_name("io_tcp_stream"), LockModule::Io);
-    assert_eq!(LockModule::from_name("unknown_component"), LockModule::Other);
+    assert_eq!(
+        LockModule::from_name("unknown_component"),
+        LockModule::Other
+    );
 }
 
 /// Example of how the enhanced API could be used in practice.
@@ -77,13 +112,10 @@ fn test_lock_order_enforcer_usage_example() {
     clear_held_locks();
 
     // Create enforcers for different locks
-    let runtime_lock = LockOrderEnforcer::with_module(
-        "runtime_task_queue",
-        LockRank::Tasks,
-        LockModule::Runtime
-    );
+    let runtime_lock =
+        LockOrderEnforcer::with_module("runtime_task_queue", LockRank::Tasks, LockModule::Runtime);
 
-    let obligation_lock = LockOrderEnforcer::new("obligation_tracker");
+    let obligation_lock = LockOrderEnforcer::new("obligation_tracker", LockRank::Obligations);
 
     // Use them in the correct order
     runtime_lock.acquire();
