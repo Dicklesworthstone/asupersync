@@ -51,7 +51,17 @@ fn fixture_text(fixture: &str) -> String {
         .unwrap_or_else(|error| panic!("read golden fixture {fixture}: {error}"))
 }
 
-fn assert_output_matches_golden(actual: String, expected_fixture: &str, drift_message: &str) {
+fn assert_output_matches_golden(input_fixture: &str, expected_fixture: &str, drift_message: &str) {
+    let output = run_receipt(input_fixture);
+    assert!(
+        output.status.success(),
+        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = String::from_utf8(output.stdout).expect("receipt stdout is utf-8");
     let expected = fixture_text(expected_fixture);
     let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
     let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
@@ -67,17 +77,8 @@ fn cues(receipt: &Value) -> &Vec<Value> {
 
 #[test]
 fn executed_success_output_matches_full_reviewed_golden() {
-    let output = run_receipt("executed_success.json");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
     assert_output_matches_golden(
-        String::from_utf8(output.stdout).expect("receipt stdout is utf-8"),
+        "executed_success.json",
         "executed_success_expected.json",
         "executed smoke run report receipt drifted from the reviewed golden",
     );
@@ -85,17 +86,8 @@ fn executed_success_output_matches_full_reviewed_golden() {
 
 #[test]
 fn dry_run_plan_output_matches_full_reviewed_golden() {
-    let output = run_receipt("dry_run_plan.json");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
     assert_output_matches_golden(
-        String::from_utf8(output.stdout).expect("receipt stdout is utf-8"),
+        "dry_run_plan.json",
         "dry_run_plan_expected.json",
         "dry-run smoke report receipt drifted from the reviewed golden",
     );
@@ -103,17 +95,8 @@ fn dry_run_plan_output_matches_full_reviewed_golden() {
 
 #[test]
 fn local_fallback_failure_output_matches_full_reviewed_golden() {
-    let output = run_receipt("local_fallback_failure.json");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
     assert_output_matches_golden(
-        String::from_utf8(output.stdout).expect("receipt stdout is utf-8"),
+        "local_fallback_failure.json",
         "local_fallback_failure_expected.json",
         "local-fallback smoke report receipt drifted from the reviewed golden",
     );
@@ -121,17 +104,8 @@ fn local_fallback_failure_output_matches_full_reviewed_golden() {
 
 #[test]
 fn missing_required_output_matches_full_reviewed_golden() {
-    let output = run_receipt("missing_required_scenario.json");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
     assert_output_matches_golden(
-        String::from_utf8(output.stdout).expect("receipt stdout is utf-8"),
+        "missing_required_scenario.json",
         "missing_required_scenario_expected.json",
         "missing-required smoke report receipt drifted from the reviewed golden",
     );
