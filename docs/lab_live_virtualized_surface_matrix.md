@@ -365,16 +365,16 @@ not completed verification work.
 
 Every change to this contract must be validated with:
 
-- `rch exec -- cargo fmt --check`
-- `rch exec -- cargo check --all-targets`
-- `rch exec -- cargo clippy --all-targets -- -D warnings`
-- `rch exec -- cargo test --test lab_live_virtualized_surface_matrix_contract -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_virtualized_docs cargo fmt --check`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_virtualized_docs cargo check --all-targets`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_virtualized_docs cargo clippy --all-targets -- -D warnings`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_virtualized_docs cargo test --test lab_live_virtualized_surface_matrix_contract -- --nocapture`
 
 Rows that move from contract-only status into executable timer or transport work
 should additionally replay the relevant executable anchors, such as:
 
-- `rch exec -- cargo test --test time_e2e -- --nocapture`
-- `rch exec -- cargo test --test e2e_transport -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_virtualized_docs cargo test --test time_e2e -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_virtualized_docs cargo test --test e2e_transport -- --nocapture`
 
 The purpose of the extra commands is not to inflate ceremony. It is to ensure
 that Phase 2 widening beads keep the same disciplined proof posture as the core

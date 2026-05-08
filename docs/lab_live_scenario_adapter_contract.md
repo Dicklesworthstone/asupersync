@@ -472,8 +472,8 @@ live_binding:
     - explicit_cancellation_witness
     - obligation_counters
 artifacts:
-  repro_command_lab: rch exec -- cargo test --test lab_live_scenario_adapter_contract -- --nocapture
-  repro_command_live: rch exec -- cargo test --test lab_live_scenario_adapter_contract -- --nocapture
+  repro_command_lab: rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_scenario_docs cargo test --test lab_live_scenario_adapter_contract -- --nocapture
+  repro_command_live: rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_scenario_docs cargo test --test lab_live_scenario_adapter_contract -- --nocapture
   mismatch_bundle: artifacts/lab_live/phase1.cancel.race.one_loser/
   summary_record: artifacts/lab_live/phase1.cancel.race.one_loser/summary.json
   seed_lineage_record: artifacts/lab_live/phase1.cancel.race.one_loser/seeds.json
@@ -529,7 +529,7 @@ lab_binding:
   config_projection: {}
   evidence_sources: []
 artifacts:
-  repro_command_lab: rch exec -- cargo test --test lab_live_scenario_adapter_contract -- --nocapture
+  repro_command_lab: rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_scenario_docs cargo test --test lab_live_scenario_adapter_contract -- --nocapture
   repro_command_live: missing
   mismatch_bundle: artifacts/lab_live/invalid.missing_live_binding/
   summary_record: artifacts/lab_live/invalid.missing_live_binding/summary.json
@@ -592,8 +592,8 @@ live_binding:
   witness_sources:
     - remote_network_response
 artifacts:
-  repro_command_lab: rch exec -- cargo test --test lab_live_scenario_adapter_contract -- --nocapture
-  repro_command_live: rch exec -- cargo test --test lab_live_scenario_adapter_contract -- --nocapture
+  repro_command_lab: rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_scenario_docs cargo test --test lab_live_scenario_adapter_contract -- --nocapture
+  repro_command_live: rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_scenario_docs cargo test --test lab_live_scenario_adapter_contract -- --nocapture
   mismatch_bundle: artifacts/lab_live/invalid.real_network_claim/
   summary_record: artifacts/lab_live/invalid.real_network_claim/summary.json
   seed_lineage_record: artifacts/lab_live/invalid.real_network_claim/seeds.json
@@ -678,10 +678,10 @@ must explain why it is not actually part of the shared differential program.
 
 Heavy validation commands must run through `rch exec --`.
 
-- `rch exec -- cargo fmt --check`
-- `rch exec -- cargo check --all-targets`
-- `rch exec -- cargo clippy --all-targets -- -D warnings`
-- `rch exec -- cargo test --test lab_live_scenario_adapter_contract -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_scenario_docs cargo fmt --check`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_scenario_docs cargo check --all-targets`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_scenario_docs cargo clippy --all-targets -- -D warnings`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_scenario_docs cargo test --test lab_live_scenario_adapter_contract -- --nocapture`
 
 Exit criteria for `asupersync-2a6k9.2.1`:
 
