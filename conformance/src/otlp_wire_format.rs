@@ -11062,46 +11062,22 @@ pub fn otlp_024_span_add_event_conformance<RT: RuntimeInterface>() -> Conformanc
     crate::conformance_test! {
         id: "otlp-024",
         name: "Span add_event() conformance",
-        description: "Verify Span.add_event() vs opentelemetry-sdk — identical event sequences produce identical OTLP trace events arrays",
+        description: "Fail closed until live asupersync and opentelemetry-sdk Span.add_event event recording are wired",
         category: TestCategory::IO,
         tags: ["otlp", "span", "events", "add_event", "trace"],
-        expected: "Identical event sequences produce identical OTLP trace events arrays",
+        expected: "No conformance pass is reported from synthetic Span.add_event vectors",
         test: |_rt| {
-            // For now, create a minimal test implementation until asupersync OpenTelemetry APIs are available
-            // This demonstrates the conformance test structure and validates the differential testing approach
-
-            // Mock test scenarios
-            let test_scenarios = vec![
-                ("basic_event", vec![("name", "test_event"), ("attr", "value")]),
-                ("empty_events", vec![]),
-                ("multiple_events", vec![("event1", "data1"), ("event2", "data2")]),
-            ];
-
-            for (scenario_name, events) in test_scenarios {
-                // Simulate asupersync span events (placeholder until actual APIs exist)
-                let asupersync_events: Vec<(String, String)> = events.iter()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect();
-
-                // Simulate OpenTelemetry SDK span events (placeholder)
-                let opentelemetry_events: Vec<(String, String)> = events.iter()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect();
-
-                // Verify events match (differential comparison)
-                if asupersync_events != opentelemetry_events {
-                    return TestResult::failed(format!(
-                        "OTLP-024 FAILED for scenario '{}': Events mismatch\n\
-                         Asupersync: {:?}\n\
-                         OpenTelemetry: {:?}",
-                        scenario_name, asupersync_events, opentelemetry_events
-                    ));
-                }
-            }
-
-            TestResult::passed()
+            otlp_024_span_add_event_reference_unavailable()
         }
     }
+}
+
+fn otlp_024_span_add_event_reference_unavailable() -> TestResult {
+    TestResult::failed(
+        "OTLP-024 Span.add_event conformance is unsupported: live asupersync Span.add_event \
+         event capture and live opentelemetry-sdk event capture are not wired into this \
+         harness; refusing synthetic differential pass",
+    )
 }
 
 /// OTLP-034: Span end_time vs export-time monotonicity conformance test.
@@ -19038,5 +19014,19 @@ mod tests {
 
         assert_eq!(decoded_key, key);
         assert_eq!(decoded_value, value);
+    }
+
+    #[test]
+    fn otlp_024_span_add_event_wrapper_fails_closed_without_live_event_capture() {
+        let result = otlp_024_span_add_event_reference_unavailable();
+        let message = result
+            .message
+            .as_deref()
+            .expect("fail-closed result must explain why it is not a pass");
+
+        assert!(!result.passed);
+        assert!(message.contains("live asupersync Span.add_event"));
+        assert!(message.contains("live opentelemetry-sdk event capture"));
+        assert!(message.contains("refusing synthetic differential pass"));
     }
 }
