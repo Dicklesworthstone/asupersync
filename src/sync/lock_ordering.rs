@@ -10,7 +10,9 @@
 //! to prevent deadlocks when operations span multiple asupersync modules. Each lock is
 //! tagged with both its rank and module, enabling detection of problematic cross-module patterns.
 
+#[cfg(debug_assertions)]
 use std::cell::RefCell;
+#[cfg(debug_assertions)]
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Lock rank categories following the asupersync hierarchy.
@@ -52,6 +54,7 @@ pub enum LockModule {
 }
 
 /// Information about an acquired lock for cross-module tracking.
+#[cfg(debug_assertions)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LockInfo {
     pub name: String,
