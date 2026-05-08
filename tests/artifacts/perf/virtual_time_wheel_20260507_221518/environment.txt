@@ -1,0 +1,11 @@
+=== VIRTUAL TIME WHEEL PROFILING FINGERPRINT ===
+Timestamp: 2026-05-07T22:15:39-04:00
+Git SHA: ea439edf0b75852ff4ffb16725754448644cae35
+Host: superserver
+Kernel: 6.17.0-22-generic
+CPU: AMD EPYC 7282 16-Core Processor
+Cores: 64
+RAM: 251Gi
+Rust: rustc 1.97.0-nightly (f53b654a8 2026-04-30)
+Target: release-perf profile
+Scenario: 10K timers, 90% cancel storm, advance_to() stress test

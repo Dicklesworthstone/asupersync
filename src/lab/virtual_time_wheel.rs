@@ -891,4 +891,99 @@ mod tests {
         assert_eq!(expired.len(), 32);
         assert!(wheel.cancelled.is_empty());
     }
+
+    /// Manual performance test for cleanup_cancelled bottleneck under cancel storm.
+    /// Run with: cargo test manual_cancel_storm_profile --release -- --ignored
+    #[test]
+    #[ignore]
+    fn manual_cancel_storm_profile() {
+        let timer_count = 10_000;
+        let mut wheel = VirtualTimerWheel::new();
+        let (_counter, waker) = counting_waker();
+
+        // Setup: Insert timers spread across time range
+        let mut handles = Vec::with_capacity(timer_count);
+        eprintln!("Inserting {} timers...", timer_count);
+        for i in 0..timer_count {
+            let deadline = (i % 1000) as u64 + 1;
+            let handle = wheel.insert(deadline, waker.clone());
+            handles.push(handle);
+        }
+
+        // Cancel storm: 90% of timers
+        let cancel_count = (timer_count * 9) / 10;
+        eprintln!("Cancelling {} timers...", cancel_count);
+        let cancel_start = std::time::Instant::now();
+        for handle in handles.into_iter().take(cancel_count) {
+            wheel.cancel(handle);
+        }
+        let cancel_duration = cancel_start.elapsed();
+        eprintln!("Cancel phase: {:?}", cancel_duration);
+
+        // Bottleneck test: advance_to() which triggers cleanup_cancelled()
+        eprintln!("Running advance_to(1000) - expect cleanup_cancelled bottleneck...");
+        let advance_start = std::time::Instant::now();
+        let expired = wheel.advance_to(1000);
+        let advance_duration = advance_start.elapsed();
+
+        eprintln!("Advance phase: {:?}", advance_duration);
+        eprintln!("Expired timers: {}", expired.len());
+        eprintln!("Expected remaining: {}", timer_count - cancel_count);
+
+        // Report ratio - advance should be much slower than cancel due to O(n log n) cleanup
+        let ratio = advance_duration.as_nanos() as f64 / cancel_duration.as_nanos() as f64;
+        eprintln!("Advance/Cancel time ratio: {:.2}x", ratio);
+        if ratio > 10.0 {
+            eprintln!("✓ Confirms advance_to() bottleneck under cancel storm");
+        } else {
+            eprintln!("? Unexpected timing ratio - investigate further");
+        }
+    }
+
+    /// Manual performance test for next_deadline() scanning bottleneck.
+    /// Run with: cargo test manual_next_deadline_profile --release -- --ignored
+    #[test]
+    #[ignore]
+    fn manual_next_deadline_profile() {
+        let timer_count = 5_000;
+        let mut wheel = VirtualTimerWheel::new();
+        let (_counter, waker) = counting_waker();
+
+        // Insert timers at sequential deadlines
+        let mut handles = Vec::with_capacity(timer_count);
+        for i in 0..timer_count {
+            let handle = wheel.insert(i as u64 + 1, waker.clone());
+            handles.push(handle);
+        }
+
+        // Cancel the first 90% (earliest deadlines)
+        let cancel_count = (timer_count * 9) / 10;
+        for handle in handles.into_iter().take(cancel_count) {
+            wheel.cancel(handle);
+        }
+
+        // Test next_deadline() hot loop - should scan through 90% cancelled timers
+        eprintln!("Testing next_deadline() with {} cancelled timers to scan...", cancel_count);
+        let start = std::time::Instant::now();
+        let deadline = wheel.next_deadline();
+        let duration = start.elapsed();
+
+        eprintln!("next_deadline() took: {:?}", duration);
+        eprintln!("Found deadline: {:?}", deadline);
+
+        // Expected: deadline should be around the 90th percentile
+        if let Some(d) = deadline {
+            let expected_deadline = cancel_count as u64 + 1;
+            if d >= expected_deadline {
+                eprintln!("✓ next_deadline() correctly found first non-cancelled timer");
+            }
+        }
+
+        // Performance expectation: scanning 4500 cancelled timers should take measurable time
+        if duration.as_micros() > 100 {
+            eprintln!("✓ Confirms next_deadline() scanning bottleneck");
+        } else {
+            eprintln!("? Faster than expected - may need larger test case");
+        }
+    }
 }
