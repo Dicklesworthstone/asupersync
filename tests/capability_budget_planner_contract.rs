@@ -6,6 +6,7 @@ use asupersync::{
     CapabilityBudgetRequirements, Cx, TaskId,
 };
 use serde::Deserialize;
+use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;
 
@@ -17,6 +18,7 @@ struct CapabilityBudgetPlannerContract {
     proof_command: String,
     required_dimensions: Vec<DimensionContract>,
     runtime_semantics: Vec<RuntimeSemanticContract>,
+    e2e_log_contract: E2eLogContract,
     source_paths: Vec<SourcePathContract>,
 }
 
@@ -32,6 +34,28 @@ struct RuntimeSemanticContract {
     scenario_id: String,
     expected_status: String,
     description: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct E2eLogContract {
+    scenario_id: String,
+    required_fields: Vec<String>,
+    required_admission_failure: E2eAdmissionFailureContract,
+    required_final_state: E2eFinalStateContract,
+}
+
+#[derive(Debug, Deserialize)]
+struct E2eAdmissionFailureContract {
+    reason: String,
+    dimension: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct E2eFinalStateContract {
+    pending_obligations: usize,
+    live_tasks: usize,
+    runtime_quiescent: bool,
+    no_obligation_leak: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -102,6 +126,157 @@ fn exhausted_budget_for(dimension: CapabilityBudgetDimension) -> CapabilityBudge
         }
         CapabilityBudgetDimension::ArtifactBytes => CapabilityBudget::new().with_artifact_bytes(0),
     }
+}
+
+fn json_path_exists(value: &Value, path: &str) -> bool {
+    let mut current = value;
+    for segment in path.split('.') {
+        let Some(next) = current.get(segment) else {
+            return false;
+        };
+        current = next;
+    }
+    true
+}
+
+fn required_delta(parent: Option<u64>, child: Option<u64>) -> i64 {
+    let parent = parent.expect("parent budget dimension");
+    let child = child.expect("child budget dimension");
+    i64::try_from(child).expect("child budget fits signed delta")
+        - i64::try_from(parent).expect("parent budget fits signed delta")
+}
+
+fn required_cost_delta(parent: Option<u64>, child: Option<u64>) -> i64 {
+    let parent = parent.expect("parent cleanup cost quota");
+    let child = child.expect("child cleanup cost quota");
+    i64::try_from(child).expect("child cleanup cost fits signed delta")
+        - i64::try_from(parent).expect("parent cleanup cost fits signed delta")
+}
+
+fn admission_failure_log(err: RegionCreateError) -> Value {
+    match err {
+        RegionCreateError::CapabilityBudgetRefused { parent, reason } => {
+            let (reason, dimension) = match reason {
+                CapabilityBudgetRefusal::MissingRequired(dimension) => {
+                    ("MissingRequired", dimension)
+                }
+                CapabilityBudgetRefusal::Exhausted(dimension) => ("Exhausted", dimension),
+            };
+            json!({
+                "parent_region_id": parent.as_u64(),
+                "reason": reason,
+                "dimension": dimension.as_str(),
+            })
+        }
+        other => panic!("unexpected region admission error {other:?}"),
+    }
+}
+
+fn capability_budget_e2e_log() -> Value {
+    let parent_capability_budget = CapabilityBudget::new()
+        .with_memory_bytes(4_096)
+        .with_cpu_units(64)
+        .with_io_bytes(8_192)
+        .with_cleanup_budget(Budget::new().with_poll_quota(16).with_cost_quota(80))
+        .with_artifact_bytes(512);
+    let child_request = CapabilityBudget::new()
+        .with_memory_bytes(1_024)
+        .with_cpu_units(8)
+        .with_cleanup_budget(Budget::new().with_poll_quota(4).with_cost_quota(20))
+        .with_artifact_bytes(256);
+
+    let mut state = RuntimeState::new();
+    let root_region =
+        state.create_root_region_with_capability_budget(Budget::INFINITE, parent_capability_budget);
+    let child_region = state
+        .create_child_region_with_capability_budget(
+            root_region,
+            Budget::INFINITE,
+            child_request,
+            all_requirements(),
+        )
+        .expect("child should be admitted");
+    let root_budget = state
+        .region_capability_budget(root_region)
+        .expect("root capability budget must be stored");
+    let child_budget = state
+        .region_capability_budget(child_region)
+        .expect("child capability budget must be stored");
+    let root_cleanup = root_budget.cleanup_budget.expect("root cleanup budget");
+    let child_cleanup = child_budget.cleanup_budget.expect("child cleanup budget");
+
+    let mut refusal_state = RuntimeState::new();
+    let refused_parent = refusal_state.create_root_region_with_capability_budget(
+        Budget::INFINITE,
+        CapabilityBudget::new().with_memory_bytes(1_024),
+    );
+    let admission_failure = refusal_state
+        .create_child_region_with_capability_budget(
+            refused_parent,
+            Budget::INFINITE,
+            CapabilityBudget::UNSPECIFIED,
+            CapabilityBudgetRequirements::new().require_artifact_bytes(),
+        )
+        .expect_err("missing required artifact envelope must reject child");
+
+    json!({
+        "schema_version": "capability-budget-e2e-log-v1",
+        "scenario_id": "capability-budget-e2e-log-v1",
+        "root_region_id": root_region.as_u64(),
+        "child_region_id": child_region.as_u64(),
+        "budget_deltas": {
+            "memory_bytes": {
+                "parent": root_budget.memory_bytes,
+                "child": child_budget.memory_bytes,
+                "delta": required_delta(root_budget.memory_bytes, child_budget.memory_bytes),
+                "source": "tightened"
+            },
+            "cpu_units": {
+                "parent": root_budget.cpu_units,
+                "child": child_budget.cpu_units,
+                "delta": required_delta(root_budget.cpu_units, child_budget.cpu_units),
+                "source": "tightened"
+            },
+            "io_bytes": {
+                "parent": root_budget.io_bytes,
+                "child": child_budget.io_bytes,
+                "delta": required_delta(root_budget.io_bytes, child_budget.io_bytes),
+                "source": "inherited"
+            },
+            "cleanup": {
+                "parent_poll_quota": root_cleanup.poll_quota,
+                "child_poll_quota": child_cleanup.poll_quota,
+                "poll_quota_delta": i64::from(child_cleanup.poll_quota)
+                    - i64::from(root_cleanup.poll_quota),
+                "parent_cost_quota": root_cleanup.cost_quota,
+                "child_cost_quota": child_cleanup.cost_quota,
+                "cost_quota_delta": required_cost_delta(
+                    root_cleanup.cost_quota,
+                    child_cleanup.cost_quota
+                ),
+                "source": "tightened"
+            },
+            "artifact_bytes": {
+                "parent": root_budget.artifact_bytes,
+                "child": child_budget.artifact_bytes,
+                "delta": required_delta(root_budget.artifact_bytes, child_budget.artifact_bytes),
+                "source": "tightened"
+            }
+        },
+        "cleanup_drain": {
+            "parent_poll_quota": root_cleanup.poll_quota,
+            "child_poll_quota": child_cleanup.poll_quota,
+            "child_cost_quota": child_cleanup.cost_quota
+        },
+        "admission_failure": admission_failure_log(admission_failure),
+        "final_state": {
+            "pending_obligations": state.pending_obligation_count(),
+            "live_tasks": state.live_task_count(),
+            "live_regions": state.live_region_count(),
+            "runtime_quiescent": state.is_quiescent(),
+            "no_obligation_leak": state.pending_obligation_count() == 0
+        }
+    })
 }
 
 #[test]
@@ -308,12 +483,71 @@ fn region_admission_reports_fail_closed_refusal() {
 }
 
 #[test]
+fn e2e_log_captures_budget_deltas_cleanup_drain_and_no_leak() {
+    let contract = contract().e2e_log_contract;
+    let log = capability_budget_e2e_log();
+
+    assert_eq!(contract.scenario_id, "capability-budget-e2e-log-v1");
+    for field_path in &contract.required_fields {
+        assert!(
+            json_path_exists(&log, field_path),
+            "e2e log is missing required field {field_path}"
+        );
+    }
+
+    assert_eq!(log["schema_version"], "capability-budget-e2e-log-v1");
+    assert_eq!(log["scenario_id"], contract.scenario_id);
+    assert_ne!(log["root_region_id"], log["child_region_id"]);
+    assert_eq!(log["budget_deltas"]["memory_bytes"]["delta"], json!(-3_072));
+    assert_eq!(log["budget_deltas"]["cpu_units"]["delta"], json!(-56));
+    assert_eq!(log["budget_deltas"]["io_bytes"]["delta"], json!(0));
+    assert_eq!(
+        log["budget_deltas"]["cleanup"]["poll_quota_delta"],
+        json!(-12)
+    );
+    assert_eq!(
+        log["budget_deltas"]["cleanup"]["cost_quota_delta"],
+        json!(-60)
+    );
+    assert_eq!(log["budget_deltas"]["artifact_bytes"]["delta"], json!(-256));
+    assert_eq!(log["budget_deltas"]["io_bytes"]["source"], "inherited");
+    assert_eq!(log["cleanup_drain"]["parent_poll_quota"], json!(16));
+    assert_eq!(log["cleanup_drain"]["child_poll_quota"], json!(4));
+    assert_eq!(log["cleanup_drain"]["child_cost_quota"], json!(20));
+    assert_eq!(
+        log["admission_failure"]["reason"],
+        contract.required_admission_failure.reason
+    );
+    assert_eq!(
+        log["admission_failure"]["dimension"],
+        contract.required_admission_failure.dimension
+    );
+    assert_eq!(
+        log["final_state"]["pending_obligations"],
+        json!(contract.required_final_state.pending_obligations)
+    );
+    assert_eq!(
+        log["final_state"]["live_tasks"],
+        json!(contract.required_final_state.live_tasks)
+    );
+    assert_eq!(
+        log["final_state"]["runtime_quiescent"],
+        json!(contract.required_final_state.runtime_quiescent)
+    );
+    assert_eq!(
+        log["final_state"]["no_obligation_leak"],
+        json!(contract.required_final_state.no_obligation_leak)
+    );
+}
+
+#[test]
 fn runtime_semantic_rows_are_executed_by_this_contract() {
     let executed = [
         "child-inherits-and-tightens-every-dimension",
         "required-dimension-missing-fails-closed",
         "required-dimension-exhausted-fails-closed",
         "cx-scope-region-task-propagation",
+        "e2e-log-captures-region-budget-deltas-cleanup-drain-and-no-leak",
     ];
 
     for row in contract().runtime_semantics {

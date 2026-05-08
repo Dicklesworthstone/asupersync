@@ -52,8 +52,48 @@
       "scenario_id": "cx-scope-region-task-propagation",
       "expected_status": "pass",
       "description": "Cx planning, scope construction, region admission, and task contexts carry the same explicit capability budget."
+    },
+    {
+      "scenario_id": "e2e-log-captures-region-budget-deltas-cleanup-drain-and-no-leak",
+      "expected_status": "pass",
+      "description": "A deterministic runtime projection records admitted region ids, tightened budget deltas, cleanup drain quotas, fail-closed admission refusal, and a final no-obligation-leak state."
     }
   ],
+  "e2e_log_contract": {
+    "scenario_id": "capability-budget-e2e-log-v1",
+    "required_fields": [
+      "schema_version",
+      "scenario_id",
+      "root_region_id",
+      "child_region_id",
+      "budget_deltas.memory_bytes.delta",
+      "budget_deltas.cpu_units.delta",
+      "budget_deltas.io_bytes.delta",
+      "budget_deltas.cleanup.poll_quota_delta",
+      "budget_deltas.cleanup.cost_quota_delta",
+      "budget_deltas.artifact_bytes.delta",
+      "cleanup_drain.parent_poll_quota",
+      "cleanup_drain.child_poll_quota",
+      "cleanup_drain.child_cost_quota",
+      "admission_failure.parent_region_id",
+      "admission_failure.reason",
+      "admission_failure.dimension",
+      "final_state.pending_obligations",
+      "final_state.live_tasks",
+      "final_state.runtime_quiescent",
+      "final_state.no_obligation_leak"
+    ],
+    "required_admission_failure": {
+      "reason": "MissingRequired",
+      "dimension": "artifact_bytes"
+    },
+    "required_final_state": {
+      "pending_obligations": 0,
+      "live_tasks": 0,
+      "runtime_quiescent": true,
+      "no_obligation_leak": true
+    }
+  },
   "source_paths": [
     {
       "path": "src/types/budget.rs",
