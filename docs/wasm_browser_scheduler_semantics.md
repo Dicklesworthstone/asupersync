@@ -393,11 +393,11 @@ For `asupersync-umelq.5.2`, artifacts must additionally include:
 Use remote offload for cargo-heavy commands:
 
 ```bash
-rch exec -- cargo test --all-targets sched_browser -- --nocapture
-rch exec -- cargo test -p asupersync --features test-internals parity_browser_scheduler -- --nocapture
-rch exec -- cargo test -p asupersync browser_clock -- --nocapture
-rch exec -- cargo test -p asupersync timer_driver_with_browser_clock -- --nocapture
-rch exec -- cargo run --features cli --bin asupersync -- trace verify --strict artifacts/browser_scheduler.trace
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_browser_scheduler_docs cargo test --all-targets sched_browser -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_browser_scheduler_docs cargo test -p asupersync --features test-internals parity_browser_scheduler -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_browser_scheduler_docs cargo test -p asupersync browser_clock -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_browser_scheduler_docs cargo test -p asupersync timer_driver_with_browser_clock -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_browser_scheduler_docs cargo run --features cli --bin asupersync -- trace verify --strict artifacts/browser_scheduler.trace
 ```
 
 ## Downstream Dependency Contract
