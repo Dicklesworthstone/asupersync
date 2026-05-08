@@ -204,14 +204,25 @@ fn doc_references_implementation() {
 fn doc_reproduction_commands_use_rch() {
     let doc = load_doc();
     let required_commands = [
-        "rch exec -- cargo test --test doctor_visual_regression_harness --features cli -- --nocapture",
-        "rch exec -- cargo test --test doctor_analyzer_fixture_harness --features cli -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_doctor_visual_docs cargo test --test doctor_visual_regression_harness --features cli -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_doctor_visual_docs cargo test --test doctor_analyzer_fixture_harness --features cli -- --nocapture",
     ];
 
     for command in &required_commands {
         assert!(
             doc.contains(command),
             "Doc reproduction section must route heavy tests through rch: {command}"
+        );
+    }
+
+    let rejected_commands = [
+        "rch exec -- cargo test --test doctor_visual_regression_harness --features cli -- --nocapture",
+        "rch exec -- cargo test --test doctor_analyzer_fixture_harness --features cli -- --nocapture",
+    ];
+    for command in &rejected_commands {
+        assert!(
+            !doc.contains(command),
+            "Doc reproduction section must not use stale bare rch cargo command: {command}"
         );
     }
 }
