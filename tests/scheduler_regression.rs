@@ -6,7 +6,7 @@
 //! These tests establish baseline performance metrics and fail if
 //! performance degrades beyond acceptable thresholds. Run with:
 //!
-//!   rch exec -- cargo test --test scheduler_regression --release -- --nocapture
+//!   rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_scheduler_regression_docs cargo test --test scheduler_regression --release -- --nocapture
 //!
 //! Note: these tests require --release for meaningful numbers.
 
@@ -217,6 +217,19 @@ fn baseline_report_format_parses() {
     assert_eq!(report.benchmarks[0].p95_ns, None);
     assert_eq!(report.benchmarks[0].p99_ns, None);
     assert_eq!(report.benchmarks[0].std_dev_ns, None);
+}
+
+#[test]
+fn scheduler_regression_repro_command_uses_rch_target_dir() {
+    let source = include_str!("scheduler_regression.rs");
+    let expected = "//!   rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_scheduler_regression_docs cargo test --test scheduler_regression --release -- --nocapture";
+    let stale = concat!(
+        "rch exec -- ",
+        "cargo test --test scheduler_regression --release -- --nocapture"
+    );
+
+    assert!(source.contains(expected));
+    assert!(!source.contains(stale));
 }
 
 #[derive(Debug, Deserialize)]
