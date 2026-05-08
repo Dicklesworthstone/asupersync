@@ -19,7 +19,9 @@ fn main() {
     let k = 10000;
     let symbol_size = 1316; // ~13MB total payload
     let loss_fraction = 0.70; // 70% loss to force heavy matrix operations
-    let extra_repair = 1000; // Sufficient repair symbols
+    let loss_count = (k as f64 * loss_fraction) as usize;
+    let repair_margin = 100;
+    let extra_repair = loss_count + repair_margin; // Sufficient repair symbols
     let seed = 0x87654321u64;
 
     let total_bytes = k * symbol_size;
@@ -76,7 +78,6 @@ fn main() {
 
     // Create realistic scattered loss pattern for K=10000
     let mut loss_pattern = vec![false; k]; // false = available
-    let loss_count = (k as f64 * loss_fraction) as usize;
     rng_state = 0xDEADBEEF12345678u64;
     let mut losses_applied = 0;
 
@@ -122,7 +123,7 @@ fn main() {
     }
 
     // Add repair symbols to ensure decodability
-    let needed_repairs = loss_count + 100; // Some safety margin
+    let needed_repairs = loss_count + repair_margin;
     for (repair_esi, repair_data) in repair_symbols.into_iter().take(needed_repairs) {
         let (cols, coefs) = decoder
             .repair_equation(repair_esi)
