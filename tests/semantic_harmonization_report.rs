@@ -140,7 +140,7 @@ fn report_has_reproducibility_commands_and_rch_for_cargo() {
         "scripts/run_semantic_verification.sh --profile full --json",
         "scripts/build_semantic_evidence_bundle.sh",
         "scripts/generate_verification_summary.sh --json --ci",
-        "rch exec -- cargo test --test semantic_verification_summary",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_harmonization_docs cargo test --test semantic_verification_summary",
     ];
     for command in commands {
         assert!(
@@ -148,4 +148,12 @@ fn report_has_reproducibility_commands_and_rch_for_cargo() {
             "report must include reproducibility command: {command}"
         );
     }
+    let stale_cargo_command = concat!(
+        "rch exec -- ",
+        "cargo test --test semantic_verification_summary"
+    );
+    assert!(
+        !report.contains(stale_cargo_command),
+        "report must not use stale bare rch cargo routing"
+    );
 }
