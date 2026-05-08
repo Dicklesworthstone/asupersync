@@ -11,6 +11,7 @@
 //! 4. **Replayable**: Sufficient info to reproduce decoder state transitions
 
 use crate::raptorq::decoder::{DecodeError, InactivationDecoder, ReceivedSymbol};
+use crate::raptorq::systematic::{SystematicEncoder, SystematicParamError, SystematicParams};
 use crate::types::ObjectId;
 use crate::util::DetHasher;
 use sha2::{Digest, Sha256};
@@ -25,6 +26,9 @@ pub const MAX_RECEIVED_SYMBOLS: usize = 1024;
 
 /// Version of the proof artifact schema.
 pub const PROOF_SCHEMA_VERSION: u8 = 2;
+
+/// Version of the proof-artifact distribution manifest schema.
+pub const PROOF_ARTIFACT_DISTRIBUTION_SCHEMA_VERSION: u8 = 1;
 
 // ============================================================================
 // Cryptographic attestation hash
@@ -290,6 +294,498 @@ impl DecodeProof {
             };
         compare_proofs(self, &actual)
     }
+}
+
+// ============================================================================
+// Proof artifact distribution
+// ============================================================================
+
+/// Manifest describing a proof bundle distributed through RaptorQ shards.
+///
+/// The manifest is intentionally small and self-authenticating. Operators can
+/// exchange it out-of-band, then verify every shard and recovered artifact
+/// against the manifest before accepting the proof bundle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "test-internals", derive(serde::Serialize))]
+pub struct ProofArtifactManifest {
+    /// Distribution schema version.
+    pub version: u8,
+    /// Object ID bound to the proof bundle.
+    pub object_id: ObjectId,
+    /// Source block number bound to the proof bundle.
+    pub sbn: u8,
+    /// Original proof-artifact byte length before symbol padding.
+    pub artifact_len: usize,
+    /// RaptorQ symbol size used for sharding.
+    pub symbol_size: usize,
+    /// Number of source symbols in the padded artifact.
+    pub source_symbols: usize,
+    /// Number of repair symbols emitted for redundancy.
+    pub repair_symbols: usize,
+    /// RFC 6330 `K'` value selected for `source_symbols`.
+    pub k_prime: usize,
+    /// Total intermediate-symbol count for the selected source block.
+    pub l: usize,
+    /// Seed used to derive deterministic repair symbols.
+    pub seed: u64,
+    /// SHA-256 hash of the original unpadded artifact bytes.
+    pub source_payload_hash: ProofHash,
+    /// SHA-256 hash of all manifest fields above.
+    pub manifest_hash: ProofHash,
+}
+
+impl ProofArtifactManifest {
+    /// Recomputes the manifest hash from all manifest fields except
+    /// `manifest_hash`.
+    #[must_use]
+    pub fn recompute_hash(&self) -> ProofHash {
+        hash_proof_artifact_manifest(self)
+    }
+
+    /// Returns true when `manifest_hash` still matches the manifest fields.
+    #[must_use]
+    pub fn hash_is_valid(&self) -> bool {
+        self.manifest_hash == self.recompute_hash()
+    }
+}
+
+/// One RaptorQ shard of a proof bundle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "test-internals", derive(serde::Serialize))]
+pub struct ProofArtifactShard {
+    /// Manifest hash this shard belongs to.
+    pub manifest_hash: ProofHash,
+    /// Encoding Symbol ID.
+    pub esi: u32,
+    /// Whether this shard is a systematic source symbol.
+    pub is_source: bool,
+    /// RaptorQ symbol payload.
+    pub data: Vec<u8>,
+    /// SHA-256 hash of the shard payload.
+    pub data_hash: ProofHash,
+    /// Deterministic authentication tag over manifest hash, ESI, kind, and data hash.
+    pub auth_tag: ProofHash,
+}
+
+/// Complete encoded distribution bundle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "test-internals", derive(serde::Serialize))]
+pub struct ProofArtifactDistribution {
+    /// Self-authenticating manifest for the bundle.
+    pub manifest: ProofArtifactManifest,
+    /// Source and repair shards emitted in deterministic ESI order.
+    pub shards: Vec<ProofArtifactShard>,
+}
+
+/// Successful proof-artifact recovery result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProofArtifactRecovery {
+    /// Recovered unpadded proof-artifact bytes.
+    pub payload: Vec<u8>,
+    /// Number of supplied shards that passed per-shard authentication.
+    pub symbols_received: usize,
+    /// Number of supplied shards beyond the manifest's source-symbol count.
+    pub overhead_symbols: usize,
+    /// True when all supplied shards matched their deterministic auth tags.
+    pub authenticated: bool,
+    /// Manifest hash that authenticated the recovered payload.
+    pub manifest_hash: ProofHash,
+}
+
+/// Error while packaging or recovering a distributed proof artifact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProofArtifactDistributionError {
+    /// Proof artifact bytes were empty.
+    EmptyArtifact,
+    /// Symbol size must be non-zero.
+    InvalidSymbolSize,
+    /// The artifact needs more source symbols than RFC 6330 supports.
+    UnsupportedSourceBlock {
+        /// Requested source-symbol count.
+        requested: usize,
+        /// Maximum supported source-symbol count.
+        max_supported: usize,
+    },
+    /// The systematic encoder could not solve the source block.
+    EncoderUnavailable,
+    /// The manifest hash does not match the manifest fields.
+    ManifestHashMismatch {
+        /// Hash stored in the manifest.
+        expected: ProofHash,
+        /// Hash recomputed from manifest fields.
+        actual: ProofHash,
+    },
+    /// A shard belongs to a different manifest.
+    ManifestMismatch {
+        /// Manifest hash expected by the recovery operation.
+        expected: ProofHash,
+        /// Manifest hash carried by the shard.
+        actual: ProofHash,
+    },
+    /// A shard payload had the wrong symbol size.
+    ShardSizeMismatch {
+        /// ESI of the malformed shard.
+        esi: u32,
+        /// Expected symbol size from the manifest.
+        expected: usize,
+        /// Actual payload length.
+        actual: usize,
+    },
+    /// A shard payload hash did not match its bytes.
+    ShardPayloadHashMismatch {
+        /// ESI of the corrupted shard.
+        esi: u32,
+    },
+    /// A shard authentication tag did not match the manifest and payload hash.
+    ShardAuthenticationFailed {
+        /// ESI of the unauthenticated shard.
+        esi: u32,
+    },
+    /// RaptorQ decode failed after all supplied shards were authenticated.
+    DecodeFailed {
+        /// Proof-compatible failure reason.
+        reason: FailureReason,
+    },
+    /// Recovered bytes did not match the source-payload hash in the manifest.
+    SourcePayloadHashMismatch {
+        /// Hash stored in the manifest.
+        expected: ProofHash,
+        /// Hash computed from recovered bytes.
+        actual: ProofHash,
+    },
+}
+
+impl fmt::Display for ProofArtifactDistributionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyArtifact => f.write_str("proof artifact payload is empty"),
+            Self::InvalidSymbolSize => f.write_str("proof artifact symbol size must be non-zero"),
+            Self::UnsupportedSourceBlock {
+                requested,
+                max_supported,
+            } => write!(
+                f,
+                "proof artifact needs {requested} source symbols; maximum supported is {max_supported}"
+            ),
+            Self::EncoderUnavailable => {
+                f.write_str("systematic RaptorQ encoder could not solve proof artifact block")
+            }
+            Self::ManifestHashMismatch { expected, actual } => write!(
+                f,
+                "manifest hash mismatch: stored {expected}, recomputed {actual}"
+            ),
+            Self::ManifestMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "shard manifest mismatch: expected {expected}, got {actual}"
+                )
+            }
+            Self::ShardSizeMismatch {
+                esi,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "shard {esi} has {actual} bytes; expected {expected} bytes"
+            ),
+            Self::ShardPayloadHashMismatch { esi } => {
+                write!(f, "shard {esi} payload hash mismatch")
+            }
+            Self::ShardAuthenticationFailed { esi } => {
+                write!(f, "shard {esi} authentication tag mismatch")
+            }
+            Self::DecodeFailed { reason } => {
+                write!(f, "proof artifact decode failed: {reason:?}")
+            }
+            Self::SourcePayloadHashMismatch { expected, actual } => write!(
+                f,
+                "recovered proof artifact hash mismatch: expected {expected}, got {actual}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ProofArtifactDistributionError {}
+
+/// Package a proof artifact into authenticated RaptorQ shards for distribution.
+///
+/// # Errors
+///
+/// Returns an error if the payload is empty, `symbol_size` is zero, the source
+/// block exceeds the RFC 6330 table, or the systematic encoder cannot solve
+/// the source block.
+pub fn package_proof_artifact_for_distribution(
+    artifact: &[u8],
+    symbol_size: usize,
+    repair_symbols: usize,
+    seed: u64,
+    object_id: ObjectId,
+    sbn: u8,
+) -> Result<ProofArtifactDistribution, ProofArtifactDistributionError> {
+    let source = proof_artifact_source_symbols(artifact, symbol_size)?;
+    let source_symbols = source.len();
+    let params = SystematicParams::try_for_source_block(source_symbols, symbol_size)
+        .map_err(map_systematic_param_error)?;
+    let source_payload_hash = hash_proof_artifact_payload(artifact);
+
+    let mut manifest = ProofArtifactManifest {
+        version: PROOF_ARTIFACT_DISTRIBUTION_SCHEMA_VERSION,
+        object_id,
+        sbn,
+        artifact_len: artifact.len(),
+        symbol_size,
+        source_symbols,
+        repair_symbols,
+        k_prime: params.k_prime,
+        l: params.l,
+        seed,
+        source_payload_hash,
+        manifest_hash: ProofHash([0u8; 32]),
+    };
+    manifest.manifest_hash = manifest.recompute_hash();
+
+    let mut encoder = SystematicEncoder::new(&source, symbol_size, seed)
+        .ok_or(ProofArtifactDistributionError::EncoderUnavailable)?;
+    let shards = encoder
+        .emit_all(repair_symbols)
+        .into_iter()
+        .map(|symbol| {
+            ProofArtifactShard::new(
+                manifest.manifest_hash,
+                symbol.esi,
+                symbol.is_source,
+                symbol.data,
+            )
+        })
+        .collect();
+
+    Ok(ProofArtifactDistribution { manifest, shards })
+}
+
+/// Recover a proof artifact from any sufficiently complete authenticated shard set.
+///
+/// # Errors
+///
+/// Returns an error if the manifest or any supplied shard fails authentication,
+/// if there are not enough shards to decode, or if the recovered artifact hash
+/// does not match the manifest.
+pub fn recover_proof_artifact_from_shards(
+    manifest: &ProofArtifactManifest,
+    shards: &[ProofArtifactShard],
+) -> Result<ProofArtifactRecovery, ProofArtifactDistributionError> {
+    validate_manifest(manifest)?;
+
+    let decoder =
+        InactivationDecoder::new(manifest.source_symbols, manifest.symbol_size, manifest.seed);
+    let mut received = decoder.constraint_symbols();
+
+    for shard in shards {
+        verify_shard(manifest, shard)?;
+        if shard.is_source {
+            received.push(ReceivedSymbol::source(shard.esi, shard.data.clone()));
+        } else {
+            let (columns, coefficients) = decoder.repair_equation(shard.esi).map_err(|_| {
+                ProofArtifactDistributionError::DecodeFailed {
+                    reason: FailureReason::SingularMatrix {
+                        row: usize::try_from(shard.esi).unwrap_or(usize::MAX),
+                        attempted_cols: Vec::new(),
+                    },
+                }
+            })?;
+            received.push(ReceivedSymbol::repair(
+                shard.esi,
+                columns,
+                coefficients,
+                shard.data.clone(),
+            ));
+        }
+    }
+
+    let decoded =
+        decoder
+            .decode(&received)
+            .map_err(|err| ProofArtifactDistributionError::DecodeFailed {
+                reason: FailureReason::from(&err),
+            })?;
+    let payload = flatten_source_payload(&decoded.source, manifest.artifact_len);
+    let actual_hash = hash_proof_artifact_payload(&payload);
+    if actual_hash != manifest.source_payload_hash {
+        return Err(ProofArtifactDistributionError::SourcePayloadHashMismatch {
+            expected: manifest.source_payload_hash,
+            actual: actual_hash,
+        });
+    }
+
+    Ok(ProofArtifactRecovery {
+        payload,
+        symbols_received: shards.len(),
+        overhead_symbols: shards.len().saturating_sub(manifest.source_symbols),
+        authenticated: true,
+        manifest_hash: manifest.manifest_hash,
+    })
+}
+
+impl ProofArtifactShard {
+    fn new(manifest_hash: ProofHash, esi: u32, is_source: bool, data: Vec<u8>) -> Self {
+        let data_hash = hash_proof_artifact_shard_payload(&data);
+        let auth_tag = hash_proof_artifact_shard_auth(manifest_hash, esi, is_source, data_hash);
+        Self {
+            manifest_hash,
+            esi,
+            is_source,
+            data,
+            data_hash,
+            auth_tag,
+        }
+    }
+}
+
+fn proof_artifact_source_symbols(
+    artifact: &[u8],
+    symbol_size: usize,
+) -> Result<Vec<Vec<u8>>, ProofArtifactDistributionError> {
+    if artifact.is_empty() {
+        return Err(ProofArtifactDistributionError::EmptyArtifact);
+    }
+    if symbol_size == 0 {
+        return Err(ProofArtifactDistributionError::InvalidSymbolSize);
+    }
+
+    let source_symbols = artifact.len().div_ceil(symbol_size);
+    SystematicParams::try_for_source_block(source_symbols, symbol_size)
+        .map_err(map_systematic_param_error)?;
+
+    let mut source = Vec::with_capacity(source_symbols);
+    for chunk in artifact.chunks(symbol_size) {
+        let mut symbol = vec![0u8; symbol_size];
+        symbol[..chunk.len()].copy_from_slice(chunk);
+        source.push(symbol);
+    }
+    Ok(source)
+}
+
+fn validate_manifest(
+    manifest: &ProofArtifactManifest,
+) -> Result<(), ProofArtifactDistributionError> {
+    if manifest.symbol_size == 0 {
+        return Err(ProofArtifactDistributionError::InvalidSymbolSize);
+    }
+    SystematicParams::try_for_source_block(manifest.source_symbols, manifest.symbol_size)
+        .map_err(map_systematic_param_error)?;
+    let actual = manifest.recompute_hash();
+    if actual != manifest.manifest_hash {
+        return Err(ProofArtifactDistributionError::ManifestHashMismatch {
+            expected: manifest.manifest_hash,
+            actual,
+        });
+    }
+    Ok(())
+}
+
+fn verify_shard(
+    manifest: &ProofArtifactManifest,
+    shard: &ProofArtifactShard,
+) -> Result<(), ProofArtifactDistributionError> {
+    if shard.manifest_hash != manifest.manifest_hash {
+        return Err(ProofArtifactDistributionError::ManifestMismatch {
+            expected: manifest.manifest_hash,
+            actual: shard.manifest_hash,
+        });
+    }
+    if shard.data.len() != manifest.symbol_size {
+        return Err(ProofArtifactDistributionError::ShardSizeMismatch {
+            esi: shard.esi,
+            expected: manifest.symbol_size,
+            actual: shard.data.len(),
+        });
+    }
+    if shard.data_hash != hash_proof_artifact_shard_payload(&shard.data) {
+        return Err(ProofArtifactDistributionError::ShardPayloadHashMismatch { esi: shard.esi });
+    }
+    if shard.auth_tag
+        != hash_proof_artifact_shard_auth(
+            shard.manifest_hash,
+            shard.esi,
+            shard.is_source,
+            shard.data_hash,
+        )
+    {
+        return Err(ProofArtifactDistributionError::ShardAuthenticationFailed { esi: shard.esi });
+    }
+    Ok(())
+}
+
+fn map_systematic_param_error(err: SystematicParamError) -> ProofArtifactDistributionError {
+    match err {
+        SystematicParamError::UnsupportedSourceBlockSize {
+            requested,
+            max_supported,
+        } => ProofArtifactDistributionError::UnsupportedSourceBlock {
+            requested,
+            max_supported,
+        },
+    }
+}
+
+fn flatten_source_payload(source: &[Vec<u8>], artifact_len: usize) -> Vec<u8> {
+    source
+        .iter()
+        .flatten()
+        .copied()
+        .take(artifact_len)
+        .collect()
+}
+
+fn hash_proof_artifact_manifest(manifest: &ProofArtifactManifest) -> ProofHash {
+    let mut hasher = Sha256::new();
+    hasher.update(b"RaptorQ::ProofArtifactManifest::v1");
+    hasher.update([manifest.version]);
+    hasher.update(manifest.object_id.as_u128().to_le_bytes());
+    hasher.update([manifest.sbn]);
+    hash_usize(&mut hasher, manifest.artifact_len);
+    hash_usize(&mut hasher, manifest.symbol_size);
+    hash_usize(&mut hasher, manifest.source_symbols);
+    hash_usize(&mut hasher, manifest.repair_symbols);
+    hash_usize(&mut hasher, manifest.k_prime);
+    hash_usize(&mut hasher, manifest.l);
+    hasher.update(manifest.seed.to_le_bytes());
+    hasher.update(manifest.source_payload_hash.as_bytes());
+    ProofHash(hasher.finalize().into())
+}
+
+fn hash_proof_artifact_payload(payload: &[u8]) -> ProofHash {
+    let mut hasher = Sha256::new();
+    hasher.update(b"RaptorQ::ProofArtifactPayload::v1");
+    hash_usize(&mut hasher, payload.len());
+    hasher.update(payload);
+    ProofHash(hasher.finalize().into())
+}
+
+fn hash_proof_artifact_shard_payload(payload: &[u8]) -> ProofHash {
+    let mut hasher = Sha256::new();
+    hasher.update(b"RaptorQ::ProofArtifactShardPayload::v1");
+    hash_usize(&mut hasher, payload.len());
+    hasher.update(payload);
+    ProofHash(hasher.finalize().into())
+}
+
+fn hash_proof_artifact_shard_auth(
+    manifest_hash: ProofHash,
+    esi: u32,
+    is_source: bool,
+    data_hash: ProofHash,
+) -> ProofHash {
+    let mut hasher = Sha256::new();
+    hasher.update(b"RaptorQ::ProofArtifactShardAuth::v1");
+    hasher.update(manifest_hash.as_bytes());
+    hasher.update(esi.to_le_bytes());
+    hasher.update([u8::from(is_source)]);
+    hasher.update(data_hash.as_bytes());
+    ProofHash(hasher.finalize().into())
+}
+
+fn hash_usize(hasher: &mut Sha256, value: usize) {
+    hasher.update(u64::try_from(value).unwrap_or(u64::MAX).to_le_bytes());
 }
 
 #[inline]
@@ -1138,6 +1634,12 @@ mod tests {
 
     fn make_test_recovered(config: &DecodeConfig) -> Vec<Vec<u8>> {
         vec![vec![0u8; config.symbol_size]; config.k]
+    }
+
+    fn deterministic_artifact_payload(len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|idx| (idx.wrapping_mul(37).wrapping_add(11) % 251) as u8)
+            .collect()
     }
 
     fn scrub_failure_reason_for_snapshot_test(reason: &FailureReason) -> serde_json::Value {
@@ -2794,6 +3296,99 @@ mod tests {
         } else {
             panic!("Expected Mismatch error, got: {:?}", err);
         }
+    }
+
+    #[test]
+    fn proof_artifact_manifest_hash_binds_distribution_metadata() {
+        let payload = deterministic_artifact_payload(512);
+        let object_id = ObjectId::new_for_test(0xA11CE);
+
+        let first = package_proof_artifact_for_distribution(&payload, 64, 8, 0x5150, object_id, 3)
+            .expect("proof artifact should package");
+        let second = package_proof_artifact_for_distribution(&payload, 64, 9, 0x5150, object_id, 3)
+            .expect("proof artifact should package with different repair count");
+
+        assert!(first.manifest.hash_is_valid());
+        assert!(second.manifest.hash_is_valid());
+        assert_eq!(
+            first.manifest.source_payload_hash, second.manifest.source_payload_hash,
+            "same artifact bytes keep the same source-payload hash"
+        );
+        assert_ne!(
+            first.manifest.manifest_hash, second.manifest.manifest_hash,
+            "manifest hash must bind repair-symbol distribution metadata"
+        );
+        assert_eq!(
+            first.shards.len(),
+            first
+                .manifest
+                .source_symbols
+                .saturating_add(first.manifest.repair_symbols)
+        );
+    }
+
+    #[test]
+    fn proof_artifact_distribution_recovers_after_source_shard_loss() {
+        let payload = deterministic_artifact_payload(1024);
+        let distribution = package_proof_artifact_for_distribution(
+            &payload,
+            64,
+            20,
+            0xD157_71B7_u64,
+            ObjectId::new_for_test(0xD151),
+            7,
+        )
+        .expect("proof artifact should package");
+
+        let dropped_source_esis = [1u32, 4, 9, 13];
+        let partial_shards: Vec<_> = distribution
+            .shards
+            .iter()
+            .filter(|shard| !(shard.is_source && dropped_source_esis.contains(&shard.esi)))
+            .cloned()
+            .collect();
+
+        let recovery = recover_proof_artifact_from_shards(&distribution.manifest, &partial_shards)
+            .expect("repair shards should recover the missing source shards");
+
+        assert_eq!(recovery.payload, payload);
+        assert_eq!(recovery.symbols_received, partial_shards.len());
+        assert_eq!(
+            recovery.overhead_symbols,
+            partial_shards
+                .len()
+                .saturating_sub(distribution.manifest.source_symbols)
+        );
+        assert!(recovery.authenticated);
+        assert_eq!(recovery.manifest_hash, distribution.manifest.manifest_hash);
+    }
+
+    #[test]
+    fn proof_artifact_distribution_rejects_corrupted_shard_payload() {
+        let payload = deterministic_artifact_payload(384);
+        let distribution = package_proof_artifact_for_distribution(
+            &payload,
+            64,
+            10,
+            0xBAD5_EED,
+            ObjectId::new_for_test(0xC0DE),
+            2,
+        )
+        .expect("proof artifact should package");
+
+        let mut shards = distribution.shards.clone();
+        shards[0].data[0] ^= 0xA5;
+
+        let err = recover_proof_artifact_from_shards(&distribution.manifest, &shards)
+            .expect_err("corrupted shard bytes must fail before decode");
+
+        assert!(
+            matches!(
+                err,
+                ProofArtifactDistributionError::ShardPayloadHashMismatch { esi: 0 }
+            ),
+            "unexpected corruption error: {err:?}"
+        );
     }
 
     #[test]
