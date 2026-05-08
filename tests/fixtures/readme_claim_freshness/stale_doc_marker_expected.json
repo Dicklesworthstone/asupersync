@@ -1,0 +1,64 @@
+{
+  "claim_count": 2,
+  "claims": [
+    {
+      "category": "fresh docs",
+      "claim_id": "fresh-doc-claim",
+      "fresh": true,
+      "missing_doc_markers": [],
+      "missing_marker_count": 0,
+      "present_marker_count": 2,
+      "required_marker_count": 2,
+      "status": "green"
+    },
+    {
+      "category": "stale docs",
+      "claim_id": "stale-doc-claim",
+      "fresh": false,
+      "missing_doc_markers": [
+        {
+          "document": "README.md",
+          "marker": "missing readme marker"
+        },
+        {
+          "document": "AGENTS.md",
+          "marker": "missing agents marker"
+        }
+      ],
+      "missing_marker_count": 2,
+      "present_marker_count": 0,
+      "required_marker_count": 2,
+      "status": "yellow_frontier"
+    }
+  ],
+  "current_date": "2026-05-08",
+  "decision": "blocked-doc-stale",
+  "documents": {
+    "AGENTS.md": {
+      "missing_marker_count": 1,
+      "path": "/data/projects/asupersync/tests/fixtures/readme_claim_freshness/stale_AGENTS.md",
+      "present_marker_count": 1,
+      "required_marker_count": 2
+    },
+    "README.md": {
+      "missing_marker_count": 1,
+      "path": "/data/projects/asupersync/tests/fixtures/readme_claim_freshness/stale_README.md",
+      "present_marker_count": 1,
+      "required_marker_count": 2
+    }
+  },
+  "forbidden_actions": {
+    "runs_beads_mutation": false,
+    "runs_cargo": false,
+    "runs_destructive_command": false,
+    "runs_git_mutation": false
+  },
+  "generated_at": "2026-05-08T05:20:00Z",
+  "missing_marker_count": 2,
+  "non_mutating": true,
+  "present_marker_count": 2,
+  "required_marker_count": 4,
+  "schema_version": "readme-claim-freshness-v1",
+  "snapshot": "/data/projects/asupersync/tests/fixtures/readme_claim_freshness/stale_doc_marker_snapshot.json",
+  "verdict": "stale"
+}

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 const SCRIPT_PATH: &str = "scripts/readme_claim_freshness.py";
+const FIXTURE_ROOT: &str = "tests/fixtures/readme_claim_freshness";
 const GENERATED_AT: &str = "2026-05-08T05:20:00Z";
 
 fn repo_root() -> PathBuf {
@@ -31,6 +32,10 @@ fn run_receipt(snapshot: &Path, readme: &Path, agents: &Path) -> Output {
         .expect("run readme claim freshness helper")
 }
 
+fn fixture_path(name: &str) -> PathBuf {
+    repo_root().join(FIXTURE_ROOT).join(name)
+}
+
 fn receipt_json(snapshot: &Path, readme: &Path, agents: &Path) -> Value {
     let output = run_receipt(snapshot, readme, agents);
     assert!(
@@ -41,6 +46,22 @@ fn receipt_json(snapshot: &Path, readme: &Path, agents: &Path) -> Value {
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("receipt output must be JSON")
+}
+
+fn receipt_stdout(snapshot: &Path, readme: &Path, agents: &Path) -> String {
+    let output = run_receipt(snapshot, readme, agents);
+    assert!(
+        output.status.success(),
+        "helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("receipt output must be UTF-8")
+}
+
+fn fixture_text(name: &str) -> String {
+    std::fs::read_to_string(fixture_path(name)).expect("fixture golden must be readable")
 }
 
 #[test]
@@ -162,6 +183,21 @@ fn stale_fixture_reports_exact_missing_doc_marker() {
         stale_claim["missing_doc_markers"][0]["marker"].as_str(),
         Some("missing readme marker")
     );
+}
+
+#[test]
+fn stale_fixture_matches_full_output_golden() {
+    let actual_text = receipt_stdout(
+        &fixture_path("stale_doc_marker_snapshot.json"),
+        &fixture_path("stale_README.md"),
+        &fixture_path("stale_AGENTS.md"),
+    );
+    let expected_text = fixture_text("stale_doc_marker_expected.json");
+    let actual_json: Value = serde_json::from_str(&actual_text).expect("actual receipt JSON");
+    let expected_json: Value = serde_json::from_str(&expected_text).expect("expected receipt JSON");
+
+    assert_eq!(actual_json, expected_json);
+    assert_eq!(actual_text, expected_text);
 }
 
 #[test]

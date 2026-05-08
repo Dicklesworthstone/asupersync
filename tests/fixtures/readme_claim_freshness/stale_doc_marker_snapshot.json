@@ -1,0 +1,30 @@
+{
+  "claim_categories": [
+    {
+      "claim_id": "fresh-doc-claim",
+      "category": "fresh docs",
+      "status": "green",
+      "doc_claim_markers": {
+        "README.md": [
+          "present readme marker"
+        ],
+        "AGENTS.md": [
+          "present agents marker"
+        ]
+      }
+    },
+    {
+      "claim_id": "stale-doc-claim",
+      "category": "stale docs",
+      "status": "yellow_frontier",
+      "doc_claim_markers": {
+        "README.md": [
+          "missing readme marker"
+        ],
+        "AGENTS.md": [
+          "missing agents marker"
+        ]
+      }
+    }
+  ]
+}
