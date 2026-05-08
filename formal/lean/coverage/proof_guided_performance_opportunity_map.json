@@ -92,8 +92,8 @@
         "reordering multi-lock acquisition (E -> D -> B -> A -> C)"
       ],
       "required_conformance_checks": [
-        "rch exec -- cargo test --test refinement_conformance -- --nocapture",
-        "rch exec -- cargo test --test scheduler_lane_fairness -- --nocapture"
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_proof_guided_docs cargo test --test refinement_conformance -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_proof_guided_docs cargo test --test scheduler_lane_fairness -- --nocapture"
       ],
       "theorem_invariant_anchors": [
         "OPT-LOCK-001",
@@ -140,8 +140,8 @@
         "reporting completion before loser drain"
       ],
       "required_conformance_checks": [
-        "rch exec -- cargo test --test refinement_conformance -- --nocapture",
-        "rch exec -- cargo test --test cancellation_conformance -- --nocapture"
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_proof_guided_docs cargo test --test refinement_conformance -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_proof_guided_docs cargo test --test cancellation_conformance -- --nocapture"
       ],
       "theorem_invariant_anchors": [
         "OPT-CANCEL-001",
@@ -186,8 +186,8 @@
         "deferred or best-effort obligation resolution"
       ],
       "required_conformance_checks": [
-        "rch exec -- cargo test --test lean_invariant_theorem_test_link_map -- --nocapture",
-        "rch exec -- cargo test --test cancellation_conformance -- --nocapture"
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_proof_guided_docs cargo test --test lean_invariant_theorem_test_link_map -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_proof_guided_docs cargo test --test cancellation_conformance -- --nocapture"
       ],
       "theorem_invariant_anchors": [
         "OPT-OBL-001",
@@ -231,8 +231,8 @@
         "non-deterministic iteration order in state transitions"
       ],
       "required_conformance_checks": [
-        "rch exec -- cargo test --test refinement_conformance -- --nocapture",
-        "rch exec -- cargo test --test runtime_state_refinement_map -- --nocapture"
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_proof_guided_docs cargo test --test refinement_conformance -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_proof_guided_docs cargo test --test runtime_state_refinement_map -- --nocapture"
       ],
       "theorem_invariant_anchors": [
         "OPT-HOT-001",
