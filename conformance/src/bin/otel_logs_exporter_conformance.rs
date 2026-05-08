@@ -1,7 +1,8 @@
-//! OpenTelemetry LogRecord Exporter Conformance Test
+//! OpenTelemetry LogRecord Exporter Conformance Guard
 //!
-//! Pattern 1: Differential Testing vs opentelemetry-sdk
-//! Ensures identical OTLP/Logs protobuf for same log inputs
+//! This binary exercises the asupersync OTLP/Logs protobuf builder, but it must
+//! not claim differential conformance until a live opentelemetry-sdk exporter
+//! reference is wired.
 
 use asupersync::observability::otel::otlp_request_builder::{
     OtlpLogRecordInput, OtlpLogScopeInput, logs_request, severity_number_from_bucket,
@@ -10,7 +11,6 @@ use asupersync::observability::otel::otlp_request_builder::{
 use clap::{Arg, Command};
 use opentelemetry::logs::Severity;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
-use opentelemetry_proto::tonic::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
 use prost::Message;
 use std::collections::HashMap;
 use std::time::SystemTime;
@@ -18,24 +18,14 @@ use std::time::SystemTime;
 /// Conformance test result tracking
 #[derive(Debug, Clone, PartialEq)]
 enum ConformanceTestResult {
-    Pass,
     Fail { reason: String },
     ExpectedFailure { reason: String },
-}
-
-/// Test metadata for conformance tracking
-#[derive(Debug)]
-struct ConformanceCase {
-    name: &'static str,
-    description: &'static str,
-    requirement_level: RequirementLevel,
 }
 
 #[derive(Debug, PartialEq)]
 enum RequirementLevel {
     Must,   // OpenTelemetry spec MUST clause
     Should, // OpenTelemetry spec SHOULD clause
-    May,    // OpenTelemetry spec MAY clause
 }
 
 /// Test cases for LogRecord exporter conformance
@@ -64,7 +54,7 @@ fn main() {
 
     let matches = Command::new("otel_logs_exporter_conformance")
         .version("0.1.0")
-        .about("OpenTelemetry LogRecord exporter conformance vs opentelemetry-sdk")
+        .about("OpenTelemetry LogRecord exporter fail-closed conformance guard")
         .arg(
             Arg::new("test")
                 .help("Test to run")
@@ -117,7 +107,6 @@ fn main() {
 
     let exit_code = exit_code_for_result(&result);
     match &result {
-        ConformanceTestResult::Pass => println!("✅ TEST PASSED"),
         ConformanceTestResult::Fail { reason } => {
             eprintln!("❌ TEST FAILED: {}", reason);
         }
@@ -130,10 +119,9 @@ fn main() {
 }
 
 fn run_all_tests(verbose: bool) {
-    println!("=== OpenTelemetry LogRecord Exporter Conformance Testing ===\n");
+    println!("=== OpenTelemetry LogRecord Exporter Conformance Guard ===\n");
 
     let mut total = 0;
-    let mut passed = 0;
     let mut failed = 0;
     let mut xfail = 0;
 
@@ -141,7 +129,7 @@ fn run_all_tests(verbose: bool) {
     let test_cases = vec![
         LogExporterTestCase {
             name: "basic-log-export",
-            description: "Basic log record export produces identical protobuf",
+            description: "Basic log record export requires a live reference comparison",
             requirement_level: RequirementLevel::Must,
             log_inputs: vec![TestLogInput {
                 timestamp: SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1640995200),
@@ -248,10 +236,6 @@ fn run_all_tests(verbose: bool) {
         let result = run_log_export_conformance_test(test_case, verbose);
 
         match &result {
-            ConformanceTestResult::Pass => {
-                passed += 1;
-                println!("✅ PASS");
-            }
             ConformanceTestResult::Fail { reason } => {
                 failed += 1;
                 println!("❌ FAIL");
@@ -273,7 +257,6 @@ fn run_all_tests(verbose: bool) {
             "{{\"test\":\"{}\",\"status\":\"{}\",\"level\":\"{:?}\"}}",
             test_case.name,
             match &result {
-                ConformanceTestResult::Pass => "PASS",
                 ConformanceTestResult::Fail { .. } => "FAIL",
                 ConformanceTestResult::ExpectedFailure { .. } => "XFAIL",
             },
@@ -287,16 +270,11 @@ fn run_all_tests(verbose: bool) {
     println!("│          CONFORMANCE REPORT         │");
     println!("├─────────────────────────────────────┤");
     println!("│  📋 Total: {}                      │", total);
-    println!("│  ✅ Passed: {}                     │", passed);
+    println!("│  ✅ Proven: 0                     │");
     println!("│  ❌ Failed: {}                     │", failed);
     println!("│  ⚠️ Expected: {}                   │", xfail);
     println!("│                                     │");
-    let score = if total > 0 {
-        (passed as f64 / total as f64) * 100.0
-    } else {
-        0.0
-    };
-    println!("│  🎯 Score: {:.1}%                   │", score);
+    println!("│  🎯 Score: 0.0%                   │");
     println!("└─────────────────────────────────────┘");
 
     println!("\n{}", final_status_line(total, failed, xfail));
@@ -312,12 +290,11 @@ fn run_all_tests(verbose: bool) {
         std::process::exit(exit_code);
     }
 
-    println!("🎯 OTLP/Logs protobuf output matches opentelemetry-sdk exactly");
+    println!("🎯 OTLP/Logs exporter guard completed without synthetic reference claims");
 }
 
 fn exit_code_for_result(result: &ConformanceTestResult) -> i32 {
     match result {
-        ConformanceTestResult::Pass => 0,
         ConformanceTestResult::Fail { .. } | ConformanceTestResult::ExpectedFailure { .. } => 1,
     }
 }
@@ -338,7 +315,7 @@ fn final_status_line(total: usize, failed: usize, expected_failures: usize) -> S
     } else if expected_failures > 0 {
         format!("NO FAILURES; PARTIAL COVERAGE ({expected_failures} expected failures)")
     } else {
-        "✅ ALL TESTS PASSED - LogRecord exporter is conformant".to_string()
+        "✅ ALL TESTS PASSED - live LogRecord exporter reference matched".to_string()
     }
 }
 
@@ -357,38 +334,18 @@ fn run_log_export_conformance_test(
         }
     };
 
-    // Generate reference implementation's OTLP request
-    let reference_request = match generate_reference_otlp_request(test_case) {
-        Ok(req) => req,
-        Err(e) => {
-            return ConformanceTestResult::Fail {
-                reason: format!("Failed to generate reference OTLP request: {}", e),
-            };
-        }
-    };
+    let _our_bytes = our_request.encode_to_vec();
 
-    // Compare protobuf serialization
-    let our_bytes = our_request.encode_to_vec();
-    let reference_bytes = reference_request.encode_to_vec();
+    live_logs_exporter_reference_unavailable(test_case.name)
+}
 
-    if our_bytes == reference_bytes {
-        ConformanceTestResult::Pass
-    } else {
-        // Check for known divergences
-        if is_known_divergence(test_case.name) {
-            ConformanceTestResult::ExpectedFailure {
-                reason: "Known divergence documented in DISCREPANCIES.md".to_string(),
-            }
-        } else {
-            ConformanceTestResult::Fail {
-                reason: format!(
-                    "Protobuf mismatch: our={} bytes, reference={} bytes. \
-                     Use protoc --decode to inspect differences.",
-                    our_bytes.len(),
-                    reference_bytes.len()
-                ),
-            }
-        }
+fn live_logs_exporter_reference_unavailable(test_name: &str) -> ConformanceTestResult {
+    ConformanceTestResult::ExpectedFailure {
+        reason: format!(
+            "OpenTelemetry Logs exporter conformance for '{test_name}' is unsupported: \
+             no live opentelemetry-sdk logs exporter reference is wired; refusing \
+             synthetic protobuf comparison"
+        ),
     }
 }
 
@@ -452,126 +409,6 @@ fn generate_our_otlp_request(
     Ok(logs_request(&scope_inputs))
 }
 
-/// Generate OTLP request using opentelemetry-sdk reference
-fn generate_reference_otlp_request(
-    test_case: &LogExporterTestCase,
-) -> Result<ExportLogsServiceRequest, Box<dyn std::error::Error>> {
-    // For now, create a simplified reference request manually
-    // In a full implementation, we'd use opentelemetry-sdk's actual exporter
-
-    let mut resource_logs = Vec::new();
-    let mut scope_logs_map: HashMap<String, Vec<LogRecord>> = HashMap::new();
-
-    for log_input in &test_case.log_inputs {
-        let scope_key = format!(
-            "{}:{}",
-            log_input.scope_name,
-            log_input.scope_version.as_deref().unwrap_or("")
-        );
-
-        let log_record = LogRecord {
-            time_unix_nano: log_input
-                .timestamp
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos() as u64,
-            observed_time_unix_nano: log_input
-                .observed_timestamp
-                .map(|t| t.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos() as u64)
-                .unwrap_or(0),
-            severity_number: severity_number_from_bucket(severity_to_bucket(&log_input.severity)),
-            severity_text: severity_text_from_bucket(severity_to_bucket(&log_input.severity)),
-            body: Some(opentelemetry_proto::tonic::common::v1::AnyValue {
-                value: Some(
-                    opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(
-                        log_input.body.clone(),
-                    ),
-                ),
-            }),
-            attributes: log_input
-                .attributes
-                .iter()
-                .map(|(k, v)| opentelemetry_proto::tonic::common::v1::KeyValue {
-                    key: k.clone(),
-                    value: Some(opentelemetry_proto::tonic::common::v1::AnyValue {
-                        value: Some(
-                            opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(
-                                v.clone(),
-                            ),
-                        ),
-                    }),
-                })
-                .collect(),
-            dropped_attributes_count: 0,
-            flags: 0,
-            trace_id: vec![],
-            span_id: vec![],
-            event_name: String::new(),
-        };
-
-        scope_logs_map
-            .entry(scope_key)
-            .or_default()
-            .push(log_record);
-    }
-
-    // Create scope logs
-    let scope_logs: Vec<ScopeLogs> = scope_logs_map
-        .into_iter()
-        .map(|(scope_key, log_records)| {
-            let scope_parts: Vec<&str> = scope_key.split(':').collect();
-            ScopeLogs {
-                scope: Some(
-                    opentelemetry_proto::tonic::common::v1::InstrumentationScope {
-                        name: scope_parts[0].to_string(),
-                        version: if scope_parts.len() > 1 && !scope_parts[1].is_empty() {
-                            scope_parts[1].to_string()
-                        } else {
-                            String::new()
-                        },
-                        attributes: vec![],
-                        dropped_attributes_count: 0,
-                    },
-                ),
-                log_records,
-                schema_url: String::new(),
-            }
-        })
-        .collect();
-
-    // Create resource attributes from first log
-    let resource_attributes = if let Some(first_log) = test_case.log_inputs.first() {
-        first_log
-            .resource_attributes
-            .iter()
-            .map(|(k, v)| opentelemetry_proto::tonic::common::v1::KeyValue {
-                key: k.clone(),
-                value: Some(opentelemetry_proto::tonic::common::v1::AnyValue {
-                    value: Some(
-                        opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(
-                            v.clone(),
-                        ),
-                    ),
-                }),
-            })
-            .collect()
-    } else {
-        vec![]
-    };
-
-    resource_logs.push(ResourceLogs {
-        resource: Some(opentelemetry_proto::tonic::resource::v1::Resource {
-            attributes: resource_attributes,
-            dropped_attributes_count: 0,
-            entity_refs: vec![],
-        }),
-        scope_logs,
-        schema_url: String::new(),
-    });
-
-    Ok(ExportLogsServiceRequest { resource_logs })
-}
-
 /// Helper to create a test log with default values
 fn create_test_log(severity: Severity, body: &str) -> TestLogInput {
     TestLogInput {
@@ -632,15 +469,6 @@ fn severity_to_bucket(severity: &Severity) -> u8 {
         Severity::Fatal2 => 22,
         Severity::Fatal3 => 23,
         Severity::Fatal4 => 24,
-    }
-}
-
-/// Check if test case has known divergences
-fn is_known_divergence(test_name: &str) -> bool {
-    // Define known divergences here
-    // For now, assume no known divergences
-    match test_name {
-        _ => false,
     }
 }
 
@@ -788,30 +616,44 @@ fn generate_compliance_report() {
     println!("| Test Case | Requirement Level | Status | Description |");
     println!("|-----------|--------------------|--------|-------------|");
     println!(
-        "| basic-log-export | MUST | ✅ | Basic log record export produces identical protobuf |"
+        "| basic-log-export | MUST | XFAIL | Live opentelemetry-sdk logs exporter reference not wired |"
     );
-    println!("| severity-levels | MUST | ✅ | All severity levels map correctly to OTLP |");
-    println!("| attributes | MUST | ✅ | Log attributes serialize correctly |");
-    println!("| timestamps | MUST | ✅ | Timestamp and observed timestamp handling |");
-    println!("| multiple-scopes | SHOULD | ✅ | Multiple log scopes in single export |");
-    println!("| resource-attributes | MUST | ✅ | Resource attributes serialization |");
-    println!("| protobuf-serialization | MUST | ✅ | Protobuf serialization consistency |");
+    println!(
+        "| severity-levels | MUST | XFAIL | Live opentelemetry-sdk logs exporter reference not wired |"
+    );
+    println!(
+        "| attributes | MUST | XFAIL | Live opentelemetry-sdk logs exporter reference not wired |"
+    );
+    println!(
+        "| timestamps | MUST | XFAIL | Live opentelemetry-sdk logs exporter reference not wired |"
+    );
+    println!(
+        "| multiple-scopes | SHOULD | XFAIL | Live opentelemetry-sdk logs exporter reference not wired |"
+    );
+    println!(
+        "| resource-attributes | MUST | XFAIL | Live opentelemetry-sdk logs exporter reference not wired |"
+    );
+    println!(
+        "| protobuf-serialization | MUST | XFAIL | Live opentelemetry-sdk logs exporter reference not wired |"
+    );
     println!();
 
     println!("## Specification Coverage");
     println!();
-    println!("### MUST clauses: 6/6 (100%)");
-    println!("### SHOULD clauses: 1/1 (100%)");
-    println!("### Overall score: 100%");
+    println!("### MUST clauses: 0/6 proven");
+    println!("### SHOULD clauses: 0/1 proven");
+    println!("### Overall score: 0% proven");
     println!();
 
     println!("## Known Divergences");
     println!();
-    println!("None documented.");
+    println!(
+        "All rows are expected failures until a live opentelemetry-sdk logs exporter reference is wired."
+    );
     println!();
 
     println!(
-        "✅ **CONFORMANT** - LogRecord exporter produces identical OTLP/Logs protobuf vs opentelemetry-sdk"
+        "REFERENCE UNAVAILABLE - live opentelemetry-sdk logs exporter reference is not wired; refusing synthetic parity claims"
     );
 }
 
@@ -819,6 +661,7 @@ fn generate_compliance_report() {
 mod tests {
     use super::{
         ConformanceTestResult, exit_code_for_result, exit_code_for_summary, final_status_line,
+        live_logs_exporter_reference_unavailable, run_basic_log_export_test,
     };
 
     #[test]
@@ -863,5 +706,47 @@ mod tests {
     #[test]
     fn final_status_line_reports_true_all_pass() {
         assert!(final_status_line(5, 0, 0).contains("ALL TESTS PASSED"));
+    }
+
+    #[test]
+    fn log_export_conformance_fails_closed_without_live_reference() {
+        let result = run_basic_log_export_test(false);
+
+        match result {
+            ConformanceTestResult::ExpectedFailure { reason } => {
+                assert!(reason.contains("live opentelemetry-sdk logs exporter reference"));
+                assert!(reason.contains("refusing synthetic protobuf comparison"));
+            }
+            other => panic!("expected fail-closed xfail, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reference_unavailable_message_names_test_case() {
+        let result = live_logs_exporter_reference_unavailable("attributes");
+
+        match result {
+            ConformanceTestResult::ExpectedFailure { reason } => {
+                assert!(reason.contains("attributes"));
+                assert!(reason.contains("no live opentelemetry-sdk logs exporter reference"));
+            }
+            other => panic!("expected fail-closed xfail, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn source_no_longer_contains_synthetic_reference_claims() {
+        let source = include_str!("otel_logs_exporter_conformance.rs");
+
+        assert!(!source.contains(concat!(
+            "For ",
+            "now, create",
+            " a simplified reference request manually"
+        )));
+        assert!(!source.contains(concat!(
+            "produces identical OTLP/Logs protobuf",
+            " vs opentelemetry-sdk"
+        )));
+        assert!(!source.contains(concat!("Overall score: ", "100%")));
     }
 }
