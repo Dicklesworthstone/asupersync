@@ -1,6 +1,6 @@
 #![allow(missing_docs)]
 
-use asupersync::channel::{broadcast, mpsc, oneshot};
+use asupersync::channel::{broadcast, mpsc, oneshot, watch};
 use asupersync::cx::Cx;
 use asupersync::types::{Budget, CancelKind};
 use asupersync::util::ArenaIndex;
@@ -508,6 +508,87 @@ fn live_broadcast_snapshot_reports_receiver_lag_waiters_and_cancelled_pressure()
     let (tx, rx) = broadcast::channel::<u8>(1);
     drop(rx);
     let after_receiver_drop = tx.telemetry_snapshot(303);
+    assert!(after_receiver_drop.closed);
+    assert_eq!(after_receiver_drop.receiver_health, "receiver_dropped");
+    assert_eq!(after_receiver_drop.receiver_count, 0);
+}
+
+#[test]
+fn live_watch_snapshot_reports_latest_value_waiters_and_cancelled_pressure() {
+    let contract = contract();
+    let rows = rows_by_kind(&contract);
+    let watch_row = rows.get("watch").expect("watch row exists");
+    assert_eq!(watch_row["live_telemetry_wired"].as_bool(), Some(true));
+    assert_eq!(watch_row["report_status"].as_str(), Some("LIVE"));
+
+    let cx = telemetry_test_cx();
+    let (tx, mut rx1) = watch::channel::<u8>(0);
+    let mut rx2 = tx.subscribe();
+    let initial = tx.telemetry_snapshot(401);
+    assert_eq!(initial.channel_id, 401);
+    assert_eq!(initial.channel_kind, "watch");
+    assert_eq!(initial.capacity, 1);
+    assert_eq!(initial.queued_messages, 0);
+    assert_eq!(initial.reserved_uncommitted_obligations, 0);
+    assert_eq!(initial.send_waiter_count, 0);
+    assert_eq!(initial.recv_waiter_count, 0);
+    assert_eq!(initial.receiver_count, 2);
+    assert_eq!(initial.receiver_health, "open");
+    assert_eq!(initial.lagged_receiver_count, Some(0));
+    assert_eq!(initial.cancellation_count, 0);
+    assert!(!initial.closed);
+
+    tx.send(1).expect("watch send succeeds");
+    let aggregate_lag = tx.telemetry_snapshot(401);
+    assert_eq!(aggregate_lag.queued_messages, 1);
+    assert_eq!(aggregate_lag.receiver_health, "lagged");
+    assert_eq!(aggregate_lag.lagged_receiver_count, Some(2));
+
+    let changed = rx1.telemetry_snapshot(401);
+    assert_eq!(changed.queued_messages, 1);
+    assert_eq!(changed.receiver_health, "changed");
+    assert_eq!(changed.lagged_receiver_count, Some(2));
+
+    assert_eq!(*rx1.borrow_and_update(), 1);
+    let after_first_seen = rx1.telemetry_snapshot(401);
+    assert_eq!(after_first_seen.queued_messages, 1);
+    assert_eq!(after_first_seen.receiver_health, "unchanged");
+    assert_eq!(after_first_seen.lagged_receiver_count, Some(1));
+    assert_eq!(*rx2.borrow_and_update(), 1);
+    assert_eq!(tx.telemetry_snapshot(401).lagged_receiver_count, Some(0));
+
+    let waker = Waker::noop().clone();
+    let mut task_cx = Context::from_waker(&waker);
+    let mut changed = Box::pin(rx1.changed(&cx));
+    assert!(matches!(changed.as_mut().poll(&mut task_cx), Poll::Pending));
+    let waiting = tx.telemetry_snapshot(402);
+    assert_eq!(waiting.recv_waiter_count, 1);
+    assert_eq!(waiting.receiver_health, "waiting");
+    drop(changed);
+    let after_dropped_waiter = rx1.telemetry_snapshot(402);
+    assert_eq!(after_dropped_waiter.recv_waiter_count, 0);
+    assert_eq!(after_dropped_waiter.cancellation_count, 1);
+
+    let cancelled_cx = telemetry_test_cx();
+    cancelled_cx.cancel_with(CancelKind::User, Some("channel telemetry contract"));
+    let mut changed = Box::pin(rx1.changed(&cancelled_cx));
+    assert!(matches!(
+        changed.as_mut().poll(&mut task_cx),
+        Poll::Ready(Err(watch::RecvError::Cancelled))
+    ));
+    drop(changed);
+    let after_cancelled_changed = rx1.telemetry_snapshot(402);
+    assert_eq!(after_cancelled_changed.cancellation_count, 2);
+    assert!(!after_cancelled_changed.closed);
+
+    drop(tx);
+    let after_sender_drop = rx1.telemetry_snapshot(402);
+    assert!(after_sender_drop.closed);
+    assert_eq!(after_sender_drop.receiver_health, "sender_closed");
+
+    let (tx, rx) = watch::channel::<u8>(0);
+    drop(rx);
+    let after_receiver_drop = tx.telemetry_snapshot(403);
     assert!(after_receiver_drop.closed);
     assert_eq!(after_receiver_drop.receiver_health, "receiver_dropped");
     assert_eq!(after_receiver_drop.receiver_count, 0);

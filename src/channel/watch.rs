@@ -47,6 +47,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 
 use crate::cx::Cx;
+use crate::util::{Arena, ArenaIndex};
 
 /// Waiter entry with deduplication flag to prevent unbounded growth.
 ///
@@ -122,6 +123,39 @@ impl std::fmt::Display for ModifyError {
 
 impl std::error::Error for ModifyError {}
 
+/// Opt-in, redacted telemetry snapshot for a watch channel.
+///
+/// The caller supplies `channel_id`, which keeps identifiers deterministic and
+/// avoids ambient globals or pointer-derived IDs. Payload values are never
+/// exposed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WatchTelemetrySnapshot {
+    /// Caller-provided deterministic channel identifier.
+    pub channel_id: u64,
+    /// Stable channel kind label.
+    pub channel_kind: &'static str,
+    /// Watch channels retain exactly one latest value.
+    pub capacity: usize,
+    /// Whether the latest value is waiting to be observed by this view.
+    pub queued_messages: usize,
+    /// Watch updates are committed synchronously without send reservations.
+    pub reserved_uncommitted_obligations: usize,
+    /// Watch has no sender-side capacity waiters.
+    pub send_waiter_count: usize,
+    /// Receiver-side waiters waiting for a change or closure.
+    pub recv_waiter_count: usize,
+    /// Number of active receivers.
+    pub receiver_count: usize,
+    /// Redacted receiver state for this snapshot view.
+    pub receiver_health: &'static str,
+    /// Number of tracked receivers that have not observed the latest version.
+    pub lagged_receiver_count: Option<usize>,
+    /// Cancel/abort events observed by the channel.
+    pub cancellation_count: u64,
+    /// Whether this channel has reached a closed state.
+    pub closed: bool,
+}
+
 /// Internal state shared between sender and receivers.
 #[derive(Debug)]
 struct WatchInner<T> {
@@ -137,6 +171,10 @@ struct WatchInner<T> {
     sender_dropped: AtomicBool,
     /// Wakers for receivers waiting on value changes.
     waiters: Mutex<SmallVec<[WatchWaiter; 4]>>,
+    /// Last observed version for each active receiver.
+    receiver_versions: Mutex<Arena<u64>>,
+    /// Number of cancellation/abort events observed by this channel.
+    cancellation_count: AtomicU64,
 }
 
 impl<T> WatchInner<T> {
@@ -147,6 +185,8 @@ impl<T> WatchInner<T> {
             receiver_count: AtomicUsize::new(1), // Counts the Receiver returned by channel()
             sender_dropped: AtomicBool::new(false),
             waiters: Mutex::new(SmallVec::new()),
+            receiver_versions: Mutex::new(Arena::new()),
+            cancellation_count: AtomicU64::new(0),
         }
     }
 
@@ -156,6 +196,88 @@ impl<T> WatchInner<T> {
 
     fn current_version(&self) -> u64 {
         self.version.load(Ordering::Acquire)
+    }
+
+    fn insert_receiver_version(&self, version: u64) -> ArenaIndex {
+        self.receiver_versions.lock().insert(version)
+    }
+
+    fn update_receiver_version(&self, token: ArenaIndex, version: u64) {
+        if let Some(seen_version) = self.receiver_versions.lock().get_mut(token) {
+            *seen_version = version;
+        }
+    }
+
+    fn remove_receiver_version(&self, token: ArenaIndex) {
+        self.receiver_versions.lock().remove(token);
+    }
+
+    fn lagged_receiver_count(&self, current_version: u64) -> usize {
+        self.receiver_versions
+            .lock()
+            .iter()
+            .filter(|(_, seen_version)| **seen_version != current_version)
+            .count()
+    }
+
+    fn recv_waiter_count(&self) -> usize {
+        self.waiters
+            .lock()
+            .iter()
+            .filter(|entry| {
+                entry.queued.load(Ordering::Acquire) && Arc::strong_count(&entry.queued) > 1
+            })
+            .count()
+    }
+
+    fn record_cancellation(&self) {
+        self.cancellation_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn telemetry_snapshot(
+        &self,
+        channel_id: u64,
+        receiver_seen_version: Option<u64>,
+    ) -> WatchTelemetrySnapshot {
+        let current_version = self.current_version();
+        let receiver_count = self.receiver_count.load(Ordering::Acquire);
+        let recv_waiter_count = self.recv_waiter_count();
+        let lagged_receiver_count = self.lagged_receiver_count(current_version);
+        let sender_dropped = self.is_sender_dropped();
+        let receiver_has_change =
+            receiver_seen_version.is_some_and(|seen_version| seen_version != current_version);
+        let closed = receiver_count == 0 || sender_dropped;
+
+        let receiver_health = if receiver_count == 0 {
+            "receiver_dropped"
+        } else if receiver_has_change {
+            "changed"
+        } else if sender_dropped {
+            "sender_closed"
+        } else if recv_waiter_count > 0 {
+            "waiting"
+        } else if receiver_seen_version.is_some() {
+            "unchanged"
+        } else if lagged_receiver_count > 0 {
+            "lagged"
+        } else {
+            "open"
+        };
+
+        WatchTelemetrySnapshot {
+            channel_id,
+            channel_kind: "watch",
+            capacity: 1,
+            queued_messages: usize::from(receiver_has_change || lagged_receiver_count > 0),
+            reserved_uncommitted_obligations: 0,
+            send_waiter_count: 0,
+            recv_waiter_count,
+            receiver_count,
+            receiver_health,
+            lagged_receiver_count: Some(lagged_receiver_count),
+            cancellation_count: self.cancellation_count.load(Ordering::Relaxed),
+            closed,
+        }
     }
 
     fn wake_all_waiters(&self) {
@@ -227,6 +349,7 @@ impl<T> WatchInner<T> {
 #[must_use]
 pub fn channel<T>(initial: T) -> (Sender<T>, Receiver<T>) {
     let inner = Arc::new(WatchInner::new(initial));
+    let receiver_token = inner.insert_receiver_version(0);
     (
         Sender {
             inner: Arc::clone(&inner),
@@ -234,6 +357,7 @@ pub fn channel<T>(initial: T) -> (Sender<T>, Receiver<T>) {
         Receiver {
             inner,
             seen_version: 0,
+            receiver_token,
             waiter: None,
         },
     )
@@ -394,14 +518,16 @@ impl<T> Sender<T> {
         // post-send version while the sender believed there were fewer
         // receivers (the same TOCTOU class fixed in broadcast subscribe
         // by commit e9314df5).
-        let current_version = {
+        let (current_version, receiver_token) = {
             let guard = self.inner.value.read();
             self.inner.receiver_count.fetch_add(1, Ordering::Relaxed);
-            guard.1
+            let receiver_token = self.inner.insert_receiver_version(guard.1);
+            (guard.1, receiver_token)
         };
         Receiver {
             inner: Arc::clone(&self.inner),
             seen_version: current_version,
+            receiver_token,
             waiter: None,
         }
     }
@@ -418,6 +544,13 @@ impl<T> Sender<T> {
     #[must_use]
     pub fn is_closed(&self) -> bool {
         self.inner.receiver_count.load(Ordering::Acquire) == 0
+    }
+
+    /// Builds an opt-in redacted telemetry snapshot.
+    #[must_use]
+    #[inline]
+    pub fn telemetry_snapshot(&self, channel_id: u64) -> WatchTelemetrySnapshot {
+        self.inner.telemetry_snapshot(channel_id, None)
     }
 }
 
@@ -446,6 +579,8 @@ pub struct Receiver<T> {
     inner: Arc<WatchInner<T>>,
     /// The version number last seen by this receiver.
     seen_version: u64,
+    /// Token for this receiver's shared telemetry version cursor.
+    receiver_token: ArenaIndex,
     /// Deduplication flag shared with our entry in the waiters vec.
     /// Prevents unbounded waker growth between sends.
     waiter: Option<Arc<AtomicBool>>,
@@ -482,12 +617,15 @@ impl<T> Receiver<T> {
     ) -> Poll<Result<(), RecvError>> {
         if cx.checkpoint().is_err() {
             cx.trace("watch::changed cancelled");
+            self.inner.record_cancellation();
             return Poll::Ready(Err(RecvError::Cancelled));
         }
 
         let current = self.inner.current_version();
         if current != self.seen_version {
             self.seen_version = current;
+            self.inner
+                .update_receiver_version(self.receiver_token, self.seen_version);
             cx.trace("watch::changed received update");
             return Poll::Ready(Ok(()));
         }
@@ -496,6 +634,8 @@ impl<T> Receiver<T> {
             let current = self.inner.current_version();
             if current != self.seen_version {
                 self.seen_version = current;
+                self.inner
+                    .update_receiver_version(self.receiver_token, self.seen_version);
                 return Poll::Ready(Ok(()));
             }
             cx.trace("watch::changed sender dropped");
@@ -533,6 +673,8 @@ impl<T> Receiver<T> {
         let current_after_register = self.inner.current_version();
         if current_after_register != self.seen_version {
             self.seen_version = current_after_register;
+            self.inner
+                .update_receiver_version(self.receiver_token, self.seen_version);
             cx.trace("watch::changed received update after register");
 
             // Fast path: we registered, but actually the value arrived.
@@ -580,6 +722,8 @@ impl<T> Receiver<T> {
     pub fn borrow_and_update(&mut self) -> Ref<'_, T> {
         let guard = self.inner.value.read();
         self.seen_version = guard.1;
+        self.inner
+            .update_receiver_version(self.receiver_token, self.seen_version);
         Ref { guard }
     }
 
@@ -621,6 +765,8 @@ impl<T> Receiver<T> {
     #[inline]
     pub fn mark_seen(&mut self) {
         self.seen_version = self.inner.current_version();
+        self.inner
+            .update_receiver_version(self.receiver_token, self.seen_version);
     }
 
     /// Returns true if there's a new value since last seen.
@@ -642,6 +788,14 @@ impl<T> Receiver<T> {
     #[must_use]
     pub fn seen_version(&self) -> u64 {
         self.seen_version
+    }
+
+    /// Builds an opt-in redacted telemetry snapshot.
+    #[must_use]
+    #[inline]
+    pub fn telemetry_snapshot(&self, channel_id: u64) -> WatchTelemetrySnapshot {
+        self.inner
+            .telemetry_snapshot(channel_id, Some(self.seen_version))
     }
 }
 
@@ -676,6 +830,7 @@ impl<T> Future for ChangedFuture<'_, '_, T> {
 
 impl<T> Drop for ChangedFuture<'_, '_, T> {
     fn drop(&mut self) {
+        let mut removed_pending_waiter = false;
         if let Some(waiter) = self.receiver.waiter.as_ref() {
             // The post-register fast paths can clear the queued flag before Drop runs
             // while the waiter entry is still linked from the shared waiter list.
@@ -683,19 +838,26 @@ impl<T> Drop for ChangedFuture<'_, '_, T> {
                 waiter.store(false, Ordering::Release);
                 let mut waiters = self.receiver.inner.waiters.lock();
                 waiters.retain(|entry| {
-                    !Arc::ptr_eq(&entry.queued, waiter) && Arc::strong_count(&entry.queued) > 1
+                    let remove = Arc::ptr_eq(&entry.queued, waiter);
+                    removed_pending_waiter |= remove;
+                    !remove && Arc::strong_count(&entry.queued) > 1
                 });
             }
+        }
+        if !self.completed && removed_pending_waiter {
+            self.receiver.inner.record_cancellation();
         }
     }
 }
 
 impl<T> Clone for Receiver<T> {
     fn clone(&self) -> Self {
+        let receiver_token = self.inner.insert_receiver_version(self.seen_version);
         self.inner.receiver_count.fetch_add(1, Ordering::Relaxed);
         Self {
             inner: Arc::clone(&self.inner),
             seen_version: self.seen_version,
+            receiver_token,
             waiter: None,
         }
     }
@@ -704,6 +866,7 @@ impl<T> Clone for Receiver<T> {
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
         self.inner.receiver_count.fetch_sub(1, Ordering::Release);
+        self.inner.remove_receiver_version(self.receiver_token);
 
         // Eagerly remove this receiver's waiter entry so dropped receivers do not
         // leave stale wakers behind until a later send/re-registration.

@@ -115,12 +115,13 @@
     {
       "channel_kind": "watch",
       "implementation_path": "src/channel/watch.rs",
-      "live_telemetry_wired": false,
-      "report_status": "XFAIL",
-      "status_reason": "contracted only; changed/borrow receiver health is not wired yet",
+      "live_telemetry_wired": true,
+      "report_status": "LIVE",
+      "status_reason": "opt-in redacted watch telemetry snapshot is wired",
       "metric_fields": [
         "channel_id",
         "channel_kind",
+        "capacity",
         "queued_messages",
         "reserved_uncommitted_obligations",
         "send_waiter_count",
@@ -131,9 +132,10 @@
         "closed"
       ],
       "core_invariants": [
-        "latest value visibility is separate from queued backlog",
-        "receiver_health reports unchanged, changed, closed, or lagged",
-        "cancellation_count tracks cancelled changed waits"
+        "latest value visibility is reported as at most one queued change rather than payload data",
+        "receiver_health distinguishes open, waiting, changed, unchanged, lagged, sender_closed, and receiver_dropped",
+        "lagged_receiver_count is explicit from tracked receiver versions",
+        "cancellation_count increments on cancelled changed waits and dropped pending changed futures"
       ]
     },
     {
@@ -188,7 +190,7 @@
       ]
     }
   ],
-  "golden_markdown": "| channel_kind | status | required_pressure_fields |\n| --- | --- | --- |\n| broadcast | LIVE | queued_messages, reserved_uncommitted_obligations, send_waiter_count, recv_waiter_count, receiver_health, lagged_receiver_count, cancellation_count |\n| mpsc | LIVE | queued_messages, reserved_uncommitted_obligations, send_waiter_count, recv_waiter_count, receiver_health, cancellation_count |\n| oneshot | LIVE | queued_messages, reserved_uncommitted_obligations, send_waiter_count, recv_waiter_count, receiver_health, cancellation_count |\n| session | XFAIL | queued_messages, reserved_uncommitted_obligations, send_waiter_count, recv_waiter_count, receiver_health, lagged_receiver_count, cancellation_count |\n| watch | XFAIL | queued_messages, reserved_uncommitted_obligations, send_waiter_count, recv_waiter_count, receiver_health, lagged_receiver_count, cancellation_count |\n",
+  "golden_markdown": "| channel_kind | status | required_pressure_fields |\n| --- | --- | --- |\n| broadcast | LIVE | queued_messages, reserved_uncommitted_obligations, send_waiter_count, recv_waiter_count, receiver_health, lagged_receiver_count, cancellation_count |\n| mpsc | LIVE | queued_messages, reserved_uncommitted_obligations, send_waiter_count, recv_waiter_count, receiver_health, cancellation_count |\n| oneshot | LIVE | queued_messages, reserved_uncommitted_obligations, send_waiter_count, recv_waiter_count, receiver_health, cancellation_count |\n| session | XFAIL | queued_messages, reserved_uncommitted_obligations, send_waiter_count, recv_waiter_count, receiver_health, lagged_receiver_count, cancellation_count |\n| watch | LIVE | queued_messages, reserved_uncommitted_obligations, send_waiter_count, recv_waiter_count, receiver_health, lagged_receiver_count, cancellation_count |\n",
   "proof_commands": [
     "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_channel_telemetry_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test channel_telemetry_contract -- --nocapture"
   ]
