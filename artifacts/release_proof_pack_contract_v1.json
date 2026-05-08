@@ -45,7 +45,7 @@
     "python3 -m json.tool artifacts/release_proof_pack_contract_v1.json",
     "python3 -m py_compile scripts/proof_runner.py",
     "python3 scripts/proof_runner.py --release-proof-pack --release-proof-pack-generated-at 2026-05-08T00:00:00Z --output json",
-    "python3 scripts/proof_runner.py --release-proof-pack-e2e-smoke --command 'rch exec -- cargo tree -e normal -p asupersync -i tokio' --release-proof-pack-generated-at 2026-05-08T00:00:00Z --release-proof-pack-output-dir /tmp/asupersync-release-proof-pack-e2e-smoke --touched-files artifacts/proof_lane_manifest_v1.json --output json",
+    "python3 scripts/proof_runner.py --release-proof-pack-e2e-smoke --command 'rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_release_proof_pack_smoke_docs cargo tree -e normal -p asupersync -i tokio' --release-proof-pack-generated-at 2026-05-08T00:00:00Z --release-proof-pack-output-dir /tmp/asupersync-release-proof-pack-e2e-smoke --touched-files artifacts/proof_lane_manifest_v1.json --output json",
     "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_release_proof_pack_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test proof_runner_contract -- --nocapture"
   ]
 }
