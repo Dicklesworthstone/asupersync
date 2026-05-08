@@ -1,7 +1,8 @@
 //! HTTP/2 SETTINGS Frame Conformance Test Runner
 //!
-//! Runs differential conformance testing between asupersync HTTP/2 implementation
-//! and h2 reference implementation for SETTINGS frame handling.
+//! Runs RFC-backed SETTINGS expected-state checks. Until a live h2 SETTINGS
+//! reference seam is wired, matching local model results are XFAIL and the
+//! runner exits nonzero.
 //!
 //! Usage:
 //!   cargo run --bin h2_settings_conformance
@@ -55,7 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("🔧 HTTP/2 SETTINGS Frame Conformance Tester");
-    println!("   Testing asupersync vs h2 reference implementation");
+    println!("{}", startup_scope_line());
     println!();
 
     // Create and configure the tester
@@ -112,6 +113,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Exit with appropriate code
     std::process::exit(exit_code(&report));
+}
+
+fn startup_scope_line() -> &'static str {
+    "   Testing local RFC SETTINGS model; h2 reference is XFAIL"
 }
 
 /// Generate a concise summary output
@@ -280,5 +285,14 @@ mod tests {
         let report = synthetic_report(8, 0, 0, 0);
 
         assert_eq!(exit_code(&report), 0);
+    }
+
+    #[test]
+    fn startup_scope_line_does_not_claim_live_h2_reference() {
+        let line = startup_scope_line();
+
+        assert!(line.contains("h2 reference is XFAIL"));
+        assert!(!line.contains("vs h2 reference implementation"));
+        assert!(!line.contains("Testing asupersync against h2 reference"));
     }
 }

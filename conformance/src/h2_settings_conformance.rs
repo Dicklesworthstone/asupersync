@@ -1,15 +1,17 @@
-//! HTTP/2 SETTINGS frame conformance testing against h2 reference implementation.
+//! HTTP/2 SETTINGS frame conformance checks.
 //!
-//! Tests differential compliance: same SETTINGS sequence → identical effective connection state.
-//! Verifies RFC 7540 Section 6.5 compliance by comparing connection state fields:
+//! Exercises RFC-backed SETTINGS expected states. The h2 reference side is not
+//! wired because h2 does not expose direct SETTINGS frame manipulation, so local
+//! expected-state matches are reported as XFAIL instead of vendor-parity PASS.
+//!
+//! Verifies RFC 7540 Section 6.5 expected-state coverage for:
 //! - max_concurrent_streams
 //! - initial_window_size
 //! - header_table_size
-//!
-//! This addresses conformance requirements where our HTTP/2 implementation must
-//! behave identically to the reference h2 crate for all valid SETTINGS sequences.
 
 use serde::{Deserialize, Serialize};
+
+const H2_REFERENCE_UNIMPLEMENTED: &str = "h2 reference comparison not yet implemented";
 
 /// Settings field values for comparison between implementations
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -313,7 +315,34 @@ impl SettingsConformanceTester {
                     error: None,
                 }
             }
-            Err(error) => ConformanceResult {
+            Err(DifferentialError::ReferenceUnavailable { local_state, error }) => {
+                let (verdict, message) = match self
+                    .evaluate_local_expected_result(test_case, local_state.as_ref())
+                {
+                    Ok(()) => (
+                        TestVerdict::ExpectedFailure,
+                        format!(
+                            "{error}; local RFC expected-state model matched the test oracle, but live asupersync/h2 vendor parity remains unexercised"
+                        ),
+                    ),
+                    Err(local_error) => (
+                        TestVerdict::Fail,
+                        format!(
+                            "local SETTINGS expected-state model failed while {error}: {local_error}"
+                        ),
+                    ),
+                };
+
+                ConformanceResult {
+                    case_id: test_case.id.clone(),
+                    verdict,
+                    our_state: local_state.ok(),
+                    h2_state: None,
+                    execution_time_ms: start_time.elapsed().as_millis() as u64,
+                    error: Some(message),
+                }
+            }
+            Err(DifferentialError::Failure(error)) => ConformanceResult {
                 case_id: test_case.id.clone(),
                 verdict: TestVerdict::Fail,
                 our_state: None,
@@ -326,32 +355,42 @@ impl SettingsConformanceTester {
         result
     }
 
-    /// Execute differential test comparing our impl vs h2 reference
+    /// Execute the local RFC model and require an explicit live h2 reference.
     async fn execute_differential_test(
         &self,
         test_case: &SettingsConformanceCase,
-    ) -> Result<(SettingsSnapshot, SettingsSnapshot), String> {
-        // Test our implementation
-        let our_state = self
-            .run_asupersync_settings(&test_case.settings_sequence)
-            .map_err(|e| format!("Asupersync error: {}", e))?;
+    ) -> Result<(SettingsSnapshot, SettingsSnapshot), DifferentialError> {
+        // Exercise the local RFC model. This is not a live asupersync endpoint.
+        let local_state = self
+            .run_local_settings_model(&test_case.settings_sequence)
+            .map_err(|e| e.to_string());
 
-        // Test h2 reference implementation
-        let h2_state = self
+        // Test h2 reference implementation when a real seam exists. Today it
+        // fails closed instead of fabricating a second local model.
+        match self
             .run_h2_reference_settings(&test_case.settings_sequence)
             .await
-            .map_err(|e| format!("H2 reference error: {}", e))?;
-
-        Ok((our_state, h2_state))
+            .map_err(|e| e.to_string())
+        {
+            Ok(h2_state) => local_state
+                .map(|state| (state, h2_state))
+                .map_err(DifferentialError::Failure),
+            Err(error) if error == H2_REFERENCE_UNIMPLEMENTED => {
+                Err(DifferentialError::ReferenceUnavailable { local_state, error })
+            }
+            Err(error) => Err(DifferentialError::Failure(format!(
+                "H2 reference error: {error}"
+            ))),
+        }
     }
 
-    /// Run settings sequence on our asupersync implementation
-    fn run_asupersync_settings(
+    /// Run a SETTINGS sequence through the local RFC expected-state model.
+    fn run_local_settings_model(
         &self,
         settings_sequence: &[SettingsFrame],
     ) -> Result<SettingsSnapshot, Box<dyn std::error::Error>> {
-        // Simulate asupersync's HTTP/2 SETTINGS processing
-        // This mirrors the logic that should exist in src/http/h2/connection.rs
+        // Local RFC expected-state model. This does not exercise the live
+        // asupersync HTTP/2 connection.
         let mut settings_state = SettingsSnapshot {
             max_concurrent_streams: u32::MAX, // Default unlimited
             initial_window_size: 65535,       // RFC 7540 default
@@ -361,8 +400,7 @@ impl SettingsConformanceTester {
             enable_push: false,               // Client default
         };
 
-        // Process each settings frame to determine final state
-        // This should match the behavior in asupersync's HTTP/2 implementation
+        // Process each SETTINGS frame to determine expected final state.
         for settings_frame in settings_sequence {
             if !settings_frame.ack {
                 for setting in &settings_frame.settings {
@@ -405,67 +443,42 @@ impl SettingsConformanceTester {
         Ok(settings_state)
     }
 
-    /// Run settings sequence on h2 reference implementation
+    /// Run a SETTINGS sequence on a live h2 reference implementation.
     async fn run_h2_reference_settings(
         &self,
-        settings_sequence: &[SettingsFrame],
+        _settings_sequence: &[SettingsFrame],
     ) -> Result<SettingsSnapshot, Box<dyn std::error::Error + Send + Sync>> {
-        // Simulate h2's HTTP/2 SETTINGS processing behavior based on RFC 7540
-        // Note: Since h2 doesn't expose direct SETTINGS frame manipulation,
-        // we replicate the expected behavior from the specification
+        Err(H2_REFERENCE_UNIMPLEMENTED.into())
+    }
 
-        let mut settings_state = SettingsSnapshot {
-            max_concurrent_streams: u32::MAX, // h2 default unlimited
-            initial_window_size: 65535,       // RFC 7540 default
-            header_table_size: 4096,          // HPACK default
-            max_frame_size: 16384,            // RFC 7540 minimum (2^14)
-            max_header_list_size: u32::MAX,   // h2 default unlimited
-            enable_push: false,               // h2 client default
-        };
-
-        // Process each settings frame to determine final state
-        // This mirrors h2's internal SETTINGS processing
-        for settings_frame in settings_sequence {
-            if !settings_frame.ack {
-                for setting in &settings_frame.settings {
-                    match setting {
-                        Setting::HeaderTableSize(size) => {
-                            settings_state.header_table_size = *size;
-                        }
-                        Setting::EnablePush(enable) => {
-                            settings_state.enable_push = *enable;
-                        }
-                        Setting::MaxConcurrentStreams(max) => {
-                            // h2 treats 0 as unlimited (u32::MAX)
-                            let value = if *max == 0 { u32::MAX } else { *max };
-                            settings_state.max_concurrent_streams = value;
-                        }
-                        Setting::InitialWindowSize(size) => {
-                            // h2 validates against RFC 7540 constraints
-                            if *size > 0x7FFF_FFFF {
-                                return Err(
-                                    "FLOW_CONTROL_ERROR: Initial window size exceeds maximum"
-                                        .into(),
-                                );
-                            }
-                            settings_state.initial_window_size = *size;
-                        }
-                        Setting::MaxFrameSize(size) => {
-                            // h2 validates against RFC 7540 constraints
-                            if *size < 16384 || *size > 0xFF_FFFF {
-                                return Err("PROTOCOL_ERROR: Invalid frame size".into());
-                            }
-                            settings_state.max_frame_size = *size;
-                        }
-                        Setting::MaxHeaderListSize(size) => {
-                            settings_state.max_header_list_size = *size;
-                        }
-                    }
-                }
+    fn evaluate_local_expected_result(
+        &self,
+        test_case: &SettingsConformanceCase,
+        local_state: Result<&SettingsSnapshot, &String>,
+    ) -> Result<(), String> {
+        match (&test_case.expected_outcome, local_state) {
+            (ExpectedOutcome::Success { final_state }, Ok(state)) if state == final_state => Ok(()),
+            (ExpectedOutcome::Success { final_state }, Ok(state)) => Err(format!(
+                "expected final state {:?}, got {:?}",
+                final_state, state
+            )),
+            (ExpectedOutcome::Success { .. }, Err(error)) => {
+                Err(format!("expected success, got error {error}"))
             }
+            (ExpectedOutcome::ConnectionError { error_type }, Err(error))
+                if error.contains(error_type) =>
+            {
+                Ok(())
+            }
+            (ExpectedOutcome::ConnectionError { error_type }, Err(error)) => Err(format!(
+                "expected {error_type} connection error, got {error}"
+            )),
+            (ExpectedOutcome::ConnectionError { error_type }, Ok(state)) => Err(format!(
+                "expected {error_type} connection error, got state {:?}",
+                state
+            )),
+            (ExpectedOutcome::Divergence { .. }, _) => Ok(()),
         }
-
-        Ok(settings_state)
     }
 
     /// Evaluate test result against expected outcome
@@ -571,14 +584,22 @@ impl SettingsConformanceTester {
         }
 
         md.push_str("\n## Coverage Matrix\n\n");
-        md.push_str("| RFC Section | MUST Clauses | Tested | Passing | Score |\n");
-        md.push_str("|-------------|:------------:|:------:|:-------:|:-----:|\n");
-        md.push_str("| 6.5 (SETTINGS) | 8 | 7 | 7 | 100% |\n");
-        md.push_str("| 6.5.2 (Validation) | 4 | 4 | 4 | 100% |\n");
-        md.push_str("| 6.5.3 (Processing) | 3 | 3 | 3 | 100% |\n");
+        md.push_str("| RFC Section | Local Model Cases | Live h2 Reference | Status |\n");
+        md.push_str("|-------------|:-----------------:|:-----------------:|--------|\n");
+        md.push_str("| 6.5 (SETTINGS) | 8 | not wired | XFAIL |\n");
+        md.push_str("| 6.5.2 (Validation) | 4 | not wired | XFAIL |\n");
+        md.push_str("| 6.5.3 (Processing) | 3 | not wired | XFAIL |\n");
 
         md
     }
+}
+
+enum DifferentialError {
+    ReferenceUnavailable {
+        local_state: Result<SettingsSnapshot, String>,
+        error: String,
+    },
+    Failure(String),
 }
 
 #[cfg(test)]
@@ -595,8 +616,40 @@ mod tests {
         assert_eq!(basic_case.id, "RFC7540-6.5-basic-settings");
     }
 
+    #[tokio::test]
+    async fn h2_reference_unavailable_fails_closed_after_local_rfc_checks() {
+        let tester = SettingsConformanceTester::new();
+        let report = tester.run_all_tests().await;
+
+        assert_eq!(report.total_cases, 8);
+        assert_eq!(report.summary.passed, 0);
+        assert_eq!(report.summary.failed + report.summary.expected_failures, 8);
+        assert_eq!(report.summary.skipped, 0);
+        assert!(
+            report
+                .results
+                .iter()
+                .all(|result| result.verdict != TestVerdict::Pass),
+            "unwired h2 reference must not produce PASS verdicts"
+        );
+        assert!(
+            report.results.iter().all(|result| result
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains(H2_REFERENCE_UNIMPLEMENTED))),
+            "each fail-closed result must name the missing h2 vendor reference"
+        );
+        assert!(
+            report
+                .results
+                .iter()
+                .all(|result| result.h2_state.is_none()),
+            "h2 reference is intentionally not wired for this harness"
+        );
+    }
+
     #[test]
-    fn test_asupersync_settings_processing() {
+    fn test_local_settings_model_processing() {
         let tester = SettingsConformanceTester::new();
 
         // Test basic settings processing
@@ -608,7 +661,7 @@ mod tests {
             ack: false,
         }];
 
-        let result = tester.run_asupersync_settings(&settings_sequence);
+        let result = tester.run_local_settings_model(&settings_sequence);
         assert!(result.is_ok(), "Settings processing should succeed");
 
         let snapshot = result.unwrap();
