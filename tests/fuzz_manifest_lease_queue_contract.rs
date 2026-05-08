@@ -306,6 +306,24 @@ fn owned_manifest_and_target_reservations_allow_the_holder_to_proceed() {
 }
 
 #[test]
+fn owned_and_expired_reservations_queue_matches_exact_reviewed_golden() {
+    let output = run_queue("owned_and_expired_reservations.json");
+    assert!(
+        output.status.success(),
+        "queue helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actual = String::from_utf8(output.stdout).expect("queue output must be UTF-8");
+    let expected = fixture_text("owned_and_expired_reservations_expected.json");
+
+    serde_json::from_str::<Value>(&actual).expect("actual output must be JSON");
+    serde_json::from_str::<Value>(&expected).expect("golden output must be JSON");
+    assert_eq!(actual, expected);
+}
+
+#[test]
 fn helper_declares_it_does_not_mutate_or_run_proofs() {
     let receipt = queue_json("clean_queue.json");
 
