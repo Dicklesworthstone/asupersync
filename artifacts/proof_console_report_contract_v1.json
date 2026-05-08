@@ -1,0 +1,129 @@
+{
+  "contract_version": "proof-console-report-contract-v1",
+  "bead_id": "asupersync-xeh8m0.1",
+  "description": "Contract for a deterministic operator proof console report generated from the proof lane manifest, proof status snapshot, and validation frontier ledger.",
+  "generated_report": {
+    "artifact_path": "target/proof-console/proof_console_report_v1.json",
+    "schema_version": "proof-console-report-v1",
+    "deterministic_ordering": [
+      "claim_rows by claim_id",
+      "lane_rows by lane_id",
+      "failure_reasons by reason_id"
+    ]
+  },
+  "source_of_truth": {
+    "contract": "artifacts/proof_console_report_contract_v1.json",
+    "contract_test": "tests/proof_console_report_contract.rs",
+    "proof_lane_manifest": "artifacts/proof_lane_manifest_v1.json",
+    "proof_lane_manifest_verifier": "tests/proof_lane_manifest_contract.rs",
+    "proof_status_snapshot": "artifacts/proof_status_snapshot_v1.json",
+    "proof_status_snapshot_verifier": "tests/proof_status_snapshot_contract.rs",
+    "validation_frontier_ledger": "artifacts/validation_frontier_ledger_schema_v1.json"
+  },
+  "required_report_fields": [
+    "schema_version",
+    "generated_at",
+    "generator",
+    "source_artifact_hashes",
+    "summary",
+    "claim_rows",
+    "lane_rows",
+    "rch_outcomes",
+    "failure_reasons",
+    "verdict"
+  ],
+  "summary_required_fields": [
+    "claim_count",
+    "lane_count",
+    "green_claim_count",
+    "yellow_claim_count",
+    "red_claim_count",
+    "stale_blocker_count",
+    "unsupported_broad_claim_count",
+    "unclassified_rch_outcome_count"
+  ],
+  "claim_row_required_fields": [
+    "claim_id",
+    "category",
+    "status",
+    "manifest_lane_ids",
+    "manifest_guarantee_ids",
+    "proof_commands",
+    "blocked_frontier",
+    "doc_claim_markers"
+  ],
+  "lane_row_required_fields": [
+    "lane_id",
+    "kind",
+    "command",
+    "guarantee_ids",
+    "expected_signal",
+    "status",
+    "explicit_not_covered"
+  ],
+  "allowed_lane_statuses": [
+    "not_run",
+    "pass",
+    "blocked_external",
+    "failed_local",
+    "not_applicable"
+  ],
+  "allowed_claim_statuses": [
+    "green",
+    "yellow_scoped",
+    "yellow_frontier",
+    "red_blocked_external"
+  ],
+  "allowed_rch_outcome_classes": [
+    "pass",
+    "blocked_external",
+    "failed_local",
+    "blocked_coordination",
+    "wrapper_hang_after_remote_exit",
+    "cancelled"
+  ],
+  "fail_closed_conditions": [
+    {
+      "reason_id": "missing-lane-status",
+      "description": "Every lane row must classify the latest known status using allowed_lane_statuses."
+    },
+    {
+      "reason_id": "stale-blocker-row",
+      "description": "A red or blocked row must carry a fresh generated_at timestamp and first_failure file/line evidence."
+    },
+    {
+      "reason_id": "unsupported-broad-claim",
+      "description": "The report must reject claims broader than the manifest lane coverage or explicit_not_covered text."
+    },
+    {
+      "reason_id": "unclassified-rch-outcome",
+      "description": "Every rch outcome must map to allowed_rch_outcome_classes before the report can pass."
+    },
+    {
+      "reason_id": "missing-source-artifact-hash",
+      "description": "The report must carry source artifact hashes for the manifest, snapshot, and validation frontier ledger."
+    },
+    {
+      "reason_id": "raw-coordination-data",
+      "description": "The report must not expose unredacted Agent Mail bodies, local home paths, or shell transcripts with secrets."
+    }
+  ],
+  "operator_verdicts": [
+    {
+      "verdict": "pass",
+      "allowed_when": "All required fields are present, all rows are classified, and no fail_closed_conditions are active."
+    },
+    {
+      "verdict": "fail_closed",
+      "allowed_when": "Any required field, row classification, freshness, unsupported claim, or redaction condition fails."
+    },
+    {
+      "verdict": "no_win",
+      "allowed_when": "All rows are classified but the correct operator action is to hold because no safe proof lane can currently establish the claim."
+    }
+  ],
+  "proof_commands": [
+    "rch exec -- cargo test -p asupersync --test proof_console_report_contract -- --nocapture",
+    "rch exec -- cargo test -p asupersync --test proof_lane_manifest_contract --test proof_status_snapshot_contract -- --nocapture"
+  ]
+}
