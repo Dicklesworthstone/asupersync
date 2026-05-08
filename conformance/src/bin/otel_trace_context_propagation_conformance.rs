@@ -1,7 +1,8 @@
 //! OpenTelemetry Trace Context Propagation Conformance Test
 //!
 //! Pattern 3: Round-Trip Conformance testing
-//! Ensures SpanContext inject → extract == identity per propagator
+//! Ensures SpanContext inject → extract == identity per propagator, but keeps
+//! a fail-closed conformance guard until a live independent reference is wired.
 
 use clap::{Arg, Command};
 use opentelemetry::propagation::{Extractor, Injector, TextMapPropagator};
@@ -13,6 +14,8 @@ const B3_SINGLE_HEADER: &str = "b3";
 const B3_TRACE_ID_HEADER: &str = "x-b3-traceid";
 const B3_SPAN_ID_HEADER: &str = "x-b3-spanid";
 const B3_SAMPLED_HEADER: &str = "x-b3-sampled";
+const OTEL_TRACE_CONTEXT_REFERENCE_UNIMPLEMENTED: &str =
+    "Live opentelemetry trace-context reference: unavailable";
 
 /// Conformance test result tracking
 #[derive(Debug, Clone, PartialEq)]
@@ -113,14 +116,34 @@ fn main() {
     let test_name = matches.get_one::<String>("test").unwrap();
     let verbose = matches.get_flag("verbose");
 
-    let result = match test_name.as_str() {
-        "w3c-traceparent-roundtrip" => run_w3c_traceparent_roundtrip_test(verbose),
-        "w3c-tracestate-roundtrip" => run_w3c_tracestate_roundtrip_test(verbose),
-        "w3c-traceparent-invalid-handling" => run_w3c_invalid_handling_test(verbose),
-        "b3-single-header-roundtrip" => run_b3_single_header_roundtrip_test(verbose),
-        "b3-multi-header-roundtrip" => run_b3_multi_header_roundtrip_test(verbose),
-        "propagator-interoperability" => run_propagator_interoperability_test(verbose),
-        "edge-case-scenarios" => run_edge_case_scenarios_test(verbose),
+    match test_name.as_str() {
+        "w3c-traceparent-roundtrip" => exit_if_not_pass(
+            "w3c-traceparent-roundtrip",
+            run_w3c_traceparent_roundtrip_test(verbose),
+        ),
+        "w3c-tracestate-roundtrip" => exit_if_not_pass(
+            "w3c-tracestate-roundtrip",
+            run_w3c_tracestate_roundtrip_test(verbose),
+        ),
+        "w3c-traceparent-invalid-handling" => exit_if_not_pass(
+            "w3c-traceparent-invalid-handling",
+            run_w3c_invalid_handling_test(verbose),
+        ),
+        "b3-single-header-roundtrip" => exit_if_not_pass(
+            "b3-single-header-roundtrip",
+            run_b3_single_header_roundtrip_test(verbose),
+        ),
+        "b3-multi-header-roundtrip" => exit_if_not_pass(
+            "b3-multi-header-roundtrip",
+            run_b3_multi_header_roundtrip_test(verbose),
+        ),
+        "propagator-interoperability" => exit_if_not_pass(
+            "propagator-interoperability",
+            run_propagator_interoperability_test(verbose),
+        ),
+        "edge-case-scenarios" => {
+            exit_if_not_pass("edge-case-scenarios", run_edge_case_scenarios_test(verbose))
+        }
         "report" => {
             generate_compliance_report();
             return;
@@ -133,25 +156,33 @@ fn main() {
             eprintln!("Unknown test: {}", test_name);
             std::process::exit(1);
         }
-    };
+    }
+}
+
+fn exit_if_not_pass(test_name: &str, result: ConformanceTestResult) {
+    let exit_code = exit_code_for_result(&result);
+    if exit_code == 0 {
+        return;
+    }
 
     match result {
-        ConformanceTestResult::Pass => println!("ALL TESTS PASSED"),
+        ConformanceTestResult::Pass => {}
         ConformanceTestResult::Fail { reason } => {
-            eprintln!("FAIL: {}", reason);
-            std::process::exit(1);
+            eprintln!("{test_name}: FAIL - {reason}");
         }
         ConformanceTestResult::ExpectedFailure { reason } => {
-            println!("EXPECTED FAILURE: {}", reason);
+            eprintln!("{test_name}: XFAIL - {reason}");
         }
     }
+
+    std::process::exit(exit_code);
 }
 
 fn run_all_tests(verbose: bool) {
     println!("=== OpenTelemetry Trace Context Propagation Conformance Testing ===\n");
 
     let mut total = 0;
-    let mut passed = 0;
+    let passed = 0;
     let mut failed = 0;
     let mut xfail = 0;
 
@@ -304,10 +335,7 @@ fn run_all_tests(verbose: bool) {
         let result = run_propagation_conformance_test(test_case, verbose);
 
         match &result {
-            ConformanceTestResult::Pass => {
-                passed += 1;
-                println!("✅ PASS");
-            }
+            ConformanceTestResult::Pass => println!("✅ PASS"),
             ConformanceTestResult::Fail { reason } => {
                 failed += 1;
                 println!("❌ FAIL");
@@ -355,13 +383,9 @@ fn run_all_tests(verbose: bool) {
     println!("│  🎯 Score: {:.1}%                   │", score);
     println!("└─────────────────────────────────────┘");
 
-    if failed > 0 {
-        eprintln!("\n❌ {} conformance tests failed", failed);
-        std::process::exit(1);
-    } else {
-        println!("\n✅ ALL TESTS PASSED - Trace context propagation is conformant");
-        println!("🎯 inject→extract roundtrip preserves SpanContext identity per propagator");
-    }
+    let exit_code = exit_code_for_summary(total, failed, xfail);
+    println!("\n{}", final_status_line(total, failed, xfail));
+    std::process::exit(exit_code);
 }
 
 /// Run conformance test for a single test case
@@ -415,7 +439,38 @@ fn run_propagation_conformance_test(
         }
     }
 
-    ConformanceTestResult::Pass
+    ConformanceTestResult::ExpectedFailure {
+        reason: format!(
+            "{OTEL_TRACE_CONTEXT_REFERENCE_UNIMPLEMENTED}; local round-trip guards ran but refusing synthetic self-comparison"
+        ),
+    }
+}
+
+fn exit_code_for_result(result: &ConformanceTestResult) -> i32 {
+    match result {
+        ConformanceTestResult::Pass => 0,
+        ConformanceTestResult::Fail { .. } | ConformanceTestResult::ExpectedFailure { .. } => 1,
+    }
+}
+
+fn exit_code_for_summary(total: usize, failed: usize, expected_failures: usize) -> i32 {
+    if total == 0 || failed > 0 || expected_failures > 0 {
+        1
+    } else {
+        0
+    }
+}
+
+fn final_status_line(total: usize, failed: usize, expected_failures: usize) -> String {
+    if total == 0 {
+        "NO TESTS EXECUTED".to_string()
+    } else if failed > 0 {
+        format!("FAILURES PRESENT ({failed} failed, {expected_failures} expected failures)")
+    } else if expected_failures > 0 {
+        format!("NO FAILURES; PARTIAL COVERAGE ({expected_failures} expected failures)")
+    } else {
+        "ALL TESTS PASSED - live trace-context reference matched".to_string()
+    }
 }
 
 /// Test inject→extract roundtrip for specific propagator
@@ -861,40 +916,29 @@ fn generate_compliance_report() {
 
     println!("## Coverage Matrix");
     println!();
-    println!("| Test Case | Requirement Level | Status | Description |");
-    println!("|-----------|--------------------|--------|-------------|");
-    println!("| w3c-traceparent-roundtrip | MUST | ✅ | W3C traceparent inject→extract identity |");
-    println!(
-        "| w3c-tracestate-roundtrip | SHOULD | ✅ | W3C tracestate vendor data preservation |"
-    );
-    println!(
-        "| w3c-traceparent-invalid-handling | MUST | ✅ | W3C invalid header handling per spec |"
-    );
-    println!(
-        "| b3-single-header-roundtrip | SHOULD | ✅ | B3 single header inject→extract identity |"
-    );
-    println!(
-        "| b3-multi-header-roundtrip | SHOULD | ✅ | B3 multi-header inject→extract identity |"
-    );
-    println!("| propagator-interoperability | MAY | ✅ | Cross-propagator graceful handling |");
+    println!("| Test Case | Requirement Level | Local Status Oracle | Live SDK Reference |");
+    println!("|-----------|--------------------|---------------------|--------------------|");
+    println!("| w3c-traceparent-roundtrip | MUST | checked | XFAIL - not wired |");
+    println!("| w3c-tracestate-roundtrip | SHOULD | checked | XFAIL - not wired |");
+    println!("| w3c-traceparent-invalid-handling | MUST | checked | XFAIL - not wired |");
+    println!("| b3-single-header-roundtrip | SHOULD | checked | XFAIL - not wired |");
+    println!("| b3-multi-header-roundtrip | SHOULD | checked | XFAIL - not wired |");
+    println!("| propagator-interoperability | MAY | checked | XFAIL - not wired |");
     println!();
 
     println!("## Specification Coverage");
     println!();
-    println!("### MUST clauses: 2/2 (100%)");
-    println!("### SHOULD clauses: 3/3 (100%)");
-    println!("### MAY clauses: 1/1 (100%)");
-    println!("### Overall score: 100%");
+    println!("### Local trace-context round-trip guards: available");
+    println!("### {OTEL_TRACE_CONTEXT_REFERENCE_UNIMPLEMENTED}");
+    println!("### Overall score: unavailable");
     println!();
 
     println!("## Known Divergences");
     println!();
-    println!("None documented.");
+    println!("- {OTEL_TRACE_CONTEXT_REFERENCE_UNIMPLEMENTED}");
     println!();
 
-    println!(
-        "✅ **CONFORMANT** - Trace context inject→extract roundtrip preserves SpanContext identity per propagator"
-    );
+    println!("⚠️ **XFAIL** - Trace context local checks run, but live SDK parity is not proven");
 }
 
 #[cfg(test)]
@@ -982,5 +1026,45 @@ mod tests {
         assert!(!source.contains(concat!("simulate ", "B3 behavior")));
         assert!(!source.contains(concat!("would use actual ", "B3 propagator")));
         assert!(!source.contains(concat!("Ok(original_context", ".clone())")));
+    }
+
+    #[test]
+    fn runner_xfails_without_live_trace_context_reference() {
+        let result = run_w3c_traceparent_roundtrip_test(false);
+
+        match result {
+            ConformanceTestResult::ExpectedFailure { reason } => {
+                assert!(reason.contains(OTEL_TRACE_CONTEXT_REFERENCE_UNIMPLEMENTED));
+                assert!(reason.contains("local round-trip guards ran"));
+            }
+            other => {
+                panic!("expected XFAIL while trace-context reference is unwired, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn exit_code_is_nonzero_for_expected_failure_results() {
+        let result = ConformanceTestResult::ExpectedFailure {
+            reason: "known divergence".to_string(),
+        };
+
+        assert_eq!(exit_code_for_result(&result), 1);
+    }
+
+    #[test]
+    fn exit_code_is_zero_only_for_clean_summary() {
+        assert_eq!(exit_code_for_summary(6, 0, 0), 0);
+        assert_eq!(exit_code_for_summary(0, 0, 0), 1);
+        assert_eq!(exit_code_for_summary(6, 1, 0), 1);
+        assert_eq!(exit_code_for_summary(6, 0, 1), 1);
+    }
+
+    #[test]
+    fn final_status_line_reports_partial_coverage_for_xfail_only() {
+        let status = final_status_line(6, 0, 1);
+
+        assert!(status.contains("NO FAILURES; PARTIAL COVERAGE"));
+        assert!(!status.contains("ALL TESTS PASSED"));
     }
 }

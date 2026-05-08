@@ -289,6 +289,30 @@
       ]
     },
     {
+      "surface_id": "otel-trace-context-propagation",
+      "binary": "otel_trace_context_propagation_conformance",
+      "source_path": "conformance/src/bin/otel_trace_context_propagation_conformance.rs",
+      "reference_family": "OpenTelemetry trace context propagation",
+      "reference_status": "live_reference_not_wired",
+      "fail_closed_without_live_reference": true,
+      "runtime_allowed_verdicts": [
+        "xfail",
+        "fail"
+      ],
+      "proof_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_otel_trace_context_registry CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test --manifest-path conformance/Cargo.toml --bin otel_trace_context_propagation_conformance -- --nocapture",
+      "proof_lane": "binary-unit-fail-closed",
+      "required_source_markers": [
+        "fail-closed conformance guard",
+        "XFAIL",
+        "Live opentelemetry trace-context reference: unavailable"
+      ],
+      "forbidden_source_tokens": [
+        "Overall score: 100%",
+        "ALL TESTS PASSED - Trace context propagation is conformant",
+        "**CONFORMANT** - Trace context inject"
+      ]
+    },
+    {
       "surface_id": "otel-trace-id-randomness",
       "binary": "otel_trace_id_randomness_conformance",
       "source_path": "conformance/src/bin/otel_trace_id_randomness_conformance.rs",
