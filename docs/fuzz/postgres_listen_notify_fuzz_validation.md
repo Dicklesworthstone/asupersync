@@ -38,7 +38,7 @@ The new fuzz target at `fuzz/fuzz_targets/postgres_listen_notify.rs` fully addre
 
 ### Compilation Check ✅
 ```bash
-cargo check --bin postgres_listen_notify --manifest-path fuzz/Cargo.toml  
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fuzz_validation_docs cargo check --bin postgres_listen_notify --manifest-path fuzz/Cargo.toml
 # Result: SUCCESS with minor warnings only (unused imports and variables)
 ```
 

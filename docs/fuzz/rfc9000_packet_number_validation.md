@@ -80,7 +80,7 @@ Added comprehensive conformance tests for QUIC packet number encoding per RFC 90
 
 ### Compilation Check ✅
 ```bash
-cargo check --lib --quiet
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fuzz_validation_docs cargo check --lib --quiet
 # Result: SUCCESS (exit code 0) - all tests compile cleanly
 ```
 

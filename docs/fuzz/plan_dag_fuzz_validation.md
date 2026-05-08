@@ -38,7 +38,7 @@ The new fuzz target at `fuzz/fuzz_targets/plan_dag_fuzz.rs` fully addresses all 
 
 ### Compilation Check ✅
 ```bash
-cargo check --bin plan_dag_fuzz --manifest-path fuzz/Cargo.toml  
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fuzz_validation_docs cargo check --bin plan_dag_fuzz --manifest-path fuzz/Cargo.toml
 # Result: SUCCESS with minor warnings only (unused variables in error handling)
 ```
 

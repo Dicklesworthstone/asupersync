@@ -38,7 +38,7 @@ The existing fuzz target at `fuzz/fuzz_targets/stealing_fuzz.rs` fully addresses
 
 ### Compilation Check ✅
 ```bash
-cargo check --bin stealing_fuzz --manifest-path fuzz/Cargo.toml
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fuzz_validation_docs cargo check --bin stealing_fuzz --manifest-path fuzz/Cargo.toml
 # Result: SUCCESS with minor warnings only
 ```
 
