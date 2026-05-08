@@ -232,6 +232,7 @@ fn doc_claim_markers_are_present_in_readme_and_agents() {
         (README_PATH, read_repo_file(README_PATH)),
         (AGENTS_PATH, read_repo_file(AGENTS_PATH)),
     ]);
+    let required_docs = docs.keys().copied().collect::<BTreeSet<_>>();
 
     for entry in array(&snapshot, "claim_categories") {
         let claim_id = string(entry, "claim_id");
@@ -239,6 +240,11 @@ fn doc_claim_markers_are_present_in_readme_and_agents() {
             .get("doc_claim_markers")
             .and_then(Value::as_object)
             .unwrap_or_else(|| panic!("{claim_id}: doc_claim_markers must be an object"));
+        let marker_docs = markers.keys().map(String::as_str).collect::<BTreeSet<_>>();
+        assert_eq!(
+            marker_docs, required_docs,
+            "{claim_id}: each proof claim must carry README and AGENTS markers"
+        );
         for (path, marker_values) in markers {
             let doc = docs
                 .get(path.as_str())
