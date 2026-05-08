@@ -1122,33 +1122,8 @@ mod tests {
             .expect("pressure governor should initialize");
         let cx = runtime.request_cx_with_budget(Budget::INFINITE);
 
-        let saturated = governor
-            .sample_pressure(&cx)
-            .expect("pressure snapshot should not fail");
-        assert!(saturated.signal_availability.runnable_queue);
-        assert!(saturated.signal_availability.blocking_pool);
-        assert!(!saturated.signal_availability.channel_backlog);
-        assert_eq!(
-            saturated.fallback_verdict,
-            PressureFallbackVerdict::PartialSignalsUnavailable
-        );
-        assert_eq!(saturated.runnable_queue_pressure, 0.0);
-        assert!(
-            saturated.blocking_pool_pressure >= 1.0,
-            "busy plus queued blocking work should saturate the pool, got {}",
-            saturated.blocking_pool_pressure
-        );
-        assert_eq!(saturated.overall_pressure, saturated.blocking_pool_pressure);
-
-        let decision = governor
-            .check_admission(&cx)
-            .expect("admission decision should not fail");
-        assert_eq!(decision, AdmissionDecision::Reject);
-        assert_eq!(
-            governor.fallback_verdict_metric(),
-            PressureFallbackVerdict::PartialSignalsUnavailable.as_metric_value()
-        );
-        assert_eq!(governor.fallback_total.get(), 1);
+        let saturated = governor.sample_pressure(&cx);
+        let decision = governor.check_admission(&cx);
 
         release_tx
             .send(())
@@ -1168,6 +1143,31 @@ mod tests {
         let drained = governor
             .sample_pressure(&cx)
             .expect("drained pressure snapshot should not fail");
+
+        let saturated = saturated.expect("pressure snapshot should not fail");
+        assert!(saturated.signal_availability.runnable_queue);
+        assert!(saturated.signal_availability.blocking_pool);
+        assert!(!saturated.signal_availability.channel_backlog);
+        assert_eq!(
+            saturated.fallback_verdict,
+            PressureFallbackVerdict::PartialSignalsUnavailable
+        );
+        assert_eq!(saturated.runnable_queue_pressure, 0.0);
+        assert!(
+            saturated.blocking_pool_pressure >= 1.0,
+            "busy plus queued blocking work should saturate the pool, got {}",
+            saturated.blocking_pool_pressure
+        );
+        assert_eq!(saturated.overall_pressure, saturated.blocking_pool_pressure);
+
+        let decision = decision.expect("admission decision should not fail");
+        assert_eq!(decision, AdmissionDecision::Reject);
+        assert_eq!(
+            governor.fallback_verdict_metric(),
+            PressureFallbackVerdict::PartialSignalsUnavailable.as_metric_value()
+        );
+        assert_eq!(governor.fallback_total.get(), 1);
+
         assert!(drained.signal_availability.runnable_queue);
         assert!(drained.signal_availability.blocking_pool);
         assert_eq!(drained.runnable_queue_pressure, 0.0);
