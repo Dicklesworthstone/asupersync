@@ -1,0 +1,16 @@
+{
+  "schema_version": "parser-fuzz-coverage-input-v1",
+  "parser_surfaces": [
+    {
+      "id": "postgres_row_description_parse",
+      "path": "src/database/postgres.rs",
+      "symbol": "parse_row_description",
+      "visibility": "pub",
+      "input_kind": "&[u8]",
+      "risk": "high",
+      "category": "postgres"
+    }
+  ],
+  "fuzz_targets": [],
+  "exemptions": []
+}

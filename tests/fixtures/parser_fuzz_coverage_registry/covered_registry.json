@@ -1,0 +1,40 @@
+{
+  "schema_version": "parser-fuzz-coverage-input-v1",
+  "parser_surfaces": [
+    {
+      "id": "http_h1_request_parse",
+      "path": "src/http/h1/parser.rs",
+      "symbol": "parse_request",
+      "visibility": "pub",
+      "input_kind": "&[u8]",
+      "risk": "high",
+      "category": "http"
+    },
+    {
+      "id": "redis_resp_decode",
+      "path": "src/messaging/redis.rs",
+      "symbol": "try_decode_with_limits",
+      "visibility": "pub",
+      "input_kind": "&[u8]",
+      "risk": "critical",
+      "category": "redis"
+    }
+  ],
+  "fuzz_targets": [
+    {
+      "id": "fuzz_http_h1_codec_split_crlf",
+      "path": "fuzz/fuzz_targets/http_h1_codec_split_crlf.rs",
+      "exists": true,
+      "covers": ["http_h1_request_parse"],
+      "references": ["parse_request"]
+    },
+    {
+      "id": "fuzz_redis_resp3_map_parse",
+      "path": "fuzz/fuzz_targets/redis_resp3_map_parse.rs",
+      "exists": true,
+      "covers": ["redis_resp_decode"],
+      "references": ["try_decode_with_limits"]
+    }
+  ],
+  "exemptions": []
+}

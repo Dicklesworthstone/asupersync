@@ -1,0 +1,38 @@
+{
+  "schema_version": "parser-fuzz-coverage-input-v1",
+  "parser_surfaces": [
+    {
+      "id": "nats_header_parse",
+      "path": "src/messaging/nats.rs",
+      "symbol": "parse_nats_headers",
+      "visibility": "pub",
+      "input_kind": "&str",
+      "risk": "medium",
+      "category": "nats"
+    }
+  ],
+  "fuzz_targets": [
+    {
+      "id": "fuzz_nats_headers_a",
+      "path": "fuzz/fuzz_targets/nats_headers_a.rs",
+      "exists": true,
+      "covers": ["nats_header_parse"],
+      "references": ["parse_nats_headers"]
+    },
+    {
+      "id": "fuzz_nats_headers_a",
+      "path": "fuzz/fuzz_targets/nats_headers_a.rs",
+      "exists": true,
+      "covers": ["nats_header_parse", "nats_header_parse"],
+      "references": ["parse_nats_headers", "parse_nats_headers"]
+    },
+    {
+      "id": "fuzz_nats_headers_b",
+      "path": "fuzz/fuzz_targets/nats_headers_b.rs",
+      "exists": true,
+      "covers": ["nats_header_parse"],
+      "references": ["parse_nats_headers"]
+    }
+  ],
+  "exemptions": []
+}
