@@ -73,7 +73,10 @@ fn assert_output_matches_golden(
     let expected = fixture_text(expected_fixture);
     let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
     let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
-    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
+    assert_eq!(
+        actual_json, expected_json,
+        "parsed claim/reservation receipt JSON drifted for {reservation_fixture} + {git_status_fixture} -> {expected_fixture}"
+    );
     assert_eq!(actual, expected, "{drift_message}");
 }
 
