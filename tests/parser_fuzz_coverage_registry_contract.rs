@@ -127,6 +127,26 @@ fn missing_high_risk_parser_surface_fails_with_action_item() {
 }
 
 #[test]
+fn missing_high_risk_matches_full_output_golden() {
+    let output = run_registry("missing_high_risk.json");
+    assert!(
+        output.status.success(),
+        "registry helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = String::from_utf8(output.stdout).expect("registry stdout is UTF-8");
+    let expected = fixture_text("missing_high_risk_expected.json");
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual registry output is JSON");
+    let expected_json: Value =
+        serde_json::from_str(&expected).expect("expected registry output is JSON");
+    assert_eq!(actual_json, expected_json, "registry golden JSON drifted");
+    assert_eq!(actual, expected, "registry golden text drifted");
+}
+
+#[test]
 fn exemptions_need_reason_and_future_expiry() {
     let receipt = registry_json("exempt_and_expired.json");
 

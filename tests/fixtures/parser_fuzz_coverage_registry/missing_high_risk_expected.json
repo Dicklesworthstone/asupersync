@@ -1,0 +1,64 @@
+{
+  "action_items": [
+    "add a fuzz target covering postgres_row_description_parse"
+  ],
+  "coverage": [
+    {
+      "evidence": {
+        "covering_targets": [],
+        "exemption_status": "missing",
+        "partial_targets": [],
+        "stale_covering_targets": []
+      },
+      "risk_rank": 3,
+      "status": "missing",
+      "surface": {
+        "category": "postgres",
+        "id": "postgres_row_description_parse",
+        "input_kind": "&[u8]",
+        "path": "src/database/postgres.rs",
+        "risk": "high",
+        "symbol": "parse_row_description",
+        "visibility": "pub"
+      }
+    }
+  ],
+  "current_date": "2026-05-08",
+  "forbidden_actions": {
+    "edits_fuzz_manifest": false,
+    "runs_beads_mutation": false,
+    "runs_cargo": false,
+    "runs_destructive_command": false,
+    "runs_git_mutation": false
+  },
+  "generated_at": "2026-05-08T05:45:00Z",
+  "input_schema_version": "parser-fuzz-coverage-input-v1",
+  "missing_coverage": [
+    "postgres_row_description_parse"
+  ],
+  "non_mutating": true,
+  "partial_coverage": [],
+  "requirements": {
+    "coverage_uses_active_fuzz_target": true,
+    "every_public_byte_or_string_parser_has_coverage_or_exemption": false,
+    "exemptions_have_reason_and_future_expiry": true,
+    "input_schema_recognized": true,
+    "partial_references_are_not_counted_as_coverage": true
+  },
+  "schema_version": "parser-fuzz-coverage-registry-v1",
+  "source": "tests/fixtures/parser_fuzz_coverage_registry/missing_high_risk.json",
+  "source_counts": {
+    "exemptions": 0,
+    "fuzz_targets": 0,
+    "parser_surfaces": 1
+  },
+  "summary": {
+    "covered": 0,
+    "exempt": 0,
+    "invalid_exemptions": 0,
+    "missing": 1,
+    "partial": 0,
+    "passes": false,
+    "stale_covering_targets": 0
+  }
+}
