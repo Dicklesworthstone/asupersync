@@ -48,6 +48,11 @@ fn receipt_json(fixture: &str, wrapper_exit_code: Option<i32>) -> Value {
     receipt_from_output(output)
 }
 
+fn receipt_text(fixture: &str, wrapper_exit_code: Option<i32>) -> String {
+    let output = run_receipt(fixture, wrapper_exit_code);
+    receipt_text_from_output(output)
+}
+
 fn receipt_json_with_args(
     fixture: &str,
     wrapper_exit_code: Option<i32>,
@@ -57,7 +62,21 @@ fn receipt_json_with_args(
     receipt_from_output(output)
 }
 
+fn receipt_text_with_args(
+    fixture: &str,
+    wrapper_exit_code: Option<i32>,
+    extra_args: &[&str],
+) -> String {
+    let output = run_receipt_with_args(fixture, wrapper_exit_code, extra_args);
+    receipt_text_from_output(output)
+}
+
 fn receipt_from_output(output: Output) -> Value {
+    let text = receipt_text_from_output(output);
+    serde_json::from_str(&text).expect("receipt output must be JSON")
+}
+
+fn receipt_text_from_output(output: Output) -> String {
     assert!(
         output.status.success(),
         "receipt helper failed: {}\nstdout: {}\nstderr: {}",
@@ -65,13 +84,20 @@ fn receipt_from_output(output: Output) -> Value {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    serde_json::from_slice(&output.stdout).expect("receipt output must be JSON")
+    String::from_utf8(output.stdout).expect("receipt output must be UTF-8")
 }
 
-fn fixture_json(fixture: &str) -> Value {
-    let raw = fs::read_to_string(repo_root().join(FIXTURE_ROOT).join(fixture))
-        .expect("read fixture JSON");
-    serde_json::from_str(&raw).expect("fixture must be JSON")
+fn fixture_text(fixture: &str) -> String {
+    fs::read_to_string(repo_root().join(FIXTURE_ROOT).join(fixture)).expect("read fixture text")
+}
+
+fn assert_json_text_eq(actual: &str, expected: &str) {
+    let actual_json: Value = serde_json::from_str(actual).expect("actual receipt output JSON");
+    let expected_json: Value =
+        serde_json::from_str(expected).expect("expected receipt output JSON");
+
+    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
+    assert_eq!(actual, expected);
 }
 
 #[test]
@@ -123,10 +149,10 @@ fn completed_artifact_retrieval_is_clean_remote_success() {
 
 #[test]
 fn remote_success_matches_full_output_golden() {
-    let actual = receipt_json("remote_success.log", None);
-    let expected = fixture_json("remote_success_expected.json");
+    let actual = receipt_text("remote_success.log", None);
+    let expected = fixture_text("remote_success_expected.json");
 
-    assert_eq!(actual, expected);
+    assert_json_text_eq(&actual, &expected);
 }
 
 #[test]
@@ -165,10 +191,10 @@ fn remote_pass_then_retrieval_timeout_is_split_verdict() {
 
 #[test]
 fn remote_pass_then_retrieval_timeout_matches_full_output_golden() {
-    let actual = receipt_json("passed_after_retrieval_timeout.log", Some(124));
-    let expected = fixture_json("passed_after_retrieval_timeout_expected.json");
+    let actual = receipt_text("passed_after_retrieval_timeout.log", Some(124));
+    let expected = fixture_text("passed_after_retrieval_timeout_expected.json");
 
-    assert_eq!(actual, expected);
+    assert_json_text_eq(&actual, &expected);
 }
 
 #[test]
@@ -226,7 +252,7 @@ fn multistage_target_retrieval_timeout_is_not_clean_success() {
 
 #[test]
 fn multistage_target_retrieval_matches_full_output_golden() {
-    let actual = receipt_json_with_args(
+    let actual = receipt_text_with_args(
         "multistage_target_timeout.log",
         Some(124),
         &[
@@ -238,9 +264,9 @@ fn multistage_target_retrieval_matches_full_output_golden() {
             "2000",
         ],
     );
-    let expected = fixture_json("multistage_target_timeout_expected.json");
+    let expected = fixture_text("multistage_target_timeout_expected.json");
 
-    assert_eq!(actual, expected);
+    assert_json_text_eq(&actual, &expected);
 }
 
 #[test]
@@ -359,10 +385,10 @@ fn remote_failure_is_not_treated_as_green_proof() {
 
 #[test]
 fn remote_failure_matches_full_output_golden() {
-    let actual = receipt_json("remote_failure.log", Some(101));
-    let expected = fixture_json("remote_failure_expected.json");
+    let actual = receipt_text("remote_failure.log", Some(101));
+    let expected = fixture_text("remote_failure_expected.json");
 
-    assert_eq!(actual, expected);
+    assert_json_text_eq(&actual, &expected);
 }
 
 #[test]
@@ -382,10 +408,10 @@ fn local_fallback_invalidates_captured_cargo_output() {
 
 #[test]
 fn local_fallback_matches_full_output_golden() {
-    let actual = receipt_json("local_fallback.log", None);
-    let expected = fixture_json("local_fallback_expected.json");
+    let actual = receipt_text("local_fallback.log", None);
+    let expected = fixture_text("local_fallback_expected.json");
 
-    assert_eq!(actual, expected);
+    assert_json_text_eq(&actual, &expected);
 }
 
 #[test]
