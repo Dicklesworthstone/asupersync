@@ -1,0 +1,346 @@
+{
+  "contract_version": "proof-lane-manifest-v1",
+  "bead_id": "asupersync-aj7lx3.1",
+  "command_policy": {
+    "all_commands_must_start_with": "rch exec -- ",
+    "cpu_intensive_validation_must_use_rch": true,
+    "formal_lean_build_must_not_shell_wrap": true,
+    "broad_validation_is_frontier_evidence_not_local_change_proof": true
+  },
+  "source_of_truth": {
+    "manifest": "artifacts/proof_lane_manifest_v1.json",
+    "contract_test": "tests/proof_lane_manifest_contract.rs",
+    "cargo_manifest": "Cargo.toml",
+    "agent_instructions": "AGENTS.md",
+    "readme": "README.md"
+  },
+  "documentation_contract": {
+    "docs_must_reference_manifest": [
+      "README.md",
+      "AGENTS.md"
+    ],
+    "required_marker": "artifacts/proof_lane_manifest_v1.json",
+    "verifier_marker": "tests/proof_lane_manifest_contract.rs"
+  },
+  "required_guarantee_ids": [
+    "default-production-tokio-free",
+    "metrics-production-tokio-free",
+    "fuzz-tokio-quarantine",
+    "workspace-tokio-audit",
+    "feature-gated-native-surfaces",
+    "fuzz-manifest-smoke",
+    "lib-test-frontier",
+    "all-target-compile-frontier",
+    "clippy-frontier",
+    "rustfmt-frontier",
+    "rustdoc-api-frontier",
+    "formal-lean-core-invariants",
+    "proof-lane-manifest-verifier"
+  ],
+  "lanes": [
+    {
+      "lane_id": "default-production-tokio-tree",
+      "kind": "dependency_graph",
+      "package": "asupersync",
+      "command": "rch exec -- cargo tree -e normal -p asupersync -i tokio",
+      "guarantee_ids": [
+        "default-production-tokio-free"
+      ],
+      "feature_flags": [],
+      "expected_signal": "warning: nothing to print.",
+      "source_paths": [
+        "Cargo.toml",
+        "artifacts/no_tokio_feature_boundary_contract_v1.json",
+        "tests/no_tokio_feature_boundary_contract.rs",
+        "tests/no_tokio_production_feature_graph_regression.rs"
+      ]
+    },
+    {
+      "lane_id": "metrics-production-tokio-tree",
+      "kind": "dependency_graph",
+      "package": "asupersync",
+      "command": "rch exec -- cargo tree -e normal -p asupersync --features metrics -i tokio",
+      "guarantee_ids": [
+        "metrics-production-tokio-free"
+      ],
+      "feature_flags": [
+        "metrics"
+      ],
+      "expected_signal": "warning: nothing to print.",
+      "source_paths": [
+        "Cargo.toml",
+        "artifacts/no_tokio_feature_boundary_contract_v1.json",
+        "tests/no_tokio_feature_boundary_contract.rs",
+        "tests/no_tokio_production_feature_graph_regression.rs"
+      ]
+    },
+    {
+      "lane_id": "fuzz-tokio-quarantine-tree",
+      "kind": "dependency_graph",
+      "package": "asupersync",
+      "command": "rch exec -- cargo tree -e normal -p asupersync --features fuzz -i tokio",
+      "guarantee_ids": [
+        "fuzz-tokio-quarantine"
+      ],
+      "feature_flags": [
+        "fuzz"
+      ],
+      "expected_signal": "dependency path containing opentelemetry-proto, tonic or tonic-prost, and tokio",
+      "source_paths": [
+        "Cargo.toml",
+        "artifacts/no_tokio_feature_boundary_contract_v1.json",
+        "tests/no_tokio_feature_boundary_contract.rs"
+      ]
+    },
+    {
+      "lane_id": "workspace-normal-tokio-audit",
+      "kind": "dependency_graph",
+      "package": "workspace",
+      "command": "rch exec -- cargo tree -e normal --workspace -i tokio",
+      "guarantee_ids": [
+        "workspace-tokio-audit"
+      ],
+      "feature_flags": [],
+      "expected_signal": "tokio paths are limited to documented workspace carve-outs",
+      "source_paths": [
+        "AGENTS.md",
+        "README.md",
+        "Cargo.toml"
+      ]
+    },
+    {
+      "lane_id": "native-feature-smoke",
+      "kind": "compile_frontier",
+      "package": "asupersync",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_native_feature_smoke CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --no-default-features --features tls,sqlite,postgres,mysql,quic,http3,compression,tracing-integration",
+      "guarantee_ids": [
+        "feature-gated-native-surfaces"
+      ],
+      "feature_flags": [
+        "tls",
+        "sqlite",
+        "postgres",
+        "mysql",
+        "quic",
+        "http3",
+        "compression",
+        "tracing-integration"
+      ],
+      "expected_signal": "cargo check exits 0 or records the first unrelated compile frontier blocker",
+      "source_paths": [
+        "Cargo.toml",
+        "src/lib.rs"
+      ]
+    },
+    {
+      "lane_id": "fuzz-manifest-smoke",
+      "kind": "compile_frontier",
+      "package": "fuzz",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fuzz_manifest_smoke CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check --manifest-path fuzz/Cargo.toml",
+      "guarantee_ids": [
+        "fuzz-manifest-smoke"
+      ],
+      "feature_flags": [],
+      "expected_signal": "cargo check exits 0 or records the first fuzz target compile blocker",
+      "source_paths": [
+        "fuzz/Cargo.toml",
+        "fuzz/fuzz_targets"
+      ]
+    },
+    {
+      "lane_id": "lib-tests",
+      "kind": "test_frontier",
+      "package": "asupersync",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lib_tests CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --lib --features test-internals -- --nocapture",
+      "guarantee_ids": [
+        "lib-test-frontier"
+      ],
+      "feature_flags": [
+        "test-internals"
+      ],
+      "expected_signal": "lib tests pass or the first failing compile/test frontier is recorded",
+      "source_paths": [
+        "src/lib.rs",
+        "Cargo.toml"
+      ]
+    },
+    {
+      "lane_id": "all-targets-check",
+      "kind": "compile_frontier",
+      "package": "asupersync",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --all-targets",
+      "guarantee_ids": [
+        "all-target-compile-frontier"
+      ],
+      "feature_flags": [],
+      "expected_signal": "cargo check exits 0 or records the first unrelated all-target blocker",
+      "source_paths": [
+        "Cargo.toml",
+        "src/lib.rs",
+        "tests"
+      ]
+    },
+    {
+      "lane_id": "clippy-all-targets",
+      "kind": "lint_frontier",
+      "package": "asupersync",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_clippy_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --all-targets -- -D warnings",
+      "guarantee_ids": [
+        "clippy-frontier"
+      ],
+      "feature_flags": [],
+      "expected_signal": "clippy exits 0 or records the first lint frontier blocker",
+      "source_paths": [
+        "Cargo.toml",
+        "src",
+        "tests"
+      ]
+    },
+    {
+      "lane_id": "rustfmt-check",
+      "kind": "format_frontier",
+      "package": "workspace",
+      "command": "rch exec -- cargo fmt --check",
+      "guarantee_ids": [
+        "rustfmt-frontier"
+      ],
+      "feature_flags": [],
+      "expected_signal": "rustfmt exits 0 or prints exact formatting diffs",
+      "source_paths": [
+        "Cargo.toml"
+      ]
+    },
+    {
+      "lane_id": "rustdoc-api",
+      "kind": "documentation_frontier",
+      "package": "asupersync",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rustdoc_api CARGO_INCREMENTAL=0 RUSTDOCFLAGS='-D warnings' cargo doc -p asupersync --no-deps --features test-internals",
+      "guarantee_ids": [
+        "rustdoc-api-frontier"
+      ],
+      "feature_flags": [
+        "test-internals"
+      ],
+      "expected_signal": "cargo doc exits 0 or records the first rustdoc warning/error",
+      "source_paths": [
+        "src/lib.rs",
+        "README.md"
+      ]
+    },
+    {
+      "lane_id": "formal-lean-build",
+      "kind": "formal_frontier",
+      "package": "formal/lean",
+      "command": "rch exec -- lake --dir formal/lean build",
+      "guarantee_ids": [
+        "formal-lean-core-invariants"
+      ],
+      "feature_flags": [],
+      "expected_signal": "Build completed successfully",
+      "source_paths": [
+        "formal/lean/Asupersync.lean",
+        "formal/lean/lakefile.lean",
+        "artifacts/formal_proof_posture_contract_v1.json",
+        "tests/formal_proof_posture_contract.rs"
+      ]
+    },
+    {
+      "lane_id": "proof-lane-manifest-contract",
+      "kind": "artifact_contract",
+      "package": "asupersync",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+      "guarantee_ids": [
+        "proof-lane-manifest-verifier"
+      ],
+      "feature_flags": [],
+      "expected_signal": "proof_lane_manifest_contract tests pass",
+      "source_paths": [
+        "artifacts/proof_lane_manifest_v1.json",
+        "tests/proof_lane_manifest_contract.rs",
+        "Cargo.toml",
+        "AGENTS.md",
+        "README.md"
+      ]
+    }
+  ],
+  "guarantees": [
+    {
+      "guarantee_id": "default-production-tokio-free",
+      "lane_ids": [
+        "default-production-tokio-tree"
+      ]
+    },
+    {
+      "guarantee_id": "metrics-production-tokio-free",
+      "lane_ids": [
+        "metrics-production-tokio-tree"
+      ]
+    },
+    {
+      "guarantee_id": "fuzz-tokio-quarantine",
+      "lane_ids": [
+        "fuzz-tokio-quarantine-tree"
+      ]
+    },
+    {
+      "guarantee_id": "workspace-tokio-audit",
+      "lane_ids": [
+        "workspace-normal-tokio-audit"
+      ]
+    },
+    {
+      "guarantee_id": "feature-gated-native-surfaces",
+      "lane_ids": [
+        "native-feature-smoke"
+      ]
+    },
+    {
+      "guarantee_id": "fuzz-manifest-smoke",
+      "lane_ids": [
+        "fuzz-manifest-smoke"
+      ]
+    },
+    {
+      "guarantee_id": "lib-test-frontier",
+      "lane_ids": [
+        "lib-tests"
+      ]
+    },
+    {
+      "guarantee_id": "all-target-compile-frontier",
+      "lane_ids": [
+        "all-targets-check"
+      ]
+    },
+    {
+      "guarantee_id": "clippy-frontier",
+      "lane_ids": [
+        "clippy-all-targets"
+      ]
+    },
+    {
+      "guarantee_id": "rustfmt-frontier",
+      "lane_ids": [
+        "rustfmt-check"
+      ]
+    },
+    {
+      "guarantee_id": "rustdoc-api-frontier",
+      "lane_ids": [
+        "rustdoc-api"
+      ]
+    },
+    {
+      "guarantee_id": "formal-lean-core-invariants",
+      "lane_ids": [
+        "formal-lean-build"
+      ]
+    },
+    {
+      "guarantee_id": "proof-lane-manifest-verifier",
+      "lane_ids": [
+        "proof-lane-manifest-contract"
+      ]
+    }
+  ]
+}

@@ -1,12 +1,14 @@
 #![allow(missing_docs)]
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 const AGENTS_PATH: &str = "AGENTS.md";
 const CARGO_PATH: &str = "Cargo.toml";
 const MANIFEST_PATH: &str = "artifacts/proof_lane_manifest_v1.json";
+const MANIFEST_PROJECTION_GOLDEN_PATH: &str =
+    "tests/fixtures/proof_lane_manifest/manifest_projection.json";
 const README_PATH: &str = "README.md";
 
 fn repo_path(relative: &str) -> PathBuf {
@@ -21,6 +23,49 @@ fn read_repo_file(relative: &str) -> String {
 fn manifest() -> Value {
     serde_json::from_str(&read_repo_file(MANIFEST_PATH))
         .unwrap_or_else(|err| panic!("parse {MANIFEST_PATH}: {err}"))
+}
+
+fn manifest_projection_golden() -> Value {
+    serde_json::from_str(&read_repo_file(MANIFEST_PROJECTION_GOLDEN_PATH))
+        .unwrap_or_else(|err| panic!("parse {MANIFEST_PROJECTION_GOLDEN_PATH}: {err}"))
+}
+
+fn manifest_projection(manifest: &Value) -> Value {
+    let lanes = array(manifest, "lanes")
+        .iter()
+        .map(|lane| {
+            json!({
+                "lane_id": lane["lane_id"].clone(),
+                "kind": lane["kind"].clone(),
+                "package": lane["package"].clone(),
+                "command": lane["command"].clone(),
+                "guarantee_ids": lane["guarantee_ids"].clone(),
+                "feature_flags": lane["feature_flags"].clone(),
+                "expected_signal": lane["expected_signal"].clone(),
+                "source_paths": lane["source_paths"].clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let guarantees = array(manifest, "guarantees")
+        .iter()
+        .map(|guarantee| {
+            json!({
+                "guarantee_id": guarantee["guarantee_id"].clone(),
+                "lane_ids": guarantee["lane_ids"].clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "contract_version": manifest["contract_version"].clone(),
+        "bead_id": manifest["bead_id"].clone(),
+        "command_policy": manifest["command_policy"].clone(),
+        "source_of_truth": manifest["source_of_truth"].clone(),
+        "documentation_contract": manifest["documentation_contract"].clone(),
+        "required_guarantee_ids": manifest["required_guarantee_ids"].clone(),
+        "lanes": lanes,
+        "guarantees": guarantees,
+    })
 }
 
 fn array<'a>(value: &'a Value, key: &str) -> &'a Vec<Value> {
@@ -131,6 +176,16 @@ fn manifest_records_required_lanes_and_doc_sources() {
     assert_eq!(
         source.get("contract_test").and_then(Value::as_str),
         Some("tests/proof_lane_manifest_contract.rs")
+    );
+}
+
+#[test]
+fn manifest_projection_matches_golden() {
+    let manifest = manifest();
+    assert_eq!(
+        manifest_projection(&manifest),
+        manifest_projection_golden(),
+        "proof-lane manifest projection changed; update the golden only after reviewing lane command, guarantee, and source-path semantics"
     );
 }
 
