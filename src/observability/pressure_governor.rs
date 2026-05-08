@@ -6,7 +6,7 @@
 
 use crate::cx::Cx;
 use crate::error::Error;
-use crate::observability::metrics::{Counter, Gauge, Metrics};
+use crate::observability::metrics::{Counter, Gauge, Metrics, Summary};
 use crate::runtime::Runtime;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -57,6 +57,130 @@ pub struct PressureSnapshot {
     pub memory_budget_pressure: f64,
     /// Overall pressure level (max of all signals).
     pub overall_pressure: f64,
+    /// Which runtime-local pressure signals were live for this sample.
+    pub signal_availability: PressureSignalAvailability,
+    /// Conservative fallback verdict for unavailable signal surfaces.
+    pub fallback_verdict: PressureFallbackVerdict,
+}
+
+/// Runtime-local pressure signal availability for a snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PressureSignalAvailability {
+    /// Scheduler runnable-queue signal is live.
+    pub runnable_queue: bool,
+    /// Blocking-pool saturation signal is live.
+    pub blocking_pool: bool,
+    /// Channel-backlog signal is live.
+    pub channel_backlog: bool,
+    /// Cleanup-debt signal is live.
+    pub cleanup_debt: bool,
+    /// Memory-budget signal is live.
+    pub memory_budget: bool,
+}
+
+impl PressureSignalAvailability {
+    const RUNNABLE_QUEUE: u64 = 1 << 0;
+    const BLOCKING_POOL: u64 = 1 << 1;
+    const CHANNEL_BACKLOG: u64 = 1 << 2;
+    const CLEANUP_DEBT: u64 = 1 << 3;
+    const MEMORY_BUDGET: u64 = 1 << 4;
+
+    /// No runtime-local signals are live.
+    pub const NONE: Self = Self {
+        runnable_queue: false,
+        blocking_pool: false,
+        channel_backlog: false,
+        cleanup_debt: false,
+        memory_budget: false,
+    };
+
+    /// All runtime-local signals are live.
+    pub const ALL: Self = Self {
+        runnable_queue: true,
+        blocking_pool: true,
+        channel_backlog: true,
+        cleanup_debt: true,
+        memory_budget: true,
+    };
+
+    #[must_use]
+    fn from_mask(mask: u64) -> Self {
+        Self {
+            runnable_queue: mask & Self::RUNNABLE_QUEUE != 0,
+            blocking_pool: mask & Self::BLOCKING_POOL != 0,
+            channel_backlog: mask & Self::CHANNEL_BACKLOG != 0,
+            cleanup_debt: mask & Self::CLEANUP_DEBT != 0,
+            memory_budget: mask & Self::MEMORY_BUDGET != 0,
+        }
+    }
+
+    #[must_use]
+    fn mask(self) -> u64 {
+        let mut mask = 0;
+        if self.runnable_queue {
+            mask |= Self::RUNNABLE_QUEUE;
+        }
+        if self.blocking_pool {
+            mask |= Self::BLOCKING_POOL;
+        }
+        if self.channel_backlog {
+            mask |= Self::CHANNEL_BACKLOG;
+        }
+        if self.cleanup_debt {
+            mask |= Self::CLEANUP_DEBT;
+        }
+        if self.memory_budget {
+            mask |= Self::MEMORY_BUDGET;
+        }
+        mask
+    }
+
+    /// Returns true if at least one runtime-local signal is live.
+    #[must_use]
+    pub fn any_live(self) -> bool {
+        self.mask() != 0
+    }
+
+    /// Returns true if all runtime-local signals are live.
+    #[must_use]
+    pub fn all_live(self) -> bool {
+        self == Self::ALL
+    }
+}
+
+/// Conservative fallback state for missing pressure signals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PressureFallbackVerdict {
+    /// Every pressure signal required by the governor was sampled live.
+    Complete,
+    /// No runtime-local pressure signal is available; admission must be conservative.
+    NoWinNoLiveSignals,
+    /// At least one signal is available, but the snapshot is still incomplete.
+    PartialSignalsUnavailable,
+}
+
+impl PressureFallbackVerdict {
+    /// Classifies a snapshot from the availability of its runtime-local signals.
+    #[must_use]
+    pub fn from_availability(availability: PressureSignalAvailability) -> Self {
+        if availability.all_live() {
+            Self::Complete
+        } else if availability.any_live() {
+            Self::PartialSignalsUnavailable
+        } else {
+            Self::NoWinNoLiveSignals
+        }
+    }
+
+    /// Returns the stable integer encoding used by governor metrics.
+    #[must_use]
+    pub const fn as_metric_value(self) -> i64 {
+        match self {
+            Self::Complete => 0,
+            Self::PartialSignalsUnavailable => 1,
+            Self::NoWinNoLiveSignals => 2,
+        }
+    }
 }
 
 /// Admission decision for new regions or task groups.
@@ -90,11 +214,17 @@ pub struct PressureGovernor {
     admissions_total: Arc<Counter>,
     rejections_total: Arc<Counter>,
     backpressure_total: Arc<Counter>,
+    fallback_total: Arc<Counter>,
 
     // Internal state
     started_at: Instant,
     last_sample: AtomicU64, // Nanoseconds elapsed since started_at
+    last_signal_availability_mask: AtomicU64,
     sample_count: AtomicU64,
+    decision_latency_summary: Arc<Summary>,
+    decision_latency_p95_gauge: Arc<Gauge>,
+    decision_latency_p999_gauge: Arc<Gauge>,
+    fallback_verdict_gauge: Arc<Gauge>,
 }
 
 impl PressureGovernor {
@@ -124,6 +254,12 @@ impl PressureGovernor {
         let rejections_total = metrics.counter("pressure_governor_rejections_total");
 
         let backpressure_total = metrics.counter("pressure_governor_backpressure_total");
+        let fallback_total = metrics.counter("pressure_governor_no_win_fallback_total");
+        let decision_latency_summary = metrics.summary("pressure_governor_decision_latency_ns");
+        let decision_latency_p95_gauge = metrics.gauge("pressure_governor_decision_latency_p95_ns");
+        let decision_latency_p999_gauge =
+            metrics.gauge("pressure_governor_decision_latency_p999_ns");
+        let fallback_verdict_gauge = metrics.gauge("pressure_governor_fallback_verdict");
         let started_at = Instant::now();
 
         Ok(Self {
@@ -139,9 +275,15 @@ impl PressureGovernor {
             admissions_total,
             rejections_total,
             backpressure_total,
+            fallback_total,
             started_at,
             last_sample: AtomicU64::new(0),
+            last_signal_availability_mask: AtomicU64::new(PressureSignalAvailability::NONE.mask()),
             sample_count: AtomicU64::new(0),
+            decision_latency_summary,
+            decision_latency_p95_gauge,
+            decision_latency_p999_gauge,
+            fallback_verdict_gauge,
         })
     }
 
@@ -180,6 +322,8 @@ impl PressureGovernor {
 
         // Update sampling state
         self.last_sample.store(now_nanos, Ordering::Release);
+        self.last_signal_availability_mask
+            .store(snapshot.signal_availability.mask(), Ordering::Release);
         self.sample_count.fetch_add(1, Ordering::Relaxed);
 
         Ok(snapshot)
@@ -187,17 +331,27 @@ impl PressureGovernor {
 
     /// Make an admission decision for a new region or task group.
     pub fn check_admission(&self, cx: &Cx) -> Result<AdmissionDecision, Error> {
+        let decision_started_at = Instant::now();
         if !self.config.enabled {
             // Governor disabled, always admit
             self.admissions_total.increment();
+            self.record_decision_latency(decision_started_at);
             return Ok(AdmissionDecision::Admit);
         }
 
-        let snapshot = self.sample_pressure(cx)?;
+        let snapshot = match self.sample_pressure(cx) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.record_decision_latency(decision_started_at);
+                return Err(error);
+            }
+        };
+        self.record_fallback_verdict(snapshot.fallback_verdict);
 
         if !self.config.admission_control {
             // Observe-only mode, always admit but record pressure
             self.admissions_total.increment();
+            self.record_decision_latency(decision_started_at);
             return Ok(AdmissionDecision::Admit);
         }
 
@@ -217,6 +371,7 @@ impl PressureGovernor {
             }
         }
 
+        self.record_decision_latency(decision_started_at);
         Ok(decision)
     }
 
@@ -230,6 +385,28 @@ impl PressureGovernor {
         self.sample_count.load(Ordering::Relaxed)
     }
 
+    /// Returns the latest fallback verdict metric value.
+    #[must_use]
+    pub fn fallback_verdict_metric(&self) -> i64 {
+        self.fallback_verdict_gauge.get()
+    }
+
+    /// Returns the current exact p95 decision latency, rounded down to nanoseconds.
+    #[must_use]
+    pub fn decision_latency_p95_ns(&self) -> Option<u64> {
+        self.decision_latency_summary
+            .quantile(0.95)
+            .map(f64_to_u64_saturating)
+    }
+
+    /// Returns the current exact p999 decision latency, rounded down to nanoseconds.
+    #[must_use]
+    pub fn decision_latency_p999_ns(&self) -> Option<u64> {
+        self.decision_latency_summary
+            .quantile(0.999)
+            .map(f64_to_u64_saturating)
+    }
+
     // Private helper methods
 
     fn collect_pressure_signals(
@@ -239,39 +416,49 @@ impl PressureGovernor {
     ) -> Result<PressureSnapshot, Error> {
         // Collect actual metrics from runtime components
 
-        // Runnable queue pressure: sample from scheduler's global and local queues
-        let runnable_queue_pressure = self.sample_runnable_queue_pressure();
+        let runnable_queue = self.sample_runnable_queue_pressure();
 
-        // Blocking pool pressure: busy threads / max threads
-        let blocking_pool_pressure = self.sample_blocking_pool_pressure();
+        let blocking_pool = self.sample_blocking_pool_pressure();
 
         // Channel backlog pressure: sum of pending items across all channels
         // TODO: Implement channel monitoring when channel registry is available
-        let channel_backlog_pressure = self.sample_channel_backlog_pressure();
+        let channel_backlog = self.sample_channel_backlog_pressure();
 
         // Cleanup debt pressure: pending cleanup tasks / capacity
         // TODO: Access runtime cleanup queue when available
-        let cleanup_debt_pressure = self.sample_cleanup_debt_pressure();
+        let cleanup_debt = self.sample_cleanup_debt_pressure();
 
         // Memory budget pressure: allocated / budget
         // TODO: Access memory allocator statistics when available
-        let memory_budget_pressure = self.sample_memory_budget_pressure();
+        let memory_budget = self.sample_memory_budget_pressure();
+
+        let signal_availability = PressureSignalAvailability {
+            runnable_queue: runnable_queue.available,
+            blocking_pool: blocking_pool.available,
+            channel_backlog: channel_backlog.available,
+            cleanup_debt: cleanup_debt.available,
+            memory_budget: memory_budget.available,
+        };
+        let fallback_verdict = PressureFallbackVerdict::from_availability(signal_availability);
 
         // Overall pressure is the maximum of all signals
-        let overall_pressure = runnable_queue_pressure
-            .max(blocking_pool_pressure)
-            .max(channel_backlog_pressure)
-            .max(cleanup_debt_pressure)
-            .max(memory_budget_pressure);
+        let overall_pressure = runnable_queue
+            .pressure
+            .max(blocking_pool.pressure)
+            .max(channel_backlog.pressure)
+            .max(cleanup_debt.pressure)
+            .max(memory_budget.pressure);
 
         Ok(PressureSnapshot {
             timestamp,
-            runnable_queue_pressure,
-            blocking_pool_pressure,
-            channel_backlog_pressure,
-            cleanup_debt_pressure,
-            memory_budget_pressure,
+            runnable_queue_pressure: runnable_queue.pressure,
+            blocking_pool_pressure: blocking_pool.pressure,
+            channel_backlog_pressure: channel_backlog.pressure,
+            cleanup_debt_pressure: cleanup_debt.pressure,
+            memory_budget_pressure: memory_budget.pressure,
             overall_pressure,
+            signal_availability,
+            fallback_verdict,
         })
     }
 
@@ -284,6 +471,10 @@ impl PressureGovernor {
         let cleanup_debt_pressure = self.cleanup_debt_gauge.get() as f64 / PRESSURE_SCALE;
         let memory_budget_pressure = self.memory_budget_gauge.get() as f64 / PRESSURE_SCALE;
         let overall_pressure = self.overall_pressure_gauge.get() as f64 / PRESSURE_SCALE;
+        let signal_availability = PressureSignalAvailability::from_mask(
+            self.last_signal_availability_mask.load(Ordering::Acquire),
+        );
+        let fallback_verdict = PressureFallbackVerdict::from_availability(signal_availability);
 
         PressureSnapshot {
             timestamp,
@@ -293,6 +484,8 @@ impl PressureGovernor {
             cleanup_debt_pressure,
             memory_budget_pressure,
             overall_pressure,
+            signal_availability,
+            fallback_verdict,
         }
     }
 
@@ -324,7 +517,7 @@ impl PressureGovernor {
 
     // Runtime metric collection implementations
 
-    fn sample_runnable_queue_pressure(&self) -> f64 {
+    fn sample_runnable_queue_pressure(&self) -> PressureSignalSample {
         // Access the runtime's scheduler statistics
         // This is a simplified implementation - in production we'd want to access
         // the actual scheduler queue depths from ThreeLaneScheduler
@@ -337,10 +530,10 @@ impl PressureGovernor {
 
         // No live scheduler queue signal is exposed yet. Report no pressure
         // instead of fabricating load from unrelated process state.
-        0.0
+        PressureSignalSample::unavailable()
     }
 
-    fn sample_blocking_pool_pressure(&self) -> f64 {
+    fn sample_blocking_pool_pressure(&self) -> PressureSignalSample {
         // TODO: Access actual blocking pool handle from runtime
         // In a full implementation, we would:
         // 1. Get BlockingPoolHandle from Runtime
@@ -348,10 +541,10 @@ impl PressureGovernor {
         // 3. Also consider pending_count() for queue pressure
 
         // No live blocking-pool saturation signal is exposed yet.
-        0.0
+        PressureSignalSample::unavailable()
     }
 
-    fn sample_channel_backlog_pressure(&self) -> f64 {
+    fn sample_channel_backlog_pressure(&self) -> PressureSignalSample {
         // TODO: Access channel registry from runtime for global channel monitoring
         // In a full implementation, we would:
         // 1. Iterate through all active mpsc/broadcast/oneshot channels
@@ -359,10 +552,10 @@ impl PressureGovernor {
         // 3. Calculate pressure relative to total buffer capacity
 
         // This requires a channel registry that doesn't exist yet
-        0.0
+        PressureSignalSample::unavailable()
     }
 
-    fn sample_cleanup_debt_pressure(&self) -> f64 {
+    fn sample_cleanup_debt_pressure(&self) -> PressureSignalSample {
         // TODO: Access runtime resource cleanup verifier statistics
         // In a full implementation, we would:
         // 1. Access ResourceCleanupVerifier from Runtime
@@ -370,10 +563,10 @@ impl PressureGovernor {
         // 3. Calculate pressure as pending / capacity
 
         // No live cleanup-debt signal is exposed yet.
-        0.0
+        PressureSignalSample::unavailable()
     }
 
-    fn sample_memory_budget_pressure(&self) -> f64 {
+    fn sample_memory_budget_pressure(&self) -> PressureSignalSample {
         // TODO: Access memory allocator and budget statistics
         // In a full implementation, we would:
         // 1. Access RegionHeap statistics for allocated memory
@@ -381,7 +574,41 @@ impl PressureGovernor {
         // 3. Calculate pressure as allocated / budget
 
         // No live memory-budget signal is exposed yet.
-        0.0
+        PressureSignalSample::unavailable()
+    }
+
+    fn record_fallback_verdict(&self, verdict: PressureFallbackVerdict) {
+        self.fallback_verdict_gauge.set(verdict.as_metric_value());
+        if verdict != PressureFallbackVerdict::Complete {
+            self.fallback_total.increment();
+        }
+    }
+
+    fn record_decision_latency(&self, started_at: Instant) {
+        let elapsed_ns = duration_nanos_u64(Instant::now().saturating_duration_since(started_at));
+        self.decision_latency_summary.observe(elapsed_ns as f64);
+        if let Some(p95) = self.decision_latency_p95_ns() {
+            self.decision_latency_p95_gauge
+                .set(u64_to_i64_saturating(p95));
+        }
+        if let Some(p999) = self.decision_latency_p999_ns() {
+            self.decision_latency_p999_gauge
+                .set(u64_to_i64_saturating(p999));
+        }
+    }
+}
+
+struct PressureSignalSample {
+    pressure: f64,
+    available: bool,
+}
+
+impl PressureSignalSample {
+    const fn unavailable() -> Self {
+        Self {
+            pressure: 0.0,
+            available: false,
+        }
     }
 }
 
@@ -391,6 +618,20 @@ fn nanos_since(started_at: Instant, now: Instant) -> u64 {
 
 fn duration_nanos_u64(duration: Duration) -> u64 {
     duration.as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
+fn f64_to_u64_saturating(value: f64) -> u64 {
+    if !value.is_finite() || value <= 0.0 {
+        0
+    } else if value >= u64::MAX as f64 {
+        u64::MAX
+    } else {
+        value as u64
+    }
+}
+
+fn u64_to_i64_saturating(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
 impl Default for PressureGovernorConfig {
@@ -480,6 +721,8 @@ mod tests {
             cleanup_debt_pressure: 0.5,
             memory_budget_pressure: 0.5,
             overall_pressure: 0.5,
+            signal_availability: PressureSignalAvailability::ALL,
+            fallback_verdict: PressureFallbackVerdict::Complete,
         };
 
         let decision = governor.evaluate_admission(&low_pressure);
@@ -494,6 +737,8 @@ mod tests {
             cleanup_debt_pressure: 0.5,
             memory_budget_pressure: 0.5,
             overall_pressure: 0.85,
+            signal_availability: PressureSignalAvailability::ALL,
+            fallback_verdict: PressureFallbackVerdict::Complete,
         };
 
         let decision = governor.evaluate_admission(&moderate_pressure);
@@ -508,6 +753,8 @@ mod tests {
             cleanup_debt_pressure: 0.5,
             memory_budget_pressure: 0.5,
             overall_pressure: 1.0,
+            signal_availability: PressureSignalAvailability::ALL,
+            fallback_verdict: PressureFallbackVerdict::Complete,
         };
 
         let decision = governor.evaluate_admission(&high_pressure);
@@ -571,6 +818,8 @@ mod tests {
             cleanup_debt_pressure: 0.5,
             memory_budget_pressure: 0.7,
             overall_pressure: 0.8, // Should be max of all signals
+            signal_availability: PressureSignalAvailability::ALL,
+            fallback_verdict: PressureFallbackVerdict::Complete,
         };
 
         // Verify overall pressure matches the highest signal
@@ -580,6 +829,72 @@ mod tests {
         assert!(snapshot.overall_pressure >= snapshot.channel_backlog_pressure);
         assert!(snapshot.overall_pressure >= snapshot.cleanup_debt_pressure);
         assert!(snapshot.overall_pressure >= snapshot.memory_budget_pressure);
+    }
+
+    #[test]
+    fn pressure_signal_availability_reports_no_win_fallback() {
+        let none = PressureSignalAvailability::NONE;
+        assert!(!none.any_live());
+        assert!(!none.all_live());
+        assert_eq!(
+            PressureFallbackVerdict::from_availability(none),
+            PressureFallbackVerdict::NoWinNoLiveSignals
+        );
+
+        let partial = PressureSignalAvailability {
+            runnable_queue: true,
+            ..PressureSignalAvailability::NONE
+        };
+        assert!(partial.any_live());
+        assert!(!partial.all_live());
+        assert_eq!(
+            PressureFallbackVerdict::from_availability(partial),
+            PressureFallbackVerdict::PartialSignalsUnavailable
+        );
+
+        let round_trip = PressureSignalAvailability::from_mask(partial.mask());
+        assert_eq!(round_trip, partial);
+    }
+
+    #[test]
+    fn pressure_governor_records_no_win_fallback_and_decision_latency() {
+        let config = PressureGovernorConfig {
+            enabled: true,
+            admission_control: true,
+            ..Default::default()
+        };
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create test runtime"),
+        );
+        let metrics = Metrics::new();
+        let governor = PressureGovernor::new(config, runtime, metrics).unwrap();
+        let cx = Cx::new();
+
+        let decision = governor
+            .check_admission(&cx)
+            .expect("pressure admission should not fail");
+
+        assert_eq!(decision, AdmissionDecision::Admit);
+        assert_eq!(
+            governor.fallback_verdict_metric(),
+            PressureFallbackVerdict::NoWinNoLiveSignals.as_metric_value()
+        );
+        assert_eq!(governor.fallback_total.get(), 1);
+        assert_eq!(governor.sample_count(), 1);
+        assert!(governor.decision_latency_p95_ns().is_some());
+        assert!(governor.decision_latency_p999_ns().is_some());
+
+        let cached = governor
+            .sample_pressure(&cx)
+            .expect("cached pressure snapshot should not fail");
+        assert_eq!(
+            cached.fallback_verdict,
+            PressureFallbackVerdict::NoWinNoLiveSignals
+        );
+        assert_eq!(cached.signal_availability, PressureSignalAvailability::NONE);
     }
 
     #[test]
