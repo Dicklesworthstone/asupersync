@@ -200,6 +200,27 @@ fn lane_source_paths_are_used_as_fallback_when_no_rule_matches() {
 }
 
 #[test]
+fn lane_source_fallback_output_matches_full_reviewed_golden() {
+    let output = run_selector("source_path_fallback.json");
+    assert!(
+        output.status.success(),
+        "selector helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let expected = fixture_text("source_path_fallback_expected.json");
+    serde_json::from_slice::<Value>(&output.stdout).expect("actual selector output must be JSON");
+    serde_json::from_str::<Value>(&expected).expect("golden selector output must be JSON");
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("selector stdout is utf-8"),
+        expected,
+        "source_path_fallback selector receipt drifted from the reviewed golden"
+    );
+}
+
+#[test]
 fn unmatched_paths_fail_with_an_action_item() {
     let receipt = selector_json("unmatched_path.json");
 
