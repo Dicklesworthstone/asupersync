@@ -1,0 +1,59 @@
+{
+  "current_date": "2026-05-08",
+  "decision": "passed",
+  "forbidden_actions": {
+    "runs_beads_mutation": false,
+    "runs_benchmarks": false,
+    "runs_cargo": false,
+    "runs_destructive_command": false,
+    "runs_git_mutation": false
+  },
+  "generated_at": "2026-05-08T05:50:00Z",
+  "measurements_path": "tests/fixtures/runtime_p999_divergence_receipt/aligned.json",
+  "non_mutating": true,
+  "scenarios": [
+    {
+      "classification": "aligned",
+      "lab": {
+        "artifact": "artifacts/perf/lab_scheduler_burst_64.json",
+        "command": "rch exec -- cargo test -p asupersync --test lab_scheduler_latency -- scheduler_burst_64",
+        "git_sha": "abc1234",
+        "mode": "lab",
+        "p95_us": 430.0,
+        "p999_us": 970.0,
+        "sample_count": 12000,
+        "scenario": "scheduler_burst_64",
+        "status": "pass"
+      },
+      "native": {
+        "artifact": "artifacts/perf/native_scheduler_burst_64.json",
+        "command": "rch exec -- cargo bench --bench scheduler_benchmark -- scheduler_burst_64",
+        "git_sha": "abc1234",
+        "mode": "native",
+        "p95_us": 420.0,
+        "p999_us": 910.0,
+        "sample_count": 12000,
+        "scenario": "scheduler_burst_64",
+        "status": "pass"
+      },
+      "operator_guidance": "Native and lab p999 samples are within the configured divergence threshold.",
+      "p999_delta_us": 60.0,
+      "p999_ratio": 1.0659,
+      "sample_count_ok": true,
+      "scenario": "scheduler_burst_64"
+    }
+  ],
+  "schema_version": "runtime-p999-divergence-receipt-v1",
+  "source_counts": {
+    "aligned": 1,
+    "blocked_measurements": 0,
+    "divergent": 0,
+    "measurements": 2,
+    "missing_pairs": 0,
+    "scenarios": 1
+  },
+  "thresholds": {
+    "max_p999_ratio": 1.25,
+    "min_samples_per_mode": 1000
+  }
+}

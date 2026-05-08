@@ -18,7 +18,7 @@ fn run_receipt(fixture: &str) -> Output {
     Command::new("python3")
         .arg(repo_root().join(SCRIPT_PATH))
         .arg("--measurements")
-        .arg(repo_root().join(FIXTURE_ROOT).join(fixture))
+        .arg(format!("{FIXTURE_ROOT}/{fixture}"))
         .arg("--generated-at")
         .arg(GENERATED_AT)
         .arg("--output")
@@ -40,6 +40,11 @@ fn receipt_json(fixture: &str) -> Value {
     serde_json::from_slice(&output.stdout).expect("receipt output must be JSON")
 }
 
+fn fixture_text(fixture: &str) -> String {
+    std::fs::read_to_string(repo_root().join(FIXTURE_ROOT).join(fixture))
+        .unwrap_or_else(|error| panic!("read golden fixture {fixture}: {error}"))
+}
+
 fn scenario<'a>(receipt: &'a Value, name: &str) -> &'a Value {
     receipt["scenarios"]
         .as_array()
@@ -47,6 +52,24 @@ fn scenario<'a>(receipt: &'a Value, name: &str) -> &'a Value {
         .iter()
         .find(|scenario| scenario["scenario"].as_str() == Some(name))
         .unwrap_or_else(|| panic!("missing scenario {name}"))
+}
+
+#[test]
+fn aligned_receipt_output_matches_full_reviewed_golden() {
+    let output = run_receipt("aligned.json");
+    assert!(
+        output.status.success(),
+        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("receipt stdout is utf-8"),
+        fixture_text("aligned_expected.json"),
+        "aligned runtime p999 receipt drifted from the reviewed golden"
+    );
 }
 
 #[test]
