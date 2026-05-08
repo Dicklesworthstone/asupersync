@@ -1,11 +1,13 @@
 //! Contract ratchets for memory-tier aware slab/pool certification.
 
+use asupersync::runtime::config::MEMORY_TIER_SLAB_POOL_CERTIFICATIONS;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
 const CONTRACT_PATH: &str = "artifacts/memory_tier_slab_pool_contract_v1.json";
+const SOURCE_DECLARATIONS_PATH: &str = "src/runtime/config.rs";
 const TEST_PATH: &str = "tests/memory_tier_slab_pool_contract.rs";
 
 fn load_contract() -> Value {
@@ -33,6 +35,13 @@ fn string_field<'a>(value: &'a Value, key: &str) -> &'a str {
 }
 
 fn string_set(value: &Value, key: &str) -> BTreeSet<String> {
+    array(value, key)
+        .iter()
+        .map(|entry| entry.as_str().expect("string array entry").to_string())
+        .collect()
+}
+
+fn string_vec(value: &Value, key: &str) -> Vec<String> {
     array(value, key)
         .iter()
         .map(|entry| entry.as_str().expect("string array entry").to_string())
@@ -114,6 +123,98 @@ fn contract_declares_the_memory_tier_coverage_surface() {
     ] {
         assert!(required_tiers.contains(tier), "missing memory tier {tier}");
     }
+}
+
+#[test]
+fn source_declarations_match_contract_rows() {
+    let contract = load_contract();
+    let policy = object(&contract, "source_declaration_policy");
+    assert_eq!(
+        string_field(&Value::Object(policy.clone()), "declaration_table"),
+        "MEMORY_TIER_SLAB_POOL_CERTIFICATIONS"
+    );
+    assert_eq!(
+        string_field(&Value::Object(policy.clone()), "source_path"),
+        SOURCE_DECLARATIONS_PATH
+    );
+    assert_eq!(
+        policy["matrix_rows_must_match_source_declarations"].as_bool(),
+        Some(true)
+    );
+
+    for field in [
+        "row_id",
+        "runtime_domain",
+        "memory_tier",
+        "operator_verdict",
+        "status",
+        "source_files",
+        "existing_contracts",
+        "proof_commands",
+    ] {
+        assert!(
+            string_set(&Value::Object(policy.clone()), "declared_fields").contains(field),
+            "source declaration policy must require {field}"
+        );
+    }
+
+    let rows_by_id = rows_by_id(&contract);
+    let declared_ids = MEMORY_TIER_SLAB_POOL_CERTIFICATIONS
+        .iter()
+        .map(|declaration| declaration.row_id.to_string())
+        .collect::<BTreeSet<_>>();
+    let contract_ids = rows_by_id.keys().cloned().collect::<BTreeSet<_>>();
+    assert_eq!(
+        contract_ids, declared_ids,
+        "memory-tier contract rows must match source declarations"
+    );
+
+    for declaration in MEMORY_TIER_SLAB_POOL_CERTIFICATIONS {
+        let row = rows_by_id
+            .get(declaration.row_id)
+            .unwrap_or_else(|| panic!("missing contract row {}", declaration.row_id));
+        assert_eq!(
+            string_field(row, "runtime_domain"),
+            declaration.runtime_domain.as_str()
+        );
+        assert_eq!(
+            string_field(row, "memory_tier"),
+            declaration.memory_tier.as_str()
+        );
+        assert_eq!(
+            string_field(row, "operator_verdict"),
+            declaration.operator_verdict.as_str()
+        );
+        assert_eq!(string_field(row, "status"), declaration.status.as_str());
+        assert_eq!(
+            string_vec(row, "source_files"),
+            declaration
+                .source_files
+                .iter()
+                .map(|entry| (*entry).to_string())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            string_vec(row, "existing_contracts"),
+            declaration
+                .existing_contracts
+                .iter()
+                .map(|entry| (*entry).to_string())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            string_vec(row, "proof_commands"),
+            declaration
+                .proof_commands
+                .iter()
+                .map(|entry| (*entry).to_string())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    let source = fs::read_to_string(SOURCE_DECLARATIONS_PATH).expect("read source declarations");
+    assert!(source.contains("pub const MEMORY_TIER_SLAB_POOL_CERTIFICATIONS"));
+    assert!(source.contains("MemoryTierSlabPoolCertification"));
 }
 
 #[test]
@@ -229,8 +330,15 @@ fn validation_commands_cover_this_contract_test() {
             == "python3 -m json.tool artifacts/memory_tier_slab_pool_contract_v1.json >/dev/null"
     }));
     assert!(commands.iter().any(|command| {
+        command.starts_with("git diff --check --")
+            && command.contains(SOURCE_DECLARATIONS_PATH)
+            && command.contains(CONTRACT_PATH)
+            && command.contains(TEST_PATH)
+    }));
+    assert!(commands.iter().any(|command| {
         command.starts_with("rch exec -- rustfmt")
             && command.contains("--edition 2024")
+            && command.contains(SOURCE_DECLARATIONS_PATH)
             && command.contains(TEST_PATH)
     }));
     assert!(commands.iter().any(|command| {

@@ -693,6 +693,229 @@ impl FromStr for TraceStorageProfile {
     }
 }
 
+/// Runtime domain covered by the memory-tier slab/pool certification matrix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MemoryTierRuntimeDomain {
+    /// Hot task-record allocation and recycling surfaces.
+    TaskRecords,
+    /// Region-record capacity and locality planning surfaces.
+    RegionRecords,
+    /// Obligation-record capacity and locality planning surfaces.
+    ObligationRecords,
+    /// Runtime trace and retained evidence surfaces.
+    TraceEvidence,
+    /// Release proof-pack and artifact-retention surfaces.
+    ProofArtifacts,
+}
+
+impl MemoryTierRuntimeDomain {
+    /// Stable JSON identifier for this runtime domain.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TaskRecords => "task_records",
+            Self::RegionRecords => "region_records",
+            Self::ObligationRecords => "obligation_records",
+            Self::TraceEvidence => "trace_evidence",
+            Self::ProofArtifacts => "proof_artifacts",
+        }
+    }
+}
+
+/// Memory tier covered by the slab/pool certification matrix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MemoryTierKind {
+    /// Allocation-sensitive runtime records kept on the hot path.
+    HotRuntimeRecords,
+    /// Capacity and locality plans that select bounded allocation envelopes.
+    WarmCapacityAndLocalityPlans,
+    /// Retained evidence and proof artifacts kept off the hot path when proven safe.
+    ColdEvidenceArtifacts,
+    /// Conservative heap-backed fallback used when optimized tiering is not proven.
+    SafeHeapFallback,
+}
+
+impl MemoryTierKind {
+    /// Stable JSON identifier for this memory tier.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::HotRuntimeRecords => "hot_runtime_records",
+            Self::WarmCapacityAndLocalityPlans => "warm_capacity_and_locality_plans",
+            Self::ColdEvidenceArtifacts => "cold_evidence_artifacts",
+            Self::SafeHeapFallback => "safe_heap_fallback",
+        }
+    }
+}
+
+/// Fail-closed certification state for memory-tier rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MemoryTierCertificationStatus {
+    /// Live implementation and proof coverage are wired.
+    ImplementedVerified,
+    /// Contract and proof lanes guard the surface, but full runtime rollout is pending.
+    ContractGuarded,
+    /// Conservative fallback is the only supported runtime mode.
+    FallbackOnly,
+    /// Design-only placeholder that must not render as passing.
+    TemplateOnly,
+}
+
+impl MemoryTierCertificationStatus {
+    /// Stable JSON identifier for this certification state.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ImplementedVerified => "implemented_verified",
+            Self::ContractGuarded => "contract_guarded",
+            Self::FallbackOnly => "fallback_only",
+            Self::TemplateOnly => "template_only",
+        }
+    }
+}
+
+/// Source-owned row declaration for the memory-tier slab/pool matrix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryTierSlabPoolCertification {
+    /// Stable row identifier.
+    pub row_id: &'static str,
+    /// Runtime domain covered by this row.
+    pub runtime_domain: MemoryTierRuntimeDomain,
+    /// Memory tier covered by this row.
+    pub memory_tier: MemoryTierKind,
+    /// Operator-facing verdict rendered by the matrix.
+    pub operator_verdict: MemoryTierCertificationStatus,
+    /// Fail-closed row status stored in the JSON contract.
+    pub status: MemoryTierCertificationStatus,
+    /// Source-owned files that back this row.
+    pub source_files: &'static [&'static str],
+    /// Existing lower-level contracts that this row composes.
+    pub existing_contracts: &'static [&'static str],
+    /// Proof commands required for this row.
+    pub proof_commands: &'static [&'static str],
+}
+
+/// Canonical source declarations for memory-tier slab/pool certification.
+pub const MEMORY_TIER_SLAB_POOL_CERTIFICATIONS: &[MemoryTierSlabPoolCertification] = &[
+    MemoryTierSlabPoolCertification {
+        row_id: "hot_task_record_pool",
+        runtime_domain: MemoryTierRuntimeDomain::TaskRecords,
+        memory_tier: MemoryTierKind::HotRuntimeRecords,
+        operator_verdict: MemoryTierCertificationStatus::ImplementedVerified,
+        status: MemoryTierCertificationStatus::ImplementedVerified,
+        source_files: &[
+            "src/runtime/task_table.rs",
+            "src/record/task.rs",
+            "src/util/pool.rs",
+            "artifacts/task_record_pool_smoke_contract_v1.json",
+            "tests/task_record_pool_contract.rs",
+        ],
+        existing_contracts: &["task-record-pool-smoke-contract-v1"],
+        proof_commands: &[
+            "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_task_record_pool_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test task_record_pool_contract --features test-internals -- --nocapture",
+        ],
+    },
+    MemoryTierSlabPoolCertification {
+        row_id: "warm_runtime_capacity_hints",
+        runtime_domain: MemoryTierRuntimeDomain::RegionRecords,
+        memory_tier: MemoryTierKind::WarmCapacityAndLocalityPlans,
+        operator_verdict: MemoryTierCertificationStatus::ImplementedVerified,
+        status: MemoryTierCertificationStatus::ImplementedVerified,
+        source_files: &[
+            "src/runtime/config.rs",
+            "src/runtime/state.rs",
+            "artifacts/runtime_capacity_hints_smoke_contract_v1.json",
+            "tests/runtime_capacity_hints_contract.rs",
+        ],
+        existing_contracts: &["runtime-capacity-hints-smoke-contract-v1"],
+        proof_commands: &[
+            "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_capacity_hints_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test runtime_capacity_hints_contract --features test-internals -- --nocapture",
+        ],
+    },
+    MemoryTierSlabPoolCertification {
+        row_id: "warm_numa_arena_locality",
+        runtime_domain: MemoryTierRuntimeDomain::ObligationRecords,
+        memory_tier: MemoryTierKind::WarmCapacityAndLocalityPlans,
+        operator_verdict: MemoryTierCertificationStatus::ContractGuarded,
+        status: MemoryTierCertificationStatus::ContractGuarded,
+        source_files: &[
+            "src/runtime/config.rs",
+            "artifacts/numa_arena_locality_smoke_contract_v1.json",
+            "tests/numa_arena_locality_contract.rs",
+        ],
+        existing_contracts: &["numa-arena-locality-smoke-contract-v1"],
+        proof_commands: &[
+            "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_numa_arena_locality_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test numa_arena_locality_contract --features test-internals -- --nocapture",
+        ],
+    },
+    MemoryTierSlabPoolCertification {
+        row_id: "cold_trace_evidence_tiers",
+        runtime_domain: MemoryTierRuntimeDomain::TraceEvidence,
+        memory_tier: MemoryTierKind::ColdEvidenceArtifacts,
+        operator_verdict: MemoryTierCertificationStatus::ContractGuarded,
+        status: MemoryTierCertificationStatus::ContractGuarded,
+        source_files: &[
+            "src/runtime/config.rs",
+            "src/trace/recorder.rs",
+            "src/trace/distributed/collector.rs",
+            "artifacts/hot_cold_arena_tiers_smoke_contract_v1.json",
+            "tests/hot_cold_arena_tiers.rs",
+        ],
+        existing_contracts: &["hot-cold-arena-tiers-smoke-contract-v1"],
+        proof_commands: &[
+            "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_hot_cold_arena_tiers_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test hot_cold_arena_tiers --features test-internals -- --nocapture",
+        ],
+    },
+    MemoryTierSlabPoolCertification {
+        row_id: "cold_proof_artifact_retention",
+        runtime_domain: MemoryTierRuntimeDomain::ProofArtifacts,
+        memory_tier: MemoryTierKind::ColdEvidenceArtifacts,
+        operator_verdict: MemoryTierCertificationStatus::ContractGuarded,
+        status: MemoryTierCertificationStatus::ContractGuarded,
+        source_files: &[
+            "scripts/proof_runner.py",
+            "artifacts/release_proof_pack_contract_v1.json",
+            "tests/proof_runner_contract.rs",
+        ],
+        existing_contracts: &["release-proof-pack-v1"],
+        proof_commands: &[
+            "python3 -m py_compile scripts/proof_runner.py",
+            "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test proof_runner_contract -- --nocapture",
+        ],
+    },
+    MemoryTierSlabPoolCertification {
+        row_id: "safe_heap_fallback",
+        runtime_domain: MemoryTierRuntimeDomain::TaskRecords,
+        memory_tier: MemoryTierKind::SafeHeapFallback,
+        operator_verdict: MemoryTierCertificationStatus::FallbackOnly,
+        status: MemoryTierCertificationStatus::FallbackOnly,
+        source_files: &[
+            "src/util/arena.rs",
+            "src/util/pool.rs",
+            "src/runtime/task_table.rs",
+            "tests/task_record_pool_contract.rs",
+            "tests/hot_cold_arena_tiers.rs",
+        ],
+        existing_contracts: &[
+            "task-record-pool-smoke-contract-v1",
+            "hot-cold-arena-tiers-smoke-contract-v1",
+        ],
+        proof_commands: &[
+            "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_memory_tier_slab_pool_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test memory_tier_slab_pool_contract --features test-internals -- --nocapture",
+        ],
+    },
+];
+
+/// Find a memory-tier slab/pool declaration by row id.
+#[must_use]
+pub fn memory_tier_slab_pool_certification(
+    row_id: &str,
+) -> Option<&'static MemoryTierSlabPoolCertification> {
+    MEMORY_TIER_SLAB_POOL_CERTIFICATIONS
+        .iter()
+        .find(|declaration| declaration.row_id == row_id)
+}
+
 fn cohort_local_touch_count(touches_by_cohort: &[u64]) -> u64 {
     let mut best = 0;
     for &touches in touches_by_cohort {
