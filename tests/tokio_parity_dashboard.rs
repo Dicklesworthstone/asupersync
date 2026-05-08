@@ -449,7 +449,7 @@ fn workflow_exists_and_enforces_hard_fail_drift_policy() {
         "Suggested drift routing actions:",
         "status_flag_command:",
         "agent_mail_thread:",
-        "cargo test --test tokio_parity_dashboard -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_parity_dashboard_docs cargo test --test tokio_parity_dashboard -- --nocapture",
     ] {
         assert!(
             workflow.contains(token),

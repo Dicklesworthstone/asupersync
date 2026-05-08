@@ -120,7 +120,7 @@ jobs:
 
       - name: Contract test
         run: |
-          cargo test --test tokio_parity_dashboard -- --nocapture
+          rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_parity_dashboard_docs cargo test --test tokio_parity_dashboard -- --nocapture
 
       - name: Upload parity dashboard artifacts
         if: always()

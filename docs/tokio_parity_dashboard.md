@@ -163,5 +163,5 @@ No actionable drift alerts detected.
 
 ```bash
 python3 scripts/generate_tokio_parity_dashboard.py
-rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_conformance_docs cargo test --test tokio_parity_dashboard -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_parity_dashboard_docs cargo test --test tokio_parity_dashboard -- --nocapture
 ```

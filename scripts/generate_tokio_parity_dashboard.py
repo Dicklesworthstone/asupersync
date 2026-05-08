@@ -25,6 +25,11 @@ from typing import Any
 PROGRAM_ID = "asupersync-2oh2u"
 PROGRAM_BEAD = "asupersync-2oh2u.1.4.1"
 SCHEMA_VERSION = "tokio-parity-dashboard-v1"
+CONTRACT_TEST_COMMAND = (
+    "rch exec -- env "
+    "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_parity_dashboard_docs "
+    "cargo test --test tokio_parity_dashboard -- --nocapture"
+)
 
 TRACKS: list[dict[str, str]] = [
     {
@@ -757,7 +762,7 @@ def render_markdown(payload: dict[str, Any]) -> str:
     lines.append("")
     lines.append("```bash")
     lines.append("python3 scripts/generate_tokio_parity_dashboard.py")
-    lines.append("rch exec -- cargo test --test tokio_parity_dashboard -- --nocapture")
+    lines.append(CONTRACT_TEST_COMMAND)
     lines.append("```")
     lines.append("")
     return "\n".join(lines)
@@ -871,7 +876,7 @@ def main() -> int:
         ),
         "ci_commands": [
             "python3 scripts/generate_tokio_parity_dashboard.py",
-            "rch exec -- cargo test --test tokio_parity_dashboard -- --nocapture",
+            CONTRACT_TEST_COMMAND,
         ],
     }
 
