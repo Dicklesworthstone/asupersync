@@ -120,6 +120,9 @@ impl DeliveryCounter {
     }
 
     fn exactly_once_invariant(&self) -> Result<(), String> {
+        let _terminal_observations =
+            self.failed_sends + self.failed_recvs + self.closed_recvs + self.cancelled_recvs;
+
         // Core invariant: successful_sends = successful_recvs
         if self.successful_sends != self.successful_recvs {
             return Err(format!(
@@ -222,6 +225,10 @@ mod tests {
                                 counter.record_recv_cancelled();
                                 // Also acceptable
                             }
+                            Err(RecvError::PolledAfterCompletion) => {
+                                counter.record_recv_failure();
+                                // Also terminal
+                            }
                         }
                     }
                 }
@@ -241,6 +248,10 @@ mod tests {
                         Err(RecvError::Cancelled) => {
                             counter.record_recv_cancelled();
                             // Also acceptable
+                        }
+                        Err(RecvError::PolledAfterCompletion) => {
+                            counter.record_recv_failure();
+                            // Also terminal
                         }
                     }
                 }
@@ -453,7 +464,7 @@ mod tests {
             tx1.send(&cx, message.clone()).expect("Initial send should succeed");
             let first_msg = block_on(rx1.recv(&cx)).expect("Initial recv should succeed");
 
-            prop_assert_eq!(first_msg, message, "State setup: wrong message received");
+            prop_assert_eq!(first_msg, message.clone(), "State setup: wrong message received");
 
             // Now probe the exhausted state multiple times
             let mut exhausted_results = Vec::new();
@@ -582,8 +593,6 @@ mod tests {
             counter3.exactly_once_invariant().is_ok(),
             "Scenario 3 failed exactly-once"
         );
-
-        println!("Composite MR test passed: Exactly-once delivery under all scenarios");
     }
 }
 

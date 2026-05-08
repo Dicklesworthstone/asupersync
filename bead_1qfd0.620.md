@@ -99,6 +99,35 @@ Each metamorphic relation includes:
 3. File any discovered violations as separate beads
 4. Ship tests as regression protection
 
+## 2026-05-08 CopperPeak Salvage Note
+
+The disabled channel suites were salvageable. The working tree now revives the
+three suites as `.rs` files and wires them from `src/channel/mod.rs`.
+
+Repairs made:
+
+- Removed corrupt trailing fragments from all three revived suite files.
+- Updated MPSC current-API usage (`DetRng::shuffle`, exhaustive `RecvError`
+  handling, and capacity-safe bounded-channel harnesses).
+- Added the three explicit requested MPSC relations: reservation-slot
+  permutation, deterministic trace replay, and N-partition decomposition.
+- Updated broadcast and oneshot error handling for current channel APIs.
+
+Current proof frontier:
+
+- File-scoped `rustfmt --edition 2024 --check` passes for the three revived
+  suites.
+- `git diff --check` passes for the channel/doc slice.
+- Remote `rch` lib-test compile probes reach unrelated shared-main blockers in
+  `src/sync/rwlock.rs`, `src/obligation/metamorphic_tests.rs`, and
+  `src/runtime/{builder,config}.rs` before completing the revived channel suite
+  target.
+- Required `rch` gates for `asupersync-z0wq1e` were attempted. The current
+  shared-main frontier is outside this bead: `cargo check --all-targets` stops
+  in `tests/metamorphic_region_table.rs`, `cargo clippy --all-targets -- -D
+  warnings` stops in bin/conformance warning debt, and `cargo fmt --check`
+  stops on unrelated formatting in `src/sync/rwlock.rs`.
+
 ## Impact
 
 Provides comprehensive metamorphic test coverage for channel message preservation properties that would be difficult to verify through conventional unit testing. These tests serve as both bug detection mechanisms and regression protection for the core channel reliability guarantees.

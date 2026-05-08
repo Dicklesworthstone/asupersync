@@ -26,9 +26,8 @@
 use crate::channel::broadcast::{self, RecvError, SendError};
 use crate::cx::Cx;
 use crate::lab::{LabConfig, LabRuntime};
-use crate::util::DetRng;
 use proptest::prelude::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -77,8 +76,6 @@ impl BroadcastMessage {
 struct FastReceiverHarness {
     sender: crate::channel::broadcast::Sender<BroadcastMessage>,
     receivers: Vec<crate::channel::broadcast::Receiver<BroadcastMessage>>,
-    capacity: usize,
-    messages_sent: u64,
 }
 
 impl FastReceiverHarness {
@@ -86,17 +83,11 @@ impl FastReceiverHarness {
         let (sender, receiver) = broadcast::channel(capacity);
         let mut receivers = vec![receiver];
 
-        // Clone additional receivers
         for _ in 1..receiver_count {
-            receivers.push(receivers[0].clone());
+            receivers.push(sender.subscribe());
         }
 
-        Self {
-            sender,
-            receivers,
-            capacity,
-            messages_sent: 0,
-        }
+        Self { sender, receivers }
     }
 
     fn send_message(
@@ -105,10 +96,7 @@ impl FastReceiverHarness {
         message: BroadcastMessage,
     ) -> Result<usize, SendError<BroadcastMessage>> {
         match self.sender.send(cx, message) {
-            Ok(receiver_count) => {
-                self.messages_sent += 1;
-                Ok(receiver_count)
-            }
+            Ok(receiver_count) => Ok(receiver_count),
             Err(e) => Err(e),
         }
     }
@@ -219,6 +207,11 @@ mod tests {
                         Err(RecvError::Cancelled) => {
                             prop_assert!(false,
                                 "MR1 VIOLATION: Receiver {} got Cancelled at message {} of {}",
+                                receiver_idx, expected_idx, message_count);
+                        }
+                        Err(RecvError::PolledAfterCompletion) => {
+                            prop_assert!(false,
+                                "MR1 VIOLATION: Receiver {} recv future was polled after completion at message {} of {}",
                                 receiver_idx, expected_idx, message_count);
                         }
                     }
@@ -476,7 +469,7 @@ mod tests {
                 .skip(pre_messages)
                 .collect();
 
-            prop_assert_eq!(early_post_received, late_post_received,
+            prop_assert_eq!(early_post_received, late_post_received.clone(),
                 "MR4 VIOLATION: Early vs late subscription produced different post-subscription sequences");
 
             prop_assert_eq!(late_post_received, post_subscription_messages,
@@ -529,8 +522,6 @@ mod tests {
                 }
             }
         }
-
-        println!("Composite MR test passed: Complete message preservation with fast receivers");
     }
 }
 

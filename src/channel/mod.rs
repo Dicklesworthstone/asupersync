@@ -85,18 +85,17 @@ mod mpsc_metamorphic;
 #[path = "watch_borrow_vs_changed_metamorphic.rs"]
 mod watch_borrow_vs_changed_metamorphic;
 
-// Temporarily disabled for compilation
-// #[cfg(test)]
-// #[path = "mpsc_message_preservation_metamorphic.rs"]
-// mod mpsc_message_preservation_metamorphic;
+#[cfg(test)]
+#[path = "mpsc_message_preservation_metamorphic.rs"]
+mod mpsc_message_preservation_metamorphic;
 
-// #[cfg(test)]
-// #[path = "broadcast_no_message_loss_metamorphic.rs"]
-// mod broadcast_no_message_loss_metamorphic;
+#[cfg(test)]
+#[path = "broadcast_no_message_loss_metamorphic.rs"]
+mod broadcast_no_message_loss_metamorphic;
 
-// #[cfg(test)]
-// #[path = "oneshot_exactly_once_metamorphic.rs"]
-// mod oneshot_exactly_once_metamorphic;
+#[cfg(test)]
+#[path = "oneshot_exactly_once_metamorphic.rs"]
+mod oneshot_exactly_once_metamorphic;
 
 // Re-export commonly used types from mpsc (the default channel)
 pub use mpsc::{Receiver, SendPermit, Sender, channel};

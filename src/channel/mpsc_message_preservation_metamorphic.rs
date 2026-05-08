@@ -14,6 +14,12 @@
 //!   batch vs N individual sends produces identical receiver state
 //! - **MR4 (Permutation Invariance)**: Permuting send order doesn't affect
 //!   the set of received messages (only their order)
+//! - **MR5 (Reservation Slot Permutation)**: Re-ordering reserved slots
+//!   preserves outcomes for commutative consumers
+//! - **MR6 (Deterministic Replay)**: Replaying the same trace under the lab
+//!   deterministic seed yields the same output
+//! - **MR7 (Decomposition)**: Splitting one logical stream into N MPSC
+//!   partitions preserves total message-count and message-set invariants
 //!
 //! # Property Coverage
 //!
@@ -24,11 +30,10 @@
 //! - Channel capacity doesn't affect message preservation
 //! - Different send/recv patterns are equivalent
 
-use crate::channel::mpsc::{self, RecvError, SendError};
+use crate::channel::mpsc::{self, RecvError};
 use crate::cx::Cx;
 use crate::lab::{LabConfig, LabRuntime};
 use crate::util::DetRng;
-use rand::Rng;
 use proptest::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -98,6 +103,69 @@ mod tests {
     )]
     use super::*;
 
+    fn messages_with_seed(message_count: usize, seed: u32) -> Vec<TestMessage> {
+        (0..message_count)
+            .map(|i| {
+                TestMessage::new(
+                    i as u64,
+                    format!("trace_{seed}_{i}"),
+                    seed.wrapping_add(i as u32),
+                )
+            })
+            .collect()
+    }
+
+    fn permuted_slot_order(message_count: usize, seed: u64) -> Vec<usize> {
+        let mut order: Vec<_> = (0..message_count).collect();
+        let mut rng = DetRng::new(seed);
+        rng.shuffle(&mut order);
+        order
+    }
+
+    fn receive_reserved_slots(
+        cx: &Cx,
+        messages: &[TestMessage],
+        slot_order: &[usize],
+    ) -> Vec<TestMessage> {
+        assert_eq!(
+            messages.len(),
+            slot_order.len(),
+            "slot order must cover each reserved slot"
+        );
+
+        if messages.is_empty() {
+            return Vec::new();
+        }
+
+        let (tx, mut rx) = mpsc::channel(messages.len());
+        let mut permits = Vec::with_capacity(messages.len());
+
+        for _ in messages {
+            permits.push(Some(block_on(tx.reserve(cx)).unwrap()));
+        }
+
+        for &slot in slot_order {
+            let permit = permits[slot]
+                .take()
+                .expect("slot_order must not repeat a reservation slot");
+            permit.send(messages[slot].clone()).unwrap();
+        }
+
+        let mut received = Vec::with_capacity(messages.len());
+        for _ in messages {
+            match block_on(rx.recv(cx)) {
+                Ok(message) => received.push(message),
+                Err(RecvError::Disconnected | RecvError::Cancelled | RecvError::Empty) => break,
+            }
+        }
+
+        received
+    }
+
+    fn message_set(messages: &[TestMessage]) -> HashSet<TestMessage> {
+        messages.iter().cloned().collect()
+    }
+
     #[test]
     fn mr1_send_order_independence() {
         let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
@@ -107,7 +175,7 @@ mod tests {
             seed in any::<u64>(),
         )| {
             let cx = test_cx();
-            let mut rng = DetRng::new(seed);
+            prop_assume!(capacity >= message_count);
 
             // Generate unique test messages
             let messages: Vec<TestMessage> = (0..message_count)
@@ -123,10 +191,7 @@ mod tests {
 
                 // Permute the send order using deterministic shuffling
                 let mut perm_rng = DetRng::new(seed.wrapping_add(permutation_seed));
-                for i in (1..send_order.len()).rev() {
-                    let j = (perm_rng.gen::<u32>() % (i as u32 + 1)) as usize;
-                    send_order.swap(i, j);
-                }
+                perm_rng.shuffle(&mut send_order);
 
                 // Send all messages in permuted order
                 for msg in &send_order {
@@ -141,7 +206,9 @@ mod tests {
                 for _ in 0..message_count {
                     match block_on(rx.recv(&cx)) {
                         Ok(msg) => received_messages.push(msg),
-                        Err(RecvError::Disconnected) => break,
+                        Err(RecvError::Disconnected | RecvError::Cancelled | RecvError::Empty) => {
+                            break;
+                        }
                     }
                 }
 
@@ -199,6 +266,7 @@ mod tests {
             interleave_pattern in any::<u32>(),
         )| {
             let cx = test_cx();
+            prop_assume!(capacity >= message_count);
 
             // Generate test messages
             let messages: Vec<TestMessage> = (0..message_count)
@@ -221,7 +289,9 @@ mod tests {
             for _ in 0..message_count {
                 match block_on(rx_batch.recv(&cx)) {
                     Ok(msg) => batch_received.push(msg),
-                    Err(RecvError::Closed) => break,
+                    Err(RecvError::Disconnected | RecvError::Cancelled | RecvError::Empty) => {
+                        break;
+                    }
                 }
             }
 
@@ -263,7 +333,9 @@ mod tests {
             while interleaved_received.len() < sent_count {
                 match block_on(rx_interleaved.recv(&cx)) {
                     Ok(msg) => interleaved_received.push(msg),
-                    Err(RecvError::Closed) => break,
+                    Err(RecvError::Disconnected | RecvError::Cancelled | RecvError::Empty) => {
+                        break;
+                    }
                 }
             }
 
@@ -302,6 +374,7 @@ mod tests {
             content_seed in any::<u32>(),
         )| {
             let cx = test_cx();
+            prop_assume!(capacity >= message_count);
 
             // Generate test messages with deterministic content
             let messages: Vec<TestMessage> = (0..message_count)
@@ -324,9 +397,10 @@ mod tests {
             for _ in 0..message_count {
                 match block_on(rx_stream.recv(&cx)) {
                     Ok(msg) => streaming_received.push(msg),
-                    Err(RecvError::Closed) => break,
-                }
-            }
+                    Err(RecvError::Disconnected | RecvError::Cancelled | RecvError::Empty) => {
+                        break;
+                    }
+                }            }
 
             // Strategy 2: Simulated batch operation (rapid succession with no yields)
             let (tx_batch, mut rx_batch) = mpsc::channel(capacity);
@@ -345,9 +419,7 @@ mod tests {
 
                 // Then send all messages atomically
                 for (permit, msg) in permits.into_iter().zip(&messages) {
-                    if let Err(e) = permit.send(msg.clone()) {
-                        return Err(format!("Send failed: {:?}", e));
-                    }
+                    permit.send(msg.clone()).unwrap();
                 }
 
                 Ok(())
@@ -360,7 +432,9 @@ mod tests {
             for _ in 0..message_count {
                 match block_on(rx_batch.recv(&cx)) {
                     Ok(msg) => batch_received.push(msg),
-                    Err(RecvError::Closed) => break,
+                    Err(RecvError::Disconnected | RecvError::Cancelled | RecvError::Empty) => {
+                        break;
+                    }
                 }
             }
 
@@ -409,12 +483,9 @@ mod tests {
 
             let mut results_by_capacity = HashMap::new();
 
-            // Test with different capacities
-            for capacity in [1, 2, 4, 8].iter().cloned() {
-                if capacity > message_count {
-                    continue; // Skip overly large capacities for small message sets
-                }
-
+            // Test with different capacities that can hold the batch without a
+            // concurrent receiver in this single-threaded harness.
+            for capacity in [message_count, message_count + 1, message_count + 2] {
                 let (tx, mut rx) = mpsc::channel(capacity);
 
                 // Send all messages
@@ -430,7 +501,9 @@ mod tests {
                 for _ in 0..message_count {
                     match block_on(rx.recv(&cx)) {
                         Ok(msg) => received.push(msg),
-                        Err(RecvError::Disconnected) => break,
+                        Err(RecvError::Disconnected | RecvError::Cancelled | RecvError::Empty) => {
+                            break;
+                        }
                     }
                 }
 
@@ -441,7 +514,7 @@ mod tests {
             // MR4 ASSERTIONS: All capacities should produce the same received set
             if results_by_capacity.len() > 1 {
                 let sent_set: HashSet<_> = messages.iter().cloned().collect();
-                let mut reference_set = None;
+                let mut reference_set: Option<&HashSet<TestMessage>> = None;
 
                 for (capacity, received_set) in &results_by_capacity {
                     // Each capacity should receive all messages
@@ -449,7 +522,7 @@ mod tests {
                         "MR4 VIOLATION: Capacity {} didn't receive all messages", capacity);
 
                     // All capacities should produce identical results
-                    match &reference_set {
+                    match reference_set {
                         None => reference_set = Some(received_set),
                         Some(reference) => {
                             prop_assert_eq!(received_set, reference,
@@ -459,6 +532,131 @@ mod tests {
                     }
                 }
             }
+        });
+    }
+
+    /// **MR5: Reservation Slot Permutation (Permutative, Score: 8.3)**
+    ///
+    /// Property: If all slots are reserved before any send commits, then
+    /// re-ordering the reserved slot commit order must preserve the received
+    /// multiset for commutative consumers.
+    ///
+    /// **Transformation**: reserve_all(slots); permute(commit_slots)
+    /// **Relation**: set(received_original) = set(received_permuted)
+    /// **Catches**: reserved-slot leaks, duplicated commits, slot/message loss
+    #[test]
+    fn mr5_reservation_slot_permutation_preserves_commutative_outcome() {
+        let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+        proptest!(|(
+            message_count in 2usize..8,
+            seed in any::<u64>(),
+            content_seed in any::<u32>(),
+        )| {
+            let cx = test_cx();
+            let messages = messages_with_seed(message_count, content_seed);
+            let original_order: Vec<_> = (0..message_count).collect();
+            let permuted_order = permuted_slot_order(message_count, seed);
+
+            let original_received = receive_reserved_slots(&cx, &messages, &original_order);
+            let permuted_received = receive_reserved_slots(&cx, &messages, &permuted_order);
+
+            prop_assert_eq!(original_received.len(), message_count,
+                "MR5 VIOLATION: original reservation order lost messages");
+            prop_assert_eq!(permuted_received.len(), message_count,
+                "MR5 VIOLATION: permuted reservation order lost messages");
+            prop_assert_eq!(message_set(&original_received), message_set(&permuted_received),
+                "MR5 VIOLATION: reordering reservation slots changed the commutative outcome");
+        });
+    }
+
+    /// **MR6: Deterministic Replay (Equivalence, Score: 8.0)**
+    ///
+    /// Property: The same deterministic lab seed and same reserved-slot trace
+    /// must produce the same received sequence on replay.
+    ///
+    /// **Transformation**: replay(trace, seed)
+    /// **Relation**: received_run_1 = received_run_2
+    /// **Catches**: nondeterministic channel state, unstable reservation replay
+    #[test]
+    fn mr6_replaying_same_trace_under_deterministic_mode_yields_same_output() {
+        proptest!(|(
+            message_count in 2usize..8,
+            seed in any::<u64>(),
+            content_seed in any::<u32>(),
+        )| {
+            fn run_trace(
+                message_count: usize,
+                seed: u64,
+                content_seed: u32,
+            ) -> Vec<TestMessage> {
+                let _runtime = LabRuntime::new(LabConfig::new(seed));
+                let cx = test_cx();
+                let messages = messages_with_seed(message_count, content_seed);
+                let trace = permuted_slot_order(message_count, seed);
+
+                receive_reserved_slots(&cx, &messages, &trace)
+            }
+
+            let first = run_trace(message_count, seed, content_seed);
+            let second = run_trace(message_count, seed, content_seed);
+
+            prop_assert_eq!(first, second,
+                "MR6 VIOLATION: deterministic replay of the same reservation trace changed output");
+        });
+    }
+
+    /// **MR7: Decomposition (Additive, Score: 6.7)**
+    ///
+    /// Property: Splitting one logical MPSC stream into N independent MPSC
+    /// partitions preserves total message count and the aggregate message set.
+    ///
+    /// **Transformation**: split(stream, N); send_each_partition()
+    /// **Relation**: sum(count(partition_outputs)) = count(single_stream_output)
+    /// **Catches**: partition fan-out loss, duplicate delivery, aggregation gaps
+    #[test]
+    fn mr7_decomposition_into_partitions_preserves_total_count() {
+        let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+        proptest!(|(
+            message_count in 2usize..10,
+            partition_count in 1usize..5,
+            seed in any::<u64>(),
+            content_seed in any::<u32>(),
+        )| {
+            let cx = test_cx();
+            let partition_count = partition_count.min(message_count);
+            let messages = messages_with_seed(message_count, content_seed);
+            let baseline_order = permuted_slot_order(message_count, seed);
+            let baseline = receive_reserved_slots(&cx, &messages, &baseline_order);
+            let baseline_set = message_set(&baseline);
+
+            let mut decomposed = Vec::new();
+            for partition in 0..partition_count {
+                let partition_messages: Vec<_> = messages
+                    .iter()
+                    .enumerate()
+                    .filter(|(idx, _)| idx % partition_count == partition)
+                    .map(|(_, message)| message.clone())
+                    .collect();
+
+                if partition_messages.is_empty() {
+                    continue;
+                }
+
+                let partition_seed = seed.wrapping_add(partition as u64);
+                let partition_order =
+                    permuted_slot_order(partition_messages.len(), partition_seed);
+                let mut received =
+                    receive_reserved_slots(&cx, &partition_messages, &partition_order);
+
+                decomposed.append(&mut received);
+            }
+
+            prop_assert_eq!(baseline.len(), message_count,
+                "MR7 VIOLATION: baseline stream did not receive all messages");
+            prop_assert_eq!(decomposed.len(), baseline.len(),
+                "MR7 VIOLATION: partitioned stream changed total message count");
+            prop_assert_eq!(message_set(&decomposed), baseline_set,
+                "MR7 VIOLATION: partitioned stream changed the aggregate message set");
         });
     }
 
@@ -509,10 +707,6 @@ mod tests {
                 "Composite MR violated: not all messages preserved"
             );
         });
-
-        println!(
-            "Composite MR test passed: Full message preservation under permutation + interleaving"
-        );
     }
 }
 
