@@ -104,7 +104,7 @@ error context for operator triage.
 
 ## Upgrade Path
 
-1. Build a new CLI binary via `rch exec -- cargo build --release --features cli --bin asupersync`.
+1. Build a new CLI binary via `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_conformance_docs cargo build --release --features cli --bin asupersync`.
 2. Re-run `doctor package-cli` and compare `packaged_binary_sha256` in release manifests.
 3. Promote only when package smoke and e2e checks are deterministic and green.
 

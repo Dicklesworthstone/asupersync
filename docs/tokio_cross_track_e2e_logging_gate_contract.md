@@ -149,8 +149,8 @@ Failures MUST include:
 
 Required command tokens:
 
-- `rch exec -- cargo test --test tokio_cross_track_e2e_logging_enforcement -- --nocapture`
-- `rch exec -- cargo test --test e2e_log_quality_schema -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_conformance_docs cargo test --test tokio_cross_track_e2e_logging_enforcement -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_conformance_docs cargo test --test e2e_log_quality_schema -- --nocapture`
 
 ---
 

@@ -196,9 +196,9 @@ error rate > 1%, health check failures).
 ## 7. CI Verification Commands
 
 ```
-rch exec -- cargo test --test tokio_web_grpc_migration_runbook_enforcement -- --nocapture
-rch exec -- cargo test --test web_grpc_e2e_service_scripts -- --nocapture
-rch exec -- cargo test --test web_grpc_exhaustive_unit -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_conformance_docs cargo test --test tokio_web_grpc_migration_runbook_enforcement -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_conformance_docs cargo test --test web_grpc_e2e_service_scripts -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_conformance_docs cargo test --test web_grpc_exhaustive_unit -- --nocapture
 ```
 
 ---

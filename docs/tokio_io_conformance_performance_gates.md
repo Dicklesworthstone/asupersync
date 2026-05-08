@@ -54,12 +54,12 @@ This document covers:
 All heavy commands are `rch`-prefixed for remote execution:
 
 ```bash
-rch exec -- cargo test --test tokio_io_conformance_gates ec_t2_io_01 -- --nocapture
-rch exec -- cargo test --test tokio_io_conformance_gates ec_t2_io_02 -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_conformance_docs cargo test --test tokio_io_conformance_gates ec_t2_io_01 -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_conformance_docs cargo test --test tokio_io_conformance_gates ec_t2_io_02 -- --nocapture
 # ... through ec_t2_io_10
 ```
 
-Full suite: `rch exec -- cargo test --test tokio_io_conformance_gates -- --nocapture`
+Full suite: `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_conformance_docs cargo test --test tokio_io_conformance_gates -- --nocapture`
 
 ---
 
@@ -145,4 +145,4 @@ T2.8 is complete when:
 2. All 6 performance budget rows have baseline sourcing defined
 3. All 4 alarm rules have gate-effect semantics documented
 4. Test suite validates JSON artifact structure and contract coverage
-5. Tests pass via `rch exec -- cargo test --test tokio_io_conformance_gates`
+5. Tests pass via `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_conformance_docs cargo test --test tokio_io_conformance_gates`

@@ -153,7 +153,7 @@ The migration lab (T9.10) establishes baseline MTTR per failure class.
 ## 8. CI Commands
 
 ```
-rch exec -- cargo test --test tokio_diagnostics_ux_enforcement -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_conformance_docs cargo test --test tokio_diagnostics_ux_enforcement -- --nocapture
 ```
 
 ---
