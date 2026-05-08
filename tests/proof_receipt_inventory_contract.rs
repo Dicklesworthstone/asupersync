@@ -53,6 +53,30 @@ fn fixture_text(fixture: &str) -> String {
     fs::read_to_string(repo_root().join(FIXTURE_ROOT).join(fixture)).expect("read fixture text")
 }
 
+fn assert_output_matches_full_golden(
+    input_fixture: &str,
+    expected_fixture: &str,
+    drift_message: &str,
+) {
+    let output = run_receipt_with_repo_path(input_fixture, "/repo");
+    assert!(
+        output.status.success(),
+        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = String::from_utf8(output.stdout).expect("receipt stdout is utf-8");
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt output JSON");
+    let expected = fixture_text(expected_fixture);
+    let expected_json: Value =
+        serde_json::from_str(&expected).expect("expected receipt output JSON");
+
+    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
+    assert_eq!(actual, expected, "{drift_message}");
+}
+
 fn helpers(receipt: &Value) -> &Vec<Value> {
     receipt["helpers"]
         .as_array()
@@ -132,23 +156,11 @@ fn duplicate_current_helpers_emit_capability_overlap_cue() {
 
 #[test]
 fn duplicate_current_matches_full_output_golden() {
-    let output = run_receipt_with_repo_path("duplicate_current.json", "/repo");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+    assert_output_matches_full_golden(
+        "duplicate_current.json",
+        "duplicate_current_expected.json",
+        "proof receipt inventory duplicate-current golden changed; update only after reviewing capability-overlap semantics",
     );
-
-    let actual = String::from_utf8(output.stdout).expect("receipt stdout is utf-8");
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt output JSON");
-    let expected = fixture_text("duplicate_current_expected.json");
-    let expected_json: Value =
-        serde_json::from_str(&expected).expect("expected receipt output JSON");
-
-    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
-    assert_eq!(actual, expected);
 }
 
 #[test]
@@ -169,23 +181,11 @@ fn missing_contract_and_fixture_are_actionable() {
 
 #[test]
 fn redaction_and_missing_contract_matches_full_output_golden() {
-    let output = run_receipt_with_repo_path("redaction_and_missing_contract.json", "/repo");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+    assert_output_matches_full_golden(
+        "redaction_and_missing_contract.json",
+        "redaction_and_missing_contract_expected.json",
+        "proof receipt inventory redaction/missing-contract golden changed; update only after reviewing redaction and actionability semantics",
     );
-
-    let actual = String::from_utf8(output.stdout).expect("receipt stdout is utf-8");
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt output JSON");
-    let expected = fixture_text("redaction_and_missing_contract_expected.json");
-    let expected_json: Value =
-        serde_json::from_str(&expected).expect("expected receipt output JSON");
-
-    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
-    assert_eq!(actual, expected);
 }
 
 #[test]
@@ -223,22 +223,11 @@ fn output_is_deterministic_for_same_fixture_and_timestamp() {
 
 #[test]
 fn current_inventory_matches_full_output_golden() {
-    let output = run_receipt_with_repo_path("current_inventory.json", "/repo");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+    assert_output_matches_full_golden(
+        "current_inventory.json",
+        "current_inventory_expected.json",
+        "proof receipt inventory current-inventory golden changed; update only after reviewing superseded-helper and source-count semantics",
     );
-    let actual = String::from_utf8(output.stdout).expect("receipt stdout is utf-8");
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt output JSON");
-    let expected = fixture_text("current_inventory_expected.json");
-    let expected_json: Value =
-        serde_json::from_str(&expected).expect("expected receipt output JSON");
-
-    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
-    assert_eq!(actual, expected);
 }
 
 #[test]
