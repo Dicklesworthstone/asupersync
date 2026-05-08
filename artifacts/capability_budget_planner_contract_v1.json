@@ -1,0 +1,153 @@
+{
+  "contract_version": "capability-budget-planner-contract-v1",
+  "owner_bead": "asupersync-3dhff2",
+  "title": "Capability budget planner contract",
+  "purpose": "Freeze the explicit resource-envelope planner for Cx, scopes, regions, and spawned task contexts so large swarm workloads cannot silently regain ambient or unbounded resource authority.",
+  "proof_lane": "contract-and-runtime-ratchet",
+  "proof_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_capability_budget_planner_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test capability_budget_planner_contract -- --nocapture",
+  "required_dimensions": [
+    {
+      "dimension": "memory_bytes",
+      "requirement_builder": "require_memory_bytes",
+      "required_enum_variant": "MemoryBytes"
+    },
+    {
+      "dimension": "cpu_units",
+      "requirement_builder": "require_cpu_units",
+      "required_enum_variant": "CpuUnits"
+    },
+    {
+      "dimension": "io_bytes",
+      "requirement_builder": "require_io_bytes",
+      "required_enum_variant": "IoBytes"
+    },
+    {
+      "dimension": "cleanup",
+      "requirement_builder": "require_cleanup",
+      "required_enum_variant": "Cleanup"
+    },
+    {
+      "dimension": "artifact_bytes",
+      "requirement_builder": "require_artifact_bytes",
+      "required_enum_variant": "ArtifactBytes"
+    }
+  ],
+  "runtime_semantics": [
+    {
+      "scenario_id": "child-inherits-and-tightens-every-dimension",
+      "expected_status": "pass",
+      "description": "Child envelopes inherit absent parent dimensions and only tighten present dimensions."
+    },
+    {
+      "scenario_id": "required-dimension-missing-fails-closed",
+      "expected_status": "pass",
+      "description": "Required dimensions are rejected when neither parent nor child supplies an envelope."
+    },
+    {
+      "scenario_id": "required-dimension-exhausted-fails-closed",
+      "expected_status": "pass",
+      "description": "Required dimensions are rejected when the effective envelope is already exhausted."
+    },
+    {
+      "scenario_id": "cx-scope-region-task-propagation",
+      "expected_status": "pass",
+      "description": "Cx planning, scope construction, region admission, and task contexts carry the same explicit capability budget."
+    }
+  ],
+  "source_paths": [
+    {
+      "path": "src/types/budget.rs",
+      "required_markers": [
+        "pub enum CapabilityBudgetDimension",
+        "pub struct CapabilityBudgetRequirements",
+        "pub enum CapabilityBudgetRefusal",
+        "pub struct CapabilityBudget",
+        "pub fn plan_child(",
+        "pub fn validate(",
+        "validate_required_u64(",
+        "validate_required_cleanup("
+      ],
+      "forbidden_markers": [
+        "AmbientCapabilityBudget",
+        "allow_unbounded_child_capability_budget"
+      ]
+    },
+    {
+      "path": "src/types/task_context.rs",
+      "required_markers": [
+        "pub capability_budget: CapabilityBudget",
+        "capability_budget: CapabilityBudget::UNSPECIFIED"
+      ],
+      "forbidden_markers": [
+        "capability_budget: None"
+      ]
+    },
+    {
+      "path": "src/cx/cx.rs",
+      "required_markers": [
+        "pub fn capability_budget(&self) -> CapabilityBudget",
+        "pub fn plan_child_capability_budget(",
+        "pub fn apply_child_capability_budget(",
+        "pub fn scope_with_budget_and_capability_budget(",
+        "self.plan_child_capability_budget(capability_budget, requirements)"
+      ],
+      "forbidden_markers": [
+        "ignore_capability_budget_requirements"
+      ]
+    },
+    {
+      "path": "src/cx/scope.rs",
+      "required_markers": [
+        "pub fn capability_budget(&self) -> CapabilityBudget",
+        "pub async fn region_with_budget_and_capability_budget",
+        "state.create_child_region_with_capability_budget(",
+        "crate::record::RegionRecord::capability_budget",
+        "child_cx.apply_child_capability_budget("
+      ],
+      "forbidden_markers": [
+        "CapabilityBudgetRequirements::NONE, _policy, f"
+      ]
+    },
+    {
+      "path": "src/runtime/region_table.rs",
+      "required_markers": [
+        "pub enum RegionCreateError",
+        "CapabilityBudgetRefused",
+        "pub fn create_child_with_capability_budget(",
+        ".plan_child(capability_budget, requirements)",
+        "RegionRecord::new_with_time_and_capability_budget("
+      ],
+      "forbidden_markers": [
+        "unwrap_or(CapabilityBudget::UNSPECIFIED)"
+      ]
+    },
+    {
+      "path": "src/runtime/state.rs",
+      "required_markers": [
+        "pub fn create_root_region_with_capability_budget(",
+        "pub fn create_child_region_with_capability_budget(",
+        "pub fn region_capability_budget(&self, region: RegionId)"
+      ],
+      "forbidden_markers": []
+    },
+    {
+      "path": "src/record/region.rs",
+      "required_markers": [
+        "capability_budget: CapabilityBudget",
+        "pub fn capability_budget(&self) -> CapabilityBudget",
+        "pub fn set_capability_budget(&self, capability_budget: CapabilityBudget)"
+      ],
+      "forbidden_markers": [
+        "capability_budget: Default::default()"
+      ]
+    },
+    {
+      "path": "src/lib.rs",
+      "required_markers": [
+        "CapabilityBudget, CapabilityBudgetDimension,",
+        "CapabilityBudgetRefusal, CapabilityBudgetRequirements"
+      ],
+      "forbidden_markers": []
+    }
+  ]
+}
