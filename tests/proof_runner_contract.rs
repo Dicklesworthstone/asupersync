@@ -2,7 +2,7 @@
 
 #![allow(missing_docs)]
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::io::Write;
 use std::process::{Command, Output};
@@ -59,10 +59,94 @@ fn write_build_slot_snapshot(raw: &str) -> tempfile::NamedTempFile {
     file
 }
 
+fn write_json_fixture(value: &Value) -> tempfile::NamedTempFile {
+    let mut file = tempfile::NamedTempFile::new().expect("create JSON fixture");
+    serde_json::to_writer_pretty(&mut file, value).expect("write JSON fixture");
+    writeln!(file).expect("terminate JSON fixture");
+    file
+}
+
 fn output_json(output: &Output) -> Value {
     let stdout = String::from_utf8_lossy(&output.stdout);
     serde_json::from_str(&stdout)
         .unwrap_or_else(|error| panic!("proof runner output not JSON: {error}\noutput: {stdout}"))
+}
+
+fn release_pack_golden_projection(result: &Value) -> Value {
+    let pack = &result["proof_pack"];
+    let source_artifacts = pack["source_artifacts"]
+        .as_array()
+        .expect("source artifact rows")
+        .iter()
+        .map(|row| {
+            json!({
+                "path": row["path"],
+                "copy_path": row["copy_path"],
+                "status": row["status"],
+            })
+        })
+        .collect::<Vec<_>>();
+    let proof_commands = pack["proof_commands"]
+        .as_array()
+        .expect("proof command rows")
+        .iter()
+        .map(|row| {
+            json!({
+                "lane_id": row["lane_id"],
+                "expected_signal": row["expected_signal"],
+                "guarantee_ids": row["guarantee_ids"],
+                "command": row["command"],
+            })
+        })
+        .collect::<Vec<_>>();
+    let tracker = &pack["summaries"]["tracker"];
+    let status_count_keys = tracker["status_counts"]
+        .as_object()
+        .expect("tracker status counts")
+        .keys()
+        .map(|key| Value::String(key.clone()))
+        .collect::<Vec<_>>();
+
+    json!({
+        "schema_version": pack["schema_version"],
+        "generated_at": pack["generated_at"],
+        "generator": pack["generator"],
+        "source_artifacts": source_artifacts,
+        "embedded_report_rows": [
+            {
+                "path": pack["embedded_report_rows"][0]["path"],
+                "schema_version": pack["embedded_report_rows"][0]["schema_version"],
+                "sha256": "sha256:[scrubbed]",
+                "bytes": "[bytes]"
+            }
+        ],
+        "embedded_reports": {
+            "proof_console_report_v1": {
+                "schema_version": pack["embedded_reports"]["proof_console_report_v1"]["schema_version"],
+                "generated_at": pack["embedded_reports"]["proof_console_report_v1"]["generated_at"],
+                "generator": pack["embedded_reports"]["proof_console_report_v1"]["generator"],
+                "summary": pack["embedded_reports"]["proof_console_report_v1"]["summary"],
+                "verdict": pack["embedded_reports"]["proof_console_report_v1"]["verdict"]
+            }
+        },
+        "proof_commands": proof_commands,
+        "summaries": {
+            "proof_console": pack["summaries"]["proof_console"],
+            "conformance_registry": pack["summaries"]["conformance_registry"],
+            "adapter_certification_matrix": pack["summaries"]["adapter_certification_matrix"],
+            "tracker": {
+                "path": tracker["path"],
+                "status": tracker["status"],
+                "sha256": "sha256:[scrubbed]",
+                "valid_issue_count": "[count]",
+                "status_count_keys": status_count_keys,
+                "raw_issue_rows_embedded": tracker["raw_issue_rows_embedded"]
+            }
+        },
+        "summary": pack["summary"],
+        "failure_reasons": pack["failure_reasons"],
+        "verdict": pack["verdict"]
+    })
 }
 
 fn fixture_text(fixture: &str) -> String {
@@ -1017,6 +1101,22 @@ fn proof_runner_treats_normal_artifact_retrieval_as_pass() {
             .expect("summary")
             .contains("passed")
     );
+    assert_eq!(
+        outcome["source_log_path"].as_str(),
+        Some("tests/fixtures/proof_runner/normal_artifact_retrieval.log")
+    );
+    assert!(
+        outcome["source_log_sha256"]
+            .as_str()
+            .expect("source log hash")
+            .starts_with("sha256:")
+    );
+    assert!(
+        outcome["source_log_bytes"]
+            .as_u64()
+            .expect("source log bytes")
+            > 0
+    );
 }
 
 #[test]
@@ -1463,6 +1563,24 @@ fn proof_runner_emits_deterministic_release_proof_pack() {
 }
 
 #[test]
+fn release_proof_pack_index_matches_scrubbed_golden() {
+    let result = proof_runner_json(&[
+        "--release-proof-pack",
+        "--release-proof-pack-generated-at",
+        "2026-05-08T00:00:00Z",
+        "--output",
+        "json",
+    ]);
+    let projection = release_pack_golden_projection(&result);
+    let expected =
+        load_json("tests/fixtures/proof_runner/release_proof_pack_index_scrubbed_expected.json");
+    assert_eq!(
+        projection, expected,
+        "scrubbed release proof-pack index changed; update the golden only after reviewing release evidence shape, proof commands, and redaction boundaries"
+    );
+}
+
+#[test]
 fn proof_runner_writes_reproducible_release_proof_pack_directory() {
     let tempdir = tempfile::tempdir().expect("create release proof pack tempdir");
     let output_dir = tempdir.path().join("pack");
@@ -1525,6 +1643,85 @@ fn proof_runner_writes_reproducible_release_proof_pack_directory() {
             "written_files must include {required}"
         );
     }
+}
+
+#[test]
+fn release_proof_pack_fail_closes_on_missing_rch_log() {
+    let command = "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test proof_runner_contract -- --nocapture";
+    let mut classified = classify_fixture(
+        "normal_artifact_retrieval.log",
+        command,
+        &["tests/proof_runner_contract.rs"],
+    );
+    classified["rch_outcome"]["source_log_path"] =
+        Value::String("tests/fixtures/proof_runner/missing-rch-proof.log".to_string());
+    let outcome = write_json_fixture(&classified);
+    let outcome_path = outcome.path().to_str().expect("outcome path utf8");
+    let output = run_proof_runner(&[
+        "--release-proof-pack",
+        "--release-proof-pack-generated-at",
+        "2026-05-08T00:00:00Z",
+        "--release-proof-pack-rch-outcome",
+        outcome_path,
+        "--output",
+        "json",
+    ])
+    .expect("release proof pack should execute");
+    assert!(
+        !output.status.success(),
+        "missing source rch log must make release pack fail closed"
+    );
+    let result = output_json(&output);
+    let pack = &result["proof_pack"];
+    assert_eq!(pack["verdict"].as_str(), Some("fail_closed"));
+    assert!(
+        pack["failure_reasons"]
+            .as_array()
+            .expect("failure reasons")
+            .iter()
+            .any(|reason| reason["reason_id"].as_str() == Some("missing-rch-log")),
+        "release pack should name the missing rch source log"
+    );
+}
+
+#[test]
+fn release_proof_pack_fail_closes_on_stale_rch_log_digest() {
+    let command = "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test proof_runner_contract -- --nocapture";
+    let mut classified = classify_fixture(
+        "normal_artifact_retrieval.log",
+        command,
+        &["tests/proof_runner_contract.rs"],
+    );
+    classified["rch_outcome"]["source_log_sha256"] = Value::String(
+        "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+    );
+    let outcome = write_json_fixture(&classified);
+    let outcome_path = outcome.path().to_str().expect("outcome path utf8");
+    let output = run_proof_runner(&[
+        "--release-proof-pack",
+        "--release-proof-pack-generated-at",
+        "2026-05-08T00:00:00Z",
+        "--release-proof-pack-rch-outcome",
+        outcome_path,
+        "--output",
+        "json",
+    ])
+    .expect("release proof pack should execute");
+    assert!(
+        !output.status.success(),
+        "stale source rch log digest must make release pack fail closed"
+    );
+    let result = output_json(&output);
+    let pack = &result["proof_pack"];
+    assert_eq!(pack["verdict"].as_str(), Some("fail_closed"));
+    assert!(
+        pack["failure_reasons"]
+            .as_array()
+            .expect("failure reasons")
+            .iter()
+            .any(|reason| reason["reason_id"].as_str() == Some("stale-rch-log")),
+        "release pack should name the stale rch source log"
+    );
 }
 
 #[test]

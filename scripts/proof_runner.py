@@ -87,6 +87,15 @@ def payload_hash(payload: Dict[str, Any]) -> str:
     return f"sha256:{hashlib.sha256(canonical_json_bytes(payload)).hexdigest()}"
 
 
+def file_hash(path: Path) -> str:
+    """Return a sha256 digest for a file without loading it all at once."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return f"sha256:{digest.hexdigest()}"
+
+
 def proof_console_markdown(report: Dict[str, Any]) -> str:
     """Render a deterministic Markdown operator proof-console report."""
     summary = report["summary"]
@@ -1096,11 +1105,7 @@ class ProofRunner:
             return json.load(handle)
 
     def _repo_hash(self, relative_path: str) -> str:
-        digest = hashlib.sha256()
-        with (self.repo_root / relative_path).open("rb") as handle:
-            for chunk in iter(lambda: handle.read(65536), b""):
-                digest.update(chunk)
-        return f"sha256:{digest.hexdigest()}"
+        return file_hash(self.repo_root / relative_path)
 
     def _repo_artifact_row(self, relative_path: str) -> Dict[str, Any]:
         path = self.repo_root / relative_path
@@ -1210,6 +1215,72 @@ class ProofRunner:
             else:
                 raise ValueError(f"rch outcome file must contain an object: {path}")
         return outcomes
+
+    def _rch_outcome_provenance_failures(
+        self,
+        rch_outcomes: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        failures = []
+        for index, outcome in enumerate(rch_outcomes):
+            source_log_path = outcome.get("source_log_path")
+            source_log_sha256 = outcome.get("source_log_sha256")
+            source_log_bytes = outcome.get("source_log_bytes")
+            missing_fields = [
+                field
+                for field, value in (
+                    ("source_log_path", source_log_path),
+                    ("source_log_sha256", source_log_sha256),
+                    ("source_log_bytes", source_log_bytes),
+                )
+                if value in ("", None)
+            ]
+            if isinstance(source_log_bytes, bool) or not isinstance(source_log_bytes, int):
+                if "source_log_bytes" not in missing_fields:
+                    missing_fields.append("source_log_bytes")
+            if missing_fields:
+                failures.append(
+                    {
+                        "reason_id": "missing-rch-log-provenance",
+                        "summary": "rch outcome lacks source log path, hash, or byte count",
+                        "outcome_index": index,
+                        "command": outcome.get("command", ""),
+                        "missing_fields": missing_fields,
+                    }
+                )
+                continue
+
+            source_path = Path(str(source_log_path))
+            if not source_path.is_absolute():
+                source_path = self.repo_root / source_path
+            if not source_path.exists():
+                failures.append(
+                    {
+                        "reason_id": "missing-rch-log",
+                        "summary": "rch outcome references a source log that is not present",
+                        "outcome_index": index,
+                        "command": outcome.get("command", ""),
+                        "source_log_path": str(source_log_path),
+                    }
+                )
+                continue
+
+            actual_sha256 = file_hash(source_path)
+            actual_bytes = source_path.stat().st_size
+            if actual_sha256 != source_log_sha256 or actual_bytes != source_log_bytes:
+                failures.append(
+                    {
+                        "reason_id": "stale-rch-log",
+                        "summary": "rch outcome source log hash or byte count changed",
+                        "outcome_index": index,
+                        "command": outcome.get("command", ""),
+                        "source_log_path": str(source_log_path),
+                        "expected_sha256": source_log_sha256,
+                        "actual_sha256": actual_sha256,
+                        "expected_bytes": source_log_bytes,
+                        "actual_bytes": actual_bytes,
+                    }
+                )
+        return failures
 
     def proof_console_report(
         self,
@@ -1449,6 +1520,10 @@ class ProofRunner:
                     "verdict": proof_console["verdict"],
                 }
             )
+        rch_outcome_provenance_failures = self._rch_outcome_provenance_failures(
+            proof_console["rch_outcomes"]
+        )
+        failure_reasons.extend(rch_outcome_provenance_failures)
 
         embedded_reports = {
             "proof_console_report_v1": proof_console,
@@ -1485,6 +1560,9 @@ class ProofRunner:
                 "proof_lane_count": len(lanes),
                 "proof_command_count": len(proof_commands),
                 "rch_outcome_count": len(proof_console["rch_outcomes"]),
+                "rch_outcome_provenance_failure_count": len(
+                    rch_outcome_provenance_failures
+                ),
             },
             "failure_reasons": failure_reasons,
             "verdict": "fail_closed" if failure_reasons else "pass",
@@ -1696,8 +1774,12 @@ class ProofRunner:
         touched_files: List[str],
     ) -> Dict[str, Any]:
         """Classify a saved rch transcript as a machine-readable proof outcome."""
-        log_text = Path(log_path).read_text(encoding="utf-8")
+        source_log = Path(log_path)
+        log_text = source_log.read_text(encoding="utf-8")
         outcome = classify_rch_outcome(command, log_text, touched_files)
+        outcome["source_log_path"] = str(source_log)
+        outcome["source_log_sha256"] = file_hash(source_log)
+        outcome["source_log_bytes"] = source_log.stat().st_size
         record = ValidationFrontierRecord(command, touched_files)
         blocker = outcome["first_blocker"]
         scope = outcome["command_scope"]
