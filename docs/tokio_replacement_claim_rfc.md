@@ -357,8 +357,7 @@ Rollback authority escalation:
 
 Validation:
 ```bash
-cargo test --test tokio_replacement_claim_rfc_enforcement
-rch exec 'cargo test --test tokio_replacement_claim_rfc_enforcement'
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_policy_docs cargo test --test tokio_replacement_claim_rfc_enforcement
 ```
 
 ---

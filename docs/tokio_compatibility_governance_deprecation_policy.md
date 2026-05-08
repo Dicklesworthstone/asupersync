@@ -383,8 +383,7 @@ Any proposed change that would weaken an invariant requires:
 
 Validation:
 ```bash
-cargo test --test tokio_compatibility_governance_enforcement
-rch exec 'cargo test --test tokio_compatibility_governance_enforcement'
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_policy_docs cargo test --test tokio_compatibility_governance_enforcement
 ```
 
 ---

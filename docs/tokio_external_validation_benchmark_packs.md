@@ -230,8 +230,7 @@ evidence-packs/
 
 Validation:
 ```bash
-cargo test --test tokio_external_validation_benchmark_enforcement
-rch exec 'cargo test --test tokio_external_validation_benchmark_enforcement'
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_policy_docs cargo test --test tokio_external_validation_benchmark_enforcement
 ```
 
 ---

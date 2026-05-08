@@ -241,8 +241,7 @@ When a promotion gate cannot be satisfied:
 
 Validation:
 ```bash
-cargo test --test tokio_release_channels_stabilization_enforcement
-rch exec 'cargo test --test tokio_release_channels_stabilization_enforcement'
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_policy_docs cargo test --test tokio_release_channels_stabilization_enforcement
 ```
 
 ---
