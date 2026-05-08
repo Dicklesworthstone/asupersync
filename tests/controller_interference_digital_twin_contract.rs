@@ -117,7 +117,10 @@ fn stable_state_vectors() -> Vec<ControllerInterferenceStateVector> {
 fn base_request() -> ControllerInterferenceDigitalTwinRequest {
     ControllerInterferenceDigitalTwinRequest {
         scenario_id: DEFAULT_SCENARIO_ID.to_string(),
-        controller_versions: controllers().iter().map(|name| controller_version(name)).collect(),
+        controller_versions: controllers()
+            .iter()
+            .map(|name| controller_version(name))
+            .collect(),
         input_evidence_hashes: controllers().iter().map(|name| evidence(name)).collect(),
         state_vectors: stable_state_vectors(),
         bundle_manifest_digest_sha256: digest('1'),
@@ -127,9 +130,12 @@ fn base_request() -> ControllerInterferenceDigitalTwinRequest {
         shadow_run_decision: Some(SignedProfileBundleShadowRunDecision::Promote),
         shadow_run_hold_reasons: Vec::new(),
         budget: ControllerInterferenceTwinBudget::default(),
-        replay_command:
-            "rch exec -- cargo test -p asupersync --test controller_interference_digital_twin_contract"
-                .to_string(),
+        replay_command: concat!(
+            "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/",
+            "rch_target_controller_interference_digital_twin_docs ",
+            "cargo test -p asupersync --test controller_interference_digital_twin_contract"
+        )
+        .to_string(),
     }
 }
 
@@ -358,11 +364,18 @@ fn controller_interference_digital_twin_smoke_emits_report() {
         report["fallback_decision"],
         json!("accept_combined_policy_bundle")
     );
+    let replay_command = report["replay_command"].as_str().expect("replay");
     assert!(
-        report["replay_command"]
-            .as_str()
-            .expect("replay")
-            .contains("rch exec")
+        replay_command.contains("rch exec -- env "),
+        "replay command must use rch env routing: {replay_command}"
+    );
+    assert!(
+        replay_command.contains("CARGO_TARGET_DIR="),
+        "replay command must isolate Cargo output: {replay_command}"
+    );
+    assert!(
+        !replay_command.contains("rch exec -- cargo"),
+        "replay command must not use bare rch cargo routing: {replay_command}"
     );
 
     if let Ok(path) = std::env::var("ASUPERSYNC_CONTROLLER_INTERFERENCE_DIGITAL_TWIN_REPORT_PATH") {
