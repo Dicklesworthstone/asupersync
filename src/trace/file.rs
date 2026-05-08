@@ -1543,6 +1543,39 @@ mod tests {
         })
     }
 
+    fn scrub_metadata_for_snapshot(metadata: &TraceMetadata) -> serde_json::Value {
+        let mut metadata = serde_json::to_value(metadata).expect("serialize metadata");
+        if let Some(obj) = metadata.as_object_mut() {
+            if let Some(recorded_at) = obj.get_mut("recorded_at") {
+                *recorded_at = json!("[recorded_at]");
+            }
+        }
+        metadata
+    }
+
+    fn trace_file_roundtrip_summary(path: &std::path::Path) -> serde_json::Value {
+        let (reader_event_count, reader_metadata) = {
+            let reader = TraceReader::open(path).expect("open reader");
+            (
+                reader.event_count(),
+                scrub_metadata_for_snapshot(reader.metadata()),
+            )
+        };
+
+        let (metadata, events) = read_trace(path).expect("read trace");
+
+        json!({
+            "reader": {
+                "event_count": reader_event_count,
+                "metadata": reader_metadata,
+            },
+            "read_trace": {
+                "metadata": scrub_metadata_for_snapshot(&metadata),
+                "events": events,
+            },
+        })
+    }
+
     // =========================================================================
     // Pure data-type tests (wave 40 – CyanBarn)
     // =========================================================================
@@ -1630,6 +1663,28 @@ mod tests {
         for (orig, read) in events.iter().zip(read_events.iter()) {
             assert_eq!(orig, read);
         }
+    }
+
+    #[test]
+    fn trace_file_roundtrip_serialization_summary() {
+        let temp = NamedTempFile::new().expect("create temp file");
+        let path = temp.path();
+
+        let metadata = TraceMetadata {
+            version: REPLAY_SCHEMA_VERSION,
+            seed: 7,
+            recorded_at: 1_726_133_456_789_000_000,
+            config_hash: 0x1020_3040_5060_7080,
+            description: Some("trace file round-trip snapshot".to_string()),
+        };
+        let events = sample_events();
+
+        write_trace(path, &metadata, &events).expect("write trace");
+
+        insta::assert_json_snapshot!(
+            "trace_file_roundtrip_serialization_summary",
+            trace_file_roundtrip_summary(path)
+        );
     }
 
     #[cfg(not(feature = "trace-compression"))]

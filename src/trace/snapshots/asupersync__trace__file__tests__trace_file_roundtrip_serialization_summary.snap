@@ -1,0 +1,55 @@
+---
+source: src/trace/file.rs
+expression: trace_file_roundtrip_summary(path)
+---
+{
+  "read_trace": {
+    "events": [
+      {
+        "seed": 42,
+        "type": "RngSeed"
+      },
+      {
+        "at_tick": 0,
+        "task": 1,
+        "type": "TaskScheduled"
+      },
+      {
+        "from_nanos": 0,
+        "to_nanos": 1000000,
+        "type": "TimeAdvanced"
+      },
+      {
+        "task": 1,
+        "type": "TaskYielded"
+      },
+      {
+        "at_tick": 1,
+        "task": 1,
+        "type": "TaskScheduled"
+      },
+      {
+        "outcome": 0,
+        "task": 1,
+        "type": "TaskCompleted"
+      }
+    ],
+    "metadata": {
+      "config_hash": 1161981756646125696,
+      "description": "trace file round-trip snapshot",
+      "recorded_at": "[recorded_at]",
+      "seed": 7,
+      "version": 1
+    }
+  },
+  "reader": {
+    "event_count": 6,
+    "metadata": {
+      "config_hash": 1161981756646125696,
+      "description": "trace file round-trip snapshot",
+      "recorded_at": "[recorded_at]",
+      "seed": 7,
+      "version": 1
+    }
+  }
+}
