@@ -147,6 +147,26 @@ fn stale_cache_output_matches_full_reviewed_golden() {
 }
 
 #[test]
+fn changed_cache_output_matches_full_reviewed_golden() {
+    let first = cache_json(&fixture("current_receipt.json"), None, 1800);
+    let cache = patched_cache("changed_cache.json", &first);
+    let output = run_cache(&fixture("current_receipt.json"), Some(cache.path()), 1800);
+    assert!(
+        output.status.success(),
+        "cache helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("cache stdout is utf-8"),
+        fixture_text("changed_cache_expected.json"),
+        "changed-digest onboarding receipt cache output drifted from the reviewed golden"
+    );
+}
+
+#[test]
 fn no_matching_cache_output_matches_full_reviewed_golden() {
     let output = run_cache(
         &fixture("current_receipt.json"),
