@@ -521,7 +521,7 @@ impl crate::codec::Encoder<Request> for Http1ClientCodec {
 
         // Headers
         for (name, value) in &req.headers {
-            dst.extend_from_slice(name.as_bytes());
+            dst.extend_from_slice(name.to_ascii_lowercase().as_bytes());
             dst.extend_from_slice(b": ");
             dst.extend_from_slice(value.as_bytes());
             dst.extend_from_slice(b"\r\n");
@@ -538,7 +538,7 @@ impl crate::codec::Encoder<Request> for Http1ClientCodec {
 
             dst.extend_from_slice(b"0\r\n");
             for (name, value) in &req.trailers {
-                dst.extend_from_slice(name.as_bytes());
+                dst.extend_from_slice(name.to_ascii_lowercase().as_bytes());
                 dst.extend_from_slice(b": ");
                 dst.extend_from_slice(value.as_bytes());
                 dst.extend_from_slice(b"\r\n");
@@ -553,7 +553,7 @@ impl crate::codec::Encoder<Request> for Http1ClientCodec {
                 append_decimal(dst, req.body.len());
                 dst.extend_from_slice(b"\r\n");
             } else if req.method == Method::Post || req.method == Method::Put {
-                dst.extend_from_slice(b"Content-Length: 0\r\n");
+                dst.extend_from_slice(b"content-length: 0\r\n");
             }
         }
 

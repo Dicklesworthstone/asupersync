@@ -520,7 +520,6 @@ impl RequestBuildingConformanceTester {
         }
 
         // Sort headers for deterministic output (hyper-like behavior)
-        normalized_headers.sort_by_key(|(name, _)| name.clone());
 
         // Generate HTTP/1.1 wire format (hyper reference style)
         let mut wire = Vec::new();
