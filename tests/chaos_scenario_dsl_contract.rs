@@ -580,6 +580,128 @@ fn live_cancellation_storm_replay_uses_lab_runtime_state_machine() {
 }
 
 #[test]
+fn live_partition_cancel_storm_row_is_backed_by_runner_and_swarm_replay() {
+    let contract = contract();
+    let probe = contract
+        .get("live_partition_cancel_storm_contract")
+        .expect("live_partition_cancel_storm_contract object");
+    assert_eq!(string(probe, "report_status"), "LIVE");
+
+    let rows = rows_by_scenario(&contract);
+    let row = rows
+        .get(string(probe, "scenario_id"))
+        .expect("partition cancel storm scenario row");
+    let required_row_fields = probe
+        .get("required_row_fields")
+        .and_then(Value::as_object)
+        .expect("required_row_fields object");
+    assert_eq!(
+        row["live_runner_wired"],
+        required_row_fields["live_runner_wired"]
+    );
+    assert_eq!(
+        string(row, "report_status"),
+        required_row_fields["report_status"]
+            .as_str()
+            .expect("required row report_status")
+    );
+    assert_eq!(
+        string(row, "status_reason"),
+        required_row_fields["status_reason"]
+            .as_str()
+            .expect("required row status_reason")
+    );
+
+    let runner_probe_key = string(probe, "runner_probe");
+    let runner_probe = contract
+        .get(runner_probe_key)
+        .unwrap_or_else(|| panic!("runner probe {runner_probe_key} must exist"));
+    let cancellation_probe_key = string(probe, "cancellation_probe");
+    let cancellation_probe = contract
+        .get(cancellation_probe_key)
+        .unwrap_or_else(|| panic!("cancellation probe {cancellation_probe_key} must exist"));
+    assert_eq!(string(runner_probe, "report_status"), "LIVE");
+    assert_eq!(string(cancellation_probe, "report_status"), "LIVE");
+
+    let source_markers = probe.get("source_markers").expect("source_markers object");
+    for source_path in ["src/lab/scenario_runner.rs", "src/lab/swarm_replay.rs"] {
+        let source = std::fs::read_to_string(repo_path(source_path))
+            .unwrap_or_else(|error| panic!("read {source_path}: {error}"));
+        for marker in string_list(source_markers, source_path) {
+            assert!(
+                source.contains(&marker),
+                "{source_path} must contain live marker {marker}"
+            );
+        }
+    }
+
+    let raw_scenario = serde_json::to_string(
+        contract
+            .get("canonical_source_backed_scenario")
+            .expect("canonical source-backed scenario object"),
+    )
+    .expect("serialize canonical source-backed scenario");
+    let scenario = Scenario::from_json(&raw_scenario).expect("parse canonical scenario");
+    assert!(
+        scenario.validate().is_empty(),
+        "partition/cancel scenario must validate"
+    );
+
+    let result =
+        ScenarioRunner::validate_replay(&scenario).expect("partition/cancel scenario must replay");
+    assert!(result.passed(), "partition/cancel runner probe must pass");
+    let result_json = result.to_json();
+    for field in string_list(probe, "required_runner_fields") {
+        assert!(
+            result_json.get(&field).is_some(),
+            "runner JSON result must include {field}"
+        );
+    }
+    let expected_fault_log = Value::Array(array(runner_probe, "expected_fault_log").clone());
+    assert_eq!(result_json["fault_log"], expected_fault_log);
+
+    let replay_scenario: SwarmReplayScenario = serde_json::from_value(
+        cancellation_probe
+            .get("swarm_replay_scenario")
+            .expect("swarm replay scenario object")
+            .clone(),
+    )
+    .expect("parse swarm replay scenario");
+    let summary =
+        run_swarm_replay_scenario(&replay_scenario).expect("swarm replay scenario must run");
+    let summary_json = serde_json::to_value(&summary).expect("serialize swarm replay summary");
+    for field in string_list(probe, "required_swarm_summary_fields") {
+        assert!(
+            summary_json.get(&field).is_some(),
+            "swarm replay summary must include {field}"
+        );
+    }
+    assert!(summary.quiescent, "swarm replay must quiesce");
+    assert_eq!(
+        summary.non_terminal_task_count, 0,
+        "swarm replay must drain every tracked task"
+    );
+    let minimums = cancellation_probe
+        .get("minimums")
+        .and_then(Value::as_object)
+        .expect("cancellation minimums object");
+    let min_cancellations = minimums["cancellation_requests"]
+        .as_u64()
+        .expect("cancellation_requests minimum") as usize;
+    assert!(
+        summary.cancellation_requests >= min_cancellations,
+        "swarm replay must issue cancellation requests"
+    );
+    assert!(
+        summary
+            .event_log
+            .iter()
+            .any(|event| event.kind == SwarmReplayEventKind::CancelObserved),
+        "swarm replay must include observed task cancellation"
+    );
+}
+
+#[test]
 fn current_fault_actions_are_explicit_and_future_dimensions_fail_closed() {
     let contract = contract();
     let existing = string_set(&contract, "existing_fault_actions");
@@ -600,7 +722,7 @@ fn current_fault_actions_are_explicit_and_future_dimensions_fail_closed() {
     }
 
     let rows = rows_by_scenario(&contract);
-    assert!(rows["chaos-partition-cancel-storm"]["live_runner_wired"] == false);
+    assert!(rows["chaos-partition-cancel-storm"]["live_runner_wired"] == true);
     assert!(rows["chaos-disk-pressure-cleanup-delay"]["live_runner_wired"] == true);
     assert!(rows["chaos-process-stall-minimized-counterexample"]["live_runner_wired"] == true);
 }
