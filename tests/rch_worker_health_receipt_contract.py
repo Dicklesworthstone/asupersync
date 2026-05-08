@@ -134,6 +134,18 @@ class RchWorkerHealthReceiptContract(unittest.TestCase):
         self.assertFalse(receipt["workers"][0]["signals"]["reachable"])
         self.assertIn("rch workers probe --all", receipt["workers"][0]["remediation"][0])
 
+    def test_unreachable_worker_output_matches_full_reviewed_golden(self) -> None:
+        output = run_receipt_output("unreachable_worker.json")
+        expected = fixture_text("unreachable_worker_expected.json")
+
+        self.assertEqual(
+            output.stdout,
+            expected,
+            "unreachable rch worker health receipt drifted from the reviewed golden",
+        )
+        json.loads(output.stdout)
+        json.loads(expected)
+
     def test_mixed_fleet_prefers_healthy_worker_but_marks_degraded(self) -> None:
         receipt = run_receipt("mixed_fleet.json")
 
