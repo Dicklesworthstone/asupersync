@@ -106,6 +106,39 @@ impl std::fmt::Display for TryRecvError {
 
 impl std::error::Error for TryRecvError {}
 
+/// Opt-in, redacted telemetry snapshot for a broadcast channel.
+///
+/// The caller supplies `channel_id`, which keeps identifiers deterministic and
+/// avoids ambient globals or pointer-derived IDs. Payload values are never
+/// exposed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BroadcastTelemetrySnapshot {
+    /// Caller-provided deterministic channel identifier.
+    pub channel_id: u64,
+    /// Stable channel kind label.
+    pub channel_kind: &'static str,
+    /// Maximum number of committed messages retained for lagging receivers.
+    pub capacity: usize,
+    /// Number of committed values retained in the broadcast ring.
+    pub queued_messages: usize,
+    /// Broadcast reservations do not consume ring capacity before commit.
+    pub reserved_uncommitted_obligations: usize,
+    /// Broadcast has no sender-side capacity waiters.
+    pub send_waiter_count: usize,
+    /// Receiver-side waiters waiting for messages or closure.
+    pub recv_waiter_count: usize,
+    /// Number of active receivers.
+    pub receiver_count: usize,
+    /// Redacted receiver state for this snapshot view.
+    pub receiver_health: &'static str,
+    /// Number of tracked receivers whose cursor has fallen behind the ring.
+    pub lagged_receiver_count: Option<usize>,
+    /// Cancel/abort events observed by the channel.
+    pub cancellation_count: u64,
+    /// Whether this channel has reached a closed state.
+    pub closed: bool,
+}
+
 /// Internal state shared between senders and receivers.
 #[derive(Debug)]
 struct Shared<T> {
@@ -117,6 +150,10 @@ struct Shared<T> {
     total_sent: u64,
     /// Waiting receivers.
     wakers: Arena<Waker>,
+    /// Active receiver cursors used for explicit lag telemetry.
+    receiver_cursors: Arena<u64>,
+    /// Number of cancellation/abort events observed by this channel.
+    cancellation_count: u64,
 }
 
 #[derive(Debug)]
@@ -152,6 +189,8 @@ impl<T: std::fmt::Debug> std::fmt::Debug for Channel<T> {
 #[inline]
 pub fn channel<T: Clone>(capacity: usize) -> (Sender<T>, Receiver<T>) {
     assert!(capacity > 0, "capacity must be non-zero");
+    let mut receiver_cursors = Arena::new();
+    let receiver_token = receiver_cursors.insert(0);
 
     let shared = Arc::new(Channel {
         sender_count: AtomicUsize::new(1),
@@ -161,6 +200,8 @@ pub fn channel<T: Clone>(capacity: usize) -> (Sender<T>, Receiver<T>) {
             capacity,
             total_sent: 0,
             wakers: Arena::new(),
+            receiver_cursors,
+            cancellation_count: 0,
         }),
     });
 
@@ -171,9 +212,105 @@ pub fn channel<T: Clone>(capacity: usize) -> (Sender<T>, Receiver<T>) {
     let receiver = Receiver {
         channel: shared,
         next_index: 0,
+        receiver_token,
     };
 
     (sender, receiver)
+}
+
+impl<T> Shared<T> {
+    #[inline]
+    fn earliest_index(&self) -> u64 {
+        self.buffer
+            .front()
+            .map_or(self.total_sent, |slot| slot.index)
+    }
+
+    #[inline]
+    fn is_message_ready_for(&self, next_index: u64) -> bool {
+        let earliest = self.earliest_index();
+        let delta = next_index.saturating_sub(earliest);
+        usize::try_from(delta)
+            .ok()
+            .is_some_and(|offset| self.buffer.get(offset).is_some())
+    }
+
+    #[inline]
+    fn update_receiver_cursor(&mut self, token: ArenaIndex, next_index: u64) {
+        if let Some(cursor) = self.receiver_cursors.get_mut(token) {
+            *cursor = next_index;
+        }
+    }
+
+    #[inline]
+    fn lagged_receiver_count(&self) -> usize {
+        let earliest = self.earliest_index();
+        self.receiver_cursors
+            .iter()
+            .filter(|(_, next_index)| **next_index < earliest)
+            .count()
+    }
+
+    #[inline]
+    fn record_cancellation(&mut self) {
+        self.cancellation_count = self.cancellation_count.saturating_add(1);
+    }
+}
+
+impl<T> Channel<T> {
+    #[inline]
+    fn record_cancellation(&self) {
+        self.inner.lock().record_cancellation();
+    }
+
+    #[inline]
+    fn telemetry_snapshot(
+        &self,
+        channel_id: u64,
+        receiver_next_index: Option<u64>,
+    ) -> BroadcastTelemetrySnapshot {
+        let inner = self.inner.lock();
+        let receiver_count = self.receiver_count.load(Ordering::Acquire);
+        let sender_count = self.sender_count.load(Ordering::Acquire);
+        let queued_messages = inner.buffer.len();
+        let recv_waiter_count = inner.wakers.len();
+        let lagged_receiver_count = inner.lagged_receiver_count();
+        let closed = receiver_count == 0 || (sender_count == 0 && queued_messages == 0);
+
+        let receiver_health = if receiver_count == 0 {
+            "receiver_dropped"
+        } else if sender_count == 0 && queued_messages == 0 {
+            "sender_closed"
+        } else if receiver_next_index.is_some_and(|next_index| next_index < inner.earliest_index())
+        {
+            "lagged"
+        } else if receiver_next_index
+            .is_some_and(|next_index| inner.is_message_ready_for(next_index))
+        {
+            "value_ready"
+        } else if recv_waiter_count > 0 {
+            "waiting"
+        } else if receiver_next_index.is_some() {
+            "caught_up"
+        } else {
+            "open"
+        };
+
+        BroadcastTelemetrySnapshot {
+            channel_id,
+            channel_kind: "broadcast",
+            capacity: inner.capacity,
+            queued_messages,
+            reserved_uncommitted_obligations: 0,
+            send_waiter_count: 0,
+            recv_waiter_count,
+            receiver_count,
+            receiver_health,
+            lagged_receiver_count: Some(lagged_receiver_count),
+            cancellation_count: inner.cancellation_count,
+            closed,
+        }
+    }
 }
 
 /// The sending side of a broadcast channel.
@@ -202,6 +339,7 @@ impl<T: Clone> Sender<T> {
         // the caller doesn't proceed to commit a message under a cancelled
         // Cx.
         if cx.checkpoint().is_err() {
+            self.channel.record_cancellation();
             return Err(SendError::Cancelled);
         }
 
@@ -252,23 +390,33 @@ impl<T: Clone> Sender<T> {
         self.len() == 0
     }
 
+    /// Builds an opt-in redacted telemetry snapshot.
+    #[must_use]
+    #[inline]
+    pub fn telemetry_snapshot(&self, channel_id: u64) -> BroadcastTelemetrySnapshot {
+        self.channel.telemetry_snapshot(channel_id, None)
+    }
+
     /// Creates a new receiver subscribed to this channel.
     #[must_use]
     #[inline]
     pub fn subscribe(&self) -> Receiver<T> {
-        let (total_sent, _to_drop) = {
+        let (total_sent, receiver_token, _to_drop) = {
             let mut inner = self.channel.inner.lock();
+            let total_sent = inner.total_sent;
+            let receiver_token = inner.receiver_cursors.insert(total_sent);
             let to_drop = if self.channel.receiver_count.fetch_add(1, Ordering::Relaxed) == 0 {
                 Some(std::mem::take(&mut inner.buffer))
             } else {
                 None
             };
-            (inner.total_sent, to_drop)
+            (total_sent, receiver_token, to_drop)
         };
 
         Receiver {
             channel: Arc::clone(&self.channel),
             next_index: total_sent,
+            receiver_token,
         }
     }
 }
@@ -308,6 +456,13 @@ pub struct SendPermit<'a, T> {
 }
 
 impl<T: Clone> SendPermit<'_, T> {
+    /// Builds an opt-in redacted telemetry snapshot.
+    #[must_use]
+    #[inline]
+    pub fn telemetry_snapshot(&self, channel_id: u64) -> BroadcastTelemetrySnapshot {
+        self.sender.telemetry_snapshot(channel_id)
+    }
+
     /// Sends the message.
     ///
     /// Returns the number of receivers that were live at commit time.
@@ -367,6 +522,7 @@ impl<T: Clone> SendPermit<'_, T> {
 pub struct Receiver<T> {
     channel: Arc<Channel<T>>,
     next_index: u64,
+    receiver_token: ArenaIndex,
 }
 
 impl<T> Receiver<T> {
@@ -375,6 +531,22 @@ impl<T> Receiver<T> {
             let mut inner = self.channel.inner.lock();
             inner.wakers.remove(token);
         }
+    }
+
+    fn clear_waiter_registration_and_record_cancellation(&self, waiter: &mut Option<ArenaIndex>) {
+        let mut inner = self.channel.inner.lock();
+        if let Some(token) = waiter.take() {
+            inner.wakers.remove(token);
+        }
+        inner.record_cancellation();
+    }
+
+    /// Builds an opt-in redacted telemetry snapshot.
+    #[must_use]
+    #[inline]
+    pub fn telemetry_snapshot(&self, channel_id: u64) -> BroadcastTelemetrySnapshot {
+        self.channel
+            .telemetry_snapshot(channel_id, Some(self.next_index))
     }
 }
 
@@ -389,13 +561,14 @@ impl<T: Clone> Receiver<T> {
     /// - `TryRecvError::Closed`: All senders have been dropped and the buffer
     ///   is drained.
     pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
-        let inner = self.channel.inner.lock();
+        let mut inner = self.channel.inner.lock();
 
         // 1. Check for lag
         let earliest = inner.buffer.front().map_or(inner.total_sent, |s| s.index);
         if self.next_index < earliest {
             let missed = earliest - self.next_index;
             self.next_index = earliest;
+            inner.update_receiver_cursor(self.receiver_token, self.next_index);
             return Err(TryRecvError::Lagged(missed));
         }
 
@@ -405,6 +578,7 @@ impl<T: Clone> Receiver<T> {
             if let Some(slot) = inner.buffer.get(offset) {
                 let msg = slot.msg.clone();
                 self.next_index += 1;
+                inner.update_receiver_cursor(self.receiver_token, self.next_index);
                 return Ok(msg);
             }
         }
@@ -443,7 +617,7 @@ impl<T: Clone> Receiver<T> {
     ) -> Poll<Result<T, RecvError>> {
         if cx.checkpoint().is_err() {
             cx.trace("broadcast::recv cancelled");
-            self.clear_waiter_registration(waiter);
+            self.clear_waiter_registration_and_record_cancellation(waiter);
             return Poll::Ready(Err(RecvError::Cancelled));
         }
 
@@ -455,6 +629,7 @@ impl<T: Clone> Receiver<T> {
         if self.next_index < earliest {
             let missed = earliest - self.next_index;
             self.next_index = earliest;
+            inner.update_receiver_cursor(self.receiver_token, self.next_index);
             if let Some(token) = waiter.take() {
                 inner.wakers.remove(token);
             }
@@ -471,6 +646,7 @@ impl<T: Clone> Receiver<T> {
             if let Some(slot) = inner.buffer.get(offset) {
                 let msg = slot.msg.clone();
                 self.next_index += 1;
+                inner.update_receiver_cursor(self.receiver_token, self.next_index);
                 if let Some(token) = waiter.take() {
                     inner.wakers.remove(token);
                 }
@@ -560,33 +736,45 @@ impl<T> Drop for Recv<'_, T> {
     fn drop(&mut self) {
         // If the future is dropped while Pending (e.g. select/race loser),
         // ensure we don't leave stale waiters behind.
-        self.clear_waiter_registration();
+        if !self.completed && self.waiter.is_some() {
+            self.receiver
+                .clear_waiter_registration_and_record_cancellation(&mut self.waiter);
+        } else {
+            self.clear_waiter_registration();
+        }
     }
 }
 
 impl<T> Clone for Receiver<T> {
     fn clone(&self) -> Self {
-        self.channel.receiver_count.fetch_add(1, Ordering::Relaxed);
+        let receiver_token = {
+            let mut inner = self.channel.inner.lock();
+            let token = inner.receiver_cursors.insert(self.next_index);
+            self.channel.receiver_count.fetch_add(1, Ordering::Relaxed);
+            token
+        };
         Self {
             channel: Arc::clone(&self.channel),
             next_index: self.next_index,
+            receiver_token,
         }
     }
 }
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        if self.channel.receiver_count.fetch_sub(1, Ordering::AcqRel) == 1 {
-            let mut to_drop = None;
-            {
-                let mut inner = self.channel.inner.lock();
-                // Re-check under lock in case a sender concurrently called `subscribe`
+        let mut to_drop = None;
+        {
+            let mut inner = self.channel.inner.lock();
+            inner.receiver_cursors.remove(self.receiver_token);
+            if self.channel.receiver_count.fetch_sub(1, Ordering::AcqRel) == 1 {
+                // Re-check under lock in case a sender concurrently called `subscribe`.
                 if self.channel.receiver_count.load(Ordering::Acquire) == 0 {
                     to_drop = Some(std::mem::take(&mut inner.buffer));
                 }
             }
-            drop(to_drop);
         }
+        drop(to_drop);
     }
 }
 
