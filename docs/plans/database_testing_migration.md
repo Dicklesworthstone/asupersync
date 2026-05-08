@@ -40,9 +40,7 @@ docker run -d --name postgres-test \
   postgres:15
 
 # Run the migration tests
-REAL_PG_TESTS=true \
-  POSTGRES_URL=postgres://postgres:postgres@localhost:5432/postgres \
-  cargo test --features postgres --test postgres_make_test_connection_migration
+rch exec -- env REAL_PG_TESTS=true POSTGRES_URL=postgres://postgres:postgres@localhost:5432/postgres CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_database_testing_migration_docs cargo test --features postgres --test postgres_make_test_connection_migration
 ```
 
 ### MySQL Real Database Tests
@@ -55,9 +53,7 @@ docker run -d --name mysql-test \
   mysql:8.0
 
 # Run the migration tests
-REAL_MYSQL_TESTS=true \
-  MYSQL_URL=mysql://root:password@localhost:3306/mysql \
-  cargo test --features mysql --test mysql_make_test_connection_migration
+rch exec -- env REAL_MYSQL_TESTS=true MYSQL_URL=mysql://root:password@localhost:3306/mysql CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_database_testing_migration_docs cargo test --features mysql --test mysql_make_test_connection_migration
 ```
 
 ## Production Safety Guards
