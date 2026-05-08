@@ -4,7 +4,19 @@
   "purpose": "Fail-closed certification matrix for adapter surfaces whose support, reference coverage, and proof commands must not drift into unsupported pass claims.",
   "source_of_truth": {
     "matrix": "artifacts/adapter_certification_matrix_v1.json",
+    "adapter_declarations": "src/adapter_certification.rs",
     "verifier": "tests/adapter_certification_matrix_contract.rs"
+  },
+  "source_declaration_policy": {
+    "declaration_table": "ADAPTER_CERTIFICATIONS",
+    "declared_fields": [
+      "adapter_id",
+      "category",
+      "certification_status",
+      "rendered_status",
+      "fail_closed_without_full_reference"
+    ],
+    "matrix_rows_must_match_source_declarations": true
   },
   "required_categories": [
     "http",
@@ -278,7 +290,8 @@
   ],
   "validation_commands": [
     "python3 -m json.tool artifacts/adapter_certification_matrix_v1.json",
-    "rch exec -- rustfmt --edition 2024 --check tests/adapter_certification_matrix_contract.rs",
+    "rch exec -- rustfmt --edition 2024 --check src/adapter_certification.rs src/lib.rs tests/adapter_certification_matrix_contract.rs",
+    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_adapter_certification_declarations_lib CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --lib adapter_certifications_have_stable_ids_and_statuses -- --nocapture",
     "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_adapter_certification_matrix CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test adapter_certification_matrix_contract --features test-internals -- --nocapture"
   ]
 }

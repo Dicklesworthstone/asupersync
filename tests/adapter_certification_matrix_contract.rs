@@ -2,11 +2,13 @@
 
 #![allow(missing_docs)]
 
+use asupersync::adapter_certification::ADAPTER_CERTIFICATIONS;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 const MATRIX_PATH: &str = "artifacts/adapter_certification_matrix_v1.json";
+const SOURCE_DECLARATIONS_PATH: &str = "src/adapter_certification.rs";
 const TEST_PATH: &str = "tests/adapter_certification_matrix_contract.rs";
 
 fn repo_path(relative: &str) -> PathBuf {
@@ -127,6 +129,10 @@ fn matrix_declares_required_schema_sources_and_categories() {
         Some(MATRIX_PATH)
     );
     assert_eq!(
+        matrix["source_of_truth"]["adapter_declarations"].as_str(),
+        Some(SOURCE_DECLARATIONS_PATH)
+    );
+    assert_eq!(
         matrix["source_of_truth"]["verifier"].as_str(),
         Some(TEST_PATH)
     );
@@ -141,6 +147,71 @@ fn matrix_declares_required_schema_sources_and_categories() {
         "adapter matrix must cover each required category exactly once"
     );
     assert_eq!(actual.len(), 5, "matrix must cover five adapter categories");
+}
+
+#[test]
+fn source_declarations_match_matrix_rows() {
+    let matrix = matrix();
+    let policy = matrix
+        .get("source_declaration_policy")
+        .expect("source_declaration_policy object");
+    assert_eq!(
+        string(policy, "declaration_table"),
+        "ADAPTER_CERTIFICATIONS"
+    );
+    assert!(bool_field(
+        policy,
+        "matrix_rows_must_match_source_declarations"
+    ));
+    for field in [
+        "adapter_id",
+        "category",
+        "certification_status",
+        "rendered_status",
+        "fail_closed_without_full_reference",
+    ] {
+        assert!(
+            string_set(policy, "declared_fields").contains(field),
+            "source declaration policy must require {field}"
+        );
+    }
+
+    let rows_by_id = array(&matrix, "adapters")
+        .iter()
+        .map(|row| (string(row, "adapter_id").to_string(), row))
+        .collect::<BTreeMap<_, _>>();
+    let declared_ids = ADAPTER_CERTIFICATIONS
+        .iter()
+        .map(|declaration| declaration.adapter_id.to_string())
+        .collect::<BTreeSet<_>>();
+    let matrix_ids = rows_by_id.keys().cloned().collect::<BTreeSet<_>>();
+    assert_eq!(
+        matrix_ids, declared_ids,
+        "matrix adapter ids must match source declarations"
+    );
+
+    for declaration in ADAPTER_CERTIFICATIONS {
+        let row = rows_by_id
+            .get(declaration.adapter_id)
+            .unwrap_or_else(|| panic!("missing matrix row {}", declaration.adapter_id));
+        assert_eq!(string(row, "category"), declaration.category.as_str());
+        assert_eq!(
+            string(row, "certification_status"),
+            declaration.certification_status.as_str()
+        );
+        assert_eq!(
+            string(row, "rendered_status"),
+            declaration.rendered_status.as_str()
+        );
+        assert_eq!(
+            bool_field(row, "fail_closed_without_full_reference"),
+            declaration.fail_closed_without_full_reference
+        );
+    }
+
+    let source = read_repo_file(SOURCE_DECLARATIONS_PATH);
+    assert!(source.contains("pub const ADAPTER_CERTIFICATIONS"));
+    assert!(source.contains("AdapterCertificationDeclaration"));
 }
 
 #[test]
@@ -186,8 +257,30 @@ fn validation_commands_cover_the_matrix_contract_itself() {
         "rustfmt command must be rch-routed: {rustfmt}"
     );
     assert!(
+        rustfmt.contains(SOURCE_DECLARATIONS_PATH),
+        "rustfmt command must target source declarations: {rustfmt}"
+    );
+    assert!(
+        rustfmt.contains("src/lib.rs"),
+        "rustfmt command must include crate-root module wiring: {rustfmt}"
+    );
+    assert!(
         rustfmt.contains(TEST_PATH),
         "rustfmt command must target the contract test: {rustfmt}"
+    );
+
+    let source_declaration_test = commands
+        .iter()
+        .find(|command| command.contains("adapter_certifications_have_stable_ids_and_statuses"))
+        .expect("source declaration cargo proof command");
+    assert!(
+        source_declaration_test.starts_with("rch exec -- "),
+        "source declaration proof must be rch-routed: {source_declaration_test}"
+    );
+    assert!(
+        source_declaration_test
+            .contains("CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_adapter_certification_"),
+        "source declaration proof must use an isolated adapter target dir: {source_declaration_test}"
     );
 
     let cargo = commands
