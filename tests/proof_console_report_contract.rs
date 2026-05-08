@@ -3,11 +3,13 @@
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 const CONTRACT_PATH: &str = "artifacts/proof_console_report_contract_v1.json";
 const FRONTIER_PATH: &str = "artifacts/validation_frontier_ledger_schema_v1.json";
 const MANIFEST_PATH: &str = "artifacts/proof_lane_manifest_v1.json";
 const SNAPSHOT_PATH: &str = "artifacts/proof_status_snapshot_v1.json";
+const SCRIPT_PATH: &str = "scripts/proof_runner.py";
 
 fn repo_path(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
@@ -145,6 +147,30 @@ fn valid_report() -> Value {
         ],
         "failure_reasons": [],
         "verdict": "pass"
+    })
+}
+
+fn generated_report() -> Value {
+    let output = Command::new("python3")
+        .arg(SCRIPT_PATH)
+        .arg("--proof-console-report")
+        .arg("--output")
+        .arg("json")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("proof console generator should execute");
+    assert!(
+        output.status.success(),
+        "proof console generator failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "proof console generator output must be JSON: {error}\nstdout: {}",
+            String::from_utf8_lossy(&output.stdout)
+        )
     })
 }
 
@@ -328,6 +354,53 @@ fn valid_report_shape_passes_contract_validator() {
     let contract = contract();
     let failures = validate_report(&contract, &valid_report());
     assert!(failures.is_empty(), "unexpected failures: {failures:?}");
+}
+
+#[test]
+fn generated_report_shape_passes_contract_validator() {
+    let contract = contract();
+    let report = generated_report();
+    let failures = validate_report(&contract, &report);
+
+    assert!(failures.is_empty(), "unexpected failures: {failures:?}");
+    assert_eq!(
+        report["schema_version"].as_str(),
+        contract["generated_report"]["schema_version"].as_str()
+    );
+    assert!(
+        !array(&report, "claim_rows").is_empty(),
+        "generated report must include snapshot claim rows"
+    );
+    assert!(
+        !array(&report, "lane_rows").is_empty(),
+        "generated report must include manifest lane rows"
+    );
+}
+
+#[test]
+fn generated_report_does_not_treat_snapshot_green_as_fresh_execution() {
+    let report = generated_report();
+    let green_claim = array(&report, "claim_rows")
+        .iter()
+        .find(|row| row["status"].as_str() == Some("green"))
+        .expect("snapshot should contain a green mapped claim");
+    let lane_id = green_claim["manifest_lane_ids"][0]
+        .as_str()
+        .expect("green claim should reference a lane");
+    let lane = array(&report, "lane_rows")
+        .iter()
+        .find(|row| row["lane_id"].as_str() == Some(lane_id))
+        .expect("generated report should include referenced lane");
+
+    assert_eq!(
+        lane["status"].as_str(),
+        Some("not_run"),
+        "mapped snapshot green is not fresh rch execution evidence"
+    );
+    assert!(
+        array(&report, "rch_outcomes").is_empty(),
+        "default report generation must not invent command outcomes"
+    );
 }
 
 #[test]

@@ -9,6 +9,7 @@ Compatible with the validation frontier ledger schema.
 
 import argparse
 import fnmatch
+import hashlib
 import json
 import subprocess
 import sys
@@ -23,6 +24,17 @@ SAFE_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 ALLOWED_REMOTE_PROGRAMS = {"cargo", "lake", "rustfmt"}
 SHELL_CONTROL_TOKENS = (";", "&", "|", "<", ">", "`", "$(")
 RCH_OUTCOME_SCHEMA_VERSION = "proof-runner-rch-outcome-v1"
+PROOF_CONSOLE_REPORT_SCHEMA_VERSION = "proof-console-report-v1"
+PROOF_STATUS_SNAPSHOT_PATH = "artifacts/proof_status_snapshot_v1.json"
+VALIDATION_FRONTIER_LEDGER_PATH = "artifacts/validation_frontier_ledger_schema_v1.json"
+PROOF_CONSOLE_ALLOWED_RCH_OUTCOMES = {
+    "pass",
+    "blocked_external",
+    "failed_local",
+    "blocked_coordination",
+    "wrapper_hang_after_remote_exit",
+    "cancelled",
+}
 REMOTE_EXIT_RE = re.compile(
     r"(?:Remote command finished:\s*exit=|remote exit(?: status)?[=:]\s*)(-?\d+)",
     re.IGNORECASE,
@@ -970,6 +982,225 @@ class ProofRunner:
         )
         self.skip_dirty_check = skip_dirty_check
 
+    def _repo_json(self, relative_path: str) -> Dict[str, Any]:
+        with (self.repo_root / relative_path).open(encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def _repo_hash(self, relative_path: str) -> str:
+        digest = hashlib.sha256()
+        with (self.repo_root / relative_path).open("rb") as handle:
+            for chunk in iter(lambda: handle.read(65536), b""):
+                digest.update(chunk)
+        return f"sha256:{digest.hexdigest()}"
+
+    def _load_rch_outcomes(self, paths: List[str]) -> List[Dict[str, Any]]:
+        outcomes = []
+        for path in paths:
+            with Path(path).open(encoding="utf-8") as handle:
+                payload = json.load(handle)
+            if isinstance(payload, dict) and isinstance(payload.get("rch_outcome"), dict):
+                outcomes.append(payload["rch_outcome"])
+            elif isinstance(payload, dict) and isinstance(payload.get("rch_outcomes"), list):
+                outcomes.extend(
+                    item for item in payload["rch_outcomes"] if isinstance(item, dict)
+                )
+            elif isinstance(payload, dict):
+                outcomes.append(payload)
+            else:
+                raise ValueError(f"rch outcome file must contain an object: {path}")
+        return outcomes
+
+    def proof_console_report(
+        self,
+        generated_at: str = "",
+        rch_outcome_paths: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Generate the deterministic operator proof-console report."""
+        snapshot = self._repo_json(PROOF_STATUS_SNAPSHOT_PATH)
+        manifest = self.manifest.data
+        rch_outcomes = self._load_rch_outcomes(rch_outcome_paths or [])
+        lanes = sorted(manifest.get("lanes", []), key=lambda row: row.get("lane_id", ""))
+        lane_ids = {lane.get("lane_id", "") for lane in lanes}
+        guarantee_ids = {
+            guarantee
+            for lane in lanes
+            for guarantee in lane.get("guarantee_ids", [])
+            if isinstance(guarantee, str)
+        }
+        outcome_by_command = {
+            outcome.get("command", ""): outcome
+            for outcome in rch_outcomes
+            if isinstance(outcome.get("command"), str)
+        }
+
+        if not generated_at:
+            created_date = snapshot.get("created_date", "1970-01-01")
+            generated_at = f"{created_date}T00:00:00Z"
+
+        claim_rows = []
+        unsupported_broad_claim_count = 0
+        stale_blocker_count = 0
+        for claim in sorted(
+            snapshot.get("claim_categories", []), key=lambda row: row.get("claim_id", "")
+        ):
+            manifest_lane_ids = [
+                lane
+                for lane in claim.get("manifest_lane_ids", [])
+                if isinstance(lane, str)
+            ]
+            manifest_guarantee_ids = [
+                guarantee
+                for guarantee in claim.get("manifest_guarantee_ids", [])
+                if isinstance(guarantee, str)
+            ]
+            broad_claim = (
+                not manifest_lane_ids
+                or any(lane not in lane_ids for lane in manifest_lane_ids)
+                or any(guarantee not in guarantee_ids for guarantee in manifest_guarantee_ids)
+            )
+            if broad_claim:
+                unsupported_broad_claim_count += 1
+
+            blocked_frontier = claim.get("blocked_frontier")
+            if claim.get("status") == "red_blocked_external" and isinstance(
+                blocked_frontier, dict
+            ):
+                first_failure = blocked_frontier.get("first_failure", {})
+                if (
+                    blocked_frontier.get("generated_at", "") < generated_at
+                    or not first_failure.get("file")
+                    or int(first_failure.get("line") or 0) == 0
+                ):
+                    stale_blocker_count += 1
+
+            claim_rows.append(
+                {
+                    "claim_id": claim.get("claim_id", ""),
+                    "category": claim.get("category", ""),
+                    "status": claim.get("status", ""),
+                    "manifest_lane_ids": manifest_lane_ids,
+                    "manifest_guarantee_ids": manifest_guarantee_ids,
+                    "proof_commands": [
+                        command
+                        for command in claim.get("proof_commands", [])
+                        if isinstance(command, str)
+                    ],
+                    "blocked_frontier": blocked_frontier,
+                    "doc_claim_markers": claim.get("doc_claim_markers", {}),
+                    "broad_claim": broad_claim,
+                }
+            )
+
+        blocked_lane_ids = {
+            lane
+            for claim in claim_rows
+            if claim["status"] == "red_blocked_external"
+            for lane in claim["manifest_lane_ids"]
+        }
+        lane_rows = []
+        for lane in lanes:
+            command = lane.get("command", "")
+            outcome = outcome_by_command.get(command)
+            if outcome:
+                decision = outcome.get("decision", "")
+                if decision == "pass":
+                    status = "pass"
+                elif decision == "blocked-external":
+                    status = "blocked_external"
+                elif decision == "failed-local":
+                    status = "failed_local"
+                else:
+                    status = "not_run"
+            elif lane.get("lane_id") in blocked_lane_ids:
+                status = "blocked_external"
+            else:
+                status = "not_run"
+
+            lane_rows.append(
+                {
+                    "lane_id": lane.get("lane_id", ""),
+                    "kind": lane.get("kind", ""),
+                    "command": command,
+                    "guarantee_ids": lane.get("guarantee_ids", []),
+                    "expected_signal": lane.get("expected_signal", ""),
+                    "status": status,
+                    "explicit_not_covered": lane.get("explicit_not_covered", ""),
+                }
+            )
+
+        unclassified_rch_outcome_count = sum(
+            1
+            for outcome in rch_outcomes
+            if outcome.get("outcome_class") not in PROOF_CONSOLE_ALLOWED_RCH_OUTCOMES
+        )
+        green_claim_count = sum(1 for claim in claim_rows if claim["status"] == "green")
+        yellow_claim_count = sum(
+            1 for claim in claim_rows if str(claim["status"]).startswith("yellow_")
+        )
+        red_claim_count = sum(
+            1 for claim in claim_rows if claim["status"] == "red_blocked_external"
+        )
+
+        failure_reasons = []
+        for claim in claim_rows:
+            if claim["broad_claim"]:
+                failure_reasons.append(
+                    {
+                        "reason_id": "unsupported-broad-claim",
+                        "claim_id": claim["claim_id"],
+                        "summary": "claim references missing manifest lane or guarantee coverage",
+                    }
+                )
+        if stale_blocker_count:
+            failure_reasons.append(
+                {
+                    "reason_id": "stale-blocker-row",
+                    "summary": "one or more red blocker rows lack fresh file and line evidence",
+                }
+            )
+        if unclassified_rch_outcome_count:
+            failure_reasons.append(
+                {
+                    "reason_id": "unclassified-rch-outcome",
+                    "summary": "one or more rch outcomes could not be mapped to an operator class",
+                }
+            )
+
+        return {
+            "schema_version": PROOF_CONSOLE_REPORT_SCHEMA_VERSION,
+            "generated_at": generated_at,
+            "generator": {
+                "name": "scripts/proof_runner.py",
+                "mode": "proof-console-report",
+            },
+            "source_artifact_hashes": {
+                "artifacts/proof_lane_manifest_v1.json": self._repo_hash(
+                    "artifacts/proof_lane_manifest_v1.json"
+                ),
+                "artifacts/proof_status_snapshot_v1.json": self._repo_hash(
+                    PROOF_STATUS_SNAPSHOT_PATH
+                ),
+                "artifacts/validation_frontier_ledger_schema_v1.json": self._repo_hash(
+                    VALIDATION_FRONTIER_LEDGER_PATH
+                ),
+            },
+            "summary": {
+                "claim_count": len(claim_rows),
+                "lane_count": len(lane_rows),
+                "green_claim_count": green_claim_count,
+                "yellow_claim_count": yellow_claim_count,
+                "red_claim_count": red_claim_count,
+                "stale_blocker_count": stale_blocker_count,
+                "unsupported_broad_claim_count": unsupported_broad_claim_count,
+                "unclassified_rch_outcome_count": unclassified_rch_outcome_count,
+            },
+            "claim_rows": claim_rows,
+            "lane_rows": lane_rows,
+            "rch_outcomes": rch_outcomes,
+            "failure_reasons": failure_reasons,
+            "verdict": "fail_closed" if failure_reasons else "pass",
+        }
+
     def analyze_preflight(
         self,
         lane_id: str,
@@ -1256,6 +1487,22 @@ def main():
         help="Operator recipe mode"
     )
     parser.add_argument(
+        "--proof-console-report",
+        action="store_true",
+        help="Emit the deterministic operator proof-console report"
+    )
+    parser.add_argument(
+        "--proof-console-generated-at",
+        default="",
+        help="Override generated_at for deterministic proof-console fixtures"
+    )
+    parser.add_argument(
+        "--proof-console-rch-outcome",
+        action="append",
+        default=[],
+        help="JSON rch outcome produced by --classify-rch-log to include in the proof console"
+    )
+    parser.add_argument(
         "--command",
         default="",
         help="Original rch command for --classify-rch-log"
@@ -1357,6 +1604,26 @@ def main():
                 print(f"Recipe: {recipe['recipe_id']}")
                 print(f"Mode: {result['mode']}")
                 print(f"Verdict: {result['operator_verdict']}")
+            return 0
+
+        if args.proof_console_report:
+            result = runner.proof_console_report(
+                generated_at=args.proof_console_generated_at,
+                rch_outcome_paths=args.proof_console_rch_outcome,
+            )
+            if args.output == "json":
+                print(json.dumps(result, indent=2))
+            else:
+                summary = result["summary"]
+                print(f"Proof console verdict: {result['verdict']}")
+                print(
+                    "Claims: "
+                    f"{summary['claim_count']} total, "
+                    f"{summary['green_claim_count']} green, "
+                    f"{summary['yellow_claim_count']} yellow, "
+                    f"{summary['red_claim_count']} red"
+                )
+                print(f"Lanes: {summary['lane_count']}")
             return 0
 
         # Validate required arguments for proof analysis

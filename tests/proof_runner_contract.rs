@@ -1201,3 +1201,134 @@ fn proof_runner_output_format_is_machine_readable() {
         "recommendation should be valid: {recommendation}"
     );
 }
+
+#[test]
+fn proof_runner_emits_deterministic_proof_console_report() {
+    let args = &[
+        "--proof-console-report",
+        "--proof-console-generated-at",
+        "2026-05-08T00:00:00Z",
+        "--output",
+        "json",
+    ];
+    let report1 = proof_runner_json(args);
+    let report2 = proof_runner_json(args);
+
+    assert_eq!(report1, report2, "proof console output must be stable");
+    assert_eq!(
+        report1["schema_version"].as_str(),
+        Some("proof-console-report-v1")
+    );
+    assert_eq!(
+        report1["generated_at"].as_str(),
+        Some("2026-05-08T00:00:00Z")
+    );
+    assert_eq!(report1["generator"]["name"].as_str(), Some(SCRIPT_PATH));
+    assert!(
+        report1["source_artifact_hashes"]["artifacts/proof_lane_manifest_v1.json"]
+            .as_str()
+            .expect("manifest hash")
+            .starts_with("sha256:")
+    );
+    assert!(
+        !report1["claim_rows"]
+            .as_array()
+            .expect("claim rows")
+            .is_empty()
+    );
+    assert!(
+        !report1["lane_rows"]
+            .as_array()
+            .expect("lane rows")
+            .is_empty()
+    );
+    assert_eq!(report1["verdict"].as_str(), Some("pass"));
+}
+
+#[test]
+fn proof_console_report_keeps_mapped_claims_distinct_from_fresh_rch_outcomes() {
+    let report = proof_runner_json(&["--proof-console-report", "--output", "json"]);
+    let default_claim = report["claim_rows"]
+        .as_array()
+        .expect("claim rows")
+        .iter()
+        .find(|row| row["claim_id"].as_str() == Some("no-tokio-production-graph"))
+        .expect("no-tokio claim should be present");
+    assert_eq!(default_claim["status"].as_str(), Some("green"));
+    assert_eq!(default_claim["broad_claim"].as_bool(), Some(false));
+
+    let lane_id = default_claim["manifest_lane_ids"][0]
+        .as_str()
+        .expect("claim lane id");
+    let lane = report["lane_rows"]
+        .as_array()
+        .expect("lane rows")
+        .iter()
+        .find(|row| row["lane_id"].as_str() == Some(lane_id))
+        .expect("referenced lane should be present");
+    assert_eq!(
+        lane["status"].as_str(),
+        Some("not_run"),
+        "snapshot mapping is not a fresh remote execution result"
+    );
+    assert!(
+        lane["explicit_not_covered"]
+            .as_str()
+            .expect("explicit_not_covered")
+            .contains("Workspace"),
+        "operator report should preserve lane scope limits"
+    );
+    assert!(
+        report["rch_outcomes"]
+            .as_array()
+            .expect("rch outcomes")
+            .is_empty(),
+        "report must not fabricate rch outcomes"
+    );
+}
+
+#[test]
+fn proof_console_report_maps_explicit_rch_outcome_to_lane_status() {
+    let outcome = write_reservation_snapshot(
+        r#"{
+          "rch_outcome": {
+            "command": "rch exec -- cargo tree -e normal -p asupersync -i tokio",
+            "outcome_class": "pass",
+            "decision": "pass",
+            "remote_exit_status": 0,
+            "first_blocker": null
+          }
+        }"#,
+    );
+    let outcome_path = outcome.path().to_str().expect("outcome path utf8");
+    let report = proof_runner_json(&[
+        "--proof-console-report",
+        "--proof-console-rch-outcome",
+        outcome_path,
+        "--output",
+        "json",
+    ]);
+    let lane = report["lane_rows"]
+        .as_array()
+        .expect("lane rows")
+        .iter()
+        .find(|row| row["lane_id"].as_str() == Some("default-production-tokio-tree"))
+        .expect("default production tokio lane should be present");
+
+    assert_eq!(
+        lane["status"].as_str(),
+        Some("pass"),
+        "explicit classified rch outcome should update the matching lane"
+    );
+    assert_eq!(
+        report["summary"]["unclassified_rch_outcome_count"].as_u64(),
+        Some(0)
+    );
+    assert_eq!(
+        report["rch_outcomes"]
+            .as_array()
+            .expect("rch outcomes")
+            .len(),
+        1
+    );
+}
