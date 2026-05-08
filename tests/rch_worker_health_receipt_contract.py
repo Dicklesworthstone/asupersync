@@ -90,6 +90,18 @@ class RchWorkerHealthReceiptContract(unittest.TestCase):
         self.assertEqual(receipt["workers"][0]["status"], "quarantine-candidate")
         self.assertIn("low storage on /tmp", receipt["workers"][0]["reasons"])
 
+    def test_low_tmp_storage_output_matches_full_reviewed_golden(self) -> None:
+        output = run_receipt_output("low_tmp_storage.json")
+        expected = fixture_text("low_tmp_storage_expected.json")
+
+        self.assertEqual(
+            output.stdout,
+            expected,
+            "low /tmp storage rch worker health receipt drifted from the reviewed golden",
+        )
+        json.loads(output.stdout)
+        json.loads(expected)
+
     def test_unreachable_worker_is_unavailable(self) -> None:
         receipt = run_receipt("unreachable_worker.json")
 
