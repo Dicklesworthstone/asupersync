@@ -120,7 +120,7 @@ bash scripts/test_wasm_pilot_observability_e2e.sh
 
 bash ./scripts/run_all_e2e.sh --verify-matrix
 
-rch exec -- cargo test --test wasm_pilot_feedback_triage_loop -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_pilot_feedback_docs cargo test --test wasm_pilot_feedback_triage_loop -- --nocapture
 ```
 
 Optional reproducibility fingerprint:
