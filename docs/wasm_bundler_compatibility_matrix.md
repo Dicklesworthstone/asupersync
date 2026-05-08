@@ -340,16 +340,16 @@ Stage 8: Publishing
 
 ```bash
 # Profile compilation gates (via rch)
-rch exec -- cargo check --target wasm32-unknown-unknown \
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_bundler_docs cargo check --target wasm32-unknown-unknown \
   --no-default-features --features wasm-browser-dev
 
-rch exec -- cargo check --target wasm32-unknown-unknown \
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_bundler_docs cargo check --target wasm32-unknown-unknown \
   --no-default-features --features wasm-browser-prod
 
-rch exec -- cargo check --target wasm32-unknown-unknown \
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_bundler_docs cargo check --target wasm32-unknown-unknown \
   --no-default-features --features wasm-browser-deterministic
 
-rch exec -- cargo check --target wasm32-unknown-unknown \
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_bundler_docs cargo check --target wasm32-unknown-unknown \
   --no-default-features --features wasm-browser-minimal
 
 # Package policy gate
@@ -360,7 +360,7 @@ python3 scripts/check_wasm_typescript_package_policy.py \
 bash scripts/validate_npm_pack_smoke.sh
 
 # Bundler compatibility checks
-cargo test --test wasm_bundler_compatibility -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_bundler_docs cargo test --test wasm_bundler_compatibility -- --nocapture
 ```
 
 ---
@@ -413,13 +413,13 @@ The CI `check` job includes a dedicated certification step:
 Local deterministic reproduction command:
 
 ```bash
-rch exec -- cargo test -p asupersync --test wasm_bundler_compatibility -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_bundler_docs cargo test -p asupersync --test wasm_bundler_compatibility -- --nocapture
 ```
 
 Full CI gate:
 
 ```bash
-cargo test --test wasm_bundler_compatibility -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_bundler_docs cargo test --test wasm_bundler_compatibility -- --nocapture
 ```
 
 ---
