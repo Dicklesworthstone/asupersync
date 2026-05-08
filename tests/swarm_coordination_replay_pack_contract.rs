@@ -45,7 +45,8 @@ fn fixture_text(fixture: &str) -> String {
         .unwrap_or_else(|error| panic!("read golden fixture {fixture}: {error}"))
 }
 
-fn assert_replay_output_matches_golden(output: Output, fixture: &str, label: &str) {
+fn assert_replay_output_matches_golden(input_fixture: &str, expected_fixture: &str, label: &str) {
+    let output = run_replay(input_fixture);
     assert!(
         output.status.success(),
         "replay helper failed: {}\nstdout: {}\nstderr: {}",
@@ -55,7 +56,7 @@ fn assert_replay_output_matches_golden(output: Output, fixture: &str, label: &st
     );
 
     let actual = String::from_utf8(output.stdout).expect("replay stdout is utf-8");
-    let expected = fixture_text(fixture);
+    let expected = fixture_text(expected_fixture);
     let actual_json: Value =
         serde_json::from_str(&actual).expect("actual replay output must be JSON");
     let expected_json: Value =
@@ -110,8 +111,11 @@ fn clean_replay_passes_all_invariants() {
 
 #[test]
 fn clean_replay_output_matches_full_reviewed_golden() {
-    let output = run_replay("clean_replay.json");
-    assert_replay_output_matches_golden(output, "clean_replay_expected.json", "clean_replay");
+    assert_replay_output_matches_golden(
+        "clean_replay.json",
+        "clean_replay_expected.json",
+        "clean_replay",
+    );
 }
 
 #[test]
@@ -129,9 +133,8 @@ fn duplicate_claims_are_errors() {
 
 #[test]
 fn duplicate_claims_output_matches_full_reviewed_golden() {
-    let output = run_replay("duplicate_claims.json");
     assert_replay_output_matches_golden(
-        output,
+        "duplicate_claims.json",
         "duplicate_claims_expected.json",
         "duplicate_claims",
     );
@@ -156,9 +159,8 @@ fn overlapping_exclusive_reservations_are_errors() {
 
 #[test]
 fn reservation_contention_output_matches_full_reviewed_golden() {
-    let output = run_replay("reservation_contention.json");
     assert_replay_output_matches_golden(
-        output,
+        "reservation_contention.json",
         "reservation_contention_expected.json",
         "reservation_contention",
     );
@@ -178,8 +180,11 @@ fn partial_proof_launches_require_remote_exit_evidence() {
 
 #[test]
 fn partial_proof_output_matches_full_reviewed_golden() {
-    let output = run_replay("partial_proof.json");
-    assert_replay_output_matches_golden(output, "partial_proof_expected.json", "partial_proof");
+    assert_replay_output_matches_golden(
+        "partial_proof.json",
+        "partial_proof_expected.json",
+        "partial_proof",
+    );
 }
 
 #[test]
@@ -197,9 +202,8 @@ fn remote_success_without_artifact_and_closeout_evidence_is_warning() {
 
 #[test]
 fn artifact_warning_and_closeout_gap_output_matches_full_reviewed_golden() {
-    let output = run_replay("artifact_warning_and_closeout_gap.json");
     assert_replay_output_matches_golden(
-        output,
+        "artifact_warning_and_closeout_gap.json",
         "artifact_warning_and_closeout_gap_expected.json",
         "artifact_warning_and_closeout_gap",
     );
@@ -215,9 +219,8 @@ fn released_claims_and_reservations_do_not_trigger_false_contention() {
 
 #[test]
 fn released_claim_and_reservation_output_matches_full_reviewed_golden() {
-    let output = run_replay("released_claim_and_reservation.json");
     assert_replay_output_matches_golden(
-        output,
+        "released_claim_and_reservation.json",
         "released_claim_and_reservation_expected.json",
         "released_claim_and_reservation",
     );
