@@ -146,8 +146,8 @@ fn find_header_starts(encoded: &[u8]) -> Vec<usize> {
             pos += count_integer_bytes(&encoded[pos..], prefix_bits);
 
             // Skip name string if index was 0
-            let (index, index_bytes) =
-                decode_integer_at(&encoded[positions.last().unwrap()..], prefix_bits);
+            let last_pos = *positions.last().unwrap();
+            let (index, _index_bytes) = decode_integer_at(&encoded[last_pos..], prefix_bits);
             if index == 0 {
                 pos += count_string_bytes(&encoded[pos..]);
             }
@@ -275,10 +275,13 @@ fuzz_target!(|input: HpackNeverIndexedFuzz| {
         encoder.encode(&regular_headers, &mut encoded_regular);
     }
 
-    // Encode mixed headers (sensitive with encode_sensitive, regular with encode)
+    // Encode mixed headers (sensitive with encode_sensitive, regular with encode).
+    // HpackEncoder is not Clone — use a fresh encoder mirroring the same
+    // configuration, since this section is independent of the runs above.
     if !headers.is_empty() {
-        // First encode all sensitive headers as Never-Indexed
-        let mut temp_encoder = encoder.clone(); // Start fresh for mixed test
+        let mut temp_encoder = Encoder::new();
+        temp_encoder.set_use_huffman(input.use_huffman);
+        temp_encoder.set_max_table_size(table_size);
         temp_encoder.encode_sensitive(&sensitive_headers, &mut encoded_mixed);
         temp_encoder.encode(&regular_headers, &mut encoded_mixed);
     }
@@ -300,7 +303,8 @@ fuzz_target!(|input: HpackNeverIndexedFuzz| {
     // ASSERTION 2: Flag preserved through decode+re-encode
     if input.test_reencode && !encoded_sensitive.is_empty() {
         let mut decoder = Decoder::new();
-        let decoded_result = decoder.decode(encoded_sensitive.clone().freeze());
+        let mut sensitive_bytes = encoded_sensitive.clone().freeze();
+        let decoded_result = decoder.decode(&mut sensitive_bytes);
 
         if let Ok(decoded_headers) = decoded_result {
             // Re-encode the decoded headers as sensitive
@@ -431,7 +435,8 @@ fuzz_target!(|input: HpackNeverIndexedFuzz| {
     // Additional validation: Decode and verify header content integrity
     if !encoded_sensitive.is_empty() {
         let mut validator_decoder = Decoder::new();
-        if let Ok(decoded) = validator_decoder.decode(encoded_sensitive.clone().freeze()) {
+        let mut validator_bytes = encoded_sensitive.clone().freeze();
+        if let Ok(decoded) = validator_decoder.decode(&mut validator_bytes) {
             assert_eq!(
                 decoded.len(),
                 sensitive_headers.len(),
