@@ -52,7 +52,7 @@
       "owner_bead": "asupersync-d87ytw.2",
       "artifact_path": "artifacts/runtime_latency_budget_certificate_v1.json",
       "command_class": "rch_cargo_test",
-      "proof_command": "timeout 900 rch exec -- cargo test -p asupersync --test runtime_capacity_hints_contract --features test-internals",
+      "proof_command": "timeout 900 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_final_control_loop_signoff_docs cargo test -p asupersync --test runtime_capacity_hints_contract --features test-internals",
       "child_status": "closed",
       "fallback_status": "pass",
       "proxy_only": false
@@ -162,7 +162,7 @@
       "owner_bead": "asupersync-d87ytw.13",
       "artifact_path": "artifacts/formal_proof_posture_contract_v1.json",
       "command_class": "rch_cargo_test",
-      "proof_command": "timeout 900 rch exec -- cargo test -p asupersync --test session_type_obligations --features test-internals",
+      "proof_command": "timeout 900 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_final_control_loop_signoff_docs cargo test -p asupersync --test session_type_obligations --features test-internals",
       "child_status": "closed",
       "fallback_status": "pass",
       "proxy_only": false

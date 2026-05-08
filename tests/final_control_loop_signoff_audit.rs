@@ -299,10 +299,21 @@ fn validate_row(row: &RowReport, failure_reasons: &mut Vec<String>) {
 fn validate_command(command_class: &str, proof_command: &str) -> Option<String> {
     match command_class {
         "rch_cargo_test" => {
-            if proof_command.contains("rch exec") && proof_command.contains("cargo test") {
+            if proof_command.contains("rch exec -- cargo") {
+                Some(
+                    "rch_cargo_test command must route cargo through `rch exec -- env CARGO_TARGET_DIR=... cargo test`, not bare `rch exec -- cargo`"
+                        .to_string(),
+                )
+            } else if proof_command.contains("rch exec -- env")
+                && proof_command.contains("CARGO_TARGET_DIR=")
+                && proof_command.contains(" cargo test ")
+            {
                 None
             } else {
-                Some("rch_cargo_test command must contain `rch exec` and `cargo test`".to_string())
+                Some(
+                    "rch_cargo_test command must contain `rch exec -- env`, `CARGO_TARGET_DIR=`, and `cargo test`"
+                        .to_string(),
+                )
             }
         }
         "smoke_runner" => {
@@ -321,6 +332,24 @@ fn validate_command(command_class: &str, proof_command: &str) -> Option<String> 
         }
         other => Some(format!("unknown command_class {other}")),
     }
+}
+
+#[test]
+fn final_signoff_rejects_bare_rch_cargo_test_commands() {
+    let stale = validate_command(
+        "rch_cargo_test",
+        "timeout 900 rch exec -- cargo test -p asupersync --test runtime_capacity_hints_contract --features test-internals",
+    )
+    .expect("bare rch cargo command must be rejected");
+    assert!(stale.contains("bare `rch exec -- cargo`"));
+
+    assert!(
+        validate_command(
+            "rch_cargo_test",
+            "timeout 900 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_final_control_loop_signoff_docs cargo test -p asupersync --test runtime_capacity_hints_contract --features test-internals",
+        )
+        .is_none()
+    );
 }
 
 fn validate_dirty_blocker(blocker: &DirtyBlocker, failure_reasons: &mut Vec<String>) {
