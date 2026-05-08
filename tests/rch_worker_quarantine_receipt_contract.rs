@@ -46,6 +46,32 @@ fn receipt_json(fixture: &str) -> Value {
     serde_json::from_slice(&output.stdout).expect("receipt output must be JSON")
 }
 
+fn assert_receipt_matches_full_reviewed_golden(input_fixture: &str, expected_fixture: &str) {
+    let output = run_receipt(input_fixture);
+    assert!(
+        output.status.success(),
+        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = String::from_utf8(output.stdout).expect("receipt stdout must be utf-8");
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt output JSON");
+    let expected = fixture_text(expected_fixture);
+    let expected_json: Value =
+        serde_json::from_str(&expected).expect("expected receipt output JSON");
+
+    assert_eq!(
+        actual_json, expected_json,
+        "parsed rch worker quarantine receipt JSON drifted for {input_fixture}"
+    );
+    assert_eq!(
+        actual, expected,
+        "rch worker quarantine receipt output changed for {input_fixture}; update {expected_fixture} only after reviewing worker classification and quarantine guidance"
+    );
+}
+
 fn worker<'a>(receipt: &'a Value, name: &str) -> &'a Value {
     receipt["workers"]
         .as_array()
@@ -95,44 +121,15 @@ fn healthy_fixture_does_not_quarantine_worker() {
 
 #[test]
 fn healthy_output_matches_full_reviewed_golden() {
-    let output = run_receipt("healthy.json");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let actual = String::from_utf8(output.stdout).expect("receipt stdout must be utf-8");
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt output JSON");
-    let expected = fixture_text("healthy_expected.json");
-    let expected_json: Value =
-        serde_json::from_str(&expected).expect("expected receipt output JSON");
-
-    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
-    assert_eq!(actual, expected);
+    assert_receipt_matches_full_reviewed_golden("healthy.json", "healthy_expected.json");
 }
 
 #[test]
 fn mixed_degraded_output_matches_full_reviewed_golden() {
-    let output = run_receipt("mixed_degraded.json");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+    assert_receipt_matches_full_reviewed_golden(
+        "mixed_degraded.json",
+        "mixed_degraded_expected.json",
     );
-
-    let actual = String::from_utf8(output.stdout).expect("receipt stdout must be utf-8");
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt output JSON");
-    let expected = fixture_text("mixed_degraded_expected.json");
-    let expected_json: Value =
-        serde_json::from_str(&expected).expect("expected receipt output JSON");
-
-    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
-    assert_eq!(actual, expected);
 }
 
 #[test]
