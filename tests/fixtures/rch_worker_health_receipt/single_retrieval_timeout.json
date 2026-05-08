@@ -1,0 +1,19 @@
+{
+  "workers": [
+    {
+      "name": "worker-slow-sync",
+      "reachable": true,
+      "root_free_gb": 100,
+      "tmp_free_gb": 32,
+      "recent_jobs": [
+        {
+          "classification": "remote_success",
+          "retrieval_elapsed_ms": 1900
+        },
+        {
+          "classification": "passed_after_retrieval_timeout"
+        }
+      ]
+    }
+  ]
+}

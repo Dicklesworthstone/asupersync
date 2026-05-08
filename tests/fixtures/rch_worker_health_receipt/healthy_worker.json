@@ -1,0 +1,24 @@
+{
+  "workers": [
+    {
+      "name": "worker-a",
+      "reachable": true,
+      "root_free_gb": 180,
+      "tmp_free_gb": 64,
+      "pressure": {
+        "io_some_avg10": 0.2,
+        "memory_some_avg10": 0.1
+      },
+      "recent_jobs": [
+        {
+          "classification": "remote_success",
+          "retrieval_elapsed_ms": 2326
+        },
+        {
+          "classification": "remote_success",
+          "retrieval_elapsed_ms": 1800
+        }
+      ]
+    }
+  ]
+}
