@@ -3747,6 +3747,17 @@ test = false
 doc = false
 bench = false
 
+# Semaphore multi-acquirer cancellation races and weighted acquire ordering
+# Tests concurrent acquire/cancel operations with variable permit counts to find
+# race conditions in waiter management, permit double-release bugs, and FIFO ordering.
+# Validates obligation tracking prevents double-release and cancel cleanup is correct.
+[[bin]]
+name = "semaphore_multi_acquirer_races"
+path = "fuzz_targets/semaphore_multi_acquirer_races.rs"
+test = false
+doc = false
+bench = false
+
 # GlobalQueue MPMC injector correctness testing for scheduler task distribution
 # Tests arbitrary push/steal sequences across N workers to ensure no task is
 # lost or duplicated in the fetch-and-add based global task queue.
