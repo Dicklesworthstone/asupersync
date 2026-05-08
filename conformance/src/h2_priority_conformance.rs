@@ -1,16 +1,14 @@
 //! HTTP/2 PRIORITY frame conformance testing.
 //!
 //! This harness exercises the asupersync HTTP/2 connection's PRIORITY frame
-//! handling against the h2 reference implementation to ensure identical
-//! stream priority graph management per RFC 7540.
+//! handling against RFC-backed expected states. The h2 reference side is not
+//! wired yet, so matching the local expected state is reported as XFAIL instead
+//! of a vendor-parity pass.
 
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::http::h2::{
     Connection, Header, HpackEncoder, Settings,
-    frame::{
-        Frame, FrameHeader, FrameType, HeadersFrame, PriorityFrame, PrioritySpec, SettingsFrame,
-        parse_frame,
-    },
+    frame::{Frame, HeadersFrame, PriorityFrame, PrioritySpec, SettingsFrame},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -243,7 +241,13 @@ impl PriorityConformanceTester {
                 let differences = self
                     .compare_priority_states(asupersync_priorities, &case.expected_priority_graph);
                 if differences.is_empty() {
-                    (PriorityTestVerdict::Pass, None, differences)
+                    (
+                        PriorityTestVerdict::ExpectedFailure,
+                        Some(format!(
+                            "{h2_err}; live asupersync matched the RFC-expected state but vendor parity remains unexercised"
+                        )),
+                        differences,
+                    )
                 } else {
                     (
                         PriorityTestVerdict::Fail,
@@ -830,16 +834,33 @@ fn create_priority_test_cases() -> Vec<PriorityConformanceCase> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use asupersync::http::h2::frame::{FrameHeader, FrameType, parse_frame};
 
     #[tokio::test]
-    async fn h2_reference_unavailable_still_runs_live_priority_assertions() {
+    async fn h2_reference_unavailable_fails_closed_after_live_priority_assertions() {
         let tester = PriorityConformanceTester::new();
         let report = tester.run_all_tests().await;
 
         assert_eq!(report.total_cases, 7);
-        assert_eq!(report.summary.passed, 7);
+        assert_eq!(report.summary.passed, 0);
         assert_eq!(report.summary.failed, 0);
+        assert_eq!(report.summary.expected_failures, 7);
         assert_eq!(report.summary.skipped, 0);
+        assert!(
+            report
+                .results
+                .iter()
+                .all(|result| result.verdict == PriorityTestVerdict::ExpectedFailure),
+            "unwired h2 reference must not produce PASS verdicts"
+        );
+        assert!(
+            report.results.iter().all(|result| result
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains(H2_REFERENCE_UNIMPLEMENTED)
+                    && error.contains("vendor parity remains unexercised"))),
+            "each xfail must name the missing vendor reference"
+        );
         assert!(
             report
                 .results

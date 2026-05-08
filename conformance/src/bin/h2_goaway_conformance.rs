@@ -1,7 +1,7 @@
 //! HTTP/2 GOAWAY Frame Conformance Test Runner
 //!
-//! Runs differential conformance testing for HTTP/2 GOAWAY frame handling
-//! comparing asupersync against the h2 reference implementation.
+//! Runs HTTP/2 GOAWAY frame conformance checks. Until the h2 reference seam is
+//! wired, RFC-backed local expected-state matches are reported as XFAIL.
 //!
 //! Usage:
 //!   cargo run --bin h2_goaway_conformance
@@ -11,7 +11,7 @@
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 
-use asupersync_conformance::{GoAwayComplianceReport, GoAwayComplianceSummary, GoAwayTestVerdict};
+use asupersync_conformance::{GoAwayComplianceReport, GoAwayTestVerdict};
 
 #[derive(Parser)]
 #[command(name = "h2_goaway_conformance")]
@@ -55,7 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("🔧 HTTP/2 GOAWAY Frame Conformance Tester");
-    println!("   Testing asupersync against h2 reference implementation");
+    println!("   Testing asupersync against RFC expected states; h2 reference is XFAIL");
     println!();
 
     // Create and configure the tester
@@ -236,6 +236,7 @@ fn exit_code(report: &GoAwayComplianceReport) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use asupersync_conformance::GoAwayComplianceSummary;
 
     fn synthetic_report(
         total_cases: usize,

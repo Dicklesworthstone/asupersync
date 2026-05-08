@@ -1,8 +1,9 @@
 //! HTTP/2 GOAWAY frame conformance testing.
 //!
 //! This harness exercises the asupersync HTTP/2 connection's GOAWAY frame
-//! handling against the h2 reference implementation to ensure identical
-//! connection state transitions per RFC 7540.
+//! handling against RFC-backed expected states. The h2 reference side is not
+//! wired yet, so matching the local expected state is reported as XFAIL instead
+//! of a vendor-parity pass.
 
 use asupersync::bytes::Bytes;
 use asupersync::http::h2::{
@@ -244,7 +245,13 @@ impl GoAwayConformanceTester {
                 let differences = self
                     .compare_connection_states(asupersync_state, &case.expected_connection_state);
                 if differences.is_empty() {
-                    (GoAwayTestVerdict::Pass, None, differences)
+                    (
+                        GoAwayTestVerdict::ExpectedFailure,
+                        Some(format!(
+                            "{h2_err}; live asupersync matched the RFC-expected state but vendor parity remains unexercised"
+                        )),
+                        differences,
+                    )
                 } else {
                     (
                         GoAwayTestVerdict::Fail,
@@ -736,14 +743,30 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn h2_reference_unavailable_still_runs_live_goaway_assertions() {
+    async fn h2_reference_unavailable_fails_closed_after_live_goaway_assertions() {
         let tester = GoAwayConformanceTester::new();
         let report = tester.run_all_tests().await;
 
         assert_eq!(report.total_cases, 7);
-        assert_eq!(report.summary.passed, 7);
+        assert_eq!(report.summary.passed, 0);
         assert_eq!(report.summary.failed, 0);
+        assert_eq!(report.summary.expected_failures, 7);
         assert_eq!(report.summary.skipped, 0);
+        assert!(
+            report
+                .results
+                .iter()
+                .all(|result| result.verdict == GoAwayTestVerdict::ExpectedFailure),
+            "unwired h2 reference must not produce PASS verdicts"
+        );
+        assert!(
+            report.results.iter().all(|result| result
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains(H2_REFERENCE_UNIMPLEMENTED)
+                    && error.contains("vendor parity remains unexercised"))),
+            "each xfail must name the missing vendor reference"
+        );
         assert!(
             report
                 .results
