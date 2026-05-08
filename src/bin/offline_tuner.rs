@@ -8,16 +8,16 @@
 //!
 //! ```bash
 //! # Run optimization for current host architecture
-//! cargo run --bin offline_tuner -- optimize --auto-detect
+//! rch exec -- cargo run --bin offline_tuner -- optimize --auto-detect
 //!
 //! # Run optimization for specific architecture
-//! cargo run --bin offline_tuner -- optimize --arch x86-avx2
+//! rch exec -- cargo run --bin offline_tuner -- optimize --arch x86-avx2
 //!
 //! # Generate candidate list without benchmarking
-//! cargo run --bin offline_tuner -- candidates --arch aarch64-neon
+//! rch exec -- cargo run --bin offline_tuner -- candidates --arch aarch64-neon
 //!
 //! # Emit profile pack from previous tuning results
-//! cargo run --bin offline_tuner -- emit-profile --results-file tuning_results.json
+//! rch exec -- cargo run --bin offline_tuner -- emit-profile --results-file tuning_results.json
 //! ```
 
 use std::fs;

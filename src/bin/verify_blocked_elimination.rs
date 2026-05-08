@@ -136,5 +136,7 @@ fn main() {
 #[cfg(not(feature = "test-internals"))]
 fn main() {
     println!("This verification requires the test-internals feature.");
-    println!("Run with: cargo run --bin verify_blocked_elimination --features test-internals");
+    println!(
+        "Run with: rch exec -- cargo run --bin verify_blocked_elimination --features test-internals"
+    );
 }
