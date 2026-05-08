@@ -7,13 +7,13 @@ fault injection.
 ## Install
 
 ```bash
-cargo install --path frankenlab
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_adoption_getting_started_docs cargo install --path frankenlab
 ```
 
 Or from the workspace root:
 
 ```bash
-cargo build -p frankenlab --release
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_adoption_getting_started_docs cargo build -p frankenlab --release
 # Binary at target/release/frankenlab
 ```
 
