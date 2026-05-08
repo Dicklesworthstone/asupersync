@@ -11,7 +11,7 @@
 //! tagged with both its rank and module, enabling detection of problematic cross-module patterns.
 
 use std::cell::RefCell;
-use std::collections::{BTreeSet, BTreeMap};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Lock rank categories following the asupersync hierarchy.
 /// Lower numeric values must be acquired before higher values.
@@ -170,18 +170,17 @@ pub fn check_acquire_with_module(lock_name: &str, rank: LockRank, module: LockMo
 
                 // Basic rank ordering check
                 if let Some(&highest_held) = held_ranks_ref.iter().last() {
-                    if rank < highest_held {
-                        panic!(
-                            "DEADLOCK PREVENTION: Lock ordering violation!\n\
-                            Attempted to acquire '{}' (rank {:?}, module {:?}) while holding locks of rank {:?}.\n\
-                            Correct order: Config -> Instrumentation -> Regions -> Tasks -> Obligations\n\
-                            This violates the asupersync lock hierarchy and could cause deadlocks.",
-                            lock_name,
-                            rank,
-                            module,
-                            highest_held
-                        );
-                    }
+                    assert!(
+                        rank >= highest_held,
+                        "DEADLOCK PREVENTION: Lock ordering violation!\n\
+                        Attempted to acquire '{}' (rank {:?}, module {:?}) while holding locks of rank {:?}.\n\
+                        Correct order: Config -> Instrumentation -> Regions -> Tasks -> Obligations\n\
+                        This violates the asupersync lock hierarchy and could cause deadlocks.",
+                        lock_name,
+                        rank,
+                        module,
+                        highest_held
+                    );
                 }
 
                 // Cross-module pattern validation
@@ -209,14 +208,14 @@ fn validate_cross_module_pattern(
     if module == LockModule::Obligation && rank == LockRank::Obligations {
         for locks_at_rank in held_locks.values() {
             for lock_info in locks_at_rank {
-                if lock_info.module == LockModule::Cancel {
-                    panic!(
-                        "CROSS-MODULE DEADLOCK PREVENTION: Attempted to acquire obligation lock '{}' \
-                        while holding cancel module lock '{}'. This pattern can cause deadlocks \
-                        between cancellation and obligation tracking.",
-                        lock_name, lock_info.name
-                    );
-                }
+                assert!(
+                    lock_info.module != LockModule::Cancel,
+                    "CROSS-MODULE DEADLOCK PREVENTION: Attempted to acquire obligation lock '{}' \
+                    while holding cancel module lock '{}'. This pattern can cause deadlocks \
+                    between cancellation and obligation tracking.",
+                    lock_name,
+                    lock_info.name
+                );
             }
         }
     }
@@ -226,14 +225,16 @@ fn validate_cross_module_pattern(
     if module == LockModule::Cancel {
         for (held_rank, locks_at_rank) in held_locks {
             for lock_info in locks_at_rank {
-                if lock_info.module == LockModule::Cx && *held_rank > rank {
-                    panic!(
-                        "CROSS-MODULE DEADLOCK PREVENTION: Attempted to acquire cancel lock '{}' (rank {:?}) \
-                        while holding higher-ranked Cx lock '{}' (rank {:?}). \
-                        Capability context operations must complete before cancellation.",
-                        lock_name, rank, lock_info.name, held_rank
-                    );
-                }
+                assert!(
+                    !(lock_info.module == LockModule::Cx && *held_rank > rank),
+                    "CROSS-MODULE DEADLOCK PREVENTION: Attempted to acquire cancel lock '{}' (rank {:?}) \
+                    while holding higher-ranked Cx lock '{}' (rank {:?}). \
+                    Capability context operations must complete before cancellation.",
+                    lock_name,
+                    rank,
+                    lock_info.name,
+                    held_rank
+                );
             }
         }
     }
@@ -243,14 +244,15 @@ fn validate_cross_module_pattern(
     if module == LockModule::Runtime && rank == LockRank::Tasks {
         for locks_at_rank in held_locks.values() {
             for lock_info in locks_at_rank {
-                if lock_info.module == LockModule::Obligation && lock_info.rank == LockRank::Obligations {
-                    panic!(
-                        "CROSS-MODULE DEADLOCK PREVENTION: Attempted to acquire task lock '{}' \
-                        while holding obligation lock '{}'. Task scheduling must be coordinated \
-                        with obligation tracking to prevent state inconsistencies.",
-                        lock_name, lock_info.name
-                    );
-                }
+                assert!(
+                    !(lock_info.module == LockModule::Obligation
+                        && lock_info.rank == LockRank::Obligations),
+                    "CROSS-MODULE DEADLOCK PREVENTION: Attempted to acquire task lock '{}' \
+                    while holding obligation lock '{}'. Task scheduling must be coordinated \
+                    with obligation tracking to prevent state inconsistencies.",
+                    lock_name,
+                    lock_info.name
+                );
             }
         }
     }
@@ -287,7 +289,8 @@ pub fn record_acquire_with_module(lock_name: &str, rank: LockRank, module: LockM
                     module,
                 };
 
-                held_locks.borrow_mut()
+                held_locks
+                    .borrow_mut()
                     .entry(rank)
                     .or_insert_with(Vec::new)
                     .push(lock_info);
@@ -373,7 +376,6 @@ pub fn clear_held_locks() {
 
 /// Enhanced API for Mutex to use cross-module lock ordering enforcement.
 /// This replaces the basic check_acquire/record_acquire pattern with module-aware tracking.
-#[allow(dead_code)]
 #[allow(dead_code)]
 pub struct LockOrderEnforcer {
     lock_name: String,
@@ -487,11 +489,17 @@ mod tests {
 
     #[test]
     fn test_module_from_name() {
-        assert_eq!(LockModule::from_name("runtime_scheduler"), LockModule::Runtime);
+        assert_eq!(
+            LockModule::from_name("runtime_scheduler"),
+            LockModule::Runtime
+        );
         assert_eq!(LockModule::from_name("sync_mutex"), LockModule::Sync);
         assert_eq!(LockModule::from_name("cx_scope"), LockModule::Cx);
         assert_eq!(LockModule::from_name("cancel_protocol"), LockModule::Cancel);
-        assert_eq!(LockModule::from_name("obligation_tracker"), LockModule::Obligation);
+        assert_eq!(
+            LockModule::from_name("obligation_tracker"),
+            LockModule::Obligation
+        );
         assert_eq!(LockModule::from_name("channel_mpsc"), LockModule::Channel);
         assert_eq!(LockModule::from_name("io_tcp"), LockModule::Io);
         assert_eq!(LockModule::from_name("unknown_module"), LockModule::Other);
@@ -524,7 +532,11 @@ mod tests {
         record_acquire_with_module("cancel_token", LockRank::Tasks, LockModule::Cancel);
 
         // This should panic - acquiring Obligation lock while holding Cancel lock
-        check_acquire_with_module("obligation_tracker", LockRank::Obligations, LockModule::Obligation);
+        check_acquire_with_module(
+            "obligation_tracker",
+            LockRank::Obligations,
+            LockModule::Obligation,
+        );
     }
 
     #[test]
@@ -547,7 +559,11 @@ mod tests {
         clear_held_locks(); // Start with clean state
 
         // Hold an Obligation lock
-        record_acquire_with_module("obligation_ledger", LockRank::Obligations, LockModule::Obligation);
+        record_acquire_with_module(
+            "obligation_ledger",
+            LockRank::Obligations,
+            LockModule::Obligation,
+        );
 
         // This should panic - acquiring Task lock while holding Obligation lock
         check_acquire_with_module("runtime_tasks", LockRank::Tasks, LockModule::Runtime);
