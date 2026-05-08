@@ -655,7 +655,7 @@ impl fmt::Display for ConformanceReport {
         if self.failed == 0 && self.skipped == 0 {
             writeln!(
                 f,
-                "🎉 ALL TESTS PASSED - asupersync and h2 produce identical RST_STREAM behavior"
+                "LIVE H2 REFERENCE PASSED - RST_STREAM behavior matched observed h2 output"
             )?;
         } else {
             writeln!(f, "❌ CONFORMANCE ISSUES DETECTED")?;
@@ -748,9 +748,9 @@ pub fn main() {
                     }
                 }
             } else {
-                println!("## ✅ All Tests Passed\n");
+                println!("## Live H2 Reference Passed\n");
                 println!(
-                    "asupersync and h2 produce identical RST_STREAM error code propagation behavior."
+                    "RST_STREAM behavior matched observed h2 output for every checked scenario."
                 );
             }
         }
@@ -882,5 +882,27 @@ mod tests {
 
         // Should have half-closed stream test
         assert!(test_cases.iter().any(|tc| tc.name.contains("half_closed")));
+    }
+
+    #[test]
+    fn test_report_wording_does_not_claim_mocked_h2_success() {
+        let report = ConformanceReport {
+            total_tests: 1,
+            passed: 1,
+            failed: 0,
+            skipped: 0,
+            results: vec![RstStreamTestResult {
+                test_name: "synthetic".to_string(),
+                asupersync_result: ClientObservedStatus::default(),
+                h2_result: ClientObservedStatus::default(),
+                conformance_status: ConformanceStatus::Pass,
+                error_details: None,
+            }],
+        };
+        let rendered = report.to_string();
+
+        assert!(rendered.contains("LIVE H2 REFERENCE PASSED"));
+        assert!(!rendered.contains("ALL TESTS PASSED"));
+        assert!(!rendered.contains("asupersync and h2 produce identical"));
     }
 }
