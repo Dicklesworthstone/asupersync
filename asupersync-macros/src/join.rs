@@ -112,10 +112,16 @@ pub fn join_impl(input: TokenStream) -> TokenStream {
 
 fn generate_join(cx: Option<&Expr>, futures: &Punctuated<Expr, Token![,]>) -> TokenStream2 {
     let future_count = futures.len();
+    let cx_ack = generate_cx_ack(cx);
 
     // Handle empty case
     if future_count == 0 {
-        return quote! { () };
+        return quote! {
+            {
+                #cx_ack
+                ()
+            }
+        };
     }
 
     // Handle single future case - just await it directly
@@ -124,7 +130,10 @@ fn generate_join(cx: Option<&Expr>, futures: &Punctuated<Expr, Token![,]>) -> To
             .first()
             .expect("future_count == 1 guarantees first element exists");
         return quote! {
-            (#fut.await,)
+            {
+                #cx_ack
+                (#fut.await,)
+            }
         };
     }
 
@@ -166,21 +175,9 @@ fn generate_join(cx: Option<&Expr>, futures: &Punctuated<Expr, Token![,]>) -> To
         .map(|ident| quote! { #ident })
         .collect();
 
-    // If cx is provided, we can use it for future enhancements
-    // For now, we just acknowledge it in a comment
-    let cx_comment = if cx.is_some() {
-        quote! {
-            // Capability context provided for cancellation propagation
-            // (Phase 1+ will use this for concurrent polling with cancellation)
-            let _ = &#cx;
-        }
-    } else {
-        quote! {}
-    };
-
     quote! {
         {
-            #cx_comment
+            #cx_ack
             // Bind all futures first (ensures evaluation order is left-to-right)
             #(#fut_bindings)*
             // Await all futures (Phase 0: sequential, Phase 1+: concurrent)
@@ -219,10 +216,16 @@ pub fn join_all_impl(input: TokenStream) -> TokenStream {
 
 fn generate_join_all(cx: Option<&Expr>, futures: &Punctuated<Expr, Token![,]>) -> TokenStream2 {
     let future_count = futures.len();
+    let cx_ack = generate_cx_ack(cx);
 
     // Handle empty case - empty array
     if future_count == 0 {
-        return quote! { [] };
+        return quote! {
+            {
+                #cx_ack
+                []
+            }
+        };
     }
 
     // Handle single future case - single element array
@@ -231,7 +234,10 @@ fn generate_join_all(cx: Option<&Expr>, futures: &Punctuated<Expr, Token![,]>) -
             .first()
             .expect("future_count == 1 guarantees first element exists");
         return quote! {
-            [#fut.await]
+            {
+                #cx_ack
+                [#fut.await]
+            }
         };
     }
 
@@ -273,20 +279,9 @@ fn generate_join_all(cx: Option<&Expr>, futures: &Punctuated<Expr, Token![,]>) -
         .map(|ident| quote! { #ident })
         .collect();
 
-    // If cx is provided, we can use it for future enhancements
-    let cx_comment = if cx.is_some() {
-        quote! {
-            // Capability context provided for cancellation propagation
-            // (Phase 1+ will use this for concurrent polling with cancellation)
-            let _ = &#cx;
-        }
-    } else {
-        quote! {}
-    };
-
     quote! {
         {
-            #cx_comment
+            #cx_ack
             // Bind all futures first (ensures evaluation order is left-to-right)
             #(#fut_bindings)*
             // Await all futures (Phase 0: sequential, Phase 1+: concurrent)
@@ -294,6 +289,18 @@ fn generate_join_all(cx: Option<&Expr>, futures: &Punctuated<Expr, Token![,]>) -
             // Return results as array
             [#(#result_array),*]
         }
+    }
+}
+
+fn generate_cx_ack(cx: Option<&Expr>) -> TokenStream2 {
+    if cx.is_some() {
+        quote! {
+            // Capability context provided for cancellation propagation
+            // (Phase 1+ will use this for concurrent polling with cancellation)
+            let _ = &#cx;
+        }
+    } else {
+        quote! {}
     }
 }
 
@@ -328,5 +335,45 @@ mod tests {
         let parsed: JoinInput = syn::parse2(input).unwrap();
         assert!(parsed.cx.is_some());
         assert_eq!(parsed.futures.len(), 2);
+    }
+
+    #[test]
+    fn test_join_single_future_keeps_cx_expr() {
+        let input: JoinInput = syn::parse2(quote! { make_cx(); future_a }).unwrap();
+        let tokens = generate_join(input.cx.as_ref(), &input.futures).to_string();
+        assert!(
+            tokens.contains("make_cx"),
+            "single-future join must still typecheck the cx expression"
+        );
+    }
+
+    #[test]
+    fn test_join_empty_keeps_cx_expr() {
+        let input: JoinInput = syn::parse2(quote! { make_cx(); }).unwrap();
+        let tokens = generate_join(input.cx.as_ref(), &input.futures).to_string();
+        assert!(
+            tokens.contains("make_cx"),
+            "empty join must still typecheck the cx expression"
+        );
+    }
+
+    #[test]
+    fn test_join_all_single_future_keeps_cx_expr() {
+        let input: JoinInput = syn::parse2(quote! { make_cx(); future_a }).unwrap();
+        let tokens = generate_join_all(input.cx.as_ref(), &input.futures).to_string();
+        assert!(
+            tokens.contains("make_cx"),
+            "single-future join_all must still typecheck the cx expression"
+        );
+    }
+
+    #[test]
+    fn test_join_all_empty_keeps_cx_expr() {
+        let input: JoinInput = syn::parse2(quote! { make_cx(); }).unwrap();
+        let tokens = generate_join_all(input.cx.as_ref(), &input.futures).to_string();
+        assert!(
+            tokens.contains("make_cx"),
+            "empty join_all must still typecheck the cx expression"
+        );
     }
 }
