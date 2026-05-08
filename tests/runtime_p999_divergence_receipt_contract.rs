@@ -73,6 +73,24 @@ fn aligned_receipt_output_matches_full_reviewed_golden() {
 }
 
 #[test]
+fn divergent_receipt_output_matches_full_reviewed_golden() {
+    let output = run_receipt("diverged_and_missing.json");
+    assert!(
+        output.status.success(),
+        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("receipt stdout is utf-8"),
+        fixture_text("diverged_and_missing_expected.json"),
+        "divergent runtime p999 receipt drifted from the reviewed golden"
+    );
+}
+
+#[test]
 fn script_exists_and_help_is_non_mutating() {
     assert!(
         repo_root().join(SCRIPT_PATH).exists(),
