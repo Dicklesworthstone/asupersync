@@ -50,6 +50,29 @@ fn fixture_text(fixture: &str) -> String {
         .unwrap_or_else(|error| panic!("read golden fixture {fixture}: {error}"))
 }
 
+fn assert_receipt_output_matches_golden(
+    input_fixture: &str,
+    expected_fixture: &str,
+    drift_message: &str,
+) {
+    let output = run_receipt(input_fixture);
+    assert!(
+        output.status.success(),
+        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = String::from_utf8(output.stdout).expect("receipt stdout is utf-8");
+    let expected = fixture_text(expected_fixture);
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
+    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
+
+    assert_eq!(actual_json, expected_json);
+    assert_eq!(actual, expected, "{drift_message}");
+}
+
 fn next_action_category(receipt: &Value) -> &str {
     receipt["next_action"]["category"]
         .as_str()
@@ -91,23 +114,10 @@ fn clean_tree_recommends_claiming_ready_bead() {
 
 #[test]
 fn clean_tree_output_matches_full_reviewed_golden() {
-    let output = run_receipt("clean_tree.json");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let actual = String::from_utf8(output.stdout).expect("receipt stdout is utf-8");
-    let expected = fixture_text("clean_tree_expected.json");
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
-    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
-    assert_eq!(actual_json, expected_json);
-    assert_eq!(
-        actual, expected,
-        "clean_tree receipt drifted from the reviewed golden"
+    assert_receipt_output_matches_golden(
+        "clean_tree.json",
+        "clean_tree_expected.json",
+        "clean_tree receipt drifted from the reviewed golden",
     );
 }
 
@@ -139,23 +149,10 @@ fn dirty_peer_owned_tree_recommends_avoiding_surface() {
 
 #[test]
 fn dirty_peer_owned_tree_output_matches_full_reviewed_golden() {
-    let output = run_receipt("dirty_peer_owned_tree.json");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let actual = String::from_utf8(output.stdout).expect("receipt stdout is utf-8");
-    let expected = fixture_text("dirty_peer_owned_tree_expected.json");
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
-    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
-    assert_eq!(actual_json, expected_json);
-    assert_eq!(
-        actual, expected,
-        "dirty_peer_owned_tree receipt drifted from the reviewed golden"
+    assert_receipt_output_matches_golden(
+        "dirty_peer_owned_tree.json",
+        "dirty_peer_owned_tree_expected.json",
+        "dirty_peer_owned_tree receipt drifted from the reviewed golden",
     );
 }
 
@@ -180,23 +177,10 @@ fn tracker_reservation_conflict_waits_before_claiming() {
 
 #[test]
 fn tracker_reservation_conflict_output_matches_full_reviewed_golden() {
-    let output = run_receipt("tracker_reservation_conflict.json");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let actual = String::from_utf8(output.stdout).expect("receipt stdout is utf-8");
-    let expected = fixture_text("tracker_reservation_conflict_expected.json");
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
-    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
-    assert_eq!(actual_json, expected_json);
-    assert_eq!(
-        actual, expected,
-        "tracker-reservation handoff receipt drifted from the reviewed golden"
+    assert_receipt_output_matches_golden(
+        "tracker_reservation_conflict.json",
+        "tracker_reservation_conflict_expected.json",
+        "tracker-reservation handoff receipt drifted from the reviewed golden",
     );
 }
 
@@ -216,23 +200,10 @@ fn unavailable_agent_mail_is_explicitly_reported() {
 
 #[test]
 fn no_agent_mail_output_matches_full_reviewed_golden() {
-    let output = run_receipt("no_agent_mail.json");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let actual = String::from_utf8(output.stdout).expect("receipt stdout is utf-8");
-    let expected = fixture_text("no_agent_mail_expected.json");
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
-    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
-    assert_eq!(actual_json, expected_json);
-    assert_eq!(
-        actual, expected,
-        "no-Agent-Mail handoff receipt drifted from the reviewed golden"
+    assert_receipt_output_matches_golden(
+        "no_agent_mail.json",
+        "no_agent_mail_expected.json",
+        "no-Agent-Mail handoff receipt drifted from the reviewed golden",
     );
 }
 
@@ -256,23 +227,10 @@ fn stale_in_progress_candidate_is_listed_without_mutation() {
 
 #[test]
 fn stale_in_progress_output_matches_full_reviewed_golden() {
-    let output = run_receipt("stale_in_progress.json");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let actual = String::from_utf8(output.stdout).expect("receipt stdout is utf-8");
-    let expected = fixture_text("stale_in_progress_expected.json");
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
-    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
-    assert_eq!(actual_json, expected_json);
-    assert_eq!(
-        actual, expected,
-        "stale-in-progress handoff receipt drifted from the reviewed golden"
+    assert_receipt_output_matches_golden(
+        "stale_in_progress.json",
+        "stale_in_progress_expected.json",
+        "stale-in-progress handoff receipt drifted from the reviewed golden",
     );
 }
 
