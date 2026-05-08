@@ -91,21 +91,21 @@ This section is intentionally parseable for CI/planning automation.
 
 | User Journey | Before (Tokio-locked) | After (Asupersync path) | Edge Case | Validation Path |
 |---|---|---|---|---|
-| Outbound HTTP client | `reqwest::Client` directly inside Tokio runtime | Prefer native Asupersync HTTP surfaces; if interop is mandatory, route through T7 adapter boundary and `asupersync-tokio-compat` scaffolding | cancellation requested during body upload | `rch exec -- cargo test -p asupersync-tokio-compat --features hyper-bridge --lib -- --nocapture` |
-| HTTP server routing/middleware | `axum::serve(listener, router)` + tower-http layers | Prefer Asupersync `src/web/` + `src/service/`; transitional route is axum routing reuse behind explicit adapter boundary | graceful shutdown while long-running handlers are active | `rch exec -- cargo test --test tokio_web_grpc_parity_map -- --nocapture` |
-| gRPC service/client transport | tonic transport (`tonic::transport::{Server,Channel}`) | Prefer Asupersync native gRPC (`src/grpc/`); optional future transport bridge after hyper adapter maturity | half-closed stream + parent cancellation | `rch exec -- cargo test --test native_seam_parity -- --nocapture` |
-| DB application using sqlx ecosystem | sqlx runtime set to Tokio | Near-term: native Asupersync database modules (`src/database/*`); longer-term: runtime adapter feature for sqlx track | timeout budget exhausted during retry loop | `rch exec -- cargo test --test tokio_db_messaging_gap_baseline -- --nocapture` |
+| Outbound HTTP client | `reqwest::Client` directly inside Tokio runtime | Prefer native Asupersync HTTP surfaces; if interop is mandatory, route through T7 adapter boundary and `asupersync-tokio-compat` scaffolding | cancellation requested during body upload | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_interop_ranking_docs cargo test -p asupersync-tokio-compat --features hyper-bridge --lib -- --nocapture` |
+| HTTP server routing/middleware | `axum::serve(listener, router)` + tower-http layers | Prefer Asupersync `src/web/` + `src/service/`; transitional route is axum routing reuse behind explicit adapter boundary | graceful shutdown while long-running handlers are active | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_interop_ranking_docs cargo test --test tokio_web_grpc_parity_map -- --nocapture` |
+| gRPC service/client transport | tonic transport (`tonic::transport::{Server,Channel}`) | Prefer Asupersync native gRPC (`src/grpc/`); optional future transport bridge after hyper adapter maturity | half-closed stream + parent cancellation | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_interop_ranking_docs cargo test --test native_seam_parity -- --nocapture` |
+| DB application using sqlx ecosystem | sqlx runtime set to Tokio | Near-term: native Asupersync database modules (`src/database/*`); longer-term: runtime adapter feature for sqlx track | timeout budget exhausted during retry loop | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_interop_ranking_docs cargo test --test tokio_db_messaging_gap_baseline -- --nocapture` |
 
 ### 2.3 Validation Command Bundle (Unit + E2E + Conformance)
 
 All commands are rch-offloaded by policy and are intended to be replay-safe.
 
 ```bash
-rch exec -- cargo test -p asupersync-tokio-compat --features hyper-bridge --lib -- --nocapture
-rch exec -- cargo test -p asupersync-tokio-compat --features tokio-io --lib -- --nocapture
-rch exec -- cargo test --test native_seam_parity -- --nocapture
-rch exec -- cargo test --test semantic_conformance_harness -- --nocapture
-rch exec -- cargo test --test tokio_executable_conformance_contracts -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_interop_ranking_docs cargo test -p asupersync-tokio-compat --features hyper-bridge --lib -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_interop_ranking_docs cargo test -p asupersync-tokio-compat --features tokio-io --lib -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_interop_ranking_docs cargo test --test native_seam_parity -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_interop_ranking_docs cargo test --test semantic_conformance_harness -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_interop_ranking_docs cargo test --test tokio_executable_conformance_contracts -- --nocapture
 ```
 
 ### 2.4 Operational Caveats, Rollback, and Troubleshooting
