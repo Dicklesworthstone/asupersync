@@ -1,0 +1,132 @@
+{
+  "agent": "TopazGoose",
+  "commit_boundary": {
+    "decision": "path-limited-commit-required",
+    "non_self_staged_paths": [
+      "fuzz/Cargo.toml",
+      "fuzz/fuzz_targets/http_header_map_invariants.rs"
+    ],
+    "ordinary_index_commit_allowed": false,
+    "path_limited_commit_command": "git commit --only -- scripts/dirty_tree_ownership_receipt.py",
+    "peer_index_preservation_required": true,
+    "reason": "self-owned staged paths share the index with peer or unattributed staged paths",
+    "self_owned_staged_paths": [
+      "scripts/dirty_tree_ownership_receipt.py"
+    ]
+  },
+  "current_date": "2026-05-08",
+  "generated_at": "2026-05-08T05:10:00Z",
+  "repo_path": "/data/projects/asupersync",
+  "rows": [
+    {
+      "bead_id": "",
+      "classification": "self-owned",
+      "evidence": {
+        "current_date": "2026-05-08",
+        "generated_at": "2026-05-08T05:10:00Z",
+        "index_status": "A",
+        "message_created_ts": "",
+        "message_from": "",
+        "message_subject": "",
+        "reservation_expires_ts": "2026-05-08T06:08:00Z",
+        "reservation_holder": "TopazGoose",
+        "reservation_path_pattern": "scripts/dirty_tree_ownership_receipt.py",
+        "worktree_status": " "
+      },
+      "owner": "TopazGoose",
+      "path": "scripts/dirty_tree_ownership_receipt.py",
+      "proposed_action": {
+        "allowed_now": true,
+        "command": "git add -- scripts/dirty_tree_ownership_receipt.py",
+        "kind": "git-add-pathspec",
+        "mutates": true
+      },
+      "staging_guidance": {
+        "decision": "safe-to-stage-with-pathspec",
+        "reason": "active reservation or message indicates current agent ownership"
+      },
+      "status": "A "
+    },
+    {
+      "bead_id": "",
+      "classification": "peer-owned",
+      "evidence": {
+        "current_date": "2026-05-08",
+        "generated_at": "2026-05-08T05:10:00Z",
+        "index_status": "M",
+        "message_created_ts": "",
+        "message_from": "",
+        "message_subject": "",
+        "reservation_expires_ts": "2026-05-08T06:30:00Z",
+        "reservation_holder": "MaroonBear",
+        "reservation_path_pattern": "fuzz/Cargo.toml",
+        "worktree_status": " "
+      },
+      "owner": "MaroonBear",
+      "path": "fuzz/Cargo.toml",
+      "proposed_action": {
+        "allowed_now": true,
+        "command": "send_message(thread_id='dirty-tree-ownership', to=['MaroonBear'], subject='Dirty tree ownership check', body_md='Please confirm ownership for fuzz/Cargo.toml.')",
+        "kind": "agent-mail-contact",
+        "mutates": true
+      },
+      "staging_guidance": {
+        "decision": "unstage-before-commit",
+        "reason": "path is already staged without current-agent ownership evidence"
+      },
+      "status": "M "
+    },
+    {
+      "bead_id": "",
+      "classification": "peer-owned",
+      "evidence": {
+        "current_date": "2026-05-08",
+        "generated_at": "2026-05-08T05:10:00Z",
+        "index_status": "A",
+        "message_created_ts": "",
+        "message_from": "",
+        "message_subject": "",
+        "reservation_expires_ts": "2026-05-08T06:30:00Z",
+        "reservation_holder": "MaroonBear",
+        "reservation_path_pattern": "fuzz/fuzz_targets/*.rs",
+        "worktree_status": " "
+      },
+      "owner": "MaroonBear",
+      "path": "fuzz/fuzz_targets/http_header_map_invariants.rs",
+      "proposed_action": {
+        "allowed_now": true,
+        "command": "send_message(thread_id='dirty-tree-ownership', to=['MaroonBear'], subject='Dirty tree ownership check', body_md='Please confirm ownership for fuzz/fuzz_targets/http_header_map_invariants.rs.')",
+        "kind": "agent-mail-contact",
+        "mutates": true
+      },
+      "staging_guidance": {
+        "decision": "unstage-before-commit",
+        "reason": "path is already staged without current-agent ownership evidence"
+      },
+      "status": "A "
+    }
+  ],
+  "safety": {
+    "beads_mutated": false,
+    "branch_or_worktree_operations": false,
+    "cargo_executed": false,
+    "forbidden_command_tokens": [],
+    "mutating_commands_executed": false
+  },
+  "schema_version": "dirty-tree-ownership-receipt-v1",
+  "subsystems": {
+    "agent_mail": "ok",
+    "beads": "ok",
+    "git": "ok"
+  },
+  "summary": {
+    "do_not_stage": 2,
+    "owner_conflict": 0,
+    "peer_owned": 2,
+    "safe_to_stage": 1,
+    "self_owned": 1,
+    "total_paths": 3,
+    "tracker_state": 0,
+    "unattributed": 0
+  }
+}
