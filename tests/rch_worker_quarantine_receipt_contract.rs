@@ -94,6 +94,27 @@ fn healthy_fixture_does_not_quarantine_worker() {
 }
 
 #[test]
+fn healthy_output_matches_full_reviewed_golden() {
+    let output = run_receipt("healthy.json");
+    assert!(
+        output.status.success(),
+        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = String::from_utf8(output.stdout).expect("receipt stdout must be utf-8");
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt output JSON");
+    let expected = fixture_text("healthy_expected.json");
+    let expected_json: Value =
+        serde_json::from_str(&expected).expect("expected receipt output JSON");
+
+    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
+    assert_eq!(actual, expected);
+}
+
+#[test]
 fn mixed_degraded_output_matches_full_reviewed_golden() {
     let output = run_receipt("mixed_degraded.json");
     assert!(
