@@ -21,6 +21,7 @@ const CAPACITY_CERTIFICATE_ID: &str = "artifacts/capacity_envelope_planner_smoke
 const LATENCY_CERTIFICATE_ID: &str =
     "artifacts/runtime_latency_budget_certificate_contract_v1.json";
 const RECEIPT_PATH: &str = "shadow_promote_rollback_receipt.json";
+const REPLAY_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_shadow_promote_rollback_receipts_docs cargo test -p asupersync --test shadow_promote_rollback_receipts_contract";
 
 #[derive(Debug, Deserialize)]
 struct ShadowReceiptContract {
@@ -221,9 +222,7 @@ fn base_request() -> ShadowPromoteRollbackReceiptRequest {
         controller_interference_verdict: Some(ControllerInterferenceTwinVerdict::Pass),
         dirty_artifacts: Vec::new(),
         receipt_path: RECEIPT_PATH.to_string(),
-        replay_command:
-            "rch exec -- cargo test -p asupersync --test shadow_promote_rollback_receipts_contract"
-                .to_string(),
+        replay_command: REPLAY_COMMAND.to_string(),
     }
 }
 
@@ -412,12 +411,15 @@ fn shadow_promote_rollback_receipt_smoke_emits_report() {
         json!(LATENCY_CERTIFICATE_ID)
     );
     assert_eq!(report["rollback_receipt_path"], json!(RECEIPT_PATH));
-    assert!(
-        report["replay_command"]
-            .as_str()
-            .expect("replay command")
-            .contains("rch exec")
+    let replay_command = report["replay_command"].as_str().expect("replay command");
+    let stale_replay_command = concat!(
+        "rch exec -- ",
+        "cargo test -p asupersync --test shadow_promote_rollback_receipts_contract"
     );
+    assert_eq!(replay_command, REPLAY_COMMAND);
+    assert!(replay_command.starts_with("rch exec -- env "));
+    assert!(replay_command.contains("CARGO_TARGET_DIR="));
+    assert!(!replay_command.contains(stale_replay_command));
 
     if let Ok(path) = std::env::var("ASUPERSYNC_SHADOW_PROMOTE_ROLLBACK_RECEIPT_PATH") {
         let compact_report = serde_json::to_string(&report).expect("report renders compactly");
