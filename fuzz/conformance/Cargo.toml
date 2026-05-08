@@ -26,12 +26,6 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 [[bin]]
-name = "h1_expect_continue_conformance"
-path = "src/bin/h1_expect_continue_conformance.rs"
-test = false
-doc = false
-
-[[bin]]
 name = "h2_continuation_ordering_conformance"
 path = "src/bin/h2_continuation_ordering_conformance.rs"
 test = false
