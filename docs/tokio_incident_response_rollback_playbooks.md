@@ -177,11 +177,11 @@ git log --oneline --grep="asupersync-2oh2u" | head -10
 git revert HEAD --no-edit
 
 # Step 3: Verify rollback
-cargo test --test tokio_cross_track_e2e_logging_enforcement
-cargo test --test tokio_golden_log_corpus_enforcement
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_operator_docs cargo test --test tokio_cross_track_e2e_logging_enforcement
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_operator_docs cargo test --test tokio_golden_log_corpus_enforcement
 
 # Step 4: Confirm service health
-rch exec 'cargo test --lib health'
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_operator_docs cargo test --lib health
 ```
 
 ### 6.2 Gradual Rollback (Feature-Flag Controlled)
@@ -270,13 +270,13 @@ rch exec 'cargo test --lib health'
 
 ```bash
 # T6 pool exhaustion drill
-cargo test --test e2e_t6_data_path -- pool_exhaustion --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_operator_docs cargo test --test e2e_t6_data_path -- pool_exhaustion --nocapture
 
 # T2 I/O deadlock drill
-cargo test --test tokio_io_parity_audit -- deadlock_injection --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_operator_docs cargo test --test tokio_io_parity_audit -- deadlock_injection --nocapture
 
 # T5 gRPC degradation drill
-rch exec 'cargo test --test web_grpc_e2e_service_scripts -- degradation'
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_operator_docs cargo test --test web_grpc_e2e_service_scripts -- degradation
 ```
 
 ---
@@ -315,8 +315,7 @@ rch exec 'cargo test --test web_grpc_e2e_service_scripts -- degradation'
 
 Validation:
 ```bash
-cargo test --test tokio_incident_response_rollback_enforcement
-rch exec 'cargo test --test tokio_incident_response_rollback_enforcement'
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_operator_docs cargo test --test tokio_incident_response_rollback_enforcement
 ```
 
 ---

@@ -223,16 +223,16 @@ Downstream:
 
 ```bash
 # Drill 1: Pool exhaustion (T6)
-cargo test --test e2e_t6_data_path -- pool_exhaustion --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_operator_docs cargo test --test e2e_t6_data_path -- pool_exhaustion --nocapture
 
 # Drill 2: I/O deadlock (T2)
-cargo test --test tokio_io_parity_audit -- deadlock --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_operator_docs cargo test --test tokio_io_parity_audit -- deadlock --nocapture
 
 # Drill 3: gRPC degradation (T5)
-rch exec 'cargo test --test web_grpc_e2e_service_scripts -- degradation'
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_operator_docs cargo test --test web_grpc_e2e_service_scripts -- degradation
 
 # Drill 4: Adapter panic (T7)
-cargo test --test tokio_interop_support_matrix -- panic_injection --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_operator_docs cargo test --test tokio_interop_support_matrix -- panic_injection --nocapture
 ```
 
 ### 5.3 Post-Drill Report Schema
@@ -287,8 +287,7 @@ cargo test --test tokio_interop_support_matrix -- panic_injection --nocapture
 
 Validation:
 ```bash
-cargo test --test tokio_operator_enablement_enforcement
-rch exec 'cargo test --test tokio_operator_enablement_enforcement'
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_operator_docs cargo test --test tokio_operator_enablement_enforcement
 ```
 
 ---
