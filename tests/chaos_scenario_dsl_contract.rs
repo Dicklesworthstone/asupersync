@@ -2,6 +2,9 @@
 
 use asupersync::lab::scenario::{FaultAction, GoldenProjectionFormat, Scenario};
 use asupersync::lab::scenario_runner::ScenarioRunner;
+use asupersync::lab::swarm_replay::{
+    SwarmReplayEventKind, SwarmReplayScenario, SwarmReplayTaskStatus, run_swarm_replay_scenario,
+};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -405,6 +408,168 @@ fn live_runner_fault_log_executes_canonical_scenario_and_projects_redacted_log()
         assert!(
             !rendered_fault_log.contains(&forbidden),
             "fault log projection must not expose raw coordination marker {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn live_cancellation_storm_replay_uses_lab_runtime_state_machine() {
+    let contract = contract();
+    let probe = contract
+        .get("live_cancellation_storm_replay")
+        .expect("live_cancellation_storm_replay object");
+    assert_eq!(string(probe, "report_status"), "LIVE");
+    assert_eq!(probe["must_use_lab_runtime"].as_bool(), Some(true));
+    assert_eq!(
+        probe["must_request_cancellation_through_runtime_state"].as_bool(),
+        Some(true)
+    );
+
+    let source_path = string(probe, "source_path");
+    let source = std::fs::read_to_string(repo_path(source_path))
+        .unwrap_or_else(|error| panic!("read {source_path}: {error}"));
+    assert!(source.contains(string(probe, "live_function")));
+    assert!(
+        source.contains("runtime.state.cancel_request("),
+        "live replay must request cancellation through RuntimeState"
+    );
+    assert!(
+        source.contains("scheduler.schedule_cancel("),
+        "live replay must route cancelled tasks through the scheduler cancel lane"
+    );
+
+    let raw_scenario = serde_json::to_string(
+        contract
+            .get("canonical_source_backed_scenario")
+            .expect("canonical_source_backed_scenario object"),
+    )
+    .expect("serialize canonical source-backed scenario");
+    let canonical_scenario = Scenario::from_json(&raw_scenario).expect("parse canonical scenario");
+    assert_eq!(string(probe, "scenario_id"), canonical_scenario.id);
+
+    let replay_scenario: SwarmReplayScenario = serde_json::from_value(
+        probe
+            .get("swarm_replay_scenario")
+            .expect("swarm replay scenario object")
+            .clone(),
+    )
+    .expect("parse swarm replay scenario");
+    replay_scenario
+        .validate()
+        .expect("contracted swarm replay scenario must be bounded");
+    assert_eq!(replay_scenario.seed, canonical_scenario.lab.seed);
+    assert_eq!(
+        replay_scenario.worker_count,
+        canonical_scenario.lab.worker_count
+    );
+    assert_eq!(replay_scenario.cancel_after_steps, Some(1));
+
+    let summary =
+        run_swarm_replay_scenario(&replay_scenario).expect("swarm replay scenario must run");
+    let replayed =
+        run_swarm_replay_scenario(&replay_scenario).expect("swarm replay scenario must replay");
+    assert_eq!(
+        summary.event_log, replayed.event_log,
+        "cancellation-storm event log must be deterministic"
+    );
+    assert_eq!(
+        summary.task_outcomes, replayed.task_outcomes,
+        "cancellation-storm task outcomes must be deterministic"
+    );
+    assert_eq!(
+        summary.trace_fingerprint, replayed.trace_fingerprint,
+        "live replay trace fingerprint must be deterministic"
+    );
+
+    let summary_json = serde_json::to_value(&summary).expect("serialize swarm replay summary");
+    for field in string_list(probe, "required_summary_fields") {
+        assert!(
+            summary_json.get(&field).is_some(),
+            "swarm replay summary must include {field}"
+        );
+    }
+    assert_eq!(summary.scenario_id, replay_scenario.scenario_id);
+    assert!(summary.quiescent, "swarm replay must quiesce");
+    assert!(
+        summary.invariant_violations.is_empty(),
+        "swarm replay must not emit invariant violations: {:?}",
+        summary.invariant_violations
+    );
+    assert_eq!(
+        summary.non_terminal_task_count, 0,
+        "all tracked cancellation-storm tasks must reach terminal state"
+    );
+
+    let minimums = probe
+        .get("minimums")
+        .and_then(Value::as_object)
+        .expect("minimums object");
+    let min_cancellations = minimums["cancellation_requests"]
+        .as_u64()
+        .expect("cancellation_requests minimum") as usize;
+    assert!(
+        summary.cancellation_requests >= min_cancellations,
+        "live replay must schedule cancellation requests"
+    );
+    let min_terminal = minimums["terminal_task_count"]
+        .as_u64()
+        .expect("terminal_task_count minimum") as usize;
+    assert!(summary.terminal_task_count >= min_terminal);
+    assert_eq!(summary.terminal_task_count, replay_scenario.task_count());
+
+    let event_kinds = summary
+        .event_log
+        .iter()
+        .map(|event| serde_json::to_value(event.kind).expect("event kind JSON"))
+        .map(|value| value.as_str().expect("event kind string").to_string())
+        .collect::<BTreeSet<_>>();
+    for kind in string_list(probe, "required_event_kinds") {
+        assert!(
+            event_kinds.contains(&kind),
+            "swarm replay must emit event kind {kind}"
+        );
+    }
+
+    let cancel_observed_events = summary
+        .event_log
+        .iter()
+        .filter(|event| event.kind == SwarmReplayEventKind::CancelObserved)
+        .count();
+    let min_cancel_observed = minimums["cancel_observed_events"]
+        .as_u64()
+        .expect("cancel_observed_events minimum") as usize;
+    assert!(
+        cancel_observed_events >= min_cancel_observed,
+        "cancel-storm replay must include observed task cancellation"
+    );
+
+    let statuses = summary
+        .task_outcomes
+        .iter()
+        .map(|outcome| serde_json::to_value(outcome.status).expect("task status JSON"))
+        .map(|value| value.as_str().expect("task status string").to_string())
+        .collect::<BTreeSet<_>>();
+    for status in string_list(probe, "required_task_statuses") {
+        assert!(
+            statuses.contains(&status),
+            "swarm replay must include task status {status}"
+        );
+    }
+    assert!(
+        summary
+            .task_outcomes
+            .iter()
+            .all(|outcome| outcome.status == SwarmReplayTaskStatus::Cancelled),
+        "cancel-after-one-step scenario should cancel every tracked task"
+    );
+    assert!(summary.shrink_hint.first_cancelled_task.is_some());
+    assert!(summary.shrink_hint.event_prefix_len <= summary.event_log.len());
+
+    let rendered_summary = serde_json::to_string(&summary_json).expect("render summary JSON");
+    for forbidden in string_list(probe, "forbidden_projection_markers") {
+        assert!(
+            !rendered_summary.contains(&forbidden),
+            "swarm replay projection must not expose raw coordination marker {forbidden}"
         );
     }
 }

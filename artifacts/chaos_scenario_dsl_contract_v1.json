@@ -193,6 +193,69 @@
       "ack_required"
     ]
   },
+  "live_cancellation_storm_replay": {
+    "scenario_id": "chaos-partition-cancel-storm",
+    "report_status": "LIVE",
+    "source_path": "src/lab/swarm_replay.rs",
+    "live_function": "run_swarm_replay_scenario",
+    "must_use_lab_runtime": true,
+    "must_request_cancellation_through_runtime_state": true,
+    "swarm_replay_scenario": {
+      "scenario_id": "chaos-partition-cancel-storm-swarm-replay",
+      "seed": 340334,
+      "worker_count": 2,
+      "region_count": 2,
+      "tasks_per_region": 4,
+      "yields_per_task": 8,
+      "yield_jitter": 0,
+      "channel_capacity": 8,
+      "messages_per_task": 2,
+      "artifact_bytes_per_task": 128,
+      "cancel_after_steps": 1,
+      "max_steps": 1000
+    },
+    "required_summary_fields": [
+      "schema_version",
+      "scenario_id",
+      "scheduled_task_count",
+      "cancellation_requests",
+      "terminal_task_count",
+      "non_terminal_task_count",
+      "quiescent",
+      "invariant_violations",
+      "event_log",
+      "task_outcomes",
+      "shrink_hint"
+    ],
+    "required_event_kinds": [
+      "task_scheduled",
+      "message_reserved",
+      "cancellation_requested",
+      "cancel_observed"
+    ],
+    "required_task_statuses": [
+      "cancelled"
+    ],
+    "required_invariants": [
+      "quiescent",
+      "no_invariant_violations",
+      "no_non_terminal_tasks",
+      "deterministic_replay"
+    ],
+    "minimums": {
+      "cancellation_requests": 1,
+      "cancel_observed_events": 1,
+      "terminal_task_count": 8
+    },
+    "forbidden_projection_markers": [
+      "/home/ubuntu/",
+      "Authorization: Bearer ",
+      "body_md",
+      "created_ts",
+      "ack_required"
+    ],
+    "proof_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_chaos_scenario_cancellation_storm_replay CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test chaos_scenario_dsl_contract live_cancellation_storm_replay_uses_lab_runtime_state_machine -- --nocapture"
+  },
   "required_invariants": [
     "quiescence",
     "losers_drained",
