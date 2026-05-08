@@ -26,9 +26,38 @@ fn load_runner() -> String {
 }
 
 fn load_drift_golden() -> Value {
-    let content = std::fs::read_to_string(DRIFT_GOLDEN_PATH)
-        .expect("drift detection golden fixture must exist");
+    let content = load_drift_golden_text();
     serde_json::from_str(&content).expect("drift golden must be valid JSON")
+}
+
+fn load_drift_golden_text() -> String {
+    std::fs::read_to_string(DRIFT_GOLDEN_PATH).expect("drift detection golden fixture must exist")
+}
+
+fn drift_detection_projection() -> Value {
+    let art = load_artifact();
+    let drift = &art["drift_detection"];
+    json!({
+        "contract_version": art["contract_version"],
+        "drift_detection": {
+            "source_paths": drift["source_paths"],
+            "required_rule_prefixes": drift["required_rule_prefixes"],
+            "check_ids": drift["checks"]
+                .as_array()
+                .expect("drift checks must be array")
+                .iter()
+                .map(|check| check["check_id"].clone())
+                .collect::<Vec<_>>(),
+            "failure_modes": drift["checks"]
+                .as_array()
+                .expect("drift checks must be array")
+                .iter()
+                .map(|check| check["failure_mode"].clone())
+                .collect::<Vec<_>>(),
+            "safety": drift["safety"],
+        },
+        "structured_log_fields_required": art["structured_log_fields_required"],
+    })
 }
 
 // ── Document stability ─────────────────────────────────────────────
@@ -434,34 +463,23 @@ fn drift_detection_covers_mitigation_and_evidence_drift() {
 
 #[test]
 fn drift_detection_projection_matches_golden() {
-    let art = load_artifact();
-    let drift = &art["drift_detection"];
-    let projection = json!({
-        "contract_version": art["contract_version"],
-        "drift_detection": {
-            "source_paths": drift["source_paths"],
-            "required_rule_prefixes": drift["required_rule_prefixes"],
-            "check_ids": drift["checks"]
-                .as_array()
-                .expect("drift checks must be array")
-                .iter()
-                .map(|check| check["check_id"].clone())
-                .collect::<Vec<_>>(),
-            "failure_modes": drift["checks"]
-                .as_array()
-                .expect("drift checks must be array")
-                .iter()
-                .map(|check| check["failure_mode"].clone())
-                .collect::<Vec<_>>(),
-            "safety": drift["safety"],
-        },
-        "structured_log_fields_required": art["structured_log_fields_required"],
-    });
-
     assert_eq!(
-        projection,
+        drift_detection_projection(),
         load_drift_golden(),
         "authority-flow drift projection changed; update the golden only after reviewing the contract drift semantics"
+    );
+}
+
+#[test]
+fn drift_detection_projection_matches_golden_text() {
+    let mut actual = serde_json::to_string_pretty(&drift_detection_projection())
+        .expect("drift projection must serialize to JSON");
+    actual.push('\n');
+
+    assert_eq!(
+        actual,
+        load_drift_golden_text(),
+        "authority-flow drift projection text changed; update the golden only after reviewing ordering and formatting drift"
     );
 }
 
