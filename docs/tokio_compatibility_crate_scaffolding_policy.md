@@ -88,11 +88,11 @@ human review.
 
 | Gate ID | Requirement | Threshold | Command / Check |
 |---------|-------------|-----------|-----------------|
-| `GATE-T7.3-PROM-01` | T7.3 policy contract tests pass | 100% pass | `rch exec -- cargo test --test tokio_compatibility_crate_scaffolding_policy -- --nocapture` |
-| `GATE-T7.3-PROM-02` | Prior architecture boundary contract remains valid | 100% pass | `rch exec -- cargo test --test tokio_adapter_boundary_architecture -- --nocapture` |
-| `GATE-T7.3-PROM-03` | Workspace and targets compile | exit code 0 | `rch exec -- cargo check --all-targets -q` |
-| `GATE-T7.3-PROM-04` | Formatting compliance | exit code 0 | `rch exec -- cargo fmt --check` |
-| `GATE-T7.3-PROM-05` | Lint baseline and warnings enforcement | exit code 0 | `rch exec -- cargo clippy --all-targets -- -D warnings` |
+| `GATE-T7.3-PROM-01` | T7.3 policy contract tests pass | 100% pass | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_compat_scaffolding_docs cargo test --test tokio_compatibility_crate_scaffolding_policy -- --nocapture` |
+| `GATE-T7.3-PROM-02` | Prior architecture boundary contract remains valid | 100% pass | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_compat_scaffolding_docs cargo test --test tokio_adapter_boundary_architecture -- --nocapture` |
+| `GATE-T7.3-PROM-03` | Workspace and targets compile | exit code 0 | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_compat_scaffolding_docs cargo check --all-targets -q` |
+| `GATE-T7.3-PROM-04` | Formatting compliance | exit code 0 | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_compat_scaffolding_docs cargo fmt --check` |
+| `GATE-T7.3-PROM-05` | Lint baseline and warnings enforcement | exit code 0 | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_compat_scaffolding_docs cargo clippy --all-targets -- -D warnings` |
 
 Promotion to `T7.4` is blocked if any `GATE-T7.3-PROM-*` gate fails.
 
@@ -139,11 +139,11 @@ Exception approvals without policy IDs or TTL are invalid.
 ### 6.1 Mandatory Command Bundle (RCH)
 
 ```bash
-rch exec -- cargo test --test tokio_compatibility_crate_scaffolding_policy -- --nocapture
-rch exec -- cargo test --test tokio_adapter_boundary_architecture -- --nocapture
-rch exec -- cargo check --all-targets -q
-rch exec -- cargo fmt --check
-rch exec -- cargo clippy --all-targets -- -D warnings
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_compat_scaffolding_docs cargo test --test tokio_compatibility_crate_scaffolding_policy -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_compat_scaffolding_docs cargo test --test tokio_adapter_boundary_architecture -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_compat_scaffolding_docs cargo check --all-targets -q
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_compat_scaffolding_docs cargo fmt --check
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_compat_scaffolding_docs cargo clippy --all-targets -- -D warnings
 ```
 
 ### 6.2 Review Checklist
