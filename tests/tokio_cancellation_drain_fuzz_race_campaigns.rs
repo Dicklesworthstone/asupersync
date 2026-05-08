@@ -140,9 +140,15 @@ fn doc_requires_rch_exec_for_heavy_runs() {
     );
     assert!(
         doc.contains(
-            "rch exec -- cargo test --test tokio_cancellation_drain_fuzz_race_campaigns -- --nocapture"
+            "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_cancellation_drain_fuzz_docs cargo test --test tokio_cancellation_drain_fuzz_race_campaigns -- --nocapture"
         ),
         "document must include direct runner command for this campaign contract test"
+    );
+    assert!(
+        !doc.contains(
+            "rch exec -- cargo test --test tokio_cancellation_drain_fuzz_race_campaigns -- --nocapture"
+        ),
+        "document must route the campaign contract test through rch env CARGO_TARGET_DIR"
     );
 }
 
