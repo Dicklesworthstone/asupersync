@@ -278,9 +278,9 @@ python3 scripts/check_wasm_typescript_type_model_policy.py \
 Run deterministic harnesses directly:
 
 ```bash
-rch exec -- cargo test --lib worker_channel::tests::coordinator_ -- --nocapture
-rch exec -- cargo test --test react_wasm_strictmode_harness -- --nocapture
-rch exec -- cargo test --test nextjs_bootstrap_harness -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_canonical_examples_docs cargo test --lib worker_channel::tests::coordinator_ -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_canonical_examples_docs cargo test --test react_wasm_strictmode_harness -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_canonical_examples_docs cargo test --test nextjs_bootstrap_harness -- --nocapture
 ```
 
 ## Drift-Detection Test Contract
