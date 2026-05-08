@@ -543,10 +543,10 @@ With this adapter architecture, users can:
 All CPU-intensive checks are executed through `rch exec -- ...`.
 
 ```bash
-rch exec -- cargo test --test tokio_adapter_boundary_architecture -- --nocapture
-rch exec -- cargo check --all-targets -q
-rch exec -- cargo fmt --check
-rch exec -- cargo clippy --all-targets -- -D warnings
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_adapter_boundary_docs cargo test --test tokio_adapter_boundary_architecture -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_adapter_boundary_docs cargo check --all-targets -q
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_adapter_boundary_docs cargo fmt --check
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_adapter_boundary_docs cargo clippy --all-targets -- -D warnings
 ```
 
 ---
