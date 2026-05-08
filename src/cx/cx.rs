@@ -979,7 +979,14 @@ impl<Caps> Cx<Caps> {
     #[must_use]
     pub fn attenuate(&self, predicate: super::macaroon::CaveatPredicate) -> Option<Self> {
         let token = self.handles.macaroon.as_ref()?;
-        let attenuated = MacaroonToken::clone(token).add_caveat(predicate);
+        let attenuated = MacaroonToken::clone(token).add_caveat(predicate.clone());
+        if !attenuated.is_direct_attenuation_of(token, &predicate) {
+            error!(
+                token_id = %token.identifier(),
+                "macaroon attenuation failed runtime subset validation"
+            );
+            return None;
+        }
 
         info!(
             token_id = %attenuated.identifier(),
@@ -4113,6 +4120,13 @@ mod tests {
         assert_eq!(
             cx.macaroon().unwrap().identifier(),
             cx2.macaroon().unwrap().identifier()
+        );
+        assert!(
+            cx2.macaroon().unwrap().is_direct_attenuation_of(
+                cx.macaroon().unwrap(),
+                &CaveatPredicate::TimeBefore(5000)
+            ),
+            "Cx::attenuate must install only a direct child of the parent token"
         );
     }
 

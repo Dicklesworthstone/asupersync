@@ -722,6 +722,47 @@ impl MacaroonToken {
         self
     }
 
+    /// Returns true if `self` is exactly `parent` attenuated by one
+    /// additional first-party caveat.
+    ///
+    /// This is a runtime guard for callers that derive child capability
+    /// contexts. It verifies that attenuation preserved the signed
+    /// identifier/location, retained every parent caveat as an ordered prefix,
+    /// appended the requested predicate, and produced the expected next HMAC
+    /// chain signature. A failure means the derived token may have widened or
+    /// corrupted the parent capability and must be rejected fail-closed.
+    #[must_use]
+    pub fn is_direct_attenuation_of(
+        &self,
+        parent: &Self,
+        added_predicate: &CaveatPredicate,
+    ) -> bool {
+        if self.identifier != parent.identifier || self.location != parent.location {
+            return false;
+        }
+        if self.bound != parent.bound {
+            return false;
+        }
+        if self.caveats.len() != parent.caveats.len() + 1 {
+            return false;
+        }
+        if !self.caveats.starts_with(&parent.caveats) {
+            return false;
+        }
+        if !matches!(
+            self.caveats.last(),
+            Some(Caveat::FirstParty { predicate }) if predicate == added_predicate
+        ) {
+            return false;
+        }
+
+        let Ok(parent_sig_key) = AuthKey::from_hmac_derived(*parent.signature.as_bytes()) else {
+            return false;
+        };
+        let expected_sig = hmac_compute(&parent_sig_key, &added_predicate.to_bytes());
+        MacaroonSignature::from_bytes(*expected_sig.as_bytes()).constant_time_eq(&self.signature)
+    }
+
     /// Add a third-party caveat to the token.
     ///
     /// The `caveat_key` is a shared secret between the issuer and
@@ -1819,6 +1860,41 @@ mod tests {
 
         assert_ne!(sig1, sig2);
         assert!(t2.verify_signature(&key));
+    }
+
+    #[test]
+    fn direct_attenuation_check_requires_parent_prefix_and_expected_signature() {
+        let key = test_root_key();
+        let parent =
+            MacaroonToken::mint(&key, "cap", "loc").add_caveat(CaveatPredicate::TimeBefore(5000));
+        let added = CaveatPredicate::RegionScope(42);
+        let child = parent.clone().add_caveat(added.clone());
+
+        assert!(
+            child.is_direct_attenuation_of(&parent, &added),
+            "child must validate as exactly parent plus the requested caveat"
+        );
+
+        let missing_parent_prefix = MacaroonToken::mint(&key, "cap", "loc").add_caveat(added);
+        assert!(
+            !missing_parent_prefix
+                .is_direct_attenuation_of(&parent, &CaveatPredicate::RegionScope(42)),
+            "attenuation must retain every parent caveat as an ordered prefix"
+        );
+
+        let mut wrong_identifier = child.clone();
+        wrong_identifier.identifier = "other".to_string();
+        assert!(
+            !wrong_identifier.is_direct_attenuation_of(&parent, &CaveatPredicate::RegionScope(42)),
+            "attenuation must not change the signed capability identifier"
+        );
+
+        let mut wrong_signature = child;
+        wrong_signature.signature = parent.signature;
+        assert!(
+            !wrong_signature.is_direct_attenuation_of(&parent, &CaveatPredicate::RegionScope(42)),
+            "attenuation must produce the expected next HMAC chain signature"
+        );
     }
 
     #[test]
