@@ -1,0 +1,15 @@
+{
+  "conflicts": [
+    {
+      "path": ".beads/issues.jsonl",
+      "holders": [
+        {
+          "agent": "BlackDove",
+          "exclusive": true,
+          "expires_ts": "2999-01-01T00:00:00Z",
+          "path_pattern": ".beads/issues.jsonl"
+        }
+      ]
+    }
+  ]
+}
