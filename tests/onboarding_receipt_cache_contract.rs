@@ -127,6 +127,32 @@ fn stale_cache_output_matches_full_reviewed_golden() {
 }
 
 #[test]
+fn no_matching_cache_output_matches_full_reviewed_golden() {
+    let output = run_cache(
+        &fixture("current_receipt.json"),
+        Some(&fixture("no_matching_cache.json")),
+        1800,
+    );
+    assert!(
+        output.status.success(),
+        "cache helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = String::from_utf8(output.stdout).expect("cache stdout is utf-8");
+    let expected = fixture_text("no_matching_cache_expected.json");
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual cache JSON");
+    let expected_json: Value = serde_json::from_str(&expected).expect("golden cache JSON");
+    assert_eq!(actual_json, expected_json);
+    assert_eq!(
+        actual, expected,
+        "no-matching onboarding receipt cache output drifted from the reviewed golden"
+    );
+}
+
+#[test]
 fn script_exists_and_help_is_non_mutating() {
     assert!(
         repo_root().join(SCRIPT_PATH).exists(),
