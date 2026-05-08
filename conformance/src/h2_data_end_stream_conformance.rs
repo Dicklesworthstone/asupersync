@@ -1,8 +1,9 @@
 //! HTTP/2 DATA frame END_STREAM conformance testing.
 //!
 //! This harness exercises the asupersync HTTP/2 connection's DATA frame
-//! END_STREAM handling against the h2 reference implementation to ensure
-//! identical stream state transitions per RFC 7540.
+//! END_STREAM handling against RFC-backed expected states. The h2 reference
+//! side is not wired yet, so matching the local expected state is reported as
+//! XFAIL instead of a vendor-parity pass.
 
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::http::h2::{

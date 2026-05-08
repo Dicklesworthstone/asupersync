@@ -1,7 +1,7 @@
 //! HTTP/2 PING Frame Conformance Test Runner
 //!
-//! Runs differential conformance testing for HTTP/2 PING frame handling
-//! comparing asupersync against the h2 reference implementation.
+//! Runs HTTP/2 PING frame checks against RFC expected states while the h2
+//! reference path remains an explicit XFAIL.
 //!
 //! Usage:
 //!   cargo run --bin h2_ping_conformance
@@ -47,6 +47,10 @@ enum OutputFormat {
     Summary,
 }
 
+fn reference_scope_line() -> &'static str {
+    "Testing asupersync against RFC expected states; h2 reference is XFAIL"
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
@@ -57,7 +61,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("🔧 HTTP/2 PING Frame Conformance Tester");
-    println!("   Testing asupersync against h2 reference implementation");
+    println!("   {}", reference_scope_line());
     println!("   Focus: RTT computation accuracy, connection stability");
     println!();
 
@@ -294,6 +298,15 @@ mod tests {
     #[test]
     fn final_status_claims_all_passed_only_for_full_green_results() {
         assert_eq!(final_status_line(0, 0), "✅ ALL TESTS PASSED");
+    }
+
+    #[test]
+    fn reference_scope_line_does_not_claim_live_h2_parity() {
+        let line = reference_scope_line();
+
+        assert!(line.contains("RFC expected states"));
+        assert!(line.contains("XFAIL"));
+        assert!(!line.contains("h2 reference implementation"));
     }
 
     #[test]

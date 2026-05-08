@@ -1,8 +1,9 @@
 //! HTTP/2 PING frame conformance testing.
 //!
 //! This harness exercises the asupersync HTTP/2 connection's PING frame
-//! handling against the h2 reference implementation to ensure identical
-//! RTT computation and response behavior per RFC 7540.
+//! handling against RFC-backed expected states. The h2 reference side is not
+//! wired yet, so matching the local expected state is reported as XFAIL instead
+//! of a vendor-parity pass.
 
 use asupersync::http::h2::{
     Connection, Settings,
