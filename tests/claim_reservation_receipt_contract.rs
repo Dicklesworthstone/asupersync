@@ -189,6 +189,28 @@ fn implementation_reservation_conflict_blocks_claim_sequence() {
 }
 
 #[test]
+fn implementation_conflict_output_matches_full_reviewed_golden() {
+    let output = run_receipt("implementation_conflict.json", "clean_git_status.json");
+    assert!(
+        output.status.success(),
+        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actual = String::from_utf8(output.stdout).expect("receipt stdout is utf-8");
+    let expected = fixture_text("implementation_conflict_expected.json");
+
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
+    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
+    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
+    assert_eq!(
+        actual, expected,
+        "claim/reservation implementation-conflict receipt changed; update the golden only after reviewing wait-for-implementation-reservation semantics"
+    );
+}
+
+#[test]
 fn dirty_index_conflict_takes_precedence_over_reservations() {
     let receipt = receipt("clear_reservations.json", "dirty_index.json");
 
