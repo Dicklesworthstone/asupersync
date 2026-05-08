@@ -3,6 +3,7 @@
 #![allow(missing_docs)]
 
 use serde_json::Value;
+use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
@@ -15,12 +16,16 @@ fn repo_root() -> PathBuf {
 }
 
 fn run_receipt(fixture: &str) -> Output {
+    run_receipt_with_repo_path(fixture, repo_root().to_string_lossy().as_ref())
+}
+
+fn run_receipt_with_repo_path(fixture: &str, repo_path: &str) -> Output {
     Command::new("python3")
         .arg(repo_root().join(SCRIPT_PATH))
         .arg("--fixture")
         .arg(repo_root().join(FIXTURE_ROOT).join(fixture))
         .arg("--repo-path")
-        .arg(repo_root())
+        .arg(repo_path)
         .arg("--agent")
         .arg("CoralGorge")
         .arg("--generated-at")
@@ -42,6 +47,12 @@ fn receipt_json(fixture: &str) -> Value {
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("receipt output must be JSON")
+}
+
+fn fixture_json(fixture: &str) -> Value {
+    let raw = fs::read_to_string(repo_root().join(FIXTURE_ROOT).join(fixture))
+        .expect("read fixture JSON");
+    serde_json::from_str(&raw).expect("fixture must be JSON")
 }
 
 fn helpers(receipt: &Value) -> &Vec<Value> {
@@ -168,6 +179,22 @@ fn output_is_deterministic_for_same_fixture_and_timestamp() {
     assert!(first.status.success());
     assert!(second.status.success());
     assert_eq!(first.stdout, second.stdout);
+}
+
+#[test]
+fn current_inventory_matches_full_output_golden() {
+    let output = run_receipt_with_repo_path("current_inventory.json", "/repo");
+    assert!(
+        output.status.success(),
+        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actual: Value = serde_json::from_slice(&output.stdout).expect("receipt output JSON");
+    let expected = fixture_json("current_inventory_expected.json");
+
+    assert_eq!(actual, expected);
 }
 
 #[test]

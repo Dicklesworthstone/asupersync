@@ -1,0 +1,124 @@
+{
+  "agent": "CoralGorge",
+  "capabilities": [
+    {
+      "active_helper_count": 1,
+      "canonical_helper": "swarm-timeline-receipt",
+      "capability_id": "cross-agent-timeline",
+      "draft_helper_count": 0,
+      "duplicate_active_count": 0,
+      "helper_count": 1,
+      "needs_review": false,
+      "superseded_helper_count": 0
+    },
+    {
+      "active_helper_count": 1,
+      "canonical_helper": "rch-worker-health-receipt",
+      "capability_id": "rch-worker-health",
+      "draft_helper_count": 0,
+      "duplicate_active_count": 0,
+      "helper_count": 2,
+      "needs_review": false,
+      "superseded_helper_count": 1
+    }
+  ],
+  "classification_counts": {
+    "canonical": 2,
+    "superseded": 1
+  },
+  "current_date": "2026-05-08",
+  "generated_at": "2026-05-08T05:45:00Z",
+  "helpers": [
+    {
+      "bead_id": "asupersync-aj7lx3.11",
+      "capability_id": "cross-agent-timeline",
+      "classification": "canonical",
+      "commit": "17896bafc001",
+      "fixture_root": "tests/fixtures/swarm_timeline_receipt",
+      "helper_id": "swarm-timeline-receipt",
+      "owner": "CopperSpring",
+      "script_path": "scripts/swarm_timeline_receipt.py",
+      "status": "shipped",
+      "summary": "Redacted cross-agent timeline with claim, ship, block, reservation, and validation events.",
+      "superseded_by": "",
+      "test_path": "tests/swarm_timeline_receipt_contract.rs",
+      "validation": [
+        "rch exec -- cargo test -p asupersync --test swarm_timeline_receipt_contract"
+      ]
+    },
+    {
+      "bead_id": "asupersync-aj7lx3",
+      "capability_id": "rch-worker-health",
+      "classification": "canonical",
+      "commit": "8112321f2bb0",
+      "fixture_root": "tests/fixtures/rch_worker_health_receipt",
+      "helper_id": "rch-worker-health-receipt",
+      "owner": "BoldPlateau",
+      "script_path": "scripts/rch_worker_health_receipt.py",
+      "status": "shipped",
+      "summary": "Classifies rch workers as healthy, warn, quarantine-candidate, or unavailable.",
+      "superseded_by": "",
+      "test_path": "tests/rch_worker_health_receipt_contract.py",
+      "validation": [
+        "python3 -m unittest tests/rch_worker_health_receipt_contract.py"
+      ]
+    },
+    {
+      "bead_id": "asupersync-aj7lx3",
+      "capability_id": "rch-worker-health",
+      "classification": "superseded",
+      "commit": "1f0d6f221000",
+      "fixture_root": "tests/fixtures/rch_worker_quarantine_receipt",
+      "helper_id": "rch-worker-quarantine-receipt",
+      "owner": "CoralGorge",
+      "script_path": "scripts/rch_worker_quarantine_receipt.py",
+      "status": "shipped",
+      "summary": "Quarantine-specific helper that is superseded by the broader rch worker health receipt.",
+      "superseded_by": "rch-worker-health-receipt",
+      "test_path": "tests/rch_worker_quarantine_receipt_contract.rs",
+      "validation": []
+    }
+  ],
+  "redaction_counts": {
+    "long_token": 0,
+    "secret": 0,
+    "token": 0,
+    "total": 0,
+    "url_query": 0
+  },
+  "repo_path": "/repo",
+  "review_cues": [
+    {
+      "capability_id": "rch-worker-health",
+      "helper_id": "rch-worker-quarantine-receipt",
+      "kind": "superseded-helper",
+      "recommendation": "route future fixes to the superseding helper and avoid citing this one as canonical",
+      "severity": "medium",
+      "superseded_by": "rch-worker-health-receipt"
+    }
+  ],
+  "safety": {
+    "agent_mail_mutated": false,
+    "beads_mutated": false,
+    "branch_or_worktree_operations": false,
+    "cargo_executed": false,
+    "files_deleted": false,
+    "git_mutated": false,
+    "live_probe_performed": false,
+    "non_mutating": true,
+    "reads_fixture_only": true
+  },
+  "safety_notes": [
+    "fixture mode reads only the supplied inventory JSON",
+    "receipt does not inspect live Agent Mail, Beads, git, rch, or cargo state",
+    "review cues are advisory and require human or agent coordination before action"
+  ],
+  "schema_version": "proof-receipt-inventory-v1",
+  "source_counts": {
+    "capabilities": 2,
+    "duplicate_capabilities": 0,
+    "helpers": 3,
+    "review_cues": 1,
+    "superseded_helpers": 1
+  }
+}
