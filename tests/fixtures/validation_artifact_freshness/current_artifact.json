@@ -1,0 +1,8 @@
+{
+  "decision": "passed",
+  "generated_at": "2026-05-08T05:20:00Z",
+  "repo_head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "touched_files": [
+    "scripts/proof_runner.py"
+  ]
+}
