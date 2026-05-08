@@ -266,10 +266,10 @@ bead is wrong until this matrix is updated deliberately.
 
 Heavy validation commands must run through `rch exec --`.
 
-- `rch exec -- cargo fmt --check`
-- `rch exec -- cargo check --all-targets`
-- `rch exec -- cargo clippy --all-targets -- -D warnings`
-- `rch exec -- cargo test --test lab_live_differential_scope_matrix -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_differential_docs cargo fmt --check`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_differential_docs cargo check --all-targets`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_differential_docs cargo clippy --all-targets -- -D warnings`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_differential_docs cargo test --test lab_live_differential_scope_matrix -- --nocapture`
 
 Exit criteria for `asupersync-2a6k9.1.1`:
 

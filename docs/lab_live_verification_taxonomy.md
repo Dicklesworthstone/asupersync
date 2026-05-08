@@ -693,10 +693,10 @@ This standard inherits the final policy classes from
 
 Heavy validation commands must run through `rch exec --`.
 
-- `rch exec -- cargo fmt --check`
-- `rch exec -- cargo check --all-targets`
-- `rch exec -- cargo clippy --all-targets -- -D warnings`
-- `rch exec -- cargo test --test lab_live_verification_taxonomy_contract -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_taxonomy_docs cargo fmt --check`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_taxonomy_docs cargo check --all-targets`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_taxonomy_docs cargo clippy --all-targets -- -D warnings`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_taxonomy_docs cargo test --test lab_live_verification_taxonomy_contract -- --nocapture`
 
 If this bead or a later bead adds executable helper code, it should also run
 the narrowest relevant contract or smoke test under `rch exec -- ...`.
