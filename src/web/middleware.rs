@@ -3158,6 +3158,286 @@ mod tests {
         }
     }
 
+    // ─── CORS preflight Fetch §3.2 conformance harness ───────────────
+    //
+    // Spec source: https://fetch.spec.whatwg.org/#cors-preflight-fetch
+    // (consulted version: 2026-04 commit; the relevant clauses below are
+    // stable since 2017). Each test names the clause it pins. Tests are
+    // structured one-clause-per-test so a regression message points to
+    // the exact spec rule that regressed.
+
+    /// Fetch §3.2.1 — "A CORS-preflight request is a CORS request whose
+    /// method is `OPTIONS` and that uses these headers:
+    /// `Access-Control-Request-Method`, `Access-Control-Request-Headers`."
+    /// An OPTIONS request without `Origin` is NOT a preflight — it is an
+    /// ordinary OPTIONS request the application must handle.
+    #[test]
+    fn fetch_3_2_preflight_requires_origin_header() {
+        let inner_calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let handler = CountingHandler {
+            calls: Arc::clone(&inner_calls),
+            delay: Duration::ZERO,
+            status: StatusCode::OK,
+        };
+        let mw = CorsMiddleware::new(handler, CorsPolicy::default());
+
+        let req = Request::new("OPTIONS", "/cors")
+            .with_header("Access-Control-Request-Method", "POST");
+        let resp = mw.call(req);
+
+        assert_eq!(
+            inner_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "OPTIONS without Origin must reach the inner handler",
+        );
+        assert_eq!(resp.status, StatusCode::OK);
+        assert!(
+            !resp.headers.contains_key("access-control-allow-origin"),
+            "non-CORS OPTIONS must not emit ACAO",
+        );
+    }
+
+    /// Fetch §3.2.1 — without `Access-Control-Request-Method`, an
+    /// OPTIONS request with `Origin` is a non-preflight CORS request:
+    /// the inner handler runs and the simple-request CORS headers are
+    /// applied, but no preflight short-circuit.
+    #[test]
+    fn fetch_3_2_preflight_requires_acrm_header() {
+        let inner_calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let handler = CountingHandler {
+            calls: Arc::clone(&inner_calls),
+            delay: Duration::ZERO,
+            status: StatusCode::OK,
+        };
+        let mw = CorsMiddleware::new(handler, CorsPolicy::default());
+
+        let req = Request::new("OPTIONS", "/cors")
+            .with_header("Origin", "https://example.com");
+        let resp = mw.call(req);
+
+        assert_eq!(
+            inner_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "OPTIONS without ACRM must reach the inner handler (not a preflight)",
+        );
+        assert_eq!(
+            resp.headers.get("access-control-allow-origin"),
+            Some(&"*".to_string()),
+            "non-preflight CORS request still gets ACAO",
+        );
+        assert!(
+            !resp.headers.contains_key("access-control-allow-methods"),
+            "Allow-Methods is preflight-only",
+        );
+        assert!(
+            !resp.headers.contains_key("access-control-max-age"),
+            "Max-Age is preflight-only",
+        );
+    }
+
+    /// Fetch §4.10 step 7 — preflight response status MUST be in the
+    /// 2xx range. Implementation pins to 204 No Content; this test
+    /// freezes that contract so a future "200 OK" change is visible.
+    #[test]
+    fn fetch_3_2_preflight_response_status_is_204() {
+        let mw = CorsMiddleware::new(FailingIfCalled, CorsPolicy::default());
+        let req = Request::new("OPTIONS", "/cors")
+            .with_header("Origin", "https://example.com")
+            .with_header("Access-Control-Request-Method", "POST");
+        let resp = mw.call(req);
+
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+        assert!(resp.body.is_empty(), "preflight body must be empty");
+    }
+
+    /// Fetch §3.2.2 — `Access-Control-Allow-Methods` advertises the
+    /// methods supported on the resource. The middleware must emit
+    /// every method from the policy, NOT echo `Access-Control-Request-Method`
+    /// (which would silently allow any caller-requested method).
+    #[test]
+    fn fetch_3_2_preflight_allow_methods_comes_from_policy_not_request() {
+        let policy = CorsPolicy {
+            allow_methods: vec!["GET".to_string(), "POST".to_string()],
+            ..CorsPolicy::default()
+        };
+        let mw = CorsMiddleware::new(FailingIfCalled, policy);
+        let req = Request::new("OPTIONS", "/cors")
+            .with_header("Origin", "https://example.com")
+            .with_header("Access-Control-Request-Method", "DELETE");
+        let resp = mw.call(req);
+
+        let allow = resp
+            .headers
+            .get("access-control-allow-methods")
+            .expect("preflight must set Allow-Methods");
+        assert!(allow.contains("GET"));
+        assert!(allow.contains("POST"));
+        assert!(
+            !allow.contains("DELETE"),
+            "DELETE was requested but is not in the policy — it must NOT be echoed; got {allow:?}",
+        );
+    }
+
+    /// Fetch §3.2.2 — `Access-Control-Max-Age` is advertised when the
+    /// policy sets it. Counter: when the policy sets `max_age = None`
+    /// the header MUST be omitted (default 5s on browser side; emitting
+    /// `0` would be a different signal).
+    #[test]
+    fn fetch_3_2_preflight_max_age_emitted_from_policy() {
+        let policy = CorsPolicy {
+            max_age: Some(Duration::from_secs(7200)),
+            ..CorsPolicy::default()
+        };
+        let mw = CorsMiddleware::new(FailingIfCalled, policy);
+        let req = Request::new("OPTIONS", "/cors")
+            .with_header("Origin", "https://example.com")
+            .with_header("Access-Control-Request-Method", "POST");
+        let resp = mw.call(req);
+
+        assert_eq!(
+            resp.headers.get("access-control-max-age"),
+            Some(&"7200".to_string()),
+            "Max-Age must reflect the policy duration in seconds",
+        );
+    }
+
+    /// Counter to the previous test: `max_age = None` MUST omit the
+    /// header (rather than emitting a misleading default).
+    #[test]
+    fn fetch_3_2_preflight_max_age_omitted_when_none() {
+        let policy = CorsPolicy {
+            max_age: None,
+            ..CorsPolicy::default()
+        };
+        let mw = CorsMiddleware::new(FailingIfCalled, policy);
+        let req = Request::new("OPTIONS", "/cors")
+            .with_header("Origin", "https://example.com")
+            .with_header("Access-Control-Request-Method", "POST");
+        let resp = mw.call(req);
+
+        assert!(
+            !resp.headers.contains_key("access-control-max-age"),
+            "Max-Age must be omitted when policy.max_age is None",
+        );
+    }
+
+    /// HTTP caching §4.1 (and Fetch §3.2 by reference) — preflight
+    /// responses MUST set `Vary` to include every request header whose
+    /// value influenced the response. For a CORS preflight that is
+    /// `Origin`, `Access-Control-Request-Method`, and
+    /// `Access-Control-Request-Headers`. Without these tokens, an
+    /// HTTP cache could serve a preflight response for one origin/method
+    /// pair to a different origin/method pair.
+    #[test]
+    fn fetch_3_2_preflight_vary_includes_origin_acrm_acrh() {
+        let mw = CorsMiddleware::new(FailingIfCalled, CorsPolicy::default());
+        let req = Request::new("OPTIONS", "/cors")
+            .with_header("Origin", "https://example.com")
+            .with_header("Access-Control-Request-Method", "POST")
+            .with_header("Access-Control-Request-Headers", "content-type");
+        let resp = mw.call(req);
+
+        let vary = resp
+            .headers
+            .get("vary")
+            .expect("preflight must emit a Vary header");
+        for token in [
+            "origin",
+            "access-control-request-method",
+            "access-control-request-headers",
+        ] {
+            assert!(
+                vary.split(',').any(|t| t.trim().eq_ignore_ascii_case(token)),
+                "Vary must include {token:?}; got {vary:?}",
+            );
+        }
+    }
+
+    /// Fetch §3.2.4 — `Access-Control-Expose-Headers` is meaningful
+    /// only on actual responses (not preflights), and it lists the
+    /// response headers the client JS may read. The middleware MUST
+    /// emit it from policy.expose_headers when non-empty.
+    #[test]
+    fn fetch_3_2_simple_request_emits_expose_headers_from_policy() {
+        let policy = CorsPolicy {
+            expose_headers: vec!["X-Request-Id".to_string(), "ETag".to_string()],
+            ..CorsPolicy::default()
+        };
+        let mw = CorsMiddleware::new(FnHandler::new(ok_handler), policy);
+        let req = Request::new("GET", "/cors")
+            .with_header("Origin", "https://example.com");
+        let resp = mw.call(req);
+
+        let expose = resp
+            .headers
+            .get("access-control-expose-headers")
+            .expect("Expose-Headers must be set when policy lists them");
+        assert!(expose.contains("X-Request-Id"));
+        assert!(expose.contains("ETag"));
+    }
+
+    /// Fetch §3.2.4 — empty `expose_headers` MUST omit the header
+    /// (rather than emitting an empty value, which some caches treat
+    /// as "expose nothing" and others as "advertise all").
+    #[test]
+    fn fetch_3_2_simple_request_omits_expose_headers_when_policy_empty() {
+        let mw = CorsMiddleware::new(FnHandler::new(ok_handler), CorsPolicy::default());
+        let req = Request::new("GET", "/cors")
+            .with_header("Origin", "https://example.com");
+        let resp = mw.call(req);
+
+        assert!(
+            !resp.headers.contains_key("access-control-expose-headers"),
+            "Expose-Headers must be omitted when policy.expose_headers is empty",
+        );
+    }
+
+    /// Fetch §3.2.1 — `Origin: null` is a valid serialized origin
+    /// (sandboxed iframe, file://, redirected `data:` URI). Under the
+    /// non-credentialed `Any` policy, the middleware echoes `*` per the
+    /// existing `allowed_origin_value(Any)` branch — `null` is not
+    /// `*`, but `*` does cover `null` for non-credentialed reads. This
+    /// test pins that `null` does NOT trigger the malformed-origin
+    /// fail-closed (which is reserved for comma-bearing multi-origin).
+    #[test]
+    fn fetch_3_2_origin_null_is_not_malformed() {
+        let mw = CorsMiddleware::new(FnHandler::new(ok_handler), CorsPolicy::default());
+        let req = Request::new("GET", "/cors").with_header("Origin", "null");
+        let resp = mw.call(req);
+
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(
+            resp.headers.get("access-control-allow-origin"),
+            Some(&"*".to_string()),
+            "Any policy must echo `*` for an opaque (`null`) origin on a non-credentialed request",
+        );
+    }
+
+    /// Fetch §3.2.5 — credentialed mode MUST never match `Origin: null`
+    /// against an exact-origin allow-list that does not literally list
+    /// `null`. The fail-closed contract: no ACAO header.
+    #[test]
+    fn fetch_3_2_origin_null_not_in_exact_allowlist_emits_no_acao() {
+        let policy = CorsPolicy {
+            allow_credentials: true,
+            ..CorsPolicy::with_exact_origins(vec!["https://app.example.com".to_string()])
+        };
+        let mw = CorsMiddleware::new(FnHandler::new(ok_handler), policy);
+        let req = Request::new("GET", "/cors").with_header("Origin", "null");
+        let resp = mw.call(req);
+
+        assert_eq!(resp.status, StatusCode::OK);
+        assert!(
+            !resp.headers.contains_key("access-control-allow-origin"),
+            "Origin: null must not match an exact-origin allow-list of named origins",
+        );
+        assert!(
+            !resp
+                .headers
+                .contains_key("access-control-allow-credentials"),
+        );
+    }
+
     // --- MiddlewareStack ---
 
     #[test]
