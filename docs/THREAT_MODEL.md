@@ -334,8 +334,8 @@ Security invariant tests are located in:
 
 Run security tests:
 ```bash
-cargo test --test security_invariants
-cargo test security -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_security_docs cargo test --test security_invariants
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_security_docs cargo test security -- --nocapture
 ```
 
 ---

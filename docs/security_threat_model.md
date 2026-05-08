@@ -88,16 +88,16 @@ This addendum defines browser-specific security assumptions and controls for the
 For local reproduction with remote offload:
 
 ```bash
-rch exec -- cargo test --test security_invariants browser_fetch_security -- --nocapture
-rch exec -- cargo test --lib io::cap -- --nocapture
-rch exec -- cargo test --test security -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_security_docs cargo test --test security_invariants browser_fetch_security -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_security_docs cargo test --lib io::cap -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_security_docs cargo test --test security -- --nocapture
 ```
 
 For CI parity checks:
 
 ```bash
 python3 scripts/check_wasm_dependency_policy.py --policy .github/wasm_dependency_policy.json
-cargo test --test security_invariants browser_fetch_security -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_security_docs cargo test --test security_invariants browser_fetch_security -- --nocapture
 ```
 
 ### Residual Risk Register (Browser Scope)
