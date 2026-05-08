@@ -528,10 +528,10 @@ The following production features are required for tonic-equivalent gRPC deploym
 
 **Evidence commands**:
 ```bash
-rch exec -- cargo test --test grpc_enhancement_integration -- --nocapture
-rch exec -- cargo test --lib grpc::codec::tests -- --nocapture
-rch exec -- cargo test --lib grpc::web::tests -- --nocapture
-rch exec -- cargo test --lib grpc::health::tests -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_web_grpc_parity_docs cargo test --test grpc_enhancement_integration -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_web_grpc_parity_docs cargo test --lib grpc::codec::tests -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_web_grpc_parity_docs cargo test --lib grpc::web::tests -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_web_grpc_parity_docs cargo test --lib grpc::health::tests -- --nocapture
 ```
 
 **Remaining T5.7 gaps**: Only GRPC-G9 (deadline propagation) is missing. All other tonic production features have complete implementations with deterministic tests.
@@ -631,14 +631,14 @@ br show asupersync-2oh2u.5.2 --json
 br show asupersync-2oh2u.5.3 --json
 br show asupersync-2oh2u.5.4 --json
 br show asupersync-2oh2u.5.5 --json
-rch exec -- cargo test --test tokio_web_grpc_parity_map -- --nocapture
-rch exec -- cargo test --lib web::extract::tests -- --nocapture
-rch exec -- cargo test --lib web::middleware::tests -- --nocapture
-rch exec -- cargo test --test web_router_composition -- --nocapture
-rch exec -- cargo test --test web_router_match_order -- --nocapture
-rch exec -- cargo test --test grpc_enhancement_integration -- --nocapture
-rch exec -- cargo test --lib grpc::web::tests -- --nocapture
-rch exec -- cargo test --lib grpc::codec::tests -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_web_grpc_parity_docs cargo test --test tokio_web_grpc_parity_map -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_web_grpc_parity_docs cargo test --lib web::extract::tests -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_web_grpc_parity_docs cargo test --lib web::middleware::tests -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_web_grpc_parity_docs cargo test --test web_router_composition -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_web_grpc_parity_docs cargo test --test web_router_match_order -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_web_grpc_parity_docs cargo test --test grpc_enhancement_integration -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_web_grpc_parity_docs cargo test --lib grpc::web::tests -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_web_grpc_parity_docs cargo test --lib grpc::codec::tests -- --nocapture
 rg -n "WEB-G|MW-G|GRPC-G|HT-G|WS-G" docs/tokio_web_grpc_parity_map.md
 ```
 
