@@ -256,6 +256,65 @@ def agent_profiles(agent_mail: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return profiles
 
 
+def agent_roster_summary(
+    agent_mail: dict[str, Any],
+    issues: list[dict[str, Any]],
+    generated_at: str,
+    active_after_hours: int,
+) -> dict[str, Any]:
+    profiles = agent_profiles(agent_mail)
+    assignees = sorted(
+        {
+            str(issue.get("assignee") or issue.get("created_by") or "")
+            for issue in issues
+            if issue.get("assignee") or issue.get("created_by")
+        }
+    )
+    agents = []
+    for name in sorted(profiles):
+        profile = profiles[name]
+        last_active = str(profile.get("last_active_ts") or "")
+        inactive_hours = age_hours(
+            parse_timestamp(generated_at) or dt.datetime.now(dt.timezone.utc),
+            last_active,
+        )
+        if inactive_hours is None:
+            activity = "unknown"
+        elif inactive_hours <= active_after_hours:
+            activity = "active"
+        else:
+            activity = "inactive"
+        agents.append(
+            {
+                "name": name,
+                "activity": activity,
+                "last_active_ts": last_active,
+                "inactive_hours": inactive_hours,
+                "program": str(profile.get("program") or ""),
+                "model": str(profile.get("model") or ""),
+                "task_description": str(profile.get("task_description") or ""),
+                "contact_policy": str(profile.get("contact_policy") or ""),
+            }
+        )
+
+    missing_assignees = [name for name in assignees if name not in profiles]
+    return {
+        "active_window_hours": active_after_hours,
+        "assignees": assignees,
+        "missing_assignees": missing_assignees,
+        "agents": agents,
+        "counts": {
+            "total_agents": len(agents),
+            "active_agents": sum(1 for row in agents if row["activity"] == "active"),
+            "inactive_agents": sum(1 for row in agents if row["activity"] == "inactive"),
+            "unknown_activity_agents": sum(
+                1 for row in agents if row["activity"] == "unknown"
+            ),
+            "missing_assignees": len(missing_assignees),
+        },
+    }
+
+
 def recent_message_for(agent_mail: dict[str, Any], bead_id: str) -> dict[str, Any] | None:
     messages = extract_rows(agent_mail, ("messages", "inbox", "threads"))
     matches = [row for row in messages if contains_bead(row, bead_id)]
@@ -510,6 +569,7 @@ def build_receipt(
 ) -> dict[str, Any]:
     dirty_tracker = dirty_tracker_status(source)
     issues = extract_issues(source.get("beads", {}).get("in_progress", []))
+    agent_mail = source.get("agent_mail") if isinstance(source.get("agent_mail"), dict) else {}
     classifications = [
         classify_issue(
             issue,
@@ -540,6 +600,12 @@ def build_receipt(
             "git": str(source.get("git", {}).get("status", "ok")),
             "dirty_tree": str(source.get("dirty_tree", {}).get("status", "ok")),
         },
+        "agent_roster": agent_roster_summary(
+            agent_mail,
+            issues,
+            generated_at,
+            active_after_hours,
+        ),
         "tracker_state": dirty_tracker,
         "classifications": classifications,
         "summary": {

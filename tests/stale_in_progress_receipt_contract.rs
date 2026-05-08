@@ -89,6 +89,18 @@ fn fresh_active_peer_is_wait_contact_not_stale() {
         row["evidence"]["message_created_ts"].as_str(),
         Some("2026-05-08T04:20:00Z")
     );
+    assert_eq!(
+        receipt["agent_roster"]["counts"]["active_agents"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        receipt["agent_roster"]["agents"][0]["name"].as_str(),
+        Some("CopperSpring")
+    );
+    assert_eq!(
+        receipt["agent_roster"]["agents"][0]["activity"].as_str(),
+        Some("active")
+    );
 }
 
 #[test]
@@ -104,6 +116,14 @@ fn expired_reservation_and_inactive_agent_is_probably_stale() {
         Some("br update asupersync-stale1 --status open --json")
     );
     assert_eq!(row["proposed_action"]["allowed_now"].as_bool(), Some(false));
+    assert_eq!(
+        receipt["agent_roster"]["counts"]["inactive_agents"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        receipt["agent_roster"]["agents"][0]["activity"].as_str(),
+        Some("inactive")
+    );
 }
 
 #[test]
@@ -192,6 +212,14 @@ fn unavailable_agent_mail_is_explicitly_escalated() {
             .expect("rationale string")
             .contains("Agent Mail data is unavailable")
     );
+    assert_eq!(
+        receipt["agent_roster"]["counts"]["missing_assignees"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        receipt["agent_roster"]["missing_assignees"][0].as_str(),
+        Some("UnknownAgent")
+    );
 }
 
 #[test]
@@ -228,6 +256,7 @@ fn receipt_has_required_top_level_shape() {
         "repo_path",
         "thresholds",
         "subsystems",
+        "agent_roster",
         "tracker_state",
         "classifications",
         "summary",
