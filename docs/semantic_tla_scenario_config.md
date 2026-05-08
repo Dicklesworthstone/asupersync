@@ -241,7 +241,7 @@ scripts/run_model_check.sh --ci
 cat formal/tla/output/result.json
 
 # Run scenario validation tests (no TLC required)
-cargo test --test semantic_tla_scenarios -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_tla_docs cargo test --test semantic_tla_scenarios -- --nocapture
 scripts/run_tla_scenarios.sh --json
 ```
 

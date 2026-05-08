@@ -121,9 +121,9 @@ scripts/build_semantic_evidence_bundle.sh \
 scripts/generate_verification_summary.sh --json --ci
 
 # Cargo-heavy validation (must be offloaded)
-rch exec -- cargo test --test semantic_verification_summary
-rch exec -- cargo test --test semantic_gate_evaluation
-rch exec -- cargo test --test semantic_log_schema_validation
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_harmonization_docs cargo test --test semantic_verification_summary
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_harmonization_docs cargo test --test semantic_gate_evaluation
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_harmonization_docs cargo test --test semantic_log_schema_validation
 ```
 
 Logging expectations:

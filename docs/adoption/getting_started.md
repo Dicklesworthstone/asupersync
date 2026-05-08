@@ -184,8 +184,8 @@ Required review artifact content:
 For deterministic evidence commands, run heavy checks via `rch`:
 
 ```bash
-rch exec -- cargo check --all-targets
-rch exec -- cargo clippy --all-targets -- -D warnings
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_adoption_getting_started_docs cargo check --all-targets
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_adoption_getting_started_docs cargo clippy --all-targets -- -D warnings
 ```
 
 Detailed routing and review rules are documented in

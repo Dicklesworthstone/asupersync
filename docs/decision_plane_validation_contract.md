@@ -191,7 +191,7 @@ bash ./scripts/run_decision_plane_validation_smoke.sh --scenario AA023-SMOKE-CON
 Focused invariant test command (routed through `rch`):
 
 ```bash
-rch exec -- env CARGO_INCREMENTAL=0 cargo test --test decision_plane_validation_contract -- --nocapture
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_decision_plane_docs cargo test --test decision_plane_validation_contract -- --nocapture
 ```
 
 ## Cross-References
