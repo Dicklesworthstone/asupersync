@@ -18,7 +18,7 @@ fn run_selector(fixture: &str) -> Output {
     Command::new("python3")
         .arg(repo_root().join(SCRIPT_PATH))
         .arg("--input")
-        .arg(repo_root().join(FIXTURE_ROOT).join(fixture))
+        .arg(PathBuf::from(FIXTURE_ROOT).join(fixture))
         .arg("--generated-at")
         .arg(GENERATED_AT)
         .arg("--output")
@@ -38,6 +38,11 @@ fn selector_json(fixture: &str) -> Value {
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("selector output must be JSON")
+}
+
+fn fixture_text(fixture: &str) -> String {
+    std::fs::read_to_string(repo_root().join(FIXTURE_ROOT).join(fixture))
+        .unwrap_or_else(|error| panic!("read golden fixture {fixture}: {error}"))
 }
 
 fn lane_ids(receipt: &Value, key: &str) -> Vec<String> {
@@ -82,6 +87,27 @@ fn runtime_source_selects_lib_tests_with_broad_supplemental_frontiers() {
     assert_eq!(
         receipt["supplemental_lanes"][0]["broad_frontier"].as_bool(),
         Some(true)
+    );
+}
+
+#[test]
+fn runtime_source_output_matches_full_reviewed_golden() {
+    let output = run_selector("src_change.json");
+    assert!(
+        output.status.success(),
+        "selector helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let expected = fixture_text("src_change_expected.json");
+    serde_json::from_slice::<Value>(&output.stdout).expect("actual selector output must be JSON");
+    serde_json::from_str::<Value>(&expected).expect("golden selector output must be JSON");
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("selector stdout is utf-8"),
+        expected,
+        "src_change selector receipt drifted from the reviewed golden"
     );
 }
 
