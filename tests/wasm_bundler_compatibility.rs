@@ -661,13 +661,19 @@ fn matrix_documents_ci_certification_artifacts_and_repro_command() {
     for expected in [
         "artifacts/wasm_bundler_compatibility_summary.json",
         "artifacts/wasm_bundler_compatibility_test.log",
-        "rch exec -- cargo test -p asupersync --test wasm_bundler_compatibility -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_bundler_docs cargo test -p asupersync --test wasm_bundler_compatibility -- --nocapture",
     ] {
         assert!(
             doc.contains(expected),
             "Matrix must document CI certification evidence token: {expected}"
         );
     }
+    assert!(
+        !doc.contains(
+            "rch exec -- cargo test -p asupersync --test wasm_bundler_compatibility -- --nocapture"
+        ),
+        "Matrix must route the CI certification repro command through rch env CARGO_TARGET_DIR"
+    );
 }
 
 #[test]
