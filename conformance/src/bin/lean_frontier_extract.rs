@@ -66,7 +66,7 @@ fn print_usage() {
     println!(
         "\
 Usage:
-  cargo run -p asupersync-conformance --bin lean_frontier_extract -- \\
+  rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_remaining_docs cargo run -p asupersync-conformance --bin lean_frontier_extract -- \\
     --log <lake-build.log> \\
     --out <frontier-report.json> \\
     [--gap-plan <formal/lean/coverage/gap_risk_sequencing_plan.json>] \\

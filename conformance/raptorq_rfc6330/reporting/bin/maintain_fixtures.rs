@@ -198,10 +198,10 @@ fn default_reference_catalog() -> BTreeMap<String, ReferencePlan> {
     let golden_dir = root.join("tests/conformance/raptorq_rfc6330/golden/fixtures");
     let mut golden = ReferenceVersion::new("golden".to_string(), golden_dir);
     golden.generation_command =
-        "cargo run --manifest-path ../Cargo.toml --bin generate_goldens -- --output . --golden ."
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_remaining_docs cargo run --manifest-path ../Cargo.toml --bin generate_goldens -- --output . --golden ."
             .to_string();
     golden.validation_command = Some(
-        "cargo run --manifest-path ../Cargo.toml --bin validate_round_trips -- --golden . --validate-format"
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_remaining_docs cargo run --manifest-path ../Cargo.toml --bin validate_round_trips -- --golden . --validate-format"
             .to_string(),
     );
     references.insert(

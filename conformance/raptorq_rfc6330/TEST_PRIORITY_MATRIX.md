@@ -314,42 +314,42 @@ graph TD
 ### Phase 1: Infrastructure (Week 1)
 ```bash
 # Build conformance harness
-cargo run --bin raptorq_rfc6330_conformance -- --setup
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_remaining_docs cargo run --bin raptorq_rfc6330_conformance -- --setup
 
 # Validate harness with P0 tests  
-cargo test --test rfc6330_p0_conformance
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_remaining_docs cargo test --test rfc6330_p0_conformance
 ```
 
 ### Phase 2: Core Algorithm Validation (Week 2-3)
 ```bash
 # P0 critical tests
-cargo test --test rfc6330_tuple_generation
-cargo test --test rfc6330_lookup_tables  
-cargo test --test rfc6330_systematic_index
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_remaining_docs cargo test --test rfc6330_tuple_generation
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_remaining_docs cargo test --test rfc6330_lookup_tables
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_remaining_docs cargo test --test rfc6330_systematic_index
 
 # P1 parameter validation
-cargo test --test rfc6330_parameter_derivation
-cargo test --test rfc6330_matrix_structure
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_remaining_docs cargo test --test rfc6330_parameter_derivation
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_remaining_docs cargo test --test rfc6330_matrix_structure
 ```
 
 ### Phase 3: Algorithm and Symbol Testing (Week 4-5)
 ```bash
 # P2 algorithm tests
-cargo test --test rfc6330_gaussian_elimination
-cargo test --test rfc6330_symbol_generation
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_remaining_docs cargo test --test rfc6330_gaussian_elimination
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_remaining_docs cargo test --test rfc6330_symbol_generation
 
 # Coverage validation
-cargo run --bin generate_conformance_report
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_remaining_docs cargo run --bin generate_conformance_report
 ```
 
 ### Phase 4: Edge Cases and Integration (Week 6+)
 ```bash
 # P3 comprehensive testing
-cargo test --test rfc6330_edge_cases
-cargo test --test rfc6330_stress_scenarios
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_remaining_docs cargo test --test rfc6330_edge_cases
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_remaining_docs cargo test --test rfc6330_stress_scenarios
 
 # Full conformance validation
-cargo run --bin raptorq_rfc6330_conformance -- --comprehensive
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_remaining_docs cargo run --bin raptorq_rfc6330_conformance -- --comprehensive
 ```
 
 ## Success Metrics
