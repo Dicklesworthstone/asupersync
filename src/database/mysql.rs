@@ -1128,8 +1128,57 @@ fn validate_auth_nonce(plugin_name: &str, nonce: &[u8]) -> Result<(), MySqlError
     Ok(())
 }
 
+/// br-asupersync-h75445: Volatile-zeroize byte buffer for password-derived
+/// secrets that must not survive on the heap past the auth call.
+///
+/// Wraps either `[u8; N]` or `Vec<u8>` and overwrites every byte with 0
+/// via `ptr::write_volatile` plus a `SeqCst` `compiler_fence` on Drop —
+/// the same manual pattern used by `crate::security::key::AuthKey`. We
+/// inline it here rather than reaching for the `zeroize` crate so the
+/// MySQL auth surface stays a leaf, with no new transitive deps.
+struct ZeroizingBytes<T: AsMut<[u8]>>(T);
+
+impl<T: AsMut<[u8]>> ZeroizingBytes<T> {
+    #[inline]
+    fn new(inner: T) -> Self {
+        Self(inner)
+    }
+    #[inline]
+    fn as_slice(&self) -> &[u8]
+    where
+        T: AsRef<[u8]>,
+    {
+        self.0.as_ref()
+    }
+}
+
+impl<T: AsMut<[u8]>> Drop for ZeroizingBytes<T> {
+    #[allow(unsafe_code)] // see SAFETY note below.
+    fn drop(&mut self) {
+        // SAFETY: `self.0.as_mut()` is owned, fully initialised storage; volatile
+        // byte writes through it are well-defined. The `compiler_fence` bars the
+        // optimiser from sinking later operations above the zeroizing writes,
+        // matching the pattern in `src/security/key.rs::AuthKey`.
+        let slice: &mut [u8] = self.0.as_mut();
+        for byte in slice.iter_mut() {
+            unsafe {
+                core::ptr::write_volatile(byte, 0);
+            }
+        }
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// mysql_native_password authentication.
 /// scramble = SHA1(password) XOR SHA1(nonce + SHA1(SHA1(password)))
+///
+/// br-asupersync-h75445: `double_hash = SHA1(SHA1(password))` is the
+/// exact value `mysql.user.authentication_string` stores for
+/// mysql_native_password accounts — i.e. password-equivalent for the
+/// wire protocol. All SHA intermediates are wrapped in
+/// [`ZeroizingBytes`] so they are volatile-zeroed when this function
+/// returns; only the XOR'd scramble (which is what we send on the
+/// wire and is meaningless without the matching nonce) is returned.
 fn mysql_native_auth(password: &str, nonce: &[u8]) -> Result<Vec<u8>, MySqlError> {
     validate_auth_nonce("mysql_native_password", nonce)?;
 
@@ -1137,23 +1186,30 @@ fn mysql_native_auth(password: &str, nonce: &[u8]) -> Result<Vec<u8>, MySqlError
         return Ok(Vec::new());
     }
 
-    let password_hash = sha1(password.as_bytes());
-    let double_hash = sha1(&password_hash);
+    let password_hash = ZeroizingBytes::new(sha1(password.as_bytes()));
+    let double_hash = ZeroizingBytes::new(sha1(password_hash.as_slice()));
 
-    let mut combined = Vec::with_capacity(nonce.len() + 20);
-    combined.extend_from_slice(nonce);
-    combined.extend_from_slice(&double_hash);
-    let scramble_hash = sha1(&combined);
+    let mut combined_bytes = Vec::with_capacity(nonce.len() + 20);
+    combined_bytes.extend_from_slice(nonce);
+    combined_bytes.extend_from_slice(double_hash.as_slice());
+    let combined = ZeroizingBytes::new(combined_bytes);
+    let scramble_hash = ZeroizingBytes::new(sha1(combined.as_slice()));
 
     Ok(password_hash
+        .as_slice()
         .iter()
-        .zip(scramble_hash.iter())
+        .zip(scramble_hash.as_slice().iter())
         .map(|(a, b)| a ^ b)
         .collect())
 }
 
 /// caching_sha2_password authentication (fast auth).
 /// scramble = SHA256(password) XOR SHA256(SHA256(SHA256(password)) + nonce)
+///
+/// br-asupersync-h75445: `double_hash = SHA256(SHA256(password))` is
+/// password-derived secret material that must not survive on the heap
+/// past this call. All SHA intermediates are volatile-zeroed via
+/// [`ZeroizingBytes`].
 fn caching_sha2_auth(password: &str, nonce: &[u8]) -> Result<Vec<u8>, MySqlError> {
     validate_auth_nonce("caching_sha2_password", nonce)?;
 
@@ -1161,17 +1217,19 @@ fn caching_sha2_auth(password: &str, nonce: &[u8]) -> Result<Vec<u8>, MySqlError
         return Ok(Vec::new());
     }
 
-    let password_hash = sha256(password.as_bytes());
-    let double_hash = sha256(&password_hash);
+    let password_hash = ZeroizingBytes::new(sha256(password.as_bytes()));
+    let double_hash = ZeroizingBytes::new(sha256(password_hash.as_slice()));
 
-    let mut combined = Vec::with_capacity(32 + nonce.len());
-    combined.extend_from_slice(&double_hash);
-    combined.extend_from_slice(nonce);
-    let scramble_hash = sha256(&combined);
+    let mut combined_bytes = Vec::with_capacity(32 + nonce.len());
+    combined_bytes.extend_from_slice(double_hash.as_slice());
+    combined_bytes.extend_from_slice(nonce);
+    let combined = ZeroizingBytes::new(combined_bytes);
+    let scramble_hash = ZeroizingBytes::new(sha256(combined.as_slice()));
 
     Ok(password_hash
+        .as_slice()
         .iter()
-        .zip(scramble_hash.iter())
+        .zip(scramble_hash.as_slice().iter())
         .map(|(a, b)| a ^ b)
         .collect())
 }
