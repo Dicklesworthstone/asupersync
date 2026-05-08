@@ -45,6 +45,25 @@ fn registry_json(fixture: &str) -> Value {
     serde_json::from_slice(&output.stdout).expect("registry output must be JSON")
 }
 
+fn assert_registry_output_matches_golden(input_fixture: &str, expected_fixture: &str) {
+    let output = run_registry(input_fixture);
+    assert!(
+        output.status.success(),
+        "registry helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = String::from_utf8(output.stdout).expect("registry stdout is UTF-8");
+    let expected = fixture_text(expected_fixture);
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual registry output is JSON");
+    let expected_json: Value =
+        serde_json::from_str(&expected).expect("expected registry output is JSON");
+    assert_eq!(actual_json, expected_json, "registry golden JSON drifted");
+    assert_eq!(actual, expected, "registry golden text drifted");
+}
+
 fn coverage_record<'a>(receipt: &'a Value, id: &str) -> &'a Value {
     receipt["coverage"]
         .as_array()
@@ -71,22 +90,10 @@ fn script_exists_and_help_is_non_mutating() {
 
 #[test]
 fn covered_registry_matches_full_output_golden() {
-    let output = run_registry("covered_registry.json");
-    assert!(
-        output.status.success(),
-        "registry helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+    assert_registry_output_matches_golden(
+        "covered_registry.json",
+        "covered_registry_expected.json",
     );
-
-    let actual = String::from_utf8(output.stdout).expect("registry stdout is UTF-8");
-    let expected = fixture_text("covered_registry_expected.json");
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual registry output is JSON");
-    let expected_json: Value =
-        serde_json::from_str(&expected).expect("expected registry output is JSON");
-    assert_eq!(actual_json, expected_json, "registry golden JSON drifted");
-    assert_eq!(actual, expected, "registry golden text drifted");
 }
 
 #[test]
@@ -128,22 +135,10 @@ fn missing_high_risk_parser_surface_fails_with_action_item() {
 
 #[test]
 fn missing_high_risk_matches_full_output_golden() {
-    let output = run_registry("missing_high_risk.json");
-    assert!(
-        output.status.success(),
-        "registry helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+    assert_registry_output_matches_golden(
+        "missing_high_risk.json",
+        "missing_high_risk_expected.json",
     );
-
-    let actual = String::from_utf8(output.stdout).expect("registry stdout is UTF-8");
-    let expected = fixture_text("missing_high_risk_expected.json");
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual registry output is JSON");
-    let expected_json: Value =
-        serde_json::from_str(&expected).expect("expected registry output is JSON");
-    assert_eq!(actual_json, expected_json, "registry golden JSON drifted");
-    assert_eq!(actual, expected, "registry golden text drifted");
 }
 
 #[test]
@@ -168,22 +163,10 @@ fn exemptions_need_reason_and_future_expiry() {
 
 #[test]
 fn exempt_and_expired_matches_full_output_golden() {
-    let output = run_registry("exempt_and_expired.json");
-    assert!(
-        output.status.success(),
-        "registry helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+    assert_registry_output_matches_golden(
+        "exempt_and_expired.json",
+        "exempt_and_expired_expected.json",
     );
-
-    let actual = String::from_utf8(output.stdout).expect("registry stdout is UTF-8");
-    let expected = fixture_text("exempt_and_expired_expected.json");
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual registry output is JSON");
-    let expected_json: Value =
-        serde_json::from_str(&expected).expect("expected registry output is JSON");
-    assert_eq!(actual_json, expected_json, "registry golden JSON drifted");
-    assert_eq!(actual, expected, "registry golden text drifted");
 }
 
 #[test]
@@ -208,22 +191,10 @@ fn partial_references_and_stale_targets_do_not_count_as_coverage() {
 
 #[test]
 fn partial_and_stale_targets_match_full_output_golden() {
-    let output = run_registry("partial_and_stale_target.json");
-    assert!(
-        output.status.success(),
-        "registry helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+    assert_registry_output_matches_golden(
+        "partial_and_stale_target.json",
+        "partial_and_stale_target_expected.json",
     );
-
-    let actual = String::from_utf8(output.stdout).expect("registry stdout is UTF-8");
-    let expected = fixture_text("partial_and_stale_target_expected.json");
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual registry output is JSON");
-    let expected_json: Value =
-        serde_json::from_str(&expected).expect("expected registry output is JSON");
-    assert_eq!(actual_json, expected_json, "registry golden JSON drifted");
-    assert_eq!(actual, expected, "registry golden text drifted");
 }
 
 #[test]
@@ -241,22 +212,10 @@ fn duplicate_target_ids_are_coalesced_deterministically() {
 
 #[test]
 fn duplicate_targets_matches_full_output_golden() {
-    let output = run_registry("duplicate_targets.json");
-    assert!(
-        output.status.success(),
-        "registry helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+    assert_registry_output_matches_golden(
+        "duplicate_targets.json",
+        "duplicate_targets_expected.json",
     );
-
-    let actual = String::from_utf8(output.stdout).expect("registry stdout is UTF-8");
-    let expected = fixture_text("duplicate_targets_expected.json");
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual registry output is JSON");
-    let expected_json: Value =
-        serde_json::from_str(&expected).expect("expected registry output is JSON");
-    assert_eq!(actual_json, expected_json, "registry golden JSON drifted");
-    assert_eq!(actual, expected, "registry golden text drifted");
 }
 
 #[test]
