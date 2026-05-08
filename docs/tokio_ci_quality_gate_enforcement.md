@@ -113,12 +113,12 @@ Heavy validation commands MUST be offloaded via `rch exec --`.
 
 Required command tokens:
 
-- `rch exec -- cargo check --all-targets`
-- `rch exec -- cargo clippy --all-targets -- -D warnings`
-- `rch exec -- cargo fmt --check`
-- `rch exec -- cargo test --test tokio_executable_conformance_contracts -- --nocapture`
-- `rch exec -- cargo test --test tokio_cancellation_drain_fuzz_race_campaigns -- --nocapture`
-- `rch exec -- cargo test --test tokio_ci_quality_gate_enforcement -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_ci_quality_gate_docs cargo check --all-targets`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_ci_quality_gate_docs cargo clippy --all-targets -- -D warnings`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_ci_quality_gate_docs cargo fmt --check`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_ci_quality_gate_docs cargo test --test tokio_executable_conformance_contracts -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_ci_quality_gate_docs cargo test --test tokio_cancellation_drain_fuzz_race_campaigns -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_ci_quality_gate_docs cargo test --test tokio_ci_quality_gate_enforcement -- --nocapture`
 
 ---
 
@@ -215,7 +215,7 @@ Alarm routing is deterministic: identical perf manifests must produce identical 
 
 Performance-budget checks MUST run via `rch exec --`:
 
-- `rch exec -- cargo bench --bench scheduler_benchmark`
-- `rch exec -- cargo bench --bench reactor_benchmark`
-- `rch exec -- cargo bench --bench protocol_benchmark`
-- `rch exec -- cargo test --test perf_regression_gates -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_ci_quality_gate_docs cargo bench --bench scheduler_benchmark`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_ci_quality_gate_docs cargo bench --bench reactor_benchmark`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_ci_quality_gate_docs cargo bench --bench protocol_benchmark`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_ci_quality_gate_docs cargo test --test perf_regression_gates -- --nocapture`
