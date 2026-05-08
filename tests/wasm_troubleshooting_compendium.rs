@@ -64,21 +64,36 @@ fn troubleshooting_doc_includes_deterministic_command_paths() {
         "python3 scripts/check_wasm_dependency_policy.py",
         "--policy .github/wasm_dependency_policy.json",
         "PATH=/usr/bin:$PATH bash scripts/validate_vite_vanilla_consumer.sh",
-        "rch exec -- cargo test --test e2e_log_quality_schema -- --nocapture",
-        "rch exec -- cargo test --test wasm_js_exports_coverage_contract browser_src_index_exposes_storage_and_artifact_diagnostics -- --nocapture",
-        "rch exec -- cargo test --test wasm_browser_feasibility_matrix dedicated_worker_storage_ -- --nocapture",
-        "rch exec -- cargo test --test wasm_bundler_compatibility -- --nocapture",
-        "rch exec -- cargo test --lib worker_channel::tests::coordinator_ -- --nocapture",
         "PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh",
         "python3 scripts/check_wasm_flake_governance.py --policy .github/wasm_flake_governance_policy.json",
-        "rch exec -- cargo test --test obligation_wasm_parity wasm_full_browser_lifecycle_simulation -- --nocapture",
     ];
 
     let mut missing = Vec::new();
     for token in required_tokens {
         if !doc.contains(token) {
-            missing.push(token);
+            missing.push(token.to_string());
         }
+    }
+
+    let target_prefix = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_troubleshooting_docs cargo ";
+    for command in [
+        "test --test e2e_log_quality_schema -- --nocapture",
+        "test --test wasm_js_exports_coverage_contract browser_src_index_exposes_storage_and_artifact_diagnostics -- --nocapture",
+        "test --test wasm_browser_feasibility_matrix dedicated_worker_storage_ -- --nocapture",
+        "test --test wasm_bundler_compatibility -- --nocapture",
+        "test --lib worker_channel::tests::coordinator_ -- --nocapture",
+        "test --test obligation_wasm_parity wasm_full_browser_lifecycle_simulation -- --nocapture",
+    ] {
+        let target = format!("{target_prefix}{command}");
+        if !doc.contains(&target) {
+            missing.push(target);
+        }
+
+        let stale = format!("{}cargo {command}", "rch exec -- ");
+        assert!(
+            !doc.contains(&stale),
+            "Troubleshooting compendium must not document bare rch cargo routing: {stale}"
+        );
     }
 
     assert!(
