@@ -28,7 +28,7 @@
 //! # Running This Example
 //!
 //! ```bash
-//! rch exec -- cargo run --example cancellation_injection
+//! rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_example_docs cargo run --example cancellation_injection
 //! ```
 
 use asupersync::lab::injection::{LabInjectionConfig, LabInjectionRunner, lab};

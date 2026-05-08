@@ -6,7 +6,7 @@
 //! # Running
 //!
 //! ```bash
-//! rch exec -- cargo run --example prometheus_metrics --features metrics
+//! rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_example_docs cargo run --example prometheus_metrics --features metrics
 //! ```
 //!
 //! # Production Setup with Prometheus
@@ -25,7 +25,9 @@
 #[cfg(not(feature = "metrics"))]
 fn main() {
     println!("This example requires the 'metrics' feature.");
-    println!("Run with: rch exec -- cargo run --example prometheus_metrics --features metrics");
+    println!(
+        "Run with: rch exec -- env CARGO_TARGET_DIR=${{TMPDIR:-/tmp}}/rch_target_asupersync_example_docs cargo run --example prometheus_metrics --features metrics"
+    );
 }
 
 #[cfg(feature = "metrics")]

@@ -6,10 +6,10 @@
 //!
 //! Usage:
 //! ```bash
-//! rch exec -- cargo run --bin quic_conformance_report                    # Console status
-//! rch exec -- cargo run --bin quic_conformance_report -- --format=json  # JSON status
-//! rch exec -- cargo run --bin quic_conformance_report -- --format=md    # Markdown status
-//! rch exec -- cargo run --bin quic_conformance_report -- --ci           # CI status
+//! rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_cli_docs cargo run --bin quic_conformance_report                    # Console status
+//! rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_cli_docs cargo run --bin quic_conformance_report -- --format=json  # JSON status
+//! rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_cli_docs cargo run --bin quic_conformance_report -- --format=md    # Markdown status
+//! rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_cli_docs cargo run --bin quic_conformance_report -- --ci           # CI status
 //! ```
 
 use std::env;

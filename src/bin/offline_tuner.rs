@@ -8,16 +8,16 @@
 //!
 //! ```bash
 //! # Run optimization for current host architecture
-//! rch exec -- cargo run --bin offline_tuner -- optimize --auto-detect
+//! rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_cli_docs cargo run --bin offline_tuner -- optimize --auto-detect
 //!
 //! # Run optimization for specific architecture
-//! rch exec -- cargo run --bin offline_tuner -- optimize --arch x86-avx2
+//! rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_cli_docs cargo run --bin offline_tuner -- optimize --arch x86-avx2
 //!
 //! # Generate candidate list without benchmarking
-//! rch exec -- cargo run --bin offline_tuner -- candidates --arch aarch64-neon
+//! rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_cli_docs cargo run --bin offline_tuner -- candidates --arch aarch64-neon
 //!
 //! # Emit profile pack from previous tuning results
-//! rch exec -- cargo run --bin offline_tuner -- emit-profile --results-file tuning_results.json
+//! rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_cli_docs cargo run --bin offline_tuner -- emit-profile --results-file tuning_results.json
 //! ```
 
 use std::fs;

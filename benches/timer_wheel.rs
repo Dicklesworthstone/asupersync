@@ -22,7 +22,7 @@
 //!
 //! ## Benchmark Results (10K timers)
 //!
-//! Run: `rch exec -- cargo bench --bench timer_wheel -- comparison/`
+//! Run: `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_bench_docs cargo bench --bench timer_wheel -- comparison/`
 //!
 //! ### Insert (10K elements)
 //! | Structure    | Time      | Throughput     | vs. Wheel |

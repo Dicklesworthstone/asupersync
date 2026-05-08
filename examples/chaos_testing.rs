@@ -27,7 +27,7 @@
 //! # Running This Example
 //!
 //! ```bash
-//! rch exec -- cargo run --example chaos_testing
+//! rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_example_docs cargo run --example chaos_testing
 //! ```
 
 use asupersync::lab::chaos::ChaosConfig;

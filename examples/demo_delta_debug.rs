@@ -12,7 +12,7 @@
 //! sub-linear replay counts for hierarchical scenarios.
 //!
 //! Usage:
-//!   rch exec -- cargo run --example demo_delta_debug --features test-internals
+//!   rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_example_docs cargo run --example demo_delta_debug --features test-internals
 //!
 //! Environment variables:
 //!   DEMO_SEED_START   - First seed to try (default: 0)

@@ -16,10 +16,10 @@
 //! - The minimizer algorithm is deterministic.
 //!
 //! Usage:
-//!   rch exec -- cargo run --example demo_benchmark --features test-internals
+//!   rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_example_docs cargo run --example demo_benchmark --features test-internals
 //!
 //! Update golden checksums:
-//!   rch exec -- env GOLDEN_UPDATE=1 cargo run --example demo_benchmark --features test-internals
+//!   rch exec -- env GOLDEN_UPDATE=1 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_example_docs cargo run --example demo_benchmark --features test-internals
 //!
 //! Environment variables:
 //!   GOLDEN_UPDATE  - Set to "1" to regenerate golden checksums.
