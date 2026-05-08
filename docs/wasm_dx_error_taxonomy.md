@@ -271,13 +271,13 @@ In React Strict Mode (development), double-invocation produces:
 
 ```bash
 # Run error taxonomy validation
-cargo test --test wasm_dx_error_taxonomy -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_dx_docs cargo test --test wasm_dx_error_taxonomy -- --nocapture
 
 # Run existing contract tests (outcome/error mapping)
-cargo test --test wasm_abi_contract -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_dx_docs cargo test --test wasm_abi_contract -- --nocapture
 
 # Run compatibility harness (error lifecycle)
-cargo test --test wasm_abi_compatibility_harness -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_dx_docs cargo test --test wasm_abi_compatibility_harness -- --nocapture
 ```
 
 ---

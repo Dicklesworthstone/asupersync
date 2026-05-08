@@ -311,8 +311,8 @@ raw Rust crates:
 6. Re-run the package-facing verification pair after an upgrade:
 
 ```bash
-rch exec -- cargo test --test wasm_packaged_abi_compatibility_matrix -- --nocapture
-rch exec -- cargo test --test wasm_js_exports_coverage_contract -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_abi_policy_docs cargo test --test wasm_packaged_abi_compatibility_matrix -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_abi_policy_docs cargo test --test wasm_js_exports_coverage_contract -- --nocapture
 ```
 
 7. Keep higher-level package versions aligned with the `browser-core` metadata
@@ -345,13 +345,13 @@ rch exec -- cargo test --test wasm_js_exports_coverage_contract -- --nocapture
 
 ```bash
 # Run compatibility harness
-cargo test --test wasm_abi_compatibility_harness -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_abi_compat_docs cargo test --test wasm_abi_compatibility_harness -- --nocapture
 
 # Run packaged ABI matrix contract
-cargo test --test wasm_packaged_abi_compatibility_matrix -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_abi_compat_docs cargo test --test wasm_packaged_abi_compatibility_matrix -- --nocapture
 
 # Run existing contract tests
-cargo test --test wasm_abi_contract -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_abi_compat_docs cargo test --test wasm_abi_contract -- --nocapture
 
 # Run CI policy gate
 python3 scripts/check_wasm_abi_policy.py --policy .github/wasm_abi_policy.json
