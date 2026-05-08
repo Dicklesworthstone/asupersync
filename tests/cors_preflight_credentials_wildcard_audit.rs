@@ -156,7 +156,7 @@ fn cors_preflight_untrusted_origin_with_exact_policy_blocked() {
 
     // Should pass through to inner handler (not preflight response)
     assert_eq!(response.status, StatusCode::OK);
-    assert_eq!(response.body, b"test response");
+    assert_eq!(response.body.as_ref(), b"test response");
 
     // No CORS headers should be set for untrusted origin
     assert!(!response.headers.contains_key("access-control-allow-origin"));

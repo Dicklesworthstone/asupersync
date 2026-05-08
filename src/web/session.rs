@@ -1431,8 +1431,8 @@ mod tests {
         // Property 1: response carries a NEW session-id cookie that is
         // NOT the attacker-planted one.
         let cookie = resp
-            .headers
-            .get("set-cookie")
+            .set_cookies
+            .first()
             .expect("middleware must issue Set-Cookie after regenerate");
         assert!(
             !cookie.contains(attacker_planted_id),
