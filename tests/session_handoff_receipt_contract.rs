@@ -225,6 +225,28 @@ fn stale_in_progress_candidate_is_listed_without_mutation() {
 }
 
 #[test]
+fn stale_in_progress_output_matches_full_reviewed_golden() {
+    let output = run_receipt("stale_in_progress.json");
+    assert!(
+        output.status.success(),
+        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = String::from_utf8(output.stdout).expect("receipt stdout is utf-8");
+    let expected = fixture_text("stale_in_progress_expected.json");
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
+    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
+    assert_eq!(actual_json, expected_json);
+    assert_eq!(
+        actual, expected,
+        "stale-in-progress handoff receipt drifted from the reviewed golden"
+    );
+}
+
+#[test]
 fn receipt_has_required_top_level_shape() {
     let receipt = receipt_json("clean_tree.json");
     for field in [
