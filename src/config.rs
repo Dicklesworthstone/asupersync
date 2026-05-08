@@ -1253,6 +1253,260 @@ default_timeout_ms = 5000
         assert_eq!(config.timeouts.default_timeout, Duration::from_secs(5));
     }
 
+    fn runtime_config_toml_fixture() -> &'static str {
+        r#"
+[encoding]
+repair_overhead = 1.25
+max_block_size = 4096
+symbol_size = 512
+encoding_parallelism = 3
+decoding_parallelism = 5
+
+[transport]
+max_paths = 3
+health_check_interval_ms = 2500
+dead_path_backoff_initial_ms = 125
+dead_path_backoff_max_ms = 5000
+dead_path_backoff_multiplier = 1.75
+max_symbols_in_flight = 64
+path_strategy = "latency_weighted"
+experiment_gate = "multipath_preview"
+coding_policy = "raptorq_fec_preview"
+
+[resources]
+max_symbol_buffer_memory = 2097152
+max_encoding_ops = 6
+max_decoding_ops = 7
+symbol_pool_size = 128
+
+[timeouts]
+default_timeout_ms = 5000
+encoding_timeout_ms = 6000
+decoding_timeout_ms = 7000
+path_timeout_ms = 8000
+quorum_timeout_ms = 9000
+
+[observability]
+log_level = "warn"
+trace_all_symbols = false
+sample_rate = 0.25
+max_spans = 33
+max_log_entries = 44
+include_timestamps = false
+metrics_enabled = true
+
+[security]
+auth_mode = "permissive"
+auth_key_seed = 12345
+reject_unauthenticated = false
+"#
+    }
+
+    fn duration_ms(duration: Duration) -> u64 {
+        u64::try_from(duration.as_millis()).expect("test durations fit u64")
+    }
+
+    fn path_strategy_toml_value(strategy: &PathSelectionStrategy) -> &'static str {
+        match strategy {
+            PathSelectionStrategy::RoundRobin => "round_robin",
+            PathSelectionStrategy::LatencyWeighted => "latency_weighted",
+            PathSelectionStrategy::Adaptive(_) => "adaptive",
+            PathSelectionStrategy::Random => "random",
+        }
+    }
+
+    fn experiment_gate_toml_value(gate: ExperimentalTransportGate) -> &'static str {
+        match gate {
+            ExperimentalTransportGate::Disabled => "disabled",
+            ExperimentalTransportGate::MultipathPreview => "multipath_preview",
+        }
+    }
+
+    fn coding_policy_toml_value(policy: TransportCodingPolicy) -> &'static str {
+        match policy {
+            TransportCodingPolicy::Disabled => "disabled",
+            TransportCodingPolicy::RaptorQFecPreview => "raptorq_fec_preview",
+            TransportCodingPolicy::RlncPreview => "rlnc_preview",
+        }
+    }
+
+    fn auth_mode_toml_value(mode: AuthMode) -> &'static str {
+        match mode {
+            AuthMode::Strict => "strict",
+            AuthMode::Permissive => "permissive",
+            AuthMode::Disabled => "disabled",
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn render_runtime_config_toml_for_snapshot(config: &RaptorQConfig) -> String {
+        format!(
+            "[encoding]\n\
+             repair_overhead = {:.2}\n\
+             max_block_size = {}\n\
+             symbol_size = {}\n\
+             encoding_parallelism = {}\n\
+             decoding_parallelism = {}\n\
+             \n\
+             [transport]\n\
+             max_paths = {}\n\
+             health_check_interval_ms = {}\n\
+             dead_path_backoff_initial_ms = {}\n\
+             dead_path_backoff_max_ms = {}\n\
+             dead_path_backoff_multiplier = {:.2}\n\
+             max_symbols_in_flight = {}\n\
+             path_strategy = \"{}\"\n\
+             experiment_gate = \"{}\"\n\
+             coding_policy = \"{}\"\n\
+             \n\
+             [resources]\n\
+             max_symbol_buffer_memory = {}\n\
+             max_encoding_ops = {}\n\
+             max_decoding_ops = {}\n\
+             symbol_pool_size = {}\n\
+             \n\
+             [timeouts]\n\
+             default_timeout_ms = {}\n\
+             encoding_timeout_ms = {}\n\
+             decoding_timeout_ms = {}\n\
+             path_timeout_ms = {}\n\
+             quorum_timeout_ms = {}\n\
+             \n\
+             [observability]\n\
+             log_level = \"{}\"\n\
+             trace_all_symbols = {}\n\
+             sample_rate = {:.2}\n\
+             max_spans = {}\n\
+             max_log_entries = {}\n\
+             include_timestamps = {}\n\
+             metrics_enabled = {}\n\
+             \n\
+             [security]\n\
+             auth_mode = \"{}\"\n\
+             auth_key_seed = {}\n\
+             reject_unauthenticated = {}\n",
+            config.encoding.repair_overhead,
+            config.encoding.max_block_size,
+            config.encoding.symbol_size,
+            config.encoding.encoding_parallelism,
+            config.encoding.decoding_parallelism,
+            config.transport.max_paths,
+            duration_ms(config.transport.health_check_interval),
+            duration_ms(config.transport.dead_path_backoff.initial_delay),
+            duration_ms(config.transport.dead_path_backoff.max_delay),
+            config.transport.dead_path_backoff.multiplier,
+            config.transport.max_symbols_in_flight,
+            path_strategy_toml_value(&config.transport.path_strategy),
+            experiment_gate_toml_value(config.transport.experiment_gate),
+            coding_policy_toml_value(config.transport.coding_policy),
+            config.resources.max_symbol_buffer_memory,
+            config.resources.max_encoding_ops,
+            config.resources.max_decoding_ops,
+            config.resources.symbol_pool_size,
+            duration_ms(config.timeouts.default_timeout),
+            duration_ms(config.timeouts.encoding_timeout),
+            duration_ms(config.timeouts.decoding_timeout),
+            duration_ms(config.timeouts.path_timeout),
+            duration_ms(config.timeouts.quorum_timeout),
+            config.observability.log_level().as_str_lower(),
+            config.observability.trace_all_symbols(),
+            config.observability.sample_rate(),
+            config.observability.max_spans(),
+            config.observability.max_log_entries(),
+            config.observability.include_timestamps(),
+            config.observability.metrics_enabled(),
+            auth_mode_toml_value(config.security.auth_mode),
+            config
+                .security
+                .auth_key_seed
+                .expect("snapshot fixture sets auth key seed"),
+            config.security.reject_unauthenticated,
+        )
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn config_summary_for_snapshot(config: &RaptorQConfig) -> serde_json::Value {
+        let aggregator = config.transport.aggregator_config();
+        serde_json::json!({
+            "encoding": {
+                "repair_overhead": config.encoding.repair_overhead,
+                "max_block_size": config.encoding.max_block_size,
+                "symbol_size": config.encoding.symbol_size,
+                "encoding_parallelism": config.encoding.encoding_parallelism,
+                "decoding_parallelism": config.encoding.decoding_parallelism,
+            },
+            "transport": {
+                "max_paths": config.transport.max_paths,
+                "health_check_interval_ms": duration_ms(config.transport.health_check_interval),
+                "dead_path_backoff": {
+                    "initial_ms": duration_ms(config.transport.dead_path_backoff.initial_delay),
+                    "max_ms": duration_ms(config.transport.dead_path_backoff.max_delay),
+                    "multiplier": config.transport.dead_path_backoff.multiplier,
+                },
+                "max_symbols_in_flight": config.transport.max_symbols_in_flight,
+                "path_strategy": path_strategy_toml_value(&config.transport.path_strategy),
+                "experiment_gate": experiment_gate_toml_value(config.transport.experiment_gate),
+                "coding_policy": coding_policy_toml_value(config.transport.coding_policy),
+                "aggregator_effective_policy": {
+                    "path_policy": format!("{:?}", aggregator.path_policy),
+                    "experiment_gate": aggregator.experiment_gate.gate_id(),
+                    "coding_policy": aggregator.coding_policy.policy_id(),
+                },
+            },
+            "resources": {
+                "max_symbol_buffer_memory": config.resources.max_symbol_buffer_memory,
+                "max_encoding_ops": config.resources.max_encoding_ops,
+                "max_decoding_ops": config.resources.max_decoding_ops,
+                "symbol_pool_size": config.resources.symbol_pool_size,
+            },
+            "timeouts_ms": {
+                "default": duration_ms(config.timeouts.default_timeout),
+                "encoding": duration_ms(config.timeouts.encoding_timeout),
+                "decoding": duration_ms(config.timeouts.decoding_timeout),
+                "path": duration_ms(config.timeouts.path_timeout),
+                "quorum": duration_ms(config.timeouts.quorum_timeout),
+            },
+            "observability": {
+                "log_level": config.observability.log_level().as_str_lower(),
+                "trace_all_symbols": config.observability.trace_all_symbols(),
+                "sample_rate": config.observability.sample_rate(),
+                "max_spans": config.observability.max_spans(),
+                "max_log_entries": config.observability.max_log_entries(),
+                "include_timestamps": config.observability.include_timestamps(),
+                "metrics_enabled": config.observability.metrics_enabled(),
+            },
+            "security": {
+                "auth_mode": auth_mode_toml_value(config.security.auth_mode),
+                "auth_key_seed": config.security.auth_key_seed,
+                "reject_unauthenticated": config.security.reject_unauthenticated,
+            },
+        })
+    }
+
+    #[test]
+    fn runtime_config_toml_roundtrip_canonical_shape() {
+        let fixture = runtime_config_toml_fixture();
+        let parsed = parse_config(fixture, RuntimeProfile::Testing.to_config()).unwrap();
+        parsed.validate().unwrap();
+
+        let canonical_toml = render_runtime_config_toml_for_snapshot(&parsed);
+        let reparsed = parse_config(&canonical_toml, RuntimeProfile::Testing.to_config()).unwrap();
+        reparsed.validate().unwrap();
+
+        let parsed_summary = config_summary_for_snapshot(&parsed);
+        let reparsed_summary = config_summary_for_snapshot(&reparsed);
+        assert_eq!(parsed_summary, reparsed_summary);
+
+        insta::assert_json_snapshot!(
+            "runtime_config_toml_roundtrip_canonical_shape",
+            serde_json::json!({
+                "input_toml": fixture.trim(),
+                "canonical_toml": canonical_toml.trim_end(),
+                "config": parsed_summary,
+            })
+        );
+    }
+
     #[test]
     fn invalid_repair_overhead() {
         let mut config = RaptorQConfig::default();
