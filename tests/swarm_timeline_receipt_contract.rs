@@ -143,9 +143,10 @@ fn mixed_timeline_matches_exact_reviewed_golden() {
     let actual = receipt_text("mixed_claim_ship_block.json");
     let expected = fixture_text("mixed_claim_ship_block_expected.json");
 
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
+    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
+    assert_eq!(actual_json, expected_json, "mixed timeline JSON drifted");
     assert_eq!(actual, expected);
-    serde_json::from_str::<Value>(&actual).expect("actual receipt must be JSON");
-    serde_json::from_str::<Value>(&expected).expect("golden receipt must be JSON");
 }
 
 #[test]
