@@ -117,15 +117,25 @@ fn packet_doc_declares_automatic_fail_closed_rules() {
 fn packet_doc_contains_deterministic_repro_commands_and_rch_usage() {
     let doc = load_packet_doc();
     for command in [
-        "rch exec -- cargo test -p asupersync --test wasm_ga_go_no_go_evidence_packet -- --nocapture",
-        "rch exec -- cargo test -p asupersync --test wasm_release_rollback_incident_playbook -- --nocapture",
-        "rch exec -- cargo test -p asupersync --test wasm_supply_chain_controls -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_ga_go_no_go_docs cargo test -p asupersync --test wasm_ga_go_no_go_evidence_packet -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_ga_go_no_go_docs cargo test -p asupersync --test wasm_release_rollback_incident_playbook -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_ga_go_no_go_docs cargo test -p asupersync --test wasm_supply_chain_controls -- --nocapture",
         "python3 scripts/check_security_release_gate.py --policy .github/security_release_policy.json --check-deps --dep-policy .github/wasm_dependency_policy.json",
         "python3 scripts/run_browser_onboarding_checks.py --scenario all",
     ] {
         assert!(
             doc.contains(command),
             "doc missing deterministic reproduction command: {command}"
+        );
+    }
+    for stale in [
+        "rch exec -- cargo test -p asupersync --test wasm_ga_go_no_go_evidence_packet -- --nocapture",
+        "rch exec -- cargo test -p asupersync --test wasm_release_rollback_incident_playbook -- --nocapture",
+        "rch exec -- cargo test -p asupersync --test wasm_supply_chain_controls -- --nocapture",
+    ] {
+        assert!(
+            !doc.contains(stale),
+            "go/no-go packet must route cargo repro command through rch env CARGO_TARGET_DIR: {stale}"
         );
     }
 }
