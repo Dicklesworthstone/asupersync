@@ -298,6 +298,27 @@ fn empty_touched_files_do_not_select_a_proxy_lane() {
 }
 
 #[test]
+fn empty_touched_output_matches_full_reviewed_golden() {
+    let output = run_selector("empty_touched.json");
+    assert!(
+        output.status.success(),
+        "selector helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let expected = fixture_text("empty_touched_expected.json");
+    serde_json::from_slice::<Value>(&output.stdout).expect("actual selector output must be JSON");
+    serde_json::from_str::<Value>(&expected).expect("golden selector output must be JSON");
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("selector stdout is utf-8"),
+        expected,
+        "empty_touched selector receipt drifted from the reviewed golden"
+    );
+}
+
+#[test]
 fn helper_declares_it_does_not_run_or_mutate_anything() {
     let receipt = selector_json("src_change.json");
 
