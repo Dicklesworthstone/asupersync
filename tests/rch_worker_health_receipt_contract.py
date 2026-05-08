@@ -56,6 +56,18 @@ class RchWorkerHealthReceiptContract(unittest.TestCase):
         self.assertEqual(receipt["workers"][0]["status"], "healthy")
         self.assertIn("eligible", receipt["workers"][0]["remediation"][0])
 
+    def test_healthy_worker_output_matches_full_reviewed_golden(self) -> None:
+        output = run_receipt_output("healthy_worker.json")
+        expected = fixture_text("healthy_worker_expected.json")
+
+        self.assertEqual(
+            output.stdout,
+            expected,
+            "healthy rch worker health receipt drifted from the reviewed golden",
+        )
+        json.loads(output.stdout)
+        json.loads(expected)
+
     def test_retrieval_stall_warns_before_quarantine_threshold(self) -> None:
         receipt = run_receipt("single_retrieval_timeout.json")
 

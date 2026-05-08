@@ -1,0 +1,55 @@
+{
+  "current_date": "2026-05-08",
+  "fleet_status": "healthy",
+  "forbidden_actions": {
+    "runs_beads_mutation": false,
+    "runs_cargo": false,
+    "runs_destructive_command": false,
+    "runs_git_mutation": false,
+    "runs_rch": false,
+    "runs_ssh": false
+  },
+  "generated_at": "2026-05-08T05:40:00Z",
+  "non_mutating": true,
+  "observations_path": "tests/fixtures/rch_worker_health_receipt/healthy_worker.json",
+  "safety_notes": [
+    "receipt is fixture/capture based and does not probe live workers",
+    "quarantine is advisory; coordinate before changing live rch worker routing"
+  ],
+  "schema_version": "rch-worker-health-receipt-v1",
+  "source_counts": {
+    "jobs": 2,
+    "workers": 1
+  },
+  "status_counts": {
+    "healthy": 1,
+    "quarantine-candidate": 0,
+    "unavailable": 0,
+    "warn": 0
+  },
+  "workers": [
+    {
+      "reasons": [
+        "recent observations are inside budget"
+      ],
+      "remediation": [
+        "worker is eligible for normal rch proof lanes"
+      ],
+      "signals": {
+        "io_some_avg10": 0.2,
+        "job_count": 2,
+        "local_fallback": 0,
+        "memory_some_avg10": 0.1,
+        "reachable": true,
+        "remote_failure": 0,
+        "remote_success": 2,
+        "retrieval_timeout": 0,
+        "root_free_gb": 180.0,
+        "slow_retrieval": 0,
+        "tmp_free_gb": 64.0
+      },
+      "status": "healthy",
+      "worker": "worker-a"
+    }
+  ]
+}
