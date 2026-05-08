@@ -113,6 +113,78 @@ fn validation_commands(matrix: &Value) -> BTreeSet<String> {
     string_set(matrix, "validation_commands")
 }
 
+fn adapter_row_mut<'a>(matrix: &'a mut Value, adapter_id: &str) -> &'a mut Value {
+    matrix
+        .get_mut("adapters")
+        .and_then(Value::as_array_mut)
+        .expect("adapters must be an array")
+        .iter_mut()
+        .find(|row| row.get("adapter_id").and_then(Value::as_str) == Some(adapter_id))
+        .unwrap_or_else(|| panic!("missing adapter row {adapter_id}"))
+}
+
+fn validate_adapter_guard_row(
+    row: &Value,
+    allowed_status: &BTreeMap<String, bool>,
+) -> Result<(), String> {
+    let adapter_id = string(row, "adapter_id");
+    let proof_commands = array(row, "proof_commands");
+    if proof_commands.is_empty() {
+        return Err(format!("{adapter_id} must list at least one proof command"));
+    }
+    for command in proof_commands {
+        let command = command.as_str().expect("proof command string");
+        if !command.starts_with("rch exec -- ") {
+            return Err(format!(
+                "{adapter_id} proof command must be rch-routed: {command}"
+            ));
+        }
+        if !command.contains(" cargo test ") {
+            return Err(format!(
+                "{adapter_id} proof command must run a cargo test lane: {command}"
+            ));
+        }
+        if !command.contains("CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_adapter_matrix_") {
+            return Err(format!(
+                "{adapter_id} proof command must use an isolated adapter-matrix target dir: {command}"
+            ));
+        }
+    }
+
+    let status = string(row, "certification_status");
+    let allows_pass = *allowed_status
+        .get(status)
+        .unwrap_or_else(|| panic!("unknown status {status}"));
+    let verdicts = string_set(row, "runtime_allowed_verdicts");
+    let rendered_status = string(row, "rendered_status");
+
+    if allows_pass {
+        if !verdicts.contains("pass") {
+            return Err(format!("{adapter_id} pass-capable row must allow pass"));
+        }
+        if rendered_status != "PASS" {
+            return Err(format!("{adapter_id} pass-capable row must render PASS"));
+        }
+        return Ok(());
+    }
+
+    if !bool_field(row, "fail_closed_without_full_reference") {
+        return Err(format!(
+            "{adapter_id} non-pass row must fail closed without full reference"
+        ));
+    }
+    if verdicts.contains("pass") {
+        return Err(format!("{adapter_id} fail-closed row must not allow pass"));
+    }
+    if !matches!(rendered_status, "XFAIL" | "BLOCKED") {
+        return Err(format!(
+            "{adapter_id} fail-closed row must render XFAIL or BLOCKED, not {rendered_status}"
+        ));
+    }
+
+    Ok(())
+}
+
 #[test]
 fn matrix_declares_required_schema_sources_and_categories() {
     let matrix = matrix();
@@ -285,7 +357,11 @@ fn validation_commands_cover_the_matrix_contract_itself() {
 
     let cargo = commands
         .iter()
-        .find(|command| command.contains("--test adapter_certification_matrix_contract"))
+        .find(|command| {
+            command.contains(
+                "cargo test -p asupersync --test adapter_certification_matrix_contract --features test-internals",
+            )
+        })
         .expect("adapter certification cargo proof command");
     assert!(
         cargo.starts_with("rch exec -- "),
@@ -349,6 +425,99 @@ fn adapter_rows_are_source_owned_and_have_rch_proofs() {
             );
         }
     }
+}
+
+#[test]
+fn adapter_matrix_guard_rejects_missing_stale_or_unsupported_pass_claims() {
+    let matrix = matrix();
+    let policy = matrix
+        .get("e2e_guard_policy")
+        .expect("e2e_guard_policy object");
+    assert_eq!(
+        string(policy, "scenario_id"),
+        "adapter-matrix-proof-command-guard-v1"
+    );
+    assert_eq!(
+        string(policy, "guard_test"),
+        "adapter_matrix_guard_rejects_missing_stale_or_unsupported_pass_claims"
+    );
+
+    let cases = array(policy, "required_fail_closed_cases")
+        .iter()
+        .map(|case| string(case, "case_id").to_string())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        cases,
+        BTreeSet::from([
+            "missing-proof-command".to_string(),
+            "non-rch-proof-command".to_string(),
+            "non-isolated-target-dir".to_string(),
+            "unsupported-pass-render".to_string(),
+        ])
+    );
+    let guard_command = string(policy, "guard_command");
+    assert!(
+        validation_commands(&matrix).contains(guard_command),
+        "validation commands must expose the focused guard command"
+    );
+    assert!(
+        guard_command.starts_with("rch exec -- "),
+        "guard command must be rch-routed: {guard_command}"
+    );
+    assert!(
+        guard_command.contains(
+            "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_adapter_certification_matrix_guard"
+        ),
+        "guard command must use the isolated guard target dir: {guard_command}"
+    );
+
+    let allowed_status = status_allows_pass(&matrix);
+    for row in array(&matrix, "adapters") {
+        validate_adapter_guard_row(row, &allowed_status)
+            .unwrap_or_else(|err| panic!("canonical row must pass guard: {err}"));
+    }
+
+    let mut missing_proof = matrix.clone();
+    adapter_row_mut(&mut missing_proof, "http-h1-h2")["proof_commands"] = Value::Array(Vec::new());
+    let err = validate_adapter_guard_row(
+        adapter_row_mut(&mut missing_proof, "http-h1-h2"),
+        &allowed_status,
+    )
+    .expect_err("missing proof commands must be rejected");
+    assert!(err.contains("at least one proof command"));
+
+    let mut non_rch = matrix.clone();
+    adapter_row_mut(&mut non_rch, "http-h1-h2")["proof_commands"][0] = Value::String(
+        "cargo test -p asupersync --test conformance_h1_expect --features test-internals"
+            .to_string(),
+    );
+    let err =
+        validate_adapter_guard_row(adapter_row_mut(&mut non_rch, "http-h1-h2"), &allowed_status)
+            .expect_err("non-rch proof commands must be rejected");
+    assert!(err.contains("rch-routed"));
+
+    let mut non_isolated = matrix.clone();
+    adapter_row_mut(&mut non_isolated, "http-h1-h2")["proof_commands"][0] = Value::String(
+        "rch exec -- cargo test -p asupersync --test conformance_h1_expect --features test-internals"
+            .to_string(),
+    );
+    let err = validate_adapter_guard_row(
+        adapter_row_mut(&mut non_isolated, "http-h1-h2"),
+        &allowed_status,
+    )
+    .expect_err("non-isolated proof target dirs must be rejected");
+    assert!(err.contains("isolated adapter-matrix target dir"));
+
+    let mut unsupported_pass = matrix.clone();
+    let database = adapter_row_mut(&mut unsupported_pass, "database-postgres-mysql-sqlite");
+    database["rendered_status"] = Value::String("PASS".to_string());
+    database["runtime_allowed_verdicts"] = Value::Array(vec![
+        Value::String("pass".to_string()),
+        Value::String("xfail".to_string()),
+    ]);
+    let err = validate_adapter_guard_row(database, &allowed_status)
+        .expect_err("unsupported pass claims must be rejected");
+    assert!(err.contains("must not allow pass"));
 }
 
 #[test]

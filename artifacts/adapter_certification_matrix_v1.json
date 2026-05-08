@@ -76,6 +76,34 @@
       "test-internals"
     ]
   },
+  "e2e_guard_policy": {
+    "scenario_id": "adapter-matrix-proof-command-guard-v1",
+    "purpose": "The matrix verifier must fail closed when proof commands are missing, stale, not rch-routed, not target-isolated, or when unsupported adapter rows try to render pass.",
+    "guard_test": "adapter_matrix_guard_rejects_missing_stale_or_unsupported_pass_claims",
+    "required_fail_closed_cases": [
+      {
+        "case_id": "missing-proof-command",
+        "mutates": "proof_commands",
+        "expected_status": "blocked"
+      },
+      {
+        "case_id": "non-rch-proof-command",
+        "mutates": "proof_commands",
+        "expected_status": "blocked"
+      },
+      {
+        "case_id": "non-isolated-target-dir",
+        "mutates": "proof_commands",
+        "expected_status": "blocked"
+      },
+      {
+        "case_id": "unsupported-pass-render",
+        "mutates": "rendered_status,runtime_allowed_verdicts",
+        "expected_status": "blocked"
+      }
+    ],
+    "guard_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_adapter_certification_matrix_guard CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test adapter_certification_matrix_contract adapter_matrix_guard_rejects_missing_stale_or_unsupported_pass_claims --features test-internals -- --nocapture"
+  },
   "adapters": [
     {
       "adapter_id": "http-h1-h2",
@@ -292,6 +320,7 @@
     "python3 -m json.tool artifacts/adapter_certification_matrix_v1.json",
     "rch exec -- rustfmt --edition 2024 --check src/adapter_certification.rs src/lib.rs tests/adapter_certification_matrix_contract.rs",
     "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_adapter_certification_declarations_lib CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --lib adapter_certifications_have_stable_ids_and_statuses -- --nocapture",
+    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_adapter_certification_matrix_guard CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test adapter_certification_matrix_contract adapter_matrix_guard_rejects_missing_stale_or_unsupported_pass_claims --features test-internals -- --nocapture",
     "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_adapter_certification_matrix CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test adapter_certification_matrix_contract --features test-internals -- --nocapture"
   ]
 }
