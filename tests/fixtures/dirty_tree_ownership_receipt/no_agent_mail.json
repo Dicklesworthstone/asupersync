@@ -1,0 +1,21 @@
+{
+  "agent_mail": {
+    "available": false,
+    "messages": [],
+    "reservations": [],
+    "status": "unavailable"
+  },
+  "beads": {
+    "issues": [],
+    "status": "ok"
+  },
+  "git": {
+    "entries": [
+      {
+        "path": "src/unknown.rs",
+        "status": " M"
+      }
+    ],
+    "status": "ok"
+  }
+}

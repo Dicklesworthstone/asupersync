@@ -1,0 +1,29 @@
+{
+  "agent_mail": {
+    "available": true,
+    "messages": [
+      {
+        "body_md": "Reserved tests/proof_status_snapshot_contract.rs for proof-status marker hardening.",
+        "created_ts": "2026-05-08T05:04:37Z",
+        "from": "CoralGorge",
+        "subject": "[asupersync-aj7lx3] Starting proof-status marker hardening",
+        "thread_id": "asupersync-aj7lx3"
+      }
+    ],
+    "reservations": [],
+    "status": "ok"
+  },
+  "beads": {
+    "issues": [],
+    "status": "ok"
+  },
+  "git": {
+    "entries": [
+      {
+        "path": "tests/proof_status_snapshot_contract.rs",
+        "status": " M"
+      }
+    ],
+    "status": "ok"
+  }
+}
