@@ -16,8 +16,8 @@
       "formal/lean/coverage/lean_coverage_matrix.sample.json"
     ],
     "validation_commands": [
-      "rch exec -- cargo test --test lean_baseline_report -- --nocapture",
-      "rch exec -- cargo test --test lean_coverage_matrix_schema -- --nocapture"
+      "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_testing_matrix_docs cargo test --test lean_baseline_report -- --nocapture",
+      "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_testing_matrix_docs cargo test --test lean_coverage_matrix_schema -- --nocapture"
     ]
   },
   "row_mappings": [
