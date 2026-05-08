@@ -371,11 +371,11 @@ and direct replay commands.
 
 | Feature bead | Coverage focus | Unit/integration anchors | Deterministic scenario IDs | Structured log contract | Replay command (rch-offloaded) |
 |--------------|----------------|--------------------------|-----------------------------|-------------------------|----------------------------------|
-| `asupersync-2oh2u.2.2` | AsyncRead/AsyncWrite core trait semantics, typed read/write ext methods, split baseline | `tests/io_e2e.rs::{io_e2e_copy_stream, io_e2e_copy_bidirectional, io_e2e_split_read_write}` + `tests/tokio_io_utility_operators_parity.rs::{split_invariant_1_read_half_produces_same_bytes, buf_invariant_2_bufwriter_flushed_matches}` | `T29-T22-READWRITE`, `T29-T22-TYPED-EXT` | `scenario_id`, `correlation_id`, `bead_id`, `seed`, `artifact_path`, `expected_invariant`, `actual_invariant` | `rch exec -- cargo test --test io_e2e io_e2e_copy_stream -- --nocapture` |
-| `asupersync-2oh2u.2.3` | Utility operators parity (`copy`, `split`, `lines`, buffered adapters, stream bridges) | `tests/tokio_io_utility_operators_parity.rs::{lines_invariant_1_crlf_stripped_correctly, adapt_invariant_2_stream_reader_round_trip, adapt_invariant_3_stream_reader_defers_error}` | `T29-T23-OPERATORS`, `T29-T23-STREAM-BRIDGE` | `scenario_id`, `correlation_id`, `operator_family`, `cancel_safe`, `artifact_path`, `invariant_status` | `rch exec -- cargo test --test tokio_io_utility_operators_parity adapt_invariant_2_stream_reader_round_trip -- --nocapture` |
-| `asupersync-2oh2u.2.4` | Codec/framing correctness (`LinesCodec`, `LengthDelimitedCodec`, framed decode/encode edge paths) | `tests/codec_e2e.rs::{e2e_codec_001_lines_multi_decode, e2e_codec_011_length_delimited_partial, e2e_codec_016_length_delimited_multi_frame, e2e_codec_023_buffer_state_preservation}` | `T29-T24-CODEC-LINES`, `T29-T24-CODEC-LENGTH`, `T29-T24-CODEC-RECOVERY` | `scenario_id`, `correlation_id`, `codec_family`, `frame_len`, `expected_frame_count`, `actual_frame_count`, `artifact_path` | `rch exec -- cargo test --test codec_e2e e2e_codec_011_length_delimited_partial -- --nocapture` |
-| `asupersync-2oh2u.2.5` | Cancellation-correctness and loser-drain behavior for I/O + codec surfaces | `tests/tokio_io_codec_cancellation_correctness.rs::{csr_01_bufreader_cancel_preserves_buffer, rld_03_framed_write_drop_loses_encoded, ba_03_framed_write_split_to_monotonic, ol_03_framed_read_into_parts_complete, cs_02_length_delimited_partial_decode_state}` | `T29-T25-CANCEL-RESUME`, `T29-T25-RACE-DRAIN`, `T29-T25-BUFFER-ACCOUNTING` | `scenario_id`, `correlation_id`, `cancel_phase`, `obligation_leak`, `buffer_delta`, `artifact_path`, `verdict` | `rch exec -- cargo test --test tokio_io_codec_cancellation_correctness csr_01_bufreader_cancel_preserves_buffer -- --nocapture` |
-| `asupersync-2oh2u.2.6` | Reactor backend parity and readiness consistency (registration lifecycle, stale-token safety, cancel cleanup) | `tests/io_cancellation.rs::{io_cancel_005_registration_cleanup_on_drop, io_cancel_registration_count_tracking, io_cancel_010_region_close_waits_for_io_obligations}` + `tests/io_uring_reactor.rs::deregister_cancels_in_flight_poll` + `tests/io_driver_concurrency.rs::test_io_driver_handle_split_lock` | `T29-T26-REACTOR-REGISTER`, `T29-T26-STALE-TOKEN`, `T29-T26-CANCEL-CLEANUP` | `scenario_id`, `correlation_id`, `backend`, `token`, `interest`, `cleanup_result`, `artifact_path`, `invariant_status` | `rch exec -- cargo test --test io_cancellation io_cancel_registration_count_tracking -- --nocapture` |
+| `asupersync-2oh2u.2.2` | AsyncRead/AsyncWrite core trait semantics, typed read/write ext methods, split baseline | `tests/io_e2e.rs::{io_e2e_copy_stream, io_e2e_copy_bidirectional, io_e2e_split_read_write}` + `tests/tokio_io_utility_operators_parity.rs::{split_invariant_1_read_half_produces_same_bytes, buf_invariant_2_bufwriter_flushed_matches}` | `T29-T22-READWRITE`, `T29-T22-TYPED-EXT` | `scenario_id`, `correlation_id`, `bead_id`, `seed`, `artifact_path`, `expected_invariant`, `actual_invariant` | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_io_parity_audit_docs cargo test --test io_e2e io_e2e_copy_stream -- --nocapture` |
+| `asupersync-2oh2u.2.3` | Utility operators parity (`copy`, `split`, `lines`, buffered adapters, stream bridges) | `tests/tokio_io_utility_operators_parity.rs::{lines_invariant_1_crlf_stripped_correctly, adapt_invariant_2_stream_reader_round_trip, adapt_invariant_3_stream_reader_defers_error}` | `T29-T23-OPERATORS`, `T29-T23-STREAM-BRIDGE` | `scenario_id`, `correlation_id`, `operator_family`, `cancel_safe`, `artifact_path`, `invariant_status` | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_io_parity_audit_docs cargo test --test tokio_io_utility_operators_parity adapt_invariant_2_stream_reader_round_trip -- --nocapture` |
+| `asupersync-2oh2u.2.4` | Codec/framing correctness (`LinesCodec`, `LengthDelimitedCodec`, framed decode/encode edge paths) | `tests/codec_e2e.rs::{e2e_codec_001_lines_multi_decode, e2e_codec_011_length_delimited_partial, e2e_codec_016_length_delimited_multi_frame, e2e_codec_023_buffer_state_preservation}` | `T29-T24-CODEC-LINES`, `T29-T24-CODEC-LENGTH`, `T29-T24-CODEC-RECOVERY` | `scenario_id`, `correlation_id`, `codec_family`, `frame_len`, `expected_frame_count`, `actual_frame_count`, `artifact_path` | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_io_parity_audit_docs cargo test --test codec_e2e e2e_codec_011_length_delimited_partial -- --nocapture` |
+| `asupersync-2oh2u.2.5` | Cancellation-correctness and loser-drain behavior for I/O + codec surfaces | `tests/tokio_io_codec_cancellation_correctness.rs::{csr_01_bufreader_cancel_preserves_buffer, rld_03_framed_write_drop_loses_encoded, ba_03_framed_write_split_to_monotonic, ol_03_framed_read_into_parts_complete, cs_02_length_delimited_partial_decode_state}` | `T29-T25-CANCEL-RESUME`, `T29-T25-RACE-DRAIN`, `T29-T25-BUFFER-ACCOUNTING` | `scenario_id`, `correlation_id`, `cancel_phase`, `obligation_leak`, `buffer_delta`, `artifact_path`, `verdict` | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_io_parity_audit_docs cargo test --test tokio_io_codec_cancellation_correctness csr_01_bufreader_cancel_preserves_buffer -- --nocapture` |
+| `asupersync-2oh2u.2.6` | Reactor backend parity and readiness consistency (registration lifecycle, stale-token safety, cancel cleanup) | `tests/io_cancellation.rs::{io_cancel_005_registration_cleanup_on_drop, io_cancel_registration_count_tracking, io_cancel_010_region_close_waits_for_io_obligations}` + `tests/io_uring_reactor.rs::deregister_cancels_in_flight_poll` + `tests/io_driver_concurrency.rs::test_io_driver_handle_split_lock` | `T29-T26-REACTOR-REGISTER`, `T29-T26-STALE-TOKEN`, `T29-T26-CANCEL-CLEANUP` | `scenario_id`, `correlation_id`, `backend`, `token`, `interest`, `cleanup_result`, `artifact_path`, `invariant_status` | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_io_parity_audit_docs cargo test --test io_cancellation io_cancel_registration_count_tracking -- --nocapture` |
 
 ### T2.9 Matrix Gate
 
@@ -386,11 +386,11 @@ logs must preserve the required structured fields so failures stay replayable.
 ### T2.9 Replay Bundle (minimum)
 
 ```bash
-rch exec -- cargo test --test io_e2e io_e2e_copy_stream -- --nocapture
-rch exec -- cargo test --test tokio_io_utility_operators_parity adapt_invariant_2_stream_reader_round_trip -- --nocapture
-rch exec -- cargo test --test codec_e2e e2e_codec_011_length_delimited_partial -- --nocapture
-rch exec -- cargo test --test tokio_io_codec_cancellation_correctness csr_01_bufreader_cancel_preserves_buffer -- --nocapture
-rch exec -- cargo test --test io_cancellation io_cancel_registration_count_tracking -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_io_parity_audit_docs cargo test --test io_e2e io_e2e_copy_stream -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_io_parity_audit_docs cargo test --test tokio_io_utility_operators_parity adapt_invariant_2_stream_reader_round_trip -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_io_parity_audit_docs cargo test --test codec_e2e e2e_codec_011_length_delimited_partial -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_io_parity_audit_docs cargo test --test tokio_io_codec_cancellation_correctness csr_01_bufreader_cancel_preserves_buffer -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_io_parity_audit_docs cargo test --test io_cancellation io_cancel_registration_count_tracking -- --nocapture
 ```
 
 ## 13. T2.10 End-to-End Protocol Scripts and Structured Detailed Logging (T2.10)
@@ -460,12 +460,12 @@ Missing bundle artifacts fail T2.10 contract validation.
 ### 13.5 Replay Bundle (rch-offloaded, minimum)
 
 ```bash
-rch exec -- cargo test --test io_e2e io_e2e_copy_bidirectional -- --nocapture
-rch exec -- cargo test --test tokio_io_utility_operators_parity lines_invariant_1_crlf_stripped_correctly -- --nocapture
-rch exec -- cargo test --test codec_e2e e2e_codec_016_length_delimited_multi_frame -- --nocapture
-rch exec -- cargo test --test tokio_io_codec_cancellation_correctness rld_03_framed_write_drop_loses_encoded -- --nocapture
-rch exec -- cargo test --test io_uring_reactor deregister_cancels_in_flight_poll -- --nocapture
-rch exec -- cargo test --test t2_track_conformance_and_performance_gates -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_io_parity_audit_docs cargo test --test io_e2e io_e2e_copy_bidirectional -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_io_parity_audit_docs cargo test --test tokio_io_utility_operators_parity lines_invariant_1_crlf_stripped_correctly -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_io_parity_audit_docs cargo test --test codec_e2e e2e_codec_016_length_delimited_multi_frame -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_io_parity_audit_docs cargo test --test tokio_io_codec_cancellation_correctness rld_03_framed_write_drop_loses_encoded -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_io_parity_audit_docs cargo test --test io_uring_reactor deregister_cancels_in_flight_poll -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_io_parity_audit_docs cargo test --test t2_track_conformance_and_performance_gates -- --nocapture
 ```
 
 ### 13.6 Migration-Cookbook Evidence Linkage
@@ -532,14 +532,14 @@ surfaces with no compatibility shims.
 The following command set is the minimum reproducible T2.7 evidence bundle:
 
 ```bash
-rch exec -- cargo test --test io_e2e io_e2e_copy_bidirectional -- --nocapture
-rch exec -- cargo test --test tokio_io_utility_operators_parity lines_invariant_1_crlf_stripped_correctly -- --nocapture
-rch exec -- cargo test --test codec_e2e e2e_codec_016_length_delimited_multi_frame -- --nocapture
-rch exec -- cargo test --test tokio_io_codec_cancellation_correctness csr_01_bufreader_cancel_preserves_buffer -- --nocapture
-rch exec -- cargo test --test io_cancellation io_cancel_registration_count_tracking -- --nocapture
-rch exec -- cargo test --test io_uring_reactor deregister_cancels_in_flight_poll -- --nocapture
-rch exec -- cargo test --test t2_track_conformance_and_performance_gates -- --nocapture
-rch exec -- cargo test --test tokio_io_parity_audit -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_io_parity_audit_docs cargo test --test io_e2e io_e2e_copy_bidirectional -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_io_parity_audit_docs cargo test --test tokio_io_utility_operators_parity lines_invariant_1_crlf_stripped_correctly -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_io_parity_audit_docs cargo test --test codec_e2e e2e_codec_016_length_delimited_multi_frame -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_io_parity_audit_docs cargo test --test tokio_io_codec_cancellation_correctness csr_01_bufreader_cancel_preserves_buffer -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_io_parity_audit_docs cargo test --test io_cancellation io_cancel_registration_count_tracking -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_io_parity_audit_docs cargo test --test io_uring_reactor deregister_cancels_in_flight_poll -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_io_parity_audit_docs cargo test --test t2_track_conformance_and_performance_gates -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_io_parity_audit_docs cargo test --test tokio_io_parity_audit -- --nocapture
 ```
 
 ### 14.5 Structured Log and Replay Linkage for Migration Scenarios
