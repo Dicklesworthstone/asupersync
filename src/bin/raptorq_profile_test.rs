@@ -1,7 +1,11 @@
 //! RaptorQ profiling test for large K workloads.
 //!
 //! Simple standalone binary to profile encoder/decoder hot paths.
-//! Run with: perf record --call-graph dwarf ./target/release-perf/raptorq_profile_test
+//!
+//! Usage:
+//! CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-/tmp/rch_target_raptorq_profile_test}
+//! rch exec -- env CARGO_TARGET_DIR=$CARGO_TARGET_DIR cargo build --profile release-perf --bin raptorq_profile_test --features simd-intrinsics
+//! perf record --call-graph dwarf $CARGO_TARGET_DIR/release-perf/raptorq_profile_test
 
 use asupersync::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::gf256::{Gf256, gf256_addmul_slice, gf256_mul_slice};
@@ -14,7 +18,10 @@ fn main() {
     let k = 1024;
     let symbol_size = 1316; // ~1.3MB total payload
     let loss_fraction = 0.6; // 60% loss
-    let extra_repair = 200;
+    let loss_count = (k as f64 * loss_fraction) as usize;
+    let repair_margin = 50;
+    let extra_repair = loss_count + repair_margin;
+    let seed = 42u64;
 
     println!(
         "Testing K={}, symbol_size={}, loss_fraction={:.1}%",
@@ -51,7 +58,6 @@ fn main() {
 
     // **HOT PATH TEST 2: Encoder creation and symbol generation**
     println!("Creating encoder...");
-    let seed = 42u64;
     let encoder = SystematicEncoder::new(&source_symbols, symbol_size, seed)
         .expect("encoder creation failed");
 
@@ -68,7 +74,6 @@ fn main() {
 
     // Create scattered loss pattern
     let mut loss_pattern = vec![false; k]; // false = available
-    let loss_count = (k as f64 * loss_fraction) as usize;
     rng_state = 0xDEADBEEF;
     let mut losses_applied = 0;
 
@@ -83,41 +88,30 @@ fn main() {
 
     println!("Loss pattern: {}/{} symbols lost", losses_applied, k);
 
+    println!("Creating decoder...");
+    let decoder = InactivationDecoder::new(k, symbol_size, seed);
+
     // Collect received symbols for decoding
-    let mut received_symbols = Vec::new();
+    let mut received_symbols = decoder.constraint_symbols();
 
     // Add available source symbols
     for (i, &is_lost) in loss_pattern.iter().enumerate() {
         if !is_lost {
-            received_symbols.push(ReceivedSymbol {
-                esi: i as u32,
-                is_source: true,
-                columns: vec![i],
-                coefficients: vec![Gf256::ONE],
-                data: source_symbols[i].clone(),
-            });
+            received_symbols.push(ReceivedSymbol::source(i as u32, source_symbols[i].clone()));
         }
     }
 
     // Add repair symbols to ensure decodability
-    let needed_repairs = loss_count + 50; // Some overhead
-    for (repair_esi, repair_data) in repair_symbols.into_iter().take(needed_repairs) {
-        received_symbols.push(ReceivedSymbol {
-            esi: repair_esi,
-            is_source: false,
-            columns: vec![], // Will be filled by decoder
-            coefficients: vec![],
-            data: repair_data,
-        });
+    for (repair_esi, repair_data) in repair_symbols {
+        let (cols, coefs) = decoder
+            .repair_equation(repair_esi)
+            .expect("repair equation failed");
+        received_symbols.push(ReceivedSymbol::repair(repair_esi, cols, coefs, repair_data));
     }
 
     println!("Received symbols: {}", received_symbols.len());
 
-    // **HOT PATH TEST 4: Inactivation decoding (matrix operations)**
-    println!("Creating decoder...");
-    let decoder = InactivationDecoder::new(k, symbol_size, seed);
-
-    // **HOT PATH TEST 5: Decode (Gaussian elimination and gap handling)**
+    // **HOT PATH TEST 4: Decode (Gaussian elimination and gap handling)**
     println!("Starting decode - this is where matrix solve happens...");
     let start = std::time::Instant::now();
 

@@ -1,7 +1,6 @@
 //! Quick K=1024 baseline to establish profiling methodology while K=10000 builds.
 
 use asupersync::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
-use asupersync::raptorq::gf256::Gf256;
 use asupersync::raptorq::systematic::SystematicEncoder;
 use std::time::Instant;
 
@@ -11,7 +10,9 @@ fn main() {
     let k = 1024;
     let symbol_size = 1316;
     let loss_fraction = 0.70; // High loss to trigger matrix operations
-    let extra_repair = 200;
+    let loss_count = (k as f64 * loss_fraction) as usize;
+    let repair_margin = 50;
+    let extra_repair = loss_count + repair_margin;
     let seed = 42u64;
 
     let total_bytes = k * symbol_size;
@@ -58,7 +59,6 @@ fn main() {
 
     println!("Creating loss pattern...");
     let mut loss_pattern = vec![false; k];
-    let loss_count = (k as f64 * loss_fraction) as usize;
     rng_state = 0xDEADBEEF;
     let mut losses_applied = 0;
 
@@ -72,37 +72,27 @@ fn main() {
     }
     println!("Lost {} symbols", losses_applied);
 
+    println!("Creating decoder...");
+    let decoder = InactivationDecoder::new(k, symbol_size, seed);
+
     println!("Collecting received symbols...");
-    let mut received_symbols = Vec::new();
+    let mut received_symbols = decoder.constraint_symbols();
 
     // Add available source symbols
     for (i, &is_lost) in loss_pattern.iter().enumerate() {
         if !is_lost {
-            received_symbols.push(ReceivedSymbol {
-                esi: i as u32,
-                is_source: true,
-                columns: vec![i],
-                coefficients: vec![Gf256::ONE],
-                data: source_symbols[i].clone(),
-            });
+            received_symbols.push(ReceivedSymbol::source(i as u32, source_symbols[i].clone()));
         }
     }
 
     // Add repair symbols to ensure decodability
-    let needed_repairs = loss_count + 50;
-    for (repair_esi, repair_data) in repair_symbols.into_iter().take(needed_repairs) {
-        received_symbols.push(ReceivedSymbol {
-            esi: repair_esi,
-            is_source: false,
-            columns: vec![], // Will be filled by decoder
-            coefficients: vec![],
-            data: repair_data,
-        });
+    for (repair_esi, repair_data) in repair_symbols {
+        let (cols, coefs) = decoder
+            .repair_equation(repair_esi)
+            .expect("repair equation failed");
+        received_symbols.push(ReceivedSymbol::repair(repair_esi, cols, coefs, repair_data));
     }
     println!("Received symbols: {}", received_symbols.len());
-
-    println!("Creating decoder...");
-    let decoder = InactivationDecoder::new(k, symbol_size, seed);
 
     println!("=== DECODE (PROFILING TARGET) ===");
     let decode_start = Instant::now();
