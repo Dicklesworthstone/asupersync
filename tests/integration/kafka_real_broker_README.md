@@ -29,8 +29,7 @@ Mock-based tests would pass while these real-world scenarios fail in production.
 cargo +nightly -Zscript scripts/provision_kafka_test_env.rs --setup-docker
 
 # 2. Run real broker tests
-export REAL_KAFKA_TESTS=true
-cargo test kafka_real_broker --features kafka -- --nocapture
+rch exec -- env REAL_KAFKA_TESTS=true CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_kafka_real_broker cargo test --features kafka --test kafka_real_broker -- --nocapture
 
 # 3. Clean up
 cargo +nightly -Zscript scripts/provision_kafka_test_env.rs --stop-docker
@@ -43,7 +42,7 @@ If you have an existing Kafka broker:
 ```bash
 export REAL_KAFKA_TESTS=true
 export KAFKA_BOOTSTRAP_SERVERS=your-broker:9092
-cargo test kafka_real_broker --features kafka
+rch exec -- env REAL_KAFKA_TESTS=true KAFKA_BOOTSTRAP_SERVERS=your-broker:9092 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_kafka_real_broker cargo test --features kafka --test kafka_real_broker
 ```
 
 ## Test Coverage
@@ -139,13 +138,13 @@ All tests emit structured JSON logs for CI analysis:
 
 ```bash
 # Run tests with JSON output
-REAL_KAFKA_TESTS=true cargo test kafka_real_broker 2>&1 | grep '{' | jq
+rch exec -- env REAL_KAFKA_TESTS=true CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_kafka_real_broker cargo test --features kafka --test kafka_real_broker 2>&1 | grep '{' | jq
 
 # Extract only failures
-REAL_KAFKA_TESTS=true cargo test kafka_real_broker 2>&1 | grep '{' | jq 'select(.event == "assertion" and .matches == false)'
+rch exec -- env REAL_KAFKA_TESTS=true CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_kafka_real_broker cargo test --features kafka --test kafka_real_broker 2>&1 | grep '{' | jq 'select(.event == "assertion" and .matches == false)'
 
 # Performance analysis
-REAL_KAFKA_TESTS=true cargo test kafka_real_broker 2>&1 | grep '{' | jq 'select(.event == "kafka_operation")' | jq -s 'group_by(.operation) | map({operation: .[0].operation, count: length})'
+rch exec -- env REAL_KAFKA_TESTS=true CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_kafka_real_broker cargo test --features kafka --test kafka_real_broker 2>&1 | grep '{' | jq 'select(.event == "kafka_operation")' | jq -s 'group_by(.operation) | map({operation: .[0].operation, count: length})'
 ```
 
 ## Safety Guards
@@ -185,16 +184,14 @@ let batch = factory.create_batch_messages(100, "orders");
   run: cargo +nightly -Zscript scripts/provision_kafka_test_env.rs --setup-docker
 
 - name: Run Real Broker Tests
-  run: |
-    export REAL_KAFKA_TESTS=true
-    cargo test kafka_real_broker --features kafka -- --nocapture
+  run: rch exec -- env REAL_KAFKA_TESTS=true CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_kafka_real_broker cargo test --features kafka --test kafka_real_broker -- --nocapture
   env:
     RUST_LOG: info
 
 - name: Parse Test Results
   run: |
     # Extract structured logs and validate no assertion failures
-    cargo test kafka_real_broker 2>&1 | grep '{' | jq -e 'select(.event == "assertion" and .matches == false) | length == 0'
+    rch exec -- env REAL_KAFKA_TESTS=true CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_kafka_real_broker cargo test --features kafka --test kafka_real_broker 2>&1 | grep '{' | jq -e 'select(.event == "assertion" and .matches == false) | length == 0'
 
 - name: Cleanup
   if: always()
@@ -234,7 +231,7 @@ cargo +nightly -Zscript scripts/provision_kafka_test_env.rs --setup-docker
 ```bash
 # Enable detailed Kafka logging
 export RUST_LOG=kafka=debug
-REAL_KAFKA_TESTS=true cargo test kafka_real_broker -- --nocapture
+rch exec -- env REAL_KAFKA_TESTS=true RUST_LOG=kafka=debug CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_kafka_real_broker cargo test --features kafka --test kafka_real_broker -- --nocapture
 
 # Check Docker container health
 docker ps | grep kafka
@@ -296,5 +293,5 @@ Real broker tests also serve as performance baselines:
 
 Use structured logs to extract timing data:
 ```bash
-REAL_KAFKA_TESTS=true cargo test kafka_real_broker 2>&1 | grep kafka_operation | jq '.duration_ms' | sort -n
+rch exec -- env REAL_KAFKA_TESTS=true CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_kafka_real_broker cargo test --features kafka --test kafka_real_broker 2>&1 | grep kafka_operation | jq '.duration_ms' | sort -n
 ```

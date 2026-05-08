@@ -3,9 +3,7 @@
 //! Bead: br-asupersync-yyqs0n
 //!
 //! Run with:
-//!     rch exec -- env REAL_MYSQL_TESTS=true \
-//!         MYSQL_URL=mysql://root:password@localhost:3306/mysql \
-//!         cargo test --features mysql --test mysql_real_server -- --nocapture
+//!     rch exec -- env REAL_MYSQL_TESTS=true MYSQL_URL=mysql://root:password@localhost:3306/mysql CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_mysql_real_server cargo test --features mysql --test mysql_real_server -- --nocapture
 //!
 //! Production safety guards block:
 //!  * `NODE_ENV=production`

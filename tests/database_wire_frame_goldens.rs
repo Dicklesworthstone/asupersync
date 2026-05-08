@@ -7,10 +7,10 @@
 //! Bead: br-asupersync-x3313u
 //!
 //! Run with:
-//!     cargo test --features "postgres mysql" --test database_wire_frame_goldens
+//!     rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_database_wire_frame_goldens cargo test --features "postgres mysql" --test database_wire_frame_goldens
 //!
 //! Update goldens on intentional change:
-//!     cargo insta review
+//!     rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_database_wire_frame_goldens cargo insta review
 //!
 //! Frame coverage:
 //!   PostgreSQL (frontend Extended Query Protocol, RFC §53.2):

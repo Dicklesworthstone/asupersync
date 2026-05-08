@@ -3,9 +3,7 @@
 //! Bead: br-asupersync-shyxh0
 //!
 //! Run with:
-//!     rch exec -- env REAL_NATS_TESTS=true \
-//!         NATS_URL=nats://127.0.0.1:4222 \
-//!         cargo test --test nats_real_server -- --nocapture
+//!     rch exec -- env REAL_NATS_TESTS=true NATS_URL=nats://127.0.0.1:4222 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_nats_real_server cargo test --test nats_real_server -- --nocapture
 //!
 //! Behavior:
 //! - If `NATS_TEST_URL` or `NATS_URL` is set, connect to that broker after

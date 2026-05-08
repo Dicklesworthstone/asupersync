@@ -42,10 +42,10 @@ This ensures deterministic output across test runs while preserving the structur
 
 ```bash
 # Run all OTEL span golden tests
-cargo test span_golden --features tracing-integration
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_otel_span_goldens cargo test span_golden --features tracing-integration
 
 # Update golden artifacts when intentional changes are made
-UPDATE_GOLDENS=1 cargo test span_golden --features tracing-integration
+rch exec -- env UPDATE_GOLDENS=1 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_otel_span_goldens cargo test span_golden --features tracing-integration
 
 # Review changes before committing
 git diff tests/golden/otel/

@@ -12,9 +12,7 @@
 //! deterministic message injection is superior for those test cases.
 //!
 //! Run with:
-//!     REAL_PG_TESTS=true \
-//!         POSTGRES_URL=postgres://postgres:postgres@localhost:5432/postgres \
-//!         cargo test --features postgres --test postgres_make_test_connection_migration
+//!     rch exec -- env REAL_PG_TESTS=true POSTGRES_URL=postgres://postgres:postgres@localhost:5432/postgres CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_postgres_connection_migration cargo test --features postgres --test postgres_make_test_connection_migration
 //!
 //! Production safety guards block:
 //!  * `NODE_ENV=production`

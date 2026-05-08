@@ -5,7 +5,7 @@
 //! cause golden mismatches, ensuring backwards compatibility per RFC 7541.
 //!
 //! To update goldens after intentional changes:
-//!   UPDATE_GOLDENS=1 cargo test --test hpack_golden_artifacts
+//!   rch exec -- env UPDATE_GOLDENS=1 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_hpack_golden_artifacts cargo test --test hpack_golden_artifacts
 
 use insta::assert_json_snapshot;
 use serde::{Deserialize, Serialize};

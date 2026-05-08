@@ -10,10 +10,10 @@
 ### Generation Commands
 ```bash
 # Generate all golden files
-UPDATE_GOLDENS=1 cargo test --test conformance_kqueue_bsd_events
+rch exec -- env UPDATE_GOLDENS=1 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_kqueue_goldens cargo test --test conformance_kqueue_bsd_events
 
 # Generate specific test golden
-UPDATE_GOLDENS=1 cargo test --test conformance_kqueue_bsd_events kqueue_ev_oneshot_fire_and_silence -- --exact
+rch exec -- env UPDATE_GOLDENS=1 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_kqueue_goldens cargo test --test conformance_kqueue_bsd_events kqueue_ev_oneshot_fire_and_silence -- --exact
 
 # Review changes after generation
 git diff tests/golden/kqueue/

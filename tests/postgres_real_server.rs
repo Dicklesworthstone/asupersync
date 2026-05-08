@@ -11,9 +11,7 @@
 //! implementation and a real PostgreSQL server.
 //!
 //! Run with:
-//!     rch exec -- env REAL_POSTGRES_TESTS=true \
-//!         POSTGRES_URL=postgres://postgres:postgres@localhost:5432/postgres \
-//!         cargo test --features postgres --test postgres_real_server
+//!     rch exec -- env REAL_POSTGRES_TESTS=true POSTGRES_URL=postgres://postgres:postgres@localhost:5432/postgres CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_postgres_real_server cargo test --features postgres --test postgres_real_server
 //!
 //! Production safety guards block:
 //!  * `NODE_ENV=production`

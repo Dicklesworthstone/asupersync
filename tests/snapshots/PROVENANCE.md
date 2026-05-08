@@ -37,13 +37,13 @@ When RaptorQ encoder behavior intentionally changes:
 
 ```bash
 # Run tests to see what changed
-cargo test --test raptorq_encoder_stability
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_raptorq_encoder_stability_snapshots cargo test --test raptorq_encoder_stability
 
 # Review changes interactively
-cargo insta review
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_raptorq_encoder_stability_snapshots cargo insta review
 
 # Or accept all changes (CAREFUL - review diffs first)
-cargo insta test --test raptorq_encoder_stability --accept-unseen
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_raptorq_encoder_stability_snapshots cargo insta test --test raptorq_encoder_stability --accept-unseen
 
 # Review the git diff before committing
 git diff tests/snapshots/
@@ -70,5 +70,5 @@ git commit -m "Update RaptorQ encoder goldens: [reason for change]"
 
 - **Rust version**: As of project rust-toolchain.toml
 - **Encoder version**: asupersync v0.3.1+ with blocked elimination optimization
-- **Test execution**: `cargo test --test raptorq_encoder_stability`
+- **Test execution**: `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_raptorq_encoder_stability_snapshots cargo test --test raptorq_encoder_stability`
 - **Generated**: 2026-05-08 (bead asupersync-nerid1)

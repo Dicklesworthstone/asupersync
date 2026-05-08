@@ -1,5 +1,5 @@
 //! Temporary probe to capture golden vector values for conformance suite.
-//! Run: cargo test --test golden_probe -- --nocapture
+//! Run: rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_golden_probe cargo test --test golden_probe -- --nocapture
 
 use asupersync::raptorq::decoder::InactivationDecoder;
 use asupersync::raptorq::rfc6330::{deg, next_prime_ge, rand, tuple, tuple_indices};

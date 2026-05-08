@@ -10,10 +10,10 @@
 //! unit-test time.
 //!
 //! Run with:
-//!     cargo test --test codec_wire_frame_goldens
+//!     rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_codec_wire_frame_goldens cargo test --test codec_wire_frame_goldens
 //!
 //! Update on intentional change:
-//!     cargo insta review
+//!     rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_codec_wire_frame_goldens cargo insta review
 
 #![cfg(test)]
 #![allow(clippy::pedantic, clippy::nursery, clippy::print_stderr)]

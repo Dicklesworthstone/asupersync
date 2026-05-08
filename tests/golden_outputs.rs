@@ -11,7 +11,7 @@
 //! This is the "behavior equivalence" gate for the optimization pipeline.
 //!
 //! To update golden values after an intentional behavioral change:
-//!   1. Run `cargo test --test golden_outputs -- --nocapture`
+//!   1. Run `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_golden_outputs cargo test --test golden_outputs -- --nocapture`
 //!   2. Review the new checksums in the output
 //!   3. Update the expected values below
 //!   4. Document why the behavior changed in the commit message

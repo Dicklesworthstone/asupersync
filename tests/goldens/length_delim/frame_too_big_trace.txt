@@ -1,7 +1,7 @@
 # LengthDelimitedCodec FrameTooBig rejection trace
 # Regression contract for br-asupersync-o7e5xu (framing recovery on
 # max_frame_length violation). Re-generate by running:
-#   cargo test --lib codec::length_delimited::ld_goldens_frame_too_big
+#   rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_length_delim_goldens cargo test --lib codec::length_delimited::ld_goldens_frame_too_big
 # (with INSTA_UPDATE=auto-equivalent: write expected bytes here verbatim).
 
 codec.length_field_length: 4

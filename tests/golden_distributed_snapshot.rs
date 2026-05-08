@@ -5,9 +5,9 @@
 //! in distributed environments and consensus protocols.
 //!
 //! To update golden files after an intentional format change:
-//!   1. Run `cargo test --test golden_distributed_snapshot`
-//!   2. Review all changes via `cargo insta review`
-//!   3. Accept changes with `cargo insta accept` if correct
+//!   1. Run `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_golden_distributed_snapshot cargo test --test golden_distributed_snapshot`
+//!   2. Review all changes via `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_golden_distributed_snapshot cargo insta review`
+//!   3. Accept changes with `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_golden_distributed_snapshot cargo insta accept` if correct
 //!   4. Commit with detailed explanation of format changes
 
 use asupersync::distributed::snapshot::{
@@ -421,13 +421,13 @@ fn create_provenance_file() -> std::io::Result<()> {
 ### Generation Commands
 ```bash
 # Generate all snapshot files
-cargo test --test golden_distributed_snapshot
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_golden_distributed_snapshot cargo test --test golden_distributed_snapshot
 
 # Review snapshots
-cargo insta review
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_golden_distributed_snapshot cargo insta review
 
 # Accept snapshots if correct
-cargo insta accept
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_golden_distributed_snapshot cargo insta accept
 ```
 
 ### Golden Snapshot Format
@@ -438,8 +438,8 @@ cargo insta accept
 
 ### Validation Workflow
 1. Run tests to generate/compare snapshots
-2. Review snapshot changes via `cargo insta review`
-3. Accept correct changes with `cargo insta accept`
+2. Review snapshot changes via `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_golden_distributed_snapshot cargo insta review`
+3. Accept correct changes with `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_golden_distributed_snapshot cargo insta accept`
 4. Commit snapshot files with descriptive commit message
 
 ### Regeneration Triggers

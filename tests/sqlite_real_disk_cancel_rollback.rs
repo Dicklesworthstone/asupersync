@@ -5,7 +5,7 @@
 //! Bead: br-asupersync-qlwsxf
 //!
 //! Run with:
-//!     cargo test --features sqlite --test sqlite_real_disk_cancel_rollback
+//!     rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_sqlite_real_disk_cancel_rollback cargo test --features sqlite --test sqlite_real_disk_cancel_rollback
 //!
 //! Existing inline tests in `src/database/sqlite.rs` use `:memory:` and
 //! exercise the rollback contract against a private VFS that never

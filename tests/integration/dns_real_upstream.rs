@@ -3,7 +3,7 @@
 //! Bead: br-asupersync-3t9amh
 //!
 //! Run with:
-//!     REAL_DNS_TESTS=true cargo test --test dns_real_upstream -- --nocapture
+//!     rch exec -- env REAL_DNS_TESTS=true CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dns_real_upstream cargo test --test dns_real_upstream -- --nocapture
 //!
 //! Optional environment:
 //!     REAL_DNS_NAMESERVER=1.1.1.1

@@ -71,10 +71,10 @@ The golden artifacts validate the following OTLP specification compliance:
 
 ```bash
 # Run all OTLP golden snapshot tests
-cargo test otlp_metrics_request_golden
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_otlp_metrics_request_golden cargo test otlp_metrics_request_golden
 
 # Update golden artifacts when intentional changes are made
-UPDATE_GOLDENS=1 cargo test otlp_metrics_request_golden
+rch exec -- env UPDATE_GOLDENS=1 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_otlp_metrics_request_golden cargo test otlp_metrics_request_golden
 
 # Review changes before committing
 git diff tests/snapshots/otlp_metrics_request_golden*

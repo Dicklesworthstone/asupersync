@@ -2,7 +2,7 @@
 //!
 //! These tests require a real Kafka broker running with specific configuration.
 //! Run with:
-//! `REAL_KAFKA_TESTS=true cargo test --features kafka --test kafka_real_broker -- --nocapture`
+//! `rch exec -- env REAL_KAFKA_TESTS=true CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_kafka_real_broker cargo test --features kafka --test kafka_real_broker -- --nocapture`
 
 #![cfg(test)]
 

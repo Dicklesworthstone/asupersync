@@ -13,10 +13,10 @@
 //!
 //! ```bash
 //! # Run all pool tests with trace logging
-//! cargo test --test pool_tests -- --nocapture
+//! rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_pool_tests cargo test --test pool_tests -- --nocapture
 //!
 //! # Run specific test
-//! cargo test --test pool_tests pool_respects_max_size -- --nocapture
+//! rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_pool_tests cargo test --test pool_tests pool_respects_max_size -- --nocapture
 //! ```
 
 #[macro_use]
