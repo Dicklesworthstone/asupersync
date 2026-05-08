@@ -225,20 +225,38 @@ fn doc_names_validation_rules_and_non_goals() {
 #[test]
 fn doc_binds_downstream_beads_and_validation_commands() {
     let doc = load_doc();
-    for token in [
+    for bead_token in [
         "asupersync-2a6k9.2.2",
         "asupersync-2a6k9.2.3",
         "asupersync-2a6k9.2.4",
         "asupersync-2a6k9.4.*",
         "asupersync-2a6k9.6.*",
+    ] {
+        assert!(
+            doc.contains(bead_token),
+            "document missing downstream token: {bead_token}"
+        );
+    }
+    for command in [
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_scenario_docs cargo fmt --check",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_scenario_docs cargo check --all-targets",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_scenario_docs cargo clippy --all-targets -- -D warnings",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_scenario_docs cargo test --test lab_live_scenario_adapter_contract -- --nocapture",
+    ] {
+        assert!(
+            doc.contains(command),
+            "document missing validation command: {command}"
+        );
+    }
+    for stale in [
         "rch exec -- cargo fmt --check",
         "rch exec -- cargo check --all-targets",
         "rch exec -- cargo clippy --all-targets -- -D warnings",
         "rch exec -- cargo test --test lab_live_scenario_adapter_contract -- --nocapture",
     ] {
         assert!(
-            doc.contains(token),
-            "document missing downstream or validation token: {token}"
+            !doc.contains(stale),
+            "document still contains unscoped validation command: {stale}"
         );
     }
 }
@@ -287,6 +305,7 @@ fn minimal_contract_scenario(identity: &DualRunScenarioIdentity) -> Scenario {
         cancellation: None,
         include: Vec::new(),
         metadata,
+        ..Scenario::default()
     }
 }
 
