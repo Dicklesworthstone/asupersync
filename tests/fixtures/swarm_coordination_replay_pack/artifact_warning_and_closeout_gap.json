@@ -1,0 +1,29 @@
+{
+  "schema_version": "swarm-coordination-replay-input-v1",
+  "events": [
+    {
+      "id": "proof-start",
+      "timestamp": "2026-05-08T05:00:00Z",
+      "agent": "BlackDove",
+      "type": "proof_start",
+      "bead_id": "asupersync-aj7lx3.17",
+      "proof_id": "proof-no-artifact"
+    },
+    {
+      "id": "proof-exit",
+      "timestamp": "2026-05-08T05:01:00Z",
+      "agent": "BlackDove",
+      "type": "proof_remote_exit",
+      "bead_id": "asupersync-aj7lx3.17",
+      "proof_id": "proof-no-artifact",
+      "remote_exit": 0
+    },
+    {
+      "id": "closeout",
+      "timestamp": "2026-05-08T05:02:00Z",
+      "agent": "BlackDove",
+      "type": "close",
+      "bead_id": "asupersync-aj7lx3.17"
+    }
+  ]
+}

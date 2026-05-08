@@ -1,0 +1,13 @@
+{
+  "schema_version": "swarm-coordination-replay-input-v1",
+  "events": [
+    {
+      "id": "proof-start",
+      "timestamp": "2026-05-08T05:00:00Z",
+      "agent": "BlackDove",
+      "type": "proof_start",
+      "bead_id": "asupersync-aj7lx3.16",
+      "proof_id": "proof-missing-exit"
+    }
+  ]
+}
