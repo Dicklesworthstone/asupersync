@@ -54,7 +54,7 @@ scripts/semantic_rerun.sh docs
 
 **Detailed rerun**:
 ```bash
-cargo test --test semantic_docs_lint --test semantic_docs_rule_mapping_lint -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_failure_replay_docs cargo test --test semantic_docs_lint --test semantic_docs_rule_mapping_lint -- --nocapture
 ```
 
 **Root cause checklist**:
@@ -79,7 +79,7 @@ scripts/semantic_rerun.sh golden
 
 **Detailed rerun**:
 ```bash
-cargo test --test semantic_golden_fixture_validation -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_failure_replay_docs cargo test --test semantic_golden_fixture_validation -- --nocapture
 ```
 
 **Root cause checklist**:
@@ -105,7 +105,7 @@ scripts/semantic_rerun.sh lean
 **Detailed rerun**:
 ```bash
 # Validation tests (no Lean toolchain needed)
-cargo test --test semantic_lean_regression -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_failure_replay_docs cargo test --test semantic_lean_regression -- --nocapture
 
 # Full Lean build (requires Lean toolchain)
 scripts/run_lean_regression.sh --json
@@ -134,7 +134,7 @@ scripts/semantic_rerun.sh tla
 **Detailed rerun**:
 ```bash
 # Validation tests (no TLC needed)
-cargo test --test semantic_tla_scenarios -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_failure_replay_docs cargo test --test semantic_tla_scenarios -- --nocapture
 
 # Full TLC model check (requires TLC)
 scripts/run_model_check.sh --ci
@@ -167,7 +167,7 @@ scripts/semantic_rerun.sh logging
 
 **Detailed rerun**:
 ```bash
-cargo test --test semantic_log_schema_validation --test semantic_witness_replay_e2e -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_failure_replay_docs cargo test --test semantic_log_schema_validation --test semantic_witness_replay_e2e -- --nocapture
 ```
 
 **Root cause checklist**:
@@ -218,7 +218,7 @@ scripts/semantic_rerun.sh runtime
 
 **Detailed rerun**:
 ```bash
-cargo test --test semantic_golden_fixture_validation -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_failure_replay_docs cargo test --test semantic_golden_fixture_validation -- --nocapture
 scripts/assemble_evidence_bundle.sh --json --skip-runner --phase 1
 ```
 
@@ -241,7 +241,7 @@ scripts/semantic_rerun.sh laws
 
 **Detailed rerun**:
 ```bash
-cargo test law_join_assoc law_race_comm law_timeout_min metamorphic_drain law_race_abandon -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_failure_replay_docs cargo test law_join_assoc law_race_comm law_timeout_min metamorphic_drain law_race_abandon -- --nocapture
 ```
 
 **Root cause checklist**:
@@ -262,7 +262,7 @@ scripts/semantic_rerun.sh e2e
 
 **Detailed rerun**:
 ```bash
-cargo test --test semantic_witness_replay_e2e --test adversarial_witness_corpus -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_failure_replay_docs cargo test --test semantic_witness_replay_e2e --test adversarial_witness_corpus -- --nocapture
 ```
 
 **Root cause checklist**:
@@ -307,7 +307,7 @@ All verification runs support deterministic replay through seeds:
 # trace_fingerprint: Foata trace hash for ordering verification
 
 # Reproduce a specific run by setting the seed
-SEED=42 cargo test --test semantic_golden_fixture_validation -- --nocapture
+rch exec -- env SEED=42 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_failure_replay_docs cargo test --test semantic_golden_fixture_validation -- --nocapture
 
 # Reproduce with full correlation context
 # Each log entry includes repro_command field with exact one-liner
