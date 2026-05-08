@@ -118,6 +118,33 @@ pub struct TraceCertificateSnapshot {
     pub trace_fingerprint: u64,
 }
 
+/// Structured record for a scenario fault injection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FaultInjectionLogEntry {
+    /// Virtual time in milliseconds when the fault fired.
+    pub at_ms: u64,
+    /// Stable fault action name.
+    pub action: String,
+    /// Canonical, sorted argument summary.
+    pub args_summary: String,
+    /// Redacted trace message emitted into the lab trace buffer.
+    pub trace_message: String,
+}
+
+impl FaultInjectionLogEntry {
+    /// Convert to JSON for artifact storage.
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        use serde_json::json;
+        json!({
+            "at_ms": self.at_ms,
+            "action": self.action,
+            "args_summary": self.args_summary,
+            "trace_message": self.trace_message,
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Run result
 // ---------------------------------------------------------------------------
@@ -135,6 +162,8 @@ pub struct ScenarioRunResult {
     pub oracle_report: FilteredOracleReport,
     /// Number of fault events injected during the run.
     pub faults_injected: usize,
+    /// Structured log of fault injections, in deterministic execution order.
+    pub fault_log: Vec<FaultInjectionLogEntry>,
     /// Replay trace, if recording was enabled.
     pub replay_trace: Option<ReplayTrace>,
     /// Trace certificate snapshot for replay validation.
@@ -171,6 +200,7 @@ impl ScenarioRunResult {
             "passed": self.passed(),
             "steps": self.lab_report.steps_total,
             "faults_injected": self.faults_injected,
+            "fault_log": self.fault_log.iter().map(FaultInjectionLogEntry::to_json).collect::<Vec<_>>(),
             "certificate": {
                 "event_hash": self.certificate.event_hash,
                 "schedule_hash": self.certificate.schedule_hash,
@@ -477,8 +507,8 @@ impl ScenarioRunner {
     ///
     /// Processes faults in `at_ms` order, advancing virtual time and injecting
     /// each fault action. Between faults, the runtime runs to idle.
-    fn inject_faults(runtime: &mut LabRuntime, scenario: &Scenario) -> usize {
-        let mut injected = 0;
+    fn inject_faults(runtime: &mut LabRuntime, scenario: &Scenario) -> Vec<FaultInjectionLogEntry> {
+        let mut fault_log = Vec::with_capacity(scenario.faults.len());
 
         for fault in &scenario.faults {
             // Advance time to the fault trigger point
@@ -501,21 +531,22 @@ impl ScenarioRunner {
                 FaultAction::ClockSkew => "clock_skew",
                 FaultAction::ClockReset => "clock_reset",
             };
+            let args_summary = Self::fault_args_summary(&fault.args);
+            let trace_message = format!("fault:{action_name}:{args_summary}");
             let now = runtime.now();
+            let trace_message_for_event = trace_message.clone();
             runtime.state.record_trace_event(|seq| {
-                crate::trace::TraceEvent::user_trace(
-                    seq,
-                    now,
-                    format!(
-                        "fault:{action_name}:{}",
-                        Self::fault_args_summary(&fault.args)
-                    ),
-                )
+                crate::trace::TraceEvent::user_trace(seq, now, trace_message_for_event)
             });
-            injected += 1;
+            fault_log.push(FaultInjectionLogEntry {
+                at_ms: fault.at_ms,
+                action: action_name.to_string(),
+                args_summary,
+                trace_message,
+            });
         }
 
-        injected
+        fault_log
     }
 
     /// Summarize fault args for trace events.
@@ -578,7 +609,8 @@ impl ScenarioRunner {
         let config = Self::lab_config_for_identity(scenario, identity);
         let mut runtime = LabRuntime::new(config);
 
-        let faults_injected = Self::inject_faults(&mut runtime, scenario);
+        let fault_log = Self::inject_faults(&mut runtime, scenario);
+        let faults_injected = fault_log.len();
         runtime.run_until_quiescent();
 
         let lab_report = runtime.report();
@@ -595,6 +627,7 @@ impl ScenarioRunner {
             lab_report,
             oracle_report,
             faults_injected,
+            fault_log,
             replay_trace,
             certificate,
             adapter: LAB_SCENARIO_RUNNER_ADAPTER.to_string(),
@@ -625,7 +658,8 @@ impl ScenarioRunner {
         let mut runtime = LabRuntime::new(config);
 
         // 3. Inject timed faults and run between them
-        let faults_injected = Self::inject_faults(&mut runtime, scenario);
+        let fault_log = Self::inject_faults(&mut runtime, scenario);
+        let faults_injected = fault_log.len();
 
         // 4. Run to quiescence after all faults
         runtime.run_until_quiescent();
@@ -650,6 +684,7 @@ impl ScenarioRunner {
             lab_report,
             oracle_report,
             faults_injected,
+            fault_log,
             replay_trace,
             certificate,
             adapter: LAB_SCENARIO_RUNNER_ADAPTER.to_string(),

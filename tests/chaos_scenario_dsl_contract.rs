@@ -1,6 +1,7 @@
 #![allow(missing_docs)]
 
 use asupersync::lab::scenario::{FaultAction, GoldenProjectionFormat, Scenario};
+use asupersync::lab::scenario_runner::ScenarioRunner;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -329,6 +330,81 @@ fn canonical_source_backed_scenario_parses_validates_and_projects_golden() {
         assert!(
             !actual.contains(forbidden),
             "source-backed projection must not expose {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn live_runner_fault_log_executes_canonical_scenario_and_projects_redacted_log() {
+    let contract = contract();
+    let live_probe = contract
+        .get("live_runner_fault_log")
+        .expect("live_runner_fault_log object");
+    assert_eq!(string(live_probe, "report_status"), "LIVE");
+    assert_eq!(live_probe["must_pass_replay"].as_bool(), Some(true));
+    assert_eq!(
+        live_probe["must_log_every_scheduled_fault"].as_bool(),
+        Some(true)
+    );
+
+    let raw_scenario = serde_json::to_string(
+        contract
+            .get("canonical_source_backed_scenario")
+            .expect("canonical_source_backed_scenario object"),
+    )
+    .expect("serialize canonical source-backed scenario");
+    let scenario = Scenario::from_json(&raw_scenario).expect("parse canonical scenario");
+    assert_eq!(string(live_probe, "scenario_id"), scenario.id);
+
+    let result =
+        ScenarioRunner::validate_replay(&scenario).expect("canonical scenario must replay");
+    assert!(result.passed(), "canonical scenario must pass");
+    assert!(
+        result.lab_report.quiescent,
+        "canonical scenario must quiesce"
+    );
+    assert!(
+        result.lab_report.invariant_violations.is_empty(),
+        "canonical scenario must not emit invariant violations: {:?}",
+        result.lab_report.invariant_violations
+    );
+    assert_eq!(result.faults_injected, scenario.faults.len());
+    assert_eq!(result.fault_log.len(), scenario.faults.len());
+
+    let actual_fault_log = Value::Array(
+        result
+            .fault_log
+            .iter()
+            .map(|entry| entry.to_json())
+            .collect(),
+    );
+    let expected_fault_log = Value::Array(array(live_probe, "expected_fault_log").clone());
+    assert_eq!(
+        actual_fault_log, expected_fault_log,
+        "runner fault log must remain canonical and source backed"
+    );
+
+    let result_json = result.to_json();
+    for field in string_list(live_probe, "required_result_fields") {
+        assert!(
+            result_json.get(&field).is_some(),
+            "runner JSON result must include {field}"
+        );
+    }
+    assert_eq!(result_json["passed"].as_bool(), Some(true));
+    let expected_fault_count = u64::try_from(scenario.faults.len()).expect("fault count fits u64");
+    assert_eq!(
+        result_json["faults_injected"].as_u64(),
+        Some(expected_fault_count)
+    );
+    assert_eq!(result_json["fault_log"], expected_fault_log);
+
+    let rendered_fault_log =
+        serde_json::to_string(&result_json["fault_log"]).expect("render fault log");
+    for forbidden in string_list(live_probe, "forbidden_projection_markers") {
+        assert!(
+            !rendered_fault_log.contains(&forbidden),
+            "fault log projection must not expose raw coordination marker {forbidden}"
         );
     }
 }
