@@ -156,6 +156,14 @@ fn remote_pass_then_retrieval_timeout_is_split_verdict() {
 }
 
 #[test]
+fn remote_pass_then_retrieval_timeout_matches_full_output_golden() {
+    let actual = receipt_json("passed_after_retrieval_timeout.log", Some(124));
+    let expected = fixture_json("passed_after_retrieval_timeout_expected.json");
+
+    assert_eq!(actual, expected);
+}
+
+#[test]
 fn multistage_target_retrieval_timeout_is_not_clean_success() {
     let receipt = receipt_json_with_args(
         "multistage_target_timeout.log",
