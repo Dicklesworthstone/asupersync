@@ -33,7 +33,7 @@ pub struct ContinuationTestCase {
 }
 
 /// Test result for conformance comparison
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ConformanceResult {
     pub test_name: String,
     pub reference_status: String,
@@ -458,7 +458,7 @@ pub fn generate_conformance_report(results: &[ConformanceResult]) -> String {
 
     if passed == total {
         report.push_str(
-            "**LIVE REFERENCE PASSED** - asupersync and h2 crate produced identical results\n\n",
+            "**LIVE H2 REFERENCE PASSED** - CONTINUATION behavior matched observed h2/HPACK output\n\n",
         );
     } else {
         report.push_str("**FAIL-CLOSED** - no conformance pass is claimed without a live h2/HPACK reference\n\n");
@@ -595,7 +595,7 @@ mod tests {
         assert!(report.contains("FAIL-CLOSED"));
         assert!(report.contains(H2_REFERENCE_STATUS));
         assert!(!report.contains("ALL TESTS PASSED"));
-        assert!(!report.contains("asupersync and h2 crate produce identical results"));
+        assert!(!report.contains("produced identical"));
     }
 
     #[test]

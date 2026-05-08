@@ -88,6 +88,6 @@ fn print_help() {
     println!("    a real h2 PING frame observation seam is wired.");
     println!();
     println!("EXIT CODES:");
-    println!("    0    All tests passed - implementations are conformant");
-    println!("    1    One or more tests failed - behavior divergence detected");
+    println!("    0    Live h2 PING reference comparison passed");
+    println!("    1    Fail-closed, unsupported reference, or behavior divergence detected");
 }

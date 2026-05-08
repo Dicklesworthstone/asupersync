@@ -178,7 +178,7 @@ fn output_summary(results: &[ConformanceResult], verbose: bool) {
 
     if passed == total {
         println!(
-            "LIVE REFERENCE PASSED - asupersync and h2 produced identical CONTINUATION frame handling"
+            "LIVE H2 REFERENCE PASSED - CONTINUATION behavior matched observed h2/HPACK output"
         );
     } else {
         println!("FAIL-CLOSED - no conformance pass is claimed without a live h2/HPACK reference");
@@ -190,7 +190,7 @@ fn output_summary(results: &[ConformanceResult], verbose: bool) {
         if verbose || !result.passed() {
             println!("{}", result.summary());
             if verbose && !result.passed() {
-                if let (Some(ref a_headers), Some(ref h_headers)) =
+                if let (Some(a_headers), Some(h_headers)) =
                     (&result.asupersync_headers, &result.h2_headers)
                 {
                     println!("  asupersync headers: {} entries", a_headers.len());
@@ -312,24 +312,5 @@ mod tests {
             "h2 crate reference implementation ",
             "to ensure identical"
         )));
-    }
-}
-
-// Add Serialize support for JSON output
-impl serde::Serialize for ConformanceResult {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("ConformanceResult", 7)?;
-        state.serialize_field("test_name", &self.test_name)?;
-        state.serialize_field("reference_status", &self.reference_status)?;
-        state.serialize_field("passed", &self.passed())?;
-        state.serialize_field("asupersync_headers", &self.asupersync_headers)?;
-        state.serialize_field("h2_headers", &self.h2_headers)?;
-        state.serialize_field("asupersync_error", &self.asupersync_error)?;
-        state.serialize_field("h2_error", &self.h2_error)?;
-        state.end()
     }
 }
