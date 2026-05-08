@@ -518,19 +518,13 @@ impl PressureGovernor {
     // Runtime metric collection implementations
 
     fn sample_runnable_queue_pressure(&self) -> PressureSignalSample {
-        // Access the runtime's scheduler statistics
-        // This is a simplified implementation - in production we'd want to access
-        // the actual scheduler queue depths from ThreeLaneScheduler
+        let capacity = self.runtime.config().global_queue_limit;
+        if capacity == 0 {
+            return PressureSignalSample::unavailable();
+        }
 
-        // For now, get approximation from worker ready counts
-        // In a full implementation, we would:
-        // 1. Access ThreeLaneScheduler.workers[].ready_count() for each worker
-        // 2. Sum global queue depths from GlobalInjector
-        // 3. Calculate pressure as (total_ready_tasks / (worker_count * expected_capacity))
-
-        // No live scheduler queue signal is exposed yet. Report no pressure
-        // instead of fabricating load from unrelated process state.
-        PressureSignalSample::unavailable()
+        let ready_depth = self.runtime.scheduler_global_ready_depth();
+        PressureSignalSample::available(ready_depth as f64 / capacity as f64)
     }
 
     fn sample_blocking_pool_pressure(&self) -> PressureSignalSample {
@@ -999,6 +993,66 @@ mod tests {
         queued_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("queued blocking task should execute after release");
+    }
+
+    #[test]
+    fn pressure_governor_leaves_runnable_queue_unavailable_without_capacity() {
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create test runtime"),
+        );
+        let config = PressureGovernorConfig {
+            enabled: true,
+            admission_control: true,
+            sample_interval: Duration::ZERO,
+            ..Default::default()
+        };
+        let metrics = Metrics::new();
+        let governor = PressureGovernor::new(config, std::sync::Arc::clone(&runtime), metrics)
+            .expect("pressure governor should initialize");
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+
+        let snapshot = governor
+            .sample_pressure(&cx)
+            .expect("pressure snapshot should not fail");
+
+        assert!(!snapshot.signal_availability.runnable_queue);
+        assert_eq!(snapshot.runnable_queue_pressure, 0.0);
+    }
+
+    #[test]
+    fn pressure_governor_samples_runnable_queue_when_capacity_is_configured() {
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .global_queue_limit(4)
+                .build()
+                .expect("Failed to create global-queue-limited runtime"),
+        );
+        let config = PressureGovernorConfig {
+            enabled: true,
+            admission_control: true,
+            sample_interval: Duration::ZERO,
+            ..Default::default()
+        };
+        let metrics = Metrics::new();
+        let governor = PressureGovernor::new(config, std::sync::Arc::clone(&runtime), metrics)
+            .expect("pressure governor should initialize");
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+
+        let snapshot = governor
+            .sample_pressure(&cx)
+            .expect("pressure snapshot should not fail");
+
+        assert_eq!(runtime.scheduler_global_ready_depth(), 0);
+        assert!(snapshot.signal_availability.runnable_queue);
+        assert_eq!(snapshot.runnable_queue_pressure, 0.0);
+        assert_eq!(
+            snapshot.fallback_verdict,
+            PressureFallbackVerdict::PartialSignalsUnavailable
+        );
     }
 
     #[test]

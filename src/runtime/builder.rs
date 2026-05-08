@@ -3389,6 +3389,17 @@ impl Runtime {
     pub fn blocking_handle(&self) -> Option<crate::runtime::blocking_pool::BlockingPoolHandle> {
         self.inner.blocking_handle()
     }
+
+    /// Returns the approximate number of ready tasks in the shared global
+    /// scheduler queue.
+    ///
+    /// This is an observability hint, not an admission oracle: worker-local
+    /// ready queues and in-flight worker prefetch buffers are intentionally not
+    /// included.
+    #[must_use]
+    pub fn scheduler_global_ready_depth(&self) -> usize {
+        self.inner.scheduler.global_injector().ready_count()
+    }
 }
 
 /// Handle for spawning tasks onto a runtime from outside async context.
