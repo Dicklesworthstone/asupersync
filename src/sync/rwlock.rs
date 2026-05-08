@@ -4398,7 +4398,7 @@ mod metamorphic_tests {
             let lock = RwLock::with_name("test_abandon_write", 42_u32);
 
             // Block with reader so writer will queue
-            let _reader = read_blocking(&lock, &cx);
+            let _reader = block_on(lock.read(&cx)).expect("read");
 
             // Start write future but don't complete it
             let mut write_fut = lock.write(&cx);
@@ -4425,3 +4425,4 @@ mod metamorphic_tests {
         crate::test_complete!("abandon_waiter_calls_lock_ordering_record_release");
     }
 }
+
