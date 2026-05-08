@@ -518,8 +518,7 @@ mod tests {
         assert_eq!(copied, cloned);
         assert_ne!(def, sampled);
 
-        let dbg = format!("{sampled:?}");
-        assert!(dbg.contains("TraceFlags"), "{dbg}");
+        insta::assert_debug_snapshot!(sampled);
     }
 
     #[test]
@@ -528,8 +527,7 @@ mod tests {
         let t1 = RegionTag::new("us-west-2");
         let t2 = RegionTag::new("eu-central-1");
 
-        let dbg = format!("{t1:?}");
-        assert!(dbg.contains("RegionTag"), "{dbg}");
+        insta::assert_debug_snapshot!(t1);
         assert_eq!(format!("{t1}"), "us-west-2");
 
         let cloned = t1.clone();
@@ -553,8 +551,7 @@ mod tests {
             &mut rng,
         );
 
-        let dbg = format!("{ctx:?}");
-        assert!(dbg.contains("SymbolTraceContext"), "{dbg}");
+        insta::assert_debug_snapshot!(ctx);
 
         let cloned = ctx.clone();
         assert_eq!(cloned, ctx);

@@ -462,7 +462,7 @@ mod tests {
         let record2 = record;
         assert_eq!(record2.trace_id, trace_id);
         assert!(!record2.is_complete);
-        assert!(format!("{record2:?}").contains("TraceRecord"));
+        insta::assert_debug_snapshot!(record2);
     }
 
     #[test]
@@ -484,7 +484,7 @@ mod tests {
         let summary = collector.get_summary(trace_id).unwrap();
         let summary2 = summary;
         assert_eq!(summary2.symbols_encoded, 5);
-        assert!(format!("{summary2:?}").contains("TraceSummary"));
+        insta::assert_debug_snapshot!(summary2);
     }
 
     #[test]
