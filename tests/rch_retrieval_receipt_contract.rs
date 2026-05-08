@@ -373,6 +373,14 @@ fn local_fallback_invalidates_captured_cargo_output() {
 }
 
 #[test]
+fn local_fallback_matches_full_output_golden() {
+    let actual = receipt_json("local_fallback.log", None);
+    let expected = fixture_json("local_fallback_expected.json");
+
+    assert_eq!(actual, expected);
+}
+
+#[test]
 fn helper_declares_it_does_not_run_mutating_commands() {
     let receipt = receipt_json("passed_after_retrieval_timeout.log", Some(124));
 
