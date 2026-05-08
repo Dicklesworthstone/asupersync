@@ -11,7 +11,7 @@
 //! implementation and a real PostgreSQL server.
 //!
 //! Run with:
-//!     REAL_POSTGRES_TESTS=true \
+//!     rch exec -- env REAL_POSTGRES_TESTS=true \
 //!         POSTGRES_URL=postgres://postgres:postgres@localhost:5432/postgres \
 //!         cargo test --features postgres --test postgres_real_server
 //!

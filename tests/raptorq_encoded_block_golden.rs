@@ -7,7 +7,7 @@
 //! mismatches, ensuring backwards compatibility and correctness.
 //!
 //! To update goldens after intentional changes:
-//!   UPDATE_GOLDENS=1 cargo test --test raptorq_encoded_block_golden
+//!   rch exec -- env UPDATE_GOLDENS=1 cargo test --test raptorq_encoded_block_golden
 //!   Review diffs and commit changes with justification
 
 use insta::assert_json_snapshot;

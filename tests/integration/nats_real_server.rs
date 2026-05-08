@@ -3,7 +3,7 @@
 //! Bead: br-asupersync-shyxh0
 //!
 //! Run with:
-//!     REAL_NATS_TESTS=true \
+//!     rch exec -- env REAL_NATS_TESTS=true \
 //!         NATS_URL=nats://127.0.0.1:4222 \
 //!         cargo test --test nats_real_server -- --nocapture
 //!

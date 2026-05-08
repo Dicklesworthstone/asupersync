@@ -6,7 +6,7 @@
 //! These tests establish baseline performance metrics and fail if
 //! performance degrades beyond acceptable thresholds. Run with:
 //!
-//!   cargo test --test scheduler_regression --release -- --nocapture
+//!   rch exec -- cargo test --test scheduler_regression --release -- --nocapture
 //!
 //! Note: these tests require --release for meaningful numbers.
 

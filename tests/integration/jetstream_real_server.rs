@@ -3,7 +3,7 @@
 //! Bead: br-asupersync-vkoobf
 //!
 //! Run with:
-//!     REAL_NATS_TESTS=true cargo test --test jetstream_real_server -- --nocapture
+//!     rch exec -- env REAL_NATS_TESTS=true cargo test --test jetstream_real_server -- --nocapture
 //!
 //! Behavior:
 //! - If `NATS_URL` is set, connect to that broker after localhost / production
