@@ -1472,11 +1472,17 @@ fn golden_trace_replay_delta_report_flags_fixture_drift() {
         "golden_trace_replay_delta_report.json",
         &serde_json::to_value(&drift).expect("serialize replay delta report"),
     );
+    let repro_command = concat!(
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/",
+        "rch_target_replay_e2e_suite_docs cargo test -p asupersync ",
+        "--test replay_e2e_suite golden_trace_replay_delta_report_flags_fixture_drift ",
+        "-- --nocapture"
+    );
     let triage_bundle = serde_json::json!({
         "schema_version": "golden-replay-delta-triage-v1",
         "scenario_id": "replay_e2e_suite::golden_trace_replay_delta_report_flags_fixture_drift",
         "source_seed": "0xD17AFEED",
-        "repro_command": "rch exec -- cargo test -p asupersync --test replay_e2e_suite golden_trace_replay_delta_report_flags_fixture_drift -- --nocapture",
+        "repro_command": repro_command,
         "artifact_paths": {
             "delta_report": "golden_trace_replay_delta_report.json",
             "triage_bundle": "golden_trace_replay_delta_triage_bundle.json"
@@ -1492,6 +1498,21 @@ fn golden_trace_replay_delta_report_flags_fixture_drift() {
             "observability_drift": drift.observability_drift
         }
     });
+    let repro_command = triage_bundle["repro_command"]
+        .as_str()
+        .expect("triage repro command");
+    assert!(
+        repro_command.contains("rch exec -- env "),
+        "triage repro command must use rch env routing: {repro_command}"
+    );
+    assert!(
+        repro_command.contains("CARGO_TARGET_DIR="),
+        "triage repro command must isolate Cargo output: {repro_command}"
+    );
+    assert!(
+        !repro_command.contains("rch exec -- cargo"),
+        "triage repro command must not use bare rch cargo routing: {repro_command}"
+    );
     write_replay_artifact_json(
         "golden_trace_replay_delta_triage_bundle.json",
         &triage_bundle,
