@@ -1,0 +1,44 @@
+{
+  "schema_version": "semantic-signal-quality-v1",
+  "generated_at": "[generated_at]",
+  "status": "pass",
+  "inputs": {
+    "verification_report": "$REPO/tests/fixtures/semantic_signal_quality/verification_report_sample.json",
+    "variance_dashboard": "$REPO/tests/fixtures/semantic_signal_quality/variance_dashboard_pass.json"
+  },
+  "metrics": {
+    "runner_profile": "smoke",
+    "suite_count": 2,
+    "unstable_suite_count": 0,
+    "flake_rate_pct": 0.0,
+    "false_positive_proxy_count": 0,
+    "false_positive_proxy_rate_pct": 0.0,
+    "total_duration_s": 150,
+    "runtime_budget_s": 180,
+    "runtime_ratio": 0.833
+  },
+  "thresholds": {
+    "max_flake_rate_pct": 0,
+    "max_false_positive_rate_pct": 5,
+    "max_runtime_ratio": 1.0
+  },
+  "diagnostics_links": {
+    "runner_report_dir": "$REPO/tests/fixtures/semantic_signal_quality/report_artifacts",
+    "existing_required_artifacts": [
+      "$REPO/tests/fixtures/semantic_signal_quality/report_artifacts/docs_output.txt",
+      "$REPO/tests/fixtures/semantic_signal_quality/report_artifacts/golden_output.txt"
+    ],
+    "missing_required_artifacts": [],
+    "variance_events_ndjson": "$REPO/tests/fixtures/semantic_signal_quality/flake/variance_events.ndjson",
+    "variance_summary": "$REPO/tests/fixtures/semantic_signal_quality/flake/summary.txt"
+  },
+  "maintenance_guidance": {
+    "document": "$REPO/docs/semantic_ci_signal_quality.md"
+  },
+  "rerun_commands": [
+    "scripts/run_semantic_verification.sh --profile full --json",
+    "scripts/run_semantic_flake_detector.sh --iterations 5 --json",
+    "scripts/check_semantic_signal_quality.sh --report $REPO/tests/fixtures/semantic_signal_quality/verification_report_sample.json --dashboard $REPO/tests/fixtures/semantic_signal_quality/variance_dashboard_pass.json --output $TMP/semantic_signal_quality_report_[n].json"
+  ],
+  "failures": []
+}

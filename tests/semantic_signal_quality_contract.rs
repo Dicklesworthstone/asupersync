@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 const FIXTURE_DIR: &str = "tests/fixtures/semantic_signal_quality";
 const SCRIPT_PATH: &str = "scripts/check_semantic_signal_quality.sh";
@@ -44,6 +44,65 @@ fn run_signal_quality(dashboard_fixture: &str) -> (std::process::ExitStatus, Val
     (command_output.status, parsed)
 }
 
+fn fixture_json(name: &str) -> Value {
+    let raw = std::fs::read_to_string(fixture_path(name))
+        .unwrap_or_else(|error| panic!("read fixture {name}: {error}"));
+    serde_json::from_str(&raw).unwrap_or_else(|error| panic!("parse fixture {name}: {error}"))
+}
+
+fn scrub_report(mut report: Value) -> Value {
+    scrub_strings(&mut report);
+    report["generated_at"] = json!("[generated_at]");
+    report
+}
+
+fn scrub_strings(value: &mut Value) {
+    match value {
+        Value::String(text) => {
+            *text = scrub_string(text);
+        }
+        Value::Array(items) => {
+            for item in items {
+                scrub_strings(item);
+            }
+        }
+        Value::Object(fields) => {
+            for value in fields.values_mut() {
+                scrub_strings(value);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
+fn scrub_string(text: &str) -> String {
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let tmp = std::env::temp_dir();
+    let tmp = tmp.to_string_lossy();
+    let scrubbed = text.replace(repo, "$REPO").replace(tmp.as_ref(), "$TMP");
+    collapse_signal_quality_temp_names(scrubbed)
+}
+
+fn collapse_signal_quality_temp_names(mut text: String) -> String {
+    const MARKER: &str = "semantic_signal_quality_report_";
+    const REPLACEMENT: &str = "semantic_signal_quality_report_[n].json";
+    let mut search_start = 0;
+    while let Some(relative_start) = text[search_start..].find(MARKER) {
+        let start = search_start + relative_start;
+        let mut digit_end = start + MARKER.len();
+        while digit_end < text.len() && text.as_bytes()[digit_end].is_ascii_digit() {
+            digit_end += 1;
+        }
+        if digit_end == start + MARKER.len() || !text[digit_end..].starts_with(".json") {
+            search_start = digit_end;
+            continue;
+        }
+        text.replace_range(start..digit_end + ".json".len(), REPLACEMENT);
+        search_start = start + REPLACEMENT.len();
+    }
+    text
+}
+
 #[test]
 fn signal_quality_pass_fixture_meets_thresholds() {
     let (status, report) = run_signal_quality("variance_dashboard_pass.json");
@@ -72,6 +131,21 @@ fn signal_quality_pass_fixture_meets_thresholds() {
             .as_array()
             .is_some_and(|arr| arr.len() >= 2),
         "required artifacts should be linked for deep diagnostics"
+    );
+}
+
+#[test]
+fn signal_quality_pass_fixture_matches_scrubbed_golden() {
+    let (status, report) = run_signal_quality("variance_dashboard_pass.json");
+
+    assert!(
+        status.success(),
+        "pass fixture should satisfy thresholds and return success"
+    );
+    assert_eq!(
+        scrub_report(report),
+        fixture_json("variance_dashboard_pass_expected.json"),
+        "semantic signal-quality pass report drifted from the reviewed scrubbed golden"
     );
 }
 
@@ -115,5 +189,20 @@ fn signal_quality_fail_fixture_flags_flake_and_false_positive_proxy() {
             .filter_map(Value::as_str)
             .any(|msg| msg.contains("false_positive_proxy_rate_pct")),
         "failure report should include false-positive proxy threshold breach"
+    );
+}
+
+#[test]
+fn signal_quality_fail_fixture_matches_scrubbed_golden() {
+    let (status, report) = run_signal_quality("variance_dashboard_fail.json");
+
+    assert!(
+        !status.success(),
+        "fail fixture should return non-zero status"
+    );
+    assert_eq!(
+        scrub_report(report),
+        fixture_json("variance_dashboard_fail_expected.json"),
+        "semantic signal-quality fail report drifted from the reviewed scrubbed golden"
     );
 }
