@@ -65,9 +65,12 @@ fn aligned_receipt_output_matches_full_reviewed_golden() {
         String::from_utf8_lossy(&output.stderr)
     );
 
+    let actual = String::from_utf8(output.stdout).expect("receipt stdout is utf-8");
+    let expected = fixture_text("aligned_expected.json");
+    serde_json::from_str::<Value>(&actual).expect("actual aligned receipt must be JSON");
+    serde_json::from_str::<Value>(&expected).expect("aligned golden receipt must be JSON");
     assert_eq!(
-        String::from_utf8(output.stdout).expect("receipt stdout is utf-8"),
-        fixture_text("aligned_expected.json"),
+        actual, expected,
         "aligned runtime p999 receipt drifted from the reviewed golden"
     );
 }
@@ -83,9 +86,12 @@ fn divergent_receipt_output_matches_full_reviewed_golden() {
         String::from_utf8_lossy(&output.stderr)
     );
 
+    let actual = String::from_utf8(output.stdout).expect("receipt stdout is utf-8");
+    let expected = fixture_text("diverged_and_missing_expected.json");
+    serde_json::from_str::<Value>(&actual).expect("actual divergent receipt must be JSON");
+    serde_json::from_str::<Value>(&expected).expect("divergent golden receipt must be JSON");
     assert_eq!(
-        String::from_utf8(output.stdout).expect("receipt stdout is utf-8"),
-        fixture_text("diverged_and_missing_expected.json"),
+        actual, expected,
         "divergent runtime p999 receipt drifted from the reviewed golden"
     );
 }
