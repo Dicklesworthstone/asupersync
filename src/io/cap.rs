@@ -1767,16 +1767,76 @@ impl From<IoNotAvailable> for io::Error {
     }
 }
 
+/// Number of submit/complete shards. Power of 2 for fast modulo via
+/// bitwise AND. 8 shards keeps memory footprint bounded
+/// (8 × 64-byte cache line × 2 counter sets = 1 KiB per LabIoCap)
+/// while delivering up to 8-way write scaling on multi-thread tests.
+///
+/// br-asupersync-jyqjh9.
+const LAB_IOCAP_SHARD_COUNT: usize = 8;
+const LAB_IOCAP_SHARD_MASK: usize = LAB_IOCAP_SHARD_COUNT - 1;
+
 /// Lab I/O capability for testing.
 ///
 /// This implementation provides virtual I/O that can be controlled by tests:
 /// - Deterministic timing
 /// - Fault injection
 /// - Replay support
-#[derive(Debug, Default)]
+///
+/// br-asupersync-jyqjh9: submit/complete counters are sharded across
+/// `LAB_IOCAP_SHARD_COUNT` cache-padded `AtomicU64`s. Pre-fix the two
+/// counters lived in adjacent fields of the same struct, sharing a
+/// cache line — every `record_submit` ping-ponged the line away from
+/// concurrent `record_complete` writers and vice versa, AND every
+/// concurrent `record_submit` from N threads serialized on the single
+/// counter. Sharding distributes writers across cache lines via a
+/// thread-local shard index, eliminating both kinds of false-sharing
+/// contention. Stats reads sum across shards — O(SHARD_COUNT) per
+/// call, but stats() is not on the hot path.
+#[derive(Debug)]
 pub struct LabIoCap {
-    submitted: AtomicU64,
-    completed: AtomicU64,
+    submitted_shards: [crate::util::CachePadded<AtomicU64>; LAB_IOCAP_SHARD_COUNT],
+    completed_shards: [crate::util::CachePadded<AtomicU64>; LAB_IOCAP_SHARD_COUNT],
+}
+
+impl Default for LabIoCap {
+    fn default() -> Self {
+        Self {
+            submitted_shards: std::array::from_fn(|_| {
+                crate::util::CachePadded::new(AtomicU64::new(0))
+            }),
+            completed_shards: std::array::from_fn(|_| {
+                crate::util::CachePadded::new(AtomicU64::new(0))
+            }),
+        }
+    }
+}
+
+/// Returns a thread-local shard index in `[0, LAB_IOCAP_SHARD_COUNT)`.
+///
+/// br-asupersync-jyqjh9: computed once per thread from
+/// `thread::current().id()` and cached. Keeps the hot path to a single
+/// TLS load + masked `fetch_add`.
+#[inline]
+fn lab_iocap_shard() -> usize {
+    use std::cell::Cell;
+    thread_local! {
+        static SHARD: Cell<usize> = Cell::new(usize::MAX);
+    }
+    SHARD.with(|cell| {
+        let cached = cell.get();
+        if cached != usize::MAX {
+            return cached;
+        }
+        // First call on this thread — compute and cache.
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        std::thread::current().id().hash(&mut hasher);
+        let idx = (hasher.finish() as usize) & LAB_IOCAP_SHARD_MASK;
+        cell.set(idx);
+        idx
+    })
 }
 
 impl LabIoCap {
@@ -1797,13 +1857,41 @@ impl LabIoCap {
     }
 
     /// Records a submitted virtual I/O operation.
+    #[inline]
     pub fn record_submit(&self) {
-        self.submitted.fetch_add(1, Ordering::Relaxed);
+        let idx = lab_iocap_shard();
+        // Safe: idx is masked to `[0, LAB_IOCAP_SHARD_COUNT)`.
+        self.submitted_shards[idx].fetch_add(1, Ordering::Relaxed);
     }
 
     /// Records a completed virtual I/O operation.
+    #[inline]
     pub fn record_complete(&self) {
-        self.completed.fetch_add(1, Ordering::Relaxed);
+        let idx = lab_iocap_shard();
+        self.completed_shards[idx].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// br-asupersync-jyqjh9 internal helper for benchmarks: sums the
+    /// submitted counter across all shards. Same semantics as the
+    /// `submitted` field in `IoStats`, exposed so a Criterion harness
+    /// can read it without going through the trait dispatch overhead.
+    #[cfg(any(test, feature = "test-internals"))]
+    #[must_use]
+    pub fn submitted_total(&self) -> u64 {
+        self.submitted_shards
+            .iter()
+            .map(|shard| shard.load(Ordering::Relaxed))
+            .sum()
+    }
+
+    /// Companion of [`Self::submitted_total`] for completed events.
+    #[cfg(any(test, feature = "test-internals"))]
+    #[must_use]
+    pub fn completed_total(&self) -> u64 {
+        self.completed_shards
+            .iter()
+            .map(|shard| shard.load(Ordering::Relaxed))
+            .sum()
     }
 }
 
@@ -1821,9 +1909,22 @@ impl IoCap for LabIoCap {
     }
 
     fn stats(&self) -> IoStats {
+        // br-asupersync-jyqjh9: sum across shards. O(SHARD_COUNT) per
+        // call. Stats reads are not hot-path; the optimization wins
+        // come on the write side (record_submit / record_complete).
+        let submitted: u64 = self
+            .submitted_shards
+            .iter()
+            .map(|shard| shard.load(Ordering::Relaxed))
+            .sum();
+        let completed: u64 = self
+            .completed_shards
+            .iter()
+            .map(|shard| shard.load(Ordering::Relaxed))
+            .sum();
         IoStats {
-            submitted: self.submitted.load(Ordering::Relaxed),
-            completed: self.completed.load(Ordering::Relaxed),
+            submitted,
+            completed,
         }
     }
 }

@@ -345,6 +345,11 @@ harness = false
 required-features = ["test-internals"]
 
 [[bench]]
+name = "lab_iocap_contention"
+harness = false
+required-features = ["test-internals"]
+
+[[bench]]
 name = "timer_wheel"
 harness = false
 
