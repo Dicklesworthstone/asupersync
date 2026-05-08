@@ -4,8 +4,8 @@
 //!
 //! Usage:
 //! ```bash
-//! cargo test --test conformance_quic_stream_rfc9000
-//! cargo run --bin quic_conformance_report  # Generate compliance report
+//! rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_quic_conformance cargo test --test conformance_quic_stream_rfc9000
+//! rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_quic_conformance cargo test --test conformance_quic_stream_rfc9000 -- --nocapture  # Emit compliance diagnostics
 //! ```
 
 pub mod stream_states;

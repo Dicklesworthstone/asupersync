@@ -33,7 +33,7 @@ This directory contains a comprehensive conformance test suite for gRPC with Con
 Start the test server:
 
 ```bash
-cargo run --bin connect-server -- --port 8080 --enable-compression --connect-protocol
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_grpc_connect_conformance cargo run --manifest-path tests/conformance/grpc_connect/Cargo.toml --bin grpc-connect-server -- --port 8080 --enable-compression --connect-protocol
 ```
 
 ### Conformance Runner
@@ -41,20 +41,20 @@ cargo run --bin connect-server -- --port 8080 --enable-compression --connect-pro
 Run the complete test suite:
 
 ```bash
-cargo run --bin conformance-runner -- --server http://127.0.0.1:8080 --connect-protocol --enable-compression
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_grpc_connect_conformance cargo run --manifest-path tests/conformance/grpc_connect/Cargo.toml --bin conformance-runner -- --server http://127.0.0.1:8080 --connect-protocol --enable-compression
 ```
 
 ### Custom Configuration
 
 ```bash
 # Test against external server
-cargo run --bin conformance-runner -- --server https://api.example.com --enable-tls
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_grpc_connect_conformance cargo run --manifest-path tests/conformance/grpc_connect/Cargo.toml --bin conformance-runner -- --server https://api.example.com --enable-tls
 
 # Run specific test categories
-cargo run --bin conformance-runner -- --filter "unary"
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_grpc_connect_conformance cargo run --manifest-path tests/conformance/grpc_connect/Cargo.toml --bin conformance-runner -- --filter "unary"
 
 # Parallel execution
-cargo run --bin conformance-runner -- --parallel
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_grpc_connect_conformance cargo run --manifest-path tests/conformance/grpc_connect/Cargo.toml --bin conformance-runner -- --parallel
 ```
 
 ## Test Results
@@ -102,7 +102,7 @@ This conformance suite is designed to integrate with:
 Enable verbose logging:
 
 ```bash
-RUST_LOG=grpc_conformance_suite=debug,asupersync=debug cargo run --bin conformance-runner
+rch exec -- env RUST_LOG=grpc_conformance_suite=debug,asupersync=debug CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_grpc_connect_conformance cargo run --manifest-path tests/conformance/grpc_connect/Cargo.toml --bin conformance-runner
 ```
 
 View detailed error information in the generated JSON report.

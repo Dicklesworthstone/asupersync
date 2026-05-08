@@ -1157,5 +1157,7 @@ fn trace_event_conformance_suite_availability() {
     println!(
         "✓ Covers: event kind stability, timestamp ordering, correlation IDs, serialization round-trip, forward compatibility"
     );
-    println!("  Run with: cargo test --test conformance_trace_event");
+    println!(
+        "  Run with: rch exec -- env CARGO_TARGET_DIR=${{TMPDIR:-/tmp}}/rch_target_conformance_trace_event cargo test --test conformance_trace_event"
+    );
 }

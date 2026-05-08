@@ -14,17 +14,17 @@ This document tracks the provenance and generation methodology for RaptorQ RFC 6
 
 ### Parameter Derivation Fixtures
 ```bash
-cargo run --bin generate_goldens -- --output fixtures/parameter_derivation --seed 42
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_raptorq_rfc6330_golden cargo run --manifest-path tests/conformance/raptorq_rfc6330/golden/Cargo.toml --bin generate_goldens -- --output fixtures/parameter_derivation --seed 42
 ```
 
 ### Constraint Matrix Fixtures  
 ```bash
-cargo run --bin generate_goldens -- --output fixtures/constraint_matrices --seed 123
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_raptorq_rfc6330_golden cargo run --manifest-path tests/conformance/raptorq_rfc6330/golden/Cargo.toml --bin generate_goldens -- --output fixtures/constraint_matrices --seed 123
 ```
 
 ### Symbol Output Fixtures
 ```bash
-cargo run --bin generate_goldens -- --output fixtures/symbol_outputs --seed 456
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_raptorq_rfc6330_golden cargo run --manifest-path tests/conformance/raptorq_rfc6330/golden/Cargo.toml --bin generate_goldens -- --output fixtures/symbol_outputs --seed 456
 ```
 
 ## Test Coverage

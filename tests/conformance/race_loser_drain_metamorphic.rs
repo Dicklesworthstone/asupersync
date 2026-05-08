@@ -1259,7 +1259,7 @@ fn race_loser_drain_metamorphic_suite_availability() {
     {
         println!("⚠ Race loser-drain metamorphic tests require --features deterministic-mode");
         println!(
-            "  Run with: cargo test --features deterministic-mode race_loser_drain_metamorphic"
+            "  Run with: rch exec -- env CARGO_TARGET_DIR=${{TMPDIR:-/tmp}}/rch_target_race_loser_drain_metamorphic cargo test --features deterministic-mode race_loser_drain_metamorphic"
         );
     }
 }

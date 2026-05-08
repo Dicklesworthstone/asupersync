@@ -1210,7 +1210,7 @@ fn obligation_lifecycle_metamorphic_suite_availability() {
     {
         println!("⚠ Obligation lifecycle metamorphic tests require --features deterministic-mode");
         println!(
-            "  Run with: cargo test --features deterministic-mode obligation_lifecycle_metamorphic"
+            "  Run with: rch exec -- env CARGO_TARGET_DIR=${{TMPDIR:-/tmp}}/rch_target_obligation_lifecycle_metamorphic cargo test --features deterministic-mode obligation_lifecycle_metamorphic"
         );
     }
 }

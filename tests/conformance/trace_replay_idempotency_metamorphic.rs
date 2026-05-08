@@ -1331,7 +1331,7 @@ fn trace_replay_idempotency_metamorphic_suite_availability() {
             "⚠ Trace replay idempotency metamorphic tests require --features deterministic-mode"
         );
         println!(
-            "  Run with: cargo test --features deterministic-mode trace_replay_idempotency_metamorphic"
+            "  Run with: rch exec -- env CARGO_TARGET_DIR=${{TMPDIR:-/tmp}}/rch_target_trace_replay_idempotency_metamorphic cargo test --features deterministic-mode trace_replay_idempotency_metamorphic"
         );
     }
 }

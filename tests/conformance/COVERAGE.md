@@ -87,13 +87,13 @@ These would be verified by extended statistical analysis:
 ### Execution Protocol
 ```bash
 # Run ring-consistency conformance tests
-cargo test -p asupersync consistent_hash_ring::run_all_tests
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_coverage cargo test -p asupersync consistent_hash_ring::run_all_tests
 
 # Run specific ring property tests
-cargo test -p asupersync --test conformance ring_consistency_conformance_suite
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_coverage cargo test -p asupersync --test conformance ring_consistency_conformance_suite
 
 # Generate conformance report
-cargo test -p asupersync conformance_report
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_coverage cargo test -p asupersync conformance_report
 ```
 
 ### Expected Output

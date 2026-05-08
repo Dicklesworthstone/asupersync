@@ -1268,6 +1268,8 @@ fn cancel_dag_determinism_conformance_suite_availability() {
         println!(
             "⚠ Cancel DAG determinism conformance tests require --features deterministic-mode"
         );
-        println!("  Run with: cargo test --features deterministic-mode cancel_dag_determinism");
+        println!(
+            "  Run with: rch exec -- env CARGO_TARGET_DIR=${{TMPDIR:-/tmp}}/rch_target_cancel_dag_determinism cargo test --features deterministic-mode cancel_dag_determinism"
+        );
     }
 }

@@ -46,7 +46,7 @@ fn rfc6330_section6_systematic_repair_mix_differential() {
          3. ESI ordering or symbol kind classification bug\n\
          \n\
          To update golden after confirming change is intentional:\n\
-         cargo test --lib conformance::raptorq_rfc6330_section6_systematic_repair_mix::regenerate_rfc6330_section6_golden -- --include-ignored --nocapture"
+         rch exec -- env CARGO_TARGET_DIR=${{TMPDIR:-/tmp}}/rch_target_raptorq_section6_repair_mix cargo test --lib conformance::raptorq_rfc6330_section6_systematic_repair_mix::regenerate_rfc6330_section6_golden -- --include-ignored --nocapture"
     );
 }
 
@@ -215,7 +215,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 /// Generator test: creates the golden file for RFC 6330 §6 test case
 ///
 /// Run this to regenerate the golden file after intentional changes:
-/// cargo test --lib conformance::raptorq_rfc6330_section6_systematic_repair_mix::regenerate_rfc6330_section6_golden -- --include-ignored --nocapture
+/// rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_raptorq_section6_repair_mix cargo test --lib conformance::raptorq_rfc6330_section6_systematic_repair_mix::regenerate_rfc6330_section6_golden -- --include-ignored --nocapture
 #[test]
 #[ignore = "regen-only: writes golden file — run manually after algorithm changes"]
 fn regenerate_rfc6330_section6_golden() {

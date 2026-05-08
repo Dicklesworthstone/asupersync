@@ -152,7 +152,7 @@ impl GoldenFileManager {
              Golden:  {}\n\
              Actual:  {}\n\
              \n\
-             To update: UPDATE_GOLDENS=1 cargo test {test_name}\n\
+             To update: rch exec -- env UPDATE_GOLDENS=1 CARGO_TARGET_DIR=${{TMPDIR:-/tmp}}/rch_target_raptorq_rfc6330_golden cargo test --manifest-path tests/conformance/raptorq_rfc6330/golden/Cargo.toml {test_name}\n\
              To diff:   xxd {} && xxd {}",
             expected.len(),
             actual.len(),
@@ -175,7 +175,7 @@ impl GoldenFileManager {
              Golden:  {}\n\
              Actual:  {}\n\
              \n\
-             To update: UPDATE_GOLDENS=1 cargo test {test_name}\n\
+             To update: rch exec -- env UPDATE_GOLDENS=1 CARGO_TARGET_DIR=${{TMPDIR:-/tmp}}/rch_target_raptorq_rfc6330_golden cargo test --manifest-path tests/conformance/raptorq_rfc6330/golden/Cargo.toml {test_name}\n\
              To diff:   diff {} {}",
             golden_path.display(),
             actual_path.display(),
