@@ -534,14 +534,19 @@ impl PressureGovernor {
     }
 
     fn sample_blocking_pool_pressure(&self) -> PressureSignalSample {
-        // TODO: Access actual blocking pool handle from runtime
-        // In a full implementation, we would:
-        // 1. Get BlockingPoolHandle from Runtime
-        // 2. Call blocking_pool.busy_threads() / blocking_pool.max_threads
-        // 3. Also consider pending_count() for queue pressure
+        let max_threads = self.runtime.config().blocking.max_threads;
+        if max_threads == 0 {
+            return PressureSignalSample::unavailable();
+        }
 
-        // No live blocking-pool saturation signal is exposed yet.
-        PressureSignalSample::unavailable()
+        let Some(blocking_pool) = self.runtime.blocking_handle() else {
+            return PressureSignalSample::unavailable();
+        };
+
+        let busy = blocking_pool.busy_threads();
+        let pending = blocking_pool.pending_count();
+        let load = busy.saturating_add(pending);
+        PressureSignalSample::available(load as f64 / max_threads as f64)
     }
 
     fn sample_channel_backlog_pressure(&self) -> PressureSignalSample {
@@ -610,6 +615,13 @@ impl PressureSignalSample {
             available: false,
         }
     }
+
+    const fn available(pressure: f64) -> Self {
+        Self {
+            pressure,
+            available: true,
+        }
+    }
 }
 
 fn nanos_since(started_at: Instant, now: Instant) -> u64 {
@@ -662,6 +674,7 @@ mod tests {
     use super::*;
     use crate::observability::metrics::Metrics;
     use crate::runtime::RuntimeBuilder;
+    use crate::types::Budget;
     use std::time::Duration;
 
     #[test]
@@ -870,8 +883,9 @@ mod tests {
                 .expect("Failed to create test runtime"),
         );
         let metrics = Metrics::new();
-        let governor = PressureGovernor::new(config, runtime, metrics).unwrap();
-        let cx = Cx::new();
+        let governor = PressureGovernor::new(config, std::sync::Arc::clone(&runtime), metrics)
+            .expect("pressure governor should initialize");
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
 
         let decision = governor
             .check_admission(&cx)
@@ -895,6 +909,96 @@ mod tests {
             PressureFallbackVerdict::NoWinNoLiveSignals
         );
         assert_eq!(cached.signal_availability, PressureSignalAvailability::NONE);
+    }
+
+    #[test]
+    fn pressure_governor_samples_blocking_pool_pressure_when_runtime_exposes_pool() {
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .blocking_threads(0, 1)
+                .build()
+                .expect("Failed to create blocking-pool runtime"),
+        );
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let first = runtime
+            .spawn_blocking(move || {
+                started_tx
+                    .send(())
+                    .expect("test should observe first task start");
+                release_rx
+                    .recv()
+                    .expect("test should release first blocking task");
+            })
+            .expect("runtime should expose a blocking pool");
+        started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("first blocking task should start");
+
+        let (queued_tx, queued_rx) = std::sync::mpsc::channel();
+        let second = runtime
+            .spawn_blocking(move || {
+                let _ = queued_tx.send(());
+            })
+            .expect("runtime should accept a queued blocking task");
+
+        let config = PressureGovernorConfig {
+            enabled: true,
+            admission_control: true,
+            sample_interval: Duration::ZERO,
+            ..Default::default()
+        };
+        let metrics = Metrics::new();
+        let governor = PressureGovernor::new(config, std::sync::Arc::clone(&runtime), metrics)
+            .expect("pressure governor should initialize");
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+
+        let snapshot = governor
+            .sample_pressure(&cx)
+            .expect("blocking-pool pressure snapshot should not fail");
+        assert!(snapshot.signal_availability.blocking_pool);
+        assert!(!snapshot.signal_availability.runnable_queue);
+        assert_eq!(
+            snapshot.fallback_verdict,
+            PressureFallbackVerdict::PartialSignalsUnavailable
+        );
+        assert!(
+            snapshot.blocking_pool_pressure >= 1.0,
+            "one busy blocking thread should produce saturation, got {}",
+            snapshot.blocking_pool_pressure
+        );
+        assert_eq!(snapshot.overall_pressure, snapshot.blocking_pool_pressure);
+
+        let decision = governor
+            .check_admission(&cx)
+            .expect("blocking-pool pressure decision should not fail");
+        assert!(
+            matches!(
+                decision,
+                AdmissionDecision::AdmitWithBackpressure | AdmissionDecision::Reject
+            ),
+            "blocking-pool pressure should influence admission, got {decision:?}"
+        );
+        assert_eq!(
+            governor.fallback_verdict_metric(),
+            PressureFallbackVerdict::PartialSignalsUnavailable.as_metric_value()
+        );
+
+        release_tx
+            .send(())
+            .expect("test should release first blocking task");
+        assert!(
+            first.wait_timeout(Duration::from_secs(2)),
+            "first blocking task should finish"
+        );
+        assert!(
+            second.wait_timeout(Duration::from_secs(2)),
+            "queued blocking task should finish"
+        );
+        queued_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("queued blocking task should execute after release");
     }
 
     #[test]

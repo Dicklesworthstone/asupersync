@@ -793,6 +793,12 @@ impl BlockingPoolHandle {
         self.inner.active_threads.load(Ordering::Relaxed)
     }
 
+    /// Returns the number of threads currently executing work.
+    #[must_use]
+    pub fn busy_threads(&self) -> usize {
+        self.inner.busy_threads.load(Ordering::Relaxed)
+    }
+
     /// Returns a snapshot of locality-routing activity for this handle's pool.
     #[must_use]
     pub fn affinity_metrics(&self) -> BlockingPoolAffinityMetricsSnapshot {
