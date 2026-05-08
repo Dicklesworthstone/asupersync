@@ -132,12 +132,12 @@ Heavy commands MUST be run through `rch exec --`.
 
 Required command tokens:
 
-- `rch exec -- cargo check --all-targets`
-- `rch exec -- cargo clippy --all-targets -- -D warnings`
-- `rch exec -- cargo fmt --check`
-- `rch exec -- cargo test --test tokio_differential_behavior_suites -- --nocapture`
-- `rch exec -- cargo test --test tokio_ci_quality_gate_enforcement -- --nocapture`
-- `rch exec -- cargo test --test tokio_track_performance_regression_budgets -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_performance_budgets_docs cargo check --all-targets`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_performance_budgets_docs cargo clippy --all-targets -- -D warnings`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_performance_budgets_docs cargo fmt --check`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_performance_budgets_docs cargo test --test tokio_differential_behavior_suites -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_performance_budgets_docs cargo test --test tokio_ci_quality_gate_enforcement -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_performance_budgets_docs cargo test --test tokio_track_performance_regression_budgets -- --nocapture`
 
 ---
 
