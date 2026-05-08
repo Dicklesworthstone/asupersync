@@ -183,7 +183,7 @@ Use this template for CI summaries, issue comments, or handoff notes.
 ## Repro Commands
 - full rerun: `NO_PREFLIGHT=1 ./scripts/run_raptorq_e2e.sh --profile <profile> --bundle`
 - focused rerun: `NO_PREFLIGHT=1 ./scripts/run_raptorq_e2e.sh --profile <profile> --scenario <SCENARIO_ID> --bundle`
-- CI gate replay: `rch exec -- cargo test --test ci_regression_gates -- --nocapture`
+- CI gate replay: `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_raptorq_unit_matrix_docs cargo test --test ci_regression_gates -- --nocapture`
 
 ## First-response triage decision
 - suspected class: <config|loss envelope|decode policy|kernel dispatch|cache/regime|infrastructure>
@@ -278,10 +278,10 @@ The D5 bead can close only when all of the following are true:
 
 ```bash
 # Unit-heavy pass (focused)
-rch exec -- cargo test --lib raptorq -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_raptorq_unit_matrix_docs cargo test --lib raptorq -- --nocapture
 
 # Deterministic conformance scenario suite
-rch exec -- cargo test --test raptorq_conformance e2e_pipeline_reports_are_deterministic -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_raptorq_unit_matrix_docs cargo test --test raptorq_conformance e2e_pipeline_reports_are_deterministic -- --nocapture
 
 # Deterministic D6 profile suite (staged unit + perf-smoke + E2E)
 rch exec -- ./scripts/run_raptorq_e2e.sh --profile full --bundle
@@ -290,8 +290,8 @@ rch exec -- ./scripts/run_raptorq_e2e.sh --profile full --bundle
 rch exec -- ./scripts/run_raptorq_e2e.sh --profile forensics --scenario RQ-E2E-FAILURE-INSUFFICIENT --bundle
 
 # Structured logging sentinel in perf invariants
-rch exec -- cargo test --test raptorq_perf_invariants seed_sweep_structured_logging -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_raptorq_unit_matrix_docs cargo test --test raptorq_perf_invariants seed_sweep_structured_logging -- --nocapture
 
 # Replay catalog schema/linkage validation
-rch exec -- cargo test --test raptorq_perf_invariants replay_catalog_schema_and_linkage -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_raptorq_unit_matrix_docs cargo test --test raptorq_perf_invariants replay_catalog_schema_and_linkage -- --nocapture
 ```
