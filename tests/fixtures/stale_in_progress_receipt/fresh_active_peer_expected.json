@@ -1,0 +1,96 @@
+{
+  "agent": "TopazGoose",
+  "agent_roster": {
+    "active_window_hours": 4,
+    "agents": [
+      {
+        "activity": "active",
+        "contact_policy": "",
+        "inactive_hours": 0.2,
+        "last_active_ts": "2026-05-08T04:18:00Z",
+        "model": "",
+        "name": "CopperSpring",
+        "program": "",
+        "task_description": ""
+      }
+    ],
+    "assignees": [
+      "CopperSpring"
+    ],
+    "counts": {
+      "active_agents": 1,
+      "inactive_agents": 0,
+      "missing_assignees": 0,
+      "total_agents": 1,
+      "unknown_activity_agents": 0
+    },
+    "missing_assignees": []
+  },
+  "classifications": [
+    {
+      "assignee": "CopperSpring",
+      "classification": "fresh-active-peer",
+      "evidence": {
+        "assignee_inactive_hours": 0.2,
+        "assignee_last_active_ts": "2026-05-08T04:18:00Z",
+        "commit_created_ts": "",
+        "commit_hash": "",
+        "commit_subject": "",
+        "current_date": "2026-05-08",
+        "generated_at": "2026-05-08T04:30:00Z",
+        "issue_age_hours": 0.33,
+        "issue_updated_at": "2026-05-08T04:10:00Z",
+        "message_age_hours": 0.17,
+        "message_created_ts": "2026-05-08T04:20:00Z",
+        "reservation_expired": false,
+        "reservation_expires_ts": "2026-05-08T05:00:00Z",
+        "reservation_holder": "CopperSpring",
+        "reservation_path_pattern": "tests/fresh_peer_contract.rs"
+      },
+      "id": "asupersync-fresh1",
+      "proposed_action": {
+        "allowed_now": true,
+        "command": "send_message(thread_id='asupersync-fresh1', to=['CopperSpring'], subject='[asupersync-fresh1] freshness check', body_md='I see active work/reservations and will stand off.')",
+        "kind": "agent-mail-reply",
+        "mutates": true,
+        "target": "CopperSpring"
+      },
+      "rationale": "active reservation and peer freshness evidence indicate live work",
+      "title": "Fresh peer work"
+    }
+  ],
+  "current_date": "2026-05-08",
+  "generated_at": "2026-05-08T04:30:00Z",
+  "repo_path": "/data/projects/asupersync",
+  "safety": {
+    "beads_mutated": false,
+    "branch_or_worktree_operations": false,
+    "cargo_executed": false,
+    "forbidden_command_tokens": [],
+    "mutating_commands_executed": false
+  },
+  "schema_version": "stale-in-progress-receipt-v1",
+  "subsystems": {
+    "agent_mail": "ok",
+    "beads": "ok",
+    "dirty_tree": "ok",
+    "git": "ok"
+  },
+  "summary": {
+    "blocked_by_active_reservation": 0,
+    "closed_by_recent_commit": 0,
+    "fresh_active_peer": 1,
+    "needs_human_escalation": 0,
+    "probably_stale": 0,
+    "total_in_progress": 1
+  },
+  "thresholds": {
+    "active_after_hours": 4,
+    "stale_after_hours": 12
+  },
+  "tracker_state": {
+    "non_tracker_paths": [],
+    "status": "clean",
+    "tracker_paths": []
+  }
+}
