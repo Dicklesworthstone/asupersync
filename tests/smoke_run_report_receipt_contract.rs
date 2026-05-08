@@ -76,6 +76,24 @@ fn executed_success_output_matches_full_reviewed_golden() {
 }
 
 #[test]
+fn dry_run_plan_output_matches_full_reviewed_golden() {
+    let output = run_receipt("dry_run_plan.json");
+    assert!(
+        output.status.success(),
+        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("receipt stdout is utf-8"),
+        fixture_text("dry_run_plan_expected.json"),
+        "dry-run smoke report receipt drifted from the reviewed golden"
+    );
+}
+
+#[test]
 fn executed_success_report_is_complete_proof() {
     let receipt = receipt_json("executed_success.json");
 
