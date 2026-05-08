@@ -133,6 +133,37 @@ impl std::fmt::Display for RecvError {
 
 impl std::error::Error for RecvError {}
 
+/// Opt-in, redacted telemetry snapshot for an MPSC channel.
+///
+/// The caller supplies `channel_id`, which keeps identifiers deterministic and
+/// avoids ambient globals or pointer-derived IDs. Payload values are never
+/// exposed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MpscTelemetrySnapshot {
+    /// Caller-provided deterministic channel identifier.
+    pub channel_id: u64,
+    /// Stable channel kind label.
+    pub channel_kind: &'static str,
+    /// Maximum number of queued or reserved slots.
+    pub capacity: usize,
+    /// Number of committed values waiting for the receiver.
+    pub queued_messages: usize,
+    /// Number of reserved-but-uncommitted send obligations.
+    pub reserved_uncommitted_obligations: usize,
+    /// Sender-side waiters waiting for capacity.
+    pub send_waiter_count: usize,
+    /// Receiver-side waiters waiting for messages or closure.
+    pub recv_waiter_count: usize,
+    /// Redacted receiver state.
+    pub receiver_health: &'static str,
+    /// MPSC has no lagging receiver concept.
+    pub lagged_receiver_count: Option<usize>,
+    /// Cancel/abort events observed by the channel.
+    pub cancellation_count: u64,
+    /// Whether this channel has reached a closed state.
+    pub closed: bool,
+}
+
 /// Internal channel state shared between senders and receivers.
 #[derive(Debug)]
 struct ChannelInner<T> {
@@ -146,6 +177,8 @@ struct ChannelInner<T> {
     waiter_queue: VecDeque<SlabToken>,
     /// Waker for the receiver waiting for messages.
     recv_waker: Option<Waker>,
+    /// Number of cancellation/abort events observed by this channel.
+    cancellation_count: u64,
 }
 
 /// Shared state wrapper.
@@ -181,6 +214,7 @@ impl<T> ChannelInner<T> {
             send_wakers: TokenSlab::with_capacity(4),
             waiter_queue: VecDeque::with_capacity(4),
             recv_waker: None,
+            cancellation_count: 0,
         }
     }
 
@@ -208,6 +242,51 @@ impl<T> ChannelInner<T> {
             .front()
             .and_then(|&token| self.send_wakers.get(token))
             .cloned()
+    }
+
+    /// Records a cancellation or abort event without exposing payloads.
+    #[inline]
+    fn record_cancellation(&mut self) {
+        self.cancellation_count = self.cancellation_count.saturating_add(1);
+    }
+}
+
+impl<T> ChannelShared<T> {
+    /// Builds an opt-in redacted telemetry snapshot.
+    #[inline]
+    fn telemetry_snapshot(&self, channel_id: u64) -> MpscTelemetrySnapshot {
+        let inner = self.inner.lock();
+        let sender_count = self.sender_count.load(Ordering::Acquire);
+        let receiver_dropped = self.receiver_dropped.load(Ordering::Acquire);
+        let queued_messages = inner.queue.len();
+        let recv_waiter_count = usize::from(inner.recv_waker.is_some());
+        let closed = receiver_dropped || sender_count == 0;
+
+        let receiver_health = if receiver_dropped {
+            "receiver_dropped"
+        } else if queued_messages > 0 {
+            "value_ready"
+        } else if sender_count == 0 {
+            "sender_closed"
+        } else if recv_waiter_count > 0 {
+            "waiting"
+        } else {
+            "open"
+        };
+
+        MpscTelemetrySnapshot {
+            channel_id,
+            channel_kind: "mpsc",
+            capacity: self.capacity,
+            queued_messages,
+            reserved_uncommitted_obligations: inner.reserved,
+            send_waiter_count: inner.send_wakers.len(),
+            recv_waiter_count,
+            receiver_health,
+            lagged_receiver_count: None,
+            cancellation_count: inner.cancellation_count,
+            closed,
+        }
     }
 }
 
@@ -398,6 +477,13 @@ impl<T> Sender<T> {
         self.shared.capacity
     }
 
+    /// Returns an opt-in redacted telemetry snapshot for this MPSC sender.
+    #[inline]
+    #[must_use]
+    pub fn telemetry_snapshot(&self, channel_id: u64) -> MpscTelemetrySnapshot {
+        self.shared.telemetry_snapshot(channel_id)
+    }
+
     #[cfg(test)]
     pub(crate) fn debug_counts(&self) -> (usize, usize) {
         let inner = self.shared.inner.lock();
@@ -564,6 +650,7 @@ impl<'a, T> Future for Reserve<'a, T> {
         // Check cancellation
         if self.cx.checkpoint().is_err() {
             self.cx.trace("mpsc::reserve cancelled");
+            self.sender.shared.inner.lock().record_cancellation();
             self.cleanup_waiter();
             return Poll::Ready(Err(SendError::<()>::Cancelled(())));
         }
@@ -793,12 +880,20 @@ impl<T> SendPermit<'_, T> {
             } else {
                 inner.reserved -= 1;
             }
+            inner.record_cancellation();
             inner.take_next_sender_waker()
         };
         // Wake outside the lock.
         if let Some(w) = next_waker {
             w.wake();
         }
+    }
+
+    /// Returns an opt-in redacted telemetry snapshot for this send permit.
+    #[inline]
+    #[must_use]
+    pub fn telemetry_snapshot(&self, channel_id: u64) -> MpscTelemetrySnapshot {
+        self.sender.shared.telemetry_snapshot(channel_id)
     }
 }
 
@@ -812,6 +907,7 @@ impl<T> Drop for SendPermit<'_, T> {
                 } else {
                     inner.reserved -= 1;
                 }
+                inner.record_cancellation();
                 inner.take_next_sender_waker()
             };
             // Wake outside the lock.
@@ -883,7 +979,9 @@ impl<T> Receiver<T> {
     pub fn poll_recv(&mut self, cx: &Cx, task_cx: &mut Context<'_>) -> Poll<Result<T, RecvError>> {
         if cx.checkpoint().is_err() {
             cx.trace("mpsc::recv cancelled");
-            self.shared.inner.lock().recv_waker = None;
+            let mut inner = self.shared.inner.lock();
+            inner.recv_waker = None;
+            inner.record_cancellation();
             return Poll::Ready(Err(RecvError::Cancelled));
         }
 
@@ -975,6 +1073,13 @@ impl<T> Receiver<T> {
     pub fn capacity(&self) -> usize {
         self.shared.capacity
     }
+
+    /// Returns an opt-in redacted telemetry snapshot for this MPSC receiver.
+    #[inline]
+    #[must_use]
+    pub fn telemetry_snapshot(&self, channel_id: u64) -> MpscTelemetrySnapshot {
+        self.shared.telemetry_snapshot(channel_id)
+    }
 }
 
 /// Future returned by [`Receiver::recv`].
@@ -1047,7 +1152,7 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
-    use crate::types::Budget;
+    use crate::types::{Budget, CancelKind};
     use crate::util::ArenaIndex;
     use crate::{RegionId, TaskId};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -1095,6 +1200,140 @@ mod tests {
         let value = block_on(rx.recv(&cx)).expect("recv failed");
         crate::assert_with_log!(value == 42, "recv value", 42, value);
         crate::test_complete!("basic_send_recv");
+    }
+
+    #[test]
+    fn telemetry_snapshot_reports_backlog_waiters_and_cancellations() {
+        init_test("telemetry_snapshot_reports_backlog_waiters_and_cancellations");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<u8>(2);
+
+        let initial = tx.telemetry_snapshot(11);
+        crate::assert_with_log!(initial.capacity == 2, "capacity", 2, initial.capacity);
+        crate::assert_with_log!(
+            initial.queued_messages == 0,
+            "initial queue",
+            0,
+            initial.queued_messages
+        );
+        crate::assert_with_log!(
+            initial.reserved_uncommitted_obligations == 0,
+            "initial reserved",
+            0,
+            initial.reserved_uncommitted_obligations
+        );
+        crate::assert_with_log!(
+            initial.receiver_health == "open",
+            "initial health",
+            "open",
+            initial.receiver_health
+        );
+
+        let permit = tx.try_reserve().expect("reserve");
+        let reserved = permit.telemetry_snapshot(11);
+        crate::assert_with_log!(
+            reserved.reserved_uncommitted_obligations == 1,
+            "reserved permit count",
+            1,
+            reserved.reserved_uncommitted_obligations
+        );
+        permit.abort();
+        crate::assert_with_log!(
+            rx.telemetry_snapshot(11).cancellation_count == 1,
+            "abort cancellation count",
+            1,
+            rx.telemetry_snapshot(11).cancellation_count
+        );
+
+        tx.try_send(7).expect("send");
+        let ready = rx.telemetry_snapshot(11);
+        crate::assert_with_log!(
+            ready.queued_messages == 1,
+            "ready queue",
+            1,
+            ready.queued_messages
+        );
+        crate::assert_with_log!(
+            ready.receiver_health == "value_ready",
+            "ready health",
+            "value_ready",
+            ready.receiver_health
+        );
+        crate::assert_with_log!(rx.try_recv().expect("recv") == 7, "received value", 7, 7);
+
+        let (tx, mut rx) = channel::<u8>(1);
+        tx.try_send(9).expect("fill");
+        let waker = std::task::Waker::noop().clone();
+        let mut task_cx = Context::from_waker(&waker);
+        let mut reserve = Box::pin(tx.reserve(&cx));
+        crate::assert_with_log!(
+            matches!(reserve.as_mut().poll(&mut task_cx), Poll::Pending),
+            "reserve waits when full",
+            "pending",
+            "pending"
+        );
+        crate::assert_with_log!(
+            tx.telemetry_snapshot(12).send_waiter_count == 1,
+            "sender waiter count",
+            1,
+            tx.telemetry_snapshot(12).send_waiter_count
+        );
+        drop(reserve);
+        crate::assert_with_log!(
+            tx.telemetry_snapshot(12).send_waiter_count == 0,
+            "sender waiter cleaned",
+            0,
+            tx.telemetry_snapshot(12).send_waiter_count
+        );
+        crate::assert_with_log!(
+            rx.try_recv().expect("recv filled") == 9,
+            "drained value",
+            9,
+            9
+        );
+
+        let cancelled = test_cx();
+        cancelled.cancel_with(CancelKind::User, Some("mpsc telemetry test"));
+        let (tx, mut rx) = channel::<u8>(1);
+        let mut reserve = Box::pin(tx.reserve(&cancelled));
+        crate::assert_with_log!(
+            matches!(
+                reserve.as_mut().poll(&mut task_cx),
+                Poll::Ready(Err(SendError::Cancelled(())))
+            ),
+            "cancelled reserve",
+            "cancelled",
+            "cancelled"
+        );
+        drop(reserve);
+        let mut recv = Box::pin(rx.recv(&cancelled));
+        crate::assert_with_log!(
+            matches!(
+                recv.as_mut().poll(&mut task_cx),
+                Poll::Ready(Err(RecvError::Cancelled))
+            ),
+            "cancelled recv",
+            "cancelled",
+            "cancelled"
+        );
+        drop(recv);
+        crate::assert_with_log!(
+            rx.telemetry_snapshot(13).cancellation_count == 2,
+            "cancelled ops count",
+            2,
+            rx.telemetry_snapshot(13).cancellation_count
+        );
+        drop(tx);
+        let closed = rx.telemetry_snapshot(13);
+        crate::assert_with_log!(closed.closed, "sender closed", true, closed.closed);
+        crate::assert_with_log!(
+            closed.receiver_health == "sender_closed",
+            "closed health",
+            "sender_closed",
+            closed.receiver_health
+        );
+
+        crate::test_complete!("telemetry_snapshot_reports_backlog_waiters_and_cancellations");
     }
 
     #[test]

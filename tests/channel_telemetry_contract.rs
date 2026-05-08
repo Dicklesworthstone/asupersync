@@ -1,6 +1,6 @@
 #![allow(missing_docs)]
 
-use asupersync::channel::oneshot;
+use asupersync::channel::{mpsc, oneshot};
 use asupersync::cx::Cx;
 use asupersync::types::{Budget, CancelKind};
 use asupersync::util::ArenaIndex;
@@ -237,6 +237,110 @@ fn unwired_channel_rows_fail_closed_until_live_metrics_exist() {
             );
         }
     }
+}
+
+#[test]
+fn live_mpsc_snapshot_reports_backlog_waiters_and_cancelled_pressure() {
+    let contract = contract();
+    let rows = rows_by_kind(&contract);
+    let mpsc_row = rows.get("mpsc").expect("mpsc row exists");
+    assert_eq!(mpsc_row["live_telemetry_wired"].as_bool(), Some(true));
+    assert_eq!(mpsc_row["report_status"].as_str(), Some("LIVE"));
+
+    let cx = telemetry_test_cx();
+    let (tx, mut rx) = mpsc::channel::<u8>(2);
+    let initial = tx.telemetry_snapshot(197);
+    assert_eq!(initial.channel_id, 197);
+    assert_eq!(initial.channel_kind, "mpsc");
+    assert_eq!(initial.capacity, 2);
+    assert_eq!(initial.queued_messages, 0);
+    assert_eq!(initial.reserved_uncommitted_obligations, 0);
+    assert_eq!(initial.send_waiter_count, 0);
+    assert_eq!(initial.recv_waiter_count, 0);
+    assert_eq!(initial.receiver_health, "open");
+    assert_eq!(initial.lagged_receiver_count, None);
+    assert_eq!(initial.cancellation_count, 0);
+    assert!(!initial.closed);
+
+    let permit = tx.try_reserve().expect("try_reserve succeeds");
+    let reserved = permit.telemetry_snapshot(197);
+    assert_eq!(reserved.queued_messages, 0);
+    assert_eq!(reserved.reserved_uncommitted_obligations, 1);
+    assert_eq!(reserved.receiver_health, "open");
+    assert!(!reserved.closed);
+
+    permit.abort();
+    let aborted = rx.telemetry_snapshot(197);
+    assert_eq!(aborted.queued_messages, 0);
+    assert_eq!(aborted.reserved_uncommitted_obligations, 0);
+    assert_eq!(aborted.cancellation_count, 1);
+    assert_eq!(aborted.receiver_health, "open");
+
+    tx.try_send(11).expect("try_send succeeds");
+    let ready = rx.telemetry_snapshot(197);
+    assert_eq!(ready.queued_messages, 1);
+    assert_eq!(ready.reserved_uncommitted_obligations, 0);
+    assert_eq!(ready.receiver_health, "value_ready");
+    assert!(!ready.closed);
+
+    assert_eq!(rx.try_recv().expect("value ready"), 11);
+    let drained = tx.telemetry_snapshot(197);
+    assert_eq!(drained.queued_messages, 0);
+    assert_eq!(drained.cancellation_count, 1);
+
+    let (tx, mut rx) = mpsc::channel::<u8>(1);
+    tx.try_send(7).expect("fill channel");
+    let mut reserve = Box::pin(tx.reserve(&cx));
+    let waker = Waker::noop().clone();
+    let mut task_cx = Context::from_waker(&waker);
+    assert!(matches!(reserve.as_mut().poll(&mut task_cx), Poll::Pending));
+    let waiting = tx.telemetry_snapshot(198);
+    assert_eq!(waiting.queued_messages, 1);
+    assert_eq!(waiting.reserved_uncommitted_obligations, 0);
+    assert_eq!(waiting.send_waiter_count, 1);
+    drop(reserve);
+    assert_eq!(tx.telemetry_snapshot(198).send_waiter_count, 0);
+
+    let mut recv = Box::pin(rx.recv(&cx));
+    assert!(matches!(
+        recv.as_mut().poll(&mut task_cx),
+        Poll::Ready(Ok(7))
+    ));
+    drop(recv);
+
+    let cancelled_cx = telemetry_test_cx();
+    cancelled_cx.cancel_with(CancelKind::User, Some("channel telemetry contract"));
+    let (tx, mut rx) = mpsc::channel::<u8>(1);
+    let mut reserve = Box::pin(tx.reserve(&cancelled_cx));
+    assert!(matches!(
+        reserve.as_mut().poll(&mut task_cx),
+        Poll::Ready(Err(mpsc::SendError::Cancelled(())))
+    ));
+    drop(reserve);
+    let after_cancelled_reserve = tx.telemetry_snapshot(199);
+    assert_eq!(after_cancelled_reserve.cancellation_count, 1);
+    assert_eq!(after_cancelled_reserve.reserved_uncommitted_obligations, 0);
+    assert!(!after_cancelled_reserve.closed);
+
+    let mut recv = Box::pin(rx.recv(&cancelled_cx));
+    assert!(matches!(
+        recv.as_mut().poll(&mut task_cx),
+        Poll::Ready(Err(mpsc::RecvError::Cancelled))
+    ));
+    drop(recv);
+    let after_cancelled_recv = rx.telemetry_snapshot(199);
+    assert_eq!(after_cancelled_recv.cancellation_count, 2);
+    assert!(!after_cancelled_recv.closed);
+    drop(tx);
+    let after_sender_drop = rx.telemetry_snapshot(199);
+    assert!(after_sender_drop.closed);
+    assert_eq!(after_sender_drop.receiver_health, "sender_closed");
+
+    let (tx, rx) = mpsc::channel::<u8>(1);
+    drop(rx);
+    let after_receiver_drop = tx.telemetry_snapshot(200);
+    assert!(after_receiver_drop.closed);
+    assert_eq!(after_receiver_drop.receiver_health, "receiver_dropped");
 }
 
 #[test]
