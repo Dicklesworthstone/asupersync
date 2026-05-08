@@ -85,9 +85,9 @@ Cargo-heavy commands must use `rch`.
 
 ```bash
 # Rust closure checks
-rch exec -- cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-minimal
-rch exec -- cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-dev
-rch exec -- cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-deterministic
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_evidence_matrix_docs cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-minimal
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_evidence_matrix_docs cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-dev
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_evidence_matrix_docs cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-deterministic
 
 # Browser E2E and matrix gates
 bash ./scripts/run_all_e2e.sh --suite wasm-packaged-bootstrap
