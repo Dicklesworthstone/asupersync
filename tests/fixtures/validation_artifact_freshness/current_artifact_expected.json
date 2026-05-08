@@ -1,0 +1,39 @@
+{
+  "artifact": {
+    "decision": "passed",
+    "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "touched_files": [
+      "scripts/proof_runner.py"
+    ]
+  },
+  "artifact_path": "tests/fixtures/validation_artifact_freshness/current_artifact.json",
+  "classification": "current",
+  "current": {
+    "dirty_paths": [],
+    "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "current_date": "2026-05-08",
+  "forbidden_actions": {
+    "runs_beads_mutation": false,
+    "runs_cargo": false,
+    "runs_destructive_command": false,
+    "runs_git_mutation": false
+  },
+  "generated_at": "2026-05-08T05:30:00Z",
+  "markers": {
+    "dirty_external_paths": [],
+    "dirty_touched_overlap": [],
+    "has_artifact_head": true,
+    "head_matches": true
+  },
+  "non_mutating": true,
+  "remediation": {
+    "next_steps": [
+      "include this receipt alongside the proof artifact"
+    ],
+    "operator_note": "The artifact can be cited for its touched surface.",
+    "summary": "artifact matches the current frontier"
+  },
+  "schema_version": "validation-artifact-freshness-v1",
+  "verdict": "current"
+}

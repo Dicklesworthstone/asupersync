@@ -10,19 +10,23 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "validation_artifact_freshness.py"
 FIXTURES = REPO_ROOT / "tests" / "fixtures" / "validation_artifact_freshness"
+FIXTURES_REL = "tests/fixtures/validation_artifact_freshness"
 GENERATED_AT = "2026-05-08T05:30:00Z"
 CURRENT_HEAD = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 
-def run_receipt(artifact: str, dirty_paths: str = "clean_dirty_paths.json") -> dict:
-    output = subprocess.run(
+def run_receipt_output(
+    artifact: str,
+    dirty_paths: str = "clean_dirty_paths.json",
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
         [
             "python3",
             str(SCRIPT),
             "--artifact",
-            str(FIXTURES / artifact),
+            f"{FIXTURES_REL}/{artifact}",
             "--dirty-paths-json",
-            str(FIXTURES / dirty_paths),
+            f"{FIXTURES_REL}/{dirty_paths}",
             "--current-head",
             CURRENT_HEAD,
             "--generated-at",
@@ -35,10 +39,25 @@ def run_receipt(artifact: str, dirty_paths: str = "clean_dirty_paths.json") -> d
         capture_output=True,
         text=True,
     )
+
+
+def run_receipt(artifact: str, dirty_paths: str = "clean_dirty_paths.json") -> dict:
+    output = run_receipt_output(artifact, dirty_paths)
     return json.loads(output.stdout)
 
 
+def fixture_text(name: str) -> str:
+    return (FIXTURES / name).read_text(encoding="utf-8")
+
+
 class ValidationArtifactFreshnessContract(unittest.TestCase):
+    def test_current_artifact_output_matches_full_reviewed_golden(self) -> None:
+        output = run_receipt_output("current_artifact.json")
+        expected = fixture_text("current_artifact_expected.json")
+
+        self.assertEqual(output.stdout, expected)
+        self.assertEqual(json.loads(output.stdout), json.loads(expected))
+
     def test_current_artifact_is_citable_for_touched_surface(self) -> None:
         receipt = run_receipt("current_artifact.json")
 
