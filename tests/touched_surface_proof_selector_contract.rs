@@ -61,7 +61,10 @@ fn assert_selector_output_matches_golden(input_fixture: &str, expected_fixture: 
         serde_json::from_str(&actual).expect("actual selector output must be JSON");
     let expected_json: Value =
         serde_json::from_str(&expected).expect("golden selector output must be JSON");
-    assert_eq!(actual_json, expected_json);
+    assert_eq!(
+        actual_json, expected_json,
+        "parsed touched-surface selector JSON drifted for {input_fixture} -> {expected_fixture}"
+    );
     assert_eq!(
         actual, expected,
         "{label} selector receipt drifted from the reviewed golden"
