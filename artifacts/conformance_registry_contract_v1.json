@@ -215,6 +215,43 @@
       "source does not contain stale synthetic parity or 100 percent conformance claims"
     ]
   },
+  "registry_api": {
+    "source_path": "conformance/src/reference_registry.rs",
+    "crate_export": "conformance::ReferenceSurfaceRegistry",
+    "embedded_contract_constant": "SOURCE_CONFORMANCE_REGISTRY_CONTRACT",
+    "admission_function": "ReferenceSurfaceRegistry::admit_runtime_verdict",
+    "required_symbols": [
+      "pub const SOURCE_CONFORMANCE_REGISTRY_CONTRACT",
+      "pub enum RuntimeConformanceVerdict",
+      "pub struct ReferenceSurfaceRegistry",
+      "pub fn source_contract",
+      "pub fn from_json_str",
+      "pub fn admit_runtime_verdict",
+      "ReferenceRegistryError::MissingSurfaceId",
+      "ReferenceRegistryError::UnwiredReferencePass",
+      "ReferenceRegistryError::DisallowedVerdict"
+    ],
+    "fail_closed_cases": [
+      {
+        "case_id": "missing-surface-rejected",
+        "surface_id": "missing-surface",
+        "candidate_verdict": "pass",
+        "expected_error": "MissingSurfaceId"
+      },
+      {
+        "case_id": "unwired-reference-pass-rejected",
+        "surface_id": "otel-trace-context-propagation",
+        "candidate_verdict": "pass",
+        "expected_error": "UnwiredReferencePass"
+      },
+      {
+        "case_id": "unregistered-verdict-rejected",
+        "surface_id": "otel-trace-context-propagation",
+        "candidate_verdict": "unavailable",
+        "expected_error": "DisallowedVerdict"
+      }
+    ]
+  },
   "reference_surfaces": [
     {
       "surface_id": "otel-baggage-propagation",

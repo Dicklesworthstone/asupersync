@@ -56,6 +56,7 @@ pub mod logging;
 pub mod mysql_conformance;
 pub mod otlp_wire_format;
 pub mod raptorq_rfc6330;
+pub mod reference_registry;
 pub mod report;
 pub mod rfc6330_fixtures;
 pub mod rfc6330_tests;
@@ -150,6 +151,10 @@ pub use lean_frontier::{
 };
 pub use logging::{
     ConformanceTestLogger, LogCollector, LogConfig, LogEntry, LogLevel, TestEvent, TestEventKind,
+};
+pub use reference_registry::{
+    ReferenceRegistryError, ReferenceSurfaceRegistry, ReferenceSurfaceRow,
+    ReferenceVerdictAdmission, RuntimeConformanceVerdict, SOURCE_CONFORMANCE_REGISTRY_CONTRACT,
 };
 pub use report::{render_console_summary, write_json_report};
 pub use runner::{

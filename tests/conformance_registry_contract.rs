@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use conformance::{ReferenceRegistryError, ReferenceSurfaceRegistry, RuntimeConformanceVerdict};
 use serde_json::Value;
 
 fn repo_path(relative: &str) -> PathBuf {
@@ -371,6 +372,128 @@ fn reference_surface_registry_rejects_unwired_live_reference_claims() {
             ],
         );
     }
+}
+
+#[test]
+fn reference_registry_api_rejects_unregistered_and_unwired_pass_claims() {
+    let contract = contract();
+    let api = contract.get("registry_api").expect("registry_api object");
+    let source_path = nonempty_string(api, "source_path");
+    assert_eq!(source_path, "conformance/src/reference_registry.rs");
+    assert_eq!(
+        nonempty_string(api, "crate_export"),
+        "conformance::ReferenceSurfaceRegistry"
+    );
+    assert_eq!(
+        nonempty_string(api, "admission_function"),
+        "ReferenceSurfaceRegistry::admit_runtime_verdict"
+    );
+
+    let source = read_repo_file(source_path);
+    for symbol in string_values(api, "required_symbols") {
+        assert!(
+            source.contains(symbol),
+            "registry API source must contain required symbol {symbol:?}"
+        );
+    }
+    let lib_source = read_repo_file("conformance/src/lib.rs");
+    assert!(
+        lib_source.contains("pub mod reference_registry;"),
+        "conformance crate must expose the registry module"
+    );
+    assert!(
+        lib_source.contains("ReferenceSurfaceRegistry"),
+        "conformance crate must re-export ReferenceSurfaceRegistry"
+    );
+
+    let registry = ReferenceSurfaceRegistry::from_json_str(&read_repo_file(
+        "artifacts/conformance_registry_contract_v1.json",
+    ))
+    .expect("load source-owned reference registry");
+    assert_eq!(
+        registry.len(),
+        object_array(&contract, "reference_surfaces").len()
+    );
+
+    let trace_context = registry
+        .surface("otel-trace-context-propagation")
+        .expect("trace-context reference surface row");
+    assert_eq!(
+        trace_context.binary,
+        "otel_trace_context_propagation_conformance"
+    );
+    assert!(!trace_context.has_live_reference());
+
+    let pass_error = registry
+        .admit_runtime_verdict(
+            "otel-trace-context-propagation",
+            RuntimeConformanceVerdict::Pass,
+        )
+        .expect_err("unwired reference must reject pass");
+    assert!(matches!(
+        pass_error,
+        ReferenceRegistryError::UnwiredReferencePass { surface_id, .. }
+            if surface_id == "otel-trace-context-propagation"
+    ));
+    registry
+        .admit_runtime_verdict(
+            "otel-trace-context-propagation",
+            RuntimeConformanceVerdict::Xfail,
+        )
+        .expect("xfail is the admitted fail-closed verdict");
+
+    let missing_error = registry
+        .admit_runtime_verdict("missing-surface", RuntimeConformanceVerdict::Pass)
+        .expect_err("missing registry rows must fail closed");
+    assert_eq!(
+        missing_error,
+        ReferenceRegistryError::MissingSurfaceId("missing-surface".to_string())
+    );
+
+    for case in object_array(api, "fail_closed_cases") {
+        let surface_id = nonempty_string(case, "surface_id");
+        let candidate = match nonempty_string(case, "candidate_verdict") {
+            "pass" => RuntimeConformanceVerdict::Pass,
+            "fail" => RuntimeConformanceVerdict::Fail,
+            "xfail" => RuntimeConformanceVerdict::Xfail,
+            "unavailable" => RuntimeConformanceVerdict::Unavailable,
+            other => panic!("unknown candidate verdict in registry_api case: {other}"),
+        };
+        let actual = registry
+            .admit_runtime_verdict(surface_id, candidate)
+            .expect_err("registry_api fail-closed case unexpectedly passed");
+        let expected_error = nonempty_string(case, "expected_error");
+        assert!(
+            matches!(
+                (&actual, expected_error),
+                (
+                    ReferenceRegistryError::MissingSurfaceId(_),
+                    "MissingSurfaceId"
+                ) | (
+                    ReferenceRegistryError::UnwiredReferencePass { .. },
+                    "UnwiredReferencePass"
+                ) | (
+                    ReferenceRegistryError::DisallowedVerdict { .. },
+                    "DisallowedVerdict"
+                )
+            ),
+            "registry_api case {} expected {expected_error}, got {actual:?}",
+            nonempty_string(case, "case_id")
+        );
+    }
+
+    log_contract_event(
+        "registry-api-admission-guard",
+        &[
+            ("owner_bead", "asupersync-ghquqs".to_string()),
+            ("source_path", source_path.to_string()),
+            ("registered_surface_count", registry.len().to_string()),
+            ("pass_guard", "unwired-reference-rejected".to_string()),
+            ("missing_surface_guard", "fail-closed".to_string()),
+            ("verdict", "pass".to_string()),
+            ("first_failure", String::new()),
+        ],
+    );
 }
 
 #[test]
