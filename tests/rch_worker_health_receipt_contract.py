@@ -13,13 +13,21 @@ FIXTURES = REPO_ROOT / "tests" / "fixtures" / "rch_worker_health_receipt"
 GENERATED_AT = "2026-05-08T05:40:00Z"
 
 
-def run_receipt(fixture: str) -> dict:
-    output = subprocess.run(
+def fixture_arg(fixture: str) -> str:
+    return f"tests/fixtures/rch_worker_health_receipt/{fixture}"
+
+
+def fixture_text(fixture: str) -> str:
+    return (FIXTURES / fixture).read_text(encoding="utf-8")
+
+
+def run_receipt_output(fixture: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
         [
             "python3",
             str(SCRIPT),
             "--observations",
-            str(FIXTURES / fixture),
+            fixture_arg(fixture),
             "--generated-at",
             GENERATED_AT,
             "--output",
@@ -30,6 +38,10 @@ def run_receipt(fixture: str) -> dict:
         capture_output=True,
         text=True,
     )
+
+
+def run_receipt(fixture: str) -> dict:
+    output = run_receipt_output(fixture)
     return json.loads(output.stdout)
 
 
@@ -82,6 +94,18 @@ class RchWorkerHealthReceiptContract(unittest.TestCase):
         self.assertEqual(receipt["status_counts"]["healthy"], 1)
         self.assertEqual(receipt["status_counts"]["warn"], 1)
         self.assertEqual(receipt["status_counts"]["quarantine-candidate"], 1)
+
+    def test_mixed_fleet_output_matches_full_reviewed_golden(self) -> None:
+        output = run_receipt_output("mixed_fleet.json")
+        expected = fixture_text("mixed_fleet_expected.json")
+
+        self.assertEqual(
+            output.stdout,
+            expected,
+            "mixed fleet rch worker health receipt drifted from the reviewed golden",
+        )
+        json.loads(output.stdout)
+        json.loads(expected)
 
     def test_helper_declares_it_does_not_mutate_or_probe(self) -> None:
         receipt = run_receipt("healthy_worker.json")
