@@ -852,8 +852,8 @@ pub const MEMORY_TIER_SLAB_POOL_CERTIFICATIONS: &[MemoryTierSlabPoolCertificatio
         row_id: "cold_trace_evidence_tiers",
         runtime_domain: MemoryTierRuntimeDomain::TraceEvidence,
         memory_tier: MemoryTierKind::ColdEvidenceArtifacts,
-        operator_verdict: MemoryTierCertificationStatus::ContractGuarded,
-        status: MemoryTierCertificationStatus::ContractGuarded,
+        operator_verdict: MemoryTierCertificationStatus::ImplementedVerified,
+        status: MemoryTierCertificationStatus::ImplementedVerified,
         source_files: &[
             "src/runtime/config.rs",
             "src/trace/recorder.rs",

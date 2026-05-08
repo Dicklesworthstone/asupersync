@@ -1,7 +1,11 @@
 //! Contract ratchets for memory-tier aware slab/pool certification.
 
 use asupersync::record::{ObligationRecord, RegionRecord, TaskRecord};
-use asupersync::runtime::config::{MEMORY_TIER_SLAB_POOL_CERTIFICATIONS, RuntimeCapacityHints};
+use asupersync::runtime::config::{
+    ArenaLocalityAccessModel, ArenaLocalityPolicy, ArenaTemperatureFallbackReason,
+    ArenaTemperaturePolicy, MEMORY_TIER_SLAB_POOL_CERTIFICATIONS, RuntimeCapacityHints,
+    RuntimeConfig, TraceStorageProfile, WorkerCohortMapping,
+};
 use asupersync::util::Arena;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -10,6 +14,8 @@ use std::path::Path;
 use std::process::Command;
 
 const CONTRACT_PATH: &str = "artifacts/memory_tier_slab_pool_contract_v1.json";
+const HOT_COLD_ARENA_TIERS_CONTRACT_PATH: &str =
+    "artifacts/hot_cold_arena_tiers_smoke_contract_v1.json";
 const NUMA_LOCALITY_CONTRACT_PATH: &str = "artifacts/numa_arena_locality_smoke_contract_v1.json";
 const RELEASE_PROOF_PACK_CONTRACT_PATH: &str = "artifacts/release_proof_pack_contract_v1.json";
 const SOURCE_DECLARATIONS_PATH: &str = "src/runtime/config.rs";
@@ -484,6 +490,220 @@ fn warm_numa_locality_row_is_backed_by_live_accounting_contract() {
     assert!(saw_remote_touch_win, "missing locality win scenario");
     assert!(saw_safe_fallback, "missing safe-fallback scenario");
     assert!(saw_template, "missing host-template scenario");
+}
+
+#[test]
+fn cold_trace_evidence_tiers_row_is_backed_by_hot_cold_arena_contract() {
+    let contract = load_contract();
+    let rows = rows_by_id(&contract);
+    let row = rows
+        .get("cold_trace_evidence_tiers")
+        .expect("cold trace evidence row must exist");
+    assert_eq!(
+        string_field(row, "operator_verdict"),
+        "implemented_verified"
+    );
+    assert_eq!(string_field(row, "status"), "implemented_verified");
+    assert!(
+        string_vec(row, "existing_contracts")
+            .iter()
+            .any(|contract| contract == "hot-cold-arena-tiers-smoke-contract-v1"),
+        "cold trace row must compose the live hot/cold arena smoke contract"
+    );
+
+    let required_accounting = string_vec(row, "required_accounting");
+    for required in [
+        "trace_storage_profile",
+        "hot_metadata_bytes",
+        "cold_evidence_bytes",
+        "retained_evidence_budget_bytes",
+        "fallback_reason_codes",
+    ] {
+        assert!(
+            required_accounting.iter().any(|field| field == required),
+            "cold trace row must require {required}"
+        );
+    }
+
+    let hot_cold_contract: Value = serde_json::from_str(
+        &fs::read_to_string(HOT_COLD_ARENA_TIERS_CONTRACT_PATH)
+            .expect("read hot/cold arena smoke contract"),
+    )
+    .expect("parse hot/cold arena smoke contract");
+    assert_eq!(
+        string_field(&hot_cold_contract, "contract_version"),
+        "hot-cold-arena-tiers-smoke-contract-v1"
+    );
+
+    for field in [
+        "expected_report_projection",
+        "actual_report_projection",
+        "actual_report_projection_repeat_2",
+    ] {
+        assert!(
+            string_set(&hot_cold_contract, "required_run_report_fields").contains(field),
+            "hot/cold run report must retain {field}"
+        );
+        assert!(
+            string_set(&hot_cold_contract, "required_bundle_fields").contains(field),
+            "hot/cold bundle must retain {field}"
+        );
+    }
+
+    let mut saw_tiered_retention = false;
+    let mut saw_large_page_fallback = false;
+    let mut saw_locality_no_win = false;
+    let mut saw_real_host_template = false;
+    for scenario in array(&hot_cold_contract, "smoke_scenarios") {
+        let scenario_id = string_field(scenario, "scenario_id");
+        assert_eq!(
+            string_field(scenario, "trace_storage_profile"),
+            "large_memory_256g",
+            "{scenario_id} must exercise the large-memory trace profile"
+        );
+        assert!(
+            scenario.get("expected_report_projection").is_some(),
+            "{scenario_id} must keep the projection slot explicit"
+        );
+
+        let workload = scenario
+            .get("workload_model")
+            .expect("scenario workload model");
+        assert_eq!(
+            string_field(workload, "default_safe_fallback_profile"),
+            "unified",
+            "{scenario_id} must name the safe fallback profile"
+        );
+        let capacity_hints = object(workload, "capacity_hints");
+        for field in ["task_capacity", "region_capacity", "obligation_capacity"] {
+            assert!(
+                capacity_hints
+                    .get(field)
+                    .and_then(Value::as_u64)
+                    .is_some_and(|value| value > 0),
+                "{scenario_id} must keep nonzero {field}"
+            );
+        }
+
+        let requested_policy = string_field(scenario, "requested_policy");
+        if requested_policy == "tiered_cold_evidence" && scenario_id.contains("TIERED-RETENTION") {
+            saw_tiered_retention = true;
+        }
+        if requested_policy == "tiered_cold_evidence_large_pages" {
+            saw_large_page_fallback = workload
+                .get("large_page_cold_slabs_supported")
+                .and_then(Value::as_bool)
+                == Some(false);
+        }
+        if scenario_id.contains("NO-WIN") {
+            saw_locality_no_win = true;
+            assert_eq!(requested_policy, "tiered_cold_evidence");
+        }
+        if scenario_id.contains("REAL-HOST-TEMPLATE") {
+            saw_real_host_template = true;
+            assert!(
+                workload["locality_profile_input"]["worker_to_cohort_map"].is_null(),
+                "real-host template must not fabricate locality evidence"
+            );
+        }
+    }
+    assert!(saw_tiered_retention, "missing tiered-retention scenario");
+    assert!(
+        saw_large_page_fallback,
+        "missing unsupported large-page fallback scenario"
+    );
+    assert!(saw_locality_no_win, "missing locality no-win scenario");
+    assert!(
+        saw_real_host_template,
+        "missing real-host template scenario"
+    );
+
+    let capacity_hints = RuntimeCapacityHints::new(4096, 1024, 2048);
+    let worker_cohort_map = (0..64).map(|worker| worker / 8).collect::<Vec<_>>();
+    let winning_locality = RuntimeConfig {
+        worker_threads: 64,
+        worker_cohort_map: Some(WorkerCohortMapping::new(worker_cohort_map)),
+        capacity_hints: Some(capacity_hints),
+        ..RuntimeConfig::default()
+    }
+    .arena_locality_report(
+        ArenaLocalityPolicy::CohortPinned {
+            min_topology_confidence_percent: 80,
+            remote_touch_budget_bps: 6500,
+            accounting_epoch: 11,
+        },
+        Some(91),
+        &ArenaLocalityAccessModel {
+            task_arena_touches_by_cohort: vec![3200, 640, 640, 640, 640, 640, 640, 640],
+            region_arena_touches_by_cohort: vec![1024, 128, 128, 128, 128, 128, 128, 128],
+            obligation_arena_touches_by_cohort: vec![768, 768, 128, 128, 128, 128, 128, 128],
+            task_record_pool_touches_by_cohort: vec![3200, 640, 640, 640, 640, 640, 640, 640],
+        },
+    );
+    let tiered_config = RuntimeConfig {
+        worker_threads: 64,
+        capacity_hints: Some(capacity_hints),
+        arena_temperature_policy: ArenaTemperaturePolicy::TieredColdEvidence,
+        trace_storage_profile: TraceStorageProfile::LargeMemory256G,
+        ..RuntimeConfig::default()
+    };
+    let tiered_report =
+        tiered_config.arena_temperature_report_with_locality(false, Some(&winning_locality), false);
+    assert_eq!(tiered_report.fallback_reason, None);
+    assert_eq!(
+        tiered_report.cold_evidence_bytes,
+        tiered_report.retained_evidence_bytes
+    );
+    assert_eq!(
+        tiered_report.retained_evidence_bytes,
+        TraceStorageProfile::LargeMemory256G
+            .budget()
+            .estimated_cold_bytes()
+    );
+    assert!(tiered_report.estimated_hot_bytes() > 0);
+    let rendered_fields = tiered_report
+        .render_report_fields()
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .collect::<BTreeMap<_, _>>();
+    for field in [
+        "estimated_hot_bytes",
+        "cold_evidence_bytes",
+        "retained_evidence_bytes",
+        "fallback_reason",
+    ] {
+        assert!(
+            rendered_fields.contains_key(field),
+            "live arena report must render {field}"
+        );
+    }
+
+    let large_page_report = RuntimeConfig {
+        arena_temperature_policy: ArenaTemperaturePolicy::TieredColdEvidenceLargePages,
+        trace_storage_profile: TraceStorageProfile::LargeMemory256G,
+        ..RuntimeConfig::default()
+    }
+    .arena_temperature_report_with_locality(false, Some(&winning_locality), false);
+    assert_eq!(
+        large_page_report.fallback_reason,
+        Some(ArenaTemperatureFallbackReason::LargePagesUnsupported)
+    );
+    assert!(
+        !large_page_report.large_page_cold_slabs_active,
+        "unsupported large-page requests must fail closed"
+    );
+
+    let missing_locality_report = RuntimeConfig {
+        arena_temperature_policy: ArenaTemperaturePolicy::TieredColdEvidence,
+        trace_storage_profile: TraceStorageProfile::LargeMemory256G,
+        ..RuntimeConfig::default()
+    }
+    .arena_temperature_report_with_locality(false, None, false);
+    assert_eq!(
+        missing_locality_report.fallback_reason,
+        Some(ArenaTemperatureFallbackReason::LocalityProfileMissing)
+    );
+    assert_eq!(missing_locality_report.cold_evidence_bytes, 0);
 }
 
 #[test]
