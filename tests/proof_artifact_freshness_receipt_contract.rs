@@ -167,6 +167,27 @@ fn non_main_artifact_branch_is_wrong_branch() {
 }
 
 #[test]
+fn wrong_branch_matches_full_output_golden() {
+    let output = run_receipt_with_repo_path("wrong_branch.json", "/repo");
+    assert!(
+        output.status.success(),
+        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = String::from_utf8(output.stdout).expect("receipt stdout is utf-8");
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt output JSON");
+    let expected = fixture_text("wrong_branch_expected.json");
+    let expected_json: Value =
+        serde_json::from_str(&expected).expect("expected receipt output JSON");
+
+    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
+    assert_eq!(actual, expected);
+}
+
+#[test]
 fn dirty_peer_surface_overlap_requires_rerun() {
     let receipt = receipt_json("dirty_surface_overlap.json");
     let row = first_row(&receipt);

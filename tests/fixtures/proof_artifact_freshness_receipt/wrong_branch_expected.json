@@ -1,0 +1,59 @@
+{
+  "agent": "TopazGoose",
+  "artifact_errors": [],
+  "current_branch": "main",
+  "current_date": "2026-05-08",
+  "current_head_sha": "2222222222222222222222222222222222222222",
+  "generated_at": "2026-05-08T05:20:00Z",
+  "repo_path": "/repo",
+  "rows": [
+    {
+      "artifact_path": "artifacts/proof/wrong-branch.json",
+      "classification": "wrong-branch",
+      "command": "rch exec -- cargo test --test proof_runner_contract -- --nocapture",
+      "decision": "suppress-as-stale",
+      "evidence": {
+        "artifact_git_branch": "agent-proof-spike",
+        "artifact_git_sha": "2222222222222222222222222222222222222222",
+        "current_branch": "main",
+        "current_head_sha": "2222222222222222222222222222222222222222",
+        "dirty_overlap_count": 0,
+        "dirty_overlaps": []
+      },
+      "generated_at": "2026-05-08T05:19:00Z",
+      "reason": "artifact was produced on a non-main branch",
+      "remediation": {
+        "next_steps": [
+          "rerun the proof command on current main HEAD"
+        ],
+        "operator_note": "Suppress this artifact as stale before reporting a green lane.",
+        "rerun_command": "rch exec -- cargo test --test proof_runner_contract -- --nocapture"
+      },
+      "safe_to_cite": false,
+      "status": "pass",
+      "touched_files": [
+        "scripts/proof_runner.py"
+      ]
+    }
+  ],
+  "safety": {
+    "beads_mutated": false,
+    "branch_or_worktree_operations": false,
+    "cargo_executed": false,
+    "destructive_commands_executed": false,
+    "executed_commands": [],
+    "mutating_commands_executed": false,
+    "non_mutating": true
+  },
+  "schema_version": "proof-artifact-freshness-receipt-v1",
+  "summary": {
+    "by_classification": {
+      "wrong-branch": 1
+    },
+    "rerun_required": 0,
+    "safe_to_cite": 0,
+    "suppressed": 1,
+    "total": 1,
+    "unverifiable": 0
+  }
+}
