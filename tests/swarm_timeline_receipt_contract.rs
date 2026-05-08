@@ -3,6 +3,7 @@
 #![allow(missing_docs)]
 
 use serde_json::Value;
+use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
@@ -32,6 +33,14 @@ fn run_receipt(fixture: &str) -> Output {
         .expect("run swarm timeline receipt")
 }
 
+fn fixture_path(fixture: &str) -> PathBuf {
+    repo_root().join(FIXTURE_ROOT).join(fixture)
+}
+
+fn fixture_text(fixture: &str) -> String {
+    fs::read_to_string(fixture_path(fixture)).expect("read fixture text")
+}
+
 fn receipt_json(fixture: &str) -> Value {
     let output = run_receipt(fixture);
     assert!(
@@ -42,6 +51,18 @@ fn receipt_json(fixture: &str) -> Value {
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("receipt output must be JSON")
+}
+
+fn receipt_text(fixture: &str) -> String {
+    let output = run_receipt(fixture);
+    assert!(
+        output.status.success(),
+        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("receipt output must be UTF-8")
 }
 
 fn timeline<'a>(receipt: &'a Value) -> &'a Vec<Value> {
@@ -115,6 +136,16 @@ fn mixed_messages_and_commits_become_ordered_timeline() {
             .is_empty(),
         "ship event should keep validation evidence"
     );
+}
+
+#[test]
+fn mixed_timeline_matches_exact_reviewed_golden() {
+    let actual = receipt_text("mixed_claim_ship_block.json");
+    let expected = fixture_text("mixed_claim_ship_block_expected.json");
+
+    assert_eq!(actual, expected);
+    serde_json::from_str::<Value>(&actual).expect("actual receipt must be JSON");
+    serde_json::from_str::<Value>(&expected).expect("golden receipt must be JSON");
 }
 
 #[test]
