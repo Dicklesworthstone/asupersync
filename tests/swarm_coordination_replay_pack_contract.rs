@@ -45,6 +45,28 @@ fn fixture_text(fixture: &str) -> String {
         .unwrap_or_else(|error| panic!("read golden fixture {fixture}: {error}"))
 }
 
+fn assert_replay_output_matches_golden(output: Output, fixture: &str, label: &str) {
+    assert!(
+        output.status.success(),
+        "replay helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = String::from_utf8(output.stdout).expect("replay stdout is utf-8");
+    let expected = fixture_text(fixture);
+    let actual_json: Value =
+        serde_json::from_str(&actual).expect("actual replay output must be JSON");
+    let expected_json: Value =
+        serde_json::from_str(&expected).expect("golden replay output must be JSON");
+    assert_eq!(actual_json, expected_json);
+    assert_eq!(
+        actual, expected,
+        "{label} receipt drifted from the reviewed golden"
+    );
+}
+
 fn violation_codes(receipt: &Value) -> Vec<&str> {
     receipt["violations"]
         .as_array()
@@ -89,22 +111,7 @@ fn clean_replay_passes_all_invariants() {
 #[test]
 fn clean_replay_output_matches_full_reviewed_golden() {
     let output = run_replay("clean_replay.json");
-    assert!(
-        output.status.success(),
-        "replay helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let expected = fixture_text("clean_replay_expected.json");
-    serde_json::from_slice::<Value>(&output.stdout).expect("actual replay output must be JSON");
-    serde_json::from_str::<Value>(&expected).expect("golden replay output must be JSON");
-    assert_eq!(
-        String::from_utf8(output.stdout).expect("replay stdout is utf-8"),
-        expected,
-        "clean_replay receipt drifted from the reviewed golden"
-    );
+    assert_replay_output_matches_golden(output, "clean_replay_expected.json", "clean_replay");
 }
 
 #[test]
@@ -123,21 +130,10 @@ fn duplicate_claims_are_errors() {
 #[test]
 fn duplicate_claims_output_matches_full_reviewed_golden() {
     let output = run_replay("duplicate_claims.json");
-    assert!(
-        output.status.success(),
-        "replay helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let expected = fixture_text("duplicate_claims_expected.json");
-    serde_json::from_slice::<Value>(&output.stdout).expect("actual replay output must be JSON");
-    serde_json::from_str::<Value>(&expected).expect("golden replay output must be JSON");
-    assert_eq!(
-        String::from_utf8(output.stdout).expect("replay stdout is utf-8"),
-        expected,
-        "duplicate_claims receipt drifted from the reviewed golden"
+    assert_replay_output_matches_golden(
+        output,
+        "duplicate_claims_expected.json",
+        "duplicate_claims",
     );
 }
 
@@ -161,21 +157,10 @@ fn overlapping_exclusive_reservations_are_errors() {
 #[test]
 fn reservation_contention_output_matches_full_reviewed_golden() {
     let output = run_replay("reservation_contention.json");
-    assert!(
-        output.status.success(),
-        "replay helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let expected = fixture_text("reservation_contention_expected.json");
-    serde_json::from_slice::<Value>(&output.stdout).expect("actual replay output must be JSON");
-    serde_json::from_str::<Value>(&expected).expect("golden replay output must be JSON");
-    assert_eq!(
-        String::from_utf8(output.stdout).expect("replay stdout is utf-8"),
-        expected,
-        "reservation_contention receipt drifted from the reviewed golden"
+    assert_replay_output_matches_golden(
+        output,
+        "reservation_contention_expected.json",
+        "reservation_contention",
     );
 }
 
@@ -194,22 +179,7 @@ fn partial_proof_launches_require_remote_exit_evidence() {
 #[test]
 fn partial_proof_output_matches_full_reviewed_golden() {
     let output = run_replay("partial_proof.json");
-    assert!(
-        output.status.success(),
-        "replay helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let expected = fixture_text("partial_proof_expected.json");
-    serde_json::from_slice::<Value>(&output.stdout).expect("actual replay output must be JSON");
-    serde_json::from_str::<Value>(&expected).expect("golden replay output must be JSON");
-    assert_eq!(
-        String::from_utf8(output.stdout).expect("replay stdout is utf-8"),
-        expected,
-        "partial_proof receipt drifted from the reviewed golden"
-    );
+    assert_replay_output_matches_golden(output, "partial_proof_expected.json", "partial_proof");
 }
 
 #[test]
@@ -228,21 +198,10 @@ fn remote_success_without_artifact_and_closeout_evidence_is_warning() {
 #[test]
 fn artifact_warning_and_closeout_gap_output_matches_full_reviewed_golden() {
     let output = run_replay("artifact_warning_and_closeout_gap.json");
-    assert!(
-        output.status.success(),
-        "replay helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let expected = fixture_text("artifact_warning_and_closeout_gap_expected.json");
-    serde_json::from_slice::<Value>(&output.stdout).expect("actual replay output must be JSON");
-    serde_json::from_str::<Value>(&expected).expect("golden replay output must be JSON");
-    assert_eq!(
-        String::from_utf8(output.stdout).expect("replay stdout is utf-8"),
-        expected,
-        "artifact_warning_and_closeout_gap receipt drifted from the reviewed golden"
+    assert_replay_output_matches_golden(
+        output,
+        "artifact_warning_and_closeout_gap_expected.json",
+        "artifact_warning_and_closeout_gap",
     );
 }
 
@@ -257,21 +216,10 @@ fn released_claims_and_reservations_do_not_trigger_false_contention() {
 #[test]
 fn released_claim_and_reservation_output_matches_full_reviewed_golden() {
     let output = run_replay("released_claim_and_reservation.json");
-    assert!(
-        output.status.success(),
-        "replay helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let expected = fixture_text("released_claim_and_reservation_expected.json");
-    serde_json::from_slice::<Value>(&output.stdout).expect("actual replay output must be JSON");
-    serde_json::from_str::<Value>(&expected).expect("golden replay output must be JSON");
-    assert_eq!(
-        String::from_utf8(output.stdout).expect("replay stdout is utf-8"),
-        expected,
-        "released_claim_and_reservation receipt drifted from the reviewed golden"
+    assert_replay_output_matches_golden(
+        output,
+        "released_claim_and_reservation_expected.json",
+        "released_claim_and_reservation",
     );
 }
 
