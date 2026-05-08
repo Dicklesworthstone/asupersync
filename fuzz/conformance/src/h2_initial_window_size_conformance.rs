@@ -1,12 +1,14 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use serde::{Serialize, Deserialize};
-use bytes::Bytes;
 
 /// Conformance test for SETTINGS_INITIAL_WINDOW_SIZE retroactive updates
-/// Compares asupersync h2 implementation against reference h2 crate
+/// Fail-closed until it drives both asupersync H2 and a live h2 crate endpoint.
 ///
 /// RFC 9113 §6.5.2: "A change to SETTINGS_INITIAL_WINDOW_SIZE affects the
 /// connection flow-control window of all open streams."
+const REFERENCE_IMPLEMENTATION: &str = "local-rfc-window-model";
+const REFERENCE_STATUS: &str = "xfail-no-live-h2-reference";
+const FAIL_CLOSED_REASON: &str = "fail-closed: this harness currently compares local window models and does not drive a live h2 crate reference implementation";
 
 /// Output format for conformance test results
 #[derive(Debug, Clone, Copy)]
@@ -21,6 +23,12 @@ pub enum OutputFormat {
 pub struct ConformanceResults {
     /// Whether implementations are conformant
     pub conformant_implementations: bool,
+    /// Reference implementation used by this run
+    pub reference_implementation: String,
+    /// Whether the reference is live or fail-closed
+    pub reference_status: String,
+    /// Fail-closed reason when no live reference was used
+    pub fail_closed_reason: Option<String>,
     /// Number of tests passed
     pub tests_passed: usize,
     /// Number of tests failed
@@ -36,6 +44,7 @@ pub struct ConformanceResults {
 pub struct TestResult {
     pub test_name: String,
     pub passed: bool,
+    pub reference_status: String,
     pub error_message: Option<String>,
     pub description: String,
 }
@@ -63,9 +72,9 @@ struct WindowSizeScenario {
     stream_data_sizes: Vec<usize>,
 }
 
-/// Mock connection state for both implementations
+/// Local RFC-derived window model used only as sanity coverage.
 #[derive(Debug)]
-struct MockConnectionState {
+struct ModeledConnectionState {
     /// Current SETTINGS_INITIAL_WINDOW_SIZE
     initial_window_size: u32,
     /// Per-stream flow control windows
@@ -74,7 +83,7 @@ struct MockConnectionState {
     next_stream_id: u32,
 }
 
-impl MockConnectionState {
+impl ModeledConnectionState {
     fn new(initial_window_size: u32) -> Self {
         Self {
             initial_window_size,
@@ -89,13 +98,17 @@ impl MockConnectionState {
         self.next_stream_id += 2; // Client streams are odd
 
         // New stream gets the current initial window size
-        self.stream_windows.insert(stream_id, self.initial_window_size as i32);
+        self.stream_windows
+            .insert(stream_id, self.initial_window_size as i32);
 
         stream_id
     }
 
     /// Update SETTINGS_INITIAL_WINDOW_SIZE retroactively
-    fn update_initial_window_size(&mut self, new_size: u32) -> Result<Vec<(u32, i32, i32)>, String> {
+    fn update_initial_window_size(
+        &mut self,
+        new_size: u32,
+    ) -> Result<Vec<(u32, i32, i32)>, String> {
         let old_size = self.initial_window_size;
         let window_delta = new_size as i64 - old_size as i64;
 
@@ -104,7 +117,9 @@ impl MockConnectionState {
         // Apply retroactive changes to all existing streams
         for (&stream_id, window) in &mut self.stream_windows {
             let old_window = *window;
-            let new_window = (old_window as i64 + window_delta).max(0).min(i32::MAX as i64) as i32;
+            let new_window = (old_window as i64 + window_delta)
+                .max(0)
+                .min(i32::MAX as i64) as i32;
 
             *window = new_window;
             changes.push((stream_id, old_window, new_window));
@@ -128,7 +143,10 @@ impl MockConnectionState {
     fn send_data(&mut self, stream_id: u32, size: usize) -> Result<i32, String> {
         if let Some(window) = self.stream_windows.get_mut(&stream_id) {
             if *window < size as i32 {
-                return Err(format!("Flow control violation: window={}, size={}", window, size));
+                return Err(format!(
+                    "Flow control violation: window={}, size={}",
+                    window, size
+                ));
             }
             *window -= size as i32;
             Ok(*window)
@@ -142,15 +160,15 @@ impl MockConnectionState {
     }
 }
 
-/// Asupersync H2 implementation adapter
-struct AsupersyncH2Adapter {
-    state: MockConnectionState,
+/// Modeled candidate-side adapter; not the live asupersync H2 implementation.
+struct ModeledCandidateAdapter {
+    state: ModeledConnectionState,
 }
 
-impl AsupersyncH2Adapter {
+impl ModeledCandidateAdapter {
     fn new(initial_window_size: u32) -> Self {
         Self {
-            state: MockConnectionState::new(initial_window_size),
+            state: ModeledConnectionState::new(initial_window_size),
         }
     }
 
@@ -158,7 +176,10 @@ impl AsupersyncH2Adapter {
         self.state.create_stream()
     }
 
-    fn update_initial_window_size(&mut self, new_size: u32) -> Result<Vec<(u32, i32, i32)>, String> {
+    fn update_initial_window_size(
+        &mut self,
+        new_size: u32,
+    ) -> Result<Vec<(u32, i32, i32)>, String> {
         self.state.update_initial_window_size(new_size)
     }
 
@@ -171,15 +192,15 @@ impl AsupersyncH2Adapter {
     }
 }
 
-/// Reference h2 crate implementation adapter
-struct ReferenceH2Adapter {
-    state: MockConnectionState,
+/// Modeled RFC reference; not the live h2 crate.
+struct ModeledReferenceAdapter {
+    state: ModeledConnectionState,
 }
 
-impl ReferenceH2Adapter {
+impl ModeledReferenceAdapter {
     fn new(initial_window_size: u32) -> Self {
         Self {
-            state: MockConnectionState::new(initial_window_size),
+            state: ModeledConnectionState::new(initial_window_size),
         }
     }
 
@@ -187,8 +208,11 @@ impl ReferenceH2Adapter {
         self.state.create_stream()
     }
 
-    fn update_initial_window_size(&mut self, new_size: u32) -> Result<Vec<(u32, i32, i32)>, String> {
-        // Reference implementation follows RFC 9113 exactly
+    fn update_initial_window_size(
+        &mut self,
+        new_size: u32,
+    ) -> Result<Vec<(u32, i32, i32)>, String> {
+        // Local RFC model follows the §6.5.2 window-delta rule.
         self.state.update_initial_window_size(new_size)
     }
 
@@ -203,114 +227,139 @@ impl ReferenceH2Adapter {
 
 /// Run conformance test comparing implementations
 fn test_conformance(scenario: WindowSizeScenario) -> Result<(), String> {
-    let mut asupersync = AsupersyncH2Adapter::new(scenario.initial_window_size);
-    let mut reference = ReferenceH2Adapter::new(scenario.initial_window_size);
+    let mut candidate = ModeledCandidateAdapter::new(scenario.initial_window_size);
+    let mut reference = ModeledReferenceAdapter::new(scenario.initial_window_size);
 
     // Phase 1: Create streams on both implementations
     let mut stream_ids = Vec::new();
     for _ in 0..scenario.streams_to_create {
-        let asupersync_id = asupersync.create_stream();
+        let candidate_id = candidate.create_stream();
         let reference_id = reference.create_stream();
 
         // Stream IDs should match
-        if asupersync_id != reference_id {
-            return Err(format!("Stream ID mismatch: asupersync={}, reference={}",
-                asupersync_id, reference_id));
+        if candidate_id != reference_id {
+            return Err(format!(
+                "Stream ID mismatch: candidate model={}, reference model={}",
+                candidate_id, reference_id
+            ));
         }
 
-        stream_ids.push(asupersync_id);
+        stream_ids.push(candidate_id);
     }
 
     // Verify initial window sizes match
     for &stream_id in &stream_ids {
-        let asupersync_window = asupersync.get_window(stream_id).unwrap();
+        let candidate_window = candidate.get_window(stream_id).unwrap();
         let reference_window = reference.get_window(stream_id).unwrap();
 
-        if asupersync_window != reference_window {
-            return Err(format!("Initial window mismatch for stream {}: asupersync={}, reference={}",
-                stream_id, asupersync_window, reference_window));
+        if candidate_window != reference_window {
+            return Err(format!(
+                "Initial window mismatch for stream {}: candidate model={}, reference model={}",
+                stream_id, candidate_window, reference_window
+            ));
         }
     }
 
     // Phase 2: Send data on streams (if specified)
     for (i, &data_size) in scenario.stream_data_sizes.iter().enumerate() {
-        if i >= stream_ids.len() { break; }
+        if i >= stream_ids.len() {
+            break;
+        }
 
         let stream_id = stream_ids[i];
 
-        let asupersync_result = asupersync.send_data(stream_id, data_size);
+        let candidate_result = candidate.send_data(stream_id, data_size);
         let reference_result = reference.send_data(stream_id, data_size);
 
-        match (asupersync_result, reference_result) {
-            (Ok(asupersync_window), Ok(reference_window)) => {
-                if asupersync_window != reference_window {
-                    return Err(format!("Window mismatch after send on stream {}: asupersync={}, reference={}",
-                        stream_id, asupersync_window, reference_window));
+        match (candidate_result, reference_result) {
+            (Ok(candidate_window), Ok(reference_window)) => {
+                if candidate_window != reference_window {
+                    return Err(format!(
+                        "Window mismatch after send on stream {}: candidate model={}, reference model={}",
+                        stream_id, candidate_window, reference_window
+                    ));
                 }
             }
-            (Err(asupersync_err), Err(reference_err)) => {
+            (Err(candidate_err), Err(reference_err)) => {
                 // Both failed - check error similarity
-                if asupersync_err != reference_err {
-                    return Err(format!("Error mismatch on stream {}: asupersync='{}', reference='{}'",
-                        stream_id, asupersync_err, reference_err));
+                if candidate_err != reference_err {
+                    return Err(format!(
+                        "Error mismatch on stream {}: candidate model='{}', reference model='{}'",
+                        stream_id, candidate_err, reference_err
+                    ));
                 }
             }
             (Ok(_), Err(ref_err)) => {
-                return Err(format!("Asupersync succeeded but reference failed on stream {}: {}",
-                    stream_id, ref_err));
+                return Err(format!(
+                    "Candidate model succeeded but reference model failed on stream {}: {}",
+                    stream_id, ref_err
+                ));
             }
-            (Err(asup_err), Ok(_)) => {
-                return Err(format!("Reference succeeded but asupersync failed on stream {}: {}",
-                    stream_id, asup_err));
+            (Err(candidate_err), Ok(_)) => {
+                return Err(format!(
+                    "Reference model succeeded but candidate model failed on stream {}: {}",
+                    stream_id, candidate_err
+                ));
             }
         }
     }
 
     // Phase 3: Apply SETTINGS_INITIAL_WINDOW_SIZE changes
     for &new_window_size in &scenario.new_window_sizes {
-        let asupersync_changes = asupersync.update_initial_window_size(new_window_size)?;
+        let candidate_changes = candidate.update_initial_window_size(new_window_size)?;
         let reference_changes = reference.update_initial_window_size(new_window_size)?;
 
         // Verify same number of affected streams
-        if asupersync_changes.len() != reference_changes.len() {
-            return Err(format!("Different number of streams affected: asupersync={}, reference={}",
-                asupersync_changes.len(), reference_changes.len()));
+        if candidate_changes.len() != reference_changes.len() {
+            return Err(format!(
+                "Different number of streams affected: candidate model={}, reference model={}",
+                candidate_changes.len(),
+                reference_changes.len()
+            ));
         }
 
         // Sort changes by stream ID for comparison
-        let mut asup_sorted = asupersync_changes;
+        let mut candidate_sorted = candidate_changes;
         let mut ref_sorted = reference_changes;
-        asup_sorted.sort_by_key(|(id, _, _)| *id);
+        candidate_sorted.sort_by_key(|(id, _, _)| *id);
         ref_sorted.sort_by_key(|(id, _, _)| *id);
 
         // Compare each stream's window changes
-        for ((asup_id, asup_old, asup_new), (ref_id, ref_old, ref_new)) in
-            asup_sorted.iter().zip(ref_sorted.iter()) {
-
-            if asup_id != ref_id {
-                return Err(format!("Stream ID mismatch in changes: asupersync={}, reference={}",
-                    asup_id, ref_id));
+        for ((candidate_id, candidate_old, candidate_new), (ref_id, ref_old, ref_new)) in
+            candidate_sorted.iter().zip(ref_sorted.iter())
+        {
+            if candidate_id != ref_id {
+                return Err(format!(
+                    "Stream ID mismatch in changes: candidate model={}, reference model={}",
+                    candidate_id, ref_id
+                ));
             }
 
-            if asup_old != ref_old {
-                return Err(format!("Old window mismatch for stream {}: asupersync={}, reference={}",
-                    asup_id, asup_old, ref_old));
+            if candidate_old != ref_old {
+                return Err(format!(
+                    "Old window mismatch for stream {}: candidate model={}, reference model={}",
+                    candidate_id, candidate_old, ref_old
+                ));
             }
 
-            if asup_new != ref_new {
-                return Err(format!("New window mismatch for stream {}: asupersync={}, reference={}",
-                    asup_id, asup_new, ref_new));
+            if candidate_new != ref_new {
+                return Err(format!(
+                    "New window mismatch for stream {}: candidate model={}, reference model={}",
+                    candidate_id, candidate_new, ref_new
+                ));
             }
         }
 
         // Verify final window states match
         for &stream_id in &stream_ids {
-            let asupersync_window = asupersync.get_window(stream_id).unwrap();
+            let candidate_window = candidate.get_window(stream_id).unwrap();
             let reference_window = reference.get_window(stream_id).unwrap();
 
-            if asupersync_window != reference_window {
-                return Err(format!("Final window mismatch for stream {} after setting to {}: asupersync={}, reference={}",
-                    stream_id, new_window_size, asupersync_window, reference_window));
+            if candidate_window != reference_window {
+                return Err(format!(
+                    "Final window mismatch for stream {} after setting to {}: candidate model={}, reference model={}",
+                    stream_id, new_window_size, candidate_window, reference_window
+                ));
             }
         }
     }
@@ -431,18 +480,50 @@ fn run_conformance_tests(comprehensive: bool) -> ConformanceResults {
     let mut test_results = Vec::new();
 
     // Basic test suite
-    let basic_tests = vec![
-        ("Basic window increase", test_basic_increase as fn() -> Result<(), String>, "Tests increasing SETTINGS_INITIAL_WINDOW_SIZE"),
-        ("Window size decrease", test_window_decrease, "Tests decreasing SETTINGS_INITIAL_WINDOW_SIZE"),
-        ("Multiple window changes", test_multiple_changes, "Tests sequential window size changes"),
-        ("Window changes with data transfer", test_with_data_transfer, "Tests window changes with active data transfer"),
-        ("Minimum window size", test_minimum_window, "Tests minimum allowed window size (0)"),
-        ("Maximum window size", test_maximum_window, "Tests maximum allowed window size (2^31-1)"),
+    let basic_tests: Vec<(&str, fn() -> Result<(), String>, &str)> = vec![
+        (
+            "Basic window increase",
+            test_basic_increase as fn() -> Result<(), String>,
+            "Tests increasing SETTINGS_INITIAL_WINDOW_SIZE",
+        ),
+        (
+            "Window size decrease",
+            test_window_decrease,
+            "Tests decreasing SETTINGS_INITIAL_WINDOW_SIZE",
+        ),
+        (
+            "Multiple window changes",
+            test_multiple_changes,
+            "Tests sequential window size changes",
+        ),
+        (
+            "Window changes with data transfer",
+            test_with_data_transfer,
+            "Tests window changes with active data transfer",
+        ),
+        (
+            "Minimum window size",
+            test_minimum_window,
+            "Tests minimum allowed window size (0)",
+        ),
+        (
+            "Maximum window size",
+            test_maximum_window,
+            "Tests maximum allowed window size (2^31-1)",
+        ),
     ];
 
-    let mut comprehensive_tests = vec![
-        ("Mixed stream states", test_mixed_stream_states, "Tests mixed stream states during window changes"),
-        ("Flow control boundaries", test_flow_control_boundaries, "Tests flow control boundary conditions"),
+    let mut comprehensive_tests: Vec<(&str, fn() -> Result<(), String>, &str)> = vec![
+        (
+            "Mixed stream states",
+            test_mixed_stream_states,
+            "Tests mixed stream states during window changes",
+        ),
+        (
+            "Flow control boundaries",
+            test_flow_control_boundaries,
+            "Tests flow control boundary conditions",
+        ),
     ];
 
     let mut all_tests = basic_tests;
@@ -450,7 +531,6 @@ fn run_conformance_tests(comprehensive: bool) -> ConformanceResults {
         all_tests.append(&mut comprehensive_tests);
     }
 
-    let mut tests_passed = 0;
     let mut tests_failed = 0;
 
     for (name, test_fn, description) in all_tests {
@@ -458,17 +538,22 @@ fn run_conformance_tests(comprehensive: bool) -> ConformanceResults {
             Ok(()) => {
                 test_results.push(TestResult {
                     test_name: name.to_string(),
-                    passed: true,
-                    error_message: None,
+                    passed: false,
+                    reference_status: REFERENCE_STATUS.to_string(),
+                    error_message: Some(FAIL_CLOSED_REASON.to_string()),
                     description: description.to_string(),
                 });
-                tests_passed += 1;
+                tests_failed += 1;
             }
             Err(error) => {
                 test_results.push(TestResult {
                     test_name: name.to_string(),
                     passed: false,
-                    error_message: Some(error),
+                    reference_status: REFERENCE_STATUS.to_string(),
+                    error_message: Some(format!(
+                        "fail-closed before live h2 comparison: modeled sanity check failed: {}",
+                        error
+                    )),
                     description: description.to_string(),
                 });
                 tests_failed += 1;
@@ -476,19 +561,18 @@ fn run_conformance_tests(comprehensive: bool) -> ConformanceResults {
         }
     }
 
-    let conformant = tests_failed == 0;
-    let summary = if conformant {
-        format!("All {} tests passed - SETTINGS_INITIAL_WINDOW_SIZE behavior is conformant", tests_passed)
-    } else {
-        format!("{} of {} tests failed - behavior divergence detected", tests_failed, tests_passed + tests_failed)
-    };
-
     ConformanceResults {
-        conformant_implementations: conformant,
-        tests_passed,
+        conformant_implementations: false,
+        reference_implementation: REFERENCE_IMPLEMENTATION.to_string(),
+        reference_status: REFERENCE_STATUS.to_string(),
+        fail_closed_reason: Some(FAIL_CLOSED_REASON.to_string()),
+        tests_passed: 0,
         tests_failed,
         test_results,
-        summary,
+        summary: format!(
+            "{} modeled scenarios were checked, but no result is conformant because the harness does not drive a live h2 crate reference",
+            tests_failed
+        ),
     }
 }
 
@@ -501,8 +585,22 @@ pub fn format_results_as_json(results: &ConformanceResults) -> String {
 pub fn format_results_as_markdown(results: &ConformanceResults) -> String {
     let mut output = String::new();
 
-    output.push_str("# SETTINGS_INITIAL_WINDOW_SIZE Conformance Test Results\n\n");
-    output.push_str(&format!("**Status:** {}\n\n", if results.conformant_implementations { "✅ CONFORMANT" } else { "❌ NON-CONFORMANT" }));
+    output.push_str("# SETTINGS_INITIAL_WINDOW_SIZE Fail-Closed Check Results\n\n");
+    output.push_str(&format!(
+        "**Status:** {}\n\n",
+        if results.conformant_implementations {
+            "CONFORMANT"
+        } else {
+            "FAIL-CLOSED"
+        }
+    ));
+    output.push_str(&format!(
+        "**Reference:** {} ({})\n",
+        results.reference_implementation, results.reference_status
+    ));
+    if let Some(reason) = &results.fail_closed_reason {
+        output.push_str(&format!("**Reason:** {}\n", reason));
+    }
     output.push_str(&format!("**Tests Passed:** {}\n", results.tests_passed));
     output.push_str(&format!("**Tests Failed:** {}\n\n", results.tests_failed));
 
@@ -511,8 +609,15 @@ pub fn format_results_as_markdown(results: &ConformanceResults) -> String {
     output.push_str("|------|--------|-------------|\n");
 
     for result in &results.test_results {
-        let status = if result.passed { "✅ PASS" } else { "❌ FAIL" };
-        output.push_str(&format!("| {} | {} | {} |\n", result.test_name, status, result.description));
+        let status = if result.passed {
+            "✅ PASS"
+        } else {
+            "❌ FAIL"
+        };
+        output.push_str(&format!(
+            "| {} | {} | {} |\n",
+            result.test_name, status, result.description
+        ));
     }
 
     if results.tests_failed > 0 {
@@ -535,11 +640,25 @@ pub fn format_results_as_markdown(results: &ConformanceResults) -> String {
 pub fn format_results_as_summary(results: &ConformanceResults) -> String {
     let mut output = String::new();
 
-    output.push_str("SETTINGS_INITIAL_WINDOW_SIZE Conformance Test Results\n");
-    output.push_str("=".repeat(55).as_str());
+    output.push_str("SETTINGS_INITIAL_WINDOW_SIZE Fail-Closed Check Results\n");
+    output.push_str("=".repeat(59).as_str());
     output.push_str("\n\n");
 
-    output.push_str(&format!("Status: {}\n", if results.conformant_implementations { "CONFORMANT" } else { "NON-CONFORMANT" }));
+    output.push_str(&format!(
+        "Status: {}\n",
+        if results.conformant_implementations {
+            "CONFORMANT"
+        } else {
+            "FAIL-CLOSED"
+        }
+    ));
+    output.push_str(&format!(
+        "Reference: {} ({})\n",
+        results.reference_implementation, results.reference_status
+    ));
+    if let Some(reason) = &results.fail_closed_reason {
+        output.push_str(&format!("Reason: {}\n", reason));
+    }
     output.push_str(&format!("Tests Passed: {}\n", results.tests_passed));
     output.push_str(&format!("Tests Failed: {}\n\n", results.tests_failed));
 
@@ -575,14 +694,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_conformance_basic() {
+    fn test_fail_closed_without_live_h2_reference() {
         let results = run_basic_conformance_tests();
-        assert!(results.conformant_implementations);
+        assert!(!results.conformant_implementations);
+        assert_eq!(results.reference_status, REFERENCE_STATUS);
+        assert_eq!(results.tests_passed, 0);
+        assert!(results.tests_failed > 0);
+        assert!(
+            results
+                .fail_closed_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("does not drive a live h2 crate reference")
+        );
+        assert!(results.test_results.iter().all(|result| {
+            !result.passed
+                && result.reference_status == REFERENCE_STATUS
+                && result
+                    .error_message
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("fail-closed")
+        }));
+    }
+
+    #[test]
+    fn test_public_output_does_not_claim_conformance() {
+        let results = run_basic_conformance_tests();
+        let summary = format_results_as_summary(&results);
+        let markdown = format_results_as_markdown(&results);
+
+        assert!(summary.contains("FAIL-CLOSED"));
+        assert!(summary.contains(REFERENCE_STATUS));
+        assert!(!summary.contains("Status: CONFORMANT"));
+        assert!(markdown.contains("FAIL-CLOSED"));
+        assert!(markdown.contains(REFERENCE_STATUS));
     }
 
     #[test]
     fn test_window_size_math() {
-        let mut state = MockConnectionState::new(65535);
+        let mut state = ModeledConnectionState::new(65535);
         let stream_id = state.create_stream();
 
         // Test increase
@@ -598,7 +749,7 @@ mod tests {
 
     #[test]
     fn test_multiple_streams() {
-        let mut state = MockConnectionState::new(65535);
+        let mut state = ModeledConnectionState::new(65535);
         let stream1 = state.create_stream();
         let stream2 = state.create_stream();
         let stream3 = state.create_stream();

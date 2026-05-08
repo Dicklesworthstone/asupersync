@@ -1,7 +1,7 @@
 //! CLI runner for H2 SETTINGS_INITIAL_WINDOW_SIZE conformance testing
 //!
-//! This binary runs the conformance test harness comparing asupersync's
-//! SETTINGS_INITIAL_WINDOW_SIZE retroactive update behavior against the h2 crate reference.
+//! This binary runs a fail-closed check until the harness drives both
+//! asupersync H2 and a live h2 crate endpoint.
 
 use std::env;
 use std::process;
@@ -59,12 +59,16 @@ fn main() {
     }
 
     // Exit with appropriate code
-    let exit_code = if results.conformant_implementations { 0 } else { 1 };
+    let exit_code = if results.conformant_implementations {
+        0
+    } else {
+        1
+    };
     process::exit(exit_code);
 }
 
 fn print_help() {
-    println!("H2 SETTINGS_INITIAL_WINDOW_SIZE Conformance Test");
+    println!("H2 SETTINGS_INITIAL_WINDOW_SIZE Fail-Closed Check");
     println!();
     println!("USAGE:");
     println!("    h2_initial_window_size_conformance [OPTIONS]");
@@ -77,16 +81,16 @@ fn print_help() {
     println!("    --help, -h   Print this help message");
     println!();
     println!("DESCRIPTION:");
-    println!("    This tool tests HTTP/2 SETTINGS_INITIAL_WINDOW_SIZE compliance");
-    println!("    by comparing asupersync behavior against the h2 crate reference");
-    println!("    implementation. It verifies that both implementations handle");
-    println!("    retroactive window size updates identically per RFC 9113 §6.5.2.");
+    println!("    This tool refuses to claim HTTP/2 SETTINGS_INITIAL_WINDOW_SIZE");
+    println!("    differential conformance until the harness drives a live h2 crate");
+    println!("    endpoint and the asupersync H2 implementation for the same RFC");
+    println!("    9113 §6.5.2 scenarios.");
     println!();
     println!("    Tests cover window size increases, decreases, mixed stream states,");
     println!("    boundary conditions, and data transfer scenarios to ensure");
-    println!("    identical flow control behavior across implementations.");
+    println!("    modeled flow-control behavior only; they are not a conformance pass.");
     println!();
     println!("EXIT CODES:");
-    println!("    0    All tests passed - implementations are conformant");
-    println!("    1    One or more tests failed - behavior divergence detected");
+    println!("    0    Live reference comparison passed");
+    println!("    1    Fail-closed or behavior divergence detected");
 }
