@@ -1,0 +1,183 @@
+{
+  "contract_version": "lock-contention-atlas-contract-v1",
+  "bead_id": "asupersync-xpjyl7",
+  "description": "Fail-closed contract for a deterministic lock contention atlas over ContendedMutex and the canonical lock-order hierarchy.",
+  "source_of_truth": {
+    "contract": "artifacts/lock_contention_atlas_contract_v1.json",
+    "contract_test": "tests/lock_contention_atlas_contract.rs",
+    "contended_mutex": "src/sync/contended_mutex.rs",
+    "lock_ordering": "src/sync/lock_ordering.rs",
+    "sharded_state": "src/runtime/sharded_state.rs",
+    "contention_inventory": "docs/runtime_state_contention_inventory.md"
+  },
+  "atlas_policy": {
+    "default_mode": "disabled",
+    "enabled_mode": "opt_in_lock_metrics",
+    "instrumentation_off_overhead_must_be_measured": true,
+    "lab_runtime_deterministic": true,
+    "redaction_required": true,
+    "fail_closed_when_live_samples_missing": true
+  },
+  "canonical_lock_order": [
+    {
+      "rank": "E",
+      "name": "Config",
+      "numeric_rank": 10,
+      "must_precede": [
+        "D",
+        "B",
+        "A",
+        "C"
+      ]
+    },
+    {
+      "rank": "D",
+      "name": "Instrumentation",
+      "numeric_rank": 20,
+      "must_precede": [
+        "B",
+        "A",
+        "C"
+      ]
+    },
+    {
+      "rank": "B",
+      "name": "Regions",
+      "numeric_rank": 30,
+      "must_precede": [
+        "A",
+        "C"
+      ]
+    },
+    {
+      "rank": "A",
+      "name": "Tasks",
+      "numeric_rank": 40,
+      "must_precede": [
+        "C"
+      ]
+    },
+    {
+      "rank": "C",
+      "name": "Obligations",
+      "numeric_rank": 50,
+      "must_precede": []
+    }
+  ],
+  "current_snapshot_fields": [
+    "name",
+    "acquisitions",
+    "contentions",
+    "wait_ns",
+    "hold_ns",
+    "max_wait_ns",
+    "max_hold_ns"
+  ],
+  "required_atlas_fields": [
+    "lock_name",
+    "lock_rank",
+    "lock_module",
+    "acquisitions",
+    "contentions",
+    "wait_ns",
+    "hold_ns",
+    "max_wait_ns",
+    "max_hold_ns",
+    "p95_wait_ns",
+    "p999_wait_ns",
+    "p95_hold_ns",
+    "p999_hold_ns",
+    "order_edges_exercised",
+    "order_violations",
+    "instrumentation_mode"
+  ],
+  "allowed_report_statuses": [
+    "LIVE",
+    "XFAIL",
+    "BLOCKED"
+  ],
+  "atlas_rows": [
+    {
+      "surface": "contended_mutex_snapshot",
+      "implementation_path": "src/sync/contended_mutex.rs",
+      "live_atlas_wired": false,
+      "report_status": "XFAIL",
+      "status_reason": "current snapshot exposes cumulative and max wait/hold counters, but p95/p999 atlas rows are not wired yet",
+      "required_fields": [
+        "lock_name",
+        "acquisitions",
+        "contentions",
+        "wait_ns",
+        "hold_ns",
+        "max_wait_ns",
+        "max_hold_ns",
+        "p95_wait_ns",
+        "p999_wait_ns",
+        "p95_hold_ns",
+        "p999_hold_ns",
+        "instrumentation_mode"
+      ]
+    },
+    {
+      "surface": "lock_order_edges",
+      "implementation_path": "src/sync/lock_ordering.rs",
+      "live_atlas_wired": false,
+      "report_status": "XFAIL",
+      "status_reason": "debug lock-order violations exist, but deterministic exercised-edge atlas output is not wired yet",
+      "required_fields": [
+        "lock_name",
+        "lock_rank",
+        "lock_module",
+        "order_edges_exercised",
+        "order_violations",
+        "instrumentation_mode"
+      ]
+    },
+    {
+      "surface": "sharded_state_order",
+      "implementation_path": "src/runtime/sharded_state.rs",
+      "live_atlas_wired": false,
+      "report_status": "XFAIL",
+      "status_reason": "ShardGuard enforces order, but atlas coverage for exercised E-D-B-A-C edges is not wired yet",
+      "required_fields": [
+        "lock_rank",
+        "order_edges_exercised",
+        "order_violations",
+        "instrumentation_mode"
+      ]
+    },
+    {
+      "surface": "instrumentation_off_overhead",
+      "implementation_path": "src/sync/contended_mutex.rs",
+      "live_atlas_wired": false,
+      "report_status": "XFAIL",
+      "status_reason": "feature-off overhead proof lane is required before atlas reports may claim LIVE",
+      "required_fields": [
+        "instrumentation_mode",
+        "acquisitions",
+        "contentions"
+      ]
+    }
+  ],
+  "required_proofs": [
+    {
+      "proof_id": "synthetic-inversion",
+      "status": "XFAIL",
+      "description": "A deterministic synthetic inversion must produce an order_violations entry instead of only a debug panic."
+    },
+    {
+      "proof_id": "instrumentation-off-overhead",
+      "status": "XFAIL",
+      "description": "A benchmark or proof lane must show instrumentation-disabled overhead remains negligible."
+    },
+    {
+      "proof_id": "stable-redacted-report",
+      "status": "XFAIL",
+      "description": "The atlas report must sort rows deterministically and omit payloads, user paths, and raw coordination text."
+    }
+  ],
+  "golden_markdown": "| surface | status | required_fields |\n| --- | --- | --- |\n| contended_mutex_snapshot | XFAIL | lock_name, acquisitions, contentions, wait_ns, hold_ns, max_wait_ns, max_hold_ns, p95_wait_ns, p999_wait_ns, p95_hold_ns, p999_hold_ns, instrumentation_mode |\n| instrumentation_off_overhead | XFAIL | instrumentation_mode, acquisitions, contentions |\n| lock_order_edges | XFAIL | lock_name, lock_rank, lock_module, order_edges_exercised, order_violations, instrumentation_mode |\n| sharded_state_order | XFAIL | lock_rank, order_edges_exercised, order_violations, instrumentation_mode |\n",
+  "proof_commands": [
+    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lock_contention_atlas_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --features lock-metrics --test lock_contention_atlas_contract -- --nocapture"
+  ]
+}
