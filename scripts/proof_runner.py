@@ -67,6 +67,60 @@ OPERATOR_ACTION_RECIPE_IDS = (
 )
 
 
+def proof_console_markdown(report: Dict[str, Any]) -> str:
+    """Render a deterministic Markdown operator proof-console report."""
+    summary = report["summary"]
+    lines = [
+        "# Proof Console Report",
+        "",
+        f"- Schema: `{report['schema_version']}`",
+        f"- Generated at: `{report['generated_at']}`",
+        f"- Verdict: `{report['verdict']}`",
+        (
+            "- Summary: "
+            f"{summary['claim_count']} claims, "
+            f"{summary['lane_count']} lanes, "
+            f"{summary['green_claim_count']} green, "
+            f"{summary['yellow_claim_count']} yellow, "
+            f"{summary['red_claim_count']} red"
+        ),
+        "",
+        "## Claims",
+        "",
+        "| Claim | Status | Lanes | Broad Claim |",
+        "| --- | --- | --- | --- |",
+    ]
+    for row in report["claim_rows"]:
+        lanes = ", ".join(row["manifest_lane_ids"]) or "none"
+        lines.append(
+            f"| `{row['claim_id']}` | `{row['status']}` | {lanes} | {str(row['broad_claim']).lower()} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Lanes",
+            "",
+            "| Lane | Kind | Status | Guarantees |",
+            "| --- | --- | --- | --- |",
+        ]
+    )
+    for row in report["lane_rows"]:
+        guarantees = ", ".join(row["guarantee_ids"]) or "none"
+        lines.append(
+            f"| `{row['lane_id']}` | `{row['kind']}` | `{row['status']}` | {guarantees} |"
+        )
+
+    lines.extend(["", "## Failure Reasons", ""])
+    if report["failure_reasons"]:
+        for reason in report["failure_reasons"]:
+            lines.append(f"- `{reason['reason_id']}`: {reason['summary']}")
+    else:
+        lines.append("- none")
+
+    return "\n".join(lines) + "\n"
+
+
 def safe_command_argv(command: str) -> List[str]:
     """Convert a manifest command to argv without invoking a shell."""
     if any(ch in command for ch in ("\0", "\n", "\r")):
@@ -1614,16 +1668,7 @@ def main():
             if args.output == "json":
                 print(json.dumps(result, indent=2))
             else:
-                summary = result["summary"]
-                print(f"Proof console verdict: {result['verdict']}")
-                print(
-                    "Claims: "
-                    f"{summary['claim_count']} total, "
-                    f"{summary['green_claim_count']} green, "
-                    f"{summary['yellow_claim_count']} yellow, "
-                    f"{summary['red_claim_count']} red"
-                )
-                print(f"Lanes: {summary['lane_count']}")
+                print(proof_console_markdown(result), end="")
             return 0
 
         # Validate required arguments for proof analysis

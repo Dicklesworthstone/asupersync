@@ -1332,3 +1332,47 @@ fn proof_console_report_maps_explicit_rch_outcome_to_lane_status() {
         1
     );
 }
+
+#[test]
+fn proof_console_human_output_is_stable_markdown_without_raw_coordination_data() {
+    let output1 = run_proof_runner(&["--proof-console-report", "--output", "human"])
+        .expect("proof console markdown should execute");
+    let output2 = run_proof_runner(&["--proof-console-report", "--output", "human"])
+        .expect("proof console markdown should execute");
+
+    assert!(output1.status.success());
+    assert!(output2.status.success());
+    assert_eq!(
+        output1.stdout, output2.stdout,
+        "default markdown report should be deterministic"
+    );
+
+    let markdown = String::from_utf8(output1.stdout).expect("markdown utf8");
+    assert!(
+        markdown.starts_with("# Proof Console Report\n"),
+        "markdown should start with a stable title: {markdown}"
+    );
+    assert!(
+        markdown.contains("| Claim | Status | Lanes | Broad Claim |"),
+        "markdown should include the claim table"
+    );
+    assert!(
+        markdown.contains("| Lane | Kind | Status | Guarantees |"),
+        "markdown should include the lane table"
+    );
+    assert!(
+        markdown.contains("`no-tokio-production-graph`"),
+        "markdown should include snapshot claim rows"
+    );
+    for forbidden in [
+        "/home/ubuntu/",
+        "body_md",
+        "ack_required",
+        "Authorization: Bearer ",
+    ] {
+        assert!(
+            !markdown.contains(forbidden),
+            "markdown must not expose raw coordination marker {forbidden}"
+        );
+    }
+}
