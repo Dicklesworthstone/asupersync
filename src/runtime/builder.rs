@@ -2724,8 +2724,9 @@ impl RuntimeBuilder {
             config.runtime_state_shape,
             crate::runtime::config::RuntimeStateShape::Sharded
         ) {
-            return Err(Error::new(crate::error::ErrorKind::ConfigError).with_message(
-                "RuntimeBuilder::with_sharded_state(true) is gated pending the \
+            return Err(
+                Error::new(crate::error::ErrorKind::ConfigError).with_message(
+                    "RuntimeBuilder::with_sharded_state(true) is gated pending the \
                  scheduler-side integration tracked in br-asupersync-8fuxnt. \
                  ThreeLaneScheduler::new_with_options currently takes \
                  `&Arc<ContendedMutex<RuntimeState>>` and must accept an \
@@ -2733,8 +2734,9 @@ impl RuntimeBuilder {
                  both) before this shape can be wired through Runtime::new. \
                  The unified backing path (default `RuntimeStateShape::Unified`) \
                  remains fully supported."
-                    .to_string(),
-            ));
+                        .to_string(),
+                ),
+            );
         }
         Runtime::with_config_and_platform(
             config,

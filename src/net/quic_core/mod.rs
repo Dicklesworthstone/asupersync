@@ -2182,14 +2182,39 @@ mod tests {
         // (local, peer, expected effective)
         let cases: &[(Option<u64>, Option<u64>, Option<u64>, &str)] = &[
             // Both advertise non-zero → min wins.
-            (Some(30_000), Some(10_000), Some(10_000), "min(30k, 10k) = 10k"),
-            (Some(10_000), Some(30_000), Some(10_000), "min(10k, 30k) = 10k (commutative)"),
-            (Some(15_000), Some(15_000), Some(15_000), "equal advertised values"),
+            (
+                Some(30_000),
+                Some(10_000),
+                Some(10_000),
+                "min(30k, 10k) = 10k",
+            ),
+            (
+                Some(10_000),
+                Some(30_000),
+                Some(10_000),
+                "min(10k, 30k) = 10k (commutative)",
+            ),
+            (
+                Some(15_000),
+                Some(15_000),
+                Some(15_000),
+                "equal advertised values",
+            ),
             // Sole non-zero advertisement carries.
             (Some(20_000), None, Some(20_000), "only local advertises"),
             (None, Some(25_000), Some(25_000), "only peer advertises"),
-            (Some(20_000), Some(0), Some(20_000), "peer 0 == no peer advertisement"),
-            (Some(0), Some(25_000), Some(25_000), "local 0 == no local advertisement"),
+            (
+                Some(20_000),
+                Some(0),
+                Some(20_000),
+                "peer 0 == no peer advertisement",
+            ),
+            (
+                Some(0),
+                Some(25_000),
+                Some(25_000),
+                "local 0 == no local advertisement",
+            ),
             // Neither advertises a finite limit.
             (None, None, None, "neither advertises"),
             (Some(0), Some(0), None, "both zero == both unadvertised"),
@@ -2198,8 +2223,7 @@ mod tests {
         ];
 
         for (local, peer, expected, label) in cases.iter().copied() {
-            let actual =
-                TransportParameters::effective_max_idle_timeout(&tp(local), &tp(peer));
+            let actual = TransportParameters::effective_max_idle_timeout(&tp(local), &tp(peer));
             assert_eq!(
                 actual, expected,
                 "RFC 9000 §10.1: local={local:?}, peer={peer:?} → expected {expected:?} ({label}); got {actual:?}"

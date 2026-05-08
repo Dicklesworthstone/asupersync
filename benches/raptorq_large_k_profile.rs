@@ -11,12 +11,16 @@
 #![allow(dead_code)]
 #![allow(missing_docs)]
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main, measurement::WallTime};
+use criterion::{
+    BenchmarkId, Criterion, Throughput, criterion_group, criterion_main, measurement::WallTime,
+};
 use std::time::Duration;
 
 use asupersync::raptorq::decoder::{DecodeStats, InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::gf256::{Gf256, gf256_addmul_slice, gf256_mul_slice};
-use asupersync::raptorq::linalg::{DenseRow, GaussianSolver, row_scale_add, row_scale_add_batch2, row_scale_add_batch_multi};
+use asupersync::raptorq::linalg::{
+    DenseRow, GaussianSolver, row_scale_add, row_scale_add_batch_multi, row_scale_add_batch2,
+};
 use asupersync::raptorq::systematic::SystematicEncoder;
 use asupersync::types::ObjectId;
 
@@ -37,12 +41,11 @@ fn large_k_scenarios() -> [LargeKScenario; 6] {
         LargeKScenario {
             scenario_id: "LARGE-K-GF256-1024",
             k: 1024,
-            symbol_size: 1316, // ~1.3MB total
+            symbol_size: 1316,  // ~1.3MB total
             loss_fraction: 0.5, // 50% loss
             extra_repair: 100,
             target_bottleneck: "gf256_multiply",
         },
-
         // Stress matrix solve (Gaussian elimination)
         LargeKScenario {
             scenario_id: "LARGE-K-GAUSS-1024",
@@ -52,17 +55,15 @@ fn large_k_scenarios() -> [LargeKScenario; 6] {
             extra_repair: 50,
             target_bottleneck: "matrix_solve",
         },
-
         // Stress gap-handling with scattered losses
         LargeKScenario {
             scenario_id: "LARGE-K-GAP-1024",
             k: 1024,
             symbol_size: 1316,
             loss_fraction: 0.6, // Moderate loss with gaps
-            extra_repair: 200, // Lots of repair symbols
+            extra_repair: 200,  // Lots of repair symbols
             target_bottleneck: "gap_handling",
         },
-
         // Larger K=2048 scenarios
         LargeKScenario {
             scenario_id: "LARGE-K-GF256-2048",
@@ -72,7 +73,6 @@ fn large_k_scenarios() -> [LargeKScenario; 6] {
             extra_repair: 100,
             target_bottleneck: "gf256_multiply",
         },
-
         LargeKScenario {
             scenario_id: "LARGE-K-GAUSS-2048",
             k: 2048,
@@ -81,7 +81,6 @@ fn large_k_scenarios() -> [LargeKScenario; 6] {
             extra_repair: 150,
             target_bottleneck: "matrix_solve",
         },
-
         // Extreme K=4096 scenario
         LargeKScenario {
             scenario_id: "LARGE-K-EXTREME-4096",
@@ -128,12 +127,18 @@ fn bench_large_k_encoder_roundtrip(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(30)); // Longer measurement time
     group.warm_up_time(Duration::from_secs(5));
 
-    for scenario in &large_k_scenarios()[0..4] { // Skip extreme scenarios for basic profiling
+    for scenario in &large_k_scenarios()[0..4] {
+        // Skip extreme scenarios for basic profiling
         let total_bytes = scenario.k * scenario.symbol_size;
         group.throughput(Throughput::Bytes(total_bytes as u64));
 
-        let bench_name = format!("{}_k{}_sym{}_loss{:.1}",
-            scenario.scenario_id, scenario.k, scenario.symbol_size, scenario.loss_fraction * 100.0);
+        let bench_name = format!(
+            "{}_k{}_sym{}_loss{:.1}",
+            scenario.scenario_id,
+            scenario.k,
+            scenario.symbol_size,
+            scenario.loss_fraction * 100.0
+        );
 
         group.bench_with_input(
             BenchmarkId::new("encoder_roundtrip", &bench_name),
@@ -145,11 +150,9 @@ fn bench_large_k_encoder_roundtrip(c: &mut Criterion) {
 
                 b.iter(|| {
                     // **HOT PATH 1: ENCODER** - Test systematic encoding performance
-                    let encoder = SystematicEncoder::new(
-                        object_id,
-                        &source_data,
-                        scenario.symbol_size
-                    ).expect("encoder creation failed");
+                    let encoder =
+                        SystematicEncoder::new(object_id, &source_data, scenario.symbol_size)
+                            .expect("encoder creation failed");
 
                     // Generate repair symbols - this stresses gf256 operations
                     let mut repair_symbols = Vec::new();
@@ -163,14 +166,15 @@ fn bench_large_k_encoder_roundtrip(c: &mut Criterion) {
                     let loss_pattern = create_scattered_loss_pattern(
                         scenario.k,
                         scenario.loss_fraction,
-                        0xDEADBEEF
+                        0xDEADBEEF,
                     );
 
                     let mut received_symbols = Vec::new();
 
                     // Add available source symbols
                     for (i, &available) in loss_pattern.iter().enumerate() {
-                        if !available { // false = available
+                        if !available {
+                            // false = available
                             if let Some(symbol) = encoder.source_symbol(i) {
                                 received_symbols.push(ReceivedSymbol {
                                     id: i,
@@ -182,7 +186,8 @@ fn bench_large_k_encoder_roundtrip(c: &mut Criterion) {
 
                     // Add repair symbols to make decoding possible
                     let needed_repairs = (scenario.k as f64 * scenario.loss_fraction) as usize + 10;
-                    for (repair_id, repair_data) in repair_symbols.into_iter().take(needed_repairs) {
+                    for (repair_id, repair_data) in repair_symbols.into_iter().take(needed_repairs)
+                    {
                         received_symbols.push(ReceivedSymbol {
                             id: repair_id,
                             data: repair_data,
@@ -205,7 +210,7 @@ fn bench_large_k_encoder_roundtrip(c: &mut Criterion) {
                     assert_eq!(decoded.len(), source_data.len(), "decoded length mismatch");
                     assert_eq!(decoded, source_data, "decoded data mismatch");
                 });
-            }
+            },
         );
     }
 
@@ -235,7 +240,7 @@ fn bench_gf256_bulk_operations(c: &mut Criterion) {
                     b.iter(|| {
                         gf256_mul_slice(&mut data, mult);
                     });
-                }
+                },
             );
 
             // Test gf256_addmul_slice performance (more complex operation)
@@ -248,7 +253,7 @@ fn bench_gf256_bulk_operations(c: &mut Criterion) {
                     b.iter(|| {
                         gf256_addmul_slice(&mut dst, &src, mult);
                     });
-                }
+                },
             );
         }
     }
@@ -300,7 +305,7 @@ fn bench_matrix_operations_stress(c: &mut Criterion) {
                     // This is where the matrix solve bottlenecks would appear
                     let _solution = solver.solve();
                 });
-            }
+            },
         );
     }
 
@@ -319,7 +324,8 @@ fn bench_row_scale_add_batching_optimization(c: &mut Criterion) {
     for &row_count in &row_counts {
         for &symbol_size in &symbol_sizes {
             for &coeff in &coefficients {
-                let bench_name = format!("rows_{}_size_{}_c_{}", row_count, symbol_size, coeff.raw());
+                let bench_name =
+                    format!("rows_{}_size_{}_c_{}", row_count, symbol_size, coeff.raw());
 
                 group.throughput(Throughput::Bytes((row_count * symbol_size) as u64));
 
@@ -343,7 +349,7 @@ fn bench_row_scale_add_batching_optimization(c: &mut Criterion) {
                                 row_scale_add(dst, src, coeff);
                             }
                         });
-                    }
+                    },
                 );
 
                 // Benchmark batched row operations (optimization)
@@ -363,11 +369,13 @@ fn bench_row_scale_add_batching_optimization(c: &mut Criterion) {
 
                             b.iter(|| {
                                 // Batched operations using dual-kernel optimization
-                                let mut dst_refs: Vec<&mut [u8]> = dst_rows.iter_mut().map(|v| v.as_mut_slice()).collect();
-                                let src_refs: Vec<&[u8]> = src_rows.iter().map(|v| v.as_slice()).collect();
+                                let mut dst_refs: Vec<&mut [u8]> =
+                                    dst_rows.iter_mut().map(|v| v.as_mut_slice()).collect();
+                                let src_refs: Vec<&[u8]> =
+                                    src_rows.iter().map(|v| v.as_slice()).collect();
                                 row_scale_add_batch_multi(&mut dst_refs, &src_refs, coeff);
                             });
-                        }
+                        },
                     );
                 }
             }
@@ -405,7 +413,7 @@ fn bench_gf256_addmul_slice_pairs(c: &mut Criterion) {
                         gf256_addmul_slice(&mut dst_a, &src_a, coeff);
                         gf256_addmul_slice(&mut dst_b, &src_b, coeff);
                     });
-                }
+                },
             );
 
             // Benchmark one batched dual-kernel call
@@ -421,7 +429,7 @@ fn bench_gf256_addmul_slice_pairs(c: &mut Criterion) {
                     b.iter(|| {
                         row_scale_add_batch2(&mut dst_a, &src_a, &mut dst_b, &src_b, coeff);
                     });
-                }
+                },
             );
         }
     }

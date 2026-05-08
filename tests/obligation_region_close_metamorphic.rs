@@ -9,8 +9,8 @@
 //! These properties should hold regardless of execution order, making them
 //! ideal candidates for metamorphic testing.
 
-use asupersync::obligation::ledger::{ObligationLedger, LedgerStats};
-use asupersync::record::{ObligationKind, ObligationAbortReason};
+use asupersync::obligation::ledger::{LedgerStats, ObligationLedger};
+use asupersync::record::{ObligationAbortReason, ObligationKind};
 use asupersync::types::{RegionId, TaskId, Time};
 use proptest::prelude::*;
 use std::collections::HashMap;
@@ -33,7 +33,13 @@ impl TestContext {
         }
     }
 
-    fn acquire(&mut self, kind: ObligationKind, task: TaskId, region: RegionId, time: Time) -> usize {
+    fn acquire(
+        &mut self,
+        kind: ObligationKind,
+        task: TaskId,
+        region: RegionId,
+        time: Time,
+    ) -> usize {
         let token = self.ledger.acquire(kind, task, region, time);
         let index = self.tokens.len();
         self.tokens.push(Some(token));

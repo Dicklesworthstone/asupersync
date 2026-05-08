@@ -1502,17 +1502,49 @@ mod tests {
             (ErrorCode::NoError, Code::Internal, "NO_ERROR"),
             (ErrorCode::ProtocolError, Code::Internal, "PROTOCOL_ERROR"),
             (ErrorCode::InternalError, Code::Internal, "INTERNAL_ERROR"),
-            (ErrorCode::FlowControlError, Code::Internal, "FLOW_CONTROL_ERROR"),
-            (ErrorCode::SettingsTimeout, Code::Internal, "SETTINGS_TIMEOUT"),
+            (
+                ErrorCode::FlowControlError,
+                Code::Internal,
+                "FLOW_CONTROL_ERROR",
+            ),
+            (
+                ErrorCode::SettingsTimeout,
+                Code::Internal,
+                "SETTINGS_TIMEOUT",
+            ),
             (ErrorCode::StreamClosed, Code::Internal, "STREAM_CLOSED"),
-            (ErrorCode::FrameSizeError, Code::Internal, "FRAME_SIZE_ERROR"),
-            (ErrorCode::RefusedStream, Code::Unavailable, "REFUSED_STREAM"),
+            (
+                ErrorCode::FrameSizeError,
+                Code::Internal,
+                "FRAME_SIZE_ERROR",
+            ),
+            (
+                ErrorCode::RefusedStream,
+                Code::Unavailable,
+                "REFUSED_STREAM",
+            ),
             (ErrorCode::Cancel, Code::Cancelled, "CANCEL"),
-            (ErrorCode::CompressionError, Code::Internal, "COMPRESSION_ERROR"),
+            (
+                ErrorCode::CompressionError,
+                Code::Internal,
+                "COMPRESSION_ERROR",
+            ),
             (ErrorCode::ConnectError, Code::Internal, "CONNECT_ERROR"),
-            (ErrorCode::EnhanceYourCalm, Code::ResourceExhausted, "ENHANCE_YOUR_CALM"),
-            (ErrorCode::InadequateSecurity, Code::PermissionDenied, "INADEQUATE_SECURITY"),
-            (ErrorCode::Http11Required, Code::Internal, "HTTP_1_1_REQUIRED"),
+            (
+                ErrorCode::EnhanceYourCalm,
+                Code::ResourceExhausted,
+                "ENHANCE_YOUR_CALM",
+            ),
+            (
+                ErrorCode::InadequateSecurity,
+                Code::PermissionDenied,
+                "INADEQUATE_SECURITY",
+            ),
+            (
+                ErrorCode::Http11Required,
+                Code::Internal,
+                "HTTP_1_1_REQUIRED",
+            ),
         ];
 
         for (rst_code, expected_code, expected_token) in cases.iter().copied() {

@@ -2028,7 +2028,7 @@ mod tests {
                 {
                     checkpoints.lock().unwrap().push(event);
                     messages.lock().unwrap().push(message);
-                }  // Drop mutex guards before yield
+                } // Drop mutex guards before yield
                 yield_now().await;
                 Ok(1)
             }

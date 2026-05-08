@@ -630,12 +630,12 @@ pub fn row_scale_add_batch2(
 ///
 /// Panics if destinations and sources slices have different lengths or
 /// if any destination/source slice length mismatch.
-pub fn row_scale_add_batch_multi(
-    destinations: &mut [&mut [u8]],
-    sources: &[&[u8]],
-    c: Gf256,
-) {
-    assert_eq!(destinations.len(), sources.len(), "destinations and sources length mismatch");
+pub fn row_scale_add_batch_multi(destinations: &mut [&mut [u8]], sources: &[&[u8]], c: Gf256) {
+    assert_eq!(
+        destinations.len(),
+        sources.len(),
+        "destinations and sources length mismatch"
+    );
 
     if c.is_zero() {
         return;
@@ -1670,19 +1670,20 @@ mod tests {
         row_scale_add(&mut seq_dst_b, &src_b, c);
 
         // Results must be identical
-        assert_eq!(batch_dst_a, seq_dst_a, "batched vs sequential mismatch for dst_a");
-        assert_eq!(batch_dst_b, seq_dst_b, "batched vs sequential mismatch for dst_b");
+        assert_eq!(
+            batch_dst_a, seq_dst_a,
+            "batched vs sequential mismatch for dst_a"
+        );
+        assert_eq!(
+            batch_dst_b, seq_dst_b,
+            "batched vs sequential mismatch for dst_b"
+        );
     }
 
     #[test]
     fn row_scale_add_batch_multi_works() {
         // Test multi-row batching with even count
-        let mut dst_rows = vec![
-            vec![0, 0, 0],
-            vec![0, 0, 0],
-            vec![0, 0, 0],
-            vec![0, 0, 0],
-        ];
+        let mut dst_rows = vec![vec![0, 0, 0], vec![0, 0, 0], vec![0, 0, 0], vec![0, 0, 0]];
         let src_rows = vec![
             vec![1, 2, 3],
             vec![4, 5, 6],
@@ -1714,11 +1715,7 @@ mod tests {
             vec![40, 50, 60],
             vec![70, 80, 90], // Odd row - sequential processing
         ];
-        let src_rows = vec![
-            vec![1, 2, 3],
-            vec![4, 5, 6],
-            vec![7, 8, 9],
-        ];
+        let src_rows = vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8, 9]];
         let c = Gf256::new(11);
 
         // Compute expected results with sequential operations
@@ -1751,8 +1748,14 @@ mod tests {
         row_scale_add_batch2(&mut dst_a, &src_a, &mut dst_b, &src_b, Gf256::ZERO);
 
         // Zero coefficient should leave destinations unchanged
-        assert_eq!(dst_a, original_dst_a, "zero coefficient should not modify dst_a");
-        assert_eq!(dst_b, original_dst_b, "zero coefficient should not modify dst_b");
+        assert_eq!(
+            dst_a, original_dst_a,
+            "zero coefficient should not modify dst_a"
+        );
+        assert_eq!(
+            dst_b, original_dst_b,
+            "zero coefficient should not modify dst_b"
+        );
     }
 
     #[test]

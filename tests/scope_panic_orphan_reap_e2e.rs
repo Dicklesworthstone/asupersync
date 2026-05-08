@@ -68,7 +68,11 @@ fn make_test_cx(region: RegionId) -> Cx {
 
 #[test]
 fn factory_panic_reaps_k_orphans_and_preserves_sibling_region() {
-    log("setup", "test_start", &format!("{{\"k\":{}}}", ORPHAN_COUNT));
+    log(
+        "setup",
+        "test_start",
+        &format!("{{\"k\":{}}}", ORPHAN_COUNT),
+    );
 
     let mut state = RuntimeState::new();
     let parent_region = state.create_root_region(Budget::INFINITE);
@@ -91,8 +95,7 @@ fn factory_panic_reaps_k_orphans_and_preserves_sibling_region() {
         // mirroring the orphan condition this test exists to verify
         // does NOT escape into the sibling region's task accounting.
     }
-    let sibling_count_before =
-        sibling_region_task_count(&state, sibling_region);
+    let sibling_count_before = sibling_region_task_count(&state, sibling_region);
     log(
         "setup",
         "sibling_seeded",
@@ -163,8 +166,7 @@ fn factory_panic_reaps_k_orphans_and_preserves_sibling_region() {
     // region id directly (region_with_budget consumed it), but we can
     // assert via total_tasks delta: total = sibling_count.
     let total_tasks_after = state.tasks_iter().count();
-    let sibling_count_after =
-        sibling_region_task_count(&state, sibling_region);
+    let sibling_count_after = sibling_region_task_count(&state, sibling_region);
     log(
         "assert",
         "tasks_after",

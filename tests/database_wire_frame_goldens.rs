@@ -33,7 +33,9 @@
 #![cfg(all(test, feature = "postgres", feature = "mysql"))]
 
 use asupersync::database::mysql::{fuzz_parse_error_packet, fuzz_parse_ok_packet_fields};
-use asupersync::database::postgres::{Format, ToSql, build_bind_msg, build_execute_msg, build_sync_msg};
+use asupersync::database::postgres::{
+    Format, ToSql, build_bind_msg, build_execute_msg, build_sync_msg,
+};
 
 /// Render a byte slice as `xxd`-style hexdump:
 ///
@@ -60,7 +62,11 @@ fn hexdump(bytes: &[u8]) -> String {
         }
         out.push_str(" |");
         for b in chunk {
-            let c = if (0x20..0x7f).contains(b) { *b as char } else { '.' };
+            let c = if (0x20..0x7f).contains(b) {
+                *b as char
+            } else {
+                '.'
+            };
             out.push(c);
         }
         out.push_str("|\n");
@@ -110,7 +116,10 @@ fn pg_bind_msg_one_i32_binary_param() {
 #[test]
 fn pg_bind_msg_named_portal_named_stmt() {
     let msg = build_bind_msg("p1", "stmt_1", &[], Format::Binary).expect("build_bind_msg");
-    insta::assert_snapshot!("pg_bind_named_portal_named_stmt_binary_result", hexdump(&msg));
+    insta::assert_snapshot!(
+        "pg_bind_named_portal_named_stmt_binary_result",
+        hexdump(&msg)
+    );
 }
 
 /// Execute ('E') with empty portal, max_rows = 0 (deliver all rows).
@@ -164,7 +173,10 @@ fn mysql_ok_packet_minimal_autocommit_no_warnings() {
         "mysql_ok_minimal_autocommit_no_warnings",
         (
             "input_hex",
-            body.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" "),
+            body.iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<Vec<_>>()
+                .join(" "),
             "affected_rows",
             affected_rows,
             "status_flags_hex",
