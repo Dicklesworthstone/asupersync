@@ -166,6 +166,7 @@ use crate::runtime::deadline_monitor::{
 };
 use crate::runtime::io_driver::IoDriverHandle;
 use crate::runtime::reactor::Reactor;
+use crate::runtime::resource_monitor::ResourceMonitor;
 use crate::runtime::scheduler::three_lane::AdaptiveBatchSizingProfile;
 use crate::runtime::scheduler::{ThreeLaneScheduler, ThreeLaneWorker};
 use crate::time::TimerDriverHandle;
@@ -3344,6 +3345,17 @@ impl Runtime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.draining_region_count_for_snapshot()
+    }
+
+    /// Returns this runtime's resource monitor for runtime-local pressure snapshots.
+    #[must_use]
+    pub fn resource_monitor(&self) -> Arc<ResourceMonitor> {
+        let guard = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.resource_monitor()
     }
 
     /// Returns the configured hot trace-ring capacity for this runtime.

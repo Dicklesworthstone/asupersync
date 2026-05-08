@@ -8,6 +8,7 @@ use crate::cx::Cx;
 use crate::error::Error;
 use crate::observability::metrics::{Counter, Gauge, Metrics, Summary};
 use crate::runtime::Runtime;
+use crate::runtime::resource_monitor::ResourceType;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -438,12 +439,10 @@ impl PressureGovernor {
         // TODO: Implement channel monitoring when channel registry is available
         let channel_backlog = self.sample_channel_backlog_pressure();
 
-        // Cleanup debt pressure: pending cleanup tasks / capacity
-        // TODO: Access runtime cleanup queue when available
+        // Cleanup debt pressure: pending cleanup work / region capacity.
         let cleanup_debt = self.sample_cleanup_debt_pressure();
 
-        // Memory budget pressure: allocated / budget
-        // TODO: Access memory allocator statistics when available
+        // Memory budget pressure: runtime resource-monitor memory usage / max limit.
         let memory_budget = self.sample_memory_budget_pressure();
 
         let signal_availability = PressureSignalAvailability {
@@ -589,14 +588,16 @@ impl PressureGovernor {
     }
 
     fn sample_memory_budget_pressure(&self) -> PressureSignalSample {
-        // TODO: Access memory allocator and budget statistics
-        // In a full implementation, we would:
-        // 1. Access RegionHeap statistics for allocated memory
-        // 2. Get budget limits from RuntimeConfig
-        // 3. Calculate pressure as allocated / budget
+        let resource_monitor = self.runtime.resource_monitor();
+        let resource_pressure = resource_monitor.pressure();
+        let Some(measurement) = resource_pressure.get_measurement(&ResourceType::Memory) else {
+            return PressureSignalSample::unavailable();
+        };
+        if measurement.max_limit == 0 {
+            return PressureSignalSample::unavailable();
+        }
 
-        // No live memory-budget signal is exposed yet.
-        PressureSignalSample::unavailable()
+        PressureSignalSample::available(measurement.usage_ratio())
     }
 
     fn record_fallback_verdict(&self, verdict: PressureFallbackVerdict) {
@@ -1316,6 +1317,43 @@ mod tests {
         assert_eq!(runtime.draining_region_count(), 0);
         assert!(snapshot.signal_availability.cleanup_debt);
         assert_eq!(snapshot.cleanup_debt_pressure, 0.0);
+        assert_eq!(
+            snapshot.fallback_verdict,
+            PressureFallbackVerdict::PartialSignalsUnavailable
+        );
+    }
+
+    #[test]
+    fn pressure_governor_samples_memory_budget_from_resource_monitor() {
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create memory-pressure runtime"),
+        );
+        runtime.resource_monitor().pressure().update_measurement(
+            ResourceType::Memory,
+            crate::runtime::resource_monitor::ResourceMeasurement::new(768, 800, 950, 1024),
+        );
+
+        let config = PressureGovernorConfig {
+            enabled: true,
+            admission_control: true,
+            sample_interval: Duration::ZERO,
+            ..Default::default()
+        };
+        let metrics = Metrics::new();
+        let governor = PressureGovernor::new(config, std::sync::Arc::clone(&runtime), metrics)
+            .expect("pressure governor should initialize");
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+
+        let snapshot = governor
+            .sample_pressure(&cx)
+            .expect("pressure snapshot should not fail");
+
+        assert!(snapshot.signal_availability.memory_budget);
+        assert_eq!(snapshot.memory_budget_pressure, 0.75);
+        assert_eq!(snapshot.overall_pressure, snapshot.memory_budget_pressure);
         assert_eq!(
             snapshot.fallback_verdict,
             PressureFallbackVerdict::PartialSignalsUnavailable
