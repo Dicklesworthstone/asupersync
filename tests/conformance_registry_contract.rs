@@ -48,6 +48,34 @@ fn contract() -> Value {
     .expect("parse conformance registry contract")
 }
 
+fn object_array<'a>(value: &'a Value, key: &str) -> &'a [Value] {
+    let items = value
+        .get(key)
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("{key} must be an array"));
+    assert!(
+        items.iter().all(Value::is_object),
+        "{key} entries must be objects"
+    );
+    items
+}
+
+fn string_values<'a>(value: &'a Value, key: &str) -> Vec<&'a str> {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("{key} must be an array"))
+        .iter()
+        .map(|item| {
+            let value = item
+                .as_str()
+                .unwrap_or_else(|| panic!("{key} entries must be strings"));
+            assert!(!value.trim().is_empty(), "{key} entries must be nonempty");
+            value
+        })
+        .collect()
+}
+
 fn string_set(value: &Value, key: &str) -> BTreeSet<String> {
     value
         .get(key)
@@ -225,6 +253,124 @@ fn conformance_registry_contract_matches_live_mod_rs() {
             ("first_failure", String::new()),
         ],
     );
+}
+
+#[test]
+fn reference_surface_registry_rejects_unwired_live_reference_claims() {
+    let contract = contract();
+    let policy = contract
+        .get("reference_surface_policy")
+        .expect("reference_surface_policy object");
+    assert_eq!(
+        nonempty_string(policy, "owner_bead"),
+        "asupersync-ghquqs",
+        "reference surface policy must name the owning bead"
+    );
+    assert!(
+        string_values(policy, "required_for_unwired_reference")
+            .iter()
+            .any(|requirement| requirement.contains("fail_closed_without_live_reference")),
+        "policy must require fail-closed behavior for unwired references"
+    );
+
+    let surfaces = object_array(&contract, "reference_surfaces");
+    assert!(
+        !surfaces.is_empty(),
+        "reference_surfaces must record every hardened conformance reference"
+    );
+
+    let mut surface_ids = BTreeSet::new();
+    for surface in surfaces {
+        let surface_id = nonempty_string(surface, "surface_id");
+        assert!(
+            surface_ids.insert(surface_id.to_string()),
+            "duplicate reference surface id: {surface_id}"
+        );
+
+        let binary = nonempty_string(surface, "binary");
+        let source_path = nonempty_string(surface, "source_path");
+        assert!(
+            repo_path(source_path).exists(),
+            "reference surface source path does not exist: {source_path}"
+        );
+        let source = read_repo_file(source_path);
+
+        let proof_command = nonempty_string(surface, "proof_command");
+        assert!(
+            proof_command.starts_with("rch exec -- "),
+            "proof command must use rch: {proof_command}"
+        );
+        assert!(
+            proof_command.contains("cargo test"),
+            "proof command must run a cargo test lane: {proof_command}"
+        );
+        assert!(
+            proof_command.contains(binary),
+            "proof command must name the conformance binary {binary}: {proof_command}"
+        );
+        nonempty_string(surface, "proof_lane");
+
+        let reference_status = nonempty_string(surface, "reference_status");
+        let allowed_verdicts = string_set(surface, "runtime_allowed_verdicts");
+        assert!(
+            !allowed_verdicts.is_empty(),
+            "runtime_allowed_verdicts must be nonempty for {surface_id}"
+        );
+        if reference_status != "live_reference_wired" {
+            assert_eq!(
+                surface
+                    .get("fail_closed_without_live_reference")
+                    .and_then(Value::as_bool),
+                Some(true),
+                "unwired reference must fail closed: {surface_id}"
+            );
+            assert!(
+                !allowed_verdicts.contains("pass"),
+                "unwired reference must not allow pass verdicts: {surface_id}"
+            );
+            assert!(
+                allowed_verdicts
+                    .iter()
+                    .all(|verdict| matches!(verdict.as_str(), "xfail" | "fail" | "unavailable")),
+                "unwired reference allowed unexpected runtime verdicts for {surface_id}: {allowed_verdicts:?}"
+            );
+            assert!(
+                source.contains("XFAIL")
+                    || source.contains("REFERENCE UNAVAILABLE")
+                    || source.contains("reference unavailable"),
+                "unwired reference source must expose an XFAIL or unavailable marker: {surface_id}"
+            );
+        }
+
+        for marker in string_values(surface, "required_source_markers") {
+            assert!(
+                source.contains(marker),
+                "source {source_path} for {surface_id} must contain marker {marker:?}"
+            );
+        }
+        for token in string_values(surface, "forbidden_source_tokens") {
+            assert!(
+                !source.contains(token),
+                "source {source_path} for {surface_id} still contains stale token {token:?}"
+            );
+        }
+
+        log_contract_event(
+            "registry-reference-surface",
+            &[
+                ("owner_bead", "asupersync-ghquqs".to_string()),
+                ("surface_id", surface_id.to_string()),
+                ("source_path", source_path.to_string()),
+                ("reference_status", reference_status.to_string()),
+                (
+                    "proof_lane",
+                    nonempty_string(surface, "proof_lane").to_string(),
+                ),
+                ("verdict", "pass".to_string()),
+                ("first_failure", String::new()),
+            ],
+        );
+    }
 }
 
 #[test]

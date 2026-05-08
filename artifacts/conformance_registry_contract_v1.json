@@ -202,5 +202,116 @@
       "reason": "ALPN and TLS handshake coverage are live under current module paths.",
       "retention_reason": "File deletion is forbidden; retained for comparison."
     }
+  ],
+  "reference_surface_policy": {
+    "owner_bead": "asupersync-ghquqs",
+    "purpose": "Prevent conformance binaries from reporting live-reference parity unless a source-owned registry row records the reference state, fail-closed behavior, and proof command.",
+    "required_for_unwired_reference": [
+      "reference_status is not live_reference_wired",
+      "fail_closed_without_live_reference is true",
+      "runtime_allowed_verdicts exclude pass",
+      "proof_command starts with rch exec -- ",
+      "source contains an explicit XFAIL or unavailable-reference marker",
+      "source does not contain stale synthetic parity or 100 percent conformance claims"
+    ]
+  },
+  "reference_surfaces": [
+    {
+      "surface_id": "otel-baggage-propagation",
+      "binary": "otel_baggage_propagation_conformance",
+      "source_path": "conformance/src/bin/otel_baggage_propagation_conformance.rs",
+      "reference_family": "OpenTelemetry baggage propagation",
+      "reference_status": "live_reference_not_wired",
+      "fail_closed_without_live_reference": true,
+      "runtime_allowed_verdicts": [
+        "xfail",
+        "fail"
+      ],
+      "proof_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_otel_baggage_registry CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test --manifest-path conformance/Cargo.toml --bin otel_baggage_propagation_conformance -- --nocapture",
+      "proof_lane": "binary-unit-fail-closed",
+      "required_source_markers": [
+        "fail-closed conformance guard",
+        "XFAIL",
+        "Live independent reference: unavailable"
+      ],
+      "forbidden_source_tokens": [
+        "Use same implementation as our version for now",
+        "produces identical W3C baggage header vs opentelemetry",
+        "Overall score: 100%"
+      ]
+    },
+    {
+      "surface_id": "otel-logs-exporter",
+      "binary": "otel_logs_exporter_conformance",
+      "source_path": "conformance/src/bin/otel_logs_exporter_conformance.rs",
+      "reference_family": "OpenTelemetry logs exporter",
+      "reference_status": "live_reference_not_wired",
+      "fail_closed_without_live_reference": true,
+      "runtime_allowed_verdicts": [
+        "xfail",
+        "fail"
+      ],
+      "proof_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_otel_logs_registry CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test --manifest-path conformance/Cargo.toml --bin otel_logs_exporter_conformance -- --nocapture",
+      "proof_lane": "binary-unit-fail-closed",
+      "required_source_markers": [
+        "fail-closed conformance guard",
+        "XFAIL",
+        "opentelemetry-sdk logs exporter reference"
+      ],
+      "forbidden_source_tokens": [
+        "generate_reference_otlp_request",
+        "synthetic reference PASS",
+        "Overall score: 100%"
+      ]
+    },
+    {
+      "surface_id": "otel-span-status",
+      "binary": "otel_span_status_conformance",
+      "source_path": "conformance/src/bin/otel_span_status_conformance.rs",
+      "reference_family": "OpenTelemetry span status",
+      "reference_status": "live_reference_not_wired",
+      "fail_closed_without_live_reference": true,
+      "runtime_allowed_verdicts": [
+        "xfail",
+        "fail"
+      ],
+      "proof_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_otel_span_status_registry CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test --manifest-path conformance/Cargo.toml --bin otel_span_status_conformance -- --nocapture",
+      "proof_lane": "binary-unit-fail-closed",
+      "required_source_markers": [
+        "fail-closed handling",
+        "XFAIL",
+        "Live opentelemetry-sdk reference: unavailable"
+      ],
+      "forbidden_source_tokens": [
+        "generate_reference_otlp_traces_request",
+        "100% conformant",
+        "Overall score: 100%"
+      ]
+    },
+    {
+      "surface_id": "otel-trace-id-randomness",
+      "binary": "otel_trace_id_randomness_conformance",
+      "source_path": "conformance/src/bin/otel_trace_id_randomness_conformance.rs",
+      "reference_family": "OpenTelemetry trace ID randomness",
+      "reference_status": "deterministic_shared_source_reference_not_wired",
+      "fail_closed_without_live_reference": true,
+      "runtime_allowed_verdicts": [
+        "unavailable",
+        "fail"
+      ],
+      "proof_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_otel_trace_id_registry CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test --manifest-path conformance/Cargo.toml --bin otel_trace_id_randomness_conformance -- --nocapture",
+      "proof_lane": "binary-unit-fail-closed",
+      "required_source_markers": [
+        "Trace ID Randomness Guard",
+        "REFERENCE UNAVAILABLE",
+        "deterministic shared-source opentelemetry-sdk trace ID parity oracle is not wired"
+      ],
+      "forbidden_source_tokens": [
+        "identical randomness distribution compared to opentelemetry-sdk",
+        "same RNG source",
+        "Trace ID generation is conformant",
+        "RNG distribution matches opentelemetry-sdk exactly"
+      ]
+    }
   ]
 }
