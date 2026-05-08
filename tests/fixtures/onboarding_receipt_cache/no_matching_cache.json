@@ -1,0 +1,9 @@
+{
+  "entries": [
+    {
+      "cached_at": "2026-05-08T05:10:00Z",
+      "receipt_digest_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "receipt_key": "different-key"
+    }
+  ]
+}

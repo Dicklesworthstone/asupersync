@@ -1,0 +1,29 @@
+{
+  "agent": "CoralGorge",
+  "branch": "main",
+  "dirty_clusters": [
+    {
+      "paths": [
+        "src/runtime/scheduler/mod.rs"
+      ]
+    }
+  ],
+  "generated_at": "2026-05-08T05:00:00Z",
+  "in_progress_beads": [
+    "asupersync-vddieh"
+  ],
+  "next_action": {
+    "category": "avoid-peer-owned-surface"
+  },
+  "ready_beads": [
+    "asupersync-aj7lx3"
+  ],
+  "repo_path": "/data/projects/asupersync",
+  "reservation_conflicts": [
+    {
+      "holder": "PeerAgent",
+      "path": ".beads/issues.jsonl"
+    }
+  ],
+  "schema_version": "session-handoff-receipt-v1"
+}

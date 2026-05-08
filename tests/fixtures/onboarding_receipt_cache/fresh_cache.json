@@ -1,0 +1,19 @@
+{
+  "entries": [
+    {
+      "agent": "CoralGorge",
+      "branch": "main",
+      "cached_at": "2026-05-08T05:10:00Z",
+      "dirty_cluster_count": 1,
+      "in_progress_bead_count": 1,
+      "next_action_category": "avoid-peer-owned-surface",
+      "ready_bead_count": 1,
+      "receipt_digest_sha256": "PLACEHOLDER_FILLED_BY_TEST",
+      "receipt_key": "PLACEHOLDER_FILLED_BY_TEST",
+      "repo_path": "/data/projects/asupersync",
+      "reservation_conflict_count": 1,
+      "schema_version": "session-handoff-receipt-v1",
+      "ttl_seconds": 1800
+    }
+  ]
+}
