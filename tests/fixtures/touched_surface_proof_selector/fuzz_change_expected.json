@@ -1,0 +1,84 @@
+{
+  "action_items": [],
+  "blocked_selected_lanes": [],
+  "blocked_supplemental_lanes": [],
+  "current_date": "2026-05-08",
+  "forbidden_actions": {
+    "runs_agent_mail_mutation": false,
+    "runs_beads_mutation": false,
+    "runs_cargo": false,
+    "runs_destructive_command": false,
+    "runs_git_mutation": false,
+    "runs_rch": false
+  },
+  "generated_at": "2026-05-08T06:00:00Z",
+  "input_schema_version": "touched-surface-proof-selector-input-v1",
+  "non_mutating": true,
+  "operator_notes": [
+    "Selected lanes are proof suggestions only; this helper does not execute rch or cargo.",
+    "Supplemental lanes are broad frontier evidence and should not be cited as the only touched-surface proof.",
+    "Blocked lanes must be surfaced separately instead of replaced by unrelated green checks."
+  ],
+  "schema_version": "touched-surface-proof-selector-v1",
+  "selected_lanes": [
+    {
+      "broad_frontier": false,
+      "command": "rch exec -- cargo check --manifest-path fuzz/Cargo.toml",
+      "guarantee_ids": [
+        "fuzz-manifest-smoke"
+      ],
+      "kind": "compile_frontier",
+      "lane_id": "fuzz-manifest-smoke",
+      "matched_paths": [
+        "fuzz/Cargo.toml",
+        "fuzz/fuzz_targets/http_header_map_invariants.rs"
+      ],
+      "reasons": [
+        "fuzz target or manifest changes need fuzz manifest smoke proof"
+      ],
+      "rule_ids": [
+        "fuzz-target"
+      ]
+    }
+  ],
+  "source": "tests/fixtures/touched_surface_proof_selector/fuzz_change.json",
+  "source_counts": {
+    "blocked_lanes": 0,
+    "lanes": 2,
+    "selection_rules": 1,
+    "touched_files": 2
+  },
+  "summary": {
+    "blocked_selected_count": 0,
+    "passes": true,
+    "selected_count": 1,
+    "supplemental_count": 1,
+    "unmatched_touched_count": 0
+  },
+  "supplemental_lanes": [
+    {
+      "broad_frontier": true,
+      "command": "rch exec -- cargo fmt --check",
+      "guarantee_ids": [
+        "rustfmt-frontier"
+      ],
+      "kind": "format_frontier",
+      "lane_id": "rustfmt-frontier",
+      "matched_paths": [
+        "fuzz/Cargo.toml",
+        "fuzz/fuzz_targets/http_header_map_invariants.rs"
+      ],
+      "reasons": [
+        "fuzz target or manifest changes need fuzz manifest smoke proof"
+      ],
+      "rule_ids": [
+        "fuzz-target"
+      ]
+    }
+  ],
+  "touched_files": [
+    "fuzz/Cargo.toml",
+    "fuzz/fuzz_targets/http_header_map_invariants.rs"
+  ],
+  "unmatched_touched_files": []
+}

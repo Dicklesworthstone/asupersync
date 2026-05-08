@@ -127,6 +127,27 @@ fn fuzz_changes_select_fuzz_manifest_smoke_without_dependency_graph_lane() {
 }
 
 #[test]
+fn fuzz_change_output_matches_full_reviewed_golden() {
+    let output = run_selector("fuzz_change.json");
+    assert!(
+        output.status.success(),
+        "selector helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let expected = fixture_text("fuzz_change_expected.json");
+    serde_json::from_slice::<Value>(&output.stdout).expect("actual selector output must be JSON");
+    serde_json::from_str::<Value>(&expected).expect("golden selector output must be JSON");
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("selector stdout is utf-8"),
+        expected,
+        "fuzz_change selector receipt drifted from the reviewed golden"
+    );
+}
+
+#[test]
 fn cargo_manifest_changes_select_dependency_graph_and_compile_frontier() {
     let receipt = selector_json("manifest_change.json");
 
