@@ -67,15 +67,19 @@ fn assert_cache_output_matches_golden(output: Output, fixture_name: &str, label:
 
     let actual = String::from_utf8(output.stdout).expect("cache stdout is utf-8");
     let expected = fixture_text(fixture_name);
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual cache JSON");
-    let expected_json: Value = serde_json::from_str(&expected).expect("golden cache JSON");
+    let actual_json: Value = serde_json::from_str(&actual).unwrap_or_else(|error| {
+        panic!("actual {label} onboarding receipt cache JSON for {fixture_name}: {error}")
+    });
+    let expected_json: Value = serde_json::from_str(&expected).unwrap_or_else(|error| {
+        panic!("golden {label} onboarding receipt cache JSON {fixture_name}: {error}")
+    });
     assert_eq!(
         actual_json, expected_json,
-        "parsed {label} onboarding receipt cache JSON drifted from the reviewed golden"
+        "parsed {label} onboarding receipt cache JSON drifted from {fixture_name}"
     );
     assert_eq!(
         actual, expected,
-        "{label} onboarding receipt cache output drifted from the reviewed golden"
+        "{label} onboarding receipt cache output drifted from {fixture_name}"
     );
 }
 
