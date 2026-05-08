@@ -48,12 +48,27 @@
 
 use asupersync::web::extract::Request;
 use asupersync::web::handler::FnHandler;
-use asupersync::web::handler::Handler as _;
-use asupersync::web::response::StatusCode;
+use asupersync::web::handler::Handler;
+use asupersync::web::response::{Response, StatusCode};
 use asupersync::web::session::{MemoryStore, Session, SessionLayer};
 
 fn ok_handler() -> StatusCode {
     StatusCode::OK
+}
+
+struct SessionStatusHandler<F>(F);
+
+impl<F> Handler for SessionStatusHandler<F>
+where
+    F: Fn(&Session) -> StatusCode + Send + Sync + 'static,
+{
+    fn call(&self, req: Request) -> Response {
+        let session = req
+            .extensions
+            .get_typed::<Session>()
+            .expect("session middleware injects Session");
+        Response::new((self.0)(&session), Vec::<u8>::new())
+    }
 }
 
 // ── (1) Token rotation on session-id change ──────────────────────
@@ -67,46 +82,41 @@ fn regenerate_rotates_csrf_token_alongside_session_id() {
     use std::sync::Arc;
     use std::sync::Mutex;
 
-    let captured_old: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let captured_new: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let old_clone = captured_old.clone();
-    let new_clone = captured_new.clone();
-
-    let inner = FnHandler::new(move || -> StatusCode {
-        // Build a fresh handler for each call. We need access to
-        // the Session via request extensions, but FnHandler::new
-        // doesn't pass the request. So we use a sync 1-extractor
-        // pattern via the Session extractor.
+    let captured: Arc<Mutex<Option<(String, String, bool)>>> = Arc::new(Mutex::new(None));
+    let captured_clone = captured.clone();
+    let layer = SessionLayer::new(MemoryStore::new())
+        .secure(false)
+        .csrf_protection(true);
+    let mw = layer.wrap(SessionStatusHandler(move |session: &Session| {
+        let token_before = session
+            .csrf_token()
+            .expect("session middleware minted a CSRF token");
+        session.regenerate();
+        let token_after = session
+            .csrf_token()
+            .expect("regenerate writes a fresh token");
+        let regenerate_requested = session.contains("__asupersync.regenerate");
+        *captured_clone.lock().unwrap() = Some((token_before, token_after, regenerate_requested));
         StatusCode::OK
-    });
-    let _ = (inner, old_clone, new_clone);
+    }));
 
-    // Behavioral pin via direct Session API: take a lock on a
-    // SessionData that contains a token, regenerate, and verify
-    // both the token AND the regenerate flag changed.
-    use asupersync::web::session::SessionData;
-    use parking_lot::Mutex as PLMutex;
-    let mut data = SessionData::new();
-    data.insert("__asupersync.csrf_token", "old-token-value");
-    let session = Session(Arc::new(PLMutex::new(data)));
+    let resp = mw.call(Request::new("GET", "/login"));
+    assert_eq!(resp.status, StatusCode::OK);
 
-    let token_before = session.csrf_token().expect("session has token after seed");
-    assert_eq!(token_before, "old-token-value");
-
-    session.regenerate();
-
-    let token_after = session
-        .csrf_token()
-        .expect("regenerate writes a fresh token");
+    let (token_before, token_after, regenerate_requested) = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("handler captured token rotation");
     assert_ne!(
-        token_after, "old-token-value",
+        token_after, token_before,
         "regenerate MUST mint a fresh CSRF token (br-asupersync-3cvnmo) — \
          a session-ID rotation that doesn't rotate the CSRF token leaves \
          a trust-boundary hole",
     );
     // Also: a regenerate flag is recorded internally.
     assert!(
-        session.regenerate_requested(),
+        regenerate_requested,
         "regenerate must mark the session for ID rotation",
     );
 }
@@ -116,21 +126,40 @@ fn rotate_csrf_token_returns_fresh_value_distinct_from_old() {
     // Pin (1) extension: `Session::rotate_csrf_token()` mints a
     // fresh token without an ID rotation — used for periodic
     // in-session rotation. Returns the new token to the caller.
-    use asupersync::web::session::SessionData;
-    use parking_lot::Mutex as PLMutex;
     use std::sync::Arc;
+    use std::sync::Mutex;
 
-    let mut data = SessionData::new();
-    data.insert("__asupersync.csrf_token", "seed-token");
-    let session = Session(Arc::new(PLMutex::new(data)));
+    let captured: Arc<Mutex<Option<(String, String, String)>>> = Arc::new(Mutex::new(None));
+    let captured_clone = captured.clone();
+    let layer = SessionLayer::new(MemoryStore::new())
+        .secure(false)
+        .csrf_protection(true);
+    let mw = layer.wrap(SessionStatusHandler(move |session: &Session| {
+        let old_token = session
+            .csrf_token()
+            .expect("session middleware minted a CSRF token");
+        let new_token = session.rotate_csrf_token();
+        let stored_token = session
+            .csrf_token()
+            .expect("rotate_csrf_token stores the new token");
+        *captured_clone.lock().unwrap() = Some((old_token, new_token, stored_token));
+        StatusCode::OK
+    }));
 
-    let new_token = session.rotate_csrf_token();
+    let resp = mw.call(Request::new("GET", "/rotate"));
+    assert_eq!(resp.status, StatusCode::OK);
+
+    let (old_token, new_token, stored_token) = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("handler captured token rotation");
     assert_ne!(
-        new_token, "seed-token",
+        new_token, old_token,
         "rotate_csrf_token returns a fresh value distinct from the old",
     );
     // The session itself now holds the new value too.
-    assert_eq!(session.csrf_token().unwrap(), new_token);
+    assert_eq!(stored_token, new_token);
 }
 
 #[test]
@@ -139,14 +168,30 @@ fn two_rotations_produce_distinct_tokens() {
     // no caching, no deterministic generator. Pinned because a
     // regression to a counter-based generator would let an
     // attacker predict future tokens.
-    use asupersync::web::session::SessionData;
-    use parking_lot::Mutex as PLMutex;
     use std::sync::Arc;
+    use std::sync::Mutex;
 
-    let session = Session(Arc::new(PLMutex::new(SessionData::new())));
-    let t1 = session.rotate_csrf_token();
-    let t2 = session.rotate_csrf_token();
-    let t3 = session.rotate_csrf_token();
+    let captured: Arc<Mutex<Option<(String, String, String)>>> = Arc::new(Mutex::new(None));
+    let captured_clone = captured.clone();
+    let layer = SessionLayer::new(MemoryStore::new())
+        .secure(false)
+        .csrf_protection(true);
+    let mw = layer.wrap(SessionStatusHandler(move |session: &Session| {
+        let t1 = session.rotate_csrf_token();
+        let t2 = session.rotate_csrf_token();
+        let t3 = session.rotate_csrf_token();
+        *captured_clone.lock().unwrap() = Some((t1, t2, t3));
+        StatusCode::OK
+    }));
+
+    let resp = mw.call(Request::new("GET", "/rotate-many"));
+    assert_eq!(resp.status, StatusCode::OK);
+
+    let (t1, t2, t3) = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("handler captured token rotations");
 
     assert_ne!(t1, t2, "rotation 1 != rotation 2");
     assert_ne!(t2, t3, "rotation 2 != rotation 3");
@@ -174,32 +219,22 @@ fn csrf_validation_uses_constant_time_for_token_compare_via_session_middleware()
     // function returns the same boolean (false) for both an
     // early-divergent and a late-divergent mismatch — and
     // that the secret-correct token does match.
-    let store = MemoryStore::new();
-    let layer = SessionLayer::new(store)
-        .secure(false) // allow non-HTTPS in tests
-        .csrf_protection(true);
-    let middleware = layer.wrap(FnHandler::new(ok_handler));
-
-    // Seed a session by issuing a GET first; capture the
-    // Set-Cookie + the CSRF token via a custom handler.
     use std::sync::Arc;
     use std::sync::Mutex;
+
     let captured_token: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let captured_clone = captured_token.clone();
-
-    // A handler that captures the session's CSRF token.
-    use asupersync::web::handler::FnHandler1;
-    let capture_handler = move |session: Session| -> StatusCode {
-        *captured_clone.lock().unwrap() = session.csrf_token();
-        StatusCode::OK
-    };
-    let layer2 = SessionLayer::new(MemoryStore::new())
+    let layer = SessionLayer::new(MemoryStore::new())
         .secure(false)
         .csrf_protection(true);
-    let mw2 = layer2.wrap(FnHandler1::<_, Session>::new(capture_handler));
+    let mw = layer.wrap(SessionStatusHandler(move |session: &Session| {
+        *captured_clone.lock().unwrap() = session.csrf_token();
+        StatusCode::OK
+    }));
 
-    let get_resp = mw2.call(Request::new("GET", "/test"));
+    let get_resp = mw.call(Request::new("GET", "/test"));
     assert_eq!(get_resp.status, StatusCode::OK);
+    let cookie = extract_set_cookie_value(&get_resp);
     let real_token = captured_token
         .lock()
         .unwrap()
@@ -209,7 +244,20 @@ fn csrf_validation_uses_constant_time_for_token_compare_via_session_middleware()
         !real_token.is_empty(),
         "fresh session has a non-empty CSRF token",
     );
-    let _ = middleware; // suppress unused warning on outer middleware
+
+    let early_mismatch = token_with_byte_changed(&real_token, 0);
+    let late_mismatch = token_with_byte_changed(&real_token, real_token.len() - 1);
+    for wrong_token in [early_mismatch, late_mismatch] {
+        let post = Request::new("POST", "/test")
+            .with_header("cookie", &cookie)
+            .with_header("x-csrf-token", &wrong_token);
+        let post_resp = mw.call(post);
+        assert_eq!(
+            post_resp.status,
+            StatusCode::FORBIDDEN,
+            "wrong CSRF token MUST reject independently of mismatch position",
+        );
+    }
 }
 
 #[test]
@@ -222,20 +270,21 @@ fn constant_time_compare_helper_returns_false_for_length_mismatch() {
     //
     // (Length mismatch returns false immediately per
     // session.rs:930-932; length is non-secret.)
-    use asupersync::web::session::SessionData;
-    use parking_lot::Mutex as PLMutex;
-    use std::sync::Arc;
+    let store = MemoryStore::new();
+    let layer = SessionLayer::new(store).secure(false).csrf_protection(true);
+    let mw = layer.wrap(FnHandler::new(ok_handler));
 
-    let mut data = SessionData::new();
-    data.insert("__asupersync.csrf_token", "abcdef0123456789");
-    let session = Session(Arc::new(PLMutex::new(data)));
-    let stored = session.csrf_token().unwrap();
-    assert_eq!(stored.len(), 16, "fixture has 16-char token");
-
-    // We pin via the documented contract: tokens of different
-    // lengths NEVER compare equal in the middleware. Surfaced
-    // via the integration test below
-    // (csrf_token_with_wrong_length_rejects).
+    let get_resp = mw.call(Request::new("GET", "/test"));
+    let cookie = extract_set_cookie_value(&get_resp);
+    let post = Request::new("POST", "/test")
+        .with_header("cookie", &cookie)
+        .with_header("x-csrf-token", "x");
+    let post_resp = mw.call(post);
+    assert_eq!(
+        post_resp.status,
+        StatusCode::FORBIDDEN,
+        "tokens of different lengths never compare equal",
+    );
 }
 
 #[test]
@@ -314,18 +363,17 @@ fn csrf_token_correct_value_succeeds() {
     // Pin (2) positive case: a state-changing request with the
     // correct X-CSRF-Token DOES succeed. Sanity check that the
     // CT-compare returns true on equality.
-    use asupersync::web::handler::FnHandler1;
     use std::sync::{Arc, Mutex};
 
     let captured_token: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let captured_clone = captured_token.clone();
-    let capture_handler = move |session: Session| -> StatusCode {
+    let capture_handler = move |session: &Session| -> StatusCode {
         *captured_clone.lock().unwrap() = session.csrf_token();
         StatusCode::OK
     };
     let store = MemoryStore::new();
     let layer = SessionLayer::new(store).secure(false).csrf_protection(true);
-    let mw = layer.wrap(FnHandler1::<_, Session>::new(capture_handler));
+    let mw = layer.wrap(SessionStatusHandler(capture_handler));
 
     // First GET: seed session + capture token.
     let get_resp = mw.call(Request::new("GET", "/test"));
@@ -573,12 +621,11 @@ fn null_origin_treated_as_absent() {
 /// Extract the cookie value from a Set-Cookie response header.
 /// Returns the `name=value` portion suitable for use in a
 /// subsequent request's `cookie` header.
-fn extract_set_cookie_value(resp: &asupersync::web::response::Response) -> String {
+fn extract_set_cookie_value(resp: &Response) -> String {
     let set_cookie = resp
-        .headers
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("set-cookie"))
-        .map(|(_, v)| v.clone())
+        .set_cookies
+        .first()
+        .cloned()
         .expect("set-cookie header present after first request");
     // Strip attributes after the first `;` — we only need
     // `name=value` for the next request's Cookie header.
@@ -588,4 +635,10 @@ fn extract_set_cookie_value(resp: &asupersync::web::response::Response) -> Strin
         .unwrap_or(&set_cookie)
         .trim()
         .to_string()
+}
+
+fn token_with_byte_changed(token: &str, index: usize) -> String {
+    let mut bytes = token.as_bytes().to_vec();
+    bytes[index] = if bytes[index] == b'a' { b'b' } else { b'a' };
+    String::from_utf8(bytes).expect("CSRF tokens are ASCII hex")
 }
