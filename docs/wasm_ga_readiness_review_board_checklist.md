@@ -169,13 +169,13 @@ Waivers are forbidden for:
 Primary contract test:
 
 ```bash
-rch exec -- cargo test -p asupersync --test wasm_ga_readiness_review_board_checklist -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_ga_readiness_docs cargo test -p asupersync --test wasm_ga_readiness_review_board_checklist -- --nocapture
 ```
 
 Replay-focused preflight:
 
 ```bash
-rch exec -- cargo test -p asupersync --test wasm_release_rollback_incident_playbook -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_ga_readiness_docs cargo test -p asupersync --test wasm_release_rollback_incident_playbook -- --nocapture
 python3 scripts/check_security_release_gate.py --policy .github/security_release_policy.json
 python3 scripts/check_perf_regression.py --budgets .github/wasm_perf_budgets.json --profile core-min
 ```
