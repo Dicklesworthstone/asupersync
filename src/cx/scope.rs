@@ -104,7 +104,10 @@ use crate::record::task::TaskState;
 use crate::runtime::task_handle::{JoinError, TaskHandle};
 use crate::runtime::{RegionCreateError, RuntimeState, SpawnError, StoredTask};
 use crate::tracing_compat::{debug, debug_span};
-use crate::types::{Budget, CancelReason, Outcome, PanicPayload, Policy, RegionId, TaskId};
+use crate::types::{
+    Budget, CancelReason, CapabilityBudget, CapabilityBudgetRequirements, Outcome, PanicPayload,
+    Policy, RegionId, TaskId,
+};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
@@ -123,6 +126,8 @@ pub struct Scope<'r, P: Policy = crate::types::policy::FailFast> {
     pub(crate) region: RegionId,
     /// The budget for this scope.
     pub(crate) budget: Budget,
+    /// The capability/resource budget for this scope.
+    pub(crate) capability_budget: CapabilityBudget,
     /// Phantom data for the policy type.
     pub(crate) _policy: PhantomData<&'r P>,
 }
@@ -217,9 +222,22 @@ impl<P: Policy> Scope<'_, P> {
     #[allow(dead_code)]
     #[cfg_attr(feature = "test-internals", visibility::make(pub))]
     pub(crate) fn new(region: RegionId, budget: Budget) -> Self {
+        Self::new_with_capability_budget(region, budget, CapabilityBudget::UNSPECIFIED)
+    }
+
+    /// Creates a new scope with an explicit capability budget (internal use).
+    #[must_use]
+    #[allow(dead_code)]
+    #[cfg_attr(feature = "test-internals", visibility::make(pub))]
+    pub(crate) fn new_with_capability_budget(
+        region: RegionId,
+        budget: Budget,
+        capability_budget: CapabilityBudget,
+    ) -> Self {
         Self {
             region,
             budget,
+            capability_budget,
             _policy: PhantomData,
         }
     }
@@ -234,6 +252,12 @@ impl<P: Policy> Scope<'_, P> {
     #[must_use]
     pub fn budget(&self) -> Budget {
         self.budget
+    }
+
+    /// Returns the capability/resource budget for this scope.
+    #[must_use]
+    pub fn capability_budget(&self) -> CapabilityBudget {
+        self.capability_budget
     }
 
     // =========================================================================
@@ -890,11 +914,56 @@ impl<P: Policy> Scope<'_, P> {
         F: FnOnce(Scope<'_, P2>, &mut RuntimeState) -> Fut,
         Fut: Future<Output = Outcome<T, P2::Error>>,
     {
-        let child_region = state.create_child_region(self.region, budget)?;
+        self.region_with_budget_and_capability_budget(
+            state,
+            _cx,
+            budget,
+            CapabilityBudget::UNSPECIFIED,
+            CapabilityBudgetRequirements::NONE,
+            _policy,
+            f,
+        )
+        .await
+    }
+
+    /// Creates a child region with explicit scheduler and capability budgets.
+    ///
+    /// Both budgets inherit from the parent scope and can only be tightened by
+    /// the child-supplied envelopes. Required capability dimensions fail closed
+    /// if neither the parent nor child supplies a non-exhausted envelope.
+    pub async fn region_with_budget_and_capability_budget<P2, F, Fut, T, Caps>(
+        &self,
+        state: &mut RuntimeState,
+        _cx: &Cx<Caps>,
+        budget: Budget,
+        capability_budget: CapabilityBudget,
+        requirements: CapabilityBudgetRequirements,
+        _policy: P2,
+        f: F,
+    ) -> Result<Outcome<T, P2::Error>, RegionCreateError>
+    where
+        P2: Policy,
+        F: FnOnce(Scope<'_, P2>, &mut RuntimeState) -> Fut,
+        Fut: Future<Output = Outcome<T, P2::Error>>,
+    {
+        let child_region = state.create_child_region_with_capability_budget(
+            self.region,
+            budget,
+            capability_budget,
+            requirements,
+        )?;
         let child_budget = state
             .region(child_region)
             .map_or(self.budget, crate::record::RegionRecord::budget);
-        let child_scope = Scope::<P2>::new(child_region, child_budget);
+        let child_capability_budget = state.region(child_region).map_or(
+            self.capability_budget,
+            crate::record::RegionRecord::capability_budget,
+        );
+        let child_scope = Scope::<P2>::new_with_capability_budget(
+            child_region,
+            child_budget,
+            child_capability_budget,
+        );
 
         let fut_result =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(child_scope, &mut *state)));
@@ -1498,6 +1567,10 @@ impl<P: Policy> Scope<'_, P> {
         .with_blocking_pool_handle(blocking_pool)
         .with_evidence_sink(evidence_sink)
         .with_macaroon_handle(macaroon);
+        let _ = child_cx.apply_child_capability_budget(
+            self.capability_budget,
+            CapabilityBudgetRequirements::NONE,
+        );
 
         // Apply pressure handle if present
         if let Some(pressure) = pressure_opt {
@@ -1636,6 +1709,7 @@ impl<P: Policy> std::fmt::Debug for Scope<'_, P> {
         f.debug_struct("Scope")
             .field("region", &self.region)
             .field("budget", &self.budget)
+            .field("capability_budget", &self.capability_budget)
             .finish()
     }
 }
@@ -1653,7 +1727,9 @@ mod tests {
     use super::*;
     use crate::record::RegionLimits;
     use crate::runtime::RuntimeState;
-    use crate::types::{CancelKind, Outcome, Time};
+    use crate::types::{
+        CancelKind, CapabilityBudgetDimension, CapabilityBudgetRefusal, Outcome, Time,
+    };
     use crate::util::ArenaIndex;
     use futures_lite::future::block_on;
     use std::sync::Arc;
@@ -1668,6 +1744,14 @@ mod tests {
 
     fn test_scope(region: RegionId, budget: Budget) -> Scope<'static> {
         Scope::new(region, budget)
+    }
+
+    fn test_scope_with_capability_budget(
+        region: RegionId,
+        budget: Budget,
+        capability_budget: CapabilityBudget,
+    ) -> Scope<'static> {
+        Scope::new_with_capability_budget(region, budget, capability_budget)
     }
 
     #[test]
@@ -2226,6 +2310,103 @@ mod tests {
             state.region(child_id).is_none(),
             "closed child region should be reclaimed from arena"
         );
+    }
+
+    #[test]
+    fn region_capability_budget_is_met_with_parent() {
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let parent_budget = CapabilityBudget::new()
+            .with_memory_bytes(1_024)
+            .with_io_bytes(8_192);
+        let parent =
+            state.create_root_region_with_capability_budget(Budget::INFINITE, parent_budget);
+        let scope = test_scope_with_capability_budget(parent, Budget::INFINITE, parent_budget);
+
+        let outcome = block_on(
+            scope.region_with_budget_and_capability_budget(
+                &mut state,
+                &cx,
+                Budget::INFINITE,
+                CapabilityBudget::new()
+                    .with_memory_bytes(4_096)
+                    .with_io_bytes(512),
+                CapabilityBudgetRequirements::new()
+                    .require_memory_bytes()
+                    .require_io_bytes(),
+                crate::types::policy::FailFast,
+                |child, _state| {
+                    let child_budget = child.capability_budget();
+                    async move { Outcome::Ok(child_budget) }
+                },
+            ),
+        )
+        .expect("child region created");
+
+        let child_budget = match outcome {
+            Outcome::Ok(budget) => budget,
+            other => unreachable!("expected Outcome::Ok(capability_budget), got {other:?}"),
+        };
+
+        assert_eq!(child_budget.memory_bytes, Some(1_024));
+        assert_eq!(child_budget.io_bytes, Some(512));
+    }
+
+    #[test]
+    fn region_capability_budget_required_absent_dimension_rejects() {
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let parent = state.create_root_region(Budget::INFINITE);
+        let scope = test_scope(parent, Budget::INFINITE);
+
+        let err = block_on(scope.region_with_budget_and_capability_budget(
+            &mut state,
+            &cx,
+            Budget::INFINITE,
+            CapabilityBudget::new(),
+            CapabilityBudgetRequirements::new().require_artifact_bytes(),
+            crate::types::policy::FailFast,
+            |_child, _state| async move { Outcome::Ok(()) },
+        ))
+        .expect_err("missing required artifact budget must fail closed");
+
+        assert!(matches!(
+            err,
+            RegionCreateError::CapabilityBudgetRefused {
+                parent: refused_parent,
+                reason: CapabilityBudgetRefusal::MissingRequired(
+                    CapabilityBudgetDimension::ArtifactBytes
+                ),
+            } if refused_parent == parent
+        ));
+    }
+
+    #[test]
+    fn spawned_task_cx_inherits_scope_capability_budget() {
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let capability_budget = CapabilityBudget::new()
+            .with_memory_bytes(4_096)
+            .with_cpu_units(16);
+        let region =
+            state.create_root_region_with_capability_budget(Budget::INFINITE, capability_budget);
+        let scope = test_scope_with_capability_budget(region, Budget::INFINITE, capability_budget);
+
+        let (handle, _stored) = scope
+            .spawn(&mut state, &cx, |child_cx| async move {
+                child_cx.capability_budget()
+            })
+            .expect("spawn should admit task");
+
+        let task = state.task(handle.task_id()).expect("task record missing");
+        let actual = task
+            .cx_inner
+            .as_ref()
+            .expect("task cx inner missing")
+            .read()
+            .capability_budget;
+
+        assert_eq!(actual, capability_budget);
     }
 
     #[test]

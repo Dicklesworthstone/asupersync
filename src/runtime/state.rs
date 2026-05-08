@@ -43,8 +43,8 @@ use crate::tracing_compat::{debug, debug_span, error, trace, trace_span};
 use crate::types::policy::PolicyAction;
 use crate::types::task_context::{CxInner, MAX_MASK_DEPTH};
 use crate::types::{
-    Budget, CancelAttributionConfig, CancelKind, CancelReason, ObligationId, Outcome, Policy,
-    RegionId, TaskId, Time,
+    Budget, CancelAttributionConfig, CancelKind, CancelReason, CapabilityBudget,
+    CapabilityBudgetRequirements, ObligationId, Outcome, Policy, RegionId, TaskId, Time,
 };
 use crate::util::{Arena, ArenaIndex, EntropySource, OsEntropy};
 use serde::{Deserialize, Serialize};
@@ -1588,13 +1588,28 @@ impl RuntimeState {
     ///
     /// Panics in debug builds if a root region already exists (double-init guard).
     pub fn create_root_region(&mut self, budget: Budget) -> RegionId {
+        self.create_root_region_with_capability_budget(budget, CapabilityBudget::UNSPECIFIED)
+    }
+
+    /// Creates a root region with an explicit capability budget and returns its ID.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug builds if a root region already exists (double-init guard).
+    pub fn create_root_region_with_capability_budget(
+        &mut self,
+        budget: Budget,
+        capability_budget: CapabilityBudget,
+    ) -> RegionId {
         debug_assert!(
             self.root_region.is_none(),
             "create_root_region called twice; previous root: {:?}",
             self.root_region
         );
         let now = self.current_runtime_time();
-        let id = self.regions.create_root(budget, now);
+        let id = self
+            .regions
+            .create_root_with_capability_budget(budget, capability_budget, now);
         self.track_new_region_in_cancel_protocol_validator(id, None, now);
 
         self.root_region = Some(id);
@@ -1619,12 +1634,34 @@ impl RuntimeState {
         parent: RegionId,
         budget: Budget,
     ) -> Result<RegionId, RegionCreateError> {
+        self.create_child_region_with_capability_budget(
+            parent,
+            budget,
+            CapabilityBudget::UNSPECIFIED,
+            CapabilityBudgetRequirements::NONE,
+        )
+    }
+
+    /// Creates a child region with explicit capability-budget admission.
+    pub fn create_child_region_with_capability_budget(
+        &mut self,
+        parent: RegionId,
+        budget: Budget,
+        capability_budget: CapabilityBudget,
+        requirements: CapabilityBudgetRequirements,
+    ) -> Result<RegionId, RegionCreateError> {
         // Check resource pressure before creating the region
         // Use Normal priority as the default for backward compatibility
         self.check_resource_pressure_for_region(RegionPriority::Normal)?;
 
         let now = self.current_runtime_time();
-        let id = self.regions.create_child(parent, budget, now)?;
+        let id = self.regions.create_child_with_capability_budget(
+            parent,
+            budget,
+            capability_budget,
+            requirements,
+            now,
+        )?;
         self.track_new_region_in_cancel_protocol_validator(id, Some(parent), now);
 
         self.record_trace_event(|seq| TraceEvent::region_created(seq, now, id, Some(parent)));
@@ -1647,6 +1684,12 @@ impl RuntimeState {
     #[must_use]
     pub fn region_limits(&self, region: RegionId) -> Option<RegionLimits> {
         self.regions.limits(region)
+    }
+
+    /// Returns the current capability budget for a region.
+    #[must_use]
+    pub fn region_capability_budget(&self, region: RegionId) -> Option<CapabilityBudget> {
+        self.regions.capability_budget(region)
     }
 
     /// Creates the infrastructure for a task (record, context, channel) without storing the future.

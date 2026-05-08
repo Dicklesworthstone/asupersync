@@ -323,6 +323,7 @@ pub mod error {
                     SporkSeverity::Permanent
                 }
                 RegionCreateError::ResourcePressure { .. } => SporkSeverity::Transient,
+                RegionCreateError::CapabilityBudgetRefused { .. } => SporkSeverity::Permanent,
             }
         }
 

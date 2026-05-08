@@ -8,7 +8,9 @@ use crate::record::task::TaskOutcome;
 use crate::runtime::region_heap::{HeapIndex, RegionHeap};
 use crate::tracing_compat::{Span, debug, info_span};
 use crate::types::rref::{RRef, RRefAccessWitness, RRefError};
-use crate::types::{Budget, CancelReason, CurveBudget, RRefAccess, RegionId, TaskId, Time};
+use crate::types::{
+    Budget, CancelReason, CapabilityBudget, CurveBudget, RRefAccess, RegionId, TaskId, Time,
+};
 use parking_lot::RwLock;
 use std::cell::Cell;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
@@ -317,6 +319,7 @@ impl AtomicRegionState {
 #[derive(Debug)]
 struct RegionInner {
     budget: Budget,
+    capability_budget: CapabilityBudget,
     children: Vec<RegionId>,
     tasks: Vec<TaskId>,
     finalizers: FinalizerStack,
@@ -364,6 +367,17 @@ impl RegionRecord {
         Self::new_with_time(id, parent, budget, Time::ZERO)
     }
 
+    /// Creates a new region record with an explicit capability budget.
+    #[must_use]
+    pub fn new_with_capability_budget(
+        id: RegionId,
+        parent: Option<RegionId>,
+        budget: Budget,
+        capability_budget: CapabilityBudget,
+    ) -> Self {
+        Self::new_with_time_and_capability_budget(id, parent, budget, Time::ZERO, capability_budget)
+    }
+
     /// Creates a new region record with an explicit creation time.
     #[must_use]
     pub fn new_with_time(
@@ -371,6 +385,24 @@ impl RegionRecord {
         parent: Option<RegionId>,
         budget: Budget,
         created_at: Time,
+    ) -> Self {
+        Self::new_with_time_and_capability_budget(
+            id,
+            parent,
+            budget,
+            created_at,
+            CapabilityBudget::UNSPECIFIED,
+        )
+    }
+
+    /// Creates a new region record with explicit creation time and capability budget.
+    #[must_use]
+    pub fn new_with_time_and_capability_budget(
+        id: RegionId,
+        parent: Option<RegionId>,
+        budget: Budget,
+        created_at: Time,
+        capability_budget: CapabilityBudget,
     ) -> Self {
         // Create a tracing span for the region lifecycle
         let span = info_span!(
@@ -403,6 +435,7 @@ impl RegionRecord {
             state: AtomicRegionState::new(RegionState::Open),
             inner: RwLock::new(RegionInner {
                 budget,
+                capability_budget,
                 children: Vec::new(),
                 tasks: Vec::new(),
                 finalizers: FinalizerStack::new(),
@@ -440,6 +473,18 @@ impl RegionRecord {
     /// Sets the region budget.
     pub fn set_budget(&self, budget: Budget) {
         self.inner.write().budget = budget;
+    }
+
+    /// Returns the explicit capability/resource budget for this region.
+    #[inline]
+    #[must_use]
+    pub fn capability_budget(&self) -> CapabilityBudget {
+        self.inner.read().capability_budget
+    }
+
+    /// Sets the explicit capability/resource budget for this region.
+    pub fn set_capability_budget(&self, capability_budget: CapabilityBudget) {
+        self.inner.write().capability_budget = capability_budget;
     }
 
     /// Returns the current admission limits for this region.

@@ -3031,7 +3031,11 @@ impl<Caps> Cx<Caps> {
             budget_source = "inherited",
             "scope budget inherited"
         );
-        crate::cx::Scope::new(self.region_id(), budget)
+        crate::cx::Scope::new_with_capability_budget(
+            self.region_id(),
+            budget,
+            self.capability_budget(),
+        )
     }
 
     /// Creates a [`Scope`](super::Scope) bound to this context's region with a custom budget.
@@ -3103,7 +3107,33 @@ impl<Caps> Cx<Caps> {
             budget_source = "explicit",
             "scope budget set"
         );
-        crate::cx::Scope::new(self.region_id(), clamped)
+        crate::cx::Scope::new_with_capability_budget(
+            self.region_id(),
+            clamped,
+            self.capability_budget(),
+        )
+    }
+
+    /// Creates a [`Scope`](super::Scope) with explicit scheduler and
+    /// capability budgets.
+    ///
+    /// The scheduler budget is clamped with [`Budget::meet`] semantics by
+    /// [`Self::scope_with_budget`]. The capability budget is planned against
+    /// the context's current capability envelope and fails closed when a
+    /// required dimension is absent or exhausted.
+    pub fn scope_with_budget_and_capability_budget(
+        &self,
+        budget: Budget,
+        capability_budget: CapabilityBudget,
+        requirements: CapabilityBudgetRequirements,
+    ) -> Result<crate::cx::Scope<'static>, CapabilityBudgetRefusal> {
+        let scope = self.scope_with_budget(budget);
+        let effective = self.plan_child_capability_budget(capability_budget, requirements)?;
+        Ok(crate::cx::Scope::new_with_capability_budget(
+            scope.region_id(),
+            scope.budget(),
+            effective,
+        ))
     }
 }
 
@@ -4056,6 +4086,39 @@ mod tests {
             CapabilityBudgetRefusal::MissingRequired(CapabilityBudgetDimension::ArtifactBytes)
         );
         assert_eq!(cx.capability_budget(), CapabilityBudget::UNSPECIFIED);
+    }
+
+    #[test]
+    fn scope_inherits_cx_capability_budget() {
+        let cx = test_cx();
+        let budget = CapabilityBudget::new()
+            .with_memory_bytes(2_048)
+            .with_cpu_units(32);
+
+        cx.apply_child_capability_budget(budget, CapabilityBudgetRequirements::NONE)
+            .expect("optional capability budget should apply");
+
+        let scope = cx.scope();
+
+        assert_eq!(scope.capability_budget(), budget);
+    }
+
+    #[test]
+    fn scope_with_capability_budget_fails_closed_when_required_missing() {
+        let cx = test_cx();
+
+        let err = cx
+            .scope_with_budget_and_capability_budget(
+                Budget::INFINITE,
+                CapabilityBudget::new(),
+                CapabilityBudgetRequirements::new().require_artifact_bytes(),
+            )
+            .expect_err("missing artifact envelope must fail closed");
+
+        assert_eq!(
+            err,
+            CapabilityBudgetRefusal::MissingRequired(CapabilityBudgetDimension::ArtifactBytes)
+        );
     }
 
     #[test]

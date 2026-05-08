@@ -8,7 +8,9 @@
 use crate::record::region::AdmissionError;
 use crate::record::{RegionLimits, RegionRecord};
 use crate::runtime::resource_monitor::RegionPriority;
-use crate::types::{Budget, RegionId, Time};
+use crate::types::{
+    Budget, CapabilityBudget, CapabilityBudgetRefusal, CapabilityBudgetRequirements, RegionId, Time,
+};
 use crate::util::{Arena, ArenaIndex};
 
 /// Errors that can occur when creating a child region.
@@ -39,6 +41,13 @@ pub enum RegionCreateError {
         /// The reason for rejection due to resource pressure.
         reason: String,
     },
+    /// A required capability-budget dimension was missing or exhausted.
+    CapabilityBudgetRefused {
+        /// The parent region whose child admission was refused.
+        parent: RegionId,
+        /// The fail-closed budget refusal reason.
+        reason: CapabilityBudgetRefusal,
+    },
 }
 
 impl std::fmt::Display for RegionCreateError {
@@ -63,6 +72,10 @@ impl std::fmt::Display for RegionCreateError {
                 f,
                 "resource pressure prevents region creation: priority={:?} reason={}",
                 requested_priority, reason
+            ),
+            Self::CapabilityBudgetRefused { parent, reason } => write!(
+                f,
+                "capability budget prevents child region creation: parent={parent:?} reason={reason}"
             ),
         }
     }
@@ -224,8 +237,28 @@ impl RegionTable {
     /// `root_region` on RuntimeState.
     #[inline]
     pub fn create_root(&mut self, budget: Budget, now: Time) -> RegionId {
+        self.create_root_with_capability_budget(budget, CapabilityBudget::UNSPECIFIED, now)
+    }
+
+    /// Creates a root region record with an explicit capability budget.
+    ///
+    /// Callers are responsible for emitting trace events and setting
+    /// `root_region` on RuntimeState.
+    #[inline]
+    pub fn create_root_with_capability_budget(
+        &mut self,
+        budget: Budget,
+        capability_budget: CapabilityBudget,
+        now: Time,
+    ) -> RegionId {
         let idx = self.regions.insert_with(|idx| {
-            RegionRecord::new_with_time(RegionId::from_arena(idx), None, budget, now)
+            RegionRecord::new_with_time_and_capability_budget(
+                RegionId::from_arena(idx),
+                None,
+                budget,
+                now,
+                capability_budget,
+            )
         });
         RegionId::from_arena(idx)
     }
@@ -243,6 +276,27 @@ impl RegionTable {
         budget: Budget,
         now: Time,
     ) -> Result<RegionId, RegionCreateError> {
+        self.create_child_with_capability_budget(
+            parent,
+            budget,
+            CapabilityBudget::UNSPECIFIED,
+            CapabilityBudgetRequirements::NONE,
+            now,
+        )
+    }
+
+    /// Creates a child region with explicit capability-budget admission.
+    ///
+    /// The child's effective budget and capability budget both inherit from the
+    /// parent and are tightened by the child-supplied envelopes.
+    pub fn create_child_with_capability_budget(
+        &mut self,
+        parent: RegionId,
+        budget: Budget,
+        capability_budget: CapabilityBudget,
+        requirements: CapabilityBudgetRequirements,
+        now: Time,
+    ) -> Result<RegionId, RegionCreateError> {
         // Invariant: on `Err` return, the arena length is unchanged from
         // entry; on `Ok`, the arena length is exactly `entry_len + 1`. The
         // rollback path is the only thing keeping that invariant in the
@@ -252,20 +306,25 @@ impl RegionTable {
         // record into the arena.
         let entry_len = self.regions.len();
 
-        let parent_budget = self
+        let parent_record = self
             .regions
             .get(parent.arena_index())
-            .map(RegionRecord::budget)
             .ok_or(RegionCreateError::ParentNotFound(parent))?;
+        let parent_budget = parent_record.budget();
+        let parent_capability_budget = parent_record.capability_budget();
 
         let effective_budget = parent_budget.meet(budget);
+        let effective_capability_budget = parent_capability_budget
+            .plan_child(capability_budget, requirements)
+            .map_err(|reason| RegionCreateError::CapabilityBudgetRefused { parent, reason })?;
 
         let idx = self.regions.insert_with(|idx| {
-            RegionRecord::new_with_time(
+            RegionRecord::new_with_time_and_capability_budget(
                 RegionId::from_arena(idx),
                 Some(parent),
                 effective_budget,
                 now,
+                effective_capability_budget,
             )
         });
         let id = RegionId::from_arena(idx);
@@ -355,6 +414,15 @@ impl RegionTable {
             .map(RegionRecord::budget)
     }
 
+    /// Returns the capability budget of a region.
+    #[inline]
+    #[must_use]
+    pub fn capability_budget(&self, region: RegionId) -> Option<CapabilityBudget> {
+        self.regions
+            .get(region.arena_index())
+            .map(RegionRecord::capability_budget)
+    }
+
     /// Returns child IDs of a region.
     #[inline]
     #[must_use]
@@ -396,7 +464,7 @@ mod tests {
     use super::*;
     use crate::record::finalizer::Finalizer;
     use crate::record::region::RegionState;
-    use crate::types::{CancelReason, TaskId};
+    use crate::types::{CancelReason, CapabilityBudgetDimension, TaskId};
 
     #[test]
     fn create_root_region() {
@@ -506,6 +574,70 @@ mod tests {
 
         let actual = table.budget(child).unwrap();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn create_child_inherits_and_tightens_capability_budget() {
+        let mut table = RegionTable::new();
+        let parent_capability_budget = CapabilityBudget::new()
+            .with_memory_bytes(1_024)
+            .with_io_bytes(8_192)
+            .with_cleanup_budget(Budget::new().with_poll_quota(20));
+        let child_capability_budget = CapabilityBudget::new()
+            .with_memory_bytes(2_048)
+            .with_io_bytes(1_024);
+
+        let parent = table.create_root_with_capability_budget(
+            Budget::default(),
+            parent_capability_budget,
+            Time::ZERO,
+        );
+        let child = table
+            .create_child_with_capability_budget(
+                parent,
+                Budget::default(),
+                child_capability_budget,
+                CapabilityBudgetRequirements::new()
+                    .require_memory_bytes()
+                    .require_io_bytes()
+                    .require_cleanup(),
+                Time::ZERO,
+            )
+            .unwrap();
+
+        let actual = table.capability_budget(child).unwrap();
+        assert_eq!(actual.memory_bytes, Some(1_024));
+        assert_eq!(actual.io_bytes, Some(1_024));
+        assert_eq!(
+            actual.cleanup_budget.map(|budget| budget.poll_quota),
+            Some(20)
+        );
+    }
+
+    #[test]
+    fn create_child_required_capability_budget_fails_closed() {
+        let mut table = RegionTable::new();
+        let parent = table.create_root(Budget::default(), Time::ZERO);
+
+        let result = table.create_child_with_capability_budget(
+            parent,
+            Budget::default(),
+            CapabilityBudget::new(),
+            CapabilityBudgetRequirements::new().require_artifact_bytes(),
+            Time::ZERO,
+        );
+
+        assert!(matches!(
+            result,
+            Err(RegionCreateError::CapabilityBudgetRefused {
+                parent: refused_parent,
+                reason: CapabilityBudgetRefusal::MissingRequired(
+                    CapabilityBudgetDimension::ArtifactBytes
+                ),
+            }) if refused_parent == parent
+        ));
+        assert_eq!(table.len(), 1);
+        assert!(table.child_ids(parent).unwrap().is_empty());
     }
 
     #[test]
@@ -879,6 +1011,12 @@ mod tests {
             limit: 10,
             live: 10,
         };
+        let e4 = RegionCreateError::CapabilityBudgetRefused {
+            parent: id,
+            reason: CapabilityBudgetRefusal::MissingRequired(
+                CapabilityBudgetDimension::MemoryBytes,
+            ),
+        };
 
         // Debug
         let d1 = format!("{e1:?}");
@@ -887,6 +1025,8 @@ mod tests {
         assert!(d2.contains("ParentClosed"), "{d2}");
         let d3 = format!("{e3:?}");
         assert!(d3.contains("ParentAtCapacity"), "{d3}");
+        let d4 = format!("{e4:?}");
+        assert!(d4.contains("CapabilityBudgetRefused"), "{d4}");
 
         // Display
         let s1 = format!("{e1}");
@@ -896,11 +1036,14 @@ mod tests {
         assert!(s2.contains("Closing"), "{s2}");
         let s3 = format!("{e3}");
         assert!(s3.contains("admission limit reached"), "{s3}");
+        let s4 = format!("{e4}");
+        assert!(s4.contains("capability budget prevents"), "{s4}");
 
         // Clone + PartialEq + Eq
         assert_eq!(e1.clone(), e1);
         assert_eq!(e2.clone(), e2);
         assert_eq!(e3.clone(), e3);
+        assert_eq!(e4.clone(), e4);
         assert_ne!(e1, e2);
 
         // std::error::Error
