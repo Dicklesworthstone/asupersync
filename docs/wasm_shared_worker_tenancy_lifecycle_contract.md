@@ -214,7 +214,7 @@ Downgrade rules:
 Contract validation:
 
 ```bash
-rch exec -- cargo test --test wasm_shared_worker_tenancy_lifecycle_contract -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_shared_worker_tenancy_docs cargo test --test wasm_shared_worker_tenancy_lifecycle_contract -- --nocapture
 ```
 
 Browser-run proof / artifact bundle:
@@ -237,7 +237,7 @@ and currently proves:
 Related host-ladder validation:
 
 ```bash
-rch exec -- cargo test --test wasm_browser_feasibility_matrix -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_shared_worker_tenancy_docs cargo test --test wasm_browser_feasibility_matrix -- --nocapture
 ```
 
 ## Cross-References
