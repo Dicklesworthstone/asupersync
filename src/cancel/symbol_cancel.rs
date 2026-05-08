@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::types::symbol::{ObjectId, Symbol};
-use crate::types::{Budget, CancelKind, CancelReason, Time};
+use crate::types::{Budget, CancelAttributionConfig, CancelKind, CancelReason, Time};
 use crate::util::DetRng;
 
 // ============================================================================
@@ -420,6 +420,19 @@ impl SymbolCancelToken {
         self.state.cleanup_budget
     }
 
+    fn parent_cancelled_with_cause(parent_reason: &CancelReason, at: Time) -> CancelReason {
+        CancelReason::parent_cancelled()
+            .with_timestamp(at)
+            .with_cause_limited(parent_reason.clone(), &CancelAttributionConfig::default())
+    }
+
+    fn parent_cascade_reason_at(&self, at: Time) -> CancelReason {
+        self.state.reason.read().as_ref().map_or_else(
+            || CancelReason::parent_cancelled().with_timestamp(at),
+            |reason| Self::parent_cancelled_with_cause(reason, at),
+        )
+    }
+
     /// Requests cancellation with the given reason.
     ///
     /// Returns true if this call triggered the cancellation (first caller wins).
@@ -476,7 +489,7 @@ impl SymbolCancelToken {
                 let mut children = self.state.children.write();
                 std::mem::take(&mut *children)
             };
-            let parent_reason = CancelReason::parent_cancelled();
+            let parent_reason = self.parent_cascade_reason_at(now);
             for child in children {
                 child.cancel(&parent_reason, now);
             }
@@ -610,7 +623,7 @@ impl SymbolCancelToken {
         }
 
         if let Some(at) = self.cancelled_at_snapshot_for_child() {
-            let parent_reason = CancelReason::parent_cancelled();
+            let parent_reason = self.parent_cascade_reason_at(at);
             child.cancel(&parent_reason, at);
         } else {
             let mut children = self.state.children.write();
@@ -1914,6 +1927,13 @@ mod tests {
         }
     }
 
+    fn reason_chain_kinds(token: &SymbolCancelToken) -> Vec<CancelKind> {
+        token
+            .reason()
+            .map(|reason| reason.chain().map(|reason| reason.kind).collect())
+            .unwrap_or_default()
+    }
+
     fn observable_token_state_json(token: &SymbolCancelToken) -> Value {
         serde_json::json!({
             "cancelled": token.is_cancelled(),
@@ -2157,6 +2177,11 @@ mod tests {
         // Child should be cancelled too
         assert!(child.is_cancelled());
         assert_eq!(child.reason().unwrap().kind, CancelKind::ParentCancelled);
+        assert_eq!(
+            reason_chain_kinds(&child),
+            vec![CancelKind::ParentCancelled, CancelKind::User],
+            "child cancellation should carry the root parent reason as a cause"
+        );
     }
 
     #[test]
@@ -2207,13 +2232,17 @@ mod tests {
             );
             assert_eq!(
                 scenario.right_child_after_parent.cause_chain,
-                vec![CancelKind::ParentCancelled],
-                "sibling child should not gain spurious causes during cascade"
+                vec![CancelKind::ParentCancelled, CancelKind::User],
+                "sibling child should retain the parent cancellation as its cause"
             );
             assert_eq!(
                 scenario.right_leaf_after_parent.cause_chain,
-                vec![CancelKind::ParentCancelled],
-                "dropped-handle descendant should preserve the canonical parent-cancelled cause chain"
+                vec![
+                    CancelKind::ParentCancelled,
+                    CancelKind::ParentCancelled,
+                    CancelKind::User,
+                ],
+                "dropped-handle descendant should preserve the full parent-cancelled cause chain"
             );
         }
 
@@ -3458,6 +3487,15 @@ mod tests {
         assert!(parent.is_cancelled());
         assert!(child.is_cancelled());
         assert_eq!(child.reason().unwrap().kind, CancelKind::ParentCancelled);
+        assert_eq!(
+            reason_chain_kinds(&child),
+            vec![
+                CancelKind::ParentCancelled,
+                CancelKind::ParentCancelled,
+                CancelKind::User,
+            ],
+            "grandchild cancellation should validate the full parent chain"
+        );
     }
 
     #[test]
@@ -3531,6 +3569,11 @@ mod tests {
             late_child.reason().unwrap().kind,
             CancelKind::ParentCancelled,
             "late child should inherit parent-cancelled semantics"
+        );
+        assert_eq!(
+            reason_chain_kinds(&late_child),
+            vec![CancelKind::ParentCancelled, CancelKind::User],
+            "late child created inside listener should retain the parent reason as a cause"
         );
         assert_eq!(
             late_child.cancelled_at(),
@@ -3921,6 +3964,16 @@ mod tests {
         assert_eq!(level1.reason().unwrap().kind, CancelKind::ParentCancelled);
         assert_eq!(level2.reason().unwrap().kind, CancelKind::ParentCancelled);
         assert_eq!(level3.reason().unwrap().kind, CancelKind::ParentCancelled);
+        assert_eq!(
+            reason_chain_kinds(&level3),
+            vec![
+                CancelKind::ParentCancelled,
+                CancelKind::ParentCancelled,
+                CancelKind::ParentCancelled,
+                CancelKind::User,
+            ],
+            "deep descendant should retain every parent-cancelled hop plus the root cause"
+        );
     }
 
     /// META-CANCEL-002: Order Independence Property
