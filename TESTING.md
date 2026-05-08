@@ -8,23 +8,23 @@ failures with high-signal traces and minimal manual digging.
 
 ```bash
 # Build hygiene check (always run first)
-rch exec -- cargo check --lib -p asupersync --features test-internals
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_check cargo check --lib -p asupersync --features test-internals
 
 # Unit + integration tests (library only)
-rch exec -- env CARGO_INCREMENTAL=0 cargo test --lib --features test-internals
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_lib cargo test --lib --features test-internals
 
 # Stream logs
-rch exec -- env CARGO_INCREMENTAL=0 cargo test --lib --features test-internals -- --nocapture
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_lib_nocapture cargo test --lib --features test-internals -- --nocapture
 
 # Run a specific test file
-rch exec -- env CARGO_INCREMENTAL=0 cargo test --test http_verification --features test-internals
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_http_verification cargo test --test http_verification --features test-internals
 
 # Run a specific test by name (substring match)
-rch exec -- env CARGO_INCREMENTAL=0 cargo test cancellation_conformance --features test-internals
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_cancellation cargo test cancellation_conformance --features test-internals
 
 # Phase 2 differential policy contract checks
-rch exec -- env CARGO_INCREMENTAL=0 cargo test --test lab_live_time_normalization_policy_contract --features test-internals -- --nocapture
-rch exec -- env CARGO_INCREMENTAL=0 cargo test --test lab_live_virtualized_surface_matrix_contract --features test-internals -- --nocapture
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_time_policy cargo test --test lab_live_time_normalization_policy_contract --features test-internals -- --nocapture
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_virtualized_surface cargo test --test lab_live_virtualized_surface_matrix_contract --features test-internals -- --nocapture
 ```
 
 ## Shared Validation Contract (asupersync-ay6qvw)
@@ -137,7 +137,7 @@ All cargo-heavy validation for Track-Z work must follow this policy:
   canonical `env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=... cargo ...` form.
 - Scripted or multi-stage validation must expose `RCH_BIN` and route cargo via
   `"$RCH_BIN" exec -- ...` when `rch` is available.
-- Scripted cargo runs must set an isolated `CARGO_TARGET_DIR` per
+- Scripted Cargo runs must set an isolated `CARGO_TARGET_DIR` per
   suite/run/stage/attempt. Accepted patterns are
   `${PROJECT_ROOT}/.rch_target_<suite>/<run_id>/<stage>` or
   `${TMPDIR:-/tmp}/rch-<suite>-<run_id>-<stage>`.
@@ -207,8 +207,8 @@ If you touch those docs or the executable policy around them, validate the
 contract surface with:
 
 ```bash
-rch exec -- cargo test --test lab_live_time_normalization_policy_contract -- --nocapture
-rch exec -- cargo test --test lab_live_virtualized_surface_matrix_contract -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_time_policy_contract cargo test --test lab_live_time_normalization_policy_contract -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_virtualized_surface_contract cargo test --test lab_live_virtualized_surface_matrix_contract -- --nocapture
 ```
 
 ## Test Categories and Locations
@@ -402,7 +402,7 @@ Sample `repro_manifest.json`:
   "invariant_ids": ["losers_drained", "no_obligation_leaks"],
   "seed": 57005,
   "trace_fingerprint": "trace_fp_v1",
-  "replay_command": "ASUPERSYNC_SEED=0xDEAD cargo test cancellation_conformance -- --nocapture",
+  "replay_command": "rch exec -- env ASUPERSYNC_SEED=0xDEAD CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_repro_manifest cargo test cancellation_conformance -- --nocapture",
   "failure_class": "assertion_failure",
   "artifact_paths": [
     "target/test-artifacts/cancellation_conformance/event_log.txt",
@@ -877,7 +877,7 @@ The conformance suite lives in the `conformance/` crate and is designed to be
 runtime-agnostic. To run it:
 
 ```bash
-rch exec -- env CARGO_INCREMENTAL=0 cargo test -p asupersync-conformance --features test-internals
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_conformance cargo test -p asupersync-conformance --features test-internals
 ```
 
 The `asupersync` crate also exposes conformance tooling in the CLI when the
@@ -1037,7 +1037,7 @@ unit tests: units validate local invariants, E2E validates the full pipeline.
 ./scripts/run_phase6_e2e.sh
 
 # Or via cargo directly:
-rch exec -- env CARGO_INCREMENTAL=0 cargo test --test e2e_geodesic_normalization \
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_e2e cargo test --test e2e_geodesic_normalization \
            --test topology_benchmark \
            --test e2e_governor_vs_baseline \
            --test raptorq_conformance \
@@ -1069,9 +1069,9 @@ rch exec -- env CARGO_INCREMENTAL=0 cargo test --test e2e_geodesic_normalization
 
 CI should run at minimum:
 
-- `cargo fmt --check`
-- `cargo clippy --all-targets -- -D warnings`
-- `rch exec -- env CARGO_INCREMENTAL=0 cargo test --lib --features test-internals`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_ci_fmt cargo fmt -- --check`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_ci_clippy cargo clippy --all-targets -- -D warnings`
+- `rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_ci_tests cargo test --lib --features test-internals`
 
 CI also includes scheduled fuzzing via `.github/workflows/fuzz.yml`,
 property tests via `.github/workflows/property-tests.yml`, and
@@ -1079,7 +1079,7 @@ Phase 6 E2E suites via the `phase6-e2e` job in `.github/workflows/ci.yml`.
 
 ## Debugging Tips
 
-- Use `rch exec -- env CARGO_INCREMENTAL=0 cargo test --lib --features test-internals -- --nocapture` to stream logs.
+- Use `rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_debug_tests cargo test --lib --features test-internals -- --nocapture` to stream logs.
 - Prefer `test_lab_with_tracing()` when you need larger trace buffers.
 - When a test fails, scan for the last `test_phase!` and `assert_with_log!`
   markers to pinpoint the failure point.

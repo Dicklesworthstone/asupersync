@@ -106,8 +106,8 @@ The implementation includes comprehensive test coverage:
 
 Run tests with:
 ```bash
-cargo test --lib cross_module_lock_ordering_test
-cargo test --lib sync::lock_ordering
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lock_ordering cargo test --lib cross_module_lock_ordering_test
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lock_ordering cargo test --lib sync::lock_ordering
 ```
 
 ## Migration

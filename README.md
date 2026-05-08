@@ -909,7 +909,7 @@ NO_PREFLIGHT=1 ./scripts/run_raptorq_e2e.sh --profile forensics --bundle
 ```
 
 Operational notes:
-- The wrapper auto-uses `rch` when available for cargo-heavy stages (`cargo test`, `cargo bench`, scenario tests).
+- The wrapper auto-uses `rch` when available for Cargo test, benchmark, and scenario-test stages.
 - `--profile` supports `fast|full|forensics`; `--scenario <ID>` can target one deterministic scenario.
 - Artifact outputs include `summary.json`, `scenarios.ndjson`, and (when bundled) `validation_stages.ndjson`.
 - Increase `VALIDATION_TIMEOUT` or `E2E_TIMEOUT` if your environment is slower than expected.
@@ -1505,7 +1505,7 @@ applications via `wasm-bindgen`.
 ```bash
 rustup target add wasm32-unknown-unknown
 # Verify the semantic core closes under a browser profile
-cargo check --target wasm32-unknown-unknown \
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_browser_check cargo check --target wasm32-unknown-unknown \
   --no-default-features --features wasm-browser-dev
 ```
 
