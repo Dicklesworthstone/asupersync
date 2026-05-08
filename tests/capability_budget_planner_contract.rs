@@ -1,5 +1,6 @@
 //! Contract-backed proofs for the capability budget planner.
 
+use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::runtime::{RegionCreateError, RuntimeState};
 use asupersync::{
     Budget, CapabilityBudget, CapabilityBudgetDimension, CapabilityBudgetRefusal,
@@ -19,6 +20,7 @@ struct CapabilityBudgetPlannerContract {
     required_dimensions: Vec<DimensionContract>,
     runtime_semantics: Vec<RuntimeSemanticContract>,
     e2e_log_contract: E2eLogContract,
+    lab_runtime_contract: LabRuntimeContract,
     source_paths: Vec<SourcePathContract>,
 }
 
@@ -56,6 +58,15 @@ struct E2eFinalStateContract {
     live_tasks: usize,
     runtime_quiescent: bool,
     no_obligation_leak: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct LabRuntimeContract {
+    scenario_id: String,
+    seed: u64,
+    required_fields: Vec<String>,
+    required_refusal: E2eAdmissionFailureContract,
+    required_final_state: E2eFinalStateContract,
 }
 
 #[derive(Debug, Deserialize)]
@@ -275,6 +286,38 @@ fn capability_budget_e2e_log() -> Value {
             "live_regions": state.live_region_count(),
             "runtime_quiescent": state.is_quiescent(),
             "no_obligation_leak": state.pending_obligation_count() == 0
+        }
+    })
+}
+
+fn capability_budget_lab_runtime_exhaustion_log(seed: u64) -> Value {
+    let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(32));
+    let root_region = runtime.state.create_root_region_with_capability_budget(
+        Budget::INFINITE,
+        CapabilityBudget::new().with_memory_bytes(0),
+    );
+    let admission_failure = runtime
+        .state
+        .create_child_region_with_capability_budget(
+            root_region,
+            Budget::INFINITE,
+            CapabilityBudget::UNSPECIFIED,
+            CapabilityBudgetRequirements::new().require_memory_bytes(),
+        )
+        .expect_err("exhausted required memory envelope must reject child");
+
+    json!({
+        "schema_version": "capability-budget-lab-runtime-proof-v1",
+        "scenario_id": "capability-budget-lab-runtime-admission-v1",
+        "seed": seed,
+        "root_region_id": root_region.as_u64(),
+        "admission_failure": admission_failure_log(admission_failure),
+        "final_state": {
+            "pending_obligations": runtime.state.pending_obligation_count(),
+            "live_tasks": runtime.state.live_task_count(),
+            "live_regions": runtime.state.live_region_count(),
+            "runtime_quiescent": runtime.state.is_quiescent(),
+            "no_obligation_leak": runtime.state.pending_obligation_count() == 0
         }
     })
 }
@@ -541,6 +584,56 @@ fn e2e_log_captures_budget_deltas_cleanup_drain_and_no_leak() {
 }
 
 #[test]
+fn lab_runtime_budget_exhaustion_fails_closed_deterministically() {
+    let contract = contract().lab_runtime_contract;
+    let first = capability_budget_lab_runtime_exhaustion_log(contract.seed);
+    let second = capability_budget_lab_runtime_exhaustion_log(contract.seed);
+
+    assert_eq!(first, second);
+    assert_eq!(
+        contract.scenario_id,
+        "capability-budget-lab-runtime-admission-v1"
+    );
+    for field_path in &contract.required_fields {
+        assert!(
+            json_path_exists(&first, field_path),
+            "LabRuntime proof log is missing required field {field_path}"
+        );
+    }
+
+    assert_eq!(
+        first["schema_version"],
+        "capability-budget-lab-runtime-proof-v1"
+    );
+    assert_eq!(first["scenario_id"], contract.scenario_id);
+    assert_eq!(first["seed"], json!(contract.seed));
+    assert_eq!(
+        first["admission_failure"]["reason"],
+        contract.required_refusal.reason
+    );
+    assert_eq!(
+        first["admission_failure"]["dimension"],
+        contract.required_refusal.dimension
+    );
+    assert_eq!(
+        first["final_state"]["pending_obligations"],
+        json!(contract.required_final_state.pending_obligations)
+    );
+    assert_eq!(
+        first["final_state"]["live_tasks"],
+        json!(contract.required_final_state.live_tasks)
+    );
+    assert_eq!(
+        first["final_state"]["runtime_quiescent"],
+        json!(contract.required_final_state.runtime_quiescent)
+    );
+    assert_eq!(
+        first["final_state"]["no_obligation_leak"],
+        json!(contract.required_final_state.no_obligation_leak)
+    );
+}
+
+#[test]
 fn runtime_semantic_rows_are_executed_by_this_contract() {
     let executed = [
         "child-inherits-and-tightens-every-dimension",
@@ -548,6 +641,7 @@ fn runtime_semantic_rows_are_executed_by_this_contract() {
         "required-dimension-exhausted-fails-closed",
         "cx-scope-region-task-propagation",
         "e2e-log-captures-region-budget-deltas-cleanup-drain-and-no-leak",
+        "lab-runtime-budget-exhaustion-fails-closed-deterministically",
     ];
 
     for row in contract().runtime_semantics {
