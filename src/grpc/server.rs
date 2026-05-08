@@ -195,6 +195,35 @@ impl ConnectionRegistry {
     }
 }
 
+/// br-asupersync-wix48k: RAII guard that removes a stream registration
+/// from a [`ConnectionRegistry`] when dropped.
+///
+/// `dispatch_unary_with_stream_enforcement` previously cleaned up the
+/// registered stream by calling `registry.remove_stream(...)` *after*
+/// awaiting the inner handler. If the awaiting future was dropped
+/// before the handler resolved — which is exactly what happens when
+/// the client RST_STREAMs the in-flight stream and the transport
+/// propagates the cancel by dropping the dispatch future — the cleanup
+/// line was never reached and the stream stayed in `active_streams`
+/// indefinitely. An attacker could open `max_concurrent_streams + 1`
+/// streams in rapid succession, RST each one mid-handler, and exhaust
+/// the connection's stream budget for the entire `idle_timeout`
+/// window. This guard removes the registration from its `Drop`, so
+/// cleanup runs whether the dispatch returns Ok, returns Err, panics,
+/// or is cancelled mid-await.
+struct StreamRegistrationGuard {
+    registry: Arc<ConnectionRegistry>,
+    connection_id: String,
+    stream_id: u32,
+}
+
+impl Drop for StreamRegistrationGuard {
+    fn drop(&mut self) {
+        self.registry
+            .remove_stream(&self.connection_id, self.stream_id);
+    }
+}
+
 /// gRPC server configuration.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -1103,17 +1132,23 @@ impl Server {
             )));
         }
 
-        // Ensure we clean up the stream when the request completes
-        let registry = Arc::clone(&self.connection_registry);
-        let conn_id = connection_id.clone();
+        // br-asupersync-wix48k: cleanup runs on Drop, not after the
+        // await. A pre-fix `registry.remove_stream(...)` placed AFTER
+        // `dispatch_unary(...).await` was unreachable when the
+        // awaiting future was cancelled mid-handler (the RST_STREAM
+        // path), leaking the stream registration into active_streams
+        // until the next idle sweep — a connection-level DoS primitive.
+        let _stream_guard = StreamRegistrationGuard {
+            registry: Arc::clone(&self.connection_registry),
+            connection_id: connection_id.clone(),
+            stream_id,
+        };
 
-        // Dispatch the actual request using the existing logic
-        let result = self.dispatch_unary(request, handler).await;
-
-        // Clean up the stream from the registry
-        registry.remove_stream(&conn_id, stream_id);
-
-        result
+        // Dispatch the actual request using the existing logic.
+        // Cleanup is performed by `_stream_guard` on Drop, regardless
+        // of whether dispatch_unary returns, errors, panics, or is
+        // cancelled mid-await.
+        self.dispatch_unary(request, handler).await
     }
 
     /// Update stream activity for idle timeout tracking.
@@ -4488,6 +4523,85 @@ mod tests {
 
         server.unregister_connection(&connection_id);
         crate::test_complete!("test_server_stream_enforcement_integration");
+    }
+
+    /// br-asupersync-wix48k — RST_STREAM mid-handler must NOT leak the
+    /// stream's registration entry. Pre-fix, dropping the dispatch
+    /// future before its inner handler resolved skipped the
+    /// post-await `remove_stream(...)` line, leaving the stream
+    /// registered until the connection's idle sweep. An attacker who
+    /// could open `max_concurrent_streams + 1` short-lived RST'd
+    /// streams would lock the connection out of further work for
+    /// minutes. Post-fix the cleanup runs from the `Drop` impl of a
+    /// `StreamRegistrationGuard`.
+    ///
+    /// Test shape: build a dispatch future whose handler is `Pending`
+    /// forever, poll once with a no-op waker (this runs the
+    /// registry-registration body and parks at the handler's first
+    /// await), then drop the future. Assert the connection's
+    /// `active_stream_count` is back to zero.
+    #[test]
+    fn test_dispatch_unary_drop_during_handler_releases_stream_registration() {
+        use std::future::Future;
+        use std::pin::pin;
+        use std::task::{Context, Poll, Waker};
+
+        init_test("test_dispatch_unary_drop_during_handler_releases_stream_registration");
+
+        let server = Server::builder()
+            .max_concurrent_streams(2)
+            .stream_idle_timeout(Some(std::time::Duration::from_secs(60)))
+            .build();
+
+        let connection_id = "rst-stream-leak-conn".to_string();
+        server.register_connection(connection_id.clone());
+
+        // Drive the dispatch future to its first Pending and then drop
+        // it. The handler `std::future::pending()` never resolves, so
+        // the await suspends on the very first poll — exactly the
+        // shape of a RST_STREAM cancellation that hits while the
+        // server is still inside the handler.
+        {
+            let request =
+                Request::with_metadata(Bytes::from_static(b"will-be-cancelled"), Metadata::new());
+            let dispatch = server.dispatch_unary_with_stream_enforcement(
+                connection_id.clone(),
+                7,
+                request,
+                |_req| async {
+                    let () = std::future::pending().await;
+                    unreachable!("handler must never resolve in this test");
+                },
+            );
+            let mut pinned = pin!(dispatch);
+            let waker = Waker::noop();
+            let mut cx = Context::from_waker(waker);
+            // First poll registers the stream and drives the handler
+            // to its first Pending.
+            assert!(
+                matches!(pinned.as_mut().poll(&mut cx), Poll::Pending),
+                "the pending() handler must keep the dispatch parked",
+            );
+            assert_eq!(
+                server.connection_registry.get_stats().1,
+                1,
+                "stream must be registered while the dispatch is in flight",
+            );
+            // Drop the future without polling further — equivalent to
+            // the transport propagating a RST_STREAM by dropping the
+            // dispatch task.
+        }
+
+        // Post-Drop, the stream registration MUST be gone.
+        let (_, total_streams) = server.connection_registry.get_stats();
+        assert_eq!(
+            total_streams, 0,
+            "RST_STREAM mid-handler must release the stream registration; \
+             pre-fix this leaked until the idle sweep ran",
+        );
+
+        server.unregister_connection(&connection_id);
+        crate::test_complete!("test_dispatch_unary_drop_during_handler_releases_stream_registration");
     }
 
     #[test]
