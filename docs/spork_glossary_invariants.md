@@ -526,15 +526,14 @@ jq '{scenario_id,seed,schema_version,config_hash,trace_fingerprint,trace_file,in
 
 # (2) Re-run exactly with same seed + artifact dir
 SEED=$(jq -r '.seed' "$ART/$SAFE_TEST_ID/repro_manifest.json")
-ASUPERSYNC_SEED="$SEED" ASUPERSYNC_TEST_ARTIFACTS_DIR="$ART" \
-  cargo test "$TEST_ID" -- --nocapture
+rch exec -- env ASUPERSYNC_SEED="$SEED" ASUPERSYNC_TEST_ARTIFACTS_DIR="$ART" CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_spork_glossary_docs cargo test "$TEST_ID" -- --nocapture
 
 # (3) Verify trace + inspect divergence
 TRACE_FILE=$(jq -r '.trace_file // "trace.async"' "$ART/$SAFE_TEST_ID/repro_manifest.json")
-cargo run --features cli --bin asupersync -- trace info "$ART/$SAFE_TEST_ID/$TRACE_FILE"
-cargo run --features cli --bin asupersync -- trace verify --strict "$ART/$SAFE_TEST_ID/$TRACE_FILE"
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_spork_glossary_docs cargo run --features cli --bin asupersync -- trace info "$ART/$SAFE_TEST_ID/$TRACE_FILE"
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_spork_glossary_docs cargo run --features cli --bin asupersync -- trace verify --strict "$ART/$SAFE_TEST_ID/$TRACE_FILE"
 # optional compare against baseline
-cargo run --features cli --bin asupersync -- trace diff <trace_a> <trace_b>
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_spork_glossary_docs cargo run --features cli --bin asupersync -- trace diff <trace_a> <trace_b>
 
 # (4) If crashpack exists, inspect + replay metadata
 CRASHPACK=$(jq -r '.failure_artifacts[]? | select(test("crashpack-.*\\.json$"))' \
@@ -547,8 +546,8 @@ if [ -n "$CRASHPACK" ]; then
 fi
 
 # (5) DPOR exploration + minimal counterexample diagnostics
-cargo test --test dpor_exploration explorer_discovers_classes_for_concurrent_tasks -- --nocapture
-cargo test --test replay_divergence_diagnostics e2e_divergence_diagnostics_structured_report -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_spork_glossary_docs cargo test --test dpor_exploration explorer_discovers_classes_for_concurrent_tasks -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_spork_glossary_docs cargo test --test replay_divergence_diagnostics e2e_divergence_diagnostics_structured_report -- --nocapture
 ```
 
 ### 7.3 Four-Step Triage Protocol
@@ -572,7 +571,7 @@ use `dpor_exploration` to enumerate schedule classes and
 Use the crashpack walkthrough suite in `src/trace/crashpack.rs`:
 
 ```bash
-cargo test --lib crashpack::tests::walkthrough -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_spork_glossary_docs cargo test --lib crashpack::tests::walkthrough -- --nocapture
 ```
 
 What this demonstrates (deterministic and currently passing in-tree):
@@ -596,7 +595,7 @@ fingerprint=<manifest.trace_fingerprint or crashpack.manifest.fingerprint>
 invariant=<INV-* or contract id>
 first_divergence_step=<n or none>
 crashpack=<path or none>
-dpor_command=cargo test --test dpor_exploration explorer_discovers_classes_for_concurrent_tasks -- --nocapture
+dpor_command=rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_spork_glossary_docs cargo test --test dpor_exploration explorer_discovers_classes_for_concurrent_tasks -- --nocapture
 artifacts=
   - target/test-artifacts/<safe_test_id>/repro_manifest.json
   - target/test-artifacts/<safe_test_id>/event_log.txt
@@ -636,8 +635,7 @@ br update <bd-id> --status in_progress --assignee <agent-name>
 # thread_id: <bd-id>
 
 # 3) Reproduce deterministically (see Section 7.2)
-ASUPERSYNC_SEED=<seed> ASUPERSYNC_TEST_ARTIFACTS_DIR=target/test-artifacts \
-  cargo test <test_id> -- --nocapture
+rch exec -- env ASUPERSYNC_SEED=<seed> ASUPERSYNC_TEST_ARTIFACTS_DIR=target/test-artifacts CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_spork_glossary_docs cargo test <test_id> -- --nocapture
 ```
 
 Minimum start message fields:
