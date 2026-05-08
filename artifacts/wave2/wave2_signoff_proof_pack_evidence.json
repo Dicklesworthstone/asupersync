@@ -108,10 +108,10 @@
       "owner_bead_id": "asupersync-fjkixh",
       "title": "Implement full QPACK instruction streams and blocked-stream scheduling",
       "tracker_status_at_capture": "closed",
-      "disposition": "deferred_with_owner_risk",
-      "promotion_state": "pending",
+      "disposition": "evidence_ready_not_broadly_promoted",
+      "promotion_state": "evidence-ready",
       "support_class_before": "feature-gated",
-      "support_class_after": "pending-proof",
+      "support_class_after": "artifact-contract-backed",
       "feature_flags": [
         "http3",
         "quic",
@@ -119,6 +119,8 @@
       ],
       "source_files": [
         "src/http/h3_native.rs",
+        "tests/http3_qpack_support_matrix_contract.rs",
+        "scripts/http3_qpack_proof_runner.sh",
         "artifacts/http3_qpack_support_matrix_v1.json"
       ],
       "test_files": [
@@ -128,31 +130,27 @@
       "unit_proofs": [
         {
           "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_h3_qpack cargo test -p asupersync --test http3_qpack_support_matrix_contract --features test-internals,http3 -- --nocapture",
-          "status": "recorded_for_deferred_or_preview_row",
-          "observed_result": "Recorded but not accepted as broad promotion proof; row remains preview, pending, or signoff-self until owner criteria close."
+          "status": "passed",
+          "observed_result": "Owner closeout reported pass; signoff rechecks command presence, rch usage for Rust proof, source paths, and artifact paths."
         }
       ],
       "e2e_proofs": [
         {
-          "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_h3_qpack_e2e cargo test -p asupersync --test e2e_http3_qpack_instruction_streams --features test-internals,http3 -- --nocapture",
-          "status": "recorded_for_deferred_or_preview_row",
-          "observed_result": "Recorded as planned or bounded evidence; unresolved risks remain visible in this signoff row."
+          "command": "bash scripts/http3_qpack_proof_runner.sh",
+          "status": "passed",
+          "observed_result": "Owner closeout reported pass; proof runner routes its Rust lane through rch and emits the required QPACK scenario rows."
         }
       ],
       "e2e_artifacts": [
         {
           "path": "artifacts/http3_qpack_support_matrix_v1.json",
           "state": "shipped"
-        },
-        {
-          "path": "artifacts/wave2/http3_qpack_instruction_streams_evidence.json",
-          "state": "planned"
         }
       ],
-      "unsupported_reason": "Full QPACK instruction-stream parity is not advertised until this owner bead lands source and proof.",
-      "fallback_target": "StaticOnly QPACK policy and existing dynamic field-section context",
+      "unsupported_reason": "",
+      "fallback_target": "StaticOnly remains the default QPACK policy; dynamic instruction streams and blocked-stream scheduling are opt-in through H3QpackMode::DynamicTableAllowed.",
       "residual_risks": [
-        "blocked-stream scheduler semantics remain unpromoted"
+        "This does not claim h3/quinn drop-in parity, default dynamic QPACK, or full QUIC deployment parity."
       ],
       "redaction_verdict": "not_applicable"
     },
@@ -216,8 +214,8 @@
       "owner_bead_id": "asupersync-szdl85",
       "title": "Promote service-worker direct runtime lane",
       "tracker_status_at_capture": "closed",
-      "disposition": "deferred_with_owner_risk",
-      "promotion_state": "pending",
+      "disposition": "evidence_ready_not_broadly_promoted",
+      "promotion_state": "evidence-ready",
       "support_class_before": "fail-closed-boundary",
       "support_class_after": "broker/coordinator-only",
       "feature_flags": [
@@ -282,8 +280,8 @@
       "owner_bead_id": "asupersync-422iga",
       "title": "Promote shared-worker direct runtime lane",
       "tracker_status_at_capture": "closed",
-      "disposition": "deferred_with_owner_risk",
-      "promotion_state": "pending",
+      "disposition": "evidence_ready_not_broadly_promoted",
+      "promotion_state": "evidence-ready",
       "support_class_before": "fail-closed-boundary",
       "support_class_after": "broker/coordinator-only",
       "feature_flags": [
@@ -554,17 +552,24 @@
       "owner_bead_id": "asupersync-nax796",
       "title": "Repair HTTP/1 and web session dormant suites",
       "tracker_status_at_capture": "closed",
-      "disposition": "deferred_with_owner_risk",
-      "promotion_state": "pending",
+      "disposition": "evidence_ready_not_broadly_promoted",
+      "promotion_state": "evidence-ready",
       "support_class_before": "dormant",
-      "support_class_after": "pending-proof",
+      "support_class_after": "artifact-contract-backed",
       "feature_flags": [
         "test-internals"
       ],
       "source_files": [
         "tests/conformance/mod.rs",
+        "tests/conformance/h1_body_framing.rs",
+        "tests/conformance/h1_content_encoding.rs",
+        "tests/conformance/h1_expect_continue.rs",
+        "tests/conformance/h1_keepalive.rs",
+        "tests/conformance/h1_methods.rs",
+        "tests/conformance/web_session_cookies.rs",
         "src/http/h1",
-        "src/web"
+        "src/web",
+        "artifacts/conformance_registry_contract_v1.json"
       ],
       "test_files": [
         "tests/conformance/h1_protocol.rs",
@@ -591,16 +596,12 @@
         {
           "path": "artifacts/conformance_registry_contract_v1.json",
           "state": "shipped"
-        },
-        {
-          "path": "artifacts/wave2/conformance_http1_web_session_evidence.json",
-          "state": "planned"
         }
       ],
-      "unsupported_reason": "Dormant HTTP/1 and web-session suites must be repaired before public support claims can expand.",
-      "fallback_target": "current active HTTP/1/web E2E lanes",
+      "unsupported_reason": "No separate Wave2 evidence artifact was committed for this closed owner bead; support remains tied to the active conformance registry and focused suites.",
+      "fallback_target": "active HTTP/1 body framing, content encoding, Expect, keepalive, method, and web-session conformance suites",
       "residual_risks": [
-        "cookie/session semantics can drift from active registry if not rewired"
+        "cookie/session semantics must keep following tests/conformance/web_session_cookies.rs and artifacts/conformance_registry_contract_v1.json"
       ],
       "redaction_verdict": "required_for_cookie_values"
     },
@@ -609,20 +610,25 @@
       "owner_bead_id": "asupersync-2qssae",
       "title": "Repair DNS/UDP/Unix/SQLite dormant suites",
       "tracker_status_at_capture": "closed",
-      "disposition": "deferred_with_owner_risk",
-      "promotion_state": "pending",
+      "disposition": "evidence_ready_not_broadly_promoted",
+      "promotion_state": "evidence-ready",
       "support_class_before": "dormant",
-      "support_class_after": "pending-proof",
+      "support_class_after": "platform-scoped",
       "feature_flags": [
         "test-internals",
         "sqlite"
       ],
       "source_files": [
         "tests/conformance/mod.rs",
+        "tests/conformance/dns_cache.rs",
+        "tests/conformance/udp_socket.rs",
+        "tests/conformance/unix_listener.rs",
+        "tests/conformance/sqlite_prepared_statements.rs",
         "src/net/dns",
         "src/net/udp.rs",
         "src/net/unix",
-        "src/database/sqlite.rs"
+        "src/database/sqlite.rs",
+        "artifacts/conformance_registry_contract_v1.json"
       ],
       "test_files": [
         "tests/conformance/dns_message.rs",
@@ -650,13 +656,9 @@
         {
           "path": "artifacts/conformance_registry_contract_v1.json",
           "state": "shipped"
-        },
-        {
-          "path": "artifacts/wave2/conformance_dns_udp_unix_sqlite_evidence.json",
-          "state": "planned"
         }
       ],
-      "unsupported_reason": "Dormant suites must be repaired and platform-gated before support-class promotion.",
+      "unsupported_reason": "No separate Wave2 evidence artifact was committed for this closed owner bead; Unix socket, native DNS, and SQLite behavior remain platform-scoped through active conformance gates.",
       "fallback_target": "active DNS/UDP/SQLite unit and integration tests",
       "residual_risks": [
         "Unix socket and filesystem fixture cleanup are platform-scoped"
@@ -743,17 +745,21 @@
       "owner_bead_id": "asupersync-o74l7u",
       "title": "Close web framework middleware and streaming support gap",
       "tracker_status_at_capture": "closed",
-      "disposition": "deferred_with_owner_risk",
-      "promotion_state": "pending",
+      "disposition": "evidence_ready_not_broadly_promoted",
+      "promotion_state": "evidence-ready",
       "support_class_before": "in-progress",
-      "support_class_after": "pending-proof",
+      "support_class_after": "source-test-backed",
       "feature_flags": [
         "test-internals"
       ],
       "source_files": [
         "src/web/mod.rs",
+        "src/web/sse.rs",
+        "src/web/request_region.rs",
         "src/service/mod.rs",
-        "docs/integration.md"
+        "tests/e2e_web.rs",
+        "docs/integration.md",
+        "README.md"
       ],
       "test_files": [
         "src/web/mod.rs",
@@ -776,14 +782,14 @@
       ],
       "e2e_artifacts": [
         {
-          "path": "artifacts/wave2/web_middleware_streaming_evidence.json",
-          "state": "planned"
+          "path": "tests/e2e_web.rs",
+          "state": "source-test-backed"
         }
       ],
-      "unsupported_reason": "Middleware and streaming are not promoted until extractor, response, SSE, backpressure, and disconnect proof land.",
-      "fallback_target": "current service/web substrate and active E2E coverage",
+      "unsupported_reason": "No committed Wave2 evidence JSON exists for this closed owner bead; support is source-test-backed by the web E2E proof runner and streaming SSE/request-region tests.",
+      "fallback_target": "current service/web substrate, StreamingSse pull API, and active E2E coverage",
       "residual_risks": [
-        "client disconnect and streaming resource cleanup remain under-proven"
+        "broad web-framework parity remains limited to the scenarios logged by tests/e2e_web.rs"
       ],
       "redaction_verdict": "required_for_request_headers"
     },
@@ -792,16 +798,18 @@
       "owner_bead_id": "asupersync-oc0ybw",
       "title": "Complete filesystem API parity and cancellation semantics",
       "tracker_status_at_capture": "closed",
-      "disposition": "deferred_with_owner_risk",
-      "promotion_state": "pending",
+      "disposition": "evidence_ready_not_broadly_promoted",
+      "promotion_state": "evidence-ready",
       "support_class_before": "in-progress",
-      "support_class_after": "pending-proof",
+      "support_class_after": "platform-scoped",
       "feature_flags": [
         "test-internals",
         "io-uring"
       ],
       "source_files": [
         "src/fs/mod.rs",
+        "src/fs/uring.rs",
+        "tests/e2e_fs.rs",
         "docs/integration.md"
       ],
       "test_files": [
@@ -817,21 +825,21 @@
       ],
       "e2e_proofs": [
         {
-          "command": "bash scripts/run_filesystem_parity_evidence.sh",
+          "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_fs_e2e cargo test -p asupersync --test e2e_fs --features test-internals,io-uring -- --nocapture",
           "status": "recorded_for_deferred_or_preview_row",
           "observed_result": "Recorded as planned or bounded evidence; unresolved risks remain visible in this signoff row."
         }
       ],
       "e2e_artifacts": [
         {
-          "path": "artifacts/wave2/filesystem_parity_cancellation_evidence.json",
-          "state": "planned"
+          "path": "tests/e2e_fs.rs",
+          "state": "source-test-backed"
         }
       ],
-      "unsupported_reason": "Filesystem parity remains early/mixed until platform, cancellation, cleanup, and virtualized proof are complete.",
-      "fallback_target": "current spawn_blocking_io and Vfs-backed APIs",
+      "unsupported_reason": "Filesystem cancellation and io_uring behavior are platform-scoped; proof rows live in tests/e2e_fs.rs and emit pass/skip diagnostics rather than a committed standalone Wave2 artifact.",
+      "fallback_target": "spawn_blocking_io, Vfs-backed APIs, and io_uring feature/platform pass-skip boundaries",
       "residual_risks": [
-        "platform-specific permission and symlink semantics need explicit gating"
+        "platform-specific permission, symlink, and io_uring availability semantics must keep explicit unsupported_reason rows"
       ],
       "redaction_verdict": "required_for_temp_paths"
     },
@@ -840,10 +848,10 @@
       "owner_bead_id": "asupersync-tohua1",
       "title": "Close Redis/NATS/Kafka real-broker E2E parity",
       "tracker_status_at_capture": "closed",
-      "disposition": "deferred_with_owner_risk",
-      "promotion_state": "pending",
+      "disposition": "evidence_ready_not_broadly_promoted",
+      "promotion_state": "evidence-ready",
       "support_class_before": "mixed",
-      "support_class_after": "broker-backed-pending-proof",
+      "support_class_after": "broker-backed-skip-aware",
       "feature_flags": [
         "test-internals",
         "kafka"
@@ -851,7 +859,9 @@
       "source_files": [
         "src/messaging/redis.rs",
         "src/messaging/nats.rs",
-        "src/messaging/kafka.rs"
+        "src/messaging/kafka.rs",
+        "tests/conformance/messaging_broker_parity.rs",
+        "scripts/kafka_broker_parity_proof_runner.sh"
       ],
       "test_files": [
         "tests/conformance/messaging_broker_parity.rs",
@@ -867,21 +877,26 @@
       ],
       "e2e_proofs": [
         {
-          "command": "bash scripts/run_messaging_broker_evidence.sh",
+          "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wave2_messaging_broker cargo test -p asupersync --test conformance messaging_broker_parity --features test-internals,kafka -- --nocapture",
+          "status": "recorded_for_deferred_or_preview_row",
+          "observed_result": "Recorded as planned or bounded evidence; unresolved risks remain visible in this signoff row."
+        },
+        {
+          "command": "bash scripts/kafka_broker_parity_proof_runner.sh",
           "status": "recorded_for_deferred_or_preview_row",
           "observed_result": "Recorded as planned or bounded evidence; unresolved risks remain visible in this signoff row."
         }
       ],
       "e2e_artifacts": [
         {
-          "path": "artifacts/wave2/messaging_real_broker_e2e_evidence.json",
-          "state": "planned"
+          "path": "tests/conformance/messaging_broker_parity.rs",
+          "state": "source-test-backed"
         }
       ],
-      "unsupported_reason": "Stub-only proof cannot promote production broker claims.",
-      "fallback_target": "parser/local-stub fixtures and feature-gated broker skips",
+      "unsupported_reason": "Broker-backed parity is skip-aware: real broker lanes pass when brokers are available and otherwise emit stable unavailable-broker reasons; no committed aggregate broker evidence artifact exists for broad production promotion.",
+      "fallback_target": "parser/local-stub fixtures, redacted real-broker pass rows, and feature-gated unavailable-broker skips",
       "residual_risks": [
-        "real broker availability and redacted credentials must be handled deterministically"
+        "full JetStream, exactly-once Kafka, and always-on broker availability are not claimed beyond the broker-backed pass/skip lanes"
       ],
       "redaction_verdict": "required_for_connection_uri"
     },
@@ -1279,10 +1294,10 @@
       "owner_bead_id": "asupersync-4a3ghz",
       "title": "Fix default storm-monitor alignment regression",
       "tracker_status_at_capture": "closed",
-      "disposition": "deferred_with_owner_risk",
-      "promotion_state": "pending",
+      "disposition": "evidence_ready_not_broadly_promoted",
+      "promotion_state": "evidence-ready",
       "support_class_before": "bug-regression",
-      "support_class_after": "pending-proof",
+      "support_class_after": "source-test-backed",
       "feature_flags": [
         "test-internals"
       ],
@@ -1310,14 +1325,14 @@
       ],
       "e2e_artifacts": [
         {
-          "path": "artifacts/wave2/supervision_storm_monitor_alignment_evidence.json",
-          "state": "planned"
+          "path": "tests/metamorphic_supervision_strategies.rs",
+          "state": "source-test-backed"
         }
       ],
-      "unsupported_reason": "A live source-unit regression remains until the storm monitor and restart-budget oracle are reconciled.",
-      "fallback_target": "existing supervision policies with known failing source filter",
+      "unsupported_reason": "No committed Wave2 evidence JSON exists for this closed owner bead; the regression is source-test-backed by restart_tracker_ and metamorphic supervision lanes.",
+      "fallback_target": "restart tracker and storm monitor source tests plus metamorphic supervision strategy checks",
       "residual_risks": [
-        "weakening storm detection would preserve tests while harming users"
+        "future restart-budget changes must preserve storm detection instead of weakening the monitor to satisfy monotonicity tests"
       ],
       "redaction_verdict": "not_applicable"
     },

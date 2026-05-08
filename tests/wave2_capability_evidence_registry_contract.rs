@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const REGISTRY_PATH: &str = "artifacts/wave2_capability_evidence_registry_v1.json";
+const TRACKER_ISSUES_PATH: &str = ".beads/issues.jsonl";
 const DIRECT_LEAN_BUILD_COMMAND: &str = "rch exec -- lake --dir formal/lean build";
 
 fn repo_path(relative: &str) -> PathBuf {
@@ -20,6 +21,15 @@ fn read_repo_file(relative: &str) -> String {
 fn registry() -> JsonValue {
     serde_json::from_str(&read_repo_file(REGISTRY_PATH))
         .unwrap_or_else(|err| panic!("parse {REGISTRY_PATH}: {err}"))
+}
+
+fn closed_owner_beads_from_tracker() -> BTreeSet<String> {
+    read_repo_file(TRACKER_ISSUES_PATH)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<JsonValue>(line).ok())
+        .filter(|row| row.get("status").and_then(JsonValue::as_str) == Some("closed"))
+        .filter_map(|row| row.get("id").and_then(JsonValue::as_str).map(str::to_owned))
+        .collect()
 }
 
 fn array<'a>(value: &'a JsonValue, key: &str) -> &'a Vec<JsonValue> {
@@ -454,5 +464,47 @@ fn registry_rows_do_not_depend_on_tracker_status_as_proof() {
                 "{capability_id}: pending rows must keep residual risk visible"
             );
         }
+    }
+}
+
+#[test]
+fn closed_owner_rows_do_not_keep_stale_pending_states() {
+    let registry = registry();
+    let closed_owner_beads = closed_owner_beads_from_tracker();
+    assert!(
+        !closed_owner_beads.is_empty(),
+        "closed tracker owner set must be available from {TRACKER_ISSUES_PATH}"
+    );
+
+    for row in array(&registry, "capability_rows") {
+        let capability_id = nonempty_string(row, "capability_id");
+        let owner_bead_id = nonempty_string(row, "owner_bead_id");
+        if !closed_owner_beads.contains(owner_bead_id) {
+            continue;
+        }
+
+        let promotion_state = nonempty_string(row, "promotion_state");
+        assert_ne!(
+            promotion_state, "pending",
+            "{capability_id}: closed owner bead {owner_bead_id} must not remain promotion_state=pending"
+        );
+
+        let support_class_after = nonempty_string(row, "support_class_after");
+        assert!(
+            !support_class_after.contains("pending"),
+            "{capability_id}: closed owner bead {owner_bead_id} must not keep pending support class {support_class_after}"
+        );
+
+        log_contract_event(
+            "closed-owner-terminal-state",
+            &[
+                ("capability_id", capability_id.to_string()),
+                ("owner_bead_id", owner_bead_id.to_string()),
+                ("promotion_state", promotion_state.to_string()),
+                ("support_class_after", support_class_after.to_string()),
+                ("verdict", "pass".to_string()),
+                ("first_failure", String::new()),
+            ],
+        );
     }
 }

@@ -101,6 +101,18 @@ capability_rows = as_list(registry, "capability_rows")
 contract = registry.get("registry_contract", {})
 required_row_fields = set(as_list(contract, "required_row_fields"))
 promoted_states = set(as_list(contract, "promoted_states_require_full_evidence"))
+closed_owner_beads = set()
+issues_path = repo_root / ".beads/issues.jsonl"
+if issues_path.exists():
+    for line in issues_path.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            issue = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(issue, dict) and issue.get("status") == "closed" and issue.get("id"):
+            closed_owner_beads.add(issue["id"])
 
 require(
     registry.get("schema_version") == "wave2-capability-evidence-registry-v1",
@@ -163,6 +175,11 @@ for row in capability_rows:
     is_promoted = promotion_state in promoted_states
     unsupported_reason = row.get("unsupported_reason", "")
     fallback_target = row.get("fallback_target", "")
+    if owner_bead_id in closed_owner_beads and (
+        promotion_state == "pending" or "pending" in support_class_after
+    ):
+        first_failure = first_failure or "closed_owner_stale_pending_state"
+        drifts.append(f"{capability_id}:closed_owner_stale_pending_state:{owner_bead_id}")
     if is_promoted:
         if not source_paths:
             first_failure = first_failure or "promoted_missing_source_paths"
