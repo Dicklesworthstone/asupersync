@@ -20,7 +20,8 @@
 mod tls_h2_preface {
     use asupersync::bytes::BytesMut;
     use asupersync::http::h2::connection::CLIENT_PREFACE;
-    use asupersync::http::h2::{Frame, FrameHeader, SettingsFrame};
+    use asupersync::http::h2::frame::SettingsFrame;
+    use asupersync::http::h2::{Frame, FrameHeader};
     use asupersync::io::{AsyncReadExt, AsyncWriteExt};
     use asupersync::lab::{config::LabConfig, runtime::LabRuntime};
     use asupersync::net::tcp::VirtualTcpStream;
