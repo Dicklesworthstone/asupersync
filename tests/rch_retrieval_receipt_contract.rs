@@ -350,6 +350,14 @@ fn remote_failure_is_not_treated_as_green_proof() {
 }
 
 #[test]
+fn remote_failure_matches_full_output_golden() {
+    let actual = receipt_json("remote_failure.log", Some(101));
+    let expected = fixture_json("remote_failure_expected.json");
+
+    assert_eq!(actual, expected);
+}
+
+#[test]
 fn local_fallback_invalidates_captured_cargo_output() {
     let receipt = receipt_json("local_fallback.log", None);
 
