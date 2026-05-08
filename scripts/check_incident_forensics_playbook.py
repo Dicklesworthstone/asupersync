@@ -115,8 +115,13 @@ def main() -> int:
         Clause(
             "IFP-003",
             "docs/replay-debugging.md",
-            r"rch exec -- cargo run --quiet --features cli --bin asupersync --",
-            "Replay guide must include explicit rch-offloaded replay command template.",
+            (
+                r"rch exec -- env\b[^\n]*\b"
+                r"CARGO_TARGET_DIR=\$\{TMPDIR:-/tmp\}/rch_target_replay_debugging_docs\b"
+                r"[^\n]*\bcargo run --quiet --features cli --bin asupersync --"
+            ),
+            "Replay guide must include explicit rch-offloaded replay command template "
+            "with a scoped cargo target directory.",
         ),
         Clause(
             "IFP-004",
