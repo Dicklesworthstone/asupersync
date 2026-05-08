@@ -44,6 +44,11 @@ fn receipt_json(fixture: &str) -> Value {
     serde_json::from_slice(&output.stdout).expect("receipt output must be JSON")
 }
 
+fn fixture_text(fixture: &str) -> String {
+    std::fs::read_to_string(repo_root().join(FIXTURE_ROOT).join(fixture))
+        .unwrap_or_else(|err| panic!("read fixture {fixture}: {err}"))
+}
+
 fn first_classification(receipt: &Value) -> &Value {
     receipt["classifications"]
         .as_array()
@@ -123,6 +128,28 @@ fn expired_reservation_and_inactive_agent_is_probably_stale() {
     assert_eq!(
         receipt["agent_roster"]["agents"][0]["activity"].as_str(),
         Some("inactive")
+    );
+}
+
+#[test]
+fn expired_reservation_matches_full_output_golden() {
+    let output = run_receipt("expired_reservation_inactive_agent.json");
+    assert!(
+        output.status.success(),
+        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actual = String::from_utf8(output.stdout).expect("receipt stdout must be UTF-8");
+    let expected = fixture_text("expired_reservation_inactive_agent_expected.json");
+
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
+    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
+    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
+    assert_eq!(
+        actual, expected,
+        "stale in-progress receipt changed; update the golden only after reviewing stale classification and proposed reopen semantics"
     );
 }
 
