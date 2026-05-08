@@ -46,6 +46,20 @@ def run_receipt(fixture: str) -> dict:
 
 
 class RchWorkerHealthReceiptContract(unittest.TestCase):
+    def assert_output_matches_reviewed_golden(
+        self,
+        input_fixture: str,
+        expected_fixture: str,
+        message: str,
+    ) -> None:
+        output = run_receipt_output(input_fixture)
+        expected = fixture_text(expected_fixture)
+        actual_json = json.loads(output.stdout)
+        expected_json = json.loads(expected)
+
+        self.assertEqual(actual_json, expected_json, f"{message}: parsed JSON drifted")
+        self.assertEqual(output.stdout, expected, message)
+
     def test_healthy_worker_is_eligible_for_normal_lanes(self) -> None:
         receipt = run_receipt("healthy_worker.json")
 
@@ -57,16 +71,11 @@ class RchWorkerHealthReceiptContract(unittest.TestCase):
         self.assertIn("eligible", receipt["workers"][0]["remediation"][0])
 
     def test_healthy_worker_output_matches_full_reviewed_golden(self) -> None:
-        output = run_receipt_output("healthy_worker.json")
-        expected = fixture_text("healthy_worker_expected.json")
-
-        self.assertEqual(
-            output.stdout,
-            expected,
+        self.assert_output_matches_reviewed_golden(
+            "healthy_worker.json",
+            "healthy_worker_expected.json",
             "healthy rch worker health receipt drifted from the reviewed golden",
         )
-        json.loads(output.stdout)
-        json.loads(expected)
 
     def test_retrieval_stall_warns_before_quarantine_threshold(self) -> None:
         receipt = run_receipt("single_retrieval_timeout.json")
@@ -77,16 +86,11 @@ class RchWorkerHealthReceiptContract(unittest.TestCase):
         self.assertIn("single artifact retrieval timeout", receipt["workers"][0]["reasons"])
 
     def test_retrieval_timeout_output_matches_full_reviewed_golden(self) -> None:
-        output = run_receipt_output("single_retrieval_timeout.json")
-        expected = fixture_text("single_retrieval_timeout_expected.json")
-
-        self.assertEqual(
-            output.stdout,
-            expected,
+        self.assert_output_matches_reviewed_golden(
+            "single_retrieval_timeout.json",
+            "single_retrieval_timeout_expected.json",
             "single retrieval timeout rch worker health receipt drifted from the reviewed golden",
         )
-        json.loads(output.stdout)
-        json.loads(expected)
 
     def test_repeated_remote_failures_are_quarantine_candidates(self) -> None:
         receipt = run_receipt("repeated_remote_failures.json")
@@ -97,16 +101,11 @@ class RchWorkerHealthReceiptContract(unittest.TestCase):
         self.assertIn("avoid scheduling expensive cargo lanes", receipt["workers"][0]["remediation"][0])
 
     def test_repeated_remote_failures_output_matches_full_reviewed_golden(self) -> None:
-        output = run_receipt_output("repeated_remote_failures.json")
-        expected = fixture_text("repeated_remote_failures_expected.json")
-
-        self.assertEqual(
-            output.stdout,
-            expected,
+        self.assert_output_matches_reviewed_golden(
+            "repeated_remote_failures.json",
+            "repeated_remote_failures_expected.json",
             "repeated remote failures rch worker health receipt drifted from the reviewed golden",
         )
-        json.loads(output.stdout)
-        json.loads(expected)
 
     def test_low_tmp_storage_is_quarantine_candidate(self) -> None:
         receipt = run_receipt("low_tmp_storage.json")
@@ -115,16 +114,11 @@ class RchWorkerHealthReceiptContract(unittest.TestCase):
         self.assertIn("low storage on /tmp", receipt["workers"][0]["reasons"])
 
     def test_low_tmp_storage_output_matches_full_reviewed_golden(self) -> None:
-        output = run_receipt_output("low_tmp_storage.json")
-        expected = fixture_text("low_tmp_storage_expected.json")
-
-        self.assertEqual(
-            output.stdout,
-            expected,
+        self.assert_output_matches_reviewed_golden(
+            "low_tmp_storage.json",
+            "low_tmp_storage_expected.json",
             "low /tmp storage rch worker health receipt drifted from the reviewed golden",
         )
-        json.loads(output.stdout)
-        json.loads(expected)
 
     def test_unreachable_worker_is_unavailable(self) -> None:
         receipt = run_receipt("unreachable_worker.json")
@@ -135,16 +129,11 @@ class RchWorkerHealthReceiptContract(unittest.TestCase):
         self.assertIn("rch workers probe --all", receipt["workers"][0]["remediation"][0])
 
     def test_unreachable_worker_output_matches_full_reviewed_golden(self) -> None:
-        output = run_receipt_output("unreachable_worker.json")
-        expected = fixture_text("unreachable_worker_expected.json")
-
-        self.assertEqual(
-            output.stdout,
-            expected,
+        self.assert_output_matches_reviewed_golden(
+            "unreachable_worker.json",
+            "unreachable_worker_expected.json",
             "unreachable rch worker health receipt drifted from the reviewed golden",
         )
-        json.loads(output.stdout)
-        json.loads(expected)
 
     def test_mixed_fleet_prefers_healthy_worker_but_marks_degraded(self) -> None:
         receipt = run_receipt("mixed_fleet.json")
@@ -156,16 +145,11 @@ class RchWorkerHealthReceiptContract(unittest.TestCase):
         self.assertEqual(receipt["status_counts"]["quarantine-candidate"], 1)
 
     def test_mixed_fleet_output_matches_full_reviewed_golden(self) -> None:
-        output = run_receipt_output("mixed_fleet.json")
-        expected = fixture_text("mixed_fleet_expected.json")
-
-        self.assertEqual(
-            output.stdout,
-            expected,
+        self.assert_output_matches_reviewed_golden(
+            "mixed_fleet.json",
+            "mixed_fleet_expected.json",
             "mixed fleet rch worker health receipt drifted from the reviewed golden",
         )
-        json.loads(output.stdout)
-        json.loads(expected)
 
     def test_helper_declares_it_does_not_mutate_or_probe(self) -> None:
         receipt = run_receipt("healthy_worker.json")
