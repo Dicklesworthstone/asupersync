@@ -144,12 +144,12 @@ Heavy checks MUST be executed via `rch exec --`.
 
 Required command tokens:
 
-- `rch exec -- cargo check --all-targets`
-- `rch exec -- cargo clippy --all-targets -- -D warnings`
-- `rch exec -- cargo fmt --check`
-- `rch exec -- cargo test --test tokio_io_codec_cancellation_correctness -- --nocapture`
-- `rch exec -- cargo test --test io_cancellation -- --nocapture`
-- `rch exec -- cargo test --test t2_track_conformance_and_performance_gates -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_io_track_docs cargo check --all-targets`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_io_track_docs cargo clippy --all-targets -- -D warnings`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_io_track_docs cargo fmt --check`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_io_track_docs cargo test --test tokio_io_codec_cancellation_correctness -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_io_track_docs cargo test --test io_cancellation -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_io_track_docs cargo test --test t2_track_conformance_and_performance_gates -- --nocapture`
 
 If any required command is omitted from evidence, gate verdict is `FAIL`.
 

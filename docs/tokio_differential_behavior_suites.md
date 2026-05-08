@@ -148,12 +148,12 @@ Heavy validation commands MUST be offloaded through `rch exec --`.
 
 Required command tokens:
 
-- `rch exec -- cargo fmt --check`
-- `rch exec -- cargo check --all-targets`
-- `rch exec -- cargo clippy --all-targets -- -D warnings`
-- `rch exec -- cargo test --test tokio_executable_conformance_contracts -- --nocapture`
-- `rch exec -- cargo test --test tokio_differential_behavior_suites -- --nocapture`
-- `rch exec -- cargo test --test tokio_ci_quality_gate_enforcement -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_differential_docs cargo fmt --check`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_differential_docs cargo check --all-targets`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_differential_docs cargo clippy --all-targets -- -D warnings`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_differential_docs cargo test --test tokio_executable_conformance_contracts -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_differential_docs cargo test --test tokio_differential_behavior_suites -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_differential_docs cargo test --test tokio_ci_quality_gate_enforcement -- --nocapture`
 
 Downstream implementations can add commands, but cannot weaken this baseline.
 
