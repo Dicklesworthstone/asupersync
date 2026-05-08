@@ -103,7 +103,7 @@ for scenario in scenarios:
     proof_command = None
     if verdict != "blocked":
         proof_id = f"validated-by-rust-promotion-test:{scenario['scenario_id']}"
-        proof_command = "rch exec -- cargo test -p asupersync --test incident_replay_promotion"
+        proof_command = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_incident_replay_promotion_script CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test incident_replay_promotion --features test-internals -- --nocapture"
     events.append(
         {
             "scenario_id": scenario["scenario_id"],

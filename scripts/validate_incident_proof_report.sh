@@ -205,7 +205,7 @@ for scenario in artifact["scenarios"]:
     status = scenario["expected_status"]
     proof_command = None
     if status in {"pass", "fail"}:
-        proof_command = "rch exec -- cargo test -p asupersync --test incident_proof_report"
+        proof_command = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_incident_proof_report_script CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test incident_proof_report --features test-internals -- --nocapture"
     event = {
         "scenario_id": scenario["scenario_id"],
         "bead_id": artifact["bead_id"],
