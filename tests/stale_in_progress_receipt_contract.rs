@@ -57,6 +57,29 @@ fn first_classification(receipt: &Value) -> &Value {
         .expect("fixture must contain one classification")
 }
 
+fn assert_output_matches_full_golden(
+    input_fixture: &str,
+    expected_fixture: &str,
+    drift_message: &str,
+) {
+    let output = run_receipt(input_fixture);
+    assert!(
+        output.status.success(),
+        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = String::from_utf8(output.stdout).expect("receipt stdout must be UTF-8");
+    let expected = fixture_text(expected_fixture);
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
+    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
+
+    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
+    assert_eq!(actual, expected, "{drift_message}");
+}
+
 #[test]
 fn script_exists_and_help_is_non_mutating() {
     assert!(
@@ -110,23 +133,10 @@ fn fresh_active_peer_is_wait_contact_not_stale() {
 
 #[test]
 fn fresh_active_peer_matches_full_output_golden() {
-    let output = run_receipt("fresh_active_peer.json");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let actual = String::from_utf8(output.stdout).expect("receipt stdout must be UTF-8");
-    let expected = fixture_text("fresh_active_peer_expected.json");
-
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
-    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
-    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
-    assert_eq!(
-        actual, expected,
-        "stale in-progress fresh-active-peer receipt changed; update the golden only after reviewing stand-off and contact semantics"
+    assert_output_matches_full_golden(
+        "fresh_active_peer.json",
+        "fresh_active_peer_expected.json",
+        "stale in-progress fresh-active-peer receipt changed; update the golden only after reviewing stand-off and contact semantics",
     );
 }
 
@@ -155,23 +165,10 @@ fn expired_reservation_and_inactive_agent_is_probably_stale() {
 
 #[test]
 fn expired_reservation_matches_full_output_golden() {
-    let output = run_receipt("expired_reservation_inactive_agent.json");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let actual = String::from_utf8(output.stdout).expect("receipt stdout must be UTF-8");
-    let expected = fixture_text("expired_reservation_inactive_agent_expected.json");
-
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
-    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
-    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
-    assert_eq!(
-        actual, expected,
-        "stale in-progress receipt changed; update the golden only after reviewing stale classification and proposed reopen semantics"
+    assert_output_matches_full_golden(
+        "expired_reservation_inactive_agent.json",
+        "expired_reservation_inactive_agent_expected.json",
+        "stale in-progress receipt changed; update the golden only after reviewing stale classification and proposed reopen semantics",
     );
 }
 
@@ -198,23 +195,10 @@ fn recent_commit_reference_recommends_verify_and_close() {
 
 #[test]
 fn recent_commit_reference_matches_full_output_golden() {
-    let output = run_receipt("recent_commit_reference.json");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let actual = String::from_utf8(output.stdout).expect("receipt stdout must be UTF-8");
-    let expected = fixture_text("recent_commit_reference_expected.json");
-
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
-    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
-    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
-    assert_eq!(
-        actual, expected,
-        "stale in-progress recent-commit receipt changed; update the golden only after reviewing verify-and-close semantics"
+    assert_output_matches_full_golden(
+        "recent_commit_reference.json",
+        "recent_commit_reference_expected.json",
+        "stale in-progress recent-commit receipt changed; update the golden only after reviewing verify-and-close semantics",
     );
 }
 
@@ -247,23 +231,10 @@ fn active_reservation_with_weak_owner_freshness_blocks_reopen() {
 
 #[test]
 fn active_reservation_blocker_matches_full_output_golden() {
-    let output = run_receipt("blocked_by_active_reservation.json");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let actual = String::from_utf8(output.stdout).expect("receipt stdout must be UTF-8");
-    let expected = fixture_text("blocked_by_active_reservation_expected.json");
-
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
-    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
-    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
-    assert_eq!(
-        actual, expected,
-        "stale in-progress active-reservation receipt changed; update the golden only after reviewing stand-off and holder-message semantics"
+    assert_output_matches_full_golden(
+        "blocked_by_active_reservation.json",
+        "blocked_by_active_reservation_expected.json",
+        "stale in-progress active-reservation receipt changed; update the golden only after reviewing stand-off and holder-message semantics",
     );
 }
 
@@ -288,23 +259,10 @@ fn dirty_tracker_only_state_requires_human_escalation() {
 
 #[test]
 fn dirty_tracker_only_matches_full_output_golden() {
-    let output = run_receipt("dirty_tracker_only.json");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let actual = String::from_utf8(output.stdout).expect("receipt stdout must be UTF-8");
-    let expected = fixture_text("dirty_tracker_only_expected.json");
-
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
-    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
-    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
-    assert_eq!(
-        actual, expected,
-        "stale in-progress dirty-tracker receipt changed; update the golden only after reviewing human-escalation semantics"
+    assert_output_matches_full_golden(
+        "dirty_tracker_only.json",
+        "dirty_tracker_only_expected.json",
+        "stale in-progress dirty-tracker receipt changed; update the golden only after reviewing human-escalation semantics",
     );
 }
 
@@ -339,23 +297,10 @@ fn unavailable_agent_mail_is_explicitly_escalated() {
 
 #[test]
 fn unavailable_agent_mail_matches_full_output_golden() {
-    let output = run_receipt("unavailable_agent_mail.json");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let actual = String::from_utf8(output.stdout).expect("receipt stdout must be UTF-8");
-    let expected = fixture_text("unavailable_agent_mail_expected.json");
-
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
-    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
-    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
-    assert_eq!(
-        actual, expected,
-        "stale in-progress unavailable-Agent-Mail receipt changed; update the golden only after reviewing human-escalation semantics"
+    assert_output_matches_full_golden(
+        "unavailable_agent_mail.json",
+        "unavailable_agent_mail_expected.json",
+        "stale in-progress unavailable-Agent-Mail receipt changed; update the golden only after reviewing human-escalation semantics",
     );
 }
 
