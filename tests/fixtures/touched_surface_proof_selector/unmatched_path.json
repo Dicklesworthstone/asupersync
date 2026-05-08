@@ -1,0 +1,17 @@
+{
+  "schema_version": "touched-surface-proof-selector-input-v1",
+  "touched_files": ["packages/browser/src/index.ts"],
+  "lanes": [
+    {
+      "lane_id": "lib-tests",
+      "kind": "test_frontier",
+      "command": "rch exec -- cargo test -p asupersync --lib",
+      "guarantee_ids": ["lib-test-frontier"],
+      "source_paths": ["src/**"],
+      "covers": "runtime crate unit-test frontier",
+      "explicit_not_covered": "integration tests and fuzz targets",
+      "broad_frontier": false
+    }
+  ],
+  "selection_rules": []
+}
