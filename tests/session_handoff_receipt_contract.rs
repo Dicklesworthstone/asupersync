@@ -69,7 +69,10 @@ fn assert_receipt_output_matches_golden(
     let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
     let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
 
-    assert_eq!(actual_json, expected_json);
+    assert_eq!(
+        actual_json, expected_json,
+        "parsed session handoff receipt JSON drifted for {input_fixture} -> {expected_fixture}"
+    );
     assert_eq!(actual, expected, "{drift_message}");
 }
 
