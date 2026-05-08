@@ -239,9 +239,9 @@ def build_dashboard(execute_commands: bool = False, validate_all: bool = False) 
         # Determine overall guarantee status
         if all(s == "green" for s in lane_statuses):
             guarantee_status = "green"
-        elif any(s == "red_blocked_external" for s in lane_statuses):
+        elif any(s.startswith("red") for s in lane_statuses):
             guarantee_status = "red_blocked_external"
-        elif any(s == "yellow_frontier" for s in lane_statuses):
+        elif any(s.startswith("yellow") for s in lane_statuses):
             guarantee_status = "yellow_frontier"
         else:
             guarantee_status = "unknown"
