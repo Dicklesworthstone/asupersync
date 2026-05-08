@@ -213,10 +213,12 @@
       "sha256": "sha256:[scrubbed]",
       "status": "included",
       "status_count_keys": [
+        "blocked",
         "closed",
         "in_progress",
         "open",
-        "tombstone"
+        "tombstone",
+        "unknown"
       ],
       "valid_issue_count": "[count]"
     }

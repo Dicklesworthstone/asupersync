@@ -1527,6 +1527,24 @@ fn proof_runner_emits_deterministic_release_proof_pack() {
         Some(false),
         "proof pack must not embed raw tracker rows"
     );
+    let tracker_status_keys: BTreeSet<String> = pack["summaries"]["tracker"]["status_counts"]
+        .as_object()
+        .expect("tracker status counts")
+        .keys()
+        .cloned()
+        .collect();
+    assert_eq!(
+        tracker_status_keys,
+        BTreeSet::from([
+            "blocked".to_string(),
+            "closed".to_string(),
+            "in_progress".to_string(),
+            "open".to_string(),
+            "tombstone".to_string(),
+            "unknown".to_string(),
+        ]),
+        "tracker status buckets must be stable under live tracker churn"
+    );
 
     let artifact_paths: BTreeSet<String> = pack["source_artifacts"]
         .as_array()

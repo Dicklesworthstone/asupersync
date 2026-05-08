@@ -35,6 +35,7 @@
     "missing source artifacts set verdict to fail_closed",
     "embedded proof console verdict other than pass sets verdict to fail_closed",
     "tracker summary includes counts and hashes only, not raw issue rows",
+    "tracker status counts use fixed buckets so scrubbed goldens remain stable under live tracker churn",
     "output directory writes index.json plus copied source artifacts under source_artifacts/",
     "output directory bundles selected rch source logs under rch_logs/ and verifies their hashes",
     "e2e smoke runs or fixture-replays an rch exec command, classifies it, writes the pack, and verifies the written directory",

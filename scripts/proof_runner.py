@@ -45,6 +45,14 @@ PROOF_CONSOLE_ALLOWED_RCH_OUTCOMES = {
     "wrapper_hang_after_remote_exit",
     "cancelled",
 }
+TRACKER_STATUS_BUCKETS = (
+    "blocked",
+    "closed",
+    "in_progress",
+    "open",
+    "tombstone",
+    "unknown",
+)
 REMOTE_EXIT_RE = re.compile(
     r"(?:Remote command finished:\s*exit=|remote exit(?: status)?[=:]\s*)(-?\d+)",
     re.IGNORECASE,
@@ -1128,7 +1136,7 @@ class ProofRunner:
     def _tracker_summary(self) -> Dict[str, Any]:
         tracker_path = ".beads/issues.jsonl"
         row = self._repo_artifact_row(tracker_path)
-        counts: Dict[str, int] = {}
+        counts: Dict[str, int] = {status: 0 for status in TRACKER_STATUS_BUCKETS}
         valid_issue_count = 0
         if row["status"] == "included":
             with (self.repo_root / tracker_path).open(encoding="utf-8") as handle:
@@ -1140,7 +1148,9 @@ class ProofRunner:
                     if not isinstance(payload, dict):
                         continue
                     status = str(payload.get("status", "unknown"))
-                    counts[status] = counts.get(status, 0) + 1
+                    if status not in counts:
+                        status = "unknown"
+                    counts[status] += 1
                     valid_issue_count += 1
         return {
             "path": tracker_path,
