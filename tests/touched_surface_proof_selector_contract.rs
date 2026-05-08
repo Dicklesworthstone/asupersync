@@ -242,6 +242,27 @@ fn unmatched_paths_fail_with_an_action_item() {
 }
 
 #[test]
+fn unmatched_path_output_matches_full_reviewed_golden() {
+    let output = run_selector("unmatched_path.json");
+    assert!(
+        output.status.success(),
+        "selector helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let expected = fixture_text("unmatched_path_expected.json");
+    serde_json::from_slice::<Value>(&output.stdout).expect("actual selector output must be JSON");
+    serde_json::from_str::<Value>(&expected).expect("golden selector output must be JSON");
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("selector stdout is utf-8"),
+        expected,
+        "unmatched_path selector receipt drifted from the reviewed golden"
+    );
+}
+
+#[test]
 fn empty_touched_files_do_not_select_a_proxy_lane() {
     let receipt = selector_json("empty_touched.json");
 

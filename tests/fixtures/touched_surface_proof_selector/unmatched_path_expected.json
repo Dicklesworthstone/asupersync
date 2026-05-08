@@ -1,0 +1,47 @@
+{
+  "action_items": [
+    "add a selection rule or lane source path for packages/browser/src/index.ts"
+  ],
+  "blocked_selected_lanes": [],
+  "blocked_supplemental_lanes": [],
+  "current_date": "2026-05-08",
+  "forbidden_actions": {
+    "runs_agent_mail_mutation": false,
+    "runs_beads_mutation": false,
+    "runs_cargo": false,
+    "runs_destructive_command": false,
+    "runs_git_mutation": false,
+    "runs_rch": false
+  },
+  "generated_at": "2026-05-08T06:00:00Z",
+  "input_schema_version": "touched-surface-proof-selector-input-v1",
+  "non_mutating": true,
+  "operator_notes": [
+    "Selected lanes are proof suggestions only; this helper does not execute rch or cargo.",
+    "Supplemental lanes are broad frontier evidence and should not be cited as the only touched-surface proof.",
+    "Blocked lanes must be surfaced separately instead of replaced by unrelated green checks."
+  ],
+  "schema_version": "touched-surface-proof-selector-v1",
+  "selected_lanes": [],
+  "source": "tests/fixtures/touched_surface_proof_selector/unmatched_path.json",
+  "source_counts": {
+    "blocked_lanes": 0,
+    "lanes": 1,
+    "selection_rules": 0,
+    "touched_files": 1
+  },
+  "summary": {
+    "blocked_selected_count": 0,
+    "passes": false,
+    "selected_count": 0,
+    "supplemental_count": 0,
+    "unmatched_touched_count": 1
+  },
+  "supplemental_lanes": [],
+  "touched_files": [
+    "packages/browser/src/index.ts"
+  ],
+  "unmatched_touched_files": [
+    "packages/browser/src/index.ts"
+  ]
+}
