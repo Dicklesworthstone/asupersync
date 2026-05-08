@@ -50,6 +50,7 @@
         "browser_operator_snapshot_from_dispatcher_diagnostics_fails_closed_on_leaked_handles",
         "dispatcher diagnostics reported unreleased closed handles",
         "pub fn browser_operator_snapshot_fixture",
+        "browser_operator_snapshot_fixture_json_goldens_are_stable",
         "has_fail_closed_native_omissions"
       ]
     },
@@ -123,6 +124,30 @@
     "required_export_symbol": "browser_operator_snapshot",
     "proof_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_browser_operator_console_snapshot_wasm_minimal CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync-browser-core --target wasm32-unknown-unknown --no-default-features --features minimal"
   },
+  "json_golden_policy": {
+    "source_test": "browser_operator_snapshot_fixture_json_goldens_are_stable",
+    "must_use_exact_fixture_payloads": true,
+    "unsupported_native_fields_must_be_repeated_in_each_golden": true,
+    "required_snapshot_kinds": [
+      "empty_runtime",
+      "loaded_runtime",
+      "cancelled_runtime",
+      "pressure_governed_runtime"
+    ],
+    "required_top_level_fields": [
+      "schema_version",
+      "kind",
+      "runtime",
+      "regions",
+      "tasks",
+      "channels",
+      "budgets",
+      "pressure",
+      "proof_status",
+      "unsupported_native_fields"
+    ],
+    "proof_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_browser_operator_console_snapshot_json_goldens CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync-browser-core browser_operator_snapshot_fixture_json_goldens_are_stable -- --nocapture"
+  },
   "scenario_matrix": [
     {
       "kind": "empty_runtime",
@@ -194,6 +219,7 @@
     "rch exec -- python3 -m json.tool artifacts/browser_operator_console_snapshot_contract_v1.json",
     "rch exec -- rustfmt --edition 2024 --check asupersync-browser-core/src/types.rs asupersync-browser-core/src/lib.rs asupersync-browser-core/src/exports.rs asupersync-browser-core/tests/abi_exports.rs tests/browser_operator_console_snapshot_contract.rs",
     "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_browser_operator_console_snapshot_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test browser_operator_console_snapshot_contract --features test-internals -- --nocapture",
+    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_browser_operator_console_snapshot_json_goldens CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync-browser-core browser_operator_snapshot_fixture_json_goldens_are_stable -- --nocapture",
     "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_browser_operator_console_snapshot_leak_ratchet CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync-browser-core browser_operator_snapshot_from_dispatcher_diagnostics_fails_closed_on_leaked_handles -- --nocapture",
     "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_browser_operator_console_snapshot_export CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync-browser-core browser_operator_snapshot_export_projects_live_dispatcher_diagnostics -- --nocapture",
     "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_browser_operator_console_snapshot_wasm_minimal CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync-browser-core --target wasm32-unknown-unknown --no-default-features --features minimal"

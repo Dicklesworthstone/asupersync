@@ -253,6 +253,66 @@ fn wasm_compile_proof_is_declared_and_target_isolated() {
 }
 
 #[test]
+fn json_golden_policy_is_source_backed_for_all_fixture_states() {
+    let contract = contract();
+    let policy = &contract["json_golden_policy"];
+    let source_test = string(policy, "source_test");
+    assert_eq!(
+        source_test,
+        "browser_operator_snapshot_fixture_json_goldens_are_stable"
+    );
+    assert!(bool_field(policy, "must_use_exact_fixture_payloads"));
+    assert!(bool_field(
+        policy,
+        "unsupported_native_fields_must_be_repeated_in_each_golden"
+    ));
+    assert_eq!(
+        string_set(policy, "required_snapshot_kinds"),
+        string_set(&contract["schema"], "required_snapshot_kinds")
+    );
+    assert_eq!(
+        string_set(policy, "required_top_level_fields"),
+        string_set(&contract["schema"], "required_top_level_fields")
+    );
+
+    let model = read_repo_file(MODEL_PATH);
+    assert!(
+        model.contains(source_test),
+        "browser model tests must include JSON golden source test {source_test}"
+    );
+    assert!(
+        model.contains("serde_json::json!"),
+        "JSON golden source test must pin exact JSON payloads"
+    );
+    for kind in string_set(policy, "required_snapshot_kinds") {
+        assert!(
+            model.contains(&kind),
+            "JSON golden source test must pin {kind} fixture"
+        );
+    }
+    for field in string_set(policy, "required_top_level_fields") {
+        assert!(
+            model.contains(&field),
+            "JSON golden source test must pin field {field}"
+        );
+    }
+
+    let proof_command = string(policy, "proof_command");
+    assert!(proof_command.starts_with("rch exec -- "));
+    assert!(proof_command.contains(
+        "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_browser_operator_console_snapshot_json_goldens"
+    ));
+    assert!(proof_command.contains("cargo test -p asupersync-browser-core"));
+    assert!(proof_command.contains(source_test));
+    assert!(
+        array(&contract, "validation_commands")
+            .iter()
+            .any(|entry| entry.as_str() == Some(proof_command)),
+        "validation commands must include the exact JSON golden proof command"
+    );
+}
+
+#[test]
 fn live_dispatcher_leaks_fail_closed_to_cancelled_snapshot() {
     let contract = contract();
     let policy = &contract["live_dispatcher_fail_closed_policy"];

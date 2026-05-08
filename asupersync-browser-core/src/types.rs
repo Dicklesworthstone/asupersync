@@ -615,6 +615,275 @@ mod tests {
         }
     }
 
+    fn unsupported_native_fields_json() -> serde_json::Value {
+        serde_json::json!([
+            {
+                "field_id": "native_thread_id",
+                "status": "unsupported_native_only",
+                "omission_reason": "browser runtimes do not expose native OS thread identifiers"
+            },
+            {
+                "field_id": "native_file_descriptor",
+                "status": "unsupported_native_only",
+                "omission_reason": "browser runtimes do not expose process file descriptors"
+            },
+            {
+                "field_id": "host_filesystem_path",
+                "status": "unsupported_native_only",
+                "omission_reason": "browser packages must not imply local filesystem access"
+            }
+        ])
+    }
+
+    fn assert_snapshot_fixture_json_golden(
+        kind: BrowserOperatorSnapshotKind,
+        expected: serde_json::Value,
+    ) {
+        let snapshot = browser_operator_snapshot_fixture(kind);
+        let actual = serde_json::to_value(&snapshot).expect("serialize snapshot fixture");
+        assert_eq!(actual, expected, "stable JSON golden for {}", kind.as_str());
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn browser_operator_snapshot_fixture_json_goldens_are_stable() {
+        assert_snapshot_fixture_json_golden(
+            BrowserOperatorSnapshotKind::EmptyRuntime,
+            serde_json::json!({
+                "schema_version": "browser-operator-snapshot-v1",
+                "kind": "empty_runtime",
+                "runtime": {
+                    "runtime_id": "browser-runtime-0",
+                    "state": "running",
+                    "logical_tick": 0,
+                    "direct_runtime_supported": true
+                },
+                "regions": {
+                    "total": 1,
+                    "active": 1,
+                    "cancelled": 0,
+                    "cleanup_pending": 0
+                },
+                "tasks": {
+                    "total": 0,
+                    "active": 0,
+                    "cancelled": 0,
+                    "cleanup_pending": 0
+                },
+                "channels": {
+                    "counts": {
+                        "total": 0,
+                        "active": 0,
+                        "cancelled": 0,
+                        "cleanup_pending": 0
+                    },
+                    "backlog": 0,
+                    "waiters": 0,
+                    "reserved_uncommitted": 0
+                },
+                "budgets": {
+                    "counts": {
+                        "total": 1,
+                        "active": 1,
+                        "cancelled": 0,
+                        "cleanup_pending": 0
+                    },
+                    "memory_limit_bytes": 67_108_864,
+                    "memory_used_bytes": 0,
+                    "cleanup_remaining_ms": 0
+                },
+                "pressure": {
+                    "level": "none",
+                    "sample_count": 0,
+                    "admission_open": true
+                },
+                "proof_status": {
+                    "proof_fresh": true,
+                    "proof_lane": "browser_operator_snapshot_empty",
+                    "blocked_reason": null
+                },
+                "unsupported_native_fields": unsupported_native_fields_json()
+            }),
+        );
+
+        assert_snapshot_fixture_json_golden(
+            BrowserOperatorSnapshotKind::LoadedRuntime,
+            serde_json::json!({
+                "schema_version": "browser-operator-snapshot-v1",
+                "kind": "loaded_runtime",
+                "runtime": {
+                    "runtime_id": "browser-runtime-loaded",
+                    "state": "running",
+                    "logical_tick": 12,
+                    "direct_runtime_supported": true
+                },
+                "regions": {
+                    "total": 4,
+                    "active": 4,
+                    "cancelled": 0,
+                    "cleanup_pending": 0
+                },
+                "tasks": {
+                    "total": 32,
+                    "active": 29,
+                    "cancelled": 0,
+                    "cleanup_pending": 0
+                },
+                "channels": {
+                    "counts": {
+                        "total": 7,
+                        "active": 7,
+                        "cancelled": 0,
+                        "cleanup_pending": 0
+                    },
+                    "backlog": 18,
+                    "waiters": 5,
+                    "reserved_uncommitted": 2
+                },
+                "budgets": {
+                    "counts": {
+                        "total": 4,
+                        "active": 4,
+                        "cancelled": 0,
+                        "cleanup_pending": 0
+                    },
+                    "memory_limit_bytes": 134_217_728,
+                    "memory_used_bytes": 38_797_312,
+                    "cleanup_remaining_ms": 250
+                },
+                "pressure": {
+                    "level": "watch",
+                    "sample_count": 3,
+                    "admission_open": true
+                },
+                "proof_status": {
+                    "proof_fresh": true,
+                    "proof_lane": "browser_operator_snapshot_loaded",
+                    "blocked_reason": null
+                },
+                "unsupported_native_fields": unsupported_native_fields_json()
+            }),
+        );
+
+        assert_snapshot_fixture_json_golden(
+            BrowserOperatorSnapshotKind::CancelledRuntime,
+            serde_json::json!({
+                "schema_version": "browser-operator-snapshot-v1",
+                "kind": "cancelled_runtime",
+                "runtime": {
+                    "runtime_id": "browser-runtime-cancelled",
+                    "state": "cancelling",
+                    "logical_tick": 24,
+                    "direct_runtime_supported": true
+                },
+                "regions": {
+                    "total": 4,
+                    "active": 1,
+                    "cancelled": 3,
+                    "cleanup_pending": 1
+                },
+                "tasks": {
+                    "total": 32,
+                    "active": 0,
+                    "cancelled": 32,
+                    "cleanup_pending": 4
+                },
+                "channels": {
+                    "counts": {
+                        "total": 7,
+                        "active": 1,
+                        "cancelled": 6,
+                        "cleanup_pending": 1
+                    },
+                    "backlog": 0,
+                    "waiters": 0,
+                    "reserved_uncommitted": 0
+                },
+                "budgets": {
+                    "counts": {
+                        "total": 4,
+                        "active": 1,
+                        "cancelled": 3,
+                        "cleanup_pending": 1
+                    },
+                    "memory_limit_bytes": 134_217_728,
+                    "memory_used_bytes": 9_437_184,
+                    "cleanup_remaining_ms": 75
+                },
+                "pressure": {
+                    "level": "none",
+                    "sample_count": 5,
+                    "admission_open": false
+                },
+                "proof_status": {
+                    "proof_fresh": true,
+                    "proof_lane": "browser_operator_snapshot_cancelled",
+                    "blocked_reason": null
+                },
+                "unsupported_native_fields": unsupported_native_fields_json()
+            }),
+        );
+
+        assert_snapshot_fixture_json_golden(
+            BrowserOperatorSnapshotKind::PressureGovernedRuntime,
+            serde_json::json!({
+                "schema_version": "browser-operator-snapshot-v1",
+                "kind": "pressure_governed_runtime",
+                "runtime": {
+                    "runtime_id": "browser-runtime-pressure",
+                    "state": "backpressured",
+                    "logical_tick": 36,
+                    "direct_runtime_supported": true
+                },
+                "regions": {
+                    "total": 9,
+                    "active": 9,
+                    "cancelled": 0,
+                    "cleanup_pending": 0
+                },
+                "tasks": {
+                    "total": 128,
+                    "active": 117,
+                    "cancelled": 0,
+                    "cleanup_pending": 0
+                },
+                "channels": {
+                    "counts": {
+                        "total": 19,
+                        "active": 19,
+                        "cancelled": 0,
+                        "cleanup_pending": 0
+                    },
+                    "backlog": 512,
+                    "waiters": 64,
+                    "reserved_uncommitted": 21
+                },
+                "budgets": {
+                    "counts": {
+                        "total": 9,
+                        "active": 9,
+                        "cancelled": 0,
+                        "cleanup_pending": 0
+                    },
+                    "memory_limit_bytes": 268_435_456,
+                    "memory_used_bytes": 231_735_296,
+                    "cleanup_remaining_ms": 25
+                },
+                "pressure": {
+                    "level": "shed",
+                    "sample_count": 8,
+                    "admission_open": false
+                },
+                "proof_status": {
+                    "proof_fresh": false,
+                    "proof_lane": null,
+                    "blocked_reason": "pressure-governor proof unavailable in browser snapshot producer"
+                },
+                "unsupported_native_fields": unsupported_native_fields_json()
+            }),
+        );
+    }
+
     #[test]
     fn browser_operator_snapshot_from_dispatcher_diagnostics_counts_live_handles() {
         let diagnostics = WasmDispatcherDiagnostics {
