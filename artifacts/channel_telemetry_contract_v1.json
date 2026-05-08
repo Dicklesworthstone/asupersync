@@ -1,0 +1,189 @@
+{
+  "contract_version": "channel-telemetry-contract-v1",
+  "bead_id": "asupersync-97wkp1",
+  "description": "Fail-closed contract for opt-in, deterministic, backpressure-aware channel telemetry across asupersync channel primitives.",
+  "source_of_truth": {
+    "contract": "artifacts/channel_telemetry_contract_v1.json",
+    "contract_test": "tests/channel_telemetry_contract.rs",
+    "channel_module": "src/channel/mod.rs",
+    "flow_control_monitor": "src/channel/flow_control_monitor.rs"
+  },
+  "telemetry_policy": {
+    "default_mode": "disabled",
+    "enabled_mode": "opt_in",
+    "lab_runtime_deterministic": true,
+    "no_ambient_globals": true,
+    "redaction_required": true,
+    "reserved_uncommitted_obligations_must_be_separate_from_queued_data": true
+  },
+  "required_channel_kinds": [
+    "mpsc",
+    "broadcast",
+    "watch",
+    "oneshot",
+    "session"
+  ],
+  "required_metric_fields": [
+    "channel_id",
+    "channel_kind",
+    "capacity",
+    "queued_messages",
+    "reserved_uncommitted_obligations",
+    "send_waiter_count",
+    "recv_waiter_count",
+    "receiver_health",
+    "lagged_receiver_count",
+    "cancellation_count",
+    "closed"
+  ],
+  "allowed_report_statuses": [
+    "LIVE",
+    "XFAIL",
+    "BLOCKED"
+  ],
+  "fail_closed_rules": [
+    {
+      "rule_id": "unwired-must-xfail",
+      "description": "A channel row with live_telemetry_wired=false must render XFAIL, never PASS or LIVE."
+    },
+    {
+      "rule_id": "reservation-pressure-separate",
+      "description": "reserved_uncommitted_obligations must be reported separately from queued_messages so aborted reserves do not look like delivered data."
+    },
+    {
+      "rule_id": "receiver-health-explicit",
+      "description": "Broadcast/watch/session rows must expose receiver health or lag rather than hiding slow receivers behind aggregate backlog."
+    },
+    {
+      "rule_id": "deterministic-redacted-report",
+      "description": "Reports must avoid payload data, user paths, raw Agent Mail bodies, and nondeterministic ordering."
+    }
+  ],
+  "channel_rows": [
+    {
+      "channel_kind": "mpsc",
+      "implementation_path": "src/channel/mpsc.rs",
+      "live_telemetry_wired": false,
+      "report_status": "XFAIL",
+      "status_reason": "contracted only; live opt-in counters are not wired yet",
+      "metric_fields": [
+        "channel_id",
+        "channel_kind",
+        "capacity",
+        "queued_messages",
+        "reserved_uncommitted_obligations",
+        "send_waiter_count",
+        "recv_waiter_count",
+        "receiver_health",
+        "cancellation_count",
+        "closed"
+      ],
+      "core_invariants": [
+        "queued_messages excludes reserved_uncommitted_obligations",
+        "aborted reserve decrements reserved_uncommitted_obligations",
+        "send_waiter_count is deterministic under LabRuntime"
+      ]
+    },
+    {
+      "channel_kind": "broadcast",
+      "implementation_path": "src/channel/broadcast.rs",
+      "live_telemetry_wired": false,
+      "report_status": "XFAIL",
+      "status_reason": "contracted only; receiver lag counters are not wired yet",
+      "metric_fields": [
+        "channel_id",
+        "channel_kind",
+        "capacity",
+        "queued_messages",
+        "reserved_uncommitted_obligations",
+        "recv_waiter_count",
+        "receiver_health",
+        "lagged_receiver_count",
+        "cancellation_count",
+        "closed"
+      ],
+      "core_invariants": [
+        "lagged_receiver_count is explicit",
+        "receiver_health distinguishes closed, lagged, and caught_up",
+        "broadcast overwrite pressure is not reported as successful delivery"
+      ]
+    },
+    {
+      "channel_kind": "watch",
+      "implementation_path": "src/channel/watch.rs",
+      "live_telemetry_wired": false,
+      "report_status": "XFAIL",
+      "status_reason": "contracted only; changed/borrow receiver health is not wired yet",
+      "metric_fields": [
+        "channel_id",
+        "channel_kind",
+        "queued_messages",
+        "reserved_uncommitted_obligations",
+        "send_waiter_count",
+        "recv_waiter_count",
+        "receiver_health",
+        "lagged_receiver_count",
+        "cancellation_count",
+        "closed"
+      ],
+      "core_invariants": [
+        "latest value visibility is separate from queued backlog",
+        "receiver_health reports unchanged, changed, closed, or lagged",
+        "cancellation_count tracks cancelled changed waits"
+      ]
+    },
+    {
+      "channel_kind": "oneshot",
+      "implementation_path": "src/channel/oneshot.rs",
+      "live_telemetry_wired": false,
+      "report_status": "XFAIL",
+      "status_reason": "contracted only; exactly-once telemetry is not wired yet",
+      "metric_fields": [
+        "channel_id",
+        "channel_kind",
+        "capacity",
+        "queued_messages",
+        "reserved_uncommitted_obligations",
+        "send_waiter_count",
+        "recv_waiter_count",
+        "receiver_health",
+        "cancellation_count",
+        "closed"
+      ],
+      "core_invariants": [
+        "capacity is always one",
+        "queued_messages is at most one",
+        "closed distinguishes sender_drop, receiver_drop, and committed"
+      ]
+    },
+    {
+      "channel_kind": "session",
+      "implementation_path": "src/channel/session.rs",
+      "live_telemetry_wired": false,
+      "report_status": "XFAIL",
+      "status_reason": "contracted only; session subchannel telemetry is not wired yet",
+      "metric_fields": [
+        "channel_id",
+        "channel_kind",
+        "capacity",
+        "queued_messages",
+        "reserved_uncommitted_obligations",
+        "send_waiter_count",
+        "recv_waiter_count",
+        "receiver_health",
+        "lagged_receiver_count",
+        "cancellation_count",
+        "closed"
+      ],
+      "core_invariants": [
+        "tracked senders preserve per-session channel ids",
+        "subchannel backlog is stable-sorted in reports",
+        "cancellation_count includes aborted tracked sends"
+      ]
+    }
+  ],
+  "golden_markdown": "| channel_kind | status | required_pressure_fields |\n| --- | --- | --- |\n| broadcast | XFAIL | queued_messages, reserved_uncommitted_obligations, recv_waiter_count, receiver_health, lagged_receiver_count, cancellation_count |\n| mpsc | XFAIL | queued_messages, reserved_uncommitted_obligations, send_waiter_count, recv_waiter_count, receiver_health, cancellation_count |\n| oneshot | XFAIL | queued_messages, reserved_uncommitted_obligations, send_waiter_count, recv_waiter_count, receiver_health, cancellation_count |\n| session | XFAIL | queued_messages, reserved_uncommitted_obligations, send_waiter_count, recv_waiter_count, receiver_health, lagged_receiver_count, cancellation_count |\n| watch | XFAIL | queued_messages, reserved_uncommitted_obligations, send_waiter_count, recv_waiter_count, receiver_health, lagged_receiver_count, cancellation_count |\n",
+  "proof_commands": [
+    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_channel_telemetry_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test channel_telemetry_contract -- --nocapture"
+  ]
+}
