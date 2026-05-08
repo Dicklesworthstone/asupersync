@@ -29,8 +29,9 @@ pub mod priority_inversion_oracle;
 pub mod ready_dispatch_invariance_metamorphic;
 #[cfg(test)]
 pub mod shutdown_behavior_audit_test;
-/// Trait abstraction over runtime backing-state shapes
-/// (br-asupersync-30atgp.1).
+/// Trait abstraction over runtime backing-state shapes.
+///
+/// Tracks br-asupersync-30atgp.1.
 pub mod state_backing;
 pub mod stealing;
 /// Versioned swarm-evidence artifacts and offline tuning contracts.

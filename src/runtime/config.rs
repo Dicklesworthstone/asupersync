@@ -1,8 +1,9 @@
 //! Runtime configuration types.
 //!
-//! These types hold the concrete values that drive runtime behavior. In most
-//! cases you should use [`RuntimeBuilder`](super::builder::RuntimeBuilder) to
-//! construct a runtime rather than creating a [`RuntimeConfig`] directly.
+//! These types hold the concrete values that drive runtime behavior.
+//!
+//! Most callers should use [`RuntimeBuilder`](super::builder::RuntimeBuilder)
+//! to construct a runtime rather than creating a [`RuntimeConfig`] directly.
 //!
 //! # Defaults
 //!
@@ -1533,6 +1534,7 @@ pub enum RuntimeStateShape {
     Sharded,
 }
 
+/// Concrete scheduler, blocking-pool, tracing, and policy settings for a runtime.
 #[derive(Clone)]
 pub struct RuntimeConfig {
     /// Number of worker threads (default: available parallelism).

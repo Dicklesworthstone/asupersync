@@ -1821,7 +1821,7 @@ impl Default for LabIoCap {
 fn lab_iocap_shard() -> usize {
     use std::cell::Cell;
     thread_local! {
-        static SHARD: Cell<usize> = Cell::new(usize::MAX);
+        static SHARD: Cell<usize> = const { Cell::new(usize::MAX) };
     }
     SHARD.with(|cell| {
         let cached = cell.get();
