@@ -325,7 +325,10 @@ fn controller_interference_catalog_and_pair_rules_are_stable() {
         )
     })
     .collect();
-    assert_eq!(actual, expected, "pair rules must remain stable");
+    assert_eq!(
+        actual, expected,
+        "{ARTIFACT_PATH} pair composition rules must remain stable"
+    );
 }
 
 // ── Promotion pipeline stability ─────────────────────────────────────
@@ -369,7 +372,10 @@ fn rollback_reasons_are_stable() {
     .into_iter()
     .map(ToOwned::to_owned)
     .collect();
-    assert_eq!(actual, expected, "rollback reasons must remain stable");
+    assert_eq!(
+        actual, expected,
+        "{ARTIFACT_PATH} rollback reasons must remain stable"
+    );
 }
 
 // ── Validation scenario catalog ──────────────────────────────────────
@@ -412,7 +418,7 @@ fn validation_scenario_ids_are_complete() {
     .collect();
     assert_eq!(
         actual, expected,
-        "validation scenario IDs must remain stable"
+        "{ARTIFACT_PATH} validation scenario IDs must remain stable"
     );
 }
 
@@ -454,7 +460,10 @@ fn evidence_ledger_event_types_are_stable() {
     .into_iter()
     .map(ToOwned::to_owned)
     .collect();
-    assert_eq!(actual, expected, "ledger event types must remain stable");
+    assert_eq!(
+        actual, expected,
+        "{ARTIFACT_PATH} ledger event types must remain stable"
+    );
 }
 
 // ── Structured log fields ────────────────────────────────────────────
