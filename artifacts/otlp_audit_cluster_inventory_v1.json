@@ -12,8 +12,8 @@
     "fallback_decision": "keep asupersync-q94ai8 and asupersync-wqsael blocked by asupersync-lf1a77 until the preserved tests are normalized or split into narrower blockers"
   },
   "proof_commands": {
-    "production_lib_check": "rch exec -- cargo check -p asupersync --lib --features metrics,tracing-integration",
-    "blocked_full_test_check": "rch exec -- cargo check -p asupersync --lib --tests --features metrics,tracing-integration"
+    "production_lib_check": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_otlp_audit_inventory_production_lib_check cargo check -p asupersync --lib --features metrics,tracing-integration",
+    "blocked_full_test_check": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_otlp_audit_inventory_blocked_full_test_check cargo check -p asupersync --lib --tests --features metrics,tracing-integration"
   },
   "required_log_fields": [
     "scenario_id",

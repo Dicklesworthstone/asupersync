@@ -48,6 +48,24 @@ artifact_value() {
     jq -r "$1" "$ARTIFACT"
 }
 
+require_target_dir_rch_cargo_command() {
+    local label="$1"
+    local command="$2"
+
+    if [[ "$command" == rch\ exec\ --\ cargo\ * ]]; then
+        echo "FATAL: $label must use \`rch exec -- env CARGO_TARGET_DIR=... cargo ...\`, not bare \`rch exec -- cargo ...\`" >&2
+        exit 1
+    fi
+    if [[ "$command" != rch\ exec\ --\ env\ *CARGO_TARGET_DIR=* ]]; then
+        echo "FATAL: $label is missing CARGO_TARGET_DIR routing: $command" >&2
+        exit 1
+    fi
+    if [[ "$command" != *" cargo "* ]]; then
+        echo "FATAL: $label must route cargo through rch env: $command" >&2
+        exit 1
+    fi
+}
+
 default_scenario_id() {
     jq -r '.smoke_scenarios[0].scenario_id' "$ARTIFACT"
 }
@@ -252,6 +270,8 @@ SANITIZED_ENDPOINT_CONFIG_JSON="$(jq '.sanitized_endpoint_config' "$ARTIFACT")"
 EMITTED_COUNTERS_JSON="$(jq '.emitted_otlp_counters' "$ARTIFACT")"
 PRODUCTION_LIB_CHECK_COMMAND="$(artifact_value '.proof_commands.production_lib_check')"
 BLOCKED_FULL_TEST_CHECK_COMMAND="$(artifact_value '.proof_commands.blocked_full_test_check')"
+require_target_dir_rch_cargo_command "proof_commands.production_lib_check" "$PRODUCTION_LIB_CHECK_COMMAND"
+require_target_dir_rch_cargo_command "proof_commands.blocked_full_test_check" "$BLOCKED_FULL_TEST_CHECK_COMMAND"
 ARTIFACT_SHA256="$(sha256sum "$ARTIFACT" | awk '{print $1}')"
 
 VALIDATION_PASSED=false
