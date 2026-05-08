@@ -1,8 +1,8 @@
 //! Quick K=1024 baseline to establish profiling methodology while K=10000 builds.
 
 use asupersync::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
+use asupersync::raptorq::gf256::Gf256;
 use asupersync::raptorq::systematic::SystematicEncoder;
-use asupersync::types::ObjectId;
 use std::time::Instant;
 
 fn main() {
@@ -12,6 +12,7 @@ fn main() {
     let symbol_size = 1316;
     let loss_fraction = 0.70; // High loss to trigger matrix operations
     let extra_repair = 200;
+    let seed = 42u64;
 
     let total_bytes = k * symbol_size;
     println!(
@@ -21,18 +22,21 @@ fn main() {
         total_bytes as f64 / 1024.0 / 1024.0
     );
 
-    // Generate test data
-    let mut source_data = vec![0u8; total_bytes];
+    // Generate test data as k symbols of symbol_size bytes each
+    let mut source_symbols = Vec::with_capacity(k);
     let mut rng_state = 0x12345678u64;
-    for byte in source_data.iter_mut() {
-        rng_state = rng_state.wrapping_mul(1103515245).wrapping_add(12345);
-        *byte = (rng_state >> 16) as u8;
+    for i in 0..k {
+        let mut symbol = vec![0u8; symbol_size];
+        for byte in symbol.iter_mut() {
+            rng_state = rng_state.wrapping_mul(1103515245).wrapping_add(12345);
+            *byte = ((rng_state >> 16) + i as u64) as u8;
+        }
+        source_symbols.push(symbol);
     }
 
     println!("Creating encoder...");
     let encoder_start = Instant::now();
-    let object_id = ObjectId::new([0; 32]);
-    let encoder = SystematicEncoder::new(object_id, &source_data, symbol_size)
+    let encoder = SystematicEncoder::new(&source_symbols, symbol_size, seed)
         .expect("encoder creation failed");
     println!(
         "Encoder: {:.1}ms",
@@ -43,9 +47,9 @@ fn main() {
     let repair_start = Instant::now();
     let mut repair_symbols = Vec::new();
     for i in 0..extra_repair {
-        if let Some(symbol) = encoder.repair_symbol(i) {
-            repair_symbols.push((k + i, symbol));
-        }
+        let esi = k as u32 + i as u32;
+        let symbol = encoder.repair_symbol(esi);
+        repair_symbols.push((esi, symbol));
     }
     println!(
         "Repair symbols: {:.1}ms",
@@ -70,37 +74,39 @@ fn main() {
 
     println!("Collecting received symbols...");
     let mut received_symbols = Vec::new();
+
+    // Add available source symbols
     for (i, &is_lost) in loss_pattern.iter().enumerate() {
         if !is_lost {
-            if let Some(symbol) = encoder.source_symbol(i) {
-                received_symbols.push(ReceivedSymbol {
-                    id: i,
-                    data: symbol,
-                });
-            }
+            received_symbols.push(ReceivedSymbol {
+                esi: i as u32,
+                is_source: true,
+                columns: vec![i],
+                coefficients: vec![Gf256::ONE],
+                data: source_symbols[i].clone(),
+            });
         }
     }
 
+    // Add repair symbols to ensure decodability
     let needed_repairs = loss_count + 50;
-    for (repair_id, repair_data) in repair_symbols.into_iter().take(needed_repairs) {
+    for (repair_esi, repair_data) in repair_symbols.into_iter().take(needed_repairs) {
         received_symbols.push(ReceivedSymbol {
-            id: repair_id,
+            esi: repair_esi,
+            is_source: false,
+            columns: vec![], // Will be filled by decoder
+            coefficients: vec![],
             data: repair_data,
         });
     }
     println!("Received symbols: {}", received_symbols.len());
 
     println!("Creating decoder...");
-    let encoding_params = encoder.encoding_params();
-    let mut decoder = InactivationDecoder::new(encoding_params);
-
-    for symbol in received_symbols {
-        decoder.add_symbol(symbol).expect("symbol addition failed");
-    }
+    let decoder = InactivationDecoder::new(k, symbol_size, seed);
 
     println!("=== DECODE (PROFILING TARGET) ===");
     let decode_start = Instant::now();
-    let decode_result = decoder.decode().expect("decode failed");
+    let decode_result = decoder.decode(&received_symbols).expect("decode failed");
     let decode_time = decode_start.elapsed();
 
     println!("Decode time: {:.1}ms", decode_time.as_secs_f64() * 1000.0);
@@ -109,20 +115,16 @@ fn main() {
         (total_bytes as f64 / 1024.0 / 1024.0) / decode_time.as_secs_f64()
     );
 
-    // Quick verification - reconstruct source from symbols
-    let mut decoded_flat = Vec::new();
-    for symbol in &decode_result.source {
-        decoded_flat.extend_from_slice(symbol);
+    // Quick verification - check symbol count
+    let decoded_symbols = decode_result.source;
+    assert_eq!(decoded_symbols.len(), k);
+
+    // Verify data matches
+    for (i, (original, decoded)) in source_symbols.iter().zip(decoded_symbols.iter()).enumerate() {
+        if original != decoded {
+            panic!("Symbol {} data mismatch!", i);
+        }
     }
-    assert_eq!(decoded_flat.len(), source_data.len());
 
-    // Show decode stats
-    println!(
-        "Decode stats: peeling={}, inactivated={}, matrix_ops={}",
-        decode_result.stats.peeled,
-        decode_result.stats.inactivated,
-        decode_result.stats.dense_matrix_operations.unwrap_or(0)
-    );
-
-    println!("✓ Decode successful");
+    println!("✓ Decode successful - data matches original");
 }

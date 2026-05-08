@@ -8,6 +8,7 @@
 //! samply record --save-only -o io_cap_cpu.json -- ./target/release-perf/io_cap_budget_profile
 
 use asupersync::io::cap::LabIoCap;
+use asupersync::io::IoCap;
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;

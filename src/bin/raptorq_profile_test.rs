@@ -6,7 +6,6 @@
 use asupersync::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::gf256::{Gf256, gf256_addmul_slice, gf256_mul_slice};
 use asupersync::raptorq::systematic::SystematicEncoder;
-use asupersync::types::ObjectId;
 
 fn main() {
     println!("Starting RaptorQ large K profiling test...");
@@ -17,18 +16,21 @@ fn main() {
     let loss_fraction = 0.6; // 60% loss
     let extra_repair = 200;
 
-    let total_bytes = k * symbol_size;
     println!(
-        "Testing K={}, symbol_size={}, total_bytes={}",
-        k, symbol_size, total_bytes
+        "Testing K={}, symbol_size={}, loss_fraction={:.1}%",
+        k, symbol_size, loss_fraction * 100.0
     );
 
-    // Generate test data
-    let mut source_data = vec![0u8; total_bytes];
+    // Generate test data as k symbols of symbol_size bytes each
+    let mut source_symbols = Vec::with_capacity(k);
     let mut rng_state = 0x12345678u64;
-    for byte in source_data.iter_mut() {
-        rng_state = rng_state.wrapping_mul(1103515245).wrapping_add(12345);
-        *byte = (rng_state >> 16) as u8;
+    for i in 0..k {
+        let mut symbol = vec![0u8; symbol_size];
+        for byte in symbol.iter_mut() {
+            rng_state = rng_state.wrapping_mul(1103515245).wrapping_add(12345);
+            *byte = ((rng_state >> 16) + i as u64) as u8;
+        }
+        source_symbols.push(symbol);
     }
 
     // **HOT PATH TEST 1: GF256 bulk operations**
@@ -47,16 +49,16 @@ fn main() {
 
     // **HOT PATH TEST 2: Encoder creation and symbol generation**
     println!("Creating encoder...");
-    let object_id = ObjectId::new([0; 32]);
-    let encoder = SystematicEncoder::new(object_id, &source_data, symbol_size)
+    let seed = 42u64;
+    let encoder = SystematicEncoder::new(&source_symbols, symbol_size, seed)
         .expect("encoder creation failed");
 
     println!("Generating repair symbols...");
     let mut repair_symbols = Vec::with_capacity(extra_repair);
     for i in 0..extra_repair {
-        if let Some(symbol) = encoder.repair_symbol(i) {
-            repair_symbols.push((k + i, symbol));
-        }
+        let esi = k as u32 + i as u32;
+        let symbol = encoder.repair_symbol(esi);
+        repair_symbols.push((esi, symbol));
     }
 
     // **HOT PATH TEST 3: Decoder with realistic loss pattern**
@@ -79,26 +81,30 @@ fn main() {
 
     println!("Loss pattern: {}/{} symbols lost", losses_applied, k);
 
-    // Collect received symbols
+    // Collect received symbols for decoding
     let mut received_symbols = Vec::new();
 
     // Add available source symbols
     for (i, &is_lost) in loss_pattern.iter().enumerate() {
         if !is_lost {
-            if let Some(symbol) = encoder.source_symbol(i) {
-                received_symbols.push(ReceivedSymbol {
-                    id: i,
-                    data: symbol,
-                });
-            }
+            received_symbols.push(ReceivedSymbol {
+                esi: i as u32,
+                is_source: true,
+                columns: vec![i],
+                coefficients: vec![Gf256::ONE],
+                data: source_symbols[i].clone(),
+            });
         }
     }
 
     // Add repair symbols to ensure decodability
     let needed_repairs = loss_count + 50; // Some overhead
-    for (repair_id, repair_data) in repair_symbols.into_iter().take(needed_repairs) {
+    for (repair_esi, repair_data) in repair_symbols.into_iter().take(needed_repairs) {
         received_symbols.push(ReceivedSymbol {
-            id: repair_id,
+            esi: repair_esi,
+            is_source: false,
+            columns: vec![], // Will be filled by decoder
+            coefficients: vec![],
             data: repair_data,
         });
     }
@@ -106,23 +112,14 @@ fn main() {
     println!("Received symbols: {}", received_symbols.len());
 
     // **HOT PATH TEST 4: Inactivation decoding (matrix operations)**
-    println!("Creating decoder and adding symbols...");
-    let encoding_params = encoder.encoding_params();
-    let mut decoder = InactivationDecoder::new(encoding_params);
-
-    // Add symbols - this may involve matrix operations
-    let symbols_added = received_symbols.len();
-    for symbol in received_symbols {
-        decoder.add_symbol(symbol).expect("symbol addition failed");
-    }
-
-    println!("Added {} symbols to decoder", symbols_added);
+    println!("Creating decoder...");
+    let decoder = InactivationDecoder::new(k, symbol_size, seed);
 
     // **HOT PATH TEST 5: Decode (Gaussian elimination and gap handling)**
     println!("Starting decode - this is where matrix solve happens...");
     let start = std::time::Instant::now();
 
-    let decoded = decoder.decode().expect("decode failed");
+    let decode_result = decoder.decode(&received_symbols).expect("decode failed");
 
     let decode_time = start.elapsed();
     println!(
@@ -131,16 +128,19 @@ fn main() {
     );
 
     // Verify correctness
-    if decoded.len() != source_data.len() {
+    let decoded_symbols = decode_result.source;
+    if decoded_symbols.len() != k {
         panic!(
-            "Decoded length mismatch: {} vs {}",
-            decoded.len(),
-            source_data.len()
+            "Decoded symbol count mismatch: {} vs {}",
+            decoded_symbols.len(),
+            k
         );
     }
 
-    if decoded != source_data {
-        panic!("Decoded data mismatch!");
+    for (i, (original, decoded)) in source_symbols.iter().zip(decoded_symbols.iter()).enumerate() {
+        if original != decoded {
+            panic!("Symbol {} data mismatch!", i);
+        }
     }
 
     println!("Success! Decoded data matches original.");
