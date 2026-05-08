@@ -171,15 +171,27 @@ fn doc_requires_rch_exec_for_heavy_commands() {
         doc.contains("rch exec --"),
         "document must require rch for heavy commands"
     );
-    for token in [
-        "rch exec -- cargo check --all-targets",
-        "rch exec -- cargo clippy --all-targets -- -D warnings",
-        "rch exec -- cargo fmt --check",
-        "rch exec -- cargo test --test tokio_io_codec_cancellation_correctness -- --nocapture",
-        "rch exec -- cargo test --test io_cancellation -- --nocapture",
-        "rch exec -- cargo test --test t2_track_conformance_and_performance_gates -- --nocapture",
+    let target_prefix =
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_io_track_docs cargo ";
+    for command in [
+        "check --all-targets",
+        "clippy --all-targets -- -D warnings",
+        "fmt --check",
+        "test --test tokio_io_codec_cancellation_correctness -- --nocapture",
+        "test --test io_cancellation -- --nocapture",
+        "test --test t2_track_conformance_and_performance_gates -- --nocapture",
     ] {
-        assert!(doc.contains(token), "missing runner command token: {token}");
+        let target = format!("{target_prefix}{command}");
+        assert!(
+            doc.contains(&target),
+            "missing runner command token: {target}"
+        );
+
+        let stale = format!("{}cargo {command}", "rch exec -- ");
+        assert!(
+            !doc.contains(&stale),
+            "document must not reintroduce bare rch cargo routing: {stale}"
+        );
     }
 }
 
