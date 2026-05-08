@@ -54,7 +54,22 @@ fn fixture_text(fixture: &str) -> String {
         .unwrap_or_else(|error| panic!("read golden fixture {fixture}: {error}"))
 }
 
-fn assert_output_matches_golden(actual: String, expected_fixture: &str, drift_message: &str) {
+fn assert_output_matches_golden(
+    reservation_fixture: &str,
+    git_status_fixture: &str,
+    expected_fixture: &str,
+    drift_message: &str,
+) {
+    let output = run_receipt(reservation_fixture, git_status_fixture);
+    assert!(
+        output.status.success(),
+        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = String::from_utf8(output.stdout).expect("receipt stdout is utf-8");
     let expected = fixture_text(expected_fixture);
     let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
     let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
@@ -100,17 +115,9 @@ fn clean_receipt_allows_atomic_claim_sequence() {
 
 #[test]
 fn clean_receipt_output_matches_full_reviewed_golden() {
-    let output = run_receipt("clear_reservations.json", "clean_git_status.json");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
     assert_output_matches_golden(
-        String::from_utf8(output.stdout).expect("receipt stdout is utf-8"),
+        "clear_reservations.json",
+        "clean_git_status.json",
         "clean_receipt_expected.json",
         "clean claim/reservation receipt drifted from the reviewed golden",
     );
@@ -154,16 +161,9 @@ fn tracker_reservation_conflict_blocks_before_beads_mutation() {
 
 #[test]
 fn tracker_conflict_output_matches_full_reviewed_golden() {
-    let output = run_receipt("tracker_conflict.json", "clean_git_status.json");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
     assert_output_matches_golden(
-        String::from_utf8(output.stdout).expect("receipt stdout is utf-8"),
+        "tracker_conflict.json",
+        "clean_git_status.json",
         "tracker_conflict_expected.json",
         "claim/reservation tracker-conflict receipt changed; update the golden only after reviewing wait-for-tracker semantics",
     );
@@ -193,16 +193,9 @@ fn implementation_reservation_conflict_blocks_claim_sequence() {
 
 #[test]
 fn implementation_conflict_output_matches_full_reviewed_golden() {
-    let output = run_receipt("implementation_conflict.json", "clean_git_status.json");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
     assert_output_matches_golden(
-        String::from_utf8(output.stdout).expect("receipt stdout is utf-8"),
+        "implementation_conflict.json",
+        "clean_git_status.json",
         "implementation_conflict_expected.json",
         "claim/reservation implementation-conflict receipt changed; update the golden only after reviewing wait-for-implementation-reservation semantics",
     );
@@ -232,16 +225,9 @@ fn dirty_index_conflict_takes_precedence_over_reservations() {
 
 #[test]
 fn dirty_index_output_matches_full_reviewed_golden() {
-    let output = run_receipt("clear_reservations.json", "dirty_index.json");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
     assert_output_matches_golden(
-        String::from_utf8(output.stdout).expect("receipt stdout is utf-8"),
+        "clear_reservations.json",
+        "dirty_index.json",
         "dirty_index_expected.json",
         "claim/reservation dirty-index receipt changed; update the golden only after reviewing staged-index preflight semantics",
     );
