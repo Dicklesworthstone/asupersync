@@ -281,6 +281,49 @@ impl FaultEffectSummary {
     }
 }
 
+/// Deterministic minimized counterexample packet for unresolved scenario faults.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MinimizedCounterexamplePacket {
+    /// Scenario identifier that produced the counterexample.
+    pub scenario_id: String,
+    /// Stable reason for the packet.
+    pub reason: String,
+    /// Number of fault-log entries retained in the minimized prefix.
+    pub prefix_len: usize,
+    /// Total scheduled fault count from the original scenario run.
+    pub fault_count: usize,
+    /// Configured maximum counterexample events.
+    pub max_counterexample_events: usize,
+    /// Participants still stalled at the end of the scheduled fault stream.
+    pub active_stalled_participants: Vec<String>,
+    /// Redacted fault-log prefix retained for replay/debugging.
+    pub fault_log_prefix: Vec<FaultInjectionLogEntry>,
+    /// Whether the source scenario requested redacted projection.
+    pub redacted: bool,
+}
+
+impl MinimizedCounterexamplePacket {
+    /// Convert to JSON for artifact storage.
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        use serde_json::json;
+        json!({
+            "scenario_id": self.scenario_id,
+            "reason": self.reason,
+            "prefix_len": self.prefix_len,
+            "fault_count": self.fault_count,
+            "max_counterexample_events": self.max_counterexample_events,
+            "active_stalled_participants": self.active_stalled_participants,
+            "fault_log_prefix": self
+                .fault_log_prefix
+                .iter()
+                .map(FaultInjectionLogEntry::to_json)
+                .collect::<Vec<_>>(),
+            "redacted": self.redacted,
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Run result
 // ---------------------------------------------------------------------------
@@ -302,6 +345,8 @@ pub struct ScenarioRunResult {
     pub fault_log: Vec<FaultInjectionLogEntry>,
     /// Deterministic summary of effects applied by fault injection.
     pub fault_effect_summary: FaultEffectSummary,
+    /// Minimized counterexample packet when bounded fault effects remain unresolved.
+    pub minimized_counterexample: Option<MinimizedCounterexamplePacket>,
     /// Replay trace, if recording was enabled.
     pub replay_trace: Option<ReplayTrace>,
     /// Trace certificate snapshot for replay validation.
@@ -340,6 +385,10 @@ impl ScenarioRunResult {
             "faults_injected": self.faults_injected,
             "fault_log": self.fault_log.iter().map(FaultInjectionLogEntry::to_json).collect::<Vec<_>>(),
             "fault_effect_summary": self.fault_effect_summary.to_json(),
+            "minimized_counterexample": self
+                .minimized_counterexample
+                .as_ref()
+                .map(MinimizedCounterexamplePacket::to_json),
             "certificate": {
                 "event_hash": self.certificate.event_hash,
                 "schedule_hash": self.certificate.schedule_hash,
@@ -717,6 +766,61 @@ impl ScenarioRunner {
         summary
     }
 
+    fn minimized_counterexample_for(
+        scenario: &Scenario,
+        fault_log: &[FaultInjectionLogEntry],
+        fault_effect_summary: &FaultEffectSummary,
+    ) -> Option<MinimizedCounterexamplePacket> {
+        if !scenario.minimization.enabled
+            || fault_effect_summary
+                .stalled_participants_until_ms
+                .is_empty()
+        {
+            return None;
+        }
+
+        let active_stalled_participants = fault_effect_summary
+            .stalled_participants_until_ms
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let first_stalled = active_stalled_participants.first()?;
+        let host_arg = format!("host={first_stalled}");
+        let first_stall_index = fault_log
+            .iter()
+            .position(|entry| {
+                entry.action == "process_stall"
+                    && entry.args_summary.split(',').any(|arg| arg == host_arg)
+            })
+            .unwrap_or(0);
+        let max_counterexample_events = scenario
+            .minimization
+            .max_counterexample_events
+            .or(scenario.resource_caps.max_counterexample_events)
+            .unwrap_or(fault_log.len())
+            .max(1);
+        let prefix_len = first_stall_index
+            .saturating_add(1)
+            .min(fault_log.len())
+            .min(max_counterexample_events);
+        let fault_log_prefix = fault_log
+            .iter()
+            .take(prefix_len)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        Some(MinimizedCounterexamplePacket {
+            scenario_id: scenario.id.clone(),
+            reason: "unresolved_process_stall".to_string(),
+            prefix_len,
+            fault_count: fault_log.len(),
+            max_counterexample_events,
+            active_stalled_participants,
+            fault_log_prefix,
+            redacted: scenario.golden_projection.redacted,
+        })
+    }
+
     /// Build a certificate snapshot from a lab report.
     fn certificate_snapshot(report: &LabRunReport) -> TraceCertificateSnapshot {
         TraceCertificateSnapshot {
@@ -760,6 +864,8 @@ impl ScenarioRunner {
 
         let (fault_log, fault_effect_summary) = Self::inject_faults(&mut runtime, scenario);
         let faults_injected = fault_log.len();
+        let minimized_counterexample =
+            Self::minimized_counterexample_for(scenario, &fault_log, &fault_effect_summary);
         runtime.run_until_quiescent();
 
         let lab_report = runtime.report();
@@ -778,6 +884,7 @@ impl ScenarioRunner {
             faults_injected,
             fault_log,
             fault_effect_summary,
+            minimized_counterexample,
             replay_trace,
             certificate,
             adapter: LAB_SCENARIO_RUNNER_ADAPTER.to_string(),
@@ -810,6 +917,8 @@ impl ScenarioRunner {
         // 3. Inject timed faults and run between them
         let (fault_log, fault_effect_summary) = Self::inject_faults(&mut runtime, scenario);
         let faults_injected = fault_log.len();
+        let minimized_counterexample =
+            Self::minimized_counterexample_for(scenario, &fault_log, &fault_effect_summary);
 
         // 4. Run to quiescence after all faults
         runtime.run_until_quiescent();
@@ -836,6 +945,7 @@ impl ScenarioRunner {
             faults_injected,
             fault_log,
             fault_effect_summary,
+            minimized_counterexample,
             replay_trace,
             certificate,
             adapter: LAB_SCENARIO_RUNNER_ADAPTER.to_string(),

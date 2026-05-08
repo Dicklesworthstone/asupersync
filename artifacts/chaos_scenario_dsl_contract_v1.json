@@ -520,6 +520,123 @@
     ],
     "proof_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_chaos_disk_cleanup_effects CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test chaos_scenario_dsl_contract live_disk_pressure_cleanup_delay_uses_runner_effect_summary -- --nocapture"
   },
+  "live_process_stall_minimized_counterexample": {
+    "scenario_id": "chaos-process-stall-minimized-counterexample",
+    "report_status": "LIVE",
+    "source_path": "src/lab/scenario_runner.rs",
+    "description": "The runner emits a deterministic minimized counterexample packet when a process-stall fault remains unresolved after the scheduled fault stream.",
+    "source_markers": [
+      "pub struct MinimizedCounterexamplePacket",
+      "minimized_counterexample_for",
+      "unresolved_process_stall",
+      "fault_log_prefix"
+    ],
+    "required_result_fields": [
+      "passed",
+      "faults_injected",
+      "fault_log",
+      "fault_effect_summary",
+      "minimized_counterexample",
+      "oracle_report",
+      "invariant_violations"
+    ],
+    "scenario": {
+      "schema_version": 1,
+      "id": "chaos-process-stall-minimized-counterexample",
+      "description": "A process stall failure must emit a deterministic minimized counterexample packet.",
+      "lab": {
+        "seed": 340337,
+        "worker_count": 2,
+        "max_steps": 1000,
+        "trace_capacity": 4096,
+        "panic_on_obligation_leak": true,
+        "panic_on_futurelock": true
+      },
+      "participants": [
+        {
+          "name": "worker-a",
+          "role": "executor"
+        }
+      ],
+      "faults": [
+        {
+          "at_ms": 10,
+          "action": "process_stall",
+          "args": {
+            "host": "worker-a",
+            "duration_ms": 100
+          }
+        }
+      ],
+      "resource_caps": {
+        "max_artifact_bytes": 8192,
+        "max_fault_events": 4,
+        "max_counterexample_events": 4
+      },
+      "expected_invariants": [
+        "quiescence",
+        "losers_drained",
+        "deterministic_replay"
+      ],
+      "minimization": {
+        "enabled": true,
+        "max_evaluations": 16,
+        "max_counterexample_events": 4
+      },
+      "golden_projection": {
+        "format": "json",
+        "canonicalized": true,
+        "redacted": true
+      },
+      "metadata": {
+        "surface_contract_version": "chaos-scenario-dsl-contract-v1",
+        "semantics_status": "minimized_counterexample_packet"
+      }
+    },
+    "expected_effect_summary": {
+      "active_disk_pressure_bytes": 0,
+      "max_disk_pressure_bytes": 0,
+      "disk_pressure_events": 0,
+      "disk_pressure_by_path": {},
+      "delayed_cleanup_total_ms": 0,
+      "delayed_cleanup_phases": {},
+      "process_stall_total_ms": 100,
+      "active_stalled_participants": [
+        "worker-a"
+      ],
+      "stalled_participants_until_ms": {
+        "worker-a": 110
+      },
+      "resource_cap_breaches": []
+    },
+    "expected_counterexample": {
+      "scenario_id": "chaos-process-stall-minimized-counterexample",
+      "reason": "unresolved_process_stall",
+      "prefix_len": 1,
+      "fault_count": 1,
+      "max_counterexample_events": 4,
+      "active_stalled_participants": [
+        "worker-a"
+      ],
+      "fault_log_prefix": [
+        {
+          "at_ms": 10,
+          "action": "process_stall",
+          "args_summary": "duration_ms=100,host=worker-a",
+          "trace_message": "fault:process_stall:duration_ms=100,host=worker-a"
+        }
+      ],
+      "redacted": true
+    },
+    "forbidden_projection_markers": [
+      "/home/ubuntu/",
+      "Authorization: Bearer ",
+      "body_md",
+      "created_ts",
+      "ack_required"
+    ],
+    "proof_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_chaos_process_stall_counterexample CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test chaos_scenario_dsl_contract live_process_stall_minimized_counterexample_is_source_backed -- --nocapture"
+  },
   "required_invariants": [
     "quiescence",
     "losers_drained",
@@ -573,9 +690,9 @@
     {
       "scenario_id": "chaos-process-stall-minimized-counterexample",
       "description": "A process stall failure must emit a deterministic minimized counterexample packet.",
-      "live_runner_wired": false,
-      "report_status": "XFAIL",
-      "status_reason": "contracted only; process-stall minimization output is not wired yet",
+      "live_runner_wired": true,
+      "report_status": "LIVE",
+      "status_reason": "runner emits deterministic minimized counterexample packet for unresolved process stalls",
       "fault_dimensions": [
         "process_stall",
         "minimized_counterexample"
@@ -588,7 +705,7 @@
       "golden_strategy": "exact_canonicalized"
     }
   ],
-  "golden_markdown": "| scenario_id | status | fault_dimensions | expected_invariants |\n| --- | --- | --- | --- |\n| chaos-disk-pressure-cleanup-delay | LIVE | disk_pressure, delayed_cleanup, resource_caps | quiescence, no_obligation_leaks, bounded_artifact_output, deterministic_replay |\n| chaos-partition-cancel-storm | XFAIL | network_partition, cancellation_storm | quiescence, losers_drained, no_obligation_leaks, deterministic_replay |\n| chaos-process-stall-minimized-counterexample | XFAIL | process_stall, minimized_counterexample | quiescence, losers_drained, deterministic_replay |\n",
+  "golden_markdown": "| scenario_id | status | fault_dimensions | expected_invariants |\n| --- | --- | --- | --- |\n| chaos-disk-pressure-cleanup-delay | LIVE | disk_pressure, delayed_cleanup, resource_caps | quiescence, no_obligation_leaks, bounded_artifact_output, deterministic_replay |\n| chaos-partition-cancel-storm | XFAIL | network_partition, cancellation_storm | quiescence, losers_drained, no_obligation_leaks, deterministic_replay |\n| chaos-process-stall-minimized-counterexample | LIVE | process_stall, minimized_counterexample | quiescence, losers_drained, deterministic_replay |\n",
   "proof_commands": [
     "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_chaos_scenario_dsl_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test chaos_scenario_dsl_contract -- --nocapture"
   ]

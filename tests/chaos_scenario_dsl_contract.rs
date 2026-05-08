@@ -602,7 +602,7 @@ fn current_fault_actions_are_explicit_and_future_dimensions_fail_closed() {
     let rows = rows_by_scenario(&contract);
     assert!(rows["chaos-partition-cancel-storm"]["live_runner_wired"] == false);
     assert!(rows["chaos-disk-pressure-cleanup-delay"]["live_runner_wired"] == true);
-    assert!(rows["chaos-process-stall-minimized-counterexample"]["live_runner_wired"] == false);
+    assert!(rows["chaos-process-stall-minimized-counterexample"]["live_runner_wired"] == true);
 }
 
 #[test]
@@ -693,8 +693,13 @@ fn live_fault_action_validation_covers_disk_process_and_cleanup_dimensions() {
     );
     assert_eq!(
         rows["chaos-process-stall-minimized-counterexample"]["report_status"].as_str(),
-        Some("XFAIL"),
-        "runner semantics stay fail-closed until process stall minimization is wired"
+        Some("LIVE"),
+        "process-stall minimization is covered by the live counterexample probe"
+    );
+    assert_eq!(
+        rows["chaos-process-stall-minimized-counterexample"]["live_runner_wired"].as_bool(),
+        Some(true),
+        "process-stall row is live once minimized counterexample output is source-backed"
     );
 }
 
@@ -800,6 +805,101 @@ fn live_disk_pressure_cleanup_delay_uses_runner_effect_summary() {
         assert!(
             !rendered_effect_summary.contains(&forbidden),
             "effect summary projection must not expose raw coordination marker {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn live_process_stall_minimized_counterexample_is_source_backed() {
+    let contract = contract();
+    let probe = contract
+        .get("live_process_stall_minimized_counterexample")
+        .expect("live_process_stall_minimized_counterexample object");
+    assert_eq!(string(probe, "report_status"), "LIVE");
+
+    let rows = rows_by_scenario(&contract);
+    let row = rows
+        .get(string(probe, "scenario_id"))
+        .expect("process stall scenario row");
+    assert_eq!(string(row, "report_status"), "LIVE");
+    assert_eq!(row["live_runner_wired"].as_bool(), Some(true));
+
+    let source_path = string(probe, "source_path");
+    let source = std::fs::read_to_string(repo_path(source_path))
+        .unwrap_or_else(|error| panic!("read {source_path}: {error}"));
+    for marker in string_list(probe, "source_markers") {
+        assert!(
+            source.contains(&marker),
+            "scenario runner source must contain counterexample marker {marker}"
+        );
+    }
+
+    let raw_scenario = serde_json::to_string(
+        probe
+            .get("scenario")
+            .expect("live process stall scenario object"),
+    )
+    .expect("serialize live process stall scenario");
+    let scenario = Scenario::from_json(&raw_scenario).expect("parse process stall scenario");
+    assert!(
+        scenario.validate().is_empty(),
+        "process stall scenario must validate"
+    );
+
+    let result =
+        ScenarioRunner::validate_replay(&scenario).expect("process stall scenario must replay");
+    assert!(result.passed(), "process stall scenario must quiesce");
+    assert_eq!(result.faults_injected, scenario.faults.len());
+
+    let result_json = result.to_json();
+    for field in string_list(probe, "required_result_fields") {
+        assert!(
+            result_json.get(&field).is_some(),
+            "runner JSON result must include {field}"
+        );
+    }
+
+    let effect_summary = result.fault_effect_summary.to_json();
+    let expected_effect_summary = probe
+        .get("expected_effect_summary")
+        .expect("expected effect summary object");
+    assert_eq!(
+        &effect_summary, expected_effect_summary,
+        "process stall effect summary must remain exact and source-backed"
+    );
+
+    let counterexample = result
+        .minimized_counterexample
+        .as_ref()
+        .expect("unresolved process stall must emit counterexample packet");
+    let counterexample_json = counterexample.to_json();
+    let expected_counterexample = probe
+        .get("expected_counterexample")
+        .expect("expected counterexample object");
+    assert_eq!(
+        &counterexample_json, expected_counterexample,
+        "process stall counterexample packet must remain exact"
+    );
+    assert_eq!(result_json["minimized_counterexample"], counterexample_json);
+    assert!(
+        counterexample.prefix_len <= counterexample.max_counterexample_events,
+        "minimized prefix must respect max_counterexample_events"
+    );
+    assert_eq!(counterexample.reason, "unresolved_process_stall");
+    assert_eq!(
+        counterexample
+            .fault_log_prefix
+            .first()
+            .map(|entry| entry.action.as_str()),
+        Some("process_stall")
+    );
+
+    let rendered_counterexample =
+        serde_json::to_string(&counterexample_json).expect("render counterexample packet");
+    for forbidden in string_list(probe, "forbidden_projection_markers") {
+        assert!(
+            !rendered_counterexample.contains(&forbidden),
+            "counterexample projection must not expose raw coordination marker {forbidden}"
         );
     }
 }
