@@ -184,7 +184,7 @@ impl PartialEq for SecretString {
             let b = other.bytes.get(index).copied().unwrap_or(0);
             acc |= usize::from(a ^ b);
         }
-        acc == 0
+        core::hint::black_box(acc) == 0
     }
 }
 

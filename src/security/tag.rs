@@ -130,7 +130,7 @@ impl PartialEq for AuthenticationTag {
         for (lhs, rhs) in self.bytes.iter().zip(other.bytes.iter()) {
             diff |= lhs ^ rhs;
         }
-        diff == 0
+        core::hint::black_box(diff) == 0
     }
 }
 
