@@ -839,3 +839,123 @@ fn pg_real_listen_in_pg_stat_and_notify_succeeds_from_separate_connection_c8fvo3
         log.end("pass");
     });
 }
+
+/// Real-PG roundtrip pinning the extended-query *prepared statement
+/// reuse* contract: a single `prepare()` call followed by N
+/// `query_prepared()` calls must Parse the plan once and Bind/Execute
+/// it N times, NOT re-Parse on every call.
+///
+/// asupersync-ikskzn: existing real-PG tests cover basic SELECT,
+/// transactions, COPY FROM, cancel-in-flight, and LISTEN/NOTIFY but
+/// none exercise multi-call prepared statement reuse against a live
+/// backend. The reuse contract is what makes the extended-query
+/// protocol worth using vs. simple-query — if asupersync ever
+/// regresses to re-Parse on each call it would silently double the
+/// per-query latency. PG's `pg_prepared_statements` system view is
+/// the server-side ground truth: the named statement persists across
+/// calls, and only one row appears for the connection no matter how
+/// many `query_prepared()` calls fire.
+///
+/// Asserts:
+/// 1. Three calls with different param pairs return the correct sums.
+/// 2. `pg_prepared_statements` shows exactly one row for the
+///    connection's prepared statement (server-side proof of reuse).
+#[test]
+fn pg_real_prepare_and_query_prepared_reuse_observed_in_pg_stat_ikskzn() {
+    let cfg = RealPgConfig::from_env();
+    if skip_if_disabled(
+        &cfg,
+        "pg_real_prepare_and_query_prepared_reuse_observed_in_pg_stat_ikskzn",
+    ) {
+        return;
+    }
+    let log = PgTestLogger::new(
+        "postgres_real",
+        "pg_real_prepare_and_query_prepared_reuse_observed_in_pg_stat_ikskzn",
+    );
+
+    run_test_with_cx(|cx| async move {
+        log.phase("connect");
+        let mut conn = unwrap_pg(PgConnection::connect(&cx, &cfg.url).await, &log, "connect");
+
+        log.phase("prepare_int_sum");
+        let stmt = match conn.prepare(&cx, "SELECT $1::int4 + $2::int4 AS sum").await {
+            Outcome::Ok(s) => s,
+            other => {
+                log.line("prepare_error", &[("variant", outcome_label(&other))]);
+                log.end("fail");
+                panic!("prepare failed: {other:?}");
+            }
+        };
+
+        // Run the prepared statement THREE times with different
+        // parameter pairs. Each call goes through Bind/Describe/
+        // Execute/Sync against the SAME backend statement name —
+        // asupersync's internal cache must skip Parse on calls 2 and 3.
+        log.phase("query_prepared_1plus1");
+        let cases: [(i32, i32, i64); 3] = [(1, 1, 2), (10, 20, 30), (100, 200, 300)];
+        for (a, b, expected) in cases {
+            let params: &[&dyn asupersync::database::postgres::ToSql] = &[&a, &b];
+            let rows = match conn.query_prepared(&cx, &stmt, params).await {
+                Outcome::Ok(rows) => rows,
+                other => {
+                    log.line(
+                        "query_prepared_error",
+                        &[
+                            ("a", &a.to_string()),
+                            ("b", &b.to_string()),
+                            ("variant", outcome_label(&other)),
+                        ],
+                    );
+                    log.end("fail");
+                    panic!("query_prepared({a}, {b}) failed: {other:?}");
+                }
+            };
+            assert_eq!(rows.len(), 1, "expected one row for {a} + {b}");
+            // PG returns int4 + int4 = int4 (wraps mod 2^32), not int8 —
+            // but get_i32 vs get_i64 depends on the binding. Try both
+            // so the assertion isn't fragile against asupersync's
+            // numeric coercion choice.
+            let actual = rows[0]
+                .get_i64("sum")
+                .or_else(|_| rows[0].get_i32("sum").map(i64::from))
+                .expect("sum int");
+            log.assert_match(
+                &format!("sum_{a}+{b}"),
+                &expected.to_string(),
+                &actual.to_string(),
+            );
+            assert_eq!(
+                actual, expected,
+                "prepared statement returned wrong sum for ({a}, {b}): got {actual}, expected {expected}"
+            );
+        }
+
+        // Server-side proof of reuse: pg_prepared_statements shows
+        // every prepared statement currently active on the connection.
+        // If asupersync re-Parsed on each call (allocating new statement
+        // names), this view would show 3 rows instead of 1.
+        log.phase("verify_pg_prepared_statements_count");
+        let psrows = unwrap_pg(
+            conn.query_unchecked(
+                &cx,
+                "SELECT count(*)::int4 AS n FROM pg_prepared_statements",
+            )
+            .await,
+            &log,
+            "pg_prepared_statements",
+        );
+        assert_eq!(psrows.len(), 1, "expected one count row");
+        let n = psrows[0].get_i32("n").expect("n");
+        log.assert_match("prepared_statement_count", "1", &n.to_string());
+        assert_eq!(
+            n, 1,
+            "expected exactly one row in pg_prepared_statements after 3 query_prepared calls; \
+             got {n}. If this is > 1, asupersync may be re-Parsing on each call instead of \
+             reusing the named statement (review src/database/postgres.rs:5309 query_prepared \
+             and prepare cache invariants)."
+        );
+
+        log.end("pass");
+    });
+}
