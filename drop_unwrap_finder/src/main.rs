@@ -9,6 +9,12 @@ const RELATIVE_SCAN_DIRS: &[&str] = &[
     "asupersync-macros/src",
     "asupersync-tokio-compat/src",
     "asupersync-wasm/src",
+    "conformance/src",
+    "franken_kernel/src",
+    "franken_evidence/src",
+    "franken_decision/src",
+    "frankenlab/src",
+    "drop_unwrap_finder/src",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,19 +158,20 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{collect_drop_findings, dirs_to_check, workspace_root};
+    use super::{RELATIVE_SCAN_DIRS, collect_drop_findings, dirs_to_check, workspace_root};
 
     #[test]
     fn dirs_to_check_are_workspace_relative() {
         let root = workspace_root();
         let dirs = dirs_to_check();
 
-        assert_eq!(dirs[0], root.join("src"));
-        assert_eq!(dirs[1], root.join("asupersync-browser-core/src"));
-        assert!(
-            dirs.iter().take(4).all(|path| path.exists()),
-            "core satellite scan roots should resolve from the workspace root"
-        );
+        for (dir, relative) in dirs.iter().zip(RELATIVE_SCAN_DIRS) {
+            assert_eq!(dir, &root.join(relative));
+            assert!(
+                dir.exists(),
+                "{relative} scan root should resolve from the workspace root"
+            );
+        }
     }
 
     #[test]
