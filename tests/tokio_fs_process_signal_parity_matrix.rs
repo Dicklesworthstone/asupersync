@@ -1129,15 +1129,15 @@ fn t37c_08_shutdown_convergence() {
 #[test]
 fn matrix_t37_has_evidence_commands() {
     let doc = load_matrix_doc();
-    // All repro commands are rch-routed
+    // All repro commands are rch-routed through an explicit target directory.
     assert!(
-        doc.contains("rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t37c"),
+        doc.contains("rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_fs_process_signal_docs cargo test --test tokio_fs_process_signal_parity_matrix t37c"),
         "T3.7 section must include rch-routed conformance test command"
     );
     // Deterministic replay command for full suite
     assert!(
         doc.contains(
-            "rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix -- --nocapture"
+            "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_fs_process_signal_docs cargo test --test tokio_fs_process_signal_parity_matrix -- --nocapture"
         ),
         "T3.7 section must include full suite replay command"
     );
@@ -1450,21 +1450,21 @@ fn t39_replay_commands_are_rch_routed() {
     let doc = load_matrix_doc();
     // Full suite replay command
     assert!(
-        doc.contains("rch exec -- cargo test --test fs_verification --test e2e_fs"),
+        doc.contains("rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_fs_process_signal_docs cargo test --test fs_verification --test e2e_fs"),
         "T3.9 must include full-suite rch replay command"
     );
     // Per-bead replay commands
     assert!(
-        doc.contains("rch exec -- cargo test --test process_lifecycle_hardening"),
+        doc.contains("rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_fs_process_signal_docs cargo test --test process_lifecycle_hardening"),
         "T3.9 must include T3.4 per-bead replay command"
     );
     assert!(
-        doc.contains("rch exec -- cargo test --test tokio_cancel_safe_fs_process_signal"),
+        doc.contains("rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_fs_process_signal_docs cargo test --test tokio_cancel_safe_fs_process_signal"),
         "T3.9 must include T3.6 per-bead replay command"
     );
     // Inline test replay
     assert!(
-        doc.contains("rch exec -- cargo test --lib fs:: signal:: process"),
+        doc.contains("rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_fs_process_signal_docs cargo test --lib fs:: signal:: process"),
         "T3.9 must include inline unit test replay command"
     );
 }
@@ -1764,7 +1764,7 @@ fn json_includes_t310_drift_rule() {
 fn t310_replay_command_is_rch_routed() {
     let doc = load_matrix_doc();
     assert!(
-        doc.contains("rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t310"),
+        doc.contains("rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_fs_process_signal_docs cargo test --test tokio_fs_process_signal_parity_matrix t310"),
         "T3.10 must include rch-routed replay command"
     );
 }

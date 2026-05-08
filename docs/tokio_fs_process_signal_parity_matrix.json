@@ -252,7 +252,7 @@
       "artifacts": ["src/fs/vfs.rs", "tests/tokio_fs_process_signal_parity_matrix.rs"],
       "contract_tests": ["t37c_01_vfs_deterministic_seam"],
       "mapped_gap": "FS-G3",
-      "reproduction_command": "rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t37c_01 -- --nocapture"
+      "reproduction_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_fs_process_signal_docs cargo test --test tokio_fs_process_signal_parity_matrix t37c_01 -- --nocapture"
     },
     {
       "id": "T37C-02",
@@ -269,7 +269,7 @@
       "artifacts": ["src/fs/file.rs", "src/fs/mod.rs", "tests/tokio_fs_process_signal_parity_matrix.rs"],
       "contract_tests": ["t37c_02_fs_cancel_safety_protocol"],
       "mapped_gap": "FS-G2",
-      "reproduction_command": "rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t37c_02 -- --nocapture"
+      "reproduction_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_fs_process_signal_docs cargo test --test tokio_fs_process_signal_parity_matrix t37c_02 -- --nocapture"
     },
     {
       "id": "T37C-03",
@@ -286,7 +286,7 @@
       "artifacts": ["src/fs/path_ops.rs", "src/fs/mod.rs", "tests/tokio_fs_process_signal_parity_matrix.rs"],
       "contract_tests": ["t37c_03_atomic_write_error_fidelity"],
       "mapped_gap": "FS-G1",
-      "reproduction_command": "rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t37c_03 -- --nocapture"
+      "reproduction_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_fs_process_signal_docs cargo test --test tokio_fs_process_signal_parity_matrix t37c_03 -- --nocapture"
     },
     {
       "id": "T37C-04",
@@ -304,7 +304,7 @@
       "artifacts": ["src/process.rs", "tests/tokio_fs_process_signal_parity_matrix.rs"],
       "contract_tests": ["t37c_04_process_lifecycle_protocol"],
       "mapped_gap": "PR-G1",
-      "reproduction_command": "rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t37c_04 -- --nocapture"
+      "reproduction_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_fs_process_signal_docs cargo test --test tokio_fs_process_signal_parity_matrix t37c_04 -- --nocapture"
     },
     {
       "id": "T37C-05",
@@ -321,7 +321,7 @@
       "artifacts": ["src/process.rs", "tests/tokio_fs_process_signal_parity_matrix.rs"],
       "contract_tests": ["t37c_05_process_kill_on_drop"],
       "mapped_gap": "PR-G4",
-      "reproduction_command": "rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t37c_05 -- --nocapture"
+      "reproduction_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_fs_process_signal_docs cargo test --test tokio_fs_process_signal_parity_matrix t37c_05 -- --nocapture"
     },
     {
       "id": "T37C-06",
@@ -339,7 +339,7 @@
       "artifacts": ["src/process.rs", "tests/tokio_fs_process_signal_parity_matrix.rs"],
       "contract_tests": ["t37c_06_process_error_classification"],
       "mapped_gap": "PR-G3",
-      "reproduction_command": "rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t37c_06 -- --nocapture"
+      "reproduction_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_fs_process_signal_docs cargo test --test tokio_fs_process_signal_parity_matrix t37c_06 -- --nocapture"
     },
     {
       "id": "T37C-07",
@@ -357,7 +357,7 @@
       "artifacts": ["src/signal/signal.rs", "src/signal/kind.rs", "tests/tokio_fs_process_signal_parity_matrix.rs"],
       "contract_tests": ["t37c_07_signal_delivery_monotonicity"],
       "mapped_gap": "SG-G3",
-      "reproduction_command": "rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t37c_07 -- --nocapture"
+      "reproduction_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_fs_process_signal_docs cargo test --test tokio_fs_process_signal_parity_matrix t37c_07 -- --nocapture"
     },
     {
       "id": "T37C-08",
@@ -375,7 +375,7 @@
       "artifacts": ["src/signal/shutdown.rs", "src/signal/graceful.rs", "tests/tokio_fs_process_signal_parity_matrix.rs"],
       "contract_tests": ["t37c_08_shutdown_convergence"],
       "mapped_gap": "SG-G4",
-      "reproduction_command": "rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t37c_08 -- --nocapture"
+      "reproduction_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_fs_process_signal_docs cargo test --test tokio_fs_process_signal_parity_matrix t37c_08 -- --nocapture"
     }
   ],
   "fault_injection_scenarios": [
@@ -406,7 +406,7 @@
         "signal_recv_observes_delivery",
         "unix_raw_signal_mapping_covers_pipe_and_alarm"
       ],
-      "reproduction_command": "rch exec -- cargo test -p asupersync signal_recv_observes_delivery -- --nocapture"
+      "reproduction_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_fs_process_signal_docs cargo test -p asupersync signal_recv_observes_delivery -- --nocapture"
     },
     {
       "id": "SGC-02",
@@ -423,7 +423,7 @@
         "signal_creation_platform_contract",
         "ctrl_c_not_available"
       ],
-      "reproduction_command": "rch exec -- cargo test -p asupersync ctrl_c_not_available -- --nocapture"
+      "reproduction_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_fs_process_signal_docs cargo test -p asupersync ctrl_c_not_available -- --nocapture"
     },
     {
       "id": "SGC-03",
@@ -444,7 +444,7 @@
         "e2e_late_subscriber_sees_shutdown",
         "e2e_concurrent_shutdown_calls"
       ],
-      "reproduction_command": "rch exec -- cargo test -p asupersync --test e2e_signal -- --nocapture"
+      "reproduction_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_fs_process_signal_docs cargo test -p asupersync --test e2e_signal -- --nocapture"
     },
     {
       "id": "SGC-04",
@@ -471,7 +471,7 @@
         "json_signal_contract_pack_is_complete",
         "json_signal_contract_paths_and_commands_are_valid"
       ],
-      "reproduction_command": "rch exec -- cargo test -p asupersync --test tokio_fs_process_signal_parity_matrix -- --nocapture"
+      "reproduction_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_fs_process_signal_docs cargo test -p asupersync --test tokio_fs_process_signal_parity_matrix -- --nocapture"
     }
   ],
   "drift_detection_rules": [
@@ -650,12 +650,12 @@
     }
   },
   "ci_commands": [
-    "rch exec -- cargo test -p asupersync --test tokio_fs_process_signal_parity_matrix -- --nocapture",
-    "rch exec -- cargo test -p asupersync --test e2e_signal -- --nocapture",
-    "rch exec -- cargo test -p asupersync ctrl_c_not_available -- --nocapture",
-    "rch exec -- cargo test -p asupersync signal_recv_observes_delivery -- --nocapture",
-    "rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t37c -- --nocapture",
-    "rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t39 -- --nocapture",
-    "rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix t310 -- --nocapture"
+    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_fs_process_signal_docs cargo test -p asupersync --test tokio_fs_process_signal_parity_matrix -- --nocapture",
+    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_fs_process_signal_docs cargo test -p asupersync --test e2e_signal -- --nocapture",
+    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_fs_process_signal_docs cargo test -p asupersync ctrl_c_not_available -- --nocapture",
+    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_fs_process_signal_docs cargo test -p asupersync signal_recv_observes_delivery -- --nocapture",
+    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_fs_process_signal_docs cargo test --test tokio_fs_process_signal_parity_matrix t37c -- --nocapture",
+    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_fs_process_signal_docs cargo test --test tokio_fs_process_signal_parity_matrix t39 -- --nocapture",
+    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_fs_process_signal_docs cargo test --test tokio_fs_process_signal_parity_matrix t310 -- --nocapture"
   ]
 }
