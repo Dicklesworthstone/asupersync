@@ -50,7 +50,8 @@
     "manifest_guarantee_ids",
     "proof_commands",
     "blocked_frontier",
-    "doc_claim_markers"
+    "doc_claim_markers",
+    "broad_claim"
   ],
   "lane_row_required_fields": [
     "lane_id",
@@ -106,6 +107,10 @@
     {
       "reason_id": "raw-coordination-data",
       "description": "The report must not expose unredacted Agent Mail bodies, local home paths, or shell transcripts with secrets."
+    },
+    {
+      "reason_id": "invalid-verdict",
+      "description": "The report verdict must be one of operator_verdicts, and pass is only valid when no fail-closed condition is active."
     }
   ],
   "operator_verdicts": [

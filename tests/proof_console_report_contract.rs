@@ -58,8 +58,31 @@ fn allowed_set(contract: &Value, key: &str) -> BTreeSet<String> {
     string_set(contract, key)
 }
 
+fn operator_verdicts(contract: &Value) -> BTreeSet<String> {
+    array(contract, "operator_verdicts")
+        .iter()
+        .map(|row| string(row, "verdict").to_string())
+        .collect()
+}
+
 fn required_report_keys(contract: &Value) -> BTreeSet<String> {
     string_set(contract, "required_report_fields")
+}
+
+fn report_contains_raw_coordination_data(report: &Value) -> bool {
+    let serialized = serde_json::to_string(report).expect("serialize report fixture");
+    [
+        "/home/ubuntu/",
+        "\"body_md\"",
+        "ack_required",
+        "sender_token",
+        "BEGIN OPENSSH PRIVATE KEY",
+        "AWS_SECRET_ACCESS_KEY",
+        "GITHUB_TOKEN=",
+        "Authorization: Bearer ",
+    ]
+    .iter()
+    .any(|marker| serialized.contains(marker))
 }
 
 fn valid_report() -> Value {
@@ -137,6 +160,7 @@ fn validate_report(contract: &Value, report: &Value) -> Vec<String> {
     let allowed_lane_statuses = allowed_set(contract, "allowed_lane_statuses");
     let allowed_claim_statuses = allowed_set(contract, "allowed_claim_statuses");
     let allowed_outcomes = allowed_set(contract, "allowed_rch_outcome_classes");
+    let allowed_verdicts = operator_verdicts(contract);
 
     for field in string_set(contract, "summary_required_fields") {
         if report["summary"].get(&field).is_none() {
@@ -183,7 +207,10 @@ fn validate_report(contract: &Value, report: &Value) -> Vec<String> {
                 .get("file")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            if generated_at < "2026-05-08T00:00:00Z" || file.is_empty() || line.is_none() {
+            if generated_at < "2026-05-08T00:00:00Z"
+                || file.trim().is_empty()
+                || line.unwrap_or(0) == 0
+            {
                 failures.push(format!("stale-blocker-row:{claim_id}"));
             }
         }
@@ -215,6 +242,20 @@ fn validate_report(contract: &Value, report: &Value) -> Vec<String> {
         if !allowed_outcomes.contains(outcome_class) {
             failures.push(format!("unclassified-rch-outcome:{command}"));
         }
+    }
+
+    if report_contains_raw_coordination_data(report) {
+        failures.push("raw-coordination-data".to_string());
+    }
+
+    let verdict = report
+        .get("verdict")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !allowed_verdicts.contains(verdict) {
+        failures.push(format!("unknown-verdict:{verdict}"));
+    } else if verdict == "pass" && !failures.is_empty() {
+        failures.push("inconsistent-verdict:pass-with-failures".to_string());
     }
 
     failures
@@ -276,6 +317,7 @@ fn contract_names_fail_closed_conditions_for_operator_review() {
         "unclassified-rch-outcome",
         "missing-source-artifact-hash",
         "raw-coordination-data",
+        "invalid-verdict",
     ] {
         assert!(reasons.contains(required), "missing reason {required}");
     }
@@ -319,7 +361,7 @@ fn stale_blocker_rows_are_rejected() {
         "command": "rch exec -- cargo test -p asupersync --lib",
         "first_failure": {
             "file": "src/runtime/scheduler/three_lane.rs",
-            "line": 0
+            "line": 44
         }
     });
     report["verdict"] = json!("fail_closed");
@@ -330,6 +372,33 @@ fn stale_blocker_rows_are_rejected() {
             .iter()
             .any(|failure| failure.starts_with("stale-blocker-row:")),
         "stale blocker rows must fail closed: {failures:?}"
+    );
+}
+
+#[test]
+fn blocker_rows_need_positive_line_evidence() {
+    let contract = contract();
+    let mut report = valid_report();
+    report["summary"]["red_claim_count"] = json!(1);
+    report["summary"]["green_claim_count"] = json!(0);
+    report["summary"]["stale_blocker_count"] = json!(1);
+    report["claim_rows"][0]["status"] = json!("red_blocked_external");
+    report["claim_rows"][0]["blocked_frontier"] = json!({
+        "generated_at": "2026-05-08T12:00:00Z",
+        "command": "rch exec -- cargo test -p asupersync --lib",
+        "first_failure": {
+            "file": "src/runtime/scheduler/three_lane.rs",
+            "line": 0
+        }
+    });
+    report["verdict"] = json!("fail_closed");
+
+    let failures = validate_report(&contract, &report);
+    assert!(
+        failures
+            .iter()
+            .any(|failure| failure.starts_with("stale-blocker-row:")),
+        "line 0 blocker evidence must fail closed: {failures:?}"
     );
 }
 
@@ -351,6 +420,24 @@ fn unsupported_broad_claims_are_rejected() {
 }
 
 #[test]
+fn claim_rows_must_classify_broad_claim_scope() {
+    let contract = contract();
+    let mut report = valid_report();
+    report["claim_rows"][0]
+        .as_object_mut()
+        .expect("claim row object")
+        .remove("broad_claim");
+
+    let failures = validate_report(&contract, &report);
+    assert!(
+        failures
+            .iter()
+            .any(|failure| failure.ends_with(":broad_claim")),
+        "missing broad_claim classifier must fail closed: {failures:?}"
+    );
+}
+
+#[test]
 fn unclassified_rch_outcomes_are_rejected() {
     let contract = contract();
     let mut report = valid_report();
@@ -364,6 +451,58 @@ fn unclassified_rch_outcomes_are_rejected() {
             .iter()
             .any(|failure| failure.starts_with("unclassified-rch-outcome:")),
         "unclassified rch outcomes must fail closed: {failures:?}"
+    );
+}
+
+#[test]
+fn raw_coordination_data_is_rejected() {
+    let contract = contract();
+    let mut report = valid_report();
+    report["failure_reasons"] = json!([
+        {
+            "reason_id": "debug-dump",
+            "text": "Agent Mail body_md copied from /home/ubuntu/.cache with Authorization: Bearer secret"
+        }
+    ]);
+    report["verdict"] = json!("fail_closed");
+
+    let failures = validate_report(&contract, &report);
+    assert!(
+        failures
+            .iter()
+            .any(|failure| failure == "raw-coordination-data"),
+        "raw coordination data must fail closed: {failures:?}"
+    );
+}
+
+#[test]
+fn invalid_operator_verdicts_are_rejected() {
+    let contract = contract();
+    let mut report = valid_report();
+    report["verdict"] = json!("optimistic");
+
+    let failures = validate_report(&contract, &report);
+    assert!(
+        failures
+            .iter()
+            .any(|failure| failure == "unknown-verdict:optimistic"),
+        "unknown verdict must fail closed: {failures:?}"
+    );
+}
+
+#[test]
+fn pass_verdict_is_rejected_when_failures_are_present() {
+    let contract = contract();
+    let mut report = valid_report();
+    report["summary"]["unclassified_rch_outcome_count"] = json!(1);
+    report["rch_outcomes"][0]["outcome_class"] = json!("mystery-wrapper-state");
+
+    let failures = validate_report(&contract, &report);
+    assert!(
+        failures
+            .iter()
+            .any(|failure| failure == "inconsistent-verdict:pass-with-failures"),
+        "pass verdict with active failures must fail closed: {failures:?}"
     );
 }
 
