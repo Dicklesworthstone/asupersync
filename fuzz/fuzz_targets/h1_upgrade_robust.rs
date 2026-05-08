@@ -1,6 +1,7 @@
 #![no_main]
 
 use asupersync::bytes::BytesMut;
+use asupersync::codec::Decoder;
 use asupersync::http::h1::codec::Http1Codec;
 use libfuzzer_sys::fuzz_target;
 

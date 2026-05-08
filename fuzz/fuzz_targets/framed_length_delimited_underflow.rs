@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use asupersync::{
-    codec::{FramedRead, length_delimited::LengthDelimitedCodecBuilder},
+    codec::{Decoder, FramedRead, length_delimited::LengthDelimitedCodecBuilder},
     cx::Cx,
     io::{AsyncRead, ReadBuf},
 };

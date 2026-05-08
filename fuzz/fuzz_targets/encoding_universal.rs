@@ -11,11 +11,11 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::config::EncodingConfig;
-use asupersync::encoding::{EncodedSymbol, EncodingError, EncodingPipeline};
+use asupersync::encoding::{EncodingError, EncodingPipeline};
 use asupersync::types::ObjectId;
 use asupersync::types::resource::{PoolConfig, SymbolPool};
 use libfuzzer_sys::fuzz_target;
-use std::io::{self, ErrorKind};
+use std::io;
 
 /// Maximum frame size to prevent memory exhaustion during fuzzing
 const MAX_FRAME_SIZE: usize = 1024 * 1024; // 1MB
@@ -124,6 +124,8 @@ fn fuzz_raw_encoding(bytes: &[u8]) {
             symbol_size: 64,
             max_block_size: 1024,
             repair_overhead: 1.2,
+            encoding_parallelism: 1,
+            decoding_parallelism: 1,
         };
         let pool = SymbolPool::new(PoolConfig::default());
         let mut pipeline = EncodingPipeline::new(config, pool);
