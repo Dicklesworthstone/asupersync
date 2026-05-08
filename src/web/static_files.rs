@@ -348,7 +348,31 @@ impl StaticFiles {
             return Response::empty(StatusCode::PAYLOAD_TOO_LARGE);
         }
 
-        // Parse Range header
+        // br-asupersync-42wywh: RFC 9110 §13.2.2 — "An origin server
+        // that supports Range MUST evaluate the request preconditions
+        // before doing so." Read the body and compute the ETag first
+        // so a matching If-None-Match returns 304 even when the Range
+        // header is malformed or unsatisfiable. Pre-fix the Range
+        // parser ran first and short-circuited to 416, forcing
+        // already-cached clients into a needless full refetch.
+        let mut file_content = Vec::new();
+        if file.read_to_end(&mut file_content).is_err() {
+            return Response::empty(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+        let etag = generate_etag(&file_content);
+
+        if let Some(client_etag) = if_none_match {
+            if etag_matches(client_etag, &etag) {
+                return self.apply_custom_headers(
+                    Response::empty(StatusCode::NOT_MODIFIED)
+                        .header("etag", &etag)
+                        .header("cache-control", format!("public, max-age={}", self.max_age))
+                        .header("accept-ranges", "bytes"),
+                );
+            }
+        }
+
+        // Parse Range header (after preconditions per RFC 9110 §13.2.2).
         let ranges = match parse_ranges(range_header, file_size) {
             Ok(ranges) if !ranges.is_empty() => ranges,
             Ok(_) | Err(RangeError::InvalidSyntax) => {
@@ -367,24 +391,6 @@ impl StaticFiles {
                 );
             }
         };
-
-        // Check If-None-Match for conditional requests
-        let mut file_content = Vec::new();
-        if file.read_to_end(&mut file_content).is_err() {
-            return Response::empty(StatusCode::INTERNAL_SERVER_ERROR);
-        }
-        let etag = generate_etag(&file_content);
-
-        if let Some(client_etag) = if_none_match {
-            if etag_matches(client_etag, &etag) {
-                return self.apply_custom_headers(
-                    Response::empty(StatusCode::NOT_MODIFIED)
-                        .header("etag", &etag)
-                        .header("cache-control", format!("public, max-age={}", self.max_age))
-                        .header("accept-ranges", "bytes"),
-                );
-            }
-        }
 
         if let [range] = ranges.as_slice() {
             // Single range - return 206 Partial Content
@@ -1152,6 +1158,98 @@ mod tests {
         assert_eq!(
             resp.headers.get("x-content-type-options").unwrap(),
             "nosniff"
+        );
+    }
+
+    /// br-asupersync-42wywh — RFC 9110 §13.2.2 requires preconditions
+    /// (If-None-Match in particular) to be evaluated BEFORE Range
+    /// processing. Pre-fix: an unsatisfiable / malformed Range header
+    /// short-circuited to 416 even when If-None-Match matched the
+    /// current ETag, forcing clients into a needless full refetch on
+    /// the next request. Post-fix: If-None-Match wins → 304 Not Modified.
+    #[test]
+    fn serve_range_with_matching_if_none_match_prefers_304_over_416() {
+        let dir = setup_dir();
+        let sf = StaticFiles::new(dir.path());
+        let path = sf.resolve_path("/hello.txt").unwrap();
+
+        // Capture the current ETag from a plain GET so we can replay
+        // the matching If-None-Match below.
+        let etag = sf
+            .serve_file(&path, None)
+            .headers
+            .get("etag")
+            .expect("etag must be present")
+            .clone();
+
+        // Range that is provably unsatisfiable: file is 13 bytes, the
+        // requested range starts well past EOF. parse_ranges returns
+        // NotSatisfiable, which the pre-fix path short-circuited to
+        // 416 before checking If-None-Match.
+        let resp = sf.serve_range(&path, "bytes=99999-100000", Some(&etag));
+
+        assert_eq!(
+            resp.status,
+            StatusCode::NOT_MODIFIED,
+            "If-None-Match must be evaluated before Range (RFC 9110 §13.2.2); \
+             matching ETag must yield 304, not 416. Got status={:?}",
+            resp.status,
+        );
+        assert!(resp.body.is_empty(), "304 responses MUST NOT carry a body",);
+        assert_eq!(
+            resp.headers.get("etag").map(String::as_str),
+            Some(etag.as_str()),
+            "304 must echo the ETag",
+        );
+        assert!(
+            !resp.headers.contains_key("content-range"),
+            "304 must not carry Content-Range; got {:?}",
+            resp.headers.get("content-range"),
+        );
+    }
+
+    /// br-asupersync-42wywh — same precondition-ordering requirement
+    /// for the syntactically-malformed Range case (`bytes=abc-def`).
+    /// The matching If-None-Match takes precedence; 304, not 416.
+    #[test]
+    fn serve_range_invalid_syntax_with_matching_if_none_match_returns_304() {
+        let dir = setup_dir();
+        let sf = StaticFiles::new(dir.path());
+        let path = sf.resolve_path("/hello.txt").unwrap();
+
+        let etag = sf
+            .serve_file(&path, None)
+            .headers
+            .get("etag")
+            .expect("etag must be present")
+            .clone();
+
+        let resp = sf.serve_range(&path, "bytes=abc-def", Some(&etag));
+
+        assert_eq!(
+            resp.status,
+            StatusCode::NOT_MODIFIED,
+            "If-None-Match must trump even a malformed Range header per \
+             RFC 9110 §13.2.2; got status={:?}",
+            resp.status,
+        );
+    }
+
+    /// br-asupersync-42wywh — counter test: a non-matching If-None-Match
+    /// with an unsatisfiable Range still yields 416. The fix must NOT
+    /// regress the existing behavior when the precondition is false.
+    #[test]
+    fn serve_range_unsatisfiable_with_non_matching_if_none_match_still_416() {
+        let dir = setup_dir();
+        let sf = StaticFiles::new(dir.path());
+        let path = sf.resolve_path("/hello.txt").unwrap();
+
+        let resp = sf.serve_range(&path, "bytes=99999-100000", Some("\"not-the-etag\""));
+
+        assert_eq!(
+            resp.status,
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            "Non-matching If-None-Match must NOT prevent the 416 path",
         );
     }
 
