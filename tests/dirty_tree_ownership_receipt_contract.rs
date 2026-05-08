@@ -233,6 +233,17 @@ fn recent_message_can_assign_peer_owner_without_reservation() {
 }
 
 #[test]
+fn message_owner_matches_full_output_golden() {
+    let actual_text = receipt_stdout("message_owner.json");
+    let expected_text = fixture_text("message_owner_expected.json");
+    let actual_json: Value = serde_json::from_str(&actual_text).expect("actual receipt JSON");
+    let expected_json: Value = serde_json::from_str(&expected_text).expect("expected receipt JSON");
+
+    assert_eq!(actual_json, expected_json);
+    assert_eq!(actual_text, expected_text);
+}
+
+#[test]
 fn unavailable_agent_mail_leaves_path_unattributed() {
     let receipt = receipt_json("no_agent_mail.json");
     let row = row(&receipt, "src/unknown.rs");
