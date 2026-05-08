@@ -49,6 +49,23 @@ fn fixture_text(fixture: &str) -> String {
         .unwrap_or_else(|err| panic!("read fixture {fixture}: {err}"))
 }
 
+fn assert_output_matches_golden(output: Output, expected_fixture: &str, drift_message: &str) {
+    assert!(
+        output.status.success(),
+        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actual = String::from_utf8(output.stdout).expect("receipt stdout must be UTF-8");
+    let expected = fixture_text(expected_fixture);
+
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
+    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
+    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
+    assert_eq!(actual, expected, "{drift_message}");
+}
+
 fn first_row(receipt: &Value) -> &Value {
     receipt["rows"]
         .as_array()
@@ -108,22 +125,10 @@ fn landed_with_tracker_conflict_waits_for_closeout_window() {
 #[test]
 fn tracker_conflict_matches_full_output_golden() {
     let output = run_receipt("landed_tracker_conflict.json");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let actual = String::from_utf8(output.stdout).expect("receipt stdout must be UTF-8");
-    let expected = fixture_text("landed_tracker_conflict_expected.json");
-
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
-    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
-    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
-    assert_eq!(
-        actual, expected,
-        "landed-but-open tracker-conflict receipt changed; update the golden only after reviewing wait-for-tracker semantics"
+    assert_output_matches_golden(
+        output,
+        "landed_tracker_conflict_expected.json",
+        "landed-but-open tracker-conflict receipt changed; update the golden only after reviewing wait-for-tracker semantics",
     );
 }
 
@@ -145,44 +150,20 @@ fn landed_without_tracker_conflict_is_ready_to_close() {
 #[test]
 fn ready_to_close_matches_full_output_golden() {
     let output = run_receipt("ready_to_close.json");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let actual = String::from_utf8(output.stdout).expect("receipt stdout must be UTF-8");
-    let expected = fixture_text("ready_to_close_expected.json");
-
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
-    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
-    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
-    assert_eq!(
-        actual, expected,
-        "landed-but-open ready closeout receipt changed; update the golden only after reviewing closeout command and evidence semantics"
+    assert_output_matches_golden(
+        output,
+        "ready_to_close_expected.json",
+        "landed-but-open ready closeout receipt changed; update the golden only after reviewing closeout command and evidence semantics",
     );
 }
 
 #[test]
 fn missing_proof_matches_full_output_golden() {
     let output = run_receipt("missing_proof.json");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let actual = String::from_utf8(output.stdout).expect("receipt stdout must be UTF-8");
-    let expected = fixture_text("missing_proof_expected.json");
-
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
-    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
-    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
-    assert_eq!(
-        actual, expected,
-        "landed-but-open missing-proof receipt changed; update the golden only after reviewing verification-before-close semantics"
+    assert_output_matches_golden(
+        output,
+        "missing_proof_expected.json",
+        "landed-but-open missing-proof receipt changed; update the golden only after reviewing verification-before-close semantics",
     );
 }
 
@@ -213,22 +194,10 @@ fn no_commit_reference_is_not_landed() {
 #[test]
 fn no_commit_reference_matches_full_output_golden() {
     let output = run_receipt("no_commit_reference.json");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let actual = String::from_utf8(output.stdout).expect("receipt stdout must be UTF-8");
-    let expected = fixture_text("no_commit_reference_expected.json");
-
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
-    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
-    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
-    assert_eq!(
-        actual, expected,
-        "landed-but-open no-commit receipt changed; update the golden only after reviewing keep-open semantics"
+    assert_output_matches_golden(
+        output,
+        "no_commit_reference_expected.json",
+        "landed-but-open no-commit receipt changed; update the golden only after reviewing keep-open semantics",
     );
 }
 
@@ -278,44 +247,20 @@ fn multi_issue_filter_matches_full_output_golden() {
         .current_dir(repo_root())
         .output()
         .expect("run filtered receipt");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let actual = String::from_utf8(output.stdout).expect("receipt stdout must be UTF-8");
-    let expected = fixture_text("multi_issue_filtered_expected.json");
-
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
-    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
-    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
-    assert_eq!(
-        actual, expected,
-        "landed-but-open multi-issue filter receipt changed; update the golden only after reviewing bead-id filtering and closeout semantics"
+    assert_output_matches_golden(
+        output,
+        "multi_issue_filtered_expected.json",
+        "landed-but-open multi-issue filter receipt changed; update the golden only after reviewing bead-id filtering and closeout semantics",
     );
 }
 
 #[test]
 fn multi_issue_matches_full_output_golden() {
     let output = run_receipt("multi_issue.json");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let actual = String::from_utf8(output.stdout).expect("receipt stdout must be UTF-8");
-    let expected = fixture_text("multi_issue_expected.json");
-
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
-    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
-    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
-    assert_eq!(
-        actual, expected,
-        "landed-but-open multi-issue receipt changed; update the golden only after reviewing closeout summary semantics"
+    assert_output_matches_golden(
+        output,
+        "multi_issue_expected.json",
+        "landed-but-open multi-issue receipt changed; update the golden only after reviewing closeout summary semantics",
     );
 }
 
