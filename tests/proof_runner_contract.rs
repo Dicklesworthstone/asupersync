@@ -102,6 +102,7 @@ fn proof_runner_can_list_available_lanes() {
 
 #[test]
 fn proof_runner_list_lanes_matches_exact_reviewed_golden() {
+    let expected_fixture = "list_lanes_expected.json";
     let output = run_proof_runner(&["--list-lanes", "--output", "json"])
         .expect("proof runner should execute");
     assert!(
@@ -112,13 +113,17 @@ fn proof_runner_list_lanes_matches_exact_reviewed_golden() {
         String::from_utf8_lossy(&output.stderr)
     );
     let actual = String::from_utf8(output.stdout).expect("proof runner stdout must be UTF-8");
-    let expected = fixture_text("list_lanes_expected.json");
+    let expected = fixture_text(expected_fixture);
 
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual list-lanes JSON");
-    let expected_json: Value = serde_json::from_str(&expected).expect("golden list-lanes JSON");
+    let actual_json: Value = serde_json::from_str(&actual).unwrap_or_else(|error| {
+        panic!("actual proof-runner list-lanes JSON for {expected_fixture}: {error}")
+    });
+    let expected_json: Value = serde_json::from_str(&expected).unwrap_or_else(|error| {
+        panic!("golden proof-runner list-lanes JSON {expected_fixture}: {error}")
+    });
     assert_eq!(
         actual_json, expected_json,
-        "parsed proof-runner lane list JSON drifted from list_lanes_expected.json"
+        "parsed proof-runner lane list JSON drifted from {expected_fixture}"
     );
     assert_eq!(
         actual, expected,
