@@ -62,11 +62,34 @@ fn json_string_field<'a>(value: &'a JsonValue, key: &str) -> &'a str {
         .unwrap_or_else(|| panic!("{key} must be a string"))
 }
 
+fn assert_target_dir_rch_cargo_command(label: &str, command: &str) {
+    assert!(
+        !command.starts_with("rch exec -- cargo "),
+        "{label} must not use bare rch cargo routing: {command}"
+    );
+    assert!(
+        command.starts_with("rch exec -- env "),
+        "{label} must route through rch env: {command}"
+    );
+    assert!(
+        command.contains("CARGO_TARGET_DIR="),
+        "{label} must pin CARGO_TARGET_DIR: {command}"
+    );
+    assert!(
+        command.contains(" cargo "),
+        "{label} must invoke cargo after the rch env prefix: {command}"
+    );
+}
+
 fn cargo_args_from_rch_command(command: &str) -> Vec<&str> {
-    let cargo_command = command
-        .strip_prefix("rch exec -- cargo ")
-        .unwrap_or_else(|| panic!("proof command must start with `rch exec -- cargo `: {command}"));
-    cargo_command.split_whitespace().collect()
+    assert_target_dir_rch_cargo_command("proof command", command);
+    let mut parts = command.split_whitespace();
+    for part in parts.by_ref() {
+        if part == "cargo" {
+            return parts.collect();
+        }
+    }
+    panic!("proof command must include cargo after rch env prefix: {command}");
 }
 
 fn no_tokio_signal_present(output: &str, expected_signal: &str) -> bool {
@@ -196,7 +219,13 @@ fn boundary_contract_records_default_metrics_and_fuzz_proofs() {
         let command = guarantee["proof_command"]
             .as_str()
             .expect("proof_command string");
-        assert!(command.starts_with("rch exec -- cargo tree "));
+        assert_target_dir_rch_cargo_command("production guarantee proof_command", command);
+        let args = cargo_args_from_rch_command(command);
+        assert_eq!(
+            args.first().copied(),
+            Some("tree"),
+            "production guarantee proof_command must invoke cargo tree"
+        );
         assert_eq!(
             guarantee.get("status").and_then(JsonValue::as_str),
             Some("tokio_free_normal_graph")
@@ -220,6 +249,14 @@ fn boundary_contract_records_default_metrics_and_fuzz_proofs() {
     assert_eq!(
         fuzz.get("status").and_then(JsonValue::as_str),
         Some("tokio_carrying_quarantined")
+    );
+    let fuzz_command = json_string_field(fuzz, "proof_command");
+    assert_target_dir_rch_cargo_command("fuzz quarantine proof_command", fuzz_command);
+    let fuzz_args = cargo_args_from_rch_command(fuzz_command);
+    assert_eq!(
+        fuzz_args.first().copied(),
+        Some("tree"),
+        "fuzz quarantine proof_command must invoke cargo tree"
     );
     let fragments = json_string_set(fuzz, "expected_path_fragments");
     for required in ["opentelemetry-proto", "tonic", "tonic-prost", "tokio"] {

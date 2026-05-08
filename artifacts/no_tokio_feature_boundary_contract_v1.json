@@ -20,14 +20,14 @@
       "profile": "default-production",
       "feature_args": "",
       "status": "tokio_free_normal_graph",
-      "proof_command": "rch exec -- cargo tree -e normal -p asupersync -i tokio",
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_no_tokio_feature_boundary_default cargo tree -e normal -p asupersync -i tokio",
       "expected_signal": "warning: nothing to print."
     },
     {
       "profile": "metrics-production",
       "feature_args": "--features metrics",
       "status": "tokio_free_normal_graph",
-      "proof_command": "rch exec -- cargo tree -e normal -p asupersync --features metrics -i tokio",
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_no_tokio_feature_boundary_metrics cargo tree -e normal -p asupersync --features metrics -i tokio",
       "expected_signal": "warning: nothing to print."
     }
   ],
@@ -36,7 +36,7 @@
       "profile": "fuzz",
       "feature_args": "--features fuzz",
       "status": "tokio_carrying_quarantined",
-      "proof_command": "rch exec -- cargo tree -e normal -p asupersync --features fuzz -i tokio",
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_no_tokio_feature_boundary_fuzz cargo tree -e normal -p asupersync --features fuzz -i tokio",
       "expected_path_fragments": [
         "opentelemetry-proto",
         "tonic",
