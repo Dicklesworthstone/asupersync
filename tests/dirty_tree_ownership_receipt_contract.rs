@@ -68,7 +68,10 @@ fn assert_receipt_output_matches_golden(fixture: &str, expected_fixture: &str) {
     let actual_json: Value = serde_json::from_str(&actual_text).expect("actual receipt JSON");
     let expected_json: Value = serde_json::from_str(&expected_text).expect("expected receipt JSON");
 
-    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
+    assert_eq!(
+        actual_json, expected_json,
+        "parsed dirty-tree ownership receipt JSON drifted for {fixture} -> {expected_fixture}"
+    );
     assert_eq!(
         actual_text, expected_text,
         "dirty-tree ownership receipt {expected_fixture} changed; update the golden only after reviewing dirty ownership semantics"
