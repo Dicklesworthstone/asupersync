@@ -419,14 +419,25 @@ fn doc_binds_downstream_beads() -> std::io::Result<()> {
 fn doc_requires_rch_validation_commands() -> std::io::Result<()> {
     let doc = load_doc()?;
     for token in [
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_taxonomy_docs cargo fmt --check",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_taxonomy_docs cargo check --all-targets",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_taxonomy_docs cargo clippy --all-targets -- -D warnings",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_taxonomy_docs cargo test --test lab_live_verification_taxonomy_contract -- --nocapture",
+    ] {
+        assert!(
+            doc.contains(token),
+            "document missing validation command: {token}"
+        );
+    }
+    for stale in [
         "rch exec -- cargo fmt --check",
         "rch exec -- cargo check --all-targets",
         "rch exec -- cargo clippy --all-targets -- -D warnings",
         "rch exec -- cargo test --test lab_live_verification_taxonomy_contract -- --nocapture",
     ] {
         assert!(
-            doc.contains(token),
-            "document missing validation command: {token}"
+            !doc.contains(stale),
+            "document must not reintroduce bare rch cargo routing: {stale}"
         );
     }
     Ok(())
