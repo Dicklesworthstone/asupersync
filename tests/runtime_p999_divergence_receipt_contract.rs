@@ -66,11 +66,11 @@ fn assert_receipt_matches_full_reviewed_golden(
         serde_json::from_str(&expected).expect("golden receipt must be JSON");
     assert_eq!(
         actual_json, expected_json,
-        "parsed runtime p999 receipt JSON drifted for {label}"
+        "parsed runtime p999 receipt JSON drifted for {label} ({input_fixture} against {expected_fixture})"
     );
     assert_eq!(
         actual, expected,
-        "{label} runtime p999 receipt drifted from the reviewed golden"
+        "{label} runtime p999 receipt drifted from reviewed golden {expected_fixture}"
     );
 }
 
