@@ -141,6 +141,13 @@ class ValidationArtifactFreshnessContract(unittest.TestCase):
             ["tests/rch_retrieval_receipt_contract.rs"],
         )
 
+    def test_nested_validation_frontier_output_matches_full_reviewed_golden(self) -> None:
+        output = run_receipt_output("nested_validation_frontier_artifact.json")
+        expected = fixture_text("nested_validation_frontier_artifact_expected.json")
+
+        self.assertEqual(output.stdout, expected)
+        self.assertEqual(json.loads(output.stdout), json.loads(expected))
+
     def test_helper_declares_it_does_not_mutate_project_state(self) -> None:
         receipt = run_receipt("current_artifact.json")
 
