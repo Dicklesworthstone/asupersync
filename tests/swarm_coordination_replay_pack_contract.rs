@@ -61,7 +61,10 @@ fn assert_replay_output_matches_golden(input_fixture: &str, expected_fixture: &s
         serde_json::from_str(&actual).expect("actual replay output must be JSON");
     let expected_json: Value =
         serde_json::from_str(&expected).expect("golden replay output must be JSON");
-    assert_eq!(actual_json, expected_json);
+    assert_eq!(
+        actual_json, expected_json,
+        "parsed swarm replay JSON drifted for {input_fixture} -> {expected_fixture}"
+    );
     assert_eq!(
         actual, expected,
         "{label} receipt drifted from the reviewed golden"
