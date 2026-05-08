@@ -6,13 +6,13 @@ This crate provides conformance testing against reference implementations to ens
 
 ### HTTP/2 CONTINUATION Frame Ordering (`h2_continuation_ordering_conformance`)
 
-**Purpose:** Tests HEADERS + CONTINUATION frame sequence handling between asupersync and h2 crate reference implementation to ensure identical HeaderMap decoding.
+**Purpose:** Tests HEADERS + CONTINUATION frame sequence handling through the asupersync parser and fails closed until an independent live h2/HPACK reference seam is wired.
 
 **Key Features:**
-- Differential testing against h2 crate reference implementation
+- Explicit `xfail-no-live-h2-hpack-reference` status instead of mocked h2 differential success
 - Comprehensive test cases covering RFC 9113 Section 6.10 requirements
 - Frame size boundary testing (small frames forcing multiple CONTINUATION frames)
-- Header block reconstruction and HPACK decoding consistency validation
+- Header block reconstruction and HPACK decoding sanity coverage for the asupersync path
 - Support for various output formats (JSON, Markdown, Summary)
 
 **Test Scenarios:**
@@ -67,9 +67,9 @@ The test harness creates realistic HEADERS + CONTINUATION sequences by:
 ### Conformance Validation
 For each test case:
 1. **asupersync path:** Process frame sequence through asupersync's HTTP/2 implementation
-2. **h2 reference path:** Process same sequence through h2 crate reference implementation  
-3. **Comparison:** Compare decoded HeaderMaps for identical key-value pairs
-4. **Error handling:** Verify both implementations handle malformed input identically
+2. **h2 reference path:** Report the missing live h2/HPACK seam as unsupported
+3. **Comparison:** Refuse a conformance pass while the reference path is unsupported
+4. **Error handling:** Preserve the malformed-input oracle intent without fabricating vendor parity
 
 ### Output Formats
 
@@ -79,10 +79,10 @@ HTTP/2 CONTINUATION Frame Ordering Conformance Test Results
 ===========================================================
 
 Total tests:  11
-Passed:       11 (100.0%)
-Failed:       0 (0.0%)
+Passed:       0 (0.0%)
+Failed:       11 (100.0%)
 
-🎉 ALL TESTS PASSED - asupersync and h2 produce identical CONTINUATION frame handling
+FAIL-CLOSED - no conformance pass is claimed without a live h2/HPACK reference
 ```
 
 **JSON Format:** Structured results suitable for CI/CD integration and automated analysis.
@@ -99,7 +99,7 @@ Failed:       0 (0.0%)
 
 ## Future Enhancements
 
-1. **Real h2 Integration:** Replace mock h2 implementation with actual h2 crate integration
+1. **Real h2 Integration:** Wire an actual h2/HPACK observation seam for reference behavior
 2. **Property-Based Testing:** Generate randomized header sets and frame boundaries
 3. **Performance Benchmarking:** Compare processing speed between implementations
 4. **Extended Test Coverage:** Add more edge cases and protocol violations
@@ -117,7 +117,7 @@ When adding new test cases:
 ## Dependencies
 
 - `asupersync`: Target implementation under test
-- `h2`: Reference implementation for differential testing  
+- `h2`: Future reference implementation seam for live differential testing
 - `bytes`: Byte buffer manipulation
 - `serde/serde_json`: JSON output format support
 - `tokio`: Async runtime for HTTP/2 operations
