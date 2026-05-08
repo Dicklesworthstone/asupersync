@@ -16,7 +16,7 @@
 
 use arbitrary::Arbitrary;
 use asupersync::cx::Cx;
-use asupersync::sync::{AsyncResourceFactory, GenericPool, Pool, PoolConfig, PooledResource};
+use asupersync::sync::{AsyncResourceFactory, GenericPool, Pool, PoolConfig, PooledResource, PoolError};
 use asupersync::types::{Budget, RegionId, TaskId};
 use asupersync::util::ArenaIndex;
 use futures::task::noop_waker;
@@ -138,7 +138,7 @@ struct TaskState {
 }
 
 struct FuzzState {
-    pool: Option<Box<dyn Pool<Resource = MockResource, Error = std::io::Error> + Send + Sync>>,
+    pool: Option<Box<dyn Pool<Resource = MockResource, Error = PoolError> + Send + Sync>>,
     factory: Arc<MockResourceFactory>,
     tasks: HashMap<u8, TaskState>,
     max_size: usize,
