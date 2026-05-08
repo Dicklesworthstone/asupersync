@@ -141,13 +141,26 @@ fn policy_doc_includes_ownership_escalation_and_exception_workflow() {
 fn policy_doc_declares_rch_ci_bundle() {
     let doc = load_policy_doc();
     for token in [
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_compat_scaffolding_docs cargo test --test tokio_compatibility_crate_scaffolding_policy -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_compat_scaffolding_docs cargo test --test tokio_adapter_boundary_architecture -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_compat_scaffolding_docs cargo check --all-targets -q",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_compat_scaffolding_docs cargo fmt --check",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_compat_scaffolding_docs cargo clippy --all-targets -- -D warnings",
+    ] {
+        assert!(doc.contains(token), "missing CI command token: {token}");
+    }
+
+    for stale in [
         "rch exec -- cargo test --test tokio_compatibility_crate_scaffolding_policy -- --nocapture",
         "rch exec -- cargo test --test tokio_adapter_boundary_architecture -- --nocapture",
         "rch exec -- cargo check --all-targets -q",
         "rch exec -- cargo fmt --check",
         "rch exec -- cargo clippy --all-targets -- -D warnings",
     ] {
-        assert!(doc.contains(token), "missing CI command token: {token}");
+        assert!(
+            !doc.contains(stale),
+            "policy doc still contains bare rch cargo command: {stale}"
+        );
     }
 }
 
