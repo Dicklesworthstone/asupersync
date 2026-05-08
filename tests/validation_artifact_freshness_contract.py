@@ -93,6 +93,13 @@ class ValidationArtifactFreshnessContract(unittest.TestCase):
         self.assertEqual(receipt["markers"]["dirty_touched_overlap"], ["scripts/proof_runner.py"])
         self.assertIn("overlap", receipt["remediation"]["summary"])
 
+    def test_dirty_overlap_output_matches_full_reviewed_golden(self) -> None:
+        output = run_receipt_output("current_artifact.json", "dirty_touched_overlap.json")
+        expected = fixture_text("dirty_touched_overlap_expected.json")
+
+        self.assertEqual(output.stdout, expected)
+        self.assertEqual(json.loads(output.stdout), json.loads(expected))
+
     def test_peer_dirty_paths_are_external_blockers_not_artifact_staleness(self) -> None:
         receipt = run_receipt("current_artifact.json", "dirty_external_paths.json")
 
