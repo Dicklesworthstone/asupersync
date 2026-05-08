@@ -701,15 +701,8 @@ mod tests {
             ..Default::default()
         };
 
-        // Create a mock governor for testing evaluation logic
-        // Note: Creating a full runtime for unit tests is complex, so we'll use a placeholder approach
-        // In a real scenario, we'd use RuntimeBuilder to create the runtime
-        // For this test, we're focusing on the evaluation logic independent of runtime
-
-        // Create a dummy runtime reference for testing
         use std::sync::Arc;
 
-        // Use a simple runtime handle for testing - this won't actually be used in evaluation
         let runtime = Arc::new(
             RuntimeBuilder::new()
                 .worker_threads(1)
@@ -1074,40 +1067,115 @@ mod tests {
         assert!(thresholds.memory_budget > 0.0 && thresholds.memory_budget < 1.0);
     }
 
-    /// Integration test demonstrating the pressure governor in a lab scenario.
-    /// This test would be expanded in a full implementation to run actual workloads
-    /// and verify pressure detection and admission decisions.
+    /// Integration test demonstrating the pressure governor against live runtime signals.
     #[cfg(feature = "test-internals")]
     #[test]
     fn test_pressure_governor_integration_scenario() {
-        // This is a placeholder for a full integration test that would:
-        // 1. Create a lab runtime with multiple workers
-        // 2. Install a pressure governor with realistic thresholds
-        // 3. Run a workload that gradually increases pressure
-        // 4. Verify that pressure metrics are collected correctly
-        // 5. Verify that admission decisions change as pressure increases
-        // 6. Verify that backpressure and rejection occur at appropriate thresholds
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .global_queue_limit(4)
+                .blocking_threads(0, 1)
+                .build()
+                .expect("Failed to create runtime for pressure integration scenario"),
+        );
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let first = runtime
+            .spawn_blocking(move || {
+                started_tx
+                    .send(())
+                    .expect("test should observe first blocking task start");
+                release_rx
+                    .recv()
+                    .expect("test should release first blocking task");
+            })
+            .expect("runtime should expose a blocking pool");
+        started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("first blocking task should start");
+
+        let (queued_tx, queued_rx) = std::sync::mpsc::channel();
+        let second = runtime
+            .spawn_blocking(move || {
+                queued_tx
+                    .send(())
+                    .expect("test should observe queued blocking task run");
+            })
+            .expect("runtime should accept a queued blocking task");
 
         let config = PressureGovernorConfig {
             enabled: true,
             admission_control: true,
-            sample_interval: Duration::from_millis(100),
+            sample_interval: Duration::ZERO,
             thresholds: PressureThresholds {
-                runnable_queue: 0.7,
-                blocking_pool: 0.8,
+                runnable_queue: 0.5,
+                blocking_pool: 0.5,
                 channel_backlog: 0.6,
                 cleanup_debt: 0.7,
                 memory_budget: 0.8,
             },
         };
+        let metrics = Metrics::new();
+        let governor = PressureGovernor::new(config, std::sync::Arc::clone(&runtime), metrics)
+            .expect("pressure governor should initialize");
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
 
-        // In a full test, we would:
-        // let runtime = RuntimeBuilder::new().worker_threads(4).build().unwrap();
-        // let metrics = Arc::new(Metrics::new());
-        // let governor = Arc::new(PressureGovernor::new(config, runtime.handle(), metrics).unwrap());
-        // ... run workload and verify behavior
+        let saturated = governor
+            .sample_pressure(&cx)
+            .expect("pressure snapshot should not fail");
+        assert!(saturated.signal_availability.runnable_queue);
+        assert!(saturated.signal_availability.blocking_pool);
+        assert!(!saturated.signal_availability.channel_backlog);
+        assert_eq!(
+            saturated.fallback_verdict,
+            PressureFallbackVerdict::PartialSignalsUnavailable
+        );
+        assert_eq!(saturated.runnable_queue_pressure, 0.0);
+        assert!(
+            saturated.blocking_pool_pressure >= 1.0,
+            "busy plus queued blocking work should saturate the pool, got {}",
+            saturated.blocking_pool_pressure
+        );
+        assert_eq!(saturated.overall_pressure, saturated.blocking_pool_pressure);
 
-        assert!(config.enabled);
-        assert!(config.admission_control);
+        let decision = governor
+            .check_admission(&cx)
+            .expect("admission decision should not fail");
+        assert_eq!(decision, AdmissionDecision::Reject);
+        assert_eq!(
+            governor.fallback_verdict_metric(),
+            PressureFallbackVerdict::PartialSignalsUnavailable.as_metric_value()
+        );
+        assert_eq!(governor.fallback_total.get(), 1);
+
+        release_tx
+            .send(())
+            .expect("test should release first blocking task");
+        assert!(
+            first.wait_timeout(Duration::from_secs(2)),
+            "first blocking task should finish"
+        );
+        assert!(
+            second.wait_timeout(Duration::from_secs(2)),
+            "queued blocking task should finish"
+        );
+        queued_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("queued blocking task should execute after release");
+
+        let drained = governor
+            .sample_pressure(&cx)
+            .expect("drained pressure snapshot should not fail");
+        assert!(drained.signal_availability.runnable_queue);
+        assert!(drained.signal_availability.blocking_pool);
+        assert_eq!(drained.runnable_queue_pressure, 0.0);
+        assert_eq!(drained.blocking_pool_pressure, 0.0);
+        assert_eq!(drained.overall_pressure, 0.0);
+        assert!(
+            runtime.is_quiescent(),
+            "runtime should be quiescent after pressure scenario drains"
+        );
     }
 }
