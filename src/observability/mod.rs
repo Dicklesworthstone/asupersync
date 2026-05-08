@@ -116,6 +116,7 @@ pub mod otlp_unexpected_status_audit_test;
 #[cfg(test)]
 pub mod otlp_upgrade_required_audit_test;
 pub mod performance_budget_monitor;
+pub mod pressure_governor;
 pub mod resource_accounting;
 #[cfg(all(test, feature = "metrics"))]
 pub mod resource_attribute_merging_audit_test;
@@ -224,6 +225,10 @@ pub use otlp_trace_exporter::{
 pub use performance_budget_monitor::{
     BudgetAlert, BudgetDirection, BudgetEvaluation, BudgetSample, BudgetSeverity,
     PerformanceBudget, PerformanceBudgetMonitor, PerformanceBudgetSnapshot,
+};
+pub use pressure_governor::{
+    AdmissionDecision, PressureGovernor, PressureGovernorConfig, PressureSnapshot,
+    PressureThresholds,
 };
 pub use resource_accounting::{
     AdmissionKindStats, ObligationKindStats, ResourceAccounting, ResourceAccountingSnapshot,
