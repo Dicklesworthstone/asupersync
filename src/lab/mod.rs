@@ -66,6 +66,7 @@ pub mod scenario;
 pub mod scenario_runner;
 pub mod snapshot_restore;
 pub mod spork_harness;
+pub mod swarm_replay;
 pub mod util;
 pub mod virtual_time_wheel;
 
@@ -166,6 +167,11 @@ pub use snapshot_restore::{
 pub use spork_harness::{
     HarnessError, ScenarioRunnerError, SporkAppHarness, SporkScenarioConfig, SporkScenarioResult,
     SporkScenarioRunner, SporkScenarioSpec,
+};
+pub use swarm_replay::{
+    SWARM_REPLAY_SCHEMA_VERSION, SwarmReplayError, SwarmReplayEvent, SwarmReplayEventKind,
+    SwarmReplayScenario, SwarmReplayShrinkHint, SwarmReplaySummary, SwarmReplayTaskOutcome,
+    SwarmReplayTaskStatus, run_swarm_replay_scenario,
 };
 pub use util::{
     StackTraceConfig, capture_stack_trace, capture_stack_trace_default, capture_stack_trace_depth,
