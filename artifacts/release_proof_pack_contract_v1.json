@@ -1,0 +1,46 @@
+{
+  "contract_version": "release-proof-pack-contract-v1",
+  "bead_id": "asupersync-rgzqen",
+  "purpose": "Define the first deterministic release proof-pack surface produced by scripts/proof_runner.py.",
+  "generator": {
+    "script": "scripts/proof_runner.py",
+    "mode": "--release-proof-pack",
+    "schema_version": "release-proof-pack-v1"
+  },
+  "required_source_artifacts": [
+    "artifacts/proof_lane_manifest_v1.json",
+    "artifacts/proof_status_snapshot_v1.json",
+    "artifacts/validation_frontier_ledger_schema_v1.json",
+    "artifacts/conformance_registry_contract_v1.json",
+    "artifacts/adapter_certification_matrix_v1.json",
+    "artifacts/release_proof_pack_contract_v1.json"
+  ],
+  "required_index_fields": [
+    "schema_version",
+    "generated_at",
+    "generator",
+    "source_artifacts",
+    "embedded_report_rows",
+    "embedded_reports.proof_console_report_v1",
+    "proof_commands",
+    "summaries.proof_console",
+    "summaries.conformance_registry",
+    "summaries.adapter_certification_matrix",
+    "summaries.tracker",
+    "failure_reasons",
+    "verdict"
+  ],
+  "fail_closed_rules": [
+    "missing source artifacts set verdict to fail_closed",
+    "embedded proof console verdict other than pass sets verdict to fail_closed",
+    "tracker summary includes counts and hashes only, not raw issue rows",
+    "output directory writes index.json plus copied source artifacts under source_artifacts/",
+    "generated JSON is byte-stable with sorted keys"
+  ],
+  "validation_commands": [
+    "python3 -m json.tool artifacts/release_proof_pack_contract_v1.json",
+    "python3 -m py_compile scripts/proof_runner.py",
+    "python3 scripts/proof_runner.py --release-proof-pack --release-proof-pack-generated-at 2026-05-08T00:00:00Z --output json",
+    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_release_proof_pack_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test proof_runner_contract -- --nocapture"
+  ]
+}

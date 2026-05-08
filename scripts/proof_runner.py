@@ -16,6 +16,7 @@ import sys
 import os
 import re
 import shlex
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
@@ -25,8 +26,17 @@ ALLOWED_REMOTE_PROGRAMS = {"cargo", "lake", "rustfmt"}
 SHELL_CONTROL_TOKENS = (";", "&", "|", "<", ">", "`", "$(")
 RCH_OUTCOME_SCHEMA_VERSION = "proof-runner-rch-outcome-v1"
 PROOF_CONSOLE_REPORT_SCHEMA_VERSION = "proof-console-report-v1"
+RELEASE_PROOF_PACK_SCHEMA_VERSION = "release-proof-pack-v1"
 PROOF_STATUS_SNAPSHOT_PATH = "artifacts/proof_status_snapshot_v1.json"
 VALIDATION_FRONTIER_LEDGER_PATH = "artifacts/validation_frontier_ledger_schema_v1.json"
+RELEASE_PROOF_PACK_SOURCE_ARTIFACTS = (
+    "artifacts/proof_lane_manifest_v1.json",
+    PROOF_STATUS_SNAPSHOT_PATH,
+    VALIDATION_FRONTIER_LEDGER_PATH,
+    "artifacts/conformance_registry_contract_v1.json",
+    "artifacts/adapter_certification_matrix_v1.json",
+    "artifacts/release_proof_pack_contract_v1.json",
+)
 PROOF_CONSOLE_ALLOWED_RCH_OUTCOMES = {
     "pass",
     "blocked_external",
@@ -65,6 +75,16 @@ OPERATOR_ACTION_RECIPE_IDS = (
     "agent-mail-reservation",
     "destructive-command-refusal",
 )
+
+
+def canonical_json_bytes(payload: Dict[str, Any]) -> bytes:
+    """Serialize JSON in the byte-stable form used by generated proof packs."""
+    return (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def payload_hash(payload: Dict[str, Any]) -> str:
+    """Return a sha256 digest for canonical JSON payload bytes."""
+    return f"sha256:{hashlib.sha256(canonical_json_bytes(payload)).hexdigest()}"
 
 
 def proof_console_markdown(report: Dict[str, Any]) -> str:
@@ -114,6 +134,41 @@ def proof_console_markdown(report: Dict[str, Any]) -> str:
     lines.extend(["", "## Failure Reasons", ""])
     if report["failure_reasons"]:
         for reason in report["failure_reasons"]:
+            lines.append(f"- `{reason['reason_id']}`: {reason['summary']}")
+    else:
+        lines.append("- none")
+
+    return "\n".join(lines) + "\n"
+
+
+def release_proof_pack_markdown(pack: Dict[str, Any]) -> str:
+    """Render a compact deterministic Markdown summary for release proof packs."""
+    summary = pack["summary"]
+    lines = [
+        "# Release Proof Pack",
+        "",
+        f"- Schema: `{pack['schema_version']}`",
+        f"- Generated at: `{pack['generated_at']}`",
+        f"- Verdict: `{pack['verdict']}`",
+        (
+            "- Summary: "
+            f"{summary['source_artifact_count']} source artifacts, "
+            f"{summary['proof_lane_count']} proof lanes, "
+            f"{summary['proof_command_count']} proof commands, "
+            f"{summary['rch_outcome_count']} rch outcomes"
+        ),
+        "",
+        "## Source Artifacts",
+        "",
+        "| Artifact | Status | Bytes |",
+        "| --- | --- | ---: |",
+    ]
+    for row in pack["source_artifacts"]:
+        lines.append(f"| `{row['path']}` | `{row['status']}` | {row['bytes']} |")
+
+    lines.extend(["", "## Failure Reasons", ""])
+    if pack["failure_reasons"]:
+        for reason in pack["failure_reasons"]:
             lines.append(f"- `{reason['reason_id']}`: {reason['summary']}")
     else:
         lines.append("- none")
@@ -1047,6 +1102,98 @@ class ProofRunner:
                 digest.update(chunk)
         return f"sha256:{digest.hexdigest()}"
 
+    def _repo_artifact_row(self, relative_path: str) -> Dict[str, Any]:
+        path = self.repo_root / relative_path
+        if not path.exists():
+            return {
+                "path": relative_path,
+                "copy_path": f"source_artifacts/{relative_path}",
+                "status": "missing",
+                "sha256": "",
+                "bytes": 0,
+            }
+        return {
+            "path": relative_path,
+            "copy_path": f"source_artifacts/{relative_path}",
+            "status": "included",
+            "sha256": self._repo_hash(relative_path),
+            "bytes": path.stat().st_size,
+        }
+
+    def _tracker_summary(self) -> Dict[str, Any]:
+        tracker_path = ".beads/issues.jsonl"
+        row = self._repo_artifact_row(tracker_path)
+        counts: Dict[str, int] = {}
+        valid_issue_count = 0
+        if row["status"] == "included":
+            with (self.repo_root / tracker_path).open(encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        payload = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(payload, dict):
+                        continue
+                    status = str(payload.get("status", "unknown"))
+                    counts[status] = counts.get(status, 0) + 1
+                    valid_issue_count += 1
+        return {
+            "path": tracker_path,
+            "status": row["status"],
+            "sha256": row["sha256"],
+            "valid_issue_count": valid_issue_count,
+            "status_counts": dict(sorted(counts.items())),
+            "raw_issue_rows_embedded": False,
+        }
+
+    def _conformance_registry_summary(self) -> Dict[str, Any]:
+        contract = self._repo_json("artifacts/conformance_registry_contract_v1.json")
+        surfaces = [
+            row for row in contract.get("reference_surfaces", []) if isinstance(row, dict)
+        ]
+        unwired_surfaces = [
+            row for row in surfaces if row.get("reference_status") != "live_reference_wired"
+        ]
+        return {
+            "contract_version": contract.get("contract_version", ""),
+            "active_module_count": contract.get("active_module_count", 0),
+            "dormant_module_count": contract.get("dormant_module_count", 0),
+            "reference_surface_count": len(surfaces),
+            "unwired_reference_surface_count": len(unwired_surfaces),
+            "unwired_fail_closed_count": sum(
+                1
+                for row in unwired_surfaces
+                if row.get("fail_closed_without_live_reference") is True
+            ),
+        }
+
+    def _adapter_matrix_summary(self) -> Dict[str, Any]:
+        matrix = self._repo_json("artifacts/adapter_certification_matrix_v1.json")
+        adapters = [row for row in matrix.get("adapters", []) if isinstance(row, dict)]
+        categories = sorted(
+            {
+                str(row.get("category", ""))
+                for row in adapters
+                if isinstance(row.get("category"), str) and row.get("category")
+            }
+        )
+        return {
+            "contract_version": matrix.get("contract_version", ""),
+            "adapter_count": len(adapters),
+            "category_count": len(categories),
+            "categories": categories,
+            "fail_closed_adapter_count": sum(
+                1
+                for row in adapters
+                if row.get("fail_closed_without_full_reference") is True
+            ),
+            "proof_command_count": sum(
+                len(row.get("proof_commands", []))
+                for row in adapters
+                if isinstance(row.get("proof_commands"), list)
+            ),
+        }
+
     def _load_rch_outcomes(self, paths: List[str]) -> List[Dict[str, Any]]:
         outcomes = []
         for path in paths:
@@ -1253,6 +1400,126 @@ class ProofRunner:
             "rch_outcomes": rch_outcomes,
             "failure_reasons": failure_reasons,
             "verdict": "fail_closed" if failure_reasons else "pass",
+        }
+
+    def release_proof_pack(
+        self,
+        generated_at: str = "",
+        rch_outcome_paths: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Generate a deterministic release proof-pack index."""
+        proof_console = self.proof_console_report(
+            generated_at=generated_at,
+            rch_outcome_paths=rch_outcome_paths,
+        )
+        if not generated_at:
+            generated_at = proof_console["generated_at"]
+
+        source_artifacts = [
+            self._repo_artifact_row(path) for path in RELEASE_PROOF_PACK_SOURCE_ARTIFACTS
+        ]
+        manifest = self.manifest.data
+        lanes = sorted(manifest.get("lanes", []), key=lambda row: row.get("lane_id", ""))
+        proof_commands = [
+            {
+                "lane_id": lane.get("lane_id", ""),
+                "command": lane.get("command", ""),
+                "guarantee_ids": lane.get("guarantee_ids", []),
+                "expected_signal": lane.get("expected_signal", ""),
+            }
+            for lane in lanes
+        ]
+        missing_artifacts = [
+            row["path"] for row in source_artifacts if row["status"] != "included"
+        ]
+        failure_reasons = []
+        if missing_artifacts:
+            failure_reasons.append(
+                {
+                    "reason_id": "missing-source-artifact",
+                    "summary": "one or more required source artifacts are missing",
+                    "paths": missing_artifacts,
+                }
+            )
+        if proof_console["verdict"] != "pass":
+            failure_reasons.append(
+                {
+                    "reason_id": "proof-console-not-pass",
+                    "summary": "embedded proof console report is not passing",
+                    "verdict": proof_console["verdict"],
+                }
+            )
+
+        embedded_reports = {
+            "proof_console_report_v1": proof_console,
+        }
+        embedded_report_rows = [
+            {
+                "path": "reports/proof_console_report_v1.json",
+                "schema_version": proof_console["schema_version"],
+                "sha256": payload_hash(proof_console),
+                "bytes": len(canonical_json_bytes(proof_console)),
+            }
+        ]
+
+        return {
+            "schema_version": RELEASE_PROOF_PACK_SCHEMA_VERSION,
+            "generated_at": generated_at,
+            "generator": {
+                "name": "scripts/proof_runner.py",
+                "mode": "release-proof-pack",
+            },
+            "source_artifacts": source_artifacts,
+            "embedded_report_rows": embedded_report_rows,
+            "embedded_reports": embedded_reports,
+            "proof_commands": proof_commands,
+            "summaries": {
+                "proof_console": proof_console["summary"],
+                "conformance_registry": self._conformance_registry_summary(),
+                "adapter_certification_matrix": self._adapter_matrix_summary(),
+                "tracker": self._tracker_summary(),
+            },
+            "summary": {
+                "source_artifact_count": len(source_artifacts),
+                "missing_source_artifact_count": len(missing_artifacts),
+                "proof_lane_count": len(lanes),
+                "proof_command_count": len(proof_commands),
+                "rch_outcome_count": len(proof_console["rch_outcomes"]),
+            },
+            "failure_reasons": failure_reasons,
+            "verdict": "fail_closed" if failure_reasons else "pass",
+        }
+
+    def write_release_proof_pack(self, output_dir: str, pack: Dict[str, Any]) -> Dict[str, Any]:
+        """Write the proof-pack index and copied source artifacts to a directory."""
+        root = Path(output_dir)
+        root.mkdir(parents=True, exist_ok=True)
+        written_files = []
+
+        index_path = root / "index.json"
+        index_path.write_bytes(canonical_json_bytes(pack))
+        written_files.append("index.json")
+
+        for name, report in pack["embedded_reports"].items():
+            if name != "proof_console_report_v1":
+                continue
+            report_path = root / "reports" / "proof_console_report_v1.json"
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            report_path.write_bytes(canonical_json_bytes(report))
+            written_files.append("reports/proof_console_report_v1.json")
+
+        for row in pack["source_artifacts"]:
+            if row["status"] != "included":
+                continue
+            destination = root / row["copy_path"]
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(self.repo_root / row["path"], destination)
+            written_files.append(row["copy_path"])
+
+        return {
+            "output_dir": str(root),
+            "index_path": str(index_path),
+            "written_files": sorted(written_files),
         }
 
     def analyze_preflight(
@@ -1557,6 +1824,27 @@ def main():
         help="JSON rch outcome produced by --classify-rch-log to include in the proof console"
     )
     parser.add_argument(
+        "--release-proof-pack",
+        action="store_true",
+        help="Emit a deterministic release proof-pack index"
+    )
+    parser.add_argument(
+        "--release-proof-pack-generated-at",
+        default="",
+        help="Override generated_at for deterministic release proof-pack fixtures"
+    )
+    parser.add_argument(
+        "--release-proof-pack-rch-outcome",
+        action="append",
+        default=[],
+        help="JSON rch outcome produced by --classify-rch-log to include in the release proof pack"
+    )
+    parser.add_argument(
+        "--release-proof-pack-output-dir",
+        default="",
+        help="Write the release proof pack to this directory"
+    )
+    parser.add_argument(
         "--command",
         default="",
         help="Original rch command for --classify-rch-log"
@@ -1671,9 +1959,28 @@ def main():
                 print(proof_console_markdown(result), end="")
             return 0
 
+        if args.release_proof_pack:
+            result = runner.release_proof_pack(
+                generated_at=args.release_proof_pack_generated_at,
+                rch_outcome_paths=args.release_proof_pack_rch_outcome,
+            )
+            response: Dict[str, Any] = {"proof_pack": result}
+            if args.release_proof_pack_output_dir:
+                response["write_result"] = runner.write_release_proof_pack(
+                    args.release_proof_pack_output_dir,
+                    result,
+                )
+            if args.output == "json":
+                print(json.dumps(response, indent=2))
+            else:
+                print(release_proof_pack_markdown(result), end="")
+            return 0 if result["verdict"] == "pass" else 1
+
         # Validate required arguments for proof analysis
         if not args.lane:
-            parser.error("--lane is required when not using --list-lanes or --suggest-lanes")
+            parser.error(
+                "--lane is required when not using a report/list/suggest mode"
+            )
 
         # Run preflight analysis
         result = runner.run_preflight(args.lane, args.touched_files, execute=args.execute, output_format=args.output)

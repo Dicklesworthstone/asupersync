@@ -1376,3 +1376,199 @@ fn proof_console_human_output_is_stable_markdown_without_raw_coordination_data()
         );
     }
 }
+
+#[test]
+fn proof_runner_emits_deterministic_release_proof_pack() {
+    let args = &[
+        "--release-proof-pack",
+        "--release-proof-pack-generated-at",
+        "2026-05-08T00:00:00Z",
+        "--output",
+        "json",
+    ];
+    let result1 = proof_runner_json(args);
+    let result2 = proof_runner_json(args);
+    assert_eq!(result1, result2, "release proof pack must be stable");
+
+    let pack = &result1["proof_pack"];
+    assert_eq!(
+        pack["schema_version"].as_str(),
+        Some("release-proof-pack-v1")
+    );
+    assert_eq!(pack["generated_at"].as_str(), Some("2026-05-08T00:00:00Z"));
+    assert_eq!(pack["generator"]["name"].as_str(), Some(SCRIPT_PATH));
+    assert_eq!(
+        pack["generator"]["mode"].as_str(),
+        Some("release-proof-pack")
+    );
+    assert_eq!(pack["verdict"].as_str(), Some("pass"));
+    assert_eq!(
+        pack["embedded_reports"]["proof_console_report_v1"]["schema_version"].as_str(),
+        Some("proof-console-report-v1")
+    );
+    assert_eq!(
+        pack["summaries"]["tracker"]["raw_issue_rows_embedded"].as_bool(),
+        Some(false),
+        "proof pack must not embed raw tracker rows"
+    );
+
+    let artifact_paths: BTreeSet<String> = pack["source_artifacts"]
+        .as_array()
+        .expect("source artifact rows")
+        .iter()
+        .map(|row| row["path"].as_str().expect("artifact path").to_string())
+        .collect();
+    for required in [
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "artifacts/validation_frontier_ledger_schema_v1.json",
+        "artifacts/conformance_registry_contract_v1.json",
+        "artifacts/adapter_certification_matrix_v1.json",
+        "artifacts/release_proof_pack_contract_v1.json",
+    ] {
+        assert!(
+            artifact_paths.contains(required),
+            "release proof pack must include {required}"
+        );
+    }
+
+    for row in pack["source_artifacts"]
+        .as_array()
+        .expect("source artifact rows")
+    {
+        assert_eq!(row["status"].as_str(), Some("included"));
+        assert!(
+            row["sha256"]
+                .as_str()
+                .expect("artifact hash")
+                .starts_with("sha256:")
+        );
+        assert!(
+            row["bytes"].as_u64().expect("artifact bytes") > 0,
+            "included artifact should have nonzero size"
+        );
+    }
+
+    let commands = pack["proof_commands"]
+        .as_array()
+        .expect("proof command rows");
+    assert!(!commands.is_empty(), "proof pack must list proof commands");
+    assert!(
+        commands.iter().any(|row| row["command"]
+            .as_str()
+            .expect("proof command")
+            .starts_with("rch exec -- ")),
+        "proof pack must carry rch-routed commands"
+    );
+}
+
+#[test]
+fn proof_runner_writes_reproducible_release_proof_pack_directory() {
+    let tempdir = tempfile::tempdir().expect("create release proof pack tempdir");
+    let output_dir = tempdir.path().join("pack");
+    let output_dir_text = output_dir
+        .to_str()
+        .expect("release proof pack tempdir path utf8");
+    let output = run_proof_runner(&[
+        "--release-proof-pack",
+        "--release-proof-pack-generated-at",
+        "2026-05-08T00:00:00Z",
+        "--release-proof-pack-output-dir",
+        output_dir_text,
+        "--output",
+        "json",
+    ])
+    .expect("release proof pack should execute");
+
+    assert!(
+        output.status.success(),
+        "release proof pack failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result = output_json(&output);
+    let index_path = output_dir.join("index.json");
+    let report_path = output_dir.join("reports/proof_console_report_v1.json");
+    let manifest_copy = output_dir.join("source_artifacts/artifacts/proof_lane_manifest_v1.json");
+    assert!(index_path.exists(), "release pack should write index.json");
+    assert!(
+        report_path.exists(),
+        "release pack should write embedded proof console report"
+    );
+    assert!(
+        manifest_copy.exists(),
+        "release pack should copy source artifacts"
+    );
+
+    let written_index: Value = serde_json::from_str(
+        &std::fs::read_to_string(index_path).expect("read written release index"),
+    )
+    .expect("parse written release index");
+    assert_eq!(
+        written_index, result["proof_pack"],
+        "written index must match reported proof pack"
+    );
+    let written_files: BTreeSet<String> = result["write_result"]["written_files"]
+        .as_array()
+        .expect("written files")
+        .iter()
+        .map(|value| value.as_str().expect("written file").to_string())
+        .collect();
+    for required in [
+        "index.json",
+        "reports/proof_console_report_v1.json",
+        "source_artifacts/artifacts/proof_lane_manifest_v1.json",
+    ] {
+        assert!(
+            written_files.contains(required),
+            "written_files must include {required}"
+        );
+    }
+}
+
+#[test]
+fn release_proof_pack_contract_names_required_artifacts_and_proofs() {
+    let contract = load_json("artifacts/release_proof_pack_contract_v1.json");
+    assert_eq!(
+        contract["contract_version"].as_str(),
+        Some("release-proof-pack-contract-v1")
+    );
+    assert_eq!(contract["bead_id"].as_str(), Some("asupersync-rgzqen"));
+    assert_eq!(
+        contract["generator"]["script"].as_str(),
+        Some("scripts/proof_runner.py")
+    );
+    assert_eq!(
+        contract["generator"]["mode"].as_str(),
+        Some("--release-proof-pack")
+    );
+
+    let required_artifacts: BTreeSet<String> = contract["required_source_artifacts"]
+        .as_array()
+        .expect("required source artifacts")
+        .iter()
+        .map(|value| value.as_str().expect("artifact path").to_string())
+        .collect();
+    for required in [
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/conformance_registry_contract_v1.json",
+        "artifacts/adapter_certification_matrix_v1.json",
+        "artifacts/release_proof_pack_contract_v1.json",
+    ] {
+        assert!(
+            required_artifacts.contains(required),
+            "contract must require {required}"
+        );
+    }
+
+    let commands = contract["validation_commands"]
+        .as_array()
+        .expect("validation commands")
+        .iter()
+        .map(|value| value.as_str().expect("validation command"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(commands.contains("--release-proof-pack"));
+    assert!(commands.contains("rch exec -- "));
+}
