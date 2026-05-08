@@ -233,6 +233,28 @@ fn dirty_index_conflict_takes_precedence_over_reservations() {
 }
 
 #[test]
+fn dirty_index_output_matches_full_reviewed_golden() {
+    let output = run_receipt("clear_reservations.json", "dirty_index.json");
+    assert!(
+        output.status.success(),
+        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actual = String::from_utf8(output.stdout).expect("receipt stdout is utf-8");
+    let expected = fixture_text("dirty_index_expected.json");
+
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
+    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
+    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
+    assert_eq!(
+        actual, expected,
+        "claim/reservation dirty-index receipt changed; update the golden only after reviewing staged-index preflight semantics"
+    );
+}
+
+#[test]
 fn receipt_command_sequence_stays_non_destructive_and_rch_free() {
     let receipt = receipt("clear_reservations.json", "clean_git_status.json");
     assert_eq!(
