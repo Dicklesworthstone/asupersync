@@ -1,14 +1,19 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
+use asupersync::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::gf256::Gf256;
 use asupersync::raptorq::linalg::{DenseRow, GaussianResult, GaussianSolver};
+use asupersync::raptorq::systematic::SystematicEncoder;
 use libfuzzer_sys::fuzz_target;
 
 /// Maximum matrix dimensions for fuzzing to avoid memory exhaustion
 const MAX_ROWS: usize = 64;
 const MAX_COLS: usize = 64;
 const MAX_RHS_LEN: usize = 32;
+const MAX_CACHE_PROBES: usize = 4;
+const CACHE_PROBE_K: usize = 4;
+const MAX_CACHE_SYMBOL_SIZE: usize = 16;
 
 /// Fuzzing input structure for RaptorQ matrix elimination kernel
 #[derive(Arbitrary, Debug)]
@@ -17,8 +22,8 @@ struct MatrixEliminationFuzzInput {
     solver_tests: Vec<SolverTest>,
     /// Boundary value tests for GF(256) operations in matrix context
     gf256_boundary_tests: Vec<Gf256BoundaryTest>,
-    /// Mock dense factor cache operations (future-proofing)
-    cache_operations: Vec<CacheOperation>,
+    /// Live dense-factor cache probes through the decoder path
+    cache_probes: Vec<DenseFactorCacheProbe>,
 }
 
 /// Test cases for GaussianSolver with different matrix configurations
@@ -84,17 +89,13 @@ enum Gf256Operation {
     IrreduciblePolyEdge,
 }
 
-/// Mock cache operations for future dense-factor cache testing
+/// Bounded decoder inputs that exercise real dense-factor cache reuse.
 #[derive(Arbitrary, Debug)]
-enum CacheOperation {
-    /// Simulate cache hit scenario
-    Hit { key: u64 },
-    /// Simulate cache miss scenario
-    Miss { key: u64, data: Vec<u8> },
-    /// Simulate cache eviction under pressure
-    Eviction { keys_to_evict: Vec<u64> },
-    /// Simulate adversarial access pattern
-    AdversarialAccess { access_pattern: Vec<u64> },
+struct DenseFactorCacheProbe {
+    symbol_size_hint: u8,
+    seed: u64,
+    payload: Vec<u8>,
+    repeat_count: u8,
 }
 
 /// Boundary values for GF(256) that are likely to expose edge cases
@@ -127,9 +128,9 @@ fuzz_target!(|input: MatrixEliminationFuzzInput| {
         test_gf256_boundaries(boundary_test);
     }
 
-    // Test cache operations (mock for now, future-proofing)
-    for cache_op in input.cache_operations {
-        test_cache_operation(cache_op);
+    // Exercise live dense-factor cache telemetry through the decoder.
+    for cache_probe in input.cache_probes.into_iter().take(MAX_CACHE_PROBES) {
+        test_dense_factor_cache_probe(cache_probe);
     }
 });
 
@@ -142,8 +143,8 @@ fn test_solver_operation(test: SolverTest) {
             matrix_data,
             rhs_data,
         } => {
-            let rows = rows.min(MAX_ROWS).max(1);
-            let cols = cols.min(MAX_COLS).max(1);
+            let rows = rows.clamp(1, MAX_ROWS);
+            let cols = cols.clamp(1, MAX_COLS);
 
             // Create rank-deficient matrix by making some rows linear combinations of others
             let mut solver = GaussianSolver::new(rows, cols);
@@ -224,7 +225,7 @@ fn test_solver_operation(test: SolverTest) {
             matrix_data,
             rhs_data,
         } => {
-            let block_size = block_size.min(MAX_ROWS / 2).max(1);
+            let block_size = block_size.clamp(1, MAX_ROWS / 2);
             let total_size = block_size * 2; // 2x2 block structure
 
             let mut solver = GaussianSolver::new(total_size, total_size);
@@ -232,8 +233,8 @@ fn test_solver_operation(test: SolverTest) {
             // Create block structure: [A B; C D] where A is block_size x block_size
             for i in 0..total_size {
                 let mut coefficients = vec![0u8; total_size];
-                for j in 0..total_size {
-                    coefficients[j] = if matrix_data.is_empty() {
+                for (j, coefficient) in coefficients.iter_mut().enumerate() {
+                    *coefficient = if matrix_data.is_empty() {
                         0
                     } else {
                         let data_idx = (i * total_size + j) % matrix_data.len();
@@ -244,7 +245,7 @@ fn test_solver_operation(test: SolverTest) {
                     if i < block_size && j < block_size {
                         // Block A - make it non-singular if possible
                         if i == j {
-                            coefficients[j] = coefficients[j].max(1); // Ensure diagonal elements
+                            *coefficient = (*coefficient).max(1); // Ensure diagonal elements
                         }
                     }
                 }
@@ -270,8 +271,8 @@ fn test_solver_operation(test: SolverTest) {
             cols,
             rhs_data,
         } => {
-            let rows = rows.min(MAX_ROWS).max(1);
-            let cols = cols.min(MAX_COLS).max(1);
+            let rows = rows.clamp(1, MAX_ROWS);
+            let cols = cols.clamp(1, MAX_COLS);
 
             let mut solver = GaussianSolver::new(rows, cols);
 
@@ -302,7 +303,7 @@ fn test_solver_operation(test: SolverTest) {
         }
 
         SolverTest::Identity { size, rhs_data } => {
-            let size = size.min(MAX_ROWS.min(MAX_COLS)).max(1);
+            let size = size.clamp(1, MAX_ROWS.min(MAX_COLS));
 
             let mut solver = GaussianSolver::new(size, size);
 
@@ -340,8 +341,8 @@ fn test_solver_operation(test: SolverTest) {
             pivot_values,
             rhs_data,
         } => {
-            let rows = rows.min(MAX_ROWS).max(1);
-            let cols = cols.min(MAX_COLS).max(1);
+            let rows = rows.clamp(1, MAX_ROWS);
+            let cols = cols.clamp(1, MAX_COLS);
 
             let mut solver = GaussianSolver::new(rows, cols);
 
@@ -371,7 +372,7 @@ fn test_solver_operation(test: SolverTest) {
         }
 
         SolverTest::AdversarialPivots { size, rhs_data } => {
-            let size = size.min(MAX_ROWS.min(MAX_COLS)).max(1);
+            let size = size.clamp(1, MAX_ROWS.min(MAX_COLS));
 
             let mut solver = GaussianSolver::new(size, size);
 
@@ -379,13 +380,13 @@ fn test_solver_operation(test: SolverTest) {
             // In GF(256), this means elements near 1 and near 255
             for i in 0..size {
                 let mut coefficients = vec![0u8; size];
-                for j in 0..size {
+                for (j, coefficient) in coefficients.iter_mut().enumerate() {
                     if i == j {
                         // Diagonal: alternate between small and large values
-                        coefficients[j] = if i % 2 == 0 { 1 } else { 255 };
+                        *coefficient = if i % 2 == 0 { 1 } else { 255 };
                     } else {
                         // Off-diagonal: create some coupling
-                        coefficients[j] = if (i + j) % 3 == 0 { 2 } else { 0 };
+                        *coefficient = if (i + j) % 3 == 0 { 2 } else { 0 };
                     }
                 }
 
@@ -410,8 +411,8 @@ fn test_solver_operation(test: SolverTest) {
             matrix_data,
             rhs_data,
         } => {
-            let rows = rows.min(MAX_ROWS).max(2); // Need at least 2 rows for inconsistency
-            let cols = cols.min(MAX_COLS).max(1);
+            let rows = rows.clamp(2, MAX_ROWS); // Need at least 2 rows for inconsistency
+            let cols = cols.clamp(1, MAX_COLS);
 
             let mut solver = GaussianSolver::new(rows, cols);
 
@@ -574,6 +575,7 @@ fn test_gf256_boundaries(test: Gf256BoundaryTest) {
             for offset in 0..8u8 {
                 let test_val = poly_coeff.wrapping_add(offset);
                 let element = Gf256::new(test_val);
+                verify_field_invariants(element, Gf256::new(0x02), Gf256::new(offset));
 
                 // Test that field operations remain valid near polynomial boundary
                 let squared = element.mul_field(element);
@@ -595,74 +597,100 @@ fn test_gf256_boundaries(test: Gf256BoundaryTest) {
 
                 // Test that polynomial reduction works correctly
                 let high_power = element.pow(255); // Maximum exponent
-                drop(high_power); // Just verify no panic
+                let _ = high_power; // Just verify no panic
 
-                drop(squared); // Verify squaring doesn't cause issues
+                let _ = squared; // Verify squaring doesn't cause issues
             }
         }
     }
 }
 
-fn test_cache_operation(op: CacheOperation) {
-    // Mock cache operations for future dense-factor cache implementation
-    match op {
-        CacheOperation::Hit { key } => {
-            // Simulate cache hit - verify key is reasonable
-            assert!(key < u64::MAX, "Cache key out of bounds");
-            // Future: test actual cache hit logic
-        }
+fn test_dense_factor_cache_probe(probe: DenseFactorCacheProbe) {
+    let symbol_size = usize::from(probe.symbol_size_hint % MAX_CACHE_SYMBOL_SIZE as u8) + 1;
+    let source = make_cache_probe_source(CACHE_PROBE_K, symbol_size, probe.seed, &probe.payload);
+    let encoder = SystematicEncoder::new(&source, symbol_size, probe.seed)
+        .expect("bounded cache probe source should build a systematic encoder");
+    let decoder = InactivationDecoder::new(CACHE_PROBE_K, symbol_size, probe.seed);
 
-        CacheOperation::Miss { key, data } => {
-            // Simulate cache miss followed by insertion
-            assert!(key < u64::MAX, "Cache key out of bounds");
-            assert!(
-                data.len() <= 1024,
-                "Cache data too large: {} bytes",
-                data.len()
-            );
-            // Future: test cache miss and insertion logic
-        }
+    let mut received = decoder.constraint_symbols();
+    let repair_count = decoder.params().l;
+    for esi in (CACHE_PROBE_K as u32)..(CACHE_PROBE_K as u32 + repair_count as u32) {
+        let (columns, coefficients) = decoder
+            .repair_equation(esi)
+            .expect("bounded repair ESI should produce an equation");
+        let data = encoder.repair_symbol(esi);
+        received.push(ReceivedSymbol::repair(esi, columns, coefficients, data));
+    }
 
-        CacheOperation::Eviction { keys_to_evict } => {
-            // Simulate cache eviction under memory pressure
-            assert!(
-                keys_to_evict.len() <= 100,
-                "Too many keys to evict: {}",
-                keys_to_evict.len()
-            );
-            for &key in &keys_to_evict {
-                assert!(key < u64::MAX, "Eviction key out of bounds");
+    let iterations = 2 + usize::from(probe.repeat_count % 2);
+    let mut previous_key = None;
+    let mut saw_miss = false;
+    let mut saw_hit = false;
+
+    for iteration in 0..iterations {
+        let decoded = decoder
+            .decode(&received)
+            .expect("repair-only cache probe should decode");
+        assert_eq!(
+            decoded.source, source,
+            "cache probe decode must recover source on iteration {iteration}"
+        );
+
+        let stats = decoded.stats;
+        saw_miss |= stats.factor_cache_misses > 0;
+        saw_hit |= stats.factor_cache_hits > 0;
+
+        if let Some(key) = stats.factor_cache_last_key {
+            if let Some(prev) = previous_key {
+                assert_eq!(
+                    key, prev,
+                    "repeated cache probe should reuse structural key"
+                );
             }
-            // Future: test LRU/LFU eviction policies
+            previous_key = Some(key);
         }
 
-        CacheOperation::AdversarialAccess { access_pattern } => {
-            // Simulate adversarial access pattern designed to thrash cache
+        if stats.factor_cache_capacity > 0 {
             assert!(
-                access_pattern.len() <= 1000,
-                "Access pattern too long: {}",
-                access_pattern.len()
+                stats.factor_cache_entries <= stats.factor_cache_capacity,
+                "cache entries {} exceed capacity {}",
+                stats.factor_cache_entries,
+                stats.factor_cache_capacity
             );
-
-            // Check for pathological patterns
-            if access_pattern.len() >= 3 {
-                let mut alternating = true;
-                for i in 2..access_pattern.len() {
-                    if access_pattern[i] != access_pattern[i - 2] {
-                        alternating = false;
-                        break;
-                    }
-                }
-
-                if alternating {
-                    // Detected alternating access pattern - this could thrash a 2-way cache
-                    // Future: verify cache handles this gracefully
-                }
-            }
-
-            // Future: test cache performance under adversarial access
         }
     }
+
+    assert!(
+        saw_miss,
+        "first repair-only decode should populate the dense-factor cache"
+    );
+    assert!(
+        saw_hit,
+        "repeated repair-only decode should hit the dense-factor cache"
+    );
+}
+
+fn make_cache_probe_source(
+    k: usize,
+    symbol_size: usize,
+    seed: u64,
+    payload: &[u8],
+) -> Vec<Vec<u8>> {
+    let seed_bytes = seed.to_le_bytes();
+    (0..k)
+        .map(|symbol_idx| {
+            (0..symbol_size)
+                .map(|byte_idx| {
+                    let offset = symbol_idx * symbol_size + byte_idx;
+                    let payload_byte = payload
+                        .get(offset % payload.len().max(1))
+                        .copied()
+                        .unwrap_or(seed_bytes[offset % seed_bytes.len()]);
+                    payload_byte ^ seed_bytes[(offset + symbol_idx) % seed_bytes.len()]
+                })
+                .collect()
+        })
+        .collect()
 }
 
 /// Test helper: verify that matrix operations maintain GF(256) field properties
