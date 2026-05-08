@@ -213,8 +213,8 @@ Required artifacts per CI run:
 Example execution commands (offloaded):
 
 ```bash
-rch exec -- cargo test --test tokio_migration_strategy_decision_framework -- --nocapture
-rch exec -- cargo test --test tokio_ci_quality_gate_enforcement -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_migration_strategy_docs cargo test --test tokio_migration_strategy_decision_framework -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_migration_strategy_docs cargo test --test tokio_ci_quality_gate_enforcement -- --nocapture
 ```
 
 ---
