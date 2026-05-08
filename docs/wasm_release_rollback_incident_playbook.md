@@ -73,8 +73,8 @@ python3 scripts/check_security_release_gate.py \
   --dep-policy .github/wasm_dependency_policy.json
 
 # 2) Reproduce wasm compatibility contract checks (cargo-heavy via rch)
-rch exec -- cargo test -p asupersync --test wasm_bundler_compatibility -- --nocapture
-rch exec -- cargo test -p asupersync --test wasm_release_rollback_incident_playbook -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_release_rollback_docs cargo test -p asupersync --test wasm_bundler_compatibility -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_release_rollback_docs cargo test -p asupersync --test wasm_release_rollback_incident_playbook -- --nocapture
 ```
 
 If any command fails, record:
@@ -212,5 +212,5 @@ Postmortem cannot be marked complete without:
 Local deterministic reproduction command:
 
 ```bash
-rch exec -- cargo test -p asupersync --test wasm_release_rollback_incident_playbook -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_release_rollback_docs cargo test -p asupersync --test wasm_release_rollback_incident_playbook -- --nocapture
 ```
