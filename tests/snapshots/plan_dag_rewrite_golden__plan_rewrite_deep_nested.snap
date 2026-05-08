@@ -1,0 +1,162 @@
+---
+source: tests/plan_dag_rewrite_golden.rs
+expression: golden
+---
+{
+  "scenario": "deep_nested",
+  "input_metadata": {
+    "node_count": 7,
+    "root_node": 6,
+    "node_types": [
+      "join",
+      "leaf",
+      "race",
+      "timeout"
+    ],
+    "max_depth": 3,
+    "description": "Deep nested structure - tests multiple rewrite interactions"
+  },
+  "rewrite_policy": {
+    "policy_name": "assume_all",
+    "associativity": true,
+    "commutativity": true,
+    "distributivity": true,
+    "require_binary_joins": false,
+    "timeout_simplification": true
+  },
+  "transformation_result": {
+    "input_plan": {
+      "root": 6,
+      "nodes": [
+        {
+          "id": 0,
+          "node_type": "leaf",
+          "details": {
+            "label": "task_a"
+          }
+        },
+        {
+          "id": 1,
+          "node_type": "leaf",
+          "details": {
+            "label": "task_b"
+          }
+        },
+        {
+          "id": 2,
+          "node_type": "leaf",
+          "details": {
+            "label": "task_c"
+          }
+        },
+        {
+          "id": 3,
+          "node_type": "race",
+          "details": {
+            "children": [
+              0,
+              1
+            ]
+          }
+        },
+        {
+          "id": 4,
+          "node_type": "timeout",
+          "details": {
+            "child": 2,
+            "duration_ms": 200
+          }
+        },
+        {
+          "id": 5,
+          "node_type": "join",
+          "details": {
+            "children": [
+              3,
+              4
+            ]
+          }
+        },
+        {
+          "id": 6,
+          "node_type": "timeout",
+          "details": {
+            "child": 5,
+            "duration_ms": 500
+          }
+        }
+      ],
+      "canonical_form": "Timeout(500ms, Join[Race[task_a,task_b],Timeout(200ms, task_c)])"
+    },
+    "output_plan": {
+      "root": 6,
+      "nodes": [
+        {
+          "id": 0,
+          "node_type": "leaf",
+          "details": {
+            "label": "task_a"
+          }
+        },
+        {
+          "id": 1,
+          "node_type": "leaf",
+          "details": {
+            "label": "task_b"
+          }
+        },
+        {
+          "id": 2,
+          "node_type": "leaf",
+          "details": {
+            "label": "task_c"
+          }
+        },
+        {
+          "id": 3,
+          "node_type": "race",
+          "details": {
+            "children": [
+              0,
+              1
+            ]
+          }
+        },
+        {
+          "id": 4,
+          "node_type": "timeout",
+          "details": {
+            "child": 2,
+            "duration_ms": 200
+          }
+        },
+        {
+          "id": 5,
+          "node_type": "join",
+          "details": {
+            "children": [
+              3,
+              4
+            ]
+          }
+        },
+        {
+          "id": 6,
+          "node_type": "timeout",
+          "details": {
+            "child": 5,
+            "duration_ms": 500
+          }
+        }
+      ],
+      "canonical_form": "Timeout(500ms, Join[Race[task_a,task_b],Timeout(200ms, task_c)])"
+    },
+    "applicable_rules": [
+      "JoinCommute",
+      "RaceCommute"
+    ],
+    "rules_applied": [],
+    "transformed": false,
+    "transformation_steps": []
+  }
+}

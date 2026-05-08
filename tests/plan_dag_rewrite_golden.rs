@@ -127,8 +127,7 @@ fn create_golden_snapshot(
 ) -> PlanRewriteGolden {
     let input_snapshot = create_plan_snapshot(input_plan);
 
-    // Apply transformations (mock for now - would use real rewriter)
-    let (output_plan, transformation_steps) = apply_mock_transformations(input_plan, policy);
+    let (output_plan, transformation_steps) = apply_real_transformations(input_plan, policy);
     let output_snapshot = create_plan_snapshot(&output_plan);
 
     let input_metadata = PlanInputMetadata {
@@ -339,39 +338,27 @@ fn get_applicable_rules(plan: &PlanDag, policy: RewritePolicy) -> Vec<&'static s
     rules
 }
 
-/// Mock transformation application (would use real rewriter in practice).
-fn apply_mock_transformations(
+/// Apply transformations through the production PlanDag rewrite engine.
+fn apply_real_transformations(
     plan: &PlanDag,
     policy: RewritePolicy,
 ) -> (PlanDag, Vec<TransformationStep>) {
     let mut output = plan.clone();
-    let mut steps = Vec::new();
-
-    // Apply associativity rewrites
-    if policy.associativity {
-        if let Some(step) = apply_join_associativity(&mut output) {
-            steps.push(step);
-        }
-    }
-
-    // Apply commutativity rewrites
-    if policy.commutativity {
-        if let Some(step) = apply_join_commutativity(&mut output) {
-            steps.push(step);
-        }
-    }
-
-    // Apply timeout simplification
-    if policy.timeout_simplification {
-        if let Some(step) = apply_timeout_simplification(&mut output) {
-            steps.push(step);
-        }
-    }
+    let report = output.apply_rewrites(policy, RewriteRule::all());
+    let steps = report
+        .steps()
+        .iter()
+        .map(|step| TransformationStep {
+            rule: rewrite_rule_name(step.rule),
+            target_nodes: vec![step.before.index(), step.after.index()],
+            before: render_node_canonical(plan, step.before),
+            after: render_node_canonical(&output, step.after),
+        })
+        .collect();
 
     (output, steps)
 }
 
-// Mock implementations for rule detection and application
 fn has_nested_joins(plan: &PlanDag) -> bool {
     for id in 0..plan.node_count() {
         let plan_id = PlanId::new(id);
@@ -463,66 +450,15 @@ fn has_race_of_joins_with_shared_child(plan: &PlanDag) -> bool {
     false
 }
 
-fn apply_join_associativity(plan: &mut PlanDag) -> Option<TransformationStep> {
-    // Mock: flatten first nested join found
-    for parent_idx in 0..plan.node_count() {
-        let plan_id = PlanId::new(parent_idx);
-        if let Some(parent_node) = plan.node(plan_id) {
-            if let PlanNode::Join { children } = parent_node {
-                for &child_id in children {
-                    if matches!(plan.node(child_id), Some(PlanNode::Join { .. })) {
-                        return Some(TransformationStep {
-                            rule: "JoinAssoc",
-                            target_nodes: vec![parent_idx, child_id.index()],
-                            before: format!("Join[Join[...], ...]"),
-                            after: format!("Join[...]"),
-                        });
-                    }
-                }
-            }
-        }
+fn rewrite_rule_name(rule: RewriteRule) -> &'static str {
+    match rule {
+        RewriteRule::JoinAssoc => "JoinAssoc",
+        RewriteRule::RaceAssoc => "RaceAssoc",
+        RewriteRule::JoinCommute => "JoinCommute",
+        RewriteRule::RaceCommute => "RaceCommute",
+        RewriteRule::TimeoutMin => "TimeoutMin",
+        RewriteRule::DedupRaceJoin => "DedupRaceJoin",
     }
-    None
-}
-
-fn apply_join_commutativity(plan: &mut PlanDag) -> Option<TransformationStep> {
-    // Mock: reorder first multi-child join
-    for idx in 0..plan.node_count() {
-        let plan_id = PlanId::new(idx);
-        if let Some(node) = plan.node(plan_id) {
-            if let PlanNode::Join { children } = node {
-                if children.len() > 1 {
-                    return Some(TransformationStep {
-                        rule: "JoinCommute",
-                        target_nodes: vec![idx],
-                        before: format!("Join[{:?}]", children),
-                        after: format!("Join[{:?}] (reordered)", children),
-                    });
-                }
-            }
-        }
-    }
-    None
-}
-
-fn apply_timeout_simplification(plan: &mut PlanDag) -> Option<TransformationStep> {
-    // Mock: flatten first nested timeout found
-    for parent_idx in 0..plan.node_count() {
-        let plan_id = PlanId::new(parent_idx);
-        if let Some(parent_node) = plan.node(plan_id) {
-            if let PlanNode::Timeout { child, duration } = parent_node {
-                if matches!(plan.node(*child), Some(PlanNode::Timeout { .. })) {
-                    return Some(TransformationStep {
-                        rule: "TimeoutMin",
-                        target_nodes: vec![parent_idx, child.index()],
-                        before: format!("Timeout({}ms, Timeout(...))", duration.as_millis()),
-                        after: format!("Timeout(min, ...)"),
-                    });
-                }
-            }
-        }
-    }
-    None
 }
 
 // ============================================================================
@@ -700,4 +636,17 @@ fn golden_deep_nested_structure() {
         "assume_all",
     );
     assert_json_snapshot!("plan_rewrite_deep_nested", golden);
+}
+
+#[test]
+fn golden_source_uses_real_rewrite_engine() {
+    let source = include_str!("plan_dag_rewrite_golden.rs");
+
+    assert!(
+        source.contains("apply_rewrites(policy, RewriteRule::all())"),
+        "golden helper must use the production PlanDag rewrite engine"
+    );
+    assert!(!source.contains(concat!("mock", " for now")));
+    assert!(!source.contains(concat!("apply_", "mock_", "transformations")));
+    assert!(!source.contains(concat!("would use ", "real rewriter in practice")));
 }

@@ -1,0 +1,182 @@
+---
+source: tests/plan_dag_rewrite_golden.rs
+expression: golden
+---
+{
+  "scenario": "distributivity_pattern",
+  "input_metadata": {
+    "node_count": 6,
+    "root_node": 5,
+    "node_types": [
+      "join",
+      "leaf",
+      "race"
+    ],
+    "max_depth": 2,
+    "description": "Race of joins with shared child - tests distributivity rewrite"
+  },
+  "rewrite_policy": {
+    "policy_name": "assume_all",
+    "associativity": true,
+    "commutativity": true,
+    "distributivity": true,
+    "require_binary_joins": false,
+    "timeout_simplification": true
+  },
+  "transformation_result": {
+    "input_plan": {
+      "root": 5,
+      "nodes": [
+        {
+          "id": 0,
+          "node_type": "leaf",
+          "details": {
+            "label": "shared_task"
+          }
+        },
+        {
+          "id": 1,
+          "node_type": "leaf",
+          "details": {
+            "label": "task_a"
+          }
+        },
+        {
+          "id": 2,
+          "node_type": "leaf",
+          "details": {
+            "label": "task_b"
+          }
+        },
+        {
+          "id": 3,
+          "node_type": "join",
+          "details": {
+            "children": [
+              0,
+              1
+            ]
+          }
+        },
+        {
+          "id": 4,
+          "node_type": "join",
+          "details": {
+            "children": [
+              0,
+              2
+            ]
+          }
+        },
+        {
+          "id": 5,
+          "node_type": "race",
+          "details": {
+            "children": [
+              3,
+              4
+            ]
+          }
+        }
+      ],
+      "canonical_form": "Race[Join[shared_task,task_a],Join[shared_task,task_b]]"
+    },
+    "output_plan": {
+      "root": 7,
+      "nodes": [
+        {
+          "id": 0,
+          "node_type": "leaf",
+          "details": {
+            "label": "shared_task"
+          }
+        },
+        {
+          "id": 1,
+          "node_type": "leaf",
+          "details": {
+            "label": "task_a"
+          }
+        },
+        {
+          "id": 2,
+          "node_type": "leaf",
+          "details": {
+            "label": "task_b"
+          }
+        },
+        {
+          "id": 3,
+          "node_type": "join",
+          "details": {
+            "children": [
+              0,
+              1
+            ]
+          }
+        },
+        {
+          "id": 4,
+          "node_type": "join",
+          "details": {
+            "children": [
+              0,
+              2
+            ]
+          }
+        },
+        {
+          "id": 5,
+          "node_type": "race",
+          "details": {
+            "children": [
+              3,
+              4
+            ]
+          }
+        },
+        {
+          "id": 6,
+          "node_type": "race",
+          "details": {
+            "children": [
+              1,
+              2
+            ]
+          }
+        },
+        {
+          "id": 7,
+          "node_type": "join",
+          "details": {
+            "children": [
+              0,
+              6
+            ]
+          }
+        }
+      ],
+      "canonical_form": "Join[shared_task,Race[task_a,task_b]]"
+    },
+    "applicable_rules": [
+      "JoinCommute",
+      "RaceCommute",
+      "DedupRaceJoin"
+    ],
+    "rules_applied": [
+      "DedupRaceJoin"
+    ],
+    "transformed": true,
+    "transformation_steps": [
+      {
+        "rule": "DedupRaceJoin",
+        "target_nodes": [
+          5,
+          7
+        ],
+        "before": "Race[Join[shared_task,task_a],Join[shared_task,task_b]]",
+        "after": "Join[shared_task,Race[task_a,task_b]]"
+      }
+    ]
+  }
+}

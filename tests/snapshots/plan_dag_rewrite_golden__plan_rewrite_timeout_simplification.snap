@@ -1,0 +1,111 @@
+---
+source: tests/plan_dag_rewrite_golden.rs
+expression: golden
+---
+{
+  "scenario": "timeout_simplification",
+  "input_metadata": {
+    "node_count": 3,
+    "root_node": 2,
+    "node_types": [
+      "leaf",
+      "timeout"
+    ],
+    "max_depth": 2,
+    "description": "Nested timeouts - tests timeout minimization rewrite"
+  },
+  "rewrite_policy": {
+    "policy_name": "conservative",
+    "associativity": true,
+    "commutativity": false,
+    "distributivity": true,
+    "require_binary_joins": true,
+    "timeout_simplification": true
+  },
+  "transformation_result": {
+    "input_plan": {
+      "root": 2,
+      "nodes": [
+        {
+          "id": 0,
+          "node_type": "leaf",
+          "details": {
+            "label": "task_a"
+          }
+        },
+        {
+          "id": 1,
+          "node_type": "timeout",
+          "details": {
+            "child": 0,
+            "duration_ms": 50
+          }
+        },
+        {
+          "id": 2,
+          "node_type": "timeout",
+          "details": {
+            "child": 1,
+            "duration_ms": 100
+          }
+        }
+      ],
+      "canonical_form": "Timeout(100ms, Timeout(50ms, task_a))"
+    },
+    "output_plan": {
+      "root": 3,
+      "nodes": [
+        {
+          "id": 0,
+          "node_type": "leaf",
+          "details": {
+            "label": "task_a"
+          }
+        },
+        {
+          "id": 1,
+          "node_type": "timeout",
+          "details": {
+            "child": 0,
+            "duration_ms": 50
+          }
+        },
+        {
+          "id": 2,
+          "node_type": "timeout",
+          "details": {
+            "child": 1,
+            "duration_ms": 100
+          }
+        },
+        {
+          "id": 3,
+          "node_type": "timeout",
+          "details": {
+            "child": 0,
+            "duration_ms": 50
+          }
+        }
+      ],
+      "canonical_form": "Timeout(50ms, task_a)"
+    },
+    "applicable_rules": [
+      "TimeoutMin"
+    ],
+    "rules_applied": [
+      "TimeoutMin"
+    ],
+    "transformed": true,
+    "transformation_steps": [
+      {
+        "rule": "TimeoutMin",
+        "target_nodes": [
+          2,
+          3
+        ],
+        "before": "Timeout(100ms, Timeout(50ms, task_a))",
+        "after": "Timeout(50ms, task_a)"
+      }
+    ]
+  }
+}

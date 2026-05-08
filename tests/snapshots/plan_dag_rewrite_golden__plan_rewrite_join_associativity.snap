@@ -1,0 +1,150 @@
+---
+source: tests/plan_dag_rewrite_golden.rs
+expression: golden
+---
+{
+  "scenario": "join_associativity",
+  "input_metadata": {
+    "node_count": 5,
+    "root_node": 4,
+    "node_types": [
+      "join",
+      "leaf"
+    ],
+    "max_depth": 2,
+    "description": "Nested join structure - tests associativity rewrite"
+  },
+  "rewrite_policy": {
+    "policy_name": "conservative",
+    "associativity": true,
+    "commutativity": false,
+    "distributivity": true,
+    "require_binary_joins": true,
+    "timeout_simplification": true
+  },
+  "transformation_result": {
+    "input_plan": {
+      "root": 4,
+      "nodes": [
+        {
+          "id": 0,
+          "node_type": "leaf",
+          "details": {
+            "label": "task_a"
+          }
+        },
+        {
+          "id": 1,
+          "node_type": "leaf",
+          "details": {
+            "label": "task_b"
+          }
+        },
+        {
+          "id": 2,
+          "node_type": "leaf",
+          "details": {
+            "label": "task_c"
+          }
+        },
+        {
+          "id": 3,
+          "node_type": "join",
+          "details": {
+            "children": [
+              0,
+              1
+            ]
+          }
+        },
+        {
+          "id": 4,
+          "node_type": "join",
+          "details": {
+            "children": [
+              3,
+              2
+            ]
+          }
+        }
+      ],
+      "canonical_form": "Join[Join[task_a,task_b],task_c]"
+    },
+    "output_plan": {
+      "root": 5,
+      "nodes": [
+        {
+          "id": 0,
+          "node_type": "leaf",
+          "details": {
+            "label": "task_a"
+          }
+        },
+        {
+          "id": 1,
+          "node_type": "leaf",
+          "details": {
+            "label": "task_b"
+          }
+        },
+        {
+          "id": 2,
+          "node_type": "leaf",
+          "details": {
+            "label": "task_c"
+          }
+        },
+        {
+          "id": 3,
+          "node_type": "join",
+          "details": {
+            "children": [
+              0,
+              1
+            ]
+          }
+        },
+        {
+          "id": 4,
+          "node_type": "join",
+          "details": {
+            "children": [
+              3,
+              2
+            ]
+          }
+        },
+        {
+          "id": 5,
+          "node_type": "join",
+          "details": {
+            "children": [
+              0,
+              1,
+              2
+            ]
+          }
+        }
+      ],
+      "canonical_form": "Join[task_a,task_b,task_c]"
+    },
+    "applicable_rules": [
+      "JoinAssoc"
+    ],
+    "rules_applied": [
+      "JoinAssoc"
+    ],
+    "transformed": true,
+    "transformation_steps": [
+      {
+        "rule": "JoinAssoc",
+        "target_nodes": [
+          4,
+          5
+        ],
+        "before": "Join[Join[task_a,task_b],task_c]",
+        "after": "Join[task_a,task_b,task_c]"
+      }
+    ]
+  }
+}
