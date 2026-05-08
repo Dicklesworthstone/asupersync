@@ -10,6 +10,7 @@ const DOC_PATH: &str = "docs/runtime_control_seam_inventory_contract.md";
 const ARTIFACT_PATH: &str = "artifacts/runtime_control_seam_inventory_v1.json";
 const WORKLOAD_ARTIFACT_PATH: &str = "artifacts/runtime_workload_corpus_v1.json";
 const RUNNER_SCRIPT_PATH: &str = "scripts/run_runtime_control_seam_smoke.sh";
+const WORKLOAD_RUNNER_SCRIPT_PATH: &str = "scripts/run_runtime_workload_corpus.sh";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -55,6 +56,20 @@ fn baseline_table_ids(artifact: &Value) -> BTreeSet<String> {
             entry["seam_id"]
                 .as_str()
                 .expect("table seam_id must be string")
+                .to_string()
+        })
+        .collect()
+}
+
+fn workload_ids(workload_artifact: &Value) -> BTreeSet<String> {
+    workload_artifact["workloads"]
+        .as_array()
+        .expect("workloads must be array")
+        .iter()
+        .map(|workload| {
+            workload["workload_id"]
+                .as_str()
+                .expect("workload_id must be string")
                 .to_string()
         })
         .collect()
@@ -149,6 +164,31 @@ fn artifact_versions_are_stable() {
     assert_eq!(
         artifact["runner_script"].as_str(),
         Some("scripts/run_runtime_control_seam_smoke.sh")
+    );
+}
+
+#[test]
+fn workload_corpus_versions_and_runner_are_stable() {
+    let workload_artifact = load_workload_artifact();
+    assert_eq!(
+        workload_artifact["contract_version"].as_str(),
+        Some("runtime-workload-corpus-v1")
+    );
+    assert_eq!(
+        workload_artifact["bundle_schema_version"].as_str(),
+        Some("runtime-workload-bundle-v1")
+    );
+    assert_eq!(
+        workload_artifact["runner_schema_version"].as_str(),
+        Some("runtime-workload-run-report-v1")
+    );
+    assert_eq!(
+        workload_artifact["runner_script"].as_str(),
+        Some(WORKLOAD_RUNNER_SCRIPT_PATH)
+    );
+    assert!(
+        repo_root().join(WORKLOAD_RUNNER_SCRIPT_PATH).exists(),
+        "workload corpus runner script must exist"
     );
 }
 
@@ -261,17 +301,7 @@ fn smoke_commands_are_rch_routed() {
 fn workload_ids_reference_known_workload_corpus() {
     let artifact = load_artifact();
     let workload_artifact = load_workload_artifact();
-    let known_ids: BTreeSet<String> = workload_artifact["workloads"]
-        .as_array()
-        .expect("workloads must be array")
-        .iter()
-        .map(|workload| {
-            workload["workload_id"]
-                .as_str()
-                .expect("workload_id must be string")
-                .to_string()
-        })
-        .collect();
+    let known_ids = workload_ids(&workload_artifact);
 
     for seam in artifact["seams"].as_array().expect("seams must be array") {
         let seam_id = seam["seam_id"].as_str().expect("seam_id must be string");
@@ -286,6 +316,73 @@ fn workload_ids_reference_known_workload_corpus() {
             assert!(
                 known_ids.contains(&workload),
                 "seam {seam_id} references unknown workload id: {workload}"
+            );
+        }
+    }
+}
+
+#[test]
+fn workload_corpus_replay_commands_match_workload_ids() {
+    let workload_artifact = load_workload_artifact();
+    let mut seen = BTreeSet::new();
+
+    for workload in workload_artifact["workloads"]
+        .as_array()
+        .expect("workloads must be array")
+    {
+        let workload_id = workload["workload_id"]
+            .as_str()
+            .expect("workload_id must be string");
+        assert!(
+            seen.insert(workload_id.to_string()),
+            "duplicate workload id: {workload_id}"
+        );
+
+        let replay_command = workload["replay_command"]
+            .as_str()
+            .expect("replay_command must be string");
+        let expected_replay_command =
+            format!("RCH_BIN=rch bash ./{WORKLOAD_RUNNER_SCRIPT_PATH} --workload {workload_id}");
+        assert_eq!(
+            replay_command, expected_replay_command,
+            "replay command must stay exact for {workload_id}"
+        );
+    }
+}
+
+#[test]
+fn workload_corpus_sets_reference_known_workloads() {
+    let workload_artifact = load_workload_artifact();
+    let known_ids = workload_ids(&workload_artifact);
+
+    for workload_id in workload_artifact["default_core_set"]
+        .as_array()
+        .expect("default_core_set must be array")
+    {
+        let workload_id = workload_id
+            .as_str()
+            .expect("default_core_set workload id must be string");
+        assert!(
+            known_ids.contains(workload_id),
+            "default_core_set references unknown workload id: {workload_id}"
+        );
+    }
+
+    for pack in workload_artifact["expansion_packs"]
+        .as_array()
+        .expect("expansion_packs must be array")
+    {
+        let pack_id = pack["pack_id"].as_str().expect("pack_id must be string");
+        for workload_id in pack["workload_ids"]
+            .as_array()
+            .expect("expansion pack workload_ids must be array")
+        {
+            let workload_id = workload_id
+                .as_str()
+                .expect("expansion pack workload id must be string");
+            assert!(
+                known_ids.contains(workload_id),
+                "expansion pack {pack_id} references unknown workload id: {workload_id}"
             );
         }
     }
