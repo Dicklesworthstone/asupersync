@@ -1,0 +1,54 @@
+{
+  "cache_age_seconds": 4800,
+  "cache_entry_found": true,
+  "current_date": "2026-05-08",
+  "current_receipt_summary": {
+    "agent": "CoralGorge",
+    "branch": "main",
+    "dirty_cluster_count": 1,
+    "generated_at": "2026-05-08T05:00:00Z",
+    "in_progress_bead_count": 1,
+    "next_action_category": "avoid-peer-owned-surface",
+    "ready_bead_count": 1,
+    "receipt_digest_sha256": "e18963ba9b3204f7fd62d5d15613087968a93d59db7541a679bb2a58281dbfe7",
+    "receipt_key": "90749c337a29d096",
+    "repo_path": "/data/projects/asupersync",
+    "reservation_conflict_count": 1,
+    "schema_version": "session-handoff-receipt-v1"
+  },
+  "decision": "refresh-cache",
+  "forbidden_actions": {
+    "runs_beads_mutation": false,
+    "runs_cargo": false,
+    "runs_destructive_command": false,
+    "runs_git_mutation": false,
+    "writes_cache": false
+  },
+  "generated_at": "2026-05-08T05:20:00Z",
+  "non_mutating": true,
+  "proposed_cache_record": {
+    "agent": "CoralGorge",
+    "branch": "main",
+    "cached_at": "2026-05-08T05:20:00Z",
+    "dirty_cluster_count": 1,
+    "generated_at": "2026-05-08T05:00:00Z",
+    "in_progress_bead_count": 1,
+    "next_action_category": "avoid-peer-owned-surface",
+    "ready_bead_count": 1,
+    "receipt_digest_sha256": "e18963ba9b3204f7fd62d5d15613087968a93d59db7541a679bb2a58281dbfe7",
+    "receipt_key": "90749c337a29d096",
+    "repo_path": "/data/projects/asupersync",
+    "reservation_conflict_count": 1,
+    "schema_version": "session-handoff-receipt-v1",
+    "ttl_seconds": 1800
+  },
+  "reason": "matching entry exceeded TTL",
+  "receipt_key": "90749c337a29d096",
+  "redaction_policy": {
+    "output_contains_hashes_and_counts_only": true,
+    "raw_receipt_embedded": false,
+    "secret_values_embedded": false
+  },
+  "schema_version": "onboarding-receipt-cache-v1",
+  "ttl_seconds": 1800
+}
