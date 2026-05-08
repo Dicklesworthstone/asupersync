@@ -1,24 +1,17 @@
 //! HTTP/2 PING with ACK frames RTT measurement conformance test
 //!
-//! This module provides conformance testing for HTTP/2 PING frame RTT measurement
-//! behavior, comparing asupersync against the h2 crate reference implementation.
+//! This module exercises asupersync's HTTP/2 PING frame timing model.
 //!
-//! The test verifies that both implementations produce identical RTT calculations
-//! given the same wire timing for PING and PING+ACK frame sequences.
+//! A live h2 crate PING frame observation seam is not wired yet. The reference
+//! side therefore fails closed instead of reporting model-only timing as
+//! differential conformance evidence.
 
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
-use std::net::SocketAddr;
 
-use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::time::timeout;
 
-use asupersync::http::h2::{Connection, H2Error, Frame, PingFrame};
-use asupersync::runtime::Runtime;
-use asupersync::cx::Cx;
+pub const H2_PING_REFERENCE_UNSUPPORTED: &str =
+    "h2 PING frame RTT reference observation is not wired; refusing model-only conformance";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PingTestCase {
@@ -34,29 +27,29 @@ pub enum TimingScenario {
     /// Single PING -> PING+ACK sequence with fixed timing
     SinglePing {
         ping_time: Duration,
-        ack_delay: Duration
+        ack_delay: Duration,
     },
     /// Multiple PINGs in flight with different payloads
     MultiplePings {
         ping_intervals: Vec<Duration>,
-        ack_delays: Vec<Duration>
+        ack_delays: Vec<Duration>,
     },
     /// PING with payload that should not be modified in ACK
     PayloadPreservation {
         payload: [u8; 8],
-        round_trip_time: Duration
+        round_trip_time: Duration,
     },
     /// Rapid PING/PONG sequence stress test
-    RapidSequence {
-        count: u32,
-        interval: Duration
-    },
+    RapidSequence { count: u32, interval: Duration },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ExpectedBehavior {
     /// RTT should match within tolerance
-    RttWithinTolerance { expected_rtt: Duration, tolerance: Duration },
+    RttWithinTolerance {
+        expected_rtt: Duration,
+        tolerance: Duration,
+    },
     /// Payload should be preserved exactly
     PayloadPreserved,
     /// All PINGs should receive ACKs
@@ -234,10 +227,7 @@ pub fn generate_ping_test_cases() -> Vec<PingTestCase> {
 
 /// Run asupersync PING RTT test
 async fn run_asupersync_ping_test(test_case: &PingTestCase) -> TestResult {
-    let runtime = Runtime::new_test();
-    let cx = runtime.cx();
-
-    match run_asupersync_ping_test_impl(&cx, test_case).await {
+    match run_asupersync_ping_test_impl(test_case).await {
         Ok(result) => result,
         Err(e) => TestResult {
             success: false,
@@ -256,7 +246,9 @@ async fn run_asupersync_ping_test(test_case: &PingTestCase) -> TestResult {
     }
 }
 
-async fn run_asupersync_ping_test_impl(cx: &Cx<'_>, test_case: &PingTestCase) -> Result<TestResult, Box<dyn std::error::Error>> {
+async fn run_asupersync_ping_test_impl(
+    test_case: &PingTestCase,
+) -> Result<TestResult, Box<dyn std::error::Error>> {
     let mut rtt_measurements = Vec::new();
     let mut ping_payloads_sent = Vec::new();
     let mut ack_payloads_received = Vec::new();
@@ -274,8 +266,11 @@ async fn run_asupersync_ping_test_impl(cx: &Cx<'_>, test_case: &PingTestCase) ->
             let measured_rtt = end_time.duration_since(start_time);
             rtt_measurements.push(measured_rtt);
             ack_payloads_received.push(test_case.ping_payload); // Payload preserved
-        },
-        TimingScenario::MultiplePings { ping_intervals, ack_delays } => {
+        }
+        TimingScenario::MultiplePings {
+            ping_intervals,
+            ack_delays,
+        } => {
             for (i, ack_delay) in ack_delays.iter().enumerate() {
                 if i < ping_intervals.len() {
                     let mut payload = test_case.ping_payload;
@@ -292,8 +287,11 @@ async fn run_asupersync_ping_test_impl(cx: &Cx<'_>, test_case: &PingTestCase) ->
                     ack_payloads_received.push(payload);
                 }
             }
-        },
-        TimingScenario::PayloadPreservation { payload, round_trip_time } => {
+        }
+        TimingScenario::PayloadPreservation {
+            payload,
+            round_trip_time,
+        } => {
             let start_time = Instant::now();
             ping_payloads_sent.push(*payload);
 
@@ -303,7 +301,7 @@ async fn run_asupersync_ping_test_impl(cx: &Cx<'_>, test_case: &PingTestCase) ->
             let measured_rtt = end_time.duration_since(start_time);
             rtt_measurements.push(measured_rtt);
             ack_payloads_received.push(*payload);
-        },
+        }
         TimingScenario::RapidSequence { count, interval } => {
             for i in 0..*count {
                 let mut payload = test_case.ping_payload;
@@ -321,10 +319,14 @@ async fn run_asupersync_ping_test_impl(cx: &Cx<'_>, test_case: &PingTestCase) ->
                 rtt_measurements.push(measured_rtt);
                 ack_payloads_received.push(payload);
             }
-        },
+        }
     }
 
-    let timing_analysis = analyze_timing(&rtt_measurements, &ping_payloads_sent, &ack_payloads_received);
+    let timing_analysis = analyze_timing(
+        &rtt_measurements,
+        &ping_payloads_sent,
+        &ack_payloads_received,
+    );
 
     Ok(TestResult {
         success: true,
@@ -338,104 +340,23 @@ async fn run_asupersync_ping_test_impl(cx: &Cx<'_>, test_case: &PingTestCase) ->
 
 /// Run h2 reference implementation PING RTT test
 async fn run_h2_ping_test(test_case: &PingTestCase) -> TestResult {
-    match run_h2_ping_test_impl(test_case).await {
-        Ok(result) => result,
-        Err(e) => TestResult {
-            success: false,
-            rtt_measurements: Vec::new(),
-            ping_payloads_sent: Vec::new(),
-            ack_payloads_received: Vec::new(),
-            error: Some(format!("H2 reference test failed: {}", e)),
-            timing_analysis: TimingAnalysis {
-                min_rtt: None,
-                max_rtt: None,
-                avg_rtt: None,
-                rtt_variance: None,
-                payload_corruption_detected: false,
-            },
+    TestResult {
+        success: false,
+        rtt_measurements: Vec::new(),
+        ping_payloads_sent: Vec::new(),
+        ack_payloads_received: Vec::new(),
+        error: Some(format!(
+            "{H2_PING_REFERENCE_UNSUPPORTED}; test_id={}",
+            test_case.id
+        )),
+        timing_analysis: TimingAnalysis {
+            min_rtt: None,
+            max_rtt: None,
+            avg_rtt: None,
+            rtt_variance: None,
+            payload_corruption_detected: false,
         },
     }
-}
-
-async fn run_h2_ping_test_impl(test_case: &PingTestCase) -> Result<TestResult, Box<dyn std::error::Error>> {
-    // For this conformance test, we simulate h2 crate behavior
-    // In a real implementation, this would use actual h2 crate APIs
-
-    let mut rtt_measurements = Vec::new();
-    let mut ping_payloads_sent = Vec::new();
-    let mut ack_payloads_received = Vec::new();
-
-    match &test_case.timing_scenario {
-        TimingScenario::SinglePing { ack_delay, .. } => {
-            let start_time = Instant::now();
-            ping_payloads_sent.push(test_case.ping_payload);
-
-            // Simulate h2 crate behavior - similar timing
-            tokio::time::sleep(*ack_delay).await;
-
-            let end_time = Instant::now();
-            let measured_rtt = end_time.duration_since(start_time);
-            rtt_measurements.push(measured_rtt);
-            ack_payloads_received.push(test_case.ping_payload);
-        },
-        TimingScenario::MultiplePings { ping_intervals, ack_delays } => {
-            for (i, ack_delay) in ack_delays.iter().enumerate() {
-                if i < ping_intervals.len() {
-                    let mut payload = test_case.ping_payload;
-                    payload[7] = i as u8;
-
-                    let start_time = Instant::now();
-                    ping_payloads_sent.push(payload);
-
-                    tokio::time::sleep(*ack_delay).await;
-
-                    let end_time = Instant::now();
-                    let measured_rtt = end_time.duration_since(start_time);
-                    rtt_measurements.push(measured_rtt);
-                    ack_payloads_received.push(payload);
-                }
-            }
-        },
-        TimingScenario::PayloadPreservation { payload, round_trip_time } => {
-            let start_time = Instant::now();
-            ping_payloads_sent.push(*payload);
-
-            tokio::time::sleep(*round_trip_time).await;
-
-            let end_time = Instant::now();
-            let measured_rtt = end_time.duration_since(start_time);
-            rtt_measurements.push(measured_rtt);
-            ack_payloads_received.push(*payload);
-        },
-        TimingScenario::RapidSequence { count, interval } => {
-            for i in 0..*count {
-                let mut payload = test_case.ping_payload;
-                payload[6] = (i >> 8) as u8;
-                payload[7] = (i & 0xff) as u8;
-
-                let start_time = Instant::now();
-                ping_payloads_sent.push(payload);
-
-                tokio::time::sleep(*interval).await;
-
-                let end_time = Instant::now();
-                let measured_rtt = end_time.duration_since(start_time);
-                rtt_measurements.push(measured_rtt);
-                ack_payloads_received.push(payload);
-            }
-        },
-    }
-
-    let timing_analysis = analyze_timing(&rtt_measurements, &ping_payloads_sent, &ack_payloads_received);
-
-    Ok(TestResult {
-        success: true,
-        rtt_measurements,
-        ping_payloads_sent,
-        ack_payloads_received,
-        error: None,
-        timing_analysis,
-    })
 }
 
 fn analyze_timing(
@@ -479,9 +400,15 @@ fn analyze_timing(
     }
 }
 
-fn compare_results(test_case: &PingTestCase, asupersync_result: &TestResult, h2_result: &TestResult) -> ComparisonResult {
-    let rtt_difference = if let (Some(asupersync_avg), Some(h2_avg)) =
-        (asupersync_result.timing_analysis.avg_rtt, h2_result.timing_analysis.avg_rtt) {
+fn compare_results(
+    _test_case: &PingTestCase,
+    asupersync_result: &TestResult,
+    h2_result: &TestResult,
+) -> ComparisonResult {
+    let rtt_difference = if let (Some(asupersync_avg), Some(h2_avg)) = (
+        asupersync_result.timing_analysis.avg_rtt,
+        h2_result.timing_analysis.avg_rtt,
+    ) {
         Some(if asupersync_avg > h2_avg {
             asupersync_avg - h2_avg
         } else {
@@ -491,12 +418,23 @@ fn compare_results(test_case: &PingTestCase, asupersync_result: &TestResult, h2_
         None
     };
 
-    let payload_match = asupersync_result.ping_payloads_sent == h2_result.ping_payloads_sent &&
-                       asupersync_result.ack_payloads_received == h2_result.ack_payloads_received;
+    let payload_match = asupersync_result.ping_payloads_sent == h2_result.ping_payloads_sent
+        && asupersync_result.ack_payloads_received == h2_result.ack_payloads_received;
 
-    let timing_correlation = calculate_timing_correlation(&asupersync_result.rtt_measurements, &h2_result.rtt_measurements);
+    let timing_correlation = calculate_timing_correlation(
+        &asupersync_result.rtt_measurements,
+        &h2_result.rtt_measurements,
+    );
 
     let mut divergence_points = Vec::new();
+
+    if let Some(error) = &asupersync_result.error {
+        divergence_points.push(format!("asupersync side failed: {error}"));
+    }
+
+    if let Some(error) = &h2_result.error {
+        divergence_points.push(format!("h2 reference unavailable: {error}"));
+    }
 
     if !payload_match {
         divergence_points.push("Payload handling differs between implementations".to_string());
@@ -509,7 +447,10 @@ fn compare_results(test_case: &PingTestCase, asupersync_result: &TestResult, h2_
     }
 
     if timing_correlation < 0.9 {
-        divergence_points.push(format!("Timing correlation too low: {:.3}", timing_correlation));
+        divergence_points.push(format!(
+            "Timing correlation too low: {:.3}",
+            timing_correlation
+        ));
     }
 
     ComparisonResult {
@@ -530,7 +471,9 @@ fn calculate_timing_correlation(rtts1: &[Duration], rtts2: &[Duration]) -> f64 {
     let sum2: f64 = rtts2.iter().map(|d| d.as_nanos() as f64).sum();
     let sum1_sq: f64 = rtts1.iter().map(|d| (d.as_nanos() as f64).powi(2)).sum();
     let sum2_sq: f64 = rtts2.iter().map(|d| (d.as_nanos() as f64).powi(2)).sum();
-    let sum_product: f64 = rtts1.iter().zip(rtts2.iter())
+    let sum_product: f64 = rtts1
+        .iter()
+        .zip(rtts2.iter())
         .map(|(d1, d2)| (d1.as_nanos() as f64) * (d2.as_nanos() as f64))
         .sum();
 
@@ -551,10 +494,10 @@ pub async fn run_single_conformance_test(test_case: &PingTestCase) -> Conformanc
 
     let comparison = compare_results(test_case, &asupersync_result, &h2_result);
 
-    let conformant = asupersync_result.success &&
-                    h2_result.success &&
-                    comparison.payload_match &&
-                    comparison.divergence_points.is_empty();
+    let conformant = asupersync_result.success
+        && h2_result.success
+        && comparison.payload_match
+        && comparison.divergence_points.is_empty();
 
     ConformanceResults {
         test_id: test_case.id.clone(),
@@ -641,21 +584,34 @@ fn calculate_test_summary(test_results: &[ConformanceResults]) -> TestSummary {
         };
     }
 
-    let rtt_accurate = test_results.iter()
-        .filter(|r| r.comparison.rtt_difference.map_or(true, |d| d < Duration::from_millis(10)))
+    let rtt_accurate = test_results
+        .iter()
+        .filter(|r| {
+            r.asupersync_result.success
+                && r.h2_result.success
+                && r.comparison
+                    .rtt_difference
+                    .is_some_and(|d| d < Duration::from_millis(10))
+        })
         .count() as f64;
 
-    let payload_preserved = test_results.iter()
-        .filter(|r| r.comparison.payload_match)
+    let payload_preserved = test_results
+        .iter()
+        .filter(|r| {
+            r.asupersync_result.success && r.h2_result.success && r.comparison.payload_match
+        })
         .count() as f64;
 
-    let timing_consistent = test_results.iter()
-        .filter(|r| r.comparison.timing_correlation > 0.9)
+    let timing_consistent = test_results
+        .iter()
+        .filter(|r| {
+            r.asupersync_result.success
+                && r.h2_result.success
+                && r.comparison.timing_correlation > 0.9
+        })
         .count() as f64;
 
-    let overall_conformant = test_results.iter()
-        .filter(|r| r.conformant)
-        .count() as f64;
+    let overall_conformant = test_results.iter().filter(|r| r.conformant).count() as f64;
 
     TestSummary {
         rtt_accuracy_score: rtt_accurate / total,
@@ -675,16 +631,40 @@ pub fn format_results_as_summary(results: &ConformanceReport) -> String {
     output.push_str(&format!("Timestamp: {}\n", results.timestamp));
     output.push_str(&format!("Total Tests: {}\n", results.total_tests));
     output.push_str(&format!("Passing: {}\n", results.passing_tests));
-    output.push_str(&format!("Conformant: {}\n\n", if results.conformant_implementations { "YES" } else { "NO" }));
+    output.push_str(&format!(
+        "Conformant: {}\n\n",
+        if results.conformant_implementations {
+            "YES"
+        } else {
+            "NO"
+        }
+    ));
+    output.push_str(&format!(
+        "Reference Status: {}\n\n",
+        H2_PING_REFERENCE_UNSUPPORTED
+    ));
 
     output.push_str("Test Summary:\n");
-    output.push_str(&format!("  RTT Accuracy Score: {:.1%}\n", results.summary.rtt_accuracy_score));
-    output.push_str(&format!("  Payload Preservation Score: {:.1%}\n", results.summary.payload_preservation_score));
-    output.push_str(&format!("  Timing Consistency Score: {:.1%}\n", results.summary.timing_consistency_score));
-    output.push_str(&format!("  Overall Conformance Score: {:.1%}\n\n", results.summary.overall_conformance_score));
+    output.push_str(&format!(
+        "  RTT Accuracy Score: {:.1}%\n",
+        results.summary.rtt_accuracy_score * 100.0
+    ));
+    output.push_str(&format!(
+        "  Payload Preservation Score: {:.1}%\n",
+        results.summary.payload_preservation_score * 100.0
+    ));
+    output.push_str(&format!(
+        "  Timing Consistency Score: {:.1}%\n",
+        results.summary.timing_consistency_score * 100.0
+    ));
+    output.push_str(&format!(
+        "  Overall Conformance Score: {:.1}%\n\n",
+        results.summary.overall_conformance_score * 100.0
+    ));
 
     for (i, result) in results.test_results.iter().enumerate() {
-        output.push_str(&format!("{}. {} [{}]\n",
+        output.push_str(&format!(
+            "{}. {} [{}]\n",
             i + 1,
             result.test_description,
             if result.conformant { "PASS" } else { "FAIL" }
@@ -710,21 +690,53 @@ pub fn format_results_as_markdown(results: &ConformanceReport) -> String {
     output.push_str(&format!("**Timestamp:** {}\n", results.timestamp));
     output.push_str(&format!("**Total Tests:** {}\n", results.total_tests));
     output.push_str(&format!("**Passing:** {}\n", results.passing_tests));
-    output.push_str(&format!("**Conformant:** {}\n\n", if results.conformant_implementations { "✅ YES" } else { "❌ NO" }));
+    output.push_str(&format!(
+        "**Conformant:** {}\n\n",
+        if results.conformant_implementations {
+            "✅ YES"
+        } else {
+            "❌ NO"
+        }
+    ));
+    output.push_str(&format!(
+        "**Reference Status:** `{}`\n\n",
+        H2_PING_REFERENCE_UNSUPPORTED
+    ));
 
     output.push_str("## Test Summary\n\n");
     output.push_str("| Metric | Score |\n");
     output.push_str("|--------|-------|\n");
-    output.push_str(&format!("| RTT Accuracy | {:.1%} |\n", results.summary.rtt_accuracy_score));
-    output.push_str(&format!("| Payload Preservation | {:.1%} |\n", results.summary.payload_preservation_score));
-    output.push_str(&format!("| Timing Consistency | {:.1%} |\n", results.summary.timing_consistency_score));
-    output.push_str(&format!("| Overall Conformance | {:.1%} |\n\n", results.summary.overall_conformance_score));
+    output.push_str(&format!(
+        "| RTT Accuracy | {:.1}% |\n",
+        results.summary.rtt_accuracy_score * 100.0
+    ));
+    output.push_str(&format!(
+        "| Payload Preservation | {:.1}% |\n",
+        results.summary.payload_preservation_score * 100.0
+    ));
+    output.push_str(&format!(
+        "| Timing Consistency | {:.1}% |\n",
+        results.summary.timing_consistency_score * 100.0
+    ));
+    output.push_str(&format!(
+        "| Overall Conformance | {:.1}% |\n\n",
+        results.summary.overall_conformance_score * 100.0
+    ));
 
     output.push_str("## Individual Test Results\n\n");
 
     for (i, result) in results.test_results.iter().enumerate() {
-        let status = if result.conformant { "✅ PASS" } else { "❌ FAIL" };
-        output.push_str(&format!("### {}. {} {}\n\n", i + 1, result.test_description, status));
+        let status = if result.conformant {
+            "✅ PASS"
+        } else {
+            "❌ FAIL"
+        };
+        output.push_str(&format!(
+            "### {}. {} {}\n\n",
+            i + 1,
+            result.test_description,
+            status
+        ));
 
         if !result.conformant && !result.comparison.divergence_points.is_empty() {
             output.push_str("**Divergences:**\n");
@@ -738,5 +750,69 @@ pub fn format_results_as_markdown(results: &ConformanceReport) -> String {
     output
 }
 
-// Add chrono dependency for timestamps
-use chrono;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn h2_reference_fails_closed_instead_of_returning_modeled_timing() {
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let test_case = generate_ping_test_cases()
+            .into_iter()
+            .next()
+            .expect("at least one ping case");
+
+        let result = runtime.block_on(run_h2_ping_test(&test_case));
+
+        assert!(!result.success);
+        assert!(result.rtt_measurements.is_empty());
+        assert!(result.ping_payloads_sent.is_empty());
+        assert!(result.ack_payloads_received.is_empty());
+        assert!(
+            result
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains(H2_PING_REFERENCE_UNSUPPORTED))
+        );
+    }
+
+    #[test]
+    fn conformance_result_records_unsupported_h2_reference() {
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let test_case = generate_ping_test_cases()
+            .into_iter()
+            .next()
+            .expect("at least one ping case");
+
+        let result = runtime.block_on(run_single_conformance_test(&test_case));
+
+        assert!(!result.conformant);
+        assert!(
+            result
+                .comparison
+                .divergence_points
+                .iter()
+                .any(|point| point.contains("h2 reference unavailable"))
+        );
+    }
+
+    #[test]
+    fn formatted_summary_exposes_fail_closed_reference_status() {
+        let report = ConformanceReport {
+            timestamp: "2026-05-08T00:00:00Z".to_string(),
+            total_tests: 0,
+            passing_tests: 0,
+            conformant_implementations: false,
+            test_results: Vec::new(),
+            summary: TestSummary {
+                rtt_accuracy_score: 0.0,
+                payload_preservation_score: 0.0,
+                timing_consistency_score: 0.0,
+                overall_conformance_score: 0.0,
+            },
+        };
+
+        let summary = format_results_as_summary(&report);
+        assert!(summary.contains(H2_PING_REFERENCE_UNSUPPORTED));
+    }
+}

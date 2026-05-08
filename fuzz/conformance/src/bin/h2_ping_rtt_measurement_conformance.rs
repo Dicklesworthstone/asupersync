@@ -1,12 +1,12 @@
 //! CLI runner for H2 PING RTT measurement conformance testing
 //!
-//! This binary runs the conformance test harness comparing asupersync's
-//! PING frame RTT measurement behavior against the h2 crate reference.
+//! This binary runs the PING timing harness in fail-closed mode until a live
+//! h2 crate PING frame observation seam is wired.
 
 use std::env;
 use std::process;
 
-use conformance::h2_ping_rtt_measurement_conformance::*;
+use asupersync_conformance::h2_ping_rtt_measurement_conformance::*;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -59,7 +59,11 @@ fn main() {
     }
 
     // Exit with appropriate code
-    let exit_code = if results.conformant_implementations { 0 } else { 1 };
+    let exit_code = if results.conformant_implementations {
+        0
+    } else {
+        1
+    };
     process::exit(exit_code);
 }
 
@@ -77,11 +81,11 @@ fn print_help() {
     println!("    --help, -h   Print this help message");
     println!();
     println!("DESCRIPTION:");
-    println!("    This tool tests HTTP/2 PING frame RTT measurement compliance");
-    println!("    by comparing asupersync behavior against the h2 crate reference");
-    println!("    implementation. It verifies that both implementations produce");
-    println!("    identical RTT calculations given the same wire timing for PING");
-    println!("    and PING+ACK frame sequences.");
+    println!("    This tool exercises the asupersync HTTP/2 PING RTT model.");
+    println!("    The h2 crate reference side is currently unsupported and");
+    println!("    fails closed instead of treating model-only timing as");
+    println!("    conformance evidence. A zero exit code is only valid after");
+    println!("    a real h2 PING frame observation seam is wired.");
     println!();
     println!("EXIT CODES:");
     println!("    0    All tests passed - implementations are conformant");
