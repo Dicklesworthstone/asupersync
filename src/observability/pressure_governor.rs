@@ -788,24 +788,80 @@ mod tests {
 
     #[test]
     fn test_pressure_governor_observe_only_mode() {
-        let config = PressureGovernorConfig {
-            enabled: true,
-            admission_control: false, // Observe-only mode
-            ..Default::default()
-        };
-
         let runtime = std::sync::Arc::new(
             RuntimeBuilder::new()
                 .worker_threads(1)
+                .blocking_threads(0, 1)
                 .build()
                 .expect("Failed to create test runtime"),
         );
-        let metrics = Metrics::new();
-        let governor = PressureGovernor::new(config, runtime, metrics).unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let first = runtime
+            .spawn_blocking(move || {
+                started_tx
+                    .send(())
+                    .expect("test should observe first blocking task start");
+                release_rx
+                    .recv()
+                    .expect("test should release first blocking task");
+            })
+            .expect("runtime should expose a blocking pool");
+        if let Err(error) = started_rx.recv_timeout(Duration::from_secs(2)) {
+            let _ = release_tx.send(());
+            panic!("first blocking task should start: {error}");
+        }
 
-        // In observe-only mode, should collect metrics but always admit
+        let (queued_tx, queued_rx) = std::sync::mpsc::channel();
+        let second = runtime
+            .spawn_blocking(move || {
+                queued_tx
+                    .send(())
+                    .expect("test should observe queued blocking task run");
+            })
+            .expect("runtime should accept a queued blocking task");
+
+        let config = PressureGovernorConfig {
+            enabled: true,
+            admission_control: false,
+            sample_interval: Duration::ZERO,
+            thresholds: PressureThresholds {
+                blocking_pool: 0.5,
+                ..Default::default()
+            },
+        };
+        let metrics = Metrics::new();
+        let governor =
+            PressureGovernor::new(config, std::sync::Arc::clone(&runtime), metrics).unwrap();
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+
+        let decision = governor.check_admission(&cx);
+
+        release_tx
+            .send(())
+            .expect("test should release first blocking task");
+        assert!(
+            first.wait_timeout(Duration::from_secs(2)),
+            "first blocking task should finish"
+        );
+        assert!(
+            second.wait_timeout(Duration::from_secs(2)),
+            "queued blocking task should finish"
+        );
+        queued_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("queued blocking task should execute after release");
+
+        let decision = decision.expect("observe-only admission should not fail");
+
         assert!(governor.config().enabled);
         assert!(!governor.config().admission_control);
+        assert_eq!(decision, AdmissionDecision::Admit);
+        assert_eq!(
+            governor.fallback_verdict_metric(),
+            PressureFallbackVerdict::PartialSignalsUnavailable.as_metric_value()
+        );
+        assert_eq!(governor.fallback_total.get(), 1);
     }
 
     #[test]
