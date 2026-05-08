@@ -1,0 +1,6 @@
+---
+source: tests/codec_wire_frame_goldens.rs
+expression: hexdump(&dst)
+---
+0000  00 00 00 01 42                                    |....B|
+(5 bytes)
