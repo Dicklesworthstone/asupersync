@@ -32,6 +32,8 @@ mod barrier;
 mod contended_mutex;
 mod lock_ordering;
 mod lock_ordering_test;
+#[cfg(test)]
+mod cross_module_lock_ordering_test;
 mod mutex;
 mod notify;
 #[cfg(test)]
@@ -48,6 +50,8 @@ mod pool_metamorphic_tests;
 mod rwlock;
 #[cfg(test)]
 mod rwlock_lost_wakeup_test;
+#[cfg(test)]
+mod scope_cancellation_metamorphic;
 pub mod semaphore;
 #[cfg(test)]
 mod semaphore_metamorphic_tests;
