@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 const CONTRACT_PATH: &str = "artifacts/browser_operator_console_snapshot_contract_v1.json";
 const MODEL_PATH: &str = "asupersync-browser-core/src/types.rs";
 const EXPORT_PATH: &str = "asupersync-browser-core/src/exports.rs";
+const BROWSER_CORE_CARGO_PATH: &str = "asupersync-browser-core/Cargo.toml";
 const ABI_EXPORT_TEST_PATH: &str = "asupersync-browser-core/tests/abi_exports.rs";
 const TEST_PATH: &str = "tests/browser_operator_console_snapshot_contract.rs";
 
@@ -206,6 +207,48 @@ fn live_export_is_wired_to_dispatcher_diagnostics() {
         abi_export_tests
             .contains("browser_operator_snapshot_export_projects_live_dispatcher_diagnostics"),
         "host export tests must exercise live snapshot export"
+    );
+}
+
+#[test]
+fn wasm_compile_proof_is_declared_and_target_isolated() {
+    let contract = contract();
+    let proof = &contract["wasm_compile_proof"];
+    assert_eq!(string(proof, "target"), "wasm32-unknown-unknown");
+    assert_eq!(string(proof, "package"), "asupersync-browser-core");
+    assert_eq!(string(proof, "feature_profile"), "minimal");
+    assert_eq!(string(proof, "core_feature"), "wasm-browser-minimal");
+    assert_eq!(
+        string(proof, "required_export_symbol"),
+        "browser_operator_snapshot"
+    );
+
+    let command = string(proof, "proof_command");
+    assert!(command.starts_with("rch exec -- "));
+    assert!(command.contains("CARGO_INCREMENTAL=0"));
+    assert!(command.contains(
+        "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_browser_operator_console_snapshot_wasm_minimal"
+    ));
+    assert!(command.contains("cargo check -p asupersync-browser-core"));
+    assert!(command.contains("--target wasm32-unknown-unknown"));
+    assert!(command.contains("--no-default-features --features minimal"));
+
+    let cargo_toml = read_repo_file(BROWSER_CORE_CARGO_PATH);
+    assert!(
+        cargo_toml.contains("minimal = [\"asupersync/wasm-browser-minimal\"]"),
+        "browser-core minimal profile must select the canonical core wasm profile"
+    );
+    let exports = read_repo_file(EXPORT_PATH);
+    assert!(
+        exports.contains("wasm_bindgen(js_name = browser_operator_snapshot)"),
+        "wasm compile proof must cover the browser operator snapshot export symbol"
+    );
+
+    assert!(
+        array(&contract, "validation_commands")
+            .iter()
+            .any(|entry| entry.as_str() == Some(command)),
+        "validation commands must include the exact wasm compile proof command"
     );
 }
 

@@ -115,6 +115,14 @@
     "blocked_reason_contains": "unreleased closed handles",
     "source_test": "browser_operator_snapshot_from_dispatcher_diagnostics_fails_closed_on_leaked_handles"
   },
+  "wasm_compile_proof": {
+    "target": "wasm32-unknown-unknown",
+    "package": "asupersync-browser-core",
+    "feature_profile": "minimal",
+    "core_feature": "wasm-browser-minimal",
+    "required_export_symbol": "browser_operator_snapshot",
+    "proof_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_browser_operator_console_snapshot_wasm_minimal CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync-browser-core --target wasm32-unknown-unknown --no-default-features --features minimal"
+  },
   "scenario_matrix": [
     {
       "kind": "empty_runtime",
@@ -187,6 +195,7 @@
     "rch exec -- rustfmt --edition 2024 --check asupersync-browser-core/src/types.rs asupersync-browser-core/src/lib.rs asupersync-browser-core/src/exports.rs asupersync-browser-core/tests/abi_exports.rs tests/browser_operator_console_snapshot_contract.rs",
     "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_browser_operator_console_snapshot_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test browser_operator_console_snapshot_contract --features test-internals -- --nocapture",
     "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_browser_operator_console_snapshot_leak_ratchet CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync-browser-core browser_operator_snapshot_from_dispatcher_diagnostics_fails_closed_on_leaked_handles -- --nocapture",
-    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_browser_operator_console_snapshot_export CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync-browser-core browser_operator_snapshot_export_projects_live_dispatcher_diagnostics -- --nocapture"
+    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_browser_operator_console_snapshot_export CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync-browser-core browser_operator_snapshot_export_projects_live_dispatcher_diagnostics -- --nocapture",
+    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_browser_operator_console_snapshot_wasm_minimal CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync-browser-core --target wasm32-unknown-unknown --no-default-features --features minimal"
   ]
 }
