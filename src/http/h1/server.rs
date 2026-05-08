@@ -28,6 +28,7 @@ pub enum HostPolicy {
     #[default]
     RejectUnknown,
     /// Accept any Host header (INSECURE - only for legacy compatibility).
+    /// Malformed requests such as duplicate Host headers are still rejected.
     /// Use with extreme caution as this enables Host header injection attacks.
     AllowAll,
 }
@@ -189,6 +190,20 @@ fn parse_host_header_host(value: &str) -> Option<String> {
     Some(value.to_ascii_lowercase())
 }
 
+fn single_host_header_value(headers: &[(String, String)]) -> Result<Option<&str>, String> {
+    let mut host_value = None;
+    for (name, value) in headers {
+        if !name.eq_ignore_ascii_case("host") {
+            continue;
+        }
+        if host_value.is_some() {
+            return Err("multiple Host headers".to_string());
+        }
+        host_value = Some(value.as_str());
+    }
+    Ok(host_value)
+}
+
 /// br-asupersync-scxixg: validate the request's `Host` header against
 /// the host policy. Returns `Ok(())` if validation passes (or is
 /// disabled); `Err(host_value)` carrying the offending host string
@@ -198,13 +213,10 @@ fn validate_host_header(
     host_policy: &HostPolicy,
 ) -> Result<(), String> {
     match host_policy {
-        HostPolicy::AllowAll => Ok(()), // Validation disabled (insecure legacy mode).
+        HostPolicy::AllowAll => single_host_header_value(headers).map(|_| ()),
         HostPolicy::RejectUnknown => {
             // Reject all requests - most secure default
-            let host_value = headers
-                .iter()
-                .find(|(name, _)| name.eq_ignore_ascii_case("host"))
-                .map(|(_, value)| value.as_str());
+            let host_value = single_host_header_value(headers)?;
             Err(host_value.unwrap_or("").to_string())
         }
         HostPolicy::AllowList(allow_list) => {
@@ -212,16 +224,10 @@ fn validate_host_header(
                 // br-asupersync-scxixg: Empty allow-list MUST reject all hosts to prevent
                 // Host header injection attacks. Previous behavior of accepting all hosts
                 // with an empty list was a fail-open security vulnerability.
-                let host_value = headers
-                    .iter()
-                    .find(|(name, _)| name.eq_ignore_ascii_case("host"))
-                    .map(|(_, value)| value.as_str());
+                let host_value = single_host_header_value(headers)?;
                 return Err(host_value.unwrap_or("").to_string());
             }
-            let host_value = headers
-                .iter()
-                .find(|(name, _)| name.eq_ignore_ascii_case("host"))
-                .map(|(_, value)| value.as_str());
+            let host_value = single_host_header_value(headers)?;
             let Some(host_value) = host_value else {
                 // RFC 7230 §5.4: HTTP/1.1 requests MUST include Host. Reject.
                 return Err(String::new());
@@ -1304,13 +1310,14 @@ mod tests {
         assert!(err.is_empty(), "missing Host should yield empty err string");
     }
 
-    /// br-asupersync-scxixg: validation policies - AllowAll disables validation,
-    /// empty allow-list now rejects all (security fix), RejectUnknown rejects all.
+    /// br-asupersync-scxixg: validation policies - AllowAll accepts any
+    /// single Host, empty allow-list now rejects all (security fix),
+    /// RejectUnknown rejects all.
     #[test]
     fn validate_host_header_policy_behaviors() {
         let headers = vec![("Host".to_string(), "anywhere.com".to_string())];
 
-        // AllowAll disables validation (insecure legacy mode).
+        // AllowAll accepts any single Host header (insecure legacy mode).
         assert!(validate_host_header(&headers, &HostPolicy::AllowAll).is_ok());
 
         // Empty allowlist now REJECTS all hosts (security fix for br-asupersync-scxixg).
@@ -1322,6 +1329,24 @@ mod tests {
         let reject_policy = HostPolicy::RejectUnknown;
         let err = validate_host_header(&headers, &reject_policy).unwrap_err();
         assert_eq!(err, "anywhere.com");
+    }
+
+    #[test]
+    fn validate_host_header_rejects_duplicate_host_headers() {
+        let duplicate_hosts = vec![
+            ("Host".to_string(), "example.com".to_string()),
+            ("Host".to_string(), "attacker.com".to_string()),
+        ];
+        let allow_list = HostPolicy::allow_list(vec!["example.com".to_string()]);
+
+        let err = validate_host_header(&duplicate_hosts, &allow_list).unwrap_err();
+        assert_eq!(err, "multiple Host headers");
+
+        let err = validate_host_header(&duplicate_hosts, &HostPolicy::RejectUnknown).unwrap_err();
+        assert_eq!(err, "multiple Host headers");
+
+        let err = validate_host_header(&duplicate_hosts, &HostPolicy::AllowAll).unwrap_err();
+        assert_eq!(err, "multiple Host headers");
     }
 
     /// br-asupersync-scxixg: IPv6 literal handling — strip brackets
