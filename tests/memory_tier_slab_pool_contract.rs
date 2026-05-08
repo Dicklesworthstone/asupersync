@@ -9,6 +9,7 @@ use std::fs;
 use std::path::Path;
 
 const CONTRACT_PATH: &str = "artifacts/memory_tier_slab_pool_contract_v1.json";
+const NUMA_LOCALITY_CONTRACT_PATH: &str = "artifacts/numa_arena_locality_smoke_contract_v1.json";
 const SOURCE_DECLARATIONS_PATH: &str = "src/runtime/config.rs";
 const TEST_PATH: &str = "tests/memory_tier_slab_pool_contract.rs";
 
@@ -348,6 +349,139 @@ fn source_declarations_match_contract_rows() {
     let source = fs::read_to_string(SOURCE_DECLARATIONS_PATH).expect("read source declarations");
     assert!(source.contains("pub const MEMORY_TIER_SLAB_POOL_CERTIFICATIONS"));
     assert!(source.contains("MemoryTierSlabPoolCertification"));
+}
+
+#[test]
+fn warm_numa_locality_row_is_backed_by_live_accounting_contract() {
+    let contract = load_contract();
+    let rows = rows_by_id(&contract);
+    let row = rows
+        .get("warm_numa_arena_locality")
+        .expect("warm NUMA locality row must exist");
+    assert_eq!(
+        string_field(row, "operator_verdict"),
+        "implemented_verified"
+    );
+    assert_eq!(string_field(row, "status"), "implemented_verified");
+    assert!(
+        string_vec(row, "existing_contracts")
+            .iter()
+            .any(|contract| contract == "numa-arena-locality-smoke-contract-v1"),
+        "warm NUMA row must compose the live NUMA locality smoke contract"
+    );
+
+    let required_accounting = string_vec(row, "required_accounting");
+    for required in [
+        "worker_cohort_fingerprint",
+        "topology_fixture_hash",
+        "selected_remote_touch_count",
+        "remote_touch_reduction_ratio",
+        "ownership_preserved",
+    ] {
+        assert!(
+            required_accounting.iter().any(|field| field == required),
+            "warm NUMA row must require {required}"
+        );
+    }
+
+    let numa_contract: Value = serde_json::from_str(
+        &fs::read_to_string(NUMA_LOCALITY_CONTRACT_PATH)
+            .expect("read NUMA locality smoke contract"),
+    )
+    .expect("parse NUMA locality smoke contract");
+    assert_eq!(
+        string_field(&numa_contract, "contract_version"),
+        "numa-arena-locality-smoke-contract-v1"
+    );
+
+    let mut saw_remote_touch_win = false;
+    let mut saw_safe_fallback = false;
+    let mut saw_template = false;
+    for scenario in array(&numa_contract, "smoke_scenarios") {
+        let scenario_id = string_field(scenario, "scenario_id");
+        let projection = object(scenario, "expected_report_projection");
+        for field in &required_accounting {
+            assert!(
+                projection.contains_key(field),
+                "{scenario_id} projection missing required accounting field {field}"
+            );
+        }
+        assert_eq!(
+            projection
+                .get("ownership_preserved")
+                .and_then(Value::as_bool),
+            Some(true),
+            "{scenario_id} must preserve logical ownership"
+        );
+
+        let baseline_remote = projection
+            .get("baseline_remote_touch_count")
+            .and_then(Value::as_u64)
+            .expect("baseline remote touch count");
+        let selected_remote = projection
+            .get("selected_remote_touch_count")
+            .and_then(Value::as_u64)
+            .expect("selected remote touch count");
+        let reduction_ratio = projection
+            .get("remote_touch_reduction_ratio")
+            .and_then(Value::as_f64)
+            .expect("remote touch reduction ratio");
+        let verdict = projection
+            .get("operator_verdict")
+            .and_then(Value::as_str)
+            .expect("operator verdict");
+        let used_safe_fallback = projection
+            .get("used_safe_fallback")
+            .and_then(Value::as_bool)
+            .expect("used safe fallback");
+
+        if verdict == "ready_for_rch" {
+            saw_remote_touch_win = true;
+            assert!(
+                selected_remote < baseline_remote,
+                "{scenario_id} must reduce remote touches before it can be a win"
+            );
+            assert!(
+                reduction_ratio > 0.0,
+                "{scenario_id} must report a positive remote-touch reduction"
+            );
+            assert!(
+                !used_safe_fallback,
+                "{scenario_id} must not use fallback when locality wins"
+            );
+        }
+        if verdict == "fallback_only" {
+            saw_safe_fallback = true;
+            assert!(
+                used_safe_fallback,
+                "{scenario_id} fallback row must keep safe fallback visible"
+            );
+            assert!(
+                !array(&Value::Object(projection.clone()), "fallback_reason_codes").is_empty(),
+                "{scenario_id} fallback row must expose a reason code"
+            );
+        }
+        if string_field(scenario, "topology_mode") == "host_template_optional" {
+            saw_template = true;
+            assert_eq!(
+                projection
+                    .get("worker_cohort_fingerprint")
+                    .and_then(Value::as_u64),
+                Some(0),
+                "{scenario_id} template must not fabricate worker evidence"
+            );
+            assert!(
+                projection
+                    .get("topology_fixture_hash")
+                    .is_some_and(Value::is_null),
+                "{scenario_id} template must not fabricate topology evidence"
+            );
+        }
+    }
+
+    assert!(saw_remote_touch_win, "missing locality win scenario");
+    assert!(saw_safe_fallback, "missing safe-fallback scenario");
+    assert!(saw_template, "missing host-template scenario");
 }
 
 #[test]

@@ -836,8 +836,8 @@ pub const MEMORY_TIER_SLAB_POOL_CERTIFICATIONS: &[MemoryTierSlabPoolCertificatio
         row_id: "warm_numa_arena_locality",
         runtime_domain: MemoryTierRuntimeDomain::ObligationRecords,
         memory_tier: MemoryTierKind::WarmCapacityAndLocalityPlans,
-        operator_verdict: MemoryTierCertificationStatus::ContractGuarded,
-        status: MemoryTierCertificationStatus::ContractGuarded,
+        operator_verdict: MemoryTierCertificationStatus::ImplementedVerified,
+        status: MemoryTierCertificationStatus::ImplementedVerified,
         source_files: &[
             "src/runtime/config.rs",
             "artifacts/numa_arena_locality_smoke_contract_v1.json",
