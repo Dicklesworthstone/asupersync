@@ -43,6 +43,8 @@ mod buf_reader;
 mod buf_writer;
 mod dir;
 mod file;
+#[cfg(test)]
+mod file_concurrent_test;
 mod lines;
 mod metadata;
 mod open_options;
