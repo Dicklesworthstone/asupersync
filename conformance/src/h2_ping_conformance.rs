@@ -134,7 +134,7 @@ pub struct PingComplianceSummary {
     pub failed: usize,
     pub expected_failures: usize,
     pub skipped: usize,
-    pub compliance_score: f64, // (passed + expected_failures) / total
+    pub compliance_score: f64, // passed / total
 }
 
 /// Complete conformance test report.
@@ -169,7 +169,7 @@ impl PingComplianceReport {
             .count();
 
         let compliance_score = if total_cases > 0 {
-            (passed + expected_failures) as f64 / total_cases as f64
+            passed as f64 / total_cases as f64
         } else {
             1.0
         };
@@ -235,7 +235,13 @@ impl PingConformanceTester {
                 let differences = self
                     .compare_connection_states(asupersync_state, &case.expected_connection_state);
                 if differences.is_empty() {
-                    (PingTestVerdict::Pass, None, differences)
+                    (
+                        PingTestVerdict::ExpectedFailure,
+                        Some(format!(
+                            "{h2_err}; live asupersync matched the RFC-expected state but vendor parity remains unexercised"
+                        )),
+                        differences,
+                    )
                 } else {
                     (
                         PingTestVerdict::Fail,
@@ -884,9 +890,11 @@ mod tests {
         let report = tester.run_all_tests().await;
 
         assert_eq!(report.total_cases, 7);
-        assert_eq!(report.summary.passed, 7);
+        assert_eq!(report.summary.passed, 0);
         assert_eq!(report.summary.failed, 0);
+        assert_eq!(report.summary.expected_failures, 7);
         assert_eq!(report.summary.skipped, 0);
+        assert_eq!(report.summary.compliance_score, 0.0);
         assert!(
             report
                 .results
@@ -900,6 +908,29 @@ mod tests {
                 .iter()
                 .all(|result| result.asupersync_state.is_some()),
             "every case must exercise the live asupersync connection"
+        );
+    }
+
+    #[tokio::test]
+    async fn h2_reference_gap_is_reported_as_expected_failure_not_pass() {
+        let tester = PingConformanceTester::new();
+        let report = tester.run_all_tests().await;
+
+        assert!(
+            report
+                .results
+                .iter()
+                .all(|result| result.verdict == PingTestVerdict::ExpectedFailure),
+            "unwired h2 vendor parity must not be reported as full pass: {:?}",
+            report.results
+        );
+        assert!(
+            report.results.iter().all(|result| result
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains(H2_REFERENCE_UNIMPLEMENTED)
+                    && error.contains("vendor parity remains unexercised"))),
+            "each expected failure should explain the missing h2 reference parity"
         );
     }
 }
