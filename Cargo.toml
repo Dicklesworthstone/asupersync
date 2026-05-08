@@ -339,6 +339,10 @@ tokio = { version = "1.0", features = ["rt", "sync", "time"] }
 name = "kafka_real_broker"
 path = "tests/integration/kafka_real_broker.rs"
 
+[[test]]
+name = "lock_contention_atlas_contract"
+path = "tests/lock_contention_atlas_contract.rs"
+
 [[bench]]
 name = "phase0_baseline"
 harness = false

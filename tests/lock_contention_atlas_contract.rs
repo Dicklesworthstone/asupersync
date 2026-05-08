@@ -16,6 +16,11 @@ fn contract() -> Value {
     serde_json::from_str(&raw).unwrap_or_else(|error| panic!("parse {CONTRACT_PATH}: {error}"))
 }
 
+fn source_text(relative: &str) -> String {
+    std::fs::read_to_string(repo_path(relative))
+        .unwrap_or_else(|error| panic!("read source file {relative}: {error}"))
+}
+
 fn array<'a>(value: &'a Value, key: &str) -> &'a Vec<Value> {
     value
         .get(key)
@@ -95,6 +100,7 @@ fn contract_declares_sources_and_atlas_policy() {
         "lock_ordering",
         "sharded_state",
         "contention_inventory",
+        "manifest",
     ] {
         let path = string(source, key);
         assert!(
@@ -390,6 +396,61 @@ fn live_lock_order_edges_report_exercised_edges_and_synthetic_inversion() {
 }
 
 #[test]
+fn sharded_state_order_row_is_backed_by_guard_metamorphic_source() {
+    let contract = contract();
+    let rows = rows_by_surface(&contract);
+    let row = rows.get("sharded_state_order").expect("sharded-state row");
+    assert_eq!(row["report_status"].as_str(), Some("LIVE"));
+    assert_eq!(row["live_atlas_wired"].as_bool(), Some(true));
+
+    let required = string_set(row, "required_fields");
+    for field in [
+        "lock_rank",
+        "order_edges_exercised",
+        "order_violations",
+        "instrumentation_mode",
+    ] {
+        assert!(
+            required.contains(field),
+            "sharded-state row must require {field}"
+        );
+    }
+
+    let source_path = string(row, "implementation_path");
+    let source = source_text(source_path);
+    for marker in [
+        "fn metamorphic_lock_order_accepts_only_canonical_permutations()",
+        "fn metamorphic_guard_unions_match_canonical_supersets()",
+        "fn capture_labels(guard: ShardGuard<'_>)",
+        "lock_order::held_labels()",
+        "assert_eq!(lock_order::held_count(), 0)",
+        "ShardGuard::for_spawn(&state)",
+        "ShardGuard::for_obligation(&state)",
+        "ShardGuard::for_cancel(&state)",
+        "ShardGuard::for_task_completed(&state)",
+        "ShardGuard::for_obligation_resolve(&state)",
+        "ShardGuard::all(&state)",
+    ] {
+        assert!(
+            source.contains(marker),
+            "sharded-state source must keep guard-order proof marker: {marker}"
+        );
+    }
+
+    for marker in [
+        "lock_order::before_lock(LockShard::Regions)",
+        "lock_order::before_lock(LockShard::Tasks)",
+        "lock_order::before_lock(LockShard::Obligations)",
+        "canonicalize_labels",
+    ] {
+        assert!(
+            source.contains(marker),
+            "sharded-state source must keep canonical order marker: {marker}"
+        );
+    }
+}
+
+#[test]
 fn proofs_cover_inversion_overhead_and_stable_report() {
     let contract = contract();
     let proofs = array(&contract, "required_proofs")
@@ -417,6 +478,13 @@ fn proofs_cover_inversion_overhead_and_stable_report() {
             .and_then(|proof| proof["status"].as_str()),
         Some("LIVE"),
         "default-build instrumentation-off proof keeps the metrics path disabled"
+    );
+    assert_eq!(
+        proofs
+            .get("sharded-state-order")
+            .and_then(|proof| proof["status"].as_str()),
+        Some("LIVE"),
+        "sharded-state guard-order proof is source-backed by metamorphic tests"
     );
 }
 
@@ -460,6 +528,11 @@ fn proof_commands_are_rch_routed_and_target_this_contract() {
         commands.iter().any(|command| command
             .contains("instrumentation_disabled_path_does_not_record_or_sample_metrics")),
         "proof commands must include the default feature-off overhead proof"
+    );
+    assert!(
+        commands.iter().any(|command| command
+            .contains("sharded_state_order_row_is_backed_by_guard_metamorphic_source")),
+        "proof commands must include the sharded-state guard-order proof"
     );
     for command in commands {
         assert!(

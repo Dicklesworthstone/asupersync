@@ -8,7 +8,8 @@
     "contended_mutex": "src/sync/contended_mutex.rs",
     "lock_ordering": "src/sync/lock_ordering.rs",
     "sharded_state": "src/runtime/sharded_state.rs",
-    "contention_inventory": "docs/runtime_state_contention_inventory.md"
+    "contention_inventory": "docs/runtime_state_contention_inventory.md",
+    "manifest": "Cargo.toml"
   },
   "atlas_policy": {
     "default_mode": "disabled",
@@ -141,9 +142,9 @@
     {
       "surface": "sharded_state_order",
       "implementation_path": "src/runtime/sharded_state.rs",
-      "live_atlas_wired": false,
-      "report_status": "XFAIL",
-      "status_reason": "ShardGuard enforces order, but atlas coverage for exercised E-D-B-A-C edges is not wired yet",
+      "live_atlas_wired": true,
+      "report_status": "LIVE",
+      "status_reason": "ShardGuard order is source-backed by metamorphic tests proving only canonical B-A-C permutations and guard unions are accepted",
       "required_fields": [
         "lock_rank",
         "order_edges_exercised",
@@ -176,14 +177,20 @@
       "description": "A default-build proof lane exercises ContendedMutex lock traffic without the lock-metrics feature and requires the disabled snapshot to keep all metric counters and samples at zero."
     },
     {
+      "proof_id": "sharded-state-order",
+      "status": "LIVE",
+      "description": "The sharded-state source carries metamorphic guard-order tests proving guard unions follow the canonical B-A-C shard order and reject non-canonical permutations."
+    },
+    {
       "proof_id": "stable-redacted-report",
       "status": "LIVE",
       "description": "The atlas report sorts rows deterministically and omits payloads, user paths, and raw coordination text."
     }
   ],
-  "golden_markdown": "| surface | status | required_fields |\n| --- | --- | --- |\n| contended_mutex_snapshot | LIVE | lock_name, acquisitions, contentions, wait_ns, hold_ns, max_wait_ns, max_hold_ns, p95_wait_ns, p999_wait_ns, p95_hold_ns, p999_hold_ns, instrumentation_mode |\n| instrumentation_off_overhead | LIVE | instrumentation_mode, acquisitions, contentions |\n| lock_order_edges | LIVE | lock_name, lock_rank, lock_module, order_edges_exercised, order_violations, instrumentation_mode |\n| sharded_state_order | XFAIL | lock_rank, order_edges_exercised, order_violations, instrumentation_mode |\n",
+  "golden_markdown": "| surface | status | required_fields |\n| --- | --- | --- |\n| contended_mutex_snapshot | LIVE | lock_name, acquisitions, contentions, wait_ns, hold_ns, max_wait_ns, max_hold_ns, p95_wait_ns, p999_wait_ns, p95_hold_ns, p999_hold_ns, instrumentation_mode |\n| instrumentation_off_overhead | LIVE | instrumentation_mode, acquisitions, contentions |\n| lock_order_edges | LIVE | lock_name, lock_rank, lock_module, order_edges_exercised, order_violations, instrumentation_mode |\n| sharded_state_order | LIVE | lock_rank, order_edges_exercised, order_violations, instrumentation_mode |\n",
   "proof_commands": [
     "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lock_contention_atlas_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --features lock-metrics --test lock_contention_atlas_contract -- --nocapture",
-    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lock_contention_atlas_no_metrics CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test lock_contention_atlas_contract instrumentation_disabled_path_does_not_record_or_sample_metrics -- --nocapture"
+    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lock_contention_atlas_no_metrics CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test lock_contention_atlas_contract instrumentation_disabled_path_does_not_record_or_sample_metrics -- --nocapture",
+    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lock_contention_atlas_sharded_state_order CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --features lock-metrics --test lock_contention_atlas_contract sharded_state_order_row_is_backed_by_guard_metamorphic_source -- --nocapture"
   ]
 }
