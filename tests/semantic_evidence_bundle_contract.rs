@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde_json::{Value, json};
+use serde_json::Value;
 
 const FIXTURE_DIR: &str = "tests/fixtures/semantic_evidence_bundle";
 const SCRIPT_PATH: &str = "scripts/build_semantic_evidence_bundle.sh";
@@ -26,7 +26,7 @@ fn unique_output_path() -> PathBuf {
     std::env::temp_dir().join(format!("semantic_evidence_bundle_{nanos}.json"))
 }
 
-fn build_bundle_from_fixtures() -> Value {
+fn build_bundle_output_from_fixtures() -> String {
     let output_path = unique_output_path();
     let output = Command::new("bash")
         .current_dir(env!("CARGO_MANIFEST_DIR"))
@@ -50,9 +50,13 @@ fn build_bundle_from_fixtures() -> Value {
     );
 
     let raw = std::fs::read_to_string(&output_path).expect("bundle output file missing");
-    let parsed: Value = serde_json::from_str(&raw).expect("bundle output must be valid JSON");
     let _ = std::fs::remove_file(output_path);
-    parsed
+    raw
+}
+
+fn build_bundle_from_fixtures() -> Value {
+    let raw = build_bundle_output_from_fixtures();
+    serde_json::from_str(&raw).expect("bundle output must be valid JSON")
 }
 
 fn fixture_json(name: &str) -> Value {
@@ -61,29 +65,35 @@ fn fixture_json(name: &str) -> Value {
     serde_json::from_str(&raw).unwrap_or_else(|error| panic!("parse fixture {name}: {error}"))
 }
 
-fn scrub_bundle(mut bundle: Value) -> Value {
-    scrub_strings(&mut bundle);
-    bundle["generated_at"] = json!("[generated_at]");
-    bundle
+fn fixture_text(name: &str) -> String {
+    std::fs::read_to_string(fixture_path(name))
+        .unwrap_or_else(|error| panic!("read fixture {name}: {error}"))
 }
 
-fn scrub_strings(value: &mut Value) {
-    match value {
-        Value::String(text) => {
-            *text = scrub_string(text);
-        }
-        Value::Array(items) => {
-            for item in items {
-                scrub_strings(item);
+fn scrub_bundle_text(raw: &str) -> String {
+    scrub_generated_at_lines(&scrub_string(raw))
+}
+
+fn scrub_generated_at_lines(text: &str) -> String {
+    let mut scrubbed = String::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("\"generated_at\":") {
+            let indent_len = line.len() - trimmed.len();
+            scrubbed.push_str(&line[..indent_len]);
+            scrubbed.push_str("\"generated_at\": \"[generated_at]\"");
+            if trimmed.ends_with(',') {
+                scrubbed.push(',');
             }
+        } else {
+            scrubbed.push_str(line);
         }
-        Value::Object(fields) => {
-            for value in fields.values_mut() {
-                scrub_strings(value);
-            }
-        }
-        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+        scrubbed.push('\n');
     }
+    if !text.ends_with('\n') {
+        scrubbed.pop();
+    }
+    scrubbed
 }
 
 fn scrub_string(text: &str) -> String {
@@ -138,12 +148,20 @@ fn bundle_schema_and_traceability_contract() {
 
 #[test]
 fn bundle_output_matches_scrubbed_golden() {
-    let bundle = build_bundle_from_fixtures();
+    let raw = build_bundle_output_from_fixtures();
+    let actual = scrub_bundle_text(&raw);
+    let expected = fixture_text("verification_report_sample_expected.json");
+    let actual_json: Value =
+        serde_json::from_str(&actual).expect("scrubbed bundle output must be valid JSON");
+    let expected_json = fixture_json("verification_report_sample_expected.json");
 
     assert_eq!(
-        scrub_bundle(bundle),
-        fixture_json("verification_report_sample_expected.json"),
-        "semantic evidence bundle drifted from the reviewed scrubbed golden"
+        actual_json, expected_json,
+        "semantic evidence bundle parsed golden drifted"
+    );
+    assert_eq!(
+        actual, expected,
+        "semantic evidence bundle reviewed text golden drifted"
     );
 }
 
