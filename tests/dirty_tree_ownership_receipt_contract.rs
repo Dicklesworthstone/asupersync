@@ -109,6 +109,17 @@ fn peer_reservation_blocks_staging() {
 }
 
 #[test]
+fn peer_reservation_matches_full_output_golden() {
+    let actual_text = receipt_stdout("peer_reservation.json");
+    let expected_text = fixture_text("peer_reservation_expected.json");
+    let actual_json: Value = serde_json::from_str(&actual_text).expect("actual receipt JSON");
+    let expected_json: Value = serde_json::from_str(&expected_text).expect("expected receipt JSON");
+
+    assert_eq!(actual_json, expected_json);
+    assert_eq!(actual_text, expected_text);
+}
+
+#[test]
 fn self_reservation_allows_pathspec_staging() {
     let receipt = receipt_json("self_reservation.json");
     let row = row(&receipt, "scripts/dirty_tree_ownership_receipt.py");
