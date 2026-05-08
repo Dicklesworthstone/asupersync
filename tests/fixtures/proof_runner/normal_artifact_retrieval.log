@@ -1,0 +1,6 @@
+Finished test profile [unoptimized + debuginfo] target(s) in 11.14s
+Running tests/proof_runner_contract.rs
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+Remote command finished: exit=0
+Retrieving artifacts from /data/projects/asupersync/.rch-target on worker
+Artifacts retrieved in 123ms

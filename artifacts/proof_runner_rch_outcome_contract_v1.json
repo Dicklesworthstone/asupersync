@@ -1,0 +1,63 @@
+{
+  "schema_version": "proof-runner-rch-outcome-contract-v1",
+  "bead_id": "asupersync-xeh8m0.2",
+  "generated_artifact_schema": "proof-runner-rch-outcome-v1",
+  "purpose": "Contract for turning saved rch proof transcripts into deterministic validation-frontier rows.",
+  "required_output_fields": [
+    "schema_version",
+    "rch_outcome",
+    "validation_frontier_record"
+  ],
+  "required_rch_outcome_fields": [
+    "command",
+    "command_scope",
+    "remote_exit_status",
+    "outcome_class",
+    "decision",
+    "first_blocker",
+    "touched_files",
+    "summary"
+  ],
+  "required_scope_fields": [
+    "program",
+    "cargo_subcommand",
+    "package",
+    "target_kind",
+    "target",
+    "manifest_path"
+  ],
+  "allowed_outcome_classes": [
+    "pass",
+    "failed_local",
+    "blocked_external",
+    "wrapper_hang_after_remote_exit"
+  ],
+  "fixtures": [
+    {
+      "path": "tests/fixtures/proof_runner/rch_pass.log",
+      "expected_outcome_class": "pass",
+      "expected_decision": "pass"
+    },
+    {
+      "path": "tests/fixtures/proof_runner/normal_artifact_retrieval.log",
+      "expected_outcome_class": "pass",
+      "expected_decision": "pass"
+    },
+    {
+      "path": "tests/fixtures/proof_runner/cargo_error.log",
+      "expected_outcome_class": "failed_local",
+      "expected_decision": "failed-local"
+    },
+    {
+      "path": "tests/fixtures/proof_runner/wrapper_hang_after_remote_exit.log",
+      "expected_outcome_class": "wrapper_hang_after_remote_exit",
+      "expected_decision": "pass"
+    },
+    {
+      "path": "tests/fixtures/proof_runner/external_blocker.log",
+      "expected_outcome_class": "blocked_external",
+      "expected_decision": "blocked-external"
+    }
+  ],
+  "proof_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test proof_runner_contract -- --nocapture"
+}

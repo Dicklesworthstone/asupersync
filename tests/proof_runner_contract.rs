@@ -10,6 +10,7 @@ use std::process::{Command, Output};
 const SCRIPT_PATH: &str = "scripts/proof_runner.py";
 const MANIFEST_PATH: &str = "artifacts/proof_lane_manifest_v1.json";
 const SCHEMA_PATH: &str = "artifacts/validation_frontier_ledger_schema_v1.json";
+const RCH_OUTCOME_CONTRACT_PATH: &str = "artifacts/proof_runner_rch_outcome_contract_v1.json";
 const FIXTURE_ROOT: &str = "tests/fixtures/proof_runner";
 
 fn load_json(path: &str) -> Value {
@@ -67,6 +68,20 @@ fn output_json(output: &Output) -> Value {
 fn fixture_text(fixture: &str) -> String {
     std::fs::read_to_string(format!("{FIXTURE_ROOT}/{fixture}"))
         .unwrap_or_else(|error| panic!("read proof runner fixture {fixture}: {error}"))
+}
+
+fn classify_fixture(fixture: &str, command: &str, touched_files: &[&str]) -> Value {
+    let fixture_path = format!("{FIXTURE_ROOT}/{fixture}");
+    let mut args = vec![
+        "--classify-rch-log",
+        fixture_path.as_str(),
+        "--command",
+        command,
+        "--touched-files",
+    ];
+    args.extend_from_slice(touched_files);
+    args.extend_from_slice(&["--output", "json"]);
+    proof_runner_json(&args)
 }
 
 #[test]
@@ -890,16 +905,192 @@ print(json.dumps(argv))
     assert_eq!(argv[3], "env");
     assert!(
         argv.iter()
-            .any(|token| token.starts_with("CARGO_TARGET_DIR=/tmp/")),
-        "TMPDIR fallback should be expanded without using a shell: {argv:?}"
+            .any(|token| token == "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_test"),
+        "TMPDIR fallback should be preserved for rch worker-side handling: {argv:?}"
     );
     assert!(
-        argv.iter().all(|token| !token.contains("${")),
-        "supported shell placeholders should not remain after parsing: {argv:?}"
+        argv.iter()
+            .all(|token| !token.starts_with("CARGO_TARGET_DIR=/tmp/")),
+        "TMPDIR fallback should not be expanded on the local client: {argv:?}"
     );
     assert!(
         argv.iter().any(|token| token == "cargo"),
         "remote cargo program should be preserved: {argv:?}"
+    );
+}
+
+#[test]
+fn proof_runner_rch_outcome_contract_names_required_fixtures() {
+    let contract = load_json(RCH_OUTCOME_CONTRACT_PATH);
+    assert_eq!(
+        contract["generated_artifact_schema"].as_str(),
+        Some("proof-runner-rch-outcome-v1")
+    );
+    assert_eq!(contract["bead_id"].as_str(), Some("asupersync-xeh8m0.2"));
+
+    let fixtures = contract["fixtures"].as_array().expect("fixtures array");
+    let fixture_names: BTreeSet<&str> = fixtures
+        .iter()
+        .map(|fixture| fixture["path"].as_str().expect("fixture path"))
+        .collect();
+    for required in [
+        "tests/fixtures/proof_runner/rch_pass.log",
+        "tests/fixtures/proof_runner/normal_artifact_retrieval.log",
+        "tests/fixtures/proof_runner/cargo_error.log",
+        "tests/fixtures/proof_runner/wrapper_hang_after_remote_exit.log",
+        "tests/fixtures/proof_runner/external_blocker.log",
+    ] {
+        assert!(
+            fixture_names.contains(required),
+            "missing fixture {required}"
+        );
+    }
+
+    let required_outcome_fields: BTreeSet<&str> = contract["required_rch_outcome_fields"]
+        .as_array()
+        .expect("required outcome fields")
+        .iter()
+        .map(|field| field.as_str().expect("field string"))
+        .collect();
+    for required in [
+        "command",
+        "command_scope",
+        "remote_exit_status",
+        "outcome_class",
+        "decision",
+        "first_blocker",
+    ] {
+        assert!(
+            required_outcome_fields.contains(required),
+            "missing required outcome field {required}"
+        );
+    }
+}
+
+#[test]
+fn proof_runner_classifies_rch_pass_log_with_command_scope() {
+    let command = "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_console CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test proof_console_report_contract -- --nocapture";
+    let result = classify_fixture(
+        "rch_pass.log",
+        command,
+        &["tests/proof_console_report_contract.rs"],
+    );
+    let outcome = &result["rch_outcome"];
+
+    assert_eq!(outcome["outcome_class"].as_str(), Some("pass"));
+    assert_eq!(outcome["decision"].as_str(), Some("pass"));
+    assert_eq!(outcome["remote_exit_status"].as_i64(), Some(0));
+    assert_eq!(
+        outcome["command_scope"]["package"].as_str(),
+        Some("asupersync")
+    );
+    assert_eq!(
+        outcome["command_scope"]["target_kind"].as_str(),
+        Some("test")
+    );
+    assert_eq!(
+        outcome["command_scope"]["target"].as_str(),
+        Some("proof_console_report_contract")
+    );
+    assert_eq!(
+        result["validation_frontier_record"]["decision"].as_str(),
+        Some("pass")
+    );
+}
+
+#[test]
+fn proof_runner_treats_normal_artifact_retrieval_as_pass() {
+    let command = "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test proof_runner_contract -- --nocapture";
+    let result = classify_fixture(
+        "normal_artifact_retrieval.log",
+        command,
+        &["tests/proof_runner_contract.rs"],
+    );
+    let outcome = &result["rch_outcome"];
+
+    assert_eq!(outcome["outcome_class"].as_str(), Some("pass"));
+    assert_eq!(outcome["decision"].as_str(), Some("pass"));
+    assert_eq!(outcome["remote_exit_status"].as_i64(), Some(0));
+    assert!(
+        outcome["summary"]
+            .as_str()
+            .expect("summary")
+            .contains("passed")
+    );
+}
+
+#[test]
+fn proof_runner_classifies_local_cargo_error_blocker() {
+    let command = "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test proof_runner_contract -- --nocapture";
+    let result = classify_fixture(
+        "cargo_error.log",
+        command,
+        &["tests/proof_runner_contract.rs"],
+    );
+    let outcome = &result["rch_outcome"];
+
+    assert_eq!(outcome["outcome_class"].as_str(), Some("failed_local"));
+    assert_eq!(outcome["decision"].as_str(), Some("failed-local"));
+    assert_eq!(outcome["remote_exit_status"].as_i64(), Some(101));
+    assert_eq!(
+        outcome["first_blocker"]["file"].as_str(),
+        Some("tests/proof_runner_contract.rs")
+    );
+    assert_eq!(outcome["first_blocker"]["line"].as_i64(), Some(918));
+    assert_eq!(
+        result["validation_frontier_record"]["decision"].as_str(),
+        Some("failed-local")
+    );
+}
+
+#[test]
+fn proof_runner_classifies_wrapper_hang_after_remote_exit_separately() {
+    let command = "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_web_csrf_audit_frontier CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test web_csrf_validation_audit -- --nocapture";
+    let result = classify_fixture(
+        "wrapper_hang_after_remote_exit.log",
+        command,
+        &["tests/web_csrf_validation_audit.rs"],
+    );
+    let outcome = &result["rch_outcome"];
+
+    assert_eq!(
+        outcome["outcome_class"].as_str(),
+        Some("wrapper_hang_after_remote_exit")
+    );
+    assert_eq!(outcome["remote_exit_status"].as_i64(), Some(0));
+    assert_eq!(outcome["decision"].as_str(), Some("pass"));
+    assert!(
+        outcome["summary"]
+            .as_str()
+            .expect("summary")
+            .contains("retrieval")
+    );
+}
+
+#[test]
+fn proof_runner_extracts_external_blocker_file_and_line() {
+    let command = "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_crashpack_repro_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test crashpack_repro_contract -- --nocapture";
+    let result = classify_fixture(
+        "external_blocker.log",
+        command,
+        &["tests/crashpack_repro_contract.rs"],
+    );
+    let outcome = &result["rch_outcome"];
+
+    assert_eq!(outcome["outcome_class"].as_str(), Some("blocked_external"));
+    assert_eq!(outcome["decision"].as_str(), Some("blocked-external"));
+    assert_eq!(
+        outcome["first_blocker"]["file"].as_str(),
+        Some("src/runtime/scheduler/three_lane.rs")
+    );
+    assert_eq!(outcome["first_blocker"]["line"].as_i64(), Some(15747));
+    assert_eq!(
+        result["validation_frontier_record"]["first_failure"]["file"].as_str(),
+        Some("src/runtime/scheduler/three_lane.rs")
+    );
+    assert_eq!(
+        result["validation_frontier_record"]["first_failure"]["line"].as_i64(),
+        Some(15747)
     );
 }
 

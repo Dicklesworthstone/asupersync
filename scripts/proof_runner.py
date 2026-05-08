@@ -22,12 +22,21 @@ from typing import Dict, List, Optional, Tuple, Any
 SAFE_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 ALLOWED_REMOTE_PROGRAMS = {"cargo", "lake", "rustfmt"}
 SHELL_CONTROL_TOKENS = (";", "&", "|", "<", ">", "`", "$(")
-
-
-def expand_supported_command_token(token: str) -> str:
-    """Expand the small shell-parameter subset used by manifest commands."""
-    tmpdir = os.environ.get("TMPDIR") or "/tmp"
-    return token.replace("${TMPDIR:-/tmp}", tmpdir)
+RCH_OUTCOME_SCHEMA_VERSION = "proof-runner-rch-outcome-v1"
+REMOTE_EXIT_RE = re.compile(
+    r"(?:Remote command finished:\s*exit=|remote exit(?: status)?[=:]\s*)(-?\d+)",
+    re.IGNORECASE,
+)
+CARGO_LOCATION_RE = re.compile(r"^\s*-->\s+([^:\s]+):(\d+):(\d+)")
+RUST_ERROR_RE = re.compile(r"^\s*error(?:\[[^\]]+\])?:\s*(.+)")
+WRAPPER_RETRIEVAL_HANG_HINTS = (
+    "retrieval timed out",
+    "retrieval stalled",
+    "timed out while retrieving",
+    "stalled while retrieving",
+    "wrapper timed out",
+    "wrapper stalled",
+)
 
 
 def safe_command_argv(command: str) -> List[str]:
@@ -39,7 +48,6 @@ def safe_command_argv(command: str) -> List[str]:
     except ValueError as error:
         raise ValueError(f"invalid proof command syntax: {error}") from error
 
-    argv = [expand_supported_command_token(token) for token in argv]
     if len(argv) < 4 or argv[:3] != ["rch", "exec", "--"]:
         raise ValueError("proof command must start with 'rch exec --'")
     if any(any(marker in token for marker in SHELL_CONTROL_TOKENS) for token in argv):
@@ -59,6 +67,140 @@ def safe_command_argv(command: str) -> List[str]:
     if argv[remote_index] not in ALLOWED_REMOTE_PROGRAMS:
         raise ValueError(f"remote proof program is not allowed: {argv[remote_index]}")
     return argv
+
+
+def command_scope(command: str) -> Dict[str, Any]:
+    """Extract stable package/scope hints from an rch-routed proof command."""
+    try:
+        argv = safe_command_argv(command)
+    except ValueError:
+        argv = shlex.split(command, posix=True)
+
+    scope = {
+        "program": "",
+        "cargo_subcommand": "",
+        "package": "",
+        "target_kind": "",
+        "target": "",
+        "manifest_path": "",
+    }
+    try:
+        remote_index = argv.index("--") + 1
+    except ValueError:
+        remote_index = 0
+
+    if remote_index < len(argv) and argv[remote_index] == "env":
+        remote_index += 1
+        while remote_index < len(argv) and "=" in argv[remote_index]:
+            remote_index += 1
+
+    if remote_index >= len(argv):
+        return scope
+
+    scope["program"] = argv[remote_index]
+    if argv[remote_index] != "cargo":
+        return scope
+
+    if remote_index + 1 < len(argv):
+        scope["cargo_subcommand"] = argv[remote_index + 1]
+
+    for index, token in enumerate(argv):
+        if token == "-p" and index + 1 < len(argv):
+            scope["package"] = argv[index + 1]
+        elif token == "--manifest-path" and index + 1 < len(argv):
+            scope["manifest_path"] = argv[index + 1]
+        elif token in {"--test", "--bench", "--bin", "--example"} and index + 1 < len(argv):
+            scope["target_kind"] = token.removeprefix("--")
+            scope["target"] = argv[index + 1]
+
+    return scope
+
+
+def remote_exit_status(log_text: str) -> Optional[int]:
+    """Return the last remote exit status reported by rch, if present."""
+    matches = REMOTE_EXIT_RE.findall(log_text)
+    if not matches:
+        return None
+    return int(matches[-1])
+
+
+def first_cargo_blocker(log_text: str) -> Dict[str, Any]:
+    """Extract the first cargo/rustc file:line blocker from captured output."""
+    pending_message = ""
+    for line in log_text.splitlines():
+        error_match = RUST_ERROR_RE.match(line)
+        if error_match:
+            pending_message = error_match.group(1).strip()
+            continue
+
+        location_match = CARGO_LOCATION_RE.match(line)
+        if location_match:
+            return {
+                "file": location_match.group(1),
+                "line": int(location_match.group(2)),
+                "column": int(location_match.group(3)),
+                "message": pending_message,
+                "raw": line.strip(),
+            }
+
+    return {
+        "file": "",
+        "line": 0,
+        "column": 0,
+        "message": pending_message,
+        "raw": "",
+    }
+
+
+def has_wrapper_retrieval_hang(log_text: str, remote_exit: Optional[int]) -> bool:
+    """Classify the common rch wrapper hang after a known remote result."""
+    if remote_exit is None:
+        return False
+    lowered = log_text.lower()
+    return any(hint in lowered for hint in WRAPPER_RETRIEVAL_HANG_HINTS)
+
+
+def classify_rch_outcome(
+    command: str,
+    log_text: str,
+    touched_files: List[str],
+) -> Dict[str, Any]:
+    """Convert an rch output transcript into a structured outcome row."""
+    scope = command_scope(command)
+    remote_exit = remote_exit_status(log_text)
+    blocker = first_cargo_blocker(log_text)
+    touched = {path.removeprefix("./") for path in touched_files}
+    blocker_file = str(blocker["file"]).removeprefix("./")
+    wrapper_hang = has_wrapper_retrieval_hang(log_text, remote_exit)
+
+    if wrapper_hang:
+        outcome_class = "wrapper_hang_after_remote_exit"
+        decision = "pass" if remote_exit == 0 else "blocked-external"
+        summary = "rch wrapper retrieval stalled after remote command result was known"
+    elif remote_exit == 0:
+        outcome_class = "pass"
+        decision = "pass"
+        summary = "remote proof command passed"
+    elif blocker_file and touched and blocker_file not in touched:
+        outcome_class = "blocked_external"
+        decision = "blocked-external"
+        summary = f"first cargo blocker is outside touched files: {blocker_file}"
+    else:
+        outcome_class = "failed_local"
+        decision = "failed-local"
+        summary = "remote proof command failed on the touched proof surface"
+
+    return {
+        "schema_version": RCH_OUTCOME_SCHEMA_VERSION,
+        "command": command,
+        "command_scope": scope,
+        "remote_exit_status": remote_exit,
+        "outcome_class": outcome_class,
+        "decision": decision,
+        "first_blocker": blocker,
+        "touched_files": touched_files,
+        "summary": summary,
+    }
 
 
 class ProofLaneManifest:
@@ -147,6 +289,33 @@ class ValidationFrontierRecord:
             "likely_bead": self.likely_bead,
             "supplemental_proof_command": supplemental,
             "summary": "preflight checks passed"
+        }
+
+    def as_failed_local(
+        self,
+        error_class: str,
+        file: str,
+        summary: str,
+        line: int = 0,
+        target: str = "",
+    ) -> Dict[str, Any]:
+        """Mark as a local proof failure."""
+        return {
+            "command": self.command,
+            "timestamp": self.timestamp,
+            "touched_files": self.touched_files,
+            "decision": "failed-local",
+            "error_class": error_class,
+            "first_failure": {
+                "crate_or_surface": "cargo",
+                "target": target,
+                "file": file,
+                "line": line,
+            },
+            "likely_owner": "local_change",
+            "likely_bead": self.likely_bead,
+            "supplemental_proof_command": "",
+            "summary": summary,
         }
 
 
@@ -782,6 +951,43 @@ class ProofRunner:
 
         return suggestions
 
+    def classify_rch_log(
+        self,
+        command: str,
+        log_path: str,
+        touched_files: List[str],
+    ) -> Dict[str, Any]:
+        """Classify a saved rch transcript as a machine-readable proof outcome."""
+        log_text = Path(log_path).read_text(encoding="utf-8")
+        outcome = classify_rch_outcome(command, log_text, touched_files)
+        record = ValidationFrontierRecord(command, touched_files)
+        blocker = outcome["first_blocker"]
+        scope = outcome["command_scope"]
+
+        if outcome["decision"] == "pass":
+            frontier = record.as_pass()
+        elif outcome["decision"] == "blocked-external":
+            frontier = record.as_blocked_external(
+                outcome["outcome_class"],
+                blocker.get("file", "") or "rch-wrapper",
+                outcome["summary"],
+                line=int(blocker.get("line") or 0),
+            )
+        else:
+            frontier = record.as_failed_local(
+                outcome["outcome_class"],
+                blocker.get("file", ""),
+                outcome["summary"],
+                line=int(blocker.get("line") or 0),
+                target=scope.get("target") or scope.get("cargo_subcommand") or "",
+            )
+
+        return {
+            "schema_version": RCH_OUTCOME_SCHEMA_VERSION,
+            "rch_outcome": outcome,
+            "validation_frontier_record": frontier,
+        }
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -817,6 +1023,15 @@ def main():
         "--execute",
         action="store_true",
         help="Actually execute the proof command if preflight passes"
+    )
+    parser.add_argument(
+        "--classify-rch-log",
+        help="Classify a saved rch output transcript instead of running lane preflight"
+    )
+    parser.add_argument(
+        "--command",
+        default="",
+        help="Original rch command for --classify-rch-log"
     )
     parser.add_argument(
         "--agent-name",
@@ -877,6 +1092,23 @@ def main():
                 print(f"Suggested lanes for {args.touched_files}:")
                 for lane in suggestions:
                     print(f"  {lane}")
+            return 0
+
+        if args.classify_rch_log:
+            if not args.command:
+                parser.error("--command is required with --classify-rch-log")
+            result = runner.classify_rch_log(
+                args.command,
+                args.classify_rch_log,
+                args.touched_files,
+            )
+            if args.output == "json":
+                print(json.dumps(result, indent=2))
+            else:
+                outcome = result["rch_outcome"]
+                print(f"Outcome: {outcome['outcome_class']}")
+                print(f"Decision: {outcome['decision']}")
+                print(f"Summary: {outcome['summary']}")
             return 0
 
         # Validate required arguments for proof analysis
