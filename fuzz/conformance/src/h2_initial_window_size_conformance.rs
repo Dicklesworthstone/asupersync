@@ -10,6 +10,8 @@ const REFERENCE_IMPLEMENTATION: &str = "local-rfc-window-model";
 const REFERENCE_STATUS: &str = "xfail-no-live-h2-reference";
 const FAIL_CLOSED_REASON: &str = "fail-closed: this harness currently compares local window models and does not drive a live h2 crate reference implementation";
 
+type ConformanceTestCase = (&'static str, fn() -> Result<(), String>, &'static str);
+
 /// Output format for conformance test results
 #[derive(Debug, Clone, Copy)]
 pub enum OutputFormat {
@@ -47,16 +49,6 @@ pub struct TestResult {
     pub reference_status: String,
     pub error_message: Option<String>,
     pub description: String,
-}
-
-/// Stream state for tracking flow control windows
-#[derive(Debug, Clone)]
-struct StreamState {
-    stream_id: u32,
-    /// Current flow control window size
-    window_size: i32,
-    /// Whether the stream is still active
-    active: bool,
 }
 
 /// Test scenario for SETTINGS_INITIAL_WINDOW_SIZE conformance
@@ -127,16 +119,6 @@ impl ModeledConnectionState {
 
         self.initial_window_size = new_size;
         Ok(changes)
-    }
-
-    /// Simulate data consumption (increases window)
-    fn consume_data(&mut self, stream_id: u32, size: usize) -> Result<i32, String> {
-        if let Some(window) = self.stream_windows.get_mut(&stream_id) {
-            *window = (*window as i64 + size as i64).min(i32::MAX as i64) as i32;
-            Ok(*window)
-        } else {
-            Err(format!("Stream {} not found", stream_id))
-        }
     }
 
     /// Simulate data sending (decreases window)
@@ -480,7 +462,7 @@ fn run_conformance_tests(comprehensive: bool) -> ConformanceResults {
     let mut test_results = Vec::new();
 
     // Basic test suite
-    let basic_tests: Vec<(&str, fn() -> Result<(), String>, &str)> = vec![
+    let basic_tests: Vec<ConformanceTestCase> = vec![
         (
             "Basic window increase",
             test_basic_increase as fn() -> Result<(), String>,
@@ -513,7 +495,7 @@ fn run_conformance_tests(comprehensive: bool) -> ConformanceResults {
         ),
     ];
 
-    let mut comprehensive_tests: Vec<(&str, fn() -> Result<(), String>, &str)> = vec![
+    let mut comprehensive_tests: Vec<ConformanceTestCase> = vec![
         (
             "Mixed stream states",
             test_mixed_stream_states,
@@ -665,28 +647,15 @@ pub fn format_results_as_summary(results: &ConformanceResults) -> String {
     for result in &results.test_results {
         let status = if result.passed { "PASS" } else { "FAIL" };
         output.push_str(&format!("  {} ... {}\n", result.test_name, status));
-        if !result.passed {
-            if let Some(ref error) = result.error_message {
-                output.push_str(&format!("    Error: {}\n", error));
-            }
+        if !result.passed
+            && let Some(ref error) = result.error_message
+        {
+            output.push_str(&format!("    Error: {}\n", error));
         }
     }
 
     output.push_str(&format!("\n{}\n", results.summary));
     output
-}
-
-/// Property-based conformance test with arbitrary scenarios
-pub fn test_arbitrary_scenarios(scenarios: Vec<WindowSizeScenario>) -> Vec<String> {
-    let mut failures = Vec::new();
-
-    for (i, scenario) in scenarios.iter().enumerate() {
-        if let Err(error) = test_conformance(scenario.clone()) {
-            failures.push(format!("Scenario {}: {}", i, error));
-        }
-    }
-
-    failures
 }
 
 #[cfg(test)]
@@ -750,9 +719,9 @@ mod tests {
     #[test]
     fn test_multiple_streams() {
         let mut state = ModeledConnectionState::new(65535);
-        let stream1 = state.create_stream();
-        let stream2 = state.create_stream();
-        let stream3 = state.create_stream();
+        state.create_stream();
+        state.create_stream();
+        state.create_stream();
 
         let changes = state.update_initial_window_size(98304).unwrap();
         assert_eq!(changes.len(), 3);
