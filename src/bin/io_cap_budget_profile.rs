@@ -4,8 +4,9 @@
 //! Expected bottleneck: AtomicU64 operations under high contention.
 //!
 //! Usage:
-//! cargo build --profile release-perf --bin io_cap_budget_profile --features test-internals
-//! samply record --save-only -o io_cap_cpu.json -- ./target/release-perf/io_cap_budget_profile
+//! CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-/tmp/rch_target_io_cap_budget_profile}
+//! rch exec -- env CARGO_TARGET_DIR=$CARGO_TARGET_DIR cargo build --profile release-perf --bin io_cap_budget_profile --features test-internals
+//! samply record --save-only -o io_cap_cpu.json -- $CARGO_TARGET_DIR/release-perf/io_cap_budget_profile
 
 use asupersync::io::IoCap;
 use asupersync::io::cap::LabIoCap;
