@@ -24,6 +24,8 @@ const RUNTIME_LATENCY_BUDGET_CERTIFICATE_PATH: &str =
     "artifacts/runtime_latency_budget_certificate_v1.json";
 const SCHEDULER_P999_BASELINE_RECEIPT_PATH: &str =
     "tests/artifacts/perf/asupersync-xeh8m0.3/three_lane_decision_baseline_v1.json";
+const SCHEDULER_P999_COMPLETE_RECEIPT_PATH: &str =
+    "tests/artifacts/perf/asupersync-h6pjqb/scheduler_p999_latency_receipt_v1.json";
 const SOURCE_DECLARATIONS_PATH: &str = "src/runtime/config.rs";
 const TASK_RECORD_POOL_CONTRACT_PATH: &str = "artifacts/task_record_pool_smoke_contract_v1.json";
 const TEST_PATH: &str = "tests/memory_tier_slab_pool_contract.rs";
@@ -1014,17 +1016,21 @@ fn cold_proof_artifact_retention_row_is_backed_by_release_pack_output() {
 }
 
 #[test]
-fn scheduler_p999_latency_receipt_stays_contract_guarded_until_complete_receipt() {
+fn scheduler_p999_latency_receipt_is_backed_by_complete_same_host_receipt() {
     let contract = load_contract();
     let rows = rows_by_id(&contract);
     let row = rows
         .get("scheduler_p999_latency_receipt")
         .expect("scheduler p999 row must exist");
-    assert_eq!(string_field(row, "operator_verdict"), "contract_guarded");
-    assert_eq!(string_field(row, "status"), "contract_guarded");
+    assert_eq!(
+        string_field(row, "operator_verdict"),
+        "implemented_verified"
+    );
+    assert_eq!(string_field(row, "status"), "implemented_verified");
     for lower_contract in [
         "operator-proof-backlog-signoff-contract-v1",
         "runtime-latency-budget-certificate-v1",
+        "asupersync-h6pjqb-scheduler-p999-latency-receipt-v1",
     ] {
         assert!(
             string_vec(row, "existing_contracts")
@@ -1040,13 +1046,19 @@ fn scheduler_p999_latency_receipt_stays_contract_guarded_until_complete_receipt(
         "p95_latency_ns",
         "p999_latency_ns",
         "sample_count",
-        "fallback_no_win_reason",
+        "previous_runtime_blocker_non_reproduction",
     ] {
         assert!(
             required_accounting.iter().any(|field| field == required),
             "scheduler p999 row must require {required}"
         );
     }
+    assert!(
+        string_vec(row, "source_files")
+            .iter()
+            .any(|path| path == SCHEDULER_P999_COMPLETE_RECEIPT_PATH),
+        "scheduler p999 row must point at the complete checked-in receipt"
+    );
 
     let latency_frontier = Value::Object(object(&contract, "latency_frontier").clone());
     assert_eq!(
@@ -1068,6 +1080,10 @@ fn scheduler_p999_latency_receipt_stays_contract_guarded_until_complete_receipt(
     assert_eq!(
         string_field(&latency_frontier, "baseline_receipt_path"),
         SCHEDULER_P999_BASELINE_RECEIPT_PATH
+    );
+    assert_eq!(
+        string_field(&latency_frontier, "complete_receipt_path"),
+        SCHEDULER_P999_COMPLETE_RECEIPT_PATH
     );
 
     let signoff: Value = serde_json::from_str(
@@ -1129,11 +1145,11 @@ fn scheduler_p999_latency_receipt_stays_contract_guarded_until_complete_receipt(
     let metrics = object(&baseline, "metrics");
     assert_eq!(
         metrics.get("metrics_state").and_then(Value::as_str),
-        Some(string_field(&latency_frontier, "required_metrics_state"))
+        Some("required_quantiles_not_collected_runtime_failed_before_full_scenario")
     );
-    for metric in string_vec(&latency_frontier, "required_metric_nulls") {
+    for metric in ["p50", "p95", "p999", "sample_count"] {
         assert!(
-            metrics.get(&metric).is_some_and(serde_json::Value::is_null),
+            metrics.get(metric).is_some_and(serde_json::Value::is_null),
             "baseline metric {metric} must remain null until the complete receipt exists"
         );
     }
@@ -1151,10 +1167,99 @@ fn scheduler_p999_latency_receipt_stays_contract_guarded_until_complete_receipt(
     let next_required_action = claims["next_required_action"]
         .as_str()
         .expect("next required action");
-    for needle in string_vec(&latency_frontier, "next_required_action_must_contain") {
+    for needle in [
+        "Fix or isolate",
+        "rerun the same rch cargo bench lane",
+        "p50/p95/p999",
+    ] {
         assert!(
-            next_required_action.contains(&needle),
+            next_required_action.contains(needle),
             "next required action must contain {needle:?}"
+        );
+    }
+
+    let complete_receipt: Value = serde_json::from_str(
+        &fs::read_to_string(SCHEDULER_P999_COMPLETE_RECEIPT_PATH)
+            .expect("read scheduler p999 complete receipt"),
+    )
+    .expect("parse scheduler p999 complete receipt");
+    assert_eq!(
+        string_field(&complete_receipt, "schema_version"),
+        string_field(&latency_frontier, "required_complete_receipt_schema")
+    );
+    assert_eq!(
+        string_field(&complete_receipt, "verdict"),
+        string_field(&latency_frontier, "required_complete_receipt_verdict")
+    );
+    assert_eq!(
+        string_field(&complete_receipt, "operator_verdict"),
+        string_field(&latency_frontier, "required_complete_operator_verdict")
+    );
+    assert_eq!(
+        complete_receipt["proof_lane_executed_through_rch"].as_bool(),
+        Some(true),
+        "complete receipt must be rch-routed"
+    );
+    assert_eq!(
+        string_field(
+            &Value::Object(object(&complete_receipt, "host_class").clone()),
+            "verdict"
+        ),
+        string_field(&latency_frontier, "required_same_host_verdict")
+    );
+    assert_eq!(
+        object(&complete_receipt, "rch_history")["remote_exit"].as_u64(),
+        Some(0),
+        "complete receipt must come from a successful rch run"
+    );
+    assert_eq!(
+        object(&complete_receipt, "previous_blocker")["reproduced_in_this_run"].as_bool(),
+        latency_frontier["previous_blocker_must_be_non_reproduced"]
+            .as_bool()
+            .map(|must_be_non_reproduced| !must_be_non_reproduced),
+        "previous os-thread-local blocker must be explicitly non-reproduced"
+    );
+    let complete_claims = object(&complete_receipt, "claims");
+    assert_eq!(
+        string_field(&Value::Object(complete_claims.clone()), "baseline_latency"),
+        string_field(&latency_frontier, "required_baseline_latency_claim")
+    );
+    assert_eq!(
+        string_field(&Value::Object(complete_claims.clone()), "scheduler_speedup"),
+        string_field(&latency_frontier, "required_scheduler_speedup_claim")
+    );
+
+    let required_quantiles = string_vec(&latency_frontier, "required_quantiles");
+    let required_sample_count = latency_frontier["required_sample_count"]
+        .as_u64()
+        .expect("required sample count");
+    let benchmarks = array(&complete_receipt, "benchmarks");
+    assert_eq!(
+        benchmarks.len(),
+        6,
+        "complete receipt must include every three-lane decision case"
+    );
+    for benchmark in benchmarks {
+        let case = string_field(benchmark, "case");
+        assert_eq!(
+            benchmark["samples"].as_u64(),
+            Some(required_sample_count),
+            "{case} must use the required sample count"
+        );
+        for quantile in &required_quantiles {
+            assert!(
+                benchmark[quantile]
+                    .as_f64()
+                    .is_some_and(|value| value > 0.0),
+                "{case} must report positive {quantile}"
+            );
+        }
+        let p50 = benchmark["p50_ns"].as_f64().expect("p50");
+        let p95 = benchmark["p95_ns"].as_f64().expect("p95");
+        let p999 = benchmark["p999_ns"].as_f64().expect("p999");
+        assert!(
+            p50 <= p95 && p95 <= p999,
+            "{case} quantiles must be monotonic"
         );
     }
 

@@ -226,34 +226,37 @@
       "row_id": "scheduler_p999_latency_receipt",
       "runtime_domain": "task_records",
       "memory_tier": "warm_capacity_and_locality_plans",
-      "operator_verdict": "contract_guarded",
-      "status": "contract_guarded",
+      "operator_verdict": "implemented_verified",
+      "status": "implemented_verified",
       "source_files": [
         "artifacts/operator_proof_backlog_signoff_contract_v1.json",
         "artifacts/runtime_latency_budget_certificate_v1.json",
         "tests/artifacts/perf/asupersync-xeh8m0.3/three_lane_decision_baseline_v1.json",
+        "tests/artifacts/perf/asupersync-h6pjqb/scheduler_p999_latency_receipt_v1.json",
         "tests/memory_tier_slab_pool_contract.rs"
       ],
       "existing_contracts": [
         "operator-proof-backlog-signoff-contract-v1",
-        "runtime-latency-budget-certificate-v1"
+        "runtime-latency-budget-certificate-v1",
+        "asupersync-h6pjqb-scheduler-p999-latency-receipt-v1"
       ],
       "required_accounting": [
         "p50_latency_ns",
         "p95_latency_ns",
         "p999_latency_ns",
         "sample_count",
-        "fallback_no_win_reason"
+        "previous_runtime_blocker_non_reproduction"
       ],
       "proof_commands": [
         "python3 -m json.tool artifacts/operator_proof_backlog_signoff_contract_v1.json >/dev/null",
         "python3 -m json.tool artifacts/runtime_latency_budget_certificate_v1.json >/dev/null",
+        "python3 -m json.tool tests/artifacts/perf/asupersync-h6pjqb/scheduler_p999_latency_receipt_v1.json >/dev/null",
         "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_memory_tier_slab_pool_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test memory_tier_slab_pool_contract --features test-internals -- --nocapture"
       ],
       "fail_closed_guards": [
-        "p999 latency improvements must not render green without a complete receipt",
+        "p999 latency improvements must render green only with a complete same-host receipt",
         "partial Criterion interval output must not count as p50/p95/p999 evidence",
-        "runtime benchmark blockers must keep the memory-tier row contract_guarded"
+        "runtime benchmark blockers must remain visible as historical no-win evidence"
       ]
     },
     {
@@ -318,25 +321,27 @@
     "signoff_contract_path": "artifacts/operator_proof_backlog_signoff_contract_v1.json",
     "latency_certificate_path": "artifacts/runtime_latency_budget_certificate_v1.json",
     "baseline_receipt_path": "tests/artifacts/perf/asupersync-xeh8m0.3/three_lane_decision_baseline_v1.json",
+    "complete_receipt_path": "tests/artifacts/perf/asupersync-h6pjqb/scheduler_p999_latency_receipt_v1.json",
     "required_signoff_verdict": "no-win-hold",
     "required_child_verdict": "no-win",
     "required_broad_readiness_claim": "not_claimed",
-    "required_metrics_state": "required_quantiles_not_collected_runtime_failed_before_full_scenario",
-    "required_metric_nulls": [
-      "p50",
-      "p95",
-      "p999",
-      "sample_count"
+    "required_complete_receipt_schema": "asupersync-h6pjqb-scheduler-p999-latency-receipt-v1",
+    "required_complete_receipt_verdict": "complete_measurement",
+    "required_complete_operator_verdict": "full_lane_completed_without_previous_os_thread_local_panic",
+    "required_same_host_verdict": "measured_single_host",
+    "required_baseline_latency_claim": "measured_for_this_same_host_run",
+    "required_scheduler_speedup_claim": "not_claimed",
+    "required_sample_count": 30,
+    "required_quantiles": [
+      "p50_ns",
+      "p95_ns",
+      "p999_ns"
     ],
-    "next_required_action_must_contain": [
-      "Fix or isolate",
-      "rerun the same rch cargo bench lane",
-      "p50/p95/p999"
-    ],
+    "previous_blocker_must_be_non_reproduced": true,
     "operator_notes": [
       "memory-tier capacity wins do not imply scheduler p999 wins",
-      "the current scheduler receipt is no-win because the rch bench lane failed before complete quantiles",
-      "this row can move to implemented_verified only after a complete same-host p50/p95/p999 receipt is checked in"
+      "the historical xeh8m0.3 receipt remains no-win evidence because the rch bench lane failed before complete quantiles",
+      "the h6pjqb receipt provides complete same-host p50/p95/p999 samples for the scheduler/three_lane_decision lane without claiming a before/after speedup"
     ]
   },
   "safe_heap_fallback_frontier": {
@@ -397,7 +402,7 @@
     "| warm_numa_arena_locality | obligation_records | warm_capacity_and_locality_plans | implemented_verified | 1 |",
     "| cold_trace_evidence_tiers | trace_evidence | cold_evidence_artifacts | implemented_verified | 1 |",
     "| cold_proof_artifact_retention | proof_artifacts | cold_evidence_artifacts | implemented_verified | 2 |",
-    "| scheduler_p999_latency_receipt | task_records | warm_capacity_and_locality_plans | contract_guarded | 3 |",
+    "| scheduler_p999_latency_receipt | task_records | warm_capacity_and_locality_plans | implemented_verified | 4 |",
     "| safe_heap_fallback | task_records | safe_heap_fallback | fallback_only | 1 |"
   ]
 }
