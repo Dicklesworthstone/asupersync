@@ -308,6 +308,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "postgres_connect_options_parse"
+path = "fuzz_targets/postgres_connect_options_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_postgres_wire_protocol"
 path = "fuzz_targets/postgres_wire_protocol.rs"
 test = false
@@ -1486,6 +1493,13 @@ bench = false
 [[bin]]
 name = "nats_creds_jwt"
 path = "fuzz_targets/nats_creds_jwt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nats_config_from_url"
+path = "fuzz_targets/nats_config_from_url.rs"
 test = false
 doc = false
 bench = false
