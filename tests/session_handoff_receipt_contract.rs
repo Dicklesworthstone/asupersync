@@ -100,6 +100,14 @@ fn dirty_peer_owned_tree_recommends_avoiding_surface() {
         clusters[0]["cluster"].as_str(),
         Some("peer-owned/channel-metamorphic")
     );
+    assert_eq!(
+        receipt["proof_suggestions"]
+            .as_array()
+            .expect("proof_suggestions must be array")
+            .first()
+            .and_then(Value::as_str),
+        Some("rustfmt-check")
+    );
 }
 
 #[test]

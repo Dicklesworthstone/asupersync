@@ -135,6 +135,12 @@ def live_probe(repo_path: Path, timeout: float) -> dict[str, Any]:
             "unstaged_tracked_count": 0,
             "untracked_count": 0,
         }
+    dirty_entries = normalize_dirty_entries(dirty_tree if isinstance(dirty_tree, dict) else {})
+    proof_runner_status, proof_suggestions = live_proof_suggestions(
+        repo_path,
+        [entry["path"] for entry in dirty_entries],
+        timeout,
+    )
 
     ready_status, ready = run_json(repo_path, ["br", "ready", "--json"], timeout)
     progress_status, progress = run_json(
@@ -166,14 +172,41 @@ def live_probe(repo_path: Path, timeout: float) -> dict[str, Any]:
             "status": "not_configured",
         },
         "proof_runner": {
-            "status": "not_probed",
-            "suggested_lanes": [],
+            "status": proof_runner_status,
+            "suggested_lanes": proof_suggestions,
         },
         "rch": {
             "available": rch_status == "ok",
             "queue_summary": compact_summary(rch_queue) if rch_status == "ok" else rch_status,
         },
     }
+
+
+def live_proof_suggestions(
+    repo_path: Path,
+    touched_files: list[str],
+    timeout: float,
+) -> tuple[str, list[str]]:
+    if not touched_files:
+        return "not_required", []
+
+    command = [
+        "python3",
+        "scripts/proof_runner.py",
+        "--suggest-lanes",
+        "--touched-files",
+        *touched_files[:25],
+        "--output",
+        "json",
+    ]
+    status, payload = run_json(repo_path, command, timeout)
+    if status != "ok" or not isinstance(payload, dict):
+        return status, []
+
+    suggestions = payload.get("suggested_lanes", [])
+    if not isinstance(suggestions, list):
+        return "malformed-json", []
+    return "ok", [str(lane) for lane in suggestions if isinstance(lane, str) and lane]
 
 
 def extract_issues(value: Any) -> list[dict[str, Any]]:
