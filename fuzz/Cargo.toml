@@ -5462,12 +5462,22 @@ test = false
 doc = false
 bench = false
 
-# I/O buffer boundary violations and cancellation edge case fuzzer  
+# I/O buffer boundary violations and cancellation edge case fuzzer
 # Tests vulnerabilities in src/io/ buffer bounds checking, copy operation
 # cancellation drain logic, and cross-operation buffer contamination
 [[bin]]
 name = "io_buffer_boundary_violations"
 path = "fuzz_targets/io_buffer_boundary_violations.rs"
+test = false
+doc = false
+bench = false
+
+# Progress certificate concurrent operations and ordering invariants fuzzer
+# Tests certificate validity under concurrent revoke operations, step ordering
+# monotonicity, and floating-point boundary edge cases (NaN, infinity, epsilon)
+[[bin]]
+name = "fuzz_progress_certificate_concurrent"
+path = "fuzz_targets/fuzz_progress_certificate_concurrent.rs"
 test = false
 doc = false
 bench = false

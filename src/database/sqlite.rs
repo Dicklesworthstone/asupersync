@@ -1642,11 +1642,19 @@ impl SqliteConnection {
             // SECURITY FIX: Explicit WAL checkpoint to ensure durability
             // Without this, WAL frames after the last auto-checkpoint may be lost on crash
             if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(FULL)") {
-                // Log checkpoint failure but don't fail close operation
-                tracing::warn!(
+                // Log checkpoint failure but don't fail close operation.
+                // br-asupersync-rtxxtt: gate behind tracing-integration so
+                // the sqlite feature compiles without it. Bare `tracing::*`
+                // requires tracing as a normal-edge dep; the codebase
+                // convention is `#[cfg(feature = "tracing-integration")]`
+                // around the call plus `let _ = e;` to consume the binding
+                // when the feature is off.
+                #[cfg(feature = "tracing-integration")]
+                crate::tracing_compat::warn!(
                     error = %e,
                     "WAL checkpoint failed during connection close - potential data loss risk"
                 );
+                let _ = e;
             }
 
             conn.flush_prepared_statement_cache();
@@ -1676,10 +1684,14 @@ impl SqliteConnection {
         {
             Outcome::Ok(()) => {}
             Outcome::Err(e) => {
-                tracing::warn!(
+                // br-asupersync-rtxxtt: gate behind tracing-integration so
+                // the sqlite feature compiles without it.
+                #[cfg(feature = "tracing-integration")]
+                crate::tracing_compat::warn!(
                     error = %e,
                     "Async WAL checkpoint failed during connection close"
                 );
+                let _ = e;
                 // Continue with close despite checkpoint failure
             }
             Outcome::Cancelled(r) => return Outcome::Cancelled(r),
