@@ -1,0 +1,91 @@
+{
+  "action_items": [
+    "record remote success and artifact retrieval as separate evidence rows",
+    "attach commit and rch proof evidence before relying on the closeout"
+  ],
+  "current_date": "2026-05-08",
+  "forbidden_actions": {
+    "runs_agent_mail_mutation": false,
+    "runs_beads_mutation": false,
+    "runs_cargo": false,
+    "runs_destructive_command": false,
+    "runs_git_mutation": false
+  },
+  "generated_at": "2026-05-08T05:55:00Z",
+  "input_schema_version": "swarm-coordination-replay-input-v1",
+  "invariants": {
+    "closeouts_have_commit_and_remote_proof": false,
+    "no_duplicate_active_claims": true,
+    "no_exclusive_reservation_contention": true,
+    "proofs_have_remote_exit_events": true,
+    "successful_proofs_have_artifact_evidence": false
+  },
+  "non_mutating": true,
+  "schema_version": "swarm-coordination-replay-pack-v1",
+  "source": "tests/fixtures/swarm_coordination_replay_pack/artifact_warning_and_closeout_gap.json",
+  "source_counts": {
+    "agents": 1,
+    "beads": 1,
+    "events": 3,
+    "proofs": 1
+  },
+  "summary": {
+    "error_count": 0,
+    "passes": false,
+    "violation_count": 2,
+    "warning_count": 2
+  },
+  "timeline": [
+    {
+      "agent": "BlackDove",
+      "bead_id": "asupersync-aj7lx3.17",
+      "id": "proof-start",
+      "path": "",
+      "proof_id": "proof-no-artifact",
+      "summary": "",
+      "timestamp": "2026-05-08T05:00:00Z",
+      "type": "proof_start"
+    },
+    {
+      "agent": "BlackDove",
+      "bead_id": "asupersync-aj7lx3.17",
+      "id": "proof-exit",
+      "path": "",
+      "proof_id": "proof-no-artifact",
+      "summary": "",
+      "timestamp": "2026-05-08T05:01:00Z",
+      "type": "proof_remote_exit"
+    },
+    {
+      "agent": "BlackDove",
+      "bead_id": "asupersync-aj7lx3.17",
+      "id": "closeout",
+      "path": "",
+      "proof_id": "",
+      "summary": "",
+      "timestamp": "2026-05-08T05:02:00Z",
+      "type": "close"
+    }
+  ],
+  "violations": [
+    {
+      "code": "proof-artifact-missing",
+      "event_ids": [
+        "proof-exit",
+        "proof-start"
+      ],
+      "message": "proof-no-artifact reached remote success without artifact retrieval evidence",
+      "remediation": "record remote success and artifact retrieval as separate evidence rows",
+      "severity": "warning"
+    },
+    {
+      "code": "closeout-evidence-gap",
+      "event_ids": [
+        "closeout"
+      ],
+      "message": "asupersync-aj7lx3.17 closeout is missing ship commit evidence",
+      "remediation": "attach commit and rch proof evidence before relying on the closeout",
+      "severity": "warning"
+    }
+  ]
+}

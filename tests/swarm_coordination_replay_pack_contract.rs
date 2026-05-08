@@ -226,11 +226,53 @@ fn remote_success_without_artifact_and_closeout_evidence_is_warning() {
 }
 
 #[test]
+fn artifact_warning_and_closeout_gap_output_matches_full_reviewed_golden() {
+    let output = run_replay("artifact_warning_and_closeout_gap.json");
+    assert!(
+        output.status.success(),
+        "replay helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let expected = fixture_text("artifact_warning_and_closeout_gap_expected.json");
+    serde_json::from_slice::<Value>(&output.stdout).expect("actual replay output must be JSON");
+    serde_json::from_str::<Value>(&expected).expect("golden replay output must be JSON");
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("replay stdout is utf-8"),
+        expected,
+        "artifact_warning_and_closeout_gap receipt drifted from the reviewed golden"
+    );
+}
+
+#[test]
 fn released_claims_and_reservations_do_not_trigger_false_contention() {
     let receipt = replay_json("released_claim_and_reservation.json");
 
     assert_eq!(receipt["summary"]["passes"].as_bool(), Some(true));
     assert_eq!(receipt["summary"]["violation_count"].as_u64(), Some(0));
+}
+
+#[test]
+fn released_claim_and_reservation_output_matches_full_reviewed_golden() {
+    let output = run_replay("released_claim_and_reservation.json");
+    assert!(
+        output.status.success(),
+        "replay helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let expected = fixture_text("released_claim_and_reservation_expected.json");
+    serde_json::from_slice::<Value>(&output.stdout).expect("actual replay output must be JSON");
+    serde_json::from_str::<Value>(&expected).expect("golden replay output must be JSON");
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("replay stdout is utf-8"),
+        expected,
+        "released_claim_and_reservation receipt drifted from the reviewed golden"
+    );
 }
 
 #[test]
