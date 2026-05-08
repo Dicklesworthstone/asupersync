@@ -189,6 +189,28 @@ fn no_commit_reference_is_not_landed() {
 }
 
 #[test]
+fn no_commit_reference_matches_full_output_golden() {
+    let output = run_receipt("no_commit_reference.json");
+    assert!(
+        output.status.success(),
+        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actual = String::from_utf8(output.stdout).expect("receipt stdout must be UTF-8");
+    let expected = fixture_text("no_commit_reference_expected.json");
+
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
+    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
+    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
+    assert_eq!(
+        actual, expected,
+        "landed-but-open no-commit receipt changed; update the golden only after reviewing keep-open semantics"
+    );
+}
+
+#[test]
 fn bead_id_filter_limits_rows() {
     let output = Command::new("python3")
         .arg(repo_root().join(SCRIPT_PATH))
