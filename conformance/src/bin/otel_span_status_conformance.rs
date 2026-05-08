@@ -1,31 +1,27 @@
 //! OpenTelemetry Span Status Conformance Test
 //!
-//! Pattern 1: Differential Testing vs opentelemetry-sdk
-//! Ensures identical OTLP/Trace status field for same status codes
+//! Local OTLP/Trace status-field checks with fail-closed handling for the
+//! missing live opentelemetry-sdk exporter reference.
 
-use asupersync::observability::otel::otlp_request_builder::{
-    OTEL_SCHEMA_URL, OTEL_SCOPE_NAME, OTEL_SCOPE_VERSION, traces_request,
-};
+use asupersync::observability::otel::otlp_request_builder::{OTEL_SCOPE_NAME, traces_request};
 use asupersync::observability::otel::span_semantics::TestSpan;
 use clap::{Arg, Command};
 use opentelemetry::trace::{
     SpanContext, SpanId, SpanKind, Status, TraceFlags, TraceId, TraceState,
 };
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
-use opentelemetry_proto::tonic::common::v1::{AnyValue, InstrumentationScope, KeyValue};
-use opentelemetry_proto::tonic::resource::v1::Resource;
 use opentelemetry_proto::tonic::trace::v1::{
-    ResourceSpans, ScopeSpans, Span as ProtoSpan, Status as ProtoStatus,
-    span::{Event as ProtoSpanEvent, SpanKind as ProtoSpanKind},
-    status::StatusCode as ProtoStatusCode,
+    Span as ProtoSpan, status::StatusCode as ProtoStatusCode,
 };
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+const OTEL_SDK_REFERENCE_UNIMPLEMENTED: &str =
+    "live opentelemetry-sdk span status reference is not wired";
+
 /// Conformance test result tracking
 #[derive(Debug, Clone, PartialEq)]
 enum ConformanceTestResult {
-    Pass,
     Fail { reason: String },
     ExpectedFailure { reason: String },
 }
@@ -63,7 +59,6 @@ struct TestSpanInput {
 #[derive(Clone)]
 struct TestSpanEvent {
     name: String,
-    timestamp: SystemTime,
     attributes: Vec<(String, String)>,
 }
 
@@ -72,7 +67,7 @@ fn main() {
 
     let matches = Command::new("otel_span_status_conformance")
         .version("0.1.0")
-        .about("OpenTelemetry Span Status conformance vs opentelemetry-sdk")
+        .about("OpenTelemetry Span Status local checks; live opentelemetry-sdk reference is XFAIL")
         .arg(
             Arg::new("test")
                 .help("Test to run")
@@ -148,7 +143,6 @@ fn exit_if_not_pass(test_name: &str, result: ConformanceTestResult) {
         ConformanceTestResult::ExpectedFailure { reason } => {
             eprintln!("{test_name}: XFAIL - {reason}");
         }
-        ConformanceTestResult::Pass => {}
     }
 
     std::process::exit(exit_code);
@@ -158,7 +152,7 @@ fn run_all_tests(verbose: bool) {
     println!("=== OpenTelemetry Span Status Conformance Testing ===\n");
 
     let mut total = 0;
-    let mut passed = 0;
+    let passed = 0;
     let mut failed = 0;
     let mut xfail = 0;
 
@@ -245,10 +239,6 @@ fn run_all_tests(verbose: bool) {
         let result = run_span_status_conformance_test(test_case, verbose);
 
         match &result {
-            ConformanceTestResult::Pass => {
-                passed += 1;
-                println!("✅ PASS");
-            }
             ConformanceTestResult::Fail { reason } => {
                 failed += 1;
                 println!("❌ FAIL");
@@ -270,7 +260,6 @@ fn run_all_tests(verbose: bool) {
             "{{\"test\":\"{}\",\"status\":\"{}\",\"level\":\"{:?}\"}}",
             test_case.name,
             match &result {
-                ConformanceTestResult::Pass => "PASS",
                 ConformanceTestResult::Fail { .. } => "FAIL",
                 ConformanceTestResult::ExpectedFailure { .. } => "XFAIL",
             },
@@ -302,13 +291,12 @@ fn run_all_tests(verbose: bool) {
         eprintln!("\nDifferences documented in DISCREPANCIES.md");
         std::process::exit(exit_code_for_summary(total, failed, xfail));
     } else {
-        println!("🎯 OTLP/Trace status field matches opentelemetry-sdk exactly");
+        println!("🎯 All enabled OTLP/Trace status checks passed");
     }
 }
 
 fn exit_code_for_result(result: &ConformanceTestResult) -> i32 {
     match result {
-        ConformanceTestResult::Pass => 0,
         ConformanceTestResult::Fail { .. } | ConformanceTestResult::ExpectedFailure { .. } => 1,
     }
 }
@@ -329,7 +317,7 @@ fn final_status_line(total: usize, failed: usize, expected_failures: usize) -> S
     } else if expected_failures > 0 {
         format!("NO FAILURES; PARTIAL COVERAGE ({expected_failures} expected failures)")
     } else {
-        "✅ ALL TESTS PASSED - Span Status setting is conformant".to_string()
+        "✅ ALL ENABLED CHECKS PASSED - Span Status local checks passed".to_string()
     }
 }
 
@@ -338,7 +326,8 @@ fn run_span_status_conformance_test(
     test_case: &SpanStatusTestCase,
     _verbose: bool,
 ) -> ConformanceTestResult {
-    // Generate our implementation's OTLP request
+    // Generate the local asupersync OTLP request and verify it against the
+    // explicit test oracle before reporting the missing reference seam.
     let our_request = match generate_our_otlp_traces_request(test_case) {
         Ok(req) => req,
         Err(e) => {
@@ -348,30 +337,64 @@ fn run_span_status_conformance_test(
         }
     };
 
-    // Generate reference implementation's OTLP request
-    let reference_request = match generate_reference_otlp_traces_request(test_case) {
-        Ok(req) => req,
-        Err(e) => {
-            return ConformanceTestResult::Fail {
-                reason: format!("Failed to generate reference OTLP request: {}", e),
-            };
-        }
-    };
+    if let Err(reason) = verify_status_fields_against_inputs(test_case, &our_request) {
+        return ConformanceTestResult::Fail {
+            reason: format!("local OTLP status request mismatch: {reason}"),
+        };
+    }
 
-    // Compare specifically the status fields in the protobuf
-    match compare_status_fields(&our_request, &reference_request) {
-        Ok(()) => ConformanceTestResult::Pass,
-        Err(reason) => {
-            // Check for known divergences
-            if is_known_status_divergence(test_case.name) {
-                ConformanceTestResult::ExpectedFailure {
-                    reason: "Known divergence documented in DISCREPANCIES.md".to_string(),
-                }
-            } else {
-                ConformanceTestResult::Fail { reason }
-            }
+    ConformanceTestResult::ExpectedFailure {
+        reason: format!(
+            "{OTEL_SDK_REFERENCE_UNIMPLEMENTED}; local status request matched the test oracle, but live opentelemetry-sdk parity remains unexercised"
+        ),
+    }
+}
+
+fn verify_status_fields_against_inputs(
+    test_case: &SpanStatusTestCase,
+    request: &ExportTraceServiceRequest,
+) -> Result<(), String> {
+    let spans: Vec<&ProtoSpan> = request
+        .resource_spans
+        .iter()
+        .flat_map(|rs| rs.scope_spans.iter())
+        .flat_map(|ss| ss.spans.iter())
+        .collect();
+
+    if spans.len() != test_case.span_inputs.len() {
+        return Err(format!(
+            "span count mismatch: expected={}, got={}",
+            test_case.span_inputs.len(),
+            spans.len()
+        ));
+    }
+
+    for (index, (span, input)) in spans.iter().zip(test_case.span_inputs.iter()).enumerate() {
+        let Some(status) = span.status.as_ref() else {
+            return Err(format!(
+                "span[{index}] '{}' missing status field",
+                input.name
+            ));
+        };
+
+        let expected_code = status_to_proto_code(&input.status);
+        if status.code != expected_code {
+            return Err(format!(
+                "span[{index}] '{}' status code mismatch: expected={}, got={}",
+                input.name, expected_code, status.code
+            ));
+        }
+
+        let expected_message = status_to_message(&input.status);
+        if status.message != expected_message {
+            return Err(format!(
+                "span[{index}] '{}' status message mismatch: expected='{}', got='{}'",
+                input.name, expected_message, status.message
+            ));
         }
     }
+
+    Ok(())
 }
 
 /// Generate OTLP traces request using our implementation
@@ -432,179 +455,6 @@ fn generate_our_otlp_traces_request(
     ))
 }
 
-/// Generate OTLP traces request using opentelemetry-sdk reference
-fn generate_reference_otlp_traces_request(
-    test_case: &SpanStatusTestCase,
-) -> Result<ExportTraceServiceRequest, Box<dyn std::error::Error>> {
-    // Create spans manually using OTLP protobuf structures
-    let mut resource_spans = Vec::new();
-
-    let proto_spans: Vec<ProtoSpan> = test_case.span_inputs
-        .iter()
-        .map(|input| {
-            ProtoSpan {
-                trace_id: input.trace_id.to_vec(),
-                span_id: input.span_id.to_vec(),
-                parent_span_id: input.parent_span_id
-                    .map(|id| id.to_vec())
-                    .unwrap_or_default(),
-                name: input.name.clone(),
-                kind: span_kind_to_proto(&input.span_kind) as i32,
-                start_time_unix_nano: input.start_time
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos() as u64,
-                end_time_unix_nano: input.end_time
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos() as u64,
-                attributes: input.attributes.iter().map(|(k, v)| {
-                    KeyValue {
-                        key: k.clone(),
-                        value: Some(AnyValue {
-                            value: Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(
-                                v.clone()
-                            )),
-                        }),
-                    }
-                }).collect(),
-                events: input.events.iter().map(|e| {
-                    ProtoSpanEvent {
-                        time_unix_nano: e.timestamp
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap()
-                            .as_nanos() as u64,
-                        name: e.name.clone(),
-                        attributes: e.attributes.iter().map(|(k, v)| {
-                            KeyValue {
-                                key: k.clone(),
-                                value: Some(AnyValue {
-                                    value: Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(
-                                        v.clone()
-                                    )),
-                                }),
-                            }
-                        }).collect(),
-                        dropped_attributes_count: 0,
-                    }
-                }).collect(),
-                dropped_attributes_count: 0,
-                dropped_events_count: 0,
-                status: Some(ProtoStatus {
-                    code: status_to_proto_code(&input.status),
-                    message: status_to_message(&input.status),
-                }),
-                dropped_links_count: 0,
-                flags: 0,
-                trace_state: String::new(),
-                links: vec![],
-            }
-        })
-        .collect();
-
-    let scope_spans = ScopeSpans {
-        scope: Some(InstrumentationScope {
-            name: OTEL_SCOPE_NAME.to_string(),
-            version: OTEL_SCOPE_VERSION.to_string(),
-            attributes: vec![],
-            dropped_attributes_count: 0,
-        }),
-        spans: proto_spans,
-        schema_url: OTEL_SCHEMA_URL.to_string(),
-    };
-
-    resource_spans.push(ResourceSpans {
-        resource: Some(Resource {
-            attributes: vec![KeyValue {
-                key: "service.name".to_string(),
-                value: Some(AnyValue {
-                    value: Some(
-                        opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(
-                            "test-service".to_string(),
-                        ),
-                    ),
-                }),
-            }],
-            dropped_attributes_count: 0,
-            entity_refs: vec![],
-        }),
-        scope_spans: vec![scope_spans],
-        schema_url: OTEL_SCHEMA_URL.to_string(),
-    });
-
-    Ok(ExportTraceServiceRequest { resource_spans })
-}
-
-/// Compare status fields between two OTLP requests
-fn compare_status_fields(
-    our_request: &ExportTraceServiceRequest,
-    reference_request: &ExportTraceServiceRequest,
-) -> Result<(), String> {
-    // Extract spans from both requests
-    let our_spans: Vec<&ProtoSpan> = our_request
-        .resource_spans
-        .iter()
-        .flat_map(|rs| rs.scope_spans.iter())
-        .flat_map(|ss| ss.spans.iter())
-        .collect();
-
-    let reference_spans: Vec<&ProtoSpan> = reference_request
-        .resource_spans
-        .iter()
-        .flat_map(|rs| rs.scope_spans.iter())
-        .flat_map(|ss| ss.spans.iter())
-        .collect();
-
-    if our_spans.len() != reference_spans.len() {
-        return Err(format!(
-            "Span count mismatch: our={}, reference={}",
-            our_spans.len(),
-            reference_spans.len()
-        ));
-    }
-
-    // Compare status fields for each span
-    for (i, (our_span, ref_span)) in our_spans.iter().zip(reference_spans.iter()).enumerate() {
-        let our_status = our_span.status.as_ref();
-        let ref_status = ref_span.status.as_ref();
-
-        match (our_status, ref_status) {
-            (Some(our), Some(reference)) => {
-                if our.code != reference.code {
-                    return Err(format!(
-                        "Span[{}] '{}': Status code mismatch: our={}, reference={}",
-                        i, our_span.name, our.code, reference.code
-                    ));
-                }
-
-                if our.message != reference.message {
-                    return Err(format!(
-                        "Span[{}] '{}': Status message mismatch: our='{}', reference='{}'",
-                        i, our_span.name, our.message, reference.message
-                    ));
-                }
-            }
-            (None, None) => {
-                // Both have no status - this is OK for UNSET
-            }
-            (Some(our), None) => {
-                return Err(format!(
-                    "Span[{}] '{}': Our status present ({}/'{}'), reference has none",
-                    i, our_span.name, our.code, our.message
-                ));
-            }
-            (None, Some(reference)) => {
-                return Err(format!(
-                    "Span[{}] '{}': Reference status present ({}/'{}'), our has none",
-                    i, our_span.name, reference.code, reference.message
-                ));
-            }
-        }
-    }
-
-    Ok(())
-}
-
 /// Helper to create a test span with specific status
 fn create_test_span_with_status(name: &str, status: Status) -> TestSpanInput {
     TestSpanInput {
@@ -636,26 +486,6 @@ fn status_to_message(status: &Status) -> String {
         Status::Unset => String::new(),
         Status::Ok => String::new(),
         Status::Error { description } => description.to_string(),
-    }
-}
-
-/// Convert SpanKind to protobuf SpanKind
-fn span_kind_to_proto(kind: &SpanKind) -> ProtoSpanKind {
-    match kind {
-        SpanKind::Internal => ProtoSpanKind::Internal,
-        SpanKind::Server => ProtoSpanKind::Server,
-        SpanKind::Client => ProtoSpanKind::Client,
-        SpanKind::Producer => ProtoSpanKind::Producer,
-        SpanKind::Consumer => ProtoSpanKind::Consumer,
-    }
-}
-
-/// Check if test case has known status divergences
-fn is_known_status_divergence(test_name: &str) -> bool {
-    // Define known divergences here
-    // For now, assume no known divergences
-    match test_name {
-        _ => false,
     }
 }
 
@@ -748,39 +578,38 @@ fn generate_compliance_report() {
 
     println!("## Coverage Matrix");
     println!();
-    println!("| Test Case | Requirement Level | Status | Description |");
-    println!("|-----------|--------------------|--------|-------------|");
-    println!("| basic-status-codes | MUST | ✅ | Basic status codes map correctly to OTLP |");
-    println!(
-        "| status-with-messages | MUST | ✅ | Status with custom messages serialize correctly |"
-    );
-    println!("| status-transitions | SHOULD | ✅ | Status transitions within span lifecycle |");
-    println!("| error-status-scenarios | MUST | ✅ | Various error status scenarios |");
-    println!("| unset-status-default | MUST | ✅ | Default UNSET status behavior |");
-    println!("| status-protobuf-serialization | MUST | ✅ | Protobuf serialization consistency |");
+    println!("| Test Case | Requirement Level | Local Status Oracle | Live SDK Reference |");
+    println!("|-----------|--------------------|---------------------|--------------------|");
+    println!("| basic-status-codes | MUST | checked | XFAIL - not wired |");
+    println!("| status-with-messages | MUST | checked | XFAIL - not wired |");
+    println!("| status-transitions | SHOULD | checked | XFAIL - not wired |");
+    println!("| error-status-scenarios | MUST | checked | XFAIL - not wired |");
+    println!("| unset-status-default | MUST | checked | XFAIL - not wired |");
+    println!("| status-protobuf-serialization | MUST | checked | XFAIL - not wired |");
     println!();
 
     println!("## Specification Coverage");
     println!();
-    println!("### MUST clauses: 5/5 (100%)");
-    println!("### SHOULD clauses: 1/1 (100%)");
-    println!("### Overall score: 100%");
+    println!("### Local OTLP status oracle: available");
+    println!("### Live opentelemetry-sdk reference: unavailable");
+    println!("### Overall score: unavailable");
     println!();
 
     println!("## Known Divergences");
     println!();
-    println!("None documented.");
+    println!("- {OTEL_SDK_REFERENCE_UNIMPLEMENTED}");
     println!();
 
     println!(
-        "✅ **CONFORMANT** - Span Status setting produces identical OTLP/Trace status field vs opentelemetry"
+        "⚠️ **XFAIL** - Span Status local checks run, but live opentelemetry-sdk parity is not proven"
     );
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ConformanceTestResult, exit_code_for_result, exit_code_for_summary, final_status_line,
+        ConformanceTestResult, OTEL_SDK_REFERENCE_UNIMPLEMENTED, exit_code_for_result,
+        exit_code_for_summary, final_status_line, run_basic_status_codes_test,
     };
 
     #[test]
@@ -790,6 +619,19 @@ mod tests {
         };
 
         assert_eq!(exit_code_for_result(&result), 1);
+    }
+
+    #[test]
+    fn span_status_runner_xfails_without_live_sdk_reference() {
+        let result = run_basic_status_codes_test(false);
+
+        match result {
+            ConformanceTestResult::ExpectedFailure { reason } => {
+                assert!(reason.contains(OTEL_SDK_REFERENCE_UNIMPLEMENTED));
+                assert!(reason.contains("local status request matched the test oracle"));
+            }
+            other => panic!("expected XFAIL while SDK reference is unwired, got {other:?}"),
+        }
     }
 
     #[test]
@@ -815,6 +657,26 @@ mod tests {
 
     #[test]
     fn final_status_line_reports_true_all_pass() {
-        assert!(final_status_line(5, 0, 0).contains("ALL TESTS PASSED"));
+        let status = final_status_line(5, 0, 0);
+
+        assert!(status.contains("ALL ENABLED CHECKS PASSED"));
+        assert!(!status.contains("conformant"));
+    }
+
+    #[test]
+    fn source_no_longer_claims_synthetic_sdk_parity() {
+        let source = include_str!("otel_span_status_conformance.rs");
+
+        assert!(!source.contains(concat!("generate_reference_", "otlp_traces_request")));
+        assert!(!source.contains(concat!("MUST clauses: 5/5 ", "(100%)")));
+        assert!(!source.contains(concat!(
+            "CONFORMANT** - Span Status setting produces ",
+            "identical ",
+            "OTLP/Trace status field vs opentelemetry"
+        )));
+        assert!(!source.contains(concat!(
+            "Pattern 1: Differential Testing vs ",
+            "opentelemetry-sdk"
+        )));
     }
 }
