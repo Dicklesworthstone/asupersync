@@ -5,11 +5,10 @@ use asupersync::trace::distributed::id::{DistTraceId, SymbolSpanId};
 use asupersync::util::DetRng;
 use clap::{Arg, Command};
 use opentelemetry::trace::{
-    SpanContext, SpanId, TraceFlags as OtelTraceFlags, TraceId, TraceState,
+    SpanContext, SpanId, TraceContextExt as _, TraceFlags as OtelTraceFlags, TraceId, TraceState,
 };
-use opentelemetry::{Baggage, Context, KeyValue, propagation::TextMapPropagator};
-use opentelemetry_sdk::trace::{Config, Sampler, TracerProvider};
-use opentelemetry_sdk::{Resource, runtime::Tokio};
+use opentelemetry::{Context, propagation::TextMapPropagator};
+use opentelemetry_sdk::propagation::TraceContextPropagator;
 use std::collections::HashMap;
 
 /// Cross-process trace context propagation conformance testing.
@@ -39,7 +38,7 @@ fn main() {
     let verbose = matches.get_flag("verbose");
     let test_name = matches.get_one::<String>("test");
 
-    let test_cases = vec![
+    let test_cases: [(&str, fn(bool) -> TestResult); 5] = [
         ("w3c-roundtrip", test_w3c_roundtrip),
         ("b3-roundtrip", test_b3_roundtrip),
         ("baggage-roundtrip", test_baggage_roundtrip),
@@ -100,7 +99,6 @@ struct B3Headers {
     trace_id: String,
     span_id: String,
     sampled: Option<String>,
-    flags: Option<String>,
 }
 
 /// Converts SymbolTraceContext to W3C headers
@@ -149,7 +147,6 @@ fn to_b3_headers(ctx: &SymbolTraceContext) -> B3Headers {
         trace_id,
         span_id,
         sampled,
-        flags: None,
     }
 }
 
@@ -190,12 +187,10 @@ fn create_otel_span_context(
     flags: AsuperTraceFlags,
     baggage: &[(String, String)],
 ) -> Result<SpanContext, Box<dyn std::error::Error>> {
-    let trace_id_bytes = [
-        &trace_id.high().to_be_bytes(),
-        &trace_id.low().to_be_bytes(),
-    ]
-    .concat();
-    let otel_trace_id = TraceId::from_bytes(trace_id_bytes.try_into().unwrap());
+    let mut trace_id_bytes = [0_u8; 16];
+    trace_id_bytes[..8].copy_from_slice(&trace_id.high().to_be_bytes());
+    trace_id_bytes[8..].copy_from_slice(&trace_id.low().to_be_bytes());
+    let otel_trace_id = TraceId::from_bytes(trace_id_bytes);
 
     let span_id_bytes = span_id.as_u64().to_be_bytes();
     let otel_span_id = SpanId::from_bytes(span_id_bytes);
@@ -206,10 +201,7 @@ fn create_otel_span_context(
         OtelTraceFlags::default()
     };
 
-    let mut trace_state = TraceState::default();
-    for (key, value) in baggage {
-        trace_state = trace_state.with_key_value(key, value)?;
-    }
+    let trace_state = TraceState::from_key_value(baggage.iter().map(|(key, value)| (key, value)))?;
 
     Ok(SpanContext::new(
         otel_trace_id,
@@ -299,9 +291,9 @@ fn test_w3c_roundtrip(verbose: bool) -> TestResult {
         original_ctx.baggage(),
     )?;
 
-    let propagator = opentelemetry::propagation::TraceContextPropagator::new();
+    let propagator = TraceContextPropagator::new();
     let mut ref_headers = HashMap::new();
-    let ctx = Context::default().with_span(MockSpan::new(otel_span_context));
+    let ctx = Context::default().with_remote_span_context(otel_span_context);
     propagator.inject_context(&ctx, &mut HeaderInjector(&mut ref_headers));
 
     let ref_traceparent = ref_headers
@@ -501,7 +493,7 @@ fn test_comprehensive_scenario(verbose: bool) -> TestResult {
 
     // Service A -> Service B (W3C headers)
     let a_to_b_headers = to_w3c_headers(&service_a_ctx);
-    let (trace_id, _, flags) = parse_w3c_traceparent(&a_to_b_headers.traceparent)?;
+    let (trace_id, _, _flags) = parse_w3c_traceparent(&a_to_b_headers.traceparent)?;
 
     // Service B creates child span
     let service_b_ctx = SymbolTraceContext::new_for_encoding(
@@ -561,56 +553,6 @@ fn test_comprehensive_scenario(verbose: bool) -> TestResult {
     Ok(())
 }
 
-// =============================================================================
-// Mock Implementations
-// =============================================================================
-
-struct MockSpan {
-    context: SpanContext,
-}
-
-impl MockSpan {
-    fn new(context: SpanContext) -> Self {
-        Self { context }
-    }
-}
-
-impl opentelemetry::trace::Span for MockSpan {
-    fn add_event_with_timestamp<T>(&mut self, _name: T, _timestamp: std::time::SystemTime)
-    where
-        T: Into<std::borrow::Cow<'static, str>>,
-    {
-        // No-op
-    }
-
-    fn span_context(&self) -> &SpanContext {
-        &self.context
-    }
-
-    fn is_recording(&self) -> bool {
-        false
-    }
-
-    fn set_attribute(&mut self, _attribute: KeyValue) {
-        // No-op
-    }
-
-    fn set_status(&mut self, _status: opentelemetry::trace::Status) {
-        // No-op
-    }
-
-    fn update_name<T>(&mut self, _new_name: T)
-    where
-        T: Into<std::borrow::Cow<'static, str>>,
-    {
-        // No-op
-    }
-
-    fn end_with_timestamp(&mut self, _timestamp: std::time::SystemTime) {
-        // No-op
-    }
-}
-
 struct HeaderInjector<'a>(&'a mut HashMap<String, String>);
 
 impl<'a> opentelemetry::propagation::Injector for HeaderInjector<'a> {
@@ -634,11 +576,6 @@ mod tests {
         );
 
         let headers = to_w3c_headers(&ctx);
-        let expected = format!(
-            "00-1234567890abcdeffedcba0987654321-{:016x}-01",
-            ctx.span_id().as_u64()
-        );
-
         assert!(
             headers
                 .traceparent
@@ -656,5 +593,19 @@ mod tests {
         assert_eq!(trace_id.low(), 0xfedcba0987654321);
         assert_eq!(span_id.as_u64(), 0x5555666677778888);
         assert!(flags.is_sampled());
+    }
+
+    #[test]
+    fn source_uses_real_opentelemetry_context_instead_of_local_mock_span() {
+        let source = include_str!("cross_process_trace_conformance.rs");
+        for (left, right) in [
+            ("Mock", "Span"),
+            ("Mock", " Implementations"),
+            ("Context::default().with_", "span"),
+        ] {
+            let forbidden = format!("{left}{right}");
+            assert!(!source.contains(&forbidden), "found {forbidden}");
+        }
+        assert!(source.contains("with_remote_span_context"));
     }
 }
