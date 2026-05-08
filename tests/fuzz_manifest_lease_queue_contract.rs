@@ -55,6 +55,30 @@ fn fixture_text(fixture: &str) -> String {
         .unwrap_or_else(|error| panic!("read fixture {fixture}: {error}"))
 }
 
+fn assert_queue_matches_exact_reviewed_golden(input_fixture: &str, expected_fixture: &str) {
+    let output = run_queue(input_fixture);
+    assert!(
+        output.status.success(),
+        "queue helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actual = String::from_utf8(output.stdout).expect("queue output must be UTF-8");
+    let expected = fixture_text(expected_fixture);
+
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual output must be JSON");
+    let expected_json: Value = serde_json::from_str(&expected).expect("golden output must be JSON");
+    assert_eq!(
+        actual_json, expected_json,
+        "parsed fuzz manifest queue JSON drifted for {input_fixture}"
+    );
+    assert_eq!(
+        actual, expected,
+        "fuzz manifest queue output changed for {input_fixture}; update {expected_fixture} only after reviewing reservation ordering and queue semantics"
+    );
+}
+
 #[test]
 fn script_exists_and_help_is_non_mutating() {
     assert!(
@@ -110,25 +134,7 @@ fn clean_manifest_queue_selects_one_ready_proposal_and_queues_the_next() {
 
 #[test]
 fn clean_manifest_queue_matches_exact_reviewed_golden() {
-    let output = run_queue("clean_queue.json");
-    assert!(
-        output.status.success(),
-        "queue helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let actual = String::from_utf8(output.stdout).expect("queue output must be UTF-8");
-    let expected = fs::read_to_string(
-        repo_root()
-            .join(FIXTURE_ROOT)
-            .join("clean_queue_expected.json"),
-    )
-    .expect("read clean queue golden");
-
-    serde_json::from_str::<Value>(&actual).expect("actual output must be JSON");
-    serde_json::from_str::<Value>(&expected).expect("golden output must be JSON");
-    assert_eq!(actual, expected);
+    assert_queue_matches_exact_reviewed_golden("clean_queue.json", "clean_queue_expected.json");
 }
 
 #[test]
@@ -160,20 +166,10 @@ fn active_manifest_reservation_blocks_all_proposals_before_manifest_edits() {
 
 #[test]
 fn manifest_reserved_queue_matches_exact_reviewed_golden() {
-    let output = run_queue("manifest_reserved.json");
-    assert!(
-        output.status.success(),
-        "queue helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+    assert_queue_matches_exact_reviewed_golden(
+        "manifest_reserved.json",
+        "manifest_reserved_expected.json",
     );
-    let actual = String::from_utf8(output.stdout).expect("queue output must be UTF-8");
-    let expected = fixture_text("manifest_reserved_expected.json");
-
-    serde_json::from_str::<Value>(&actual).expect("actual output must be JSON");
-    serde_json::from_str::<Value>(&expected).expect("golden output must be JSON");
-    assert_eq!(actual, expected);
 }
 
 #[test]
@@ -207,20 +203,10 @@ fn active_target_reservation_blocks_only_that_target_and_next_eligible_can_run()
 
 #[test]
 fn target_reserved_queue_matches_exact_reviewed_golden() {
-    let output = run_queue("target_reserved.json");
-    assert!(
-        output.status.success(),
-        "queue helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+    assert_queue_matches_exact_reviewed_golden(
+        "target_reserved.json",
+        "target_reserved_expected.json",
     );
-    let actual = String::from_utf8(output.stdout).expect("queue output must be UTF-8");
-    let expected = fixture_text("target_reserved_expected.json");
-
-    serde_json::from_str::<Value>(&actual).expect("actual output must be JSON");
-    serde_json::from_str::<Value>(&expected).expect("golden output must be JSON");
-    assert_eq!(actual, expected);
 }
 
 #[test]
@@ -253,20 +239,10 @@ fn duplicate_manifest_and_proposal_targets_are_hard_blocks() {
 
 #[test]
 fn duplicate_targets_queue_matches_exact_reviewed_golden() {
-    let output = run_queue("duplicate_targets.json");
-    assert!(
-        output.status.success(),
-        "queue helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+    assert_queue_matches_exact_reviewed_golden(
+        "duplicate_targets.json",
+        "duplicate_targets_expected.json",
     );
-    let actual = String::from_utf8(output.stdout).expect("queue output must be UTF-8");
-    let expected = fixture_text("duplicate_targets_expected.json");
-
-    serde_json::from_str::<Value>(&actual).expect("actual output must be JSON");
-    serde_json::from_str::<Value>(&expected).expect("golden output must be JSON");
-    assert_eq!(actual, expected);
 }
 
 #[test]
@@ -307,20 +283,10 @@ fn owned_manifest_and_target_reservations_allow_the_holder_to_proceed() {
 
 #[test]
 fn owned_and_expired_reservations_queue_matches_exact_reviewed_golden() {
-    let output = run_queue("owned_and_expired_reservations.json");
-    assert!(
-        output.status.success(),
-        "queue helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+    assert_queue_matches_exact_reviewed_golden(
+        "owned_and_expired_reservations.json",
+        "owned_and_expired_reservations_expected.json",
     );
-    let actual = String::from_utf8(output.stdout).expect("queue output must be UTF-8");
-    let expected = fixture_text("owned_and_expired_reservations_expected.json");
-
-    serde_json::from_str::<Value>(&actual).expect("actual output must be JSON");
-    serde_json::from_str::<Value>(&expected).expect("golden output must be JSON");
-    assert_eq!(actual, expected);
 }
 
 #[test]
