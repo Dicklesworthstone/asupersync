@@ -1,0 +1,56 @@
+{
+  "current_date": "2026-05-08",
+  "fleet_status": "degraded",
+  "forbidden_actions": {
+    "runs_beads_mutation": false,
+    "runs_cargo": false,
+    "runs_destructive_command": false,
+    "runs_git_mutation": false,
+    "runs_rch": false,
+    "runs_ssh": false
+  },
+  "generated_at": "2026-05-08T05:40:00Z",
+  "non_mutating": true,
+  "observations_path": "tests/fixtures/rch_worker_health_receipt/single_retrieval_timeout.json",
+  "safety_notes": [
+    "receipt is fixture/capture based and does not probe live workers",
+    "quarantine is advisory; coordinate before changing live rch worker routing"
+  ],
+  "schema_version": "rch-worker-health-receipt-v1",
+  "source_counts": {
+    "jobs": 2,
+    "workers": 1
+  },
+  "status_counts": {
+    "healthy": 0,
+    "quarantine-candidate": 0,
+    "unavailable": 0,
+    "warn": 1
+  },
+  "workers": [
+    {
+      "reasons": [
+        "single artifact retrieval timeout"
+      ],
+      "remediation": [
+        "keep the worker eligible only for narrow proof lanes",
+        "watch the next rch receipt for repeated failures or retrieval stalls"
+      ],
+      "signals": {
+        "io_some_avg10": 0.0,
+        "job_count": 2,
+        "local_fallback": 0,
+        "memory_some_avg10": 0.0,
+        "reachable": true,
+        "remote_failure": 0,
+        "remote_success": 1,
+        "retrieval_timeout": 1,
+        "root_free_gb": 100.0,
+        "slow_retrieval": 0,
+        "tmp_free_gb": 32.0
+      },
+      "status": "warn",
+      "worker": "worker-slow-sync"
+    }
+  ]
+}
