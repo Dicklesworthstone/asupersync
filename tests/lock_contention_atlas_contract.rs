@@ -176,6 +176,11 @@ fn atlas_fields_extend_current_snapshot_without_losing_existing_counters() {
         "hold_ns",
         "max_wait_ns",
         "max_hold_ns",
+        "p95_wait_ns",
+        "p999_wait_ns",
+        "p95_hold_ns",
+        "p999_hold_ns",
+        "instrumentation_mode",
     ] {
         assert!(
             current.contains(field),
@@ -240,6 +245,37 @@ fn rows_fail_closed_until_live_atlas_reporting_exists() {
             );
         }
     }
+}
+
+#[cfg(feature = "lock-metrics")]
+#[test]
+fn live_contended_mutex_snapshot_projects_tail_latency_fields() {
+    use asupersync::sync::ContendedMutex;
+
+    let contract = contract();
+    let rows = rows_by_surface(&contract);
+    let row = rows
+        .get("contended_mutex_snapshot")
+        .expect("contended mutex row");
+    assert_eq!(row["report_status"].as_str(), Some("LIVE"));
+    assert_eq!(row["live_atlas_wired"].as_bool(), Some(true));
+
+    let lock = ContendedMutex::new("tasks", 0u32);
+    for _ in 0..4 {
+        let mut guard = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard += 1;
+    }
+
+    let snapshot = lock.snapshot();
+    assert_eq!(snapshot.name, "tasks");
+    assert_eq!(snapshot.instrumentation_mode, "opt_in_lock_metrics");
+    assert_eq!(snapshot.acquisitions, 4);
+    assert!(snapshot.p95_wait_ns <= snapshot.max_wait_ns);
+    assert!(snapshot.p999_wait_ns <= snapshot.max_wait_ns);
+    assert!(snapshot.p95_hold_ns <= snapshot.max_hold_ns);
+    assert!(snapshot.p999_hold_ns <= snapshot.max_hold_ns);
 }
 
 #[test]

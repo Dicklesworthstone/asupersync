@@ -41,6 +41,16 @@ pub struct LockMetricsSnapshot {
     pub max_wait_ns: u64,
     /// Maximum single hold duration in nanoseconds.
     pub max_hold_ns: u64,
+    /// Exact p95 wait duration in nanoseconds for observed acquisitions.
+    pub p95_wait_ns: u64,
+    /// Exact p999 wait duration in nanoseconds for observed acquisitions.
+    pub p999_wait_ns: u64,
+    /// Exact p95 hold duration in nanoseconds for observed guards.
+    pub p95_hold_ns: u64,
+    /// Exact p999 hold duration in nanoseconds for observed guards.
+    pub p999_hold_ns: u64,
+    /// Instrumentation mode used to produce this snapshot.
+    pub instrumentation_mode: &'static str,
 }
 
 // ── Feature-gated implementation ──────────────────────────────────────────
@@ -56,7 +66,8 @@ mod inner {
     /// Metrics counters split into two cache lines to avoid false sharing.
     /// Lock-path counters (acquisitions, contentions, wait_ns, max_wait_ns) are
     /// updated during lock(); unlock-path counters (hold_ns, max_hold_ns) are
-    /// updated during drop(Guard). Separating them prevents cross-invalidation.
+    /// updated during drop(Guard). Exact samples are feature-gated with this
+    /// instrumentation mode so the default build stays on the no-op path.
     #[derive(Debug, Default)]
     #[repr(C, align(64))]
     struct Metrics {
@@ -70,11 +81,88 @@ mod inner {
         // ── Cache line 2: updated on drop(Guard) ──
         hold_ns: AtomicU64,
         max_hold_ns: AtomicU64,
+        wait_samples: Mutex<Vec<u64>>,
+        hold_samples: Mutex<Vec<u64>>,
     }
 
     impl Metrics {
         fn update_max(current: &AtomicU64, value: u64) {
             current.fetch_max(value, Ordering::Relaxed);
+        }
+
+        fn record_acquire(&self, wait_ns: u64, contended: bool) {
+            self.acquisitions.fetch_add(1, Ordering::Relaxed);
+            self.wait_ns.fetch_add(wait_ns, Ordering::Relaxed);
+            Self::update_max(&self.max_wait_ns, wait_ns);
+            self.wait_samples
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(wait_ns);
+
+            if contended {
+                self.contentions.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        fn record_hold(&self, hold_ns: u64) {
+            self.hold_ns.fetch_add(hold_ns, Ordering::Relaxed);
+            Self::update_max(&self.max_hold_ns, hold_ns);
+            self.hold_samples
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(hold_ns);
+        }
+
+        fn quantile(samples: &Mutex<Vec<u64>>, numerator: usize, denominator: usize) -> u64 {
+            let mut values = samples
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            if values.is_empty() {
+                return 0;
+            }
+
+            values.sort_unstable();
+            let last_index = values.len() - 1;
+            let rank = last_index
+                .saturating_mul(numerator)
+                .saturating_add(denominator / 2)
+                / denominator;
+            values[rank.min(last_index)]
+        }
+
+        fn snapshot(&self, name: &'static str) -> LockMetricsSnapshot {
+            LockMetricsSnapshot {
+                name,
+                acquisitions: self.acquisitions.load(Ordering::Relaxed),
+                contentions: self.contentions.load(Ordering::Relaxed),
+                wait_ns: self.wait_ns.load(Ordering::Relaxed),
+                hold_ns: self.hold_ns.load(Ordering::Relaxed),
+                max_wait_ns: self.max_wait_ns.load(Ordering::Relaxed),
+                max_hold_ns: self.max_hold_ns.load(Ordering::Relaxed),
+                p95_wait_ns: Self::quantile(&self.wait_samples, 95, 100),
+                p999_wait_ns: Self::quantile(&self.wait_samples, 999, 1000),
+                p95_hold_ns: Self::quantile(&self.hold_samples, 95, 100),
+                p999_hold_ns: Self::quantile(&self.hold_samples, 999, 1000),
+                instrumentation_mode: "opt_in_lock_metrics",
+            }
+        }
+
+        fn reset(&self) {
+            self.acquisitions.store(0, Ordering::Relaxed);
+            self.contentions.store(0, Ordering::Relaxed);
+            self.wait_ns.store(0, Ordering::Relaxed);
+            self.hold_ns.store(0, Ordering::Relaxed);
+            self.max_wait_ns.store(0, Ordering::Relaxed);
+            self.max_hold_ns.store(0, Ordering::Relaxed);
+            self.wait_samples
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clear();
+            self.hold_samples
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clear();
         }
     }
 
@@ -116,13 +204,7 @@ mod inner {
 
             let wait_ns = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
 
-            self.metrics.acquisitions.fetch_add(1, Ordering::Relaxed);
-            self.metrics.wait_ns.fetch_add(wait_ns, Ordering::Relaxed);
-            Metrics::update_max(&self.metrics.max_wait_ns, wait_ns);
-
-            if contended {
-                self.metrics.contentions.fetch_add(1, Ordering::Relaxed);
-            }
+            self.metrics.record_acquire(wait_ns, contended);
 
             // Record lock acquisition for ordering tracking
             if let Some(rank) = self.rank {
@@ -158,7 +240,7 @@ mod inner {
                         lock_ordering::record_acquire(rank);
                     }
 
-                    self.metrics.acquisitions.fetch_add(1, Ordering::Relaxed);
+                    self.metrics.record_acquire(0, false);
                     Ok(ContendedMutexGuard {
                         guard: Some(guard),
                         acquired_at: Instant::now(),
@@ -170,12 +252,17 @@ mod inner {
                     Err(std::sync::TryLockError::WouldBlock)
                 }
                 Err(std::sync::TryLockError::Poisoned(poison)) => {
-                    self.metrics.acquisitions.fetch_add(1, Ordering::Relaxed);
+                    if let Some(rank) = self.rank {
+                        lock_ordering::check_acquire(self.name, rank);
+                        lock_ordering::record_acquire(rank);
+                    }
+                    self.metrics.record_acquire(0, false);
                     Err(std::sync::TryLockError::Poisoned(PoisonError::new(
                         ContendedMutexGuard {
                             guard: Some(poison.into_inner()),
                             acquired_at: Instant::now(),
                             metrics: &self.metrics,
+                            rank: self.rank,
                         },
                     )))
                 }
@@ -184,25 +271,12 @@ mod inner {
 
         /// Returns a snapshot of the current metrics.
         pub fn snapshot(&self) -> LockMetricsSnapshot {
-            LockMetricsSnapshot {
-                name: self.name,
-                acquisitions: self.metrics.acquisitions.load(Ordering::Relaxed),
-                contentions: self.metrics.contentions.load(Ordering::Relaxed),
-                wait_ns: self.metrics.wait_ns.load(Ordering::Relaxed),
-                hold_ns: self.metrics.hold_ns.load(Ordering::Relaxed),
-                max_wait_ns: self.metrics.max_wait_ns.load(Ordering::Relaxed),
-                max_hold_ns: self.metrics.max_hold_ns.load(Ordering::Relaxed),
-            }
+            self.metrics.snapshot(self.name)
         }
 
         /// Resets all metrics to zero.
         pub fn reset_metrics(&self) {
-            self.metrics.acquisitions.store(0, Ordering::Relaxed);
-            self.metrics.contentions.store(0, Ordering::Relaxed);
-            self.metrics.wait_ns.store(0, Ordering::Relaxed);
-            self.metrics.hold_ns.store(0, Ordering::Relaxed);
-            self.metrics.max_wait_ns.store(0, Ordering::Relaxed);
-            self.metrics.max_hold_ns.store(0, Ordering::Relaxed);
+            self.metrics.reset();
         }
 
         /// Returns the lock name.
@@ -244,8 +318,7 @@ mod inner {
                 lock_ordering::record_release(rank);
             }
 
-            self.metrics.hold_ns.fetch_add(hold_ns, Ordering::Relaxed);
-            Metrics::update_max(&self.metrics.max_hold_ns, hold_ns);
+            self.metrics.record_hold(hold_ns);
         }
     }
 
@@ -351,6 +424,7 @@ mod inner {
         pub fn snapshot(&self) -> LockMetricsSnapshot {
             LockMetricsSnapshot {
                 name: self.name,
+                instrumentation_mode: "disabled",
                 ..Default::default()
             }
         }
@@ -648,8 +722,63 @@ mod tests {
         assert_eq!(snap.hold_ns, 0);
         assert_eq!(snap.max_wait_ns, 0);
         assert_eq!(snap.max_hold_ns, 0);
+        assert_eq!(snap.p95_wait_ns, 0);
+        assert_eq!(snap.p999_wait_ns, 0);
+        assert_eq!(snap.p95_hold_ns, 0);
+        assert_eq!(snap.p999_hold_ns, 0);
         let cloned = snap.clone();
         assert_eq!(cloned.name, snap.name);
+    }
+
+    #[cfg(feature = "lock-metrics")]
+    #[test]
+    fn metrics_snapshot_reports_tail_latencies() {
+        init_test("metrics_snapshot_reports_tail_latencies");
+        let m = ContendedMutex::new("tasks", 0u32);
+
+        for _ in 0..4 {
+            let mut guard = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            *guard += 1;
+        }
+
+        let snap = m.snapshot();
+        crate::assert_with_log!(
+            snap.instrumentation_mode == "opt_in_lock_metrics",
+            "instrumentation mode",
+            "opt_in_lock_metrics",
+            snap.instrumentation_mode
+        );
+        crate::assert_with_log!(
+            snap.acquisitions == 4,
+            "acquisitions",
+            4u64,
+            snap.acquisitions
+        );
+        crate::assert_with_log!(
+            snap.p95_wait_ns <= snap.max_wait_ns,
+            "p95 wait <= max wait",
+            true,
+            snap.p95_wait_ns <= snap.max_wait_ns
+        );
+        crate::assert_with_log!(
+            snap.p999_wait_ns <= snap.max_wait_ns,
+            "p999 wait <= max wait",
+            true,
+            snap.p999_wait_ns <= snap.max_wait_ns
+        );
+        crate::assert_with_log!(
+            snap.p95_hold_ns <= snap.max_hold_ns,
+            "p95 hold <= max hold",
+            true,
+            snap.p95_hold_ns <= snap.max_hold_ns
+        );
+        crate::assert_with_log!(
+            snap.p999_hold_ns <= snap.max_hold_ns,
+            "p999 hold <= max hold",
+            true,
+            snap.p999_hold_ns <= snap.max_hold_ns
+        );
+        crate::test_complete!("metrics_snapshot_reports_tail_latencies");
     }
 
     #[test]
