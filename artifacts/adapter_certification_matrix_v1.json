@@ -1,0 +1,271 @@
+{
+  "contract_version": "adapter-certification-matrix-v1",
+  "bead_id": "asupersync-y5rb4y",
+  "purpose": "Fail-closed certification matrix for adapter surfaces whose support, reference coverage, and proof commands must not drift into unsupported pass claims.",
+  "source_of_truth": {
+    "matrix": "artifacts/adapter_certification_matrix_v1.json",
+    "verifier": "tests/adapter_certification_matrix_contract.rs"
+  },
+  "required_categories": [
+    "http",
+    "database",
+    "messaging",
+    "tls",
+    "transport"
+  ],
+  "status_catalog": [
+    {
+      "status": "certified_live",
+      "allows_pass": true,
+      "meaning": "The adapter has live native implementation coverage and may report pass only through listed rch proof commands."
+    },
+    {
+      "status": "certified_opt_in",
+      "allows_pass": true,
+      "meaning": "The adapter is feature-gated or opt-in; pass is valid only with listed feature flags and proof commands."
+    },
+    {
+      "status": "partial_fail_closed",
+      "allows_pass": false,
+      "meaning": "The adapter has implemented local surfaces, but live reference or deployment coverage is partial; dashboards must render xfail or blocked until proof is wired."
+    },
+    {
+      "status": "unavailable_fail_closed",
+      "allows_pass": false,
+      "meaning": "The adapter declaration exists, but required implementation or reference proof is unavailable; pass is forbidden."
+    }
+  ],
+  "fail_closed_policy": {
+    "required_for_non_pass_status": [
+      "fail_closed_without_full_reference is true",
+      "runtime_allowed_verdicts excludes pass",
+      "proof_commands are present and start with rch exec -- ",
+      "unsupported_or_out_of_scope is nonempty",
+      "rendered_status is XFAIL or BLOCKED"
+    ],
+    "forbidden_rendered_claims": [
+      "100% conformant",
+      "fully compatible",
+      "drop-in parity",
+      "pass for unsupported",
+      "green without proof"
+    ]
+  },
+  "adapters": [
+    {
+      "adapter_id": "http-h1-h2",
+      "category": "http",
+      "certification_status": "certified_live",
+      "rendered_status": "PASS",
+      "reference_status": "native_conformance_wired",
+      "fail_closed_without_full_reference": false,
+      "runtime_allowed_verdicts": [
+        "pass",
+        "fail"
+      ],
+      "source_paths": [
+        "src/http/h1/server.rs",
+        "src/http/h2/connection.rs",
+        "src/http/h2/frame.rs"
+      ],
+      "source_markers": [
+        "pub struct Http1Server",
+        "pub struct Connection",
+        "pub enum Frame"
+      ],
+      "implemented_features": [
+        "HTTP/1.1 server connection lifecycle and keep-alive policy",
+        "HTTP/2 frame codec, settings exchange, stream state, and GOAWAY/RST handling"
+      ],
+      "unsupported_or_out_of_scope": [
+        "HTTP/3 and QPACK support are certified separately by artifacts/http3_qpack_support_matrix_v1.json"
+      ],
+      "reference_coverage": [
+        "native conformance tests",
+        "RFC-derived HTTP/1 and HTTP/2 vector suites"
+      ],
+      "proof_commands": [
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_adapter_matrix_h1 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test conformance_h1_expect --features test-internals -- --nocapture",
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_adapter_matrix_h2 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test conformance_h2_goaway_graceful_shutdown --features test-internals -- --nocapture"
+      ]
+    },
+    {
+      "adapter_id": "database-postgres-mysql-sqlite",
+      "category": "database",
+      "certification_status": "partial_fail_closed",
+      "rendered_status": "XFAIL",
+      "reference_status": "feature_gated_reference_partial",
+      "fail_closed_without_full_reference": true,
+      "runtime_allowed_verdicts": [
+        "xfail",
+        "blocked-external",
+        "fail"
+      ],
+      "source_paths": [
+        "src/database/postgres.rs",
+        "src/database/mysql.rs",
+        "src/database/sqlite.rs"
+      ],
+      "source_markers": [
+        "pub struct PgConnection",
+        "pub struct MySqlConnection",
+        "pub struct SqliteConnection"
+      ],
+      "implemented_features": [
+        "PostgreSQL wire client surface",
+        "MySQL protocol client surface",
+        "SQLite blocking-pool-backed async wrapper"
+      ],
+      "unsupported_or_out_of_scope": [
+        "Real server parity depends on external service availability and feature flags",
+        "Reference comparisons must not be rendered as pass without the listed rch lanes"
+      ],
+      "reference_coverage": [
+        "feature-gated integration tests",
+        "protocol conformance and audit tests"
+      ],
+      "proof_commands": [
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_adapter_matrix_pg CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test postgres_query_execution_golden --features test-internals,postgres -- --nocapture",
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_adapter_matrix_mysql CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test mysql_binary_protocol_sqlx_conformance --features test-internals,mysql -- --nocapture",
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_adapter_matrix_sqlite CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test sqlite_wal_conformance --features test-internals,sqlite -- --nocapture"
+      ]
+    },
+    {
+      "adapter_id": "messaging-nats-jetstream-kafka-redis",
+      "category": "messaging",
+      "certification_status": "partial_fail_closed",
+      "rendered_status": "XFAIL",
+      "reference_status": "broker_reference_partial",
+      "fail_closed_without_full_reference": true,
+      "runtime_allowed_verdicts": [
+        "xfail",
+        "blocked-external",
+        "fail"
+      ],
+      "source_paths": [
+        "src/messaging/nats.rs",
+        "src/messaging/jetstream.rs",
+        "src/messaging/kafka.rs",
+        "src/messaging/redis.rs"
+      ],
+      "source_markers": [
+        "pub struct NatsClient",
+        "pub struct JetStreamContext",
+        "pub struct KafkaClient",
+        "pub struct RedisClient"
+      ],
+      "implemented_features": [
+        "NATS connection and subscription surface",
+        "JetStream context and stream/consumer metadata surface",
+        "Kafka producer/client protocol surface",
+        "Redis command, RESP3, cluster, and pub/sub surfaces"
+      ],
+      "unsupported_or_out_of_scope": [
+        "External broker parity requires live broker fixtures or explicitly recorded blockers",
+        "Partial local protocol checks must render xfail or blocked when live broker proof is missing"
+      ],
+      "reference_coverage": [
+        "local protocol conformance",
+        "real-broker integration tests where configured"
+      ],
+      "proof_commands": [
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_adapter_matrix_nats CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test messaging_nats_handshake --features test-internals -- --nocapture",
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_adapter_matrix_jetstream CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test jetstream_conformance --features test-internals -- --nocapture",
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_adapter_matrix_kafka CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test kafka_record_batch_v2_integration --features test-internals,kafka -- --nocapture"
+      ]
+    },
+    {
+      "adapter_id": "tls-rustls",
+      "category": "tls",
+      "certification_status": "certified_opt_in",
+      "rendered_status": "PASS",
+      "reference_status": "feature_gated_conformance_wired",
+      "fail_closed_without_full_reference": false,
+      "runtime_allowed_verdicts": [
+        "pass",
+        "fail"
+      ],
+      "source_paths": [
+        "src/tls/connector.rs",
+        "src/tls/acceptor.rs",
+        "src/tls/mod.rs"
+      ],
+      "source_markers": [
+        "pub struct TlsConnector",
+        "pub struct TlsAcceptor",
+        "pub use acceptor::{ClientAuth, TlsAcceptor, TlsAcceptorBuilder}"
+      ],
+      "implemented_features": [
+        "rustls-backed connector and acceptor",
+        "ALPN, SNI, certificate roots, pinning, and handshake timeout configuration"
+      ],
+      "unsupported_or_out_of_scope": [
+        "TLS pass claims require the tls feature and listed proof lanes"
+      ],
+      "reference_coverage": [
+        "feature-gated TLS conformance tests",
+        "gRPC over TLS/H2 preface proof"
+      ],
+      "proof_commands": [
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_adapter_matrix_tls CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test tls_conformance --features test-internals,tls -- --nocapture",
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_adapter_matrix_grpc_tls CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test grpc_tls_h2_preface_conformance --features test-internals,tls -- --nocapture"
+      ]
+    },
+    {
+      "adapter_id": "transport-quic-websocket-router",
+      "category": "transport",
+      "certification_status": "partial_fail_closed",
+      "rendered_status": "XFAIL",
+      "reference_status": "mixed_native_and_feature_gated_partial",
+      "fail_closed_without_full_reference": true,
+      "runtime_allowed_verdicts": [
+        "xfail",
+        "blocked-external",
+        "fail"
+      ],
+      "source_paths": [
+        "src/transport/router.rs",
+        "src/net/quic/endpoint.rs",
+        "src/net/websocket/server.rs"
+      ],
+      "source_markers": [
+        "pub struct SymbolRouter",
+        "pub struct QuicEndpoint",
+        "pub enum WsAcceptError"
+      ],
+      "implemented_features": [
+        "symbol routing and dispatch policy",
+        "feature-gated QUIC endpoint surface",
+        "WebSocket server handshake/acceptance surface"
+      ],
+      "unsupported_or_out_of_scope": [
+        "Full transport deployment parity across QUIC and WebSocket requires feature and environment-specific proof",
+        "Mixed transport dashboards must render xfail or blocked when a required lane is missing"
+      ],
+      "reference_coverage": [
+        "transport router conformance",
+        "QUIC RFC9000 tests",
+        "WebSocket RFC6455 tests"
+      ],
+      "proof_commands": [
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_adapter_matrix_transport CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test conformance_transport_router --features test-internals -- --nocapture",
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_adapter_matrix_quic CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test conformance_quic_stream_rfc9000 --features test-internals,quic -- --nocapture",
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_adapter_matrix_websocket CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test conformance_websocket --features test-internals -- --nocapture"
+      ]
+    }
+  ],
+  "markdown_golden": [
+    "| adapter | category | status | fail closed | proof count |",
+    "|---|---|---|---|---|",
+    "| http-h1-h2 | http | PASS | no | 2 |",
+    "| database-postgres-mysql-sqlite | database | XFAIL | yes | 3 |",
+    "| messaging-nats-jetstream-kafka-redis | messaging | XFAIL | yes | 3 |",
+    "| tls-rustls | tls | PASS | no | 2 |",
+    "| transport-quic-websocket-router | transport | XFAIL | yes | 3 |"
+  ],
+  "validation_commands": [
+    "python3 -m json.tool artifacts/adapter_certification_matrix_v1.json",
+    "rch exec -- rustfmt --edition 2024 --check tests/adapter_certification_matrix_contract.rs",
+    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_adapter_certification_matrix CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test adapter_certification_matrix_contract --features test-internals -- --nocapture"
+  ]
+}
