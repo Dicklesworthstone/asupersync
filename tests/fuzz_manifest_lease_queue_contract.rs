@@ -3,6 +3,7 @@
 #![allow(missing_docs)]
 
 use serde_json::Value;
+use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
@@ -100,6 +101,29 @@ fn clean_manifest_queue_selects_one_ready_proposal_and_queues_the_next() {
         second["status"].as_str(),
         Some("queued-after-earlier-proposal")
     );
+}
+
+#[test]
+fn clean_manifest_queue_matches_exact_reviewed_golden() {
+    let output = run_queue("clean_queue.json");
+    assert!(
+        output.status.success(),
+        "queue helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actual = String::from_utf8(output.stdout).expect("queue output must be UTF-8");
+    let expected = fs::read_to_string(
+        repo_root()
+            .join(FIXTURE_ROOT)
+            .join("clean_queue_expected.json"),
+    )
+    .expect("read clean queue golden");
+
+    serde_json::from_str::<Value>(&actual).expect("actual output must be JSON");
+    serde_json::from_str::<Value>(&expected).expect("golden output must be JSON");
+    assert_eq!(actual, expected);
 }
 
 #[test]
