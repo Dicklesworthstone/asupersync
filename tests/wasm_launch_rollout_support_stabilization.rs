@@ -249,14 +249,25 @@ fn rollout_doc_defines_incident_communication_cadence() {
 fn rollout_doc_includes_deterministic_rehearsal_commands() {
     let doc = load_doc();
     for command in [
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_docs cargo test -p asupersync --test wasm_launch_rollout_support_stabilization -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_docs cargo test -p asupersync --test wasm_ga_readiness_review_board_checklist -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_docs cargo test -p asupersync --test wasm_release_rollback_incident_playbook -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_docs cargo test -p asupersync --test wasm_pilot_feedback_triage_loop -- --nocapture",
+    ] {
+        assert!(
+            doc.contains(command),
+            "doc missing rehearsal command: {command}"
+        );
+    }
+    for stale in [
         "rch exec -- cargo test -p asupersync --test wasm_launch_rollout_support_stabilization -- --nocapture",
         "rch exec -- cargo test -p asupersync --test wasm_ga_readiness_review_board_checklist -- --nocapture",
         "rch exec -- cargo test -p asupersync --test wasm_release_rollback_incident_playbook -- --nocapture",
         "rch exec -- cargo test -p asupersync --test wasm_pilot_feedback_triage_loop -- --nocapture",
     ] {
         assert!(
-            doc.contains(command),
-            "doc missing rehearsal command: {command}"
+            !doc.contains(stale),
+            "rollout support doc must not reintroduce bare rch cargo routing: {stale}"
         );
     }
 }

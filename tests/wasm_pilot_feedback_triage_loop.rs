@@ -82,7 +82,7 @@ fn pilot_feedback_doc_contains_deterministic_command_bundle_and_refs() {
         "python3 scripts/evaluate_wasm_pilot_cohort.py --self-test",
         "bash scripts/test_wasm_pilot_observability_e2e.sh",
         "bash ./scripts/run_all_e2e.sh --verify-matrix",
-        "rch exec -- cargo test --test wasm_pilot_feedback_triage_loop -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_pilot_feedback_docs cargo test --test wasm_pilot_feedback_triage_loop -- --nocapture",
         "sha256sum artifacts/pilot/pilot_observability_summary.json",
     ];
 
@@ -100,6 +100,12 @@ fn pilot_feedback_doc_contains_deterministic_command_bundle_and_refs() {
             .map(|cmd| format!("  - {cmd}"))
             .collect::<Vec<_>>()
             .join("\n")
+    );
+    assert!(
+        !doc.contains(
+            "rch exec -- cargo test --test wasm_pilot_feedback_triage_loop -- --nocapture"
+        ),
+        "Pilot feedback triage doc must not reintroduce bare rch cargo routing"
     );
 
     for doc_ref in [
