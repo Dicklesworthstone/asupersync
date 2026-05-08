@@ -278,6 +278,69 @@ fn live_contended_mutex_snapshot_projects_tail_latency_fields() {
     assert!(snapshot.p999_hold_ns <= snapshot.max_hold_ns);
 }
 
+#[cfg(debug_assertions)]
+#[test]
+fn live_lock_order_edges_report_exercised_edges_and_synthetic_inversion() {
+    use asupersync::sync::lock_ordering::{self, LockModule, LockRank};
+
+    let contract = contract();
+    let rows = rows_by_surface(&contract);
+    let row = rows.get("lock_order_edges").expect("lock-order row");
+    assert_eq!(row["report_status"].as_str(), Some("LIVE"));
+    assert_eq!(row["live_atlas_wired"].as_bool(), Some(true));
+
+    lock_ordering::clear_held_locks();
+    lock_ordering::clear_lock_order_atlas();
+
+    lock_ordering::check_acquire_with_module("config_cache", LockRank::Config, LockModule::Runtime);
+    lock_ordering::record_acquire_with_module(
+        "config_cache",
+        LockRank::Config,
+        LockModule::Runtime,
+    );
+    lock_ordering::check_acquire_with_module("runtime_tasks", LockRank::Tasks, LockModule::Runtime);
+    lock_ordering::record_acquire_with_module(
+        "runtime_tasks",
+        LockRank::Tasks,
+        LockModule::Runtime,
+    );
+
+    let snapshot = lock_ordering::lock_order_atlas_snapshot();
+    assert_eq!(snapshot.instrumentation_mode, "debug_lock_ordering");
+    assert!(snapshot.order_violations.is_empty());
+    assert!(snapshot.order_edges_exercised.iter().any(|edge| {
+        edge.held_lock_name == "config_cache"
+            && edge.held_rank == LockRank::Config
+            && edge.held_module == LockModule::Runtime
+            && edge.acquired_lock_name == "runtime_tasks"
+            && edge.acquired_rank == LockRank::Tasks
+            && edge.acquired_module == LockModule::Runtime
+    }));
+
+    lock_ordering::clear_held_locks();
+    lock_ordering::record_acquire_with_module("tasks_queue", LockRank::Tasks, LockModule::Runtime);
+
+    let inversion = std::panic::catch_unwind(|| {
+        lock_ordering::check_acquire_with_module(
+            "config_cache",
+            LockRank::Config,
+            LockModule::Runtime,
+        );
+    });
+    assert!(inversion.is_err());
+
+    let snapshot = lock_ordering::lock_order_atlas_snapshot();
+    assert!(snapshot.order_violations.iter().any(|violation| {
+        violation.lock_name == "config_cache"
+            && violation.lock_rank == LockRank::Config
+            && violation.lock_module == LockModule::Runtime
+            && violation.held_rank == LockRank::Tasks
+            && violation.reason == "rank-order"
+    }));
+
+    lock_ordering::clear_held_locks();
+}
+
 #[test]
 fn proofs_cover_inversion_overhead_and_stable_report() {
     let contract = contract();
@@ -286,11 +349,15 @@ fn proofs_cover_inversion_overhead_and_stable_report() {
         .map(|proof| (string(proof, "proof_id").to_string(), proof))
         .collect::<BTreeMap<_, _>>();
 
-    for proof_id in [
-        "synthetic-inversion",
-        "instrumentation-off-overhead",
-        "stable-redacted-report",
-    ] {
+    assert_eq!(
+        proofs
+            .get("synthetic-inversion")
+            .and_then(|proof| proof["status"].as_str()),
+        Some("LIVE"),
+        "synthetic inversion is now a live lock-order atlas proof"
+    );
+
+    for proof_id in ["instrumentation-off-overhead", "stable-redacted-report"] {
         let proof = proofs
             .get(proof_id)
             .unwrap_or_else(|| panic!("missing proof {proof_id}"));

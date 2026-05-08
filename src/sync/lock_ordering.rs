@@ -53,12 +53,58 @@ pub enum LockModule {
     Other,
 }
 
+/// One deterministic lock-order edge observed by the atlas.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct LockOrderEdge {
+    /// Lock already held when the edge was observed.
+    pub held_lock_name: String,
+    /// Rank of the already-held lock.
+    pub held_rank: LockRank,
+    /// Module of the already-held lock.
+    pub held_module: LockModule,
+    /// Lock being acquired.
+    pub acquired_lock_name: String,
+    /// Rank of the lock being acquired.
+    pub acquired_rank: LockRank,
+    /// Module of the lock being acquired.
+    pub acquired_module: LockModule,
+}
+
+/// One deterministic lock-order violation observed before enforcement panics.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct LockOrderViolation {
+    /// Lock whose acquisition violated the hierarchy.
+    pub lock_name: String,
+    /// Rank of the violating lock.
+    pub lock_rank: LockRank,
+    /// Module of the violating lock.
+    pub lock_module: LockModule,
+    /// Rank already held when the violation occurred.
+    pub held_rank: LockRank,
+    /// Stable violation reason for reports and tests.
+    pub reason: String,
+}
+
+/// Deterministic lock-order atlas snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LockOrderAtlasSnapshot {
+    /// Exercised held-lock to acquired-lock order edges.
+    pub order_edges_exercised: Vec<LockOrderEdge>,
+    /// Violations recorded before enforcement panicked.
+    pub order_violations: Vec<LockOrderViolation>,
+    /// Instrumentation mode that produced the snapshot.
+    pub instrumentation_mode: &'static str,
+}
+
 /// Information about an acquired lock for cross-module tracking.
 #[cfg(debug_assertions)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LockInfo {
+    /// Lock name recorded for ordering checks.
     pub name: String,
+    /// Lock rank recorded for ordering checks.
     pub rank: LockRank,
+    /// Lock module recorded for ordering checks.
     pub module: LockModule,
 }
 
@@ -143,6 +189,8 @@ impl LockRank {
 thread_local! {
     static HELD_RANKS: RefCell<BTreeSet<LockRank>> = const { RefCell::new(BTreeSet::new()) };
     static HELD_LOCKS: RefCell<BTreeMap<LockRank, Vec<LockInfo>>> = const { RefCell::new(BTreeMap::new()) };
+    static ORDER_EDGES: RefCell<BTreeSet<LockOrderEdge>> = const { RefCell::new(BTreeSet::new()) };
+    static ORDER_VIOLATIONS: RefCell<Vec<LockOrderViolation>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Check if acquiring a lock of the given rank would violate ordering.
@@ -171,19 +219,26 @@ pub fn check_acquire_with_module(lock_name: &str, rank: LockRank, module: LockMo
                 let held_ranks_ref = held_ranks.borrow();
                 let held_locks_ref = held_locks.borrow();
 
+                record_order_edges(lock_name, rank, module, &held_locks_ref);
+
                 // Basic rank ordering check
                 if let Some(&highest_held) = held_ranks_ref.iter().last() {
-                    assert!(
-                        rank >= highest_held,
-                        "DEADLOCK PREVENTION: Lock ordering violation!\n\
-                        Attempted to acquire '{}' (rank {:?}, module {:?}) while holding locks of rank {:?}.\n\
-                        Correct order: Config -> Instrumentation -> Regions -> Tasks -> Obligations\n\
-                        This violates the asupersync lock hierarchy and could cause deadlocks.",
-                        lock_name,
-                        rank,
-                        module,
-                        highest_held
-                    );
+                    if rank < highest_held {
+                        record_order_violation(
+                            lock_name,
+                            rank,
+                            module,
+                            highest_held,
+                            "rank-order",
+                        );
+                        panic!(
+                            "DEADLOCK PREVENTION: Lock ordering violation!\n\
+                            Attempted to acquire '{}' (rank {:?}, module {:?}) while holding locks of rank {:?}.\n\
+                            Correct order: Config -> Instrumentation -> Regions -> Tasks -> Obligations\n\
+                            This violates the asupersync lock hierarchy and could cause deadlocks.",
+                            lock_name, rank, module, highest_held
+                        );
+                    }
                 }
 
                 // Cross-module pattern validation
@@ -196,6 +251,49 @@ pub fn check_acquire_with_module(lock_name: &str, rank: LockRank, module: LockMo
     {
         let _ = (lock_name, rank, module); // Suppress unused variable warnings
     }
+}
+
+#[cfg(debug_assertions)]
+fn record_order_edges(
+    lock_name: &str,
+    rank: LockRank,
+    module: LockModule,
+    held_locks: &BTreeMap<LockRank, Vec<LockInfo>>,
+) {
+    ORDER_EDGES.with(|edges| {
+        let mut edges = edges.borrow_mut();
+        for locks_at_rank in held_locks.values() {
+            for held in locks_at_rank {
+                edges.insert(LockOrderEdge {
+                    held_lock_name: held.name.clone(),
+                    held_rank: held.rank,
+                    held_module: held.module,
+                    acquired_lock_name: lock_name.to_string(),
+                    acquired_rank: rank,
+                    acquired_module: module,
+                });
+            }
+        }
+    });
+}
+
+#[cfg(debug_assertions)]
+fn record_order_violation(
+    lock_name: &str,
+    rank: LockRank,
+    module: LockModule,
+    held_rank: LockRank,
+    reason: &'static str,
+) {
+    ORDER_VIOLATIONS.with(|violations| {
+        violations.borrow_mut().push(LockOrderViolation {
+            lock_name: lock_name.to_string(),
+            lock_rank: rank,
+            lock_module: module,
+            held_rank,
+            reason: reason.to_string(),
+        });
+    });
 }
 
 /// Validate cross-module lock acquisition patterns to prevent complex deadlocks.
@@ -211,14 +309,21 @@ fn validate_cross_module_pattern(
     if module == LockModule::Obligation && rank == LockRank::Obligations {
         for locks_at_rank in held_locks.values() {
             for lock_info in locks_at_rank {
-                assert!(
-                    lock_info.module != LockModule::Cancel,
-                    "CROSS-MODULE DEADLOCK PREVENTION: Attempted to acquire obligation lock '{}' \
-                    while holding cancel module lock '{}'. This pattern can cause deadlocks \
-                    between cancellation and obligation tracking.",
-                    lock_name,
-                    lock_info.name
-                );
+                if lock_info.module == LockModule::Cancel {
+                    record_order_violation(
+                        lock_name,
+                        rank,
+                        module,
+                        lock_info.rank,
+                        "cancel-before-obligation",
+                    );
+                    panic!(
+                        "CROSS-MODULE DEADLOCK PREVENTION: Attempted to acquire obligation lock '{}' \
+                        while holding cancel module lock '{}'. This pattern can cause deadlocks \
+                        between cancellation and obligation tracking.",
+                        lock_name, lock_info.name
+                    );
+                }
             }
         }
     }
@@ -228,16 +333,15 @@ fn validate_cross_module_pattern(
     if module == LockModule::Cancel {
         for (held_rank, locks_at_rank) in held_locks {
             for lock_info in locks_at_rank {
-                assert!(
-                    !(lock_info.module == LockModule::Cx && *held_rank > rank),
-                    "CROSS-MODULE DEADLOCK PREVENTION: Attempted to acquire cancel lock '{}' (rank {:?}) \
-                    while holding higher-ranked Cx lock '{}' (rank {:?}). \
-                    Capability context operations must complete before cancellation.",
-                    lock_name,
-                    rank,
-                    lock_info.name,
-                    held_rank
-                );
+                if lock_info.module == LockModule::Cx && *held_rank > rank {
+                    record_order_violation(lock_name, rank, module, *held_rank, "cx-before-cancel");
+                    panic!(
+                        "CROSS-MODULE DEADLOCK PREVENTION: Attempted to acquire cancel lock '{}' (rank {:?}) \
+                        while holding higher-ranked Cx lock '{}' (rank {:?}). \
+                        Capability context operations must complete before cancellation.",
+                        lock_name, rank, lock_info.name, held_rank
+                    );
+                }
             }
         }
     }
@@ -247,15 +351,23 @@ fn validate_cross_module_pattern(
     if module == LockModule::Runtime && rank == LockRank::Tasks {
         for locks_at_rank in held_locks.values() {
             for lock_info in locks_at_rank {
-                assert!(
-                    !(lock_info.module == LockModule::Obligation
-                        && lock_info.rank == LockRank::Obligations),
-                    "CROSS-MODULE DEADLOCK PREVENTION: Attempted to acquire task lock '{}' \
-                    while holding obligation lock '{}'. Task scheduling must be coordinated \
-                    with obligation tracking to prevent state inconsistencies.",
-                    lock_name,
-                    lock_info.name
-                );
+                if lock_info.module == LockModule::Obligation
+                    && lock_info.rank == LockRank::Obligations
+                {
+                    record_order_violation(
+                        lock_name,
+                        rank,
+                        module,
+                        lock_info.rank,
+                        "obligation-before-runtime-task",
+                    );
+                    panic!(
+                        "CROSS-MODULE DEADLOCK PREVENTION: Attempted to acquire task lock '{}' \
+                        while holding obligation lock '{}'. Task scheduling must be coordinated \
+                        with obligation tracking to prevent state inconsistencies.",
+                        lock_name, lock_info.name
+                    );
+                }
             }
         }
     }
@@ -375,6 +487,42 @@ pub fn current_held_locks() -> BTreeMap<LockRank, Vec<LockInfo>> {
 pub fn clear_held_locks() {
     HELD_RANKS.with(|held_ranks| held_ranks.borrow_mut().clear());
     HELD_LOCKS.with(|held_locks| held_locks.borrow_mut().clear());
+    clear_lock_order_atlas();
+}
+
+/// Return the current deterministic lock-order atlas snapshot.
+#[must_use]
+pub fn lock_order_atlas_snapshot() -> LockOrderAtlasSnapshot {
+    #[cfg(debug_assertions)]
+    {
+        let order_edges_exercised =
+            ORDER_EDGES.with(|edges| edges.borrow().iter().cloned().collect());
+        let order_violations = ORDER_VIOLATIONS.with(|violations| violations.borrow().clone());
+
+        LockOrderAtlasSnapshot {
+            order_edges_exercised,
+            order_violations,
+            instrumentation_mode: "debug_lock_ordering",
+        }
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        LockOrderAtlasSnapshot {
+            order_edges_exercised: Vec::new(),
+            order_violations: Vec::new(),
+            instrumentation_mode: "disabled",
+        }
+    }
+}
+
+/// Clear deterministic lock-order atlas state for the current thread.
+pub fn clear_lock_order_atlas() {
+    #[cfg(debug_assertions)]
+    {
+        ORDER_EDGES.with(|edges| edges.borrow_mut().clear());
+        ORDER_VIOLATIONS.with(|violations| violations.borrow_mut().clear());
+    }
 }
 
 /// Enhanced API for Mutex to use cross-module lock ordering enforcement.

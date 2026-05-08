@@ -126,9 +126,9 @@
     {
       "surface": "lock_order_edges",
       "implementation_path": "src/sync/lock_ordering.rs",
-      "live_atlas_wired": false,
-      "report_status": "XFAIL",
-      "status_reason": "debug lock-order violations exist, but deterministic exercised-edge atlas output is not wired yet",
+      "live_atlas_wired": true,
+      "report_status": "LIVE",
+      "status_reason": "debug lock-ordering records deterministic exercised edges and violations before enforcement panics",
       "required_fields": [
         "lock_name",
         "lock_rank",
@@ -167,8 +167,8 @@
   "required_proofs": [
     {
       "proof_id": "synthetic-inversion",
-      "status": "XFAIL",
-      "description": "A deterministic synthetic inversion must produce an order_violations entry instead of only a debug panic."
+      "status": "LIVE",
+      "description": "A deterministic synthetic inversion produces an order_violations entry before enforcement panics."
     },
     {
       "proof_id": "instrumentation-off-overhead",
@@ -181,7 +181,7 @@
       "description": "The atlas report must sort rows deterministically and omit payloads, user paths, and raw coordination text."
     }
   ],
-  "golden_markdown": "| surface | status | required_fields |\n| --- | --- | --- |\n| contended_mutex_snapshot | LIVE | lock_name, acquisitions, contentions, wait_ns, hold_ns, max_wait_ns, max_hold_ns, p95_wait_ns, p999_wait_ns, p95_hold_ns, p999_hold_ns, instrumentation_mode |\n| instrumentation_off_overhead | XFAIL | instrumentation_mode, acquisitions, contentions |\n| lock_order_edges | XFAIL | lock_name, lock_rank, lock_module, order_edges_exercised, order_violations, instrumentation_mode |\n| sharded_state_order | XFAIL | lock_rank, order_edges_exercised, order_violations, instrumentation_mode |\n",
+  "golden_markdown": "| surface | status | required_fields |\n| --- | --- | --- |\n| contended_mutex_snapshot | LIVE | lock_name, acquisitions, contentions, wait_ns, hold_ns, max_wait_ns, max_hold_ns, p95_wait_ns, p999_wait_ns, p95_hold_ns, p999_hold_ns, instrumentation_mode |\n| instrumentation_off_overhead | XFAIL | instrumentation_mode, acquisitions, contentions |\n| lock_order_edges | LIVE | lock_name, lock_rank, lock_module, order_edges_exercised, order_violations, instrumentation_mode |\n| sharded_state_order | XFAIL | lock_rank, order_edges_exercised, order_violations, instrumentation_mode |\n",
   "proof_commands": [
     "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lock_contention_atlas_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --features lock-metrics --test lock_contention_atlas_contract -- --nocapture"
   ]
