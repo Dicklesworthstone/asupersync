@@ -187,16 +187,24 @@ fn stale_fixture_reports_exact_missing_doc_marker() {
 
 #[test]
 fn stale_fixture_matches_full_output_golden() {
+    let expected_fixture = "stale_doc_marker_expected.json";
     let actual_text = receipt_stdout(
         &fixture_path("stale_doc_marker_snapshot.json"),
         &fixture_path("stale_README.md"),
         &fixture_path("stale_AGENTS.md"),
     );
-    let expected_text = fixture_text("stale_doc_marker_expected.json");
-    let actual_json: Value = serde_json::from_str(&actual_text).expect("actual receipt JSON");
-    let expected_json: Value = serde_json::from_str(&expected_text).expect("expected receipt JSON");
+    let expected_text = fixture_text(expected_fixture);
+    let actual_json: Value = serde_json::from_str(&actual_text).unwrap_or_else(|err| {
+        panic!("actual README claim freshness receipt JSON for {expected_fixture}: {err}")
+    });
+    let expected_json: Value = serde_json::from_str(&expected_text).unwrap_or_else(|err| {
+        panic!("expected README claim freshness fixture {expected_fixture} must be JSON: {err}")
+    });
 
-    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
+    assert_eq!(
+        actual_json, expected_json,
+        "parsed README claim freshness receipt JSON drifted from {expected_fixture}; update the golden only after reviewing missing-marker semantics"
+    );
     assert_eq!(
         actual_text, expected_text,
         "README claim freshness stale-doc-marker receipt changed; update the golden only after reviewing missing-marker semantics"
