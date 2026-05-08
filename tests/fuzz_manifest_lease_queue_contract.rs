@@ -206,6 +206,24 @@ fn active_target_reservation_blocks_only_that_target_and_next_eligible_can_run()
 }
 
 #[test]
+fn target_reserved_queue_matches_exact_reviewed_golden() {
+    let output = run_queue("target_reserved.json");
+    assert!(
+        output.status.success(),
+        "queue helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actual = String::from_utf8(output.stdout).expect("queue output must be UTF-8");
+    let expected = fixture_text("target_reserved_expected.json");
+
+    serde_json::from_str::<Value>(&actual).expect("actual output must be JSON");
+    serde_json::from_str::<Value>(&expected).expect("golden output must be JSON");
+    assert_eq!(actual, expected);
+}
+
+#[test]
 fn duplicate_manifest_and_proposal_targets_are_hard_blocks() {
     let receipt = queue_json("duplicate_targets.json");
 
