@@ -196,8 +196,11 @@ fn stale_fixture_matches_full_output_golden() {
     let actual_json: Value = serde_json::from_str(&actual_text).expect("actual receipt JSON");
     let expected_json: Value = serde_json::from_str(&expected_text).expect("expected receipt JSON");
 
-    assert_eq!(actual_json, expected_json);
-    assert_eq!(actual_text, expected_text);
+    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
+    assert_eq!(
+        actual_text, expected_text,
+        "README claim freshness stale-doc-marker receipt changed; update the golden only after reviewing missing-marker semantics"
+    );
 }
 
 #[test]
