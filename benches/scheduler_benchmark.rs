@@ -1924,7 +1924,7 @@ fn bench_three_lane_decision(c: &mut Criterion) {
                         }
                         black_box(drained)
                     },
-                    BatchSize::SmallInput,
+                    BatchSize::PerIteration,
                 )
             },
         );
@@ -1967,7 +1967,7 @@ fn bench_three_lane_decision(c: &mut Criterion) {
                     }
                     black_box(drained)
                 },
-                BatchSize::SmallInput,
+                BatchSize::PerIteration,
             )
         });
     }
