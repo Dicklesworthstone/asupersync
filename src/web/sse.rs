@@ -148,10 +148,25 @@ impl SseEvent {
         // Normalize bare \r to \n before splitting so the browser's
         // EventSource parser (WHATWG SSE spec) can't interpret a bare
         // \r as a field separator and inject retry:/event:/id: fields.
+        //
+        // br-asupersync-fek81o: WHATWG HTML §9.2.6 EventSource parser
+        // strips one U+0020 SPACE from the start of the field value
+        // ("If value starts with a U+0020 SPACE character, remove it
+        // from value."). Without compensation, `data(" hello")` would
+        // round-trip as "hello" — the application's leading space is
+        // silently lost. When a data line starts with a space, prepend
+        // an extra padding space so the parser's strip leaves the
+        // original value intact. The non-leading-space wire format
+        // (`data:hello`) stays unchanged for backward compat with the
+        // existing wire-format pin tests.
         if let Some(ref data) = self.data {
             let normalized = data.replace("\r\n", "\n").replace('\r', "\n");
             for line in normalized.split('\n') {
-                let _ = writeln!(buf, "data:{line}");
+                if line.starts_with(' ') {
+                    let _ = writeln!(buf, "data: {line}");
+                } else {
+                    let _ = writeln!(buf, "data:{line}");
+                }
             }
         }
 
@@ -861,6 +876,62 @@ mod tests {
     fn event_multiline_data() {
         let event = SseEvent::default().data("line1\nline2\nline3");
         assert_eq!(event.to_string(), "data:line1\ndata:line2\ndata:line3\n\n");
+    }
+
+    /// br-asupersync-fek81o — WHATWG HTML §9.2.6 EventSource parser
+    /// strips one U+0020 SPACE from the start of every field value.
+    /// Without compensation, `data(" hello")` would emit `data: hello`
+    /// which the parser strips to `"hello"` — the application's
+    /// leading space is silently lost. Pre-fix this test failed with
+    /// `data: hello\n\n`. Post-fix the writer emits an extra padding
+    /// space (`data:  hello`) so the parser's strip leaves the
+    /// original ` hello` intact.
+    #[test]
+    fn event_data_preserves_leading_space_for_whatwg_round_trip() {
+        let event = SseEvent::default().data(" hello");
+        assert_eq!(
+            event.to_string(),
+            "data:  hello\n\n",
+            "leading space in data must be padded so the WHATWG parser's \
+             leading-space strip preserves the application value",
+        );
+    }
+
+    /// Counter test: a line with NO leading space stays at the
+    /// pre-fix wire format `data:value` (no extra space). Locks the
+    /// fix to leading-space lines only so the existing wire-format
+    /// test pins below stay green.
+    #[test]
+    fn event_data_without_leading_space_unchanged() {
+        let event = SseEvent::default().data("hello");
+        assert_eq!(event.to_string(), "data:hello\n\n");
+    }
+
+    /// br-asupersync-fek81o — multi-line data where ONLY some lines
+    /// start with a space: each line is independently padded.
+    #[test]
+    fn event_data_multiline_pads_only_leading_space_lines() {
+        let event = SseEvent::default().data("first\n  second\nthird");
+        assert_eq!(
+            event.to_string(),
+            "data:first\ndata:   second\ndata:third\n\n",
+            "only the leading-space line gets an extra padding space; \
+             the parser will strip one and preserve the rest. Got: {:?}",
+            event.to_string(),
+        );
+    }
+
+    /// br-asupersync-fek81o — a tab-prefixed line is NOT padded
+    /// (parser only strips U+0020 SPACE, not U+0009 HTAB).
+    #[test]
+    fn event_data_tab_prefix_not_padded() {
+        let event = SseEvent::default().data("\tindented");
+        assert_eq!(
+            event.to_string(),
+            "data:\tindented\n\n",
+            "U+0009 HTAB is not stripped by the WHATWG parser; \
+             only U+0020 SPACE needs the padding workaround",
+        );
     }
 
     #[test]
