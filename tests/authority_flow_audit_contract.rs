@@ -2,12 +2,14 @@
 
 #![allow(missing_docs)]
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::HashSet;
 
 const DOC_PATH: &str = "docs/authority_flow_audit_contract.md";
 const ARTIFACT_PATH: &str = "artifacts/authority_flow_audit_v1.json";
 const RUNNER_PATH: &str = "scripts/run_authority_flow_audit_smoke.sh";
+const DRIFT_GOLDEN_PATH: &str =
+    "tests/fixtures/authority_flow_audit/drift_detection_projection.json";
 
 fn load_artifact() -> Value {
     let content =
@@ -21,6 +23,12 @@ fn load_doc() -> String {
 
 fn load_runner() -> String {
     std::fs::read_to_string(RUNNER_PATH).expect("runner script must exist")
+}
+
+fn load_drift_golden() -> Value {
+    let content = std::fs::read_to_string(DRIFT_GOLDEN_PATH)
+        .expect("drift detection golden fixture must exist");
+    serde_json::from_str(&content).expect("drift golden must be valid JSON")
 }
 
 // ── Document stability ─────────────────────────────────────────────
@@ -422,6 +430,39 @@ fn drift_detection_covers_mitigation_and_evidence_drift() {
             "{evidence_id}: at least one evidence field must be in structured_log_fields_required"
         );
     }
+}
+
+#[test]
+fn drift_detection_projection_matches_golden() {
+    let art = load_artifact();
+    let drift = &art["drift_detection"];
+    let projection = json!({
+        "contract_version": art["contract_version"],
+        "drift_detection": {
+            "source_paths": drift["source_paths"],
+            "required_rule_prefixes": drift["required_rule_prefixes"],
+            "check_ids": drift["checks"]
+                .as_array()
+                .expect("drift checks must be array")
+                .iter()
+                .map(|check| check["check_id"].clone())
+                .collect::<Vec<_>>(),
+            "failure_modes": drift["checks"]
+                .as_array()
+                .expect("drift checks must be array")
+                .iter()
+                .map(|check| check["failure_mode"].clone())
+                .collect::<Vec<_>>(),
+            "safety": drift["safety"],
+        },
+        "structured_log_fields_required": art["structured_log_fields_required"],
+    });
+
+    assert_eq!(
+        projection,
+        load_drift_golden(),
+        "authority-flow drift projection changed; update the golden only after reviewing the contract drift semantics"
+    );
 }
 
 // ── Smoke / runner ─────────────────────────────────────────────────

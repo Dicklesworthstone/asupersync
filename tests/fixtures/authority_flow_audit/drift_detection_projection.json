@@ -1,0 +1,59 @@
+{
+  "contract_version": "authority-flow-audit-v1",
+  "drift_detection": {
+    "check_ids": [
+      "AFD-SOURCE-PATHS-EXIST",
+      "AFD-MITIGATION-RULE-PREFIXES",
+      "AFD-STRUCTURED-FIELDS-COVER-EVIDENCE"
+    ],
+    "failure_modes": [
+      "blocked-contract-stale",
+      "blocked-mitigation-unmapped",
+      "blocked-evidence-unlogged"
+    ],
+    "required_rule_prefixes": [
+      "ATT-",
+      "REV-",
+      "MEM-",
+      "RA-",
+      "CVT-"
+    ],
+    "safety": {
+      "agent_mail_mutated": false,
+      "beads_mutated": false,
+      "branch_or_worktree_operations": false,
+      "cargo_must_be_rch": true,
+      "non_mutating": true
+    },
+    "source_paths": [
+      "artifacts/authority_flow_audit_v1.json",
+      "artifacts/capability_token_model_v1.json",
+      "docs/security_threat_model.md",
+      "src/cx/cx.rs",
+      "src/security/cryptographic_boundary_tests.rs",
+      "tests/authority_flow_audit_contract.rs"
+    ]
+  },
+  "structured_log_fields_required": [
+    "audit_scenario_id",
+    "token_id",
+    "issuer_id",
+    "capabilities",
+    "caveats",
+    "action_id",
+    "verdict",
+    "denial_reason",
+    "expected_capability",
+    "caveat_violation",
+    "revoked_token_id",
+    "cascade_count",
+    "revocation_reason",
+    "domain_id",
+    "old_capabilities",
+    "new_capabilities",
+    "recovery_phase",
+    "drill_id",
+    "drill_step",
+    "epoch"
+  ]
+}
