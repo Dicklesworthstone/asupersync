@@ -189,6 +189,25 @@ fn rendered_report(report: &OperatorReport) -> String {
     )
 }
 
+fn assert_target_dir_rch_cargo_tree(label: &str, command: &str) {
+    assert!(
+        !command.starts_with("rch exec -- cargo "),
+        "{label} must not use bare rch cargo routing: {command}"
+    );
+    assert!(
+        command.starts_with("rch exec -- env "),
+        "{label} must route through rch env: {command}"
+    );
+    assert!(
+        command.contains("CARGO_TARGET_DIR="),
+        "{label} must pin CARGO_TARGET_DIR: {command}"
+    );
+    assert!(
+        command.contains(" cargo tree "),
+        "{label} must invoke cargo tree after the rch env prefix: {command}"
+    );
+}
+
 #[test]
 fn contract_declares_stable_version_and_source_artifacts() {
     let contract = load_contract();
@@ -385,7 +404,8 @@ fn no_tokio_graph_proof_and_command_links_are_pinned() {
     assert!(joined_commands.contains("rch exec -- rustfmt"));
     assert!(joined_commands.contains("rch exec -- env CARGO_INCREMENTAL=0"));
     assert!(joined_commands.contains("scripts/run_tokio_migration_shadow_workload_smoke.sh"));
-    assert!(joined_commands.contains("rch exec -- cargo tree -e normal -p asupersync -i tokio"));
+    assert!(joined_commands.contains("rch exec -- env CARGO_TARGET_DIR="));
+    assert!(!joined_commands.contains("rch exec -- cargo tree"));
 
     for report in &contract.reports {
         let graph_command = report
@@ -393,7 +413,7 @@ fn no_tokio_graph_proof_and_command_links_are_pinned() {
             .get("graph_proof")
             .expect("report should name graph proof command");
         assert_eq!(graph_command, &report.no_tokio_graph_proof.command);
-        assert!(graph_command.starts_with("rch exec -- cargo tree"));
+        assert_target_dir_rch_cargo_tree("operator graph proof", graph_command);
         assert_eq!(
             report.no_tokio_graph_proof.expected_stdout,
             "warning: nothing to print."

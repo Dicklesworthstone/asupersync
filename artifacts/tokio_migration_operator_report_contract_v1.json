@@ -51,7 +51,7 @@
     "rch exec -- rustfmt --edition 2024 --check tests/tokio_migration_operator_report_contract.rs",
     "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_migrep cargo test -p asupersync --test tokio_migration_operator_report_contract --features test-internals -- --nocapture",
     "scripts/run_tokio_migration_shadow_workload_smoke.sh --execute --scenario TM-SHADOW-001-MPSC-BACKPRESSURE --output-root /tmp/asupersync-migrep-shadow-execute",
-    "rch exec -- cargo tree -e normal -p asupersync -i tokio"
+    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_migration_operator_graph_proof cargo tree -e normal -p asupersync -i tokio"
   ],
   "reports": [
     {
@@ -73,7 +73,7 @@
       "command_lines": {
         "shadow_runner": "scripts/run_tokio_migration_shadow_workload_smoke.sh --execute --scenario TM-SHADOW-001-MPSC-BACKPRESSURE --output-root /tmp/asupersync-miglat-shadow-execute",
         "test": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_migrep cargo test -p asupersync --test tokio_migration_operator_report_contract --features test-internals -- --nocapture",
-        "graph_proof": "rch exec -- cargo tree -e normal -p asupersync -i tokio"
+        "graph_proof": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_migration_operator_graph_proof cargo tree -e normal -p asupersync -i tokio"
       },
       "performance_delta": {
         "status": "present",
@@ -86,7 +86,7 @@
       "cancellation_loss_verdict": "asupersync_no_loss_tokio_reference_loss_visible",
       "orphan_task_verdict": "not_applicable",
       "no_tokio_graph_proof": {
-        "command": "rch exec -- cargo tree -e normal -p asupersync -i tokio",
+        "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_migration_operator_graph_proof cargo tree -e normal -p asupersync -i tokio",
         "expected_stdout": "warning: nothing to print.",
         "proof_ref": "asupersync-shdwrk"
       },
@@ -112,7 +112,7 @@
       "command_lines": {
         "shadow_runner": "scripts/run_tokio_migration_shadow_workload_smoke.sh --execute --scenario TM-SHADOW-002-SELECT-TIMEOUT-RACE --output-root /tmp/asupersync-miglat-shadow-execute",
         "test": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_migrep cargo test -p asupersync --test tokio_migration_operator_report_contract --features test-internals -- --nocapture",
-        "graph_proof": "rch exec -- cargo tree -e normal -p asupersync -i tokio"
+        "graph_proof": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_migration_operator_graph_proof cargo tree -e normal -p asupersync -i tokio"
       },
       "performance_delta": {
         "status": "present_no_win",
@@ -125,7 +125,7 @@
       "cancellation_loss_verdict": "asupersync_drains_losers_tokio_reference_loss_visible",
       "orphan_task_verdict": "not_applicable",
       "no_tokio_graph_proof": {
-        "command": "rch exec -- cargo tree -e normal -p asupersync -i tokio",
+        "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_migration_operator_graph_proof cargo tree -e normal -p asupersync -i tokio",
         "expected_stdout": "warning: nothing to print.",
         "proof_ref": "asupersync-shdwrk"
       },
@@ -151,7 +151,7 @@
       "command_lines": {
         "shadow_runner": "scripts/run_tokio_migration_shadow_workload_smoke.sh --execute --scenario TM-SHADOW-004-SPAWN-JOIN-OWNERSHIP --output-root /tmp/asupersync-shdwrk-shadow-execute",
         "test": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_migrep cargo test -p asupersync --test tokio_migration_operator_report_contract --features test-internals -- --nocapture",
-        "graph_proof": "rch exec -- cargo tree -e normal -p asupersync -i tokio"
+        "graph_proof": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_migration_operator_graph_proof cargo tree -e normal -p asupersync -i tokio"
       },
       "performance_delta": {
         "status": "missing",
@@ -164,7 +164,7 @@
       "cancellation_loss_verdict": "asupersync_region_close_quiesces_children",
       "orphan_task_verdict": "asupersync_no_orphan_tasks_tokio_reference_orphan_risk_visible",
       "no_tokio_graph_proof": {
-        "command": "rch exec -- cargo tree -e normal -p asupersync -i tokio",
+        "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_migration_operator_graph_proof cargo tree -e normal -p asupersync -i tokio",
         "expected_stdout": "warning: nothing to print.",
         "proof_ref": "asupersync-shdwrk"
       },
@@ -190,7 +190,7 @@
       "command_lines": {
         "shadow_runner": "scripts/run_tokio_migration_shadow_workload_smoke.sh --execute --scenario TM-SHADOW-005-MUTEX-CONTENTION --output-root /tmp/asupersync-stale",
         "test": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_migrep cargo test -p asupersync --test tokio_migration_operator_report_contract --features test-internals -- --nocapture",
-        "graph_proof": "rch exec -- cargo tree -e normal -p asupersync -i tokio"
+        "graph_proof": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_migration_operator_graph_proof cargo tree -e normal -p asupersync -i tokio"
       },
       "performance_delta": {
         "status": "stale",
@@ -203,7 +203,7 @@
       "cancellation_loss_verdict": "asupersync_unlinks_cancelled_waiters",
       "orphan_task_verdict": "not_applicable",
       "no_tokio_graph_proof": {
-        "command": "rch exec -- cargo tree -e normal -p asupersync -i tokio",
+        "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_migration_operator_graph_proof cargo tree -e normal -p asupersync -i tokio",
         "expected_stdout": "warning: nothing to print.",
         "proof_ref": "asupersync-shdwrk"
       },
