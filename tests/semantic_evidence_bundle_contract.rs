@@ -150,18 +150,19 @@ fn bundle_schema_and_traceability_contract() {
 fn bundle_output_matches_scrubbed_golden() {
     let raw = build_bundle_output_from_fixtures();
     let actual = scrub_bundle_text(&raw);
-    let expected = fixture_text("verification_report_sample_expected.json");
+    let expected_fixture = "verification_report_sample_expected.json";
+    let expected = fixture_text(expected_fixture);
     let actual_json: Value =
         serde_json::from_str(&actual).expect("scrubbed bundle output must be valid JSON");
-    let expected_json = fixture_json("verification_report_sample_expected.json");
+    let expected_json = fixture_json(expected_fixture);
 
     assert_eq!(
         actual_json, expected_json,
-        "semantic evidence bundle parsed golden drifted"
+        "semantic evidence bundle parsed golden drifted for {expected_fixture}"
     );
     assert_eq!(
         actual, expected,
-        "semantic evidence bundle reviewed text golden drifted"
+        "semantic evidence bundle reviewed text golden drifted for {expected_fixture}"
     );
 }
 
