@@ -54,7 +54,7 @@
 //!
 //! ── How to run via rch ──────────────────────────────────
 //!
-//!   rch exec -- cargo test --test no_tokio_production_feature_graph_regression
+//!   rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_no_tokio_prod_graph cargo test --test no_tokio_production_feature_graph_regression
 
 use std::process::Command;
 
