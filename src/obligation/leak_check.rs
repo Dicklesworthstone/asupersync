@@ -376,6 +376,7 @@ pub const fn static_leak_check_contract() -> StaticLeakCheckContract {
             "Rust-source parsing, macro expansion, and dynamic dispatch analysis",
         ],
         runtime_oracles: &[
+            "RuntimeObligationValidator live reserve/commit/abort hook API",
             "src/obligation/ledger.rs",
             "src/obligation/marking.rs",
             "src/obligation/no_leak_proof.rs",
@@ -569,12 +570,7 @@ impl LeakChecker {
         self.check_instructions(&body.instructions, &[], &[]);
         self.check_exit_leaks();
 
-        CheckResult {
-            scope: body.name.clone(),
-            diagnostics: self.diagnostics.clone(),
-            contract: static_leak_check_contract(),
-            graded_budget: self.graded_budget_summary(),
-        }
+        self.check_result()
     }
 
     fn check_instructions(
@@ -829,6 +825,97 @@ impl LeakChecker {
             ambiguous_peak_outstanding: self.peak_ambiguous_outstanding,
             ..GradedBudgetSummary::default()
         }
+    }
+
+    fn check_result(&self) -> CheckResult {
+        CheckResult {
+            scope: self.scope_name.clone(),
+            diagnostics: self.diagnostics.clone(),
+            contract: static_leak_check_contract(),
+            graded_budget: self.graded_budget_summary(),
+        }
+    }
+}
+
+// ============================================================================
+// RuntimeObligationValidator
+// ============================================================================
+
+/// Runtime hook surface for validating observed obligation transitions.
+///
+/// The static checker verifies a complete structured [`Body`]. This validator
+/// applies the same transition rules to the concrete reserve/commit/abort events
+/// emitted by a live path, then checks pending obligations when [`Self::finish`]
+/// is called.
+#[derive(Debug)]
+pub struct RuntimeObligationValidator {
+    checker: LeakChecker,
+    next_instruction_index: usize,
+}
+
+impl RuntimeObligationValidator {
+    /// Start validating observed transitions for a runtime scope.
+    #[must_use]
+    pub fn new(scope: impl Into<String>) -> Self {
+        let mut checker = LeakChecker::new();
+        checker.scope_name = scope.into();
+        checker.record_budget_snapshot();
+        Self {
+            checker,
+            next_instruction_index: 0,
+        }
+    }
+
+    /// Apply a reserve event for an observed obligation variable.
+    #[must_use]
+    pub fn reserve(&mut self, var: ObligationVar, kind: ObligationKind) -> &[Diagnostic] {
+        self.apply(Instruction::Reserve { var, kind })
+    }
+
+    /// Apply a commit event for an observed obligation variable.
+    #[must_use]
+    pub fn commit(&mut self, var: ObligationVar) -> &[Diagnostic] {
+        self.apply(Instruction::Commit { var })
+    }
+
+    /// Apply an abort event for an observed obligation variable.
+    #[must_use]
+    pub fn abort(&mut self, var: ObligationVar) -> &[Diagnostic] {
+        self.apply(Instruction::Abort { var })
+    }
+
+    /// Apply one observed IR instruction.
+    ///
+    /// `Reserve`, `Commit`, and `Abort` model live transition hooks directly.
+    /// `Branch` keeps the existing static all-arm semantics for callers that
+    /// validate an already-materialized structured sub-flow.
+    #[must_use]
+    pub fn apply(&mut self, instruction: Instruction) -> &[Diagnostic] {
+        let instruction_path = vec![self.next_instruction_index];
+        self.next_instruction_index += 1;
+        self.checker
+            .check_instruction(&instruction, &instruction_path, &[]);
+        self.checker.record_budget_snapshot();
+        &self.checker.diagnostics
+    }
+
+    /// Diagnostics emitted before scope-exit validation.
+    #[must_use]
+    pub fn diagnostics(&self) -> &[Diagnostic] {
+        &self.checker.diagnostics
+    }
+
+    /// Returns true when all observed transitions have respected the rules so far.
+    #[must_use]
+    pub fn is_clean_so_far(&self) -> bool {
+        self.checker.diagnostics.is_empty()
+    }
+
+    /// Finish the observed scope and emit pending-obligation leak diagnostics.
+    #[must_use]
+    pub fn finish(mut self) -> CheckResult {
+        self.checker.check_exit_leaks();
+        self.checker.check_result()
     }
 }
 
@@ -1312,6 +1399,88 @@ mod tests {
         let is_clean = result.is_clean();
         crate::assert_with_log!(is_clean, "clean", true, is_clean);
         crate::test_complete!("clean_multiple_obligations");
+    }
+
+    #[test]
+    fn runtime_validator_detects_double_resolve_on_live_path() {
+        init_test("runtime_validator_detects_double_resolve_on_live_path");
+        let var = v(9);
+        let mut validator = RuntimeObligationValidator::new("runtime_double_resolve");
+
+        let diagnostics = validator.reserve(var, ObligationKind::SendPermit);
+        crate::assert_with_log!(
+            diagnostics.is_empty(),
+            "reserve clean",
+            true,
+            diagnostics.len()
+        );
+        let diagnostics = validator.commit(var);
+        crate::assert_with_log!(
+            diagnostics.is_empty(),
+            "commit clean",
+            true,
+            diagnostics.len()
+        );
+        let diagnostics = validator.abort(var);
+        crate::assert_with_log!(
+            diagnostics.len() == 1,
+            "double resolve count",
+            1,
+            diagnostics.len()
+        );
+        crate::assert_with_log!(
+            diagnostics[0].code == DiagnosticCode::DoubleResolve,
+            "diagnostic code",
+            DiagnosticCode::DoubleResolve,
+            diagnostics[0].code
+        );
+
+        let result = validator.finish();
+        crate::assert_with_log!(
+            result.double_resolves().len() == 1,
+            "final double resolve count",
+            1,
+            result.double_resolves().len()
+        );
+        crate::assert_with_log!(
+            result.leaks().is_empty(),
+            "no leaks",
+            true,
+            result.leaks().len()
+        );
+        crate::test_complete!("runtime_validator_detects_double_resolve_on_live_path");
+    }
+
+    #[test]
+    fn runtime_validator_detects_scope_exit_leak() {
+        init_test("runtime_validator_detects_scope_exit_leak");
+        let var = v(1);
+        let mut validator = RuntimeObligationValidator::new("runtime_exit_leak");
+
+        let diagnostics = validator.reserve(var, ObligationKind::Lease);
+        crate::assert_with_log!(
+            diagnostics.is_empty(),
+            "reserve clean",
+            true,
+            diagnostics.len()
+        );
+
+        let result = validator.finish();
+        let leaks = result.leaks();
+        crate::assert_with_log!(leaks.len() == 1, "leak count", 1, leaks.len());
+        crate::assert_with_log!(
+            leaks[0].code == DiagnosticCode::LeakExitDefinite,
+            "leak code",
+            DiagnosticCode::LeakExitDefinite,
+            leaks[0].code
+        );
+        crate::assert_with_log!(
+            result.graded_budget.exit_outstanding_upper_bound == 1,
+            "exit outstanding",
+            1,
+            result.graded_budget.exit_outstanding_upper_bound
+        );
+        crate::test_complete!("runtime_validator_detects_scope_exit_leak");
     }
 
     // ---- Definite leaks ----------------------------------------------------

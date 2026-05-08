@@ -10,7 +10,7 @@ use common::*;
 
 use asupersync::obligation::{
     BodyBuilder, DiagnosticCode, DiagnosticKind, DiagnosticLocationKind, LeakChecker,
-    ObligationAnalyzer, ObligationVar, static_leak_check_contract,
+    ObligationAnalyzer, ObligationVar, RuntimeObligationValidator, static_leak_check_contract,
 };
 use asupersync::record::ObligationKind;
 use asupersync::{assert_has_leaks, assert_no_leaks, obligation_body};
@@ -775,4 +775,59 @@ fn e2e_clean_result_reports_bounded_budget_surface() {
     );
 
     test_complete!("e2e_clean_result_reports_bounded_budget_surface");
+}
+
+#[test]
+fn e2e_runtime_validator_catches_dynamic_double_resolve() {
+    init_test_logging();
+    test_phase!("e2e_runtime_validator_catches_dynamic_double_resolve");
+
+    let permit = ObligationVar(7);
+    let mut validator = RuntimeObligationValidator::new("runtime_double_resolve");
+    assert!(
+        validator
+            .reserve(permit, ObligationKind::SendPermit)
+            .is_empty()
+    );
+    assert!(validator.commit(permit).is_empty());
+
+    {
+        let diagnostics = validator.commit(permit);
+        assert_eq!(diagnostics.len(), 1);
+        let diagnostic = diagnostics.last().expect("double resolve diagnostic");
+        assert_eq!(diagnostic.code, DiagnosticCode::DoubleResolve);
+        assert_eq!(diagnostic.kind, DiagnosticKind::DoubleResolve);
+        assert_eq!(
+            diagnostic.location.kind,
+            DiagnosticLocationKind::Instruction
+        );
+        assert_eq!(diagnostic.location.instruction_path, vec![2]);
+    }
+
+    let result = validator.finish();
+    assert_eq!(result.scope, "runtime_double_resolve");
+    assert_eq!(result.double_resolves().len(), 1);
+    assert!(result.leaks().is_empty());
+    assert_eq!(result.graded_budget.conservative_peak_outstanding, 1);
+
+    test_complete!("e2e_runtime_validator_catches_dynamic_double_resolve");
+}
+
+#[test]
+fn e2e_runtime_validator_catches_exit_leak() {
+    init_test_logging();
+    test_phase!("e2e_runtime_validator_catches_exit_leak");
+
+    let lease = ObligationVar(0);
+    let mut validator = RuntimeObligationValidator::new("runtime_exit_leak");
+    assert!(validator.reserve(lease, ObligationKind::Lease).is_empty());
+
+    let result = validator.finish();
+    let leaks = result.leaks();
+    assert_eq!(leaks.len(), 1);
+    assert_eq!(leaks[0].code, DiagnosticCode::LeakExitDefinite);
+    assert_eq!(leaks[0].location.kind, DiagnosticLocationKind::ScopeExit);
+    assert_eq!(result.graded_budget.exit_outstanding_upper_bound, 1);
+
+    test_complete!("e2e_runtime_validator_catches_exit_leak");
 }

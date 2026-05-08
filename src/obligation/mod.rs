@@ -78,6 +78,6 @@ pub mod session_types;
 pub use leak_check::{
     ArmBuilder, Body, BodyBuilder, BranchBuilder, CheckResult, Diagnostic, DiagnosticCode,
     DiagnosticKind, DiagnosticLocation, DiagnosticLocationKind, GradedBudgetSummary, Instruction,
-    LeakChecker, ObligationAnalyzer, ObligationVar, StaticLeakCheckContract, VarState,
-    static_leak_check_contract,
+    LeakChecker, ObligationAnalyzer, ObligationVar, RuntimeObligationValidator,
+    StaticLeakCheckContract, VarState, static_leak_check_contract,
 };
