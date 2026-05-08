@@ -45,12 +45,22 @@ fn adoption_guide_points_to_correctness_by_construction_workflow() {
         "Proof + Conformance Impact",
         "Theorem touchpoints",
         "Refinement mapping touchpoints",
-        "rch exec -- cargo check --all-targets",
-        "rch exec -- cargo clippy --all-targets -- -D warnings",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_adoption_getting_started_docs cargo check --all-targets",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_adoption_getting_started_docs cargo clippy --all-targets -- -D warnings",
     ] {
         assert!(
             ADOPTION_GUIDE.contains(required_snippet),
             "adoption guide must include `{required_snippet}`"
+        );
+    }
+
+    for stale_snippet in [
+        "rch exec -- cargo check --all-targets",
+        "rch exec -- cargo clippy --all-targets -- -D warnings",
+    ] {
+        assert!(
+            !ADOPTION_GUIDE.contains(stale_snippet),
+            "adoption guide must not include stale non-isolated `{stale_snippet}`"
         );
     }
 }
