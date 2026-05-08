@@ -1,0 +1,71 @@
+{
+  "action_items": [
+    "one agent should stand down or split the write surface before edits continue"
+  ],
+  "current_date": "2026-05-08",
+  "forbidden_actions": {
+    "runs_agent_mail_mutation": false,
+    "runs_beads_mutation": false,
+    "runs_cargo": false,
+    "runs_destructive_command": false,
+    "runs_git_mutation": false
+  },
+  "generated_at": "2026-05-08T05:55:00Z",
+  "input_schema_version": "swarm-coordination-replay-input-v1",
+  "invariants": {
+    "closeouts_have_commit_and_remote_proof": true,
+    "no_duplicate_active_claims": false,
+    "no_exclusive_reservation_contention": true,
+    "proofs_have_remote_exit_events": true,
+    "successful_proofs_have_artifact_evidence": true
+  },
+  "non_mutating": true,
+  "schema_version": "swarm-coordination-replay-pack-v1",
+  "source": "tests/fixtures/swarm_coordination_replay_pack/duplicate_claims.json",
+  "source_counts": {
+    "agents": 2,
+    "beads": 1,
+    "events": 2,
+    "proofs": 0
+  },
+  "summary": {
+    "error_count": 1,
+    "passes": false,
+    "violation_count": 1,
+    "warning_count": 0
+  },
+  "timeline": [
+    {
+      "agent": "BlackDove",
+      "bead_id": "asupersync-aj7lx3.13",
+      "id": "claim-a",
+      "path": "",
+      "proof_id": "",
+      "summary": "",
+      "timestamp": "2026-05-08T05:00:00Z",
+      "type": "claim"
+    },
+    {
+      "agent": "CopperSpring",
+      "bead_id": "asupersync-aj7lx3.13",
+      "id": "claim-b",
+      "path": "",
+      "proof_id": "",
+      "summary": "",
+      "timestamp": "2026-05-08T05:01:00Z",
+      "type": "claim"
+    }
+  ],
+  "violations": [
+    {
+      "code": "duplicate-active-claim",
+      "event_ids": [
+        "claim-a",
+        "claim-b"
+      ],
+      "message": "asupersync-aj7lx3.13 has simultaneous active claims from BlackDove, CopperSpring",
+      "remediation": "one agent should stand down or split the write surface before edits continue",
+      "severity": "error"
+    }
+  ]
+}

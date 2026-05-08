@@ -121,6 +121,27 @@ fn duplicate_claims_are_errors() {
 }
 
 #[test]
+fn duplicate_claims_output_matches_full_reviewed_golden() {
+    let output = run_replay("duplicate_claims.json");
+    assert!(
+        output.status.success(),
+        "replay helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let expected = fixture_text("duplicate_claims_expected.json");
+    serde_json::from_slice::<Value>(&output.stdout).expect("actual replay output must be JSON");
+    serde_json::from_str::<Value>(&expected).expect("golden replay output must be JSON");
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("replay stdout is utf-8"),
+        expected,
+        "duplicate_claims receipt drifted from the reviewed golden"
+    );
+}
+
+#[test]
 fn overlapping_exclusive_reservations_are_errors() {
     let receipt = replay_json("reservation_contention.json");
 
