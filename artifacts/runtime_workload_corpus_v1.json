@@ -607,7 +607,7 @@
       "config_ref": "tests/cancellation_stress_e2e.rs::cancel_storm_single_region",
       "entrypoint_kind": "cargo-test",
       "entrypoint_path": "tests/cancellation_stress_e2e.rs",
-      "entry_command": "WORKLOAD_ID=AA01-WL-CANCEL-001 RUNTIME_PROFILE=lab-deterministic WORKLOAD_CONFIG_REF='tests/cancellation_stress_e2e.rs::cancel_storm_single_region' TEST_SEED=0xAA010202 ASUPERSYNC_SEED=0xAA010202 rch exec -- cargo test --test cancellation_stress_e2e cancel_storm_single_region -- --nocapture",
+      "entry_command": "WORKLOAD_ID=AA01-WL-CANCEL-001 RUNTIME_PROFILE=lab-deterministic WORKLOAD_CONFIG_REF='tests/cancellation_stress_e2e.rs::cancel_storm_single_region' TEST_SEED=0xAA010202 ASUPERSYNC_SEED=0xAA010202 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_workload_corpus_cancel cargo test --test cancellation_stress_e2e cancel_storm_single_region -- --nocapture",
       "replay_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload AA01-WL-CANCEL-001",
       "expected_artifacts": [
         {
@@ -714,7 +714,7 @@
       "config_ref": "tests/time_e2e.rs::test_timer_wheel_basic_operations",
       "entrypoint_kind": "cargo-test",
       "entrypoint_path": "tests/time_e2e.rs",
-      "entry_command": "WORKLOAD_ID=AA01-WL-TIMER-001 RUNTIME_PROFILE=lab-deterministic WORKLOAD_CONFIG_REF='tests/time_e2e.rs::test_timer_wheel_basic_operations' TEST_SEED=0xAA010205 ASUPERSYNC_SEED=0xAA010205 rch exec -- cargo test --test time_e2e test_timer_wheel_basic_operations -- --nocapture",
+      "entry_command": "WORKLOAD_ID=AA01-WL-TIMER-001 RUNTIME_PROFILE=lab-deterministic WORKLOAD_CONFIG_REF='tests/time_e2e.rs::test_timer_wheel_basic_operations' TEST_SEED=0xAA010205 ASUPERSYNC_SEED=0xAA010205 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_workload_corpus_timer cargo test --test time_e2e test_timer_wheel_basic_operations -- --nocapture",
       "replay_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload AA01-WL-TIMER-001",
       "expected_artifacts": [
         {

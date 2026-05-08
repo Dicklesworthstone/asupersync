@@ -483,6 +483,9 @@ fn entry_commands_are_rch_routed_and_reference_existing_paths() {
         let entrypoint_path = workload["entrypoint_path"]
             .as_str()
             .expect("entrypoint_path must be string");
+        let entrypoint_kind = workload["entrypoint_kind"]
+            .as_str()
+            .expect("entrypoint_kind must be string");
         let entry_command = workload["entry_command"]
             .as_str()
             .expect("entry_command must be string");
@@ -514,10 +517,16 @@ fn entry_commands_are_rch_routed_and_reference_existing_paths() {
             );
         }
         assert!(
-            entry_command.contains("rch exec -- cargo")
+            entry_command.contains("rch exec -- env CARGO_TARGET_DIR=")
                 || entry_command.contains("RCH_BIN=rch bash ./scripts/"),
             "entry command must route heavy work through rch: {entry_command}"
         );
+        if entrypoint_kind == "cargo-test" {
+            assert!(
+                entry_command.contains("rch exec -- env CARGO_TARGET_DIR="),
+                "direct cargo workload commands must set a remote CARGO_TARGET_DIR: {entry_command}"
+            );
+        }
     }
 }
 

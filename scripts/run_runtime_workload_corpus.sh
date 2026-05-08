@@ -101,6 +101,8 @@ build_workload_command_argv() {
                 "${RCH_BIN}"
                 exec
                 --
+                env
+                "CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_runtime_workload_corpus_cancel}"
                 cargo
                 test
                 --test
@@ -146,6 +148,8 @@ build_workload_command_argv() {
                 "${RCH_BIN}"
                 exec
                 --
+                env
+                "CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_runtime_workload_corpus_timer}"
                 cargo
                 test
                 --test
