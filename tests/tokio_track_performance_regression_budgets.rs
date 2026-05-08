@@ -173,6 +173,16 @@ fn doc_requires_rch_exec_for_heavy_checks() {
     );
 
     for token in [
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_performance_budgets_docs cargo check --all-targets",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_performance_budgets_docs cargo clippy --all-targets -- -D warnings",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_performance_budgets_docs cargo fmt --check",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_performance_budgets_docs cargo test --test tokio_differential_behavior_suites -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_performance_budgets_docs cargo test --test tokio_ci_quality_gate_enforcement -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_performance_budgets_docs cargo test --test tokio_track_performance_regression_budgets -- --nocapture",
+    ] {
+        assert!(doc.contains(token), "missing runner command token: {token}");
+    }
+    for stale in [
         "rch exec -- cargo check --all-targets",
         "rch exec -- cargo clippy --all-targets -- -D warnings",
         "rch exec -- cargo fmt --check",
@@ -180,7 +190,10 @@ fn doc_requires_rch_exec_for_heavy_checks() {
         "rch exec -- cargo test --test tokio_ci_quality_gate_enforcement -- --nocapture",
         "rch exec -- cargo test --test tokio_track_performance_regression_budgets -- --nocapture",
     ] {
-        assert!(doc.contains(token), "missing runner command token: {token}");
+        assert!(
+            !doc.contains(stale),
+            "document must not reintroduce bare rch cargo routing: {stale}"
+        );
     }
 }
 
