@@ -116,6 +116,28 @@ fn local_fallback_failure_output_matches_full_reviewed_golden() {
 }
 
 #[test]
+fn missing_required_output_matches_full_reviewed_golden() {
+    let output = run_receipt("missing_required_scenario.json");
+    assert!(
+        output.status.success(),
+        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = String::from_utf8(output.stdout).expect("receipt stdout is utf-8");
+    let expected = fixture_text("missing_required_scenario_expected.json");
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
+    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
+    assert_eq!(actual_json, expected_json);
+    assert_eq!(
+        actual, expected,
+        "missing-required smoke report receipt drifted from the reviewed golden"
+    );
+}
+
+#[test]
 fn executed_success_report_is_complete_proof() {
     let receipt = receipt_json("executed_success.json");
 

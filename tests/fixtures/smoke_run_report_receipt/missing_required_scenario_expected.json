@@ -1,0 +1,71 @@
+{
+  "agent": "CopperSpring",
+  "classification_counts": {
+    "executed-pass": 2,
+    "missing-required-scenario": 1
+  },
+  "contract_version": "authority-flow-audit-v1",
+  "dry_run": false,
+  "generated_at": "2026-05-08T05:55:00Z",
+  "missing_required_scenarios": [
+    "AFA-SMOKE-AUDIT"
+  ],
+  "redaction_counts": {
+    "long_token": 0,
+    "secret": 0,
+    "token": 0,
+    "total": 0,
+    "url_query": 0
+  },
+  "report_schema_version": "authority-flow-audit-smoke-run-report-v1",
+  "review_cues": [
+    {
+      "kind": "missing-required-scenario",
+      "message": "required scenario AFA-SMOKE-AUDIT is absent from run_report",
+      "scenario_id": "AFA-SMOKE-AUDIT",
+      "severity": "blocker"
+    }
+  ],
+  "run_dir": "target/authority-flow-audit-smoke/run_20260508_055503",
+  "safety": {
+    "agent_mail_mutated": false,
+    "beads_mutated": false,
+    "branch_or_worktree_operations": false,
+    "cargo_executed": false,
+    "files_deleted": false,
+    "git_mutated": false,
+    "live_probe_performed": false,
+    "non_mutating": true,
+    "reads_fixture_only": true
+  },
+  "scenarios": [
+    {
+      "classification": "executed-pass",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch_target_authority_flow_audit_AFA_SMOKE_ABUSE cargo test -p asupersync --test authority_flow_audit_contract --features test-internals abuse -- --nocapture",
+      "exit_code": 0,
+      "local_fallback_detected": false,
+      "log_excerpt": "",
+      "rch_routed": true,
+      "scenario_id": "AFA-SMOKE-ABUSE",
+      "status": "passed"
+    },
+    {
+      "classification": "executed-pass",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch_target_authority_flow_audit_AFA_SMOKE_REVOCATION cargo test -p asupersync --test authority_flow_audit_contract --features test-internals revocation -- --nocapture",
+      "exit_code": 0,
+      "local_fallback_detected": false,
+      "log_excerpt": "",
+      "rch_routed": true,
+      "scenario_id": "AFA-SMOKE-REVOCATION",
+      "status": "passed"
+    }
+  ],
+  "schema_version": "smoke-run-report-receipt-v1",
+  "source_counts": {
+    "missing_required_scenarios": 1,
+    "required_scenarios": 3,
+    "review_cues": 1,
+    "scenarios": 2
+  },
+  "verdict": "blocked"
+}
