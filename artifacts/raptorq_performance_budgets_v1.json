@@ -138,7 +138,7 @@
   },
   "ci_gate_configuration": {
     "runner_script": "scripts/run_raptorq_perf_gates.sh",
-    "benchmark_command": "rch exec -- cargo bench --bench raptorq_benchmark",
+    "benchmark_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_raptorq_performance_budgets_benchmark cargo bench --bench raptorq_benchmark",
     "measurement_samples": 50,
     "warmup_iterations": 10,
     "timeout_seconds": 1800,
@@ -163,7 +163,7 @@
       "slo_violation_above_10_percent",
       "regression_above_50_percent"
     ],
-    "rollback_command": "git revert HEAD && rch exec -- cargo test --test raptorq_perf_invariants",
+    "rollback_command": "git revert HEAD && rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_raptorq_performance_budgets_rollback cargo test --test raptorq_perf_invariants",
     "verification_command": "rch exec -- scripts/run_raptorq_perf_gates.sh --verify-rollback"
   },
   "governance_integration": {

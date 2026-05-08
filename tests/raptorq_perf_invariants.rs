@@ -6741,6 +6741,25 @@ const RAPTORQ_PERFORMANCE_BUDGETS_V1: &str =
     include_str!("../artifacts/raptorq_performance_budgets_v1.json");
 const RAPTORQ_PERF_GATES_SCRIPT: &str = include_str!("../scripts/run_raptorq_perf_gates.sh");
 
+fn assert_target_dir_rch_cargo_command(label: &str, command: &str) {
+    assert!(
+        !command.starts_with("rch exec -- cargo "),
+        "{label} must not use bare rch cargo routing: {command}"
+    );
+    assert!(
+        command.starts_with("rch exec -- env "),
+        "{label} must route through rch env: {command}"
+    );
+    assert!(
+        command.contains("CARGO_TARGET_DIR="),
+        "{label} must pin CARGO_TARGET_DIR: {command}"
+    );
+    assert!(
+        command.contains(" cargo "),
+        "{label} must invoke cargo after the rch env prefix: {command}"
+    );
+}
+
 /// G1 performance budgets schema and workload coverage validation.
 #[test]
 fn g1_performance_budgets_schema_and_coverage() {
@@ -6848,6 +6867,24 @@ fn g1_performance_budgets_schema_and_coverage() {
     assert!(
         ci_gate_config["timeout_seconds"].as_u64().unwrap_or(0) >= 300,
         "CI gate must have reasonable timeout"
+    );
+    let benchmark_command = ci_gate_config["benchmark_command"]
+        .as_str()
+        .expect("ci_gate_configuration.benchmark_command must be a string");
+    assert_target_dir_rch_cargo_command(
+        "ci_gate_configuration.benchmark_command",
+        benchmark_command,
+    );
+    let rollback_command = artifact["rollback_policy"]["rollback_command"]
+        .as_str()
+        .expect("rollback_policy.rollback_command must be a string");
+    let rollback_rch_command = rollback_command
+        .rsplit(" && ")
+        .next()
+        .expect("rollback command must include a cargo verification step");
+    assert_target_dir_rch_cargo_command(
+        "rollback_policy.rollback_command cargo step",
+        rollback_rch_command,
     );
 
     // Reproducibility requirements validation
