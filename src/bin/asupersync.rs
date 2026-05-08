@@ -889,15 +889,41 @@ fn main() {
     let color = common.color_choice();
 
     let mut output = Output::new(format).with_color(color);
-    if let Err(err) = run(cli.command, &mut output) {
-        // Write error to stderr; if that fails, fall back to eprintln!
-        if write_cli_error(&err, format, color).is_err() {
-            eprintln!(
-                "Error: {} (failed to write structured error to stderr)",
-                err.title
-            );
+    let run_result = run(cli.command, &mut output);
+
+    // br-asupersync-9yktkv: explicitly flush the buffered Output writer
+    // before any std::process::exit path. Output is a buffered writer
+    // (Output::flush exists at src/cli/output.rs:295), and any
+    // structured/streamed stdout content (StreamJson, Json, Tsv, Human)
+    // accumulated during `run` may still sit in the writer's internal
+    // buffer when `run` returns. process::exit terminates the process
+    // WITHOUT running destructors and bypasses stdout's stdlib atexit
+    // auto-flush, so buffered content would be silently lost — partial
+    // stdout + structured stderr error → downstream consumers (rch,
+    // proof-lane harnesses) parse invalid/truncated machine-readable
+    // output. The flush here is best-effort: a failure to flush stdout
+    // is itself a runtime IO error and is reported via eprintln before
+    // the process exits with RUNTIME_ERROR.
+    let flush_result = output.flush();
+
+    match (run_result, flush_result) {
+        (Ok(()), Ok(())) => {}
+        (Err(err), _) => {
+            // Write error to stderr; if that fails, fall back to eprintln!
+            if write_cli_error(&err, format, color).is_err() {
+                eprintln!(
+                    "Error: {} (failed to write structured error to stderr)",
+                    err.title
+                );
+            }
+            std::process::exit(ExitCode::sanitize(err.exit_code));
         }
-        std::process::exit(ExitCode::sanitize(err.exit_code));
+        (Ok(()), Err(flush_err)) => {
+            eprintln!(
+                "Error: failed to flush buffered output to stdout: {flush_err}"
+            );
+            std::process::exit(ExitCode::sanitize(ExitCode::RUNTIME_ERROR));
+        }
     }
 }
 
