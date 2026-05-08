@@ -1,0 +1,126 @@
+{
+  "action_items": [
+    "asupersync-fuzz-a:MaroonBear:http_header_map_invariants: coordinate-or-rename-before-reserving (duplicate-manifest-target)",
+    "asupersync-fuzz-c:CoralGorge:postgres_row_description_state: coordinate-or-rename-before-reserving (duplicate-proposal-target)",
+    "asupersync-fuzz-d:TopazGoose:postgres_row_description_state: coordinate-or-rename-before-reserving (duplicate-proposal-target)"
+  ],
+  "blocked_proposals": [
+    "asupersync-fuzz-a:MaroonBear:http_header_map_invariants",
+    "asupersync-fuzz-c:CoralGorge:postgres_row_description_state",
+    "asupersync-fuzz-d:TopazGoose:postgres_row_description_state"
+  ],
+  "forbidden_actions": {
+    "creates_fuzz_target": false,
+    "edits_fuzz_manifest": false,
+    "runs_agent_mail_mutation": false,
+    "runs_beads_mutation": false,
+    "runs_cargo": false,
+    "runs_destructive_command": false,
+    "runs_git_mutation": false,
+    "runs_rch": false
+  },
+  "generated_at": "2026-05-08T06:10:00Z",
+  "generated_date": "2026-05-08",
+  "input_schema_version": "fuzz-manifest-lease-queue-input-v1",
+  "manifest_path": "fuzz/Cargo.toml",
+  "manifest_reservation": {
+    "expires_ts": "",
+    "holder": "",
+    "status": "free"
+  },
+  "non_mutating": true,
+  "queue": [
+    {
+      "agent": "MaroonBear",
+      "bead_id": "asupersync-fuzz-a",
+      "blockers": [
+        {
+          "detail": "http_header_map_invariants",
+          "kind": "duplicate-manifest-target"
+        },
+        {
+          "detail": "fuzz/fuzz_targets/http_header_map_invariants.rs",
+          "kind": "duplicate-manifest-path"
+        }
+      ],
+      "created_ts": "2026-05-08T06:02:00Z",
+      "manifest_path": "fuzz/Cargo.toml",
+      "priority": 1,
+      "proposal_id": "asupersync-fuzz-a:MaroonBear:http_header_map_invariants",
+      "queue_position": null,
+      "recommended_action": "coordinate-or-rename-before-reserving",
+      "status": "blocked-duplicate-manifest-target",
+      "target_name": "http_header_map_invariants",
+      "target_path": "fuzz/fuzz_targets/http_header_map_invariants.rs"
+    },
+    {
+      "agent": "CoralGorge",
+      "bead_id": "asupersync-fuzz-c",
+      "blockers": [
+        {
+          "detail": "postgres_row_description_state",
+          "kind": "duplicate-proposal-target"
+        },
+        {
+          "detail": "fuzz/fuzz_targets/postgres_row_description_state.rs",
+          "kind": "duplicate-proposal-path"
+        }
+      ],
+      "created_ts": "2026-05-08T06:03:00Z",
+      "manifest_path": "fuzz/Cargo.toml",
+      "priority": 2,
+      "proposal_id": "asupersync-fuzz-c:CoralGorge:postgres_row_description_state",
+      "queue_position": null,
+      "recommended_action": "coordinate-or-rename-before-reserving",
+      "status": "blocked-duplicate-proposal-target",
+      "target_name": "postgres_row_description_state",
+      "target_path": "fuzz/fuzz_targets/postgres_row_description_state.rs"
+    },
+    {
+      "agent": "TopazGoose",
+      "bead_id": "asupersync-fuzz-d",
+      "blockers": [
+        {
+          "detail": "postgres_row_description_state",
+          "kind": "duplicate-proposal-target"
+        },
+        {
+          "detail": "fuzz/fuzz_targets/postgres_row_description_state.rs",
+          "kind": "duplicate-proposal-path"
+        }
+      ],
+      "created_ts": "2026-05-08T06:04:00Z",
+      "manifest_path": "fuzz/Cargo.toml",
+      "priority": 2,
+      "proposal_id": "asupersync-fuzz-d:TopazGoose:postgres_row_description_state",
+      "queue_position": null,
+      "recommended_action": "coordinate-or-rename-before-reserving",
+      "status": "blocked-duplicate-proposal-target",
+      "target_name": "postgres_row_description_state",
+      "target_path": "fuzz/fuzz_targets/postgres_row_description_state.rs"
+    }
+  ],
+  "ready_now": [],
+  "safety_notes": [
+    "receipt is fixture-backed and does not call Agent Mail",
+    "manifest and target reservations must be acquired by the operator before editing",
+    "fuzz/Cargo.toml and fuzz target files are intentionally not modified"
+  ],
+  "schema_version": "fuzz-manifest-lease-queue-v1",
+  "source_counts": {
+    "active_reservations": 0,
+    "current_manifest_targets": 1,
+    "duplicate_target_names": 1,
+    "duplicate_target_paths": 1,
+    "proposals": 3,
+    "reservations": 0
+  },
+  "summary": {
+    "blocked_count": 3,
+    "passes": false,
+    "queued_count": 0,
+    "ready_count": 0,
+    "waiting_count": 0
+  },
+  "waiting_proposals": []
+}

@@ -234,6 +234,24 @@ fn duplicate_manifest_and_proposal_targets_are_hard_blocks() {
 }
 
 #[test]
+fn duplicate_targets_queue_matches_exact_reviewed_golden() {
+    let output = run_queue("duplicate_targets.json");
+    assert!(
+        output.status.success(),
+        "queue helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actual = String::from_utf8(output.stdout).expect("queue output must be UTF-8");
+    let expected = fixture_text("duplicate_targets_expected.json");
+
+    serde_json::from_str::<Value>(&actual).expect("actual output must be JSON");
+    serde_json::from_str::<Value>(&expected).expect("golden output must be JSON");
+    assert_eq!(actual, expected);
+}
+
+#[test]
 fn owned_manifest_and_target_reservations_allow_the_holder_to_proceed() {
     let receipt = queue_json("owned_and_expired_reservations.json");
 
