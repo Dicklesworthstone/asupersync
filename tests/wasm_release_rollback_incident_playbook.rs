@@ -83,13 +83,22 @@ fn playbook_includes_deterministic_repro_commands() {
         "python3 scripts/check_wasm_optimization_policy.py",
         "python3 scripts/check_wasm_dependency_policy.py",
         "python3 scripts/check_security_release_gate.py",
-        "rch exec -- cargo test -p asupersync --test wasm_bundler_compatibility -- --nocapture",
-        "rch exec -- cargo test -p asupersync --test wasm_release_rollback_incident_playbook -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_release_rollback_docs cargo test -p asupersync --test wasm_bundler_compatibility -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_release_rollback_docs cargo test -p asupersync --test wasm_release_rollback_incident_playbook -- --nocapture",
     ];
     for cmd in required {
         assert!(
             playbook.contains(cmd),
             "playbook missing deterministic command: {cmd}"
+        );
+    }
+    for stale in [
+        "rch exec -- cargo test -p asupersync --test wasm_bundler_compatibility -- --nocapture",
+        "rch exec -- cargo test -p asupersync --test wasm_release_rollback_incident_playbook -- --nocapture",
+    ] {
+        assert!(
+            !playbook.contains(stale),
+            "playbook must route cargo repro command through rch env CARGO_TARGET_DIR: {stale}"
         );
     }
 }
