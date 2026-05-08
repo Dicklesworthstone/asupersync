@@ -121,6 +121,39 @@ impl std::fmt::Display for TryRecvError {
 
 impl std::error::Error for TryRecvError {}
 
+/// Opt-in, redacted telemetry snapshot for a oneshot channel.
+///
+/// The caller supplies `channel_id`, which keeps identifiers deterministic and
+/// avoids ambient globals or pointer-derived IDs. Payload values are never
+/// exposed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OneshotTelemetrySnapshot {
+    /// Caller-provided deterministic channel identifier.
+    pub channel_id: u64,
+    /// Stable channel kind label.
+    pub channel_kind: &'static str,
+    /// Oneshot channels can queue at most one committed value.
+    pub capacity: usize,
+    /// Number of committed values waiting for the receiver.
+    pub queued_messages: usize,
+    /// Number of reserved-but-uncommitted send obligations.
+    pub reserved_uncommitted_obligations: usize,
+    /// Sender-side waiters observing receiver closure.
+    pub send_waiter_count: usize,
+    /// Receiver-side waiters observing value or sender closure.
+    pub recv_waiter_count: usize,
+    /// Redacted receiver state.
+    pub receiver_health: &'static str,
+    /// Oneshot has no lagging receiver concept.
+    pub lagged_receiver_count: Option<usize>,
+    /// Cancel/abort events observed by the channel.
+    pub cancellation_count: u64,
+    /// Whether this channel has reached a terminal closed state.
+    pub closed: bool,
+    /// Redacted terminal reason, when closed.
+    pub closed_reason: Option<&'static str>,
+}
+
 /// Internal state for a oneshot channel.
 #[derive(Debug)]
 struct OneShotInner<T> {
@@ -148,6 +181,10 @@ struct OneShotInner<T> {
     /// The waker to notify receiver when sender is dropped.
     /// Used by Receiver::poll_closed, separate from receiver waker system.
     receiver_closed_waker: Option<Waker>,
+    /// Number of cancellation/abort events observed by this channel.
+    cancellation_count: u64,
+    /// Redacted terminal reason once the channel has closed.
+    closed_reason: Option<&'static str>,
 }
 
 impl<T> OneShotInner<T> {
@@ -163,6 +200,8 @@ impl<T> OneShotInner<T> {
             next_waiter_id: 0,
             sender_waker: None,
             receiver_closed_waker: None,
+            cancellation_count: 0,
+            closed_reason: None,
         }
     }
 
@@ -190,6 +229,50 @@ impl<T> OneShotInner<T> {
     fn take_waker(&mut self) -> Option<Waker> {
         self.waker_id = None;
         self.waker.take()
+    }
+
+    /// Records a cancellation or abort event without exposing payloads.
+    #[inline]
+    fn record_cancellation(&mut self) {
+        self.cancellation_count = self.cancellation_count.saturating_add(1);
+    }
+
+    /// Builds an opt-in redacted telemetry snapshot.
+    #[inline]
+    fn telemetry_snapshot(&self, channel_id: u64) -> OneshotTelemetrySnapshot {
+        let queued_messages = usize::from(self.value.is_some());
+        let reserved_uncommitted_obligations = usize::from(self.permit_outstanding);
+        let recv_waiter_count =
+            usize::from(self.waker.is_some()) + usize::from(self.receiver_closed_waker.is_some());
+        let closed = self.receiver_dropped
+            || (self.sender_consumed && !self.permit_outstanding && self.value.is_none());
+
+        let receiver_health = if self.receiver_dropped {
+            "receiver_dropped"
+        } else if self.value.is_some() {
+            "value_ready"
+        } else if self.is_closed() {
+            "sender_closed"
+        } else if recv_waiter_count > 0 {
+            "waiting"
+        } else {
+            "open"
+        };
+
+        OneshotTelemetrySnapshot {
+            channel_id,
+            channel_kind: "oneshot",
+            capacity: 1,
+            queued_messages,
+            reserved_uncommitted_obligations,
+            send_waiter_count: usize::from(self.sender_waker.is_some()),
+            recv_waiter_count,
+            receiver_health,
+            lagged_receiver_count: None,
+            cancellation_count: self.cancellation_count,
+            closed,
+            closed_reason: closed.then_some(self.closed_reason).flatten(),
+        }
     }
 }
 
@@ -259,6 +342,20 @@ impl<T> Sender<T> {
         // been signalled to drain.
         if cx.checkpoint().is_err() {
             cx.trace("oneshot::reserve cancelled");
+            let (waker, receiver_closed_waker) = {
+                let mut inner = self.inner.lock();
+                inner.sender_consumed = true;
+                inner.permit_outstanding = false;
+                inner.record_cancellation();
+                inner.closed_reason = Some("cancelled_reserve");
+                (inner.take_waker(), inner.receiver_closed_waker.take())
+            };
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+            if let Some(waker) = receiver_closed_waker {
+                waker.wake();
+            }
             return Err(SendError::Cancelled(()));
         }
 
@@ -329,6 +426,13 @@ impl<T> Sender<T> {
         self.inner.lock().receiver_dropped
     }
 
+    /// Returns an opt-in redacted telemetry snapshot for this oneshot sender.
+    #[inline]
+    #[must_use]
+    pub fn telemetry_snapshot(&self, channel_id: u64) -> OneshotTelemetrySnapshot {
+        self.inner.lock().telemetry_snapshot(channel_id)
+    }
+
     /// Polls for notification that the receiver has been dropped.
     ///
     /// This method returns:
@@ -364,6 +468,7 @@ impl<T> Drop for Sender<T> {
                 (None, None)
             } else {
                 inner.sender_consumed = true;
+                inner.closed_reason = Some("sender_drop");
                 // Take wakers under lock, wake outside to avoid deadlock
                 // with inline-polling executors.
                 let waker = inner.take_waker();
@@ -423,6 +528,7 @@ impl<T> SendPermit<T> {
             } else {
                 inner.value = Some(value);
                 inner.permit_outstanding = false;
+                inner.closed_reason = None;
                 // Take waker under lock, wake outside to avoid deadlock
                 // with inline-polling executors.
                 let waker = inner.take_waker();
@@ -448,6 +554,8 @@ impl<T> SendPermit<T> {
         let waker = {
             let mut inner = self.inner.lock();
             inner.permit_outstanding = false;
+            inner.record_cancellation();
+            inner.closed_reason = Some("abort");
             // Take waker under lock, wake outside.
             inner.take_waker()
         };
@@ -463,6 +571,13 @@ impl<T> SendPermit<T> {
     pub fn is_closed(&self) -> bool {
         self.inner.lock().receiver_dropped
     }
+
+    /// Returns an opt-in redacted telemetry snapshot for this send permit.
+    #[inline]
+    #[must_use]
+    pub fn telemetry_snapshot(&self, channel_id: u64) -> OneshotTelemetrySnapshot {
+        self.inner.lock().telemetry_snapshot(channel_id)
+    }
 }
 
 impl<T> Drop for SendPermit<T> {
@@ -472,6 +587,8 @@ impl<T> Drop for SendPermit<T> {
             let waker = {
                 let mut inner = self.inner.lock();
                 inner.permit_outstanding = false;
+                inner.record_cancellation();
+                inner.closed_reason = Some("permit_drop");
                 inner.take_waker()
             };
             if let Some(waker) = waker {
@@ -511,6 +628,7 @@ impl<T> Future for RecvUninterruptibleFuture<'_, T> {
 
         if let Some(value) = inner.value.take() {
             inner.clear_waker();
+            inner.closed_reason = Some("committed");
 
             this.waiter_id = None;
             this.completed = true;
@@ -619,6 +737,7 @@ impl<T> Future for RecvFuture<'_, T> {
             // Clear the stale waker so we don't retain executor state
             // after the channel is done.
             inner.clear_waker();
+            inner.closed_reason = Some("committed");
             this.waiter_id = None;
             this.completed = true;
             drop(inner);
@@ -645,6 +764,7 @@ impl<T> Future for RecvFuture<'_, T> {
             {
                 inner.clear_waker();
             }
+            inner.record_cancellation();
             this.waiter_id = None;
             this.completed = true;
             drop(inner);
@@ -766,6 +886,7 @@ impl<T> Receiver<T> {
         if let Some(value) = inner.value.take() {
             // Terminal success path: clear stale waiter registration.
             inner.clear_waker();
+            inner.closed_reason = Some("committed");
             drop(inner);
             return Ok(value);
         }
@@ -794,6 +915,13 @@ impl<T> Receiver<T> {
         self.inner.lock().is_closed()
     }
 
+    /// Returns an opt-in redacted telemetry snapshot for this oneshot receiver.
+    #[inline]
+    #[must_use]
+    pub fn telemetry_snapshot(&self, channel_id: u64) -> OneshotTelemetrySnapshot {
+        self.inner.lock().telemetry_snapshot(channel_id)
+    }
+
     /// Returns a future that resolves when the sender is dropped.
     ///
     /// This provides async notification of channel closure without attempting
@@ -819,6 +947,7 @@ impl<T> Drop for Receiver<T> {
         let (sender_waker, _value) = {
             let mut inner = self.inner.lock();
             inner.receiver_dropped = true;
+            inner.closed_reason = Some("receiver_drop");
             // Clear any pending recv waker so a dropped receiver does not
             // retain executor task state indefinitely.
             inner.clear_waker();

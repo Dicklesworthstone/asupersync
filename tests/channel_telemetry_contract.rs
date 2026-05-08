@@ -1,10 +1,25 @@
 #![allow(missing_docs)]
 
+use asupersync::channel::oneshot;
+use asupersync::cx::Cx;
+use asupersync::types::{Budget, CancelKind};
+use asupersync::util::ArenaIndex;
+use asupersync::{RegionId, TaskId};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
 use std::path::Path;
+use std::task::{Context, Poll, Waker};
 
 const CONTRACT_PATH: &str = "artifacts/channel_telemetry_contract_v1.json";
+
+fn telemetry_test_cx() -> Cx {
+    Cx::new(
+        RegionId::from_arena(ArenaIndex::new(0, 0)),
+        TaskId::from_arena(ArenaIndex::new(0, 0)),
+        Budget::INFINITE,
+    )
+}
 
 fn repo_path(relative: &str) -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
@@ -222,6 +237,84 @@ fn unwired_channel_rows_fail_closed_until_live_metrics_exist() {
             );
         }
     }
+}
+
+#[test]
+fn live_oneshot_snapshot_reports_reserved_queued_and_cancelled_pressure() {
+    let contract = contract();
+    let rows = rows_by_kind(&contract);
+    let oneshot_row = rows.get("oneshot").expect("oneshot row exists");
+    assert_eq!(oneshot_row["live_telemetry_wired"].as_bool(), Some(true));
+    assert_eq!(oneshot_row["report_status"].as_str(), Some("LIVE"));
+
+    let cx = telemetry_test_cx();
+    let (tx, rx) = oneshot::channel::<u8>();
+    let initial = tx.telemetry_snapshot(97);
+    assert_eq!(initial.channel_id, 97);
+    assert_eq!(initial.channel_kind, "oneshot");
+    assert_eq!(initial.capacity, 1);
+    assert_eq!(initial.queued_messages, 0);
+    assert_eq!(initial.reserved_uncommitted_obligations, 0);
+    assert_eq!(initial.recv_waiter_count, 0);
+    assert_eq!(initial.receiver_health, "open");
+    assert_eq!(initial.lagged_receiver_count, None);
+    assert_eq!(initial.cancellation_count, 0);
+    assert!(!initial.closed);
+
+    let permit = tx.reserve(&cx).expect("reserve succeeds");
+    let reserved = permit.telemetry_snapshot(97);
+    assert_eq!(reserved.queued_messages, 0);
+    assert_eq!(reserved.reserved_uncommitted_obligations, 1);
+    assert_eq!(reserved.receiver_health, "open");
+    assert!(!reserved.closed);
+
+    let receiver_view = rx.telemetry_snapshot(97);
+    assert_eq!(receiver_view.reserved_uncommitted_obligations, 1);
+    assert_eq!(receiver_view.queued_messages, 0);
+    assert_eq!(receiver_view.cancellation_count, 0);
+
+    permit.abort();
+    let aborted = rx.telemetry_snapshot(97);
+    assert_eq!(aborted.queued_messages, 0);
+    assert_eq!(aborted.reserved_uncommitted_obligations, 0);
+    assert_eq!(aborted.receiver_health, "sender_closed");
+    assert_eq!(aborted.cancellation_count, 1);
+    assert!(aborted.closed);
+    assert_eq!(aborted.closed_reason, Some("abort"));
+
+    let (tx, mut rx) = oneshot::channel::<u8>();
+    tx.send(&cx, 11).expect("send succeeds");
+    let ready = rx.telemetry_snapshot(98);
+    assert_eq!(ready.queued_messages, 1);
+    assert_eq!(ready.reserved_uncommitted_obligations, 0);
+    assert_eq!(ready.receiver_health, "value_ready");
+    assert!(!ready.closed);
+
+    assert_eq!(rx.try_recv().expect("value ready"), 11);
+    let committed = rx.telemetry_snapshot(98);
+    assert_eq!(committed.queued_messages, 0);
+    assert!(committed.closed);
+    assert_eq!(committed.closed_reason, Some("committed"));
+
+    let cancelled_cx = telemetry_test_cx();
+    cancelled_cx.cancel_with(CancelKind::User, Some("channel telemetry contract"));
+    let (tx, mut rx) = oneshot::channel::<u8>();
+    let waker = Waker::noop().clone();
+    let mut task_cx = Context::from_waker(&waker);
+    let mut recv = Box::pin(rx.recv(&cancelled_cx));
+    assert!(matches!(
+        recv.as_mut().poll(&mut task_cx),
+        Poll::Ready(Err(oneshot::RecvError::Cancelled))
+    ));
+    drop(recv);
+
+    let after_cancelled_recv = rx.telemetry_snapshot(99);
+    assert_eq!(after_cancelled_recv.cancellation_count, 1);
+    assert!(!after_cancelled_recv.closed);
+    drop(tx);
+    let after_sender_drop = rx.telemetry_snapshot(99);
+    assert!(after_sender_drop.closed);
+    assert_eq!(after_sender_drop.closed_reason, Some("sender_drop"));
 }
 
 #[test]
