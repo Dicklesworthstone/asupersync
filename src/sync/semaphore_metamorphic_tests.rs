@@ -9,7 +9,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::cx::Cx;
-use crate::sync::Semaphore;
+use crate::lab::LabRuntime;
+use crate::sync::{AcquireError, Semaphore};
+use crate::types::CancelKind;
 use proptest::prelude::*;
 
 /// MR1: Total Conservation - Permits are conserved across all operations
@@ -193,6 +195,74 @@ fn mr_non_overlapping_commutativity() {
         assert_eq!(
             final_ab, final_ba,
             "Non-overlapping acquire/release sequences should be commutative"
+        );
+    });
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetryErrorKind {
+    Cancelled,
+    Closed,
+}
+
+fn canonical_acquire_error(error: AcquireError) -> RetryErrorKind {
+    match error {
+        AcquireError::Cancelled => RetryErrorKind::Cancelled,
+        AcquireError::Closed | AcquireError::PolledAfterCompletion => RetryErrorKind::Closed,
+    }
+}
+
+fn retry_error_sequence(seed: u64, attempts: usize, closed: bool) -> Vec<RetryErrorKind> {
+    let mut runtime = LabRuntime::with_seed(seed);
+    let mut sequence = Vec::with_capacity(attempts);
+
+    for _ in 0..attempts {
+        let sem = Semaphore::new(0);
+        let cx = Cx::for_testing();
+        if closed {
+            sem.close();
+        } else {
+            cx.cancel_fast(CancelKind::User);
+        }
+
+        let error = match futures_lite::future::block_on(sem.acquire(&cx, 1)) {
+            Ok(_) => panic!("retry attempt should produce a canonical acquisition error"),
+            Err(error) => error,
+        };
+        sequence.push(canonical_acquire_error(error));
+    }
+
+    let violations = runtime.check_invariants();
+    assert!(
+        violations.is_empty(),
+        "lab runtime invariant violations during retry MR: {violations:?}"
+    );
+    sequence
+}
+
+/// MR7b: Deterministic retry error sequence.
+///
+/// Transformation: replay the same N-attempt retry trace under the same lab
+/// seed and identical input condition.
+///
+/// Relation: every replay produces the same canonical error sequence.
+#[test]
+fn mr_retry_same_input_replays_same_canonical_error_sequence() {
+    proptest!(|(
+        seed in any::<u64>(),
+        attempts in 1usize..12,
+        closed in any::<bool>(),
+    )| {
+        let first = retry_error_sequence(seed, attempts, closed);
+        let second = retry_error_sequence(seed, attempts, closed);
+
+        prop_assert_eq!(&first, &second,
+            "retrying the same input under deterministic mode changed the canonical error sequence");
+        prop_assert_eq!(first.len(), attempts,
+            "retry sequence length should equal the requested attempt count");
+        prop_assert!(
+            first.iter().all(|kind| *kind == first[0]),
+            "same-input retries should not alternate canonical error kind: {first:?}"
         );
     });
 }

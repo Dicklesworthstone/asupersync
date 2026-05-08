@@ -88,6 +88,9 @@ mod watch_borrow_vs_changed_metamorphic;
 #[cfg(test)]
 #[path = "mpsc_message_preservation_metamorphic.rs"]
 mod mpsc_message_preservation_metamorphic;
+#[cfg(test)]
+#[path = "mpsc_reservation_commutation_metamorphic.rs"]
+mod mpsc_reservation_commutation_metamorphic;
 
 #[cfg(test)]
 #[path = "broadcast_no_message_loss_metamorphic.rs"]
