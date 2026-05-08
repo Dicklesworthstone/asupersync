@@ -136,11 +136,15 @@ fn architecture_doc_requires_structured_logs_and_replay_artifacts() {
 #[test]
 fn architecture_doc_includes_rch_validation_bundle() {
     let doc = load_doc();
+    assert!(
+        !doc.contains("rch exec -- cargo "),
+        "validation commands must route Cargo through rch env CARGO_TARGET_DIR"
+    );
     for token in [
-        "rch exec -- cargo test --test tokio_adapter_boundary_architecture -- --nocapture",
-        "rch exec -- cargo check --all-targets -q",
-        "rch exec -- cargo fmt --check",
-        "rch exec -- cargo clippy --all-targets -- -D warnings",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_adapter_boundary_docs cargo test --test tokio_adapter_boundary_architecture -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_adapter_boundary_docs cargo check --all-targets -q",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_adapter_boundary_docs cargo fmt --check",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_adapter_boundary_docs cargo clippy --all-targets -- -D warnings",
     ] {
         assert!(
             doc.contains(token),
