@@ -182,8 +182,9 @@ pub use scoring::{
     score_persistence, seed_fingerprint,
 };
 pub use streaming::{
-    ReplayCheckpoint, ReplayProgress, StreamingReplayError, StreamingReplayResult,
-    StreamingReplayer,
+    EvidenceOverflowPolicy, EvidenceSinkDecision, ReplayCheckpoint, ReplayProgress,
+    StreamingReplayError, StreamingReplayResult, StreamingReplayer, TraceEvidenceChunk,
+    TraceEvidenceSink, TraceEvidenceStreamConfig, TraceEvidenceStreamStats, TraceEvidenceStreamer,
 };
 pub use tla_export::{TlaExporter, TlaModule, TlaStateSnapshot};
 

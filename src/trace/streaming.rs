@@ -78,10 +78,394 @@ pub enum StreamingReplayError {
     /// Serialization error.
     #[error("serialization error: {0}")]
     Serialize(String),
+
+    /// A serialized evidence record does not fit in the configured chunk size.
+    #[error("evidence record too large: {actual} bytes exceeds max chunk size {max}")]
+    EvidenceRecordTooLarge {
+        /// Serialized record length, including the length prefix.
+        actual: usize,
+        /// Configured maximum chunk size.
+        max: usize,
+    },
+
+    /// The configured sink reported backpressure and the policy requires an error.
+    #[error("evidence sink backpressure at sequence {sequence}")]
+    EvidenceBackpressure {
+        /// First record sequence in the backpressured chunk.
+        sequence: u64,
+    },
 }
 
 /// Result type for streaming replay operations.
 pub type StreamingReplayResult<T> = Result<T, StreamingReplayError>;
+
+// =============================================================================
+// Trace Evidence Streaming
+// =============================================================================
+
+/// Policy applied when an evidence record cannot be emitted immediately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceOverflowPolicy {
+    /// Stop streaming and return the stats gathered so far.
+    Stop,
+    /// Drop the record or chunk that could not be emitted.
+    DropNewest,
+    /// Return an explicit error.
+    Error,
+}
+
+/// Decision returned by a trace evidence sink.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceSinkDecision {
+    /// The sink accepted the chunk.
+    Accepted,
+    /// The sink is applying backpressure.
+    Backpressured,
+    /// The sink is closed and no further chunks should be sent.
+    Closed,
+}
+
+/// Bounded-copy streaming configuration for trace evidence records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TraceEvidenceStreamConfig {
+    /// Maximum bytes per emitted evidence chunk.
+    pub max_chunk_bytes: usize,
+    /// Policy for oversized records and backpressured sinks.
+    pub overflow_policy: EvidenceOverflowPolicy,
+}
+
+impl TraceEvidenceStreamConfig {
+    /// Default maximum evidence chunk size: 64 KiB.
+    pub const DEFAULT_MAX_CHUNK_BYTES: usize = 64 * 1024;
+
+    /// Creates a new config with defaults.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            max_chunk_bytes: Self::DEFAULT_MAX_CHUNK_BYTES,
+            overflow_policy: EvidenceOverflowPolicy::Stop,
+        }
+    }
+
+    /// Sets the maximum chunk size in bytes.
+    #[must_use]
+    pub const fn with_max_chunk_bytes(mut self, max_chunk_bytes: usize) -> Self {
+        self.max_chunk_bytes = max_chunk_bytes;
+        self
+    }
+
+    /// Sets the overflow and backpressure policy.
+    #[must_use]
+    pub const fn with_overflow_policy(mut self, policy: EvidenceOverflowPolicy) -> Self {
+        self.overflow_policy = policy;
+        self
+    }
+}
+
+impl Default for TraceEvidenceStreamConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Borrowed evidence chunk handed to a sink.
+///
+/// The payload is a sequence of length-prefixed MessagePack [`ReplayEvent`]
+/// records. The slice is valid only for the duration of the sink call, allowing
+/// callers to stream from the reusable internal buffer without allocating a new
+/// chunk per sink write.
+#[derive(Debug, Clone, Copy)]
+pub struct TraceEvidenceChunk<'a> {
+    /// First record sequence in this chunk.
+    pub first_sequence: u64,
+    /// Number of records in this chunk.
+    pub records: u64,
+    /// Length-prefixed MessagePack records.
+    pub payload: &'a [u8],
+}
+
+impl TraceEvidenceChunk<'_> {
+    /// Returns the payload length in bytes.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.payload.len()
+    }
+
+    /// Returns true when the payload is empty.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.payload.is_empty()
+    }
+}
+
+/// Sink for bounded-copy trace evidence chunks.
+pub trait TraceEvidenceSink {
+    /// Pushes one borrowed evidence chunk to the sink.
+    ///
+    /// Implementations must copy or consume the payload before returning if
+    /// they need to retain it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the sink fails while accepting the chunk.
+    fn push_trace_evidence(
+        &mut self,
+        chunk: TraceEvidenceChunk<'_>,
+    ) -> StreamingReplayResult<EvidenceSinkDecision>;
+}
+
+/// Streaming counters emitted by [`TraceEvidenceStreamer`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TraceEvidenceStreamStats {
+    /// Records presented to the streamer.
+    pub records_seen: u64,
+    /// Records accepted by the sink.
+    pub records_emitted: u64,
+    /// Records dropped by overflow/backpressure policy.
+    pub records_dropped: u64,
+    /// Bytes accepted by the sink.
+    pub bytes_emitted: u64,
+    /// Number of oversized-record decisions.
+    pub overflow_events: u64,
+    /// Number of sink backpressure decisions.
+    pub backpressure_events: u64,
+    /// Largest combined scratch-buffer footprint observed.
+    pub max_buffered_bytes: usize,
+}
+
+/// Bounded-copy evidence streamer for replay events.
+///
+/// Events are encoded into a reusable scratch buffer, framed with a 4-byte
+/// little-endian length prefix, and packed into bounded chunks. The sink sees a
+/// borrowed slice into the streamer's chunk buffer, so the hot path avoids
+/// allocating one owned `Vec<u8>` per emitted chunk.
+pub struct TraceEvidenceStreamer {
+    config: TraceEvidenceStreamConfig,
+    chunk: Vec<u8>,
+    event: Vec<u8>,
+    first_sequence_in_chunk: u64,
+    pending_records: u64,
+    stats: TraceEvidenceStreamStats,
+}
+
+impl TraceEvidenceStreamer {
+    /// Creates a new evidence streamer.
+    #[must_use]
+    pub fn new(config: TraceEvidenceStreamConfig) -> Self {
+        let capacity = config
+            .max_chunk_bytes
+            .min(TraceEvidenceStreamConfig::DEFAULT_MAX_CHUNK_BYTES);
+        Self {
+            config,
+            chunk: Vec::with_capacity(capacity),
+            event: Vec::new(),
+            first_sequence_in_chunk: 0,
+            pending_records: 0,
+            stats: TraceEvidenceStreamStats::default(),
+        }
+    }
+
+    /// Returns the configured stream policy.
+    #[must_use]
+    pub const fn config(&self) -> TraceEvidenceStreamConfig {
+        self.config
+    }
+
+    /// Returns the current streaming counters.
+    #[must_use]
+    pub const fn stats(&self) -> TraceEvidenceStreamStats {
+        self.stats
+    }
+
+    fn update_buffer_watermark(&mut self) {
+        let buffered = self.chunk.len().saturating_add(self.event.len());
+        self.stats.max_buffered_bytes = self.stats.max_buffered_bytes.max(buffered);
+    }
+
+    fn encode_event(&mut self, event: &ReplayEvent) -> StreamingReplayResult<usize> {
+        self.event.clear();
+        let mut serializer = rmp_serde::Serializer::new(&mut self.event);
+        event
+            .serialize(&mut serializer)
+            .map_err(|err| StreamingReplayError::Serialize(err.to_string()))?;
+        self.update_buffer_watermark();
+        Ok(4usize.saturating_add(self.event.len()))
+    }
+
+    fn handle_record_overflow(&mut self, record_len: usize) -> StreamingReplayResult<bool> {
+        self.stats.overflow_events = self.stats.overflow_events.saturating_add(1);
+        match self.config.overflow_policy {
+            EvidenceOverflowPolicy::Stop => Ok(false),
+            EvidenceOverflowPolicy::DropNewest => {
+                self.stats.records_dropped = self.stats.records_dropped.saturating_add(1);
+                Ok(true)
+            }
+            EvidenceOverflowPolicy::Error => Err(StreamingReplayError::EvidenceRecordTooLarge {
+                actual: record_len,
+                max: self.config.max_chunk_bytes,
+            }),
+        }
+    }
+
+    fn append_encoded_event(&mut self) -> StreamingReplayResult<()> {
+        let len = u32::try_from(self.event.len()).map_err(|_| {
+            StreamingReplayError::EvidenceRecordTooLarge {
+                actual: self.event.len(),
+                max: u32::MAX as usize,
+            }
+        })?;
+        self.chunk.extend_from_slice(&len.to_le_bytes());
+        self.chunk.extend_from_slice(&self.event);
+        self.pending_records = self.pending_records.saturating_add(1);
+        self.update_buffer_watermark();
+        Ok(())
+    }
+
+    fn flush_pending<S>(&mut self, sink: &mut S) -> StreamingReplayResult<bool>
+    where
+        S: TraceEvidenceSink,
+    {
+        if self.chunk.is_empty() {
+            return Ok(true);
+        }
+
+        let first_sequence = self.first_sequence_in_chunk;
+        let records = self.pending_records;
+        let len = self.chunk.len();
+        let chunk = TraceEvidenceChunk {
+            first_sequence,
+            records,
+            payload: &self.chunk,
+        };
+
+        match sink.push_trace_evidence(chunk)? {
+            EvidenceSinkDecision::Accepted => {
+                self.stats.records_emitted = self.stats.records_emitted.saturating_add(records);
+                self.stats.bytes_emitted = self.stats.bytes_emitted.saturating_add(len as u64);
+                self.chunk.clear();
+                self.pending_records = 0;
+                Ok(true)
+            }
+            EvidenceSinkDecision::Backpressured => {
+                self.stats.backpressure_events = self.stats.backpressure_events.saturating_add(1);
+                match self.config.overflow_policy {
+                    EvidenceOverflowPolicy::Stop => Ok(false),
+                    EvidenceOverflowPolicy::DropNewest => {
+                        self.stats.records_dropped =
+                            self.stats.records_dropped.saturating_add(records);
+                        self.chunk.clear();
+                        self.pending_records = 0;
+                        Ok(true)
+                    }
+                    EvidenceOverflowPolicy::Error => {
+                        Err(StreamingReplayError::EvidenceBackpressure {
+                            sequence: first_sequence,
+                        })
+                    }
+                }
+            }
+            EvidenceSinkDecision::Closed => Ok(false),
+        }
+    }
+
+    /// Streams replay events from an iterator to a sink.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if serialization fails or if the configured policy
+    /// treats overflow/backpressure as an error.
+    pub fn stream_events<'a, I, S>(
+        &mut self,
+        events: I,
+        sink: &mut S,
+    ) -> StreamingReplayResult<TraceEvidenceStreamStats>
+    where
+        I: IntoIterator<Item = &'a ReplayEvent>,
+        S: TraceEvidenceSink,
+    {
+        for event in events {
+            let sequence = self.stats.records_seen;
+            self.stats.records_seen = self.stats.records_seen.saturating_add(1);
+
+            let record_len = self.encode_event(event)?;
+            if record_len > self.config.max_chunk_bytes {
+                if !self.handle_record_overflow(record_len)? {
+                    return Ok(self.stats);
+                }
+                continue;
+            }
+
+            if !self.chunk.is_empty()
+                && self.chunk.len().saturating_add(record_len) > self.config.max_chunk_bytes
+                && !self.flush_pending(sink)?
+            {
+                return Ok(self.stats);
+            }
+
+            if self.chunk.is_empty() {
+                self.first_sequence_in_chunk = sequence;
+            }
+            self.append_encoded_event()?;
+        }
+
+        self.finish(sink)
+    }
+
+    /// Streams all remaining events from a [`StreamingReplayer`] to a sink.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the replayer, serialization, or sink fails.
+    pub fn stream_replayer<S>(
+        &mut self,
+        replayer: &mut StreamingReplayer,
+        sink: &mut S,
+    ) -> StreamingReplayResult<TraceEvidenceStreamStats>
+    where
+        S: TraceEvidenceSink,
+    {
+        while let Some(event) = replayer.next_event()? {
+            let sequence = self.stats.records_seen;
+            self.stats.records_seen = self.stats.records_seen.saturating_add(1);
+
+            let record_len = self.encode_event(&event)?;
+            if record_len > self.config.max_chunk_bytes {
+                if !self.handle_record_overflow(record_len)? {
+                    return Ok(self.stats);
+                }
+                continue;
+            }
+
+            if !self.chunk.is_empty()
+                && self.chunk.len().saturating_add(record_len) > self.config.max_chunk_bytes
+                && !self.flush_pending(sink)?
+            {
+                return Ok(self.stats);
+            }
+
+            if self.chunk.is_empty() {
+                self.first_sequence_in_chunk = sequence;
+            }
+            self.append_encoded_event()?;
+        }
+
+        self.finish(sink)
+    }
+
+    /// Flushes the final pending chunk and returns stream stats.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the configured policy treats final sink
+    /// backpressure as an error.
+    pub fn finish<S>(&mut self, sink: &mut S) -> StreamingReplayResult<TraceEvidenceStreamStats>
+    where
+        S: TraceEvidenceSink,
+    {
+        let _ = self.flush_pending(sink)?;
+        Ok(self.stats)
+    }
+}
 
 // =============================================================================
 // Progress Tracking
@@ -688,6 +1072,174 @@ mod tests {
                 at_tick: i,
             })
             .collect()
+    }
+
+    #[derive(Debug, Default)]
+    struct CapturingEvidenceSink {
+        chunks: Vec<(u64, u64, Vec<u8>)>,
+        backpressure_after_chunks: Option<usize>,
+    }
+
+    impl CapturingEvidenceSink {
+        fn with_backpressure_after_chunks(limit: usize) -> Self {
+            Self {
+                chunks: Vec::new(),
+                backpressure_after_chunks: Some(limit),
+            }
+        }
+
+        fn decoded_ticks(&self) -> Vec<u64> {
+            let mut ticks = Vec::new();
+            for (_, _, payload) in &self.chunks {
+                let mut cursor = payload.as_slice();
+                while !cursor.is_empty() {
+                    let (len_bytes, rest) = cursor.split_at(4);
+                    let len = u32::from_le_bytes(len_bytes.try_into().unwrap()) as usize;
+                    let (event_bytes, remaining) = rest.split_at(len);
+                    let event: ReplayEvent = rmp_serde::from_slice(event_bytes).unwrap();
+                    if let ReplayEvent::TaskScheduled { at_tick, .. } = event {
+                        ticks.push(at_tick);
+                    }
+                    cursor = remaining;
+                }
+            }
+            ticks
+        }
+    }
+
+    impl TraceEvidenceSink for CapturingEvidenceSink {
+        fn push_trace_evidence(
+            &mut self,
+            chunk: TraceEvidenceChunk<'_>,
+        ) -> StreamingReplayResult<EvidenceSinkDecision> {
+            if let Some(limit) = self.backpressure_after_chunks
+                && self.chunks.len() >= limit
+            {
+                return Ok(EvidenceSinkDecision::Backpressured);
+            }
+            self.chunks
+                .push((chunk.first_sequence, chunk.records, chunk.payload.to_vec()));
+            Ok(EvidenceSinkDecision::Accepted)
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct CountingEvidenceSink {
+        chunks: u64,
+        max_chunk_len: usize,
+    }
+
+    impl TraceEvidenceSink for CountingEvidenceSink {
+        fn push_trace_evidence(
+            &mut self,
+            chunk: TraceEvidenceChunk<'_>,
+        ) -> StreamingReplayResult<EvidenceSinkDecision> {
+            assert!(!chunk.is_empty());
+            self.chunks = self.chunks.saturating_add(1);
+            self.max_chunk_len = self.max_chunk_len.max(chunk.len());
+            Ok(EvidenceSinkDecision::Accepted)
+        }
+    }
+
+    #[test]
+    fn evidence_stream_chunks_respect_capacity_and_ordering() {
+        let events = sample_events(8);
+        let config = TraceEvidenceStreamConfig::new().with_max_chunk_bytes(48);
+        let mut streamer = TraceEvidenceStreamer::new(config);
+        let mut sink = CapturingEvidenceSink::default();
+
+        let stats = streamer.stream_events(events.iter(), &mut sink).unwrap();
+
+        assert_eq!(stats.records_seen, 8);
+        assert_eq!(stats.records_emitted, 8);
+        assert_eq!(stats.records_dropped, 0);
+        assert_eq!(stats.overflow_events, 0);
+        assert_eq!(stats.backpressure_events, 0);
+        assert!(stats.bytes_emitted > 0);
+        assert!(stats.max_buffered_bytes <= config.max_chunk_bytes * 2);
+        assert!(!sink.chunks.is_empty());
+        for (_, records, payload) in &sink.chunks {
+            assert!(*records >= 1);
+            assert!(payload.len() <= config.max_chunk_bytes);
+        }
+        assert_eq!(sink.decoded_ticks(), (0..8).collect::<Vec<_>>());
+        assert_eq!(sink.chunks.first().unwrap().0, 0);
+    }
+
+    #[test]
+    fn evidence_stream_backpressure_drop_newest_records_decision() {
+        let events = sample_events(8);
+        let config = TraceEvidenceStreamConfig::new()
+            .with_max_chunk_bytes(48)
+            .with_overflow_policy(EvidenceOverflowPolicy::DropNewest);
+        let mut streamer = TraceEvidenceStreamer::new(config);
+        let mut sink = CapturingEvidenceSink::with_backpressure_after_chunks(1);
+
+        let stats = streamer.stream_events(events.iter(), &mut sink).unwrap();
+
+        assert_eq!(stats.records_seen, 8);
+        assert!(stats.records_emitted > 0);
+        assert!(stats.records_emitted < stats.records_seen);
+        assert_eq!(
+            stats.records_seen,
+            stats.records_emitted + stats.records_dropped
+        );
+        assert!(stats.backpressure_events > 0);
+        assert_eq!(sink.chunks.len(), 1);
+        let accepted_ticks = sink.decoded_ticks();
+        assert_eq!(accepted_ticks.first(), Some(&0));
+        assert_eq!(accepted_ticks.len() as u64, stats.records_emitted);
+        assert!(accepted_ticks.len() < events.len());
+    }
+
+    #[test]
+    fn evidence_stream_oversized_record_errors_when_policy_requires() {
+        let events = sample_events(1);
+        let config = TraceEvidenceStreamConfig::new()
+            .with_max_chunk_bytes(4)
+            .with_overflow_policy(EvidenceOverflowPolicy::Error);
+        let mut streamer = TraceEvidenceStreamer::new(config);
+        let mut sink = CapturingEvidenceSink::default();
+
+        let err = streamer
+            .stream_events(events.iter(), &mut sink)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            StreamingReplayError::EvidenceRecordTooLarge { .. }
+        ));
+    }
+
+    #[test]
+    fn evidence_stream_large_trace_keeps_bounded_buffers() {
+        let temp = NamedTempFile::new().unwrap();
+        let path = temp.path();
+        let metadata = TraceMetadata::new(42);
+        let event_count = 1_000u64;
+        {
+            let mut writer = TraceWriter::create(path).unwrap();
+            writer.write_metadata(&metadata).unwrap();
+            for event in sample_events(event_count) {
+                writer.write_event(&event).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+
+        let config = TraceEvidenceStreamConfig::new().with_max_chunk_bytes(256);
+        let mut streamer = TraceEvidenceStreamer::new(config);
+        let mut replayer = StreamingReplayer::open(path).unwrap();
+        let mut sink = CountingEvidenceSink::default();
+
+        let stats = streamer.stream_replayer(&mut replayer, &mut sink).unwrap();
+
+        assert_eq!(stats.records_seen, event_count);
+        assert_eq!(stats.records_emitted, event_count);
+        assert_eq!(stats.records_dropped, 0);
+        assert_eq!(stats.overflow_events, 0);
+        assert!(sink.chunks > 1);
+        assert!(sink.max_chunk_len <= config.max_chunk_bytes);
+        assert!(stats.max_buffered_bytes <= config.max_chunk_bytes * 2);
+        assert!(replayer.is_complete());
     }
 
     #[test]

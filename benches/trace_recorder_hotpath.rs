@@ -9,7 +9,11 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use std::hint::black_box;
 
 use asupersync::trace::recorder::{RecorderConfig, TraceRecorder};
-use asupersync::trace::replay::TraceMetadata;
+use asupersync::trace::replay::{CompactTaskId, ReplayEvent, TraceMetadata};
+use asupersync::trace::streaming::{
+    EvidenceSinkDecision, StreamingReplayResult, TraceEvidenceChunk, TraceEvidenceSink,
+    TraceEvidenceStreamConfig, TraceEvidenceStreamer,
+};
 use asupersync::types::{TaskId, Time};
 
 /// Mixed trace workload: typical patterns from lab runtime
@@ -44,6 +48,32 @@ const WORKLOADS: &[TraceWorkload] = &[
         io_events: 2000,
     },
 ];
+
+#[derive(Debug, Default)]
+struct CountingEvidenceSink {
+    chunks: u64,
+    bytes: u64,
+}
+
+impl TraceEvidenceSink for CountingEvidenceSink {
+    fn push_trace_evidence(
+        &mut self,
+        chunk: TraceEvidenceChunk<'_>,
+    ) -> StreamingReplayResult<EvidenceSinkDecision> {
+        self.chunks = self.chunks.saturating_add(1);
+        self.bytes = self.bytes.saturating_add(chunk.len() as u64);
+        Ok(EvidenceSinkDecision::Accepted)
+    }
+}
+
+fn synthetic_replay_events(count: u64) -> Vec<ReplayEvent> {
+    (0..count)
+        .map(|i| ReplayEvent::TaskScheduled {
+            task: CompactTaskId(i),
+            at_tick: i,
+        })
+        .collect()
+}
 
 fn bench_trace_emit_hotpath(c: &mut Criterion) {
     let mut group = c.benchmark_group("trace_emit_hotpath");
@@ -174,10 +204,36 @@ fn bench_recorder_overhead(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_trace_evidence_streaming(c: &mut Criterion) {
+    let mut group = c.benchmark_group("trace_evidence_streaming");
+
+    for event_count in [1_000_u64, 10_000] {
+        let events = synthetic_replay_events(event_count);
+        group.throughput(Throughput::Elements(event_count));
+        group.bench_with_input(
+            BenchmarkId::new("bounded_copy_chunks", event_count),
+            &events,
+            |b, events| {
+                b.iter(|| {
+                    let config = TraceEvidenceStreamConfig::new().with_max_chunk_bytes(64 * 1024);
+                    let mut streamer = TraceEvidenceStreamer::new(config);
+                    let mut sink = CountingEvidenceSink::default();
+                    let stats = streamer.stream_events(events.iter(), &mut sink).unwrap();
+                    black_box(stats);
+                    black_box(sink);
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     trace_recorder_benches,
     bench_trace_emit_hotpath,
     bench_record_event_microbench,
-    bench_recorder_overhead
+    bench_recorder_overhead,
+    bench_trace_evidence_streaming
 );
 criterion_main!(trace_recorder_benches);
