@@ -39,6 +39,8 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Stable schema for deterministic replay plans synthesized from coordination packs.
 pub const COORDINATION_PRESSURE_REPLAY_SCHEMA_VERSION: &str =
     "asupersync.coordination-pressure-replay.v1";
+/// Stable schema for deterministic swarm replay lab summaries.
+pub const SWARM_REPLAY_LAB_SCHEMA_VERSION: &str = "asupersync.swarm-replay-lab.v1";
 
 const COORDINATION_REQUIRED_FAMILIES: [&str; 7] = [
     "tracker_lock_contention",
@@ -778,6 +780,458 @@ fn stable_hash_str(hash: &mut u64, value: &str) {
         *hash ^= u64::from(*byte);
         *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
+}
+
+/// Deterministic knobs for the swarm replay lab workload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmReplayScenarioKnobs {
+    /// Number of deterministic scheduler workers to model.
+    pub worker_count: usize,
+    /// Number of child regions under the root region.
+    pub region_count: usize,
+    /// Number of tasks spawned into each child region.
+    pub tasks_per_region: usize,
+    /// Capacity of the modeled MPSC backlog.
+    pub channel_capacity: usize,
+    /// Number of logical messages generated per task.
+    pub messages_per_task: usize,
+    /// Every Nth region receives a cancellation cascade.
+    pub cancellation_stride: usize,
+    /// Deterministic CPU/blocking-pool pressure units per task.
+    pub blocking_units: usize,
+    /// Number of logical trace artifacts produced by the run.
+    pub artifact_count: usize,
+    /// Maximum lab runtime steps.
+    pub max_steps: u64,
+}
+
+impl SwarmReplayScenarioKnobs {
+    /// CI-sized workload that still exercises regions, mixed priorities,
+    /// cancellation cascades, backlog pressure, and artifact logging.
+    #[must_use]
+    pub const fn ci() -> Self {
+        Self {
+            worker_count: 4,
+            region_count: 4,
+            tasks_per_region: 4,
+            channel_capacity: 3,
+            messages_per_task: 2,
+            cancellation_stride: 2,
+            blocking_units: 3,
+            artifact_count: 2,
+            max_steps: 16_384,
+        }
+    }
+
+    #[must_use]
+    fn normalized(&self) -> Self {
+        Self {
+            worker_count: self.worker_count.max(1),
+            region_count: self.region_count.max(1),
+            tasks_per_region: self.tasks_per_region.max(1),
+            channel_capacity: self.channel_capacity.max(1),
+            messages_per_task: self.messages_per_task.max(1),
+            cancellation_stride: self.cancellation_stride.max(1),
+            blocking_units: self.blocking_units.max(1),
+            artifact_count: self.artifact_count.max(1),
+            max_steps: self.max_steps,
+        }
+    }
+
+    #[must_use]
+    fn total_task_count(&self) -> usize {
+        self.region_count * self.tasks_per_region
+    }
+
+    #[must_use]
+    fn logical_message_count(&self) -> usize {
+        self.total_task_count() * self.messages_per_task
+    }
+}
+
+impl Default for SwarmReplayScenarioKnobs {
+    fn default() -> Self {
+        Self::ci()
+    }
+}
+
+/// Resource deltas captured by a deterministic swarm replay run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmReplayResourceDeltas {
+    /// Child regions created under the root.
+    pub regions_created: usize,
+    /// Tasks created across all child regions.
+    pub tasks_created: usize,
+    /// Logical messages committed into the modeled MPSC backlog.
+    pub messages_committed: usize,
+    /// Logical messages drained from the modeled MPSC backlog.
+    pub messages_drained: usize,
+    /// Backpressure events observed while filling the modeled backlog.
+    pub channel_backpressure_events: usize,
+    /// Tasks scheduled onto the cancel lane by cancellation cascades.
+    pub cancel_targets: usize,
+    /// Deterministic blocking-pool pressure units represented in the run.
+    pub blocking_units: usize,
+    /// Logical trace artifacts emitted by the workload.
+    pub trace_artifacts: usize,
+    /// Trace events in the final lab report.
+    pub trace_events: usize,
+    /// Scheduler steps in the final lab report.
+    pub scheduler_steps: u64,
+}
+
+/// Stable trace-certificate projection for swarm replay summaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmReplayTraceCertificate {
+    /// Incremental hash of witnessed events.
+    pub event_hash: u64,
+    /// Total number of witnessed events.
+    pub event_count: u64,
+    /// Hash of scheduler decisions.
+    pub schedule_hash: u64,
+}
+
+impl From<crate::lab::runtime::LabTraceCertificateSummary> for SwarmReplayTraceCertificate {
+    fn from(value: crate::lab::runtime::LabTraceCertificateSummary) -> Self {
+        Self {
+            event_hash: value.event_hash,
+            event_count: value.event_count,
+            schedule_hash: value.schedule_hash,
+        }
+    }
+}
+
+/// Stable lab-run projection used by swarm replay summaries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmReplayLabFacts {
+    /// Whether the runtime reached quiescence.
+    pub quiescent: bool,
+    /// Steps executed during this replay call.
+    pub steps_delta: u64,
+    /// Total scheduler steps executed by the runtime.
+    pub steps_total: u64,
+    /// Virtual time in nanoseconds at report time.
+    pub now_nanos: u64,
+    /// Canonical replay trace fingerprint.
+    pub trace_fingerprint: u64,
+    /// Stable trace certificate summary.
+    pub trace_certificate: SwarmReplayTraceCertificate,
+    /// Number of oracle entries checked.
+    pub oracle_total: usize,
+    /// Number of oracle entries that passed.
+    pub oracle_passed: usize,
+    /// Number of oracle entries that failed.
+    pub oracle_failed: usize,
+    /// Runtime invariant violations.
+    pub invariant_violations: Vec<String>,
+    /// Temporal invariant failures.
+    pub temporal_failures: Vec<String>,
+}
+
+/// Deterministic minimized failing schedule metadata for invariant failures.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmReplayMinimizedSchedule {
+    /// Invariant preserved by minimization.
+    pub preserved_invariant: String,
+    /// Prefix length that is sufficient to reproduce the failure.
+    pub prefix_len: usize,
+    /// Deterministic schedule replay steps retained in the minimized case.
+    pub schedule_steps: Vec<String>,
+}
+
+/// Structured replay log for a deterministic swarm replay run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmReplayLog {
+    /// Log schema version.
+    pub schema_version: String,
+    /// Deterministic replay seed.
+    pub seed: u64,
+    /// Scenario knobs copied into the log for reproduction.
+    pub scenario_knobs: SwarmReplayScenarioKnobs,
+    /// Resource deltas copied into the log for diagnostics.
+    pub resource_deltas: SwarmReplayResourceDeltas,
+    /// Logical trace artifact references produced by the run.
+    pub trace_artifact_refs: Vec<String>,
+    /// Minimized failing schedule, present only when an invariant failed.
+    pub minimized_failing_schedule: Option<SwarmReplayMinimizedSchedule>,
+}
+
+/// Byte-stable deterministic swarm replay summary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmReplayRunSummary {
+    /// Summary schema version.
+    pub schema_version: String,
+    /// Stable scenario id.
+    pub scenario_id: String,
+    /// Deterministic replay seed.
+    pub seed: u64,
+    /// Scenario knobs after normalization.
+    pub knobs: SwarmReplayScenarioKnobs,
+    /// Resource deltas observed during the run.
+    pub resource_deltas: SwarmReplayResourceDeltas,
+    /// Stable projection of the lab report.
+    pub lab: SwarmReplayLabFacts,
+    /// Structured replay log.
+    pub log: SwarmReplayLog,
+}
+
+/// Run the deterministic swarm replay lab workload and return a byte-stable summary.
+#[must_use]
+pub fn run_swarm_replay_lab(seed: u64, knobs: &SwarmReplayScenarioKnobs) -> SwarmReplayRunSummary {
+    let knobs = knobs.normalized();
+    let mut config = LabConfig::new(seed)
+        .worker_count(knobs.worker_count)
+        .trace_capacity((knobs.total_task_count() * 32).max(2_048));
+    if knobs.max_steps > 0 {
+        config = config.max_steps(knobs.max_steps);
+    }
+
+    let mut runtime = LabRuntime::new(config);
+    let mut resource_deltas = install_swarm_replay_workload(&mut runtime, &knobs);
+    let report = runtime.run_until_quiescent_with_report();
+
+    resource_deltas.trace_events = report.trace_len;
+    resource_deltas.scheduler_steps = report.steps_total;
+
+    let lab = SwarmReplayLabFacts {
+        quiescent: report.quiescent,
+        steps_delta: report.steps_delta,
+        steps_total: report.steps_total,
+        now_nanos: report.now_nanos,
+        trace_fingerprint: report.trace_fingerprint,
+        trace_certificate: report.trace_certificate.into(),
+        oracle_total: report.oracle_report.total,
+        oracle_passed: report.oracle_report.passed,
+        oracle_failed: report.oracle_report.failed,
+        invariant_violations: report.invariant_violations.clone(),
+        temporal_failures: report.temporal_invariant_failures.clone(),
+    };
+
+    let minimized_failing_schedule =
+        minimized_swarm_schedule(seed, &knobs, &resource_deltas, &report);
+    let trace_artifact_refs = swarm_trace_artifact_refs(seed, &knobs);
+    let log = SwarmReplayLog {
+        schema_version: SWARM_REPLAY_LAB_SCHEMA_VERSION.to_string(),
+        seed,
+        scenario_knobs: knobs.clone(),
+        resource_deltas: resource_deltas.clone(),
+        trace_artifact_refs,
+        minimized_failing_schedule,
+    };
+
+    SwarmReplayRunSummary {
+        schema_version: SWARM_REPLAY_LAB_SCHEMA_VERSION.to_string(),
+        scenario_id: "deterministic-swarm-replay-lab".to_string(),
+        seed,
+        knobs,
+        resource_deltas,
+        lab,
+        log,
+    }
+}
+
+fn install_swarm_replay_workload(
+    runtime: &mut LabRuntime,
+    knobs: &SwarmReplayScenarioKnobs,
+) -> SwarmReplayResourceDeltas {
+    let root = runtime
+        .state
+        .create_root_region(crate::types::Budget::INFINITE);
+    let mut regions = Vec::with_capacity(knobs.region_count);
+    for _ in 0..knobs.region_count {
+        regions.push(
+            runtime
+                .state
+                .create_child_region(root, crate::types::Budget::INFINITE)
+                .expect("create swarm child region"),
+        );
+    }
+
+    let mut tasks_created = 0usize;
+    for (region_index, &region) in regions.iter().enumerate() {
+        for task_index in 0..knobs.tasks_per_region {
+            let blocking_units = knobs.blocking_units;
+            let messages_per_task = knobs.messages_per_task;
+            let (task, _) = runtime
+                .state
+                .create_task(region, crate::types::Budget::INFINITE, async move {
+                    let mut digest = ((region_index as u64) << 32)
+                        ^ (task_index as u64)
+                        ^ messages_per_task as u64;
+                    for unit in 0..blocking_units {
+                        digest = digest
+                            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                            .wrapping_add(unit as u64);
+                        if unit % 2 == 0 {
+                            crate::runtime::yield_now::yield_now().await;
+                        }
+                    }
+                    for _ in 0..=((region_index + task_index) % 2) {
+                        crate::runtime::yield_now::yield_now().await;
+                    }
+                    digest
+                })
+                .expect("create swarm task");
+            let priority = (((region_index + 1) * 11 + task_index * 5) % 10) as u8;
+            runtime.scheduler.lock().schedule(task, priority);
+            tasks_created += 1;
+        }
+    }
+
+    let (messages_committed, messages_drained, channel_backpressure_events) =
+        model_swarm_channel_backpressure(knobs);
+    let now = runtime.now();
+    runtime.trace().record_event(|seq| {
+        TraceEvent::user_trace(
+            seq,
+            now,
+            format!(
+                "swarm.channel_backpressure committed={messages_committed} drained={messages_drained} backpressure={channel_backpressure_events}"
+            ),
+        )
+    });
+
+    let cancel_targets = schedule_swarm_cancellations(runtime, &regions, knobs.cancellation_stride);
+    for artifact_ref in swarm_trace_artifact_refs(runtime.config().seed, knobs) {
+        let now = runtime.now();
+        runtime.trace().record_event(|seq| {
+            TraceEvent::user_trace(seq, now, format!("swarm.trace_artifact {artifact_ref}"))
+        });
+    }
+
+    SwarmReplayResourceDeltas {
+        regions_created: regions.len(),
+        tasks_created,
+        messages_committed,
+        messages_drained,
+        channel_backpressure_events,
+        cancel_targets,
+        blocking_units: knobs.blocking_units * tasks_created,
+        trace_artifacts: knobs.artifact_count,
+        trace_events: 0,
+        scheduler_steps: 0,
+    }
+}
+
+fn model_swarm_channel_backpressure(knobs: &SwarmReplayScenarioKnobs) -> (usize, usize, usize) {
+    let (sender, mut receiver) = crate::channel::mpsc::channel::<u64>(knobs.channel_capacity);
+    let mut committed = 0usize;
+    let mut drained = 0usize;
+    let mut backpressure_events = 0usize;
+
+    for message in 0..knobs.logical_message_count() {
+        match sender.try_send(message as u64) {
+            Ok(()) => committed += 1,
+            Err(crate::channel::mpsc::SendError::Full(value)) => {
+                backpressure_events += 1;
+                if receiver.try_recv().is_ok() {
+                    drained += 1;
+                }
+                sender
+                    .try_send(value)
+                    .expect("draining one slot should clear backpressure");
+                committed += 1;
+            }
+            Err(
+                crate::channel::mpsc::SendError::Disconnected(_)
+                | crate::channel::mpsc::SendError::Cancelled(_),
+            ) => {
+                unreachable!("swarm replay keeps both channel halves alive")
+            }
+        }
+    }
+
+    while receiver.try_recv().is_ok() {
+        drained += 1;
+    }
+
+    (committed, drained, backpressure_events)
+}
+
+fn schedule_swarm_cancellations(
+    runtime: &mut LabRuntime,
+    regions: &[crate::types::RegionId],
+    cancellation_stride: usize,
+) -> usize {
+    let mut cancel_targets = 0usize;
+    for (index, &region) in regions.iter().enumerate() {
+        if (index + 1) % cancellation_stride != 0 {
+            continue;
+        }
+        let cancel_reason = crate::types::CancelReason::user("swarm replay cancellation cascade");
+        let targets = runtime.state.cancel_request(region, &cancel_reason, None);
+        cancel_targets += targets.len();
+        let mut scheduler = runtime.scheduler.lock();
+        for (task, priority) in targets {
+            scheduler.schedule_cancel(task, priority);
+        }
+    }
+    cancel_targets
+}
+
+fn swarm_trace_artifact_refs(seed: u64, knobs: &SwarmReplayScenarioKnobs) -> Vec<String> {
+    (0..knobs.artifact_count)
+        .map(|index| {
+            format!(
+                "target/lab-replay/swarm/seed-{seed:016x}/artifact-{index:02}-regions-{}-tasks-{}.json",
+                knobs.region_count,
+                knobs.total_task_count()
+            )
+        })
+        .collect()
+}
+
+fn minimized_swarm_schedule(
+    seed: u64,
+    knobs: &SwarmReplayScenarioKnobs,
+    resource_deltas: &SwarmReplayResourceDeltas,
+    report: &crate::lab::runtime::LabRunReport,
+) -> Option<SwarmReplayMinimizedSchedule> {
+    if report.quiescent
+        && report.invariant_violations.is_empty()
+        && report.temporal_invariant_failures.is_empty()
+    {
+        return None;
+    }
+
+    let preserved_invariant = report
+        .invariant_violations
+        .first()
+        .or_else(|| report.temporal_invariant_failures.first())
+        .cloned()
+        .unwrap_or_else(|| "quiescence".to_string());
+    let prefix_len = report
+        .refinement_counterexample_prefix_len
+        .or(report.temporal_counterexample_prefix_len)
+        .unwrap_or_else(|| report.trace_len.min(knobs.total_task_count()));
+    let schedule_steps = vec![
+        format!("seed={seed:016x}"),
+        format!(
+            "spawn regions={} tasks_per_region={}",
+            knobs.region_count, knobs.tasks_per_region
+        ),
+        format!(
+            "channel capacity={} committed={} drained={} backpressure={}",
+            knobs.channel_capacity,
+            resource_deltas.messages_committed,
+            resource_deltas.messages_drained,
+            resource_deltas.channel_backpressure_events
+        ),
+        format!(
+            "cancel stride={} targets={}",
+            knobs.cancellation_stride, resource_deltas.cancel_targets
+        ),
+        format!(
+            "replay prefix_len={} trace_fingerprint={:016x}",
+            prefix_len, report.trace_fingerprint
+        ),
+    ];
+
+    Some(SwarmReplayMinimizedSchedule {
+        preserved_invariant,
+        prefix_len,
+        schedule_steps,
+    })
 }
 
 /// Compares two traces and returns the first divergence point.
@@ -2439,6 +2893,103 @@ mod tests {
         crate::test_complete!(
             "coordination_replay_canonicalizes_source_hashes_and_rejects_live_only_fields"
         );
+    }
+
+    #[test]
+    fn swarm_replay_lab_summary_is_byte_stable() {
+        init_test("swarm_replay_lab_summary_is_byte_stable");
+        let knobs = SwarmReplayScenarioKnobs::ci();
+        let first = run_swarm_replay_lab(0x5EED_5A1D, &knobs);
+        let second = run_swarm_replay_lab(0x5EED_5A1D, &knobs);
+
+        let first_bytes = serde_json::to_vec(&first).expect("serialize first swarm summary");
+        let second_bytes = serde_json::to_vec(&second).expect("serialize second swarm summary");
+        assert_eq!(
+            first_bytes, second_bytes,
+            "same-seed swarm replay summary must be byte-stable"
+        );
+        assert_eq!(first.schema_version, SWARM_REPLAY_LAB_SCHEMA_VERSION);
+        assert_eq!(first.seed, 0x5EED_5A1D);
+        assert_eq!(first.resource_deltas.tasks_created, 16);
+        assert_eq!(first.resource_deltas.messages_committed, 32);
+        assert_eq!(
+            first.log.trace_artifact_refs.len(),
+            first.knobs.artifact_count
+        );
+        crate::test_complete!("swarm_replay_lab_summary_is_byte_stable");
+    }
+
+    #[test]
+    fn swarm_replay_cancellation_cascade_reaches_quiescence() {
+        init_test("swarm_replay_cancellation_cascade_reaches_quiescence");
+        let summary = run_swarm_replay_lab(0xC4CE_5A1D, &SwarmReplayScenarioKnobs::ci());
+
+        assert!(summary.lab.quiescent, "swarm replay should quiesce");
+        assert!(
+            summary.lab.invariant_violations.is_empty(),
+            "swarm replay invariants should be clean: {:?}",
+            summary.lab.invariant_violations
+        );
+        assert!(
+            summary.lab.temporal_failures.is_empty(),
+            "swarm replay temporal invariants should be clean: {:?}",
+            summary.lab.temporal_failures
+        );
+        assert!(
+            summary.resource_deltas.cancel_targets > 0,
+            "cancellation cascade must schedule cancel-lane work"
+        );
+        assert_eq!(
+            summary.resource_deltas.messages_committed, summary.resource_deltas.messages_drained,
+            "modeled channel backlog must drain completely"
+        );
+        assert!(
+            summary.resource_deltas.channel_backpressure_events > 0,
+            "channel workload must exercise backpressure"
+        );
+        assert!(
+            summary.log.minimized_failing_schedule.is_none(),
+            "passing swarm replay should not carry a minimized failure"
+        );
+        crate::test_complete!("swarm_replay_cancellation_cascade_reaches_quiescence");
+    }
+
+    #[test]
+    fn swarm_replay_log_records_minimized_failure_schedule() {
+        init_test("swarm_replay_log_records_minimized_failure_schedule");
+        let knobs = SwarmReplayScenarioKnobs {
+            max_steps: 1,
+            ..SwarmReplayScenarioKnobs::ci()
+        };
+        let summary = run_swarm_replay_lab(0xFA11_5EED, &knobs);
+        let minimized = summary
+            .log
+            .minimized_failing_schedule
+            .as_ref()
+            .expect("step-limited replay should emit minimized failure schedule");
+
+        assert_eq!(summary.log.seed, summary.seed);
+        assert_eq!(summary.log.scenario_knobs, summary.knobs);
+        assert_eq!(summary.log.resource_deltas, summary.resource_deltas);
+        assert!(
+            !minimized.preserved_invariant.is_empty(),
+            "minimized schedule should name the preserved invariant"
+        );
+        assert!(
+            minimized
+                .schedule_steps
+                .iter()
+                .any(|step| step.contains("channel capacity=")),
+            "minimized schedule should retain channel/backpressure context"
+        );
+        assert!(
+            minimized
+                .schedule_steps
+                .iter()
+                .any(|step| step.contains("cancel stride=")),
+            "minimized schedule should retain cancellation context"
+        );
+        crate::test_complete!("swarm_replay_log_records_minimized_failure_schedule");
     }
 
     #[test]
