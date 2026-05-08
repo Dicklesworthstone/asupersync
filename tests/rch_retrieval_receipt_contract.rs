@@ -48,11 +48,6 @@ fn receipt_json(fixture: &str, wrapper_exit_code: Option<i32>) -> Value {
     receipt_from_output(output)
 }
 
-fn receipt_text(fixture: &str, wrapper_exit_code: Option<i32>) -> String {
-    let output = run_receipt(fixture, wrapper_exit_code);
-    receipt_text_from_output(output)
-}
-
 fn receipt_json_with_args(
     fixture: &str,
     wrapper_exit_code: Option<i32>,
@@ -60,15 +55,6 @@ fn receipt_json_with_args(
 ) -> Value {
     let output = run_receipt_with_args(fixture, wrapper_exit_code, extra_args);
     receipt_from_output(output)
-}
-
-fn receipt_text_with_args(
-    fixture: &str,
-    wrapper_exit_code: Option<i32>,
-    extra_args: &[&str],
-) -> String {
-    let output = run_receipt_with_args(fixture, wrapper_exit_code, extra_args);
-    receipt_text_from_output(output)
 }
 
 fn receipt_from_output(output: Output) -> Value {
@@ -91,13 +77,20 @@ fn fixture_text(fixture: &str) -> String {
     fs::read_to_string(repo_root().join(FIXTURE_ROOT).join(fixture)).expect("read fixture text")
 }
 
-fn assert_json_text_eq(actual: &str, expected: &str) {
+fn assert_output_matches_golden(output: Output, expected_fixture: &str, drift_message: &str) {
+    let actual = receipt_text_from_output(output);
+    let expected = fixture_text(expected_fixture);
+
+    assert_json_text_eq(&actual, &expected, drift_message);
+}
+
+fn assert_json_text_eq(actual: &str, expected: &str, drift_message: &str) {
     let actual_json: Value = serde_json::from_str(actual).expect("actual receipt output JSON");
     let expected_json: Value =
         serde_json::from_str(expected).expect("expected receipt output JSON");
 
     assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
-    assert_eq!(actual, expected);
+    assert_eq!(actual, expected, "{drift_message}");
 }
 
 #[test]
@@ -149,10 +142,12 @@ fn completed_artifact_retrieval_is_clean_remote_success() {
 
 #[test]
 fn remote_success_matches_full_output_golden() {
-    let actual = receipt_text("remote_success.log", None);
-    let expected = fixture_text("remote_success_expected.json");
-
-    assert_json_text_eq(&actual, &expected);
+    let output = run_receipt("remote_success.log", None);
+    assert_output_matches_golden(
+        output,
+        "remote_success_expected.json",
+        "rch retrieval remote-success receipt changed; update the golden only after reviewing clean remote proof semantics",
+    );
 }
 
 #[test]
@@ -191,10 +186,12 @@ fn remote_pass_then_retrieval_timeout_is_split_verdict() {
 
 #[test]
 fn remote_pass_then_retrieval_timeout_matches_full_output_golden() {
-    let actual = receipt_text("passed_after_retrieval_timeout.log", Some(124));
-    let expected = fixture_text("passed_after_retrieval_timeout_expected.json");
-
-    assert_json_text_eq(&actual, &expected);
+    let output = run_receipt("passed_after_retrieval_timeout.log", Some(124));
+    assert_output_matches_golden(
+        output,
+        "passed_after_retrieval_timeout_expected.json",
+        "rch retrieval timeout receipt changed; update the golden only after reviewing pass-with-retrieval-blocker semantics",
+    );
 }
 
 #[test]
@@ -252,7 +249,7 @@ fn multistage_target_retrieval_timeout_is_not_clean_success() {
 
 #[test]
 fn multistage_target_retrieval_matches_full_output_golden() {
-    let actual = receipt_text_with_args(
+    let output = run_receipt_with_args(
         "multistage_target_timeout.log",
         Some(124),
         &[
@@ -264,9 +261,11 @@ fn multistage_target_retrieval_matches_full_output_golden() {
             "2000",
         ],
     );
-    let expected = fixture_text("multistage_target_timeout_expected.json");
-
-    assert_json_text_eq(&actual, &expected);
+    assert_output_matches_golden(
+        output,
+        "multistage_target_timeout_expected.json",
+        "rch retrieval multi-stage timeout receipt changed; update the golden only after reviewing partial retrieval and artifact-budget semantics",
+    );
 }
 
 #[test]
@@ -385,10 +384,12 @@ fn remote_failure_is_not_treated_as_green_proof() {
 
 #[test]
 fn remote_failure_matches_full_output_golden() {
-    let actual = receipt_text("remote_failure.log", Some(101));
-    let expected = fixture_text("remote_failure_expected.json");
-
-    assert_json_text_eq(&actual, &expected);
+    let output = run_receipt("remote_failure.log", Some(101));
+    assert_output_matches_golden(
+        output,
+        "remote_failure_expected.json",
+        "rch retrieval remote-failure receipt changed; update the golden only after reviewing failed proof semantics",
+    );
 }
 
 #[test]
@@ -408,10 +409,12 @@ fn local_fallback_invalidates_captured_cargo_output() {
 
 #[test]
 fn local_fallback_matches_full_output_golden() {
-    let actual = receipt_text("local_fallback.log", None);
-    let expected = fixture_text("local_fallback_expected.json");
-
-    assert_json_text_eq(&actual, &expected);
+    let output = run_receipt("local_fallback.log", None);
+    assert_output_matches_golden(
+        output,
+        "local_fallback_expected.json",
+        "rch retrieval local-fallback receipt changed; update the golden only after reviewing invalid local cargo output semantics",
+    );
 }
 
 #[test]
