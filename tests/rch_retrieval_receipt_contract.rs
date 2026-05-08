@@ -3,6 +3,7 @@
 #![allow(missing_docs)]
 
 use serde_json::Value;
+use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
@@ -65,6 +66,12 @@ fn receipt_from_output(output: Output) -> Value {
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("receipt output must be JSON")
+}
+
+fn fixture_json(fixture: &str) -> Value {
+    let raw = fs::read_to_string(repo_root().join(FIXTURE_ROOT).join(fixture))
+        .expect("read fixture JSON");
+    serde_json::from_str(&raw).expect("fixture must be JSON")
 }
 
 #[test]
@@ -199,6 +206,25 @@ fn multistage_target_retrieval_timeout_is_not_clean_success() {
         receipt["artifact_budget"]["status"].as_str(),
         Some("retrieval-incomplete")
     );
+}
+
+#[test]
+fn multistage_target_retrieval_matches_full_output_golden() {
+    let actual = receipt_json_with_args(
+        "multistage_target_timeout.log",
+        Some(124),
+        &[
+            "--proof-lane",
+            "rch-retrieval-budget",
+            "--max-retrieval-ms",
+            "3000",
+            "--max-artifact-files",
+            "2000",
+        ],
+    );
+    let expected = fixture_json("multistage_target_timeout_expected.json");
+
+    assert_eq!(actual, expected);
 }
 
 #[test]
