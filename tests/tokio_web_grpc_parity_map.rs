@@ -429,9 +429,9 @@ fn parity_has_t52_validation_bundle_and_evidence_links() {
     let doc = load_parity_doc();
     for token in [
         "br show asupersync-2oh2u.5.2 --json",
-        "rch exec -- cargo test --test tokio_web_grpc_parity_map",
-        "rch exec -- cargo test --test web_router_composition -- --nocapture",
-        "rch exec -- cargo test --test web_router_match_order -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_web_grpc_parity_docs cargo test --test tokio_web_grpc_parity_map -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_web_grpc_parity_docs cargo test --test web_router_composition -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_web_grpc_parity_docs cargo test --test web_router_match_order -- --nocapture",
         "src/web/router.rs",
         "src/web/extract.rs",
         "src/web/middleware.rs",
@@ -439,6 +439,17 @@ fn parity_has_t52_validation_bundle_and_evidence_links() {
         assert!(
             doc.contains(token),
             "missing validation/evidence token: {token}"
+        );
+    }
+
+    for stale in [
+        "rch exec -- cargo test --test tokio_web_grpc_parity_map",
+        "rch exec -- cargo test --test web_router_composition -- --nocapture",
+        "rch exec -- cargo test --test web_router_match_order -- --nocapture",
+    ] {
+        assert!(
+            !doc.contains(stale),
+            "web/gRPC parity map must not document bare rch cargo routing: {stale}"
         );
     }
 }
