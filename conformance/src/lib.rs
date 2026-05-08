@@ -153,8 +153,9 @@ pub use logging::{
     ConformanceTestLogger, LogCollector, LogConfig, LogEntry, LogLevel, TestEvent, TestEventKind,
 };
 pub use reference_registry::{
-    ReferenceRegistryError, ReferenceSurfaceRegistry, ReferenceSurfaceRow,
-    ReferenceVerdictAdmission, RuntimeConformanceVerdict, SOURCE_CONFORMANCE_REGISTRY_CONTRACT,
+    ReferenceRegistryError, ReferenceRegistryGuardFailure, ReferenceRegistryGuardReport,
+    ReferenceSurfaceRegistry, ReferenceSurfaceRow, ReferenceVerdictAdmission,
+    RuntimeConformanceVerdict, SOURCE_CONFORMANCE_REGISTRY_CONTRACT,
 };
 pub use report::{render_console_summary, write_json_report};
 pub use runner::{

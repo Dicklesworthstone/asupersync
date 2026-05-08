@@ -250,7 +250,30 @@
         "candidate_verdict": "unavailable",
         "expected_error": "DisallowedVerdict"
       }
-    ]
+    ],
+    "e2e_guard": {
+      "binary": "conformance_reference_registry_guard",
+      "source_path": "conformance/src/bin/conformance_reference_registry_guard.rs",
+      "cargo_manifest": "conformance/Cargo.toml",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_reference_registry_guard CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo run --manifest-path conformance/Cargo.toml --bin conformance_reference_registry_guard -- --output=json",
+      "schema_version": "conformance-reference-registry-guard-v1",
+      "required_report_fields": [
+        "schema_version",
+        "verdict",
+        "checked_surface_count",
+        "checked_binaries",
+        "failures"
+      ],
+      "fail_closed_reasons": [
+        "missing-proof-lane",
+        "proof-command-not-rch",
+        "proof-command-not-cargo-test",
+        "proof-command-missing-bin",
+        "unwired-reference-not-fail-closed",
+        "unwired-reference-allows-pass",
+        "unwired-reference-pass-not-rejected-by-admission"
+      ]
+    }
   },
   "reference_surfaces": [
     {

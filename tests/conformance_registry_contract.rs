@@ -497,6 +497,140 @@ fn reference_registry_api_rejects_unregistered_and_unwired_pass_claims() {
 }
 
 #[test]
+fn reference_registry_e2e_guard_walks_registered_bins() {
+    let contract = contract();
+    let api = contract.get("registry_api").expect("registry_api object");
+    let guard = api.get("e2e_guard").expect("registry_api.e2e_guard object");
+    let source_path = nonempty_string(guard, "source_path");
+    let binary = nonempty_string(guard, "binary");
+    let command = nonempty_string(guard, "command");
+
+    assert_eq!(binary, "conformance_reference_registry_guard");
+    assert_eq!(
+        source_path,
+        "conformance/src/bin/conformance_reference_registry_guard.rs"
+    );
+    assert!(
+        command.starts_with("rch exec -- "),
+        "guard command must route through rch: {command}"
+    );
+    assert!(
+        command.contains("cargo run --manifest-path conformance/Cargo.toml --bin conformance_reference_registry_guard"),
+        "guard command must run the guard binary: {command}"
+    );
+    assert!(
+        repo_path(source_path).exists(),
+        "guard source path must exist: {source_path}"
+    );
+
+    let cargo_toml = read_repo_file(nonempty_string(guard, "cargo_manifest"));
+    assert!(cargo_toml.contains("name = \"conformance_reference_registry_guard\""));
+    assert!(cargo_toml.contains("path = \"src/bin/conformance_reference_registry_guard.rs\""));
+
+    let source = read_repo_file(source_path);
+    for marker in [
+        "ReferenceSurfaceRegistry::source_contract",
+        "guard_report",
+        "ExitCode::from(1)",
+        "serde_json::to_string_pretty",
+    ] {
+        assert!(
+            source.contains(marker),
+            "guard source must contain marker {marker:?}"
+        );
+    }
+
+    let registry = ReferenceSurfaceRegistry::from_json_str(&read_repo_file(
+        "artifacts/conformance_registry_contract_v1.json",
+    ))
+    .expect("load source-owned reference registry");
+    let report = registry.guard_report();
+    assert!(report.is_pass(), "guard failures: {:?}", report.failures);
+    assert_eq!(
+        report.schema_version,
+        nonempty_string(guard, "schema_version")
+    );
+    assert_eq!(
+        report.checked_surface_count,
+        object_array(&contract, "reference_surfaces").len()
+    );
+
+    let checked_binaries: BTreeSet<_> = report.checked_binaries.iter().cloned().collect();
+    for surface in registry.surfaces() {
+        assert!(
+            checked_binaries.contains(&surface.binary),
+            "guard report did not walk binary {}",
+            surface.binary
+        );
+        assert!(
+            surface
+                .proof_command
+                .contains(&format!("--bin {}", surface.binary)),
+            "registered proof command must name its binary: {}",
+            surface.proof_command
+        );
+    }
+
+    for field in string_values(guard, "required_report_fields") {
+        assert!(
+            serde_json::to_value(&report)
+                .expect("serialize guard report")
+                .get(field)
+                .is_some(),
+            "guard report must serialize field {field}"
+        );
+    }
+
+    let fail_closed = ReferenceSurfaceRegistry::from_json_str(
+        r#"{
+            "reference_surfaces": [
+                {
+                    "surface_id": "live-reference-without-proof",
+                    "binary": "live_reference_without_proof_conformance",
+                    "source_path": "conformance/src/bin/live_reference_without_proof_conformance.rs",
+                    "reference_family": "demo",
+                    "reference_status": "live_reference_wired",
+                    "fail_closed_without_live_reference": false,
+                    "runtime_allowed_verdicts": ["pass"],
+                    "proof_command": "rch exec -- cargo test --manifest-path conformance/Cargo.toml --bin live_reference_without_proof_conformance",
+                    "proof_lane": ""
+                }
+            ]
+        }"#,
+    )
+    .expect("parse negative guard registry");
+    let fail_report = fail_closed.guard_report();
+    assert_eq!(fail_report.verdict, "fail_closed");
+    assert!(fail_report.failures.iter().any(|failure| {
+        failure.surface_id == "live-reference-without-proof"
+            && failure.reason == "missing-proof-lane"
+    }));
+    assert!(
+        string_values(guard, "fail_closed_reasons").contains(&"missing-proof-lane"),
+        "contract must name the missing proof-lane fail-closed reason"
+    );
+
+    log_contract_event(
+        "registry-e2e-guard",
+        &[
+            ("owner_bead", "asupersync-ghquqs".to_string()),
+            ("binary", binary.to_string()),
+            (
+                "checked_surface_count",
+                report.checked_surface_count.to_string(),
+            ),
+            ("schema_version", report.schema_version.to_string()),
+            (
+                "fail_closed_negative_case",
+                "missing-proof-lane".to_string(),
+            ),
+            ("verdict", "pass".to_string()),
+            ("first_failure", String::new()),
+        ],
+    );
+}
+
+#[test]
 fn readme_uses_checked_contract_instead_of_stale_counts() {
     let readme = read_repo_file("README.md");
     assert!(

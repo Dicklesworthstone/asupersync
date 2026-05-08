@@ -15,6 +15,10 @@ keywords = ["async", "conformance", "runtime", "testing"]
 categories = ["asynchronous", "development-tools::testing"]
 
 [[bin]]
+name = "conformance_reference_registry_guard"
+path = "src/bin/conformance_reference_registry_guard.rs"
+
+[[bin]]
 name = "raptorq_rfc6330_conformance"
 path = "src/bin/raptorq_rfc6330_conformance.rs"
 

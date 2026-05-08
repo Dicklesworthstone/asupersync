@@ -3,7 +3,7 @@
 //! A harness may only report a runtime verdict that the registry allows for
 //! its surface. Missing rows and unwired-reference pass claims fail closed.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -12,7 +12,7 @@ pub const SOURCE_CONFORMANCE_REGISTRY_CONTRACT: &str =
     include_str!("../../artifacts/conformance_registry_contract_v1.json");
 
 /// Runtime verdicts a conformance harness can report through the registry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RuntimeConformanceVerdict {
     /// The harness has a live reference and observed parity.
@@ -76,6 +76,31 @@ pub struct ReferenceVerdictAdmission {
     pub binary: String,
     pub verdict: RuntimeConformanceVerdict,
     pub reference_status: String,
+}
+
+/// One fail-closed finding from the registry e2e guard.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReferenceRegistryGuardFailure {
+    pub surface_id: String,
+    pub binary: String,
+    pub reason: String,
+}
+
+/// Deterministic report emitted by the registry e2e guard command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReferenceRegistryGuardReport {
+    pub schema_version: &'static str,
+    pub verdict: String,
+    pub checked_surface_count: usize,
+    pub checked_binaries: Vec<String>,
+    pub failures: Vec<ReferenceRegistryGuardFailure>,
+}
+
+impl ReferenceRegistryGuardReport {
+    /// Whether the guard found no fail-closed findings.
+    pub fn is_pass(&self) -> bool {
+        self.failures.is_empty() && self.verdict == "pass"
+    }
 }
 
 /// Fail-closed registry validation errors.
@@ -182,6 +207,11 @@ impl ReferenceSurfaceRegistry {
         self.rows.is_empty()
     }
 
+    /// Registered surfaces in deterministic surface-id order.
+    pub fn surfaces(&self) -> impl Iterator<Item = &ReferenceSurfaceRow> {
+        self.rows.values()
+    }
+
     /// Fetch one row by surface id.
     pub fn surface(
         &self,
@@ -222,6 +252,97 @@ impl ReferenceSurfaceRegistry {
             reference_status: row.reference_status.clone(),
         })
     }
+
+    /// Walk every registered reference surface and produce an e2e guard report.
+    pub fn guard_report(&self) -> ReferenceRegistryGuardReport {
+        let mut checked_binaries = Vec::new();
+        let mut failures = Vec::new();
+
+        for row in self.surfaces() {
+            checked_binaries.push(row.binary.clone());
+
+            push_if_empty(&mut failures, row, &row.binary, "missing-binary");
+            push_if_empty(&mut failures, row, &row.source_path, "missing-source-path");
+            push_if_empty(&mut failures, row, &row.proof_lane, "missing-proof-lane");
+            push_if_empty(
+                &mut failures,
+                row,
+                &row.proof_command,
+                "missing-proof-command",
+            );
+
+            if !row.source_path.ends_with(".rs") {
+                push_failure(&mut failures, row, "source-path-not-rust");
+            }
+            if !row.proof_command.starts_with("rch exec -- ") {
+                push_failure(&mut failures, row, "proof-command-not-rch");
+            }
+            if !row.proof_command.contains("cargo test") {
+                push_failure(&mut failures, row, "proof-command-not-cargo-test");
+            }
+            let bin_arg = format!("--bin {}", row.binary);
+            if !row.proof_command.contains(&bin_arg) {
+                push_failure(&mut failures, row, "proof-command-missing-bin");
+            }
+            if row.has_live_reference() && row.proof_lane.trim().is_empty() {
+                push_failure(&mut failures, row, "live-reference-missing-proof-lane");
+            }
+            if !row.has_live_reference() {
+                if !row.fail_closed_without_live_reference {
+                    push_failure(&mut failures, row, "unwired-reference-not-fail-closed");
+                }
+                if row.allows(RuntimeConformanceVerdict::Pass) {
+                    push_failure(&mut failures, row, "unwired-reference-allows-pass");
+                }
+                if !matches!(
+                    self.admit_runtime_verdict(&row.surface_id, RuntimeConformanceVerdict::Pass),
+                    Err(ReferenceRegistryError::UnwiredReferencePass { .. })
+                ) {
+                    push_failure(
+                        &mut failures,
+                        row,
+                        "unwired-reference-pass-not-rejected-by-admission",
+                    );
+                }
+            }
+        }
+
+        let verdict = if failures.is_empty() {
+            "pass"
+        } else {
+            "fail_closed"
+        };
+        ReferenceRegistryGuardReport {
+            schema_version: "conformance-reference-registry-guard-v1",
+            verdict: verdict.to_string(),
+            checked_surface_count: checked_binaries.len(),
+            checked_binaries,
+            failures,
+        }
+    }
+}
+
+fn push_if_empty(
+    failures: &mut Vec<ReferenceRegistryGuardFailure>,
+    row: &ReferenceSurfaceRow,
+    value: &str,
+    reason: &str,
+) {
+    if value.trim().is_empty() {
+        push_failure(failures, row, reason);
+    }
+}
+
+fn push_failure(
+    failures: &mut Vec<ReferenceRegistryGuardFailure>,
+    row: &ReferenceSurfaceRow,
+    reason: &str,
+) {
+    failures.push(ReferenceRegistryGuardFailure {
+        surface_id: row.surface_id.clone(),
+        binary: row.binary.clone(),
+        reason: reason.to_string(),
+    });
 }
 
 #[cfg(test)]
@@ -360,5 +481,51 @@ mod tests {
             error,
             ReferenceRegistryError::DuplicateSurfaceId("demo-surface".to_string())
         );
+    }
+
+    #[test]
+    fn source_contract_guard_report_passes_registered_surfaces() {
+        let registry = ReferenceSurfaceRegistry::source_contract().expect("load source registry");
+        let report = registry.guard_report();
+        assert!(
+            report.is_pass(),
+            "guard report failures: {:?}",
+            report.failures
+        );
+        assert_eq!(report.checked_surface_count, registry.len());
+        assert!(
+            report
+                .checked_binaries
+                .contains(&"otel_trace_context_propagation_conformance".to_string())
+        );
+    }
+
+    #[test]
+    fn guard_report_fails_closed_for_live_reference_without_proof_lane() {
+        let registry = ReferenceSurfaceRegistry::from_json_str(
+            r#"{
+                "reference_surfaces": [
+                    {
+                        "surface_id": "live-reference-without-proof",
+                        "binary": "live_reference_without_proof_conformance",
+                        "source_path": "conformance/src/bin/live_reference_without_proof_conformance.rs",
+                        "reference_family": "demo",
+                        "reference_status": "live_reference_wired",
+                        "fail_closed_without_live_reference": false,
+                        "runtime_allowed_verdicts": ["pass"],
+                        "proof_command": "rch exec -- cargo test --manifest-path conformance/Cargo.toml --bin live_reference_without_proof_conformance",
+                        "proof_lane": ""
+                    }
+                ]
+            }"#,
+        )
+        .expect("parse inline registry");
+        let report = registry.guard_report();
+        assert!(!report.is_pass());
+        assert_eq!(report.verdict, "fail_closed");
+        assert!(report.failures.iter().any(|failure| {
+            failure.surface_id == "live-reference-without-proof"
+                && failure.reason == "missing-proof-lane"
+        }));
     }
 }
