@@ -176,10 +176,10 @@ Canonical channels:
 Deterministic rehearsal command bundle:
 
 ```bash
-rch exec -- cargo test -p asupersync --test wasm_launch_rollout_support_stabilization -- --nocapture
-rch exec -- cargo test -p asupersync --test wasm_ga_readiness_review_board_checklist -- --nocapture
-rch exec -- cargo test -p asupersync --test wasm_release_rollback_incident_playbook -- --nocapture
-rch exec -- cargo test -p asupersync --test wasm_pilot_feedback_triage_loop -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_docs cargo test -p asupersync --test wasm_launch_rollout_support_stabilization -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_docs cargo test -p asupersync --test wasm_ga_readiness_review_board_checklist -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_docs cargo test -p asupersync --test wasm_release_rollback_incident_playbook -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_docs cargo test -p asupersync --test wasm_pilot_feedback_triage_loop -- --nocapture
 ```
 
 The rehearsal is non-compliant unless support escalation, incident comms, and

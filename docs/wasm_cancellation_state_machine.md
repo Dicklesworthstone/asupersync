@@ -257,10 +257,10 @@ Required failure artifacts:
 Use `rch` for cargo-heavy commands:
 
 ```bash
-rch exec -- cargo test -p asupersync cancel_request -- --nocapture
-rch exec -- cargo test -p asupersync cancel_drain_finalize -- --nocapture
-rch exec -- cargo test --all-targets cancel -- --nocapture
-rch exec -- cargo run --features cli --bin asupersync -- trace verify --strict artifacts/cancel_wasm.trace
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_docs cargo test -p asupersync cancel_request -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_docs cargo test -p asupersync cancel_drain_finalize -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_docs cargo test --all-targets cancel -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_docs cargo run --features cli --bin asupersync -- trace verify --strict artifacts/cancel_wasm.trace
 ```
 
 ## Downstream Contract Surface

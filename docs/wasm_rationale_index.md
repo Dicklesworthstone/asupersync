@@ -80,13 +80,13 @@ Decision column with the replacement decision ID.
 ## Validation Bundle
 
 ```bash
-rch exec -- cargo test --test wasm_rationale_index -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_docs cargo test --test wasm_rationale_index -- --nocapture
 
 python3 scripts/run_browser_onboarding_checks.py --scenario all
 
 bash ./scripts/run_all_e2e.sh --verify-matrix
 
-rch exec -- cargo test --test e2e_log_quality_schema -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_docs cargo test --test e2e_log_quality_schema -- --nocapture
 ```
 
 Expected outcomes:

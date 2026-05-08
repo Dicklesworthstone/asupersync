@@ -73,13 +73,13 @@ Required artifacts:
 ### Gate 4: Browser profile build checks (cargo-heavy, offloaded)
 
 ```bash
-rch exec -- cargo check --target wasm32-unknown-unknown \
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_docs cargo check --target wasm32-unknown-unknown \
   --no-default-features --features wasm-browser-dev
 
-rch exec -- cargo check --target wasm32-unknown-unknown \
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_docs cargo check --target wasm32-unknown-unknown \
   --no-default-features --features wasm-browser-prod
 
-rch exec -- cargo check --target wasm32-unknown-unknown \
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_docs cargo check --target wasm32-unknown-unknown \
   --no-default-features --features wasm-browser-deterministic
 ```
 
