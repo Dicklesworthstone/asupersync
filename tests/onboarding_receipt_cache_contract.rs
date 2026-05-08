@@ -51,6 +51,11 @@ fn fixture(name: &str) -> PathBuf {
     repo_root().join(FIXTURE_ROOT).join(name)
 }
 
+fn fixture_text(name: &str) -> String {
+    fs::read_to_string(fixture(name))
+        .unwrap_or_else(|error| panic!("read golden fixture {name}: {error}"))
+}
+
 fn patched_cache(fixture_name: &str, receipt: &Value) -> tempfile::NamedTempFile {
     let current_key = receipt["receipt_key"]
         .as_str()
@@ -81,6 +86,24 @@ fn patched_cache(fixture_name: &str, receipt: &Value) -> tempfile::NamedTempFile
     )
     .expect("write patched cache");
     file
+}
+
+#[test]
+fn no_cache_output_matches_full_reviewed_golden() {
+    let output = run_cache(&fixture("current_receipt.json"), None, 1800);
+    assert!(
+        output.status.success(),
+        "cache helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("cache stdout is utf-8"),
+        fixture_text("no_cache_expected.json"),
+        "no-cache onboarding receipt cache output drifted from the reviewed golden"
+    );
 }
 
 #[test]
