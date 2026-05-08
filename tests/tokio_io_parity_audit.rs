@@ -7,9 +7,27 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+const TOKIO_IO_PARITY_TARGET_PREFIX: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_io_parity_audit_docs cargo test --test ";
+
 fn load_audit_doc() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/tokio_io_parity_audit.md");
     std::fs::read_to_string(path).expect("audit document must exist")
+}
+
+fn assert_replay_bundle_commands(doc: &str, context: &str, command_suffixes: &[&str]) {
+    for suffix in command_suffixes {
+        let required = format!("{TOKIO_IO_PARITY_TARGET_PREFIX}{suffix}");
+        assert!(
+            doc.contains(&required),
+            "{context} replay bundle must include command: {required}"
+        );
+
+        let stale = format!("{}cargo test --test {suffix}", "rch exec -- ");
+        assert!(
+            !doc.contains(&stale),
+            "{context} replay bundle must not document bare rch cargo routing: {stale}"
+        );
+    }
 }
 
 fn normalize_table_cell(cell: &str) -> String {
@@ -710,20 +728,17 @@ fn t2_9_matrix_requires_structured_log_fields() {
 #[test]
 fn t2_9_replay_bundle_uses_rch_for_all_commands() {
     let doc = load_audit_doc();
-    let required_cmds = [
-        "rch exec -- cargo test --test io_e2e io_e2e_copy_stream -- --nocapture",
-        "rch exec -- cargo test --test tokio_io_utility_operators_parity adapt_invariant_2_stream_reader_round_trip -- --nocapture",
-        "rch exec -- cargo test --test codec_e2e e2e_codec_011_length_delimited_partial -- --nocapture",
-        "rch exec -- cargo test --test tokio_io_codec_cancellation_correctness csr_01_bufreader_cancel_preserves_buffer -- --nocapture",
-        "rch exec -- cargo test --test io_cancellation io_cancel_registration_count_tracking -- --nocapture",
-    ];
-
-    for cmd in &required_cmds {
-        assert!(
-            doc.contains(cmd),
-            "T2.9 replay bundle must include command: {cmd}"
-        );
-    }
+    assert_replay_bundle_commands(
+        &doc,
+        "T2.9",
+        &[
+            "io_e2e io_e2e_copy_stream -- --nocapture",
+            "tokio_io_utility_operators_parity adapt_invariant_2_stream_reader_round_trip -- --nocapture",
+            "codec_e2e e2e_codec_011_length_delimited_partial -- --nocapture",
+            "tokio_io_codec_cancellation_correctness csr_01_bufreader_cancel_preserves_buffer -- --nocapture",
+            "io_cancellation io_cancel_registration_count_tracking -- --nocapture",
+        ],
+    );
 }
 
 #[test]
@@ -866,21 +881,18 @@ fn t2_10_declares_adversarial_and_recovery_paths() {
 #[test]
 fn t2_10_replay_bundle_uses_rch_for_all_commands() {
     let doc = load_audit_doc();
-    let required_cmds = [
-        "rch exec -- cargo test --test io_e2e io_e2e_copy_bidirectional -- --nocapture",
-        "rch exec -- cargo test --test tokio_io_utility_operators_parity lines_invariant_1_crlf_stripped_correctly -- --nocapture",
-        "rch exec -- cargo test --test codec_e2e e2e_codec_016_length_delimited_multi_frame -- --nocapture",
-        "rch exec -- cargo test --test tokio_io_codec_cancellation_correctness rld_03_framed_write_drop_loses_encoded -- --nocapture",
-        "rch exec -- cargo test --test io_uring_reactor deregister_cancels_in_flight_poll -- --nocapture",
-        "rch exec -- cargo test --test t2_track_conformance_and_performance_gates -- --nocapture",
-    ];
-
-    for cmd in &required_cmds {
-        assert!(
-            doc.contains(cmd),
-            "T2.10 replay bundle must include command: {cmd}"
-        );
-    }
+    assert_replay_bundle_commands(
+        &doc,
+        "T2.10",
+        &[
+            "io_e2e io_e2e_copy_bidirectional -- --nocapture",
+            "tokio_io_utility_operators_parity lines_invariant_1_crlf_stripped_correctly -- --nocapture",
+            "codec_e2e e2e_codec_016_length_delimited_multi_frame -- --nocapture",
+            "tokio_io_codec_cancellation_correctness rld_03_framed_write_drop_loses_encoded -- --nocapture",
+            "io_uring_reactor deregister_cancels_in_flight_poll -- --nocapture",
+            "t2_track_conformance_and_performance_gates -- --nocapture",
+        ],
+    );
 }
 
 #[test]
@@ -951,23 +963,20 @@ fn t2_7_defines_forbidden_antipatterns_and_call_graph_playbooks() {
 #[test]
 fn t2_7_has_executable_rch_evidence_bundle() {
     let doc = load_audit_doc();
-    let required_cmds = [
-        "rch exec -- cargo test --test io_e2e io_e2e_copy_bidirectional -- --nocapture",
-        "rch exec -- cargo test --test tokio_io_utility_operators_parity lines_invariant_1_crlf_stripped_correctly -- --nocapture",
-        "rch exec -- cargo test --test codec_e2e e2e_codec_016_length_delimited_multi_frame -- --nocapture",
-        "rch exec -- cargo test --test tokio_io_codec_cancellation_correctness csr_01_bufreader_cancel_preserves_buffer -- --nocapture",
-        "rch exec -- cargo test --test io_cancellation io_cancel_registration_count_tracking -- --nocapture",
-        "rch exec -- cargo test --test io_uring_reactor deregister_cancels_in_flight_poll -- --nocapture",
-        "rch exec -- cargo test --test t2_track_conformance_and_performance_gates -- --nocapture",
-        "rch exec -- cargo test --test tokio_io_parity_audit -- --nocapture",
-    ];
-
-    for cmd in &required_cmds {
-        assert!(
-            doc.contains(cmd),
-            "T2.7 evidence bundle must include command: {cmd}"
-        );
-    }
+    assert_replay_bundle_commands(
+        &doc,
+        "T2.7",
+        &[
+            "io_e2e io_e2e_copy_bidirectional -- --nocapture",
+            "tokio_io_utility_operators_parity lines_invariant_1_crlf_stripped_correctly -- --nocapture",
+            "codec_e2e e2e_codec_016_length_delimited_multi_frame -- --nocapture",
+            "tokio_io_codec_cancellation_correctness csr_01_bufreader_cancel_preserves_buffer -- --nocapture",
+            "io_cancellation io_cancel_registration_count_tracking -- --nocapture",
+            "io_uring_reactor deregister_cancels_in_flight_poll -- --nocapture",
+            "t2_track_conformance_and_performance_gates -- --nocapture",
+            "tokio_io_parity_audit -- --nocapture",
+        ],
+    );
 }
 
 #[test]
