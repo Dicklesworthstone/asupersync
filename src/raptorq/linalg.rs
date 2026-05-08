@@ -684,18 +684,42 @@ pub fn row_scale_add_batch_multi(destinations: &mut [&mut [u8]], sources: &[&[u8
 /// }
 /// ```
 pub fn collect_batch_candidates(
-    _matrix: &[Vec<u8>],
-    _pivot_row: usize,
-    _pivot_col: usize,
+    matrix: &[Vec<u8>],
+    pivot_row: usize,
+    pivot_col: usize,
 ) -> Vec<(Vec<u8>, Vec<u8>)> {
-    let candidates = Vec::new();
+    let mut candidates = Vec::new();
 
-    // In a real implementation, this would scan the matrix for rows that need
-    // elimination with the same pivot coefficient. For now, return empty to
-    // maintain compatibility while the optimization infrastructure is built.
-    //
-    // TODO: Implement actual candidate collection based on matrix structure
-    // and pivot coefficients during Gaussian elimination.
+    // Validate input parameters
+    if pivot_row >= matrix.len() || matrix.is_empty() {
+        return candidates;
+    }
+
+    let pivot_element = matrix
+        .get(pivot_row)
+        .and_then(|row| row.get(pivot_col))
+        .copied()
+        .unwrap_or(0);
+
+    // Skip if pivot is zero (no elimination possible)
+    if pivot_element == 0 {
+        return candidates;
+    }
+
+    // Collect rows that have the same non-zero coefficient in the pivot column
+    // These can be batch-eliminated together for efficiency
+    for (row_idx, row) in matrix.iter().enumerate() {
+        if row_idx == pivot_row || pivot_col >= row.len() {
+            continue;
+        }
+
+        let element = row[pivot_col];
+        if element != 0 && element == pivot_element {
+            // Found a candidate: both pivot row and current row have same coefficient
+            // Return as (pivot_row_copy, candidate_row_copy) for batch processing
+            candidates.push((matrix[pivot_row].clone(), row.clone()));
+        }
+    }
 
     candidates
 }
