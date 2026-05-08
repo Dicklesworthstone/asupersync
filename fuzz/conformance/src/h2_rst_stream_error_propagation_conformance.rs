@@ -1,9 +1,8 @@
 //! HTTP/2 RST_STREAM Error Code Propagation Conformance Test Harness
 //!
-//! Provides differential testing between asupersync and h2 crate reference implementation
-//! to ensure identical RST_STREAM error code propagation and client-observed status behavior.
-//! Tests various error codes defined in RFC 9113 Section 7 to verify consistent error handling
-//! across implementations.
+//! Intended differential test surface for asupersync and the h2 crate reference implementation.
+//! Until a real h2 reference adapter is wired, this harness fails closed instead of reporting
+//! mocked differential success for RST_STREAM error propagation behavior.
 //!
 //! ## Test Coverage
 //!
@@ -19,7 +18,8 @@
 //!
 //! For each test scenario:
 //! 1. asupersync: Process RST_STREAM sequence and observe client status
-//! 2. h2 reference: Process identical sequence and observe client status
+//! 2. h2 reference: Process identical sequence and observe client status, or fail closed if
+//!    the live reference seam is unavailable
 //! 3. Compare: Client-observed error codes, stream states, and cleanup behavior
 //! 4. Assert: Identical behavior across both implementations per RFC 9113
 //!
@@ -32,22 +32,20 @@
 //! - Error codes preserve semantic meaning across implementations
 
 use asupersync::bytes::Bytes;
-use asupersync::http::h2::connection::{Connection as AsupersyncConnection, ConnectionState};
+use asupersync::http::h2::connection::Connection as AsupersyncConnection;
 use asupersync::http::h2::error::ErrorCode as AsupersyncErrorCode;
 use asupersync::http::h2::frame::{
     DataFrame as AsupersyncDataFrame, HeadersFrame as AsupersyncHeadersFrame,
     RstStreamFrame as AsupersyncRstStreamFrame, Setting as AsupersyncSetting,
-    SettingsFrame as AsupersyncSettingsFrame
+    SettingsFrame as AsupersyncSettingsFrame,
 };
 use asupersync::http::h2::settings::Settings as AsupersyncSettings;
 use asupersync::http::h2::{Frame as AsupersyncFrame, H2Error as AsupersyncH2Error};
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fmt;
 
-// Note: h2 crate integration would go here in a real implementation
-// For now, we'll create a mock h2 implementation to demonstrate the pattern
+const H2_REFERENCE_UNSUPPORTED: &str = "h2 reference adapter unavailable: no live h2 crate seam is wired for RST_STREAM state observation; refusing mocked differential success";
 
 /// Test result from a single RST_STREAM conformance test
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -116,9 +114,19 @@ pub struct RstStreamTestCase {
 /// Simplified frame representation for test setup
 #[derive(Debug, Clone)]
 pub enum TestFrame {
-    Headers { stream_id: u32, end_stream: bool, headers: Vec<(String, String)> },
-    Data { stream_id: u32, data: Vec<u8>, end_stream: bool },
-    Settings { settings: Vec<(u16, u32)> },
+    Headers {
+        stream_id: u32,
+        end_stream: bool,
+        headers: Vec<(String, String)>,
+    },
+    Data {
+        stream_id: u32,
+        data: Vec<u8>,
+        end_stream: bool,
+    },
+    Settings {
+        settings: Vec<(u16, u32)>,
+    },
 }
 
 /// RST_STREAM action in a test sequence
@@ -233,7 +241,8 @@ impl RstStreamConformanceTester {
         };
 
         // Compare results for conformance
-        let (conformance_status, error_details) = self.compare_results(&asupersync_result, &h2_result);
+        let (conformance_status, error_details) =
+            self.compare_results(&asupersync_result, &h2_result);
 
         RstStreamTestResult {
             test_name: test_case.name.clone(),
@@ -245,7 +254,10 @@ impl RstStreamConformanceTester {
     }
 
     /// Run test case on asupersync implementation
-    fn run_asupersync_test(&self, test_case: &RstStreamTestCase) -> Result<ClientObservedStatus, AsupersyncH2Error> {
+    fn run_asupersync_test(
+        &self,
+        test_case: &RstStreamTestCase,
+    ) -> Result<ClientObservedStatus, AsupersyncH2Error> {
         let mut connection = AsupersyncConnection::server(AsupersyncSettings::default());
 
         // Initialize connection
@@ -257,12 +269,14 @@ impl RstStreamConformanceTester {
         }
 
         // Record initial state
-        let initial_stream_exists = self.asupersync_stream_exists(&mut connection, test_case.stream_id);
+        let initial_stream_exists =
+            self.asupersync_stream_exists(&mut connection, test_case.stream_id);
 
         // Execute RST_STREAM sequence
         let mut error_code_observed = None;
         for rst_action in &test_case.rst_sequence {
-            let rst_frame = AsupersyncRstStreamFrame::new(rst_action.stream_id, rst_action.error_code.clone());
+            let rst_frame =
+                AsupersyncRstStreamFrame::new(rst_action.stream_id, rst_action.error_code.clone());
 
             if let Err(e) = connection.process_frame(AsupersyncFrame::RstStream(rst_frame)) {
                 // Error during RST processing - record the error
@@ -289,63 +303,39 @@ impl RstStreamConformanceTester {
 
         let connection_state_info = ConnectionStateInfo {
             state: format!("{:?}", connection.state()),
-            streams_count: 0, // Would need access to internal stream count
+            streams_count: 0,   // Would need access to internal stream count
             goaway_sent: false, // Would need to check outgoing frames
         };
+        let cleanup_completed = stream_state == StreamState::Closed;
 
         Ok(ClientObservedStatus {
             stream_id: test_case.stream_id,
             error_code: error_code_observed,
             stream_state,
             additional_frames_ignored,
-            cleanup_completed: stream_state == StreamState::Closed,
+            cleanup_completed,
             connection_state: connection_state_info,
         })
     }
 
-    /// Run test case on h2 reference implementation (mock for now)
-    fn run_h2_reference_test(&self, test_case: &RstStreamTestCase) -> Result<ClientObservedStatus, Box<dyn std::error::Error>> {
-        // TODO: Integrate with actual h2 crate
-        // For now, return a mock result that demonstrates expected behavior
-
-        let expected_error_code = match test_case.rst_error_code {
-            AsupersyncErrorCode::NoError => 0,
-            AsupersyncErrorCode::ProtocolError => 1,
-            AsupersyncErrorCode::InternalError => 2,
-            AsupersyncErrorCode::FlowControlError => 3,
-            AsupersyncErrorCode::SettingsTimeout => 4,
-            AsupersyncErrorCode::StreamClosed => 5,
-            AsupersyncErrorCode::FrameSizeError => 6,
-            AsupersyncErrorCode::RefusedStream => 7,
-            AsupersyncErrorCode::Cancel => 8,
-            AsupersyncErrorCode::CompressionError => 9,
-            AsupersyncErrorCode::ConnectError => 10,
-            AsupersyncErrorCode::EnhanceYourCalm => 11,
-            AsupersyncErrorCode::InadequateSecurity => 12,
-        };
-
-        // Mock h2 behavior based on RFC 9113 specification
-        let stream_state = match test_case.initial_stream_state {
-            StreamState::NonExistent => StreamState::NonExistent,
-            _ => StreamState::Reset,
-        };
-
-        Ok(ClientObservedStatus {
-            stream_id: test_case.stream_id,
-            error_code: Some(expected_error_code as u32),
-            stream_state,
-            additional_frames_ignored: true,
-            cleanup_completed: true,
-            connection_state: ConnectionStateInfo {
-                state: "Open".to_string(),
-                streams_count: 0,
-                goaway_sent: false,
-            },
-        })
+    /// Run test case on h2 reference implementation.
+    fn run_h2_reference_test(
+        &self,
+        test_case: &RstStreamTestCase,
+    ) -> Result<ClientObservedStatus, Box<dyn std::error::Error>> {
+        let message = format!(
+            "{}; test_case={}; stream_id={}",
+            H2_REFERENCE_UNSUPPORTED, test_case.name, test_case.stream_id
+        );
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, message).into())
     }
 
     /// Compare asupersync and h2 results for conformance
-    fn compare_results(&self, asupersync: &ClientObservedStatus, h2: &ClientObservedStatus) -> (ConformanceStatus, Option<String>) {
+    fn compare_results(
+        &self,
+        asupersync: &ClientObservedStatus,
+        h2: &ClientObservedStatus,
+    ) -> (ConformanceStatus, Option<String>) {
         let mut differences = Vec::new();
 
         // Compare error codes
@@ -388,7 +378,10 @@ impl RstStreamConformanceTester {
     }
 
     /// Helper functions for asupersync implementation testing
-    fn initialize_asupersync_connection(&self, connection: &mut AsupersyncConnection) -> Result<(), AsupersyncH2Error> {
+    fn initialize_asupersync_connection(
+        &self,
+        connection: &mut AsupersyncConnection,
+    ) -> Result<(), AsupersyncH2Error> {
         let settings_frame = AsupersyncSettingsFrame::new(vec![
             AsupersyncSetting::MaxConcurrentStreams(100),
             AsupersyncSetting::InitialWindowSize(65536),
@@ -398,23 +391,32 @@ impl RstStreamConformanceTester {
         Ok(())
     }
 
-    fn send_asupersync_frame(&self, connection: &mut AsupersyncConnection, frame: &TestFrame) -> Result<(), AsupersyncH2Error> {
+    fn send_asupersync_frame(
+        &self,
+        connection: &mut AsupersyncConnection,
+        frame: &TestFrame,
+    ) -> Result<(), AsupersyncH2Error> {
         match frame {
-            TestFrame::Headers { stream_id, end_stream, headers: _ } => {
+            TestFrame::Headers {
+                stream_id,
+                end_stream,
+                headers: _,
+            } => {
                 let headers_frame = AsupersyncHeadersFrame::new(
                     *stream_id,
                     Bytes::from("dummy headers"),
                     *end_stream,
-                    true // end_headers
+                    true, // end_headers
                 );
                 let _ = connection.process_frame(AsupersyncFrame::Headers(headers_frame))?;
             }
-            TestFrame::Data { stream_id, data, end_stream } => {
-                let data_frame = AsupersyncDataFrame::new(
-                    *stream_id,
-                    Bytes::copy_from_slice(data),
-                    *end_stream
-                );
+            TestFrame::Data {
+                stream_id,
+                data,
+                end_stream,
+            } => {
+                let data_frame =
+                    AsupersyncDataFrame::new(*stream_id, Bytes::copy_from_slice(data), *end_stream);
                 let _ = connection.process_frame(AsupersyncFrame::Data(data_frame))?;
             }
             TestFrame::Settings { settings } => {
@@ -438,7 +440,11 @@ impl RstStreamConformanceTester {
         Ok(())
     }
 
-    fn asupersync_stream_exists(&self, connection: &mut AsupersyncConnection, stream_id: u32) -> bool {
+    fn asupersync_stream_exists(
+        &self,
+        connection: &mut AsupersyncConnection,
+        stream_id: u32,
+    ) -> bool {
         // Check if stream exists (simplified - would need access to internal stream store)
         connection.stream(stream_id).is_some()
     }
@@ -461,7 +467,10 @@ impl RstStreamConformanceTester {
             (AsupersyncErrorCode::CompressionError, "COMPRESSION_ERROR"),
             (AsupersyncErrorCode::ConnectError, "CONNECT_ERROR"),
             (AsupersyncErrorCode::EnhanceYourCalm, "ENHANCE_YOUR_CALM"),
-            (AsupersyncErrorCode::InadequateSecurity, "INADEQUATE_SECURITY"),
+            (
+                AsupersyncErrorCode::InadequateSecurity,
+                "INADEQUATE_SECURITY",
+            ),
         ];
 
         for (error_code, error_name) in &error_codes {
@@ -471,25 +480,21 @@ impl RstStreamConformanceTester {
                 stream_id: 1,
                 initial_stream_state: StreamState::Open,
                 rst_error_code: error_code.clone(),
-                setup_frames: vec![
-                    TestFrame::Headers {
-                        stream_id: 1,
-                        end_stream: false,
-                        headers: vec![("method".to_string(), "GET".to_string())],
-                    },
-                ],
+                setup_frames: vec![TestFrame::Headers {
+                    stream_id: 1,
+                    end_stream: false,
+                    headers: vec![("method".to_string(), "GET".to_string())],
+                }],
                 rst_sequence: vec![RstStreamAction {
                     stream_id: 1,
                     error_code: error_code.clone(),
                     delay_ms: None,
                 }],
-                post_rst_frames: vec![
-                    TestFrame::Data {
-                        stream_id: 1,
-                        data: b"should be ignored".to_vec(),
-                        end_stream: true,
-                    },
-                ],
+                post_rst_frames: vec![TestFrame::Data {
+                    stream_id: 1,
+                    data: b"should be ignored".to_vec(),
+                    end_stream: true,
+                }],
                 expected_behavior: ExpectedBehavior {
                     error_code_propagated: true,
                     stream_immediately_reset: true,
@@ -530,13 +535,11 @@ impl RstStreamConformanceTester {
             stream_id: 3,
             initial_stream_state: StreamState::Open,
             rst_error_code: AsupersyncErrorCode::Cancel,
-            setup_frames: vec![
-                TestFrame::Headers {
-                    stream_id: 3,
-                    end_stream: false,
-                    headers: vec![("method".to_string(), "POST".to_string())],
-                },
-            ],
+            setup_frames: vec![TestFrame::Headers {
+                stream_id: 3,
+                end_stream: false,
+                headers: vec![("method".to_string(), "POST".to_string())],
+            }],
             rst_sequence: vec![
                 RstStreamAction {
                     stream_id: 3,
@@ -566,13 +569,11 @@ impl RstStreamConformanceTester {
             stream_id: 5,
             initial_stream_state: StreamState::HalfClosedLocal,
             rst_error_code: AsupersyncErrorCode::StreamClosed,
-            setup_frames: vec![
-                TestFrame::Headers {
-                    stream_id: 5,
-                    end_stream: true, // Half-close the stream
-                    headers: vec![("method".to_string(), "GET".to_string())],
-                },
-            ],
+            setup_frames: vec![TestFrame::Headers {
+                stream_id: 5,
+                end_stream: true, // Half-close the stream
+                headers: vec![("method".to_string(), "GET".to_string())],
+            }],
             rst_sequence: vec![RstStreamAction {
                 stream_id: 5,
                 error_code: AsupersyncErrorCode::StreamClosed,
@@ -621,28 +622,56 @@ pub struct ConformanceReport {
 
 impl fmt::Display for ConformanceReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "HTTP/2 RST_STREAM Error Code Propagation Conformance Test Results")?;
-        writeln!(f, "==============================================================")?;
+        writeln!(
+            f,
+            "HTTP/2 RST_STREAM Error Code Propagation Conformance Test Results"
+        )?;
+        writeln!(
+            f,
+            "=============================================================="
+        )?;
         writeln!(f)?;
         writeln!(f, "Total tests:  {}", self.total_tests)?;
-        writeln!(f, "Passed:       {} ({:.1}%)", self.passed,
-                 (self.passed as f64 / self.total_tests as f64) * 100.0)?;
-        writeln!(f, "Failed:       {} ({:.1}%)", self.failed,
-                 (self.failed as f64 / self.total_tests as f64) * 100.0)?;
-        writeln!(f, "Skipped:      {} ({:.1}%)", self.skipped,
-                 (self.skipped as f64 / self.total_tests as f64) * 100.0)?;
+        writeln!(
+            f,
+            "Passed:       {} ({:.1}%)",
+            self.passed,
+            (self.passed as f64 / self.total_tests as f64) * 100.0
+        )?;
+        writeln!(
+            f,
+            "Failed:       {} ({:.1}%)",
+            self.failed,
+            (self.failed as f64 / self.total_tests as f64) * 100.0
+        )?;
+        writeln!(
+            f,
+            "Skipped:      {} ({:.1}%)",
+            self.skipped,
+            (self.skipped as f64 / self.total_tests as f64) * 100.0
+        )?;
         writeln!(f)?;
 
         if self.failed == 0 && self.skipped == 0 {
-            writeln!(f, "🎉 ALL TESTS PASSED - asupersync and h2 produce identical RST_STREAM behavior")?;
+            writeln!(
+                f,
+                "🎉 ALL TESTS PASSED - asupersync and h2 produce identical RST_STREAM behavior"
+            )?;
         } else {
             writeln!(f, "❌ CONFORMANCE ISSUES DETECTED")?;
             writeln!(f)?;
             writeln!(f, "Failed tests:")?;
             for result in &self.results {
                 if result.conformance_status == ConformanceStatus::Fail {
-                    writeln!(f, "  - {}: {}", result.test_name,
-                             result.error_details.as_ref().unwrap_or(&"Unknown error".to_string()))?;
+                    writeln!(
+                        f,
+                        "  - {}: {}",
+                        result.test_name,
+                        result
+                            .error_details
+                            .as_ref()
+                            .unwrap_or(&"Unknown error".to_string())
+                    )?;
                 }
             }
         }
@@ -665,7 +694,10 @@ pub fn main() {
             "--format=markdown" => output_format = "markdown",
             "--format=summary" => output_format = "summary",
             _ => {
-                eprintln!("Usage: {} [--verbose] [--format=json|markdown|summary]", args[0]);
+                eprintln!(
+                    "Usage: {} [--verbose] [--format=json|markdown|summary]",
+                    args[0]
+                );
                 std::process::exit(1);
             }
         }
@@ -687,12 +719,21 @@ pub fn main() {
             println!("# HTTP/2 RST_STREAM Error Code Propagation Conformance Report\n");
             println!("## Summary\n");
             println!("- **Total tests:** {}", report.total_tests);
-            println!("- **Passed:** {} ({:.1}%)", report.passed,
-                     (report.passed as f64 / report.total_tests as f64) * 100.0);
-            println!("- **Failed:** {} ({:.1}%)", report.failed,
-                     (report.failed as f64 / report.total_tests as f64) * 100.0);
-            println!("- **Skipped:** {} ({:.1}%)\n", report.skipped,
-                     (report.skipped as f64 / report.total_tests as f64) * 100.0);
+            println!(
+                "- **Passed:** {} ({:.1}%)",
+                report.passed,
+                (report.passed as f64 / report.total_tests as f64) * 100.0
+            );
+            println!(
+                "- **Failed:** {} ({:.1}%)",
+                report.failed,
+                (report.failed as f64 / report.total_tests as f64) * 100.0
+            );
+            println!(
+                "- **Skipped:** {} ({:.1}%)\n",
+                report.skipped,
+                (report.skipped as f64 / report.total_tests as f64) * 100.0
+            );
 
             if report.failed > 0 {
                 println!("## Failed Tests\n");
@@ -708,7 +749,9 @@ pub fn main() {
                 }
             } else {
                 println!("## ✅ All Tests Passed\n");
-                println!("asupersync and h2 produce identical RST_STREAM error code propagation behavior.");
+                println!(
+                    "asupersync and h2 produce identical RST_STREAM error code propagation behavior."
+                );
             }
         }
         "summary" | _ => {
@@ -754,7 +797,10 @@ mod tests {
         // Ensure all error codes are covered in test generation
         let tester = RstStreamConformanceTester::new();
         for error_code in &error_codes {
-            let has_test = tester.test_cases.iter().any(|tc| tc.rst_error_code == *error_code);
+            let has_test = tester
+                .test_cases
+                .iter()
+                .any(|tc| tc.rst_error_code == *error_code);
             assert!(has_test, "Missing test for error code: {:?}", error_code);
         }
     }
@@ -784,11 +830,49 @@ mod tests {
     }
 
     #[test]
+    fn test_h2_reference_adapter_fails_closed_without_live_seam() {
+        let tester = RstStreamConformanceTester::new();
+        let test_case = tester
+            .test_cases
+            .first()
+            .expect("default scenarios should include RST_STREAM cases");
+
+        let err = tester
+            .run_h2_reference_test(test_case)
+            .expect_err("missing h2 reference seam must not fabricate a pass")
+            .to_string();
+
+        assert!(err.contains("h2 reference adapter unavailable"));
+        assert!(err.contains("no live h2 crate seam is wired"));
+        assert!(err.contains(&test_case.name));
+    }
+
+    #[test]
+    fn test_report_fails_closed_until_h2_reference_is_live() {
+        let mut tester = RstStreamConformanceTester::new();
+        let report = tester.run_all_tests();
+
+        assert_eq!(report.passed, 0);
+        assert_eq!(report.failed, report.total_tests);
+        assert_eq!(report.skipped, 0);
+        assert!(report.results.iter().all(|result| {
+            result.conformance_status == ConformanceStatus::Fail
+                && result
+                    .error_details
+                    .as_deref()
+                    .is_some_and(|details| details.contains(H2_REFERENCE_UNSUPPORTED))
+        }));
+    }
+
+    #[test]
     fn test_test_case_generation_completeness() {
         let test_cases = RstStreamConformanceTester::generate_test_cases();
 
         // Should have tests for all error codes plus edge cases
-        assert!(test_cases.len() >= 13, "Should have at least 13 test cases (one per error code)");
+        assert!(
+            test_cases.len() >= 13,
+            "Should have at least 13 test cases (one per error code)"
+        );
 
         // Should have non-existent stream test
         assert!(test_cases.iter().any(|tc| tc.name.contains("nonexistent")));

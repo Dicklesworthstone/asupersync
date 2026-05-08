@@ -1,7 +1,8 @@
 //! CLI runner for H2 RST_STREAM error code propagation conformance testing
 //!
-//! This binary runs the conformance test harness comparing asupersync's
-//! RST_STREAM error code propagation behavior against the h2 crate reference.
+//! This binary runs the RST_STREAM conformance harness. Until the h2 crate
+//! reference adapter is wired, it exits non-zero instead of reporting mocked
+//! differential success.
 
 use std::env;
 use std::process;
@@ -77,11 +78,10 @@ fn print_help() {
     println!("    --help, -h   Print this help message");
     println!();
     println!("DESCRIPTION:");
-    println!("    This tool tests HTTP/2 RST_STREAM error code propagation compliance");
-    println!("    by comparing asupersync behavior against the h2 crate reference");
-    println!("    implementation. It verifies that both implementations produce");
-    println!("    identical client-observed status codes for the same RST_STREAM");
-    println!("    sequences across all RFC 9113 error codes and stream states.");
+    println!("    This tool tests HTTP/2 RST_STREAM error code propagation compliance.");
+    println!("    The h2 crate reference adapter is currently fail-closed until a live");
+    println!("    h2 seam is wired; the harness must not report mocked differential");
+    println!("    success as conformance evidence.");
     println!();
     println!("EXIT CODES:");
     println!("    0    All tests passed - implementations are conformant");
