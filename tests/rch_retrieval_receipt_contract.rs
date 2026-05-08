@@ -122,6 +122,14 @@ fn completed_artifact_retrieval_is_clean_remote_success() {
 }
 
 #[test]
+fn remote_success_matches_full_output_golden() {
+    let actual = receipt_json("remote_success.log", None);
+    let expected = fixture_json("remote_success_expected.json");
+
+    assert_eq!(actual, expected);
+}
+
+#[test]
 fn remote_pass_then_retrieval_timeout_is_split_verdict() {
     let receipt = receipt_json("passed_after_retrieval_timeout.log", Some(124));
 
