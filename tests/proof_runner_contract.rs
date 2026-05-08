@@ -118,7 +118,7 @@ fn proof_runner_list_lanes_matches_exact_reviewed_golden() {
     let expected_json: Value = serde_json::from_str(&expected).expect("golden list-lanes JSON");
     assert_eq!(
         actual_json, expected_json,
-        "parsed lane list JSON must match"
+        "parsed proof-runner lane list JSON drifted from list_lanes_expected.json"
     );
     assert_eq!(
         actual, expected,
