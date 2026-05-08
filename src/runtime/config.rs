@@ -28,6 +28,7 @@
 //! | `enable_read_biased_region_snapshot` | `false` |
 //! | `enable_adaptive_cancel_streak` | `true` |
 //! | `adaptive_cancel_streak_epoch_steps` | `128` |
+//! | `adaptive_ready_batch` | disabled |
 
 use crate::observability::ObservabilityConfig;
 use crate::observability::metrics::{MetricsProvider, NoOpMetrics};
@@ -96,6 +97,74 @@ impl BlockingPoolConfig {
             self.max_threads = self.min_threads;
         }
         self.affinity_profile.normalize();
+    }
+}
+
+/// Observe-first adaptive ready-lane batch sizing profile.
+///
+/// The default is disabled and preserves fixed `steal_batch_size` behavior.
+/// When enabled, scheduler workers may temporarily choose a larger or smaller
+/// ready-lane drain batch from deterministic local signals: ready depth,
+/// global-ready combiner contention, and cancel-lane debt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdaptiveReadyBatchConfig {
+    /// Enables adaptive ready-batch selection when `true`.
+    pub enabled: bool,
+    /// Smallest batch size allowed while the profile is active.
+    pub min_batch_size: usize,
+    /// Largest batch size allowed while the profile is active.
+    pub max_batch_size: usize,
+    /// Minimum ready depth required before the scheduler can scale up.
+    pub scale_up_ready_depth: usize,
+    /// Minimum observed combiner in-flight depth required before scale-up.
+    pub scale_up_in_flight: usize,
+    /// Minimum combiner claim-failure delta required before scale-up.
+    pub scale_up_claim_failures: usize,
+    /// Cancel-debt floor that forces the batch size down to `min_batch_size`.
+    pub cancel_debt_floor: usize,
+    /// Number of subsequent batch drains that should keep the scaled-up size.
+    pub cooldown_steps: usize,
+}
+
+impl AdaptiveReadyBatchConfig {
+    /// Conservative disabled profile.
+    pub const DISABLED: Self = Self {
+        enabled: false,
+        min_batch_size: 1,
+        max_batch_size: 16,
+        scale_up_ready_depth: 64,
+        scale_up_in_flight: 2,
+        scale_up_claim_failures: 1,
+        cancel_debt_floor: 16,
+        cooldown_steps: 0,
+    };
+
+    /// Normalize profile parameters to safe non-zero bounds.
+    pub fn normalize(&mut self, fixed_batch_size: usize) {
+        let fixed_batch_size = fixed_batch_size.max(1);
+        self.min_batch_size = self.min_batch_size.max(1);
+        self.max_batch_size = self
+            .max_batch_size
+            .max(self.min_batch_size)
+            .max(fixed_batch_size);
+        if self.scale_up_ready_depth == 0 {
+            self.scale_up_ready_depth = fixed_batch_size;
+        }
+        if self.scale_up_in_flight == 0 {
+            self.scale_up_in_flight = 1;
+        }
+        if self.scale_up_claim_failures == 0 {
+            self.scale_up_claim_failures = 1;
+        }
+        if self.cancel_debt_floor == 0 {
+            self.cancel_debt_floor = 1;
+        }
+    }
+}
+
+impl Default for AdaptiveReadyBatchConfig {
+    fn default() -> Self {
+        Self::DISABLED
     }
 }
 
@@ -1549,6 +1618,8 @@ pub struct RuntimeConfig {
     pub global_queue_limit: usize,
     /// Work stealing batch size.
     pub steal_batch_size: usize,
+    /// Observe-first adaptive ready-lane batch sizing profile.
+    pub adaptive_ready_batch: AdaptiveReadyBatchConfig,
     /// Blocking pool configuration.
     pub blocking: BlockingPoolConfig,
     /// Enable parking for idle workers.
@@ -1656,6 +1727,7 @@ impl RuntimeConfig {
         if self.steal_batch_size == 0 {
             self.steal_batch_size = 1;
         }
+        self.adaptive_ready_batch.normalize(self.steal_batch_size);
         if self.poll_budget == 0 {
             self.poll_budget = 1;
         }
@@ -1815,6 +1887,7 @@ impl Default for RuntimeConfig {
             thread_name_prefix: "asupersync-worker".to_string(),
             global_queue_limit: 0,
             steal_batch_size: 16,
+            adaptive_ready_batch: AdaptiveReadyBatchConfig::default(),
             blocking: BlockingPoolConfig::default(),
             enable_parking: true,
             poll_budget: 128,
@@ -9031,6 +9104,16 @@ mod tests {
             thread_name_prefix: String::new(),
             global_queue_limit: 0,
             steal_batch_size: 0,
+            adaptive_ready_batch: AdaptiveReadyBatchConfig {
+                enabled: true,
+                min_batch_size: 0,
+                max_batch_size: 0,
+                scale_up_ready_depth: 0,
+                scale_up_in_flight: 0,
+                scale_up_claim_failures: 0,
+                cancel_debt_floor: 0,
+                cooldown_steps: 0,
+            },
             blocking: BlockingPoolConfig {
                 min_threads: 4,
                 max_threads: 1,
@@ -9321,6 +9404,16 @@ mod tests {
             thread_name_prefix: "custom".to_string(),
             global_queue_limit: 64,
             steal_batch_size: 8,
+            adaptive_ready_batch: AdaptiveReadyBatchConfig {
+                enabled: true,
+                min_batch_size: 2,
+                max_batch_size: 32,
+                scale_up_ready_depth: 128,
+                scale_up_in_flight: 4,
+                scale_up_claim_failures: 3,
+                cancel_debt_floor: 6,
+                cooldown_steps: 2,
+            },
             blocking: BlockingPoolConfig {
                 min_threads: 2,
                 max_threads: 4,

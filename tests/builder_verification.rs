@@ -25,6 +25,7 @@ use common::init_test_logging;
 
 use asupersync::lab::chaos::ChaosConfig;
 use asupersync::lab::{LabConfig, LabRuntime};
+use asupersync::runtime::config::AdaptiveReadyBatchConfig;
 use asupersync::runtime::deadline_monitor::{AdaptiveDeadlineConfig, MonitorConfig};
 use asupersync::runtime::{RegionLimits, RuntimeBuilder, SpawnError};
 use asupersync::types::Time;
@@ -96,6 +97,16 @@ fn builder_verify_003_scheduler_tuning() {
 
     let runtime = RuntimeBuilder::new()
         .steal_batch_size(32)
+        .adaptive_ready_batch(AdaptiveReadyBatchConfig {
+            enabled: true,
+            min_batch_size: 4,
+            max_batch_size: 64,
+            scale_up_ready_depth: 128,
+            scale_up_in_flight: 2,
+            scale_up_claim_failures: 3,
+            cancel_debt_floor: 8,
+            cooldown_steps: 2,
+        })
         .poll_budget(64)
         .global_queue_limit(8192)
         .enable_parking(false)
@@ -104,6 +115,14 @@ fn builder_verify_003_scheduler_tuning() {
 
     let config = runtime.config();
     assert_eq!(config.steal_batch_size, 32);
+    assert!(config.adaptive_ready_batch.enabled);
+    assert_eq!(config.adaptive_ready_batch.min_batch_size, 4);
+    assert_eq!(config.adaptive_ready_batch.max_batch_size, 64);
+    assert_eq!(config.adaptive_ready_batch.scale_up_ready_depth, 128);
+    assert_eq!(config.adaptive_ready_batch.scale_up_in_flight, 2);
+    assert_eq!(config.adaptive_ready_batch.scale_up_claim_failures, 3);
+    assert_eq!(config.adaptive_ready_batch.cancel_debt_floor, 8);
+    assert_eq!(config.adaptive_ready_batch.cooldown_steps, 2);
     assert_eq!(config.poll_budget, 64);
     assert_eq!(config.global_queue_limit, 8192);
     assert!(!config.enable_parking);

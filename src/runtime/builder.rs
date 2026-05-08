@@ -117,6 +117,7 @@
 //! | [`thread_name_prefix`](RuntimeBuilder::thread_name_prefix) | `"asupersync-worker"` | Thread name prefix |
 //! | [`global_queue_limit`](RuntimeBuilder::global_queue_limit) | 0 (unbounded) | Global queue depth |
 //! | [`steal_batch_size`](RuntimeBuilder::steal_batch_size) | 16 | Work-stealing batch size |
+//! | [`adaptive_ready_batch`](RuntimeBuilder::adaptive_ready_batch) | disabled | Observe-first adaptive ready-lane batch sizing |
 //! | [`blocking_threads`](RuntimeBuilder::blocking_threads) | 0, 0 | Blocking pool min/max |
 //! | [`enable_parking`](RuntimeBuilder::enable_parking) | true | Park idle workers |
 //! | [`poll_budget`](RuntimeBuilder::poll_budget) | 128 | Polls before cooperative yield |
@@ -156,13 +157,16 @@ use crate::observability::metrics::MetricsProvider;
 use crate::record::RegionLimits;
 use crate::runtime::RuntimeState;
 use crate::runtime::SpawnError;
-use crate::runtime::config::{RuntimeCapacityHints, RuntimeConfig, WorkerCohortMapping};
+use crate::runtime::config::{
+    AdaptiveReadyBatchConfig, RuntimeCapacityHints, RuntimeConfig, WorkerCohortMapping,
+};
 use crate::runtime::deadline_monitor::{
     AdaptiveDeadlineConfig, DeadlineTaskSnapshot, DeadlineWarning, MonitorConfig,
     default_warning_handler,
 };
 use crate::runtime::io_driver::IoDriverHandle;
 use crate::runtime::reactor::Reactor;
+use crate::runtime::scheduler::three_lane::AdaptiveBatchSizingProfile;
 use crate::runtime::scheduler::{ThreeLaneScheduler, ThreeLaneWorker};
 use crate::time::TimerDriverHandle;
 use crate::trace::distributed::LogicalClockMode;
@@ -2269,6 +2273,18 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Set the observe-first adaptive ready-lane batch sizing profile.
+    ///
+    /// The default profile is disabled, preserving fixed `steal_batch_size`
+    /// behavior. When enabled, workers can scale ready-lane batch drains from
+    /// deterministic scheduler-local pressure signals while retaining a
+    /// conservative fixed-profile fallback.
+    #[must_use]
+    pub fn adaptive_ready_batch(mut self, profile: AdaptiveReadyBatchConfig) -> Self {
+        self.config.adaptive_ready_batch = profile;
+        self
+    }
+
     /// Set the logical clock mode used for causal trace ordering.
     #[must_use]
     pub fn logical_clock_mode(mut self, mode: LogicalClockMode) -> Self {
@@ -3104,6 +3120,21 @@ impl Default for RuntimeBuilder {
     }
 }
 
+fn scheduler_adaptive_ready_batch_profile(
+    config: AdaptiveReadyBatchConfig,
+) -> Option<AdaptiveBatchSizingProfile> {
+    config.enabled.then_some(AdaptiveBatchSizingProfile {
+        enabled: true,
+        min_batch_size: config.min_batch_size,
+        max_batch_size: config.max_batch_size,
+        scale_up_ready_depth: config.scale_up_ready_depth,
+        scale_up_in_flight: config.scale_up_in_flight,
+        scale_up_claim_failures: config.scale_up_claim_failures,
+        cancel_debt_floor: config.cancel_debt_floor,
+        cooldown_steps: config.cooldown_steps,
+    })
+}
+
 /// A configured Asupersync runtime.
 ///
 /// Created via [`RuntimeBuilder`]. The runtime owns worker threads and a
@@ -3779,6 +3810,9 @@ impl RuntimeInner {
             config.enable_adaptive_cancel_streak,
             config.adaptive_cancel_streak_epoch_steps,
         );
+        scheduler.set_adaptive_batch_profile(scheduler_adaptive_ready_batch_profile(
+            config.adaptive_ready_batch,
+        ));
         if let Some(mapping) = config.worker_cohort_map.as_ref() {
             scheduler
                 .set_worker_cohort_map(&mapping.worker_to_cohort)

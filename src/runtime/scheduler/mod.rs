@@ -8,6 +8,7 @@
 //! Multi-worker scheduling preserves this strict lane ordering while
 //! supporting work-stealing for load balancing across workers.
 
+pub mod autotuner;
 pub mod decision_contract;
 #[cfg(test)]
 pub mod edf_priority_metamorphic;
@@ -42,6 +43,10 @@ pub mod work_stealing_checker;
 pub mod work_stealing_fairness_metamorphic;
 pub mod worker;
 
+pub use autotuner::{
+    AutotunerConfig, AutotunerRecommendation, HotPathObservation, SchedulerAutotuner,
+    extract_observation,
+};
 pub use global_injector::GlobalInjector;
 pub use global_queue::GlobalQueue;
 pub use intrusive::{IntrusiveRing, IntrusiveStack, QUEUE_TAG_CANCEL, QUEUE_TAG_READY};

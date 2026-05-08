@@ -1660,14 +1660,8 @@ impl ThreeLaneScheduler {
         }
     }
 
-    /// Installs or removes the adaptive ready-batch sizing profile used by
-    /// test and smoke-contract harnesses.
-    #[doc(hidden)]
-    #[cfg(any(test, feature = "test-internals"))]
-    pub fn set_adaptive_batch_profile_for_test(
-        &mut self,
-        profile: Option<AdaptiveBatchSizingProfile>,
-    ) {
+    /// Installs or removes the adaptive ready-batch sizing profile.
+    pub fn set_adaptive_batch_profile(&mut self, profile: Option<AdaptiveBatchSizingProfile>) {
         for worker in &mut self.workers {
             worker.adaptive_batch_profile = profile;
             worker.reset_adaptive_batch_state();
@@ -1676,6 +1670,16 @@ impl ThreeLaneScheduler {
             worker.preemption_metrics.adaptive_batch_cooldown_holds = 0;
             worker.preemption_metrics.adaptive_batch_max_selected = worker.fixed_ready_batch_size();
         }
+    }
+
+    /// Test and smoke-contract alias for adaptive ready-batch sizing.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-internals"))]
+    pub fn set_adaptive_batch_profile_for_test(
+        &mut self,
+        profile: Option<AdaptiveBatchSizingProfile>,
+    ) {
+        self.set_adaptive_batch_profile(profile);
     }
 
     /// Seeds ready-combiner contention counters for deterministic adaptive-batch tests.
