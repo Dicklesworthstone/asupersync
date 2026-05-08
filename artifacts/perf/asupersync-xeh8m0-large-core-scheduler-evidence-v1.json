@@ -1,0 +1,93 @@
+{
+  "schema_version": "asupersync-large-core-scheduler-evidence-v1",
+  "bead_id": "asupersync-xeh8m0.3",
+  "title": "Large-core scheduler evidence corpus",
+  "status": "scenario_defined_not_yet_measured",
+  "purpose": "Define the reproducible large-core scheduler evidence lane before changing scheduler code or claiming swarm-scale speedups.",
+  "source_of_truth": {
+    "evidence_contract": "artifacts/perf/asupersync-xeh8m0-large-core-scheduler-evidence-v1.json",
+    "operator_runbook": "artifacts/perf/asupersync-xeh8m0-large-core-scheduler-runbook-v1.md",
+    "benchmark_surface": "benches/scheduler_benchmark.rs"
+  },
+  "maintained_benchmark_surface": {
+    "path": "benches/scheduler_benchmark.rs",
+    "criterion_group": "scheduler/three_lane_decision",
+    "source_markers": [
+      "bench_three_lane_decision",
+      "fast_ready_uncontended",
+      "fast_ready_local_peek_contended",
+      "global_ready_burst/64",
+      "global_ready_burst/512",
+      "global_ready_burst_evidence_off",
+      "global_ready_burst_evidence_on"
+    ],
+    "reason": "This is the maintained scheduler decision surface that exercises the Phase 3 ready-work path, local queue fast path, global ready bursts, and scheduler evidence capture overhead."
+  },
+  "scenario": {
+    "id": "xeh8m0-three-lane-decision-large-core-baseline",
+    "description": "Collect a comparable baseline for three-lane scheduler decision overhead on a large-core host class without changing scheduler code.",
+    "host_class": {
+      "minimum_logical_cpus": 64,
+      "minimum_ram_gib": 256,
+      "rch_required": true,
+      "same_host_required_for_comparison": true
+    },
+    "benchmark_filter": "scheduler/three_lane_decision",
+    "workload_classes": [
+      "fast-ready uncontended dispatch",
+      "fast-ready dispatch with local priority lock contention",
+      "global ready burst drain",
+      "scheduler evidence capture on/off comparison"
+    ]
+  },
+  "metric_contract": {
+    "required_latency_quantiles": [
+      "p50",
+      "p95",
+      "p999"
+    ],
+    "required_throughput_fields": [
+      "elements_per_second",
+      "sample_count"
+    ],
+    "required_fingerprint_fields": [
+      "git_sha",
+      "timestamp_utc",
+      "hostname_or_rch_worker",
+      "logical_cpu_count",
+      "ram_gib",
+      "kernel",
+      "rustc_version",
+      "cargo_version",
+      "benchmark_command",
+      "criterion_filter"
+    ],
+    "variance_policy": {
+      "same_host_p95_drift_noise_threshold_percent": 10,
+      "same_host_p95_drift_escalation_threshold_percent": 20,
+      "comparison_requires_same_worker": true
+    }
+  },
+  "baseline_artifact_paths": {
+    "receipt_json": "tests/artifacts/perf/asupersync-xeh8m0.3/three_lane_decision_baseline_v1.json",
+    "run_log": "tests/artifacts/perf/asupersync-xeh8m0.3/three_lane_decision_rch.log",
+    "hotspot_table": "tests/artifacts/perf/asupersync-xeh8m0.3/hotspot_table.md",
+    "criterion_directory": "target/criterion/scheduler/three_lane_decision"
+  },
+  "proof_commands": [
+    "jq empty artifacts/perf/asupersync-xeh8m0-large-core-scheduler-evidence-v1.json",
+    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_xeh8m0_scheduler_evidence CARGO_INCREMENTAL=0 RUSTFLAGS='-C debuginfo=1 -C force-frame-pointers=yes' cargo bench -p asupersync --bench scheduler_benchmark -- scheduler/three_lane_decision"
+  ],
+  "closeout_requirements": [
+    "Run the rch-routed cargo bench command on a host with at least 64 logical CPUs and 256 GiB RAM, or record a no_win verdict that the available worker class cannot prove the claim.",
+    "Write receipt_json with the required fingerprint, quantiles, throughput fields, command, git SHA, worker identity, and verdict.",
+    "If no improvement is attempted or proven, record verdict=no_win rather than claiming a speedup.",
+    "Do not edit scheduler code or README support claims until a measured receipt exists."
+  ],
+  "not_covered": [
+    "This artifact does not claim any scheduler speedup.",
+    "This artifact does not change scheduler behavior.",
+    "This artifact does not prove NUMA placement or worker-affinity changes.",
+    "This artifact does not replace later flamegraph, allocation, or off-CPU profiles."
+  ]
+}
