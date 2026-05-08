@@ -298,6 +298,28 @@ fn multi_issue_filter_matches_full_output_golden() {
 }
 
 #[test]
+fn multi_issue_matches_full_output_golden() {
+    let output = run_receipt("multi_issue.json");
+    assert!(
+        output.status.success(),
+        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actual = String::from_utf8(output.stdout).expect("receipt stdout must be UTF-8");
+    let expected = fixture_text("multi_issue_expected.json");
+
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
+    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
+    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
+    assert_eq!(
+        actual, expected,
+        "landed-but-open multi-issue receipt changed; update the golden only after reviewing closeout summary semantics"
+    );
+}
+
+#[test]
 fn receipt_declares_non_mutating_safety_contract() {
     let receipt = receipt_json("landed_tracker_conflict.json");
 
