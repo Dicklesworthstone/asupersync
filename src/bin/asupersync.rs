@@ -9596,13 +9596,25 @@ lab:
             .expect("fixture exists");
         let document = build_report_export_document(&bundle, fixture).expect("document");
         let markdown = render_doctor_report_markdown(&document);
+        let section_headings = markdown
+            .lines()
+            .filter(|line| line.starts_with("## "))
+            .collect::<Vec<_>>()
+            .join("\n");
 
-        assert!(markdown.contains("## Evidence Links"));
-        assert!(markdown.contains("## Command Provenance"));
-        assert!(markdown.contains("## Remediation Outcomes"));
-        assert!(markdown.contains("## Trust Transitions"));
-        assert!(markdown.contains("## Collaboration Trail"));
-        assert!(markdown.contains("## Troubleshooting Playbooks"));
+        assert_snapshot!(
+            section_headings,
+            @r###"
+        ## Summary
+        ## Findings
+        ## Evidence Links
+        ## Command Provenance
+        ## Remediation Outcomes
+        ## Trust Transitions
+        ## Collaboration Trail
+        ## Troubleshooting Playbooks
+        "###
+        );
     }
 
     #[test]
