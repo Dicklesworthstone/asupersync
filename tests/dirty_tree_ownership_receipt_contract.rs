@@ -220,6 +220,17 @@ fn tracker_dirty_state_is_never_mixed() {
 }
 
 #[test]
+fn tracker_dirty_matches_full_output_golden() {
+    let actual_text = receipt_stdout("tracker_dirty.json");
+    let expected_text = fixture_text("tracker_dirty_expected.json");
+    let actual_json: Value = serde_json::from_str(&actual_text).expect("actual receipt JSON");
+    let expected_json: Value = serde_json::from_str(&expected_text).expect("expected receipt JSON");
+
+    assert_eq!(actual_json, expected_json);
+    assert_eq!(actual_text, expected_text);
+}
+
+#[test]
 fn recent_message_can_assign_peer_owner_without_reservation() {
     let receipt = receipt_json("message_owner.json");
     let row = row(&receipt, "tests/proof_status_snapshot_contract.rs");
