@@ -1,0 +1,74 @@
+{
+  "measurements": [
+    {
+      "scenario": "scheduler_burst_64",
+      "mode": "native",
+      "p95_us": 420,
+      "p999_us": 900,
+      "sample_count": 10000,
+      "status": "pass",
+      "command": "rch exec -- cargo bench --bench scheduler_benchmark -- scheduler_burst_64",
+      "git_sha": "abc1234"
+    },
+    {
+      "scenario": "scheduler_burst_64",
+      "mode": "lab",
+      "p95_us": 600,
+      "p999_us": 1800,
+      "sample_count": 10000,
+      "status": "pass",
+      "command": "rch exec -- cargo test -p asupersync --test lab_scheduler_latency -- scheduler_burst_64",
+      "git_sha": "abc1234"
+    },
+    {
+      "scenario": "cancel_storm_512",
+      "mode": "native",
+      "p95_us": 800,
+      "p999_us": 2400,
+      "sample_count": 9000,
+      "status": "pass",
+      "command": "rch exec -- cargo bench --bench cancel_benchmark -- cancel_storm_512",
+      "git_sha": "abc1234"
+    },
+    {
+      "scenario": "timer_wheel_steady",
+      "mode": "native",
+      "p95_us": 120,
+      "p999_us": 300,
+      "sample_count": 500,
+      "status": "pass",
+      "command": "rch exec -- cargo bench --bench timer_wheel -- timer_wheel_steady",
+      "git_sha": "abc1234"
+    },
+    {
+      "scenario": "timer_wheel_steady",
+      "mode": "lab",
+      "p95_us": 124,
+      "p999_us": 310,
+      "sample_count": 500,
+      "status": "pass",
+      "command": "rch exec -- cargo test -p asupersync --test lab_timer_latency -- timer_wheel_steady",
+      "git_sha": "abc1234"
+    },
+    {
+      "scenario": "io_reactor_wakeup",
+      "mode": "native",
+      "p95_us": 300,
+      "p999_us": 1200,
+      "sample_count": 7000,
+      "status": "blocked",
+      "command": "rch exec -- cargo bench --bench reactor_benchmark -- io_reactor_wakeup",
+      "git_sha": "abc1234"
+    },
+    {
+      "scenario": "io_reactor_wakeup",
+      "mode": "lab",
+      "p95_us": 310,
+      "p999_us": 1210,
+      "sample_count": 7000,
+      "status": "pass",
+      "command": "rch exec -- cargo test -p asupersync --test lab_reactor_latency -- io_reactor_wakeup",
+      "git_sha": "abc1234"
+    }
+  ]
+}
