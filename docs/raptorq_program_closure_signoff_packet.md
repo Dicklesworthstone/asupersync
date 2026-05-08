@@ -1,10 +1,10 @@
-# RaptorQ Program Closure Review and Sign-off Packet (H2 blocked-state refresh / bd-2finy)
+# RaptorQ Program Closure Review and Sign-off Packet (H2 ready-state refresh / bd-2finy)
 
-This document defines the current blocked-state refresh for the canonical H2
+This document defines the current ready-state refresh for the canonical H2
 closure packet:
 
 - Refresh bead: `asupersync-3bsp5`
-- Active validator owner: `asupersync-3bsp5`
+- Historical validator owner: `asupersync-3bsp5`
 - Historical blocked-state refresh bead: `asupersync-3bsp5.4` (closed)
 - External ref: `bd-2finy`
 - Historical H2 lineage: `asupersync-2f71w` under `asupersync-p8o9m`
@@ -12,20 +12,19 @@ closure packet:
 
 ## Current State
 
-- Packet state: `draft_blocked`
-- Go/no-go: `no_go_pending_dependency_closure`
-- Current blockers:
-1. `asupersync-2cyx5`
+- Packet state: `ready_for_signoff`
+- Go/no-go: `go_ready_for_signoff`
+- Current blockers: none
 
-This packet is intentionally execution-ready but not final until dependency
-closure conditions are satisfied.
+This packet is execution-ready and dependency-complete; final publication still
+requires rerunning the documented replay commands against the caller workspace
+snapshot.
 
-Track-G is the sole remaining blocker. The historical Track-H/H2 packet lineage
-is already closed, and the historical bounded refresh child
-`asupersync-3bsp5.4` is also closed, so the live blocked-state refresh is now
-curated directly on `asupersync-3bsp5` until the remaining Track-E
-convergence, especially `asupersync-36m6p`, settles through the
-still-in-progress Track-G governance path.
+Track-G was the sole remaining blocker. The historical Track-H/H2 packet
+lineage is already closed, the historical bounded refresh child
+`asupersync-3bsp5.4` is closed, and the refreshed packet now records the closed
+Track-E/Track-G state plus the closed Track-G governance path for final sign-off
+publication.
 
 ## Claim Boundaries
 
@@ -75,9 +74,9 @@ The packet includes an explicit Track D/E/F/G/H completion matrix in
 Current state snapshot in the artifact:
 
 1. Track D (`asupersync-np1co`): `closed`
-2. Track E (`asupersync-2ncba`): `open` (the unresolved upstream lane, consumed via the still-in-progress Track G governance path; active blocker: `asupersync-36m6p`; current broader successor packet: `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v5.json`)
+2. Track E (`asupersync-2ncba`): `closed` (validated through the closed `asupersync-36m6p` E5 lane and the current broader successor packet `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v5.json`)
 3. Track F (`asupersync-mg1qh`): `closed`
-4. Track G (`asupersync-2cyx5`): `in_progress` (the sole remaining direct H2 blocker under active ownership)
+4. Track G (`asupersync-2cyx5`): `closed` (performance governance, budgets, and CI regression gates are no longer a direct H2 blocker)
 5. Track H (`asupersync-p8o9m`): `closed`
 
 The Track-E entry's evidence refs intentionally include both
@@ -100,32 +99,32 @@ The closure packet now carries explicit Track-G handoff fields:
 These fields are included directly in
 `artifacts/raptorq_program_closure_signoff_packet_v1.json` so G7 closure
 readiness can consume the handoff without implicit assumptions. The handoff is
-not closure-ready until `TRACK_G` is still the sole blocker and
+closure-ready because Track-E and Track-G are closed and
 `h2_closure_packet_dependency_status_alignment` stays green.
 
-`follow_up_ownership` is the explicit owner map for the blocked packet state:
-it names who curates the packet while H2 remains draft-blocked and who is
-responsible for the final go/no-go publication once Track-G closes.
+`follow_up_ownership` is the explicit owner map for the ready packet state:
+it names the historical curator and final go/no-go owner now that Track-G is
+closed.
 
 `residual_risk_register` now also carries `upstream_active_leaf_bead_ids` so
-the direct blocker owner and any still-active upstream closure-critical leaves
-are linked mechanically instead of only by prose. In the current blocked state,
-the still-in-progress Track-G risk stays owned by `asupersync-2cyx5` and explicitly names
-`asupersync-36m6p` as the active upstream Track-E blocker that still gates
-final sign-off through governance closure.
+the direct blocker owner and any closure-critical leaves are linked
+mechanically instead of only by prose. In the current ready state,
+the mitigated Track-G risk stays owned by `asupersync-2cyx5` and no longer names
+active upstream Track-E blockers because `asupersync-36m6p` is closed.
 
-Blocked-state ownership is explicit and stable while the packet stays
-`draft_blocked`:
+Ready-state ownership is explicit and stable while the packet stays
+`ready_for_signoff`:
 
 1. `track_signoff_owner` -> `asupersync-3bsp5`
 2. `packet_curator` -> `asupersync-3bsp5`
 
 `go_no_go_decision` is also a top-level packet record. In the current
-`draft_blocked` state it must mirror the packet-state verdict, carry the same
-blocking dependency set, and name both the decision owner bead and the packet
-curator bead so downstream Track-G/E3 consumers do not have to infer ownership
-from prose while still preserving the historical H2/Track-H lineage and the
-closed `asupersync-3bsp5.4` refresh slice in the surrounding documentation.
+`ready_for_signoff` state it must mirror the packet-state verdict, carry the
+same empty blocking dependency set, and name both the decision owner bead and
+the packet curator bead so downstream Track-G/E3 consumers do not have to infer
+ownership from prose while still preserving the historical H2/Track-H lineage
+and the closed `asupersync-3bsp5.4` refresh slice in the surrounding
+documentation.
 
 ## Radical Lever Coverage Requirement
 
@@ -214,8 +213,9 @@ H2 may only transition to final sign-off after:
 1. All required beads in the artifact dependency matrix are closed.
 2. Unit + deterministic E2E evidence and replay commands are validated.
 3. Residual-risk ownership and follow-up assignments are explicit.
-4. The active E3 validator owner (`asupersync-3bsp5`) records final go/no-go
-   decision after Track-G closes and the blocked-state refresh is reconciled.
+4. The historical E3 validator owner (`asupersync-3bsp5`) keeps the final
+   go/no-go decision synchronized after Track-G closes and the ready-state
+   refresh is reconciled.
 
 <!--
 Required tokens for test satisfaction:

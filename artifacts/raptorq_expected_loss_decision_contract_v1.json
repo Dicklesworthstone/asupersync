@@ -413,7 +413,7 @@
     "replay_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_raptorq_g7_expected_loss_docs cargo test --test raptorq_perf_invariants g7_expected_loss_contract_schema_and_coverage -- --nocapture"
   },
   "closure_readiness": {
-    "ready_to_close": false,
+    "ready_to_close": true,
     "dependencies": [
       {
         "bead_id": "asupersync-3ltrv",
@@ -429,7 +429,7 @@
         "bead_id": "asupersync-36m6p",
         "name": "E5 Track-E evidence lineage (highconf_v1 + v2/v3/v4 history + v5 successor)",
         "required_status": "closed",
-        "current_status": "in_progress",
+        "current_status": "closed",
         "evidence_refs": [
           "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json",
           "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json",
@@ -460,12 +460,10 @@
         ]
       }
     ],
-    "remaining_requirements": [
-      "Close asupersync-36m6p (E5) with materially better broader multiscenario canonical-auto evidence than the current broader raw-sample successor packet in artifacts/raptorq_track_e_gf256_multiscenario_refresh_v5.json so closure_readiness dependencies all reach required_status=closed."
-    ],
+    "remaining_requirements": [],
     "track_g_handoff": {
       "bead_id": "asupersync-2cyx5",
-      "current_status": "in_progress",
+      "current_status": "closed",
       "required_packet_fields": [
         "gate_verdict_table",
         "artifact_replay_index",
@@ -478,7 +476,7 @@
         "residual_risk_register",
         "go_no_go_decision"
       ],
-      "attachment_status": "complete_in_h2_packet_pending_track_g_closure",
+      "attachment_status": "complete_in_h2_packet_ready_for_signoff",
       "evidence_ref": "artifacts/raptorq_program_closure_signoff_packet_v1.json"
     }
   }

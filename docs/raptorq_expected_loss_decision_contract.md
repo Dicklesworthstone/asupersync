@@ -151,7 +151,7 @@ can otherwise observe stale Beads JSONL during multi-agent sync races.
 ## Closure Readiness Contract
 
 The artifact includes a machine-checkable `closure_readiness` section to avoid
-hand-off ambiguity while dependencies are still active.
+hand-off ambiguity as dependency state changes.
 
 Current dependency set in the artifact:
 
@@ -163,17 +163,17 @@ Current dependency set in the artifact:
 
 Dependency shorthand: `highconf_v1 + v2/v3/v4 history + v5 successor`.
 
-Current closure-readiness status (2026-04-11 refresh):
+Current closure-readiness status (2026-05-08 refresh):
 
 - `asupersync-3ltrv`: `closed`
 - `asupersync-n5fk6`: `closed`
 - `asupersync-2zu9p`: `closed`
-- `asupersync-36m6p`: still `in_progress`
+- `asupersync-36m6p`: `closed`
 
-`ready_to_close` remains `false` because `asupersync-36m6p` has not yet reached
-`closed`.
+`ready_to_close` is now `true` because all closure-readiness dependencies have
+reached `closed`.
 
-The current unresolved broader successor packet in that dependency lineage is
+The current broader successor packet in that dependency lineage is
 `artifacts/raptorq_track_e_gf256_multiscenario_refresh_v5.json`; `v4` remains
 the historical mixed-signal packet, `highconf_v1` stays the narrowed guardrail,
 and `v2`/`v3` stay historical.
@@ -181,8 +181,8 @@ and `v2`/`v3` stay historical.
 Track-G handoff packet fields (`gate_verdict_table`, `artifact_replay_index`,
 `residual_risk_register`, `go_no_go_decision`) are now attached in
 `artifacts/raptorq_program_closure_signoff_packet_v1.json` and recorded under
-`closure_readiness.track_g_handoff.attached_packet_fields`. Track-G itself
-remains `in_progress` under active ownership, and that live state is now
+`closure_readiness.track_g_handoff.attached_packet_fields`. Track-G itself is
+now `closed`, and that live state is
 recorded under `closure_readiness.track_g_handoff.current_status` so the G7
 contract does not rely on bead id alone.
 
@@ -194,14 +194,14 @@ The handoff remains machine-checkable through four explicit fields on
 3. `attachment_status`
 4. `evidence_ref`
 
-`required_packet_fields` and `attached_packet_fields` must match exactly while
-the handoff stays blocked, `attachment_status` must remain
-`complete_in_h2_packet_pending_track_g_closure`, and `evidence_ref` must stay
+`required_packet_fields` and `attached_packet_fields` must match exactly for
+the ready-for-signoff handoff, `attachment_status` must remain
+`complete_in_h2_packet_ready_for_signoff`, and `evidence_ref` must stay
 anchored to `artifacts/raptorq_program_closure_signoff_packet_v1.json`.
 
 ## Closure Notes
 
-`asupersync-m7o6i` can close after:
+`asupersync-m7o6i` closure prerequisites are satisfied after:
 
-1. `asupersync-36m6p` reaches `closed` (dependency status requirement),
+1. `asupersync-36m6p` reached `closed` (dependency status requirement),
 2. Track-G summary packet for `asupersync-2cyx5` remains synchronized with this contract artifact as the canonical G7 source.

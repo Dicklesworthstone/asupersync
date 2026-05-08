@@ -4,23 +4,19 @@
   "track_bead_id": "asupersync-3bsp5",
   "parent_track_bead_id": "asupersync-3bsp5",
   "external_ref": "bd-2finy",
-  "generated_at_utc": "2026-04-17T06:42:30Z",
+  "generated_at_utc": "2026-05-08T21:26:00Z",
   "packet_state": {
-    "status": "draft_blocked",
-    "go_no_go_decision": "no_go_pending_dependency_closure",
-    "blocking_dependencies": [
-      "asupersync-2cyx5"
-    ],
+    "status": "ready_for_signoff",
+    "go_no_go_decision": "go_ready_for_signoff",
+    "blocking_dependencies": [],
     "readiness_rule": "all required_beads must be closed before final sign-off"
   },
   "go_no_go_decision": {
-    "current_verdict": "no_go_pending_dependency_closure",
+    "current_verdict": "go_ready_for_signoff",
     "decision_owner_bead_id": "asupersync-3bsp5",
     "packet_curator_bead_id": "asupersync-3bsp5",
-    "blocking_dependency_ids": [
-      "asupersync-2cyx5"
-    ],
-    "finalization_rule": "The active E3 validator owner records the final go/no-go decision only after all required_beads are closed, Track-G is no longer blocked, and the H2 packet remains synchronized with the active Track-E closure evidence."
+    "blocking_dependency_ids": [],
+    "finalization_rule": "All required beads are closed; final sign-off publication can proceed after replay commands are rerun against the caller workspace snapshot and the H2 packet remains synchronized with the closed Track-E and Track-G evidence."
   },
   "command_policy": {
     "cargo_heavy_commands_must_use_rch": true,
@@ -102,8 +98,8 @@
       "track_code": "E",
       "track_bead_id": "asupersync-2ncba",
       "required_status": "closed",
-      "current_status": "completed",
-      "status_reason": "Track-E has been completed with the closure of asupersync-36m6p (E5 Offline Kernel Superoptimization), validated against raptorq_track_e_gf256_multiscenario_refresh_v5.json. All GF(256) kernel acceleration and offline tuning infrastructure is now operational with comprehensive validation. The completion transitions to the still-in-progress Track-G governance path for final sign-off coordination.",
+      "current_status": "closed",
+      "status_reason": "Track-E is closed with the closure of asupersync-36m6p (E5 Offline Kernel Superoptimization), validated against raptorq_track_e_gf256_multiscenario_refresh_v5.json. All GF(256) kernel acceleration and offline tuning infrastructure is now operational with comprehensive validation. The closed Track-G governance path is ready for final sign-off coordination.",
       "closure_dependency_path": "via asupersync-2cyx5",
       "evidence_refs": [
         "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json",
@@ -129,8 +125,8 @@
       "track_code": "G",
       "track_bead_id": "asupersync-2cyx5",
       "required_status": "closed",
-      "current_status": "in_progress",
-      "status_reason": "Track-G is the sole remaining direct blocker for H2 sign-off; the live bead is now in_progress under active ownership, and parent governance closure still depends on Track-E convergence, especially the active E5 lane.",
+      "current_status": "closed",
+      "status_reason": "Track-G is closed; performance governance, budgets, and CI regression gates are no longer a direct blocker for H2 sign-off.",
       "closure_dependency_path": "direct",
       "evidence_refs": [
         "artifacts/raptorq_controlled_rollout_policy_v1.json",
@@ -143,7 +139,7 @@
       "track_bead_id": "asupersync-p8o9m",
       "required_status": "closed",
       "current_status": "closed",
-      "status_reason": "Historical Track-H finalization/sign-off is closed; the live blocked-state refresh is carried by the active E3 validator lane while Track-G remains the sole remaining blocker before final sign-off publication.",
+      "status_reason": "Historical Track-H finalization/sign-off is closed; the refreshed H2 packet now reflects closed Track-E and Track-G status and is ready for final sign-off publication.",
       "closure_dependency_path": "direct",
       "evidence_refs": [
         "docs/raptorq_program_closure_signoff_packet.md",
@@ -352,8 +348,8 @@
       "gate_id": "TRACK_G",
       "bead_id": "asupersync-2cyx5",
       "required_status": "closed",
-      "current_status": "in_progress",
-      "verdict": "blocked",
+      "current_status": "closed",
+      "verdict": "pass",
       "evidence_refs": [
         "artifacts/raptorq_expected_loss_decision_contract_v1.json",
         "artifacts/raptorq_program_closure_signoff_packet_v1.json#gate_verdict_table"
@@ -456,7 +452,7 @@
     },
     {
       "check_id": "h2-residual-risk-and-follow-up-ownership",
-      "state": "blocked",
+      "state": "ready",
       "required_artifacts": [
         "artifacts/raptorq_program_closure_signoff_packet_v1.json#residual_risk_register",
         "artifacts/raptorq_program_closure_signoff_packet_v1.json#follow_up_ownership"
@@ -472,16 +468,16 @@
       "severity": "medium",
       "status": "mitigated",
       "description": "Track-H final dossier (`asupersync-346lm`) previously lagged closure, creating narrative drift risk before H1 consolidation.",
-      "mitigation": "H1 is now closed; keep H2 packet fields synchronized with live Beads statuses while Track-G remains in_progress and Track-H is closed.",
+      "mitigation": "H1 and Track-G are now closed; keep H2 packet fields synchronized with live Beads statuses through final sign-off publication.",
       "owner_bead_id": "asupersync-346lm",
       "upstream_active_leaf_bead_ids": []
     },
     {
       "risk_id": "RQ-H2-R2",
       "severity": "medium",
-      "status": "open",
-      "description": "Track-G aggregation (`asupersync-2cyx5`) is the sole remaining H2 blocker. Track-E has completed, but governance artifacts require final synchronization and validation.",
-      "mitigation": "Complete Track-G governance synchronization including updated status alignment, lever matrix validation, and final claim-boundary checklist before H2 closure.",
+      "status": "mitigated",
+      "description": "Track-G aggregation (`asupersync-2cyx5`) was the sole remaining H2 blocker; Track-E and Track-G are now closed and the governance packet has been synchronized.",
+      "mitigation": "Track-G governance synchronization is complete; keep the final claim-boundary checklist green before sign-off publication.",
       "owner_bead_id": "asupersync-2cyx5",
       "upstream_active_leaf_bead_ids": []
     }
@@ -490,12 +486,12 @@
     {
       "bead_id": "asupersync-3bsp5",
       "role": "track_signoff_owner",
-      "handoff_expectation": "Record the final go/no-go decision once Track-G closes and the remaining Track-E evidence bundle is reconciled."
+      "handoff_expectation": "Historical E3 validator owner for the final go/no-go decision; all Track-E and Track-G blocker statuses are closed in the synchronized packet."
     },
     {
       "bead_id": "asupersync-3bsp5",
       "role": "packet_curator",
-      "handoff_expectation": "Keep the blocked-state metadata, evidence pointers, and replay commands synchronized directly on the parent E3 validator lane while Track-E/E5 remains active, because the historical child refresh bead asupersync-3bsp5.4 is already closed."
+      "handoff_expectation": "Keep the ready-for-signoff metadata, evidence pointers, and replay commands synchronized on the parent E3 validator lane; the historical child refresh bead asupersync-3bsp5.4 is already closed."
     }
   ]
 }

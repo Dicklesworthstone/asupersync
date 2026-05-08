@@ -4228,10 +4228,10 @@ fn g7_expected_loss_contract_schema_and_coverage() {
         );
     }
 
+    let remaining_requirements = closure_readiness["remaining_requirements"]
+        .as_array()
+        .expect("remaining_requirements must be an array");
     if !ready_to_close {
-        let remaining_requirements = closure_readiness["remaining_requirements"]
-            .as_array()
-            .expect("remaining_requirements must be an array when not ready_to_close");
         assert!(
             !remaining_requirements.is_empty(),
             "remaining_requirements must be non-empty when ready_to_close is false"
@@ -4257,6 +4257,11 @@ fn g7_expected_loss_contract_schema_and_coverage() {
                 .iter()
                 .any(|entry| entry.contains("mixed-signal raw-sample v4")),
             "remaining_requirements must not describe v4 as the current broader blocker after the v5 refresh"
+        );
+    } else {
+        assert!(
+            remaining_requirements.is_empty(),
+            "remaining_requirements must be empty once ready_to_close is true"
         );
     }
 
@@ -4315,12 +4320,12 @@ fn g7_expected_loss_contract_schema_and_coverage() {
             .collect::<BTreeSet<_>>();
     assert_eq!(
         attached_track_g_handoff_fields, expected_track_g_handoff_fields,
-        "closure_readiness.track_g_handoff.attached_packet_fields must match the required handoff fields while Track-G remains non-closed"
+        "closure_readiness.track_g_handoff.attached_packet_fields must match the required handoff fields"
     );
     assert_eq!(
         closure_readiness["track_g_handoff"]["attachment_status"].as_str(),
-        Some("complete_in_h2_packet_pending_track_g_closure"),
-        "closure_readiness.track_g_handoff.attachment_status must describe the blocked-but-attached H2 packet state"
+        Some("complete_in_h2_packet_ready_for_signoff"),
+        "closure_readiness.track_g_handoff.attachment_status must describe the ready-for-signoff H2 packet state"
     );
     assert_eq!(
         closure_readiness["track_g_handoff"]["evidence_ref"].as_str(),
@@ -4556,7 +4561,7 @@ fn g7_expected_loss_contract_docs_are_cross_linked() {
         "attached_packet_fields",
         "attachment_status",
         "evidence_ref",
-        "complete_in_h2_packet_pending_track_g_closure",
+        "complete_in_h2_packet_ready_for_signoff",
         "raw-sample",
         "asupersync-2zu9p",
         "argmin_expected_loss",
@@ -4582,8 +4587,8 @@ fn g7_expected_loss_contract_docs_are_cross_linked() {
         );
     }
     assert!(
-        RAPTORQ_G7_EXPECTED_LOSS_MD.contains("remains `in_progress` under active ownership"),
-        "G7 expected-loss doc must describe the live Track-G handoff status as in_progress"
+        RAPTORQ_G7_EXPECTED_LOSS_MD.contains("Track-G itself is"),
+        "G7 expected-loss doc must describe the live Track-G handoff status as closed"
     );
     assert!(
         !RAPTORQ_G7_EXPECTED_LOSS_MD.contains("current mixed-signal raw-sample blocker"),
@@ -4596,6 +4601,10 @@ fn g7_expected_loss_contract_docs_are_cross_linked() {
     assert!(
         !RAPTORQ_G7_EXPECTED_LOSS_MD.contains("remains `open` after stale-triage reopen"),
         "G7 expected-loss doc must not describe the live Track-G handoff status as open"
+    );
+    assert!(
+        !RAPTORQ_G7_EXPECTED_LOSS_MD.contains("remains `in_progress` under active ownership"),
+        "G7 expected-loss doc must not describe Track-G as in_progress after closure"
     );
 }
 
@@ -4786,12 +4795,12 @@ fn h2_closure_packet_schema_and_lever_coverage() {
     assert_eq!(
         artifact["track_bead_id"].as_str(),
         Some("asupersync-3bsp5"),
-        "H2 closure packet must stay anchored to the active E3 curator bead"
+        "H2 closure packet must stay anchored to the historical E3 curator bead"
     );
     assert_eq!(
         artifact["parent_track_bead_id"].as_str(),
         Some("asupersync-3bsp5"),
-        "H2 closure packet must stay anchored to the active E3 validator owner"
+        "H2 closure packet must stay anchored to the historical E3 validator owner"
     );
     assert_eq!(
         artifact["command_policy"]["cargo_heavy_commands_must_use_rch"].as_bool(),
@@ -4828,6 +4837,11 @@ fn h2_closure_packet_schema_and_lever_coverage() {
             blocking_dependencies, expected_blockers,
             "draft_blocked H2 packet must list Track-G as the sole blocker"
         );
+    } else {
+        assert!(
+            blocking_dependencies.is_empty(),
+            "non-draft H2 packet must not list blocking dependencies"
+        );
     }
     let packet_go_no_go = artifact["packet_state"]["go_no_go_decision"]
         .as_str()
@@ -4847,14 +4861,14 @@ fn h2_closure_packet_schema_and_lever_coverage() {
             .get("decision_owner_bead_id")
             .and_then(serde_json::Value::as_str),
         Some("asupersync-3bsp5"),
-        "H2 go/no-go decision must name the active E3 validator owner"
+        "H2 go/no-go decision must name the historical E3 validator owner"
     );
     assert_eq!(
         go_no_go_decision
             .get("packet_curator_bead_id")
             .and_then(serde_json::Value::as_str),
         Some("asupersync-3bsp5"),
-        "H2 go/no-go decision must name the active E3 packet curator"
+        "H2 go/no-go decision must name the historical E3 packet curator"
     );
     let go_no_go_blockers = go_no_go_decision
         .get("blocking_dependency_ids")
@@ -4977,8 +4991,8 @@ fn h2_closure_packet_schema_and_lever_coverage() {
                 track["status_reason"]
                     .as_str()
                     .expect("track H must include status_reason")
-                    .contains("sole remaining blocker"),
-                "track H status_reason must say Track-G is the sole remaining blocker"
+                    .contains("ready for final sign-off publication"),
+                "track H status_reason must say the H2 packet is ready for final sign-off publication"
             );
         }
         if track_code == "E" {
@@ -4986,16 +5000,20 @@ fn h2_closure_packet_schema_and_lever_coverage() {
                 .as_str()
                 .expect("track E must include status_reason");
             assert!(
-                status_reason.contains("still-in-progress Track-G governance path"),
-                "track E status_reason must describe the live Track-G governance path as in_progress"
+                status_reason.contains("closed Track-G governance path"),
+                "track E status_reason must describe the live Track-G governance path as closed"
             );
             assert!(
                 !status_reason.contains("still-open Track-G governance path"),
                 "track E status_reason must not describe the live Track-G governance path as open"
             );
             assert!(
+                !status_reason.contains("still-in-progress Track-G governance path"),
+                "track E status_reason must not describe the live Track-G governance path as in_progress"
+            );
+            assert!(
                 status_reason.contains("asupersync-36m6p"),
-                "track E status_reason must still name the active E5 blocker"
+                "track E status_reason must still name the E5 dependency"
             );
             assert!(
                 !status_reason.contains("asupersync-36m6p.23"),
@@ -5349,6 +5367,9 @@ fn h2_closure_packet_schema_and_lever_coverage() {
 fn h2_closure_packet_dependency_status_alignment() {
     let artifact: serde_json::Value = serde_json::from_str(RAPTORQ_H2_CLOSURE_PACKET_JSON)
         .expect("H2 closure packet artifact must be valid JSON");
+    let packet_status = artifact["packet_state"]["status"]
+        .as_str()
+        .expect("packet_state.status must be present");
 
     // Validate the artifact's internal consistency using its own data.
     // Shared rch workers can observe stale .beads/issues.jsonl snapshots
@@ -5496,23 +5517,23 @@ fn h2_closure_packet_dependency_status_alignment() {
     }
     let (risk_status, mitigation, owner_bead_id, upstream_active_leaf_bead_ids) = risks_by_id
         .get("RQ-H2-R2")
-        .expect("residual_risk_register must retain the open Track-G blocker risk");
+        .expect("residual_risk_register must retain the Track-G blocker risk");
     assert_eq!(
-        risk_status, "open",
-        "RQ-H2-R2 must remain open while Track-G governance synchronization is incomplete"
+        risk_status, "mitigated",
+        "RQ-H2-R2 must be mitigated once Track-G governance synchronization is complete"
     );
     assert_eq!(
         owner_bead_id, "asupersync-2cyx5",
-        "RQ-H2-R2 must remain owned by the active Track-G blocker"
+        "RQ-H2-R2 must remain owned by the Track-G governance bead"
     );
     assert_eq!(
         upstream_active_leaf_bead_ids,
         &BTreeSet::new(),
-        "RQ-H2-R2 upstream blockers should be empty since Track-E is completed"
+        "RQ-H2-R2 upstream blockers should be empty since Track-E is closed"
     );
     assert!(
-        mitigation.contains("Complete Track-G governance synchronization"),
-        "RQ-H2-R2 mitigation must reflect that Track-E is complete and Track-G needs final sync"
+        mitigation.contains("Track-G governance synchronization is complete"),
+        "RQ-H2-R2 mitigation must reflect that Track-E and Track-G are closed"
     );
     let (_, mitigation, _, upstream_active_leaf_bead_ids) = risks_by_id
         .get("RQ-H2-R1")
@@ -5522,12 +5543,16 @@ fn h2_closure_packet_dependency_status_alignment() {
         "RQ-H2-R1 should not name any active upstream blocker leaves once the dossier drift is mitigated"
     );
     assert!(
-        mitigation.contains("Track-G remains in_progress"),
-        "RQ-H2-R1 mitigation must describe the live Track-G state as in_progress"
+        mitigation.contains("Track-G are now closed"),
+        "RQ-H2-R1 mitigation must describe the live Track-G state as closed"
     );
     assert!(
         !mitigation.contains("Track-G remains open"),
         "RQ-H2-R1 mitigation must not describe the live Track-G state as open"
+    );
+    assert!(
+        !mitigation.contains("Track-G remains in_progress"),
+        "RQ-H2-R1 mitigation must not describe the live Track-G state as in_progress"
     );
     let follow_up_ownership = artifact["follow_up_ownership"]
         .as_array()
@@ -5565,12 +5590,12 @@ fn h2_closure_packet_dependency_status_alignment() {
             .get("track_signoff_owner")
             .map(String::as_str),
         Some("asupersync-3bsp5"),
-        "follow_up_ownership must name the active E3 validator owner as track_signoff_owner"
+        "follow_up_ownership must name the historical E3 validator owner as track_signoff_owner"
     );
     assert_eq!(
         follow_up_roles.get("packet_curator").map(String::as_str),
         Some("asupersync-3bsp5"),
-        "follow_up_ownership must name the active E3 packet curator bead"
+        "follow_up_ownership must name the historical E3 packet curator bead"
     );
     let packet_curator_status = canonical_issue_statuses
         .get(
@@ -5579,10 +5604,17 @@ fn h2_closure_packet_dependency_status_alignment() {
                 .expect("follow_up_ownership must name a packet_curator bead"),
         )
         .expect("packet_curator bead must exist in canonical Beads state");
-    assert!(
-        matches!(packet_curator_status.as_str(), "open" | "in_progress"),
-        "active H2 packet curator bead must remain open or in_progress, not {packet_curator_status}"
-    );
+    if packet_status == "draft_blocked" {
+        assert!(
+            matches!(packet_curator_status.as_str(), "open" | "in_progress"),
+            "active H2 packet curator bead must remain open or in_progress while draft_blocked, not {packet_curator_status}"
+        );
+    } else {
+        assert_eq!(
+            packet_curator_status, "closed",
+            "historical H2 packet curator bead must be closed once packet is ready for signoff"
+        );
+    }
     let go_no_go_decision = artifact["go_no_go_decision"]
         .as_object()
         .expect("H2 packet must expose go_no_go_decision as a top-level object");
@@ -5651,16 +5683,20 @@ fn h2_closure_packet_docs_are_cross_linked() {
         );
     }
     assert!(
-        RAPTORQ_H2_CLOSURE_PACKET_MD.contains("still-in-progress Track-G governance path"),
-        "H2 closure packet doc must describe the live Track-G governance path as in_progress"
+        RAPTORQ_H2_CLOSURE_PACKET_MD.contains("closed Track-G governance path"),
+        "H2 closure packet doc must describe the live Track-G governance path as closed"
     );
     assert!(
         !RAPTORQ_H2_CLOSURE_PACKET_MD.contains("still-open Track-G governance path"),
         "H2 closure packet doc must not describe the live Track-G governance path as open"
     );
     assert!(
-        RAPTORQ_H2_CLOSURE_PACKET_MD.contains("still-in-progress Track-G risk"),
-        "H2 closure packet doc must describe the live Track-G blocker risk as in_progress"
+        !RAPTORQ_H2_CLOSURE_PACKET_MD.contains("still-in-progress Track-G governance path"),
+        "H2 closure packet doc must not describe the live Track-G governance path as in_progress"
+    );
+    assert!(
+        RAPTORQ_H2_CLOSURE_PACKET_MD.contains("mitigated Track-G risk"),
+        "H2 closure packet doc must describe the live Track-G blocker risk as mitigated"
     );
     assert!(
         !RAPTORQ_H2_CLOSURE_PACKET_MD.contains("open Track-G risk"),
