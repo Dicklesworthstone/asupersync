@@ -844,12 +844,14 @@ impl OfflineTuner {
     /// Measure performance of a candidate on test data.
     fn measure_performance(
         &self,
-        candidate: &KernelCandidate,
+        _candidate: &KernelCandidate,
         workload: &TuningWorkload,
         test_data: &[u8],
     ) -> Result<(LatencyStats, f64, f64), TuningError> {
-        // This is a simplified measurement - in practice would dispatch to
-        // actual optimized kernel implementations
+        // Measure the real implemented GF(256) operation for the workload.
+        // Candidate tile/unroll/prefetch/fusion knobs are metadata until a
+        // real variant dispatcher exists; they must not fabricate latency via
+        // synthetic loops or alternate scalars.
         let iterations = self.benchmark_iterations;
         let mut latencies = Vec::with_capacity(iterations);
 
@@ -863,18 +865,12 @@ impl OfflineTuner {
             // duration_since() yields a saturating-subtraction u64 ns.
             let start = wall_now();
 
-            // Simulate kernel execution - would call actual optimized kernels
-            match workload.operation {
-                GF256Operation::Mul => {
-                    self.simulate_mul_kernel(candidate, test_data)?;
-                }
-                GF256Operation::AddMul => {
-                    self.simulate_addmul_kernel(candidate, test_data)?;
-                }
-                GF256Operation::Add => {
-                    self.simulate_add_kernel(candidate, test_data)?;
-                }
-            }
+            let digest = match workload.operation {
+                GF256Operation::Mul => self.execute_mul_kernel(workload, test_data)?,
+                GF256Operation::AddMul => self.execute_addmul_kernel(workload, test_data)?,
+                GF256Operation::Add => self.execute_add_kernel(test_data)?,
+            };
+            std::hint::black_box(digest);
 
             #[allow(clippy::cast_precision_loss)]
             latencies.push(wall_now().duration_since(start) as f64);
@@ -960,11 +956,8 @@ impl OfflineTuner {
                     *dst_byte = Gf256::new(*dst_byte).add(Gf256::new(*src_byte)).raw();
                 }
 
-                // Test implementation - use gf256_add_slice if available or simulate
-                // For now, implement the reference since we don't have a separate add kernel
-                for (dst_byte, src_byte) in test_data_copy.iter_mut().zip(&src_data) {
-                    *dst_byte = Gf256::new(*dst_byte).add(Gf256::new(*src_byte)).raw();
-                }
+                // Test implementation using the optimized XOR/add kernel.
+                gf256_add_slice(&mut test_data_copy, &src_data);
             }
         }
 
@@ -986,127 +979,58 @@ impl OfflineTuner {
             .map_or(1.0, |w| w.weight)
     }
 
-    /// Simulate mul kernel execution by calling the actual GF256 kernel.
-    fn simulate_mul_kernel(
+    /// Execute the implemented mul kernel for a workload.
+    fn execute_mul_kernel(
         &self,
-        candidate: &KernelCandidate,
+        workload: &TuningWorkload,
         data: &[u8],
-    ) -> Result<(), TuningError> {
+    ) -> Result<u64, TuningError> {
         // Create a mutable copy of the data to operate on
         let mut data_copy = data.to_vec();
 
-        // Use a non-trivial scalar that exercises the kernel properly
-        let scalar = Gf256::new(candidate.tile_bytes as u8 | 1); // Ensure non-zero
+        // Use the workload scalar so candidate metadata cannot alter the
+        // operation being timed until a real variant dispatcher exists.
+        let scalar = Gf256::new(workload.multiplicand);
 
-        // Actually execute the mul kernel - this provides realistic performance measurement
         gf256_mul_slice(&mut data_copy, scalar);
 
-        // Simulate additional work based on candidate parameters
-        if candidate.prefetch_distance > 0 {
-            // Simulate prefetch overhead with a small delay
-            std::hint::spin_loop();
-        }
-
-        match candidate.fusion_shape {
-            FusionShape::Fused => {
-                // Fused operations might do additional work
-                for _ in 0..candidate.unroll {
-                    std::hint::spin_loop();
-                }
-            }
-            FusionShape::Split => {
-                // Split operations are simpler
-                std::hint::spin_loop();
-            }
-            FusionShape::Balanced => {
-                // Balanced approach
-                for _ in 0..(candidate.unroll / 2) {
-                    std::hint::spin_loop();
-                }
-            }
-        }
-
-        Ok(())
+        Ok(Self::digest_kernel_output(&data_copy))
     }
 
-    /// Simulate addmul kernel execution by calling the actual GF256 kernel.
-    fn simulate_addmul_kernel(
+    /// Execute the implemented addmul kernel for a workload.
+    fn execute_addmul_kernel(
         &self,
-        candidate: &KernelCandidate,
+        workload: &TuningWorkload,
         data: &[u8],
-    ) -> Result<(), TuningError> {
+    ) -> Result<u64, TuningError> {
         // Create source and destination data
         let src_data = data.to_vec();
         let mut dst_data = vec![0u8; data.len()];
 
-        // Use a non-trivial scalar that exercises the kernel properly
-        let scalar = Gf256::new((candidate.tile_bytes as u8).wrapping_mul(3) | 1);
+        // Use the workload scalar so candidate metadata cannot alter the
+        // operation being timed until a real variant dispatcher exists.
+        let scalar = Gf256::new(workload.multiplicand);
 
-        // Actually execute the addmul kernel
         gf256_addmul_slice(&mut dst_data, &src_data, scalar);
 
-        // Simulate additional work based on candidate parameters
-        if candidate.prefetch_distance > 0 {
-            // Simulate prefetch overhead
-            std::hint::spin_loop();
-        }
-
-        match candidate.fusion_shape {
-            FusionShape::Fused => {
-                // Fused addmul might do multiple operations
-                for _ in 0..candidate.unroll {
-                    std::hint::spin_loop();
-                }
-            }
-            FusionShape::Split => {
-                // Split operations are simpler
-                std::hint::spin_loop();
-            }
-            FusionShape::Balanced => {
-                // Balanced approach
-                for _ in 0..(candidate.unroll / 2) {
-                    std::hint::spin_loop();
-                }
-            }
-        }
-
-        Ok(())
+        Ok(Self::digest_kernel_output(&dst_data))
     }
 
-    /// Simulate add kernel execution by calling the actual GF256 kernel.
-    fn simulate_add_kernel(
-        &self,
-        candidate: &KernelCandidate,
-        data: &[u8],
-    ) -> Result<(), TuningError> {
+    /// Execute the implemented add kernel.
+    fn execute_add_kernel(&self, data: &[u8]) -> Result<u64, TuningError> {
         // Create source and destination data
         let src_data = data.to_vec();
         let mut dst_data = vec![0u8; data.len()];
 
-        // Actually execute the add kernel - add src to dst
         gf256_add_slice(&mut dst_data, &src_data);
 
-        // Simulate minimal overhead based on candidate parameters
-        match candidate.fusion_shape {
-            FusionShape::Fused => {
-                // Fused operations might have slight overhead
-                for _ in 0..(candidate.unroll / 4) {
-                    std::hint::spin_loop();
-                }
-            }
-            FusionShape::Split => {
-                // Split operations are most efficient for simple add
-                std::hint::spin_loop();
-            }
-            FusionShape::Balanced => {
-                // Balanced approach
-                for _ in 0..(candidate.unroll / 8) {
-                    std::hint::spin_loop();
-                }
-            }
-        }
+        Ok(Self::digest_kernel_output(&dst_data))
+    }
 
-        Ok(())
+    fn digest_kernel_output(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(0xcbf2_9ce4_8422_2325, |acc, byte| {
+            acc.wrapping_mul(0x100_0000_01b3) ^ u64::from(*byte)
+        })
     }
 }
 
@@ -1300,6 +1224,48 @@ mod tests {
             .benchmark_candidate(candidate, workload)
             .expect("benchmark runs");
         assert_eq!(result.iterations, 3);
+    }
+
+    #[test]
+    fn benchmark_execution_uses_real_workload_kernel_inputs() {
+        let tuner = OfflineTuner::new(Gf256ArchitectureClass::GenericScalar, test_criteria());
+        let workload = TuningWorkload {
+            workload_id: "mul_oracle".to_string(),
+            data_size: 64,
+            multiplicand: 137,
+            operation: GF256Operation::Mul,
+            weight: 1.0,
+        };
+        let data = tuner.generate_test_data(&workload);
+
+        let mut expected_mul = data.clone();
+        gf256_mul_slice(&mut expected_mul, Gf256::new(workload.multiplicand));
+        assert_eq!(
+            tuner
+                .execute_mul_kernel(&workload, &data)
+                .expect("mul execution"),
+            OfflineTuner::digest_kernel_output(&expected_mul)
+        );
+
+        let mut expected_addmul = vec![0u8; data.len()];
+        gf256_addmul_slice(
+            &mut expected_addmul,
+            &data,
+            Gf256::new(workload.multiplicand),
+        );
+        assert_eq!(
+            tuner
+                .execute_addmul_kernel(&workload, &data)
+                .expect("addmul execution"),
+            OfflineTuner::digest_kernel_output(&expected_addmul)
+        );
+
+        let mut expected_add = vec![0u8; data.len()];
+        gf256_add_slice(&mut expected_add, &data);
+        assert_eq!(
+            tuner.execute_add_kernel(&data).expect("add execution"),
+            OfflineTuner::digest_kernel_output(&expected_add)
+        );
     }
 
     fn synthetic_bench(
