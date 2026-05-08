@@ -120,13 +120,61 @@
     "action_id",
     "verdict",
     "denial_reason",
+    "expected_capability",
     "caveat_violation",
     "revoked_token_id",
     "cascade_count",
+    "revocation_reason",
+    "domain_id",
+    "old_capabilities",
+    "new_capabilities",
+    "recovery_phase",
     "drill_id",
     "drill_step",
     "epoch"
   ],
+  "drift_detection": {
+    "description": "Detect drift between authority-flow scenarios, capability-token semantics, Cx ambient-authority defenses, and security boundary tests before operators cite this contract as current evidence.",
+    "source_paths": [
+      "artifacts/authority_flow_audit_v1.json",
+      "artifacts/capability_token_model_v1.json",
+      "docs/security_threat_model.md",
+      "src/cx/cx.rs",
+      "src/security/cryptographic_boundary_tests.rs",
+      "tests/authority_flow_audit_contract.rs"
+    ],
+    "required_rule_prefixes": [
+      "ATT-",
+      "REV-",
+      "MEM-",
+      "RA-",
+      "CVT-"
+    ],
+    "checks": [
+      {
+        "check_id": "AFD-SOURCE-PATHS-EXIST",
+        "description": "Every source path referenced by the drift detector exists in the repository.",
+        "failure_mode": "blocked-contract-stale"
+      },
+      {
+        "check_id": "AFD-MITIGATION-RULE-PREFIXES",
+        "description": "Every abuse mitigation references an approved authority-flow rule prefix.",
+        "failure_mode": "blocked-mitigation-unmapped"
+      },
+      {
+        "check_id": "AFD-STRUCTURED-FIELDS-COVER-EVIDENCE",
+        "description": "Every audit evidence requirement contributes at least one required structured log field.",
+        "failure_mode": "blocked-evidence-unlogged"
+      }
+    ],
+    "safety": {
+      "non_mutating": true,
+      "cargo_must_be_rch": true,
+      "beads_mutated": false,
+      "agent_mail_mutated": false,
+      "branch_or_worktree_operations": false
+    }
+  },
   "smoke_scenarios": [
     {
       "scenario_id": "AFA-SMOKE-ABUSE",

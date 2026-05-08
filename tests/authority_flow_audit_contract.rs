@@ -34,6 +34,7 @@ fn doc_exists_and_has_required_sections() {
         "## Abuse Scenarios",
         "## Revocation Drills",
         "## Audit Evidence",
+        "## Drift Detection",
         "## Validation",
         "## Cross-References",
     ] {
@@ -317,6 +318,110 @@ fn structured_log_fields_are_nonempty_and_unique() {
     deduped.sort_unstable();
     deduped.dedup();
     assert_eq!(strs.len(), deduped.len(), "log fields must be unique");
+}
+
+// ── Drift detection ────────────────────────────────────────────────
+
+#[test]
+fn drift_detection_sources_exist_and_are_non_mutating() {
+    let art = load_artifact();
+    let drift = &art["drift_detection"];
+
+    assert!(
+        drift["description"]
+            .as_str()
+            .is_some_and(|text| text.contains("ambient-authority")),
+        "drift detector should describe the capability/Cx drift surface"
+    );
+
+    let source_paths = drift["source_paths"]
+        .as_array()
+        .expect("drift detector must list source paths");
+    assert!(
+        source_paths.len() >= 5,
+        "drift detector should tie the contract to multiple source artifacts"
+    );
+    for path in source_paths {
+        let path = path.as_str().expect("source path must be string");
+        assert!(
+            std::path::Path::new(path).exists(),
+            "drift source path must exist: {path}"
+        );
+    }
+
+    let safety = &drift["safety"];
+    assert_eq!(safety["non_mutating"].as_bool(), Some(true));
+    assert_eq!(safety["cargo_must_be_rch"].as_bool(), Some(true));
+    assert_eq!(safety["beads_mutated"].as_bool(), Some(false));
+    assert_eq!(safety["agent_mail_mutated"].as_bool(), Some(false));
+    assert_eq!(
+        safety["branch_or_worktree_operations"].as_bool(),
+        Some(false)
+    );
+}
+
+#[test]
+fn drift_detection_covers_mitigation_and_evidence_drift() {
+    let art = load_artifact();
+    let drift = &art["drift_detection"];
+
+    let required_prefixes: HashSet<&str> = drift["required_rule_prefixes"]
+        .as_array()
+        .expect("required rule prefixes must be array")
+        .iter()
+        .map(|prefix| prefix.as_str().expect("prefix must be string"))
+        .collect();
+    for prefix in ["ATT-", "REV-", "MEM-", "RA-", "CVT-"] {
+        assert!(
+            required_prefixes.contains(prefix),
+            "drift detector must require rule prefix {prefix}"
+        );
+    }
+
+    let check_ids: HashSet<&str> = drift["checks"]
+        .as_array()
+        .expect("drift checks must be array")
+        .iter()
+        .map(|check| check["check_id"].as_str().expect("check id must be string"))
+        .collect();
+    for check_id in [
+        "AFD-SOURCE-PATHS-EXIST",
+        "AFD-MITIGATION-RULE-PREFIXES",
+        "AFD-STRUCTURED-FIELDS-COVER-EVIDENCE",
+    ] {
+        assert!(
+            check_ids.contains(check_id),
+            "drift detector missing check {check_id}"
+        );
+    }
+
+    let structured: HashSet<&str> = art["structured_log_fields_required"]
+        .as_array()
+        .expect("structured fields must be array")
+        .iter()
+        .map(|field| field.as_str().expect("field must be string"))
+        .collect();
+    for evidence in art["audit_evidence_requirements"]
+        .as_array()
+        .expect("evidence requirements must be array")
+    {
+        let evidence_id = evidence["evidence_id"]
+            .as_str()
+            .expect("evidence id must be string");
+        let has_logged_field = evidence["log_fields"]
+            .as_array()
+            .expect("log fields must be array")
+            .iter()
+            .any(|field| {
+                field
+                    .as_str()
+                    .is_some_and(|field| structured.contains(field))
+            });
+        assert!(
+            has_logged_field,
+            "{evidence_id}: at least one evidence field must be in structured_log_fields_required"
+        );
+    }
 }
 
 // ── Smoke / runner ─────────────────────────────────────────────────

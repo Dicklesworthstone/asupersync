@@ -43,6 +43,12 @@ This contract defines the adversarial validation corpus for authority flow: abus
 | AE-REVOCATION-TRAIL | revoked_token_id, cascade_count, revocation_reason |
 | AE-RECOVERY-AUTHORITY | domain_id, old_capabilities, new_capabilities, recovery_phase |
 
+## Drift Detection
+
+The contract artifact includes a `drift_detection` section that ties the authority-flow corpus back to concrete capability-token, Cx ambient-authority, threat-model, and security-boundary sources. The detector is intentionally non-mutating: it checks that referenced paths exist, abuse mitigations still point at approved authority-flow rule prefixes, and every audit evidence requirement has at least one required structured log field.
+
+Drift failures must be treated as stale contract evidence, not as proof of authority-flow safety.
+
 ## Validation
 
 ```bash
