@@ -130,7 +130,7 @@
         "artifact_path": "target/phase6-e2e/report_<timestamp>.txt"
       },
       {
-        "command": "rch exec -- cargo test --test raptorq_conformance e2e_pipeline_reports_are_deterministic -- --nocapture",
+        "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_raptorq_baseline_profile_docs cargo test --test raptorq_conformance e2e_pipeline_reports_are_deterministic -- --nocapture",
         "coverage": "pipeline report determinism + proof/hash stability",
         "source": "tests/raptorq_conformance.rs"
       }

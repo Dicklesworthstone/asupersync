@@ -143,7 +143,7 @@ Artifact path conventions by profile:
 Track-E dual-lane policy probes are emitted from `benches/raptorq_benchmark.rs` under benchmark group `gf256_dual_policy`:
 
 ```bash
-rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_dual_policy
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_raptorq_baseline_profile_docs cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_dual_policy
 ```
 
 Probe log schema:
@@ -211,9 +211,9 @@ Coverage intent:
 Command-surface split:
 
 - Comparator/rollback bundle: manifest-level `command_bundle` in the profile-pack
-  snapshot remains anchored to `rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives`.
+  snapshot remains anchored to `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_raptorq_baseline_profile_docs cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_primitives`.
 - Probe-specific bundle: the dual-policy log `repro_command` remains anchored to
-  `rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_dual_policy`.
+  `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_raptorq_baseline_profile_docs cargo bench --bench raptorq_benchmark --features simd-intrinsics -- gf256_dual_policy`.
 
 Current default policy note (profile-pack schema v5):
 
@@ -533,7 +533,7 @@ This document satisfies the G1 draft-definition phase (workload taxonomy + budge
 - `rch exec -- ./scripts/run_raptorq_e2e.sh --profile full`
 - `rch exec -- ./scripts/run_raptorq_e2e.sh --profile forensics --scenario RQ-E2E-FAILURE-INSUFFICIENT`
 - `rch exec -- ./scripts/run_phase6_e2e.sh`
-- `rch exec -- cargo test --test raptorq_conformance e2e_pipeline_reports_are_deterministic -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_raptorq_baseline_profile_docs cargo test --test raptorq_conformance e2e_pipeline_reports_are_deterministic -- --nocapture`
 
 Artifacts:
 - `target/phase6-e2e/report_<timestamp>.txt`
