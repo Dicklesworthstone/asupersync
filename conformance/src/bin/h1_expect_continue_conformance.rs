@@ -5,9 +5,9 @@
 //! identical 100 Continue / 417 Expectation Failed behavior.
 //!
 //! Usage:
-//!   cargo run --bin h1_expect_continue_conformance
-//!   cargo run --bin h1_expect_continue_conformance -- --format json
-//!   cargo run --bin h1_expect_continue_conformance -- --output report.md
+//!   rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_bin_docs cargo run --bin h1_expect_continue_conformance
+//!   rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_bin_docs cargo run --bin h1_expect_continue_conformance -- --format json
+//!   rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_bin_docs cargo run --bin h1_expect_continue_conformance -- --output report.md
 
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;

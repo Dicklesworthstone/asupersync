@@ -7,19 +7,19 @@
 //!
 //! ```bash
 //! # Run all conformance tests
-//! cargo run --bin raptorq_rfc6330_conformance -- --run-all
+//! rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_bin_docs cargo run --bin raptorq_rfc6330_conformance -- --run-all
 //!
 //! # Run tests for specific section
-//! cargo run --bin raptorq_rfc6330_conformance -- --section 5.3
+//! rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_bin_docs cargo run --bin raptorq_rfc6330_conformance -- --section 5.3
 //!
 //! # Run only MUST clause tests
-//! cargo run --bin raptorq_rfc6330_conformance -- --level must
+//! rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_bin_docs cargo run --bin raptorq_rfc6330_conformance -- --level must
 //!
 //! # Generate coverage report
-//! cargo run --bin raptorq_rfc6330_conformance -- --generate-report
+//! rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_bin_docs cargo run --bin raptorq_rfc6330_conformance -- --generate-report
 //!
 //! # Run with CI mode (JSON-line output)
-//! cargo run --bin raptorq_rfc6330_conformance -- --run-all --ci-mode
+//! rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_bin_docs cargo run --bin raptorq_rfc6330_conformance -- --run-all --ci-mode
 //! ```
 
 use clap::{Arg, ArgAction, ArgMatches, Command};

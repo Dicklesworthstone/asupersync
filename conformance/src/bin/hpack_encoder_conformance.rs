@@ -4,9 +4,9 @@
 //! asupersync against the h2 reference implementation.
 //!
 //! Usage:
-//!   cargo run --bin hpack_encoder_conformance
-//!   cargo run --bin hpack_encoder_conformance -- --format json
-//!   cargo run --bin hpack_encoder_conformance -- --output report.md
+//!   rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_bin_docs cargo run --bin hpack_encoder_conformance
+//!   rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_bin_docs cargo run --bin hpack_encoder_conformance -- --format json
+//!   rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_bin_docs cargo run --bin hpack_encoder_conformance -- --output report.md
 
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;

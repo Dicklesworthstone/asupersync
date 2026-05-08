@@ -3,9 +3,9 @@
 //! Runs vector-based conformance testing for the asupersync HPACK decoder.
 //!
 //! Usage:
-//!   cargo run --bin hpack_conformance
-//!   cargo run --bin hpack_conformance -- --format json
-//!   cargo run --bin hpack_conformance -- --output report.md
+//!   rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_bin_docs cargo run --bin hpack_conformance
+//!   rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_bin_docs cargo run --bin hpack_conformance -- --format json
+//!   rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_bin_docs cargo run --bin hpack_conformance -- --output report.md
 
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;

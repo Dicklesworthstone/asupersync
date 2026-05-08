@@ -4,9 +4,9 @@
 //! reference path remains an explicit XFAIL.
 //!
 //! Usage:
-//!   cargo run --bin h2_data_end_stream_conformance
-//!   cargo run --bin h2_data_end_stream_conformance -- --format json
-//!   cargo run --bin h2_data_end_stream_conformance -- --output report.md
+//!   rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_bin_docs cargo run --bin h2_data_end_stream_conformance
+//!   rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_bin_docs cargo run --bin h2_data_end_stream_conformance -- --format json
+//!   rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_bin_docs cargo run --bin h2_data_end_stream_conformance -- --output report.md
 
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;

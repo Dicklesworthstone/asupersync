@@ -5,9 +5,9 @@
 //! frames without any intervening frames.
 //!
 //! Usage:
-//!   cargo run --bin h2_continuation_conformance
-//!   cargo run --bin h2_continuation_conformance -- --format json
-//!   cargo run --bin h2_continuation_conformance -- --output report.md
+//!   rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_bin_docs cargo run --bin h2_continuation_conformance
+//!   rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_bin_docs cargo run --bin h2_continuation_conformance -- --format json
+//!   rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_bin_docs cargo run --bin h2_continuation_conformance -- --output report.md
 
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;

@@ -6,9 +6,9 @@
 //! unless a real peer is wired in.
 //!
 //! Usage:
-//!   cargo run --bin h2_enable_push_conformance
-//!   cargo run --bin h2_enable_push_conformance -- --format json
-//!   cargo run --bin h2_enable_push_conformance -- --output report.md
+//!   rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_bin_docs cargo run --bin h2_enable_push_conformance
+//!   rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_bin_docs cargo run --bin h2_enable_push_conformance -- --format json
+//!   rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_bin_docs cargo run --bin h2_enable_push_conformance -- --output report.md
 
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
