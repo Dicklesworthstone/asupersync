@@ -266,6 +266,27 @@ fn missing_touched_files_is_unverifiable_surface() {
 }
 
 #[test]
+fn missing_touched_files_matches_full_output_golden() {
+    let output = run_receipt_with_repo_path("missing_touched_files.json", "/repo");
+    assert!(
+        output.status.success(),
+        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = String::from_utf8(output.stdout).expect("receipt stdout is utf-8");
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt output JSON");
+    let expected = fixture_text("missing_touched_files_expected.json");
+    let expected_json: Value =
+        serde_json::from_str(&expected).expect("expected receipt output JSON");
+
+    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
+    assert_eq!(actual, expected);
+}
+
+#[test]
 fn receipt_safety_contract_declares_read_only_behavior() {
     let receipt = receipt_json("current_clean.json");
 

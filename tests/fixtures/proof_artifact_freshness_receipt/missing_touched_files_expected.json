@@ -1,0 +1,57 @@
+{
+  "agent": "TopazGoose",
+  "artifact_errors": [],
+  "current_branch": "main",
+  "current_date": "2026-05-08",
+  "current_head_sha": "2222222222222222222222222222222222222222",
+  "generated_at": "2026-05-08T05:20:00Z",
+  "repo_path": "/repo",
+  "rows": [
+    {
+      "artifact_path": "artifacts/proof/missing-touched-files.json",
+      "classification": "unverifiable-surface",
+      "command": "rch exec -- cargo clippy -p asupersync --lib -- -D warnings",
+      "decision": "suppress-as-unverifiable",
+      "evidence": {
+        "artifact_git_branch": "main",
+        "artifact_git_sha": "2222222222222222222222222222222222222222",
+        "current_branch": "main",
+        "current_head_sha": "2222222222222222222222222222222222222222",
+        "dirty_overlap_count": 0,
+        "dirty_overlaps": []
+      },
+      "generated_at": "2026-05-08T05:18:00Z",
+      "reason": "artifact does not declare touched files",
+      "remediation": {
+        "next_steps": [
+          "produce a new artifact with git_sha, git_branch, command, and touched_files"
+        ],
+        "operator_note": "Artifact lacks enough provenance to support a green claim.",
+        "rerun_command": "rch exec -- cargo clippy -p asupersync --lib -- -D warnings"
+      },
+      "safe_to_cite": false,
+      "status": "pass",
+      "touched_files": []
+    }
+  ],
+  "safety": {
+    "beads_mutated": false,
+    "branch_or_worktree_operations": false,
+    "cargo_executed": false,
+    "destructive_commands_executed": false,
+    "executed_commands": [],
+    "mutating_commands_executed": false,
+    "non_mutating": true
+  },
+  "schema_version": "proof-artifact-freshness-receipt-v1",
+  "summary": {
+    "by_classification": {
+      "unverifiable-surface": 1
+    },
+    "rerun_required": 0,
+    "safe_to_cite": 0,
+    "suppressed": 1,
+    "total": 1,
+    "unverifiable": 1
+  }
+}
