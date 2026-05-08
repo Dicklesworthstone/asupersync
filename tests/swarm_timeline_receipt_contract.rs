@@ -194,6 +194,20 @@ fn secrets_urls_and_oversized_bodies_are_redacted() {
 }
 
 #[test]
+fn redaction_and_urls_matches_exact_reviewed_golden() {
+    let actual = receipt_text("redaction_and_urls.json");
+    let expected = fixture_text("redaction_and_urls_expected.json");
+
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
+    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
+    assert_eq!(actual_json, expected_json, "redaction receipt JSON drifted");
+    assert_eq!(
+        actual, expected,
+        "swarm timeline redaction receipt changed; update the golden only after reviewing secret/query redaction and truncation semantics"
+    );
+}
+
+#[test]
 fn duplicate_events_are_coalesced_with_source_refs() {
     let receipt = receipt_json("duplicate_events.json");
     let rows = timeline(&receipt);

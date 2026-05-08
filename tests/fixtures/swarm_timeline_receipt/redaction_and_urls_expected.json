@@ -1,0 +1,58 @@
+{
+  "agent": "CopperSpring",
+  "current_date": "2026-05-08",
+  "generated_at": "2026-05-08T05:30:00Z",
+  "redaction_counts": {
+    "long_token": 0,
+    "secret": 4,
+    "token": 0,
+    "total": 8,
+    "truncated": 2,
+    "url_query": 2
+  },
+  "repo_path": "/data/projects/asupersync",
+  "safety": {
+    "agent_mail_mutated": false,
+    "beads_mutated": false,
+    "branch_or_worktree_operations": false,
+    "cargo_executed": false,
+    "files_deleted": false,
+    "git_mutated": false,
+    "non_mutating": true
+  },
+  "safety_notes": [
+    "fixture mode reads JSON only",
+    "no Agent Mail acknowledgements, sends, reservations, or Beads updates are performed",
+    "cargo/rch commands are not executed by this helper"
+  ],
+  "schema_version": "swarm-timeline-receipt-v1",
+  "source_counts": {
+    "agent_mail_messages": 1,
+    "duplicates_coalesced": 0,
+    "events_before_coalescing": 1,
+    "git_commits": 0,
+    "timeline_events": 1
+  },
+  "timeline": [
+    {
+      "agent": "BoldPlateau",
+      "bead_ids": [
+        "asupersync-aj7lx3.11"
+      ],
+      "created_ts": "2026-05-08T05:24:00Z",
+      "event_id": "0f21bc23b37e",
+      "kind": "validation",
+      "source": "agent-mail",
+      "source_refs": [
+        "20"
+      ],
+      "subject": "[asupersync-aj7lx3.11] Validation note",
+      "summary": "Validation passed with token=[REDACTED_SECRET] and report at https://example.invalid/proof?[REDACTED_QUERY]] This body intentionally carries a very long explanation about receipt handling, handoff logs, source rows, peer messages, validation evidence, and operator review cues so the helper must trunc [TRUNCATED]",
+      "thread_id": "asupersync-aj7lx3.11",
+      "validation": [
+        "Validation passed with token=[REDACTED_SECRET] and report at https://example.invalid/proof?[REDACTED_QUERY]] This body intentionally carries a very long explanation about receipt handling, handoff logs, source rows, peer messages, validation evidence, and operator review cues so the helper must trunc [TRUNCATED]"
+      ]
+    }
+  ],
+  "unresolved_cues": []
+}
