@@ -114,8 +114,20 @@ fn packet_includes_reproducible_commands_with_rch_for_cargo() {
         packet.contains("scripts/run_lean_regression.sh --json"),
         "packet must include lean rerun command"
     );
+    let rch_cargo_commands = [
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_closure_docs cargo test --test algebraic_laws",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_closure_docs cargo test --test semantic_witness_replay_e2e --test adversarial_witness_corpus",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_closure_docs cargo test --test semantic_log_schema_validation",
+    ];
+    for command in rch_cargo_commands {
+        assert!(
+            packet.contains(command),
+            "packet must include target-dir-qualified rch cargo command: {command}"
+        );
+    }
+    let stale_cargo_command = concat!("rch exec -- ", "cargo test");
     assert!(
-        packet.contains("rch exec -- cargo test"),
-        "packet must route cargo-heavy checks through rch"
+        !packet.contains(stale_cargo_command),
+        "packet must not use stale bare rch cargo routing"
     );
 }
