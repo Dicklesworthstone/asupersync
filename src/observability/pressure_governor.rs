@@ -319,6 +319,8 @@ impl PressureGovernor {
             .set((snapshot.memory_budget_pressure * PRESSURE_SCALE) as i64);
         self.overall_pressure_gauge
             .set((snapshot.overall_pressure * PRESSURE_SCALE) as i64);
+        self.fallback_verdict_gauge
+            .set(snapshot.fallback_verdict.as_metric_value());
 
         // Update sampling state
         self.last_sample.store(now_nanos, Ordering::Release);
@@ -1015,6 +1017,23 @@ mod tests {
         let governor = PressureGovernor::new(config, std::sync::Arc::clone(&runtime), metrics)
             .expect("pressure governor should initialize");
         let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+
+        let sampled = governor
+            .sample_pressure(&cx)
+            .expect("direct pressure sample should not fail");
+        assert_eq!(
+            sampled.fallback_verdict,
+            PressureFallbackVerdict::NoWinNoLiveSignals
+        );
+        assert_eq!(
+            governor.fallback_verdict_metric(),
+            PressureFallbackVerdict::NoWinNoLiveSignals.as_metric_value()
+        );
+        assert_eq!(
+            governor.fallback_total.get(),
+            0,
+            "direct sampling updates the verdict gauge without counting an admission fallback"
+        );
 
         let decision = governor
             .check_admission(&cx)
