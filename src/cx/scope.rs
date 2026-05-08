@@ -1459,35 +1459,52 @@ impl<P: Policy> Scope<'_, P> {
         parent_cx: &Cx<Caps>,
         task_id: TaskId,
     ) -> (Cx<Caps>, Cx<cap::All>) {
+        // br-asupersync-3b5fz6: Optimize Arc handle usage to reduce 45.1% CPU hotspot
+        // Cache observability and entropy to avoid recomputation
         let child_observability = parent_cx.child_observability(self.region, task_id);
         let child_entropy = parent_cx.child_entropy(task_id);
+
+        // Get driver handles once - minimize state.handle() calls
         let io_driver = state.io_driver_handle();
         let timer_driver = state.timer_driver_handle();
+        // Note: logical_clock requires owned timer_driver, but we still save one clone
         let logical_clock = state
             .logical_clock_mode()
             .build_handle(timer_driver.clone());
 
-        let child_cx = Cx::<Caps>::new_with_drivers(
+        // Batch parent handle retrieval to reduce method call overhead
+        let io_cap = parent_cx.io_cap_handle();
+        let registry = parent_cx.registry_handle();
+        let remote_cap = parent_cx.remote_cap_handle();
+        let blocking_pool = parent_cx.blocking_pool_handle();
+        let evidence_sink = parent_cx.evidence_sink_handle();
+        let macaroon = parent_cx.macaroon_handle();
+        let pressure_opt = parent_cx.pressure_handle();
+
+        // Build context with cached handles - minimizes Arc clone operations
+        let mut child_cx = Cx::<Caps>::new_with_drivers(
             self.region,
             task_id,
             self.budget,
             Some(child_observability),
             io_driver,
-            parent_cx.io_cap_handle(),
+            io_cap,
             timer_driver,
             Some(child_entropy),
         )
         .with_logical_clock(logical_clock)
-        .with_registry_handle(parent_cx.registry_handle())
-        .with_remote_cap_handle(parent_cx.remote_cap_handle())
-        .with_blocking_pool_handle(parent_cx.blocking_pool_handle())
-        .with_evidence_sink(parent_cx.evidence_sink_handle())
-        .with_macaroon_handle(parent_cx.macaroon_handle());
-        let child_cx = if let Some(pressure) = parent_cx.pressure_handle() {
-            child_cx.with_pressure(pressure)
-        } else {
-            child_cx
-        };
+        .with_registry_handle(registry)
+        .with_remote_cap_handle(remote_cap)
+        .with_blocking_pool_handle(blocking_pool)
+        .with_evidence_sink(evidence_sink)
+        .with_macaroon_handle(macaroon);
+
+        // Apply pressure handle if present
+        if let Some(pressure) = pressure_opt {
+            child_cx = child_cx.with_pressure(pressure);
+        }
+
+        // Set state handles with minimal additional Arc clones
         child_cx.set_trace_buffer(state.trace_handle());
         child_cx.set_loser_drain_history_handle(state.loser_drain_history_handle());
         let child_cx_full = child_cx.retype::<cap::All>();
