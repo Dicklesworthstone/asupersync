@@ -9,6 +9,11 @@ use opentelemetry::trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, Tra
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use std::collections::HashMap;
 
+const B3_SINGLE_HEADER: &str = "b3";
+const B3_TRACE_ID_HEADER: &str = "x-b3-traceid";
+const B3_SPAN_ID_HEADER: &str = "x-b3-spanid";
+const B3_SAMPLED_HEADER: &str = "x-b3-sampled";
+
 /// Conformance test result tracking
 #[derive(Debug, Clone, PartialEq)]
 enum ConformanceTestResult {
@@ -379,11 +384,9 @@ fn run_propagation_conformance_test(
         {
             Ok(extracted_context) => {
                 // Compare contexts for identity
-                if let Err(reason) = compare_span_contexts(
-                    &original_context,
-                    &extracted_context,
-                    test_case.propagator_type == PropagatorType::W3CTraceContext,
-                ) {
+                if let Err(reason) =
+                    compare_span_contexts(&original_context, &extracted_context, true)
+                {
                     return if is_known_propagation_divergence(
                         test_case.name,
                         &span_context_input.name,
@@ -440,11 +443,116 @@ fn test_roundtrip_for_propagator(
             Ok(span_context.clone())
         }
         PropagatorType::B3Single | PropagatorType::B3Multi => {
-            // For now, simulate B3 behavior since we might not have full B3 implementation
-            // In real implementation, this would use actual B3 propagator
-            Ok(original_context.clone())
+            let mut carrier = HeaderCarrier::default();
+            match propagator_type {
+                PropagatorType::B3Single => {
+                    inject_b3_single(original_context, &mut carrier);
+                    extract_b3_single(&carrier)
+                }
+                PropagatorType::B3Multi => {
+                    inject_b3_multi(original_context, &mut carrier);
+                    extract_b3_multi(&carrier)
+                }
+                PropagatorType::W3CTraceContext => unreachable!("handled above"),
+            }
         }
     }
+}
+
+fn inject_b3_single(span_context: &SpanContext, carrier: &mut HeaderCarrier) {
+    carrier.set(
+        B3_SINGLE_HEADER,
+        format!(
+            "{}-{}-{}",
+            span_context.trace_id(),
+            span_context.span_id(),
+            b3_sampled_value(span_context.trace_flags())
+        ),
+    );
+}
+
+fn extract_b3_single(carrier: &HeaderCarrier) -> Result<SpanContext, String> {
+    let header = carrier
+        .get(B3_SINGLE_HEADER)
+        .ok_or_else(|| "missing b3 single header".to_string())?;
+    let fields: Vec<&str> = header.split('-').collect();
+    if !(2..=4).contains(&fields.len()) {
+        return Err(format!("invalid b3 single header field count: {}", header));
+    }
+
+    let trace_id = parse_b3_trace_id(fields[0])?;
+    let span_id = parse_b3_span_id(fields[1])?;
+    let trace_flags = parse_b3_sampling_state(fields.get(2).copied())?;
+
+    Ok(SpanContext::new(
+        trace_id,
+        span_id,
+        trace_flags,
+        true,
+        TraceState::default(),
+    ))
+}
+
+fn inject_b3_multi(span_context: &SpanContext, carrier: &mut HeaderCarrier) {
+    carrier.set(B3_TRACE_ID_HEADER, span_context.trace_id().to_string());
+    carrier.set(B3_SPAN_ID_HEADER, span_context.span_id().to_string());
+    carrier.set(
+        B3_SAMPLED_HEADER,
+        b3_sampled_value(span_context.trace_flags()).to_string(),
+    );
+}
+
+fn extract_b3_multi(carrier: &HeaderCarrier) -> Result<SpanContext, String> {
+    let trace_id = parse_b3_trace_id(
+        carrier
+            .get(B3_TRACE_ID_HEADER)
+            .ok_or_else(|| "missing x-b3-traceid header".to_string())?,
+    )?;
+    let span_id = parse_b3_span_id(
+        carrier
+            .get(B3_SPAN_ID_HEADER)
+            .ok_or_else(|| "missing x-b3-spanid header".to_string())?,
+    )?;
+    let trace_flags = parse_b3_sampling_state(carrier.get(B3_SAMPLED_HEADER))?;
+
+    Ok(SpanContext::new(
+        trace_id,
+        span_id,
+        trace_flags,
+        true,
+        TraceState::default(),
+    ))
+}
+
+fn b3_sampled_value(trace_flags: TraceFlags) -> &'static str {
+    if trace_flags.is_sampled() { "1" } else { "0" }
+}
+
+fn parse_b3_sampling_state(value: Option<&str>) -> Result<TraceFlags, String> {
+    match value {
+        Some(value) if value.eq_ignore_ascii_case("1") || value.eq_ignore_ascii_case("true") => {
+            Ok(TraceFlags::SAMPLED)
+        }
+        Some(value) if value.eq_ignore_ascii_case("d") => Ok(TraceFlags::SAMPLED),
+        Some(value) if value.eq_ignore_ascii_case("0") || value.eq_ignore_ascii_case("false") => {
+            Ok(TraceFlags::default())
+        }
+        Some("") | None => Ok(TraceFlags::default()),
+        Some(value) => Err(format!("invalid b3 sampling state: {}", value)),
+    }
+}
+
+fn parse_b3_trace_id(value: &str) -> Result<TraceId, String> {
+    if value.len() == 16 {
+        TraceId::from_hex(&format!("{value:0>32}"))
+    } else {
+        TraceId::from_hex(value)
+    }
+    .map_err(|error| format!("invalid b3 trace id '{}': {}", value, error))
+}
+
+fn parse_b3_span_id(value: &str) -> Result<SpanId, String> {
+    SpanId::from_hex(value).map_err(|error| format!("invalid b3 span id '{}': {}", value, error))
 }
 
 /// Compare two SpanContexts for identity
@@ -787,4 +895,92 @@ fn generate_compliance_report() {
     println!(
         "✅ **CONFORMANT** - Trace context inject→extract roundtrip preserves SpanContext identity per propagator"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sampled_span_context() -> SpanContext {
+        SpanContext::new(
+            TraceId::from_hex("4bf92f3577b34da6a3ce929d0e0e4736").unwrap(),
+            SpanId::from_hex("00f067aa0ba902b7").unwrap(),
+            TraceFlags::SAMPLED,
+            false,
+            TraceState::default(),
+        )
+    }
+
+    fn unsampled_span_context() -> SpanContext {
+        SpanContext::new(
+            TraceId::from_hex("4bf92f3577b34da6a3ce929d0e0e4736").unwrap(),
+            SpanId::from_hex("00f067aa0ba902b7").unwrap(),
+            TraceFlags::default(),
+            false,
+            TraceState::default(),
+        )
+    }
+
+    #[test]
+    fn b3_single_roundtrip_uses_b3_header_and_remote_extract() {
+        let original = sampled_span_context();
+        let mut carrier = HeaderCarrier::default();
+
+        inject_b3_single(&original, &mut carrier);
+
+        assert_eq!(
+            carrier.headers.get(B3_SINGLE_HEADER).map(String::as_str),
+            Some("4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-1")
+        );
+
+        let extracted = extract_b3_single(&carrier).unwrap();
+        compare_span_contexts(&original, &extracted, true).unwrap();
+        assert!(extracted.is_remote());
+    }
+
+    #[test]
+    fn b3_multi_roundtrip_uses_b3_headers_and_remote_extract() {
+        let original = unsampled_span_context();
+        let mut carrier = HeaderCarrier::default();
+
+        inject_b3_multi(&original, &mut carrier);
+
+        assert_eq!(
+            carrier.headers.get(B3_TRACE_ID_HEADER).map(String::as_str),
+            Some("4bf92f3577b34da6a3ce929d0e0e4736")
+        );
+        assert_eq!(
+            carrier.headers.get(B3_SPAN_ID_HEADER).map(String::as_str),
+            Some("00f067aa0ba902b7")
+        );
+        assert_eq!(
+            carrier.headers.get(B3_SAMPLED_HEADER).map(String::as_str),
+            Some("0")
+        );
+
+        let extracted = extract_b3_multi(&carrier).unwrap();
+        compare_span_contexts(&original, &extracted, true).unwrap();
+        assert!(extracted.is_remote());
+    }
+
+    #[test]
+    fn b3_roundtrip_no_longer_clones_local_span_context() {
+        let original = sampled_span_context();
+
+        let extracted =
+            test_roundtrip_for_propagator(&PropagatorType::B3Single, &original, false).unwrap();
+
+        assert!(!original.is_remote());
+        assert!(extracted.is_remote());
+        compare_span_contexts(&original, &extracted, true).unwrap();
+    }
+
+    #[test]
+    fn b3_source_no_longer_contains_mock_shortcut_claims() {
+        let source = include_str!("otel_trace_context_propagation_conformance.rs");
+
+        assert!(!source.contains(concat!("simulate ", "B3 behavior")));
+        assert!(!source.contains(concat!("would use actual ", "B3 propagator")));
+        assert!(!source.contains(concat!("Ok(original_context", ".clone())")));
+    }
 }
