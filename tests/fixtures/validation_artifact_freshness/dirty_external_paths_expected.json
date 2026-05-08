@@ -1,0 +1,44 @@
+{
+  "artifact": {
+    "decision": "passed",
+    "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "touched_files": [
+      "scripts/proof_runner.py"
+    ]
+  },
+  "artifact_path": "tests/fixtures/validation_artifact_freshness/current_artifact.json",
+  "classification": "current-with-external-dirt",
+  "current": {
+    "dirty_paths": [
+      "src/channel/mod.rs"
+    ],
+    "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "current_date": "2026-05-08",
+  "forbidden_actions": {
+    "runs_beads_mutation": false,
+    "runs_cargo": false,
+    "runs_destructive_command": false,
+    "runs_git_mutation": false
+  },
+  "generated_at": "2026-05-08T05:30:00Z",
+  "markers": {
+    "dirty_external_paths": [
+      "src/channel/mod.rs"
+    ],
+    "dirty_touched_overlap": [],
+    "has_artifact_head": true,
+    "head_matches": true
+  },
+  "non_mutating": true,
+  "remediation": {
+    "next_steps": [
+      "cite the artifact only for its touched surface",
+      "surface the unrelated dirty paths separately"
+    ],
+    "operator_note": "The artifact may support its touched files; unrelated dirty paths still block broad proof lanes.",
+    "summary": "artifact matches HEAD, but unrelated dirty paths remain"
+  },
+  "schema_version": "validation-artifact-freshness-v1",
+  "verdict": "blocked-external"
+}

@@ -109,6 +109,13 @@ class ValidationArtifactFreshnessContract(unittest.TestCase):
         self.assertEqual(receipt["markers"]["dirty_external_paths"], ["src/channel/mod.rs"])
         self.assertIn("unrelated dirty paths", receipt["remediation"]["operator_note"])
 
+    def test_external_dirt_output_matches_full_reviewed_golden(self) -> None:
+        output = run_receipt_output("current_artifact.json", "dirty_external_paths.json")
+        expected = fixture_text("dirty_external_paths_expected.json")
+
+        self.assertEqual(output.stdout, expected)
+        self.assertEqual(json.loads(output.stdout), json.loads(expected))
+
     def test_missing_head_invalidates_artifact(self) -> None:
         receipt = run_receipt("unbound_artifact.json")
 
