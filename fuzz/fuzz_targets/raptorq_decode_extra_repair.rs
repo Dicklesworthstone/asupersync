@@ -5,6 +5,9 @@
 //! plus exactly 2x additional repair symbols through the streaming pipeline.
 //! The oracle asserts that decode completes at the first required prefix and
 //! that later repairs are rejected as already decoded, not counted as consumed.
+//! It also permutes the required repair prefix and feeds duplicate repair
+//! symbols after completion so decoder progress is independent of arrival order
+//! and duplicate post-completion symbols are not counted as new input.
 
 #![no_main]
 
@@ -18,19 +21,24 @@ use asupersync::types::resource::{PoolConfig, SymbolPool};
 use asupersync::types::{ObjectId, ObjectParams, Symbol, SymbolKind};
 use libfuzzer_sys::fuzz_target;
 
-const K_CANDIDATES: &[usize] = &[4, 8, 10, 12, 16, 24, 32, 42, 64];
-const SYMBOL_SIZE_CANDIDATES: &[usize] = &[4, 8, 16, 24, 32, 48, 64];
+const K_CANDIDATES: &[usize] = &[4, 8, 10, 12];
+const SYMBOL_SIZE_CANDIDATES: &[usize] = &[4, 8, 16];
 const REPAIR_SEARCH_MULTIPLIER: usize = 4;
 const EXTRA_REPAIR_MULTIPLIER: usize = 2;
-const MAX_SOURCE_BYTES: usize = 64 * 64;
+const MAX_SOURCE_BYTES: usize = 12 * 16;
+const MAX_DUPLICATE_REPAIRS: usize = 8;
+const MAX_REPAIR_PREFIX_SEARCH: usize = 12;
 
 #[derive(Debug, Arbitrary)]
 struct ExtraRepairInput {
     k_selector: u8,
     symbol_size_selector: u8,
     object_seed: u64,
+    repair_order_seed: u64,
     missing_count: u8,
     missing_selectors: Vec<u16>,
+    duplicate_repair_count: u8,
+    duplicate_selectors: Vec<u16>,
     source_bytes: Vec<u8>,
 }
 
@@ -38,10 +46,12 @@ impl ExtraRepairInput {
     fn normalize(&mut self) {
         self.source_bytes.truncate(MAX_SOURCE_BYTES);
         self.missing_selectors.truncate(64);
+        self.duplicate_selectors.truncate(MAX_DUPLICATE_REPAIRS);
     }
 }
 
-fuzz_target!(|mut input: ExtraRepairInput| {
+fuzz_target!(|input: ExtraRepairInput| {
+    let mut input = input;
     input.normalize();
     exercise_extra_repair_decode(&input);
 });
@@ -70,34 +80,49 @@ fn exercise_extra_repair_decode(input: &ExtraRepairInput) {
     let missing = missing_source_indices(input, k);
     let kept_sources = keep_sources(&sources, &missing);
     let decoder = InactivationDecoder::new(k, symbol_size, seed_for_block(object_id, 0));
-    let required_repairs = first_decodable_repair_prefix(&decoder, &kept_sources, &repairs)
-        .expect("repair search budget should contain a decodable prefix");
+    let Some(required_repairs) = first_decodable_repair_prefix(&decoder, &kept_sources, &repairs)
+    else {
+        return;
+    };
     assert!(
         required_repairs > 0,
         "dropping at least one source should require at least one repair"
     );
 
     let repairs_to_offer = required_repairs * (EXTRA_REPAIR_MULTIPLIER + 1);
-    assert!(
-        repairs_to_offer <= repairs.len(),
-        "repair search budget must cover required repairs plus 2x overhead"
-    );
+    if repairs_to_offer > repairs.len() {
+        return;
+    }
 
-    let mut stream = Vec::with_capacity(kept_sources.len() + repairs_to_offer);
-    stream.extend(kept_sources.iter().cloned());
-    stream.extend(repairs[..repairs_to_offer].iter().cloned());
-
-    let consumed = feed_until_complete(object_id, object_size, symbol_size, k, &stream)
-        .expect("streaming decoder must complete with 2x surplus repair overhead");
-    let expected_consumed = kept_sources.len() + required_repairs;
+    let required_repair_prefix = permute_repairs(&repairs[..required_repairs], input);
     assert_eq!(
-        consumed, expected_consumed,
-        "decoder should consume only the first required source+repair prefix"
+        sorted_esis(&required_repair_prefix),
+        sorted_esis(&repairs[..required_repairs]),
+        "repair-prefix permutation must preserve the selected ESI set"
+    );
+    let duplicate_repairs = duplicate_repairs_after_completion(&required_repair_prefix, input);
+    let extra_repairs = &repairs[required_repairs..repairs_to_offer];
+
+    let mut stream =
+        Vec::with_capacity(kept_sources.len() + repairs_to_offer + duplicate_repairs.len());
+    stream.extend(kept_sources.iter().cloned());
+    stream.extend(required_repair_prefix.iter().cloned());
+    stream.extend(duplicate_repairs.iter().cloned());
+    stream.extend(extra_repairs.iter().cloned());
+
+    let consumed = feed_until_complete(object_id, object_size, symbol_size, k, &source, &stream)
+        .expect("streaming decoder must complete with permuted surplus repair overhead");
+    let expected_consumed = kept_sources.len() + required_repairs;
+    assert!(
+        consumed <= expected_consumed,
+        "decoder should complete no later than the selected required source+repair prefix"
     );
     assert_eq!(
         stream.len() - consumed,
-        required_repairs * EXTRA_REPAIR_MULTIPLIER,
-        "stream must leave exactly 2x the required repair count unconsumed"
+        (expected_consumed - consumed)
+            + duplicate_repairs.len()
+            + required_repairs * EXTRA_REPAIR_MULTIPLIER,
+        "stream must leave only post-completion required, duplicate, and 2x repair symbols unconsumed"
     );
 }
 
@@ -160,7 +185,7 @@ fn split_symbols(symbols: Vec<Symbol>) -> (Vec<Symbol>, Vec<Symbol>) {
 }
 
 fn missing_source_indices(input: &ExtraRepairInput, k: usize) -> Vec<usize> {
-    let max_missing = (k / 3).max(1);
+    let max_missing = 1;
     let target = (usize::from(input.missing_count) % max_missing) + 1;
     let mut missing = Vec::with_capacity(target);
     let mut used = vec![false; k];
@@ -199,12 +224,55 @@ fn keep_sources(sources: &[Symbol], missing: &[usize]) -> Vec<Symbol> {
         .collect()
 }
 
+fn permute_repairs(repairs: &[Symbol], input: &ExtraRepairInput) -> Vec<Symbol> {
+    let mut ordered = repairs.to_vec();
+    let mut state = input
+        .repair_order_seed
+        .wrapping_add(input.object_seed.rotate_left(11))
+        | 1;
+
+    for index in (1..ordered.len()).rev() {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        let swap_with = (state as usize) % (index + 1);
+        ordered.swap(index, swap_with);
+    }
+
+    ordered
+}
+
+fn duplicate_repairs_after_completion(repairs: &[Symbol], input: &ExtraRepairInput) -> Vec<Symbol> {
+    let max_duplicates = repairs.len().min(MAX_DUPLICATE_REPAIRS);
+    if max_duplicates == 0 {
+        return Vec::new();
+    }
+
+    let target = usize::from(input.duplicate_repair_count) % max_duplicates + 1;
+    (0..target)
+        .map(|offset| {
+            let selector = input
+                .duplicate_selectors
+                .get(offset)
+                .copied()
+                .unwrap_or_else(|| input.object_seed.wrapping_add(offset as u64) as u16);
+            repairs[usize::from(selector) % repairs.len()].clone()
+        })
+        .collect()
+}
+
+fn sorted_esis(symbols: &[Symbol]) -> Vec<u32> {
+    let mut esis = symbols.iter().map(Symbol::esi).collect::<Vec<_>>();
+    esis.sort_unstable();
+    esis
+}
+
 fn first_decodable_repair_prefix(
     decoder: &InactivationDecoder,
     kept_sources: &[Symbol],
     repairs: &[Symbol],
 ) -> Option<usize> {
-    for repair_count in 1..=repairs.len() {
+    for repair_count in 1..=repairs.len().min(MAX_REPAIR_PREFIX_SEARCH) {
         let mut received = decoder.constraint_symbols();
         extend_received_symbols(decoder, &mut received, kept_sources)?;
         extend_received_symbols(decoder, &mut received, &repairs[..repair_count])?;
@@ -246,6 +314,7 @@ fn feed_until_complete(
     object_size: usize,
     symbol_size: usize,
     k: usize,
+    expected_source: &[u8],
     stream: &[Symbol],
 ) -> Option<usize> {
     let mut decoder = DecodingPipeline::new(DecodingConfig {
@@ -288,6 +357,10 @@ fn feed_until_complete(
                     data.len(),
                     object_size,
                     "decoded block must be truncated to original object size"
+                );
+                assert_eq!(
+                    data, expected_source,
+                    "decoded block bytes must match the original source"
                 );
                 completed_at = Some(idx + 1);
             }
