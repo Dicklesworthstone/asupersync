@@ -1,7 +1,7 @@
 //! Quick validation test for IO cap counter overflow fuzzing approach
 #[cfg(test)]
 mod overflow_validation {
-    use crate::io::cap::{LabIoCap, IoCap};
+    use crate::io::cap::{IoCap, LabIoCap};
 
     #[test]
     fn test_counter_overflow_approach() {

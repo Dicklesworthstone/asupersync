@@ -41,6 +41,8 @@ pub mod browser_stream;
 mod buf_reader;
 mod buf_writer;
 pub mod cap;
+#[cfg(test)]
+mod cap_tests;
 mod copy;
 pub mod ext;
 mod lines;
