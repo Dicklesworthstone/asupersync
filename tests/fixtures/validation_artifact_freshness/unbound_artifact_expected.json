@@ -1,0 +1,40 @@
+{
+  "artifact": {
+    "decision": "passed",
+    "head": "",
+    "touched_files": [
+      "scripts/proof_runner.py"
+    ]
+  },
+  "artifact_path": "tests/fixtures/validation_artifact_freshness/unbound_artifact.json",
+  "classification": "unbound-artifact",
+  "current": {
+    "dirty_paths": [],
+    "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "current_date": "2026-05-08",
+  "forbidden_actions": {
+    "runs_beads_mutation": false,
+    "runs_cargo": false,
+    "runs_destructive_command": false,
+    "runs_git_mutation": false
+  },
+  "generated_at": "2026-05-08T05:30:00Z",
+  "markers": {
+    "dirty_external_paths": [],
+    "dirty_touched_overlap": [],
+    "has_artifact_head": false,
+    "head_matches": false
+  },
+  "non_mutating": true,
+  "remediation": {
+    "next_steps": [
+      "regenerate the artifact with repo_head or git.head",
+      "record touched_files before citing the proof"
+    ],
+    "operator_note": "Do not infer freshness from an unbound artifact.",
+    "summary": "artifact lacks a usable repo HEAD marker"
+  },
+  "schema_version": "validation-artifact-freshness-v1",
+  "verdict": "invalid"
+}

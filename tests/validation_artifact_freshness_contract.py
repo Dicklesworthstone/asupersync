@@ -124,6 +124,13 @@ class ValidationArtifactFreshnessContract(unittest.TestCase):
         self.assertFalse(receipt["markers"]["has_artifact_head"])
         self.assertIn("repo HEAD", receipt["remediation"]["summary"])
 
+    def test_unbound_artifact_output_matches_full_reviewed_golden(self) -> None:
+        output = run_receipt_output("unbound_artifact.json")
+        expected = fixture_text("unbound_artifact_expected.json")
+
+        self.assertEqual(output.stdout, expected)
+        self.assertEqual(json.loads(output.stdout), json.loads(expected))
+
     def test_nested_validation_frontier_record_is_supported(self) -> None:
         receipt = run_receipt("nested_validation_frontier_artifact.json")
 
