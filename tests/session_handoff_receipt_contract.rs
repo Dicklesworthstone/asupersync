@@ -185,6 +185,28 @@ fn unavailable_agent_mail_is_explicitly_reported() {
 }
 
 #[test]
+fn no_agent_mail_output_matches_full_reviewed_golden() {
+    let output = run_receipt("no_agent_mail.json");
+    assert!(
+        output.status.success(),
+        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = String::from_utf8(output.stdout).expect("receipt stdout is utf-8");
+    let expected = fixture_text("no_agent_mail_expected.json");
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
+    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
+    assert_eq!(actual_json, expected_json);
+    assert_eq!(
+        actual, expected,
+        "no-Agent-Mail handoff receipt drifted from the reviewed golden"
+    );
+}
+
+#[test]
 fn stale_in_progress_candidate_is_listed_without_mutation() {
     let receipt = receipt_json("stale_in_progress.json");
     assert_eq!(next_action_category(&receipt), "proof-only");
