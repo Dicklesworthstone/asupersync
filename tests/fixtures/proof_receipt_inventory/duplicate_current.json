@@ -1,0 +1,30 @@
+{
+  "helpers": [
+    {
+      "capability_id": "artifact-freshness",
+      "commit": "5ad65a39f000",
+      "fixture_root": "tests/fixtures/validation_artifact_freshness",
+      "helper_id": "validation-artifact-freshness",
+      "script_path": "scripts/validation_artifact_freshness.py",
+      "status": "shipped",
+      "summary": "Checks whether validation artifacts overlap dirty paths.",
+      "test_path": "tests/validation_artifact_freshness_contract.py",
+      "validation": [
+        "python3 -m pytest tests/validation_artifact_freshness_contract.py"
+      ]
+    },
+    {
+      "capability_id": "artifact-freshness",
+      "commit": "5ad65a39f111",
+      "fixture_root": "tests/fixtures/proof_artifact_freshness_receipt",
+      "helper_id": "proof-artifact-freshness-receipt",
+      "script_path": "scripts/proof_artifact_freshness_receipt.py",
+      "status": "shipped",
+      "summary": "Checks current HEAD, branch, and touched-file provenance for proof artifacts.",
+      "test_path": "tests/proof_artifact_freshness_receipt_contract.rs",
+      "validation": [
+        "rch exec -- cargo test -p asupersync --test proof_artifact_freshness_receipt_contract"
+      ]
+    }
+  ]
+}

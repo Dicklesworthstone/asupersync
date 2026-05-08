@@ -1,0 +1,49 @@
+{
+  "helpers": [
+    {
+      "bead_id": "asupersync-aj7lx3",
+      "capability_id": "rch-worker-health",
+      "commit": "8112321f2bb0d4a66d",
+      "fixture_root": "tests/fixtures/rch_worker_health_receipt",
+      "helper_id": "rch-worker-health-receipt",
+      "owner": "BoldPlateau",
+      "script_path": "scripts/rch_worker_health_receipt.py",
+      "status": "shipped",
+      "summary": "Classifies rch workers as healthy, warn, quarantine-candidate, or unavailable.",
+      "superseded_by": "",
+      "test_path": "tests/rch_worker_health_receipt_contract.py",
+      "validation": [
+        "python3 -m unittest tests/rch_worker_health_receipt_contract.py"
+      ]
+    },
+    {
+      "bead_id": "asupersync-aj7lx3",
+      "capability_id": "rch-worker-health",
+      "commit": "1f0d6f221000",
+      "fixture_root": "tests/fixtures/rch_worker_quarantine_receipt",
+      "helper_id": "rch-worker-quarantine-receipt",
+      "owner": "CoralGorge",
+      "script_path": "scripts/rch_worker_quarantine_receipt.py",
+      "status": "shipped",
+      "summary": "Quarantine-specific helper that is superseded by the broader rch worker health receipt.",
+      "superseded_by": "rch-worker-health-receipt",
+      "test_path": "tests/rch_worker_quarantine_receipt_contract.rs",
+      "validation": []
+    },
+    {
+      "bead_id": "asupersync-aj7lx3.11",
+      "capability_id": "cross-agent-timeline",
+      "commit": "17896bafc001",
+      "fixture_root": "tests/fixtures/swarm_timeline_receipt",
+      "helper_id": "swarm-timeline-receipt",
+      "owner": "CopperSpring",
+      "script_path": "scripts/swarm_timeline_receipt.py",
+      "status": "shipped",
+      "summary": "Redacted cross-agent timeline with claim, ship, block, reservation, and validation events.",
+      "test_path": "tests/swarm_timeline_receipt_contract.rs",
+      "validation": [
+        "rch exec -- cargo test -p asupersync --test swarm_timeline_receipt_contract"
+      ]
+    }
+  ]
+}
