@@ -137,6 +137,6 @@ fn main() {
 fn main() {
     println!("This verification requires the test-internals feature.");
     println!(
-        "Run with: rch exec -- cargo run --bin verify_blocked_elimination --features test-internals"
+        "Run with: rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_verify_blocked_docs cargo run --bin verify_blocked_elimination --features test-internals"
     );
 }

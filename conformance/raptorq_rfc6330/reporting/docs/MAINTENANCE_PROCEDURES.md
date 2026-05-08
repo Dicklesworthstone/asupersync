@@ -22,22 +22,22 @@ conformance fixture surfaces that ship in this repository.
 ### Fixture Generation
 ```bash
 # Check what needs updating
-rch exec -- cargo run -p asupersync-conformance --bin maintain_fixtures -- --check-versions --dry-run
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_maintenance_docs cargo run -p asupersync-conformance --bin maintain_fixtures -- --check-versions --dry-run
 
 # Regenerate the real golden-fixture workflow
-rch exec -- cargo run -p asupersync-conformance --bin maintain_fixtures -- --regenerate golden --dry-run
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_maintenance_docs cargo run -p asupersync-conformance --bin maintain_fixtures -- --regenerate golden --dry-run
 
 # Combined regenerate + validate cycle for the golden fixture lane
-rch exec -- cargo run -p asupersync-conformance --bin maintain_fixtures -- --regenerate golden --validate
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_maintenance_docs cargo run -p asupersync-conformance --bin maintain_fixtures -- --regenerate golden --validate
 ```
 
 ### Validation
 ```bash
 # Validate fixtures after regeneration
-rch exec -- cargo run -p asupersync-conformance --bin maintain_fixtures -- --validate
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_maintenance_docs cargo run -p asupersync-conformance --bin maintain_fixtures -- --validate
 
 # Check for regressions
-rch exec -- cargo run -p asupersync-conformance --bin check_conformance_regression -- --input <result.json>
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_maintenance_docs cargo run -p asupersync-conformance --bin check_conformance_regression -- --input <result.json>
 ```
 
 ## Reference Implementation Tracking

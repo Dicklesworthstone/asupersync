@@ -123,7 +123,7 @@ fn transport_loopback_identity() -> DualRunScenarioIdentity {
     )
     .with_metadata(
         "repro_command",
-        "rch exec -- cargo test --test e2e_transport transport_dual_run_pilot_preserves_virtualized_loopback_close_and_ordering_semantics -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_e2e_transport_docs cargo test --test e2e_transport transport_dual_run_pilot_preserves_virtualized_loopback_close_and_ordering_semantics -- --nocapture",
     );
     identity.phase = Phase::Phase2;
     identity

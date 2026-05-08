@@ -221,8 +221,8 @@ cat target/verification-summary/triage_report.md
 
 CPU-intensive cargo operations must be offloaded via `rch`:
 ```bash
-rch exec -- cargo test --test semantic_golden_fixture_validation -- --nocapture
-rch exec -- cargo clippy --all-targets -- -D warnings
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_maintainer_docs cargo test --test semantic_golden_fixture_validation -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_maintainer_docs cargo clippy --all-targets -- -D warnings
 ```
 
 ---

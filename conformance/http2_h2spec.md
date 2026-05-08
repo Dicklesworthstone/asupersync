@@ -31,8 +31,8 @@ Run `h2spec` against the HTTP/2 implementation once the tool is available and th
 
 Remote validation of this bead was attempted with:
 
-- `rch exec -- cargo check --all-targets`
-- `rch exec -- cargo test --lib h2`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_http2_h2spec_docs cargo check --all-targets`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_http2_h2spec_docs cargo test --lib h2`
 
 The shared tree is currently blocked by unrelated existing compile failures outside the reserved HTTP/2 surface, including:
 
