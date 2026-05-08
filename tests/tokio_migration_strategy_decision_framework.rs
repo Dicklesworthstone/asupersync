@@ -255,13 +255,20 @@ fn document_declares_ci_artifacts_and_rch_offload_commands() {
         "Replay traces",
         "Gate report",
         "Failure triage markdown",
-        "rch exec -- cargo test --test tokio_migration_strategy_decision_framework",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_migration_strategy_docs cargo test --test tokio_migration_strategy_decision_framework -- --nocapture",
     ] {
         assert!(
             doc.contains(token),
             "CI/artifact section missing token: {token}"
         );
     }
+    assert!(
+        !doc.contains(concat!(
+            "rch exec -- ",
+            "cargo test --test tokio_migration_strategy_decision_framework"
+        )),
+        "CI/artifact section must not document bare rch cargo routing"
+    );
 }
 
 #[test]
