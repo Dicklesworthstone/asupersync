@@ -10,6 +10,7 @@ use std::process::{Command, Output};
 const SCRIPT_PATH: &str = "scripts/proof_runner.py";
 const MANIFEST_PATH: &str = "artifacts/proof_lane_manifest_v1.json";
 const SCHEMA_PATH: &str = "artifacts/validation_frontier_ledger_schema_v1.json";
+const FIXTURE_ROOT: &str = "tests/fixtures/proof_runner";
 
 fn load_json(path: &str) -> Value {
     let raw = std::fs::read_to_string(path).unwrap_or_else(|error| panic!("read {path}: {error}"));
@@ -55,6 +56,11 @@ fn output_json(output: &Output) -> Value {
         .unwrap_or_else(|error| panic!("proof runner output not JSON: {error}\noutput: {stdout}"))
 }
 
+fn fixture_text(fixture: &str) -> String {
+    std::fs::read_to_string(format!("{FIXTURE_ROOT}/{fixture}"))
+        .unwrap_or_else(|error| panic!("read proof runner fixture {fixture}: {error}"))
+}
+
 #[test]
 fn proof_runner_script_exists_and_is_executable() {
     assert!(
@@ -92,6 +98,32 @@ fn proof_runner_can_list_available_lanes() {
             "list-lanes should include {required_lane}"
         );
     }
+}
+
+#[test]
+fn proof_runner_list_lanes_matches_exact_reviewed_golden() {
+    let output = run_proof_runner(&["--list-lanes", "--output", "json"])
+        .expect("proof runner should execute");
+    assert!(
+        output.status.success(),
+        "proof runner failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actual = String::from_utf8(output.stdout).expect("proof runner stdout must be UTF-8");
+    let expected = fixture_text("list_lanes_expected.json");
+
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual list-lanes JSON");
+    let expected_json: Value = serde_json::from_str(&expected).expect("golden list-lanes JSON");
+    assert_eq!(
+        actual_json, expected_json,
+        "parsed lane list JSON must match"
+    );
+    assert_eq!(
+        actual, expected,
+        "proof runner list-lanes output changed; update the golden only after reviewing lane ordering and operator-facing JSON shape"
+    );
 }
 
 #[test]
