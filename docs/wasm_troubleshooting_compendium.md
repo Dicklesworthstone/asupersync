@@ -43,7 +43,7 @@ python3 scripts/check_wasm_dependency_policy.py \
   --policy .github/wasm_dependency_policy.json \
   | tee artifacts/troubleshooting/dependency_policy.log
 
-rch exec -- cargo test --test e2e_log_quality_schema -- --nocapture \
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_troubleshooting_docs cargo test --test e2e_log_quality_schema -- --nocapture \
   | tee artifacts/troubleshooting/log_quality_schema.log
 ```
 
@@ -73,23 +73,23 @@ evidence landed.
 
 | Symptom | Likely Cause | Run | Expected Evidence |
 |---|---|---|---|
-| wasm32 compile fails with forbidden-surface errors | Invalid profile/feature mix (`cli`, `tls`, `sqlite`, `postgres`, `mysql`, `kafka`, etc.) or native-only leakage into the browser closure | `rch exec -- cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-dev` | compile output references wasm guardrails in `src/lib.rs`; supporting audit artifacts: `artifacts/wasm_dependency_audit_summary.json`, `artifacts/wasm_dependency_audit_log.ndjson` |
-| `ASUPERSYNC_*_UNSUPPORTED_RUNTIME` thrown during init/bootstrap | direct runtime attempted in Node, SSR, Next server/edge, or another environment outside the shipped browser support boundary | `rch exec -- cargo test --test wasm_js_exports_coverage_contract -- --nocapture` | contract test output proves package-specific unsupported-runtime codes, support reasons, and guidance strings; use `docs/integration.md` support matrix to choose the correct bridge-only fallback |
-| WebTransport reports unsupported/runtime-denied or session/datagram setup fails | browser/runtime lacks `globalThis.WebTransport`, runtime is not a valid HTTPS/HTTP3 target, or the browser rejects datagram readiness for this endpoint | `rch exec -- cargo test --test wasm_js_exports_coverage_contract webtransport -- --nocapture`<br>`rch exec -- cargo test --test wasm_browser_feasibility_matrix web_transport_docs_name_fetch_and_websocket_fallbacks -- --exact` | contract output proves the exported WebTransport diagnostics and cleanup markers remain intact; the matrix contract proves docs still tell operators to fall back to `WebSocket` or `fetch` when WebTransport is unavailable or rejected |
-| `MessageChannel` / `MessagePort` / `BroadcastChannel` helpers deny construction | missing explicit `BrowserNativeMessagingCapability`, degraded-mode host API capability, unsupported browser context, or missing browser constructor | `rch exec -- cargo test --test wasm_browser_feasibility_matrix browser_native_surfaces_are_guarded_public_helpers -- --exact`<br>`rch exec -- cargo test --test wasm_js_exports_coverage_contract browser_package_exports_guarded_native_messaging_helpers -- --exact`<br>`rch exec -- cargo test browser_reactor_message_port --lib -- --nocapture`<br>`rch exec -- cargo test browser_reactor_broadcast_channel --lib -- --nocapture` | package contract output proves public messaging helpers and diagnostics exist; the matrix contract proves docs still keep them at the browser application boundary; focused reactor tests prove host listener validation remains covered |
-| `ReadableStream` / `WritableStream` helpers deny construction or fail after close/cancel/abort/release | missing explicit `BrowserNativeStreamCapability`, degraded-mode host API capability, unsupported browser context, missing WHATWG stream constructor, byte limit violation, or a terminal helper state | `rch exec -- cargo test --test wasm_browser_feasibility_matrix browser_native_surfaces_are_guarded_public_helpers -- --exact`<br>`rch exec -- cargo test --test wasm_js_exports_coverage_contract browser_package_exports_guarded_native_stream_helpers -- --exact`<br>`rch exec -- cargo test browser_stream --lib -- --nocapture` | package contract output proves public stream helpers and deterministic lifecycle errors exist; the matrix contract proves docs keep Rust `AsyncRead` / `AsyncWrite` browser-core ABI parity substrate-only; focused Rust tests prove the underlying stream substrate still covers limits, backpressure, cancel, abort, shutdown, and stats |
-| `ASUPERSYNC_BROWSER_STORAGE_OPERATION_FAILED`, `ASUPERSYNC_BROWSER_ARTIFACT_OPERATION_FAILED`, or `ASUPERSYNC_BROWSER_ARTIFACT_DOWNLOAD_UNSUPPORTED` surfaces during browser persistence flows | blocked IndexedDB upgrade/open, quota pressure, corrupt artifact index state, or a worker/non-DOM runtime attempting direct download instead of export handoff | `rch exec -- cargo test --test wasm_js_exports_coverage_contract browser_src_index_exposes_storage_and_artifact_diagnostics -- --nocapture`<br>`PATH=/usr/bin:$PATH bash scripts/validate_vite_vanilla_consumer.sh`<br>`PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh` | contract output proves the exported codes/reasons/guidance stay in sync; bundle summaries under `target/e2e-results/vite_vanilla_consumer/<timestamp>/summary.json`, `target/e2e-results/dedicated_worker_consumer/<timestamp>/summary.json`, and `target/e2e-results/dedicated_worker_consumer/<timestamp>/browser-run.json` confirm the maintained fixtures still exercise storage/artifact bundle markers while preserving dedicated-worker `scenario_inventory` plus artifact pointers under `artifacts` |
+| wasm32 compile fails with forbidden-surface errors | Invalid profile/feature mix (`cli`, `tls`, `sqlite`, `postgres`, `mysql`, `kafka`, etc.) or native-only leakage into the browser closure | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_troubleshooting_docs cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-dev` | compile output references wasm guardrails in `src/lib.rs`; supporting audit artifacts: `artifacts/wasm_dependency_audit_summary.json`, `artifacts/wasm_dependency_audit_log.ndjson` |
+| `ASUPERSYNC_*_UNSUPPORTED_RUNTIME` thrown during init/bootstrap | direct runtime attempted in Node, SSR, Next server/edge, or another environment outside the shipped browser support boundary | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_troubleshooting_docs cargo test --test wasm_js_exports_coverage_contract -- --nocapture` | contract test output proves package-specific unsupported-runtime codes, support reasons, and guidance strings; use `docs/integration.md` support matrix to choose the correct bridge-only fallback |
+| WebTransport reports unsupported/runtime-denied or session/datagram setup fails | browser/runtime lacks `globalThis.WebTransport`, runtime is not a valid HTTPS/HTTP3 target, or the browser rejects datagram readiness for this endpoint | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_troubleshooting_docs cargo test --test wasm_js_exports_coverage_contract webtransport -- --nocapture`<br>`rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_troubleshooting_docs cargo test --test wasm_browser_feasibility_matrix web_transport_docs_name_fetch_and_websocket_fallbacks -- --exact` | contract output proves the exported WebTransport diagnostics and cleanup markers remain intact; the matrix contract proves docs still tell operators to fall back to `WebSocket` or `fetch` when WebTransport is unavailable or rejected |
+| `MessageChannel` / `MessagePort` / `BroadcastChannel` helpers deny construction | missing explicit `BrowserNativeMessagingCapability`, degraded-mode host API capability, unsupported browser context, or missing browser constructor | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_troubleshooting_docs cargo test --test wasm_browser_feasibility_matrix browser_native_surfaces_are_guarded_public_helpers -- --exact`<br>`rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_troubleshooting_docs cargo test --test wasm_js_exports_coverage_contract browser_package_exports_guarded_native_messaging_helpers -- --exact`<br>`rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_troubleshooting_docs cargo test browser_reactor_message_port --lib -- --nocapture`<br>`rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_troubleshooting_docs cargo test browser_reactor_broadcast_channel --lib -- --nocapture` | package contract output proves public messaging helpers and diagnostics exist; the matrix contract proves docs still keep them at the browser application boundary; focused reactor tests prove host listener validation remains covered |
+| `ReadableStream` / `WritableStream` helpers deny construction or fail after close/cancel/abort/release | missing explicit `BrowserNativeStreamCapability`, degraded-mode host API capability, unsupported browser context, missing WHATWG stream constructor, byte limit violation, or a terminal helper state | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_troubleshooting_docs cargo test --test wasm_browser_feasibility_matrix browser_native_surfaces_are_guarded_public_helpers -- --exact`<br>`rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_troubleshooting_docs cargo test --test wasm_js_exports_coverage_contract browser_package_exports_guarded_native_stream_helpers -- --exact`<br>`rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_troubleshooting_docs cargo test browser_stream --lib -- --nocapture` | package contract output proves public stream helpers and deterministic lifecycle errors exist; the matrix contract proves docs keep Rust `AsyncRead` / `AsyncWrite` browser-core ABI parity substrate-only; focused Rust tests prove the underlying stream substrate still covers limits, backpressure, cancel, abort, shutdown, and stats |
+| `ASUPERSYNC_BROWSER_STORAGE_OPERATION_FAILED`, `ASUPERSYNC_BROWSER_ARTIFACT_OPERATION_FAILED`, or `ASUPERSYNC_BROWSER_ARTIFACT_DOWNLOAD_UNSUPPORTED` surfaces during browser persistence flows | blocked IndexedDB upgrade/open, quota pressure, corrupt artifact index state, or a worker/non-DOM runtime attempting direct download instead of export handoff | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_troubleshooting_docs cargo test --test wasm_js_exports_coverage_contract browser_src_index_exposes_storage_and_artifact_diagnostics -- --nocapture`<br>`PATH=/usr/bin:$PATH bash scripts/validate_vite_vanilla_consumer.sh`<br>`PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh` | contract output proves the exported codes/reasons/guidance stay in sync; bundle summaries under `target/e2e-results/vite_vanilla_consumer/<timestamp>/summary.json`, `target/e2e-results/dedicated_worker_consumer/<timestamp>/summary.json`, and `target/e2e-results/dedicated_worker_consumer/<timestamp>/browser-run.json` confirm the maintained fixtures still exercise storage/artifact bundle markers while preserving dedicated-worker `scenario_inventory` plus artifact pointers under `artifacts` |
 | packaged consumer validation says required Browser Edition artifacts are missing | `packages/browser-core/` wasm artifacts or higher-level package `dist/` outputs were not built/staged before running consumer validation | `PATH=/usr/bin:$PATH corepack pnpm run build && bash ./scripts/validate_react_consumer.sh` | built artifacts appear under `packages/browser-core/`; consumer evidence appears at `target/e2e-results/react_consumer/<timestamp>/consumer_build.log` and `summary.json` |
 | dedicated-worker onboarding or bootstrap validation fails | dedicated-worker runtime guard drift, worker fetch-host regression, coordination protocol drift, or a stale packaged consumer fixture | `python3 scripts/run_browser_onboarding_checks.py --scenario worker` | `artifacts/onboarding/worker.ndjson`, `artifacts/onboarding/worker.summary.json`, `target/e2e-results/dedicated_worker_consumer/<timestamp>/consumer_build.log`, `target/e2e-results/dedicated_worker_consumer/<timestamp>/summary.json`, `target/e2e-results/dedicated_worker_consumer/<timestamp>/browser-run.json`; confirm the summary still preserves `scenario_inventory` plus artifact pointers under `artifacts` |
 | shared-worker coordinator onboarding or packaged-consumer validation fails | shared-worker support-matrix drift, coordinator attach/reuse/fallback regression, or a stale packaged consumer fixture | `python3 scripts/run_browser_onboarding_checks.py --scenario shared_worker`<br>`PATH=/usr/bin:$PATH bash scripts/validate_shared_worker_consumer.sh` | `artifacts/onboarding/shared_worker.ndjson`, `artifacts/onboarding/shared_worker.summary.json`, `target/e2e-results/shared_worker_consumer/<timestamp>/consumer_build.log`, `target/e2e-results/shared_worker_consumer/<timestamp>/summary.json`, `target/e2e-results/shared_worker_consumer/<timestamp>/browser-run.json`; confirm the summary still preserves `scenario_inventory` plus artifact pointers under `artifacts` |
 | `npm pack --dry-run` or package-shape validation fails | manifest/export-map/files-array drift, missing staged browser-core artifacts, or resolver policy drift | `bash ./scripts/validate_npm_pack_smoke.sh` | terminal output names the failing manifest field or missing artifact; warnings reference `packages/browser-core/*` and tell you whether `build:wasm` must run first |
 | Browser Edition onboarding + QA smoke CI lane red | onboarding command bundle drift, smoke-scenario command drift, or mismatch between `.github/workflows/ci.yml` and `.github/ci_matrix_policy.json` for lane `wasm-browser-qa-smoke` | `python3 scripts/run_browser_onboarding_checks.py --scenario all --dry-run --out-dir artifacts/onboarding && bash ./scripts/run_all_e2e.sh --suite wasm-qa-evidence-smoke` | onboarding summaries under `artifacts/onboarding/`; per-scenario smoke bundles under `target/wasm-qa-evidence-smoke/<run>/<scenario>/`; suite summary under `target/e2e-results/wasm_qa_evidence_smoke/run_<timestamp>/summary.json`; CI lane id `wasm-browser-qa-smoke` |
 | `run_all_e2e --verify-matrix` fails on redaction/retention/lifecycle policy | invalid `ARTIFACT_REDACTION_MODE`, retention settings, or suite matrix drift | `bash ./scripts/run_all_e2e.sh --verify-matrix` | orchestrator report bundle under `target/e2e-results/orchestrator_<timestamp>/`; inspect `report.json`, `artifact_manifest.json`, `replay_verification.json`, and `artifact_lifecycle_policy.json` |
-| log-quality gate failure | missing required summary fields, low score under threshold, or doc/workflow drift against the schema contract | `rch exec -- cargo test --test e2e_log_quality_schema -- --nocapture` | `e2e_log_quality_schema` pinpoints missing/invalid contract tokens; pair it with the latest orchestrator `report.json` when the failure originated from an E2E run |
-| bundler compatibility lane red | bundler matrix drift, docs/workflow mismatch, or package staging gap | `rch exec -- cargo test --test wasm_bundler_compatibility -- --nocapture` | pass/fail tied to matrix contract; artifact pointers include `artifacts/wasm_bundler_compatibility_summary.json` and `artifacts/wasm_bundler_compatibility_test.log` |
+| log-quality gate failure | missing required summary fields, low score under threshold, or doc/workflow drift against the schema contract | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_troubleshooting_docs cargo test --test e2e_log_quality_schema -- --nocapture` | `e2e_log_quality_schema` pinpoints missing/invalid contract tokens; pair it with the latest orchestrator `report.json` when the failure originated from an E2E run |
+| bundler compatibility lane red | bundler matrix drift, docs/workflow mismatch, or package staging gap | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_troubleshooting_docs cargo test --test wasm_bundler_compatibility -- --nocapture` | pass/fail tied to matrix contract; artifact pointers include `artifacts/wasm_bundler_compatibility_summary.json` and `artifacts/wasm_bundler_compatibility_test.log` |
 | replay/forensics lane red | flake governance drift, missing quarantine/forensics metadata, or stale incident playbook linkage | `python3 scripts/check_wasm_flake_governance.py --policy .github/wasm_flake_governance_policy.json` | report + events files: `artifacts/wasm_flake_governance_report.json`, `artifacts/wasm_flake_governance_events.ndjson`; cross-check `artifacts/wasm_flake_quarantine_manifest.json` when flakes are quarantined |
 | packaged bootstrap/load/reload harness fails | browser-core artifact mismatch, bootstrap state-machine drift, reload/remount regression, or shutdown leak | `bash ./scripts/test_wasm_packaged_bootstrap_e2e.sh` | packaged bootstrap bundle under `target/e2e-results/wasm_packaged_bootstrap/e2e-runs/<scenario>/<run>/`; inspect `summary.json`, `run-metadata.json`, `log.jsonl`, `steps.ndjson`, and `perf-summary.json` |
-| obligation/quiescence failures in browser lifecycle tests | cancel/drain sequencing regression or missing lifecycle cleanup path | `rch exec -- cargo test --test obligation_wasm_parity wasm_full_browser_lifecycle_simulation -- --nocapture` | deterministic failure points to lifecycle phase and obligation invariant breach; if reproduced through onboarding, also inspect `artifacts/onboarding/react.obligation_lifecycle.log` |
+| obligation/quiescence failures in browser lifecycle tests | cancel/drain sequencing regression or missing lifecycle cleanup path | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_troubleshooting_docs cargo test --test obligation_wasm_parity wasm_full_browser_lifecycle_simulation -- --nocapture` | deterministic failure points to lifecycle phase and obligation invariant breach; if reproduced through onboarding, also inspect `artifacts/onboarding/react.obligation_lifecycle.log` |
 
 ## Deep-Dive Playbooks
 
@@ -101,10 +101,10 @@ Use when wasm32 checks fail or native-only features appear in browser closure.
 python3 scripts/check_wasm_dependency_policy.py \
   --policy .github/wasm_dependency_policy.json
 
-rch exec -- cargo check --target wasm32-unknown-unknown \
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_troubleshooting_docs cargo check --target wasm32-unknown-unknown \
   --no-default-features --features wasm-browser-dev
 
-rch exec -- cargo check --target wasm32-unknown-unknown \
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_troubleshooting_docs cargo check --target wasm32-unknown-unknown \
   --no-default-features --features wasm-browser-deterministic
 ```
 
@@ -121,7 +121,7 @@ Use when `@asupersync/browser`, `@asupersync/react`, or `@asupersync/next`
 throws an unsupported-runtime error during bootstrap.
 
 ```bash
-rch exec -- cargo test --test wasm_js_exports_coverage_contract -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_troubleshooting_docs cargo test --test wasm_js_exports_coverage_contract -- --nocapture
 PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh
 ```
 
@@ -145,7 +145,7 @@ Expected operator action:
   main-thread entrypoint or a dedicated worker bootstrap module
 - when the failure is worker-specific, rerun
   `PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh`
-  plus `rch exec -- cargo test --lib worker_channel::tests::coordinator_ -- --nocapture`
+  plus `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_troubleshooting_docs cargo test --lib worker_channel::tests::coordinator_ -- --nocapture`
   to separate package/bootstrap breakage from coordination protocol drift
 - when the failure is shared-worker-specific, rerun
   `python3 scripts/run_browser_onboarding_checks.py --scenario shared_worker`
@@ -278,7 +278,7 @@ Evidence to capture:
 Use when diagnostics are present but not machine-parseable or policy-compliant.
 
 ```bash
-rch exec -- cargo test --test e2e_log_quality_schema -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_troubleshooting_docs cargo test --test e2e_log_quality_schema -- --nocapture
 ```
 
 Evidence to capture:
@@ -295,8 +295,8 @@ handoff stops matching the package contract, or when operators report storage
 quota/blocked-open/download-boundary failures.
 
 ```bash
-rch exec -- cargo test --test wasm_js_exports_coverage_contract browser_src_index_exposes_storage_and_artifact_diagnostics -- --nocapture
-rch exec -- cargo test --test wasm_browser_feasibility_matrix dedicated_worker_storage_ -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_troubleshooting_docs cargo test --test wasm_js_exports_coverage_contract browser_src_index_exposes_storage_and_artifact_diagnostics -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_troubleshooting_docs cargo test --test wasm_browser_feasibility_matrix dedicated_worker_storage_ -- --nocapture
 PATH=/usr/bin:$PATH bash scripts/validate_vite_vanilla_consumer.sh
 PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh
 ```
@@ -348,7 +348,7 @@ Use when a browser lifecycle or shutdown path leaks work, skips loser drain, or
 fails to reach quiescence.
 
 ```bash
-rch exec -- cargo test --test obligation_wasm_parity \
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_troubleshooting_docs cargo test --test obligation_wasm_parity \
   wasm_full_browser_lifecycle_simulation -- --nocapture
 
 bash ./scripts/test_wasm_packaged_bootstrap_e2e.sh
@@ -369,14 +369,14 @@ with browser-native messaging support, or when WebTransport is treated as an
 ambient transport instead of a guarded capability lane.
 
 ```bash
-rch exec -- cargo test --test wasm_browser_feasibility_matrix \
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_troubleshooting_docs cargo test --test wasm_browser_feasibility_matrix \
   web_transport_docs_name_fetch_and_websocket_fallbacks -- --exact
 
-rch exec -- cargo test --test wasm_browser_feasibility_matrix \
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_troubleshooting_docs cargo test --test wasm_browser_feasibility_matrix \
   messaging_surfaces_remain_public_sdk_unshipped_but_explicitly_documented -- --exact
 
-rch exec -- cargo test browser_reactor_message_port --lib -- --nocapture
-rch exec -- cargo test browser_reactor_broadcast_channel --lib -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_troubleshooting_docs cargo test browser_reactor_message_port --lib -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_troubleshooting_docs cargo test browser_reactor_broadcast_channel --lib -- --nocapture
 ```
 
 Evidence to capture:
@@ -455,8 +455,8 @@ rch exec -- bash ./scripts/run_nightly_stress_soak.sh \
   --suites cancellation_stress,scheduler_fairness \
   --timeout 3600
 
-rch exec -- cargo test --test wasm_browser_feasibility_matrix -- --nocapture
-rch exec -- cargo test --test wasm_js_exports_coverage_contract -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_troubleshooting_docs cargo test --test wasm_browser_feasibility_matrix -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_troubleshooting_docs cargo test --test wasm_js_exports_coverage_contract -- --nocapture
 ```
 
 Required evidence to capture:
