@@ -1,5 +1,6 @@
 #![allow(missing_docs)]
 
+use asupersync::lab::scenario::{FaultAction, GoldenProjectionFormat, Scenario};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -75,6 +76,75 @@ fn markdown_projection(contract: &Value) -> String {
         ));
     }
     lines.join("\n") + "\n"
+}
+
+fn action_name(action: &FaultAction) -> &'static str {
+    match action {
+        FaultAction::Partition => "partition",
+        FaultAction::Heal => "heal",
+        FaultAction::HostCrash => "host_crash",
+        FaultAction::HostRestart => "host_restart",
+        FaultAction::ClockSkew => "clock_skew",
+        FaultAction::ClockReset => "clock_reset",
+    }
+}
+
+fn projection_format(format: GoldenProjectionFormat) -> &'static str {
+    match format {
+        GoldenProjectionFormat::Json => "json",
+        GoldenProjectionFormat::Markdown => "markdown",
+    }
+}
+
+fn source_backed_projection(scenario: &Scenario) -> String {
+    let participants = scenario
+        .participants
+        .iter()
+        .map(|participant| participant.name.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    let faults = scenario
+        .faults
+        .iter()
+        .map(|fault| {
+            let from = fault.args.get("from").and_then(Value::as_str).unwrap_or("");
+            let to = fault.args.get("to").and_then(Value::as_str).unwrap_or("");
+            format!(
+                "{}:{}:{}->{}",
+                fault.at_ms,
+                action_name(&fault.action),
+                from,
+                to
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("|");
+    format!(
+        "scenario_id={};seed={};participants={};faults={};invariants={};caps=max_artifact_bytes={},max_fault_events={},max_counterexample_events={};minimization=enabled={},max_evaluations={},max_counterexample_events={};golden=format={},canonicalized={},redacted={}",
+        scenario.id,
+        scenario.lab.seed,
+        participants,
+        faults,
+        scenario.expected_invariants.join(","),
+        scenario
+            .resource_caps
+            .max_artifact_bytes
+            .unwrap_or_default(),
+        scenario.resource_caps.max_fault_events.unwrap_or_default(),
+        scenario
+            .resource_caps
+            .max_counterexample_events
+            .unwrap_or_default(),
+        scenario.minimization.enabled,
+        scenario.minimization.max_evaluations.unwrap_or_default(),
+        scenario
+            .minimization
+            .max_counterexample_events
+            .unwrap_or_default(),
+        projection_format(scenario.golden_projection.format),
+        scenario.golden_projection.canonicalized,
+        scenario.golden_projection.redacted
+    )
 }
 
 #[test]
@@ -163,6 +233,102 @@ fn required_dimensions_cover_the_bead_scope() {
         assert!(
             fields.contains(field),
             "scenario fields must include {field}"
+        );
+    }
+}
+
+#[test]
+fn source_markers_cover_required_dsl_fields() {
+    let contract = contract();
+    let source = contract
+        .get("source_of_truth")
+        .expect("source_of_truth object");
+    let scenario_format = std::fs::read_to_string(repo_path(string(source, "scenario_format")))
+        .expect("read scenario source");
+
+    for marker in string_list(&contract, "source_markers") {
+        assert!(
+            scenario_format.contains(&marker),
+            "scenario source must contain marker {marker}"
+        );
+    }
+
+    let mappings = contract
+        .get("source_field_mappings")
+        .and_then(Value::as_object)
+        .expect("source_field_mappings object");
+    for field in string_set(&contract, "required_scenario_fields") {
+        assert!(
+            mappings.contains_key(&field),
+            "required scenario field {field} must map to a source-owned field"
+        );
+    }
+    assert_eq!(
+        mappings["resource_caps"].as_str(),
+        Some("Scenario.resource_caps")
+    );
+    assert_eq!(
+        mappings["expected_invariants"].as_str(),
+        Some("Scenario.expected_invariants")
+    );
+    assert_eq!(
+        mappings["minimization"].as_str(),
+        Some("Scenario.minimization")
+    );
+    assert_eq!(
+        mappings["golden_projection"].as_str(),
+        Some("Scenario.golden_projection")
+    );
+}
+
+#[test]
+fn canonical_source_backed_scenario_parses_validates_and_projects_golden() {
+    let contract = contract();
+    let raw_scenario = serde_json::to_string(
+        contract
+            .get("canonical_source_backed_scenario")
+            .expect("canonical_source_backed_scenario object"),
+    )
+    .expect("serialize canonical source-backed scenario");
+    let scenario = Scenario::from_json(&raw_scenario).expect("parse canonical scenario");
+    let errors = scenario.validate();
+    assert!(
+        errors.is_empty(),
+        "canonical scenario must validate: {errors:?}"
+    );
+
+    let rows = rows_by_scenario(&contract);
+    let row = rows
+        .get(&scenario.id)
+        .unwrap_or_else(|| panic!("scenario row for {}", scenario.id));
+    assert_eq!(string(row, "scenario_id"), scenario.id);
+    let row_invariants = string_set(row, "expected_invariants");
+    for invariant in &scenario.expected_invariants {
+        assert!(
+            row_invariants.contains(invariant),
+            "scenario invariant {invariant} must be represented in its row"
+        );
+    }
+    assert_eq!(scenario.resource_caps.max_artifact_bytes, Some(65_536));
+    assert_eq!(scenario.resource_caps.max_fault_events, Some(8));
+    assert_eq!(scenario.resource_caps.max_counterexample_events, Some(16));
+    assert!(scenario.minimization.enabled);
+    assert_eq!(scenario.minimization.max_evaluations, Some(64));
+    assert_eq!(scenario.minimization.max_counterexample_events, Some(16));
+    assert!(scenario.golden_projection.canonicalized);
+    assert!(scenario.golden_projection.redacted);
+
+    let actual = source_backed_projection(&scenario);
+    assert_eq!(actual, string(&contract, "source_backed_golden_projection"));
+    for forbidden in [
+        "/home/ubuntu/",
+        "Authorization: Bearer ",
+        "body_md",
+        "created_ts",
+    ] {
+        assert!(
+            !actual.contains(forbidden),
+            "source-backed projection must not expose {forbidden}"
         );
     }
 }

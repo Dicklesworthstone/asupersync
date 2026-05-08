@@ -47,6 +47,27 @@
 //! cancellation:
 //!   strategy: random_sample
 //!   count: 100
+//!
+//! resource_caps:
+//!   max_artifact_bytes: 65536
+//!   max_fault_events: 8
+//!   max_counterexample_events: 16
+//!
+//! expected_invariants:
+//!   - quiescence
+//!   - losers_drained
+//!   - no_obligation_leaks
+//!   - deterministic_replay
+//!
+//! minimization:
+//!   enabled: true
+//!   max_evaluations: 64
+//!   max_counterexample_events: 16
+//!
+//! golden_projection:
+//!   format: json
+//!   canonicalized: true
+//!   redacted: true
 //! ```
 //!
 //! # Composability
@@ -118,6 +139,22 @@ pub struct Scenario {
     #[serde(default)]
     pub cancellation: Option<CancellationSection>,
 
+    /// Resource caps for bounded artifact and counterexample emission.
+    #[serde(default)]
+    pub resource_caps: ResourceCapsSection,
+
+    /// Invariants the scenario expects the runner to enforce or report.
+    #[serde(default = "default_expected_invariants")]
+    pub expected_invariants: Vec<String>,
+
+    /// Counterexample minimization settings.
+    #[serde(default)]
+    pub minimization: MinimizationSection,
+
+    /// Golden projection settings for stable, redacted scenario output.
+    #[serde(default)]
+    pub golden_projection: GoldenProjectionSection,
+
     /// Optional includes (for composability).
     #[serde(default)]
     pub include: Vec<IncludeRef>,
@@ -133,6 +170,50 @@ fn default_schema_version() -> u32 {
 
 fn default_oracles() -> Vec<String> {
     vec!["all".to_string()]
+}
+
+/// Source-owned invariant names understood by the chaos scenario DSL.
+pub const SUPPORTED_EXPECTED_INVARIANTS: &[&str] = &[
+    "quiescence",
+    "losers_drained",
+    "no_obligation_leaks",
+    "bounded_artifact_output",
+    "deterministic_replay",
+];
+
+fn default_expected_invariants() -> Vec<String> {
+    [
+        "quiescence",
+        "losers_drained",
+        "no_obligation_leaks",
+        "deterministic_replay",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+impl Default for Scenario {
+    fn default() -> Self {
+        Self {
+            schema_version: default_schema_version(),
+            id: String::new(),
+            description: String::new(),
+            lab: LabSection::default(),
+            chaos: ChaosSection::default(),
+            network: NetworkSection::default(),
+            faults: Vec::new(),
+            participants: Vec::new(),
+            oracles: default_oracles(),
+            cancellation: None,
+            resource_caps: ResourceCapsSection::default(),
+            expected_invariants: default_expected_invariants(),
+            minimization: MinimizationSection::default(),
+            golden_projection: GoldenProjectionSection::default(),
+            include: Vec::new(),
+            metadata: BTreeMap::new(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -439,6 +520,79 @@ pub enum CancellationStrategy {
 }
 
 // ---------------------------------------------------------------------------
+// Resource caps, invariants, and golden projection
+// ---------------------------------------------------------------------------
+
+/// Resource bounds applied to scenario execution and emitted artifacts.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceCapsSection {
+    /// Maximum bytes allowed for scenario artifacts.
+    #[serde(default)]
+    pub max_artifact_bytes: Option<u64>,
+
+    /// Maximum fault events permitted by the scenario definition.
+    #[serde(default)]
+    pub max_fault_events: Option<usize>,
+
+    /// Maximum events retained in minimized counterexample output.
+    #[serde(default)]
+    pub max_counterexample_events: Option<usize>,
+}
+
+/// Counterexample minimization policy for failing scenario runs.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MinimizationSection {
+    /// Whether counterexample minimization is required for this scenario.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Maximum minimizer evaluations before fail-closed exhaustion.
+    #[serde(default)]
+    pub max_evaluations: Option<usize>,
+
+    /// Maximum events retained in minimized counterexample output.
+    #[serde(default)]
+    pub max_counterexample_events: Option<usize>,
+}
+
+/// Stable projection formats for chaos scenario goldens.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoldenProjectionFormat {
+    /// Canonical JSON projection.
+    #[default]
+    Json,
+    /// Markdown summary projection.
+    Markdown,
+}
+
+/// Golden-output policy for deterministic chaos scenario artifacts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoldenProjectionSection {
+    /// Projection format.
+    #[serde(default)]
+    pub format: GoldenProjectionFormat,
+
+    /// Projection must use stable canonical ordering.
+    #[serde(default = "default_true")]
+    pub canonicalized: bool,
+
+    /// Projection must redact host/user/coordination-sensitive data.
+    #[serde(default = "default_true")]
+    pub redacted: bool,
+}
+
+impl Default for GoldenProjectionSection {
+    fn default() -> Self {
+        Self {
+            format: GoldenProjectionFormat::Json,
+            canonicalized: true,
+            redacted: true,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Include
 // ---------------------------------------------------------------------------
 
@@ -483,6 +637,10 @@ impl Scenario {
         self.validate_faults(&mut errors);
         self.validate_participants(&mut errors);
         self.validate_cancellation(&mut errors);
+        self.validate_resource_caps(&mut errors);
+        self.validate_expected_invariants(&mut errors);
+        self.validate_minimization(&mut errors);
+        self.validate_golden_projection(&mut errors);
         errors
     }
 
@@ -809,6 +967,113 @@ impl Scenario {
         }
     }
 
+    fn validate_resource_caps(&self, errors: &mut Vec<ValidationError>) {
+        if self.resource_caps.max_artifact_bytes == Some(0) {
+            errors.push(ValidationError {
+                field: "resource_caps.max_artifact_bytes".into(),
+                message: "max_artifact_bytes must be >= 1 when set".into(),
+            });
+        }
+
+        if let Some(max_fault_events) = self.resource_caps.max_fault_events {
+            if max_fault_events == 0 {
+                errors.push(ValidationError {
+                    field: "resource_caps.max_fault_events".into(),
+                    message: "max_fault_events must be >= 1 when set".into(),
+                });
+            } else if self.faults.len() > max_fault_events {
+                errors.push(ValidationError {
+                    field: "resource_caps.max_fault_events".into(),
+                    message: format!(
+                        "scenario defines {} fault event(s), exceeding cap {max_fault_events}",
+                        self.faults.len()
+                    ),
+                });
+            }
+        }
+
+        if self.resource_caps.max_counterexample_events == Some(0) {
+            errors.push(ValidationError {
+                field: "resource_caps.max_counterexample_events".into(),
+                message: "max_counterexample_events must be >= 1 when set".into(),
+            });
+        }
+    }
+
+    fn validate_expected_invariants(&self, errors: &mut Vec<ValidationError>) {
+        if self.expected_invariants.is_empty() {
+            errors.push(ValidationError {
+                field: "expected_invariants".into(),
+                message: "at least one expected invariant is required".into(),
+            });
+            return;
+        }
+
+        let mut seen = HashSet::new();
+        for (index, invariant) in self.expected_invariants.iter().enumerate() {
+            let invariant = invariant.trim();
+            if invariant.is_empty() {
+                errors.push(ValidationError {
+                    field: format!("expected_invariants[{index}]"),
+                    message: "expected invariant name must not be empty".into(),
+                });
+                continue;
+            }
+
+            if !SUPPORTED_EXPECTED_INVARIANTS.contains(&invariant) {
+                errors.push(ValidationError {
+                    field: format!("expected_invariants[{index}]"),
+                    message: format!("unsupported expected invariant `{invariant}`"),
+                });
+            }
+
+            if !seen.insert(invariant) {
+                errors.push(ValidationError {
+                    field: format!("expected_invariants[{index}]"),
+                    message: format!("duplicate expected invariant `{invariant}`"),
+                });
+            }
+        }
+    }
+
+    fn validate_minimization(&self, errors: &mut Vec<ValidationError>) {
+        if self.minimization.enabled {
+            match self.minimization.max_evaluations {
+                Some(0) => errors.push(ValidationError {
+                    field: "minimization.max_evaluations".into(),
+                    message: "enabled minimization requires max_evaluations >= 1".into(),
+                }),
+                None => errors.push(ValidationError {
+                    field: "minimization.max_evaluations".into(),
+                    message: "enabled minimization requires max_evaluations".into(),
+                }),
+                Some(_) => {}
+            }
+        }
+
+        if self.minimization.max_counterexample_events == Some(0) {
+            errors.push(ValidationError {
+                field: "minimization.max_counterexample_events".into(),
+                message: "max_counterexample_events must be >= 1 when set".into(),
+            });
+        }
+    }
+
+    fn validate_golden_projection(&self, errors: &mut Vec<ValidationError>) {
+        if !self.golden_projection.canonicalized {
+            errors.push(ValidationError {
+                field: "golden_projection.canonicalized".into(),
+                message: "golden projection must be canonicalized".into(),
+            });
+        }
+        if !self.golden_projection.redacted {
+            errors.push(ValidationError {
+                field: "golden_projection.redacted".into(),
+                message: "golden projection must be redacted".into(),
+            });
+        }
+    }
+
     /// Convert this scenario to a [`super::config::LabConfig`].
     #[must_use]
     pub fn to_lab_config(&self) -> super::config::LabConfig {
@@ -917,6 +1182,10 @@ mod tests {
         assert!(s.faults.is_empty());
         assert!(s.participants.is_empty());
         assert_eq!(s.oracles, vec!["all"]);
+        assert_eq!(s.resource_caps, ResourceCapsSection::default());
+        assert_eq!(s.expected_invariants, default_expected_invariants());
+        assert_eq!(s.minimization, MinimizationSection::default());
+        assert_eq!(s.golden_projection, GoldenProjectionSection::default());
     }
 
     #[test]
@@ -1271,6 +1540,178 @@ mod tests {
     }
 
     #[test]
+    fn parse_source_backed_dsl_fields() {
+        let json = r#"{
+            "id": "chaos-partition-cancel-storm",
+            "description": "partition plus cancellation storm",
+            "lab": {"seed": 340334, "worker_count": 2, "max_steps": 1000},
+            "participants": [
+                {"name": "alice", "role": "sender"},
+                {"name": "bob", "role": "receiver"}
+            ],
+            "faults": [
+                {"at_ms": 100, "action": "partition", "args": {"from": "alice", "to": "bob"}},
+                {"at_ms": 500, "action": "heal", "args": {"from": "alice", "to": "bob"}}
+            ],
+            "cancellation": {"strategy": "random_sample", "count": 8},
+            "resource_caps": {
+                "max_artifact_bytes": 65536,
+                "max_fault_events": 8,
+                "max_counterexample_events": 16
+            },
+            "expected_invariants": [
+                "quiescence",
+                "losers_drained",
+                "no_obligation_leaks",
+                "deterministic_replay"
+            ],
+            "minimization": {
+                "enabled": true,
+                "max_evaluations": 64,
+                "max_counterexample_events": 16
+            },
+            "golden_projection": {
+                "format": "json",
+                "canonicalized": true,
+                "redacted": true
+            }
+        }"#;
+
+        let s: Scenario = serde_json::from_str(json).unwrap();
+        assert_eq!(s.lab.seed, 340_334);
+        assert_eq!(s.resource_caps.max_artifact_bytes, Some(65_536));
+        assert_eq!(s.resource_caps.max_fault_events, Some(8));
+        assert_eq!(s.resource_caps.max_counterexample_events, Some(16));
+        assert_eq!(
+            s.expected_invariants,
+            vec![
+                "quiescence".to_string(),
+                "losers_drained".to_string(),
+                "no_obligation_leaks".to_string(),
+                "deterministic_replay".to_string()
+            ]
+        );
+        assert!(s.minimization.enabled);
+        assert_eq!(s.minimization.max_evaluations, Some(64));
+        assert_eq!(s.minimization.max_counterexample_events, Some(16));
+        assert_eq!(s.golden_projection.format, GoldenProjectionFormat::Json);
+        assert!(s.golden_projection.canonicalized);
+        assert!(s.golden_projection.redacted);
+        assert!(
+            s.validate().is_empty(),
+            "source-backed scenario must validate"
+        );
+    }
+
+    #[test]
+    fn validate_resource_caps_bound_fault_count() {
+        let json = r#"{
+            "id": "x",
+            "participants": [{"name": "alice"}, {"name": "bob"}],
+            "faults": [
+                {"at_ms": 1, "action": "partition", "args": {"from": "alice", "to": "bob"}},
+                {"at_ms": 2, "action": "heal", "args": {"from": "alice", "to": "bob"}}
+            ],
+            "resource_caps": {
+                "max_artifact_bytes": 0,
+                "max_fault_events": 1,
+                "max_counterexample_events": 0
+            }
+        }"#;
+
+        let s: Scenario = serde_json::from_str(json).unwrap();
+        let errors = s.validate();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.field == "resource_caps.max_artifact_bytes")
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.field == "resource_caps.max_fault_events")
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.field == "resource_caps.max_counterexample_events")
+        );
+    }
+
+    #[test]
+    fn validate_expected_invariants_fail_closed() {
+        let json = r#"{
+            "id": "x",
+            "expected_invariants": ["quiescence", "", "quiescence", "mystery"]
+        }"#;
+
+        let s: Scenario = serde_json::from_str(json).unwrap();
+        let errors = s.validate();
+        assert!(errors.iter().any(|e| {
+            e.field == "expected_invariants[1]" && e.message.contains("must not be empty")
+        }));
+        assert!(
+            errors.iter().any(|e| {
+                e.field == "expected_invariants[2]" && e.message.contains("duplicate")
+            })
+        );
+        assert!(
+            errors.iter().any(|e| {
+                e.field == "expected_invariants[3]" && e.message.contains("unsupported")
+            })
+        );
+    }
+
+    #[test]
+    fn validate_minimization_requires_positive_budget_when_enabled() {
+        let json = r#"{
+            "id": "x",
+            "minimization": {
+                "enabled": true,
+                "max_counterexample_events": 0
+            }
+        }"#;
+
+        let s: Scenario = serde_json::from_str(json).unwrap();
+        let errors = s.validate();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.field == "minimization.max_evaluations")
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.field == "minimization.max_counterexample_events")
+        );
+    }
+
+    #[test]
+    fn validate_golden_projection_requires_canonical_redacted_output() {
+        let json = r#"{
+            "id": "x",
+            "golden_projection": {
+                "format": "markdown",
+                "canonicalized": false,
+                "redacted": false
+            }
+        }"#;
+
+        let s: Scenario = serde_json::from_str(json).unwrap();
+        let errors = s.validate();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.field == "golden_projection.canonicalized")
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.field == "golden_projection.redacted")
+        );
+    }
+
+    #[test]
     fn to_lab_config_defaults() {
         let s: Scenario = serde_json::from_str(minimal_json()).unwrap();
         let config = s.to_lab_config();
@@ -1306,7 +1747,11 @@ mod tests {
             "chaos": {"preset": "heavy"},
             "network": {"preset": "wan"},
             "participants": [{"name": "alice", "role": "sender"}],
-            "faults": [{"at_ms": 100, "action": "partition"}]
+            "faults": [{"at_ms": 100, "action": "partition"}],
+            "resource_caps": {"max_artifact_bytes": 1024, "max_fault_events": 2},
+            "expected_invariants": ["quiescence", "deterministic_replay"],
+            "minimization": {"enabled": false, "max_counterexample_events": 8},
+            "golden_projection": {"format": "markdown", "canonicalized": true, "redacted": true}
         }"#;
         let s1: Scenario = serde_json::from_str(json).unwrap();
         let serialized = s1.to_json().unwrap();
@@ -1315,6 +1760,10 @@ mod tests {
         assert_eq!(s1.lab.seed, s2.lab.seed);
         assert_eq!(s1.participants.len(), s2.participants.len());
         assert_eq!(s1.faults.len(), s2.faults.len());
+        assert_eq!(s1.resource_caps, s2.resource_caps);
+        assert_eq!(s1.expected_invariants, s2.expected_invariants);
+        assert_eq!(s1.minimization, s2.minimization);
+        assert_eq!(s1.golden_projection, s2.golden_projection);
     }
 
     #[test]

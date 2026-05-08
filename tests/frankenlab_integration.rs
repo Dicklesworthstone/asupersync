@@ -50,12 +50,7 @@ fn minimal_scenario() -> Scenario {
         lab: LabSection::default(),
         chaos: ChaosSection::Off,
         network: NetworkSection::default(),
-        faults: Vec::new(),
-        participants: Vec::new(),
-        oracles: vec!["all".to_string()],
-        cancellation: None,
-        include: Vec::new(),
-        metadata: BTreeMap::new(),
+        ..Scenario::default()
     }
 }
 
@@ -183,10 +178,7 @@ fn arb_scenario() -> impl Strategy<Value = Scenario> {
                     },
                     faults,
                     participants,
-                    oracles: vec!["all".to_string()],
-                    cancellation: None,
-                    include: Vec::new(),
-                    metadata: BTreeMap::new(),
+                    ..Scenario::default()
                 }
             },
         )

@@ -56,6 +56,109 @@
     "minimization",
     "golden_projection"
   ],
+  "source_field_mappings": {
+    "scenario_id": "Scenario.id",
+    "seed": "Scenario.lab.seed",
+    "worker_count": "Scenario.lab.worker_count",
+    "max_steps": "Scenario.lab.max_steps",
+    "participants": "Scenario.participants",
+    "fault_schedule": "Scenario.faults",
+    "resource_caps": "Scenario.resource_caps",
+    "expected_invariants": "Scenario.expected_invariants",
+    "minimization": "Scenario.minimization",
+    "golden_projection": "Scenario.golden_projection"
+  },
+  "source_markers": [
+    "pub resource_caps: ResourceCapsSection",
+    "pub expected_invariants: Vec<String>",
+    "pub minimization: MinimizationSection",
+    "pub golden_projection: GoldenProjectionSection",
+    "pub const SUPPORTED_EXPECTED_INVARIANTS",
+    "pub struct ResourceCapsSection",
+    "pub struct MinimizationSection",
+    "pub enum GoldenProjectionFormat",
+    "pub struct GoldenProjectionSection",
+    "fn validate_resource_caps",
+    "fn validate_expected_invariants",
+    "fn validate_minimization",
+    "fn validate_golden_projection"
+  ],
+  "canonical_source_backed_scenario": {
+    "schema_version": 1,
+    "id": "chaos-partition-cancel-storm",
+    "description": "Network partition plus cancellation storm must replay deterministically and drain losers.",
+    "lab": {
+      "seed": 340334,
+      "worker_count": 2,
+      "max_steps": 1000,
+      "trace_capacity": 4096,
+      "panic_on_obligation_leak": true,
+      "panic_on_futurelock": true
+    },
+    "chaos": {
+      "preset": "light"
+    },
+    "network": {
+      "preset": "lan"
+    },
+    "participants": [
+      {
+        "name": "alice",
+        "role": "sender"
+      },
+      {
+        "name": "bob",
+        "role": "receiver"
+      }
+    ],
+    "faults": [
+      {
+        "at_ms": 100,
+        "action": "partition",
+        "args": {
+          "from": "alice",
+          "to": "bob"
+        }
+      },
+      {
+        "at_ms": 500,
+        "action": "heal",
+        "args": {
+          "from": "alice",
+          "to": "bob"
+        }
+      }
+    ],
+    "cancellation": {
+      "strategy": "random_sample",
+      "count": 8
+    },
+    "resource_caps": {
+      "max_artifact_bytes": 65536,
+      "max_fault_events": 8,
+      "max_counterexample_events": 16
+    },
+    "expected_invariants": [
+      "quiescence",
+      "losers_drained",
+      "no_obligation_leaks",
+      "deterministic_replay"
+    ],
+    "minimization": {
+      "enabled": true,
+      "max_evaluations": 64,
+      "max_counterexample_events": 16
+    },
+    "golden_projection": {
+      "format": "json",
+      "canonicalized": true,
+      "redacted": true
+    },
+    "metadata": {
+      "surface_contract_version": "chaos-scenario-dsl-contract-v1"
+    }
+  },
+  "source_backed_golden_projection": "scenario_id=chaos-partition-cancel-storm;seed=340334;participants=alice,bob;faults=100:partition:alice->bob|500:heal:alice->bob;invariants=quiescence,losers_drained,no_obligation_leaks,deterministic_replay;caps=max_artifact_bytes=65536,max_fault_events=8,max_counterexample_events=16;minimization=enabled=true,max_evaluations=64,max_counterexample_events=16;golden=format=json,canonicalized=true,redacted=true",
   "required_invariants": [
     "quiescence",
     "losers_drained",

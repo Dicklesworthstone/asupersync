@@ -795,12 +795,7 @@ mod tests {
             lab: LabSection::default(),
             chaos: ChaosSection::Off,
             network: NetworkSection::default(),
-            faults: Vec::new(),
-            participants: Vec::new(),
-            oracles: vec!["all".to_string()],
-            cancellation: None,
-            include: Vec::new(),
-            metadata: BTreeMap::new(),
+            ..Scenario::default()
         }
     }
 
