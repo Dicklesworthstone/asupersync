@@ -192,6 +192,27 @@ fn partial_proof_launches_require_remote_exit_evidence() {
 }
 
 #[test]
+fn partial_proof_output_matches_full_reviewed_golden() {
+    let output = run_replay("partial_proof.json");
+    assert!(
+        output.status.success(),
+        "replay helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let expected = fixture_text("partial_proof_expected.json");
+    serde_json::from_slice::<Value>(&output.stdout).expect("actual replay output must be JSON");
+    serde_json::from_str::<Value>(&expected).expect("golden replay output must be JSON");
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("replay stdout is utf-8"),
+        expected,
+        "partial_proof receipt drifted from the reviewed golden"
+    );
+}
+
+#[test]
 fn remote_success_without_artifact_and_closeout_evidence_is_warning() {
     let receipt = replay_json("artifact_warning_and_closeout_gap.json");
 
