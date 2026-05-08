@@ -5,6 +5,7 @@
 //! Tests RFC 9113 Section 4.1 cleartext HTTP/2 upgrade via HTTP/1.1 Upgrade mechanism.
 
 use super::*;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
 /// Run all h2c upgrade negotiation tests.
 #[allow(dead_code)]
@@ -73,12 +74,8 @@ fn test_h2c_upgrade_request() -> H2ConformanceResult {
         // Validate HTTP2-Settings header is base64 encoded
         let settings_header = get_header_value(&upgrade_request, "HTTP2-Settings");
         let settings_decoded = base64_decode(&settings_header)
-            .map_err(|_| "HTTP2-Settings header must be valid base64")?;
-
-        // Decoded settings should be valid HTTP/2 SETTINGS frame payload
-        if settings_decoded.len() % 6 != 0 {
-            return Err("HTTP2-Settings payload length must be multiple of 6".to_string());
-        }
+            .map_err(|error| format!("HTTP2-Settings header must be valid base64url: {error}"))?;
+        validate_http2_settings_payload(&settings_decoded)?;
 
         Ok(())
     });
@@ -102,10 +99,7 @@ fn test_h2c_upgrade_response() -> H2ConformanceResult {
             version: "HTTP/1.1",
             status_code: 101,
             reason_phrase: "Switching Protocols",
-            headers: vec![
-                ("Connection", "Upgrade"),
-                ("Upgrade", "h2c"),
-            ],
+            headers: vec![("Connection", "Upgrade"), ("Upgrade", "h2c")],
         };
 
         // Validate 101 Switching Protocols status
@@ -179,89 +173,43 @@ fn test_http2_settings_header() -> H2ConformanceResult {
         // Test valid HTTP2-Settings values
         let valid_settings = vec![
             ("", "empty settings"),
-            ("AAMAAABkAARAAAAAAAIAAAAA", "typical settings with table size and window size"),
-            ("AAEAAAgAAwAAAAEABAAA//8=", "max concurrent streams and max frame size"),
+            (
+                "AAMAAABkAARAAAAAAAIAAAAA",
+                "typical settings with table size and window size",
+            ),
+            (
+                "AAEAAAgAAwAAAAEABAAA__8",
+                "max concurrent streams and max frame size",
+            ),
         ];
 
         for (settings_value, description) in valid_settings {
             let decoded = base64_decode(settings_value)
                 .map_err(|_| format!("Failed to decode valid settings: {}", description))?;
-
-            // Validate settings payload structure
-            if decoded.len() % 6 != 0 {
-                return Err(format!(
-                    "Settings payload length not multiple of 6: {}",
-                    description
-                ));
-            }
-
-            // Parse settings parameters
-            for chunk in decoded.chunks_exact(6) {
-                let id = u16::from_be_bytes([chunk[0], chunk[1]]);
-                let value = u32::from_be_bytes([chunk[2], chunk[3], chunk[4], chunk[5]]);
-
-                // Validate known setting parameter ranges
-                match id {
-                    1 => { // SETTINGS_HEADER_TABLE_SIZE
-                        // Any value is valid
-                    }
-                    2 => { // SETTINGS_ENABLE_PUSH
-                        if value > 1 {
-                            return Err(format!(
-                                "SETTINGS_ENABLE_PUSH must be 0 or 1, got {}",
-                                value
-                            ));
-                        }
-                    }
-                    3 => { // SETTINGS_MAX_CONCURRENT_STREAMS
-                        // Any value is valid
-                    }
-                    4 => { // SETTINGS_INITIAL_WINDOW_SIZE
-                        if value > 0x7FFFFFFF {
-                            return Err(format!(
-                                "SETTINGS_INITIAL_WINDOW_SIZE must be ≤ 2^31-1, got {}",
-                                value
-                            ));
-                        }
-                    }
-                    5 => { // SETTINGS_MAX_FRAME_SIZE
-                        if value < 16384 || value > 16777215 {
-                            return Err(format!(
-                                "SETTINGS_MAX_FRAME_SIZE must be 16384-16777215, got {}",
-                                value
-                            ));
-                        }
-                    }
-                    6 => { // SETTINGS_MAX_HEADER_LIST_SIZE
-                        // Any value is valid
-                    }
-                    _ => {
-                        // Unknown settings should be ignored per RFC
-                    }
-                }
-            }
+            validate_http2_settings_payload(&decoded)
+                .map_err(|error| format!("Invalid settings payload for {description}: {error}"))?;
         }
 
         // Test invalid HTTP2-Settings values
         let invalid_settings = vec![
             ("not-base64!", "invalid base64 encoding"),
-            ("QUE=", "payload length not multiple of 6"), // "AA" -> 2 bytes
-            ("AAEAAAgAAwAAAAE=", "incomplete parameter"), // 11 bytes
+            ("AAEAAAAI=", "HTTP2-Settings uses base64url without padding"),
+            (
+                "AAEAAAgAAwAAAAEABAAA//8=",
+                "standard base64 alphabet is not base64url",
+            ),
+            ("QUE", "payload length not multiple of 6"), // "AA" -> 2 bytes
         ];
 
         for (settings_value, description) in invalid_settings {
-            match base64_decode(settings_value) {
-                Ok(decoded) => {
-                    if decoded.len() % 6 == 0 {
-                        return Err(format!(
-                            "Invalid settings '{}' was accepted: {}",
-                            settings_value, description
-                        ));
-                    }
-                }
-                Err(_) => {
-                    // Expected for invalid base64
-                }
+            let accepted = base64_decode(settings_value)
+                .and_then(|decoded| validate_http2_settings_payload(&decoded))
+                .is_ok();
+            if accepted {
+                return Err(format!(
+                    "Invalid settings '{}' was accepted: {}",
+                    settings_value, description
+                ));
             }
         }
 
@@ -290,7 +238,7 @@ fn test_upgrade_error_handling() -> H2ConformanceResult {
                     ("Upgrade", "h2c"),
                     // Missing HTTP2-Settings
                 ],
-                "missing HTTP2-Settings header"
+                "missing HTTP2-Settings header",
             ),
             (
                 vec![
@@ -298,7 +246,7 @@ fn test_upgrade_error_handling() -> H2ConformanceResult {
                     ("Upgrade", "h2c"),
                     ("HTTP2-Settings", ""),
                 ],
-                "incorrect Connection header"
+                "incorrect Connection header",
             ),
             (
                 vec![
@@ -306,7 +254,7 @@ fn test_upgrade_error_handling() -> H2ConformanceResult {
                     ("Upgrade", "websocket"), // Wrong upgrade protocol
                     ("HTTP2-Settings", ""),
                 ],
-                "incorrect Upgrade protocol"
+                "incorrect Upgrade protocol",
             ),
             (
                 vec![
@@ -314,7 +262,7 @@ fn test_upgrade_error_handling() -> H2ConformanceResult {
                     ("Upgrade", "h2c"),
                     ("HTTP2-Settings", "invalid-base64!"),
                 ],
-                "invalid HTTP2-Settings encoding"
+                "invalid HTTP2-Settings encoding",
             ),
         ];
 
@@ -379,11 +327,11 @@ fn test_h2c_prior_knowledge() -> H2ConformanceResult {
         let invalid_setups = vec![
             (
                 b"GET / HTTP/1.1\r\n\r\n".to_vec(), // HTTP/1.1 request instead of preface
-                "HTTP/1.1 request instead of connection preface"
+                "HTTP/1.1 request instead of connection preface",
             ),
             (
                 b"PRI * HTTP/2.0\r\n\r\nXX\r\n\r\n".to_vec(), // Invalid preface
-                "malformed connection preface"
+                "malformed connection preface",
             ),
         ];
 
@@ -494,8 +442,7 @@ fn test_upgrade_header_validation() -> H2ConformanceResult {
     )
 }
 
-// Mock types and helper functions
-// In real implementation, these would integrate with actual HTTP/1.1 and HTTP/2 parsers
+// Local fixture types and helper functions for the conformance cases.
 
 #[derive(Debug)]
 struct HttpRequest<'a> {
@@ -527,54 +474,96 @@ struct H2cPriorKnowledgeSetup {
 }
 
 fn has_header(request: &HttpRequest, name: &str) -> bool {
-    request.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case(name))
+    request
+        .headers
+        .iter()
+        .any(|(n, _)| n.eq_ignore_ascii_case(name))
 }
 
 fn get_header_value(request: &HttpRequest, name: &str) -> &str {
-    request.headers.iter()
+    request
+        .headers
+        .iter()
         .find(|(n, _)| n.eq_ignore_ascii_case(name))
         .map(|(_, v)| *v)
         .unwrap_or("")
 }
 
 fn has_response_header(response: &HttpResponse, name: &str) -> bool {
-    response.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case(name))
+    response
+        .headers
+        .iter()
+        .any(|(n, _)| n.eq_ignore_ascii_case(name))
 }
 
 fn get_response_header_value(response: &HttpResponse, name: &str) -> &str {
-    response.headers.iter()
+    response
+        .headers
+        .iter()
         .find(|(n, _)| n.eq_ignore_ascii_case(name))
         .map(|(_, v)| *v)
         .unwrap_or("")
 }
 
 fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
-    // Mock base64 decoder - in real implementation would use actual base64 library
-    if input.chars().any(|c| !c.is_ascii_alphanumeric() && c != '+' && c != '/' && c != '=') {
-        return Err("Invalid base64 character".to_string());
+    URL_SAFE_NO_PAD
+        .decode(input)
+        .map_err(|error| format!("invalid HTTP2-Settings base64url: {error}"))
+}
+
+fn validate_http2_settings_payload(payload: &[u8]) -> Result<(), String> {
+    if payload.len() % 6 != 0 {
+        return Err("HTTP2-Settings payload length must be multiple of 6".to_string());
     }
 
-    // Simplified: just return empty vec for empty string, error for clearly invalid
-    if input.is_empty() {
-        return Ok(vec![]);
+    for chunk in payload.chunks_exact(6) {
+        let id = u16::from_be_bytes([chunk[0], chunk[1]]);
+        let value = u32::from_be_bytes([chunk[2], chunk[3], chunk[4], chunk[5]]);
+
+        match id {
+            1 => {}
+            2 => {
+                if value > 1 {
+                    return Err(format!("SETTINGS_ENABLE_PUSH must be 0 or 1, got {value}"));
+                }
+            }
+            3 => {}
+            4 => {
+                if value > 0x7FFF_FFFF {
+                    return Err(format!(
+                        "SETTINGS_INITIAL_WINDOW_SIZE must be <= 2^31-1, got {value}"
+                    ));
+                }
+            }
+            5 => {
+                if !(16_384..=16_777_215).contains(&value) {
+                    return Err(format!(
+                        "SETTINGS_MAX_FRAME_SIZE must be 16384-16777215, got {value}"
+                    ));
+                }
+            }
+            6 => {}
+            _ => {}
+        }
     }
 
-    if input == "not-base64!" {
-        return Err("Invalid base64".to_string());
-    }
-
-    // For testing purposes, return a valid settings payload for valid inputs
-    Ok(vec![0, 1, 0, 0, 0, 8]) // SETTINGS_HEADER_TABLE_SIZE = 8
+    Ok(())
 }
 
 fn validate_h2c_upgrade_request(request: &HttpRequest) -> bool {
-    // Mock validation logic
-    has_header(request, "Connection") &&
-    has_header(request, "Upgrade") &&
-    has_header(request, "HTTP2-Settings") &&
-    get_header_value(request, "Upgrade") == "h2c" &&
-    get_header_value(request, "Connection").contains("Upgrade") &&
-    get_header_value(request, "Connection").contains("HTTP2-Settings")
+    if !(has_header(request, "Connection")
+        && has_header(request, "Upgrade")
+        && has_header(request, "HTTP2-Settings")
+        && get_header_value(request, "Upgrade") == "h2c"
+        && get_header_value(request, "Connection").contains("Upgrade")
+        && get_header_value(request, "Connection").contains("HTTP2-Settings"))
+    {
+        return false;
+    }
+
+    base64_decode(get_header_value(request, "HTTP2-Settings"))
+        .and_then(|decoded| validate_http2_settings_payload(&decoded))
+        .is_ok()
 }
 
 fn validate_h2c_prior_knowledge_setup(setup: &H2cPriorKnowledgeSetup) -> bool {
