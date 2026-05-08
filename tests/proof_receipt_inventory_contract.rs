@@ -53,12 +53,6 @@ fn fixture_text(fixture: &str) -> String {
     fs::read_to_string(repo_root().join(FIXTURE_ROOT).join(fixture)).expect("read fixture text")
 }
 
-fn fixture_json(fixture: &str) -> Value {
-    let raw = fs::read_to_string(repo_root().join(FIXTURE_ROOT).join(fixture))
-        .expect("read fixture JSON");
-    serde_json::from_str(&raw).expect("fixture must be JSON")
-}
-
 fn helpers(receipt: &Value) -> &Vec<Value> {
     receipt["helpers"]
         .as_array()
@@ -237,9 +231,13 @@ fn current_inventory_matches_full_output_golden() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let actual: Value = serde_json::from_slice(&output.stdout).expect("receipt output JSON");
-    let expected = fixture_json("current_inventory_expected.json");
+    let actual = String::from_utf8(output.stdout).expect("receipt stdout is utf-8");
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt output JSON");
+    let expected = fixture_text("current_inventory_expected.json");
+    let expected_json: Value =
+        serde_json::from_str(&expected).expect("expected receipt output JSON");
 
+    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
     assert_eq!(actual, expected);
 }
 
