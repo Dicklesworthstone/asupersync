@@ -107,6 +107,10 @@ fn render_markdown(matrix: &Value) -> Vec<String> {
     lines
 }
 
+fn validation_commands(matrix: &Value) -> BTreeSet<String> {
+    string_set(matrix, "validation_commands")
+}
+
 #[test]
 fn matrix_declares_required_schema_sources_and_categories() {
     let matrix = matrix();
@@ -137,6 +141,77 @@ fn matrix_declares_required_schema_sources_and_categories() {
         "adapter matrix must cover each required category exactly once"
     );
     assert_eq!(actual.len(), 5, "matrix must cover five adapter categories");
+}
+
+#[test]
+fn validation_commands_cover_the_matrix_contract_itself() {
+    let matrix = matrix();
+    let policy = matrix
+        .get("validation_policy")
+        .expect("validation_policy object");
+    assert_eq!(
+        string(policy, "contract_test_target"),
+        "adapter_certification_matrix_contract"
+    );
+    assert!(bool_field(policy, "cargo_proofs_must_be_rch_routed"));
+    assert!(bool_field(
+        policy,
+        "cargo_proofs_must_use_isolated_target_dir"
+    ));
+    assert!(
+        string_set(policy, "commands_must_cover").contains("json_syntax"),
+        "validation policy must require JSON syntax validation"
+    );
+    assert!(
+        string_set(policy, "commands_must_cover").contains("contract_rustfmt"),
+        "validation policy must require contract rustfmt validation"
+    );
+    assert!(
+        string_set(policy, "commands_must_cover").contains("contract_cargo_test"),
+        "validation policy must require the contract cargo test"
+    );
+
+    let commands = validation_commands(&matrix);
+    assert!(
+        commands.contains("python3 -m json.tool artifacts/adapter_certification_matrix_v1.json"),
+        "validation commands must include the matrix JSON syntax proof"
+    );
+
+    let rustfmt = commands
+        .iter()
+        .find(|command| command.contains("rustfmt --edition 2024 --check"))
+        .expect("rustfmt validation command");
+    assert!(
+        rustfmt.starts_with("rch exec -- "),
+        "rustfmt command must be rch-routed: {rustfmt}"
+    );
+    assert!(
+        rustfmt.contains(TEST_PATH),
+        "rustfmt command must target the contract test: {rustfmt}"
+    );
+
+    let cargo = commands
+        .iter()
+        .find(|command| command.contains("--test adapter_certification_matrix_contract"))
+        .expect("adapter certification cargo proof command");
+    assert!(
+        cargo.starts_with("rch exec -- "),
+        "cargo proof must be rch-routed: {cargo}"
+    );
+    assert!(
+        cargo.contains("CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_adapter_certification_matrix"),
+        "cargo proof must use the isolated matrix target dir: {cargo}"
+    );
+    assert!(
+        cargo.contains("cargo test -p asupersync --test adapter_certification_matrix_contract"),
+        "cargo proof must target this integration test: {cargo}"
+    );
+    for feature in string_set(policy, "required_feature_flags") {
+        assert!(
+            cargo.contains(&feature),
+            "cargo proof must include required feature flag {feature}: {cargo}"
+        );
+    }
 }
 
 #[test]

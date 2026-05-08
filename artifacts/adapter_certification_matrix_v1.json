@@ -51,6 +51,19 @@
       "green without proof"
     ]
   },
+  "validation_policy": {
+    "commands_must_cover": [
+      "json_syntax",
+      "contract_rustfmt",
+      "contract_cargo_test"
+    ],
+    "cargo_proofs_must_be_rch_routed": true,
+    "cargo_proofs_must_use_isolated_target_dir": true,
+    "contract_test_target": "adapter_certification_matrix_contract",
+    "required_feature_flags": [
+      "test-internals"
+    ]
+  },
   "adapters": [
     {
       "adapter_id": "http-h1-h2",
