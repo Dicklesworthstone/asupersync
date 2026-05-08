@@ -26,7 +26,9 @@
 //! let matrix = calculator.calculate_coverage("tests/golden").unwrap();
 //!
 //! // Generate compliance report
-//! let generator = compliance_report::ComplianceReportGenerator::new();
+//! let generator = compliance_report::ComplianceReportGenerator::new(
+//!     compliance_report::ReportConfig::default()
+//! ).unwrap();
 //! let report = generator.generate_report(
 //!     &matrix,
 //!     None,
@@ -100,17 +102,18 @@ pub fn run_complete_reporting_pipeline<P: AsRef<std::path::Path>>(
     let calculator = CoverageMatrixCalculator::new();
     let coverage_matrix = calculator
         .calculate_coverage(golden_path)
-        .map_err(ReportingPipelineError::CoverageCalculation)?;
+        .map_err(|error| ReportingPipelineError::CoverageCalculation(error.into()))?;
 
     // Step 2: Generate compliance reports
-    let report_generator = ComplianceReportGenerator::new();
+    let report_generator = ComplianceReportGenerator::new(ReportConfig::default())
+        .map_err(|error| ReportingPipelineError::ReportGeneration(error.into()))?;
     let markdown_report = report_generator
         .generate_report(&coverage_matrix, None, ReportFormat::Markdown)
-        .map_err(ReportingPipelineError::ReportGeneration)?;
+        .map_err(|error| ReportingPipelineError::ReportGeneration(error.into()))?;
 
     let json_report = report_generator
         .generate_report(&coverage_matrix, None, ReportFormat::Json)
-        .map_err(ReportingPipelineError::ReportGeneration)?;
+        .map_err(|error| ReportingPipelineError::ReportGeneration(error.into()))?;
 
     // Step 3: Regression detection (if baseline available)
     let regression_analysis = if let Some(baseline_path) = baseline_dir {
@@ -340,7 +343,7 @@ mod tests {
             &golden_path,
             &fixture_path,
             &output_path,
-            None::<&std::path::Path>,
+            None::<&std::path::PathBuf>,
         );
 
         // Should fail gracefully due to missing test data

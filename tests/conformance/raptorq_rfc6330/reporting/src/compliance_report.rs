@@ -138,7 +138,7 @@ impl ComplianceReportGenerator {
             ReportFormat::Markdown => self.generate_markdown_report(&context),
             ReportFormat::Json => Ok(serde_json::to_string_pretty(matrix)?),
             ReportFormat::Html => self.generate_html_report(&context),
-            ReportFormat::SvgBadge => self.generate_svg_badge(&context),
+            ReportFormat::SvgBadge => self.generate_badges(&context),
         }
     }
 
@@ -217,7 +217,7 @@ impl ComplianceReportGenerator {
             .collect();
 
         TemplateContext {
-            title: self.config.report_title.clone(),
+            title: self.config.title.clone(),
             generated_at: matrix
                 .generated_at
                 .format("%Y-%m-%d %H:%M:%S UTC")
