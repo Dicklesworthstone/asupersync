@@ -1,6 +1,6 @@
 #![allow(missing_docs)]
 
-use asupersync::channel::{broadcast, mpsc, oneshot, watch};
+use asupersync::channel::{broadcast, mpsc, oneshot, session, watch};
 use asupersync::cx::Cx;
 use asupersync::types::{Budget, CancelKind};
 use asupersync::util::ArenaIndex;
@@ -592,6 +592,84 @@ fn live_watch_snapshot_reports_latest_value_waiters_and_cancelled_pressure() {
     assert!(after_receiver_drop.closed);
     assert_eq!(after_receiver_drop.receiver_health, "receiver_dropped");
     assert_eq!(after_receiver_drop.receiver_count, 0);
+}
+
+#[test]
+fn live_session_snapshot_reports_tracked_subchannel_pressure() {
+    let contract = contract();
+    let rows = rows_by_kind(&contract);
+    let session_row = rows.get("session").expect("session row exists");
+    assert_eq!(session_row["live_telemetry_wired"].as_bool(), Some(true));
+    assert_eq!(session_row["report_status"].as_str(), Some("LIVE"));
+
+    let cx = telemetry_test_cx();
+    let (tx, mut rx) = session::tracked_channel::<u8>(2);
+    let initial = tx.telemetry_snapshot(501);
+    assert_eq!(initial.channel_id, 501);
+    assert_eq!(initial.channel_kind, "session");
+    assert_eq!(initial.subchannel_kind, "mpsc");
+    assert_eq!(initial.capacity, 2);
+    assert_eq!(initial.queued_messages, 0);
+    assert_eq!(initial.reserved_uncommitted_obligations, 0);
+    assert_eq!(initial.send_waiter_count, 0);
+    assert_eq!(initial.recv_waiter_count, 0);
+    assert_eq!(initial.receiver_health, "open");
+    assert_eq!(initial.lagged_receiver_count, None);
+    assert_eq!(initial.cancellation_count, 0);
+    assert!(!initial.closed);
+    assert_eq!(initial.subchannels[0].channel_id, 501);
+    assert_eq!(initial.subchannels[0].channel_kind, "mpsc");
+
+    let permit = tx.try_reserve().expect("tracked reserve succeeds");
+    let reserved = permit.telemetry_snapshot(501);
+    assert_eq!(reserved.channel_kind, "session");
+    assert_eq!(reserved.subchannel_kind, "mpsc");
+    assert_eq!(reserved.reserved_uncommitted_obligations, 1);
+    assert_eq!(reserved.subchannels[0].reserved_uncommitted_obligations, 1);
+    let _ = permit.abort();
+    let aborted = tx.telemetry_snapshot(501);
+    assert_eq!(aborted.reserved_uncommitted_obligations, 0);
+    assert_eq!(aborted.cancellation_count, 1);
+    assert_eq!(aborted.receiver_health, "open");
+
+    let permit = tx.try_reserve().expect("tracked reserve after abort");
+    permit.send(9).expect("tracked send succeeds");
+    let ready = tx.telemetry_snapshot(501);
+    assert_eq!(ready.queued_messages, 1);
+    assert_eq!(ready.subchannels[0].queued_messages, 1);
+    assert_eq!(ready.receiver_health, "value_ready");
+    assert_eq!(rx.try_recv().expect("tracked value ready"), 9);
+    assert_eq!(tx.telemetry_snapshot(501).queued_messages, 0);
+
+    let cancelled_cx = telemetry_test_cx();
+    cancelled_cx.cancel_with(CancelKind::User, Some("channel telemetry contract"));
+    let waker = Waker::noop().clone();
+    let mut task_cx = Context::from_waker(&waker);
+    let mut reserve = Box::pin(tx.reserve(&cancelled_cx));
+    assert!(matches!(
+        reserve.as_mut().poll(&mut task_cx),
+        Poll::Ready(Err(mpsc::SendError::Cancelled(())))
+    ));
+    drop(reserve);
+    let after_cancelled_reserve = tx.telemetry_snapshot(501);
+    assert_eq!(after_cancelled_reserve.cancellation_count, 2);
+    assert_eq!(after_cancelled_reserve.reserved_uncommitted_obligations, 0);
+
+    let (tx, _rx) = session::tracked_oneshot::<u8>();
+    let initial_oneshot = tx.telemetry_snapshot(502);
+    assert_eq!(initial_oneshot.channel_kind, "session");
+    assert_eq!(initial_oneshot.subchannel_kind, "oneshot");
+    assert_eq!(initial_oneshot.capacity, 1);
+    assert_eq!(initial_oneshot.subchannels[0].channel_kind, "oneshot");
+
+    let permit = tx.reserve(&cx).expect("tracked oneshot reserve succeeds");
+    let reserved_oneshot = permit.telemetry_snapshot(502);
+    assert_eq!(reserved_oneshot.reserved_uncommitted_obligations, 1);
+    assert_eq!(
+        reserved_oneshot.subchannels[0].reserved_uncommitted_obligations,
+        1
+    );
+    let _ = permit.abort();
 }
 
 #[test]

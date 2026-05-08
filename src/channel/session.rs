@@ -51,6 +51,106 @@ use crate::channel::{mpsc, oneshot};
 use crate::cx::Cx;
 use crate::obligation::graded::{AbortedProof, CommittedProof, ObligationToken, SendPermit};
 
+/// Redacted telemetry for one underlying channel inside a session wrapper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionSubchannelTelemetrySnapshot {
+    /// Caller-provided deterministic channel identifier.
+    pub channel_id: u64,
+    /// Stable underlying channel kind label.
+    pub channel_kind: &'static str,
+    /// Maximum number of queued or reserved slots for this subchannel.
+    pub capacity: usize,
+    /// Committed values waiting for this subchannel receiver.
+    pub queued_messages: usize,
+    /// Reserved-but-uncommitted send obligations on this subchannel.
+    pub reserved_uncommitted_obligations: usize,
+}
+
+/// Opt-in, redacted telemetry snapshot for a session channel wrapper.
+///
+/// The caller supplies `channel_id`, which keeps identifiers deterministic and
+/// avoids ambient globals or pointer-derived IDs. Payload values are never
+/// exposed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionTelemetrySnapshot {
+    /// Caller-provided deterministic session channel identifier.
+    pub channel_id: u64,
+    /// Stable wrapper kind label.
+    pub channel_kind: &'static str,
+    /// Stable underlying channel kind label.
+    pub subchannel_kind: &'static str,
+    /// Maximum number of queued or reserved slots.
+    pub capacity: usize,
+    /// Number of committed values waiting for the receiver.
+    pub queued_messages: usize,
+    /// Number of reserved-but-uncommitted send obligations.
+    pub reserved_uncommitted_obligations: usize,
+    /// Sender-side waiters waiting for capacity or closure.
+    pub send_waiter_count: usize,
+    /// Receiver-side waiters waiting for messages, values, or closure.
+    pub recv_waiter_count: usize,
+    /// Redacted receiver state.
+    pub receiver_health: &'static str,
+    /// Underlying lag count when the subchannel supports receiver lag.
+    pub lagged_receiver_count: Option<usize>,
+    /// Cancel/abort events observed by the underlying subchannel.
+    pub cancellation_count: u64,
+    /// Whether the underlying subchannel has reached a closed state.
+    pub closed: bool,
+    /// Deterministically ordered underlying subchannel report.
+    pub subchannels: [SessionSubchannelTelemetrySnapshot; 1],
+}
+
+impl SessionTelemetrySnapshot {
+    fn from_mpsc(snapshot: mpsc::MpscTelemetrySnapshot) -> Self {
+        Self {
+            channel_id: snapshot.channel_id,
+            channel_kind: "session",
+            subchannel_kind: snapshot.channel_kind,
+            capacity: snapshot.capacity,
+            queued_messages: snapshot.queued_messages,
+            reserved_uncommitted_obligations: snapshot.reserved_uncommitted_obligations,
+            send_waiter_count: snapshot.send_waiter_count,
+            recv_waiter_count: snapshot.recv_waiter_count,
+            receiver_health: snapshot.receiver_health,
+            lagged_receiver_count: snapshot.lagged_receiver_count,
+            cancellation_count: snapshot.cancellation_count,
+            closed: snapshot.closed,
+            subchannels: [SessionSubchannelTelemetrySnapshot {
+                channel_id: snapshot.channel_id,
+                channel_kind: snapshot.channel_kind,
+                capacity: snapshot.capacity,
+                queued_messages: snapshot.queued_messages,
+                reserved_uncommitted_obligations: snapshot.reserved_uncommitted_obligations,
+            }],
+        }
+    }
+
+    fn from_oneshot(snapshot: oneshot::OneshotTelemetrySnapshot) -> Self {
+        Self {
+            channel_id: snapshot.channel_id,
+            channel_kind: "session",
+            subchannel_kind: snapshot.channel_kind,
+            capacity: snapshot.capacity,
+            queued_messages: snapshot.queued_messages,
+            reserved_uncommitted_obligations: snapshot.reserved_uncommitted_obligations,
+            send_waiter_count: snapshot.send_waiter_count,
+            recv_waiter_count: snapshot.recv_waiter_count,
+            receiver_health: snapshot.receiver_health,
+            lagged_receiver_count: snapshot.lagged_receiver_count,
+            cancellation_count: snapshot.cancellation_count,
+            closed: snapshot.closed,
+            subchannels: [SessionSubchannelTelemetrySnapshot {
+                channel_id: snapshot.channel_id,
+                channel_kind: snapshot.channel_kind,
+                capacity: snapshot.capacity,
+                queued_messages: snapshot.queued_messages,
+                reserved_uncommitted_obligations: snapshot.reserved_uncommitted_obligations,
+            }],
+        }
+    }
+}
+
 // ============================================================================
 // MPSC: TrackedSender<T>
 // ============================================================================
@@ -122,6 +222,12 @@ impl<T> TrackedSender<T> {
     pub fn is_closed(&self) -> bool {
         self.inner.is_closed()
     }
+
+    /// Returns an opt-in redacted telemetry snapshot for this session sender.
+    #[must_use]
+    pub fn telemetry_snapshot(&self, channel_id: u64) -> SessionTelemetrySnapshot {
+        SessionTelemetrySnapshot::from_mpsc(self.inner.telemetry_snapshot(channel_id))
+    }
 }
 
 impl<T> Clone for TrackedSender<T> {
@@ -184,6 +290,12 @@ impl<T> TrackedPermit<'_, T> {
         let Self { permit, obligation } = self;
         permit.abort();
         obligation.abort()
+    }
+
+    /// Returns an opt-in redacted telemetry snapshot for this tracked permit.
+    #[must_use]
+    pub fn telemetry_snapshot(&self, channel_id: u64) -> SessionTelemetrySnapshot {
+        SessionTelemetrySnapshot::from_mpsc(self.permit.telemetry_snapshot(channel_id))
     }
 }
 
@@ -275,6 +387,12 @@ impl<T> TrackedOneshotSender<T> {
     pub fn is_closed(&self) -> bool {
         self.inner.is_closed()
     }
+
+    /// Returns an opt-in redacted telemetry snapshot for this session oneshot sender.
+    #[must_use]
+    pub fn telemetry_snapshot(&self, channel_id: u64) -> SessionTelemetrySnapshot {
+        SessionTelemetrySnapshot::from_oneshot(self.inner.telemetry_snapshot(channel_id))
+    }
 }
 
 // ============================================================================
@@ -320,6 +438,12 @@ impl<T> TrackedOneshotPermit<T> {
     #[must_use]
     pub fn is_closed(&self) -> bool {
         self.permit.is_closed()
+    }
+
+    /// Returns an opt-in redacted telemetry snapshot for this tracked oneshot permit.
+    #[must_use]
+    pub fn telemetry_snapshot(&self, channel_id: u64) -> SessionTelemetrySnapshot {
+        SessionTelemetrySnapshot::from_oneshot(self.permit.telemetry_snapshot(channel_id))
     }
 }
 
