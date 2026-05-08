@@ -5,11 +5,10 @@ use asupersync::trace::distributed::id::{DistTraceId, SymbolSpanId};
 use asupersync::util::DetRng;
 use clap::{Arg, Command};
 use opentelemetry::trace::{
-    SpanContext, SpanId, TraceFlags as OtelTraceFlags, TraceId, TraceState,
+    SpanContext, SpanId, TraceContextExt as _, TraceFlags as OtelTraceFlags, TraceId, TraceState,
 };
-use opentelemetry::{Context, KeyValue, propagation::TextMapPropagator};
-use opentelemetry_sdk::trace::{Config, Sampler, TracerProvider};
-use opentelemetry_sdk::{Resource, runtime::Tokio};
+use opentelemetry::{Context, propagation::TextMapPropagator};
+use opentelemetry_sdk::propagation::TraceContextPropagator;
 use std::collections::HashMap;
 
 /// W3C trace context propagation conformance testing.
@@ -39,7 +38,7 @@ fn main() {
     let verbose = matches.get_flag("verbose");
     let test_name = matches.get_one::<String>("test");
 
-    let test_cases = vec![
+    let test_cases: [(&str, fn(bool) -> TestResult); 5] = [
         ("basic", test_basic_propagation),
         ("nested", test_nested_spans),
         ("baggage", test_baggage_propagation),
@@ -122,12 +121,10 @@ fn to_otel_span_context(
     ctx: &SymbolTraceContext,
 ) -> Result<SpanContext, Box<dyn std::error::Error>> {
     // Convert trace ID from asupersync format
-    let trace_id_bytes = [
-        &ctx.trace_id().high().to_be_bytes(),
-        &ctx.trace_id().low().to_be_bytes(),
-    ]
-    .concat();
-    let trace_id = TraceId::from_bytes(trace_id_bytes.try_into().unwrap());
+    let mut trace_id_bytes = [0_u8; 16];
+    trace_id_bytes[..8].copy_from_slice(&ctx.trace_id().high().to_be_bytes());
+    trace_id_bytes[8..].copy_from_slice(&ctx.trace_id().low().to_be_bytes());
+    let trace_id = TraceId::from_bytes(trace_id_bytes);
 
     // Convert span ID
     let span_id_bytes = ctx.span_id().as_u64().to_be_bytes();
@@ -141,10 +138,8 @@ fn to_otel_span_context(
     };
 
     // Convert baggage to tracestate
-    let mut trace_state = TraceState::default();
-    for (key, value) in ctx.baggage() {
-        trace_state = trace_state.with_key_value(key, value)?;
-    }
+    let trace_state =
+        TraceState::from_key_value(ctx.baggage().iter().map(|(key, value)| (key, value)))?;
 
     Ok(SpanContext::new(
         trace_id,
@@ -192,9 +187,9 @@ fn test_basic_propagation(verbose: bool) -> TestResult {
 
     // Reference implementation using equivalent OpenTelemetry SpanContext
     let ref_span_context = to_otel_span_context(&our_ctx)?;
-    let ref_propagator = opentelemetry::propagation::TraceContextPropagator::new();
+    let ref_propagator = TraceContextPropagator::new();
     let mut ref_headers = HashMap::new();
-    let ctx = Context::default().with_span(MockSpan::new(ref_span_context));
+    let ctx = Context::default().with_remote_span_context(ref_span_context);
     ref_propagator.inject_context(&ctx, &mut HeaderInjector(&mut ref_headers));
 
     // Compare traceparent headers
@@ -345,9 +340,9 @@ fn test_baggage_propagation(verbose: bool) -> TestResult {
 
     // Test against OpenTelemetry reference
     let ref_span_context = to_otel_span_context(&ctx)?;
-    let ref_propagator = opentelemetry::propagation::TraceContextPropagator::new();
+    let ref_propagator = TraceContextPropagator::new();
     let mut ref_headers = HashMap::new();
-    let otel_ctx = Context::default().with_span(MockSpan::new(ref_span_context));
+    let otel_ctx = Context::default().with_remote_span_context(ref_span_context);
     ref_propagator.inject_context(&otel_ctx, &mut HeaderInjector(&mut ref_headers));
 
     // Compare tracestate (order may differ, so check individual entries)
@@ -424,9 +419,9 @@ fn test_sampling_decisions(verbose: bool) -> TestResult {
 
     // Test against OpenTelemetry reference for sampled case
     let ref_span_context = to_otel_span_context(&sampled_ctx)?;
-    let ref_propagator = opentelemetry::propagation::TraceContextPropagator::new();
+    let ref_propagator = TraceContextPropagator::new();
     let mut ref_headers = HashMap::new();
-    let otel_ctx = Context::default().with_span(MockSpan::new(ref_span_context));
+    let otel_ctx = Context::default().with_remote_span_context(ref_span_context);
     ref_propagator.inject_context(&otel_ctx, &mut HeaderInjector(&mut ref_headers));
 
     let ref_traceparent = ref_headers.get("traceparent").unwrap();
@@ -520,9 +515,9 @@ fn test_comprehensive_scenario(verbose: bool) -> TestResult {
     }
 
     // Verify tracestate evolution
-    let api_tracestate = api_headers.get("tracestate").unwrap_or(&String::new());
-    let db_tracestate = db_headers.get("tracestate").unwrap_or(&String::new());
-    let cache_tracestate = cache_headers.get("tracestate").unwrap_or(&String::new());
+    let api_tracestate = api_headers.get("tracestate").map_or("", String::as_str);
+    let db_tracestate = db_headers.get("tracestate").map_or("", String::as_str);
+    let cache_tracestate = cache_headers.get("tracestate").map_or("", String::as_str);
 
     // Each should contain expected context
     if !api_tracestate.contains("service=api-gateway") {
@@ -537,9 +532,9 @@ fn test_comprehensive_scenario(verbose: bool) -> TestResult {
 
     // Test OpenTelemetry conformance for one span
     let ref_span_context = to_otel_span_context(&api_ctx)?;
-    let ref_propagator = opentelemetry::propagation::TraceContextPropagator::new();
+    let ref_propagator = TraceContextPropagator::new();
     let mut ref_headers = HashMap::new();
-    let otel_ctx = Context::default().with_span(MockSpan::new(ref_span_context));
+    let otel_ctx = Context::default().with_remote_span_context(ref_span_context);
     ref_propagator.inject_context(&otel_ctx, &mut HeaderInjector(&mut ref_headers));
 
     let our_api_traceparent = api_headers.get("traceparent").unwrap();
@@ -564,58 +559,53 @@ fn test_comprehensive_scenario(verbose: bool) -> TestResult {
     Ok(())
 }
 
-// Mock implementations for testing
-
-struct MockSpan {
-    context: SpanContext,
-}
-
-impl MockSpan {
-    fn new(context: SpanContext) -> Self {
-        Self { context }
-    }
-}
-
-impl opentelemetry::trace::Span for MockSpan {
-    fn add_event_with_timestamp<T>(&mut self, _name: T, _timestamp: std::time::SystemTime)
-    where
-        T: Into<std::borrow::Cow<'static, str>>,
-    {
-        // No-op
-    }
-
-    fn span_context(&self) -> &SpanContext {
-        &self.context
-    }
-
-    fn is_recording(&self) -> bool {
-        false
-    }
-
-    fn set_attribute(&mut self, _attribute: KeyValue) {
-        // No-op
-    }
-
-    fn set_status(&mut self, _status: opentelemetry::trace::Status) {
-        // No-op
-    }
-
-    fn update_name<T>(&mut self, _new_name: T)
-    where
-        T: Into<std::borrow::Cow<'static, str>>,
-    {
-        // No-op
-    }
-
-    fn end_with_timestamp(&mut self, _timestamp: std::time::SystemTime) {
-        // No-op
-    }
-}
-
 struct HeaderInjector<'a>(&'a mut HashMap<String, String>);
 
 impl<'a> opentelemetry::propagation::Injector for HeaderInjector<'a> {
     fn set(&mut self, key: &str, value: String) {
         self.0.insert(key.to_string(), value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_opentelemetry_context_matches_traceparent_header() {
+        let mut rng = DetRng::new(42);
+        let ctx = SymbolTraceContext::new_for_encoding(
+            DistTraceId::new(0x4bf92f3577b34da6, 0xa3ce929d0e0e4736),
+            SymbolSpanId::new(0x00f067aa0ba902b7),
+            RegionTag::new("test"),
+            &mut rng,
+        )
+        .with_baggage("vendor", "test");
+
+        let ref_span_context = to_otel_span_context(&ctx).unwrap();
+        let mut ref_headers = HashMap::new();
+        TraceContextPropagator::new().inject_context(
+            &Context::default().with_remote_span_context(ref_span_context),
+            &mut HeaderInjector(&mut ref_headers),
+        );
+
+        assert_eq!(
+            create_our_headers(&ctx).get("traceparent"),
+            ref_headers.get("traceparent")
+        );
+    }
+
+    #[test]
+    fn source_uses_real_opentelemetry_context_instead_of_local_mock_span() {
+        let source = include_str!("trace_context_conformance.rs");
+        for (left, right) in [
+            ("Mock", "Span"),
+            ("Context::default().with_", "span"),
+            ("with_", "key_value"),
+        ] {
+            let forbidden = format!("{left}{right}");
+            assert!(!source.contains(&forbidden), "found {forbidden}");
+        }
+        assert!(source.contains("with_remote_span_context"));
     }
 }
