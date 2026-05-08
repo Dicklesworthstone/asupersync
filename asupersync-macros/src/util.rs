@@ -19,7 +19,7 @@ use syn::{Error, Result, parse::ParseStream};
 pub fn compile_error(message: &str) -> TokenStream {
     let msg = message;
     quote! {
-        compile_error!(#msg)
+        compile_error!(#msg);
     }
 }
 
