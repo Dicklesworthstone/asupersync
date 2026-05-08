@@ -1,0 +1,22 @@
+{
+  "observations": [
+    {
+      "worker": "vmi-fast",
+      "command": "rch exec -- cargo test --test proof_runner_contract -- --nocapture",
+      "remote_exit_code": 0,
+      "retrieval_completed": true,
+      "retrieval_elapsed_ms": 2400,
+      "selected_slots": 3,
+      "queue_wait_ms": 100
+    },
+    {
+      "worker": "vmi-fast",
+      "command": "rch exec -- cargo check -p asupersync --lib",
+      "remote_exit_code": 0,
+      "retrieval_completed": true,
+      "retrieval_elapsed_ms": 1800,
+      "selected_slots": 2,
+      "queue_wait_ms": 0
+    }
+  ]
+}
