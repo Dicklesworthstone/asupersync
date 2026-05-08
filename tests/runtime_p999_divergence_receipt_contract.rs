@@ -45,6 +45,35 @@ fn fixture_text(fixture: &str) -> String {
         .unwrap_or_else(|error| panic!("read golden fixture {fixture}: {error}"))
 }
 
+fn assert_receipt_matches_full_reviewed_golden(
+    input_fixture: &str,
+    expected_fixture: &str,
+    label: &str,
+) {
+    let output = run_receipt(input_fixture);
+    assert!(
+        output.status.success(),
+        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = String::from_utf8(output.stdout).expect("receipt stdout is utf-8");
+    let expected = fixture_text(expected_fixture);
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt must be JSON");
+    let expected_json: Value =
+        serde_json::from_str(&expected).expect("golden receipt must be JSON");
+    assert_eq!(
+        actual_json, expected_json,
+        "parsed runtime p999 receipt JSON drifted for {label}"
+    );
+    assert_eq!(
+        actual, expected,
+        "{label} runtime p999 receipt drifted from the reviewed golden"
+    );
+}
+
 fn scenario<'a>(receipt: &'a Value, name: &str) -> &'a Value {
     receipt["scenarios"]
         .as_array()
@@ -56,43 +85,15 @@ fn scenario<'a>(receipt: &'a Value, name: &str) -> &'a Value {
 
 #[test]
 fn aligned_receipt_output_matches_full_reviewed_golden() {
-    let output = run_receipt("aligned.json");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let actual = String::from_utf8(output.stdout).expect("receipt stdout is utf-8");
-    let expected = fixture_text("aligned_expected.json");
-    serde_json::from_str::<Value>(&actual).expect("actual aligned receipt must be JSON");
-    serde_json::from_str::<Value>(&expected).expect("aligned golden receipt must be JSON");
-    assert_eq!(
-        actual, expected,
-        "aligned runtime p999 receipt drifted from the reviewed golden"
-    );
+    assert_receipt_matches_full_reviewed_golden("aligned.json", "aligned_expected.json", "aligned");
 }
 
 #[test]
 fn divergent_receipt_output_matches_full_reviewed_golden() {
-    let output = run_receipt("diverged_and_missing.json");
-    assert!(
-        output.status.success(),
-        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let actual = String::from_utf8(output.stdout).expect("receipt stdout is utf-8");
-    let expected = fixture_text("diverged_and_missing_expected.json");
-    serde_json::from_str::<Value>(&actual).expect("actual divergent receipt must be JSON");
-    serde_json::from_str::<Value>(&expected).expect("divergent golden receipt must be JSON");
-    assert_eq!(
-        actual, expected,
-        "divergent runtime p999 receipt drifted from the reviewed golden"
+    assert_receipt_matches_full_reviewed_golden(
+        "diverged_and_missing.json",
+        "diverged_and_missing_expected.json",
+        "divergent",
     );
 }
 
