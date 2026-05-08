@@ -339,6 +339,50 @@
       "this row can move to implemented_verified only after a complete same-host p50/p95/p999 receipt is checked in"
     ]
   },
+  "safe_heap_fallback_frontier": {
+    "scenario_id": "memory-tier-safe-heap-fallback-frontier-v1",
+    "required_row": "safe_heap_fallback",
+    "required_row_status": "fallback_only",
+    "task_record_pool_contract_path": "artifacts/task_record_pool_smoke_contract_v1.json",
+    "hot_cold_contract_path": "artifacts/hot_cold_arena_tiers_smoke_contract_v1.json",
+    "required_existing_contracts": [
+      "task-record-pool-smoke-contract-v1",
+      "hot-cold-arena-tiers-smoke-contract-v1"
+    ],
+    "required_accounting_fields": [
+      "safe_fallback_profile",
+      "used_safe_fallback",
+      "no_win_trigger",
+      "fallback_reason_codes"
+    ],
+    "required_task_pool_scenario": "AA-TASK-RECORD-POOL-DISABLED-HEAP-FALLBACK",
+    "required_task_pool_projection": {
+      "operator_verdict": "fallback_only",
+      "safe_fallback_profile": "heap_allocation_only",
+      "used_safe_fallback": true,
+      "no_win_trigger": true,
+      "fallback_reason_codes": [
+        "pool_disabled_heap_only",
+        "no_spawn_latency_p99_win"
+      ]
+    },
+    "required_hot_cold_fallback_scenarios": [
+      "AA-HOT-COLD-ARENA-LARGE-PAGE-FALLBACK-64C-256G",
+      "AA-HOT-COLD-ARENA-LOCALITY-NO-WIN-FALLBACK-64C-256G",
+      "AA-HOT-COLD-ARENA-REAL-HOST-TEMPLATE"
+    ],
+    "required_hot_cold_fallback_policy": "unified",
+    "forbidden_operator_verdicts": [
+      "ready_for_rch",
+      "pass",
+      "implemented_verified"
+    ],
+    "operator_notes": [
+      "safe heap fallback is a certified conservative path, not a performance win",
+      "task-record pool fallback must expose heap-only allocation, no-win status, and reason codes",
+      "hot/cold arena fallback scenarios must keep unified allocation explicit when large-page or locality assumptions are unsupported"
+    ]
+  },
   "validation_commands": [
     "python3 -m json.tool artifacts/memory_tier_slab_pool_contract_v1.json >/dev/null",
     "git diff --check -- src/runtime/config.rs artifacts/memory_tier_slab_pool_contract_v1.json tests/memory_tier_slab_pool_contract.rs",

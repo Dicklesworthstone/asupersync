@@ -25,6 +25,7 @@ const RUNTIME_LATENCY_BUDGET_CERTIFICATE_PATH: &str =
 const SCHEDULER_P999_BASELINE_RECEIPT_PATH: &str =
     "tests/artifacts/perf/asupersync-xeh8m0.3/three_lane_decision_baseline_v1.json";
 const SOURCE_DECLARATIONS_PATH: &str = "src/runtime/config.rs";
+const TASK_RECORD_POOL_CONTRACT_PATH: &str = "artifacts/task_record_pool_smoke_contract_v1.json";
 const TEST_PATH: &str = "tests/memory_tier_slab_pool_contract.rs";
 
 fn load_contract() -> Value {
@@ -74,6 +75,13 @@ fn rows_by_id(contract: &Value) -> BTreeMap<String, &Value> {
         .into_iter()
         .map(|row| (string_field(row, "row_id").to_string(), row))
         .collect()
+}
+
+fn scenario_by_id<'a>(contract: &'a Value, scenario_id: &str) -> &'a Value {
+    array(contract, "smoke_scenarios")
+        .iter()
+        .find(|scenario| string_field(scenario, "scenario_id") == scenario_id)
+        .unwrap_or_else(|| panic!("missing scenario {scenario_id}"))
 }
 
 fn validation_commands(contract: &Value) -> BTreeSet<String> {
@@ -270,6 +278,159 @@ fn stress_frontier_presizes_hot_records_and_keeps_fallback_visible() {
         string_field(fallback, "status"),
         string_field(&frontier, "required_safe_fallback_status"),
         "stress frontier must not hide the safe fallback row"
+    );
+}
+
+#[test]
+fn safe_heap_fallback_row_is_backed_by_task_pool_and_hot_cold_fallbacks() {
+    let contract = load_contract();
+    let rows = rows_by_id(&contract);
+    let row = rows
+        .get("safe_heap_fallback")
+        .expect("safe heap fallback row must exist");
+    let frontier = Value::Object(object(&contract, "safe_heap_fallback_frontier").clone());
+
+    assert_eq!(
+        string_field(&frontier, "scenario_id"),
+        "memory-tier-safe-heap-fallback-frontier-v1"
+    );
+    assert_eq!(
+        string_field(&frontier, "required_row"),
+        "safe_heap_fallback"
+    );
+    assert_eq!(
+        string_field(row, "operator_verdict"),
+        string_field(&frontier, "required_row_status"),
+        "safe fallback must not render as an optimized runtime win"
+    );
+    assert_eq!(
+        string_field(row, "status"),
+        string_field(&frontier, "required_row_status")
+    );
+
+    let existing_contracts = string_set(row, "existing_contracts");
+    for required in string_vec(&frontier, "required_existing_contracts") {
+        assert!(
+            existing_contracts.contains(&required),
+            "safe fallback row must compose {required}"
+        );
+    }
+
+    let required_accounting = string_set(row, "required_accounting");
+    for field in string_vec(&frontier, "required_accounting_fields") {
+        assert!(
+            required_accounting.contains(&field),
+            "safe fallback row must require {field}"
+        );
+    }
+
+    assert_eq!(
+        string_field(&frontier, "task_record_pool_contract_path"),
+        TASK_RECORD_POOL_CONTRACT_PATH
+    );
+    let task_record_pool_contract: Value = serde_json::from_str(
+        &fs::read_to_string(TASK_RECORD_POOL_CONTRACT_PATH)
+            .expect("read task record pool smoke contract"),
+    )
+    .expect("parse task record pool smoke contract");
+    assert_eq!(
+        string_field(&task_record_pool_contract, "contract_version"),
+        "task-record-pool-smoke-contract-v1"
+    );
+    let task_pool_scenario = scenario_by_id(
+        &task_record_pool_contract,
+        string_field(&frontier, "required_task_pool_scenario"),
+    );
+    assert_eq!(
+        string_field(task_pool_scenario, "operator_verdict"),
+        "fallback_only"
+    );
+    let task_pool_projection =
+        Value::Object(object(task_pool_scenario, "expected_report_projection").clone());
+    let required_projection =
+        Value::Object(object(&frontier, "required_task_pool_projection").clone());
+    for field in [
+        "operator_verdict",
+        "safe_fallback_profile",
+        "used_safe_fallback",
+        "no_win_trigger",
+    ] {
+        assert_eq!(
+            task_pool_projection.get(field),
+            required_projection.get(field),
+            "task-pool fallback projection must preserve {field}"
+        );
+    }
+    assert_eq!(
+        string_set(&task_pool_projection, "fallback_reason_codes"),
+        string_set(&required_projection, "fallback_reason_codes"),
+        "task-pool fallback must keep the exact no-win reason set"
+    );
+    for field in &required_accounting {
+        assert!(
+            task_pool_projection.get(field).is_some(),
+            "task-pool fallback projection missing {field}"
+        );
+    }
+
+    assert_eq!(
+        string_field(&frontier, "hot_cold_contract_path"),
+        HOT_COLD_ARENA_TIERS_CONTRACT_PATH
+    );
+    let hot_cold_contract: Value = serde_json::from_str(
+        &fs::read_to_string(HOT_COLD_ARENA_TIERS_CONTRACT_PATH)
+            .expect("read hot/cold arena smoke contract"),
+    )
+    .expect("parse hot/cold arena smoke contract");
+    assert_eq!(
+        string_field(&hot_cold_contract, "contract_version"),
+        "hot-cold-arena-tiers-smoke-contract-v1"
+    );
+    for scenario_id in string_vec(&frontier, "required_hot_cold_fallback_scenarios") {
+        let scenario = scenario_by_id(&hot_cold_contract, &scenario_id);
+        let workload = Value::Object(object(scenario, "workload_model").clone());
+        assert_eq!(
+            string_field(&workload, "default_safe_fallback_profile"),
+            string_field(&frontier, "required_hot_cold_fallback_policy"),
+            "{scenario_id} must name the conservative allocation fallback"
+        );
+        let notes = Value::Object(object(scenario, "operator_notes").clone());
+        assert_eq!(
+            string_field(&notes, "fallback_policy"),
+            string_field(&frontier, "required_hot_cold_fallback_policy"),
+            "{scenario_id} must expose the operator fallback policy"
+        );
+        assert!(
+            scenario
+                .get("expected_report_projection")
+                .is_some_and(Value::is_null),
+            "{scenario_id} must keep unexecuted fallback projections explicit"
+        );
+    }
+
+    for forbidden in string_vec(&frontier, "forbidden_operator_verdicts") {
+        assert_ne!(
+            string_field(row, "operator_verdict"),
+            forbidden,
+            "safe fallback must not claim {forbidden}"
+        );
+        assert_ne!(
+            string_field(row, "status"),
+            forbidden,
+            "safe fallback status must not claim {forbidden}"
+        );
+    }
+    let rendered = render_markdown(&contract).join("\n");
+    assert!(
+        rendered.contains(
+            "| safe_heap_fallback | task_records | safe_heap_fallback | fallback_only | 1 |"
+        ),
+        "markdown golden must keep safe fallback visible"
+    );
+    assert!(
+        !rendered
+            .contains("| safe_heap_fallback | task_records | safe_heap_fallback | ready_for_rch |"),
+        "safe fallback must not render green"
     );
 }
 
