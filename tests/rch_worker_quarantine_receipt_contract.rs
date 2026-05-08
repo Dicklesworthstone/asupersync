@@ -64,7 +64,7 @@ fn assert_receipt_matches_full_reviewed_golden(input_fixture: &str, expected_fix
 
     assert_eq!(
         actual_json, expected_json,
-        "parsed rch worker quarantine receipt JSON drifted for {input_fixture}"
+        "parsed rch worker quarantine receipt JSON drifted for {input_fixture} -> {expected_fixture}"
     );
     assert_eq!(
         actual, expected,
