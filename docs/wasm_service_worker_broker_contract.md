@@ -286,13 +286,13 @@ Downgrade rules:
 Contract validation:
 
 ```bash
-rch exec -- cargo test --test wasm_service_worker_broker_contract -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_service_worker_broker_docs cargo test --test wasm_service_worker_broker_contract -- --nocapture
 ```
 
 Related host-ladder validation:
 
 ```bash
-rch exec -- cargo test --test wasm_browser_feasibility_matrix -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_service_worker_broker_docs cargo test --test wasm_browser_feasibility_matrix -- --nocapture
 ```
 
 Maintained browser-run lifecycle validation:
