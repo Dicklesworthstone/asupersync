@@ -108,6 +108,54 @@ fn self_reservation_allows_pathspec_staging() {
 }
 
 #[test]
+fn mixed_staged_index_requires_path_limited_commit_boundary() {
+    let receipt = receipt_json("mixed_staged_index.json");
+    let boundary = &receipt["commit_boundary"];
+
+    assert_eq!(
+        boundary["decision"].as_str(),
+        Some("path-limited-commit-required")
+    );
+    assert_eq!(
+        boundary["ordinary_index_commit_allowed"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        boundary["peer_index_preservation_required"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        boundary["self_owned_staged_paths"][0].as_str(),
+        Some("scripts/dirty_tree_ownership_receipt.py")
+    );
+    assert_eq!(
+        boundary["non_self_staged_paths"]
+            .as_array()
+            .expect("non-self staged paths")
+            .len(),
+        2
+    );
+    assert_eq!(
+        boundary["path_limited_commit_command"].as_str(),
+        Some("git commit --only -- scripts/dirty_tree_ownership_receipt.py")
+    );
+    assert!(
+        !boundary["path_limited_commit_command"]
+            .as_str()
+            .expect("path-limited commit command")
+            .contains("fuzz/Cargo.toml"),
+        "path-limited commit command must not include peer staged paths"
+    );
+
+    let fuzz = row(&receipt, "fuzz/Cargo.toml");
+    assert_eq!(fuzz["classification"].as_str(), Some("peer-owned"));
+    assert_eq!(
+        fuzz["staging_guidance"]["decision"].as_str(),
+        Some("unstage-before-commit")
+    );
+}
+
+#[test]
 fn tracker_dirty_state_is_never_mixed() {
     let receipt = receipt_json("tracker_dirty.json");
     let row = row(&receipt, ".beads/issues.jsonl");

@@ -11,6 +11,7 @@ import argparse
 import datetime as dt
 import fnmatch
 import json
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -362,6 +363,55 @@ def forbidden_hits(rows: list[dict[str, Any]]) -> list[str]:
     return [token for token in FORBIDDEN_COMMAND_TOKENS if token in text]
 
 
+def is_index_staged(row: dict[str, Any]) -> bool:
+    index_status = str(row["evidence"].get("index_status", ""))
+    return index_status not in {"", " ", "?"}
+
+
+def pathspec(paths: list[str]) -> str:
+    return " ".join(shlex.quote(path) for path in paths)
+
+
+def commit_boundary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    self_owned = [
+        str(row["path"])
+        for row in rows
+        if row["classification"] == "self-owned" and is_index_staged(row)
+    ]
+    non_self = [
+        str(row["path"])
+        for row in rows
+        if row["classification"] != "self-owned" and is_index_staged(row)
+    ]
+
+    if self_owned and non_self:
+        decision = "path-limited-commit-required"
+        reason = "self-owned staged paths share the index with peer or unattributed staged paths"
+    elif non_self:
+        decision = "do-not-commit-index"
+        reason = "staged paths do not have current-agent ownership evidence"
+    elif self_owned:
+        decision = "ordinary-index-commit-safe"
+        reason = "all staged paths have current-agent ownership evidence"
+    else:
+        decision = "no-staged-self-owned-paths"
+        reason = "no current-agent staged paths are ready to commit"
+
+    command = ""
+    if self_owned:
+        command = f"git commit --only -- {pathspec(self_owned)}"
+
+    return {
+        "decision": decision,
+        "reason": reason,
+        "ordinary_index_commit_allowed": decision == "ordinary-index-commit-safe",
+        "peer_index_preservation_required": bool(self_owned and non_self),
+        "self_owned_staged_paths": self_owned,
+        "non_self_staged_paths": non_self,
+        "path_limited_commit_command": command,
+    }
+
+
 def build_receipt(
     source: dict[str, Any],
     repo_path: str,
@@ -373,6 +423,7 @@ def build_receipt(
         for entry in git_entries(source)
     ]
     hits = forbidden_hits(rows)
+    boundary = commit_boundary(rows)
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated_at,
@@ -384,6 +435,7 @@ def build_receipt(
             "agent_mail": str(source.get("agent_mail", {}).get("status", "unavailable")),
             "beads": str(source.get("beads", {}).get("status", "ok")),
         },
+        "commit_boundary": boundary,
         "rows": rows,
         "summary": {
             "total_paths": len(rows),
