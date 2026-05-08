@@ -51,10 +51,10 @@ All heavy campaign execution MUST be run through `rch exec --` commands.
 
 Required runner command tokens (non-exhaustive):
 
-- `rch exec -- cargo test --test cancellation_conformance -- --nocapture`
-- `rch exec -- cargo test --test obligation_wasm_parity -- --nocapture`
-- `rch exec -- cargo test --test replay_e2e_suite -- --nocapture`
-- `rch exec -- cargo test --test tokio_cancellation_drain_fuzz_race_campaigns -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_cancellation_drain_fuzz_docs cargo test --test cancellation_conformance -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_cancellation_drain_fuzz_docs cargo test --test obligation_wasm_parity -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_cancellation_drain_fuzz_docs cargo test --test replay_e2e_suite -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_cancellation_drain_fuzz_docs cargo test --test tokio_cancellation_drain_fuzz_race_campaigns -- --nocapture`
 
 Determinism requirements (normative):
 
