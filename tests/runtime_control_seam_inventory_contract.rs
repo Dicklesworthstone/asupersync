@@ -294,6 +294,16 @@ fn smoke_commands_are_rch_routed() {
             command.contains("rch exec --") || command.contains("RCH_BIN=rch bash"),
             "smoke command for {seam_id} must be rch-routed: {command}"
         );
+        assert!(
+            !command.starts_with("rch exec -- cargo "),
+            "direct cargo smoke command for {seam_id} must declare env before cargo: {command}"
+        );
+        if command.contains(" cargo ") {
+            assert!(
+                command.starts_with("rch exec -- env ") && command.contains("CARGO_TARGET_DIR="),
+                "direct cargo smoke command for {seam_id} must use an explicit target dir: {command}"
+            );
+        }
     }
 }
 

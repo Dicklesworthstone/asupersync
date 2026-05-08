@@ -1,0 +1,559 @@
+{
+  "contract_version": "runtime-control-seam-inventory-v1",
+  "bead_id": "asupersync-1508v.1.6",
+  "description": "AA-01.3 control-seam inventory, EV ranking ledger, and conservative baseline comparator table for runtime ascension tracks.",
+  "runner_script": "scripts/run_runtime_control_seam_smoke.sh",
+  "runner_bundle_schema_version": "runtime-control-seam-smoke-bundle-v1",
+  "runner_report_schema_version": "runtime-control-seam-smoke-run-report-v1",
+  "structured_log_fields_required": [
+    "seam_id",
+    "scenario_id",
+    "workload_ids",
+    "baseline_selector",
+    "rollback_surface",
+    "comparator_smoke_command",
+    "artifact_path",
+    "run_log_path",
+    "status",
+    "exit_code"
+  ],
+  "scoring_model": {
+    "model_id": "aa01-ev-ranking-v1",
+    "scale": "1-5 ordinal",
+    "weights": {
+      "impact": 0.35,
+      "confidence": 0.2,
+      "effort_inverse": 0.15,
+      "adoption_friction_inverse": 0.15,
+      "user_visible_benefit": 0.15
+    },
+    "scoring_formula": "EV = 0.35*impact + 0.20*confidence + 0.15*(6-effort) + 0.15*(6-adoption_friction) + 0.15*user_visible_benefit"
+  },
+  "required_ev_fields": [
+    "impact",
+    "confidence",
+    "effort",
+    "adoption_friction",
+    "user_visible_benefit",
+    "expected_value_score"
+  ],
+  "required_seam_fields": [
+    "seam_id",
+    "seam_name",
+    "layer",
+    "owner_symbol",
+    "owner_file",
+    "baseline_selector",
+    "rollback_surface",
+    "comparator_candidates",
+    "comparator_smoke_command",
+    "workload_ids",
+    "downstream_beads",
+    "ev"
+  ],
+  "baseline_comparator_table": [
+    {
+      "seam_id": "AA01-SEAM-SCHED-CANCEL-STREAK",
+      "baseline_selector": "RuntimeConfig::cancel_lane_max_streak = 16",
+      "rollback_selector": "RuntimeConfig::cancel_lane_max_streak = 16 (default)"
+    },
+    {
+      "seam_id": "AA01-SEAM-SCHED-GOVERNOR",
+      "baseline_selector": "RuntimeConfig::enable_governor = false; governor_interval = 32",
+      "rollback_selector": "Disable governor and use default lane order"
+    },
+    {
+      "seam_id": "AA01-SEAM-SCHED-ADAPTIVE-CANCEL",
+      "baseline_selector": "RuntimeConfig::enable_adaptive_cancel_streak = true; epoch = 128",
+      "rollback_selector": "Keep adaptive disabled if policy evidence regresses"
+    },
+    {
+      "seam_id": "AA01-SEAM-BROWSER-HANDOFF",
+      "baseline_selector": "RuntimeConfig::browser_ready_handoff_limit = 0",
+      "rollback_selector": "Host-turn monopolization remains bounded by cooperative polls only"
+    },
+    {
+      "seam_id": "AA01-SEAM-DEADLINE-MONITOR",
+      "baseline_selector": "RuntimeConfig::deadline_monitor = None",
+      "rollback_selector": "Disable warnings and rely on existing cancellation budgets"
+    },
+    {
+      "seam_id": "AA01-SEAM-ADMISSION-ROOT-LIMITS",
+      "baseline_selector": "RuntimeConfig::root_region_limits = None",
+      "rollback_selector": "Use unbounded root admission while preserving obligations"
+    },
+    {
+      "seam_id": "AA01-SEAM-LEAK-ESCALATION",
+      "baseline_selector": "RuntimeConfig::obligation_leak_response = Log; leak_escalation = None",
+      "rollback_selector": "Revert to Log-only leak response"
+    },
+    {
+      "seam_id": "AA01-SEAM-RETRY-BACKOFF",
+      "baseline_selector": "asupersync::combinator::retry::RetryPolicy default backoff",
+      "rollback_selector": "Fixed conservative retry delay policy"
+    },
+    {
+      "seam_id": "AA01-SEAM-HEDGE-DELAY",
+      "baseline_selector": "asupersync::combinator::adaptive_hedge::AdaptiveHedgeController default bounds",
+      "rollback_selector": "Static hedge delay from HedgeConfig"
+    },
+    {
+      "seam_id": "AA01-SEAM-TRANSPORT-ROUTER",
+      "baseline_selector": "transport::router endpoint health + connection-count routing",
+      "rollback_selector": "Single-path conservative route selection"
+    },
+    {
+      "seam_id": "AA01-SEAM-RAPTORQ-DECODER-POLICY",
+      "baseline_selector": "raptorq::decoder policy mode = conservative baseline",
+      "rollback_selector": "Force conservative decode policy path"
+    }
+  ],
+  "seams": [
+    {
+      "seam_id": "AA01-SEAM-SCHED-CANCEL-STREAK",
+      "seam_name": "Scheduler cancel-lane streak bound",
+      "layer": "runtime/scheduler",
+      "owner_symbol": "asupersync::runtime::config::RuntimeConfig::cancel_lane_max_streak",
+      "owner_file": "src/runtime/config.rs",
+      "baseline_selector": "cancel_lane_max_streak = 16",
+      "rollback_surface": "Reset to RuntimeConfig default and disable candidate override",
+      "comparator_candidates": [
+        {
+          "candidate_id": "cancel-streak-8",
+          "selector": "cancel_lane_max_streak = 8"
+        },
+        {
+          "candidate_id": "cancel-streak-32",
+          "selector": "cancel_lane_max_streak = 32"
+        }
+      ],
+      "comparator_smoke_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload AA01-WL-BURST-001",
+      "workload_ids": [
+        "AA01-WL-BURST-001",
+        "AA01-WL-CANCEL-001"
+      ],
+      "downstream_beads": [
+        "asupersync-1508v.3.4",
+        "asupersync-1508v.4.4"
+      ],
+      "ev": {
+        "impact": 5,
+        "confidence": 4,
+        "effort": 2,
+        "adoption_friction": 2,
+        "user_visible_benefit": 5,
+        "expected_value_score": 4.65,
+        "confidence_note": "High leverage on cancellation-heavy tails with existing scheduler instrumentation."
+      },
+      "expected_artifacts": [
+        "target/control-seam-smoke/run_*/AA01-SEAM-SCHED-CANCEL-STREAK/bundle_manifest.json",
+        "target/control-seam-smoke/run_*/AA01-SEAM-SCHED-CANCEL-STREAK/run.log"
+      ]
+    },
+    {
+      "seam_id": "AA01-SEAM-SCHED-GOVERNOR",
+      "seam_name": "Lyapunov governor enablement and interval",
+      "layer": "runtime/scheduler",
+      "owner_symbol": "asupersync::runtime::config::RuntimeConfig::{enable_governor, governor_interval}",
+      "owner_file": "src/runtime/config.rs",
+      "baseline_selector": "enable_governor = false; governor_interval = 32",
+      "rollback_surface": "Disable governor and return to baseline lane order",
+      "comparator_candidates": [
+        {
+          "candidate_id": "governor-on-32",
+          "selector": "enable_governor = true; governor_interval = 32"
+        },
+        {
+          "candidate_id": "governor-on-16",
+          "selector": "enable_governor = true; governor_interval = 16"
+        }
+      ],
+      "comparator_smoke_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload AA01-WL-BURST-001",
+      "workload_ids": [
+        "AA01-WL-BURST-001",
+        "AA01-WL-CPU-001"
+      ],
+      "downstream_beads": [
+        "asupersync-1508v.2.4",
+        "asupersync-1508v.3.4"
+      ],
+      "ev": {
+        "impact": 4,
+        "confidence": 3,
+        "effort": 3,
+        "adoption_friction": 3,
+        "user_visible_benefit": 4,
+        "expected_value_score": 3.8,
+        "confidence_note": "Medium confidence because governor gains are workload-sensitive."
+      },
+      "expected_artifacts": [
+        "target/control-seam-smoke/run_*/AA01-SEAM-SCHED-GOVERNOR/bundle_manifest.json",
+        "target/control-seam-smoke/run_*/AA01-SEAM-SCHED-GOVERNOR/run.log"
+      ]
+    },
+    {
+      "seam_id": "AA01-SEAM-SCHED-ADAPTIVE-CANCEL",
+      "seam_name": "Adaptive cancel-streak controller",
+      "layer": "runtime/scheduler",
+      "owner_symbol": "asupersync::runtime::config::RuntimeConfig::{enable_adaptive_cancel_streak, adaptive_cancel_streak_epoch_steps}",
+      "owner_file": "src/runtime/config.rs",
+      "baseline_selector": "enable_adaptive_cancel_streak = true; adaptive_cancel_streak_epoch_steps = 128",
+      "rollback_surface": "Disable adaptive cancel streak and pin conservative static streak",
+      "comparator_candidates": [
+        {
+          "candidate_id": "adaptive-on-64",
+          "selector": "enable_adaptive_cancel_streak = true; adaptive_cancel_streak_epoch_steps = 64"
+        },
+        {
+          "candidate_id": "adaptive-off",
+          "selector": "enable_adaptive_cancel_streak = false"
+        }
+      ],
+      "comparator_smoke_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload AA01-WL-CANCEL-001",
+      "workload_ids": [
+        "AA01-WL-CANCEL-001",
+        "AA01-WL-TIMER-001"
+      ],
+      "downstream_beads": [
+        "asupersync-1508v.2.4",
+        "asupersync-1508v.6.7"
+      ],
+      "ev": {
+        "impact": 5,
+        "confidence": 3,
+        "effort": 3,
+        "adoption_friction": 3,
+        "user_visible_benefit": 4,
+        "expected_value_score": 4.0,
+        "confidence_note": "High potential impact, but policy calibration quality determines realized gains."
+      },
+      "expected_artifacts": [
+        "target/control-seam-smoke/run_*/AA01-SEAM-SCHED-ADAPTIVE-CANCEL/bundle_manifest.json",
+        "target/control-seam-smoke/run_*/AA01-SEAM-SCHED-ADAPTIVE-CANCEL/run.log"
+      ]
+    },
+    {
+      "seam_id": "AA01-SEAM-BROWSER-HANDOFF",
+      "seam_name": "Browser ready-lane handoff bound",
+      "layer": "runtime/browser",
+      "owner_symbol": "asupersync::runtime::config::RuntimeConfig::browser_ready_handoff_limit",
+      "owner_file": "src/runtime/config.rs",
+      "baseline_selector": "browser_ready_handoff_limit = 0",
+      "rollback_surface": "Disable forced browser handoff and rely on cooperative yields",
+      "comparator_candidates": [
+        {
+          "candidate_id": "handoff-32",
+          "selector": "browser_ready_handoff_limit = 32"
+        },
+        {
+          "candidate_id": "handoff-64",
+          "selector": "browser_ready_handoff_limit = 64"
+        }
+      ],
+      "comparator_smoke_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_control_seam_inventory_docs cargo test --test native_seam_parity browser_clock_through_trait_starts_at_zero -- --nocapture",
+      "workload_ids": [
+        "AA01-WL-BURST-001"
+      ],
+      "downstream_beads": [
+        "asupersync-1508v.10.4"
+      ],
+      "ev": {
+        "impact": 3,
+        "confidence": 3,
+        "effort": 3,
+        "adoption_friction": 2,
+        "user_visible_benefit": 4,
+        "expected_value_score": 3.4,
+        "confidence_note": "Medium confidence pending broader browser-profile workload evidence."
+      },
+      "expected_artifacts": [
+        "target/control-seam-smoke/run_*/AA01-SEAM-BROWSER-HANDOFF/bundle_manifest.json",
+        "target/control-seam-smoke/run_*/AA01-SEAM-BROWSER-HANDOFF/run.log"
+      ]
+    },
+    {
+      "seam_id": "AA01-SEAM-DEADLINE-MONITOR",
+      "seam_name": "Deadline monitor policy",
+      "layer": "runtime/deadline",
+      "owner_symbol": "asupersync::runtime::deadline_monitor::MonitorConfig",
+      "owner_file": "src/runtime/deadline_monitor.rs",
+      "baseline_selector": "deadline_monitor = None",
+      "rollback_surface": "Disable monitor and preserve cancellation-budget enforcement only",
+      "comparator_candidates": [
+        {
+          "candidate_id": "monitor-fast-check",
+          "selector": "enabled=true, check_interval=5ms"
+        },
+        {
+          "candidate_id": "monitor-default-check",
+          "selector": "enabled=true, check_interval=50ms"
+        }
+      ],
+      "comparator_smoke_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload AA01-WL-TIMER-001",
+      "workload_ids": [
+        "AA01-WL-TIMER-001",
+        "AA01-WL-IO-001"
+      ],
+      "downstream_beads": [
+        "asupersync-1508v.2.4",
+        "asupersync-1508v.10.4"
+      ],
+      "ev": {
+        "impact": 4,
+        "confidence": 4,
+        "effort": 2,
+        "adoption_friction": 2,
+        "user_visible_benefit": 4,
+        "expected_value_score": 4.25,
+        "confidence_note": "Strong diagnostics payoff with existing monitor hooks and warning channels."
+      },
+      "expected_artifacts": [
+        "target/control-seam-smoke/run_*/AA01-SEAM-DEADLINE-MONITOR/bundle_manifest.json",
+        "target/control-seam-smoke/run_*/AA01-SEAM-DEADLINE-MONITOR/run.log"
+      ]
+    },
+    {
+      "seam_id": "AA01-SEAM-ADMISSION-ROOT-LIMITS",
+      "seam_name": "Root-region admission limits",
+      "layer": "runtime/admission",
+      "owner_symbol": "asupersync::runtime::config::RuntimeConfig::root_region_limits",
+      "owner_file": "src/runtime/config.rs",
+      "baseline_selector": "root_region_limits = None",
+      "rollback_surface": "Remove admission constraints while keeping obligation tracking",
+      "comparator_candidates": [
+        {
+          "candidate_id": "root-limits-task-cap",
+          "selector": "root_region_limits.max_tasks = bounded"
+        },
+        {
+          "candidate_id": "root-limits-obligation-cap",
+          "selector": "root_region_limits.max_obligations = bounded"
+        }
+      ],
+      "comparator_smoke_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload AA01-WL-FANIO-001",
+      "workload_ids": [
+        "AA01-WL-FANIO-001",
+        "AA01-WL-CANCEL-001"
+      ],
+      "downstream_beads": [
+        "asupersync-1508v.3.4",
+        "asupersync-1508v.4.4"
+      ],
+      "ev": {
+        "impact": 4,
+        "confidence": 3,
+        "effort": 3,
+        "adoption_friction": 3,
+        "user_visible_benefit": 4,
+        "expected_value_score": 3.8,
+        "confidence_note": "Admission constraints can reduce pathological queue growth but require careful tuning."
+      },
+      "expected_artifacts": [
+        "target/control-seam-smoke/run_*/AA01-SEAM-ADMISSION-ROOT-LIMITS/bundle_manifest.json",
+        "target/control-seam-smoke/run_*/AA01-SEAM-ADMISSION-ROOT-LIMITS/run.log"
+      ]
+    },
+    {
+      "seam_id": "AA01-SEAM-LEAK-ESCALATION",
+      "seam_name": "Obligation leak response and escalation policy",
+      "layer": "runtime/obligation",
+      "owner_symbol": "asupersync::runtime::config::{ObligationLeakResponse, LeakEscalation}",
+      "owner_file": "src/runtime/config.rs",
+      "baseline_selector": "obligation_leak_response = Log; leak_escalation = None",
+      "rollback_surface": "Use Log-only leak handling to avoid unexpected panic escalation",
+      "comparator_candidates": [
+        {
+          "candidate_id": "leak-recover",
+          "selector": "obligation_leak_response = Recover"
+        },
+        {
+          "candidate_id": "leak-panic-threshold-10",
+          "selector": "leak_escalation = { threshold: 10, escalate_to: Panic }"
+        }
+      ],
+      "comparator_smoke_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload AA01-WL-CANCEL-001",
+      "workload_ids": [
+        "AA01-WL-CANCEL-001"
+      ],
+      "downstream_beads": [
+        "asupersync-1508v.2.4",
+        "asupersync-1508v.10.4"
+      ],
+      "ev": {
+        "impact": 5,
+        "confidence": 4,
+        "effort": 2,
+        "adoption_friction": 2,
+        "user_visible_benefit": 4,
+        "expected_value_score": 4.5,
+        "confidence_note": "Directly affects correctness and failure semantics under obligation leakage."
+      },
+      "expected_artifacts": [
+        "target/control-seam-smoke/run_*/AA01-SEAM-LEAK-ESCALATION/bundle_manifest.json",
+        "target/control-seam-smoke/run_*/AA01-SEAM-LEAK-ESCALATION/run.log"
+      ]
+    },
+    {
+      "seam_id": "AA01-SEAM-RETRY-BACKOFF",
+      "seam_name": "Retry backoff policy",
+      "layer": "combinator/retry",
+      "owner_symbol": "asupersync::combinator::retry::RetryState",
+      "owner_file": "src/combinator/retry.rs",
+      "baseline_selector": "default retry backoff policy",
+      "rollback_surface": "Pin conservative fixed-delay retry policy",
+      "comparator_candidates": [
+        {
+          "candidate_id": "retry-exp-jitter",
+          "selector": "exponential backoff with jitter"
+        },
+        {
+          "candidate_id": "retry-fixed-delay",
+          "selector": "fixed retry delay"
+        }
+      ],
+      "comparator_smoke_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload AA01-WL-IO-HTTP-EX1",
+      "workload_ids": [
+        "AA01-WL-IO-001",
+        "AA01-WL-IO-HTTP-EX1"
+      ],
+      "downstream_beads": [
+        "asupersync-1508v.6.7",
+        "asupersync-1508v.10.4"
+      ],
+      "ev": {
+        "impact": 4,
+        "confidence": 3,
+        "effort": 3,
+        "adoption_friction": 3,
+        "user_visible_benefit": 4,
+        "expected_value_score": 3.8,
+        "confidence_note": "Good user-visible latency effect but sensitive to failure-mode distribution."
+      },
+      "expected_artifacts": [
+        "target/control-seam-smoke/run_*/AA01-SEAM-RETRY-BACKOFF/bundle_manifest.json",
+        "target/control-seam-smoke/run_*/AA01-SEAM-RETRY-BACKOFF/run.log"
+      ]
+    },
+    {
+      "seam_id": "AA01-SEAM-HEDGE-DELAY",
+      "seam_name": "Adaptive hedge delay controller",
+      "layer": "combinator/hedge",
+      "owner_symbol": "asupersync::combinator::adaptive_hedge::AdaptiveHedgeController",
+      "owner_file": "src/combinator/adaptive_hedge.rs",
+      "baseline_selector": "AdaptiveHedgeController defaults",
+      "rollback_surface": "Use static hedge delay from HedgeConfig",
+      "comparator_candidates": [
+        {
+          "candidate_id": "hedge-tight-bounds",
+          "selector": "lower max_delay and faster decay"
+        },
+        {
+          "candidate_id": "hedge-conservative-bounds",
+          "selector": "higher max_delay and slower decay"
+        }
+      ],
+      "comparator_smoke_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload AA01-WL-IO-HTTP-EX1",
+      "workload_ids": [
+        "AA01-WL-IO-HTTP-EX1"
+      ],
+      "downstream_beads": [
+        "asupersync-1508v.4.4",
+        "asupersync-1508v.6.7"
+      ],
+      "ev": {
+        "impact": 3,
+        "confidence": 3,
+        "effort": 3,
+        "adoption_friction": 2,
+        "user_visible_benefit": 4,
+        "expected_value_score": 3.4,
+        "confidence_note": "Moderate impact seam; useful for tail reduction under stragglers."
+      },
+      "expected_artifacts": [
+        "target/control-seam-smoke/run_*/AA01-SEAM-HEDGE-DELAY/bundle_manifest.json",
+        "target/control-seam-smoke/run_*/AA01-SEAM-HEDGE-DELAY/run.log"
+      ]
+    },
+    {
+      "seam_id": "AA01-SEAM-TRANSPORT-ROUTER",
+      "seam_name": "Transport route and endpoint health selection",
+      "layer": "transport/router",
+      "owner_symbol": "asupersync::transport::router::{RouteConfig, EndpointState}",
+      "owner_file": "src/transport/router.rs",
+      "baseline_selector": "endpoint health and connection-count weighted selection",
+      "rollback_surface": "single-path conservative routing and disabled multipath",
+      "comparator_candidates": [
+        {
+          "candidate_id": "router-health-weighted",
+          "selector": "health-weighted route preference"
+        },
+        {
+          "candidate_id": "router-single-path",
+          "selector": "single-path fallback"
+        }
+      ],
+      "comparator_smoke_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload AA01-WL-DIST-001",
+      "workload_ids": [
+        "AA01-WL-IO-001",
+        "AA01-WL-DIST-001"
+      ],
+      "downstream_beads": [
+        "asupersync-1508v.3.4",
+        "asupersync-1508v.6.7"
+      ],
+      "ev": {
+        "impact": 4,
+        "confidence": 3,
+        "effort": 3,
+        "adoption_friction": 3,
+        "user_visible_benefit": 4,
+        "expected_value_score": 3.8,
+        "confidence_note": "High relevance for distributed-preview stability and tail control."
+      },
+      "expected_artifacts": [
+        "target/control-seam-smoke/run_*/AA01-SEAM-TRANSPORT-ROUTER/bundle_manifest.json",
+        "target/control-seam-smoke/run_*/AA01-SEAM-TRANSPORT-ROUTER/run.log"
+      ]
+    },
+    {
+      "seam_id": "AA01-SEAM-RAPTORQ-DECODER-POLICY",
+      "seam_name": "RaptorQ decoder policy mode selection",
+      "layer": "raptorq/decoder",
+      "owner_symbol": "asupersync::raptorq::decoder::PolicyMode",
+      "owner_file": "src/raptorq/decoder.rs",
+      "baseline_selector": "conservative baseline decoder policy",
+      "rollback_surface": "force conservative policy and disable hard-regime acceleration",
+      "comparator_candidates": [
+        {
+          "candidate_id": "decoder-high-support",
+          "selector": "high-support-first mode"
+        },
+        {
+          "candidate_id": "decoder-block-schur",
+          "selector": "block-schur hard-regime path"
+        }
+      ],
+      "comparator_smoke_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_control_seam_inventory_docs cargo test --test raptorq_perf_invariants -- --nocapture",
+      "workload_ids": [
+        "AA01-WL-DIST-001"
+      ],
+      "downstream_beads": [
+        "asupersync-1508v.4.4",
+        "asupersync-1508v.10.4"
+      ],
+      "ev": {
+        "impact": 3,
+        "confidence": 3,
+        "effort": 4,
+        "adoption_friction": 3,
+        "user_visible_benefit": 3,
+        "expected_value_score": 2.95,
+        "confidence_note": "Useful for distributed recovery tails but higher complexity and validation burden."
+      },
+      "expected_artifacts": [
+        "target/control-seam-smoke/run_*/AA01-SEAM-RAPTORQ-DECODER-POLICY/bundle_manifest.json",
+        "target/control-seam-smoke/run_*/AA01-SEAM-RAPTORQ-DECODER-POLICY/run.log"
+      ]
+    }
+  ]
+}
