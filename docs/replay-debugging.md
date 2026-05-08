@@ -299,7 +299,7 @@ bash ./scripts/run_all_e2e.sh --suite wasm-incident-forensics
 python3 ./scripts/check_incident_forensics_playbook.py
 
 # 4) Direct replay command template (always offload cargo-heavy execution)
-rch exec -- cargo run --quiet --features cli --bin asupersync -- --format json --color never \
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_replay_debugging_docs cargo run --quiet --features cli --bin asupersync -- --format json --color never \
   lab replay examples/scenarios/smoke_happy_path.yaml \
   --seed 4242 \
   --artifact-pointer artifacts/replay/wasm-incident-smoke-4242.json \

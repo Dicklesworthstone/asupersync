@@ -109,9 +109,9 @@ scripts/run_model_check.sh --ci
 scripts/run_lean_regression.sh --json
 
 # Runtime/e2e/logging/law evidence (cargo-heavy -> use rch)
-rch exec -- cargo test --test algebraic_laws
-rch exec -- cargo test --test semantic_witness_replay_e2e --test adversarial_witness_corpus
-rch exec -- cargo test --test semantic_log_schema_validation
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_closure_docs cargo test --test algebraic_laws
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_closure_docs cargo test --test semantic_witness_replay_e2e --test adversarial_witness_corpus
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_closure_docs cargo test --test semantic_log_schema_validation
 
 # Full semantic verification profile artifact
 scripts/run_semantic_verification.sh --profile full --json

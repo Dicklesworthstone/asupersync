@@ -169,7 +169,7 @@ When a KPI exceeds its hard-fail threshold, a follow-up bead MUST be created:
 ## 8. CI Commands
 
 ```
-rch exec -- cargo test --test tokio_migration_lab_kpi_enforcement -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_migration_lab_kpi_docs cargo test --test tokio_migration_lab_kpi_enforcement -- --nocapture
 ```
 
 ---
