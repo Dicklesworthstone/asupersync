@@ -56,6 +56,26 @@ fn fixture_text(name: &str) -> String {
         .unwrap_or_else(|error| panic!("read golden fixture {name}: {error}"))
 }
 
+fn assert_cache_output_matches_golden(output: Output, fixture_name: &str, label: &str) {
+    assert!(
+        output.status.success(),
+        "cache helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = String::from_utf8(output.stdout).expect("cache stdout is utf-8");
+    let expected = fixture_text(fixture_name);
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual cache JSON");
+    let expected_json: Value = serde_json::from_str(&expected).expect("golden cache JSON");
+    assert_eq!(actual_json, expected_json);
+    assert_eq!(
+        actual, expected,
+        "{label} onboarding receipt cache output drifted from the reviewed golden"
+    );
+}
+
 fn patched_cache(fixture_name: &str, receipt: &Value) -> tempfile::NamedTempFile {
     let current_key = receipt["receipt_key"]
         .as_str()
@@ -91,19 +111,7 @@ fn patched_cache(fixture_name: &str, receipt: &Value) -> tempfile::NamedTempFile
 #[test]
 fn no_cache_output_matches_full_reviewed_golden() {
     let output = run_cache(&fixture("current_receipt.json"), None, 1800);
-    assert!(
-        output.status.success(),
-        "cache helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    assert_eq!(
-        String::from_utf8(output.stdout).expect("cache stdout is utf-8"),
-        fixture_text("no_cache_expected.json"),
-        "no-cache onboarding receipt cache output drifted from the reviewed golden"
-    );
+    assert_cache_output_matches_golden(output, "no_cache_expected.json", "no-cache");
 }
 
 #[test]
@@ -111,19 +119,7 @@ fn fresh_cache_output_matches_full_reviewed_golden() {
     let first = cache_json(&fixture("current_receipt.json"), None, 1800);
     let cache = patched_cache("fresh_cache.json", &first);
     let output = run_cache(&fixture("current_receipt.json"), Some(cache.path()), 1800);
-    assert!(
-        output.status.success(),
-        "cache helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    assert_eq!(
-        String::from_utf8(output.stdout).expect("cache stdout is utf-8"),
-        fixture_text("fresh_cache_expected.json"),
-        "fresh onboarding receipt cache output drifted from the reviewed golden"
-    );
+    assert_cache_output_matches_golden(output, "fresh_cache_expected.json", "fresh");
 }
 
 #[test]
@@ -131,19 +127,7 @@ fn stale_cache_output_matches_full_reviewed_golden() {
     let first = cache_json(&fixture("current_receipt.json"), None, 1800);
     let cache = patched_cache("stale_cache.json", &first);
     let output = run_cache(&fixture("current_receipt.json"), Some(cache.path()), 1800);
-    assert!(
-        output.status.success(),
-        "cache helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    assert_eq!(
-        String::from_utf8(output.stdout).expect("cache stdout is utf-8"),
-        fixture_text("stale_cache_expected.json"),
-        "stale onboarding receipt cache output drifted from the reviewed golden"
-    );
+    assert_cache_output_matches_golden(output, "stale_cache_expected.json", "stale");
 }
 
 #[test]
@@ -151,19 +135,7 @@ fn changed_cache_output_matches_full_reviewed_golden() {
     let first = cache_json(&fixture("current_receipt.json"), None, 1800);
     let cache = patched_cache("changed_cache.json", &first);
     let output = run_cache(&fixture("current_receipt.json"), Some(cache.path()), 1800);
-    assert!(
-        output.status.success(),
-        "cache helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    assert_eq!(
-        String::from_utf8(output.stdout).expect("cache stdout is utf-8"),
-        fixture_text("changed_cache_expected.json"),
-        "changed-digest onboarding receipt cache output drifted from the reviewed golden"
-    );
+    assert_cache_output_matches_golden(output, "changed_cache_expected.json", "changed-digest");
 }
 
 #[test]
@@ -173,23 +145,7 @@ fn no_matching_cache_output_matches_full_reviewed_golden() {
         Some(&fixture("no_matching_cache.json")),
         1800,
     );
-    assert!(
-        output.status.success(),
-        "cache helper failed: {}\nstdout: {}\nstderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let actual = String::from_utf8(output.stdout).expect("cache stdout is utf-8");
-    let expected = fixture_text("no_matching_cache_expected.json");
-    let actual_json: Value = serde_json::from_str(&actual).expect("actual cache JSON");
-    let expected_json: Value = serde_json::from_str(&expected).expect("golden cache JSON");
-    assert_eq!(actual_json, expected_json);
-    assert_eq!(
-        actual, expected,
-        "no-matching onboarding receipt cache output drifted from the reviewed golden"
-    );
+    assert_cache_output_matches_golden(output, "no_matching_cache_expected.json", "no-matching");
 }
 
 #[test]
