@@ -11,6 +11,11 @@ use super::test_vectors::*;
 use asupersync::http::h2::hpack::Header;
 use std::time::Instant;
 
+const GO_HPACK_REFERENCE_UNSUPPORTED: &str =
+    "xfail-no-live-go-hpack-reference: Go net/http2 HPACK harness is not wired";
+const NGHTTP2_HPACK_REFERENCE_UNSUPPORTED: &str =
+    "xfail-no-live-nghttp2-hpack-reference: nghttp2 HPACK harness is not wired";
+
 /// Differential test runner for HPACK conformance.
 #[allow(dead_code)]
 pub struct HpackDifferentialTester {
@@ -174,8 +179,7 @@ impl Default for HpackDifferentialTester {
 /// Cross-implementation interoperability tests.
 #[allow(dead_code)]
 pub struct CrossImplementationTester {
-    // Note: In a full implementation, this would connect to external
-    // reference implementations (Go net/http2, nghttp2, etc.)
+    // Cross-implementation interop is fail-closed until an external harness is wired.
 }
 
 #[allow(dead_code)]
@@ -190,15 +194,14 @@ impl CrossImplementationTester {
     /// Test interoperability with Go net/http2 HPACK implementation.
     #[allow(dead_code)]
     pub fn test_go_interop(&self) -> Vec<ConformanceTestResult> {
-        // Note: This would require setting up Go test harness
-        // For now, return placeholder results
+        // No live Go harness is wired here, so this row must remain xfail evidence.
         vec![ConformanceTestResult {
             test_id: "INTEROP-GO-1".to_string(),
             description: "Go net/http2 interoperability".to_string(),
             category: TestCategory::RoundTrip,
             requirement_level: RequirementLevel::Should,
             verdict: TestVerdict::ExpectedFailure,
-            error_message: Some("Go interop not implemented yet".to_string()),
+            error_message: Some(GO_HPACK_REFERENCE_UNSUPPORTED.to_string()),
             execution_time_ms: 0,
         }]
     }
@@ -212,7 +215,7 @@ impl CrossImplementationTester {
             category: TestCategory::RoundTrip,
             requirement_level: RequirementLevel::Should,
             verdict: TestVerdict::ExpectedFailure,
-            error_message: Some("nghttp2 interop not implemented yet".to_string()),
+            error_message: Some(NGHTTP2_HPACK_REFERENCE_UNSUPPORTED.to_string()),
             execution_time_ms: 0,
         }]
     }
@@ -413,5 +416,36 @@ mod tests {
         let result = tester.test_against_fixture(&fixture);
         assert_eq!(result.verdict, TestVerdict::Pass);
         assert!(result.error_message.is_none());
+    }
+
+    #[test]
+    #[allow(dead_code)]
+    fn interop_rows_are_explicit_xfail_not_placeholder_passes() {
+        let tester = CrossImplementationTester::new();
+        let results = tester.run_all_interop_tests();
+
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|result| {
+            result.verdict == TestVerdict::ExpectedFailure
+                && result
+                    .error_message
+                    .as_deref()
+                    .is_some_and(|message| message.starts_with("xfail-no-live-"))
+        }));
+        assert!(results.iter().all(|result| {
+            !result
+                .description
+                .to_ascii_lowercase()
+                .contains("placeholder")
+        }));
+    }
+
+    #[test]
+    #[allow(dead_code)]
+    fn interop_source_no_longer_contains_placeholder_shortcut_claims() {
+        let source = include_str!("differential_tests.rs");
+
+        assert!(!source.contains(concat!("return ", "placeholder results")));
+        assert!(!source.contains(concat!("not implemented ", "yet")));
     }
 }
