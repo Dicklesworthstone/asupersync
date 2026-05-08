@@ -1,0 +1,231 @@
+{
+  "schema_version": "operator-proof-backlog-signoff-contract-v1",
+  "bead_id": "asupersync-xeh8m0.8",
+  "created_date": "2026-05-08",
+  "scenario_id": "xeh8m0.operator-proof-backlog.final-signoff",
+  "contract_version": "operator-proof-backlog-signoff-contract-v1",
+  "final_operator_verdict": "no-win-hold",
+  "broad_readiness_claim": "not_claimed",
+  "operator_note": "The proof backlog is machine-checkable, but final broad readiness remains held by the scheduler no-win receipt until the xeh8m0.3 runtime blocker is fixed and the same rch bench lane produces a complete p50/p95/p999 receipt.",
+  "generated_artifact_paths": [
+    "artifacts/operator-proof-backlog-signoff/xeh8m0.final-signoff.report.json",
+    "artifacts/operator-proof-backlog-signoff/xeh8m0.final-signoff.summary.md"
+  ],
+  "source_artifact_hashes": [
+    {
+      "bead_id": "asupersync-xeh8m0.1",
+      "path": "artifacts/proof_console_report_contract_v1.json",
+      "sha256": "c5f5c9aed3120aaa34ca31aa7c51490134ccfe41d2c68e8230e3f37341eaa39b"
+    },
+    {
+      "bead_id": "asupersync-xeh8m0.2",
+      "path": "artifacts/proof_runner_rch_outcome_contract_v1.json",
+      "sha256": "fb52b743f6aecebf7edf7c78e14ef6c03c737f263d8710f6dccf568c2352498f"
+    },
+    {
+      "bead_id": "asupersync-xeh8m0.3",
+      "path": "artifacts/perf/asupersync-xeh8m0-large-core-scheduler-evidence-v1.json",
+      "sha256": "db7f961eb9d77c9b1e4eb1f9e14b87d82060cc7dc8a35de39f77c50e022840c1"
+    },
+    {
+      "bead_id": "asupersync-xeh8m0.3",
+      "path": "tests/artifacts/perf/asupersync-xeh8m0.3/three_lane_decision_baseline_v1.json",
+      "sha256": "cf5250b464151cc1b942b8265901b40f93d56eee3b54fde8b655755e9fe118dd"
+    },
+    {
+      "bead_id": "asupersync-xeh8m0.4",
+      "path": "artifacts/lab_live_differential_v2_scenarios_v1.json",
+      "sha256": "06e97a349da7537caf4e72a776e1559c6c6c302ef975e575ff8c41118535df15"
+    },
+    {
+      "bead_id": "asupersync-xeh8m0.5",
+      "path": "scripts/crashpack_to_repro.py",
+      "sha256": "856f8c5ce32f74187fe69762f383ddecb35c1810138cfdf5b87d44f55f47a905"
+    },
+    {
+      "bead_id": "asupersync-xeh8m0.5",
+      "path": "tests/crashpack_repro_contract.rs",
+      "sha256": "9f2fdcaadaa3f39abd2c2a06e5323ad6ca7691ee1888f94e4e449f031da37130"
+    },
+    {
+      "bead_id": "asupersync-xeh8m0.6",
+      "path": "artifacts/adapter_browser_fail_closed_cookbook_contract_v1.json",
+      "sha256": "70ffcde4bec3c7e1e8b89b70aace9374353cd4dfa2ba242b9bb4a77dd28cc766"
+    },
+    {
+      "bead_id": "asupersync-xeh8m0.7",
+      "path": "artifacts/operator_action_recipe_contract_v1.json",
+      "sha256": "71fa8172b0437e29aa718337dbf08d43aa198f1e67141c89bb8266a2d96f1555"
+    }
+  ],
+  "child_receipts": [
+    {
+      "bead_id": "asupersync-xeh8m0.1",
+      "operator_verdict": "pass",
+      "source_commit": "368e1b68c",
+      "artifact_paths": [
+        "artifacts/proof_console_report_contract_v1.json",
+        "tests/proof_console_report_contract.rs"
+      ],
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_console_review_gates CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test proof_console_report_contract --test proof_lane_manifest_contract --test proof_status_snapshot_contract -- --nocapture"
+    },
+    {
+      "bead_id": "asupersync-xeh8m0.2",
+      "operator_verdict": "pass",
+      "source_commit": "158d62eee",
+      "artifact_paths": [
+        "artifacts/proof_runner_rch_outcome_contract_v1.json",
+        "tests/proof_runner_contract.rs",
+        "scripts/proof_runner.py"
+      ],
+      "proof_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_xeh8m0_2_proof_runner_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test proof_runner_contract -- --nocapture"
+    },
+    {
+      "bead_id": "asupersync-xeh8m0.3",
+      "operator_verdict": "no-win",
+      "source_commit": "17e70510f",
+      "artifact_paths": [
+        "artifacts/perf/asupersync-xeh8m0-large-core-scheduler-evidence-v1.json",
+        "tests/artifacts/perf/asupersync-xeh8m0.3/three_lane_decision_baseline_v1.json",
+        "tests/artifacts/perf/asupersync-xeh8m0.3/three_lane_decision_rch.log",
+        "tests/artifacts/perf/asupersync-xeh8m0.3/hotspot_table.md"
+      ],
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_xeh8m0_scheduler_evidence CARGO_INCREMENTAL=0 RUSTFLAGS='-C debuginfo=1 -C force-frame-pointers=yes' cargo bench -p asupersync --bench scheduler_benchmark -- scheduler/three_lane_decision",
+      "remote_exit_status": 101,
+      "first_blocker": {
+        "file": "os-thread-local-0.1.3/src/lib.rs",
+        "line": 76,
+        "case": "scheduler/three_lane_decision/global_ready_burst/64",
+        "message": "assertion left == right failed; left: 11; right: 0"
+      },
+      "fallback_no_win_reason": "scheduler benchmark hit runtime panic before a complete p50/p95/p999 baseline; no speedup or broad readiness claim is allowed"
+    },
+    {
+      "bead_id": "asupersync-xeh8m0.4",
+      "operator_verdict": "pass",
+      "source_commit": "9bcb04f7d",
+      "artifact_paths": [
+        "artifacts/lab_live_differential_v2_scenarios_v1.json",
+        "tests/lab_live_differential_v2.rs"
+      ],
+      "proof_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_xeh8m0_4_lab_live_v2 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test lab_live_differential_v2 -- --nocapture"
+    },
+    {
+      "bead_id": "asupersync-xeh8m0.5",
+      "operator_verdict": "pass",
+      "source_commit": "a9b2997fe",
+      "artifact_paths": [
+        "scripts/crashpack_to_repro.py",
+        "tests/crashpack_repro_contract.rs",
+        "tests/fixtures/crashpack_to_repro"
+      ],
+      "proof_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_crashpack_repro_contract_followup CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test crashpack_repro_contract -- --nocapture"
+    },
+    {
+      "bead_id": "asupersync-xeh8m0.6",
+      "operator_verdict": "pass",
+      "source_commit": "8be6e202c",
+      "artifact_paths": [
+        "artifacts/adapter_browser_fail_closed_cookbook_contract_v1.json",
+        "tests/adapter_browser_fail_closed_cookbook_contract.rs"
+      ],
+      "proof_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_xeh8m0_6_adapter_browser_cookbook CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test adapter_browser_fail_closed_cookbook_contract -- --nocapture"
+    },
+    {
+      "bead_id": "asupersync-xeh8m0.7",
+      "operator_verdict": "pass",
+      "source_commit": "0be447855",
+      "artifact_paths": [
+        "artifacts/operator_action_recipe_contract_v1.json",
+        "tests/operator_action_recipe_contract.rs",
+        "scripts/proof_runner.py"
+      ],
+      "proof_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_operator_action_recipe_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test operator_action_recipe_contract -- --nocapture"
+    }
+  ],
+  "gate_commands": [
+    {
+      "gate_id": "proof_receipt_inventory_contract",
+      "kind": "rch_cargo_test",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_xeh8m0_8_signoff CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test proof_receipt_inventory_contract -- --nocapture"
+    },
+    {
+      "gate_id": "proof_lane_manifest_contract",
+      "kind": "rch_cargo_test",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_xeh8m0_8_signoff CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture"
+    },
+    {
+      "gate_id": "proof_status_snapshot_contract",
+      "kind": "rch_cargo_test",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_xeh8m0_8_signoff CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test proof_status_snapshot_contract -- --nocapture"
+    },
+    {
+      "gate_id": "operator_recipe_list",
+      "kind": "local_deterministic_helper",
+      "command": "python3 scripts/proof_runner.py --list-operator-recipes --output json"
+    },
+    {
+      "gate_id": "operator_recipe_dry_run",
+      "kind": "local_deterministic_helper",
+      "command": "python3 scripts/proof_runner.py --operator-recipe rerun-proof-lane --operator-mode dry-run --output json"
+    },
+    {
+      "gate_id": "operator_recipe_safe_execute",
+      "kind": "local_deterministic_helper",
+      "command": "python3 scripts/proof_runner.py --operator-recipe dirty-frontier-refusal --operator-mode execute --output json"
+    },
+    {
+      "gate_id": "bv_robot_alerts",
+      "kind": "tracker_diagnostic",
+      "command": "bv --robot-alerts"
+    }
+  ],
+  "fail_closed_checks": [
+    {
+      "check_id": "duplicate-helper-capability",
+      "evidence": "tests/fixtures/proof_receipt_inventory/duplicate_current.json",
+      "expected_signal": "capability-overlap"
+    },
+    {
+      "check_id": "missing-fixture-root",
+      "evidence": "tests/operator_proof_backlog_signoff_contract.rs",
+      "expected_signal": "fixture path must exist"
+    },
+    {
+      "check_id": "stale-schema-version",
+      "evidence": "operator-proof-backlog-signoff-contract-v1",
+      "expected_signal": "unknown schema version rejected"
+    },
+    {
+      "check_id": "local-rch-fallback-marker",
+      "evidence": "gate_commands",
+      "expected_signal": "cargo proofs must start with rch exec --"
+    },
+    {
+      "check_id": "raw-coordination-data",
+      "evidence": "public artifact scan",
+      "expected_signal": "raw mail fields and local secret markers absent"
+    },
+    {
+      "check_id": "unsupported-broad-docs-claim",
+      "evidence": "broad_readiness_claim",
+      "expected_signal": "not_claimed"
+    },
+    {
+      "check_id": "missing-first-blocker-line",
+      "evidence": "asupersync-xeh8m0.3 first_blocker",
+      "expected_signal": "line is nonzero"
+    },
+    {
+      "check_id": "missing-no-win-fallback-verdict",
+      "evidence": "asupersync-xeh8m0.3 fallback_no_win_reason",
+      "expected_signal": "nonempty no-win reason"
+    }
+  ],
+  "validation_commands": [
+    "python3 -m json.tool artifacts/operator_proof_backlog_signoff_contract_v1.json",
+    "rch exec -- rustfmt --edition 2024 --check tests/operator_proof_backlog_signoff_contract.rs",
+    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_xeh8m0_8_signoff CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test operator_proof_backlog_signoff_contract -- --nocapture",
+    "bv --robot-alerts"
+  ]
+}
