@@ -3331,6 +3331,21 @@ impl Runtime {
         guard.is_quiescent()
     }
 
+    /// Returns the current number of regions in the draining/finalizing cleanup path.
+    ///
+    /// This is a runtime-local observability signal for cleanup debt. It is not
+    /// an admission oracle by itself; callers should compare it with the
+    /// configured region-capacity envelope for the runtime.
+    #[must_use]
+    pub fn draining_region_count(&self) -> usize {
+        let guard = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.draining_region_count_for_snapshot()
+    }
+
     /// Returns the configured hot trace-ring capacity for this runtime.
     #[must_use]
     pub fn trace_buffer_capacity(&self) -> usize {

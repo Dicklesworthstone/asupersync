@@ -569,14 +569,17 @@ impl PressureGovernor {
     }
 
     fn sample_cleanup_debt_pressure(&self) -> PressureSignalSample {
-        // TODO: Access runtime resource cleanup verifier statistics
-        // In a full implementation, we would:
-        // 1. Access ResourceCleanupVerifier from Runtime
-        // 2. Get pending cleanup task count and capacity
-        // 3. Calculate pressure as pending / capacity
+        let capacity = self
+            .runtime
+            .config()
+            .resolved_capacity_hints()
+            .region_capacity;
+        if capacity == 0 {
+            return PressureSignalSample::unavailable();
+        }
 
-        // No live cleanup-debt signal is exposed yet.
-        PressureSignalSample::unavailable()
+        let draining_regions = self.runtime.draining_region_count();
+        PressureSignalSample::available(draining_regions as f64 / capacity as f64)
     }
 
     fn sample_memory_budget_pressure(&self) -> PressureSignalSample {
@@ -1013,7 +1016,7 @@ mod tests {
     }
 
     #[test]
-    fn pressure_governor_records_no_win_fallback_and_decision_latency() {
+    fn pressure_governor_records_partial_fallback_and_decision_latency() {
         let config = PressureGovernorConfig {
             enabled: true,
             admission_control: true,
@@ -1035,11 +1038,11 @@ mod tests {
             .expect("direct pressure sample should not fail");
         assert_eq!(
             sampled.fallback_verdict,
-            PressureFallbackVerdict::NoWinNoLiveSignals
+            PressureFallbackVerdict::PartialSignalsUnavailable
         );
         assert_eq!(
             governor.fallback_verdict_metric(),
-            PressureFallbackVerdict::NoWinNoLiveSignals.as_metric_value()
+            PressureFallbackVerdict::PartialSignalsUnavailable.as_metric_value()
         );
         assert_eq!(
             governor.fallback_total.get(),
@@ -1054,7 +1057,7 @@ mod tests {
         assert_eq!(decision, AdmissionDecision::Admit);
         assert_eq!(
             governor.fallback_verdict_metric(),
-            PressureFallbackVerdict::NoWinNoLiveSignals.as_metric_value()
+            PressureFallbackVerdict::PartialSignalsUnavailable.as_metric_value()
         );
         assert_eq!(governor.fallback_total.get(), 1);
         assert_eq!(governor.sample_count(), 1);
@@ -1078,9 +1081,13 @@ mod tests {
             .expect("cached pressure snapshot should not fail");
         assert_eq!(
             cached.fallback_verdict,
-            PressureFallbackVerdict::NoWinNoLiveSignals
+            PressureFallbackVerdict::PartialSignalsUnavailable
         );
-        assert_eq!(cached.signal_availability, PressureSignalAvailability::NONE);
+        assert!(!cached.signal_availability.runnable_queue);
+        assert!(!cached.signal_availability.blocking_pool);
+        assert!(!cached.signal_availability.channel_backlog);
+        assert!(cached.signal_availability.cleanup_debt);
+        assert!(!cached.signal_availability.memory_budget);
     }
 
     #[test]
@@ -1234,6 +1241,38 @@ mod tests {
     }
 
     #[test]
+    fn pressure_governor_samples_cleanup_debt_from_runtime_draining_regions() {
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create cleanup-debt runtime"),
+        );
+        let config = PressureGovernorConfig {
+            enabled: true,
+            admission_control: true,
+            sample_interval: Duration::ZERO,
+            ..Default::default()
+        };
+        let metrics = Metrics::new();
+        let governor = PressureGovernor::new(config, std::sync::Arc::clone(&runtime), metrics)
+            .expect("pressure governor should initialize");
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+
+        let snapshot = governor
+            .sample_pressure(&cx)
+            .expect("pressure snapshot should not fail");
+
+        assert_eq!(runtime.draining_region_count(), 0);
+        assert!(snapshot.signal_availability.cleanup_debt);
+        assert_eq!(snapshot.cleanup_debt_pressure, 0.0);
+        assert_eq!(
+            snapshot.fallback_verdict,
+            PressureFallbackVerdict::PartialSignalsUnavailable
+        );
+    }
+
+    #[test]
     fn test_pressure_thresholds_defaults() {
         let thresholds = PressureThresholds::default();
 
@@ -1333,11 +1372,13 @@ mod tests {
         assert!(saturated.signal_availability.runnable_queue);
         assert!(saturated.signal_availability.blocking_pool);
         assert!(!saturated.signal_availability.channel_backlog);
+        assert!(saturated.signal_availability.cleanup_debt);
         assert_eq!(
             saturated.fallback_verdict,
             PressureFallbackVerdict::PartialSignalsUnavailable
         );
         assert_eq!(saturated.runnable_queue_pressure, 0.0);
+        assert_eq!(saturated.cleanup_debt_pressure, 0.0);
         assert!(
             saturated.blocking_pool_pressure >= 1.0,
             "busy plus queued blocking work should saturate the pool, got {}",
@@ -1355,8 +1396,10 @@ mod tests {
 
         assert!(drained.signal_availability.runnable_queue);
         assert!(drained.signal_availability.blocking_pool);
+        assert!(drained.signal_availability.cleanup_debt);
         assert_eq!(drained.runnable_queue_pressure, 0.0);
         assert_eq!(drained.blocking_pool_pressure, 0.0);
+        assert_eq!(drained.cleanup_debt_pressure, 0.0);
         assert_eq!(drained.overall_pressure, 0.0);
         assert!(
             runtime.is_quiescent(),
