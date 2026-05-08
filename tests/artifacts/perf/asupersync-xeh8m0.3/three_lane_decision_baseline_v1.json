@@ -1,0 +1,106 @@
+{
+  "schema_version": "asupersync-xeh8m0.3-three-lane-decision-baseline-v1",
+  "bead_id": "asupersync-xeh8m0.3",
+  "scenario_id": "xeh8m0-three-lane-decision-large-core-baseline",
+  "generated_at_utc": "2026-05-08T12:34:36Z",
+  "git_sha": "08fd9846d6ae9383f24494801158e77a38c294bd",
+  "benchmark_surface": "benches/scheduler_benchmark.rs",
+  "criterion_filter": "scheduler/three_lane_decision",
+  "benchmark_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_xeh8m0_scheduler_evidence CARGO_INCREMENTAL=0 RUSTFLAGS='-C debuginfo=1 -C force-frame-pointers=yes' cargo bench -p asupersync --bench scheduler_benchmark -- scheduler/three_lane_decision",
+  "proof_lane_executed_through_rch": true,
+  "verdict": "no_win",
+  "operator_verdict": "no_measurement_compile_blocker",
+  "no_win_reason": "The required rch-routed scheduler benchmark failed before Criterion measurements on two completed remote attempts, so no scheduler speedup or baseline latency claim is supported.",
+  "host_class": {
+    "minimum_logical_cpus": 64,
+    "minimum_ram_gib": 256,
+    "same_host_required_for_comparison": true,
+    "verdict": "not_evaluated",
+    "reason": "The compile blocker occurred before a Criterion baseline or worker fingerprint artifact was produced."
+  },
+  "host_fingerprint": {
+    "hostname_or_rch_worker": "vmi1149989",
+    "logical_cpu_count": null,
+    "ram_gib": null,
+    "kernel": null,
+    "rustc_version": null,
+    "cargo_version": null,
+    "fingerprint_state": "not_collected_for_failed_benchmark_worker"
+  },
+  "run_seed": null,
+  "run_seed_state": "not_reached_before_compile_failure",
+  "metrics": {
+    "p50": null,
+    "p95": null,
+    "p999": null,
+    "elements_per_second": null,
+    "sample_count": null,
+    "metrics_state": "not_collected_compile_failed_before_criterion"
+  },
+  "rch_history": {
+    "completed_build_id": 29832516688937765,
+    "worker_id": "vmi1149989",
+    "location": "remote",
+    "remote_exit": 101,
+    "started_at_utc": "2026-05-08T12:23:22.132188872Z",
+    "completed_at_utc": "2026-05-08T12:34:20.319288746Z",
+    "duration_ms": 658187,
+    "timing_ms": {
+      "sync_up": 24765,
+      "exec": 628500,
+      "sync_down": null,
+      "total": 658186
+    },
+    "status_command_observation": "rch --json status --jobs listed the run as a remote build with exit_code=101."
+  },
+  "previous_completed_attempt": {
+    "build_id": 29832516688937763,
+    "worker_id": "vmi1227854",
+    "location": "remote",
+    "remote_exit": 101,
+    "started_at_utc": "2026-05-08T12:20:30.057712389Z",
+    "completed_at_utc": "2026-05-08T12:22:09.968009814Z",
+    "duration_ms": 99910,
+    "used_for": "detailed first-blocker text reported by Agent Mail message 3311"
+  },
+  "first_blocker": {
+    "file": "src/sync/lock_ordering.rs",
+    "line": 56,
+    "column": 12,
+    "message": "error: struct LockInfo is never constructed",
+    "classification": "compile_frontier_before_benchmark_measurement"
+  },
+  "latest_followup_job_at_receipt_time": {
+    "build_id": 29832516688937765,
+    "worker_id": "vmi1149989",
+    "state": "completed_remote_exit_101",
+    "observed_at_utc": "2026-05-08T12:35:02Z",
+    "used_for_metrics": false,
+    "reason": "The job completed after the first blocker report but still exited before Criterion metrics."
+  },
+  "artifact_paths": {
+    "receipt_json": "tests/artifacts/perf/asupersync-xeh8m0.3/three_lane_decision_baseline_v1.json",
+    "run_log": "tests/artifacts/perf/asupersync-xeh8m0.3/three_lane_decision_rch.log",
+    "hotspot_table": "tests/artifacts/perf/asupersync-xeh8m0.3/hotspot_table.md"
+  },
+  "evidence_sources": [
+    {
+      "kind": "agent_mail_summary",
+      "message_id": 3311,
+      "sender": "CopperSpring",
+      "thread_id": "asupersync-xeh8m0.3",
+      "used_for": "detailed first-blocker text and submitted command"
+    },
+    {
+      "kind": "local_rch_status",
+      "command": "rch --json status --jobs",
+      "used_for": "completed remote build id, worker id, exit code, timing, and active follow-up job state"
+    }
+  ],
+  "claims": {
+    "scheduler_speedup": "not_claimed",
+    "baseline_latency": "not_claimed",
+    "hotspot_ranking": "not_claimed",
+    "next_required_action": "Clear or wait for the lock_ordering compile frontier, then rerun the same rch cargo bench lane before claiming p50/p95/p999 or throughput."
+  }
+}
