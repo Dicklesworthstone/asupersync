@@ -253,13 +253,13 @@ pub fn apply_csp_nonce(csp_template: &str, nonce: &str) -> String {
 
 ```bash
 # Test origin validation
-cargo test --lib web::session::origin
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_web_security_docs cargo test --lib web::session::origin
 
 # Test CSRF protection  
-cargo test --lib web::session::csrf
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_web_security_docs cargo test --lib web::session::csrf
 
 # Test cookie security
-cargo test --lib web::session::cookie_security
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_web_security_docs cargo test --lib web::session::cookie_security
 ```
 
 **Status:** All existing tests pass, but tests assume current (vulnerable) defaults.
