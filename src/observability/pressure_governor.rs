@@ -215,7 +215,8 @@ pub struct PressureGovernor {
     admissions_total: Arc<Counter>,
     rejections_total: Arc<Counter>,
     backpressure_total: Arc<Counter>,
-    fallback_total: Arc<Counter>,
+    partial_fallback_total: Arc<Counter>,
+    no_win_fallback_total: Arc<Counter>,
 
     // Internal state
     started_at: Instant,
@@ -255,7 +256,9 @@ impl PressureGovernor {
         let rejections_total = metrics.counter("pressure_governor_rejections_total");
 
         let backpressure_total = metrics.counter("pressure_governor_backpressure_total");
-        let fallback_total = metrics.counter("pressure_governor_no_win_fallback_total");
+        let partial_fallback_total =
+            metrics.counter("pressure_governor_partial_signal_fallback_total");
+        let no_win_fallback_total = metrics.counter("pressure_governor_no_win_fallback_total");
         let decision_latency_summary = metrics.summary("pressure_governor_decision_latency_ns");
         let decision_latency_p95_gauge = metrics.gauge("pressure_governor_decision_latency_p95_ns");
         let decision_latency_p999_gauge =
@@ -276,7 +279,8 @@ impl PressureGovernor {
             admissions_total,
             rejections_total,
             backpressure_total,
-            fallback_total,
+            partial_fallback_total,
+            no_win_fallback_total,
             started_at,
             last_sample: AtomicU64::new(0),
             last_signal_availability_mask: AtomicU64::new(PressureSignalAvailability::NONE.mask()),
@@ -602,8 +606,14 @@ impl PressureGovernor {
 
     fn record_fallback_verdict(&self, verdict: PressureFallbackVerdict) {
         self.fallback_verdict_gauge.set(verdict.as_metric_value());
-        if verdict != PressureFallbackVerdict::Complete {
-            self.fallback_total.increment();
+        match verdict {
+            PressureFallbackVerdict::Complete => {}
+            PressureFallbackVerdict::PartialSignalsUnavailable => {
+                self.partial_fallback_total.increment();
+            }
+            PressureFallbackVerdict::NoWinNoLiveSignals => {
+                self.no_win_fallback_total.increment();
+            }
         }
     }
 
@@ -1015,7 +1025,8 @@ mod tests {
             governor.fallback_verdict_metric(),
             PressureFallbackVerdict::PartialSignalsUnavailable.as_metric_value()
         );
-        assert_eq!(governor.fallback_total.get(), 1);
+        assert_eq!(governor.partial_fallback_total.get(), 1);
+        assert_eq!(governor.no_win_fallback_total.get(), 0);
     }
 
     #[test]
@@ -1067,6 +1078,44 @@ mod tests {
     }
 
     #[test]
+    fn pressure_governor_records_fallback_counters_by_verdict() {
+        let config = PressureGovernorConfig {
+            enabled: true,
+            admission_control: true,
+            ..Default::default()
+        };
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create fallback-counter runtime"),
+        );
+        let metrics = Metrics::new();
+        let governor = PressureGovernor::new(config, runtime, metrics)
+            .expect("pressure governor should initialize");
+
+        governor.record_fallback_verdict(PressureFallbackVerdict::Complete);
+        assert_eq!(governor.partial_fallback_total.get(), 0);
+        assert_eq!(governor.no_win_fallback_total.get(), 0);
+
+        governor.record_fallback_verdict(PressureFallbackVerdict::PartialSignalsUnavailable);
+        assert_eq!(governor.partial_fallback_total.get(), 1);
+        assert_eq!(governor.no_win_fallback_total.get(), 0);
+        assert_eq!(
+            governor.fallback_verdict_metric(),
+            PressureFallbackVerdict::PartialSignalsUnavailable.as_metric_value()
+        );
+
+        governor.record_fallback_verdict(PressureFallbackVerdict::NoWinNoLiveSignals);
+        assert_eq!(governor.partial_fallback_total.get(), 1);
+        assert_eq!(governor.no_win_fallback_total.get(), 1);
+        assert_eq!(
+            governor.fallback_verdict_metric(),
+            PressureFallbackVerdict::NoWinNoLiveSignals.as_metric_value()
+        );
+    }
+
+    #[test]
     fn pressure_governor_records_partial_fallback_and_decision_latency() {
         let config = PressureGovernorConfig {
             enabled: true,
@@ -1096,10 +1145,11 @@ mod tests {
             PressureFallbackVerdict::PartialSignalsUnavailable.as_metric_value()
         );
         assert_eq!(
-            governor.fallback_total.get(),
+            governor.partial_fallback_total.get(),
             0,
             "direct sampling updates the verdict gauge without counting an admission fallback"
         );
+        assert_eq!(governor.no_win_fallback_total.get(), 0);
 
         let decision = governor
             .check_admission(&cx)
@@ -1110,7 +1160,8 @@ mod tests {
             governor.fallback_verdict_metric(),
             PressureFallbackVerdict::PartialSignalsUnavailable.as_metric_value()
         );
-        assert_eq!(governor.fallback_total.get(), 1);
+        assert_eq!(governor.partial_fallback_total.get(), 1);
+        assert_eq!(governor.no_win_fallback_total.get(), 0);
         assert_eq!(governor.sample_count(), 1);
         let p95 = governor
             .decision_latency_p95_ns()
@@ -1480,7 +1531,8 @@ mod tests {
             governor.fallback_verdict_metric(),
             PressureFallbackVerdict::PartialSignalsUnavailable.as_metric_value()
         );
-        assert_eq!(governor.fallback_total.get(), 1);
+        assert_eq!(governor.partial_fallback_total.get(), 1);
+        assert_eq!(governor.no_win_fallback_total.get(), 0);
 
         assert!(drained.signal_availability.runnable_queue);
         assert!(drained.signal_availability.blocking_pool);
