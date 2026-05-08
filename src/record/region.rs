@@ -963,9 +963,22 @@ impl RegionRecord {
             return false;
         }
 
-        inner
-            .close_outcome
-            .get_or_insert(crate::types::Outcome::Ok(()));
+        // br-asupersync-n0lthy: when no task or finalizer has folded a
+        // terminal outcome via record_close_outcome, the default depends
+        // on whether the region was cancelled. A region with cancel_reason
+        // set (via cancel_request or begin_close(Some(reason))) that
+        // reaches close with no live work must still surface Cancelled,
+        // not Ok — the structured-concurrency contract says cancel is a
+        // protocol, and observers (RegionCloseFuture, oracle harnesses,
+        // audit trails) need close_outcome to agree with cancel_reason.
+        // The previous unconditional `get_or_insert(Outcome::Ok(()))`
+        // silently defaulted cancelled-but-empty regions to Ok.
+        let default_outcome = if let Some(reason) = inner.cancel_reason.as_ref() {
+            crate::types::Outcome::Cancelled(reason.clone())
+        } else {
+            crate::types::Outcome::Ok(())
+        };
+        inner.close_outcome.get_or_insert(default_outcome);
 
         let transitioned = self
             .state
@@ -1625,6 +1638,66 @@ mod tests {
             region.close_outcome(),
             Some(crate::types::Outcome::Ok(()))
         ));
+    }
+
+    #[test]
+    fn complete_close_defaults_close_outcome_to_cancelled_when_cancel_reason_set() {
+        // br-asupersync-n0lthy: a region whose cancel_reason was set
+        // (via begin_close(Some(reason)) or RuntimeState::cancel_request)
+        // and which reaches Closed with no task or finalizer folding a
+        // terminal outcome must surface Cancelled, NOT Ok.
+        // Pre-fix, complete_close unconditionally defaulted to Ok(()),
+        // losing the cancel-protocol signal for empty/never-polled
+        // regions.
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+        let cancel_reason = CancelReason::shutdown();
+
+        assert!(region.begin_close(Some(cancel_reason.clone())));
+        assert!(region.begin_finalize());
+        assert!(region.complete_close());
+
+        match region.close_outcome() {
+            Some(crate::types::Outcome::Cancelled(observed)) => {
+                assert_eq!(
+                    observed.kind, cancel_reason.kind,
+                    "close_outcome must reflect the cancel reason set on the region"
+                );
+            }
+            other => panic!(
+                "br-asupersync-n0lthy: cancelled-but-empty region must close \
+                 with Outcome::Cancelled(reason), not {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn complete_close_preserves_pre_recorded_outcome_under_cancel() {
+        // br-asupersync-n0lthy: get_or_insert semantics must still
+        // honor any outcome that was folded earlier via
+        // record_close_outcome — the new cancel-aware default only
+        // applies when close_outcome is None.
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+        let cancel_reason = CancelReason::shutdown();
+
+        // Cancel the region AND pre-record a Panicked outcome (e.g.
+        // a panicking finalizer), then close.
+        assert!(region.begin_close(Some(cancel_reason)));
+        region.record_close_outcome(crate::types::Outcome::Panicked(
+            crate::types::PanicPayload::new("finalizer panic"),
+        ));
+        assert!(region.begin_finalize());
+        assert!(region.complete_close());
+
+        // Pre-recorded Panicked must win over the new Cancelled default.
+        assert!(
+            matches!(
+                region.close_outcome(),
+                Some(crate::types::Outcome::Panicked(payload)) if payload.message() == "finalizer panic"
+            ),
+            "pre-recorded Panicked outcome must survive cancel-aware default; \
+             got {:?}",
+            region.close_outcome()
+        );
     }
 
     #[test]
