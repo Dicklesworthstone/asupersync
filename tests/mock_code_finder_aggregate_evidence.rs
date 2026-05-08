@@ -336,6 +336,46 @@ fn aggregate_runner_aggregates_fixture_children_and_preserves_logs() {
     assert_eq!(aggregate["verdict_counts"]["unsupported"], Value::from(1));
     assert_eq!(aggregate["verdict_counts"]["expected_fail"], Value::from(1));
     assert_eq!(aggregate["verdict_counts"]["fixture_only"], Value::from(1));
+    assert_eq!(
+        aggregate["non_live_disposition_counts"]["blocked"],
+        Value::from(1)
+    );
+    assert_eq!(
+        aggregate["non_live_disposition_counts"]["unsupported"],
+        Value::from(1)
+    );
+    assert_eq!(
+        aggregate["non_live_disposition_counts"]["expected_fail"],
+        Value::from(1)
+    );
+    assert_eq!(
+        aggregate["non_live_disposition_counts"]["fixture_only"],
+        Value::from(1)
+    );
+    assert_eq!(aggregate["skip_ledger_total"], Value::from(4));
+    let skip_scenarios: BTreeSet<_> = array(&aggregate, "skip_ledger")
+        .iter()
+        .map(|row| str_field(row, "scenario_id").to_string())
+        .collect();
+    assert_eq!(
+        skip_scenarios,
+        BTreeSet::from([
+            "fixture-blocked".to_string(),
+            "fixture-expected_fail".to_string(),
+            "fixture-fixture_only".to_string(),
+            "fixture-unsupported".to_string(),
+        ])
+    );
+    let summary = fs::read_to_string(
+        artifact_root
+            .join("fixture-pass")
+            .join("mock-code-finder-aggregate.summary.md"),
+    )
+    .expect("read aggregate summary markdown");
+    assert!(
+        summary.contains("non_live_disposition_counts"),
+        "human summary should make non-live dispositions visible"
+    );
 
     for child in array(&aggregate, "children") {
         let stdout = str_field(child, "stdout_log");

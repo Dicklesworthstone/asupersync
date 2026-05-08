@@ -21,6 +21,7 @@ BEAD_ID = "asupersync-oelvq2"
 CONTRACT = pathlib.Path("artifacts/mock_code_finder_verification_contract_v1.json")
 AGGREGATE_CONTRACT = pathlib.Path("artifacts/mock_code_finder_aggregate_contract_v1.json")
 VALIDATOR = pathlib.Path("scripts/validate_mock_code_finder_evidence.py")
+NON_LIVE_DISPOSITIONS = {"blocked", "unsupported", "expected_fail", "fixture_only"}
 
 
 class RunnerError(Exception):
@@ -213,14 +214,29 @@ def summarize_records(records: list[dict[str, Any]]) -> dict[str, Any]:
     verdicts: Counter[str] = Counter()
     qualities: Counter[str] = Counter()
     support: Counter[str] = Counter()
+    non_live: Counter[str] = Counter()
     first_failure = ""
     policy_scan_counts: dict[str, Any] = {}
     artifacts = []
+    skip_ledger = []
     for record in records:
         verdict = str(record.get("verdict", ""))
         verdicts[verdict] += 1
         qualities[str(record.get("evidence_quality", ""))] += 1
         support[str(record.get("support_class", ""))] += 1
+        if verdict in NON_LIVE_DISPOSITIONS:
+            non_live[verdict] += 1
+            skip_ledger.append(
+                {
+                    "scenario_id": str(record.get("scenario_id", "")),
+                    "verdict": verdict,
+                    "evidence_quality": str(record.get("evidence_quality", "")),
+                    "support_class": str(record.get("support_class", "")),
+                    "blocker_bead_id": str(record.get("blocker_bead_id", "")),
+                    "first_failure_line": str(record.get("first_failure_line", "")),
+                    "output_artifact": str(record.get("output_artifact", "")),
+                }
+            )
         output_artifact = str(record.get("output_artifact", ""))
         if output_artifact:
             artifacts.append(output_artifact)
@@ -237,6 +253,8 @@ def summarize_records(records: list[dict[str, Any]]) -> dict[str, Any]:
         "verdict_counts": dict(sorted(verdicts.items())),
         "evidence_quality_counts": dict(sorted(qualities.items())),
         "support_class_counts": dict(sorted(support.items())),
+        "non_live_disposition_counts": dict(sorted(non_live.items())),
+        "skip_ledger": skip_ledger,
         "first_failure_line": first_failure,
         "artifact_paths": sorted(set(artifacts)),
         "policy_scan_counts": policy_scan_counts,
@@ -289,6 +307,8 @@ def execute_child(
         "verdict_counts": {},
         "evidence_quality_counts": {},
         "support_class_counts": {},
+        "non_live_disposition_counts": {},
+        "skip_ledger": [],
         "first_failure_line": "",
         "artifact_paths": [],
         "policy_scan_counts": {},
@@ -323,11 +343,22 @@ def aggregate_children(
     verdict_totals: Counter[str] = Counter()
     quality_totals: Counter[str] = Counter()
     support_totals: Counter[str] = Counter()
+    non_live_totals: Counter[str] = Counter()
+    skip_ledger = []
     first_failure = ""
     for child in child_rows:
         verdict_totals.update(child["verdict_counts"])
         quality_totals.update(child["evidence_quality_counts"])
         support_totals.update(child["support_class_counts"])
+        non_live_totals.update(child["non_live_disposition_counts"])
+        for row in child["skip_ledger"]:
+            skip_ledger.append(
+                {
+                    "child_bead_id": child["child_bead_id"],
+                    "subsystem": child["subsystem"],
+                    **row,
+                }
+            )
         if not first_failure:
             if child["validation_errors"]:
                 first_failure = child["validation_errors"][0]
@@ -349,6 +380,9 @@ def aggregate_children(
         "verdict_counts": dict(sorted(verdict_totals.items())),
         "evidence_quality_counts": dict(sorted(quality_totals.items())),
         "support_class_counts": dict(sorted(support_totals.items())),
+        "non_live_disposition_counts": dict(sorted(non_live_totals.items())),
+        "skip_ledger_total": len(skip_ledger),
+        "skip_ledger": skip_ledger,
         "first_failure_line": first_failure,
         "children": child_rows,
         "final_verdict": final_verdict,
@@ -370,6 +404,7 @@ def human_summary(aggregate: dict[str, Any]) -> str:
         f"scenarios: {aggregate['scenario_count']}",
         f"verdict_counts: {aggregate['verdict_counts']}",
         f"evidence_quality_counts: {aggregate['evidence_quality_counts']}",
+        f"non_live_disposition_counts: {aggregate['non_live_disposition_counts']}",
     ]
     if aggregate["first_failure_line"]:
         lines.append(f"first_failure: {aggregate['first_failure_line']}")
