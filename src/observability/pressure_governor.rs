@@ -409,6 +409,18 @@ impl PressureGovernor {
             .map(f64_to_u64_saturating)
     }
 
+    /// Returns the latest published p95 decision latency gauge value.
+    #[must_use]
+    pub fn decision_latency_p95_metric_ns(&self) -> i64 {
+        self.decision_latency_p95_gauge.get()
+    }
+
+    /// Returns the latest published p999 decision latency gauge value.
+    #[must_use]
+    pub fn decision_latency_p999_metric_ns(&self) -> i64 {
+        self.decision_latency_p999_gauge.get()
+    }
+
     // Private helper methods
 
     fn collect_pressure_signals(
@@ -1046,8 +1058,20 @@ mod tests {
         );
         assert_eq!(governor.fallback_total.get(), 1);
         assert_eq!(governor.sample_count(), 1);
-        assert!(governor.decision_latency_p95_ns().is_some());
-        assert!(governor.decision_latency_p999_ns().is_some());
+        let p95 = governor
+            .decision_latency_p95_ns()
+            .expect("p95 decision latency should be recorded");
+        let p999 = governor
+            .decision_latency_p999_ns()
+            .expect("p999 decision latency should be recorded");
+        assert_eq!(
+            governor.decision_latency_p95_metric_ns(),
+            u64_to_i64_saturating(p95)
+        );
+        assert_eq!(
+            governor.decision_latency_p999_metric_ns(),
+            u64_to_i64_saturating(p999)
+        );
 
         let cached = governor
             .sample_pressure(&cx)
