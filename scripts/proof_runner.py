@@ -1282,6 +1282,32 @@ class ProofRunner:
                 )
         return failures
 
+    def _rch_log_rows(self, rch_outcomes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Return deterministic copy rows for source rch logs bundled in a pack."""
+        rows = []
+        for index, outcome in enumerate(rch_outcomes):
+            source_log_path = str(outcome.get("source_log_path", ""))
+            source_log_sha256 = str(outcome.get("source_log_sha256", ""))
+            source_log_bytes = int(outcome.get("source_log_bytes") or 0)
+            if not source_log_path or not source_log_sha256 or source_log_bytes <= 0:
+                continue
+            command = str(outcome.get("command", ""))
+            digest = hashlib.sha256(
+                f"{index}\0{command}\0{source_log_sha256}".encode("utf-8")
+            ).hexdigest()[:16]
+            rows.append(
+                {
+                    "path": f"rch_logs/{index:02d}-{digest}.log",
+                    "source_log_path": source_log_path,
+                    "command": command,
+                    "outcome_class": outcome.get("outcome_class", ""),
+                    "decision": outcome.get("decision", ""),
+                    "sha256": source_log_sha256,
+                    "bytes": source_log_bytes,
+                }
+            )
+        return rows
+
     def proof_console_report(
         self,
         generated_at: str = "",
@@ -1524,6 +1550,7 @@ class ProofRunner:
             proof_console["rch_outcomes"]
         )
         failure_reasons.extend(rch_outcome_provenance_failures)
+        rch_log_rows = self._rch_log_rows(proof_console["rch_outcomes"])
 
         embedded_reports = {
             "proof_console_report_v1": proof_console,
@@ -1546,6 +1573,7 @@ class ProofRunner:
             },
             "source_artifacts": source_artifacts,
             "embedded_report_rows": embedded_report_rows,
+            "rch_log_rows": rch_log_rows,
             "embedded_reports": embedded_reports,
             "proof_commands": proof_commands,
             "summaries": {
@@ -1560,6 +1588,7 @@ class ProofRunner:
                 "proof_lane_count": len(lanes),
                 "proof_command_count": len(proof_commands),
                 "rch_outcome_count": len(proof_console["rch_outcomes"]),
+                "rch_log_count": len(rch_log_rows),
                 "rch_outcome_provenance_failure_count": len(
                     rch_outcome_provenance_failures
                 ),
@@ -1593,6 +1622,18 @@ class ProofRunner:
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(self.repo_root / row["path"], destination)
             written_files.append(row["copy_path"])
+
+        for row in pack.get("rch_log_rows", []):
+            if not isinstance(row, dict):
+                continue
+            source_log_path = row.get("source_log_path", "")
+            copy_path = row.get("path", "")
+            if not source_log_path or not copy_path:
+                continue
+            destination = root / str(copy_path)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(Path(str(source_log_path)), destination)
+            written_files.append(str(copy_path))
 
         return {
             "output_dir": str(root),
@@ -1633,6 +1674,7 @@ class ProofRunner:
 
         missing_file_count = 0
         stale_file_count = 0
+        rch_log_count = 0
         for row in pack.get("source_artifacts", []):
             if not isinstance(row, dict) or row.get("status") != "included":
                 continue
@@ -1697,6 +1739,40 @@ class ProofRunner:
                     }
                 )
 
+        for row in pack.get("rch_log_rows", []):
+            if not isinstance(row, dict):
+                continue
+            rch_log_count += 1
+            log_path = str(row.get("path", ""))
+            actual_path = root / log_path
+            if not log_path or not actual_path.exists():
+                missing_file_count += 1
+                failure_reasons.append(
+                    {
+                        "reason_id": "missing-rch-log-copy",
+                        "summary": "bundled rch source log copy is missing",
+                        "path": log_path,
+                        "source_log_path": row.get("source_log_path", ""),
+                    }
+                )
+                continue
+            actual_sha256 = file_hash(actual_path)
+            actual_bytes = actual_path.stat().st_size
+            if actual_sha256 != row.get("sha256") or actual_bytes != row.get("bytes"):
+                stale_file_count += 1
+                failure_reasons.append(
+                    {
+                        "reason_id": "stale-rch-log-copy",
+                        "summary": "bundled rch source log hash or byte count changed",
+                        "path": log_path,
+                        "source_log_path": row.get("source_log_path", ""),
+                        "expected_sha256": row.get("sha256", ""),
+                        "actual_sha256": actual_sha256,
+                        "expected_bytes": row.get("bytes", 0),
+                        "actual_bytes": actual_bytes,
+                    }
+                )
+
         return {
             "schema_version": "release-proof-pack-verification-v1",
             "pack_dir": str(root),
@@ -1719,7 +1795,139 @@ class ProofRunner:
                 ),
                 "missing_file_count": missing_file_count,
                 "stale_file_count": stale_file_count,
+                "rch_log_count": rch_log_count,
             },
+            "failure_reasons": failure_reasons,
+            "verdict": "fail_closed" if failure_reasons else "pass",
+        }
+
+    def release_proof_pack_e2e_smoke(
+        self,
+        command: str,
+        output_dir: str,
+        generated_at: str = "",
+        touched_files: Optional[List[str]] = None,
+        log_fixture: str = "",
+    ) -> Dict[str, Any]:
+        """Run or fixture-replay one rch command, write a pack, then verify it."""
+        touched_files = touched_files or []
+        root = Path(output_dir)
+        root.mkdir(parents=True, exist_ok=True)
+        log_dir = root / "rch_logs"
+        outcome_dir = root / "rch_outcomes"
+        pack_dir = root / "pack"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        outcome_dir.mkdir(parents=True, exist_ok=True)
+
+        safe_command_argv(command)
+        log_path = log_dir / "smoke_000.log"
+        if log_fixture:
+            log_path.write_text(Path(log_fixture).read_text(encoding="utf-8"), encoding="utf-8")
+            return_code = 0
+            execution_mode = "fixture"
+        else:
+            completed = subprocess.run(
+                safe_command_argv(command),
+                cwd=self.repo_root,
+                text=True,
+                capture_output=True,
+            )
+            log_path.write_text(
+                "\n".join(
+                    [
+                        f"$ {command}",
+                        "",
+                        "[stdout]",
+                        completed.stdout,
+                        "[stderr]",
+                        completed.stderr,
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            return_code = completed.returncode
+            execution_mode = "rch"
+
+        classified = self.classify_rch_log(command, str(log_path), touched_files)
+        outcome = classified["rch_outcome"]
+        if (
+            return_code == 0
+            and outcome.get("remote_exit_status") is None
+            and outcome.get("decision") == "failed-local"
+        ):
+            outcome["outcome_class"] = "pass"
+            outcome["decision"] = "pass"
+            outcome["summary"] = "rch command exited 0 without a remote-exit marker"
+            classified["validation_frontier_record"] = ValidationFrontierRecord(
+                command,
+                touched_files,
+            ).as_pass()
+        outcome_path = outcome_dir / "smoke_000.json"
+        outcome_path.write_bytes(canonical_json_bytes(classified))
+        proof_pack = self.release_proof_pack(
+            generated_at=generated_at,
+            rch_outcome_paths=[str(outcome_path)],
+        )
+        write_result = self.write_release_proof_pack(str(pack_dir), proof_pack)
+        verification = self.verify_release_proof_pack_dir(str(pack_dir))
+
+        failure_reasons = []
+        if return_code != 0:
+            failure_reasons.append(
+                {
+                    "reason_id": "smoke-rch-command-failed",
+                    "summary": "release proof-pack smoke rch command exited nonzero",
+                    "command": command,
+                    "return_code": return_code,
+                }
+            )
+        if classified["rch_outcome"]["decision"] != "pass":
+            failure_reasons.append(
+                {
+                    "reason_id": "smoke-rch-outcome-not-pass",
+                    "summary": "release proof-pack smoke rch outcome was not classified as pass",
+                    "command": command,
+                    "decision": classified["rch_outcome"]["decision"],
+                    "outcome_class": classified["rch_outcome"]["outcome_class"],
+                }
+            )
+        if proof_pack["verdict"] != "pass":
+            failure_reasons.append(
+                {
+                    "reason_id": "smoke-proof-pack-not-pass",
+                    "summary": "release proof pack generated by smoke did not pass",
+                    "verdict": proof_pack["verdict"],
+                }
+            )
+        if verification["verdict"] != "pass":
+            failure_reasons.append(
+                {
+                    "reason_id": "smoke-verification-not-pass",
+                    "summary": "written release proof pack directory did not verify",
+                    "verdict": verification["verdict"],
+                }
+            )
+
+        return {
+            "schema_version": "release-proof-pack-e2e-smoke-v1",
+            "execution_mode": execution_mode,
+            "output_dir": str(root),
+            "pack_dir": str(pack_dir),
+            "smoke_commands": [
+                {
+                    "command": command,
+                    "return_code": return_code,
+                    "log_path": str(log_path),
+                    "outcome_path": str(outcome_path),
+                    "outcome_class": classified["rch_outcome"]["outcome_class"],
+                    "decision": classified["rch_outcome"]["decision"],
+                    "source_log_sha256": classified["rch_outcome"]["source_log_sha256"],
+                    "source_log_bytes": classified["rch_outcome"]["source_log_bytes"],
+                }
+            ],
+            "proof_pack": proof_pack,
+            "write_result": write_result,
+            "verification": verification,
             "failure_reasons": failure_reasons,
             "verdict": "fail_closed" if failure_reasons else "pass",
         }
@@ -2035,6 +2243,11 @@ def main():
         help="Emit a deterministic release proof-pack index"
     )
     parser.add_argument(
+        "--release-proof-pack-e2e-smoke",
+        action="store_true",
+        help="Run or fixture-replay an rch command, write a release proof pack, and verify it"
+    )
+    parser.add_argument(
         "--release-proof-pack-generated-at",
         default="",
         help="Override generated_at for deterministic release proof-pack fixtures"
@@ -2049,6 +2262,11 @@ def main():
         "--release-proof-pack-output-dir",
         default="",
         help="Write the release proof pack to this directory"
+    )
+    parser.add_argument(
+        "--release-proof-pack-smoke-log-fixture",
+        default="",
+        help="Use a saved rch transcript for release proof-pack smoke tests instead of running rch"
     )
     parser.add_argument(
         "--verify-release-proof-pack-dir",
@@ -2185,6 +2403,29 @@ def main():
                 print(json.dumps(response, indent=2))
             else:
                 print(release_proof_pack_markdown(result), end="")
+            return 0 if result["verdict"] == "pass" else 1
+
+        if args.release_proof_pack_e2e_smoke:
+            if not args.command:
+                parser.error("--command is required with --release-proof-pack-e2e-smoke")
+            if not args.release_proof_pack_output_dir:
+                parser.error(
+                    "--release-proof-pack-output-dir is required with "
+                    "--release-proof-pack-e2e-smoke"
+                )
+            result = runner.release_proof_pack_e2e_smoke(
+                command=args.command,
+                output_dir=args.release_proof_pack_output_dir,
+                generated_at=args.release_proof_pack_generated_at,
+                touched_files=args.touched_files,
+                log_fixture=args.release_proof_pack_smoke_log_fixture,
+            )
+            if args.output == "json":
+                print(json.dumps(result, indent=2))
+            else:
+                print(f"Verdict: {result['verdict']}")
+                for reason in result["failure_reasons"]:
+                    print(f"- {reason['reason_id']}: {reason['summary']}")
             return 0 if result["verdict"] == "pass" else 1
 
         if args.verify_release_proof_pack_dir:

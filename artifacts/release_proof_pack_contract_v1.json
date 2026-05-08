@@ -21,6 +21,7 @@
     "generator",
     "source_artifacts",
     "embedded_report_rows",
+    "rch_log_rows",
     "embedded_reports.proof_console_report_v1",
     "proof_commands",
     "summaries.proof_console",
@@ -35,12 +36,15 @@
     "embedded proof console verdict other than pass sets verdict to fail_closed",
     "tracker summary includes counts and hashes only, not raw issue rows",
     "output directory writes index.json plus copied source artifacts under source_artifacts/",
+    "output directory bundles selected rch source logs under rch_logs/ and verifies their hashes",
+    "e2e smoke runs or fixture-replays an rch exec command, classifies it, writes the pack, and verifies the written directory",
     "generated JSON is byte-stable with sorted keys"
   ],
   "validation_commands": [
     "python3 -m json.tool artifacts/release_proof_pack_contract_v1.json",
     "python3 -m py_compile scripts/proof_runner.py",
     "python3 scripts/proof_runner.py --release-proof-pack --release-proof-pack-generated-at 2026-05-08T00:00:00Z --output json",
+    "python3 scripts/proof_runner.py --release-proof-pack-e2e-smoke --command 'rch exec -- cargo tree -e normal -p asupersync -i tokio' --release-proof-pack-generated-at 2026-05-08T00:00:00Z --release-proof-pack-output-dir /tmp/asupersync-release-proof-pack-e2e-smoke --touched-files artifacts/proof_lane_manifest_v1.json --output json",
     "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_release_proof_pack_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test proof_runner_contract -- --nocapture"
   ]
 }

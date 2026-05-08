@@ -34,6 +34,7 @@
     "mode": "release-proof-pack",
     "name": "scripts/proof_runner.py"
   },
+  "rch_log_rows": [],
   "proof_commands": [
     {
       "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --all-targets",
@@ -192,9 +193,9 @@
       "active_module_count": 81,
       "contract_version": "conformance-registry-contract-v1",
       "dormant_module_count": 11,
-      "reference_surface_count": 4,
-      "unwired_fail_closed_count": 4,
-      "unwired_reference_surface_count": 4
+      "reference_surface_count": 5,
+      "unwired_fail_closed_count": 5,
+      "unwired_reference_surface_count": 5
     },
     "proof_console": {
       "claim_count": 8,
@@ -224,6 +225,7 @@
     "missing_source_artifact_count": 0,
     "proof_command_count": 13,
     "proof_lane_count": 13,
+    "rch_log_count": 0,
     "rch_outcome_count": 0,
     "rch_outcome_provenance_failure_count": 0,
     "source_artifact_count": 6

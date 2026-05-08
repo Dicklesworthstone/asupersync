@@ -99,6 +99,21 @@ fn release_pack_golden_projection(result: &Value) -> Value {
             })
         })
         .collect::<Vec<_>>();
+    let rch_log_rows = pack["rch_log_rows"]
+        .as_array()
+        .expect("rch log rows")
+        .iter()
+        .map(|row| {
+            json!({
+                "path": row["path"],
+                "command": row["command"],
+                "outcome_class": row["outcome_class"],
+                "decision": row["decision"],
+                "sha256": "sha256:[scrubbed]",
+                "bytes": "[bytes]"
+            })
+        })
+        .collect::<Vec<_>>();
     let tracker = &pack["summaries"]["tracker"];
     let status_count_keys = tracker["status_counts"]
         .as_object()
@@ -129,6 +144,7 @@ fn release_pack_golden_projection(result: &Value) -> Value {
                 "verdict": pack["embedded_reports"]["proof_console_report_v1"]["verdict"]
             }
         },
+        "rch_log_rows": rch_log_rows,
         "proof_commands": proof_commands,
         "summaries": {
             "proof_console": pack["summaries"]["proof_console"],
@@ -1764,6 +1780,191 @@ fn release_proof_pack_verifier_fail_closes_on_stale_copied_artifact() {
 }
 
 #[test]
+fn release_proof_pack_rch_log_bundles_and_verifies_source_logs() {
+    let command = "rch exec -- cargo tree -e normal -p asupersync -i tokio";
+    let classified = classify_fixture(
+        "rch_pass.log",
+        command,
+        &["artifacts/proof_lane_manifest_v1.json"],
+    );
+    let outcome = write_json_fixture(&classified);
+    let outcome_path = outcome.path().to_str().expect("outcome path utf8");
+    let tempdir = tempfile::tempdir().expect("create release proof pack tempdir");
+    let output_dir = tempdir.path().join("pack");
+    let output_dir_text = output_dir
+        .to_str()
+        .expect("release proof pack tempdir path utf8");
+
+    let write_output = run_proof_runner(&[
+        "--release-proof-pack",
+        "--release-proof-pack-generated-at",
+        "2026-05-08T00:00:00Z",
+        "--release-proof-pack-rch-outcome",
+        outcome_path,
+        "--release-proof-pack-output-dir",
+        output_dir_text,
+        "--output",
+        "json",
+    ])
+    .expect("release proof pack should execute");
+    assert!(
+        write_output.status.success(),
+        "release proof pack with rch log failed: {}\nstdout: {}\nstderr: {}",
+        write_output.status,
+        String::from_utf8_lossy(&write_output.stdout),
+        String::from_utf8_lossy(&write_output.stderr)
+    );
+    let result = output_json(&write_output);
+    let pack = &result["proof_pack"];
+    let rch_log_rows = pack["rch_log_rows"].as_array().expect("rch log rows");
+    assert_eq!(rch_log_rows.len(), 1);
+    assert_eq!(
+        pack["summary"]["rch_log_count"].as_u64(),
+        Some(1),
+        "pack summary should count bundled rch logs"
+    );
+    let copied_log = output_dir.join(rch_log_rows[0]["path"].as_str().expect("rch log path"));
+    assert!(
+        copied_log.exists(),
+        "release pack should copy rch source log"
+    );
+
+    let verify_output = run_proof_runner(&[
+        "--verify-release-proof-pack-dir",
+        output_dir_text,
+        "--output",
+        "json",
+    ])
+    .expect("release proof pack verifier should execute");
+    assert!(
+        verify_output.status.success(),
+        "release proof pack verifier failed after rch log copy: {}\nstdout: {}\nstderr: {}",
+        verify_output.status,
+        String::from_utf8_lossy(&verify_output.stdout),
+        String::from_utf8_lossy(&verify_output.stderr)
+    );
+    let verification = output_json(&verify_output);
+    assert_eq!(verification["verdict"].as_str(), Some("pass"));
+    assert_eq!(verification["summary"]["rch_log_count"].as_u64(), Some(1));
+}
+
+#[test]
+fn release_proof_pack_rch_log_verifier_fail_closes_on_stale_copy() {
+    let command = "rch exec -- cargo tree -e normal -p asupersync -i tokio";
+    let classified = classify_fixture(
+        "rch_pass.log",
+        command,
+        &["artifacts/proof_lane_manifest_v1.json"],
+    );
+    let outcome = write_json_fixture(&classified);
+    let outcome_path = outcome.path().to_str().expect("outcome path utf8");
+    let tempdir = tempfile::tempdir().expect("create release proof pack tempdir");
+    let output_dir = tempdir.path().join("pack");
+    let output_dir_text = output_dir
+        .to_str()
+        .expect("release proof pack tempdir path utf8");
+
+    let write_output = run_proof_runner(&[
+        "--release-proof-pack",
+        "--release-proof-pack-generated-at",
+        "2026-05-08T00:00:00Z",
+        "--release-proof-pack-rch-outcome",
+        outcome_path,
+        "--release-proof-pack-output-dir",
+        output_dir_text,
+        "--output",
+        "json",
+    ])
+    .expect("release proof pack should execute");
+    assert!(write_output.status.success());
+    let result = output_json(&write_output);
+    let log_path = result["proof_pack"]["rch_log_rows"][0]["path"]
+        .as_str()
+        .expect("rch log path");
+    let copied_log = output_dir.join(log_path);
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&copied_log)
+        .expect("open copied rch log");
+    writeln!(file, "stale rch log mutation").expect("mutate copied rch log");
+
+    let verify_output = run_proof_runner(&[
+        "--verify-release-proof-pack-dir",
+        output_dir_text,
+        "--output",
+        "json",
+    ])
+    .expect("release proof pack verifier should execute");
+    assert!(
+        !verify_output.status.success(),
+        "stale copied rch log must make verifier fail closed"
+    );
+    let verification = output_json(&verify_output);
+    assert_eq!(verification["verdict"].as_str(), Some("fail_closed"));
+    assert!(
+        verification["failure_reasons"]
+            .as_array()
+            .expect("failure reasons")
+            .iter()
+            .any(|reason| reason["reason_id"].as_str() == Some("stale-rch-log-copy")),
+        "verifier should identify stale copied rch log"
+    );
+}
+
+#[test]
+fn release_proof_pack_rch_log_e2e_smoke_fixture_writes_and_verifies_pack() {
+    let command = "rch exec -- cargo tree -e normal -p asupersync -i tokio";
+    let tempdir = tempfile::tempdir().expect("create release proof pack smoke tempdir");
+    let output_dir = tempdir.path().join("smoke");
+    let output_dir_text = output_dir
+        .to_str()
+        .expect("release proof pack smoke tempdir path utf8");
+    let output = run_proof_runner(&[
+        "--release-proof-pack-e2e-smoke",
+        "--command",
+        command,
+        "--release-proof-pack-generated-at",
+        "2026-05-08T00:00:00Z",
+        "--release-proof-pack-output-dir",
+        output_dir_text,
+        "--release-proof-pack-smoke-log-fixture",
+        "tests/fixtures/proof_runner/rch_pass.log",
+        "--touched-files",
+        "artifacts/proof_lane_manifest_v1.json",
+        "--output",
+        "json",
+    ])
+    .expect("release proof pack smoke should execute");
+    assert!(
+        output.status.success(),
+        "release proof pack smoke failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let smoke = output_json(&output);
+    assert_eq!(
+        smoke["schema_version"].as_str(),
+        Some("release-proof-pack-e2e-smoke-v1")
+    );
+    assert_eq!(smoke["execution_mode"].as_str(), Some("fixture"));
+    assert_eq!(smoke["verdict"].as_str(), Some("pass"));
+    assert_eq!(
+        smoke["smoke_commands"][0]["decision"].as_str(),
+        Some("pass")
+    );
+    assert_eq!(
+        smoke["proof_pack"]["summary"]["rch_log_count"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(smoke["verification"]["verdict"].as_str(), Some("pass"));
+    assert!(
+        output_dir.join("pack/index.json").exists(),
+        "smoke should write a release proof pack directory"
+    );
+}
+
+#[test]
 fn release_proof_pack_fail_closes_on_missing_rch_log() {
     let command = "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test proof_runner_contract -- --nocapture";
     let mut classified = classify_fixture(
@@ -1885,5 +2086,6 @@ fn release_proof_pack_contract_names_required_artifacts_and_proofs() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(commands.contains("--release-proof-pack"));
+    assert!(commands.contains("--release-proof-pack-e2e-smoke"));
     assert!(commands.contains("rch exec -- "));
 }
