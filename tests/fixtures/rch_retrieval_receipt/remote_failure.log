@@ -1,0 +1,5 @@
+  2026-05-08T04:54:12.205872Z  INFO rch::hook: Executing command remotely: cargo clippy --test proof_runner_contract -- -D warnings
+error: unused import: `error::ErrorCode`
+error: could not compile `asupersync-conformance` (lib) due to 179 previous errors
+  2026-05-08T04:55:35.218061Z  INFO rch::hook: Remote command finished: exit=101 in 83012ms
+[RCH] remote vmi1152480 failed (exit 101)
