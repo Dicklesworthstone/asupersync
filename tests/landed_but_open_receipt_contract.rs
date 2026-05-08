@@ -143,6 +143,28 @@ fn ready_to_close_matches_full_output_golden() {
 }
 
 #[test]
+fn missing_proof_matches_full_output_golden() {
+    let output = run_receipt("missing_proof.json");
+    assert!(
+        output.status.success(),
+        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actual = String::from_utf8(output.stdout).expect("receipt stdout must be UTF-8");
+    let expected = fixture_text("missing_proof_expected.json");
+
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
+    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
+    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
+    assert_eq!(
+        actual, expected,
+        "landed-but-open missing-proof receipt changed; update the golden only after reviewing verification-before-close semantics"
+    );
+}
+
+#[test]
 fn commit_without_proof_stays_open_for_verification() {
     let receipt = receipt_json("missing_proof.json");
     let row = first_row(&receipt);
