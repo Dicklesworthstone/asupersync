@@ -67,13 +67,13 @@ EOF
     cd "$PROJECT_ROOT"
 
     # Set deterministic environment
-    export CARGO_TARGET_DIR="/tmp/rch-target-raptorq-perf"
+    export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_raptorq_perf_gates_full}"
     export RAPTORQ_PERF_SEED=424242
     export RAPTORQ_PERF_THREADS=1
     export RUST_TEST_THREADS=1
 
     # Run the benchmark suite
-    if rch exec -- cargo bench --bench raptorq_benchmark \
+    if rch exec -- env CARGO_TARGET_DIR="$CARGO_TARGET_DIR" cargo bench --bench raptorq_benchmark \
         --features simd-intrinsics \
         -- --output-format json > "$CURRENT_RESULTS" 2>&1; then
 
@@ -97,11 +97,11 @@ run_smoke_benchmarks() {
 EOF
 
     cd "$PROJECT_ROOT"
-    export CARGO_TARGET_DIR="/tmp/rch-target-raptorq-smoke"
+    export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_raptorq_perf_gates_smoke}"
     export RAPTORQ_PERF_SEED=424242
 
     # Run critical workloads only
-    if rch exec -- cargo bench --bench raptorq_benchmark \
+    if rch exec -- env CARGO_TARGET_DIR="$CARGO_TARGET_DIR" cargo bench --bench raptorq_benchmark \
         -- --warm-up-time 1 --measurement-time 5 \
         'gf256_primitives' 'raptorq_e2e/encode' \
         --output-format json > "$CURRENT_RESULTS" 2>&1; then
@@ -203,7 +203,9 @@ verify_rollback_integrity() {
     # Run basic functionality tests to ensure rollback didn't break anything
     cd "$PROJECT_ROOT"
 
-    if rch exec -- cargo test --test raptorq_perf_invariants \
+    export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_raptorq_perf_gates_rollback}"
+
+    if rch exec -- env CARGO_TARGET_DIR="$CARGO_TARGET_DIR" cargo test --test raptorq_perf_invariants \
         h2_closure_packet_dependency_status_alignment \
         g1_budget_draft_schema_and_coverage -- --nocapture; then
 
