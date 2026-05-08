@@ -8,17 +8,11 @@ use asupersync::observability::otel::otlp_request_builder::{
     severity_text_from_bucket,
 };
 use clap::{Arg, Command};
-use opentelemetry::logs::{LogRecord as OtelLogRecord, LoggerProvider, Severity};
-use opentelemetry_proto::tonic::logs::v1::{
-    ExportLogsServiceRequest, LogRecord, LogsData, ResourceLogs, ScopeLogs,
-};
-use opentelemetry_sdk::Resource;
-use opentelemetry_sdk::logs::{
-    BatchLogProcessor, LogProcessor, LoggerProvider as SdkLoggerProvider,
-};
+use opentelemetry::logs::Severity;
+use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+use opentelemetry_proto::tonic::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
 use prost::Message;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::SystemTime;
 
 /// Conformance test result tracking
@@ -99,7 +93,7 @@ fn main() {
     let test_name = matches.get_one::<String>("test").unwrap();
     let verbose = matches.get_flag("verbose");
 
-    match test_name.as_str() {
+    let result = match test_name.as_str() {
         "basic-log-export" => run_basic_log_export_test(verbose),
         "severity-levels" => run_severity_levels_test(verbose),
         "attributes" => run_attributes_test(verbose),
@@ -111,12 +105,28 @@ fn main() {
             generate_compliance_report();
             return;
         }
-        "all" => run_all_tests(verbose),
+        "all" => {
+            run_all_tests(verbose);
+            return;
+        }
         _ => {
             eprintln!("Unknown test: {}", test_name);
             std::process::exit(1);
         }
+    };
+
+    let exit_code = exit_code_for_result(&result);
+    match &result {
+        ConformanceTestResult::Pass => println!("✅ TEST PASSED"),
+        ConformanceTestResult::Fail { reason } => {
+            eprintln!("❌ TEST FAILED: {}", reason);
+        }
+        ConformanceTestResult::ExpectedFailure { reason } => {
+            eprintln!("⚠️ EXPECTED FAILURE: {}", reason);
+        }
     }
+
+    std::process::exit(exit_code);
 }
 
 fn run_all_tests(verbose: bool) {
@@ -237,7 +247,7 @@ fn run_all_tests(verbose: bool) {
 
         let result = run_log_export_conformance_test(test_case, verbose);
 
-        match result {
+        match &result {
             ConformanceTestResult::Pass => {
                 passed += 1;
                 println!("✅ PASS");
@@ -262,7 +272,7 @@ fn run_all_tests(verbose: bool) {
         eprintln!(
             "{{\"test\":\"{}\",\"status\":\"{}\",\"level\":\"{:?}\"}}",
             test_case.name,
-            match result {
+            match &result {
                 ConformanceTestResult::Pass => "PASS",
                 ConformanceTestResult::Fail { .. } => "FAIL",
                 ConformanceTestResult::ExpectedFailure { .. } => "XFAIL",
@@ -289,12 +299,46 @@ fn run_all_tests(verbose: bool) {
     println!("│  🎯 Score: {:.1}%                   │", score);
     println!("└─────────────────────────────────────┘");
 
-    if failed > 0 {
-        eprintln!("\n❌ {} conformance tests failed", failed);
-        std::process::exit(1);
+    println!("\n{}", final_status_line(total, failed, xfail));
+
+    let exit_code = exit_code_for_summary(total, failed, xfail);
+    if exit_code != 0 {
+        if failed > 0 {
+            eprintln!("\n❌ {} conformance tests failed", failed);
+        }
+        if xfail > 0 {
+            eprintln!("\n⚠️ {} expected-failure tests require review", xfail);
+        }
+        std::process::exit(exit_code);
+    }
+
+    println!("🎯 OTLP/Logs protobuf output matches opentelemetry-sdk exactly");
+}
+
+fn exit_code_for_result(result: &ConformanceTestResult) -> i32 {
+    match result {
+        ConformanceTestResult::Pass => 0,
+        ConformanceTestResult::Fail { .. } | ConformanceTestResult::ExpectedFailure { .. } => 1,
+    }
+}
+
+fn exit_code_for_summary(total: usize, failed: usize, expected_failures: usize) -> i32 {
+    if total == 0 || failed > 0 || expected_failures > 0 {
+        1
     } else {
-        println!("\n✅ ALL TESTS PASSED - LogRecord exporter is conformant");
-        println!("🎯 OTLP/Logs protobuf output matches opentelemetry-sdk exactly");
+        0
+    }
+}
+
+fn final_status_line(total: usize, failed: usize, expected_failures: usize) -> String {
+    if total == 0 {
+        "NO TESTS EXECUTED".to_string()
+    } else if failed > 0 {
+        format!("FAILURES PRESENT ({failed} failed, {expected_failures} expected failures)")
+    } else if expected_failures > 0 {
+        format!("NO FAILURES; PARTIAL COVERAGE ({expected_failures} expected failures)")
+    } else {
+        "✅ ALL TESTS PASSED - LogRecord exporter is conformant".to_string()
     }
 }
 
@@ -462,6 +506,7 @@ fn generate_reference_otlp_request(
             flags: 0,
             trace_id: vec![],
             span_id: vec![],
+            event_name: String::new(),
         };
 
         scope_logs_map
@@ -518,6 +563,7 @@ fn generate_reference_otlp_request(
         resource: Some(opentelemetry_proto::tonic::resource::v1::Resource {
             attributes: resource_attributes,
             dropped_attributes_count: 0,
+            entity_refs: vec![],
         }),
         scope_logs,
         schema_url: String::new(),
@@ -563,11 +609,29 @@ fn create_test_log_with_scope(
 fn severity_to_bucket(severity: &Severity) -> u8 {
     match severity {
         Severity::Trace => 1,
+        Severity::Trace2 => 2,
+        Severity::Trace3 => 3,
+        Severity::Trace4 => 4,
         Severity::Debug => 5,
+        Severity::Debug2 => 6,
+        Severity::Debug3 => 7,
+        Severity::Debug4 => 8,
         Severity::Info => 9,
+        Severity::Info2 => 10,
+        Severity::Info3 => 11,
+        Severity::Info4 => 12,
         Severity::Warn => 13,
+        Severity::Warn2 => 14,
+        Severity::Warn3 => 15,
+        Severity::Warn4 => 16,
         Severity::Error => 17,
+        Severity::Error2 => 18,
+        Severity::Error3 => 19,
+        Severity::Error4 => 20,
         Severity::Fatal => 21,
+        Severity::Fatal2 => 22,
+        Severity::Fatal3 => 23,
+        Severity::Fatal4 => 24,
     }
 }
 
@@ -749,4 +813,55 @@ fn generate_compliance_report() {
     println!(
         "✅ **CONFORMANT** - LogRecord exporter produces identical OTLP/Logs protobuf vs opentelemetry-sdk"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ConformanceTestResult, exit_code_for_result, exit_code_for_summary, final_status_line,
+    };
+
+    #[test]
+    fn exit_code_is_nonzero_for_expected_failure_results() {
+        let result = ConformanceTestResult::ExpectedFailure {
+            reason: "known divergence".to_string(),
+        };
+
+        assert_eq!(exit_code_for_result(&result), 1);
+    }
+
+    #[test]
+    fn exit_code_is_nonzero_for_failure_results() {
+        let result = ConformanceTestResult::Fail {
+            reason: "mismatch".to_string(),
+        };
+
+        assert_eq!(exit_code_for_result(&result), 1);
+    }
+
+    #[test]
+    fn exit_code_is_zero_only_for_clean_summary() {
+        assert_eq!(exit_code_for_summary(5, 0, 0), 0);
+        assert_eq!(exit_code_for_summary(0, 0, 0), 1);
+        assert_eq!(exit_code_for_summary(5, 1, 0), 1);
+        assert_eq!(exit_code_for_summary(5, 0, 1), 1);
+    }
+
+    #[test]
+    fn final_status_line_reports_partial_coverage_for_xfail_only() {
+        let status = final_status_line(5, 0, 1);
+
+        assert!(status.contains("NO FAILURES; PARTIAL COVERAGE"));
+        assert!(!status.contains("ALL TESTS PASSED"));
+    }
+
+    #[test]
+    fn final_status_line_reports_zero_coverage() {
+        assert_eq!(final_status_line(0, 0, 0), "NO TESTS EXECUTED");
+    }
+
+    #[test]
+    fn final_status_line_reports_true_all_pass() {
+        assert!(final_status_line(5, 0, 0).contains("ALL TESTS PASSED"));
+    }
 }
