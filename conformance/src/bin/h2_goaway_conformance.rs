@@ -55,7 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("🔧 HTTP/2 GOAWAY Frame Conformance Tester");
-    println!("   Testing asupersync against RFC expected states; h2 reference is XFAIL");
+    println!("{}", startup_scope_line());
     println!();
 
     // Create and configure the tester
@@ -112,6 +112,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Exit with appropriate code
     std::process::exit(exit_code(&report));
+}
+
+fn startup_scope_line() -> &'static str {
+    "   Testing asupersync against RFC expected states; h2 reference is XFAIL"
 }
 
 /// Generate a concise summary output
@@ -302,5 +306,15 @@ mod tests {
         let report = synthetic_report(8, 0, 0, 0);
 
         assert_eq!(exit_code(&report), 0);
+    }
+
+    #[test]
+    fn startup_scope_line_does_not_claim_live_h2_reference() {
+        let line = startup_scope_line();
+
+        assert!(line.contains("RFC expected states"));
+        assert!(line.contains("h2 reference is XFAIL"));
+        assert!(!line.contains("vs h2 reference implementation"));
+        assert!(!line.contains("Testing asupersync against h2 reference"));
     }
 }
