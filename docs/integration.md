@@ -149,8 +149,8 @@ I/O trait compatibility, do not also bring in the hyper or tower bridges.
    boundary is in place:
 
 ```bash
-rch exec -- cargo tree -e normal -p asupersync -i tokio
-rch exec -- cargo tree -e normal -p asupersync --features metrics -i tokio
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_integration_docs cargo tree -e normal -p asupersync -i tokio
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_integration_docs cargo tree -e normal -p asupersync --features metrics -i tokio
 ```
 
 These commands should still print `warning: nothing to print.` The compat crate
