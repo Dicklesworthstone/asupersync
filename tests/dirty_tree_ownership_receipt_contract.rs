@@ -62,6 +62,16 @@ fn fixture_text(fixture: &str) -> String {
         .expect("fixture golden must be readable")
 }
 
+fn assert_receipt_output_matches_golden(fixture: &str, expected_fixture: &str) {
+    let actual_text = receipt_stdout(fixture);
+    let expected_text = fixture_text(expected_fixture);
+    let actual_json: Value = serde_json::from_str(&actual_text).expect("actual receipt JSON");
+    let expected_json: Value = serde_json::from_str(&expected_text).expect("expected receipt JSON");
+
+    assert_eq!(actual_json, expected_json);
+    assert_eq!(actual_text, expected_text);
+}
+
 fn row<'a>(receipt: &'a Value, path: &str) -> &'a Value {
     receipt["rows"]
         .as_array()
@@ -110,13 +120,7 @@ fn peer_reservation_blocks_staging() {
 
 #[test]
 fn peer_reservation_matches_full_output_golden() {
-    let actual_text = receipt_stdout("peer_reservation.json");
-    let expected_text = fixture_text("peer_reservation_expected.json");
-    let actual_json: Value = serde_json::from_str(&actual_text).expect("actual receipt JSON");
-    let expected_json: Value = serde_json::from_str(&expected_text).expect("expected receipt JSON");
-
-    assert_eq!(actual_json, expected_json);
-    assert_eq!(actual_text, expected_text);
+    assert_receipt_output_matches_golden("peer_reservation.json", "peer_reservation_expected.json");
 }
 
 #[test]
@@ -138,13 +142,7 @@ fn self_reservation_allows_pathspec_staging() {
 
 #[test]
 fn self_reservation_matches_full_output_golden() {
-    let actual_text = receipt_stdout("self_reservation.json");
-    let expected_text = fixture_text("self_reservation_expected.json");
-    let actual_json: Value = serde_json::from_str(&actual_text).expect("actual receipt JSON");
-    let expected_json: Value = serde_json::from_str(&expected_text).expect("expected receipt JSON");
-
-    assert_eq!(actual_json, expected_json);
-    assert_eq!(actual_text, expected_text);
+    assert_receipt_output_matches_golden("self_reservation.json", "self_reservation_expected.json");
 }
 
 #[test]
@@ -197,13 +195,10 @@ fn mixed_staged_index_requires_path_limited_commit_boundary() {
 
 #[test]
 fn mixed_staged_index_matches_full_output_golden() {
-    let actual_text = receipt_stdout("mixed_staged_index.json");
-    let expected_text = fixture_text("mixed_staged_index_expected.json");
-    let actual_json: Value = serde_json::from_str(&actual_text).expect("actual receipt JSON");
-    let expected_json: Value = serde_json::from_str(&expected_text).expect("expected receipt JSON");
-
-    assert_eq!(actual_json, expected_json);
-    assert_eq!(actual_text, expected_text);
+    assert_receipt_output_matches_golden(
+        "mixed_staged_index.json",
+        "mixed_staged_index_expected.json",
+    );
 }
 
 #[test]
@@ -221,13 +216,7 @@ fn tracker_dirty_state_is_never_mixed() {
 
 #[test]
 fn tracker_dirty_matches_full_output_golden() {
-    let actual_text = receipt_stdout("tracker_dirty.json");
-    let expected_text = fixture_text("tracker_dirty_expected.json");
-    let actual_json: Value = serde_json::from_str(&actual_text).expect("actual receipt JSON");
-    let expected_json: Value = serde_json::from_str(&expected_text).expect("expected receipt JSON");
-
-    assert_eq!(actual_json, expected_json);
-    assert_eq!(actual_text, expected_text);
+    assert_receipt_output_matches_golden("tracker_dirty.json", "tracker_dirty_expected.json");
 }
 
 #[test]
@@ -245,13 +234,7 @@ fn recent_message_can_assign_peer_owner_without_reservation() {
 
 #[test]
 fn message_owner_matches_full_output_golden() {
-    let actual_text = receipt_stdout("message_owner.json");
-    let expected_text = fixture_text("message_owner_expected.json");
-    let actual_json: Value = serde_json::from_str(&actual_text).expect("actual receipt JSON");
-    let expected_json: Value = serde_json::from_str(&expected_text).expect("expected receipt JSON");
-
-    assert_eq!(actual_json, expected_json);
-    assert_eq!(actual_text, expected_text);
+    assert_receipt_output_matches_golden("message_owner.json", "message_owner_expected.json");
 }
 
 #[test]
@@ -272,13 +255,7 @@ fn unavailable_agent_mail_leaves_path_unattributed() {
 
 #[test]
 fn no_agent_mail_matches_full_output_golden() {
-    let actual_text = receipt_stdout("no_agent_mail.json");
-    let expected_text = fixture_text("no_agent_mail_expected.json");
-    let actual_json: Value = serde_json::from_str(&actual_text).expect("actual receipt JSON");
-    let expected_json: Value = serde_json::from_str(&expected_text).expect("expected receipt JSON");
-
-    assert_eq!(actual_json, expected_json);
-    assert_eq!(actual_text, expected_text);
+    assert_receipt_output_matches_golden("no_agent_mail.json", "no_agent_mail_expected.json");
 }
 
 #[test]
@@ -296,13 +273,7 @@ fn conflicting_owner_signals_are_explicit() {
 
 #[test]
 fn owner_conflict_matches_full_output_golden() {
-    let actual_text = receipt_stdout("owner_conflict.json");
-    let expected_text = fixture_text("owner_conflict_expected.json");
-    let actual_json: Value = serde_json::from_str(&actual_text).expect("actual receipt JSON");
-    let expected_json: Value = serde_json::from_str(&expected_text).expect("expected receipt JSON");
-
-    assert_eq!(actual_json, expected_json);
-    assert_eq!(actual_text, expected_text);
+    assert_receipt_output_matches_golden("owner_conflict.json", "owner_conflict_expected.json");
 }
 
 #[test]
