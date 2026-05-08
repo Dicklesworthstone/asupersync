@@ -164,14 +164,18 @@ fn doc_requires_ci_integration_and_rch_exec() {
         doc.contains("rch exec --"),
         "document must require rch exec for heavy commands"
     );
+    assert!(
+        !doc.contains("rch exec -- cargo "),
+        "CI commands must route Cargo through rch env CARGO_TARGET_DIR"
+    );
 
     for token in [
-        "rch exec -- cargo test --test tokio_executable_conformance_contracts -- --nocapture",
-        "rch exec -- cargo test --test tokio_ci_quality_gate_enforcement -- --nocapture",
-        "rch exec -- cargo test --test tokio_replay_artifact_schema_policy -- --nocapture",
-        "rch exec -- cargo check --all-targets",
-        "rch exec -- cargo clippy --all-targets -- -D warnings",
-        "rch exec -- cargo fmt --check",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_replay_artifact_docs cargo test --test tokio_executable_conformance_contracts -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_replay_artifact_docs cargo test --test tokio_ci_quality_gate_enforcement -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_replay_artifact_docs cargo test --test tokio_replay_artifact_schema_policy -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_replay_artifact_docs cargo check --all-targets",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_replay_artifact_docs cargo clippy --all-targets -- -D warnings",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_replay_artifact_docs cargo fmt --check",
         "QG-04",
         "QG-06",
     ] {
