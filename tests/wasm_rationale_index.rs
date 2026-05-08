@@ -59,10 +59,10 @@ fn rationale_doc_contains_decision_register_and_rejected_alternatives() {
 fn rationale_doc_contains_validation_bundle_commands() {
     let doc = load_doc();
     let required_commands = [
-        "rch exec -- cargo test --test wasm_rationale_index -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_docs cargo test --test wasm_rationale_index -- --nocapture",
         "python3 scripts/run_browser_onboarding_checks.py --scenario all",
         "bash ./scripts/run_all_e2e.sh --verify-matrix",
-        "rch exec -- cargo test --test e2e_log_quality_schema -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_docs cargo test --test e2e_log_quality_schema -- --nocapture",
     ];
 
     let mut missing = Vec::new();
@@ -81,6 +81,16 @@ fn rationale_doc_contains_validation_bundle_commands() {
             .collect::<Vec<_>>()
             .join("\n")
     );
+
+    for stale in [
+        "rch exec -- cargo test --test wasm_rationale_index -- --nocapture",
+        "rch exec -- cargo test --test e2e_log_quality_schema -- --nocapture",
+    ] {
+        assert!(
+            !doc.contains(stale),
+            "Rationale index still contains bare rch cargo command: {stale}"
+        );
+    }
 }
 
 #[test]
