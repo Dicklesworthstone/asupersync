@@ -134,6 +134,24 @@ fn dirty_peer_owned_tree_recommends_avoiding_surface() {
 }
 
 #[test]
+fn dirty_peer_owned_tree_output_matches_full_reviewed_golden() {
+    let output = run_receipt("dirty_peer_owned_tree.json");
+    assert!(
+        output.status.success(),
+        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("receipt stdout is utf-8"),
+        fixture_text("dirty_peer_owned_tree_expected.json"),
+        "dirty_peer_owned_tree receipt drifted from the reviewed golden"
+    );
+}
+
+#[test]
 fn tracker_reservation_conflict_waits_before_claiming() {
     let receipt = receipt_json("tracker_reservation_conflict.json");
     assert_eq!(next_action_category(&receipt), "wait-for-reservation");
