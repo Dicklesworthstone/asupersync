@@ -51,19 +51,25 @@ def fixture_text(name: str) -> str:
 
 
 class ValidationArtifactFreshnessContract(unittest.TestCase):
+    def assert_output_matches_golden(
+        self,
+        output: subprocess.CompletedProcess[str],
+        fixture_name: str,
+    ) -> None:
+        expected = fixture_text(fixture_name)
+        actual_json = json.loads(output.stdout)
+        expected_json = json.loads(expected)
+
+        self.assertEqual(actual_json, expected_json, "parsed receipt JSON must match")
+        self.assertEqual(output.stdout, expected)
+
     def test_current_artifact_output_matches_full_reviewed_golden(self) -> None:
         output = run_receipt_output("current_artifact.json")
-        expected = fixture_text("current_artifact_expected.json")
-
-        self.assertEqual(output.stdout, expected)
-        self.assertEqual(json.loads(output.stdout), json.loads(expected))
+        self.assert_output_matches_golden(output, "current_artifact_expected.json")
 
     def test_stale_head_output_matches_full_reviewed_golden(self) -> None:
         output = run_receipt_output("stale_head_artifact.json")
-        expected = fixture_text("stale_head_artifact_expected.json")
-
-        self.assertEqual(output.stdout, expected)
-        self.assertEqual(json.loads(output.stdout), json.loads(expected))
+        self.assert_output_matches_golden(output, "stale_head_artifact_expected.json")
 
     def test_current_artifact_is_citable_for_touched_surface(self) -> None:
         receipt = run_receipt("current_artifact.json")
@@ -95,10 +101,7 @@ class ValidationArtifactFreshnessContract(unittest.TestCase):
 
     def test_dirty_overlap_output_matches_full_reviewed_golden(self) -> None:
         output = run_receipt_output("current_artifact.json", "dirty_touched_overlap.json")
-        expected = fixture_text("dirty_touched_overlap_expected.json")
-
-        self.assertEqual(output.stdout, expected)
-        self.assertEqual(json.loads(output.stdout), json.loads(expected))
+        self.assert_output_matches_golden(output, "dirty_touched_overlap_expected.json")
 
     def test_peer_dirty_paths_are_external_blockers_not_artifact_staleness(self) -> None:
         receipt = run_receipt("current_artifact.json", "dirty_external_paths.json")
@@ -111,10 +114,7 @@ class ValidationArtifactFreshnessContract(unittest.TestCase):
 
     def test_external_dirt_output_matches_full_reviewed_golden(self) -> None:
         output = run_receipt_output("current_artifact.json", "dirty_external_paths.json")
-        expected = fixture_text("dirty_external_paths_expected.json")
-
-        self.assertEqual(output.stdout, expected)
-        self.assertEqual(json.loads(output.stdout), json.loads(expected))
+        self.assert_output_matches_golden(output, "dirty_external_paths_expected.json")
 
     def test_missing_head_invalidates_artifact(self) -> None:
         receipt = run_receipt("unbound_artifact.json")
@@ -126,10 +126,7 @@ class ValidationArtifactFreshnessContract(unittest.TestCase):
 
     def test_unbound_artifact_output_matches_full_reviewed_golden(self) -> None:
         output = run_receipt_output("unbound_artifact.json")
-        expected = fixture_text("unbound_artifact_expected.json")
-
-        self.assertEqual(output.stdout, expected)
-        self.assertEqual(json.loads(output.stdout), json.loads(expected))
+        self.assert_output_matches_golden(output, "unbound_artifact_expected.json")
 
     def test_nested_validation_frontier_record_is_supported(self) -> None:
         receipt = run_receipt("nested_validation_frontier_artifact.json")
@@ -143,10 +140,10 @@ class ValidationArtifactFreshnessContract(unittest.TestCase):
 
     def test_nested_validation_frontier_output_matches_full_reviewed_golden(self) -> None:
         output = run_receipt_output("nested_validation_frontier_artifact.json")
-        expected = fixture_text("nested_validation_frontier_artifact_expected.json")
-
-        self.assertEqual(output.stdout, expected)
-        self.assertEqual(json.loads(output.stdout), json.loads(expected))
+        self.assert_output_matches_golden(
+            output,
+            "nested_validation_frontier_artifact_expected.json",
+        )
 
     def test_helper_declares_it_does_not_mutate_project_state(self) -> None:
         receipt = run_receipt("current_artifact.json")
