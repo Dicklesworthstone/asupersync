@@ -1,4 +1,4 @@
-//! CLI runner for HTTP/2 CONTINUATION frame ordering conformance tests
+//! CLI runner for HTTP/2 CONTINUATION frame ordering fail-closed checks
 //!
 //! Usage:
 //!   cargo run --bin h2_continuation_ordering_conformance [OPTIONS]
@@ -9,13 +9,13 @@
 //!   --verbose                        Include detailed test output
 //!   --help                           Show this help message
 
+use asupersync_conformance::h2_continuation_ordering_conformance::{
+    ConformanceResult, H2_REFERENCE_STATUS, generate_conformance_report, generate_test_cases,
+    run_all_conformance_tests, run_conformance_test,
+};
+use serde_json;
 use std::env;
 use std::process;
-use serde_json;
-use asupersync_conformance::h2_continuation_ordering_conformance::{
-    generate_test_cases, run_conformance_test, run_all_conformance_tests,
-    generate_conformance_report, ConformanceResult
-};
 
 #[derive(Debug, Clone)]
 struct Config {
@@ -64,10 +64,13 @@ fn main() {
         process::exit(1);
     });
 
-    // Exit with failure code if any tests failed
+    // Exit with failure code if any tests failed or the reference remains unavailable.
     let failed_count = results.iter().filter(|r| !r.passed()).count();
     if failed_count > 0 {
-        eprintln!("\n{} conformance tests failed", failed_count);
+        eprintln!(
+            "\n{} fail-closed checks did not produce live h2 conformance evidence",
+            failed_count
+        );
         process::exit(1);
     }
 }
@@ -118,7 +121,9 @@ fn parse_args() -> Result<Config, String> {
     Ok(config)
 }
 
-fn run_single_test_case(test_name: &str) -> Result<Vec<ConformanceResult>, Box<dyn std::error::Error>> {
+fn run_single_test_case(
+    test_name: &str,
+) -> Result<Vec<ConformanceResult>, Box<dyn std::error::Error>> {
     let test_cases = generate_test_cases();
     let test_case = test_cases
         .iter()
@@ -129,7 +134,10 @@ fn run_single_test_case(test_name: &str) -> Result<Vec<ConformanceResult>, Box<d
     Ok(vec![result])
 }
 
-fn output_results(results: &[ConformanceResult], config: &Config) -> Result<(), Box<dyn std::error::Error>> {
+fn output_results(
+    results: &[ConformanceResult],
+    config: &Config,
+) -> Result<(), Box<dyn std::error::Error>> {
     match config.format {
         OutputFormat::Json => {
             let json = serde_json::to_string_pretty(results)?;
@@ -151,18 +159,29 @@ fn output_summary(results: &[ConformanceResult], verbose: bool) {
     let passed = results.iter().filter(|r| r.passed()).count();
     let failed = total - passed;
 
-    println!("HTTP/2 CONTINUATION Frame Ordering Conformance Test Results");
-    println!("===========================================================");
+    println!("HTTP/2 CONTINUATION Frame Ordering Fail-Closed Results");
+    println!("======================================================");
     println!();
+    println!("Reference status: {}", H2_REFERENCE_STATUS);
     println!("Total tests:  {}", total);
-    println!("Passed:       {} ({:.1}%)", passed, (passed as f64 / total as f64) * 100.0);
-    println!("Failed:       {} ({:.1}%)", failed, (failed as f64 / total as f64) * 100.0);
+    println!(
+        "Passed:       {} ({:.1}%)",
+        passed,
+        (passed as f64 / total as f64) * 100.0
+    );
+    println!(
+        "Failed:       {} ({:.1}%)",
+        failed,
+        (failed as f64 / total as f64) * 100.0
+    );
     println!();
 
     if passed == total {
-        println!("🎉 ALL TESTS PASSED - asupersync and h2 produce identical CONTINUATION frame handling");
+        println!(
+            "LIVE REFERENCE PASSED - asupersync and h2 produced identical CONTINUATION frame handling"
+        );
     } else {
-        println!("❌ CONFORMANCE ISSUES DETECTED");
+        println!("FAIL-CLOSED - no conformance pass is claimed without a live h2/HPACK reference");
     }
     println!();
 
@@ -171,7 +190,9 @@ fn output_summary(results: &[ConformanceResult], verbose: bool) {
         if verbose || !result.passed() {
             println!("{}", result.summary());
             if verbose && !result.passed() {
-                if let (Some(ref a_headers), Some(ref h_headers)) = (&result.asupersync_headers, &result.h2_headers) {
+                if let (Some(ref a_headers), Some(ref h_headers)) =
+                    (&result.asupersync_headers, &result.h2_headers)
+                {
                     println!("  asupersync headers: {} entries", a_headers.len());
                     println!("  h2 headers:         {} entries", h_headers.len());
                     if a_headers.len() != h_headers.len() {
@@ -189,19 +210,24 @@ fn output_summary(results: &[ConformanceResult], verbose: bool) {
         println!();
         println!("Failed test cases:");
         for result in results.iter().filter(|r| !r.passed()) {
-            println!("- {}: {}", result.test_name,
-                result.asupersync_error.as_deref()
+            println!(
+                "- {}: {}",
+                result.test_name,
+                result
+                    .asupersync_error
+                    .as_deref()
                     .or(result.h2_error.as_deref())
-                    .unwrap_or("Header mismatch"));
+                    .unwrap_or("Header mismatch")
+            );
         }
     }
 }
 
 fn print_help() {
-    println!("HTTP/2 CONTINUATION Frame Ordering Conformance Test");
+    println!("HTTP/2 CONTINUATION Frame Ordering Fail-Closed Check");
     println!();
-    println!("Tests HEADERS + CONTINUATION frame sequence handling between asupersync");
-    println!("and h2 crate reference implementation to ensure identical HeaderMap decoding.");
+    println!("Refuses to claim HEADERS + CONTINUATION differential conformance");
+    println!("until the harness drives an independent live h2/HPACK reference seam.");
     println!();
     println!("USAGE:");
     println!("    cargo run --bin h2_continuation_ordering_conformance [OPTIONS]");
@@ -213,17 +239,23 @@ fn print_help() {
     println!("    --help                Show this help message");
     println!();
     println!("EXAMPLES:");
-    println!("    # Run all tests with summary output");
+    println!("    # Run all fail-closed checks with summary output");
     println!("    cargo run --bin h2_continuation_ordering_conformance");
     println!();
     println!("    # Run specific test case");
-    println!("    cargo run --bin h2_continuation_ordering_conformance --test-case simple_continuation");
+    println!(
+        "    cargo run --bin h2_continuation_ordering_conformance --test-case simple_continuation"
+    );
     println!();
     println!("    # Generate detailed markdown report");
-    println!("    cargo run --bin h2_continuation_ordering_conformance --format markdown > report.md");
+    println!(
+        "    cargo run --bin h2_continuation_ordering_conformance --format markdown > report.md"
+    );
     println!();
     println!("    # Generate JSON output for CI");
-    println!("    cargo run --bin h2_continuation_ordering_conformance --format json > results.json");
+    println!(
+        "    cargo run --bin h2_continuation_ordering_conformance --format json > results.json"
+    );
     println!();
     println!("TEST CASES:");
     let test_cases = generate_test_cases();
@@ -269,6 +301,18 @@ mod tests {
             matches!(parsed_format, expected_format);
         }
     }
+
+    #[test]
+    fn test_help_wording_is_fail_closed() {
+        let source = include_str!("h2_continuation_ordering_conformance.rs");
+        assert!(source.contains("Fail-Closed Check"));
+        assert!(source.contains("independent live h2/HPACK reference seam"));
+        assert!(!source.contains(concat!("ensure identical ", "HeaderMap decoding")));
+        assert!(!source.contains(concat!(
+            "h2 crate reference implementation ",
+            "to ensure identical"
+        )));
+    }
 }
 
 // Add Serialize support for JSON output
@@ -278,8 +322,9 @@ impl serde::Serialize for ConformanceResult {
         S: serde::Serializer,
     {
         use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("ConformanceResult", 6)?;
+        let mut state = serializer.serialize_struct("ConformanceResult", 7)?;
         state.serialize_field("test_name", &self.test_name)?;
+        state.serialize_field("reference_status", &self.reference_status)?;
         state.serialize_field("passed", &self.passed())?;
         state.serialize_field("asupersync_headers", &self.asupersync_headers)?;
         state.serialize_field("h2_headers", &self.h2_headers)?;

@@ -1,7 +1,8 @@
 //! HTTP/2 CONTINUATION Frame Ordering Conformance Test
 //!
-//! Tests HEADERS + CONTINUATION frame sequence handling between asupersync
-//! and h2 crate reference implementation to ensure identical HeaderMap decoding.
+//! Intended differential surface for HEADERS + CONTINUATION frame sequence handling.
+//! Until a real independent h2/HPACK reference seam is wired, this harness fails
+//! closed instead of reporting local Asupersync HPACK results as h2 crate evidence.
 //!
 //! Key scenarios tested per RFC 9113 Section 6.10:
 //! - HEADERS without END_HEADERS followed by CONTINUATION with END_HEADERS
@@ -10,14 +11,16 @@
 //! - Header block reconstruction and HPACK decoding consistency
 //! - Stream ID validation and ordering requirements
 
-use std::collections::HashMap;
-use asupersync::bytes::{Bytes, BytesMut, BufMut};
-use asupersync::http::h2::{Frame, H2Error};
-use asupersync::http::h2::frame::{
-    FrameHeader, HeadersFrame, ContinuationFrame, FrameType,
-    headers_flags, continuation_flags, parse_frame
+use asupersync::bytes::{Bytes, BytesMut};
+use asupersync::http::h2::Frame;
+use asupersync::http::h2::frame::{ContinuationFrame, HeadersFrame};
+use asupersync::http::h2::hpack::{
+    Decoder as AsupersyncDecoder, Encoder as AsupersyncEncoder, Header,
 };
-use asupersync::http::h2::hpack::{Encoder as AsupersyncEncoder, Decoder as AsupersyncDecoder, Header};
+use std::collections::HashMap;
+
+pub const H2_REFERENCE_STATUS: &str = "xfail-no-live-h2-hpack-reference";
+pub const H2_REFERENCE_UNSUPPORTED: &str = "fail-closed: h2 crate HPACK/CONTINUATION reference seam is not wired; refusing to reuse asupersync HPACK as the reference implementation";
 
 /// Test case for CONTINUATION frame ordering
 #[derive(Debug, Clone)]
@@ -33,6 +36,7 @@ pub struct ContinuationTestCase {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConformanceResult {
     pub test_name: String,
+    pub reference_status: String,
     pub asupersync_headers: Option<Vec<(String, String)>>,
     pub h2_headers: Option<Vec<(String, String)>>,
     pub asupersync_error: Option<String>,
@@ -48,17 +52,39 @@ impl ConformanceResult {
     pub fn summary(&self) -> String {
         match (self.passed(), &self.asupersync_error, &self.h2_error) {
             (true, None, None) => format!("✓ {}: Headers match", self.test_name),
-            (true, Some(a_err), Some(h_err)) => format!("✓ {}: Both failed as expected (as: {}, h2: {})", self.test_name, a_err, h_err),
+            (true, Some(a_err), Some(h_err)) => format!(
+                "✓ {}: Both failed as expected (as: {}, h2: {})",
+                self.test_name, a_err, h_err
+            ),
+            (true, Some(a_err), None) => format!(
+                "✓ {}: asupersync failed as expected ({})",
+                self.test_name, a_err
+            ),
+            (true, None, Some(h_err)) => {
+                format!("✓ {}: h2 failed as expected ({})", self.test_name, h_err)
+            }
             (false, None, None) => format!("✗ {}: Header mismatch", self.test_name),
-            (false, Some(a_err), None) => format!("✗ {}: asupersync failed, h2 succeeded ({})", self.test_name, a_err),
-            (false, None, Some(h_err)) => format!("✗ {}: h2 failed, asupersync succeeded ({})", self.test_name, h_err),
-            (false, Some(a_err), Some(h_err)) => format!("✗ {}: Different errors (as: {}, h2: {})", self.test_name, a_err, h_err),
+            (false, Some(a_err), None) => format!(
+                "✗ {}: asupersync failed, h2 succeeded ({})",
+                self.test_name, a_err
+            ),
+            (false, None, Some(h_err)) => format!(
+                "✗ {}: h2 reference unavailable, asupersync sanity path produced headers ({})",
+                self.test_name, h_err
+            ),
+            (false, Some(a_err), Some(h_err)) => format!(
+                "✗ {}: Different errors (as: {}, h2: {})",
+                self.test_name, a_err, h_err
+            ),
         }
     }
 }
 
 /// Generate comprehensive test cases for CONTINUATION frame ordering
 pub fn generate_test_cases() -> Vec<ContinuationTestCase> {
+    let large_metadata: &'static str = Box::leak("x".repeat(500).into_boxed_str());
+    let large_tracking: &'static str = Box::leak("y".repeat(300).into_boxed_str());
+
     vec![
         ContinuationTestCase {
             name: "simple_continuation",
@@ -83,7 +109,10 @@ pub fn generate_test_cases() -> Vec<ContinuationTestCase> {
                 (":authority", "api.example.com"),
                 ("content-type", "application/json"),
                 ("content-length", "1234"),
-                ("authorization", "Bearer very-long-token-value-that-should-force-frame-splits"),
+                (
+                    "authorization",
+                    "Bearer very-long-token-value-that-should-force-frame-splits",
+                ),
                 ("x-request-id", "12345678-1234-1234-1234-123456789012"),
                 ("x-trace-id", "abcdefgh-ijkl-mnop-qrst-uvwxyz123456"),
                 ("user-agent", "MyApp/1.0 (platform; build)"),
@@ -115,9 +144,12 @@ pub fn generate_test_cases() -> Vec<ContinuationTestCase> {
                 (":path", "/upload"),
                 (":scheme", "https"),
                 (":authority", "upload.example.com"),
-                ("content-type", "multipart/form-data; boundary=----WebKitFormBoundary7MA4YWxkTrZu0gW"),
-                ("x-large-metadata", &"x".repeat(500)), // Large value
-                ("x-large-tracking", &"y".repeat(300)), // Another large value
+                (
+                    "content-type",
+                    "multipart/form-data; boundary=----WebKitFormBoundary7MA4YWxkTrZu0gW",
+                ),
+                ("x-large-metadata", large_metadata), // Large value
+                ("x-large-tracking", large_tracking), // Another large value
             ],
             max_frame_size: 128,
             stream_id: 7,
@@ -126,13 +158,20 @@ pub fn generate_test_cases() -> Vec<ContinuationTestCase> {
             name: "many_small_headers",
             description: "Many small headers requiring frame fragmentation",
             headers: (1..=50)
-                .map(|i| (format!("x-header-{:02}", i).leak(), "value"))
-                .chain([
-                    (":method", "GET"),
-                    (":path", "/headers"),
-                    (":scheme", "https"),
-                    (":authority", "headers.example.com"),
-                ].iter().copied())
+                .map(|i| {
+                    let name: &'static mut str = format!("x-header-{:02}", i).leak();
+                    (&*name, "value")
+                })
+                .chain(
+                    [
+                        (":method", "GET"),
+                        (":path", "/headers"),
+                        (":scheme", "https"),
+                        (":authority", "headers.example.com"),
+                    ]
+                    .iter()
+                    .copied(),
+                )
                 .collect(),
             max_frame_size: 256,
             stream_id: 9,
@@ -183,7 +222,10 @@ pub fn generate_test_cases() -> Vec<ContinuationTestCase> {
                 (":path", "/huffman-test-path-with-many-characters"),
                 (":scheme", "https"),
                 (":authority", "huffman-encoding-test.example.com"),
-                ("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
+                (
+                    "accept",
+                    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                ),
                 ("accept-encoding", "gzip,deflate,sdch"),
                 ("accept-language", "en-US,en;q=0.5"),
             ],
@@ -221,21 +263,25 @@ pub fn generate_test_cases() -> Vec<ContinuationTestCase> {
 }
 
 /// Run conformance test for a specific test case
-pub fn run_conformance_test(test_case: &ContinuationTestCase) -> Result<ConformanceResult, Box<dyn std::error::Error>> {
+pub fn run_conformance_test(
+    test_case: &ContinuationTestCase,
+) -> Result<ConformanceResult, Box<dyn std::error::Error>> {
     // Test asupersync implementation
     let asupersync_result = test_asupersync_continuation(&test_case);
 
-    // Test h2 reference implementation
+    // Test h2 reference implementation. This currently fails closed until an
+    // independent h2/HPACK seam exists.
     let h2_result = test_h2_continuation(&test_case);
 
     let match_result = match (&asupersync_result, &h2_result) {
         (Ok(a_headers), Ok(h_headers)) => headers_match(a_headers, h_headers),
         (Err(_), Err(_)) => true, // Both failed - this might be expected for invalid cases
-        _ => false, // One succeeded, one failed
+        _ => false,               // One succeeded, one failed
     };
 
     Ok(ConformanceResult {
         test_name: test_case.name.to_string(),
+        reference_status: H2_REFERENCE_STATUS.to_string(),
         asupersync_headers: asupersync_result.as_ref().ok().cloned(),
         h2_headers: h2_result.as_ref().ok().cloned(),
         asupersync_error: asupersync_result.as_ref().err().map(|e| e.to_string()),
@@ -246,21 +292,23 @@ pub fn run_conformance_test(test_case: &ContinuationTestCase) -> Result<Conforma
 
 /// Test asupersync CONTINUATION frame handling
 fn test_asupersync_continuation(
-    test_case: &ContinuationTestCase
+    test_case: &ContinuationTestCase,
 ) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
     // Encode headers with HPACK
     let mut encoder = AsupersyncEncoder::new();
     let mut header_block = BytesMut::new();
-
-    for (name, value) in &test_case.headers {
-        let header = Header::new(name.as_bytes(), value.as_bytes());
-        encoder.encode(header, &mut header_block)?;
-    }
+    let headers = test_case
+        .headers
+        .iter()
+        .map(|(name, value)| Header::new(*name, *value))
+        .collect::<Vec<_>>();
+    encoder.encode(&headers, &mut header_block);
 
     let header_block = header_block.freeze();
 
     // Split header block into HEADERS + CONTINUATION frames based on max_frame_size
-    let frames = create_frame_sequence(&header_block, test_case.max_frame_size, test_case.stream_id)?;
+    let frames =
+        create_frame_sequence(&header_block, test_case.max_frame_size, test_case.stream_id)?;
 
     // Process frames through asupersync decoder
     let mut decoder = AsupersyncDecoder::new();
@@ -285,61 +333,21 @@ fn test_asupersync_continuation(
     }
 
     // Decode complete header block
-    let headers = decoder.decode(&complete_header_block)?;
+    let mut complete_header_block = complete_header_block.freeze();
+    let headers = decoder.decode(&mut complete_header_block)?;
 
-    Ok(headers.into_iter()
-        .map(|h| (String::from_utf8_lossy(h.name()).to_string(),
-                 String::from_utf8_lossy(h.value()).to_string()))
-        .collect())
+    Ok(headers.into_iter().map(|h| (h.name, h.value)).collect())
 }
 
-/// Test h2 reference implementation (mock for now - would use actual h2 crate)
+/// Test h2 reference implementation.
 fn test_h2_continuation(
-    test_case: &ContinuationTestCase
+    test_case: &ContinuationTestCase,
 ) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
-    // For now, implement a mock h2 test that follows the same pattern
-    // In a real implementation, this would use the h2 crate
-
-    // Mock implementation that simulates h2 crate behavior
-    // This would be replaced with actual h2 crate integration
-
-    // For demonstration, we'll implement the same logic as asupersync
-    // but in a real conformance test, this would use h2::hpack directly
-
-    let mut encoder = AsupersyncEncoder::new(); // In real test: h2::hpack::Encoder
-    let mut header_block = BytesMut::new();
-
-    for (name, value) in &test_case.headers {
-        let header = Header::new(name.as_bytes(), value.as_bytes());
-        encoder.encode(header, &mut header_block)?;
-    }
-
-    let header_block = header_block.freeze();
-
-    // Simulate h2 crate frame processing
-    let frames = create_frame_sequence(&header_block, test_case.max_frame_size, test_case.stream_id)?;
-
-    let mut decoder = AsupersyncDecoder::new(); // In real test: h2::hpack::Decoder
-    let mut complete_header_block = BytesMut::new();
-
-    for frame in frames {
-        match frame {
-            Frame::Headers(headers_frame) => {
-                complete_header_block.extend_from_slice(&headers_frame.header_block);
-            }
-            Frame::Continuation(continuation_frame) => {
-                complete_header_block.extend_from_slice(&continuation_frame.header_block);
-            }
-            _ => return Err("Unexpected frame type in h2 test".into()),
-        }
-    }
-
-    let headers = decoder.decode(&complete_header_block)?;
-
-    Ok(headers.into_iter()
-        .map(|h| (String::from_utf8_lossy(h.name()).to_string(),
-                 String::from_utf8_lossy(h.value()).to_string()))
-        .collect())
+    let message = format!(
+        "{}; test_case={}; stream_id={}",
+        H2_REFERENCE_UNSUPPORTED, test_case.name, test_case.stream_id
+    );
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, message).into())
 }
 
 /// Create HEADERS + CONTINUATION frame sequence from header block
@@ -383,10 +391,7 @@ fn create_frame_sequence(
 }
 
 /// Compare two header lists for equality (order-independent for most headers)
-fn headers_match(
-    headers1: &[(String, String)],
-    headers2: &[(String, String)]
-) -> bool {
+fn headers_match(headers1: &[(String, String)], headers2: &[(String, String)]) -> bool {
     if headers1.len() != headers2.len() {
         return false;
     }
@@ -434,15 +439,29 @@ pub fn generate_conformance_report(results: &[ConformanceResult]) -> String {
     let failed = total - passed;
 
     let mut report = String::new();
-    report.push_str("# HTTP/2 CONTINUATION Frame Ordering Conformance Report\n\n");
+    report.push_str("# HTTP/2 CONTINUATION Frame Ordering Fail-Closed Report\n\n");
+    report.push_str(&format!(
+        "**Reference status:** `{}`\n\n",
+        H2_REFERENCE_STATUS
+    ));
     report.push_str(&format!("**Total Tests:** {}\n", total));
-    report.push_str(&format!("**Passed:** {} ({:.1}%)\n", passed, (passed as f64 / total as f64) * 100.0));
-    report.push_str(&format!("**Failed:** {} ({:.1}%)\n\n", failed, (failed as f64 / total as f64) * 100.0));
+    report.push_str(&format!(
+        "**Passed:** {} ({:.1}%)\n",
+        passed,
+        (passed as f64 / total as f64) * 100.0
+    ));
+    report.push_str(&format!(
+        "**Failed:** {} ({:.1}%)\n\n",
+        failed,
+        (failed as f64 / total as f64) * 100.0
+    ));
 
     if passed == total {
-        report.push_str("🎉 **ALL TESTS PASSED** - asupersync and h2 crate produce identical results\n\n");
+        report.push_str(
+            "**LIVE REFERENCE PASSED** - asupersync and h2 crate produced identical results\n\n",
+        );
     } else {
-        report.push_str("❌ **CONFORMANCE ISSUES DETECTED**\n\n");
+        report.push_str("**FAIL-CLOSED** - no conformance pass is claimed without a live h2/HPACK reference\n\n");
     }
 
     // Detailed results
@@ -474,7 +493,8 @@ pub fn generate_conformance_report(results: &[ConformanceResult]) -> String {
         report.push_str("1. Review failed test cases for differences in frame handling\n");
         report.push_str("2. Check HPACK encoding/decoding consistency\n");
         report.push_str("3. Verify CONTINUATION frame ordering rules per RFC 9113 Section 6.10\n");
-        report.push_str("4. Ensure frame size boundary handling matches reference implementation\n");
+        report
+            .push_str("4. Ensure frame size boundary handling matches reference implementation\n");
     }
 
     report
@@ -500,7 +520,18 @@ mod tests {
         };
 
         let result = run_conformance_test(&test_case).expect("Test should not fail");
-        assert!(result.passed(), "Simple case should pass: {}", result.summary());
+        assert!(
+            !result.passed(),
+            "missing h2/HPACK reference must fail closed"
+        );
+        assert_eq!(result.reference_status, H2_REFERENCE_STATUS);
+        assert!(
+            result
+                .h2_error
+                .as_deref()
+                .unwrap_or_default()
+                .contains(H2_REFERENCE_UNSUPPORTED)
+        );
     }
 
     #[test]
@@ -522,7 +553,49 @@ mod tests {
         };
 
         let result = run_conformance_test(&test_case).expect("Test should not fail");
-        assert!(result.passed(), "Multiple continuation case should pass: {}", result.summary());
+        assert!(
+            !result.passed(),
+            "multiple CONTINUATION case must not pass without a live h2 reference"
+        );
+        assert!(result.asupersync_headers.is_some());
+        assert!(result.h2_headers.is_none());
+        assert!(result.summary().contains("h2 reference unavailable"));
+    }
+
+    #[test]
+    fn test_reference_function_does_not_reuse_asupersync_hpack() {
+        let source = include_str!("h2_continuation_ordering_conformance.rs");
+        let reference_function = source
+            .split("fn test_h2_continuation")
+            .nth(1)
+            .and_then(|tail| tail.split("/// Create HEADERS").next())
+            .expect("reference function source should be locatable");
+
+        for forbidden in [
+            concat!("Asupersync", "Encoder"),
+            concat!("Asupersync", "Decoder"),
+            concat!("h2", "::", "hpack"),
+            concat!("mock ", "h2 test"),
+            concat!("simulates ", "h2 crate behavior"),
+        ] {
+            assert!(
+                !reference_function.contains(forbidden),
+                "h2 reference function must not contain stale local-reference marker {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_report_refuses_conformance_claim_without_reference() {
+        let results = run_all_conformance_tests().expect("fail-closed run should produce results");
+        assert_eq!(results.len(), generate_test_cases().len());
+        assert!(results.iter().all(|result| !result.passed()));
+
+        let report = generate_conformance_report(&results);
+        assert!(report.contains("FAIL-CLOSED"));
+        assert!(report.contains(H2_REFERENCE_STATUS));
+        assert!(!report.contains("ALL TESTS PASSED"));
+        assert!(!report.contains("asupersync and h2 crate produce identical results"));
     }
 
     #[test]
@@ -536,8 +609,14 @@ mod tests {
 
         let map = headers_to_multimap(&headers);
 
-        assert_eq!(map.get("content-type").unwrap(), &vec!["application/json".to_string()]);
-        assert_eq!(map.get("content-length").unwrap(), &vec!["1234".to_string()]);
+        assert_eq!(
+            map.get("content-type").unwrap(),
+            &vec!["application/json".to_string()]
+        );
+        assert_eq!(
+            map.get("content-length").unwrap(),
+            &vec!["1234".to_string()]
+        );
 
         let mut expected_cookies = vec!["session=abc".to_string(), "tracking=xyz".to_string()];
         expected_cookies.sort();
