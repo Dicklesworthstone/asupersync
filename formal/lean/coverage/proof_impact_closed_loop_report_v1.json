@@ -57,8 +57,8 @@
           "attribution"
         ],
         "mandatory_commands": [
-          "rch exec -- cargo test --test lean_proof_guided_performance_opportunity_map -- --nocapture",
-          "rch exec -- cargo test --test refinement_conformance -- --nocapture"
+          "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test lean_proof_guided_performance_opportunity_map -- --nocapture",
+          "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test refinement_conformance -- --nocapture"
         ]
       },
       {
@@ -79,8 +79,8 @@
           "attribution"
         ],
         "mandatory_commands": [
-          "rch exec -- cargo test --test lean_invariant_theorem_test_link_map -- --nocapture",
-          "rch exec -- cargo test --test refinement_conformance -- --nocapture"
+          "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test lean_invariant_theorem_test_link_map -- --nocapture",
+          "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test refinement_conformance -- --nocapture"
         ]
       },
       {
@@ -102,8 +102,8 @@
           "attribution"
         ],
         "mandatory_commands": [
-          "rch exec -- cargo test --test proof_aware_workflow_contract -- --nocapture",
-          "rch exec -- cargo test --test runtime_state_refinement_map -- --nocapture"
+          "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test proof_aware_workflow_contract -- --nocapture",
+          "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test runtime_state_refinement_map -- --nocapture"
         ]
       }
     ],
@@ -119,7 +119,7 @@
           "OPT-CANCEL-001",
           "OPT-DET-001"
         ],
-        "repro_command": "rch exec -- cargo test --test refinement_conformance refinement_semantics_trace_golden -- --nocapture",
+        "repro_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test refinement_conformance refinement_semantics_trace_golden -- --nocapture",
         "baseline_artifact": "formal/lean/coverage/refinement_conformance_report_v1.json#mismatch_trend",
         "current_artifact": "formal/lean/coverage/proof_impact_closed_loop_report_v1.json#report_snapshot.performance_delta_evidence.workload_results[0]"
       },
@@ -135,7 +135,7 @@
           "OPT-CANCEL-001",
           "OPT-CANCEL-002"
         ],
-        "repro_command": "rch exec -- cargo test --test refinement_conformance refinement_trace_equivalence_filters_schedule_noise -- --nocapture",
+        "repro_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test refinement_conformance refinement_trace_equivalence_filters_schedule_noise -- --nocapture",
         "baseline_artifact": "formal/lean/coverage/refinement_conformance_report_v1.json#coverage_percent",
         "current_artifact": "formal/lean/coverage/proof_impact_closed_loop_report_v1.json#report_snapshot.performance_delta_evidence.workload_results[1]"
       }
@@ -163,8 +163,8 @@
           "source_field_path": "formal/lean/coverage/proof_guided_performance_opportunity_map.json#opportunities"
         },
         "supporting_commands": [
-          "rch exec -- cargo test --test lean_proof_guided_performance_opportunity_map -- --nocapture",
-          "rch exec -- cargo test --test refinement_conformance -- --nocapture"
+          "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test lean_proof_guided_performance_opportunity_map -- --nocapture",
+          "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test refinement_conformance -- --nocapture"
         ]
       },
       {
@@ -183,8 +183,8 @@
           "source_field_path": "formal/lean/coverage/invariant_theorem_test_link_map.json#reliability_hardening_contract"
         },
         "supporting_commands": [
-          "rch exec -- cargo test --test lean_invariant_theorem_test_link_map -- --nocapture",
-          "rch exec -- cargo test --test refinement_conformance -- --nocapture"
+          "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test lean_invariant_theorem_test_link_map -- --nocapture",
+          "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test refinement_conformance -- --nocapture"
         ]
       },
       {
@@ -204,8 +204,8 @@
           "source_field_path": "formal/lean/coverage/runtime_state_refinement_map.json#reporting_and_signoff_contract"
         },
         "supporting_commands": [
-          "rch exec -- cargo test --test proof_aware_workflow_contract -- --nocapture",
-          "rch exec -- cargo test --test runtime_state_refinement_map -- --nocapture"
+          "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test proof_aware_workflow_contract -- --nocapture",
+          "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test runtime_state_refinement_map -- --nocapture"
         ]
       }
     ],
@@ -272,8 +272,8 @@
         "method_id": "reliability.coverage_milestone_pairing.v1",
         "description": "Pair each reliability metric window with invariant/assumption coverage milestones and deterministic conformance checks before attributing deltas.",
         "required_commands": [
-          "rch exec -- cargo test --test lean_invariant_theorem_test_link_map -- --nocapture",
-          "rch exec -- cargo test --test refinement_conformance -- --nocapture"
+          "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test lean_invariant_theorem_test_link_map -- --nocapture",
+          "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test refinement_conformance -- --nocapture"
         ],
         "assumptions": [
           "Incident/failure samples are collected under comparable workload mix across windows.",
@@ -313,9 +313,9 @@
         "confidence_note": "Correctness trend indicates fewer regressions and lower rework/diagnosis burden once proof-aware workflow gates and refinement conformance checks are fully linked."
       },
       "repro_queries": [
-        "rch exec -- cargo test --test proof_aware_workflow_contract -- --nocapture",
-        "rch exec -- cargo test --test runtime_state_refinement_map -- --nocapture",
-        "rch exec -- cargo test --test refinement_conformance -- --nocapture"
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test proof_aware_workflow_contract -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test runtime_state_refinement_map -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test refinement_conformance -- --nocapture"
       ],
       "governance_adjustments": [
         {
@@ -337,11 +337,11 @@
       ]
     },
     "evidence_commands": [
-      "rch exec -- cargo test --test lean_proof_guided_performance_opportunity_map -- --nocapture",
-      "rch exec -- cargo test --test lean_invariant_theorem_test_link_map -- --nocapture",
-      "rch exec -- cargo test --test proof_aware_workflow_contract -- --nocapture",
-      "rch exec -- cargo test --test runtime_state_refinement_map -- --nocapture",
-      "rch exec -- cargo test --test refinement_conformance -- --nocapture"
+      "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test lean_proof_guided_performance_opportunity_map -- --nocapture",
+      "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test lean_invariant_theorem_test_link_map -- --nocapture",
+      "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test proof_aware_workflow_contract -- --nocapture",
+      "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test runtime_state_refinement_map -- --nocapture",
+      "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test refinement_conformance -- --nocapture"
     ],
     "confidence_caveats": [
       "Current deltas represent contract-completeness outcomes and conformance readiness, not long-horizon production telemetry.",
@@ -406,8 +406,8 @@
             "asupersync-228pu"
           ],
           "repro_commands": [
-            "rch exec -- cargo test --test lean_proof_guided_performance_opportunity_map -- --nocapture",
-            "rch exec -- cargo test --test refinement_conformance refinement_semantics_trace_golden -- --nocapture"
+            "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test lean_proof_guided_performance_opportunity_map -- --nocapture",
+            "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test refinement_conformance refinement_semantics_trace_golden -- --nocapture"
           ],
           "residual_risks": [
             "Current cycle reflects deterministic governance signals and requires future throughput/latency augmentation."
@@ -434,8 +434,8 @@
             "asupersync-2ue65"
           ],
           "repro_commands": [
-            "rch exec -- cargo test --test lean_invariant_theorem_test_link_map -- --nocapture",
-            "rch exec -- cargo test --test refinement_conformance -- --nocapture"
+            "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test lean_invariant_theorem_test_link_map -- --nocapture",
+            "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test refinement_conformance -- --nocapture"
           ],
           "residual_risks": [
             "Reliability trend windows should be expanded with larger operational sample sets in follow-up cycles."
@@ -464,8 +464,8 @@
             "asupersync-3o1ga"
           ],
           "repro_commands": [
-            "rch exec -- cargo test --test proof_aware_workflow_contract -- --nocapture",
-            "rch exec -- cargo test --test runtime_state_refinement_map -- --nocapture"
+            "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test proof_aware_workflow_contract -- --nocapture",
+            "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test runtime_state_refinement_map -- --nocapture"
           ],
           "residual_risks": [
             "Correctness trend metrics are short-window indicators and require release-cycle longitudinal validation."
