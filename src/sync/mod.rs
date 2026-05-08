@@ -30,10 +30,10 @@
 
 mod barrier;
 mod contended_mutex;
-pub mod lock_ordering;
-mod lock_ordering_test;
 #[cfg(test)]
 mod cross_module_lock_ordering_test;
+pub mod lock_ordering;
+mod lock_ordering_test;
 mod mutex;
 mod notify;
 #[cfg(test)]
