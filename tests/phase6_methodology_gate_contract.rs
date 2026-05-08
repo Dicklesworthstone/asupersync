@@ -98,8 +98,22 @@ fn local_gate_commands_are_rch_backed_and_scoped() {
             command.starts_with("rch exec -- "),
             "{gate_id}: command must be rch-backed: {command}"
         );
+        assert!(
+            !command.starts_with("rch exec -- cargo "),
+            "{gate_id}: cargo command must declare env before cargo: {command}"
+        );
 
-        if command.contains(" cargo bench ") || command.contains(" cargo test ") {
+        if command.contains(" cargo ") {
+            assert!(
+                command.contains("CARGO_TARGET_DIR="),
+                "{gate_id}: cargo command must use an explicit target dir: {command}"
+            );
+        }
+
+        if command.contains(" cargo bench ")
+            || command.contains(" cargo test ")
+            || command.contains(" cargo flamegraph ")
+        {
             assert!(
                 command.contains("-p asupersync") || command.contains("--package asupersync"),
                 "{gate_id}: cargo command must stay scoped to the asupersync crate: {command}"
