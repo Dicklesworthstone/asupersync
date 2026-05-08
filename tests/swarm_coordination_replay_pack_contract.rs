@@ -159,6 +159,27 @@ fn overlapping_exclusive_reservations_are_errors() {
 }
 
 #[test]
+fn reservation_contention_output_matches_full_reviewed_golden() {
+    let output = run_replay("reservation_contention.json");
+    assert!(
+        output.status.success(),
+        "replay helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let expected = fixture_text("reservation_contention_expected.json");
+    serde_json::from_slice::<Value>(&output.stdout).expect("actual replay output must be JSON");
+    serde_json::from_str::<Value>(&expected).expect("golden replay output must be JSON");
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("replay stdout is utf-8"),
+        expected,
+        "reservation_contention receipt drifted from the reviewed golden"
+    );
+}
+
+#[test]
 fn partial_proof_launches_require_remote_exit_evidence() {
     let receipt = replay_json("partial_proof.json");
 
