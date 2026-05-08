@@ -16,10 +16,10 @@
 //! - The minimizer algorithm is deterministic.
 //!
 //! Usage:
-//!   cargo run --example demo_benchmark --features test-internals
+//!   rch exec -- cargo run --example demo_benchmark --features test-internals
 //!
 //! Update golden checksums:
-//!   GOLDEN_UPDATE=1 cargo run --example demo_benchmark --features test-internals
+//!   rch exec -- env GOLDEN_UPDATE=1 cargo run --example demo_benchmark --features test-internals
 //!
 //! Environment variables:
 //!   GOLDEN_UPDATE  - Set to "1" to regenerate golden checksums.

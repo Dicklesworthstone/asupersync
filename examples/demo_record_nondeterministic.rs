@@ -19,7 +19,7 @@
 //! an obligation in Reserved state at region close — a genuine leak.
 //!
 //! Usage:
-//!   cargo run --example demo_record_nondeterministic
+//!   rch exec -- cargo run --example demo_record_nondeterministic
 //!
 //! Environment variables:
 //!   DEMO_SEED_START   - First seed to try (default: 0)

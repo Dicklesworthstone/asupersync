@@ -28,7 +28,7 @@
 //! # Running This Example
 //!
 //! ```bash
-//! cargo run --example cancellation_injection
+//! rch exec -- cargo run --example cancellation_injection
 //! ```
 
 use asupersync::lab::injection::{LabInjectionConfig, LabInjectionRunner, lab};

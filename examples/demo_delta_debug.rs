@@ -12,7 +12,7 @@
 //! sub-linear replay counts for hierarchical scenarios.
 //!
 //! Usage:
-//!   cargo run --example demo_delta_debug --features test-internals
+//!   rch exec -- cargo run --example demo_delta_debug --features test-internals
 //!
 //! Environment variables:
 //!   DEMO_SEED_START   - First seed to try (default: 0)

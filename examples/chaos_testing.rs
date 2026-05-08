@@ -27,7 +27,7 @@
 //! # Running This Example
 //!
 //! ```bash
-//! cargo run --example chaos_testing
+//! rch exec -- cargo run --example chaos_testing
 //! ```
 
 use asupersync::lab::chaos::ChaosConfig;
