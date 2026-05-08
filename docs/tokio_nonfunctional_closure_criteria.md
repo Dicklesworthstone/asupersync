@@ -377,7 +377,7 @@ All NF metrics MUST be tracked in CI with automatic regression alerts:
 
 ```
 # Example CI gate
-cargo bench --bench <suite> -- --save-baseline current
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_nonfunctional_closure_docs cargo bench --bench <suite> -- --save-baseline current
 critcmp baseline current --threshold 10%
 # Fail if any metric regresses >10% from baseline
 ```
