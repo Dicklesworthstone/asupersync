@@ -978,6 +978,15 @@ test = false
 doc = false
 bench = false
 
+# Cancel hierarchy finalize - testing request→drain→finalize protocol across 3-deep hierarchies
+# Tests nested scope cancellation propagation and finalize phase completeness
+[[bin]]
+name = "cancel_hierarchy_finalize"
+path = "fuzz_targets/cancel_hierarchy_finalize.rs"
+test = false
+doc = false
+bench = false
+
 [[bin]]
 name = "fuzz_intrusive_heap_operations"
 path = "fuzz_targets/intrusive_heap_operations.rs"
@@ -3754,6 +3763,17 @@ bench = false
 [[bin]]
 name = "semaphore_multi_acquirer_races"
 path = "fuzz_targets/semaphore_multi_acquirer_races.rs"
+test = false
+doc = false
+bench = false
+
+# Broadcast channel lag eviction and multi-producer fairness races
+# Tests slow-receiver lag detection, capacity-boundary multi-producer send ordering,
+# and receiver drop timing races to find buffer corruption, fairness violations,
+# and state inconsistencies in lag calculation and waker management.
+[[bin]]
+name = "broadcast_lag_eviction_races"
+path = "fuzz_targets/broadcast_lag_eviction_races.rs"
 test = false
 doc = false
 bench = false
