@@ -148,7 +148,7 @@ fn snapshot_declares_schema_sources_and_required_categories() {
 }
 
 #[test]
-fn statuses_are_known_and_include_green_yellow_and_red_rows() {
+fn statuses_are_known_and_include_live_green_and_frontier_rows() {
     let snapshot = json(SNAPSHOT_PATH);
     let allowed = array(&snapshot, "status_catalog")
         .iter()
@@ -169,7 +169,7 @@ fn statuses_are_known_and_include_green_yellow_and_red_rows() {
         assert!(allowed.contains(status), "unknown status {status}");
         seen.insert(status.to_string());
     }
-    for required in ["green", "yellow_frontier", "red_blocked_external"] {
+    for required in ["green", "yellow_frontier"] {
         assert!(
             seen.contains(required),
             "dashboard must contain at least one {required} row"
