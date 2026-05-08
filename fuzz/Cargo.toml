@@ -5495,3 +5495,10 @@ path = "fuzz_targets/fuzz_http_accept_encoding.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "http_header_map_invariants"
+path = "fuzz_targets/http_header_map_invariants.rs"
+test = false
+doc = false
+bench = false

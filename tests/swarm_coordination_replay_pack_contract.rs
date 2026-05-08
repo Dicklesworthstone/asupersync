@@ -18,7 +18,7 @@ fn run_replay(fixture: &str) -> Output {
     Command::new("python3")
         .arg(repo_root().join(SCRIPT_PATH))
         .arg("--input")
-        .arg(repo_root().join(FIXTURE_ROOT).join(fixture))
+        .arg(PathBuf::from(FIXTURE_ROOT).join(fixture))
         .arg("--generated-at")
         .arg(GENERATED_AT)
         .arg("--output")
@@ -38,6 +38,11 @@ fn replay_json(fixture: &str) -> Value {
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("replay output must be JSON")
+}
+
+fn fixture_text(fixture: &str) -> String {
+    std::fs::read_to_string(repo_root().join(FIXTURE_ROOT).join(fixture))
+        .unwrap_or_else(|error| panic!("read golden fixture {fixture}: {error}"))
 }
 
 fn violation_codes(receipt: &Value) -> Vec<&str> {
@@ -79,6 +84,27 @@ fn clean_replay_passes_all_invariants() {
     for (_, value) in receipt["invariants"].as_object().expect("invariants") {
         assert_eq!(value.as_bool(), Some(true));
     }
+}
+
+#[test]
+fn clean_replay_output_matches_full_reviewed_golden() {
+    let output = run_replay("clean_replay.json");
+    assert!(
+        output.status.success(),
+        "replay helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let expected = fixture_text("clean_replay_expected.json");
+    serde_json::from_slice::<Value>(&output.stdout).expect("actual replay output must be JSON");
+    serde_json::from_str::<Value>(&expected).expect("golden replay output must be JSON");
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("replay stdout is utf-8"),
+        expected,
+        "clean_replay receipt drifted from the reviewed golden"
+    );
 }
 
 #[test]

@@ -1,0 +1,118 @@
+{
+  "action_items": [],
+  "current_date": "2026-05-08",
+  "forbidden_actions": {
+    "runs_agent_mail_mutation": false,
+    "runs_beads_mutation": false,
+    "runs_cargo": false,
+    "runs_destructive_command": false,
+    "runs_git_mutation": false
+  },
+  "generated_at": "2026-05-08T05:55:00Z",
+  "input_schema_version": "swarm-coordination-replay-input-v1",
+  "invariants": {
+    "closeouts_have_commit_and_remote_proof": true,
+    "no_duplicate_active_claims": true,
+    "no_exclusive_reservation_contention": true,
+    "proofs_have_remote_exit_events": true,
+    "successful_proofs_have_artifact_evidence": true
+  },
+  "non_mutating": true,
+  "schema_version": "swarm-coordination-replay-pack-v1",
+  "source": "tests/fixtures/swarm_coordination_replay_pack/clean_replay.json",
+  "source_counts": {
+    "agents": 1,
+    "beads": 1,
+    "events": 8,
+    "proofs": 1
+  },
+  "summary": {
+    "error_count": 0,
+    "passes": true,
+    "violation_count": 0,
+    "warning_count": 0
+  },
+  "timeline": [
+    {
+      "agent": "BlackDove",
+      "bead_id": "asupersync-aj7lx3.12",
+      "id": "e1",
+      "path": "",
+      "proof_id": "",
+      "summary": "claimed fixture-backed proof lane",
+      "timestamp": "2026-05-08T05:00:00Z",
+      "type": "claim"
+    },
+    {
+      "agent": "BlackDove",
+      "bead_id": "asupersync-aj7lx3.12",
+      "id": "e2",
+      "path": "scripts/example.py",
+      "proof_id": "",
+      "summary": "",
+      "timestamp": "2026-05-08T05:01:00Z",
+      "type": "reservation"
+    },
+    {
+      "agent": "BlackDove",
+      "bead_id": "asupersync-aj7lx3.12",
+      "id": "e3",
+      "path": "",
+      "proof_id": "proof-1",
+      "summary": "rch exec -- cargo test -p asupersync --test example_contract",
+      "timestamp": "2026-05-08T05:02:00Z",
+      "type": "proof_start"
+    },
+    {
+      "agent": "BlackDove",
+      "bead_id": "asupersync-aj7lx3.12",
+      "id": "e4",
+      "path": "",
+      "proof_id": "proof-1",
+      "summary": "",
+      "timestamp": "2026-05-08T05:03:00Z",
+      "type": "proof_remote_exit"
+    },
+    {
+      "agent": "BlackDove",
+      "bead_id": "asupersync-aj7lx3.12",
+      "id": "e5",
+      "path": "",
+      "proof_id": "proof-1",
+      "summary": "",
+      "timestamp": "2026-05-08T05:04:00Z",
+      "type": "proof_artifact"
+    },
+    {
+      "agent": "BlackDove",
+      "bead_id": "asupersync-aj7lx3.12",
+      "id": "e6",
+      "path": "",
+      "proof_id": "",
+      "summary": "",
+      "timestamp": "2026-05-08T05:05:00Z",
+      "type": "ship"
+    },
+    {
+      "agent": "BlackDove",
+      "bead_id": "asupersync-aj7lx3.12",
+      "id": "e7",
+      "path": "",
+      "proof_id": "",
+      "summary": "",
+      "timestamp": "2026-05-08T05:06:00Z",
+      "type": "close"
+    },
+    {
+      "agent": "BlackDove",
+      "bead_id": "asupersync-aj7lx3.12",
+      "id": "e8",
+      "path": "scripts/example.py",
+      "proof_id": "",
+      "summary": "",
+      "timestamp": "2026-05-08T05:07:00Z",
+      "type": "reservation"
+    }
+  ],
+  "violations": []
+}
