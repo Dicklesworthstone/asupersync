@@ -224,12 +224,21 @@ fn testing_guide_pins_phase2_virtualized_surface_validation_commands() {
         "docs/lab_live_differential_scope_matrix.md",
         "docs/lab_live_time_normalization_policy.md",
         "docs/lab_live_virtualized_surface_matrix.md",
-        "rch exec -- cargo test --test lab_live_time_normalization_policy_contract -- --nocapture",
-        "rch exec -- cargo test --test lab_live_virtualized_surface_matrix_contract -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_time_policy_contract cargo test --test lab_live_time_normalization_policy_contract -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_virtualized_surface_contract cargo test --test lab_live_virtualized_surface_matrix_contract -- --nocapture",
     ] {
         assert!(
             testing.contains(token),
             "TESTING guide missing Phase 2 virtualized-surface token: {token}"
+        );
+    }
+    for stale in [
+        "rch exec -- cargo test --test lab_live_time_normalization_policy_contract -- --nocapture",
+        "rch exec -- cargo test --test lab_live_virtualized_surface_matrix_contract -- --nocapture",
+    ] {
+        assert!(
+            !testing.contains(stale),
+            "TESTING guide still contains unscoped validation command: {stale}"
         );
     }
 }
@@ -238,6 +247,19 @@ fn testing_guide_pins_phase2_virtualized_surface_validation_commands() {
 fn doc_requires_rch_validation_commands() {
     let doc = load_doc();
     for token in [
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_virtualized_docs cargo fmt --check",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_virtualized_docs cargo check --all-targets",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_virtualized_docs cargo clippy --all-targets -- -D warnings",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_virtualized_docs cargo test --test lab_live_virtualized_surface_matrix_contract -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_virtualized_docs cargo test --test time_e2e -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_virtualized_docs cargo test --test e2e_transport -- --nocapture",
+    ] {
+        assert!(
+            doc.contains(token),
+            "document missing validation command: {token}"
+        );
+    }
+    for stale in [
         "rch exec -- cargo fmt --check",
         "rch exec -- cargo check --all-targets",
         "rch exec -- cargo clippy --all-targets -- -D warnings",
@@ -246,8 +268,8 @@ fn doc_requires_rch_validation_commands() {
         "rch exec -- cargo test --test e2e_transport -- --nocapture",
     ] {
         assert!(
-            doc.contains(token),
-            "document missing validation command: {token}"
+            !doc.contains(stale),
+            "document still contains unscoped validation command: {stale}"
         );
     }
 }

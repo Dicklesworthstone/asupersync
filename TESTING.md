@@ -133,8 +133,10 @@ All cargo-heavy validation for Track-Z work must follow this policy:
   rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-<lane-id> cargo <...>
   ```
 
-- Interactive one-shot commands must use `rch exec -- cargo ...` or the
-  canonical `env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=... cargo ...` form.
+- Interactive one-shot commands must use the canonical
+  `rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=... cargo ...` form.
+  Bare `rch exec -- cargo ...` commands are not compliant because they reuse
+  the ambient target directory.
 - Scripted or multi-stage validation must expose `RCH_BIN` and route cargo via
   `"$RCH_BIN" exec -- ...` when `rch` is available.
 - Scripted Cargo runs must set an isolated `CARGO_TARGET_DIR` per
