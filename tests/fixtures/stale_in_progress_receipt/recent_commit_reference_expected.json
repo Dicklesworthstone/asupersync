@@ -1,0 +1,96 @@
+{
+  "agent": "TopazGoose",
+  "agent_roster": {
+    "active_window_hours": 4,
+    "agents": [
+      {
+        "activity": "active",
+        "contact_policy": "",
+        "inactive_hours": 1.0,
+        "last_active_ts": "2026-05-08T03:30:00Z",
+        "model": "",
+        "name": "TopazGoose",
+        "program": "",
+        "task_description": ""
+      }
+    ],
+    "assignees": [
+      "TopazGoose"
+    ],
+    "counts": {
+      "active_agents": 1,
+      "inactive_agents": 0,
+      "missing_assignees": 0,
+      "total_agents": 1,
+      "unknown_activity_agents": 0
+    },
+    "missing_assignees": []
+  },
+  "classifications": [
+    {
+      "assignee": "TopazGoose",
+      "classification": "closed-by-recent-commit",
+      "evidence": {
+        "assignee_inactive_hours": 1.0,
+        "assignee_last_active_ts": "2026-05-08T03:30:00Z",
+        "commit_created_ts": "2026-05-08T04:45:00Z",
+        "commit_hash": "29d852cf8123456789",
+        "commit_subject": "[br-asupersync-aj7lx3.7] cover proof runner build-slot admission",
+        "current_date": "2026-05-08",
+        "generated_at": "2026-05-08T04:30:00Z",
+        "issue_age_hours": 1.5,
+        "issue_updated_at": "2026-05-08T03:00:00Z",
+        "message_age_hours": null,
+        "message_created_ts": "",
+        "reservation_expired": false,
+        "reservation_expires_ts": "",
+        "reservation_holder": "",
+        "reservation_path_pattern": ""
+      },
+      "id": "asupersync-aj7lx3.7",
+      "proposed_action": {
+        "allowed_now": false,
+        "command": "br close asupersync-aj7lx3.7 --reason 'Shipped in 29d852cf8123' --json",
+        "kind": "br-update-command",
+        "mutates": true,
+        "requires": "tracker reservation plus clean staged index"
+      },
+      "rationale": "recent commit references the in-progress bead",
+      "title": "Build-slot admission"
+    }
+  ],
+  "current_date": "2026-05-08",
+  "generated_at": "2026-05-08T04:30:00Z",
+  "repo_path": "/data/projects/asupersync",
+  "safety": {
+    "beads_mutated": false,
+    "branch_or_worktree_operations": false,
+    "cargo_executed": false,
+    "forbidden_command_tokens": [],
+    "mutating_commands_executed": false
+  },
+  "schema_version": "stale-in-progress-receipt-v1",
+  "subsystems": {
+    "agent_mail": "ok",
+    "beads": "ok",
+    "dirty_tree": "ok",
+    "git": "ok"
+  },
+  "summary": {
+    "blocked_by_active_reservation": 0,
+    "closed_by_recent_commit": 1,
+    "fresh_active_peer": 0,
+    "needs_human_escalation": 0,
+    "probably_stale": 0,
+    "total_in_progress": 1
+  },
+  "thresholds": {
+    "active_after_hours": 4,
+    "stale_after_hours": 12
+  },
+  "tracker_state": {
+    "non_tracker_paths": [],
+    "status": "clean",
+    "tracker_paths": []
+  }
+}
