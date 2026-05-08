@@ -526,6 +526,11 @@ impl ScenarioRunner {
             let action_name = match fault.action {
                 FaultAction::Partition => "partition",
                 FaultAction::Heal => "heal",
+                FaultAction::DiskPressure => "disk_pressure",
+                FaultAction::DiskRecovered => "disk_recovered",
+                FaultAction::DelayedCleanup => "delayed_cleanup",
+                FaultAction::ProcessStall => "process_stall",
+                FaultAction::ProcessResume => "process_resume",
                 FaultAction::HostCrash => "host_crash",
                 FaultAction::HostRestart => "host_restart",
                 FaultAction::ClockSkew => "clock_skew",
@@ -927,41 +932,128 @@ mod tests {
     fn run_with_all_fault_types() {
         init_test("run_with_all_fault_types");
         let mut scenario = minimal_scenario();
+        scenario.participants = vec![
+            crate::lab::scenario::Participant {
+                name: "alice".to_string(),
+                role: "sender".to_string(),
+                properties: BTreeMap::new(),
+            },
+            crate::lab::scenario::Participant {
+                name: "bob".to_string(),
+                role: "receiver".to_string(),
+                properties: BTreeMap::new(),
+            },
+        ];
         scenario.faults = vec![
             FaultEvent {
                 at_ms: 10,
                 action: FaultAction::Partition,
-                args: BTreeMap::new(),
+                args: {
+                    let mut m = BTreeMap::new();
+                    m.insert("from".into(), serde_json::json!("alice"));
+                    m.insert("to".into(), serde_json::json!("bob"));
+                    m
+                },
             },
             FaultEvent {
                 at_ms: 20,
                 action: FaultAction::Heal,
-                args: BTreeMap::new(),
+                args: {
+                    let mut m = BTreeMap::new();
+                    m.insert("from".into(), serde_json::json!("alice"));
+                    m.insert("to".into(), serde_json::json!("bob"));
+                    m
+                },
             },
             FaultEvent {
                 at_ms: 30,
-                action: FaultAction::HostCrash,
-                args: BTreeMap::new(),
+                action: FaultAction::DiskPressure,
+                args: {
+                    let mut m = BTreeMap::new();
+                    m.insert("path".into(), serde_json::json!("target/proof"));
+                    m.insert("bytes".into(), serde_json::json!(4096));
+                    m
+                },
             },
             FaultEvent {
                 at_ms: 40,
-                action: FaultAction::HostRestart,
-                args: BTreeMap::new(),
+                action: FaultAction::DiskRecovered,
+                args: {
+                    let mut m = BTreeMap::new();
+                    m.insert("path".into(), serde_json::json!("target/proof"));
+                    m
+                },
             },
             FaultEvent {
                 at_ms: 50,
-                action: FaultAction::ClockSkew,
-                args: BTreeMap::new(),
+                action: FaultAction::DelayedCleanup,
+                args: {
+                    let mut m = BTreeMap::new();
+                    m.insert("phase".into(), serde_json::json!("finalizers"));
+                    m.insert("delay_ms".into(), serde_json::json!(25));
+                    m
+                },
             },
             FaultEvent {
                 at_ms: 60,
+                action: FaultAction::ProcessStall,
+                args: {
+                    let mut m = BTreeMap::new();
+                    m.insert("host".into(), serde_json::json!("alice"));
+                    m.insert("duration_ms".into(), serde_json::json!(40));
+                    m
+                },
+            },
+            FaultEvent {
+                at_ms: 70,
+                action: FaultAction::ProcessResume,
+                args: {
+                    let mut m = BTreeMap::new();
+                    m.insert("host".into(), serde_json::json!("alice"));
+                    m
+                },
+            },
+            FaultEvent {
+                at_ms: 80,
+                action: FaultAction::HostCrash,
+                args: {
+                    let mut m = BTreeMap::new();
+                    m.insert("host".into(), serde_json::json!("bob"));
+                    m
+                },
+            },
+            FaultEvent {
+                at_ms: 90,
+                action: FaultAction::HostRestart,
+                args: {
+                    let mut m = BTreeMap::new();
+                    m.insert("host".into(), serde_json::json!("bob"));
+                    m
+                },
+            },
+            FaultEvent {
+                at_ms: 100,
+                action: FaultAction::ClockSkew,
+                args: {
+                    let mut m = BTreeMap::new();
+                    m.insert("host".into(), serde_json::json!("alice"));
+                    m.insert("skew_ms".into(), serde_json::json!(5));
+                    m
+                },
+            },
+            FaultEvent {
+                at_ms: 110,
                 action: FaultAction::ClockReset,
-                args: BTreeMap::new(),
+                args: {
+                    let mut m = BTreeMap::new();
+                    m.insert("host".into(), serde_json::json!("alice"));
+                    m
+                },
             },
         ];
         let result = ScenarioRunner::run(&scenario).unwrap();
         assert!(result.passed());
-        assert_eq!(result.faults_injected, 6);
+        assert_eq!(result.faults_injected, 11);
         crate::test_complete!("run_with_all_fault_types");
     }
 

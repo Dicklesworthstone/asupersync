@@ -86,6 +86,11 @@ fn action_name(action: &FaultAction) -> &'static str {
     match action {
         FaultAction::Partition => "partition",
         FaultAction::Heal => "heal",
+        FaultAction::DiskPressure => "disk_pressure",
+        FaultAction::DiskRecovered => "disk_recovered",
+        FaultAction::DelayedCleanup => "delayed_cleanup",
+        FaultAction::ProcessStall => "process_stall",
+        FaultAction::ProcessResume => "process_resume",
         FaultAction::HostCrash => "host_crash",
         FaultAction::HostRestart => "host_restart",
         FaultAction::ClockSkew => "clock_skew",
@@ -581,6 +586,11 @@ fn current_fault_actions_are_explicit_and_future_dimensions_fail_closed() {
     for action in [
         "partition",
         "heal",
+        "disk_pressure",
+        "disk_recovered",
+        "delayed_cleanup",
+        "process_stall",
+        "process_resume",
         "host_crash",
         "host_restart",
         "clock_skew",
@@ -593,6 +603,94 @@ fn current_fault_actions_are_explicit_and_future_dimensions_fail_closed() {
     assert!(rows["chaos-partition-cancel-storm"]["live_runner_wired"] == false);
     assert!(rows["chaos-disk-pressure-cleanup-delay"]["live_runner_wired"] == false);
     assert!(rows["chaos-process-stall-minimized-counterexample"]["live_runner_wired"] == false);
+}
+
+#[test]
+fn live_fault_action_validation_covers_disk_process_and_cleanup_dimensions() {
+    let contract = contract();
+    let probe = contract
+        .get("live_fault_action_validation")
+        .expect("live_fault_action_validation object");
+    assert_eq!(string(probe, "report_status"), "LIVE");
+
+    let source_path = string(probe, "source_path");
+    let source = std::fs::read_to_string(repo_path(source_path))
+        .unwrap_or_else(|error| panic!("read {source_path}: {error}"));
+    for marker in string_list(probe, "source_markers") {
+        assert!(
+            source.contains(&marker),
+            "scenario source must contain fault validation marker {marker}"
+        );
+    }
+
+    let raw_scenario = serde_json::to_string(
+        probe
+            .get("valid_source_backed_scenario")
+            .expect("valid source-backed scenario object"),
+    )
+    .expect("serialize valid scenario");
+    let scenario = Scenario::from_json(&raw_scenario).expect("parse valid fault-action scenario");
+    assert!(
+        scenario.validate().is_empty(),
+        "contracted disk/process/cleanup fault scenario must validate"
+    );
+
+    let actions = scenario
+        .faults
+        .iter()
+        .map(|fault| action_name(&fault.action).to_string())
+        .collect::<BTreeSet<_>>();
+    for action in string_list(probe, "required_fault_actions") {
+        assert!(
+            actions.contains(&action),
+            "valid scenario must include action {action}"
+        );
+    }
+
+    let runner_result =
+        ScenarioRunner::run(&scenario).expect("valid fault-action scenario must run");
+    assert!(runner_result.passed());
+    assert_eq!(runner_result.faults_injected, scenario.faults.len());
+    let logged_actions = runner_result
+        .fault_log
+        .iter()
+        .map(|entry| entry.action.clone())
+        .collect::<BTreeSet<_>>();
+    for action in string_list(probe, "required_fault_actions") {
+        assert!(
+            logged_actions.contains(&action),
+            "runner fault log must include action {action}"
+        );
+    }
+
+    let invalid = Scenario::from_json(
+        &serde_json::to_string(
+            probe
+                .get("invalid_fail_closed_scenario")
+                .expect("invalid fail-closed scenario object"),
+        )
+        .expect("serialize invalid scenario"),
+    )
+    .expect("parse invalid fault-action scenario");
+    let errors = invalid.validate();
+    for field in string_list(probe, "required_error_fields") {
+        assert!(
+            errors.iter().any(|error| error.field == field),
+            "invalid scenario must fail closed on {field}: {errors:?}"
+        );
+    }
+
+    let rows = rows_by_scenario(&contract);
+    assert_eq!(
+        rows["chaos-disk-pressure-cleanup-delay"]["report_status"].as_str(),
+        Some("XFAIL"),
+        "runner semantics stay fail-closed until disk/cleanup effects are wired"
+    );
+    assert_eq!(
+        rows["chaos-process-stall-minimized-counterexample"]["report_status"].as_str(),
+        Some("XFAIL"),
+        "runner semantics stay fail-closed until process stall minimization is wired"
+    );
 }
 
 #[test]

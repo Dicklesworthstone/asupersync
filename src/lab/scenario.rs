@@ -451,6 +451,16 @@ pub enum FaultAction {
     Partition,
     /// Heal a previously applied partition.
     Heal,
+    /// Apply disk-pressure accounting for an artifact or scratch path.
+    DiskPressure,
+    /// Clear disk-pressure accounting for an artifact or scratch path.
+    DiskRecovered,
+    /// Delay cleanup/finalizer progress for a named phase.
+    DelayedCleanup,
+    /// Stall a participant process for a bounded virtual duration.
+    ProcessStall,
+    /// Resume a previously stalled participant process.
+    ProcessResume,
     /// Crash a host (stop processing).
     HostCrash,
     /// Restart a previously crashed host.
@@ -829,6 +839,44 @@ impl Scenario {
                     );
                 }
             }
+            FaultAction::DiskPressure => {
+                Self::required_fault_string_arg(fault_index, &fault.args, "path", errors);
+                Self::required_fault_u64_arg(fault_index, &fault.args, "bytes", errors);
+            }
+            FaultAction::DiskRecovered => {
+                Self::required_fault_string_arg(fault_index, &fault.args, "path", errors);
+            }
+            FaultAction::DelayedCleanup => {
+                Self::required_fault_string_arg(fault_index, &fault.args, "phase", errors);
+                Self::required_fault_u64_arg(fault_index, &fault.args, "delay_ms", errors);
+            }
+            FaultAction::ProcessStall => {
+                if let Some(host) =
+                    Self::required_fault_string_arg(fault_index, &fault.args, "host", errors)
+                {
+                    Self::validate_fault_participant_ref(
+                        fault_index,
+                        "host",
+                        host,
+                        participant_names,
+                        errors,
+                    );
+                }
+                Self::required_fault_u64_arg(fault_index, &fault.args, "duration_ms", errors);
+            }
+            FaultAction::ProcessResume => {
+                if let Some(host) =
+                    Self::required_fault_string_arg(fault_index, &fault.args, "host", errors)
+                {
+                    Self::validate_fault_participant_ref(
+                        fault_index,
+                        "host",
+                        host,
+                        participant_names,
+                        errors,
+                    );
+                }
+            }
             FaultAction::HostCrash | FaultAction::HostRestart | FaultAction::ClockReset => {
                 if let Some(host) =
                     Self::required_fault_string_arg(fault_index, &fault.args, "host", errors)
@@ -856,6 +904,21 @@ impl Scenario {
                 }
                 Self::required_fault_i64_arg(fault_index, &fault.args, "skew_ms", errors);
             }
+        }
+    }
+
+    fn required_fault_u64_arg(
+        fault_index: usize,
+        args: &BTreeMap<String, serde_json::Value>,
+        key: &str,
+        errors: &mut Vec<ValidationError>,
+    ) {
+        let value = args.get(key).and_then(serde_json::Value::as_u64);
+        if value.is_none_or(|value| value == 0) {
+            errors.push(ValidationError {
+                field: format!("faults[{fault_index}].args.{key}"),
+                message: format!("fault action requires positive integer arg `{key}`"),
+            });
         }
     }
 
@@ -1439,7 +1502,10 @@ mod tests {
             "faults": [
                 {"at_ms": 1, "action": "partition"},
                 {"at_ms": 2, "action": "host_crash", "args": {"host": ""}},
-                {"at_ms": 3, "action": "clock_skew", "args": {"host": "alice", "skew_ms": "fast"}}
+                {"at_ms": 3, "action": "clock_skew", "args": {"host": "alice", "skew_ms": "fast"}},
+                {"at_ms": 4, "action": "disk_pressure", "args": {"path": "", "bytes": 0}},
+                {"at_ms": 5, "action": "delayed_cleanup", "args": {"phase": "", "delay_ms": 0}},
+                {"at_ms": 6, "action": "process_stall", "args": {"host": "", "duration_ms": 0}}
             ]
         }"#;
         let s: Scenario = serde_json::from_str(json).unwrap();
@@ -1449,6 +1515,16 @@ mod tests {
         assert!(errors.iter().any(|e| e.field == "faults[0].args.to"));
         assert!(errors.iter().any(|e| e.field == "faults[1].args.host"));
         assert!(errors.iter().any(|e| e.field == "faults[2].args.skew_ms"));
+        assert!(errors.iter().any(|e| e.field == "faults[3].args.path"));
+        assert!(errors.iter().any(|e| e.field == "faults[3].args.bytes"));
+        assert!(errors.iter().any(|e| e.field == "faults[4].args.phase"));
+        assert!(errors.iter().any(|e| e.field == "faults[4].args.delay_ms"));
+        assert!(errors.iter().any(|e| e.field == "faults[5].args.host"));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.field == "faults[5].args.duration_ms")
+        );
     }
 
     #[test]
@@ -1462,7 +1538,8 @@ mod tests {
             "faults": [
                 {"at_ms": 1, "action": "partition", "args": {"from": "alice", "to": "mallory"}},
                 {"at_ms": 2, "action": "heal", "args": {"from": "bob", "to": "bob"}},
-                {"at_ms": 3, "action": "clock_reset", "args": {"host": "mallory"}}
+                {"at_ms": 3, "action": "clock_reset", "args": {"host": "mallory"}},
+                {"at_ms": 4, "action": "process_stall", "args": {"host": "mallory", "duration_ms": 10}}
             ]
         }"#;
         let s: Scenario = serde_json::from_str(json).unwrap();
@@ -1479,6 +1556,35 @@ mod tests {
         assert!(errors.iter().any(|e| {
             e.field == "faults[2].args.host" && e.message.contains("unknown participant")
         }));
+        assert!(errors.iter().any(|e| {
+            e.field == "faults[3].args.host" && e.message.contains("unknown participant")
+        }));
+    }
+
+    #[test]
+    fn parse_disk_process_and_cleanup_fault_events() {
+        let json = r#"{
+            "id": "x",
+            "participants": [{"name": "worker-a"}],
+            "faults": [
+                {"at_ms": 10, "action": "disk_pressure", "args": {"path": "target/proof", "bytes": 4096}},
+                {"at_ms": 20, "action": "delayed_cleanup", "args": {"phase": "finalizers", "delay_ms": 25}},
+                {"at_ms": 30, "action": "process_stall", "args": {"host": "worker-a", "duration_ms": 40}},
+                {"at_ms": 80, "action": "process_resume", "args": {"host": "worker-a"}},
+                {"at_ms": 90, "action": "disk_recovered", "args": {"path": "target/proof"}}
+            ]
+        }"#;
+        let s: Scenario = serde_json::from_str(json).unwrap();
+        assert_eq!(s.faults.len(), 5);
+        assert!(matches!(s.faults[0].action, FaultAction::DiskPressure));
+        assert!(matches!(s.faults[1].action, FaultAction::DelayedCleanup));
+        assert!(matches!(s.faults[2].action, FaultAction::ProcessStall));
+        assert!(matches!(s.faults[3].action, FaultAction::ProcessResume));
+        assert!(matches!(s.faults[4].action, FaultAction::DiskRecovered));
+        assert!(
+            s.validate().is_empty(),
+            "new DSL fault actions must validate"
+        );
     }
 
     #[test]

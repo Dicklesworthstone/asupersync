@@ -29,6 +29,11 @@
   "existing_fault_actions": [
     "partition",
     "heal",
+    "disk_pressure",
+    "disk_recovered",
+    "delayed_cleanup",
+    "process_stall",
+    "process_resume",
     "host_crash",
     "host_restart",
     "clock_skew",
@@ -81,7 +86,8 @@
     "fn validate_resource_caps",
     "fn validate_expected_invariants",
     "fn validate_minimization",
-    "fn validate_golden_projection"
+    "fn validate_golden_projection",
+    "fn required_fault_u64_arg"
   ],
   "canonical_source_backed_scenario": {
     "schema_version": 1,
@@ -255,6 +261,148 @@
       "ack_required"
     ],
     "proof_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_chaos_scenario_cancellation_storm_replay CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test chaos_scenario_dsl_contract live_cancellation_storm_replay_uses_lab_runtime_state_machine -- --nocapture"
+  },
+  "live_fault_action_validation": {
+    "report_status": "LIVE",
+    "source_path": "src/lab/scenario.rs",
+    "description": "The DSL parses and fail-closed-validates the disk-pressure, delayed-cleanup, and process-stall dimensions without marking scenario runner semantics live.",
+    "required_fault_actions": [
+      "disk_pressure",
+      "disk_recovered",
+      "delayed_cleanup",
+      "process_stall",
+      "process_resume"
+    ],
+    "source_markers": [
+      "FaultAction::DiskPressure",
+      "FaultAction::DiskRecovered",
+      "FaultAction::DelayedCleanup",
+      "FaultAction::ProcessStall",
+      "FaultAction::ProcessResume",
+      "fn required_fault_u64_arg"
+    ],
+    "valid_source_backed_scenario": {
+      "schema_version": 1,
+      "id": "chaos-disk-process-cleanup-fault-actions",
+      "description": "Source-backed scenario proving disk pressure, delayed cleanup, and process stall fault actions validate and project deterministically.",
+      "lab": {
+        "seed": 340335,
+        "worker_count": 2,
+        "max_steps": 1000,
+        "trace_capacity": 4096,
+        "panic_on_obligation_leak": true,
+        "panic_on_futurelock": true
+      },
+      "participants": [
+        {
+          "name": "worker-a",
+          "role": "executor"
+        }
+      ],
+      "faults": [
+        {
+          "at_ms": 10,
+          "action": "disk_pressure",
+          "args": {
+            "path": "target/proof-bundle",
+            "bytes": 4096
+          }
+        },
+        {
+          "at_ms": 20,
+          "action": "delayed_cleanup",
+          "args": {
+            "phase": "finalizers",
+            "delay_ms": 25
+          }
+        },
+        {
+          "at_ms": 30,
+          "action": "process_stall",
+          "args": {
+            "host": "worker-a",
+            "duration_ms": 40
+          }
+        },
+        {
+          "at_ms": 80,
+          "action": "process_resume",
+          "args": {
+            "host": "worker-a"
+          }
+        },
+        {
+          "at_ms": 90,
+          "action": "disk_recovered",
+          "args": {
+            "path": "target/proof-bundle"
+          }
+        }
+      ],
+      "resource_caps": {
+        "max_artifact_bytes": 65536,
+        "max_fault_events": 8,
+        "max_counterexample_events": 16
+      },
+      "expected_invariants": [
+        "quiescence",
+        "no_obligation_leaks",
+        "bounded_artifact_output",
+        "deterministic_replay"
+      ],
+      "minimization": {
+        "enabled": true,
+        "max_evaluations": 32,
+        "max_counterexample_events": 16
+      },
+      "golden_projection": {
+        "format": "json",
+        "canonicalized": true,
+        "redacted": true
+      },
+      "metadata": {
+        "surface_contract_version": "chaos-scenario-dsl-contract-v1",
+        "semantics_status": "validation_only"
+      }
+    },
+    "invalid_fail_closed_scenario": {
+      "schema_version": 1,
+      "id": "chaos-invalid-disk-process-cleanup-fault-actions",
+      "faults": [
+        {
+          "at_ms": 10,
+          "action": "disk_pressure",
+          "args": {
+            "path": "",
+            "bytes": 0
+          }
+        },
+        {
+          "at_ms": 20,
+          "action": "delayed_cleanup",
+          "args": {
+            "phase": "",
+            "delay_ms": 0
+          }
+        },
+        {
+          "at_ms": 30,
+          "action": "process_stall",
+          "args": {
+            "host": "",
+            "duration_ms": 0
+          }
+        }
+      ]
+    },
+    "required_error_fields": [
+      "faults[0].args.path",
+      "faults[0].args.bytes",
+      "faults[1].args.phase",
+      "faults[1].args.delay_ms",
+      "faults[2].args.host",
+      "faults[2].args.duration_ms"
+    ]
   },
   "required_invariants": [
     "quiescence",
