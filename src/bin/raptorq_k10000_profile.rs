@@ -22,8 +22,13 @@ fn main() {
     let seed = 0x87654321u64;
 
     let total_bytes = k * symbol_size;
-    println!("Scenario: K={}, symbol_size={}, total_bytes={:.1}MB, loss={}%",
-        k, symbol_size, total_bytes as f64 / 1024.0 / 1024.0, loss_fraction * 100.0);
+    println!(
+        "Scenario: K={}, symbol_size={}, total_bytes={:.1}MB, loss={}%",
+        k,
+        symbol_size,
+        total_bytes as f64 / 1024.0 / 1024.0,
+        loss_fraction * 100.0
+    );
 
     // Generate source symbols as Vec<Vec<u8>> - proper API format
     println!("Generating source symbols...");
@@ -44,7 +49,10 @@ fn main() {
     let encoder = SystematicEncoder::new(&source_symbols, symbol_size, seed)
         .expect("encoder creation failed");
 
-    println!("Encoder created in {:.2}ms", encoder_start.elapsed().as_secs_f64() * 1000.0);
+    println!(
+        "Encoder created in {:.2}ms",
+        encoder_start.elapsed().as_secs_f64() * 1000.0
+    );
 
     println!("=== PROFILING TARGET 2: REPAIR SYMBOL GENERATION ===");
     let repair_start = Instant::now();
@@ -56,8 +64,11 @@ fn main() {
         repair_symbols.push((esi, symbol_data));
     }
 
-    println!("Generated {} repair symbols in {:.2}ms",
-        repair_symbols.len(), repair_start.elapsed().as_secs_f64() * 1000.0);
+    println!(
+        "Generated {} repair symbols in {:.2}ms",
+        repair_symbols.len(),
+        repair_start.elapsed().as_secs_f64() * 1000.0
+    );
 
     println!("=== PROFILING TARGET 3: LOSS PATTERN SIMULATION ===");
     let loss_start = Instant::now();
@@ -77,17 +88,23 @@ fn main() {
         }
     }
 
-    println!("Loss pattern: {}/{} symbols lost ({:.1}%) in {:.2}ms",
-        losses_applied, k, (losses_applied as f64 / k as f64) * 100.0,
-        loss_start.elapsed().as_secs_f64() * 1000.0);
+    println!(
+        "Loss pattern: {}/{} symbols lost ({:.1}%) in {:.2}ms",
+        losses_applied,
+        k,
+        (losses_applied as f64 / k as f64) * 100.0,
+        loss_start.elapsed().as_secs_f64() * 1000.0
+    );
 
     println!("=== PROFILING TARGET 4: DECODER CREATION ===");
     let decoder_start = Instant::now();
 
     let decoder = InactivationDecoder::new(k, symbol_size, seed);
 
-    println!("Decoder created in {:.2}ms",
-        decoder_start.elapsed().as_secs_f64() * 1000.0);
+    println!(
+        "Decoder created in {:.2}ms",
+        decoder_start.elapsed().as_secs_f64() * 1000.0
+    );
 
     println!("=== PROFILING TARGET 5: RECEIVED SYMBOL COLLECTION ===");
     let collect_start = Instant::now();
@@ -106,12 +123,17 @@ fn main() {
     // Add repair symbols to ensure decodability
     let needed_repairs = loss_count + 100; // Some safety margin
     for (repair_esi, repair_data) in repair_symbols.into_iter().take(needed_repairs) {
-        let (cols, coefs) = decoder.repair_equation(repair_esi).expect("repair equation failed");
+        let (cols, coefs) = decoder
+            .repair_equation(repair_esi)
+            .expect("repair equation failed");
         received_symbols.push(ReceivedSymbol::repair(repair_esi, cols, coefs, repair_data));
     }
 
-    println!("Collected {} received symbols in {:.2}ms",
-        received_symbols.len(), collect_start.elapsed().as_secs_f64() * 1000.0);
+    println!(
+        "Collected {} received symbols in {:.2}ms",
+        received_symbols.len(),
+        collect_start.elapsed().as_secs_f64() * 1000.0
+    );
 
     println!("=== PROFILING TARGET 6: DECODE (MAIN HOTSPOT) ===");
     println!("Expected bottlenecks: matrix solve, gap-handling, dense operations");
@@ -127,7 +149,10 @@ fn main() {
     let decode_result = decoder.decode(&received_symbols).expect("decode failed");
 
     let decode_time = decode_start.elapsed();
-    println!("*** DECODE COMPLETED: {:.1}s ***", decode_time.as_secs_f64());
+    println!(
+        "*** DECODE COMPLETED: {:.1}s ***",
+        decode_time.as_secs_f64()
+    );
 
     // Reconstruct source data from symbols for verification
     let mut decoded_flat = Vec::new();
@@ -143,15 +168,23 @@ fn main() {
 
     // Verify correctness
     if decoded_flat.len() != source_flat.len() {
-        panic!("Decoded length mismatch: {} vs {}", decoded_flat.len(), source_flat.len());
+        panic!(
+            "Decoded length mismatch: {} vs {}",
+            decoded_flat.len(),
+            source_flat.len()
+        );
     }
 
     let mut corruption_count = 0;
     for (i, (&expected, &actual)) in source_flat.iter().zip(decoded_flat.iter()).enumerate() {
         if expected != actual {
             corruption_count += 1;
-            if corruption_count <= 10 { // Show first 10 corruptions
-                println!("Corruption at byte {}: expected {}, got {}", i, expected, actual);
+            if corruption_count <= 10 {
+                // Show first 10 corruptions
+                println!(
+                    "Corruption at byte {}: expected {}, got {}",
+                    i, expected, actual
+                );
             }
         }
     }
@@ -161,13 +194,18 @@ fn main() {
     }
 
     // Show decode stats if available
-    println!("Decode stats: peeled={}, inactivated={}, gauss_ops={}",
-        decode_result.stats.peeled,
-        decode_result.stats.inactivated,
-        decode_result.stats.gauss_ops);
+    println!(
+        "Decode stats: peeled={}, inactivated={}, gauss_ops={}",
+        decode_result.stats.peeled, decode_result.stats.inactivated, decode_result.stats.gauss_ops
+    );
 
-    println!("✓ SUCCESS: Decoded {:.1}MB correctly in {:.1}s",
-        total_bytes as f64 / 1024.0 / 1024.0, decode_time.as_secs_f64());
-    println!("✓ Throughput: {:.1} MB/s",
-        (total_bytes as f64 / 1024.0 / 1024.0) / decode_time.as_secs_f64());
+    println!(
+        "✓ SUCCESS: Decoded {:.1}MB correctly in {:.1}s",
+        total_bytes as f64 / 1024.0 / 1024.0,
+        decode_time.as_secs_f64()
+    );
+    println!(
+        "✓ Throughput: {:.1} MB/s",
+        (total_bytes as f64 / 1024.0 / 1024.0) / decode_time.as_secs_f64()
+    );
 }

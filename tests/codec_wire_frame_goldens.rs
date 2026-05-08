@@ -266,7 +266,9 @@ fn lines_decode_first_of_two_lines_leaves_second() {
             "remaining_bytes",
             buf.len(),
             "remaining_str",
-            std::str::from_utf8(&buf).unwrap_or("<invalid utf8>").to_string()
+            std::str::from_utf8(&buf)
+                .unwrap_or("<invalid utf8>")
+                .to_string()
         )
     );
 }
@@ -287,7 +289,9 @@ fn lines_decode_partial_line_no_newline() {
             "remaining_bytes",
             buf.len(),
             "remaining_str",
-            std::str::from_utf8(&buf).unwrap_or("<invalid utf8>").to_string()
+            std::str::from_utf8(&buf)
+                .unwrap_or("<invalid utf8>")
+                .to_string()
         )
     );
 }
