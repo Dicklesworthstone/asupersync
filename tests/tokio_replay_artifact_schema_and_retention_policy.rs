@@ -187,11 +187,15 @@ fn doc_requires_rch_exec_for_heavy_validation() {
         doc.contains("rch exec --"),
         "document must require rch exec for heavy validation"
     );
+    assert!(
+        !doc.contains("rch exec -- cargo "),
+        "runner commands must route Cargo through rch env CARGO_TARGET_DIR"
+    );
     for token in [
-        "rch exec -- cargo test --test tokio_executable_conformance_contracts -- --nocapture",
-        "rch exec -- cargo test --test tokio_ci_quality_gate_enforcement -- --nocapture",
-        "rch exec -- cargo test --test tokio_replay_artifact_schema_and_retention_policy -- --nocapture",
-        "rch exec -- cargo test --test replay_e2e_suite -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_replay_artifact_retention_docs cargo test --test tokio_executable_conformance_contracts -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_replay_artifact_retention_docs cargo test --test tokio_ci_quality_gate_enforcement -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_replay_artifact_retention_docs cargo test --test tokio_replay_artifact_schema_and_retention_policy -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_replay_artifact_retention_docs cargo test --test replay_e2e_suite -- --nocapture",
     ] {
         assert!(doc.contains(token), "missing runner command token: {token}");
     }
