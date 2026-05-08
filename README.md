@@ -490,7 +490,7 @@ cargo add asupersync --git https://github.com/Dicklesworthstone/asupersync
 ```bash
 git clone https://github.com/Dicklesworthstone/asupersync.git
 cd asupersync
-cargo build --release
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_readme_docs cargo build --release
 ```
 
 ### Minimum Supported Rust Version
@@ -1568,7 +1568,7 @@ and known limitations.
 
 - **Cooperative cancellation only**: Non-cooperative code requires explicit escalation boundaries
 - **Not a drop-in replacement for other runtimes**: Different API, different guarantees
-- **No Tokio dependency compatibility by default**: runtime-specific crates that assume Tokio need explicit boundary adapters. The asupersync runtime crate's default production graph has no normal-edge dependency on tokio: `rch exec -- cargo tree -e normal -p asupersync -i tokio` should print `warning: nothing to print.` The optional `metrics` feature also has no normal-edge dependency on tokio: `rch exec -- cargo tree -e normal -p asupersync --features metrics -i tokio` should print the same warning. Two satellite workspace members carry tokio for documented purposes: `asupersync-tokio-compat` (opt-in API shims) and `conformance` (RFC vendor-comparison harnesses). Dev/test graphs pull tokio for reference implementations and `InMemoryMetricExporter` via `opentelemetry_sdk`'s `testing` feature. The `fuzz` feature is intentionally outside this guarantee because it enables `opentelemetry-proto`'s `gen-tonic-messages` path (`tonic`/`tonic-prost` -> `tokio`) for OTLP wire-format fuzz helpers. Workspace-wide and fuzz-enabled cargo-tree output is therefore an audit/quarantine surface, not the default or metrics production-consumer proof. See AGENTS.md "Documented carve-outs" and [`artifacts/no_tokio_feature_boundary_contract_v1.json`](./artifacts/no_tokio_feature_boundary_contract_v1.json) for the canonical verification commands and rationale.
+- **No Tokio dependency compatibility by default**: runtime-specific crates that assume Tokio need explicit boundary adapters. The asupersync runtime crate's default production graph has no normal-edge dependency on tokio: `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_readme_docs cargo tree -e normal -p asupersync -i tokio` should print `warning: nothing to print.` The optional `metrics` feature also has no normal-edge dependency on tokio: `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_readme_docs cargo tree -e normal -p asupersync --features metrics -i tokio` should print the same warning. Two satellite workspace members carry tokio for documented purposes: `asupersync-tokio-compat` (opt-in API shims) and `conformance` (RFC vendor-comparison harnesses). Dev/test graphs pull tokio for reference implementations and `InMemoryMetricExporter` via `opentelemetry_sdk`'s `testing` feature. The `fuzz` feature is intentionally outside this guarantee because it enables `opentelemetry-proto`'s `gen-tonic-messages` path (`tonic`/`tonic-prost` -> `tokio`) for OTLP wire-format fuzz helpers. Workspace-wide and fuzz-enabled cargo-tree output is therefore an audit/quarantine surface, not the default or metrics production-consumer proof. See AGENTS.md "Documented carve-outs" and [`artifacts/no_tokio_feature_boundary_contract_v1.json`](./artifacts/no_tokio_feature_boundary_contract_v1.json) for the canonical verification commands and rationale.
 
 ### Design Trade-offs
 
