@@ -1,0 +1,91 @@
+{
+  "action_items": [
+    "make coverage for hpack_huffman_decode explicit with a target covers entry",
+    "add a fuzz target covering mysql_handshake_parse",
+    "refresh stale fuzz target evidence for mysql_handshake_parse: fuzz_mysql_handshake_old"
+  ],
+  "coverage": [
+    {
+      "evidence": {
+        "covering_targets": [],
+        "exemption_status": "missing",
+        "partial_targets": [
+          "fuzz_hpack_decode_smoke"
+        ],
+        "stale_covering_targets": []
+      },
+      "risk_rank": 3,
+      "status": "partial",
+      "surface": {
+        "category": "hpack",
+        "id": "hpack_huffman_decode",
+        "input_kind": "&[u8]",
+        "path": "src/http/hpack.rs",
+        "risk": "high",
+        "symbol": "decode_huffman",
+        "visibility": "pub"
+      }
+    },
+    {
+      "evidence": {
+        "covering_targets": [],
+        "exemption_status": "missing",
+        "partial_targets": [],
+        "stale_covering_targets": [
+          "fuzz_mysql_handshake_old"
+        ]
+      },
+      "risk_rank": 3,
+      "status": "missing",
+      "surface": {
+        "category": "mysql",
+        "id": "mysql_handshake_parse",
+        "input_kind": "&[u8]",
+        "path": "src/database/mysql.rs",
+        "risk": "high",
+        "symbol": "parse_handshake",
+        "visibility": "pub"
+      }
+    }
+  ],
+  "current_date": "2026-05-08",
+  "forbidden_actions": {
+    "edits_fuzz_manifest": false,
+    "runs_beads_mutation": false,
+    "runs_cargo": false,
+    "runs_destructive_command": false,
+    "runs_git_mutation": false
+  },
+  "generated_at": "2026-05-08T05:45:00Z",
+  "input_schema_version": "parser-fuzz-coverage-input-v1",
+  "missing_coverage": [
+    "mysql_handshake_parse"
+  ],
+  "non_mutating": true,
+  "partial_coverage": [
+    "hpack_huffman_decode"
+  ],
+  "requirements": {
+    "coverage_uses_active_fuzz_target": false,
+    "every_public_byte_or_string_parser_has_coverage_or_exemption": false,
+    "exemptions_have_reason_and_future_expiry": true,
+    "input_schema_recognized": true,
+    "partial_references_are_not_counted_as_coverage": false
+  },
+  "schema_version": "parser-fuzz-coverage-registry-v1",
+  "source": "tests/fixtures/parser_fuzz_coverage_registry/partial_and_stale_target.json",
+  "source_counts": {
+    "exemptions": 0,
+    "fuzz_targets": 2,
+    "parser_surfaces": 2
+  },
+  "summary": {
+    "covered": 0,
+    "exempt": 0,
+    "invalid_exemptions": 0,
+    "missing": 1,
+    "partial": 1,
+    "passes": false,
+    "stale_covering_targets": 1
+  }
+}

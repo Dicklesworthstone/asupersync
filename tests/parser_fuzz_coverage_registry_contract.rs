@@ -207,6 +207,26 @@ fn partial_references_and_stale_targets_do_not_count_as_coverage() {
 }
 
 #[test]
+fn partial_and_stale_targets_match_full_output_golden() {
+    let output = run_registry("partial_and_stale_target.json");
+    assert!(
+        output.status.success(),
+        "registry helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = String::from_utf8(output.stdout).expect("registry stdout is UTF-8");
+    let expected = fixture_text("partial_and_stale_target_expected.json");
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual registry output is JSON");
+    let expected_json: Value =
+        serde_json::from_str(&expected).expect("expected registry output is JSON");
+    assert_eq!(actual_json, expected_json, "registry golden JSON drifted");
+    assert_eq!(actual, expected, "registry golden text drifted");
+}
+
+#[test]
 fn duplicate_target_ids_are_coalesced_deterministically() {
     let receipt = registry_json("duplicate_targets.json");
     let covering = coverage_record(&receipt, "nats_header_parse")["evidence"]["covering_targets"]
