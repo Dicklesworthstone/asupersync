@@ -221,9 +221,9 @@ Recommended upgrade checklist:
 1. Inspect `packages/browser-core/abi-metadata.json` (or the published package
    sidecar) for `abi_version` and fingerprint changes.
 2. Re-run the packaged ABI compatibility matrix:
-   `rch exec -- cargo test --test wasm_packaged_abi_compatibility_matrix -- --nocapture`
+   `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_typescript_topology_docs cargo test --test wasm_packaged_abi_compatibility_matrix -- --nocapture`
 3. Re-run the shipped package export/diagnostics contract:
-   `rch exec -- cargo test --test wasm_js_exports_coverage_contract -- --nocapture`
+   `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_typescript_topology_docs cargo test --test wasm_js_exports_coverage_contract -- --nocapture`
 4. If a major ABI change landed, upgrade all `@asupersync/*` packages together
    and follow the migration note in `docs/wasm_abi_compatibility_policy.md`.
 
@@ -317,8 +317,8 @@ PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh
 Reference verification:
 
 ```bash
-rch exec -- cargo test --test wasm_js_exports_coverage_contract -- --nocapture
-rch exec -- cargo test --test wasm_packaged_abi_compatibility_matrix -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_typescript_topology_docs cargo test --test wasm_js_exports_coverage_contract -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_typescript_topology_docs cargo test --test wasm_packaged_abi_compatibility_matrix -- --nocapture
 ```
 
 ## Cross-References
