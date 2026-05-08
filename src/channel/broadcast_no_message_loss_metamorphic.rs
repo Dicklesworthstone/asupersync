@@ -229,7 +229,7 @@ mod tests {
                 }
 
                 // Check ordering preservation (should be same as send order)
-                prop_assert_eq!(received_messages, messages,
+                prop_assert_eq!(&received_messages, &messages,
                     "MR1 VIOLATION: Receiver {} got messages in wrong order", receiver_idx);
             }
         });
@@ -372,16 +372,16 @@ mod tests {
             }
 
             // MR3 ASSERTIONS: Both strategies should produce identical results
-            prop_assert_eq!(fast_received_r0, slow_received_r0,
+            prop_assert_eq!(&fast_received_r0, &slow_received_r0,
                 "MR3 VIOLATION: Receiver 0 saw different sequences for fast vs slow send rates");
 
-            prop_assert_eq!(fast_received_r1, slow_received_r1,
+            prop_assert_eq!(&fast_received_r1, &slow_received_r1,
                 "MR3 VIOLATION: Receiver 1 saw different sequences for fast vs slow send rates");
 
-            prop_assert_eq!(fast_received_r0, messages,
+            prop_assert_eq!(&fast_received_r0, &messages,
                 "MR3 VIOLATION: Fast send rate didn't preserve all messages");
 
-            prop_assert_eq!(slow_received_r0, messages,
+            prop_assert_eq!(&slow_received_r0, &messages,
                 "MR3 VIOLATION: Slow send rate didn't preserve all messages");
         });
     }

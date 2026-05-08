@@ -6560,11 +6560,14 @@ worker_threads = 16
         init_test_logging();
 
         let result = RuntimeBuilder::new().with_sharded_state(true).build();
-        let err = result.expect_err(
-            "br-asupersync-8fuxnt: RuntimeBuilder::with_sharded_state(true) \
-             must return an error at build() time until the scheduler-side \
-             integration lands",
-        );
+        let err = match result {
+            Err(err) => err,
+            Ok(_) => panic!(
+                "br-asupersync-8fuxnt: RuntimeBuilder::with_sharded_state(true) \
+                 must return an error at build() time until the scheduler-side \
+                 integration lands"
+            ),
+        };
         let msg = format!("{err}");
         assert!(
             msg.contains("br-asupersync-8fuxnt"),

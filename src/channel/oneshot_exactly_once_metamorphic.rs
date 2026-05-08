@@ -197,7 +197,7 @@ mod tests {
                     match block_on(rx.recv(&cx)) {
                         Ok(received_msg) => {
                             counter.record_recv_success();
-                            prop_assert_eq!(received_msg, message,
+                            prop_assert_eq!(&received_msg, &message,
                                 "MR1 VIOLATION: Received message differs from sent message");
                             prop_assert!(received_msg.validate(),
                                 "MR1 VIOLATION: Received message failed integrity check");
@@ -323,7 +323,7 @@ mod tests {
                         SendError::Cancelled(msg) => msg,
                     };
 
-                    prop_assert_eq!(returned_message, message,
+                    prop_assert_eq!(&returned_message, &message,
                         "MR2 VIOLATION: Failed send returned different message than sent");
                     prop_assert!(returned_message.validate(),
                         "MR2 VIOLATION: Returned message failed integrity check");
@@ -373,7 +373,7 @@ mod tests {
             match first_recv {
                 Ok(received_msg) => {
                     counter.record_recv_success();
-                    prop_assert_eq!(received_msg, message,
+                    prop_assert_eq!(&received_msg, &message,
                         "MR3 VIOLATION: First receive got wrong message");
                 }
                 Err(e) => {
@@ -484,12 +484,11 @@ mod tests {
             }
 
             // Test Case 2: Failed send → disconnected state consistency
-            let (tx2, rx2) = oneshot::channel::<UniqueMessage>();
-            drop(rx2); // Create disconnected state
-
             let mut disconnected_results = Vec::new();
             for _ in 0..state_probe_count {
-                let probe_result = tx2.send(&cx, message.clone());
+                let (probe_tx, probe_rx) = oneshot::channel::<UniqueMessage>();
+                drop(probe_rx);
+                let probe_result = probe_tx.send(&cx, message.clone());
                 disconnected_results.push(probe_result);
             }
 

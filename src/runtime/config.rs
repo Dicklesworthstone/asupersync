@@ -9067,6 +9067,7 @@ mod tests {
             enable_read_biased_region_snapshot: false,
             enable_adaptive_cancel_streak: false,
             adaptive_cancel_streak_epoch_steps: 0,
+            runtime_state_shape: RuntimeStateShape::Unified,
         }
     }
 
@@ -9356,6 +9357,7 @@ mod tests {
             enable_read_biased_region_snapshot: true,
             enable_adaptive_cancel_streak: true,
             adaptive_cancel_streak_epoch_steps: 64,
+            runtime_state_shape: RuntimeStateShape::Unified,
         };
 
         config.normalize();

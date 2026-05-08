@@ -71,7 +71,7 @@ impl ExecutionContext {
     fn execute(&mut self, ops: &[ScheduledOp]) -> LedgerStats {
         self.acquired_tokens.clear();
         // Work around ObligationToken not implementing Clone by storing indices instead
-        self.acquired_tokens = vec![None; ops.len()];
+        self.acquired_tokens = (0..ops.len()).map(|_| None).collect();
 
         for (idx, op) in ops.iter().enumerate() {
             match op {
@@ -118,10 +118,6 @@ impl ExecutionContext {
         }
 
         self.ledger.stats()
-    }
-
-    fn pending_count(&self) -> u64 {
-        self.ledger.pending_count()
     }
 }
 

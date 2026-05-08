@@ -217,7 +217,7 @@ mod tests {
                 let received_set: HashSet<_> = received_messages.iter().cloned().collect();
 
                 // MR1 ASSERTION: Sets must be equal regardless of send order
-                prop_assert_eq!(received_set, sent_set,
+                prop_assert_eq!(&received_set, &sent_set,
                     "MR1 VIOLATION: Received set differs from sent set for permutation {}.\n\
                      Sent: {:?}\n\
                      Received: {:?}\n\
@@ -447,14 +447,14 @@ mod tests {
             let streaming_set: HashSet<_> = streaming_received.iter().cloned().collect();
             let batch_set: HashSet<_> = batch_received.iter().cloned().collect();
 
-            prop_assert_eq!(streaming_set, batch_set,
+            prop_assert_eq!(&streaming_set, &batch_set,
                 "MR3 VIOLATION: Different message sets between streaming and batch");
 
             // Verify completeness
             let sent_set: HashSet<_> = messages.iter().cloned().collect();
-            prop_assert_eq!(streaming_set, sent_set,
+            prop_assert_eq!(&streaming_set, &sent_set,
                 "MR3 VIOLATION: Streaming didn't preserve all messages");
-            prop_assert_eq!(batch_set, sent_set,
+            prop_assert_eq!(&batch_set, &sent_set,
                 "MR3 VIOLATION: Batch didn't preserve all messages");
         });
     }
