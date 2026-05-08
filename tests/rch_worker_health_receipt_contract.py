@@ -84,6 +84,18 @@ class RchWorkerHealthReceiptContract(unittest.TestCase):
         self.assertIn("repeated remote command failures", receipt["workers"][0]["reasons"])
         self.assertIn("avoid scheduling expensive cargo lanes", receipt["workers"][0]["remediation"][0])
 
+    def test_repeated_remote_failures_output_matches_full_reviewed_golden(self) -> None:
+        output = run_receipt_output("repeated_remote_failures.json")
+        expected = fixture_text("repeated_remote_failures_expected.json")
+
+        self.assertEqual(
+            output.stdout,
+            expected,
+            "repeated remote failures rch worker health receipt drifted from the reviewed golden",
+        )
+        json.loads(output.stdout)
+        json.loads(expected)
+
     def test_low_tmp_storage_is_quarantine_candidate(self) -> None:
         receipt = run_receipt("low_tmp_storage.json")
 
