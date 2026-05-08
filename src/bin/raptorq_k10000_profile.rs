@@ -4,8 +4,9 @@
 //! Expected hotspots: matrix solve (Gaussian elimination), gap-handling, dense core.
 //!
 //! Usage:
-//! cargo build --profile release-perf --bin raptorq_k10000_profile --features simd-intrinsics
-//! samply record --save-only -o k10000_cpu.json -- ./target/release-perf/raptorq_k10000_profile
+//! CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-/tmp/rch_target_raptorq_k10000_profile}
+//! rch exec -- env CARGO_TARGET_DIR=$CARGO_TARGET_DIR cargo build --profile release-perf --bin raptorq_k10000_profile --features simd-intrinsics
+//! samply record --save-only -o k10000_cpu.json -- $CARGO_TARGET_DIR/release-perf/raptorq_k10000_profile
 
 use asupersync::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::systematic::SystematicEncoder;
