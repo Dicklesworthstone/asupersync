@@ -1646,6 +1646,124 @@ fn proof_runner_writes_reproducible_release_proof_pack_directory() {
 }
 
 #[test]
+fn proof_runner_verifies_written_release_proof_pack_directory() {
+    let tempdir = tempfile::tempdir().expect("create release proof pack tempdir");
+    let output_dir = tempdir.path().join("pack");
+    let output_dir_text = output_dir
+        .to_str()
+        .expect("release proof pack tempdir path utf8");
+    let write_output = run_proof_runner(&[
+        "--release-proof-pack",
+        "--release-proof-pack-generated-at",
+        "2026-05-08T00:00:00Z",
+        "--release-proof-pack-output-dir",
+        output_dir_text,
+        "--output",
+        "json",
+    ])
+    .expect("release proof pack should execute");
+    assert!(
+        write_output.status.success(),
+        "release proof pack write failed: {}\nstdout: {}\nstderr: {}",
+        write_output.status,
+        String::from_utf8_lossy(&write_output.stdout),
+        String::from_utf8_lossy(&write_output.stderr)
+    );
+
+    let verify_output = run_proof_runner(&[
+        "--verify-release-proof-pack-dir",
+        output_dir_text,
+        "--output",
+        "json",
+    ])
+    .expect("release proof pack verifier should execute");
+    assert!(
+        verify_output.status.success(),
+        "release proof pack verifier failed: {}\nstdout: {}\nstderr: {}",
+        verify_output.status,
+        String::from_utf8_lossy(&verify_output.stdout),
+        String::from_utf8_lossy(&verify_output.stderr)
+    );
+    let verification = output_json(&verify_output);
+    assert_eq!(
+        verification["schema_version"].as_str(),
+        Some("release-proof-pack-verification-v1")
+    );
+    assert_eq!(verification["verdict"].as_str(), Some("pass"));
+    assert_eq!(
+        verification["summary"]["source_artifact_count"].as_u64(),
+        Some(6)
+    );
+    assert_eq!(
+        verification["summary"]["embedded_report_count"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        verification["summary"]["stale_file_count"].as_u64(),
+        Some(0)
+    );
+}
+
+#[test]
+fn release_proof_pack_verifier_fail_closes_on_stale_copied_artifact() {
+    let tempdir = tempfile::tempdir().expect("create release proof pack tempdir");
+    let output_dir = tempdir.path().join("pack");
+    let output_dir_text = output_dir
+        .to_str()
+        .expect("release proof pack tempdir path utf8");
+    let write_output = run_proof_runner(&[
+        "--release-proof-pack",
+        "--release-proof-pack-generated-at",
+        "2026-05-08T00:00:00Z",
+        "--release-proof-pack-output-dir",
+        output_dir_text,
+        "--output",
+        "json",
+    ])
+    .expect("release proof pack should execute");
+    assert!(
+        write_output.status.success(),
+        "release proof pack write failed: {}\nstdout: {}\nstderr: {}",
+        write_output.status,
+        String::from_utf8_lossy(&write_output.stdout),
+        String::from_utf8_lossy(&write_output.stderr)
+    );
+
+    let manifest_copy = output_dir.join("source_artifacts/artifacts/proof_lane_manifest_v1.json");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&manifest_copy)
+        .expect("open copied manifest artifact");
+    writeln!(file, "stale verifier mutation").expect("mutate copied manifest artifact");
+
+    let verify_output = run_proof_runner(&[
+        "--verify-release-proof-pack-dir",
+        output_dir_text,
+        "--output",
+        "json",
+    ])
+    .expect("release proof pack verifier should execute");
+    assert!(
+        !verify_output.status.success(),
+        "stale copied artifact must make verifier fail closed"
+    );
+    let verification = output_json(&verify_output);
+    assert_eq!(verification["verdict"].as_str(), Some("fail_closed"));
+    assert_eq!(
+        verification["summary"]["stale_file_count"].as_u64(),
+        Some(1)
+    );
+    assert!(
+        verification["failure_reasons"]
+            .as_array()
+            .expect("failure reasons")
+            .iter()
+            .any(|reason| reason["reason_id"].as_str() == Some("stale-source-artifact-copy")),
+        "verifier should identify stale copied source artifact"
+    );
+}
+
+#[test]
 fn release_proof_pack_fail_closes_on_missing_rch_log() {
     let command = "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_runner_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test proof_runner_contract -- --nocapture";
     let mut classified = classify_fixture(

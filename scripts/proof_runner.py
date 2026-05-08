@@ -1600,6 +1600,130 @@ class ProofRunner:
             "written_files": sorted(written_files),
         }
 
+    def verify_release_proof_pack_dir(self, pack_dir: str) -> Dict[str, Any]:
+        """Verify a written release proof-pack directory against its index."""
+        root = Path(pack_dir)
+        index_path = root / "index.json"
+        failure_reasons = []
+
+        if not index_path.exists():
+            return {
+                "schema_version": "release-proof-pack-verification-v1",
+                "pack_dir": str(root),
+                "index_path": str(index_path),
+                "pack_schema_version": "",
+                "summary": {
+                    "source_artifact_count": 0,
+                    "embedded_report_count": 0,
+                    "missing_file_count": 1,
+                    "stale_file_count": 0,
+                },
+                "failure_reasons": [
+                    {
+                        "reason_id": "missing-index",
+                        "summary": "release proof pack index.json is missing",
+                        "path": "index.json",
+                    }
+                ],
+                "verdict": "fail_closed",
+            }
+
+        with index_path.open(encoding="utf-8") as handle:
+            pack = json.load(handle)
+
+        missing_file_count = 0
+        stale_file_count = 0
+        for row in pack.get("source_artifacts", []):
+            if not isinstance(row, dict) or row.get("status") != "included":
+                continue
+            copy_path = str(row.get("copy_path", ""))
+            actual_path = root / copy_path
+            if not copy_path or not actual_path.exists():
+                missing_file_count += 1
+                failure_reasons.append(
+                    {
+                        "reason_id": "missing-source-artifact-copy",
+                        "summary": "included source artifact copy is missing",
+                        "path": copy_path,
+                        "source_path": row.get("path", ""),
+                    }
+                )
+                continue
+            actual_sha256 = file_hash(actual_path)
+            actual_bytes = actual_path.stat().st_size
+            if actual_sha256 != row.get("sha256") or actual_bytes != row.get("bytes"):
+                stale_file_count += 1
+                failure_reasons.append(
+                    {
+                        "reason_id": "stale-source-artifact-copy",
+                        "summary": "source artifact copy hash or byte count changed",
+                        "path": copy_path,
+                        "source_path": row.get("path", ""),
+                        "expected_sha256": row.get("sha256", ""),
+                        "actual_sha256": actual_sha256,
+                        "expected_bytes": row.get("bytes", 0),
+                        "actual_bytes": actual_bytes,
+                    }
+                )
+
+        for row in pack.get("embedded_report_rows", []):
+            if not isinstance(row, dict):
+                continue
+            report_path = str(row.get("path", ""))
+            actual_path = root / report_path
+            if not report_path or not actual_path.exists():
+                missing_file_count += 1
+                failure_reasons.append(
+                    {
+                        "reason_id": "missing-embedded-report",
+                        "summary": "embedded report file is missing",
+                        "path": report_path,
+                    }
+                )
+                continue
+            actual_sha256 = file_hash(actual_path)
+            actual_bytes = actual_path.stat().st_size
+            if actual_sha256 != row.get("sha256") or actual_bytes != row.get("bytes"):
+                stale_file_count += 1
+                failure_reasons.append(
+                    {
+                        "reason_id": "stale-embedded-report",
+                        "summary": "embedded report hash or byte count changed",
+                        "path": report_path,
+                        "expected_sha256": row.get("sha256", ""),
+                        "actual_sha256": actual_sha256,
+                        "expected_bytes": row.get("bytes", 0),
+                        "actual_bytes": actual_bytes,
+                    }
+                )
+
+        return {
+            "schema_version": "release-proof-pack-verification-v1",
+            "pack_dir": str(root),
+            "index_path": str(index_path),
+            "pack_schema_version": pack.get("schema_version", ""),
+            "summary": {
+                "source_artifact_count": len(
+                    [
+                        row
+                        for row in pack.get("source_artifacts", [])
+                        if isinstance(row, dict) and row.get("status") == "included"
+                    ]
+                ),
+                "embedded_report_count": len(
+                    [
+                        row
+                        for row in pack.get("embedded_report_rows", [])
+                        if isinstance(row, dict)
+                    ]
+                ),
+                "missing_file_count": missing_file_count,
+                "stale_file_count": stale_file_count,
+            },
+            "failure_reasons": failure_reasons,
+            "verdict": "fail_closed" if failure_reasons else "pass",
+        }
+
     def analyze_preflight(
         self,
         lane_id: str,
@@ -1927,6 +2051,11 @@ def main():
         help="Write the release proof pack to this directory"
     )
     parser.add_argument(
+        "--verify-release-proof-pack-dir",
+        default="",
+        help="Verify a written release proof pack directory"
+    )
+    parser.add_argument(
         "--command",
         default="",
         help="Original rch command for --classify-rch-log"
@@ -2056,6 +2185,18 @@ def main():
                 print(json.dumps(response, indent=2))
             else:
                 print(release_proof_pack_markdown(result), end="")
+            return 0 if result["verdict"] == "pass" else 1
+
+        if args.verify_release_proof_pack_dir:
+            result = runner.verify_release_proof_pack_dir(
+                args.verify_release_proof_pack_dir
+            )
+            if args.output == "json":
+                print(json.dumps(result, indent=2))
+            else:
+                print(f"Verdict: {result['verdict']}")
+                for reason in result["failure_reasons"]:
+                    print(f"- {reason['reason_id']}: {reason['summary']}")
             return 0 if result["verdict"] == "pass" else 1
 
         # Validate required arguments for proof analysis
