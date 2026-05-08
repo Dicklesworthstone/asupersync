@@ -42,6 +42,13 @@ fn write_reservation_snapshot(raw: &str) -> tempfile::NamedTempFile {
     file
 }
 
+fn write_build_slot_snapshot(raw: &str) -> tempfile::NamedTempFile {
+    let mut file = tempfile::NamedTempFile::new().expect("create build-slot snapshot fixture");
+    file.write_all(raw.as_bytes())
+        .expect("write build-slot snapshot fixture");
+    file
+}
+
 fn output_json(output: &Output) -> Value {
     let stdout = String::from_utf8_lossy(&output.stdout);
     serde_json::from_str(&stdout)
@@ -424,6 +431,222 @@ fn proof_runner_reports_reservation_check_unavailable_when_unconfigured() {
             .expect("classifications array")
             .len(),
         0
+    );
+}
+
+#[test]
+fn proof_runner_execute_allows_owned_build_slot_and_records_release_path() {
+    let snapshot = write_build_slot_snapshot(
+        r#"{
+          "acquired": {
+            "slot": "proof-runner-rch",
+            "agent_name": "BlackDove",
+            "expires_ts": "2999-01-01T00:00:00Z"
+          }
+        }"#,
+    );
+    let snapshot_path = snapshot.path().to_str().expect("snapshot path utf8");
+    let result = proof_runner_json(&[
+        "--lane",
+        "rustfmt-check",
+        "--touched-files",
+        "scripts/proof_runner.py",
+        "--build-slot-snapshot",
+        snapshot_path,
+        "--agent-name",
+        "BlackDove",
+        "--skip-dirty-check",
+        "--execute",
+        "--output",
+        "json",
+    ]);
+
+    assert_eq!(result["preflight_passed"].as_bool(), Some(true));
+    assert_eq!(
+        result["build_slot_check"]["classifications"][0]["classification"].as_str(),
+        Some("acquired")
+    );
+    assert_eq!(
+        result["build_slot_check"]["release_after_command"].as_str(),
+        Some(
+            "release_build_slot(project_key='/data/projects/asupersync', agent_name='BlackDove', slot='proof-runner-rch')"
+        )
+    );
+}
+
+#[test]
+fn proof_runner_execute_blocks_peer_build_slot_conflict() {
+    let snapshot = write_build_slot_snapshot(
+        r#"{
+          "conflicts": [
+            {
+              "slot": "proof-runner-rch",
+              "holders": [
+                {
+                  "agent": "TopazGoose",
+                  "expires_ts": "2999-01-01T00:00:00Z"
+                }
+              ]
+            }
+          ]
+        }"#,
+    );
+    let snapshot_path = snapshot.path().to_str().expect("snapshot path utf8");
+    let output = run_proof_runner(&[
+        "--lane",
+        "rustfmt-check",
+        "--touched-files",
+        "scripts/proof_runner.py",
+        "--build-slot-snapshot",
+        snapshot_path,
+        "--agent-name",
+        "BlackDove",
+        "--skip-dirty-check",
+        "--execute",
+        "--output",
+        "json",
+    ])
+    .expect("proof runner should execute");
+
+    assert_eq!(output.status.code(), Some(1));
+    let result = output_json(&output);
+    assert_eq!(
+        result["validation_frontier_record"]["error_class"].as_str(),
+        Some("build_slot_conflict")
+    );
+    assert_eq!(
+        result["build_slot_check"]["classifications"][0]["classification"].as_str(),
+        Some("peer-active")
+    );
+    assert_eq!(
+        result["build_slot_check"]["classifications"][0]["holder"].as_str(),
+        Some("TopazGoose")
+    );
+}
+
+#[test]
+fn proof_runner_execute_blocks_when_only_expired_build_slot_is_present() {
+    let snapshot = write_build_slot_snapshot(
+        r#"{
+          "build_slots": [
+            {
+              "slot": "proof-runner-rch",
+              "agent_name": "BlackDove",
+              "expires_ts": "2000-01-01T00:00:00Z"
+            }
+          ]
+        }"#,
+    );
+    let snapshot_path = snapshot.path().to_str().expect("snapshot path utf8");
+    let output = run_proof_runner(&[
+        "--lane",
+        "rustfmt-check",
+        "--touched-files",
+        "scripts/proof_runner.py",
+        "--build-slot-snapshot",
+        snapshot_path,
+        "--agent-name",
+        "BlackDove",
+        "--skip-dirty-check",
+        "--execute",
+        "--output",
+        "json",
+    ])
+    .expect("proof runner should execute");
+
+    assert_eq!(output.status.code(), Some(1));
+    let result = output_json(&output);
+    assert_eq!(
+        result["validation_frontier_record"]["error_class"].as_str(),
+        Some("build_slot_unavailable")
+    );
+    assert_eq!(
+        result["build_slot_check"]["classifications"][0]["classification"].as_str(),
+        Some("expired")
+    );
+}
+
+#[test]
+fn proof_runner_records_renewed_and_released_build_slot_states() {
+    let snapshot = write_build_slot_snapshot(
+        r#"{
+          "renewed": {
+            "slot": "proof-runner-rch",
+            "agent_name": "BlackDove",
+            "expires_ts": "2999-01-01T00:00:00Z"
+          },
+          "released": {
+            "slot": "proof-runner-rch",
+            "agent_name": "BlackDove",
+            "released_ts": "2026-05-08T04:00:00Z"
+          }
+        }"#,
+    );
+    let snapshot_path = snapshot.path().to_str().expect("snapshot path utf8");
+    let result = proof_runner_json(&[
+        "--lane",
+        "rustfmt-check",
+        "--touched-files",
+        "scripts/proof_runner.py",
+        "--build-slot-snapshot",
+        snapshot_path,
+        "--agent-name",
+        "BlackDove",
+        "--skip-dirty-check",
+        "--execute",
+        "--output",
+        "json",
+    ]);
+
+    assert_eq!(result["preflight_passed"].as_bool(), Some(true));
+    let states: BTreeSet<String> = result["build_slot_check"]["classifications"]
+        .as_array()
+        .expect("build slot classifications array")
+        .iter()
+        .map(|item| {
+            item["classification"]
+                .as_str()
+                .expect("classification string")
+                .to_string()
+        })
+        .collect();
+    assert!(states.contains("renewed"));
+    assert!(states.contains("released"));
+}
+
+#[test]
+fn proof_runner_dry_run_and_suggestions_do_not_require_build_slot_snapshot() {
+    let dry_run = proof_runner_json(&[
+        "--lane",
+        "rustfmt-check",
+        "--touched-files",
+        "scripts/proof_runner.py",
+        "--agent-name",
+        "BlackDove",
+        "--skip-dirty-check",
+        "--output",
+        "json",
+    ]);
+    assert_eq!(dry_run["preflight_passed"].as_bool(), Some(true));
+    assert_eq!(
+        dry_run["build_slot_check"]["source"].as_str(),
+        Some("not_required")
+    );
+
+    let suggestions = proof_runner_json(&[
+        "--suggest-lanes",
+        "--touched-files",
+        "scripts/proof_runner.py",
+        "--agent-name",
+        "BlackDove",
+        "--output",
+        "json",
+    ]);
+    assert!(
+        suggestions["suggested_lanes"]
+            .as_array()
+            .expect("suggestions array")
+            .contains(&Value::String("rustfmt-check".to_string()))
     );
 }
 
