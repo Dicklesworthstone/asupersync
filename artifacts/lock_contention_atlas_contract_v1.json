@@ -177,8 +177,8 @@
     },
     {
       "proof_id": "stable-redacted-report",
-      "status": "XFAIL",
-      "description": "The atlas report must sort rows deterministically and omit payloads, user paths, and raw coordination text."
+      "status": "LIVE",
+      "description": "The atlas report sorts rows deterministically and omits payloads, user paths, and raw coordination text."
     }
   ],
   "golden_markdown": "| surface | status | required_fields |\n| --- | --- | --- |\n| contended_mutex_snapshot | LIVE | lock_name, acquisitions, contentions, wait_ns, hold_ns, max_wait_ns, max_hold_ns, p95_wait_ns, p999_wait_ns, p95_hold_ns, p999_hold_ns, instrumentation_mode |\n| instrumentation_off_overhead | XFAIL | instrumentation_mode, acquisitions, contentions |\n| lock_order_edges | LIVE | lock_name, lock_rank, lock_module, order_edges_exercised, order_violations, instrumentation_mode |\n| sharded_state_order | XFAIL | lock_rank, order_edges_exercised, order_violations, instrumentation_mode |\n",

@@ -356,8 +356,15 @@ fn proofs_cover_inversion_overhead_and_stable_report() {
         Some("LIVE"),
         "synthetic inversion is now a live lock-order atlas proof"
     );
+    assert_eq!(
+        proofs
+            .get("stable-redacted-report")
+            .and_then(|proof| proof["status"].as_str()),
+        Some("LIVE"),
+        "stable redacted report is covered by the golden markdown projection proof"
+    );
 
-    for proof_id in ["instrumentation-off-overhead", "stable-redacted-report"] {
+    for proof_id in ["instrumentation-off-overhead"] {
         let proof = proofs
             .get(proof_id)
             .unwrap_or_else(|| panic!("missing proof {proof_id}"));
