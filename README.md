@@ -122,10 +122,10 @@ If you already know tokio, this section maps the primitives you use daily to the
 | `tokio::time::sleep(dur)` | `sleep(now, dur)` | Takes current `Time` instead of reading the clock implicitly. Works with virtual time in lab runtime. |
 | `tokio::time::timeout(dur, fut)` | `timeout(now, dur, fut)` | Returns `Result<T, Elapsed>`. Also see the `Timeout` combinator type for richer outcome handling. |
 | `tokio::time::interval(dur)` | `interval(now, dur)` | Same `MissedTickBehavior` options (Burst, Delay, Skip). |
-| `tokio::sync::mpsc::channel(n)` | `mpsc::channel::<T>(n)` | Two-phase send: `tx.reserve(&cx).await?.send(val)`. Reserve is cancel-safe; commit cannot fail. |
-| `tokio::sync::oneshot::channel()` | `oneshot::channel::<T>()` | Two-phase: `tx.reserve(&cx)` then `permit.send(val)`. |
-| `tokio::sync::broadcast::channel(n)` | `broadcast::channel::<T>(n)` | Two-phase send. Lagging receivers get `RecvError::Lagged`. |
-| `tokio::sync::watch::channel(init)` | `watch::channel(init)` | `rx.changed(&cx).await?` then `rx.borrow_and_clone()`. |
+| `tokio::sync::mpsc::channel(n)` | `channel::mpsc::channel::<T>(n)` | Two-phase send: `tx.reserve(&cx).await?.send(val)`. Reserve is cancel-safe; commit cannot fail. |
+| `tokio::sync::oneshot::channel()` | `channel::oneshot::channel::<T>()` | Two-phase: `tx.reserve(&cx)` then `permit.send(val)`. |
+| `tokio::sync::broadcast::channel(n)` | `channel::broadcast::channel::<T>(n)` | Two-phase send. Lagging receivers get `RecvError::Lagged`. |
+| `tokio::sync::watch::channel(init)` | `channel::watch::channel(init)` | `rx.changed(&cx).await?` then `rx.borrow_and_clone()`. |
 | `tokio::sync::Mutex` | `sync::Mutex` | `mutex.lock(&cx).await?` -- takes `&Cx`, returns `Result` (can be cancelled). |
 | `tokio::sync::RwLock` | `sync::RwLock` | `.read(&cx).await?` / `.write(&cx).await?`. Writer-preference fairness. |
 | `tokio::sync::Semaphore` | `sync::Semaphore` | `sem.acquire(&cx, n).await?`. Permit is an obligation released on drop. |
