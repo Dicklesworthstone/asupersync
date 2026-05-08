@@ -71,7 +71,7 @@ fn assert_queue_matches_exact_reviewed_golden(input_fixture: &str, expected_fixt
     let expected_json: Value = serde_json::from_str(&expected).expect("golden output must be JSON");
     assert_eq!(
         actual_json, expected_json,
-        "parsed fuzz manifest queue JSON drifted for {input_fixture}"
+        "parsed fuzz manifest queue JSON drifted for {input_fixture} -> {expected_fixture}"
     );
     assert_eq!(
         actual, expected,
