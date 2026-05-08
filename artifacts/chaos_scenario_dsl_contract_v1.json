@@ -1,0 +1,131 @@
+{
+  "contract_version": "chaos-scenario-dsl-contract-v1",
+  "bead_id": "asupersync-b3ecyh",
+  "description": "Fail-closed contract for deterministic chaos scenario DSL coverage, golden projections, and LabRuntime compile targets.",
+  "source_of_truth": {
+    "contract": "artifacts/chaos_scenario_dsl_contract_v1.json",
+    "contract_test": "tests/chaos_scenario_dsl_contract.rs",
+    "scenario_format": "src/lab/scenario.rs",
+    "scenario_runner": "src/lab/scenario_runner.rs",
+    "chaos_config": "src/lab/chaos.rs",
+    "network_module": "src/lab/network/mod.rs",
+    "swarm_replay": "src/lab/swarm_replay.rs"
+  },
+  "dsl_policy": {
+    "canonical_formats": [
+      "yaml",
+      "json",
+      "toml"
+    ],
+    "seed_required": true,
+    "lab_runtime_deterministic": true,
+    "fault_schedule_must_be_ordered": true,
+    "resource_caps_required": true,
+    "expected_invariants_required": true,
+    "minimized_counterexample_required": true,
+    "redaction_required": true,
+    "fail_closed_when_runner_is_unwired": true
+  },
+  "existing_fault_actions": [
+    "partition",
+    "heal",
+    "host_crash",
+    "host_restart",
+    "clock_skew",
+    "clock_reset"
+  ],
+  "required_chaos_dimensions": [
+    "network_partition",
+    "disk_pressure",
+    "process_stall",
+    "delayed_cleanup",
+    "cancellation_storm",
+    "resource_caps",
+    "expected_invariants",
+    "minimized_counterexample"
+  ],
+  "required_scenario_fields": [
+    "scenario_id",
+    "seed",
+    "worker_count",
+    "max_steps",
+    "participants",
+    "fault_schedule",
+    "resource_caps",
+    "expected_invariants",
+    "minimization",
+    "golden_projection"
+  ],
+  "required_invariants": [
+    "quiescence",
+    "losers_drained",
+    "no_obligation_leaks",
+    "bounded_artifact_output",
+    "deterministic_replay"
+  ],
+  "allowed_report_statuses": [
+    "LIVE",
+    "XFAIL",
+    "BLOCKED"
+  ],
+  "scenario_rows": [
+    {
+      "scenario_id": "chaos-partition-cancel-storm",
+      "description": "Network partition plus cancellation storm must replay deterministically and drain losers.",
+      "live_runner_wired": false,
+      "report_status": "XFAIL",
+      "status_reason": "contracted only; partition plus cancellation-storm DSL runner is not wired yet",
+      "fault_dimensions": [
+        "network_partition",
+        "cancellation_storm"
+      ],
+      "expected_invariants": [
+        "quiescence",
+        "losers_drained",
+        "no_obligation_leaks",
+        "deterministic_replay"
+      ],
+      "golden_strategy": "exact_canonicalized"
+    },
+    {
+      "scenario_id": "chaos-disk-pressure-cleanup-delay",
+      "description": "Disk pressure plus delayed cleanup must bound artifact emission and still close regions.",
+      "live_runner_wired": false,
+      "report_status": "XFAIL",
+      "status_reason": "contracted only; disk-pressure and delayed-cleanup faults are not wired yet",
+      "fault_dimensions": [
+        "disk_pressure",
+        "delayed_cleanup",
+        "resource_caps"
+      ],
+      "expected_invariants": [
+        "quiescence",
+        "no_obligation_leaks",
+        "bounded_artifact_output",
+        "deterministic_replay"
+      ],
+      "golden_strategy": "exact_canonicalized"
+    },
+    {
+      "scenario_id": "chaos-process-stall-minimized-counterexample",
+      "description": "A process stall failure must emit a deterministic minimized counterexample packet.",
+      "live_runner_wired": false,
+      "report_status": "XFAIL",
+      "status_reason": "contracted only; process-stall minimization output is not wired yet",
+      "fault_dimensions": [
+        "process_stall",
+        "minimized_counterexample"
+      ],
+      "expected_invariants": [
+        "quiescence",
+        "losers_drained",
+        "deterministic_replay"
+      ],
+      "golden_strategy": "exact_canonicalized"
+    }
+  ],
+  "golden_markdown": "| scenario_id | status | fault_dimensions | expected_invariants |\n| --- | --- | --- | --- |\n| chaos-disk-pressure-cleanup-delay | XFAIL | disk_pressure, delayed_cleanup, resource_caps | quiescence, no_obligation_leaks, bounded_artifact_output, deterministic_replay |\n| chaos-partition-cancel-storm | XFAIL | network_partition, cancellation_storm | quiescence, losers_drained, no_obligation_leaks, deterministic_replay |\n| chaos-process-stall-minimized-counterexample | XFAIL | process_stall, minimized_counterexample | quiescence, losers_drained, deterministic_replay |\n",
+  "proof_commands": [
+    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_chaos_scenario_dsl_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test chaos_scenario_dsl_contract -- --nocapture"
+  ]
+}
