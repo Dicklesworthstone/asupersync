@@ -35,7 +35,7 @@ use std::time::Instant;
 
 const G2_SCHEMA_VERSION: &str = "raptorq-g2-ci-regression-gate-v1";
 const G2_REPLAY_REF: &str = "replay:rq-track-g-ci-gate-v1";
-const G2_REPRO_CMD: &str = "rch exec -- cargo test --test ci_regression_gates -- --nocapture";
+const G2_REPRO_CMD: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_ci_regression_gates_docs cargo test --test ci_regression_gates -- --nocapture";
 const G2_ARTIFACT_PATH: &str = "artifacts/ci_regression_gate_report.ndjson";
 
 /// Minimum calibration runs before gate checks activate.
@@ -445,6 +445,14 @@ fn g2_repro_command_uses_rch() {
     assert!(
         G2_REPRO_CMD.contains("rch exec --"),
         "G2 repro command must use rch offload"
+    );
+    assert!(
+        G2_REPRO_CMD.contains("CARGO_TARGET_DIR="),
+        "G2 repro command must isolate Cargo outputs with CARGO_TARGET_DIR"
+    );
+    assert!(
+        !G2_REPRO_CMD.contains("rch exec -- cargo"),
+        "G2 repro command must not use bare rch cargo routing"
     );
 }
 
