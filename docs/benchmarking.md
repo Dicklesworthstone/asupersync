@@ -8,21 +8,21 @@ Asupersync uses [Criterion.rs](https://crates.io/crates/criterion) for statistic
 
 ```bash
 # Run all benchmarks (saves to target/criterion/)
-cargo bench
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench
 
 # Run specific benchmark suite
-cargo bench --bench phase0_baseline
-cargo bench --bench scheduler_benchmark
-cargo bench --bench protocol_benchmark
-cargo bench --bench timer_wheel
-cargo bench --bench tracing_overhead
-cargo bench --bench reactor_benchmark
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --bench phase0_baseline
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --bench scheduler_benchmark
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --bench protocol_benchmark
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --bench timer_wheel
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --bench tracing_overhead
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --bench reactor_benchmark
 
 # Save a named baseline for comparison
-cargo bench -- --save-baseline initial --noplot
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench -- --save-baseline initial --noplot
 
 # Compare against a baseline
-cargo bench -- --baseline initial --noplot
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench -- --baseline initial --noplot
 ```
 
 ## Extreme Optimization Loop (bd-4bfy4)
@@ -56,7 +56,7 @@ available):
 ```json
 {
   "generated_at": "2026-02-03T19:00:00Z",
-  "command": "rch exec -- cargo bench --bench phase0_baseline",
+  "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --bench phase0_baseline",
   "seed": "3735928559",
   "criterion_dir": "target/criterion",
   "baseline_path": "baselines/baseline_20260203_190000.json",
@@ -214,8 +214,7 @@ Notes:
 
 ```bash
 # High-level syscall counts + time spent
-strace -f -c -o /tmp/asupersync_syscalls.txt \
-  cargo bench --bench scheduler_benchmark
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs strace -f -c -o /tmp/asupersync_syscalls.txt cargo bench --bench scheduler_benchmark
 
 # Inspect the summary
 cat /tmp/asupersync_syscalls.txt
@@ -269,7 +268,7 @@ save dir, comparison settings).
 ```json
 {
   "generated_at": "2026-02-03T19:00:00Z",
-  "command": "rch exec -- cargo bench --bench phase0_baseline",
+  "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo bench --bench phase0_baseline",
   "seed": "3735928559",
   "criterion_dir": "target/criterion",
   "baseline_path": "baselines/baseline_20260203_190000.json",
@@ -301,10 +300,10 @@ Golden output tests verify that the runtime's observable behavior has not change
 
 ```bash
 # Run golden output verification
-cargo test --test golden_outputs
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo test --test golden_outputs
 
 # First-time recording (prints checksums to stderr)
-cargo test --test golden_outputs -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_benchmark_docs cargo test --test golden_outputs -- --nocapture
 ```
 
 ### How It Works
