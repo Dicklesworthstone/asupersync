@@ -32,6 +32,26 @@ fn run_receipt(fixture: &str) -> Output {
         .expect("run landed-but-open receipt")
 }
 
+fn run_receipt_for_bead(fixture: &str, bead_id: &str) -> Output {
+    Command::new("python3")
+        .arg(repo_root().join(SCRIPT_PATH))
+        .arg("--fixture")
+        .arg(repo_root().join(FIXTURE_ROOT).join(fixture))
+        .arg("--repo-path")
+        .arg(repo_root())
+        .arg("--agent")
+        .arg("CopperSpring")
+        .arg("--bead-id")
+        .arg(bead_id)
+        .arg("--generated-at")
+        .arg(GENERATED_AT)
+        .arg("--output")
+        .arg("json")
+        .current_dir(repo_root())
+        .output()
+        .expect("run filtered landed-but-open receipt")
+}
+
 fn receipt_json(fixture: &str) -> Value {
     let output = run_receipt(fixture);
     assert!(
@@ -49,7 +69,17 @@ fn fixture_text(fixture: &str) -> String {
         .unwrap_or_else(|err| panic!("read fixture {fixture}: {err}"))
 }
 
-fn assert_output_matches_golden(output: Output, expected_fixture: &str, drift_message: &str) {
+fn assert_output_matches_golden(input_fixture: &str, expected_fixture: &str, drift_message: &str) {
+    let output = run_receipt(input_fixture);
+    assert_output_matches_golden_output(output, input_fixture, expected_fixture, drift_message);
+}
+
+fn assert_output_matches_golden_output(
+    output: Output,
+    input_label: &str,
+    expected_fixture: &str,
+    drift_message: &str,
+) {
     assert!(
         output.status.success(),
         "receipt helper failed: {}\nstdout: {}\nstderr: {}",
@@ -62,7 +92,10 @@ fn assert_output_matches_golden(output: Output, expected_fixture: &str, drift_me
 
     let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
     let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
-    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
+    assert_eq!(
+        actual_json, expected_json,
+        "parsed landed-but-open receipt JSON drifted for {input_label} against {expected_fixture}"
+    );
     assert_eq!(actual, expected, "{drift_message}");
 }
 
@@ -124,9 +157,8 @@ fn landed_with_tracker_conflict_waits_for_closeout_window() {
 
 #[test]
 fn tracker_conflict_matches_full_output_golden() {
-    let output = run_receipt("landed_tracker_conflict.json");
     assert_output_matches_golden(
-        output,
+        "landed_tracker_conflict.json",
         "landed_tracker_conflict_expected.json",
         "landed-but-open tracker-conflict receipt changed; update the golden only after reviewing wait-for-tracker semantics",
     );
@@ -149,9 +181,8 @@ fn landed_without_tracker_conflict_is_ready_to_close() {
 
 #[test]
 fn ready_to_close_matches_full_output_golden() {
-    let output = run_receipt("ready_to_close.json");
     assert_output_matches_golden(
-        output,
+        "ready_to_close.json",
         "ready_to_close_expected.json",
         "landed-but-open ready closeout receipt changed; update the golden only after reviewing closeout command and evidence semantics",
     );
@@ -159,9 +190,8 @@ fn ready_to_close_matches_full_output_golden() {
 
 #[test]
 fn missing_proof_matches_full_output_golden() {
-    let output = run_receipt("missing_proof.json");
     assert_output_matches_golden(
-        output,
+        "missing_proof.json",
         "missing_proof_expected.json",
         "landed-but-open missing-proof receipt changed; update the golden only after reviewing verification-before-close semantics",
     );
@@ -193,9 +223,8 @@ fn no_commit_reference_is_not_landed() {
 
 #[test]
 fn no_commit_reference_matches_full_output_golden() {
-    let output = run_receipt("no_commit_reference.json");
     assert_output_matches_golden(
-        output,
+        "no_commit_reference.json",
         "no_commit_reference_expected.json",
         "landed-but-open no-commit receipt changed; update the golden only after reviewing keep-open semantics",
     );
@@ -203,23 +232,7 @@ fn no_commit_reference_matches_full_output_golden() {
 
 #[test]
 fn bead_id_filter_limits_rows() {
-    let output = Command::new("python3")
-        .arg(repo_root().join(SCRIPT_PATH))
-        .arg("--fixture")
-        .arg(repo_root().join(FIXTURE_ROOT).join("multi_issue.json"))
-        .arg("--repo-path")
-        .arg(repo_root())
-        .arg("--agent")
-        .arg("CopperSpring")
-        .arg("--bead-id")
-        .arg("asupersync-aj7lx3.11")
-        .arg("--generated-at")
-        .arg(GENERATED_AT)
-        .arg("--output")
-        .arg("json")
-        .current_dir(repo_root())
-        .output()
-        .expect("run filtered receipt");
+    let output = run_receipt_for_bead("multi_issue.json", "asupersync-aj7lx3.11");
     assert!(output.status.success());
     let receipt: Value = serde_json::from_slice(&output.stdout).expect("JSON receipt");
     let rows = receipt["rows"].as_array().expect("rows array");
@@ -230,25 +243,10 @@ fn bead_id_filter_limits_rows() {
 
 #[test]
 fn multi_issue_filter_matches_full_output_golden() {
-    let output = Command::new("python3")
-        .arg(repo_root().join(SCRIPT_PATH))
-        .arg("--fixture")
-        .arg(repo_root().join(FIXTURE_ROOT).join("multi_issue.json"))
-        .arg("--repo-path")
-        .arg(repo_root())
-        .arg("--agent")
-        .arg("CopperSpring")
-        .arg("--bead-id")
-        .arg("asupersync-aj7lx3.11")
-        .arg("--generated-at")
-        .arg(GENERATED_AT)
-        .arg("--output")
-        .arg("json")
-        .current_dir(repo_root())
-        .output()
-        .expect("run filtered receipt");
-    assert_output_matches_golden(
+    let output = run_receipt_for_bead("multi_issue.json", "asupersync-aj7lx3.11");
+    assert_output_matches_golden_output(
         output,
+        "multi_issue.json filtered to asupersync-aj7lx3.11",
         "multi_issue_filtered_expected.json",
         "landed-but-open multi-issue filter receipt changed; update the golden only after reviewing bead-id filtering and closeout semantics",
     );
@@ -256,9 +254,8 @@ fn multi_issue_filter_matches_full_output_golden() {
 
 #[test]
 fn multi_issue_matches_full_output_golden() {
-    let output = run_receipt("multi_issue.json");
     assert_output_matches_golden(
-        output,
+        "multi_issue.json",
         "multi_issue_expected.json",
         "landed-but-open multi-issue receipt changed; update the golden only after reviewing closeout summary semantics",
     );
