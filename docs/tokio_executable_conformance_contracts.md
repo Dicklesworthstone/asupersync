@@ -52,50 +52,50 @@ Required pass/fail status values are:
 
 | Contract ID | Capability Track | Source Contract Input | Runner Command | Pass Criteria | Failure Class | Required Artifacts | Gate Binding |
 |---|---|---|---|---|---|---|---|
-| `EC-T2-01` | `T2` | `tokio_io_parity_audit` + functional parity D03 | `rch exec -- cargo test --test tokio_io_parity_audit -- --nocapture` | all trait-surface parity contract tests pass | `semantic_drift` | `summary.json`, `event_log.txt` | `Gate-A` |
-| `EC-T2-02` | `T2` | T8.1 model domain `DM01` + `LM-S1` | `rch exec -- cargo test --test cancellation_conformance -- --nocapture` | cancel checkpoints preserve no-loss semantics | `cancel_protocol_violation` | `event_log.txt`, `failed_assertions.json`, `repro_manifest.json` | `Gate-B` |
+| `EC-T2-01` | `T2` | `tokio_io_parity_audit` + functional parity D03 | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_executable_conformance_docs cargo test --test tokio_io_parity_audit -- --nocapture` | all trait-surface parity contract tests pass | `semantic_drift` | `summary.json`, `event_log.txt` | `Gate-A` |
+| `EC-T2-02` | `T2` | T8.1 model domain `DM01` + `LM-S1` | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_executable_conformance_docs cargo test --test cancellation_conformance -- --nocapture` | cancel checkpoints preserve no-loss semantics | `cancel_protocol_violation` | `event_log.txt`, `failed_assertions.json`, `repro_manifest.json` | `Gate-B` |
 
 ### 3.2 Track T3 (filesystem/process/signal)
 
 | Contract ID | Capability Track | Source Contract Input | Runner Command | Pass Criteria | Failure Class | Required Artifacts | Gate Binding |
 |---|---|---|---|---|---|---|---|
-| `EC-T3-01` | `T3` | `tokio_fs_process_signal_parity_matrix` | `rch exec -- cargo test --test tokio_fs_process_signal_parity_matrix -- --nocapture` | matrix contract tests pass and gap ownership mapping remains complete | `artifact_schema_violation` | `summary.json` | `Gate-A` |
-| `EC-T3-02` | `T3` | T8.1 model domains `DM02`/`DM03`/`DM04` + `LM-S2`/`LM-S3` | `rch exec -- cargo test --test cancellation_conformance -- --nocapture` | lifecycle + shutdown deterministic checks pass | `cancel_protocol_violation` | `event_log.txt`, `failed_assertions.json`, `repro_manifest.json` | `Gate-B` |
+| `EC-T3-01` | `T3` | `tokio_fs_process_signal_parity_matrix` | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_executable_conformance_docs cargo test --test tokio_fs_process_signal_parity_matrix -- --nocapture` | matrix contract tests pass and gap ownership mapping remains complete | `artifact_schema_violation` | `summary.json` | `Gate-A` |
+| `EC-T3-02` | `T3` | T8.1 model domains `DM02`/`DM03`/`DM04` + `LM-S2`/`LM-S3` | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_executable_conformance_docs cargo test --test cancellation_conformance -- --nocapture` | lifecycle + shutdown deterministic checks pass | `cancel_protocol_violation` | `event_log.txt`, `failed_assertions.json`, `repro_manifest.json` | `Gate-B` |
 
 ### 3.3 Track T4 (QUIC/HTTP3)
 
 | Contract ID | Capability Track | Source Contract Input | Runner Command | Pass Criteria | Failure Class | Required Artifacts | Gate Binding |
 |---|---|---|---|---|---|---|---|
-| `EC-T4-01` | `T4` | functional parity D15/D16 + non-functional NF15 | `rch exec -- cargo test --test tls_conformance -- --nocapture` | transport-level conformance assertions pass for enabled surfaces | `semantic_drift` | `summary.json`, `event_log.txt` | `Gate-A` |
-| `EC-T4-02` | `T4` | T8.1 cross-domain replay model `LM-S6` | `rch exec -- cargo test --test replay_e2e_suite -- --nocapture` | replay-delta signals stay within contract policy | `timing_drift` | `event_log.txt`, `failed_assertions.json`, `repro_manifest.json` | `Gate-C` |
+| `EC-T4-01` | `T4` | functional parity D15/D16 + non-functional NF15 | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_executable_conformance_docs cargo test --test tls_conformance -- --nocapture` | transport-level conformance assertions pass for enabled surfaces | `semantic_drift` | `summary.json`, `event_log.txt` | `Gate-A` |
+| `EC-T4-02` | `T4` | T8.1 cross-domain replay model `LM-S6` | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_executable_conformance_docs cargo test --test replay_e2e_suite -- --nocapture` | replay-delta signals stay within contract policy | `timing_drift` | `event_log.txt`, `failed_assertions.json`, `repro_manifest.json` | `Gate-C` |
 
 ### 3.4 Track T5 (web/middleware/gRPC)
 
 | Contract ID | Capability Track | Source Contract Input | Runner Command | Pass Criteria | Failure Class | Required Artifacts | Gate Binding |
 |---|---|---|---|---|---|---|---|
-| `EC-T5-01` | `T5` | `tokio_web_grpc_parity_map` + functional parity D11/D12 | `rch exec -- cargo test --test tokio_web_grpc_parity_map -- --nocapture` | route/middleware/gRPC contract checks pass | `semantic_drift` | `summary.json`, `event_log.txt` | `Gate-A` |
-| `EC-T5-02` | `T5` | T8.1 model domains `DM05`/`DM06` + `LM-S1` | `rch exec -- cargo test --test e2e_log_quality_schema -- --nocapture` | request pipeline and gRPC stream logs satisfy schema + correlation invariants | `artifact_schema_violation` | `summary.json`, `failed_assertions.json` | `Gate-B` |
+| `EC-T5-01` | `T5` | `tokio_web_grpc_parity_map` + functional parity D11/D12 | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_executable_conformance_docs cargo test --test tokio_web_grpc_parity_map -- --nocapture` | route/middleware/gRPC contract checks pass | `semantic_drift` | `summary.json`, `event_log.txt` | `Gate-A` |
+| `EC-T5-02` | `T5` | T8.1 model domains `DM05`/`DM06` + `LM-S1` | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_executable_conformance_docs cargo test --test e2e_log_quality_schema -- --nocapture` | request pipeline and gRPC stream logs satisfy schema + correlation invariants | `artifact_schema_violation` | `summary.json`, `failed_assertions.json` | `Gate-B` |
 
 ### 3.5 Track T6 (database/messaging)
 
 | Contract ID | Capability Track | Source Contract Input | Runner Command | Pass Criteria | Failure Class | Required Artifacts | Gate Binding |
 |---|---|---|---|---|---|---|---|
-| `EC-T6-01` | `T6` | `tokio_db_messaging_gap_baseline` + evidence checklist | `rch exec -- cargo test --test tokio_db_messaging_gap_baseline -- --nocapture` | domain baseline contracts remain complete and parseable | `artifact_schema_violation` | `summary.json` | `Gate-A` |
-| `EC-T6-02` | `T6` | T8.1 model domains `DM07`/`DM08` + `LM-S4` | `rch exec -- cargo test --test obligation_wasm_parity -- --nocapture` | retry/idempotency and obligation lifecycle checks pass | `obligation_leak` | `event_log.txt`, `failed_assertions.json`, `repro_manifest.json` | `Gate-B` |
+| `EC-T6-01` | `T6` | `tokio_db_messaging_gap_baseline` + evidence checklist | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_executable_conformance_docs cargo test --test tokio_db_messaging_gap_baseline -- --nocapture` | domain baseline contracts remain complete and parseable | `artifact_schema_violation` | `summary.json` | `Gate-A` |
+| `EC-T6-02` | `T6` | T8.1 model domains `DM07`/`DM08` + `LM-S4` | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_executable_conformance_docs cargo test --test obligation_wasm_parity -- --nocapture` | retry/idempotency and obligation lifecycle checks pass | `obligation_leak` | `event_log.txt`, `failed_assertions.json`, `repro_manifest.json` | `Gate-B` |
 
 ### 3.6 Track T7 (interop boundaries)
 
 | Contract ID | Capability Track | Source Contract Input | Runner Command | Pass Criteria | Failure Class | Required Artifacts | Gate Binding |
 |---|---|---|---|---|---|---|---|
-| `EC-T7-01` | `T7` | `tokio_adapter_boundary_architecture` + T8.1 `DM09` | `rch exec -- cargo test --test native_seam_parity -- --nocapture` | adapter boundaries preserve capability constraints and lifecycle contracts | `interop_boundary_violation` | `summary.json`, `event_log.txt` | `Gate-A` |
-| `EC-T7-02` | `T7` | capability-security constraints + T8.1 `LM-S5` | `rch exec -- cargo test --test semantic_conformance_harness -- --nocapture` | no ambient authority leakage across adapter boundaries | `authority_flow_violation` | `event_log.txt`, `failed_assertions.json`, `repro_manifest.json` | `Gate-C` |
+| `EC-T7-01` | `T7` | `tokio_adapter_boundary_architecture` + T8.1 `DM09` | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_executable_conformance_docs cargo test --test native_seam_parity -- --nocapture` | adapter boundaries preserve capability constraints and lifecycle contracts | `interop_boundary_violation` | `summary.json`, `event_log.txt` | `Gate-A` |
+| `EC-T7-02` | `T7` | capability-security constraints + T8.1 `LM-S5` | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_executable_conformance_docs cargo test --test semantic_conformance_harness -- --nocapture` | no ambient authority leakage across adapter boundaries | `authority_flow_violation` | `event_log.txt`, `failed_assertions.json`, `repro_manifest.json` | `Gate-C` |
 
 ### 3.7 Cross-Track Determinism and Replay
 
 | Contract ID | Capability Track | Source Contract Input | Runner Command | Pass Criteria | Failure Class | Required Artifacts | Gate Binding |
 |---|---|---|---|---|---|---|---|
-| `EC-X-01` | `Cross` | T8.1 SC-01..SC-05 + replay policy | `rch exec -- cargo test --test replay_debugging -- --nocapture` | deterministic replay contract checks pass end-to-end | `timing_drift` | `event_log.txt`, `failed_assertions.json`, `repro_manifest.json` | `Gate-C` |
-| `EC-X-02` | `Cross` | evidence checklist + non-functional closure criteria | `rch exec -- cargo test --test tokio_nonfunctional_closure_criteria -- --nocapture` | non-functional thresholds and evidence fields remain contract-complete | `artifact_schema_violation` | `summary.json` | `Gate-A` |
+| `EC-X-01` | `Cross` | T8.1 SC-01..SC-05 + replay policy | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_executable_conformance_docs cargo test --test replay_debugging -- --nocapture` | deterministic replay contract checks pass end-to-end | `timing_drift` | `event_log.txt`, `failed_assertions.json`, `repro_manifest.json` | `Gate-C` |
+| `EC-X-02` | `Cross` | evidence checklist + non-functional closure criteria | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_executable_conformance_docs cargo test --test tokio_nonfunctional_closure_criteria -- --nocapture` | non-functional thresholds and evidence fields remain contract-complete | `artifact_schema_violation` | `summary.json` | `Gate-A` |
 
 ---
 
