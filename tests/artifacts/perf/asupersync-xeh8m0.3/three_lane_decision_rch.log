@@ -29,16 +29,30 @@ previous_completed_attempt:
 - used_for: detailed first-blocker text reported by Agent Mail message 3311
 
 first_blocker:
+- case: scheduler/three_lane_decision/global_ready_burst/64
+- file: os-thread-local-0.1.3/src/lib.rs
+- line: 76
+- column: 9
+- message: assertion left == right failed; left: 11; right: 0
+- classification: runtime_panic_during_criterion_warmup
+
+partial_criterion_output:
+- fast_ready_uncontended: [221.34 ns 238.67 ns 257.94 ns]
+- fast_ready_local_peek_contended: [39.469 us 44.301 us 48.614 us]
+- note: these are not the required p50/p95/p999 receipt values.
+
+previous_compile_frontier:
 - file: src/sync/lock_ordering.rs
 - line: 56
 - column: 12
 - message: error: struct LockInfo is never constructed
-- classification: compile_frontier_before_benchmark_measurement
+- state: superseded by follow-up attempt after debug cfg gating
 
 measurement_state:
-- Criterion did not run.
-- p50, p95, p999, throughput, sample_count, and run_seed were not collected.
-- The receipt verdict is no_win because this run cannot support a baseline or speedup claim.
+- Criterion started but did not complete the selected scenario.
+- Partial estimates were reported for two cases, then global_ready_burst/64 failed during warmup.
+- p50, p95, p999, throughput, sample_count, and run_seed were not collected as a complete receipt.
+- The receipt verdict is no_win because this run cannot support a complete baseline or speedup claim.
 
 latest_followup_job_observed_at_receipt_time:
 - build_id: 29832516688937765
@@ -48,4 +62,4 @@ latest_followup_job_observed_at_receipt_time:
 - used_for_metrics: false
 
 next_required_action:
-Clear or wait for the lock_ordering compile frontier, then rerun the same rch cargo bench lane before recording latency or throughput values.
+Fix or isolate the global_ready_burst/64 runtime panic, then rerun the same rch cargo bench lane before recording latency or throughput values.
