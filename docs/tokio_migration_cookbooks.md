@@ -534,7 +534,7 @@ T7 when all of the following are true:
 
 - A native Asupersync surface covers the production use case with equivalent
   structured logging and error taxonomy.
-- The native path has an executable proof lane (`rch exec -- cargo test ...`)
+- The native path has an executable proof lane (`rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_migration_cookbooks_docs cargo test ...`)
   covering cancellation, timeout/deadline propagation, and resource cleanup.
 - The adapter fallback is documented as rollback-only, with a concrete
   threshold such as latency p99, error rate, or connection/lease leak count.
@@ -612,7 +612,7 @@ Each recipe includes explicit rollback criteria:
 ## 11. CI Commands
 
 ```
-rch exec -- cargo test --test tokio_migration_cookbook_enforcement -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_migration_cookbooks_docs cargo test --test tokio_migration_cookbook_enforcement -- --nocapture
 ```
 
 ---
