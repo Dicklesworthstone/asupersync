@@ -761,6 +761,92 @@ mod tests {
         assert_eq!(decision, AdmissionDecision::Reject);
     }
 
+    fn pressure_snapshot_from_values(values: [f64; 5]) -> PressureSnapshot {
+        let overall_pressure = values.iter().copied().fold(0.0, f64::max);
+        PressureSnapshot {
+            timestamp: Instant::now(),
+            runnable_queue_pressure: values[0],
+            blocking_pool_pressure: values[1],
+            channel_backlog_pressure: values[2],
+            cleanup_debt_pressure: values[3],
+            memory_budget_pressure: values[4],
+            overall_pressure,
+            signal_availability: PressureSignalAvailability::ALL,
+            fallback_verdict: PressureFallbackVerdict::Complete,
+        }
+    }
+
+    #[test]
+    fn pressure_threshold_boundaries_apply_to_every_signal() {
+        let thresholds = PressureThresholds {
+            runnable_queue: 0.8,
+            blocking_pool: 0.9,
+            channel_backlog: 0.7,
+            cleanup_debt: 0.8,
+            memory_budget: 0.9,
+        };
+        let config = PressureGovernorConfig {
+            enabled: true,
+            admission_control: true,
+            thresholds: thresholds.clone(),
+            ..Default::default()
+        };
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create test runtime"),
+        );
+        let metrics = Metrics::new();
+        let governor = PressureGovernor::new(config, runtime, metrics).unwrap();
+        let cases = [
+            ("runnable_queue", 0, thresholds.runnable_queue),
+            ("blocking_pool", 1, thresholds.blocking_pool),
+            ("channel_backlog", 2, thresholds.channel_backlog),
+            ("cleanup_debt", 3, thresholds.cleanup_debt),
+            ("memory_budget", 4, thresholds.memory_budget),
+        ];
+
+        for (name, index, threshold) in cases {
+            let hard_reject_threshold = threshold * 1.2;
+
+            let mut at_threshold = [0.0; 5];
+            at_threshold[index] = threshold;
+            assert_eq!(
+                governor.evaluate_admission(&pressure_snapshot_from_values(at_threshold)),
+                AdmissionDecision::Admit,
+                "{name} pressure equal to threshold should still admit"
+            );
+
+            let mut above_threshold = [0.0; 5];
+            above_threshold[index] = threshold + 0.0001;
+            assert_eq!(
+                governor.evaluate_admission(&pressure_snapshot_from_values(above_threshold)),
+                AdmissionDecision::AdmitWithBackpressure,
+                "{name} pressure just above threshold should apply backpressure"
+            );
+
+            let mut at_hard_reject_threshold = [0.0; 5];
+            at_hard_reject_threshold[index] = hard_reject_threshold;
+            assert_eq!(
+                governor
+                    .evaluate_admission(&pressure_snapshot_from_values(at_hard_reject_threshold,)),
+                AdmissionDecision::AdmitWithBackpressure,
+                "{name} pressure equal to hard reject threshold should not reject"
+            );
+
+            let mut above_hard_reject_threshold = [0.0; 5];
+            above_hard_reject_threshold[index] = hard_reject_threshold + 0.0001;
+            assert_eq!(
+                governor.evaluate_admission(&pressure_snapshot_from_values(
+                    above_hard_reject_threshold,
+                )),
+                AdmissionDecision::Reject,
+                "{name} pressure above hard reject threshold should reject"
+            );
+        }
+    }
+
     #[test]
     fn test_pressure_governor_disabled_always_admits() {
         let config = PressureGovernorConfig {
