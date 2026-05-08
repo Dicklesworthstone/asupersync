@@ -557,14 +557,25 @@ fn canonical_examples_doc_lists_scenarios_and_repro_commands() {
         "python3 scripts/run_browser_onboarding_checks.py --scenario worker",
         "python3 scripts/run_browser_onboarding_checks.py --scenario react",
         "python3 scripts/run_browser_onboarding_checks.py --scenario next",
-        "rch exec -- cargo test --lib worker_channel::tests::coordinator_ -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_canonical_examples_docs cargo test --lib worker_channel::tests::coordinator_ -- --nocapture",
         "tests/wasm_rust_browser_example_contract.rs",
-        "rch exec -- cargo test --test react_wasm_strictmode_harness -- --nocapture",
-        "rch exec -- cargo test --test nextjs_bootstrap_harness -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_canonical_examples_docs cargo test --test react_wasm_strictmode_harness -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_canonical_examples_docs cargo test --test nextjs_bootstrap_harness -- --nocapture",
     ] {
         assert!(
             doc.contains(expected),
             "canonical examples doc missing required token: {expected}"
+        );
+    }
+
+    for stale in [
+        "rch exec -- cargo test --lib worker_channel::tests::coordinator_ -- --nocapture",
+        "rch exec -- cargo test --test react_wasm_strictmode_harness -- --nocapture",
+        "rch exec -- cargo test --test nextjs_bootstrap_harness -- --nocapture",
+    ] {
+        assert!(
+            !doc.contains(stale),
+            "canonical examples doc must not reintroduce bare rch cargo routing: {stale}"
         );
     }
 
