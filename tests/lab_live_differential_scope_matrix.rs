@@ -192,14 +192,25 @@ fn doc_binds_to_downstream_beads() {
 fn doc_requires_rch_for_validation() {
     let doc = load_doc();
     for token in [
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_differential_docs cargo fmt --check",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_differential_docs cargo check --all-targets",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_differential_docs cargo clippy --all-targets -- -D warnings",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_differential_docs cargo test --test lab_live_differential_scope_matrix -- --nocapture",
+    ] {
+        assert!(
+            doc.contains(token),
+            "document missing validation command: {token}"
+        );
+    }
+    for stale in [
         "rch exec -- cargo fmt --check",
         "rch exec -- cargo check --all-targets",
         "rch exec -- cargo clippy --all-targets -- -D warnings",
         "rch exec -- cargo test --test lab_live_differential_scope_matrix -- --nocapture",
     ] {
         assert!(
-            doc.contains(token),
-            "document missing validation command: {token}"
+            !doc.contains(stale),
+            "document still contains unscoped validation command: {stale}"
         );
     }
 }
