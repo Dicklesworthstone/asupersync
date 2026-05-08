@@ -105,11 +105,11 @@ fn assert_signal_quality_output_matches_golden(
     let expected_json = fixture_json(expected_fixture);
     assert_eq!(
         actual_json, expected_json,
-        "semantic signal-quality parsed golden drifted"
+        "semantic signal-quality parsed golden drifted for {dashboard_fixture} -> {expected_fixture}"
     );
     assert_eq!(
         actual, expected,
-        "semantic signal-quality reviewed text golden drifted"
+        "semantic signal-quality reviewed text golden drifted for {dashboard_fixture} -> {expected_fixture}"
     );
 }
 
