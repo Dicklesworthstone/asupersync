@@ -223,6 +223,40 @@
       ]
     },
     {
+      "row_id": "scheduler_p999_latency_receipt",
+      "runtime_domain": "task_records",
+      "memory_tier": "warm_capacity_and_locality_plans",
+      "operator_verdict": "contract_guarded",
+      "status": "contract_guarded",
+      "source_files": [
+        "artifacts/operator_proof_backlog_signoff_contract_v1.json",
+        "artifacts/runtime_latency_budget_certificate_v1.json",
+        "tests/artifacts/perf/asupersync-xeh8m0.3/three_lane_decision_baseline_v1.json",
+        "tests/memory_tier_slab_pool_contract.rs"
+      ],
+      "existing_contracts": [
+        "operator-proof-backlog-signoff-contract-v1",
+        "runtime-latency-budget-certificate-v1"
+      ],
+      "required_accounting": [
+        "p50_latency_ns",
+        "p95_latency_ns",
+        "p999_latency_ns",
+        "sample_count",
+        "fallback_no_win_reason"
+      ],
+      "proof_commands": [
+        "python3 -m json.tool artifacts/operator_proof_backlog_signoff_contract_v1.json >/dev/null",
+        "python3 -m json.tool artifacts/runtime_latency_budget_certificate_v1.json >/dev/null",
+        "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_memory_tier_slab_pool_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test memory_tier_slab_pool_contract --features test-internals -- --nocapture"
+      ],
+      "fail_closed_guards": [
+        "p999 latency improvements must not render green without a complete receipt",
+        "partial Criterion interval output must not count as p50/p95/p999 evidence",
+        "runtime benchmark blockers must keep the memory-tier row contract_guarded"
+      ]
+    },
+    {
       "row_id": "safe_heap_fallback",
       "runtime_domain": "task_records",
       "memory_tier": "safe_heap_fallback",
@@ -278,6 +312,33 @@
       "safe heap fallback remains visible even when the hinted frontier has zero growth"
     ]
   },
+  "latency_frontier": {
+    "scenario_id": "memory-tier-scheduler-p999-frontier-v1",
+    "required_row": "scheduler_p999_latency_receipt",
+    "signoff_contract_path": "artifacts/operator_proof_backlog_signoff_contract_v1.json",
+    "latency_certificate_path": "artifacts/runtime_latency_budget_certificate_v1.json",
+    "baseline_receipt_path": "tests/artifacts/perf/asupersync-xeh8m0.3/three_lane_decision_baseline_v1.json",
+    "required_signoff_verdict": "no-win-hold",
+    "required_child_verdict": "no-win",
+    "required_broad_readiness_claim": "not_claimed",
+    "required_metrics_state": "required_quantiles_not_collected_runtime_failed_before_full_scenario",
+    "required_metric_nulls": [
+      "p50",
+      "p95",
+      "p999",
+      "sample_count"
+    ],
+    "next_required_action_must_contain": [
+      "Fix or isolate",
+      "rerun the same rch cargo bench lane",
+      "p50/p95/p999"
+    ],
+    "operator_notes": [
+      "memory-tier capacity wins do not imply scheduler p999 wins",
+      "the current scheduler receipt is no-win because the rch bench lane failed before complete quantiles",
+      "this row can move to implemented_verified only after a complete same-host p50/p95/p999 receipt is checked in"
+    ]
+  },
   "validation_commands": [
     "python3 -m json.tool artifacts/memory_tier_slab_pool_contract_v1.json >/dev/null",
     "git diff --check -- src/runtime/config.rs artifacts/memory_tier_slab_pool_contract_v1.json tests/memory_tier_slab_pool_contract.rs",
@@ -292,6 +353,7 @@
     "| warm_numa_arena_locality | obligation_records | warm_capacity_and_locality_plans | implemented_verified | 1 |",
     "| cold_trace_evidence_tiers | trace_evidence | cold_evidence_artifacts | implemented_verified | 1 |",
     "| cold_proof_artifact_retention | proof_artifacts | cold_evidence_artifacts | implemented_verified | 2 |",
+    "| scheduler_p999_latency_receipt | task_records | warm_capacity_and_locality_plans | contract_guarded | 3 |",
     "| safe_heap_fallback | task_records | safe_heap_fallback | fallback_only | 1 |"
   ]
 }

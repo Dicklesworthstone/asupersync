@@ -884,6 +884,28 @@ pub const MEMORY_TIER_SLAB_POOL_CERTIFICATIONS: &[MemoryTierSlabPoolCertificatio
         ],
     },
     MemoryTierSlabPoolCertification {
+        row_id: "scheduler_p999_latency_receipt",
+        runtime_domain: MemoryTierRuntimeDomain::TaskRecords,
+        memory_tier: MemoryTierKind::WarmCapacityAndLocalityPlans,
+        operator_verdict: MemoryTierCertificationStatus::ContractGuarded,
+        status: MemoryTierCertificationStatus::ContractGuarded,
+        source_files: &[
+            "artifacts/operator_proof_backlog_signoff_contract_v1.json",
+            "artifacts/runtime_latency_budget_certificate_v1.json",
+            "tests/artifacts/perf/asupersync-xeh8m0.3/three_lane_decision_baseline_v1.json",
+            "tests/memory_tier_slab_pool_contract.rs",
+        ],
+        existing_contracts: &[
+            "operator-proof-backlog-signoff-contract-v1",
+            "runtime-latency-budget-certificate-v1",
+        ],
+        proof_commands: &[
+            "python3 -m json.tool artifacts/operator_proof_backlog_signoff_contract_v1.json >/dev/null",
+            "python3 -m json.tool artifacts/runtime_latency_budget_certificate_v1.json >/dev/null",
+            "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_memory_tier_slab_pool_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test memory_tier_slab_pool_contract --features test-internals -- --nocapture",
+        ],
+    },
+    MemoryTierSlabPoolCertification {
         row_id: "safe_heap_fallback",
         runtime_domain: MemoryTierRuntimeDomain::TaskRecords,
         memory_tier: MemoryTierKind::SafeHeapFallback,

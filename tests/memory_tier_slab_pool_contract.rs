@@ -17,7 +17,13 @@ const CONTRACT_PATH: &str = "artifacts/memory_tier_slab_pool_contract_v1.json";
 const HOT_COLD_ARENA_TIERS_CONTRACT_PATH: &str =
     "artifacts/hot_cold_arena_tiers_smoke_contract_v1.json";
 const NUMA_LOCALITY_CONTRACT_PATH: &str = "artifacts/numa_arena_locality_smoke_contract_v1.json";
+const OPERATOR_PROOF_BACKLOG_SIGNOFF_CONTRACT_PATH: &str =
+    "artifacts/operator_proof_backlog_signoff_contract_v1.json";
 const RELEASE_PROOF_PACK_CONTRACT_PATH: &str = "artifacts/release_proof_pack_contract_v1.json";
+const RUNTIME_LATENCY_BUDGET_CERTIFICATE_PATH: &str =
+    "artifacts/runtime_latency_budget_certificate_v1.json";
+const SCHEDULER_P999_BASELINE_RECEIPT_PATH: &str =
+    "tests/artifacts/perf/asupersync-xeh8m0.3/three_lane_decision_baseline_v1.json";
 const SOURCE_DECLARATIONS_PATH: &str = "src/runtime/config.rs";
 const TEST_PATH: &str = "tests/memory_tier_slab_pool_contract.rs";
 
@@ -847,6 +853,189 @@ fn cold_proof_artifact_retention_row_is_backed_by_release_pack_output() {
 }
 
 #[test]
+fn scheduler_p999_latency_receipt_stays_contract_guarded_until_complete_receipt() {
+    let contract = load_contract();
+    let rows = rows_by_id(&contract);
+    let row = rows
+        .get("scheduler_p999_latency_receipt")
+        .expect("scheduler p999 row must exist");
+    assert_eq!(string_field(row, "operator_verdict"), "contract_guarded");
+    assert_eq!(string_field(row, "status"), "contract_guarded");
+    for lower_contract in [
+        "operator-proof-backlog-signoff-contract-v1",
+        "runtime-latency-budget-certificate-v1",
+    ] {
+        assert!(
+            string_vec(row, "existing_contracts")
+                .iter()
+                .any(|contract| contract == lower_contract),
+            "scheduler p999 row must compose {lower_contract}"
+        );
+    }
+
+    let required_accounting = string_vec(row, "required_accounting");
+    for required in [
+        "p50_latency_ns",
+        "p95_latency_ns",
+        "p999_latency_ns",
+        "sample_count",
+        "fallback_no_win_reason",
+    ] {
+        assert!(
+            required_accounting.iter().any(|field| field == required),
+            "scheduler p999 row must require {required}"
+        );
+    }
+
+    let latency_frontier = Value::Object(object(&contract, "latency_frontier").clone());
+    assert_eq!(
+        string_field(&latency_frontier, "scenario_id"),
+        "memory-tier-scheduler-p999-frontier-v1"
+    );
+    assert_eq!(
+        string_field(&latency_frontier, "required_row"),
+        "scheduler_p999_latency_receipt"
+    );
+    assert_eq!(
+        string_field(&latency_frontier, "signoff_contract_path"),
+        OPERATOR_PROOF_BACKLOG_SIGNOFF_CONTRACT_PATH
+    );
+    assert_eq!(
+        string_field(&latency_frontier, "latency_certificate_path"),
+        RUNTIME_LATENCY_BUDGET_CERTIFICATE_PATH
+    );
+    assert_eq!(
+        string_field(&latency_frontier, "baseline_receipt_path"),
+        SCHEDULER_P999_BASELINE_RECEIPT_PATH
+    );
+
+    let signoff: Value = serde_json::from_str(
+        &fs::read_to_string(OPERATOR_PROOF_BACKLOG_SIGNOFF_CONTRACT_PATH)
+            .expect("read operator proof backlog signoff contract"),
+    )
+    .expect("parse operator proof backlog signoff contract");
+    assert_eq!(
+        string_field(&signoff, "contract_version"),
+        "operator-proof-backlog-signoff-contract-v1"
+    );
+    assert_eq!(
+        string_field(&signoff, "final_operator_verdict"),
+        string_field(&latency_frontier, "required_signoff_verdict")
+    );
+    assert_eq!(
+        string_field(&signoff, "broad_readiness_claim"),
+        string_field(&latency_frontier, "required_broad_readiness_claim")
+    );
+    assert!(
+        string_field(&signoff, "operator_note").contains("p50/p95/p999"),
+        "signoff note must keep the missing quantile receipt visible"
+    );
+
+    let scheduler_child = array(&signoff, "child_receipts")
+        .iter()
+        .find(|receipt| receipt["bead_id"].as_str() == Some("asupersync-xeh8m0.3"))
+        .expect("scheduler evidence child receipt");
+    assert_eq!(
+        string_field(scheduler_child, "operator_verdict"),
+        string_field(&latency_frontier, "required_child_verdict")
+    );
+    assert_eq!(
+        scheduler_child["remote_exit_status"].as_u64(),
+        Some(101),
+        "runtime blocker must remain visible"
+    );
+    assert!(
+        string_field(scheduler_child, "fallback_no_win_reason").contains("p50/p95/p999"),
+        "child receipt must refuse broad p999 claims"
+    );
+    assert!(
+        array(scheduler_child, "artifact_paths")
+            .iter()
+            .any(|path| path.as_str() == Some(SCHEDULER_P999_BASELINE_RECEIPT_PATH)),
+        "child receipt must point at the checked-in scheduler baseline receipt"
+    );
+
+    let baseline: Value = serde_json::from_str(
+        &fs::read_to_string(SCHEDULER_P999_BASELINE_RECEIPT_PATH)
+            .expect("read scheduler p999 baseline receipt"),
+    )
+    .expect("parse scheduler p999 baseline receipt");
+    assert_eq!(string_field(&baseline, "verdict"), "no_win");
+    assert_eq!(
+        baseline["proof_lane_executed_through_rch"].as_bool(),
+        Some(true)
+    );
+    let metrics = object(&baseline, "metrics");
+    assert_eq!(
+        metrics.get("metrics_state").and_then(Value::as_str),
+        Some(string_field(&latency_frontier, "required_metrics_state"))
+    );
+    for metric in string_vec(&latency_frontier, "required_metric_nulls") {
+        assert!(
+            metrics.get(&metric).is_some_and(serde_json::Value::is_null),
+            "baseline metric {metric} must remain null until the complete receipt exists"
+        );
+    }
+    let claims = object(&baseline, "claims");
+    assert_eq!(
+        claims["scheduler_speedup"].as_str(),
+        Some("not_claimed"),
+        "no memory-tier speedup can be claimed from a no-win receipt"
+    );
+    assert_eq!(
+        claims["baseline_latency"].as_str(),
+        Some("not_claimed"),
+        "baseline latency must stay unclaimed until quantiles exist"
+    );
+    let next_required_action = claims["next_required_action"]
+        .as_str()
+        .expect("next required action");
+    for needle in string_vec(&latency_frontier, "next_required_action_must_contain") {
+        assert!(
+            next_required_action.contains(&needle),
+            "next required action must contain {needle:?}"
+        );
+    }
+
+    let latency_certificate: Value = serde_json::from_str(
+        &fs::read_to_string(RUNTIME_LATENCY_BUDGET_CERTIFICATE_PATH)
+            .expect("read runtime latency budget certificate"),
+    )
+    .expect("parse runtime latency budget certificate");
+    assert_eq!(
+        string_field(&latency_certificate, "contract_version"),
+        "runtime-latency-budget-certificate-v1"
+    );
+    let verdicts = array(&latency_certificate, "verdicts")
+        .iter()
+        .map(|verdict| string_field(verdict, "verdict").to_string())
+        .collect::<BTreeSet<_>>();
+    for verdict in ["pass", "no_win", "fail_closed"] {
+        assert!(
+            verdicts.contains(verdict),
+            "latency certificate must define {verdict}"
+        );
+    }
+    let required_inputs = string_set(&latency_certificate, "required_inputs");
+    for input in ["p999_latency_ns", "sample_count", "replay_command"] {
+        assert!(
+            required_inputs.contains(input),
+            "latency certificate must require {input}"
+        );
+    }
+    let fail_closed_rules = string_set(&latency_certificate, "fail_closed_rules");
+    assert!(
+        fail_closed_rules.contains("missing_quantiles_mean_only_evidence"),
+        "mean-only evidence must fail closed"
+    );
+    let no_win_rules = string_set(&latency_certificate, "no_win_rules");
+    assert!(
+        no_win_rules.contains("p999_budget_exceeded"),
+        "p999 over-budget evidence must remain no-win"
+    );
+}
+
+#[test]
 fn every_tier_row_is_source_owned_and_has_a_proof_lane() {
     let contract = load_contract();
     let rows = rows_by_id(&contract);
@@ -856,6 +1045,7 @@ fn every_tier_row_is_source_owned_and_has_a_proof_lane() {
         "warm_numa_arena_locality",
         "cold_trace_evidence_tiers",
         "cold_proof_artifact_retention",
+        "scheduler_p999_latency_receipt",
         "safe_heap_fallback",
     ] {
         assert!(rows.contains_key(row_id), "missing row {row_id}");
