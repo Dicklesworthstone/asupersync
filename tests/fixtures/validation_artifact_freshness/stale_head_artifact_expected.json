@@ -1,0 +1,40 @@
+{
+  "artifact": {
+    "decision": "passed",
+    "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "touched_files": [
+      "scripts/proof_runner.py"
+    ]
+  },
+  "artifact_path": "tests/fixtures/validation_artifact_freshness/stale_head_artifact.json",
+  "classification": "stale-head",
+  "current": {
+    "dirty_paths": [],
+    "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "current_date": "2026-05-08",
+  "forbidden_actions": {
+    "runs_beads_mutation": false,
+    "runs_cargo": false,
+    "runs_destructive_command": false,
+    "runs_git_mutation": false
+  },
+  "generated_at": "2026-05-08T05:30:00Z",
+  "markers": {
+    "dirty_external_paths": [],
+    "dirty_touched_overlap": [],
+    "has_artifact_head": true,
+    "head_matches": false
+  },
+  "non_mutating": true,
+  "remediation": {
+    "next_steps": [
+      "rerun the focused proof lane at the current HEAD",
+      "keep the old artifact only as historical evidence"
+    ],
+    "operator_note": "Do not cite this artifact as current proof.",
+    "summary": "artifact was produced for a superseded HEAD"
+  },
+  "schema_version": "validation-artifact-freshness-v1",
+  "verdict": "stale"
+}

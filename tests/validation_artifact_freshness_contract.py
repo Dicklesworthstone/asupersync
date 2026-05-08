@@ -58,6 +58,13 @@ class ValidationArtifactFreshnessContract(unittest.TestCase):
         self.assertEqual(output.stdout, expected)
         self.assertEqual(json.loads(output.stdout), json.loads(expected))
 
+    def test_stale_head_output_matches_full_reviewed_golden(self) -> None:
+        output = run_receipt_output("stale_head_artifact.json")
+        expected = fixture_text("stale_head_artifact_expected.json")
+
+        self.assertEqual(output.stdout, expected)
+        self.assertEqual(json.loads(output.stdout), json.loads(expected))
+
     def test_current_artifact_is_citable_for_touched_surface(self) -> None:
         receipt = run_receipt("current_artifact.json")
 
