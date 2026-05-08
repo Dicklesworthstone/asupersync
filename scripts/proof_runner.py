@@ -13,9 +13,52 @@ import json
 import subprocess
 import sys
 import os
+import re
+import shlex
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
+
+SAFE_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+ALLOWED_REMOTE_PROGRAMS = {"cargo", "lake", "rustfmt"}
+SHELL_CONTROL_TOKENS = (";", "&", "|", "<", ">", "`", "$(")
+
+
+def expand_supported_command_token(token: str) -> str:
+    """Expand the small shell-parameter subset used by manifest commands."""
+    tmpdir = os.environ.get("TMPDIR") or "/tmp"
+    return token.replace("${TMPDIR:-/tmp}", tmpdir)
+
+
+def safe_command_argv(command: str) -> List[str]:
+    """Convert a manifest command to argv without invoking a shell."""
+    if any(ch in command for ch in ("\0", "\n", "\r")):
+        raise ValueError("proof command contains forbidden control characters")
+    try:
+        argv = shlex.split(command, posix=True)
+    except ValueError as error:
+        raise ValueError(f"invalid proof command syntax: {error}") from error
+
+    argv = [expand_supported_command_token(token) for token in argv]
+    if len(argv) < 4 or argv[:3] != ["rch", "exec", "--"]:
+        raise ValueError("proof command must start with 'rch exec --'")
+    if any(any(marker in token for marker in SHELL_CONTROL_TOKENS) for token in argv):
+        raise ValueError("proof command contains shell control metacharacters")
+
+    remote_index = 3
+    if argv[remote_index] == "env":
+        remote_index += 1
+        while remote_index < len(argv) and "=" in argv[remote_index]:
+            name, _value = argv[remote_index].split("=", 1)
+            if not SAFE_ENV_NAME.fullmatch(name):
+                raise ValueError(f"invalid environment assignment in proof command: {name}")
+            remote_index += 1
+
+    if remote_index >= len(argv):
+        raise ValueError("proof command has no remote program after rch exec --")
+    if argv[remote_index] not in ALLOWED_REMOTE_PROGRAMS:
+        raise ValueError(f"remote proof program is not allowed: {argv[remote_index]}")
+    return argv
 
 
 class ProofLaneManifest:
@@ -854,8 +897,8 @@ def main():
                     # Execute the command
                     lane = runner.manifest.get_lane(args.lane)
                     if lane:
-                        cmd = lane["command"]
-                        return subprocess.call(cmd, shell=True)
+                        argv = safe_command_argv(lane["command"])
+                        return subprocess.call(argv)
             else:
                 record = result["validation_frontier_record"]
                 print(f"❌ Preflight BLOCKED for lane {args.lane}")

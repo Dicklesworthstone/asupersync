@@ -21,6 +21,14 @@ fn run_proof_runner(args: &[&str]) -> Result<Output, std::io::Error> {
     Command::new("python3").arg(SCRIPT_PATH).args(args).output()
 }
 
+fn run_python_snippet(source: &str) -> Output {
+    Command::new("python3")
+        .arg("-c")
+        .arg(source)
+        .output()
+        .expect("python snippet should execute")
+}
+
 fn proof_runner_json(args: &[&str]) -> Value {
     let output = run_proof_runner(args).expect("proof runner should execute");
     if !output.status.success() {
@@ -814,6 +822,85 @@ fn proof_runner_uses_manifest_commands_correctly() {
             "proof runner should use manifest command for lane {lane_id}"
         );
     }
+}
+
+#[test]
+fn proof_runner_execute_path_does_not_use_shell_true() {
+    let script = std::fs::read_to_string(SCRIPT_PATH).expect("read proof runner script");
+    assert!(
+        !script.contains("shell=True"),
+        "execute mode must not route manifest commands through a shell"
+    );
+    assert!(
+        script.contains("safe_command_argv"),
+        "execute mode must validate manifest commands before running them"
+    );
+}
+
+#[test]
+fn proof_runner_rejects_shell_control_metacharacters() {
+    let snippet = r#"
+import importlib.util
+spec = importlib.util.spec_from_file_location("proof_runner", "scripts/proof_runner.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+try:
+    module.safe_command_argv("rch exec -- cargo test; touch /tmp/asupersync-proof-runner-pwn")
+except ValueError as error:
+    print(str(error))
+else:
+    raise SystemExit("accepted shell metacharacter")
+"#;
+    let output = run_python_snippet(snippet);
+    assert!(
+        output.status.success(),
+        "malicious command should be rejected cleanly\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("shell control metacharacters"),
+        "rejection reason should identify shell metacharacters: {stdout}"
+    );
+}
+
+#[test]
+fn proof_runner_parses_manifest_env_command_without_shell_expansion() {
+    let snippet = r#"
+import importlib.util
+import json
+spec = importlib.util.spec_from_file_location("proof_runner", "scripts/proof_runner.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+argv = module.safe_command_argv("rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_test CARGO_INCREMENTAL=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync")
+print(json.dumps(argv))
+"#;
+    let output = run_python_snippet(snippet);
+    assert!(
+        output.status.success(),
+        "valid manifest env command should parse\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let argv: Vec<String> =
+        serde_json::from_str(&stdout).unwrap_or_else(|error| panic!("parse argv JSON: {error}"));
+    assert_eq!(&argv[..3], &["rch", "exec", "--"]);
+    assert_eq!(argv[3], "env");
+    assert!(
+        argv.iter()
+            .any(|token| token.starts_with("CARGO_TARGET_DIR=/tmp/")),
+        "TMPDIR fallback should be expanded without using a shell: {argv:?}"
+    );
+    assert!(
+        argv.iter().all(|token| !token.contains("${")),
+        "supported shell placeholders should not remain after parsing: {argv:?}"
+    );
+    assert!(
+        argv.iter().any(|token| token == "cargo"),
+        "remote cargo program should be preserved: {argv:?}"
+    );
 }
 
 #[test]
