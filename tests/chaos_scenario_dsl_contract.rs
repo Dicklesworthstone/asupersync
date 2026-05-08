@@ -601,7 +601,7 @@ fn current_fault_actions_are_explicit_and_future_dimensions_fail_closed() {
 
     let rows = rows_by_scenario(&contract);
     assert!(rows["chaos-partition-cancel-storm"]["live_runner_wired"] == false);
-    assert!(rows["chaos-disk-pressure-cleanup-delay"]["live_runner_wired"] == false);
+    assert!(rows["chaos-disk-pressure-cleanup-delay"]["live_runner_wired"] == true);
     assert!(rows["chaos-process-stall-minimized-counterexample"]["live_runner_wired"] == false);
 }
 
@@ -683,14 +683,125 @@ fn live_fault_action_validation_covers_disk_process_and_cleanup_dimensions() {
     let rows = rows_by_scenario(&contract);
     assert_eq!(
         rows["chaos-disk-pressure-cleanup-delay"]["report_status"].as_str(),
-        Some("XFAIL"),
-        "runner semantics stay fail-closed until disk/cleanup effects are wired"
+        Some("LIVE"),
+        "disk/cleanup runner semantics are covered by the live effect-summary probe"
+    );
+    assert_eq!(
+        rows["chaos-disk-pressure-cleanup-delay"]["live_runner_wired"].as_bool(),
+        Some(true),
+        "disk/cleanup row is live once the runner effect summary is source-backed"
     );
     assert_eq!(
         rows["chaos-process-stall-minimized-counterexample"]["report_status"].as_str(),
         Some("XFAIL"),
         "runner semantics stay fail-closed until process stall minimization is wired"
     );
+}
+
+#[test]
+fn live_disk_pressure_cleanup_delay_uses_runner_effect_summary() {
+    let contract = contract();
+    let probe = contract
+        .get("live_disk_pressure_cleanup_delay")
+        .expect("live_disk_pressure_cleanup_delay object");
+    assert_eq!(string(probe, "report_status"), "LIVE");
+
+    let rows = rows_by_scenario(&contract);
+    let row = rows
+        .get(string(probe, "scenario_id"))
+        .expect("disk cleanup scenario row");
+    assert_eq!(string(row, "report_status"), "LIVE");
+    assert_eq!(row["live_runner_wired"].as_bool(), Some(true));
+
+    let source_path = string(probe, "source_path");
+    let source = std::fs::read_to_string(repo_path(source_path))
+        .unwrap_or_else(|error| panic!("read {source_path}: {error}"));
+    for marker in string_list(probe, "source_markers") {
+        assert!(
+            source.contains(&marker),
+            "scenario runner source must contain effect-summary marker {marker}"
+        );
+    }
+
+    let raw_scenario = serde_json::to_string(
+        probe
+            .get("scenario")
+            .expect("live disk cleanup scenario object"),
+    )
+    .expect("serialize live disk cleanup scenario");
+    let scenario = Scenario::from_json(&raw_scenario).expect("parse disk cleanup scenario");
+    assert!(
+        scenario.validate().is_empty(),
+        "disk cleanup scenario must validate"
+    );
+
+    let result =
+        ScenarioRunner::validate_replay(&scenario).expect("disk cleanup scenario must replay");
+    assert!(result.passed(), "disk cleanup scenario must pass");
+    assert!(result.lab_report.quiescent);
+    assert!(
+        result.lab_report.invariant_violations.is_empty(),
+        "disk cleanup scenario must not emit invariant violations: {:?}",
+        result.lab_report.invariant_violations
+    );
+    assert_eq!(result.faults_injected, scenario.faults.len());
+
+    let result_json = result.to_json();
+    for field in string_list(probe, "required_result_fields") {
+        assert!(
+            result_json.get(&field).is_some(),
+            "runner JSON result must include {field}"
+        );
+    }
+
+    let effect_summary = result.fault_effect_summary.to_json();
+    let expected_effect_summary = probe
+        .get("expected_effect_summary")
+        .expect("expected effect summary object");
+    assert_eq!(
+        &effect_summary, expected_effect_summary,
+        "disk cleanup effect summary must remain exact and source-backed"
+    );
+    assert_eq!(result_json["fault_effect_summary"], effect_summary);
+
+    let minimums = probe
+        .get("minimums")
+        .and_then(Value::as_object)
+        .expect("minimums object");
+    let minimum_disk_pressure = minimums["max_disk_pressure_bytes"]
+        .as_u64()
+        .expect("max disk pressure minimum");
+    let minimum_cleanup_delay = minimums["delayed_cleanup_total_ms"]
+        .as_u64()
+        .expect("cleanup delay minimum");
+    assert!(
+        effect_summary["max_disk_pressure_bytes"]
+            .as_u64()
+            .expect("max disk pressure bytes")
+            >= minimum_disk_pressure
+    );
+    assert!(
+        effect_summary["delayed_cleanup_total_ms"]
+            .as_u64()
+            .expect("cleanup delay total")
+            >= minimum_cleanup_delay
+    );
+    assert_eq!(
+        effect_summary["resource_cap_breaches"]
+            .as_array()
+            .map(Vec::len),
+        Some(0),
+        "bounded artifact output must not breach resource caps"
+    );
+
+    let rendered_effect_summary =
+        serde_json::to_string(&effect_summary).expect("render effect summary");
+    for forbidden in string_list(probe, "forbidden_projection_markers") {
+        assert!(
+            !rendered_effect_summary.contains(&forbidden),
+            "effect summary projection must not expose raw coordination marker {forbidden}"
+        );
+    }
 }
 
 #[test]

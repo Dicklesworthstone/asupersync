@@ -26,7 +26,7 @@ use super::dual_run::{DualRunScenarioIdentity, ReplayMetadata, SeedLineageRecord
 use super::meta::mutation::ALL_ORACLE_INVARIANTS;
 use super::oracle::OracleReport;
 use super::runtime::{LabRunReport, LabRuntime};
-use super::scenario::{FaultAction, Scenario, ValidationError};
+use super::scenario::{FaultAction, FaultEvent, Scenario, ValidationError};
 use crate::trace::replay::ReplayTrace;
 use crate::types::Time;
 use std::collections::{BTreeMap, HashSet};
@@ -145,6 +145,142 @@ impl FaultInjectionLogEntry {
     }
 }
 
+/// Deterministic effect accounting for scenario fault actions.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FaultEffectSummary {
+    /// Active disk-pressure bytes after all scheduled faults have fired.
+    pub active_disk_pressure_bytes: u64,
+    /// Maximum active disk-pressure bytes observed during the run.
+    pub max_disk_pressure_bytes: u64,
+    /// Number of disk-pressure events applied.
+    pub disk_pressure_events: usize,
+    /// Active disk-pressure bytes by canonical path.
+    pub disk_pressure_by_path: BTreeMap<String, u64>,
+    /// Total cleanup delay requested by delayed-cleanup faults.
+    pub delayed_cleanup_total_ms: u64,
+    /// Cleanup delay requested by phase.
+    pub delayed_cleanup_phases: BTreeMap<String, u64>,
+    /// Total bounded process-stall duration requested by process-stall faults.
+    pub process_stall_total_ms: u64,
+    /// Participants still stalled after the scheduled fault stream.
+    pub stalled_participants_until_ms: BTreeMap<String, u64>,
+    /// Resource-cap breaches observed while applying fault effects.
+    pub resource_cap_breaches: Vec<String>,
+}
+
+impl FaultEffectSummary {
+    fn fault_string_arg<'a>(fault: &'a FaultEvent, key: &str) -> Option<&'a str> {
+        fault.args.get(key).and_then(serde_json::Value::as_str)
+    }
+
+    fn fault_u64_arg(fault: &FaultEvent, key: &str) -> Option<u64> {
+        fault.args.get(key).and_then(serde_json::Value::as_u64)
+    }
+
+    fn refresh_active_disk_pressure(&mut self, cap: Option<u64>) {
+        self.active_disk_pressure_bytes = self.disk_pressure_by_path.values().copied().sum();
+        self.max_disk_pressure_bytes = self
+            .max_disk_pressure_bytes
+            .max(self.active_disk_pressure_bytes);
+
+        if let Some(cap) = cap {
+            if self.active_disk_pressure_bytes > cap {
+                self.resource_cap_breaches.push(format!(
+                    "disk_pressure_bytes:{}>{cap}",
+                    self.active_disk_pressure_bytes
+                ));
+            }
+        }
+    }
+
+    fn expire_process_stalls(&mut self, now_ms: u64) {
+        self.stalled_participants_until_ms
+            .retain(|_, resume_at_ms| *resume_at_ms > now_ms);
+    }
+
+    fn apply_fault(&mut self, fault: &FaultEvent, max_artifact_bytes: Option<u64>) {
+        self.expire_process_stalls(fault.at_ms);
+
+        match fault.action {
+            FaultAction::DiskPressure => {
+                if let (Some(path), Some(bytes)) = (
+                    Self::fault_string_arg(fault, "path"),
+                    Self::fault_u64_arg(fault, "bytes"),
+                ) {
+                    self.disk_pressure_events += 1;
+                    self.disk_pressure_by_path.insert(path.to_string(), bytes);
+                    self.refresh_active_disk_pressure(max_artifact_bytes);
+                }
+            }
+            FaultAction::DiskRecovered => {
+                if let Some(path) = Self::fault_string_arg(fault, "path") {
+                    self.disk_pressure_by_path.remove(path);
+                    self.refresh_active_disk_pressure(max_artifact_bytes);
+                }
+            }
+            FaultAction::DelayedCleanup => {
+                if let (Some(phase), Some(delay_ms)) = (
+                    Self::fault_string_arg(fault, "phase"),
+                    Self::fault_u64_arg(fault, "delay_ms"),
+                ) {
+                    self.delayed_cleanup_total_ms =
+                        self.delayed_cleanup_total_ms.saturating_add(delay_ms);
+                    self.delayed_cleanup_phases
+                        .entry(phase.to_string())
+                        .and_modify(|total| *total = total.saturating_add(delay_ms))
+                        .or_insert(delay_ms);
+                }
+            }
+            FaultAction::ProcessStall => {
+                if let (Some(host), Some(duration_ms)) = (
+                    Self::fault_string_arg(fault, "host"),
+                    Self::fault_u64_arg(fault, "duration_ms"),
+                ) {
+                    self.process_stall_total_ms =
+                        self.process_stall_total_ms.saturating_add(duration_ms);
+                    self.stalled_participants_until_ms
+                        .insert(host.to_string(), fault.at_ms.saturating_add(duration_ms));
+                }
+            }
+            FaultAction::ProcessResume => {
+                if let Some(host) = Self::fault_string_arg(fault, "host") {
+                    self.stalled_participants_until_ms.remove(host);
+                }
+            }
+            FaultAction::Partition
+            | FaultAction::Heal
+            | FaultAction::HostCrash
+            | FaultAction::HostRestart
+            | FaultAction::ClockSkew
+            | FaultAction::ClockReset => {}
+        }
+    }
+
+    /// Convert to JSON for artifact storage.
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        use serde_json::json;
+        let active_stalled_participants = self
+            .stalled_participants_until_ms
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+
+        json!({
+            "active_disk_pressure_bytes": self.active_disk_pressure_bytes,
+            "max_disk_pressure_bytes": self.max_disk_pressure_bytes,
+            "disk_pressure_events": self.disk_pressure_events,
+            "disk_pressure_by_path": self.disk_pressure_by_path,
+            "delayed_cleanup_total_ms": self.delayed_cleanup_total_ms,
+            "delayed_cleanup_phases": self.delayed_cleanup_phases,
+            "process_stall_total_ms": self.process_stall_total_ms,
+            "active_stalled_participants": active_stalled_participants,
+            "stalled_participants_until_ms": self.stalled_participants_until_ms,
+            "resource_cap_breaches": self.resource_cap_breaches,
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Run result
 // ---------------------------------------------------------------------------
@@ -164,6 +300,8 @@ pub struct ScenarioRunResult {
     pub faults_injected: usize,
     /// Structured log of fault injections, in deterministic execution order.
     pub fault_log: Vec<FaultInjectionLogEntry>,
+    /// Deterministic summary of effects applied by fault injection.
+    pub fault_effect_summary: FaultEffectSummary,
     /// Replay trace, if recording was enabled.
     pub replay_trace: Option<ReplayTrace>,
     /// Trace certificate snapshot for replay validation.
@@ -201,6 +339,7 @@ impl ScenarioRunResult {
             "steps": self.lab_report.steps_total,
             "faults_injected": self.faults_injected,
             "fault_log": self.fault_log.iter().map(FaultInjectionLogEntry::to_json).collect::<Vec<_>>(),
+            "fault_effect_summary": self.fault_effect_summary.to_json(),
             "certificate": {
                 "event_hash": self.certificate.event_hash,
                 "schedule_hash": self.certificate.schedule_hash,
@@ -507,8 +646,12 @@ impl ScenarioRunner {
     ///
     /// Processes faults in `at_ms` order, advancing virtual time and injecting
     /// each fault action. Between faults, the runtime runs to idle.
-    fn inject_faults(runtime: &mut LabRuntime, scenario: &Scenario) -> Vec<FaultInjectionLogEntry> {
+    fn inject_faults(
+        runtime: &mut LabRuntime,
+        scenario: &Scenario,
+    ) -> (Vec<FaultInjectionLogEntry>, FaultEffectSummary) {
         let mut fault_log = Vec::with_capacity(scenario.faults.len());
+        let mut fault_effect_summary = FaultEffectSummary::default();
 
         for fault in &scenario.faults {
             // Advance time to the fault trigger point
@@ -549,9 +692,10 @@ impl ScenarioRunner {
                 args_summary,
                 trace_message,
             });
+            fault_effect_summary.apply_fault(fault, scenario.resource_caps.max_artifact_bytes);
         }
 
-        fault_log
+        (fault_log, fault_effect_summary)
     }
 
     /// Summarize fault args for trace events.
@@ -614,7 +758,7 @@ impl ScenarioRunner {
         let config = Self::lab_config_for_identity(scenario, identity);
         let mut runtime = LabRuntime::new(config);
 
-        let fault_log = Self::inject_faults(&mut runtime, scenario);
+        let (fault_log, fault_effect_summary) = Self::inject_faults(&mut runtime, scenario);
         let faults_injected = fault_log.len();
         runtime.run_until_quiescent();
 
@@ -633,6 +777,7 @@ impl ScenarioRunner {
             oracle_report,
             faults_injected,
             fault_log,
+            fault_effect_summary,
             replay_trace,
             certificate,
             adapter: LAB_SCENARIO_RUNNER_ADAPTER.to_string(),
@@ -663,7 +808,7 @@ impl ScenarioRunner {
         let mut runtime = LabRuntime::new(config);
 
         // 3. Inject timed faults and run between them
-        let fault_log = Self::inject_faults(&mut runtime, scenario);
+        let (fault_log, fault_effect_summary) = Self::inject_faults(&mut runtime, scenario);
         let faults_injected = fault_log.len();
 
         // 4. Run to quiescence after all faults
@@ -690,6 +835,7 @@ impl ScenarioRunner {
             oracle_report,
             faults_injected,
             fault_log,
+            fault_effect_summary,
             replay_trace,
             certificate,
             adapter: LAB_SCENARIO_RUNNER_ADAPTER.to_string(),

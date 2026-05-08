@@ -265,7 +265,7 @@
   "live_fault_action_validation": {
     "report_status": "LIVE",
     "source_path": "src/lab/scenario.rs",
-    "description": "The DSL parses and fail-closed-validates the disk-pressure, delayed-cleanup, and process-stall dimensions without marking scenario runner semantics live.",
+    "description": "The DSL parses and fail-closed-validates disk-pressure, delayed-cleanup, and process-stall dimensions without marking process-stall minimization live.",
     "required_fault_actions": [
       "disk_pressure",
       "disk_recovered",
@@ -404,6 +404,122 @@
       "faults[2].args.duration_ms"
     ]
   },
+  "live_disk_pressure_cleanup_delay": {
+    "scenario_id": "chaos-disk-pressure-cleanup-delay",
+    "report_status": "LIVE",
+    "source_path": "src/lab/scenario_runner.rs",
+    "description": "The runner applies deterministic disk-pressure accounting and delayed-cleanup effect summaries, keeping artifact output bounded and replayable.",
+    "source_markers": [
+      "pub struct FaultEffectSummary",
+      "max_disk_pressure_bytes",
+      "delayed_cleanup_total_ms",
+      "resource_cap_breaches",
+      "fn apply_fault"
+    ],
+    "required_result_fields": [
+      "passed",
+      "faults_injected",
+      "fault_log",
+      "fault_effect_summary",
+      "oracle_report",
+      "invariant_violations"
+    ],
+    "scenario": {
+      "schema_version": 1,
+      "id": "chaos-disk-pressure-cleanup-delay",
+      "description": "Disk pressure plus delayed cleanup must bound artifact emission and still close regions.",
+      "lab": {
+        "seed": 340336,
+        "worker_count": 2,
+        "max_steps": 1000,
+        "trace_capacity": 4096,
+        "panic_on_obligation_leak": true,
+        "panic_on_futurelock": true
+      },
+      "participants": [
+        {
+          "name": "worker-a",
+          "role": "executor"
+        }
+      ],
+      "faults": [
+        {
+          "at_ms": 10,
+          "action": "disk_pressure",
+          "args": {
+            "path": "target/proof-bundle",
+            "bytes": 4096
+          }
+        },
+        {
+          "at_ms": 20,
+          "action": "delayed_cleanup",
+          "args": {
+            "phase": "finalizers",
+            "delay_ms": 25
+          }
+        },
+        {
+          "at_ms": 50,
+          "action": "disk_recovered",
+          "args": {
+            "path": "target/proof-bundle"
+          }
+        }
+      ],
+      "resource_caps": {
+        "max_artifact_bytes": 8192,
+        "max_fault_events": 4,
+        "max_counterexample_events": 16
+      },
+      "expected_invariants": [
+        "quiescence",
+        "no_obligation_leaks",
+        "bounded_artifact_output",
+        "deterministic_replay"
+      ],
+      "minimization": {
+        "enabled": true,
+        "max_evaluations": 32,
+        "max_counterexample_events": 16
+      },
+      "golden_projection": {
+        "format": "json",
+        "canonicalized": true,
+        "redacted": true
+      },
+      "metadata": {
+        "surface_contract_version": "chaos-scenario-dsl-contract-v1",
+        "semantics_status": "runner_effect_summary"
+      }
+    },
+    "expected_effect_summary": {
+      "active_disk_pressure_bytes": 0,
+      "max_disk_pressure_bytes": 4096,
+      "disk_pressure_events": 1,
+      "disk_pressure_by_path": {},
+      "delayed_cleanup_total_ms": 25,
+      "delayed_cleanup_phases": {
+        "finalizers": 25
+      },
+      "process_stall_total_ms": 0,
+      "active_stalled_participants": [],
+      "stalled_participants_until_ms": {},
+      "resource_cap_breaches": []
+    },
+    "minimums": {
+      "max_disk_pressure_bytes": 4096,
+      "delayed_cleanup_total_ms": 25
+    },
+    "forbidden_projection_markers": [
+      "/home/ubuntu/",
+      "Authorization: Bearer ",
+      "body_md",
+      "created_ts",
+      "ack_required"
+    ],
+    "proof_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_chaos_disk_cleanup_effects CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test chaos_scenario_dsl_contract live_disk_pressure_cleanup_delay_uses_runner_effect_summary -- --nocapture"
+  },
   "required_invariants": [
     "quiescence",
     "losers_drained",
@@ -438,9 +554,9 @@
     {
       "scenario_id": "chaos-disk-pressure-cleanup-delay",
       "description": "Disk pressure plus delayed cleanup must bound artifact emission and still close regions.",
-      "live_runner_wired": false,
-      "report_status": "XFAIL",
-      "status_reason": "contracted only; disk-pressure and delayed-cleanup faults are not wired yet",
+      "live_runner_wired": true,
+      "report_status": "LIVE",
+      "status_reason": "runner applies deterministic disk-pressure accounting and delayed-cleanup effect summaries",
       "fault_dimensions": [
         "disk_pressure",
         "delayed_cleanup",
@@ -472,7 +588,7 @@
       "golden_strategy": "exact_canonicalized"
     }
   ],
-  "golden_markdown": "| scenario_id | status | fault_dimensions | expected_invariants |\n| --- | --- | --- | --- |\n| chaos-disk-pressure-cleanup-delay | XFAIL | disk_pressure, delayed_cleanup, resource_caps | quiescence, no_obligation_leaks, bounded_artifact_output, deterministic_replay |\n| chaos-partition-cancel-storm | XFAIL | network_partition, cancellation_storm | quiescence, losers_drained, no_obligation_leaks, deterministic_replay |\n| chaos-process-stall-minimized-counterexample | XFAIL | process_stall, minimized_counterexample | quiescence, losers_drained, deterministic_replay |\n",
+  "golden_markdown": "| scenario_id | status | fault_dimensions | expected_invariants |\n| --- | --- | --- | --- |\n| chaos-disk-pressure-cleanup-delay | LIVE | disk_pressure, delayed_cleanup, resource_caps | quiescence, no_obligation_leaks, bounded_artifact_output, deterministic_replay |\n| chaos-partition-cancel-storm | XFAIL | network_partition, cancellation_storm | quiescence, losers_drained, no_obligation_leaks, deterministic_replay |\n| chaos-process-stall-minimized-counterexample | XFAIL | process_stall, minimized_counterexample | quiescence, losers_drained, deterministic_replay |\n",
   "proof_commands": [
     "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_chaos_scenario_dsl_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test chaos_scenario_dsl_contract -- --nocapture"
   ]
