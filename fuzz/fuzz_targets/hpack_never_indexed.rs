@@ -255,7 +255,7 @@ fuzz_target!(|input: HpackNeverIndexedFuzz| {
 
     // Create encoder with specified settings
     let mut encoder = Encoder::new();
-    encoder.set_huffman(input.use_huffman);
+    encoder.set_use_huffman(input.use_huffman);
 
     // Test different table sizes to verify independence
     let table_size = (input.max_table_size as usize).min(16384); // Cap at reasonable size
@@ -305,7 +305,7 @@ fuzz_target!(|input: HpackNeverIndexedFuzz| {
         if let Ok(decoded_headers) = decoded_result {
             // Re-encode the decoded headers as sensitive
             let mut reencoder = Encoder::new();
-            reencoder.set_huffman(input.use_huffman);
+            reencoder.set_use_huffman(input.use_huffman);
             let mut reencoded = BytesMut::new();
             reencoder.encode_sensitive(&decoded_headers, &mut reencoded);
 
@@ -400,7 +400,7 @@ fuzz_target!(|input: HpackNeverIndexedFuzz| {
         if test_table_size <= table_size * 2 {
             // Avoid excessive sizes
             let mut size_test_encoder = Encoder::new();
-            size_test_encoder.set_huffman(input.use_huffman);
+            size_test_encoder.set_use_huffman(input.use_huffman);
             size_test_encoder.set_max_table_size(test_table_size);
 
             let mut size_encoded = BytesMut::new();
