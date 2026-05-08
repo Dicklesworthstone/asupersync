@@ -1,19 +1,22 @@
 //! OpenTelemetry Span ID Randomness Conformance Test (Tick #145)
 //!
-//! This conformance test verifies that our span ID generation produces
-//! identical randomness distribution compared to opentelemetry-sdk when
-//! using the same RNG source.
+//! This guard verifies local span ID generation health and samples
+//! opentelemetry-sdk generation separately. It intentionally fails closed for
+//! SDK parity because the two implementations are sampled from independent live
+//! RNG streams, not a deterministic shared-source reference oracle.
 //!
 //! Key properties tested:
 //! - Statistical uniformity of generated 8-byte span IDs
 //! - Uniqueness over large sample sizes
-//! - Comparable distribution health vs opentelemetry-sdk
+//! - Independent distribution health for opentelemetry-sdk samples
 //! - Entropy and randomness quality metrics for 8-byte IDs
 //! - Proper handling of invalid span ID (all zeros)
 
 use asupersync::observability::w3c_trace_context::SpanId as AsupersyncSpanId;
 use opentelemetry_sdk::trace::{IdGenerator, RandomIdGenerator};
 use std::collections::BTreeSet;
+
+const OTEL_SDK_SPAN_ID_PARITY_UNIMPLEMENTED: &str = "deterministic shared-source opentelemetry-sdk span ID parity oracle is not wired; refusing independent-RNG conformance claims";
 
 /// Test cases for span ID randomness conformance
 struct SpanIdRandomnessTestCase {
@@ -157,8 +160,8 @@ impl SpanIdRandomnessAnalysis {
 }
 
 fn main() {
-    println!("🔍 OpenTelemetry Span ID Randomness Conformance Test");
-    println!("Verifying same RNG → same 8-byte span ID distribution vs opentelemetry-sdk");
+    println!("🔍 OpenTelemetry Span ID Randomness Guard");
+    println!("Checking local and SDK span ID sample health without claiming exact parity");
 
     let test_cases = vec![
         SpanIdRandomnessTestCase {
@@ -194,7 +197,7 @@ fn main() {
     ];
 
     println!(
-        "📋 Running {} span ID randomness conformance tests",
+        "📋 Running {} span ID randomness health checks",
         test_cases.len()
     );
 
@@ -206,16 +209,18 @@ fn main() {
         // Test our implementation
         let our_span_ids = test_our_span_id_generation(test_case);
 
-        // Test opentelemetry-sdk implementation
+        // Sample opentelemetry-sdk independently. This is a health comparator,
+        // not an exact conformance oracle for asupersync.
         let reference_span_ids = test_reference_span_id_generation(test_case);
 
-        // Compare distributions
+        // Check each sample set independently. Do not claim exact distribution
+        // matching from separate live RNG streams.
         if let Err(error) =
-            compare_span_id_distributions(&our_span_ids, &reference_span_ids, test_case)
+            check_span_id_distribution_health(&our_span_ids, &reference_span_ids, test_case)
         {
             failed_tests.push((test_case.name.to_string(), error));
         } else {
-            println!("    ✅ {}", test_case.name);
+            println!("    ✅ {} local/sdk health checks", test_case.name);
         }
     }
 
@@ -224,17 +229,33 @@ fn main() {
     test_span_id_randomness_properties(&mut failed_tests);
 
     // Report results
-    println!("\n📊 Span ID Randomness Conformance Test Results");
+    println!("\n📊 Span ID Randomness Guard Results");
     if failed_tests.is_empty() {
-        println!("✅ ALL TESTS PASSED - Span ID generation is conformant");
-        println!("🎯 RNG distribution matches opentelemetry-sdk exactly");
+        println!("⚠️  LOCAL HEALTH CHECKS PASSED");
+        println!("{}", final_status_line(failed_tests.len()));
+        std::process::exit(exit_code_for_summary(failed_tests.len()));
     } else {
         println!("❌ {} TESTS FAILED:", failed_tests.len());
         for (test_name, error) in &failed_tests {
             println!("   {} - {}", test_name, error);
         }
-        std::process::exit(1);
+        println!("{}", final_status_line(failed_tests.len()));
+        std::process::exit(exit_code_for_summary(failed_tests.len()));
     }
+}
+
+fn final_status_line(local_failure_count: usize) -> String {
+    if local_failure_count == 0 {
+        format!("REFERENCE UNAVAILABLE - {OTEL_SDK_SPAN_ID_PARITY_UNIMPLEMENTED}")
+    } else {
+        format!(
+            "LOCAL HEALTH CHECK FAILED - {local_failure_count} span ID sample health checks failed"
+        )
+    }
+}
+
+const fn exit_code_for_summary(_local_failure_count: usize) -> i32 {
+    1
 }
 
 /// Test our span ID generation implementation
@@ -250,7 +271,7 @@ fn test_our_span_id_generation(test_case: &SpanIdRandomnessTestCase) -> Vec<Span
     span_ids
 }
 
-/// Test reference opentelemetry-sdk span ID generation
+/// Sample opentelemetry-sdk span ID generation for independent health checks.
 fn test_reference_span_id_generation(test_case: &SpanIdRandomnessTestCase) -> Vec<SpanIdData> {
     let generator = RandomIdGenerator::default();
     let mut span_ids = Vec::with_capacity(test_case.sample_size);
@@ -274,8 +295,8 @@ fn span_id_hex_to_bytes(hex: &str) -> [u8; 8] {
     bytes
 }
 
-/// Compare span ID distributions between implementations
-fn compare_span_id_distributions(
+/// Check span ID sample health for both independently-sampled implementations.
+fn check_span_id_distribution_health(
     our_span_ids: &[SpanIdData],
     reference_span_ids: &[SpanIdData],
     _test_case: &SpanIdRandomnessTestCase,
@@ -537,5 +558,48 @@ mod tests {
 
         let id_data = SpanIdData::new(span_id);
         assert!(id_data.is_valid());
+    }
+
+    #[test]
+    fn source_no_longer_claims_exact_sdk_randomness_parity() {
+        let source = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/bin/otel_span_id_randomness_conformance.rs"
+        ));
+        let forbidden_claims = [
+            concat!(
+                "identical randomness distribution compared to ",
+                "opentelemetry-sdk"
+            ),
+            concat!("same ", "RNG"),
+            concat!("Span ID generation is ", "conformant"),
+            concat!("RNG distribution matches ", "opentelemetry-sdk exactly"),
+        ];
+
+        for forbidden in forbidden_claims {
+            assert!(
+                !source.contains(forbidden),
+                "stale exact SDK parity claim remained: {forbidden}"
+            );
+        }
+        assert!(source.contains("OTEL_SDK_SPAN_ID_PARITY_UNIMPLEMENTED"));
+    }
+
+    #[test]
+    fn guard_exits_nonzero_when_only_local_health_checks_pass() {
+        let status = final_status_line(0);
+
+        assert!(status.contains("REFERENCE UNAVAILABLE"));
+        assert!(status.contains(OTEL_SDK_SPAN_ID_PARITY_UNIMPLEMENTED));
+        assert_eq!(exit_code_for_summary(0), 1);
+    }
+
+    #[test]
+    fn guard_exits_nonzero_when_local_health_checks_fail() {
+        let status = final_status_line(3);
+
+        assert!(status.contains("LOCAL HEALTH CHECK FAILED"));
+        assert!(status.contains("3 span ID sample health checks failed"));
+        assert_eq!(exit_code_for_summary(3), 1);
     }
 }
