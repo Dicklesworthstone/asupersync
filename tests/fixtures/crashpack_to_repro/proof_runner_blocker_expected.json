@@ -1,5 +1,9 @@
 {
   "accepted_input_contract": {
+    "failure_required_fields": [
+      "summary",
+      "first_blocker"
+    ],
     "required_top_level_fields": [
       "schema_version",
       "artifact_id",
@@ -42,7 +46,7 @@
       "reason": "rerun the blocked proof-runner contract lane through rch",
       "runs_cargo": true,
       "safety_violations": [],
-      "shell_command": "rch exec -- env CARGO_INCREMENTAL=0 'CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_crashpack_proof_runner_blocker_console_report_002' CARGO_PROFILE_TEST_DEBUG=0 'RUSTFLAGS=-C debuginfo=0' cargo test -p asupersync --test proof_console_report_contract rejects_unknown_rch_outcome_class -- --nocapture",
+      "shell_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_crashpack_proof_runner_blocker_console_report_002 CARGO_PROFILE_TEST_DEBUG=0 'RUSTFLAGS=-C debuginfo=0' cargo test -p asupersync --test proof_console_report_contract rejects_unknown_rch_outcome_class -- --nocapture",
       "uses_rch": true
     }
   ],
@@ -60,6 +64,10 @@
   "safety": {
     "cargo_commands_require_rch": true,
     "direct_main_safe": true,
+    "forbidden_cwd_patterns_checked": [
+      "/tmp/asupersync-",
+      "/data/projects/asupersync-"
+    ],
     "forbidden_patterns_checked": [
       "git branch ",
       "git checkout -b",

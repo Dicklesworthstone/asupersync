@@ -45,6 +45,17 @@ fn generator_json(fixture: &str) -> Value {
     serde_json::from_str(&generator_text(fixture)).expect("generator output must be JSON")
 }
 
+fn generator_error_json(fixture: &str) -> Value {
+    let output = run_generator(fixture);
+    assert!(
+        !output.status.success(),
+        "generator should fail for {fixture}; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stderr).expect("generator stderr error must be JSON")
+}
+
 fn fixture_text(fixture: &str) -> String {
     fs::read_to_string(repo_root().join(FIXTURE_ROOT).join(fixture))
         .unwrap_or_else(|error| panic!("read fixture {fixture}: {error}"))
@@ -117,6 +128,22 @@ fn cargo_test_crashpack_generates_rch_test_command() {
             .as_str()
             .expect("shell command")
             .contains("cargo test -p asupersync --test repro_region_lifecycle")
+    );
+    assert!(
+        receipt["commands"][0]["shell_command"]
+            .as_str()
+            .expect("shell command")
+            .contains(
+                "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_crashpack_cargo_test_region_close_001"
+            ),
+        "shell repro command must leave worker-side TMPDIR expansion intact"
+    );
+    assert!(
+        !receipt["commands"][0]["shell_command"]
+            .as_str()
+            .expect("shell command")
+            .contains("'CARGO_TARGET_DIR=${TMPDIR:-/tmp}"),
+        "shell repro command must not quote away TMPDIR expansion"
     );
 }
 
@@ -193,6 +220,39 @@ fn proof_runner_blocker_matches_full_golden() {
     assert_output_matches_golden(
         "proof_runner_blocker.json",
         "proof_runner_blocker_expected.json",
+    );
+}
+
+#[test]
+fn missing_required_input_fields_fail_closed() {
+    let error = generator_error_json("missing_required_field.json");
+
+    assert_eq!(
+        error["error"].as_str(),
+        Some("missing required top-level field: artifact_id")
+    );
+}
+
+#[test]
+fn unsafe_cwd_marks_repro_command_not_direct_main_safe() {
+    let receipt = generator_json("unsafe_cwd_crashpack.json");
+    let violations = receipt["safety"]["violations"]
+        .as_array()
+        .expect("safety violations");
+
+    assert_eq!(
+        receipt["summary"]["safe_for_direct_main"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        receipt["commands"][0]["direct_main_safe"].as_bool(),
+        Some(false)
+    );
+    assert!(
+        violations
+            .iter()
+            .any(|violation| violation["code"].as_str() == Some("forbidden-cwd-pattern")),
+        "unsafe cwd must be included in direct-main safety violations"
     );
 }
 

@@ -1,0 +1,18 @@
+{
+  "artifact_id": "unsafe-cwd-001",
+  "bead_id": "asupersync-xeh8m0.5",
+  "cargo": {
+    "package": "asupersync",
+    "test": "repro_region_lifecycle"
+  },
+  "failure": {
+    "first_blocker": "thread 'region_close_panics_on_live_child' panicked at tests/repro_region_lifecycle.rs:88",
+    "summary": "Lab runtime region close crashpack from a forbidden scratch clone"
+  },
+  "repo": {
+    "commit": "fc8b7488a",
+    "cwd": "/tmp/asupersync-peer-scratch"
+  },
+  "schema_version": "crashpack-to-repro-input-v1",
+  "source_kind": "cargo_test"
+}

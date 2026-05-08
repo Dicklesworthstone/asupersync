@@ -1,5 +1,9 @@
 {
   "accepted_input_contract": {
+    "failure_required_fields": [
+      "summary",
+      "first_blocker"
+    ],
     "required_top_level_fields": [
       "schema_version",
       "artifact_id",
@@ -40,7 +44,7 @@
       "reason": "replay the captured fuzz artifact through rch without creating branches or worktrees",
       "runs_cargo": true,
       "safety_violations": [],
-      "shell_command": "rch exec -- env CARGO_INCREMENTAL=0 'CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_crashpack_fuzz_raptorq_decoder_crash_07' CARGO_PROFILE_TEST_DEBUG=0 'RUSTFLAGS=-C debuginfo=0' cargo fuzz run fuzz_raptorq_decoder fuzz/artifacts/fuzz_raptorq_decoder/crash-07 -- -runs=1",
+      "shell_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_crashpack_fuzz_raptorq_decoder_crash_07 CARGO_PROFILE_TEST_DEBUG=0 'RUSTFLAGS=-C debuginfo=0' cargo fuzz run fuzz_raptorq_decoder fuzz/artifacts/fuzz_raptorq_decoder/crash-07 -- -runs=1",
       "uses_rch": true
     }
   ],
@@ -58,6 +62,10 @@
   "safety": {
     "cargo_commands_require_rch": true,
     "direct_main_safe": true,
+    "forbidden_cwd_patterns_checked": [
+      "/tmp/asupersync-",
+      "/data/projects/asupersync-"
+    ],
     "forbidden_patterns_checked": [
       "git branch ",
       "git checkout -b",

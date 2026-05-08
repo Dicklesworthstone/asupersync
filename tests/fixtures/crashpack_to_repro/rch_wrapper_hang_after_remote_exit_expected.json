@@ -1,5 +1,9 @@
 {
   "accepted_input_contract": {
+    "failure_required_fields": [
+      "summary",
+      "first_blocker"
+    ],
     "required_top_level_fields": [
       "schema_version",
       "artifact_id",
@@ -41,7 +45,7 @@
       "reason": "rerun the exact remote proof command; keep remote exit separate from artifact retrieval",
       "runs_cargo": true,
       "safety_violations": [],
-      "shell_command": "rch exec -- env CARGO_INCREMENTAL=0 'CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_web_csrf_audit_frontier' CARGO_PROFILE_TEST_DEBUG=0 'RUSTFLAGS=-C debuginfo=0' cargo test -p asupersync --test web_csrf_validation_audit -- --nocapture",
+      "shell_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_web_csrf_audit_frontier CARGO_PROFILE_TEST_DEBUG=0 'RUSTFLAGS=-C debuginfo=0' cargo test -p asupersync --test web_csrf_validation_audit -- --nocapture",
       "uses_rch": true
     },
     {
@@ -80,6 +84,10 @@
   "safety": {
     "cargo_commands_require_rch": true,
     "direct_main_safe": true,
+    "forbidden_cwd_patterns_checked": [
+      "/tmp/asupersync-",
+      "/data/projects/asupersync-"
+    ],
     "forbidden_patterns_checked": [
       "git branch ",
       "git checkout -b",

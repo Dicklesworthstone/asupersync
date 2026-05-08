@@ -38,7 +38,14 @@ FORBIDDEN_PATTERNS = [
     "/tmp/asupersync-",
     "/data/projects/asupersync-",
 ]
+FORBIDDEN_CWD_PATTERNS = [
+    "/tmp/asupersync-",
+    "/data/projects/asupersync-",
+]
 SPACE_RE = re.compile(r"[^A-Za-z0-9_]+")
+TMPDIR_ENV_ASSIGNMENT_RE = re.compile(
+    r"^[A-Za-z_][A-Za-z0-9_]*=\$\{TMPDIR:-/tmp\}/[A-Za-z0-9_./-]+$"
+)
 
 
 def utc_now() -> str:
@@ -150,8 +157,19 @@ def uses_rch(argv: list[str]) -> bool:
     return len(argv) >= 3 and argv[0:3] == ["rch", "exec", "--"]
 
 
-def command_violations(argv: list[str]) -> list[dict[str, str]]:
+def shell_command(argv: list[str]) -> str:
+    rendered = []
+    for arg in argv:
+        if TMPDIR_ENV_ASSIGNMENT_RE.match(arg):
+            rendered.append(arg)
+        else:
+            rendered.append(shlex.quote(arg))
+    return " ".join(rendered)
+
+
+def command_violations(argv: list[str], cwd: str) -> list[dict[str, str]]:
     joined = " ".join(argv).lower()
+    cwd_lower = cwd.lower()
     violations = []
     for pattern in FORBIDDEN_PATTERNS:
         if pattern in joined:
@@ -160,6 +178,15 @@ def command_violations(argv: list[str]) -> list[dict[str, str]]:
                     "code": "forbidden-command-pattern",
                     "pattern": pattern,
                     "message": "generated command is not direct-main safe",
+                }
+            )
+    for pattern in FORBIDDEN_CWD_PATTERNS:
+        if pattern in cwd_lower:
+            violations.append(
+                {
+                    "code": "forbidden-cwd-pattern",
+                    "pattern": pattern,
+                    "message": "generated command cwd points at a forbidden scratch clone",
                 }
             )
     runs_cargo = "cargo" in argv
@@ -189,12 +216,12 @@ def command_row(
     cwd: str,
     reason: str,
 ) -> dict[str, Any]:
-    violations = command_violations(argv)
+    violations = command_violations(argv, cwd)
     return {
         "id": command_id,
         "kind": kind,
         "argv": argv,
-        "shell_command": shlex.join(argv),
+        "shell_command": shell_command(argv),
         "cwd": cwd,
         "reason": reason,
         "uses_rch": uses_rch(argv),
@@ -314,6 +341,17 @@ def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
     source_kind = as_string(data.get("source_kind"))
     if data.get("schema_version") != INPUT_SCHEMA_VERSION:
         raise ValueError(f"schema_version must be {INPUT_SCHEMA_VERSION}")
+    for field in ("artifact_id", "source_kind", "failure"):
+        if field not in data:
+            raise ValueError(f"missing required top-level field: {field}")
+    if not as_string(data.get("artifact_id")):
+        raise ValueError("artifact_id must be a non-empty string")
+    failure = as_dict(data.get("failure"))
+    if not failure:
+        raise ValueError("failure must be an object")
+    for field in ("summary", "first_blocker"):
+        if not as_string(failure.get(field)):
+            raise ValueError(f"failure.{field} must be a non-empty string")
     if source_kind not in SUPPORTED_SOURCE_KINDS:
         raise ValueError(f"source_kind must be one of {sorted(SUPPORTED_SOURCE_KINDS)}")
 
@@ -346,6 +384,10 @@ def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
                 "source_kind",
                 "failure",
             ],
+            "failure_required_fields": [
+                "summary",
+                "first_blocker",
+            ],
         },
         "tool_selection": existing_helper_analysis(),
         "commands": commands,
@@ -358,6 +400,7 @@ def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
             "direct_main_safe": not violations,
             "violations": violations,
             "forbidden_patterns_checked": FORBIDDEN_PATTERNS,
+            "forbidden_cwd_patterns_checked": FORBIDDEN_CWD_PATTERNS,
             "cargo_commands_require_rch": True,
             "target_dirs_require_tmpdir_expansion": True,
         },

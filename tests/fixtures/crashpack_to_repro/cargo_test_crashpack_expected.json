@@ -1,5 +1,9 @@
 {
   "accepted_input_contract": {
+    "failure_required_fields": [
+      "summary",
+      "first_blocker"
+    ],
     "required_top_level_fields": [
       "schema_version",
       "artifact_id",
@@ -44,7 +48,7 @@
       "reason": "rerun the focused failing integration or unit test through rch",
       "runs_cargo": true,
       "safety_violations": [],
-      "shell_command": "rch exec -- env CARGO_INCREMENTAL=0 'CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_crashpack_cargo_test_region_close_001' CARGO_PROFILE_TEST_DEBUG=0 'RUSTFLAGS=-C debuginfo=0' cargo test -p asupersync --test repro_region_lifecycle --features test-internals region_close_panics_on_live_child -- --nocapture",
+      "shell_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_crashpack_cargo_test_region_close_001 CARGO_PROFILE_TEST_DEBUG=0 'RUSTFLAGS=-C debuginfo=0' cargo test -p asupersync --test repro_region_lifecycle --features test-internals region_close_panics_on_live_child -- --nocapture",
       "uses_rch": true
     }
   ],
@@ -62,6 +66,10 @@
   "safety": {
     "cargo_commands_require_rch": true,
     "direct_main_safe": true,
+    "forbidden_cwd_patterns_checked": [
+      "/tmp/asupersync-",
+      "/data/projects/asupersync-"
+    ],
     "forbidden_patterns_checked": [
       "git branch ",
       "git checkout -b",
