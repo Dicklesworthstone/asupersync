@@ -506,6 +506,12 @@ impl PressureGovernor {
     fn evaluate_admission(&self, snapshot: &PressureSnapshot) -> AdmissionDecision {
         let thresholds = &self.config.thresholds;
 
+        // With no live pressure signals, avoid treating an empty sample as proof
+        // of low pressure. Backpressure is the least destructive conservative path.
+        if snapshot.fallback_verdict == PressureFallbackVerdict::NoWinNoLiveSignals {
+            return AdmissionDecision::AdmitWithBackpressure;
+        }
+
         // Check for hard rejection conditions
         if snapshot.runnable_queue_pressure > thresholds.runnable_queue * 1.2
             || snapshot.blocking_pool_pressure > thresholds.blocking_pool * 1.2
@@ -791,6 +797,50 @@ mod tests {
             signal_availability: PressureSignalAvailability::ALL,
             fallback_verdict: PressureFallbackVerdict::Complete,
         }
+    }
+
+    #[test]
+    fn pressure_governor_no_win_fallback_uses_backpressure() {
+        let config = PressureGovernorConfig {
+            enabled: true,
+            admission_control: true,
+            ..Default::default()
+        };
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create test runtime"),
+        );
+        let metrics = Metrics::new();
+        let governor = PressureGovernor::new(config, runtime, metrics)
+            .expect("pressure governor should initialize");
+
+        let no_win_pressure = PressureSnapshot {
+            timestamp: Instant::now(),
+            runnable_queue_pressure: 0.0,
+            blocking_pool_pressure: 0.0,
+            channel_backlog_pressure: 0.0,
+            cleanup_debt_pressure: 0.0,
+            memory_budget_pressure: 0.0,
+            overall_pressure: 0.0,
+            signal_availability: PressureSignalAvailability::NONE,
+            fallback_verdict: PressureFallbackVerdict::NoWinNoLiveSignals,
+        };
+        assert_eq!(
+            governor.evaluate_admission(&no_win_pressure),
+            AdmissionDecision::AdmitWithBackpressure
+        );
+
+        let complete_low_pressure = PressureSnapshot {
+            signal_availability: PressureSignalAvailability::ALL,
+            fallback_verdict: PressureFallbackVerdict::Complete,
+            ..no_win_pressure
+        };
+        assert_eq!(
+            governor.evaluate_admission(&complete_low_pressure),
+            AdmissionDecision::Admit
+        );
     }
 
     #[test]
