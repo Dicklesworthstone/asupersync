@@ -255,6 +255,29 @@
       ]
     }
   ],
+  "stress_frontier": {
+    "scenario_id": "memory-tier-high-count-frontier-v1",
+    "expected_concurrent_tasks": 4096,
+    "record_counts": {
+      "task_records": 4096,
+      "region_records": 1024,
+      "obligation_records": 2048
+    },
+    "required_rows": [
+      "hot_task_record_pool",
+      "warm_runtime_capacity_hints",
+      "safe_heap_fallback"
+    ],
+    "max_growth_events_after_presize": 0,
+    "min_growth_events_without_hints": 3,
+    "max_reserved_mib_after_presize": 8.0,
+    "required_safe_fallback_status": "fallback_only",
+    "operator_notes": [
+      "expected-concurrent-task hints must pre-size hot task, region, and obligation arenas before the burst starts",
+      "the stress frontier is deterministic arena capacity growth, not a scheduler latency benchmark",
+      "safe heap fallback remains visible even when the hinted frontier has zero growth"
+    ]
+  },
   "validation_commands": [
     "python3 -m json.tool artifacts/memory_tier_slab_pool_contract_v1.json >/dev/null",
     "git diff --check -- src/runtime/config.rs artifacts/memory_tier_slab_pool_contract_v1.json tests/memory_tier_slab_pool_contract.rs",

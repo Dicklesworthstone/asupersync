@@ -1,6 +1,8 @@
 //! Contract ratchets for memory-tier aware slab/pool certification.
 
-use asupersync::runtime::config::MEMORY_TIER_SLAB_POOL_CERTIFICATIONS;
+use asupersync::record::{ObligationRecord, RegionRecord, TaskRecord};
+use asupersync::runtime::config::{MEMORY_TIER_SLAB_POOL_CERTIFICATIONS, RuntimeCapacityHints};
+use asupersync::util::Arena;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -83,6 +85,51 @@ fn render_markdown(contract: &Value) -> Vec<String> {
     rows
 }
 
+fn usize_field(value: &Value, key: &str) -> usize {
+    value[key]
+        .as_u64()
+        .unwrap_or_else(|| panic!("{key} unsigned integer")) as usize
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StressArenaProbe {
+    initial_capacity: usize,
+    final_capacity: usize,
+    growth_events: usize,
+}
+
+fn stress_arena(initial_capacity: usize, inserts: usize) -> StressArenaProbe {
+    let mut arena = Arena::with_capacity(initial_capacity);
+    let initial_capacity = arena.capacity();
+    let mut last_capacity = initial_capacity;
+    let mut growth_events = 0usize;
+
+    for index in 0..inserts {
+        arena.insert(index as u64);
+        let current_capacity = arena.capacity();
+        if current_capacity != last_capacity {
+            growth_events += 1;
+            last_capacity = current_capacity;
+        }
+    }
+
+    StressArenaProbe {
+        initial_capacity,
+        final_capacity: arena.capacity(),
+        growth_events,
+    }
+}
+
+fn bytes_to_mib(bytes: usize) -> f64 {
+    bytes as f64 / 1_048_576.0
+}
+
+fn reserved_record_bytes(hints: RuntimeCapacityHints) -> usize {
+    Arena::<TaskRecord>::estimated_bytes_for_capacity(hints.task_capacity)
+        + Arena::<RegionRecord>::estimated_bytes_for_capacity(hints.region_capacity)
+        + Arena::<ObligationRecord>::estimated_bytes_for_capacity(hints.obligation_capacity)
+}
+
 #[test]
 fn contract_declares_the_memory_tier_coverage_surface() {
     let contract = load_contract();
@@ -123,6 +170,92 @@ fn contract_declares_the_memory_tier_coverage_surface() {
     ] {
         assert!(required_tiers.contains(tier), "missing memory tier {tier}");
     }
+}
+
+#[test]
+fn stress_frontier_presizes_hot_records_and_keeps_fallback_visible() {
+    let contract = load_contract();
+    let rows = rows_by_id(&contract);
+    let frontier = Value::Object(object(&contract, "stress_frontier").clone());
+    assert_eq!(
+        string_field(&frontier, "scenario_id"),
+        "memory-tier-high-count-frontier-v1"
+    );
+
+    for row_id in string_vec(&frontier, "required_rows") {
+        assert!(
+            rows.contains_key(&row_id),
+            "stress frontier required row {row_id} must exist"
+        );
+    }
+
+    let counts = Value::Object(object(&frontier, "record_counts").clone());
+    let task_records = usize_field(&counts, "task_records");
+    let region_records = usize_field(&counts, "region_records");
+    let obligation_records = usize_field(&counts, "obligation_records");
+    let hints = RuntimeCapacityHints::from_expected_concurrent_tasks(usize_field(
+        &frontier,
+        "expected_concurrent_tasks",
+    ));
+    assert!(
+        hints.task_capacity >= task_records,
+        "task capacity must cover the task-record frontier"
+    );
+    assert!(
+        hints.region_capacity >= region_records,
+        "region capacity must cover the region-record frontier"
+    );
+    assert!(
+        hints.obligation_capacity >= obligation_records,
+        "obligation capacity must cover the obligation-record frontier"
+    );
+
+    let hinted_task = stress_arena(hints.task_capacity, task_records);
+    let hinted_region = stress_arena(hints.region_capacity, region_records);
+    let hinted_obligation = stress_arena(hints.obligation_capacity, obligation_records);
+    let hinted_growth =
+        hinted_task.growth_events + hinted_region.growth_events + hinted_obligation.growth_events;
+    assert_eq!(
+        hinted_growth,
+        usize_field(&frontier, "max_growth_events_after_presize"),
+        "pre-sized hot arenas must not grow during the frontier burst"
+    );
+    assert_eq!(hinted_task.initial_capacity, hints.task_capacity);
+    assert_eq!(hinted_region.initial_capacity, hints.region_capacity);
+    assert_eq!(
+        hinted_obligation.initial_capacity,
+        hints.obligation_capacity
+    );
+    assert!(hinted_task.final_capacity >= task_records);
+    assert!(hinted_region.final_capacity >= region_records);
+    assert!(hinted_obligation.final_capacity >= obligation_records);
+
+    let default_hints = RuntimeCapacityHints::default();
+    let baseline_growth = stress_arena(default_hints.task_capacity, task_records).growth_events
+        + stress_arena(default_hints.region_capacity, region_records).growth_events
+        + stress_arena(default_hints.obligation_capacity, obligation_records).growth_events;
+    assert!(
+        baseline_growth >= usize_field(&frontier, "min_growth_events_without_hints"),
+        "unhinted baseline must still show the growth churn this frontier protects against"
+    );
+
+    let hinted_reserved_mib = bytes_to_mib(reserved_record_bytes(hints));
+    let max_reserved_mib = frontier["max_reserved_mib_after_presize"]
+        .as_f64()
+        .expect("max_reserved_mib_after_presize f64");
+    assert!(
+        hinted_reserved_mib <= max_reserved_mib,
+        "frontier reserves {hinted_reserved_mib:.4} MiB, exceeding {max_reserved_mib:.4} MiB"
+    );
+
+    let fallback = rows
+        .get("safe_heap_fallback")
+        .expect("safe heap fallback row must remain visible");
+    assert_eq!(
+        string_field(fallback, "status"),
+        string_field(&frontier, "required_safe_fallback_status"),
+        "stress frontier must not hide the safe fallback row"
+    );
 }
 
 #[test]
