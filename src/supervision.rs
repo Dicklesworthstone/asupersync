@@ -1522,8 +1522,27 @@ impl CompiledSupervisor {
             });
         }
 
-        // Phase 3: Restart in restart_order (dependencies-first)
+        // Phase 3: Restart in restart_order (dependencies-first).
+        //
+        // br-asupersync-jkwhrd: filter by per-child SupervisionStrategy.
+        // restart_plan_for(name: &str) deliberately produces an
+        // unfiltered restart_order — its doc says "does not consult
+        // per-child restartability (that is handled by per-child
+        // SupervisionStrategy in the runtime wiring)." compile_restart_ops
+        // IS that runtime-wiring layer, so the filter belongs here.
+        // Without this filter, composing restart_plan_for +
+        // compile_restart_ops emits a RestartChild op for children whose
+        // strategy is Stop or Escalate — incorrect restart of a child
+        // that should have stayed stopped. cancel + drain phases above
+        // remain unfiltered: under OneForAll / RestForOne, Stop-strategy
+        // children still need to be cancelled+drained alongside their
+        // siblings, just not restarted.
         for name in &plan.restart_order {
+            let restartable = child_by_name(name)
+                .is_some_and(|c| matches!(c.restart, SupervisionStrategy::Restart(_)));
+            if !restartable {
+                continue;
+            }
             ops.push(RegionOp::RestartChild { name: name.clone() });
         }
 
@@ -4722,6 +4741,67 @@ mod tests {
         assert!(matches!(&ops.ops[8], RegionOp::RestartChild { name } if name == "c"));
 
         crate::test_complete!("compile_restart_ops_one_for_all");
+    }
+
+    #[test]
+    fn compile_restart_ops_skips_restart_for_stop_strategy_children() {
+        // br-asupersync-jkwhrd: regression. compile_restart_ops Phase 3
+        // must filter RestartChild emission by per-child
+        // SupervisionStrategy. Pre-fix, a Stop-strategy child got a
+        // RestartChild op even when the supervisor's restart_plan_for
+        // (no-outcome variant) returned an unfiltered restart_order.
+        // OneForAll cancels+drains all three (Stop child included);
+        // restart phase emits RestartChild only for the Restart-strategy
+        // children.
+        init_test("compile_restart_ops_skips_restart_for_stop_strategy_children");
+
+        let stop_child = ChildSpec {
+            name: "b".into(),
+            start: Box::new(noop_start),
+            restart: SupervisionStrategy::Stop,
+            shutdown_budget: Budget::INFINITE,
+            depends_on: vec![],
+            registration: NameRegistrationPolicy::None,
+            start_immediately: true,
+            required: true,
+        };
+
+        let compiled = SupervisorBuilder::new("test")
+            .with_restart_policy(RestartPolicy::OneForAll)
+            .child(make_restart_child("a", Budget::INFINITE))
+            .child(stop_child)
+            .child(make_restart_child("c", Budget::INFINITE))
+            .compile()
+            .unwrap();
+
+        // Drive via the no-outcome variant (which leaves restart_order
+        // unfiltered) — the filter must live in compile_restart_ops.
+        let plan = compiled.restart_plan_for("a").unwrap();
+        let ops = compiled.compile_restart_ops(&plan);
+
+        // 3 cancel + 3 drain + 2 restart (b is filtered out of restart) = 8.
+        assert_eq!(
+            ops.ops.len(),
+            8,
+            "Stop-strategy 'b' must NOT get a RestartChild op; got ops={ops:?}"
+        );
+
+        // Cancel order is reverse start order: c, b, a — Stop child
+        // still cancelled+drained alongside siblings under OneForAll.
+        assert!(matches!(&ops.ops[0], RegionOp::CancelChild { name, .. } if name == "c"));
+        assert!(matches!(&ops.ops[1], RegionOp::CancelChild { name, .. } if name == "b"));
+        assert!(matches!(&ops.ops[2], RegionOp::CancelChild { name, .. } if name == "a"));
+
+        // Drain order matches.
+        assert!(matches!(&ops.ops[3], RegionOp::DrainChild { name, .. } if name == "c"));
+        assert!(matches!(&ops.ops[4], RegionOp::DrainChild { name, .. } if name == "b"));
+        assert!(matches!(&ops.ops[5], RegionOp::DrainChild { name, .. } if name == "a"));
+
+        // Restart phase: only "a" and "c" — "b" filtered out.
+        assert!(matches!(&ops.ops[6], RegionOp::RestartChild { name } if name == "a"));
+        assert!(matches!(&ops.ops[7], RegionOp::RestartChild { name } if name == "c"));
+
+        crate::test_complete!("compile_restart_ops_skips_restart_for_stop_strategy_children");
     }
 
     #[test]
