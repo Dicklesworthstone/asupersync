@@ -80,8 +80,8 @@ than consuming the shipped JS/TS packages.
 
 | Goal | Status today | Recommended lane |
 |---|---|---|
-| Verify browser-safe cfg/feature closure for the semantic core | Supported | `rch exec -- cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-<profile>` against `asupersync` |
-| Maintain the wasm ABI/export boundary from Rust | Supported for workspace contributors; `asupersync-browser-core` is the canonical owner and `asupersync-wasm` is retained scaffold | `rch exec -- cargo check -p asupersync-browser-core --target wasm32-unknown-unknown --no-default-features --features dev`; use the `asupersync-wasm` manifest only when you need to keep the scaffold honest |
+| Verify browser-safe cfg/feature closure for the semantic core | Supported | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_quickstart_docs cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-<profile>` against `asupersync` |
+| Maintain the wasm ABI/export boundary from Rust | Supported for workspace contributors; `asupersync-browser-core` is the canonical owner and `asupersync-wasm` is retained scaffold | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_quickstart_docs cargo check -p asupersync-browser-core --target wasm32-unknown-unknown --no-default-features --features dev`; use the `asupersync-wasm` manifest only when you need to keep the scaffold honest |
 | Ship a browser app that constructs Browser Edition runtimes directly from external Rust consumer code | Preview public lane | Use `RuntimeBuilder::browser()` plus execution-ladder inspection for truthful lane negotiation and structured fail-closed diagnostics, while keeping the support claim narrower than the shipped JS/TS Browser Edition packages |
 
 Rules for migration guidance:
@@ -107,7 +107,7 @@ Use this table to choose the correct lane before writing browser-facing Rust.
 | Situation | Recommended lane | Why |
 |---|---|---|
 | You need a shipped browser SDK for application code today | Start from `@asupersync/browser`, `@asupersync/react`, or `@asupersync/next` | These are the public Browser Edition product surfaces; they own the supported runtime diagnostics and packaging story |
-| You need to prove the semantic core still closes under browser cfg/profile rules | Run the canonical `rch exec -- cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-<profile>` commands against `asupersync` | This validates wasm-safe semantic closure without implying stable parity for the preview Rust browser builder lane |
+| You need to prove the semantic core still closes under browser cfg/profile rules | Run the canonical `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_quickstart_docs cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-<profile>` commands against `asupersync` | This validates wasm-safe semantic closure without implying stable parity for the preview Rust browser builder lane |
 | You maintain the wasm ABI/package boundary inside this repository | Work in `asupersync-browser-core` first; touch `asupersync-wasm` only to keep its retained non-canonical scaffold role honest | These crates are the Rust-side binding/export infrastructure for the JS/TS packages, not the end-user browser SDK |
 | You need the maintained Rust-authored browser example that the tree actually proves | Use `tests/fixtures/rust-browser-consumer/` plus `scripts/validate_rust_browser_consumer.sh` | This is the truthful current Rust-authored browser workflow: an in-repo fixture with deterministic validation, not general external `RuntimeBuilder` parity |
 | You need service/shared workers, cross-origin-isolated `SharedArrayBuffer` parallelism, or native-only modules | Do not start from the Rust-authored browser lane | Those surfaces are deferred, guarded optional, bridge-only, or explicit non-goals today |
@@ -238,10 +238,10 @@ python3 scripts/check_security_release_gate.py \
 Cargo-heavy profile checks remain `rch`-offloaded:
 
 ```bash
-rch exec -- cargo check --target wasm32-unknown-unknown \
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_quickstart_docs cargo check --target wasm32-unknown-unknown \
   --no-default-features --features wasm-browser-dev
 
-rch exec -- cargo check --target wasm32-unknown-unknown \
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_quickstart_docs cargo check --target wasm32-unknown-unknown \
   --no-default-features --features wasm-browser-prod
 ```
 
@@ -271,15 +271,15 @@ Core slicing intent:
 Validation commands:
 
 ```bash
-rch exec -- cargo check --target wasm32-unknown-unknown \
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_quickstart_docs cargo check --target wasm32-unknown-unknown \
   --no-default-features --features wasm-browser-minimal \
   | tee artifacts/onboarding/profile-minimal-check.log
 
-rch exec -- cargo check --target wasm32-unknown-unknown \
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_quickstart_docs cargo check --target wasm32-unknown-unknown \
   --no-default-features --features wasm-browser-dev \
   | tee artifacts/onboarding/profile-dev-check.log
 
-rch exec -- cargo check --target wasm32-unknown-unknown \
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_quickstart_docs cargo check --target wasm32-unknown-unknown \
   --no-default-features --features wasm-browser-deterministic \
   | tee artifacts/onboarding/profile-deterministic-check.log
 ```
@@ -307,8 +307,8 @@ Install/quickstart decision table:
 
 | Package | Use when | Install | First-success checkpoint |
 |---|---|---|---|
-| `@asupersync/browser-core` | You need raw ABI handles/types or metadata-driven compatibility checks | `npm install @asupersync/browser-core` | Run `rch exec -- cargo test --test wasm_packaged_abi_compatibility_matrix -- --nocapture` |
-| `@asupersync/browser` | You need direct browser runtime APIs without framework adapters (recommended starting point) | `npm install @asupersync/browser` | Run `rch exec -- cargo test --test wasm_js_exports_coverage_contract -- --nocapture` |
+| `@asupersync/browser-core` | You need raw ABI handles/types or metadata-driven compatibility checks | `npm install @asupersync/browser-core` | Run `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_quickstart_docs cargo test --test wasm_packaged_abi_compatibility_matrix -- --nocapture` |
+| `@asupersync/browser` | You need direct browser runtime APIs without framework adapters (recommended starting point) | `npm install @asupersync/browser` | Run `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_quickstart_docs cargo test --test wasm_js_exports_coverage_contract -- --nocapture` |
 | `@asupersync/react` | You are running Browser Edition inside a client-rendered React tree | `npm install @asupersync/react react react-dom` | Run `python3 scripts/run_browser_onboarding_checks.py --scenario react` |
 | `@asupersync/next` | You need Next-specific client/server/edge boundary guidance | `npm install @asupersync/next next react react-dom` | Run `python3 scripts/run_browser_onboarding_checks.py --scenario next` |
 
@@ -354,14 +354,14 @@ Goal: verify scheduler, cancellation/quiescence, and capability boundaries.
 ```bash
 mkdir -p artifacts/onboarding
 
-rch exec -- cargo test -p asupersync browser_ready_handoff -- --nocapture \
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_quickstart_docs cargo test -p asupersync browser_ready_handoff -- --nocapture \
   | tee artifacts/onboarding/vanilla-browser-ready.log
 
-rch exec -- cargo test --test close_quiescence_regression \
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_quickstart_docs cargo test --test close_quiescence_regression \
   browser_nested_cancel_cascade_reaches_quiescence -- --nocapture \
   | tee artifacts/onboarding/vanilla-quiescence.log
 
-rch exec -- cargo test --test security_invariants browser_fetch_security -- --nocapture \
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_quickstart_docs cargo test --test security_invariants browser_fetch_security -- --nocapture \
   | tee artifacts/onboarding/vanilla-security.log
 ```
 
@@ -377,15 +377,15 @@ Goal: verify browser-capable seams and deterministic behavior before integrating
 React adapters.
 
 ```bash
-rch exec -- cargo test --test native_seam_parity \
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_quickstart_docs cargo test --test native_seam_parity \
   browser_clock_through_trait_starts_at_zero -- --nocapture \
   | tee artifacts/onboarding/react-clock.log
 
-rch exec -- cargo test --test native_seam_parity \
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_quickstart_docs cargo test --test native_seam_parity \
   browser_clock_through_trait_advances_with_host_samples -- --nocapture \
   | tee artifacts/onboarding/react-clock-advance.log
 
-rch exec -- cargo test --test obligation_wasm_parity \
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_quickstart_docs cargo test --test obligation_wasm_parity \
   wasm_full_browser_lifecycle_simulation -- --nocapture \
   | tee artifacts/onboarding/react-obligation.log
 ```
@@ -408,7 +408,7 @@ python3 scripts/check_wasm_dependency_policy.py \
   --policy .github/wasm_dependency_policy.json \
   | tee artifacts/onboarding/next-dependency-policy.log
 
-rch exec -- cargo check --target wasm32-unknown-unknown \
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_quickstart_docs cargo check --target wasm32-unknown-unknown \
   --no-default-features --features wasm-browser-dev \
   | tee artifacts/onboarding/next-wasm-check.log
 
@@ -486,8 +486,8 @@ What to do:
 Verification commands:
 
 ```bash
-rch exec -- cargo test --test close_quiescence_regression browser_ -- --nocapture
-rch exec -- cargo test --test obligation_wasm_parity wasm_cancel_drain_ -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_quickstart_docs cargo test --test close_quiescence_regression browser_ -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_quickstart_docs cargo test --test obligation_wasm_parity wasm_cancel_drain_ -- --nocapture
 ```
 
 ### Migration 2: implicit global authority to capability-scoped authority
@@ -510,7 +510,7 @@ What to do:
 Verification command:
 
 ```bash
-rch exec -- cargo test --test security_invariants browser_fetch_security -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_quickstart_docs cargo test --test security_invariants browser_fetch_security -- --nocapture
 ```
 
 ### Migration 3: fire-and-forget async to region-owned structured scopes
@@ -534,7 +534,7 @@ What to do:
 Verification command:
 
 ```bash
-rch exec -- cargo test --test close_quiescence_regression browser_ -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_quickstart_docs cargo test --test close_quiescence_regression browser_ -- --nocapture
 ```
 
 ## Deferred Surface Register Alignment
@@ -581,10 +581,10 @@ Use this quick triage table before deep debugging:
 
 | Symptom | First command | Expected artifact |
 |---|---|---|
-| wasm profile compile failure | `rch exec -- cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-dev` | `artifacts/onboarding/*-wasm-check.log` |
+| wasm profile compile failure | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_quickstart_docs cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-dev` | `artifacts/onboarding/*-wasm-check.log` |
 | profile/policy mismatch | `python3 scripts/check_wasm_dependency_policy.py --policy .github/wasm_dependency_policy.json` | `artifacts/wasm_dependency_audit_summary.json` |
 | onboarding scenario drift | `python3 scripts/run_browser_onboarding_checks.py --scenario all` | `artifacts/onboarding/*.summary.json` + `*.ndjson` |
-| unclear capability/authority failure | `rch exec -- cargo test --test security_invariants browser_fetch_security -- --nocapture` | `artifacts/onboarding/vanilla-security.log` |
+| unclear capability/authority failure | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_quickstart_docs cargo test --test security_invariants browser_fetch_security -- --nocapture` | `artifacts/onboarding/vanilla-security.log` |
 
 Escalate only after capturing command output + artifact pointers. Treat missing
 artifacts as a workflow failure that must be fixed before filing runtime bugs.
@@ -595,9 +595,9 @@ Use this bundle for documentation drift detection:
 
 ```bash
 # Core compile/lint/format gates
-rch exec -- cargo check --all-targets
-rch exec -- cargo clippy --all-targets -- -D warnings
-rch exec -- cargo fmt --check
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_quickstart_docs cargo check --all-targets
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_quickstart_docs cargo clippy --all-targets -- -D warnings
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_quickstart_docs cargo fmt --check
 
 # Browser policy checks referenced by this guide
 python3 scripts/check_wasm_dependency_policy.py --policy .github/wasm_dependency_policy.json
