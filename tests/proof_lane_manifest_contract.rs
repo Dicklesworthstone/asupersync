@@ -1,5 +1,6 @@
 #![allow(missing_docs)]
 
+use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -66,6 +67,115 @@ fn manifest_projection(manifest: &Value) -> Value {
         "lanes": lanes,
         "guarantees": guarantees,
     })
+}
+
+#[derive(Serialize)]
+struct ManifestProjectionText {
+    contract_version: Value,
+    bead_id: Value,
+    command_policy: CommandPolicyProjectionText,
+    source_of_truth: SourceOfTruthProjectionText,
+    documentation_contract: DocumentationContractProjectionText,
+    required_guarantee_ids: Value,
+    lanes: Vec<LaneProjectionText>,
+    guarantees: Vec<GuaranteeProjectionText>,
+}
+
+#[derive(Serialize)]
+struct CommandPolicyProjectionText {
+    all_commands_must_start_with: Value,
+    cpu_intensive_validation_must_use_rch: Value,
+    formal_lean_build_must_not_shell_wrap: Value,
+    broad_validation_is_frontier_evidence_not_local_change_proof: Value,
+}
+
+#[derive(Serialize)]
+struct SourceOfTruthProjectionText {
+    manifest: Value,
+    contract_test: Value,
+    cargo_manifest: Value,
+    agent_instructions: Value,
+    readme: Value,
+}
+
+#[derive(Serialize)]
+struct DocumentationContractProjectionText {
+    docs_must_reference_manifest: Value,
+    required_marker: Value,
+    verifier_marker: Value,
+}
+
+#[derive(Serialize)]
+struct LaneProjectionText {
+    lane_id: Value,
+    kind: Value,
+    package: Value,
+    command: Value,
+    guarantee_ids: Value,
+    feature_flags: Value,
+    expected_signal: Value,
+    source_paths: Value,
+}
+
+#[derive(Serialize)]
+struct GuaranteeProjectionText {
+    guarantee_id: Value,
+    lane_ids: Value,
+}
+
+fn manifest_projection_text(manifest: &Value) -> ManifestProjectionText {
+    let command_policy = &manifest["command_policy"];
+    let source_of_truth = &manifest["source_of_truth"];
+    let documentation_contract = &manifest["documentation_contract"];
+
+    ManifestProjectionText {
+        contract_version: manifest["contract_version"].clone(),
+        bead_id: manifest["bead_id"].clone(),
+        command_policy: CommandPolicyProjectionText {
+            all_commands_must_start_with: command_policy["all_commands_must_start_with"].clone(),
+            cpu_intensive_validation_must_use_rch:
+                command_policy["cpu_intensive_validation_must_use_rch"].clone(),
+            formal_lean_build_must_not_shell_wrap:
+                command_policy["formal_lean_build_must_not_shell_wrap"].clone(),
+            broad_validation_is_frontier_evidence_not_local_change_proof:
+                command_policy["broad_validation_is_frontier_evidence_not_local_change_proof"]
+                    .clone(),
+        },
+        source_of_truth: SourceOfTruthProjectionText {
+            manifest: source_of_truth["manifest"].clone(),
+            contract_test: source_of_truth["contract_test"].clone(),
+            cargo_manifest: source_of_truth["cargo_manifest"].clone(),
+            agent_instructions: source_of_truth["agent_instructions"].clone(),
+            readme: source_of_truth["readme"].clone(),
+        },
+        documentation_contract: DocumentationContractProjectionText {
+            docs_must_reference_manifest: documentation_contract["docs_must_reference_manifest"]
+                .clone(),
+            required_marker: documentation_contract["required_marker"].clone(),
+            verifier_marker: documentation_contract["verifier_marker"].clone(),
+        },
+        required_guarantee_ids: manifest["required_guarantee_ids"].clone(),
+        lanes: array(manifest, "lanes")
+            .iter()
+            .map(|lane| LaneProjectionText {
+                lane_id: lane["lane_id"].clone(),
+                kind: lane["kind"].clone(),
+                package: lane["package"].clone(),
+                command: lane["command"].clone(),
+                guarantee_ids: lane["guarantee_ids"].clone(),
+                feature_flags: lane["feature_flags"].clone(),
+                expected_signal: lane["expected_signal"].clone(),
+                source_paths: lane["source_paths"].clone(),
+            })
+            .collect(),
+        guarantees: array(manifest, "guarantees")
+            .iter()
+            .map(|guarantee| GuaranteeProjectionText {
+                guarantee_id: guarantee["guarantee_id"].clone(),
+                lane_ids: guarantee["lane_ids"].clone(),
+            })
+            .collect(),
+    }
 }
 
 fn array<'a>(value: &'a Value, key: &str) -> &'a Vec<Value> {
@@ -186,6 +296,21 @@ fn manifest_projection_matches_golden() {
         manifest_projection(&manifest),
         manifest_projection_golden(),
         "proof-lane manifest projection changed; update the golden only after reviewing lane command, guarantee, and source-path semantics"
+    );
+}
+
+#[test]
+fn manifest_projection_text_matches_reviewed_golden() {
+    let manifest = manifest();
+    let projection = manifest_projection_text(&manifest);
+    let actual = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&projection).expect("serialize manifest projection")
+    );
+    let expected = read_repo_file(MANIFEST_PROJECTION_GOLDEN_PATH);
+    assert_eq!(
+        actual, expected,
+        "proof-lane manifest projection text changed; review stable ordering and formatting before updating the golden"
     );
 }
 
