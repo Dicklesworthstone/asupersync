@@ -128,7 +128,7 @@ Every T8.13 evaluation run MUST produce or validate:
 ## 7. CI Commands
 
 ```
-rch exec -- cargo test --test tokio_golden_log_corpus_enforcement -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_golden_log_corpus_docs cargo test --test tokio_golden_log_corpus_enforcement -- --nocapture
 ```
 
 ---
