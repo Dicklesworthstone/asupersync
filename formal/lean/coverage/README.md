@@ -166,8 +166,8 @@ Primary executable checks:
 Repro commands:
 
 ```bash
-rch exec -- cargo test --test refinement_conformance refinement_trace_equivalence_filters_schedule_noise -- --nocapture
-rch exec -- cargo test --test refinement_conformance refinement_trace_equivalence_detects_semantic_mismatch -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_coverage_docs cargo test --test refinement_conformance refinement_trace_equivalence_filters_schedule_noise -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_coverage_docs cargo test --test refinement_conformance refinement_trace_equivalence_detects_semantic_mismatch -- --nocapture
 ```
 
 ## Scheduler and Combinator Mapping Rows (Track-4.1b)
@@ -333,7 +333,7 @@ Validation is enforced in:
 Canonical validation command:
 
 ```bash
-rch exec -- cargo test --test lean_proof_impact_closed_loop_report -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_coverage_docs cargo test --test lean_proof_impact_closed_loop_report -- --nocapture
 ```
 
 ## Waiver Lifecycle Policy (Track-5.3a)
