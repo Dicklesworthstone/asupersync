@@ -5,9 +5,13 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::fs;
+use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+const VERSION_METADATA_FILE: &str = ".reference-version.json";
 
 /// Reference implementation version information
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -19,6 +23,16 @@ pub struct ReferenceVersion {
     pub fixture_directory: PathBuf,         // Where fixtures are stored
     pub generation_command: String,         // Command to regenerate fixtures
     pub validation_command: Option<String>, // Command to validate fixtures
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct FixtureVersionMetadata {
+    schema_version: u8,
+    name: String,
+    version: String,
+    commit_hash: String,
+    generation_command: String,
+    validation_command: Option<String>,
 }
 
 impl ReferenceVersion {
@@ -75,15 +89,22 @@ impl ReferenceVersion {
             return true;
         }
 
-        if let Ok(entries) = fs::read_dir(&self.fixture_directory) {
-            if entries.count() == 0 {
-                return true;
-            }
+        let has_fixture_files = match fs::read_dir(&self.fixture_directory) {
+            Ok(entries) => entries.filter_map(Result::ok).any(|entry| {
+                let path = entry.path();
+                path.is_file() && !is_version_metadata_path(&path)
+            }),
+            Err(_) => return true,
+        };
+
+        if !has_fixture_files {
+            return true;
         }
 
-        // Check if version has changed (would need more sophisticated tracking)
-        // For now, implement conservative approach - always allow regeneration
-        false
+        match self.read_version_metadata() {
+            Ok(metadata) => metadata != self.expected_version_metadata(),
+            Err(_) => true,
+        }
     }
 
     /// Generate fixtures using the configured command
@@ -125,8 +146,8 @@ impl ReferenceVersion {
         let output_str = String::from_utf8_lossy(&output.stdout).to_string()
             + &String::from_utf8_lossy(&output.stderr);
 
-        // List generated files
         let files_generated = if success {
+            self.write_version_metadata()?;
             self.list_generated_files()?
         } else {
             vec![]
@@ -192,14 +213,50 @@ impl ReferenceVersion {
             for entry in fs::read_dir(&self.fixture_directory)? {
                 let entry = entry?;
                 let path = entry.path();
-                if path.is_file() {
+                if path.is_file() && !is_version_metadata_path(&path) {
                     files.push(path);
                 }
             }
         }
 
+        files.sort();
         Ok(files)
     }
+
+    fn version_metadata_path(&self) -> PathBuf {
+        self.fixture_directory.join(VERSION_METADATA_FILE)
+    }
+
+    fn expected_version_metadata(&self) -> FixtureVersionMetadata {
+        FixtureVersionMetadata {
+            schema_version: 1,
+            name: self.name.clone(),
+            version: self.version.clone(),
+            commit_hash: self.commit_hash.clone(),
+            generation_command: self.generation_command.clone(),
+            validation_command: self.validation_command.clone(),
+        }
+    }
+
+    fn read_version_metadata(&self) -> Result<FixtureVersionMetadata, std::io::Error> {
+        let bytes = fs::read(self.version_metadata_path())?;
+        serde_json::from_slice(&bytes).map_err(invalid_metadata_error)
+    }
+
+    fn write_version_metadata(&self) -> Result<(), std::io::Error> {
+        fs::create_dir_all(&self.fixture_directory)?;
+        let bytes = serde_json::to_vec_pretty(&self.expected_version_metadata())
+            .map_err(invalid_metadata_error)?;
+        fs::write(self.version_metadata_path(), bytes)
+    }
+}
+
+fn is_version_metadata_path(path: &Path) -> bool {
+    path.file_name() == Some(OsStr::new(VERSION_METADATA_FILE))
+}
+
+fn invalid_metadata_error(error: serde_json::Error) -> std::io::Error {
+    Error::new(ErrorKind::InvalidData, error)
 }
 
 /// Result of fixture generation operation
@@ -602,8 +659,47 @@ mod tests {
         // Empty directory should need regeneration
         assert!(reference.needs_regeneration());
 
-        // Create a file, should not need regeneration
+        // Fixture bytes without matching reference metadata are stale.
         fs::write(temp_dir.path().join("test.txt"), "test").unwrap();
+        assert!(reference.needs_regeneration());
+
+        // Matching version metadata marks the fixture set current.
+        reference.write_version_metadata().unwrap();
+        assert!(!reference.needs_regeneration());
+    }
+
+    #[test]
+    fn test_needs_regeneration_detects_reference_version_change() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut reference =
+            ReferenceVersion::new("test-ref".to_string(), temp_dir.path().to_path_buf());
+        reference.version = "v1.0.0".to_string();
+        reference.commit_hash = "abc123".to_string();
+
+        fs::write(temp_dir.path().join("fixture.bin"), "fixture").unwrap();
+        reference.write_version_metadata().unwrap();
+        assert!(!reference.needs_regeneration());
+
+        reference.commit_hash = "def456".to_string();
+        assert!(reference.needs_regeneration());
+    }
+
+    #[test]
+    fn test_generate_fixtures_writes_reference_metadata() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut reference =
+            ReferenceVersion::new("test-ref".to_string(), temp_dir.path().to_path_buf());
+        reference.version = "v1.2.3".to_string();
+        reference.commit_hash = "cafebabe".to_string();
+        reference.generation_command = "printf fixture > generated.bin".to_string();
+        reference.validation_command = Some("test -s generated.bin".to_string());
+
+        let result = reference.generate_fixtures(false).unwrap();
+
+        assert!(result.success);
+        assert_eq!(result.files_generated.len(), 1);
+        assert!(temp_dir.path().join("generated.bin").exists());
+        assert!(temp_dir.path().join(VERSION_METADATA_FILE).exists());
         assert!(!reference.needs_regeneration());
     }
 
