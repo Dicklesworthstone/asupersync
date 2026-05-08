@@ -7,9 +7,11 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 const CONTRACT_PATH: &str = "artifacts/memory_tier_slab_pool_contract_v1.json";
 const NUMA_LOCALITY_CONTRACT_PATH: &str = "artifacts/numa_arena_locality_smoke_contract_v1.json";
+const RELEASE_PROOF_PACK_CONTRACT_PATH: &str = "artifacts/release_proof_pack_contract_v1.json";
 const SOURCE_DECLARATIONS_PATH: &str = "src/runtime/config.rs";
 const TEST_PATH: &str = "tests/memory_tier_slab_pool_contract.rs";
 
@@ -482,6 +484,146 @@ fn warm_numa_locality_row_is_backed_by_live_accounting_contract() {
     assert!(saw_remote_touch_win, "missing locality win scenario");
     assert!(saw_safe_fallback, "missing safe-fallback scenario");
     assert!(saw_template, "missing host-template scenario");
+}
+
+#[test]
+fn cold_proof_artifact_retention_row_is_backed_by_release_pack_output() {
+    let contract = load_contract();
+    let rows = rows_by_id(&contract);
+    let row = rows
+        .get("cold_proof_artifact_retention")
+        .expect("cold proof artifact retention row must exist");
+    assert_eq!(
+        string_field(row, "operator_verdict"),
+        "implemented_verified"
+    );
+    assert_eq!(string_field(row, "status"), "implemented_verified");
+    assert!(
+        string_vec(row, "existing_contracts")
+            .iter()
+            .any(|contract| contract == "release-proof-pack-v1"),
+        "cold proof row must compose the live release proof pack contract"
+    );
+
+    let required_accounting = string_vec(row, "required_accounting");
+    for required in [
+        "source_artifact_sha256",
+        "source_artifact_byte_count",
+        "proof_command_count",
+        "raw_tracker_rows_omitted",
+    ] {
+        assert!(
+            required_accounting.iter().any(|field| field == required),
+            "cold proof row must require {required}"
+        );
+    }
+
+    let release_contract: Value = serde_json::from_str(
+        &fs::read_to_string(RELEASE_PROOF_PACK_CONTRACT_PATH)
+            .expect("read release proof pack contract"),
+    )
+    .expect("parse release proof pack contract");
+    assert_eq!(
+        string_field(&release_contract, "contract_version"),
+        "release-proof-pack-contract-v1"
+    );
+
+    let required_index_fields = string_set(&release_contract, "required_index_fields");
+    for field in [
+        "source_artifacts",
+        "proof_commands",
+        "summaries.tracker",
+        "verdict",
+    ] {
+        assert!(
+            required_index_fields.contains(field),
+            "release proof pack contract must require {field}"
+        );
+    }
+    let fail_closed_rules = string_vec(&release_contract, "fail_closed_rules").join("\n");
+    assert!(fail_closed_rules.contains("missing source artifacts set verdict to fail_closed"));
+    assert!(
+        fail_closed_rules
+            .contains("tracker summary includes counts and hashes only, not raw issue rows")
+    );
+
+    let output = Command::new("python3")
+        .args([
+            "scripts/proof_runner.py",
+            "--release-proof-pack",
+            "--release-proof-pack-generated-at",
+            "2026-05-08T00:00:00Z",
+            "--output",
+            "json",
+        ])
+        .output()
+        .expect("run release proof pack generator");
+    assert!(
+        output.status.success(),
+        "release proof pack generator failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let generated: Value =
+        serde_json::from_slice(&output.stdout).expect("parse release proof pack generator output");
+    let pack = generated
+        .get("proof_pack")
+        .expect("generator output contains proof_pack");
+    assert_eq!(
+        pack["schema_version"].as_str(),
+        Some("release-proof-pack-v1")
+    );
+    assert_eq!(pack["verdict"].as_str(), Some("pass"));
+
+    let source_artifacts = array(pack, "source_artifacts");
+    assert!(
+        !source_artifacts.is_empty(),
+        "release proof pack must include source artifact rows"
+    );
+    let mut saw_hash = false;
+    let mut saw_byte_count = false;
+    for artifact in source_artifacts {
+        let sha256 = artifact["sha256"].as_str().expect("source artifact sha256");
+        assert!(
+            sha256.starts_with("sha256:"),
+            "source artifact hashes must be sha256 tagged"
+        );
+        saw_hash = true;
+
+        let byte_count = artifact["bytes"]
+            .as_u64()
+            .expect("source artifact byte count");
+        assert!(
+            byte_count > 0,
+            "included source artifacts must report nonzero bytes"
+        );
+        saw_byte_count = true;
+    }
+    assert!(saw_hash, "missing source artifact sha256 accounting");
+    assert!(
+        saw_byte_count,
+        "missing source artifact byte-count accounting"
+    );
+
+    let proof_commands = array(pack, "proof_commands");
+    assert!(
+        !proof_commands.is_empty(),
+        "release proof pack must include proof commands"
+    );
+    let summary = object(pack, "summary");
+    assert_eq!(
+        summary.get("source_artifact_count").and_then(Value::as_u64),
+        Some(u64::try_from(source_artifacts.len()).expect("artifact count fits u64"))
+    );
+    assert_eq!(
+        summary.get("proof_command_count").and_then(Value::as_u64),
+        Some(u64::try_from(proof_commands.len()).expect("proof command count fits u64"))
+    );
+    assert_eq!(
+        pack["summaries"]["tracker"]["raw_issue_rows_embedded"].as_bool(),
+        Some(false),
+        "proof packs must retain tracker counts and hashes, not raw issue rows"
+    );
 }
 
 #[test]

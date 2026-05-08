@@ -196,8 +196,8 @@
       "row_id": "cold_proof_artifact_retention",
       "runtime_domain": "proof_artifacts",
       "memory_tier": "cold_evidence_artifacts",
-      "operator_verdict": "contract_guarded",
-      "status": "contract_guarded",
+      "operator_verdict": "implemented_verified",
+      "status": "implemented_verified",
       "source_files": [
         "scripts/proof_runner.py",
         "artifacts/release_proof_pack_contract_v1.json",
@@ -291,7 +291,7 @@
     "| warm_runtime_capacity_hints | region_records | warm_capacity_and_locality_plans | implemented_verified | 1 |",
     "| warm_numa_arena_locality | obligation_records | warm_capacity_and_locality_plans | implemented_verified | 1 |",
     "| cold_trace_evidence_tiers | trace_evidence | cold_evidence_artifacts | contract_guarded | 1 |",
-    "| cold_proof_artifact_retention | proof_artifacts | cold_evidence_artifacts | contract_guarded | 2 |",
+    "| cold_proof_artifact_retention | proof_artifacts | cold_evidence_artifacts | implemented_verified | 2 |",
     "| safe_heap_fallback | task_records | safe_heap_fallback | fallback_only | 1 |"
   ]
 }

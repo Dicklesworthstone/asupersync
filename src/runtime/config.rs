@@ -870,8 +870,8 @@ pub const MEMORY_TIER_SLAB_POOL_CERTIFICATIONS: &[MemoryTierSlabPoolCertificatio
         row_id: "cold_proof_artifact_retention",
         runtime_domain: MemoryTierRuntimeDomain::ProofArtifacts,
         memory_tier: MemoryTierKind::ColdEvidenceArtifacts,
-        operator_verdict: MemoryTierCertificationStatus::ContractGuarded,
-        status: MemoryTierCertificationStatus::ContractGuarded,
+        operator_verdict: MemoryTierCertificationStatus::ImplementedVerified,
+        status: MemoryTierCertificationStatus::ImplementedVerified,
         source_files: &[
             "scripts/proof_runner.py",
             "artifacts/release_proof_pack_contract_v1.json",
