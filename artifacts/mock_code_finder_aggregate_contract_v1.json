@@ -65,16 +65,32 @@
     "scenario_count",
     "verdict_counts",
     "evidence_quality_counts",
+    "support_class_counts",
+    "non_live_disposition_counts",
+    "skip_ledger_total",
+    "skip_ledger",
     "first_failure_line",
     "artifact_paths",
     "policy_scan_counts",
     "final_verdict"
+  ],
+  "skip_ledger_fields": [
+    "child_bead_id",
+    "subsystem",
+    "scenario_id",
+    "verdict",
+    "evidence_quality",
+    "support_class",
+    "blocker_bead_id",
+    "first_failure_line",
+    "output_artifact"
   ],
   "failure_rules": [
     "Malformed child JSONL fails the aggregate.",
     "Zero child JSONL artifacts or zero scenario records fail the aggregate.",
     "Missing evidence_quality fails the aggregate.",
     "Blocked or unsupported records must include blocker or context details.",
+    "Blocked, unsupported, expected_fail, and fixture_only records must appear in skip_ledger and must not be counted as production-live pass evidence.",
     "Nonzero child exit fails the aggregate.",
     "Child artifacts and logs remain under that child bead's aggregate artifact root."
   ]

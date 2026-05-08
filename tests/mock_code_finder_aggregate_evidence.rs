@@ -167,6 +167,9 @@ fn aggregate_contract_declares_children_and_failure_rules() {
         "finished_at",
         "child_bead_id",
         "scenario_count",
+        "non_live_disposition_counts",
+        "skip_ledger_total",
+        "skip_ledger",
         "final_verdict",
     ] {
         assert!(
@@ -176,6 +179,30 @@ fn aggregate_contract_declares_children_and_failure_rules() {
             "aggregate contract should require {field}"
         );
     }
+    let skip_ledger_fields: BTreeSet<_> = array(&contract, "skip_ledger_fields")
+        .iter()
+        .map(|field| field.as_str().expect("skip ledger field should be string"))
+        .collect();
+    assert_eq!(
+        skip_ledger_fields,
+        BTreeSet::from([
+            "blocker_bead_id",
+            "child_bead_id",
+            "evidence_quality",
+            "first_failure_line",
+            "output_artifact",
+            "scenario_id",
+            "subsystem",
+            "support_class",
+            "verdict",
+        ])
+    );
+    assert!(
+        array(&contract, "failure_rules").iter().any(|rule| rule
+            .as_str()
+            .is_some_and(|text| text.contains("must appear in skip_ledger"))),
+        "contract should state non-live outcomes must be visible in skip_ledger"
+    );
 }
 
 #[test]
