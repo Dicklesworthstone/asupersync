@@ -37,6 +37,22 @@ WRAPPER_RETRIEVAL_HANG_HINTS = (
     "wrapper timed out",
     "wrapper stalled",
 )
+OPERATOR_ACTION_RECIPE_SCHEMA_VERSION = "operator-action-recipe-v1"
+OPERATOR_ACTION_RECIPE_PROOF_COMMAND = (
+    "rch exec -- env CARGO_INCREMENTAL=0 "
+    "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_operator_action_recipe_contract "
+    "CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' "
+    "cargo test -p asupersync --test operator_action_recipe_contract -- --nocapture"
+)
+OPERATOR_ACTION_RECIPE_IDS = (
+    "rerun-proof-lane",
+    "stale-in-progress-reclaim",
+    "no-win-fallback-hold",
+    "dirty-frontier-refusal",
+    "exact-blocker-escalation",
+    "agent-mail-reservation",
+    "destructive-command-refusal",
+)
 
 
 def safe_command_argv(command: str) -> List[str]:
@@ -201,6 +217,176 @@ def classify_rch_outcome(
         "touched_files": touched_files,
         "summary": summary,
     }
+
+
+def operator_action_recipes() -> List[Dict[str, Any]]:
+    """Return deterministic operator recipes for shared-main proof work."""
+    common_log_fields = [
+        "command",
+        "command_scope.package",
+        "command_scope.target",
+        "remote_exit_status",
+        "first_blocker.file",
+        "first_blocker.line",
+        "fallback_no_win_reason",
+        "operator_verdict",
+        "reservation_policy",
+    ]
+    common_br = [
+        "br ready --json",
+        "br list --status in_progress --json",
+        "br show <bead-id> --json",
+    ]
+    common_bv = [
+        "bv --robot-triage",
+        "bv --robot-alerts",
+    ]
+    reservation_policy = (
+        "Reserve every touched source, test, fixture, and artifact path with Agent Mail "
+        "before edits; mutate .beads only with an exclusive .beads reservation."
+    )
+
+    def recipe(
+        recipe_id: str,
+        title: str,
+        preconditions: List[str],
+        artifact_leaf: str,
+        operator_verdict: str,
+        fallback_no_win_reason: str,
+        safe_execute: bool = False,
+    ) -> Dict[str, Any]:
+        return {
+            "schema_version": OPERATOR_ACTION_RECIPE_SCHEMA_VERSION,
+            "recipe_id": recipe_id,
+            "title": title,
+            "preconditions": preconditions,
+            "proof_command_shape": OPERATOR_ACTION_RECIPE_PROOF_COMMAND,
+            "allowed_br_commands": common_br,
+            "allowed_bv_commands": common_bv,
+            "artifact_paths": [
+                f"artifacts/operator-recipes/{artifact_leaf}.json",
+                f"tests/artifacts/operator-recipes/{artifact_leaf}.log",
+            ],
+            "expected_log_fields": common_log_fields,
+            "first_blocker_line_required": True,
+            "fallback_no_win_reason": fallback_no_win_reason,
+            "operator_verdict": operator_verdict,
+            "reservation_policy": reservation_policy,
+            "tracker_payload_recommendation": {
+                "mutates_tracker": False,
+                "mode": "recommendation-only",
+                "requires_exclusive_beads_reservation": True,
+            },
+            "safe_execute": safe_execute,
+            "execute_effects": [] if safe_execute else ["disabled"],
+            "destructive_command_policy": {
+                "contains_raw_destructive_command_text": False,
+                "requires_explicit_user_authorization": True,
+                "default_verdict": "refuse",
+            },
+        }
+
+    return [
+        recipe(
+            "rerun-proof-lane",
+            "Rerun the exact rch proof lane before widening scope",
+            [
+                "A prior rch proof command exists in the bead, artifact, or mail thread.",
+                "The touched file set has not widened since the prior proof attempt.",
+                "No peer reservation conflicts overlap the touched paths.",
+            ],
+            "rerun-proof-lane",
+            "pass",
+            "not-applicable",
+            safe_execute=False,
+        ),
+        recipe(
+            "stale-in-progress-reclaim",
+            "Reopen a stale in-progress bead with evidence",
+            [
+                "br or raw issue evidence shows an in-progress bead with stale activity.",
+                "Agent Mail has no recent owner activity for the bead thread.",
+                "The reclaim comment names the stale owner and last observed timestamp.",
+            ],
+            "stale-in-progress-reclaim",
+            "blocked-external",
+            "tracker-lock-or-owner-activity-prevents-safe-reclaim",
+            safe_execute=False,
+        ),
+        recipe(
+            "no-win-fallback-hold",
+            "Record a no-win receipt without claiming improvement",
+            [
+                "The rch proof reached a known remote exit or first blocker.",
+                "The result does not prove a speedup or green status.",
+                "The receipt records no p50, p95, p999, throughput, or readiness claim.",
+            ],
+            "no-win-fallback-hold",
+            "no-win",
+            "proof-reached-frontier-without-usable-win",
+            safe_execute=False,
+        ),
+        recipe(
+            "dirty-frontier-refusal",
+            "Refuse to run broad proof across unrelated dirty files",
+            [
+                "git status shows dirty paths outside the requested or reserved surface.",
+                "The dirty paths are not owned by the current agent reservation.",
+                "The refusal includes the first external dirty path and owner when known.",
+            ],
+            "dirty-frontier-refusal",
+            "refuse",
+            "dirty-frontier-outside-owned-surface",
+            safe_execute=True,
+        ),
+        recipe(
+            "exact-blocker-escalation",
+            "Escalate the first exact blocker line instead of retrying blindly",
+            [
+                "The rch transcript contains a remote exit status or cargo blocker.",
+                "The first blocker file and line are known.",
+                "The blocker is outside the touched files or outside the bead scope.",
+            ],
+            "exact-blocker-escalation",
+            "blocked-external",
+            "first-blocker-outside-owned-surface",
+            safe_execute=False,
+        ),
+        recipe(
+            "agent-mail-reservation",
+            "Reserve and announce the source surface before edits",
+            [
+                "The intended edit paths are known.",
+                "Agent Mail is available for the project.",
+                "The announcement names paths, bead id, proof lane, and non-overlap scope.",
+            ],
+            "agent-mail-reservation",
+            "pass",
+            "not-applicable",
+            safe_execute=False,
+        ),
+        recipe(
+            "destructive-command-refusal",
+            "Refuse irreversible operations without explicit user authorization",
+            [
+                "A requested operation could delete, overwrite, or strand shared-main work.",
+                "The user has not supplied exact written authorization for the operation.",
+                "The response records refusal and a non-destructive alternative.",
+            ],
+            "destructive-command-refusal",
+            "refuse",
+            "irreversible-operation-not-authorized",
+            safe_execute=True,
+        ),
+    ]
+
+
+def find_operator_action_recipe(recipe_id: str) -> Dict[str, Any]:
+    """Return an operator recipe by id, or raise a deterministic error."""
+    for recipe in operator_action_recipes():
+        if recipe["recipe_id"] == recipe_id:
+            return recipe
+    raise ValueError(f"unknown operator recipe: {recipe_id}")
 
 
 class ProofLaneManifest:
@@ -988,6 +1174,31 @@ class ProofRunner:
             "validation_frontier_record": frontier,
         }
 
+    def list_operator_recipes(self) -> Dict[str, Any]:
+        """List deterministic shared-main operator recipes."""
+        return {
+            "schema_version": OPERATOR_ACTION_RECIPE_SCHEMA_VERSION,
+            "recipes": operator_action_recipes(),
+        }
+
+    def operator_recipe(self, recipe_id: str, mode: str) -> Dict[str, Any]:
+        """Render a recipe in dry-run mode or execute a safe no-op scenario."""
+        recipe = find_operator_action_recipe(recipe_id)
+        if mode == "execute" and not recipe["safe_execute"]:
+            raise ValueError(f"execute mode is disabled for operator recipe: {recipe_id}")
+
+        return {
+            "schema_version": OPERATOR_ACTION_RECIPE_SCHEMA_VERSION,
+            "mode": mode,
+            "recipe": recipe,
+            "would_execute": mode == "dry-run",
+            "executed": mode == "execute",
+            "side_effects": [],
+            "mutates_tracker": False,
+            "operator_verdict": recipe["operator_verdict"],
+            "recommended_tracker_payload": recipe["tracker_payload_recommendation"],
+        }
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -1027,6 +1238,22 @@ def main():
     parser.add_argument(
         "--classify-rch-log",
         help="Classify a saved rch output transcript instead of running lane preflight"
+    )
+    parser.add_argument(
+        "--list-operator-recipes",
+        action="store_true",
+        help="List deterministic shared-main operator action recipes"
+    )
+    parser.add_argument(
+        "--operator-recipe",
+        default="",
+        help="Render or execute one operator action recipe by id"
+    )
+    parser.add_argument(
+        "--operator-mode",
+        choices=["dry-run", "execute"],
+        default="dry-run",
+        help="Operator recipe mode"
     )
     parser.add_argument(
         "--command",
@@ -1109,6 +1336,27 @@ def main():
                 print(f"Outcome: {outcome['outcome_class']}")
                 print(f"Decision: {outcome['decision']}")
                 print(f"Summary: {outcome['summary']}")
+            return 0
+
+        if args.list_operator_recipes:
+            result = runner.list_operator_recipes()
+            if args.output == "json":
+                print(json.dumps(result, indent=2))
+            else:
+                print("Available operator recipes:")
+                for recipe in result["recipes"]:
+                    print(f"  {recipe['recipe_id']}")
+            return 0
+
+        if args.operator_recipe:
+            result = runner.operator_recipe(args.operator_recipe, args.operator_mode)
+            if args.output == "json":
+                print(json.dumps(result, indent=2))
+            else:
+                recipe = result["recipe"]
+                print(f"Recipe: {recipe['recipe_id']}")
+                print(f"Mode: {result['mode']}")
+                print(f"Verdict: {result['operator_verdict']}")
             return 0
 
         # Validate required arguments for proof analysis

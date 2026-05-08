@@ -1,0 +1,47 @@
+{
+  "schema_version": "operator-action-recipe-contract-v1",
+  "bead_id": "asupersync-xeh8m0.7",
+  "generated_artifact_schema": "operator-action-recipe-v1",
+  "purpose": "Contract for deterministic shared-main operator action recipes emitted by scripts/proof_runner.py.",
+  "required_recipe_ids": [
+    "rerun-proof-lane",
+    "stale-in-progress-reclaim",
+    "no-win-fallback-hold",
+    "dirty-frontier-refusal",
+    "exact-blocker-escalation",
+    "agent-mail-reservation",
+    "destructive-command-refusal"
+  ],
+  "required_recipe_fields": [
+    "recipe_id",
+    "preconditions",
+    "proof_command_shape",
+    "allowed_br_commands",
+    "allowed_bv_commands",
+    "artifact_paths",
+    "expected_log_fields",
+    "first_blocker_line_required",
+    "fallback_no_win_reason",
+    "operator_verdict",
+    "reservation_policy",
+    "tracker_payload_recommendation",
+    "destructive_command_policy"
+  ],
+  "allowed_operator_verdicts": [
+    "pass",
+    "blocked-external",
+    "failed-local",
+    "no-win",
+    "refuse"
+  ],
+  "required_log_fields": [
+    "command",
+    "remote_exit_status",
+    "first_blocker.file",
+    "first_blocker.line",
+    "fallback_no_win_reason",
+    "operator_verdict",
+    "reservation_policy"
+  ],
+  "proof_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_operator_action_recipe_contract CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test operator_action_recipe_contract -- --nocapture"
+}
