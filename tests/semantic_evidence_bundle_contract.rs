@@ -11,6 +11,10 @@ use serde_json::Value;
 
 const FIXTURE_DIR: &str = "tests/fixtures/semantic_evidence_bundle";
 const SCRIPT_PATH: &str = "scripts/build_semantic_evidence_bundle.sh";
+const REPORT_FIXTURE: &str = "verification_report_sample.json";
+const MATRIX_FIXTURE: &str = "semantic_verification_matrix_sample.md";
+const GATES_FIXTURE: &str = "semantic_readiness_gates_sample.md";
+const EXPECTED_FIXTURE: &str = "verification_report_sample_expected.json";
 
 fn fixture_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -32,11 +36,11 @@ fn build_bundle_output_from_fixtures() -> String {
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .arg(SCRIPT_PATH)
         .arg("--report")
-        .arg(fixture_path("verification_report_sample.json"))
+        .arg(fixture_path(REPORT_FIXTURE))
         .arg("--matrix")
-        .arg(fixture_path("semantic_verification_matrix_sample.md"))
+        .arg(fixture_path(MATRIX_FIXTURE))
         .arg("--gates")
-        .arg(fixture_path("semantic_readiness_gates_sample.md"))
+        .arg(fixture_path(GATES_FIXTURE))
         .arg("--output")
         .arg(&output_path)
         .output()
@@ -150,19 +154,18 @@ fn bundle_schema_and_traceability_contract() {
 fn bundle_output_matches_scrubbed_golden() {
     let raw = build_bundle_output_from_fixtures();
     let actual = scrub_bundle_text(&raw);
-    let expected_fixture = "verification_report_sample_expected.json";
-    let expected = fixture_text(expected_fixture);
+    let expected = fixture_text(EXPECTED_FIXTURE);
     let actual_json: Value =
         serde_json::from_str(&actual).expect("scrubbed bundle output must be valid JSON");
-    let expected_json = fixture_json(expected_fixture);
+    let expected_json = fixture_json(EXPECTED_FIXTURE);
 
     assert_eq!(
         actual_json, expected_json,
-        "semantic evidence bundle parsed golden drifted for {expected_fixture}"
+        "semantic evidence bundle parsed golden drifted for {REPORT_FIXTURE} -> {EXPECTED_FIXTURE}"
     );
     assert_eq!(
         actual, expected,
-        "semantic evidence bundle reviewed text golden drifted for {expected_fixture}"
+        "semantic evidence bundle reviewed text golden drifted for {REPORT_FIXTURE} -> {EXPECTED_FIXTURE}"
     );
 }
 
