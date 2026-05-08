@@ -18,7 +18,7 @@ fn run_receipt(fixture: &str) -> Output {
     Command::new("python3")
         .arg(repo_root().join(SCRIPT_PATH))
         .arg("--observations")
-        .arg(repo_root().join(FIXTURE_ROOT).join(fixture))
+        .arg(Path::new(FIXTURE_ROOT).join(fixture))
         .arg("--generated-at")
         .arg(GENERATED_AT)
         .arg("--output")
@@ -26,6 +26,12 @@ fn run_receipt(fixture: &str) -> Output {
         .current_dir(repo_root())
         .output()
         .expect("run rch worker quarantine receipt helper")
+}
+
+fn fixture_text(fixture: &str) -> String {
+    let path = repo_root().join(FIXTURE_ROOT).join(fixture);
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("read golden fixture {}: {err}", path.display()))
 }
 
 fn receipt_json(fixture: &str) -> Value {
@@ -85,6 +91,27 @@ fn healthy_fixture_does_not_quarantine_worker() {
     assert_eq!(fast["classification"].as_str(), Some("healthy"));
     assert_eq!(fast["quarantine_recommended"].as_bool(), Some(false));
     assert_eq!(fast["healthy_samples"].as_u64(), Some(2));
+}
+
+#[test]
+fn mixed_degraded_output_matches_full_reviewed_golden() {
+    let output = run_receipt("mixed_degraded.json");
+    assert!(
+        output.status.success(),
+        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = String::from_utf8(output.stdout).expect("receipt stdout must be utf-8");
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt output JSON");
+    let expected = fixture_text("mixed_degraded_expected.json");
+    let expected_json: Value =
+        serde_json::from_str(&expected).expect("expected receipt output JSON");
+
+    assert_eq!(actual_json, expected_json, "parsed receipt JSON must match");
+    assert_eq!(actual, expected);
 }
 
 #[test]

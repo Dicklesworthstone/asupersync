@@ -1,0 +1,207 @@
+{
+  "current_date": "2026-05-08",
+  "decision": "quarantine-suggested",
+  "forbidden_actions": {
+    "runs_beads_mutation": false,
+    "runs_cargo": false,
+    "runs_destructive_command": false,
+    "runs_git_mutation": false,
+    "runs_rch_mutation": false
+  },
+  "generated_at": "2026-05-08T05:35:00Z",
+  "non_mutating": true,
+  "observation_flags": [
+    {
+      "command": "rch exec -- cargo test --test readme_claim_freshness_contract -- --nocapture",
+      "flags": [
+        "healthy_sample"
+      ],
+      "queue_wait_ms": 0,
+      "remote_exit_code": 0,
+      "remote_success": true,
+      "retrieval_completed": true,
+      "retrieval_elapsed_ms": 2903,
+      "selected_slots": 2,
+      "timeout_observed": false,
+      "worker": "vmi-fast"
+    },
+    {
+      "command": "rch exec -- cargo test --test proof_runner_contract -- --nocapture",
+      "flags": [
+        "slow_artifact_retrieval"
+      ],
+      "queue_wait_ms": 500,
+      "remote_exit_code": 0,
+      "remote_success": true,
+      "retrieval_completed": false,
+      "retrieval_elapsed_ms": 180000,
+      "selected_slots": 2,
+      "timeout_observed": true,
+      "worker": "vmi-slow"
+    },
+    {
+      "command": "rch exec -- cargo check -p asupersync --lib",
+      "flags": [
+        "slow_artifact_retrieval"
+      ],
+      "queue_wait_ms": 100,
+      "remote_exit_code": 0,
+      "remote_success": true,
+      "retrieval_completed": true,
+      "retrieval_elapsed_ms": 225261,
+      "selected_slots": 1,
+      "timeout_observed": false,
+      "worker": "vmi-slow"
+    },
+    {
+      "command": "rch exec -- cargo test -p asupersync --lib security:: -- --nocapture",
+      "flags": [
+        "remote_failure"
+      ],
+      "queue_wait_ms": 0,
+      "remote_exit_code": 101,
+      "remote_success": false,
+      "retrieval_completed": true,
+      "retrieval_elapsed_ms": 900,
+      "selected_slots": 1,
+      "timeout_observed": false,
+      "worker": "vmi-fail"
+    },
+    {
+      "command": "rch exec -- cargo clippy -p asupersync --all-targets -- -D warnings",
+      "flags": [
+        "remote_failure"
+      ],
+      "queue_wait_ms": 0,
+      "remote_exit_code": 101,
+      "remote_success": false,
+      "retrieval_completed": true,
+      "retrieval_elapsed_ms": 1100,
+      "selected_slots": 1,
+      "timeout_observed": false,
+      "worker": "vmi-fail"
+    },
+    {
+      "command": "rch exec -- cargo check -p asupersync --all-targets",
+      "flags": [
+        "no_capacity"
+      ],
+      "queue_wait_ms": 45000,
+      "remote_exit_code": 0,
+      "remote_success": true,
+      "retrieval_completed": true,
+      "retrieval_elapsed_ms": 2200,
+      "selected_slots": 0,
+      "timeout_observed": false,
+      "worker": "vmi-zero"
+    },
+    {
+      "command": "rch exec -- cargo test --test stale_in_progress_receipt_contract -- --nocapture",
+      "flags": [
+        "remote_failure"
+      ],
+      "queue_wait_ms": 0,
+      "remote_exit_code": 101,
+      "remote_success": false,
+      "retrieval_completed": true,
+      "retrieval_elapsed_ms": 1600,
+      "selected_slots": 1,
+      "timeout_observed": false,
+      "worker": "vmi-onefail"
+    }
+  ],
+  "observations_path": "tests/fixtures/rch_worker_quarantine_receipt/mixed_degraded.json",
+  "schema_version": "rch-worker-quarantine-receipt-v1",
+  "source_counts": {
+    "degraded_workers": 4,
+    "observations": 7,
+    "quarantine_recommended": 2,
+    "workers": 5
+  },
+  "thresholds": {
+    "no_capacity_wait_ms": 30000,
+    "retrieval_slow_ms": 120000
+  },
+  "workers": [
+    {
+      "classification": "quarantine",
+      "healthy_samples": 0,
+      "local_fallback_count": 0,
+      "no_capacity_count": 0,
+      "operator_guidance": "Avoid selecting this worker until fresh successful observations clear the degraded signal.",
+      "quarantine_recommended": true,
+      "reasons": [
+        "2 remote failure sample(s)"
+      ],
+      "remote_failure_count": 2,
+      "sample_count": 2,
+      "score": 6,
+      "slow_retrieval_count": 0,
+      "worker": "vmi-fail"
+    },
+    {
+      "classification": "healthy",
+      "healthy_samples": 1,
+      "local_fallback_count": 0,
+      "no_capacity_count": 0,
+      "operator_guidance": "Worker has only healthy fixture observations.",
+      "quarantine_recommended": false,
+      "reasons": [
+        "1 healthy sample(s)"
+      ],
+      "remote_failure_count": 0,
+      "sample_count": 1,
+      "score": 0,
+      "slow_retrieval_count": 0,
+      "worker": "vmi-fast"
+    },
+    {
+      "classification": "remote-failing",
+      "healthy_samples": 0,
+      "local_fallback_count": 0,
+      "no_capacity_count": 0,
+      "operator_guidance": "Retry the proof on a different worker before treating the failure as project evidence.",
+      "quarantine_recommended": false,
+      "reasons": [
+        "1 remote failure sample(s)"
+      ],
+      "remote_failure_count": 1,
+      "sample_count": 1,
+      "score": 3,
+      "slow_retrieval_count": 0,
+      "worker": "vmi-onefail"
+    },
+    {
+      "classification": "quarantine",
+      "healthy_samples": 0,
+      "local_fallback_count": 0,
+      "no_capacity_count": 0,
+      "operator_guidance": "Avoid selecting this worker until fresh successful observations clear the degraded signal.",
+      "quarantine_recommended": true,
+      "reasons": [
+        "2 slow retrieval sample(s)"
+      ],
+      "remote_failure_count": 0,
+      "sample_count": 2,
+      "score": 4,
+      "slow_retrieval_count": 2,
+      "worker": "vmi-slow"
+    },
+    {
+      "classification": "no-capacity",
+      "healthy_samples": 0,
+      "local_fallback_count": 0,
+      "no_capacity_count": 1,
+      "operator_guidance": "Do not queue new broad proofs on this worker while zero-slot wait evidence is fresh.",
+      "quarantine_recommended": false,
+      "reasons": [
+        "1 zero-slot wait sample(s)"
+      ],
+      "remote_failure_count": 0,
+      "sample_count": 1,
+      "score": 1,
+      "slow_retrieval_count": 0,
+      "worker": "vmi-zero"
+    }
+  ]
+}
