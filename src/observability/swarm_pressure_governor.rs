@@ -717,12 +717,16 @@ impl SwarmPressureGovernor {
             requested_memory.unwrap_or(self.config.default_memory_budget_bytes)
         };
 
-        Ok(ResourceEnvelope::new(
+        let envelope = ResourceEnvelope::new(
             region_id,
             memory_budget,
             self.config.default_cpu_budget_ns_per_sec,
             self.config.default_io_budget_ops_per_sec,
-        ))
+        );
+        if let Some(requested_memory) = requested_memory {
+            envelope.reserve_memory(requested_memory)?;
+        }
+        Ok(envelope)
     }
 
     fn create_default_envelope(
@@ -1063,6 +1067,11 @@ mod tests {
         assert_eq!(
             envelope.memory_budget,
             governor.config.default_memory_budget_bytes
+        );
+        assert_eq!(
+            envelope.memory_used.load(Ordering::Relaxed),
+            1024,
+            "admitted requested memory must be charged to the returned envelope"
         );
 
         governor.register_region_envelope(envelope.region_id, envelope);
