@@ -1,7 +1,10 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::messaging::nats::{fuzz_nats_subject_max_bytes, fuzz_parse_nats_publish_subject};
+use asupersync::messaging::nats::{
+    fuzz_nats_subject_max_bytes, fuzz_parse_nats_publish_subject,
+    fuzz_validate_nats_publish_subject,
+};
 use libfuzzer_sys::fuzz_target;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -97,14 +100,27 @@ fuzz_target!(|input: SubjectParserInput| {
     let parse_result = catch_unwind(AssertUnwindSafe(|| {
         fuzz_parse_nats_publish_subject(&subject)
     }));
+    let validation_result = catch_unwind(AssertUnwindSafe(|| {
+        fuzz_validate_nats_publish_subject(&subject)
+    }));
 
-    assert!(
-        parse_result.is_ok(),
-        "parse_publish_subject panicked on input {:?}",
-        subject
-    );
+    let parsed = match parse_result {
+        Ok(parsed) => parsed,
+        Err(_) => {
+            panic!("parse_publish_subject panicked on input {:?}", subject);
+        }
+    };
 
-    let parsed = parse_result.expect("panic checked above");
+    let validation = match validation_result {
+        Ok(validation) => validation,
+        Err(_) => {
+            panic!(
+                "validate_nats_publish_subject panicked on input {:?}",
+                subject
+            );
+        }
+    };
+
     let modeled = model_parse_publish_subject(&subject, max_subject_bytes).map(|tokens| {
         tokens
             .into_iter()
@@ -117,6 +133,27 @@ fuzz_target!(|input: SubjectParserInput| {
         "parser/model mismatch for subject {:?}",
         subject
     );
+
+    match (&parsed, &validation) {
+        (Some(_), Ok(())) => {}
+        (Some(_), Err(error)) => {
+            panic!("parser accepted subject but validator rejected it: {error}");
+        }
+        (None, Ok(())) => {
+            panic!("parser rejected subject but validator accepted it: {subject:?}");
+        }
+        (None, Err(error)) => {
+            assert!(
+                !error.trim().is_empty(),
+                "publish-subject rejection should expose a diagnostic"
+            );
+            assert!(
+                error.len() <= 512,
+                "publish-subject rejection diagnostic should stay bounded: {} bytes",
+                error.len()
+            );
+        }
+    }
 
     if let Some(tokens) = parsed {
         assert!(!subject.is_empty());
