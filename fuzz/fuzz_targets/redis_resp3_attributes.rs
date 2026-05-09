@@ -200,7 +200,99 @@ fn parse_adjacent_values_without_harness_panic(wire: &[u8], limits: &RedisProtoc
 }
 
 fn parse_without_harness_panic(wire: &[u8], limits: &RedisProtocolLimits) {
-    let _ = RespValue::try_decode_with_limits(bounded_wire_ref(wire), limits);
+    observe_decode_result(bounded_wire_ref(wire), limits, "RESP3 attribute fuzz input");
+}
+
+fn observe_decode_result(wire: &[u8], limits: &RedisProtocolLimits, context: &str) {
+    match RespValue::try_decode_with_limits(wire, limits) {
+        Ok(Some((decoded, used))) => {
+            assert_ne!(used, 0, "{context}: successful decode must consume bytes");
+            assert!(
+                used <= wire.len(),
+                "{context}: consumed {used} bytes beyond input length {}",
+                wire.len()
+            );
+            assert_resp_value_respects_limits(&decoded, limits, 0, context);
+        }
+        Ok(None) => {
+            assert!(
+                wire.is_empty() || !wire.ends_with(b"\r\n") || starts_length_prefixed_frame(wire),
+                "{context}: complete-looking non-length-prefixed frame should not need more bytes"
+            );
+        }
+        Err(_) => {}
+    }
+}
+
+fn starts_length_prefixed_frame(wire: &[u8]) -> bool {
+    matches!(
+        wire.first(),
+        Some(b'$' | b'=' | b'!' | b'*' | b'%' | b'~' | b'>' | b'|')
+    )
+}
+
+fn assert_resp_value_respects_limits(
+    value: &RespValue,
+    limits: &RedisProtocolLimits,
+    depth: usize,
+    context: &str,
+) {
+    assert!(
+        depth <= limits.max_nesting_depth,
+        "{context}: decoded RESP value exceeded nesting limit {}",
+        limits.max_nesting_depth
+    );
+
+    match value {
+        RespValue::SimpleString(s)
+        | RespValue::Error(s)
+        | RespValue::Double(s)
+        | RespValue::BigNumber(s) => {
+            assert!(
+                !s.as_bytes().contains(&b'\r') && !s.as_bytes().contains(&b'\n'),
+                "{context}: line-oriented RESP string retained a CR/LF byte"
+            );
+        }
+        RespValue::Integer(_) | RespValue::Null | RespValue::Boolean(_) => {}
+        RespValue::BulkString(Some(bytes)) | RespValue::BlobError(bytes) => {
+            assert!(
+                bytes.len() <= limits.max_bulk_string_len,
+                "{context}: decoded byte payload exceeded max_bulk_string_len"
+            );
+        }
+        RespValue::BulkString(None) => {}
+        RespValue::Verbatim { format, payload } => {
+            assert_eq!(
+                format.len(),
+                3,
+                "{context}: RESP3 verbatim format marker must be exactly three bytes"
+            );
+            assert!(
+                payload.len() <= limits.max_bulk_string_len,
+                "{context}: decoded verbatim payload exceeded max_bulk_string_len"
+            );
+        }
+        RespValue::Array(Some(items)) | RespValue::Set(items) | RespValue::Push(items) => {
+            assert!(
+                items.len() <= limits.max_array_len,
+                "{context}: decoded aggregate exceeded max_array_len"
+            );
+            for item in items {
+                assert_resp_value_respects_limits(item, limits, depth + 1, context);
+            }
+        }
+        RespValue::Array(None) => {}
+        RespValue::Map(pairs) | RespValue::Attribute(pairs) => {
+            assert!(
+                pairs.len() <= limits.max_array_len,
+                "{context}: decoded pair aggregate exceeded max_array_len"
+            );
+            for (key, value) in pairs {
+                assert_resp_value_respects_limits(key, limits, depth + 1, context);
+                assert_resp_value_respects_limits(value, limits, depth + 1, context);
+            }
+        }
+    }
 }
 
 impl FuzzLimits {
