@@ -89,6 +89,12 @@ pub struct ConnectMethodConformanceTester {
     pub test_cases: Vec<ConnectMethodConformanceCase>,
 }
 
+impl Default for ConnectMethodConformanceTester {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ConnectMethodConformanceTester {
     /// Create a new CONNECT method conformance tester.
     pub fn new() -> Self {
@@ -269,7 +275,7 @@ impl ConnectMethodConformanceTester {
                     // Check if behavior matches expected
                     let status_correct = test_case
                         .expected_response_status
-                        .map_or(true, |expected| asupersync_status == expected);
+                        .is_none_or(|expected| asupersync_status == expected);
                     let tunnel_correct = asupersync_tunnel == test_case.should_establish_tunnel;
 
                     if status_correct && tunnel_correct {

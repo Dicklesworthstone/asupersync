@@ -110,6 +110,12 @@ pub struct SettingsConformanceTester {
     pub test_cases: Vec<SettingsConformanceCase>,
 }
 
+impl Default for SettingsConformanceTester {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SettingsConformanceTester {
     /// Create new tester with standard RFC 7540 test cases
     pub fn new() -> Self {
@@ -303,7 +309,7 @@ impl SettingsConformanceTester {
     async fn run_single_test(&self, test_case: &SettingsConformanceCase) -> ConformanceResult {
         let start_time = std::time::Instant::now();
 
-        let result = match self.execute_differential_test(test_case).await {
+        match self.execute_differential_test(test_case).await {
             Ok((our_state, h2_state)) => {
                 let verdict = self.evaluate_test_result(test_case, &our_state, &h2_state);
                 ConformanceResult {
@@ -350,9 +356,7 @@ impl SettingsConformanceTester {
                 execution_time_ms: start_time.elapsed().as_millis() as u64,
                 error: Some(error),
             },
-        };
-
-        result
+        }
     }
 
     /// Execute the local RFC model and require an explicit live h2 reference.

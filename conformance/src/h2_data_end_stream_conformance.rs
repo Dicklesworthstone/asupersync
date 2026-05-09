@@ -501,11 +501,8 @@ impl DataEndStreamConformanceTester {
         output.push_str("|---------|---------|-------------|\n");
         for result in &report.results {
             output.push_str(&format!(
-                "| {} | {} | {} |\n",
-                result.case_id,
-                result.verdict,
-                // Get description from case if available
-                format!("Case {}", result.case_id)
+                "| {} | {} | Case {} |\n",
+                result.case_id, result.verdict, result.case_id
             ));
         }
 

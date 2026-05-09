@@ -104,6 +104,12 @@ pub struct EnablePushConformanceTester {
     pub test_cases: Vec<EnablePushConformanceCase>,
 }
 
+impl Default for EnablePushConformanceTester {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EnablePushConformanceTester {
     /// Create a new enable push conformance tester.
     pub fn new() -> Self {

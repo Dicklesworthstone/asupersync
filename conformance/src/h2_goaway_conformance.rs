@@ -478,11 +478,8 @@ impl GoAwayConformanceTester {
         output.push_str("|---------|---------|-------------|\n");
         for result in &report.results {
             output.push_str(&format!(
-                "| {} | {} | {} |\n",
-                result.case_id,
-                result.verdict,
-                // Get description from case if available
-                format!("Case {}", result.case_id)
+                "| {} | {} | Case {} |\n",
+                result.case_id, result.verdict, result.case_id
             ));
         }
 
@@ -693,7 +690,7 @@ fn create_goaway_test_cases() -> Vec<GoAwayConformanceCase> {
             description: "GOAWAY with max stream ID allows all existing streams".to_string(),
             requirement_level: RequirementLevel::Should,
             goaway_sequence: vec![SerializableGoAwayFrame {
-                last_stream_id: u32::MAX & 0x7FFF_FFFF, // Max valid stream ID (no R bit)
+                last_stream_id: 0x7FFF_FFFF, // Max valid stream ID (no R bit)
                 error_code: "NoError".to_string(),
                 debug_data: vec![],
             }],
@@ -702,7 +699,7 @@ fn create_goaway_test_cases() -> Vec<GoAwayConformanceCase> {
                 goaway_received: true,
                 goaway_sent: false,
                 connection_state: "Closing".to_string(),
-                received_goaway_last_stream_id: Some(u32::MAX & 0x7FFF_FFFF),
+                received_goaway_last_stream_id: Some(0x7FFF_FFFF),
                 sent_goaway_last_stream_id: None,
                 reset_streams: vec![], // No streams should be reset
             },

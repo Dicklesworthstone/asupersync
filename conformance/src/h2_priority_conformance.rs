@@ -471,11 +471,8 @@ impl PriorityConformanceTester {
         output.push_str("|---------|---------|-------------|\n");
         for result in &report.results {
             output.push_str(&format!(
-                "| {} | {} | {} |\n",
-                result.case_id,
-                result.verdict,
-                // Get description from case if available
-                format!("Case {}", result.case_id)
+                "| {} | {} | Case {} |\n",
+                result.case_id, result.verdict, result.case_id
             ));
         }
 
@@ -542,7 +539,7 @@ fn process_live_priority_frame(
     priority_frame: &PriorityFrame,
 ) -> Result<(), String> {
     let received = connection
-        .process_frame(Frame::Priority(priority_frame.clone()))
+        .process_frame(Frame::Priority(*priority_frame))
         .map_err(|err| err.to_string())?;
     if received.is_some() {
         return Err(format!(
