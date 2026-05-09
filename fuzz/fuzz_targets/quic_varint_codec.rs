@@ -61,13 +61,13 @@ enum AttackScenario {
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum BoundaryType {
     /// Test around 6-bit boundary (1 << 6)
-    SixBit,
+    Six,
     /// Test around 14-bit boundary (1 << 14)
-    FourteenBit,
+    Fourteen,
     /// Test around 30-bit boundary (1 << 30)
-    ThirtyBit,
+    Thirty,
     /// Test around 62-bit max (QUIC_VARINT_MAX)
-    SixtyTwoBit,
+    SixtyTwo,
 }
 
 #[derive(Arbitrary, Debug, Clone, Copy)]
@@ -116,52 +116,52 @@ fuzz_target!(|input: QuicVarintFuzzInput| {
 /// Property 1: No panic on any input
 fn test_no_panic(input: &QuicVarintFuzzInput) {
     for operation in &input.operations {
-        let _result = std::panic::catch_unwind(|| {
+        let result = std::panic::catch_unwind(|| {
             process_varint_operation(operation);
         });
+        assert!(result.is_ok(), "varint operation helper panicked");
     }
 
     // Process attack scenario
-    let _result = std::panic::catch_unwind(|| {
+    let result = std::panic::catch_unwind(|| {
         process_attack_scenario(&input.attack_scenario);
     });
-
-    assert!(true, "Varint codec handled all inputs without panic");
+    assert!(result.is_ok(), "varint attack scenario helper panicked");
 }
 
 /// Property 2: Valid varints round-trip correctly
 fn test_round_trip_consistency(input: &QuicVarintFuzzInput) {
     for operation in &input.operations {
-        if let VarintOperation::RoundTrip { value } = operation {
-            if *value <= QUIC_VARINT_MAX {
-                // Should be able to encode and decode successfully
-                let mut encoded = Vec::new();
-                match encode_varint(*value, &mut encoded) {
-                    Ok(()) => {
-                        // Should decode back to the same value
-                        match decode_varint(&encoded) {
-                            Ok((decoded_value, consumed)) => {
-                                assert_eq!(
-                                    *value, decoded_value,
-                                    "Round-trip failed for value {value}"
-                                );
-                                assert_eq!(consumed, encoded.len(), "Consumed bytes mismatch");
-                            }
-                            Err(_) => {
-                                panic!("Valid encoded varint failed to decode: {value}");
-                            }
+        if let VarintOperation::RoundTrip { value } = operation
+            && *value <= QUIC_VARINT_MAX
+        {
+            // Should be able to encode and decode successfully
+            let mut encoded = Vec::new();
+            match encode_varint(*value, &mut encoded) {
+                Ok(()) => {
+                    // Should decode back to the same value
+                    match decode_varint(&encoded) {
+                        Ok((decoded_value, consumed)) => {
+                            assert_eq!(
+                                *value, decoded_value,
+                                "Round-trip failed for value {value}"
+                            );
+                            assert_eq!(consumed, encoded.len(), "Consumed bytes mismatch");
+                        }
+                        Err(_) => {
+                            panic!("Valid encoded varint failed to decode: {value}");
                         }
                     }
-                    Err(QuicCoreError::VarIntOutOfRange(_)) => {
-                        // This is expected if value > QUIC_VARINT_MAX
-                        assert!(
-                            *value > QUIC_VARINT_MAX,
-                            "Unexpected out-of-range error for {value}"
-                        );
-                    }
-                    Err(_) => {
-                        panic!("Unexpected error encoding valid value: {value}");
-                    }
+                }
+                Err(QuicCoreError::VarIntOutOfRange(_)) => {
+                    // This is expected if value > QUIC_VARINT_MAX
+                    assert!(
+                        *value > QUIC_VARINT_MAX,
+                        "Unexpected out-of-range error for {value}"
+                    );
+                }
+                Err(_) => {
+                    panic!("Unexpected error encoding valid value: {value}");
                 }
             }
         }
@@ -187,10 +187,7 @@ fn test_invalid_input_rejection(input: &QuicVarintFuzzInput) {
                         "Should not consume more bytes than available"
                     );
                 }
-                Err(QuicCoreError::UnexpectedEof) => {
-                    // This is expected for truncated/empty input
-                    assert!(true, "Correctly rejected truncated input");
-                }
+                Err(QuicCoreError::UnexpectedEof) => {}
                 Err(QuicCoreError::VarIntOutOfRange(val)) => {
                     // This indicates the decoding process found a value over the limit
                     assert!(
@@ -198,10 +195,7 @@ fn test_invalid_input_rejection(input: &QuicVarintFuzzInput) {
                         "VarIntOutOfRange should only occur for values > QUIC_VARINT_MAX"
                     );
                 }
-                Err(_) => {
-                    // Other errors are unexpected but should not panic
-                    assert!(true, "Unexpected error type - but no panic");
-                }
+                Err(error) => assert_observable_quic_error(&error),
             }
         }
     }
@@ -211,22 +205,22 @@ fn test_invalid_input_rejection(input: &QuicVarintFuzzInput) {
 fn test_boundary_conditions(input: &QuicVarintFuzzInput) {
     if let AttackScenario::BoundaryTest { boundary_type } = &input.attack_scenario {
         let test_values = match boundary_type {
-            BoundaryType::SixBit => vec![
+            BoundaryType::Six => vec![
                 (1 << 6) - 1, // Max 1-byte varint
                 1 << 6,       // Min 2-byte varint
                 (1 << 6) + 1, // Just over boundary
             ],
-            BoundaryType::FourteenBit => vec![
+            BoundaryType::Fourteen => vec![
                 (1 << 14) - 1, // Max 2-byte varint
                 1 << 14,       // Min 4-byte varint
                 (1 << 14) + 1, // Just over boundary
             ],
-            BoundaryType::ThirtyBit => vec![
+            BoundaryType::Thirty => vec![
                 (1 << 30) - 1, // Max 4-byte varint
                 1 << 30,       // Min 8-byte varint
                 (1 << 30) + 1, // Just over boundary
             ],
-            BoundaryType::SixtyTwoBit => vec![
+            BoundaryType::SixtyTwo => vec![
                 QUIC_VARINT_MAX,     // Maximum valid varint
                 QUIC_VARINT_MAX - 1, // Just under max
             ],
@@ -262,7 +256,7 @@ fn test_attack_scenarios(input: &QuicVarintFuzzInput) {
             original_length,
         } => {
             // Try to decode truncated varint
-            let original_len = (*original_length as usize).min(8).max(1);
+            let original_len = (*original_length as usize).clamp(1, 8);
             let truncate_pos = (*truncate_position as usize).min(original_len);
 
             // Create a potentially valid varint prefix then truncate it
@@ -279,14 +273,8 @@ fn test_attack_scenarios(input: &QuicVarintFuzzInput) {
                         "Truncated varint should not decode successfully"
                     );
                 }
-                Err(QuicCoreError::UnexpectedEof) => {
-                    // Expected for truncated input
-                    assert!(true, "Correctly detected truncated varint");
-                }
-                Err(_) => {
-                    // Other errors are acceptable
-                    assert!(true, "Truncated varint rejected with error");
-                }
+                Err(QuicCoreError::UnexpectedEof) => {}
+                Err(error) => assert_observable_quic_error(&error),
             }
         }
         AttackScenario::InvalidLengthPrefix {
@@ -306,10 +294,7 @@ fn test_attack_scenarios(input: &QuicVarintFuzzInput) {
                         "Invalid prefix produced out-of-range value"
                     );
                 }
-                Err(_) => {
-                    // Error is expected and acceptable
-                    assert!(true, "Invalid prefix correctly rejected");
-                }
+                Err(error) => assert_observable_quic_error(&error),
             }
         }
         AttackScenario::OverflowTest { target_value } => {
@@ -348,6 +333,22 @@ fn test_attack_scenarios(input: &QuicVarintFuzzInput) {
                 }
             }
         }
+        AttackScenario::MalformedVarint { malformed_type } => match malformed_type {
+            MalformedType::InvalidLength => {
+                observe_decode_varint(&[]);
+                observe_decode_varint(&[0x40]);
+                observe_decode_varint(&[0x80, 0x00, 0x00]);
+                observe_decode_varint(&[0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+            }
+            MalformedType::Overlong => {
+                observe_decode_varint(&[0x40, 0x3f]);
+                observe_decode_varint(&[0x80, 0x00, 0x00, 0x3f]);
+                observe_decode_varint(&[0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3f, 0xff]);
+            }
+            MalformedType::ReservedBits => {
+                observe_decode_varint(&[0xff; 8]);
+            }
+        },
         _ => {
             // Other scenarios tested elsewhere
         }
@@ -376,8 +377,8 @@ fn test_encoding_bounds(input: &QuicVarintFuzzInput) {
             MaxLengthTestType::OverMax => {
                 // Should fail
                 match result {
-                    Err(QuicCoreError::VarIntOutOfRange(_)) => {
-                        assert!(true, "Over-max value correctly rejected");
+                    Err(QuicCoreError::VarIntOutOfRange(rejected)) => {
+                        assert_eq!(rejected, test_value);
                     }
                     _ => {
                         panic!("Over-max value should be rejected with VarIntOutOfRange");
@@ -407,10 +408,7 @@ fn test_decode_buffer_safety(input: &QuicVarintFuzzInput) {
                     // Should not consume more than 8 bytes (max varint length)
                     assert!(consumed <= 8, "Should not consume more than 8 bytes");
                 }
-                Err(_) => {
-                    // Errors are acceptable, just ensure no buffer overrun
-                    assert!(true, "Error is acceptable - no buffer overrun");
-                }
+                Err(error) => assert_observable_quic_error(&error),
             }
         }
     }
@@ -421,15 +419,19 @@ fn process_varint_operation(operation: &VarintOperation) {
     match operation {
         VarintOperation::Encode { value } => {
             let mut encoded = Vec::new();
-            let _ = encode_varint(*value, &mut encoded);
+            observe_encode_varint(*value, &mut encoded);
         }
         VarintOperation::Decode { bytes } => {
-            let _ = decode_varint(bytes);
+            observe_decode_varint(bytes);
         }
         VarintOperation::RoundTrip { value } => {
             let mut encoded = Vec::new();
-            if encode_varint(*value, &mut encoded).is_ok() {
-                let _ = decode_varint(&encoded);
+            observe_encode_varint(*value, &mut encoded);
+            if *value <= QUIC_VARINT_MAX {
+                let (decoded, consumed) =
+                    observe_decode_varint(&encoded).expect("encoded varint should decode");
+                assert_eq!(decoded, *value);
+                assert_eq!(consumed, encoded.len());
             }
         }
         VarintOperation::Sequence { operations } => {
@@ -437,10 +439,10 @@ fn process_varint_operation(operation: &VarintOperation) {
                 match op {
                     SimpleVarintOp::Encode { value } => {
                         let mut encoded = Vec::new();
-                        let _ = encode_varint(*value, &mut encoded);
+                        observe_encode_varint(*value, &mut encoded);
                     }
                     SimpleVarintOp::Decode { bytes } => {
-                        let _ = decode_varint(bytes);
+                        observe_decode_varint(bytes);
                     }
                 }
             }
@@ -466,13 +468,88 @@ fn process_attack_scenario(scenario: &AttackScenario) {
             ];
             for value in test_values {
                 let mut encoded = Vec::new();
-                if encode_varint(value, &mut encoded).is_ok() {
-                    let _ = decode_varint(&encoded);
-                }
+                observe_encode_varint(value, &mut encoded);
             }
         }
         _ => {
             // Other scenarios are handled in their specific test functions
         }
     }
+}
+
+fn observe_encode_varint(value: u64, out: &mut Vec<u8>) {
+    let start_len = out.len();
+    match encode_varint(value, out) {
+        Ok(()) => {
+            assert!(value <= QUIC_VARINT_MAX);
+            let encoded = &out[start_len..];
+            assert_eq!(encoded.len(), encoded_len_for_value(value));
+
+            let (decoded, consumed) =
+                observe_decode_varint(encoded).expect("freshly encoded varint must decode");
+            assert_eq!(decoded, value);
+            assert_eq!(consumed, encoded.len());
+        }
+        Err(QuicCoreError::VarIntOutOfRange(rejected)) => {
+            assert_eq!(rejected, value);
+            assert!(value > QUIC_VARINT_MAX);
+            assert_eq!(out.len(), start_len);
+        }
+        Err(error) => {
+            assert_observable_quic_error(&error);
+            assert_eq!(out.len(), start_len);
+        }
+    }
+}
+
+fn observe_decode_varint(bytes: &[u8]) -> Option<(u64, usize)> {
+    match decode_varint(bytes) {
+        Ok((value, consumed)) => {
+            assert!(value <= QUIC_VARINT_MAX);
+            assert!(consumed > 0);
+            assert!(consumed <= bytes.len());
+            assert!(consumed <= 8);
+            assert_eq!(
+                consumed,
+                required_decode_len(bytes).expect("successful decode needs a prefix byte")
+            );
+            Some((value, consumed))
+        }
+        Err(QuicCoreError::UnexpectedEof) => {
+            assert!(
+                bytes.len() < required_decode_len(bytes).unwrap_or(1),
+                "UnexpectedEof should mean the prefix-selected varint is incomplete"
+            );
+            None
+        }
+        Err(QuicCoreError::VarIntOutOfRange(value)) => {
+            assert!(value > QUIC_VARINT_MAX);
+            None
+        }
+        Err(error) => {
+            assert_observable_quic_error(&error);
+            None
+        }
+    }
+}
+
+fn encoded_len_for_value(value: u64) -> usize {
+    if value < (1 << 6) {
+        1
+    } else if value < (1 << 14) {
+        2
+    } else if value < (1 << 30) {
+        4
+    } else {
+        8
+    }
+}
+
+fn required_decode_len(bytes: &[u8]) -> Option<usize> {
+    bytes.first().map(|first| 1usize << (first >> 6))
+}
+
+fn assert_observable_quic_error(error: &QuicCoreError) {
+    let rendered = error.to_string();
+    assert!(!rendered.is_empty());
 }
