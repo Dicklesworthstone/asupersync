@@ -176,6 +176,30 @@ fn assert_live_connection_rst_behavior(input: &RstStreamFuzzInput) {
     }
 }
 
+fn assert_rst_parse_contract(header: &FrameHeader, payload: &Bytes, raw_error_code: u32) {
+    let result = RstStreamFrame::parse(header, payload);
+
+    if header.stream_id == 0 {
+        let err = result.expect_err("RST_STREAM on stream ID 0 must be rejected");
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+        assert!(
+            err.stream_id.is_none(),
+            "RST_STREAM parser should report stream 0 as a connection error"
+        );
+        return;
+    }
+
+    if payload.len() != 4 {
+        let err = result.expect_err("RST_STREAM payload length must be exactly 4 bytes");
+        assert_eq!(err.code, ErrorCode::FrameSizeError);
+        return;
+    }
+
+    let parsed = result.expect("valid RST_STREAM payload should parse");
+    assert_eq!(parsed.stream_id, header.stream_id);
+    assert_eq!(parsed.error_code, ErrorCode::from_u32(raw_error_code));
+}
+
 fuzz_target!(|input: RstStreamFuzzInput| {
     // Limit input sizes to reasonable bounds
     if input.extra_payload.len() > MAX_PAYLOAD_SIZE {
@@ -284,10 +308,8 @@ fuzz_target!(|input: RstStreamFuzzInput| {
     let mut parse_frame_bytes = frame_bytes.clone();
     if let Ok(header) = FrameHeader::parse(&mut parse_frame_bytes) {
         let remaining_len = parse_frame_bytes.len().min(header.length as usize);
-        if remaining_len > 0 {
-            let payload = payload_prefix(&parse_frame_bytes, remaining_len);
-            let _ = RstStreamFrame::parse(&header, &payload);
-        }
+        let payload = payload_prefix(&parse_frame_bytes, remaining_len);
+        assert_rst_parse_contract(&header, &payload, input.error_code);
     }
 
     // Edge case: Empty payload handling
