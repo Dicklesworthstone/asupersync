@@ -5,8 +5,51 @@ use libfuzzer_sys::fuzz_target;
 
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::http::h2::connection::Connection;
-use asupersync::http::h2::frame::{Frame, FrameHeader, Setting, SettingsFrame, settings_flags};
+use asupersync::http::h2::error::H2Error;
+use asupersync::http::h2::frame::{
+    Frame, FrameHeader, FrameType, Setting, SettingsFrame, settings_flags,
+};
 use asupersync::http::h2::settings::Settings;
+
+fn observe_settings_parse(header: &FrameHeader, payload: Bytes) -> Result<Frame, H2Error> {
+    let payload_len = payload.len();
+    let result = asupersync::http::h2::frame::parse_frame(header, payload);
+
+    match &result {
+        Ok(Frame::Settings(frame)) => {
+            assert_eq!(
+                header.frame_type,
+                FrameType::Settings as u8,
+                "SETTINGS parser probe used a non-SETTINGS frame type"
+            );
+            assert_eq!(
+                header.length as usize, payload_len,
+                "successful SETTINGS parse accepted a mismatched header length"
+            );
+            assert_eq!(
+                header.stream_id, 0,
+                "successful SETTINGS parse accepted a non-zero stream id"
+            );
+            if header.flags & settings_flags::ACK != 0 {
+                assert!(
+                    frame.settings.is_empty(),
+                    "SETTINGS ACK parse must not carry settings"
+                );
+            }
+        }
+        Ok(_) => {
+            panic!("SETTINGS parser probe returned a non-SETTINGS frame");
+        }
+        Err(err) => {
+            assert!(
+                !format!("{err:?}").is_empty(),
+                "H2 SETTINGS parser errors must remain observable"
+            );
+        }
+    }
+
+    result
+}
 
 /// Comprehensive fuzz input for HTTP/2 SETTINGS frame parsing and handling
 #[derive(Arbitrary, Debug, Clone)]
@@ -25,22 +68,22 @@ struct H2SettingsFuzz {
 #[derive(Arbitrary, Debug, Clone)]
 enum SettingsOperation {
     /// Send a SETTINGS frame with specific settings
-    SendSettings {
+    Settings {
         settings: Vec<FuzzSetting>,
         ack: bool,
     },
     /// Send raw SETTINGS frame bytes for parsing edge cases
-    SendRawSettingsFrame { raw_payload: Vec<u8>, ack: bool },
+    RawFrame { raw_payload: Vec<u8>, ack: bool },
     /// Test unknown settings handling
-    SendUnknownSettings {
+    UnknownSettings {
         unknown_settings: Vec<(u16, u32)>, // (id, value) pairs for unknown settings
     },
     /// Test SETTINGS ACK handling
-    SendSettingsAck,
+    Ack,
     /// Test boundary value settings
-    SendBoundarySettings { boundary_type: BoundaryType },
+    Boundary { boundary_type: BoundaryType },
     /// Test SETTINGS flood (CVE-2019-9515)
-    SendSettingsFlood { frame_count: u32 },
+    Flood { frame_count: u32 },
 }
 
 /// Different boundary conditions to test for settings values
@@ -193,6 +236,17 @@ impl SettingsShadowModel {
             self.pending_acks -= 1;
         }
     }
+
+    fn assert_local_settings_normalized(&self) {
+        assert!(
+            self.local_settings.initial_window_size <= 0x7fff_ffff,
+            "local SETTINGS_INITIAL_WINDOW_SIZE must be normalized"
+        );
+        assert!(
+            (16_384..=16_777_215).contains(&self.local_settings.max_frame_size),
+            "local SETTINGS_MAX_FRAME_SIZE must stay in RFC bounds"
+        );
+    }
 }
 
 /// Normalize fuzz input to valid ranges
@@ -206,16 +260,16 @@ fn normalize_fuzz_input(input: &mut H2SettingsFuzz) {
 
     for op in &mut input.operations {
         match op {
-            SettingsOperation::SendSettings { settings, .. } => {
+            SettingsOperation::Settings { settings, .. } => {
                 settings.truncate(10);
                 for setting in settings {
                     normalize_setting(setting);
                 }
             }
-            SettingsOperation::SendRawSettingsFrame { raw_payload, .. } => {
+            SettingsOperation::RawFrame { raw_payload, .. } => {
                 raw_payload.truncate(1024); // Limit raw frame size
             }
-            SettingsOperation::SendUnknownSettings { unknown_settings } => {
+            SettingsOperation::UnknownSettings { unknown_settings } => {
                 unknown_settings.truncate(10);
                 for (id, _) in unknown_settings {
                     // Ensure unknown IDs (not 0x1-0x6)
@@ -225,7 +279,7 @@ fn normalize_fuzz_input(input: &mut H2SettingsFuzz) {
                     *id = (*id).clamp(0x7, 0xFFFF); // Unknown settings range
                 }
             }
-            SettingsOperation::SendSettingsFlood { frame_count } => {
+            SettingsOperation::Flood { frame_count } => {
                 *frame_count = (*frame_count).clamp(1, 50); // Reasonable flood test
             }
             _ => {}
@@ -314,6 +368,8 @@ fn execute_settings_operations(
     input: &H2SettingsFuzz,
     shadow: &mut SettingsShadowModel,
 ) -> Result<(), String> {
+    shadow.assert_local_settings_normalized();
+
     let initial_settings = Settings::from(input.connection_config.initial_settings.clone());
     let mut connection = if input.is_client {
         Connection::client(initial_settings)
@@ -324,7 +380,7 @@ fn execute_settings_operations(
     // Execute operation sequence
     for (op_index, operation) in input.operations.iter().enumerate() {
         match operation {
-            SettingsOperation::SendSettings { settings, ack } => {
+            SettingsOperation::Settings { settings, ack } => {
                 if *ack {
                     // Create SETTINGS ACK frame
                     let settings_frame = SettingsFrame::ack();
@@ -345,8 +401,19 @@ fn execute_settings_operations(
                     }
                 } else {
                     // Create SETTINGS frame with settings
-                    let actual_settings: Vec<Setting> =
-                        settings.iter().map(|s| s.clone().into()).collect();
+                    let actual_settings: Vec<Setting> = settings
+                        .iter()
+                        .filter_map(|setting| {
+                            let setting: Setting = setting.clone().into();
+                            let role_violation =
+                                !input.is_client && matches!(setting, Setting::EnablePush(_));
+                            if role_violation && !input.connection_config.test_role_violations {
+                                None
+                            } else {
+                                Some(setting)
+                            }
+                        })
+                        .collect();
                     let settings_frame = SettingsFrame::new(actual_settings.clone());
                     let frame = Frame::Settings(settings_frame);
 
@@ -376,7 +443,7 @@ fn execute_settings_operations(
                 }
             }
 
-            SettingsOperation::SendRawSettingsFrame { raw_payload, ack } => {
+            SettingsOperation::RawFrame { raw_payload, ack } => {
                 // Create raw frame data for edge case testing
                 let frame_data = create_raw_settings_frame(raw_payload, *ack);
 
@@ -387,12 +454,12 @@ fn execute_settings_operations(
 
                     // Parse the 9-byte frame header
                     if let Ok(header) = FrameHeader::parse(&mut header_buf) {
-                        let _ = asupersync::http::h2::frame::parse_frame(&header, payload_bytes);
+                        let _ = observe_settings_parse(&header, payload_bytes);
                     }
                 }
             }
 
-            SettingsOperation::SendUnknownSettings { unknown_settings } => {
+            SettingsOperation::UnknownSettings { unknown_settings } => {
                 // Test unknown settings are gracefully ignored
                 let mut raw_payload = Vec::new();
 
@@ -408,17 +475,15 @@ fn execute_settings_operations(
                     let payload_bytes = Bytes::copy_from_slice(&frame_data[9..]);
 
                     // Parse and process - unknown settings should be ignored
-                    if let Ok(header) = FrameHeader::parse(&mut header_buf) {
-                        if let Ok(frame) =
-                            asupersync::http::h2::frame::parse_frame(&header, payload_bytes)
-                        {
-                            let _ = connection.process_frame(frame);
-                        }
+                    if let Ok(header) = FrameHeader::parse(&mut header_buf)
+                        && let Ok(frame) = observe_settings_parse(&header, payload_bytes)
+                    {
+                        let _ = connection.process_frame(frame);
                     }
                 }
             }
 
-            SettingsOperation::SendSettingsAck => {
+            SettingsOperation::Ack => {
                 let settings_frame = SettingsFrame::ack();
                 let frame = Frame::Settings(settings_frame);
 
@@ -436,7 +501,7 @@ fn execute_settings_operations(
                 }
             }
 
-            SettingsOperation::SendBoundarySettings { boundary_type } => {
+            SettingsOperation::Boundary { boundary_type } => {
                 let boundary_settings = create_boundary_settings(boundary_type.clone());
                 let settings_frame = SettingsFrame::new(boundary_settings.clone());
                 let frame = Frame::Settings(settings_frame);
@@ -459,7 +524,7 @@ fn execute_settings_operations(
                     }
                 }
             }
-            SettingsOperation::SendSettingsFlood { frame_count } => {
+            SettingsOperation::Flood { frame_count } => {
                 // Test SETTINGS flood (CVE-2019-9515) - send multiple SETTINGS frames
                 for i in 0..*frame_count {
                     let flood_settings = vec![
@@ -542,7 +607,7 @@ fn execute_settings_operations(
 
                     // Malformed frames should be handled gracefully
                     if let Ok(header) = FrameHeader::parse(&mut header_buf) {
-                        let _ = asupersync::http::h2::frame::parse_frame(&header, payload_bytes);
+                        let _ = observe_settings_parse(&header, payload_bytes);
                     }
                 }
             }
@@ -613,7 +678,7 @@ fn execute_settings_operations(
 
                     // Mixed frames should be handled gracefully
                     if let Ok(header) = FrameHeader::parse(&mut header_buf) {
-                        let _ = asupersync::http::h2::frame::parse_frame(&header, payload_bytes);
+                        let _ = observe_settings_parse(&header, payload_bytes);
                     }
                 }
             }
