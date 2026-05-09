@@ -23,9 +23,9 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::bytes::{BufMut, Bytes, BytesMut};
+use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::http::h2::error::{ErrorCode, H2Error};
-use asupersync::http::h2::hpack::{DEFAULT_MAX_TABLE_SIZE, Decoder, DynamicTable, Header};
+use asupersync::http::h2::hpack::{Decoder, DynamicTable, Header};
 use libfuzzer_sys::fuzz_target;
 
 /// Maximum fuzz input size to prevent timeouts (8KB)
@@ -162,7 +162,7 @@ impl TestHeader {
 /// Test HPACK integer encoding/decoding roundtrip
 fn test_integer_encoding_roundtrip(value: usize, prefix_bits: u8, prefix: u8) -> bool {
     // Clamp prefix_bits to valid range (1-8)
-    let prefix_bits = prefix_bits.max(1).min(8);
+    let prefix_bits = prefix_bits.clamp(1, 8);
 
     // Encode the integer
     let mut encoded = BytesMut::new();
@@ -190,8 +190,7 @@ fn test_integer_encoding_roundtrip(value: usize, prefix_bits: u8, prefix: u8) ->
         return false;
     }
 
-    let first = bytes[0] & (max_first as u8);
-    let _ = bytes.split_to(1);
+    let first = consume_hpack_integer_byte(&mut bytes, "roundtrip first byte") & (max_first as u8);
 
     let decoded = if (first as usize) < max_first {
         first as usize
@@ -204,8 +203,7 @@ fn test_integer_encoding_roundtrip(value: usize, prefix_bits: u8, prefix: u8) ->
                 return false; // Invalid encoding
             }
 
-            let byte = bytes[0];
-            let _ = bytes.split_to(1);
+            let byte = consume_hpack_integer_byte(&mut bytes, "roundtrip continuation byte");
 
             let multiplier = match 1usize.checked_shl(shift) {
                 Some(m) => m,
@@ -279,24 +277,26 @@ fn fuzz_static_table_lookup(index: u8) {
         ((index as usize) % 61) + 1
     };
 
-    // Create a decoder to test static table access
-    let decoder = Decoder::new();
-
     // Assertion 1: Static table indices 1..=61 resolve to correct (name, value) pairs
-    match decoder.get_indexed_name(test_index) {
-        Ok(name) => {
+    match decode_indexed_header(test_index) {
+        Ok(header) => {
             // Verify the name matches the expected static table entry
             let expected_entry = STATIC_TABLE_EXPECTED[test_index - 1];
             assert_eq!(
-                name, expected_entry.0,
+                header.name, expected_entry.0,
                 "Static table index {} should resolve to name '{}', got '{}'",
-                test_index, expected_entry.0, name
+                test_index, expected_entry.0, header.name
+            );
+            assert_eq!(
+                header.value, expected_entry.1,
+                "Static table index {} should resolve to value '{}', got '{}'",
+                test_index, expected_entry.1, header.value
             );
 
             // The static table lookup should be consistent
-            let name2 = decoder.get_indexed_name(test_index).unwrap();
+            let header2 = decode_indexed_header(test_index).unwrap();
             assert_eq!(
-                name, name2,
+                header, header2,
                 "Static table lookup should be deterministic for index {}",
                 test_index
             );
@@ -312,10 +312,8 @@ fn fuzz_static_table_lookup(index: u8) {
 
 /// Test invalid index 0 handling
 fn fuzz_invalid_index_zero() {
-    let decoder = Decoder::new();
-
     // Assertion 2: Index 0 rejected as COMPRESSION_ERROR
-    match decoder.get_indexed_name(0) {
+    match decode_indexed_header(0) {
         Ok(_) => {
             panic!("Index 0 should be rejected but was accepted");
         }
@@ -335,46 +333,62 @@ fn fuzz_invalid_index_zero() {
 
 /// Test dynamic table offset calculation for indices > 61
 fn fuzz_dynamic_table_offset(dynamic_entries: Vec<TestHeader>, index: u16) {
-    let mut decoder = Decoder::new();
+    let mut dynamic_table = DynamicTable::with_max_size(MAX_TEST_DYNAMIC_SIZE);
+    let mut retained_entries: Vec<(String, String, usize)> = Vec::new();
 
     // Populate dynamic table with test entries
     let mut total_size = 0;
     for entry in &dynamic_entries {
-        if total_size + entry.size() <= MAX_TEST_DYNAMIC_SIZE {
-            decoder.dynamic_table_mut().insert(entry.to_header());
-            total_size += entry.size();
+        let entry_size = entry.size();
+        dynamic_table.insert(entry.to_header());
+        if entry_size > MAX_TEST_DYNAMIC_SIZE {
+            retained_entries.clear();
+            total_size = 0;
+            continue;
         }
+        while total_size + entry_size > MAX_TEST_DYNAMIC_SIZE {
+            if let Some((_, _, evicted_size)) = retained_entries.pop() {
+                total_size = total_size.saturating_sub(evicted_size);
+            } else {
+                break;
+            }
+        }
+        retained_entries.insert(0, (entry.name.clone(), entry.value.clone(), entry_size));
+        total_size = total_size.saturating_add(entry_size);
     }
 
     // Test index beyond static table (> 61)
     let test_index = 62 + (index as usize % 100); // Indices 62-161
 
     // Assertion 3: Indices > 61 reference dynamic table with correct offset
-    match decoder.get_indexed_name(test_index) {
-        Ok(name) => {
-            // If we got a name, verify it comes from our dynamic table
-            let dyn_index = test_index - 61; // Dynamic table is 0-indexed after static table
-            if dyn_index <= dynamic_entries.len() && dyn_index > 0 {
-                let expected_name = &dynamic_entries[dyn_index - 1].name;
+    let dyn_index = test_index - STATIC_TABLE_EXPECTED.len();
+    match dynamic_table.get(dyn_index) {
+        Some(header) => {
+            if dyn_index <= retained_entries.len() && dyn_index > 0 {
+                let (expected_name, expected_value, _) = &retained_entries[dyn_index - 1];
                 assert_eq!(
-                    name, *expected_name,
+                    header.name, *expected_name,
                     "Dynamic table index {} should resolve to name '{}', got '{}'",
-                    test_index, expected_name, name
+                    test_index, expected_name, header.name
+                );
+                assert_eq!(
+                    header.value, *expected_value,
+                    "Dynamic table index {} should resolve to value '{}', got '{}'",
+                    test_index, expected_value, header.value
+                );
+            } else {
+                panic!(
+                    "Dynamic table returned header for out-of-bounds index {}",
+                    dyn_index
                 );
             }
         }
-        Err(err) => {
-            // Error is expected if the dynamic table doesn't have enough entries
-            match err.code {
-                ErrorCode::CompressionError => {
-                    // This is expected when the dynamic index is out of bounds
-                }
-                other => {
-                    panic!(
-                        "Invalid dynamic index should return CompressionError, got {:?}",
-                        other
-                    );
-                }
+        None => {
+            if dyn_index <= retained_entries.len() {
+                panic!(
+                    "Dynamic table index {} should be present but returned None",
+                    dyn_index
+                );
             }
         }
     }
@@ -404,7 +418,7 @@ fn fuzz_long_index_sequence(encoded_bytes: Vec<u8>, prefix_bits: u8) {
     }
 
     // Clamp prefix_bits to valid range
-    let prefix_bits = prefix_bits.max(1).min(8);
+    let prefix_bits = prefix_bits.clamp(1, 8);
 
     let mut bytes = Bytes::from(encoded_bytes);
 
@@ -423,8 +437,7 @@ fn decode_test_integer(src: &mut Bytes, prefix_bits: u8) -> Result<usize, &'stat
     }
 
     let max_first = (1 << prefix_bits) - 1;
-    let first = src[0] & max_first as u8;
-    let _ = src.split_to(1);
+    let first = consume_hpack_integer_byte(src, "decoder first byte") & max_first as u8;
 
     if (first as usize) < max_first {
         return Ok(first as usize);
@@ -437,8 +450,7 @@ fn decode_test_integer(src: &mut Bytes, prefix_bits: u8) -> Result<usize, &'stat
         if src.is_empty() {
             return Err("unexpected end of integer");
         }
-        let byte = src[0];
-        let _ = src.split_to(1);
+        let byte = consume_hpack_integer_byte(src, "decoder continuation byte");
 
         // Guard against unbounded sequences
         if shift > 28 {
@@ -471,22 +483,32 @@ fn decode_test_integer(src: &mut Bytes, prefix_bits: u8) -> Result<usize, &'stat
     Ok(value)
 }
 
-/// Helper to access dynamic table from decoder (for testing)
-trait DecoderExt {
-    fn dynamic_table_mut(&mut self) -> &mut DynamicTable;
+fn consume_hpack_integer_byte(src: &mut Bytes, phase: &str) -> u8 {
+    let before_len = src.len();
+    assert!(before_len > 0, "{phase} must have a byte to consume");
+    let consumed = src.split_to(1);
+    assert_eq!(
+        consumed.len(),
+        1,
+        "{phase} should consume exactly one HPACK integer byte"
+    );
+    assert_eq!(
+        src.len() + consumed.len(),
+        before_len,
+        "{phase} should decrease remaining input by the consumed byte count"
+    );
+    consumed[0]
 }
 
-impl DecoderExt for Decoder {
-    fn dynamic_table_mut(&mut self) -> &mut DynamicTable {
-        // This is a test-only accessor - in real code this would be private
-        // We implement this by creating a new dynamic table for testing
-        // Since we can't access the private field directly
-        static mut TEST_DYNAMIC_TABLE: Option<DynamicTable> = None;
-        unsafe {
-            if TEST_DYNAMIC_TABLE.is_none() {
-                TEST_DYNAMIC_TABLE = Some(DynamicTable::with_max_size(MAX_TEST_DYNAMIC_SIZE));
-            }
-            TEST_DYNAMIC_TABLE.as_mut().unwrap()
-        }
-    }
+fn decode_indexed_header(index: usize) -> Result<Header, H2Error> {
+    let encoded_index = u8::try_from(index).expect("hpack_static only decodes one-byte indices");
+    let mut block = Bytes::from(vec![0x80 | encoded_index]);
+    let mut decoder = Decoder::new();
+    let mut headers = decoder.decode(&mut block)?;
+    assert_eq!(
+        headers.len(),
+        1,
+        "indexed HPACK header block should decode one header"
+    );
+    Ok(headers.remove(0))
 }
