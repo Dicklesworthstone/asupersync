@@ -2,7 +2,8 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::messaging::redis::{
-    RedisClusterSlotNode, RedisClusterSlotRange, RespValue, parse_cluster_slots_response,
+    RedisClusterSlotNode, RedisClusterSlotRange, RedisError, RespValue,
+    parse_cluster_slots_response,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -10,6 +11,45 @@ const MAX_TEXT_BYTES: usize = 64;
 const MAX_REPLICAS: usize = 4;
 const MAX_RANGES: usize = 16;
 const REDIS_CLUSTER_MAX_SLOT: u16 = 16_383;
+
+fn observe_cluster_slots_parse(
+    value: &RespValue,
+) -> Result<Vec<RedisClusterSlotRange>, RedisError> {
+    let response_len = match value {
+        RespValue::Array(Some(items)) => Some(items.len()),
+        _ => None,
+    };
+    let result = parse_cluster_slots_response(value);
+
+    match &result {
+        Ok(ranges) => {
+            if let Some(response_len) = response_len {
+                assert!(
+                    ranges.len() <= response_len,
+                    "raw CLUSTER SLOTS parse produced more ranges than response entries"
+                );
+            }
+            for range in ranges {
+                assert!(
+                    range.start <= range.end,
+                    "raw CLUSTER SLOTS parse produced a reversed range"
+                );
+                assert!(
+                    range.end <= REDIS_CLUSTER_MAX_SLOT,
+                    "raw CLUSTER SLOTS parse produced an out-of-range slot"
+                );
+            }
+        }
+        Err(err) => {
+            assert!(
+                !format!("{err:?}").is_empty(),
+                "Redis CLUSTER SLOTS parser errors must remain observable"
+            );
+        }
+    }
+
+    result
+}
 
 #[derive(Arbitrary, Debug, Clone)]
 enum FuzzEndpoint {
@@ -158,7 +198,7 @@ impl ClusterSlotsInput {
         assert_eq!(decoded.1, encoded.len());
 
         let parsed =
-            parse_cluster_slots_response(&decoded.0).expect("generated CLUSTER SLOTS should parse");
+            observe_cluster_slots_parse(&decoded.0).expect("generated CLUSTER SLOTS should parse");
         assert_eq!(parsed, expected);
 
         exercise_malformed(self.malformed);
@@ -222,12 +262,12 @@ fn exercise_malformed(case: MalformedCase) {
         }
     };
 
-    assert!(parse_cluster_slots_response(&response).is_err());
+    assert!(observe_cluster_slots_parse(&response).is_err());
 }
 
 fn exercise_raw_resp(data: &[u8]) {
     if let Ok(Some((value, _))) = RespValue::try_decode(data) {
-        let _ = parse_cluster_slots_response(&value);
+        let _ = observe_cluster_slots_parse(&value);
     }
 }
 
