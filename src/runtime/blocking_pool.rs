@@ -2452,7 +2452,7 @@ mod tests {
             fn record_execution(&self) {
                 let current_thread = thread::current().id();
                 self.thread_ids.lock().push(current_thread);
-                self.execution_count.fetch_add(1, Ordering::SeqCst);
+                self.execution_count.fetch_add(1, Ordering::Relaxed);
             }
 
             fn get_unique_thread_count(&self) -> usize {
@@ -2764,10 +2764,10 @@ mod tests {
 
                 let handle = pool.spawn(move || {
                     // Record task start
-                    tracker_clone.task_starts.fetch_add(1, Ordering::SeqCst);
+                    tracker_clone.task_starts.fetch_add(1, Ordering::Relaxed);
                     let current = tracker_clone
                         .current_concurrent
-                        .fetch_add(1, Ordering::SeqCst)
+                        .fetch_add(1, Ordering::Relaxed)
                         + 1;
 
                     // Update max concurrent
@@ -2793,8 +2793,8 @@ mod tests {
                     // Record task end
                     tracker_clone
                         .current_concurrent
-                        .fetch_sub(1, Ordering::SeqCst);
-                    tracker_clone.task_ends.fetch_add(1, Ordering::SeqCst);
+                        .fetch_sub(1, Ordering::Relaxed);
+                    tracker_clone.task_ends.fetch_add(1, Ordering::Relaxed);
                 });
 
                 handles.push(handle);

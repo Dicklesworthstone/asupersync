@@ -573,7 +573,7 @@ mod tests {
                 let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
                 let ep = client_ep.send(&cx, 42).await.expect("client send");
                 let (response, ep) = ep.recv(&cx).await.expect("client recv");
-                cr.store(response, Ordering::SeqCst);
+                cr.store(response, Ordering::Relaxed);
                 ep.close();
             })
             .unwrap();
@@ -584,7 +584,7 @@ mod tests {
             .create_task(region, crate::types::Budget::INFINITE, async move {
                 let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
                 let (request, ep) = server_ep.recv(&cx).await.expect("server recv");
-                sr.store(request, Ordering::SeqCst);
+                sr.store(request, Ordering::Relaxed);
                 let ep = ep.send(&cx, request * 2).await.expect("server send");
                 ep.close();
             })
@@ -595,12 +595,12 @@ mod tests {
         runtime.run_until_quiescent();
 
         assert_eq!(
-            server_result.load(Ordering::SeqCst),
+            server_result.load(Ordering::Relaxed),
             42,
             "server received 42"
         );
         assert_eq!(
-            client_result.load(Ordering::SeqCst),
+            client_result.load(Ordering::Relaxed),
             84,
             "client received 84"
         );
@@ -646,9 +646,9 @@ mod tests {
                 let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
                 match server_ep.offer(&cx).await.expect("offer") {
                     Offered::Left(ep) => {
-                        lt.store(true, Ordering::SeqCst);
+                        lt.store(true, Ordering::Relaxed);
                         let (val, ep) = ep.recv(&cx).await.expect("recv on left");
-                        vs.store(val, Ordering::SeqCst);
+                        vs.store(val, Ordering::Relaxed);
                         ep.close();
                     }
                     Offered::Right(ep) => {
@@ -664,8 +664,8 @@ mod tests {
         runtime.scheduler.lock().schedule(server_id, 0);
         runtime.run_until_quiescent();
 
-        assert!(left_taken.load(Ordering::SeqCst), "server took left branch");
-        assert_eq!(value_sent.load(Ordering::SeqCst), 99, "server received 99");
+        assert!(left_taken.load(Ordering::Relaxed), "server took left branch");
+        assert_eq!(value_sent.load(Ordering::Relaxed), 99, "server received 99");
 
         crate::test_complete!("session_choose_offer_e2e");
     }
@@ -692,7 +692,7 @@ mod tests {
                     let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
                     let ep = client_ep.send(&cx, 7).await.unwrap();
                     let (val, ep) = ep.recv(&cx).await.unwrap();
-                    r.store(val, Ordering::SeqCst);
+                    r.store(val, Ordering::Relaxed);
                     ep.close();
                 })
                 .unwrap();
@@ -711,7 +711,7 @@ mod tests {
             runtime.scheduler.lock().schedule(sid, 0);
             runtime.run_until_quiescent();
 
-            result.load(Ordering::SeqCst)
+            result.load(Ordering::Relaxed)
         }
 
         init_test("session_deterministic");

@@ -883,7 +883,7 @@ impl CancellationInjector {
             | InjectionStrategy::LastN(_) => false,
             InjectionStrategy::AtSequence(target) => {
                 if sequence == *target {
-                    self.injection_count.fetch_add(1, Ordering::SeqCst);
+                    self.injection_count.fetch_add(1, Ordering::Relaxed);
                     true
                 } else {
                     false
@@ -895,7 +895,7 @@ impl CancellationInjector {
                     return false;
                 }
                 if sequence == point.sequence {
-                    self.injection_count.fetch_add(1, Ordering::SeqCst);
+                    self.injection_count.fetch_add(1, Ordering::Relaxed);
                     true
                 } else {
                     false
@@ -903,7 +903,7 @@ impl CancellationInjector {
             }
             InjectionStrategy::EveryNth(n) => {
                 if *n > 0 && sequence.is_multiple_of(*n) {
-                    self.injection_count.fetch_add(1, Ordering::SeqCst);
+                    self.injection_count.fetch_add(1, Ordering::Relaxed);
                     true
                 } else {
                     false

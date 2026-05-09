@@ -2877,10 +2877,10 @@ mod tests {
                     Ok(mut data) => {
                         // Simulate delta temporality: accumulate values
                         *data.entry(metric_name).or_insert(0.0) += value;
-                        operations_completed_clone.fetch_add(1, Ordering::SeqCst);
+                        operations_completed_clone.fetch_add(1, Ordering::Relaxed);
                     }
                     Err(_) => {
-                        failed_operations_clone.fetch_add(1, Ordering::SeqCst);
+                        failed_operations_clone.fetch_add(1, Ordering::Relaxed);
                     }
                 }
 
@@ -2969,7 +2969,7 @@ mod tests {
 
                 if let Ok(mut data) = metric_data_clone.write() {
                     *data.entry(metric_name).or_insert(0.0) += value;
-                    operations_completed_clone.fetch_add(1, Ordering::SeqCst);
+                    operations_completed_clone.fetch_add(1, Ordering::Relaxed);
                 }
 
                 thread::sleep(Duration::from_nanos(150));
