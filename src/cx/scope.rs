@@ -101,6 +101,7 @@ use crate::combinator::{Either, Select};
 use crate::cx::{Cx, cap};
 use crate::record::AdmissionError;
 use crate::record::task::TaskState;
+use crate::runtime::resource_monitor::RegionPriority;
 use crate::runtime::task_handle::{JoinError, TaskHandle};
 use crate::runtime::{RegionCreateError, RuntimeState, SpawnError, StoredTask};
 use crate::tracing_compat::{debug, debug_span};
@@ -130,6 +131,14 @@ pub struct Scope<'r, P: Policy = crate::types::policy::FailFast> {
     pub(crate) capability_budget: CapabilityBudget,
     /// Phantom data for the policy type.
     pub(crate) _policy: PhantomData<&'r P>,
+}
+
+#[derive(Clone, Copy)]
+struct ChildRegionAdmission {
+    budget: Budget,
+    capability_budget: CapabilityBudget,
+    requirements: CapabilityBudgetRequirements,
+    priority: RegionPriority,
 }
 
 #[pin_project::pin_project]
@@ -914,12 +923,55 @@ impl<P: Policy> Scope<'_, P> {
         F: FnOnce(Scope<'_, P2>, &mut RuntimeState) -> Fut,
         Fut: Future<Output = Outcome<T, P2::Error>>,
     {
-        self.region_with_budget_and_capability_budget(
+        self.region_with_budget_and_priority(state, _cx, budget, RegionPriority::Normal, _policy, f)
+            .await
+    }
+
+    /// Creates a child region with an explicit resource-pressure priority.
+    ///
+    /// The child inherits this scope's scheduler and capability budgets while
+    /// classifying the admission request before pressure checks run.
+    pub async fn region_with_priority<P2, F, Fut, T, Caps>(
+        &self,
+        state: &mut RuntimeState,
+        _cx: &Cx<Caps>,
+        priority: RegionPriority,
+        _policy: P2,
+        f: F,
+    ) -> Result<Outcome<T, P2::Error>, RegionCreateError>
+    where
+        P2: Policy,
+        F: FnOnce(Scope<'_, P2>, &mut RuntimeState) -> Fut,
+        Fut: Future<Output = Outcome<T, P2::Error>>,
+    {
+        self.region_with_budget_and_priority(state, _cx, self.budget, priority, _policy, f)
+            .await
+    }
+
+    /// Creates a child region with explicit scheduler budget and pressure priority.
+    pub async fn region_with_budget_and_priority<P2, F, Fut, T, Caps>(
+        &self,
+        state: &mut RuntimeState,
+        _cx: &Cx<Caps>,
+        budget: Budget,
+        priority: RegionPriority,
+        _policy: P2,
+        f: F,
+    ) -> Result<Outcome<T, P2::Error>, RegionCreateError>
+    where
+        P2: Policy,
+        F: FnOnce(Scope<'_, P2>, &mut RuntimeState) -> Fut,
+        Fut: Future<Output = Outcome<T, P2::Error>>,
+    {
+        self.region_with_child_admission(
             state,
             _cx,
-            budget,
-            CapabilityBudget::UNSPECIFIED,
-            CapabilityBudgetRequirements::NONE,
+            ChildRegionAdmission {
+                budget,
+                capability_budget: CapabilityBudget::UNSPECIFIED,
+                requirements: CapabilityBudgetRequirements::NONE,
+                priority,
+            },
             _policy,
             f,
         )
@@ -946,11 +998,40 @@ impl<P: Policy> Scope<'_, P> {
         F: FnOnce(Scope<'_, P2>, &mut RuntimeState) -> Fut,
         Fut: Future<Output = Outcome<T, P2::Error>>,
     {
-        let child_region = state.create_child_region_with_capability_budget(
+        self.region_with_child_admission(
+            state,
+            _cx,
+            ChildRegionAdmission {
+                budget,
+                capability_budget,
+                requirements,
+                priority: RegionPriority::Normal,
+            },
+            _policy,
+            f,
+        )
+        .await
+    }
+
+    async fn region_with_child_admission<P2, F, Fut, T, Caps>(
+        &self,
+        state: &mut RuntimeState,
+        _cx: &Cx<Caps>,
+        admission: ChildRegionAdmission,
+        _policy: P2,
+        f: F,
+    ) -> Result<Outcome<T, P2::Error>, RegionCreateError>
+    where
+        P2: Policy,
+        F: FnOnce(Scope<'_, P2>, &mut RuntimeState) -> Fut,
+        Fut: Future<Output = Outcome<T, P2::Error>>,
+    {
+        let child_region = state.create_child_region_with_capability_budget_and_priority(
             self.region,
-            budget,
-            capability_budget,
-            requirements,
+            admission.budget,
+            admission.capability_budget,
+            admission.requirements,
+            admission.priority,
         )?;
         let child_budget = state
             .region(child_region)
@@ -2310,6 +2391,86 @@ mod tests {
             state.region(child_id).is_none(),
             "closed child region should be reclaimed from arena"
         );
+    }
+
+    #[test]
+    fn region_with_priority_uses_requested_admission_priority() {
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let parent = state.create_root_region(Budget::INFINITE);
+        let scope = test_scope(parent, Budget::INFINITE);
+
+        state
+            .resource_monitor()
+            .pressure()
+            .update_degradation_level(
+                crate::runtime::resource_monitor::ResourceType::Memory,
+                crate::runtime::resource_monitor::DegradationLevel::Moderate,
+            );
+
+        block_on(scope.region(
+            &mut state,
+            &cx,
+            crate::types::policy::FailFast,
+            |child, _state| {
+                let child_id = child.region_id();
+                async move { Outcome::Ok(child_id) }
+            },
+        ))
+        .expect("normal child scope should be admitted at moderate pressure");
+
+        let err = block_on(scope.region_with_priority(
+            &mut state,
+            &cx,
+            RegionPriority::Low,
+            crate::types::policy::FailFast,
+            |_child, _state| async move { Outcome::Ok(()) },
+        ))
+        .expect_err("low-priority child scope should be rejected at moderate pressure");
+
+        assert!(matches!(
+            err,
+            RegionCreateError::ResourcePressure {
+                requested_priority: RegionPriority::Low,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn region_with_priority_registers_child_shedding_priority() {
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let parent = state.create_root_region(Budget::INFINITE);
+        let scope = test_scope(parent, Budget::INFINITE);
+
+        let outcome = block_on(scope.region_with_priority(
+            &mut state,
+            &cx,
+            RegionPriority::Low,
+            crate::types::policy::FailFast,
+            |child, state| {
+                let child_id = child.region_id();
+                state
+                    .resource_monitor()
+                    .pressure()
+                    .update_degradation_level(
+                        crate::runtime::resource_monitor::ResourceType::Memory,
+                        crate::runtime::resource_monitor::DegradationLevel::Heavy,
+                    );
+                let decision = state
+                    .resource_monitor()
+                    .engine()
+                    .should_shed_region(child_id);
+                async move { Outcome::Ok(decision) }
+            },
+        ))
+        .expect("low-priority child scope should be admitted before pressure rises");
+
+        assert!(matches!(
+            outcome,
+            Outcome::Ok(crate::runtime::resource_monitor::SheddingDecision::Pause)
+        ));
     }
 
     #[test]
