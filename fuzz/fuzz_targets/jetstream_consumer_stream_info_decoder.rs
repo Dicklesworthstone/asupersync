@@ -184,6 +184,31 @@ const MAX_RESPONSES: usize = 50;
 const MAX_EDGE_CASES: usize = 20;
 const MAX_NESTING_DEPTH: usize = 50;
 
+fn assert_visible_js_error(err: &JsError) {
+    assert!(
+        !err.to_string().is_empty(),
+        "JetStream parser errors should be observable"
+    );
+}
+
+fn observe_stream_info_parse(payload: &[u8]) {
+    match fuzz_parse_stream_info(payload) {
+        Ok(info) => {
+            assert!(
+                info.config.name.len() <= payload.len(),
+                "parsed StreamInfo name should be sourced from the input"
+            );
+        }
+        Err(err) => assert_visible_js_error(&err),
+    }
+}
+
+fn observe_api_error_parse(json: &str) -> JsError {
+    let err = fuzz_parse_api_error(json);
+    assert_visible_js_error(&err);
+    err
+}
+
 fuzz_target!(|input: JetStreamInfoFuzz| {
     // Input size guards
     match &input.scenario {
@@ -222,7 +247,7 @@ fuzz_target!(|input: JetStreamInfoFuzz| {
     test_field_manipulation_strategies(&input);
 
     // Test error handling edge cases
-    test_error_handling_edge_cases(&input);
+    test_error_handling_edge_cases();
 });
 
 /// Test main JetStream info decoding scenarios
@@ -232,7 +257,7 @@ fn test_jetstream_info_decoding_scenarios(input: &JetStreamInfoFuzz) {
             for response in stream_responses.iter().take(MAX_RESPONSES) {
                 if is_valid_stream_response(response) {
                     let json = generate_stream_info_json(response, &input.field_strategy);
-                    let _ = fuzz_parse_stream_info(json.as_bytes());
+                    observe_stream_info_parse(json.as_bytes());
                 }
             }
         }
@@ -250,7 +275,7 @@ fn test_jetstream_info_decoding_scenarios(input: &JetStreamInfoFuzz) {
         InfoDecodingScenario::ApiError { error_responses } => {
             for response in error_responses.iter().take(MAX_RESPONSES) {
                 let json = generate_api_error_json(response, &input.field_strategy);
-                let _ = fuzz_parse_api_error(&json);
+                observe_api_error_parse(&json);
             }
         }
 
@@ -260,7 +285,7 @@ fn test_jetstream_info_decoding_scenarios(input: &JetStreamInfoFuzz) {
                     ResponseVariant::Stream(stream) => {
                         if is_valid_stream_response(stream) {
                             let json = generate_stream_info_json(stream, &input.field_strategy);
-                            let _ = fuzz_parse_stream_info(json.as_bytes());
+                            observe_stream_info_parse(json.as_bytes());
                         }
                     }
                     ResponseVariant::Consumer(consumer) => {
@@ -271,11 +296,11 @@ fn test_jetstream_info_decoding_scenarios(input: &JetStreamInfoFuzz) {
                     }
                     ResponseVariant::Error(error) => {
                         let json = generate_api_error_json(error, &input.field_strategy);
-                        let _ = fuzz_parse_api_error(&json);
+                        observe_api_error_parse(&json);
                     }
                     ResponseVariant::Empty => {
-                        let _ = fuzz_parse_stream_info(b"{}");
-                        let _ = fuzz_parse_api_error("{}");
+                        observe_stream_info_parse(b"{}");
+                        observe_api_error_parse("{}");
                     }
                 }
             }
@@ -291,7 +316,7 @@ fn test_jetstream_info_decoding_scenarios(input: &JetStreamInfoFuzz) {
 
 /// Test malformed JSON structure handling
 fn test_malformed_json_structure(input: &JetStreamInfoFuzz) {
-    let malformed_cases = [
+    let malformed_cases: &[&[u8]] = &[
         b"",                                  // Empty
         b"{",                                 // Incomplete object
         b"}",                                 // Invalid start
@@ -305,14 +330,14 @@ fn test_malformed_json_structure(input: &JetStreamInfoFuzz) {
         b"123",                               // Number instead of object
     ];
 
-    for &malformed in malformed_cases {
-        let _ = fuzz_parse_stream_info(malformed);
-        let _ = fuzz_parse_api_error(std::str::from_utf8(malformed).unwrap_or(""));
+    for malformed in malformed_cases {
+        observe_stream_info_parse(malformed);
+        observe_api_error_parse(std::str::from_utf8(malformed).unwrap_or(""));
     }
 
     // Test with specific field strategy
     let corrupt_json = generate_corrupted_json(&input.field_strategy);
-    let _ = fuzz_parse_stream_info(corrupt_json.as_bytes());
+    observe_stream_info_parse(corrupt_json.as_bytes());
 }
 
 /// Test JSON field manipulation strategies
@@ -338,13 +363,13 @@ fn test_field_manipulation_strategies(input: &JetStreamInfoFuzz) {
     };
 
     let manipulated_json = generate_stream_info_json(&base_stream, &input.field_strategy);
-    let _ = fuzz_parse_stream_info(manipulated_json.as_bytes());
+    observe_stream_info_parse(manipulated_json.as_bytes());
 }
 
 /// Test error handling edge cases
-fn test_error_handling_edge_cases(input: &JetStreamInfoFuzz) {
+fn test_error_handling_edge_cases() {
     // Test API error parsing edge cases
-    let error_cases = [
+    let error_cases: &[&str] = &[
         // Stream not found variations
         r#"{"error":{"code":404,"err_code":10059,"description":"stream not found"}}"#,
         r#"{"error":{"code":404,"description":"generic not found"}}"#,
@@ -359,8 +384,8 @@ fn test_error_handling_edge_cases(input: &JetStreamInfoFuzz) {
         r#"{"error":{"code":null,"description":"null code"}}"#,
     ];
 
-    for &case in error_cases {
-        let _ = fuzz_parse_api_error(case);
+    for case in error_cases {
+        observe_api_error_parse(case);
     }
 }
 
@@ -372,7 +397,7 @@ fn generate_stream_info_json(stream: &StreamInfoVariant, strategy: &FieldStrateg
     write!(&mut json, "\"config\":{{").expect("write to String");
     write!(&mut json, "\"name\":\"{}\"", json_escape(&stream.name)).expect("write to String");
 
-    if !stream.config.subjects.is_empty() {
+    if stream.include_optional && !stream.config.subjects.is_empty() {
         json.push_str(",\"subjects\":[");
         for (i, subj) in stream.config.subjects.iter().enumerate() {
             if i > 0 {
@@ -383,13 +408,20 @@ fn generate_stream_info_json(stream: &StreamInfoVariant, strategy: &FieldStrateg
         json.push(']');
     }
 
-    write!(&mut json, ",\"retention\":\"{}\"", stream.config.retention).expect("write to String");
-    write!(&mut json, ",\"storage\":\"{}\"", stream.config.storage).expect("write to String");
+    if stream.include_optional {
+        write!(&mut json, ",\"retention\":\"{}\"", stream.config.retention)
+            .expect("write to String");
+        write!(&mut json, ",\"storage\":\"{}\"", stream.config.storage).expect("write to String");
+    }
 
-    if let Some(max_msgs) = stream.config.max_msgs {
+    if stream.include_optional
+        && let Some(max_msgs) = stream.config.max_msgs
+    {
         write!(&mut json, ",\"max_msgs\":{}", max_msgs).expect("write to String");
     }
-    if let Some(max_bytes) = stream.config.max_bytes {
+    if stream.include_optional
+        && let Some(max_bytes) = stream.config.max_bytes
+    {
         write!(&mut json, ",\"max_bytes\":{}", max_bytes).expect("write to String");
     }
 
@@ -469,6 +501,10 @@ fn generate_consumer_info_json(consumer: &ConsumerInfoVariant, strategy: &FieldS
 
     json.push('}');
 
+    if consumer.include_state {
+        json.push_str(",\"num_pending\":0,\"num_waiting\":0");
+    }
+
     // Apply field strategy
     match strategy {
         FieldStrategy::OmitOptional => {
@@ -513,12 +549,11 @@ fn generate_api_error_json(error: &ApiErrorVariant, strategy: &FieldStrategy) ->
                 json.push_str(",\"err_code\":10014");
             }
         }
-        ErrorType::Malformed => match strategy {
-            FieldStrategy::TypeConfusion => {
+        ErrorType::Malformed => {
+            if let FieldStrategy::TypeConfusion = strategy {
                 json.push_str(",\"code\":\"not_a_number\"");
             }
-            _ => {}
-        },
+        }
         _ => {}
     }
 
@@ -534,19 +569,19 @@ fn test_json_edge_case(edge_case: &JsonEdgeCase) {
 
     match edge_case.edge_type {
         JsonEdgeType::Empty => {
-            let _ = fuzz_parse_stream_info(b"{}");
+            observe_stream_info_parse(b"{}");
         }
         JsonEdgeType::VeryLarge => {
             let large_json = generate_large_json();
-            let _ = fuzz_parse_stream_info(large_json.as_bytes());
+            observe_stream_info_parse(large_json.as_bytes());
         }
         JsonEdgeType::DeeplyNested => {
             let nested_json = generate_nested_json(10);
-            let _ = fuzz_parse_stream_info(nested_json.as_bytes());
+            observe_stream_info_parse(nested_json.as_bytes());
         }
         JsonEdgeType::Unicode => {
             let unicode_json = r#"{"name":"测试🌟stream","state":{"messages":100}}"#;
-            let _ = fuzz_parse_stream_info(unicode_json.as_bytes());
+            observe_stream_info_parse(unicode_json.as_bytes());
         }
         JsonEdgeType::NumericEdges => {
             let numeric_json = format!(
@@ -555,18 +590,18 @@ fn test_json_edge_case(edge_case: &JsonEdgeCase) {
                 i64::MIN,
                 u64::MAX
             );
-            let _ = fuzz_parse_stream_info(numeric_json.as_bytes());
+            observe_stream_info_parse(numeric_json.as_bytes());
         }
         JsonEdgeType::EscapeSequences => {
             let escape_json = r#"{"name":"test\nstream\t\"with\\escapes","state":{"messages":1}}"#;
-            let _ = fuzz_parse_stream_info(escape_json.as_bytes());
+            observe_stream_info_parse(escape_json.as_bytes());
         }
         JsonEdgeType::InvalidSyntax => {
-            let _ = fuzz_parse_stream_info(&edge_case.test_data);
+            observe_stream_info_parse(&edge_case.test_data);
         }
         JsonEdgeType::MissingFields => {
             let minimal_json = r#"{"name":"test"}"#;
-            let _ = fuzz_parse_stream_info(minimal_json.as_bytes());
+            observe_stream_info_parse(minimal_json.as_bytes());
         }
     }
 }
