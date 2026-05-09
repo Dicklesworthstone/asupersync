@@ -908,7 +908,9 @@ fn t811_16_triage_pointer_one_command_per_track() {
             .unwrap()
             .strip_suffix(".rs")
             .unwrap();
-        let cmd = format!("rch exec -- cargo test --test {test_stem} -- --nocapture");
+        let cmd = format!(
+            "rch exec -- env CARGO_TARGET_DIR=${{TMPDIR:-/tmp}}/rch_target_tokio_unit_quality_{test_stem} cargo test --test {test_stem} -- --nocapture"
+        );
         pointers.push((track.track_id, cmd));
     }
 
@@ -922,6 +924,14 @@ fn t811_16_triage_pointer_one_command_per_track() {
         assert!(
             cmd.contains("rch exec"),
             "track {track_id} pointer must use rch exec"
+        );
+        assert!(
+            cmd.contains("CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_unit_quality_"),
+            "track {track_id} pointer must isolate cargo target output"
+        );
+        assert!(
+            !cmd.contains("rch exec -- cargo"),
+            "track {track_id} pointer must not use bare rch cargo routing"
         );
     }
 
