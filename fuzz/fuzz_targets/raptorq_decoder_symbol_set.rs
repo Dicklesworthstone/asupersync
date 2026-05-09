@@ -15,7 +15,9 @@
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 
-use asupersync::raptorq::decoder::{DecodeError, InactivationDecoder, ReceivedSymbol};
+use asupersync::raptorq::decoder::{
+    DecodeError, DecodeResult, InactivationDecoder, ReceivedSymbol,
+};
 use asupersync::raptorq::gf256::Gf256;
 use asupersync::types::ObjectId;
 
@@ -143,15 +145,26 @@ fn test_adversarial_symbol_set(input: &AdversarialSymbolSet, k: usize, symbol_si
         return;
     }
 
-    let has_validation_malformed_repair = symbols.iter().any(|symbol| {
-        !symbol.is_source
-            && (symbol.data.len() != symbol_size
-                || symbol.columns.len() != symbol.coefficients.len()
-                || symbol
-                    .columns
-                    .iter()
-                    .any(|&column| column >= decoder.params().l))
-    });
+    let validation_malformed_repair_count = symbols
+        .iter()
+        .filter(|symbol| {
+            !symbol.is_source
+                && (symbol.data.len() != symbol_size
+                    || symbol.columns.len() != symbol.coefficients.len()
+                    || symbol
+                        .columns
+                        .iter()
+                        .any(|&column| column >= decoder.params().l))
+        })
+        .count();
+    let has_validation_malformed_repair = validation_malformed_repair_count > 0;
+
+    if input.include_violations {
+        assert!(
+            validation_malformed_repair_count <= symbols.len(),
+            "validation violation count cannot exceed generated symbols"
+        );
+    }
 
     // Test basic decode - should never panic
     let result =
@@ -159,31 +172,7 @@ fn test_adversarial_symbol_set(input: &AdversarialSymbolSet, k: usize, symbol_si
 
     match result {
         Ok(decode_result) => {
-            // Decode succeeded or failed cleanly
-            match decode_result {
-                Ok(decoded) => {
-                    // Successful decode - verify invariants
-                    assert_eq!(decoded.source.len(), k, "Source length mismatch");
-                    for (i, source_symbol) in decoded.source.iter().enumerate() {
-                        assert_eq!(
-                            source_symbol.len(),
-                            symbol_size,
-                            "Source symbol {} size mismatch",
-                            i
-                        );
-                    }
-
-                    // Intermediate symbols length should match the systematic parameter L
-                    assert!(
-                        !decoded.intermediate.is_empty(),
-                        "No intermediate symbols recovered"
-                    );
-                }
-                Err(decode_error) => {
-                    // Decode failed cleanly - validate error types
-                    validate_decode_error(&decode_error, k, &symbols);
-                }
-            }
+            observe_decode_result("decode", decode_result, k, symbol_size, &symbols)
         }
         Err(_) => {
             panic!("Decoder panicked with adversarial input: {:?}", input);
@@ -228,11 +217,20 @@ fn test_adversarial_symbol_set(input: &AdversarialSymbolSet, k: usize, symbol_si
                 decoder.decode_wavefront(&symbols, batch_size)
             }));
 
-            if result.is_err() {
-                panic!(
-                    "decode_wavefront panicked with batch_size={}, input: {:?}",
-                    batch_size, input
-                );
+            match result {
+                Ok(decode_result) => observe_decode_result(
+                    "decode_wavefront",
+                    decode_result,
+                    k,
+                    symbol_size,
+                    &symbols,
+                ),
+                Err(_) => {
+                    panic!(
+                        "decode_wavefront panicked with batch_size={}, input: {:?}",
+                        batch_size, input
+                    );
+                }
             }
         }
     }
@@ -242,13 +240,68 @@ fn test_adversarial_symbol_set(input: &AdversarialSymbolSet, k: usize, symbol_si
         // Limit for proof generation
         let object_id = ObjectId::new_for_test(input.seed);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            decoder.decode_with_proof(&symbols, object_id, 0)
+            decoder
+                .decode_with_proof(&symbols, object_id, 0)
+                .map_err(|(error, proof)| (error, format!("{:?}", proof.outcome)))
         }));
 
-        if result.is_err() {
-            panic!("decode_with_proof panicked with input: {:?}", input);
+        match result {
+            Ok(Ok(with_proof)) => {
+                validate_decode_success(&with_proof.result, k, symbol_size);
+                assert!(
+                    !format!("{:?}", with_proof.proof.outcome).is_empty(),
+                    "decode_with_proof success should expose a proof outcome"
+                );
+            }
+            Ok(Err((decode_error, proof_outcome))) => {
+                validate_decode_error(&decode_error, k, &symbols);
+                assert!(
+                    !proof_outcome.is_empty(),
+                    "decode_with_proof rejection should expose a proof outcome"
+                );
+            }
+            Err(_) => {
+                panic!("decode_with_proof panicked with input: {:?}", input);
+            }
         }
     }
+}
+
+fn observe_decode_result(
+    context: &str,
+    decode_result: Result<DecodeResult, DecodeError>,
+    k: usize,
+    symbol_size: usize,
+    symbols: &[ReceivedSymbol],
+) {
+    match decode_result {
+        Ok(decoded) => validate_decode_success(&decoded, k, symbol_size),
+        Err(decode_error) => {
+            validate_decode_error(&decode_error, k, symbols);
+            assert!(
+                !format!("{decode_error:?}").is_empty(),
+                "{context} rejection should expose a DecodeError diagnostic"
+            );
+        }
+    }
+}
+
+fn validate_decode_success(decoded: &DecodeResult, k: usize, symbol_size: usize) {
+    assert_eq!(decoded.source.len(), k, "Source length mismatch");
+    for (i, source_symbol) in decoded.source.iter().enumerate() {
+        assert_eq!(
+            source_symbol.len(),
+            symbol_size,
+            "Source symbol {} size mismatch",
+            i
+        );
+    }
+
+    // Intermediate symbols length should match the systematic parameter L.
+    assert!(
+        !decoded.intermediate.is_empty(),
+        "No intermediate symbols recovered"
+    );
 }
 
 /// Build a ReceivedSymbol from adversarial configuration
