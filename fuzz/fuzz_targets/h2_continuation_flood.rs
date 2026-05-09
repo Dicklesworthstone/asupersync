@@ -2,8 +2,8 @@
 
 use arbitrary::Arbitrary;
 use asupersync::bytes::Bytes;
-use asupersync::http::h2::connection::{Connection, ConnectionState};
-use asupersync::http::h2::error::H2Error;
+use asupersync::http::h2::connection::{Connection, ConnectionState, ReceivedFrame};
+use asupersync::http::h2::error::{ErrorCode, H2Error};
 use asupersync::http::h2::frame::{
     ContinuationFrame, Frame, FrameHeader, FrameType, HeadersFrame, SettingsFrame,
     continuation_flags, parse_frame,
@@ -58,6 +58,118 @@ fn observe_parse_frame(header: &FrameHeader, payload: Bytes) -> Result<Frame, H2
     result
 }
 
+fn assert_initial_settings_observed(
+    result: Result<Option<ReceivedFrame>, H2Error>,
+    conn: &Connection,
+) {
+    match result {
+        Ok(None) => {
+            assert_eq!(
+                conn.state(),
+                ConnectionState::Open,
+                "empty initial SETTINGS must complete the H2 handshake"
+            );
+            assert!(
+                !conn.is_awaiting_continuation(),
+                "initial SETTINGS must not enter continuation state"
+            );
+        }
+        Ok(Some(frame)) => {
+            panic!("initial SETTINGS unexpectedly produced a received event: {frame:?}");
+        }
+        Err(err) => {
+            panic!("empty initial SETTINGS must be accepted during handshake: {err:?}");
+        }
+    }
+}
+
+fn assert_connection_continuation_observed(
+    result: Result<Option<ReceivedFrame>, H2Error>,
+    conn: &Connection,
+    expected_stream_id: u32,
+    end_headers: bool,
+) -> bool {
+    match result {
+        Ok(Some(ReceivedFrame::Headers { stream_id, .. })) => {
+            assert_eq!(
+                stream_id, expected_stream_id,
+                "decoded continuation header event changed stream id"
+            );
+            assert!(
+                end_headers,
+                "continuation sequence produced headers before END_HEADERS"
+            );
+            assert!(
+                !conn.is_awaiting_continuation(),
+                "END_HEADERS continuation must clear continuation state"
+            );
+            true
+        }
+        Ok(Some(frame)) => {
+            panic!("continuation sequence produced an unrelated received event: {frame:?}");
+        }
+        Ok(None) => {
+            assert!(
+                !end_headers,
+                "END_HEADERS continuation was accepted without a decoded event"
+            );
+            assert_eq!(
+                conn.continuation_stream_id(),
+                Some(expected_stream_id),
+                "non-terminal continuation must preserve the expected stream id"
+            );
+            false
+        }
+        Err(err) => {
+            assert_ne!(
+                err.code,
+                ErrorCode::NoError,
+                "rejected continuation must carry an error code"
+            );
+            assert!(
+                !err.message.is_empty(),
+                "rejected continuation must carry diagnostics"
+            );
+            if let Some(stream_id) = err.stream_id {
+                assert_ne!(
+                    stream_id, 0,
+                    "stream-scoped continuation errors must name a nonzero stream"
+                );
+            }
+            true
+        }
+    }
+}
+
+fn assert_parser_continuation_observed(result: Result<Frame, H2Error>) {
+    match result {
+        Ok(Frame::Continuation(frame)) => {
+            assert_ne!(
+                frame.stream_id, 0,
+                "accepted parser-only CONTINUATION must name a stream"
+            );
+            assert!(
+                frame.header_block.len() <= MAX_RAW_PAYLOAD,
+                "accepted parser-only CONTINUATION exceeded payload bound"
+            );
+        }
+        Ok(frame) => {
+            panic!("parser-only CONTINUATION probe produced non-continuation frame: {frame:?}");
+        }
+        Err(err) => {
+            assert_ne!(
+                err.code,
+                ErrorCode::NoError,
+                "rejected parser-only CONTINUATION must carry an error code"
+            );
+            assert!(
+                !err.message.is_empty(),
+                "rejected parser-only CONTINUATION must carry diagnostics"
+            );
+        }
+    }
+}
+
 #[derive(Arbitrary, Debug)]
 struct ContinuationFloodInput {
     initial_stream_id: u32,
@@ -95,10 +207,8 @@ fuzz_target!(|input: ContinuationFloodInput| {
 
 fn fuzz_connection_sequence(input: &ContinuationFloodInput) {
     let mut conn = Connection::server(Settings::default());
-    let _ = conn.process_frame(Frame::Settings(SettingsFrame::new(Vec::new())));
-    if conn.state() != ConnectionState::Open {
-        return;
-    }
+    let settings_result = conn.process_frame(Frame::Settings(SettingsFrame::new(Vec::new())));
+    assert_initial_settings_observed(settings_result, &conn);
 
     let stream_id = normalize_client_stream_id(input.initial_stream_id);
     let header_block = capped_bytes(&input.initial_header_block, MAX_INITIAL_BLOCK);
@@ -116,7 +226,7 @@ fn fuzz_connection_sequence(input: &ContinuationFloodInput) {
 
         let done = fragment.end_headers;
         let result = conn.process_frame(continuation);
-        if result.is_err() || done {
+        if assert_connection_continuation_observed(result, &conn, stream_id, done) {
             break;
         }
     }
@@ -130,7 +240,7 @@ fn fuzz_parser_only(input: &ContinuationFloodInput) {
         flags: continuation_flags::END_HEADERS,
         stream_id: normalize_client_stream_id(input.initial_stream_id),
     };
-    let _ = observe_parse_frame(&raw_header, raw_payload);
+    assert_parser_continuation_observed(observe_parse_frame(&raw_header, raw_payload));
 
     for fragment in input.fragments.iter().take(MAX_CONTINUATIONS) {
         let payload = capped_bytes(&fragment.payload, MAX_RAW_PAYLOAD);
@@ -140,7 +250,7 @@ fn fuzz_parser_only(input: &ContinuationFloodInput) {
             flags: fragment.raw_flags | continuation_flags::END_HEADERS,
             stream_id: fragment.stream_id & 0x7fff_ffff,
         };
-        let _ = observe_parse_frame(&header, payload);
+        assert_parser_continuation_observed(observe_parse_frame(&header, payload));
     }
 }
 
