@@ -712,8 +712,11 @@ impl<'a, T> Future for ReadFuture<'a, '_, T> {
             // Dequeued - we were pre-granted the lock by release_writer!
             // `state.readers` was already incremented for us.
 
-            // Record lock acquisition for ordering tracking
+            // Check and record lock acquisition for ordering tracking.
+            // Queued handoffs must enforce the same E->D->B->A->C
+            // ordering as immediate acquisition.
             if let Some(rank) = this.lock.rank {
+                lock_ordering::check_acquire(this.lock.name, rank);
                 lock_ordering::record_acquire(rank);
             }
 
@@ -809,8 +812,11 @@ impl<'a, T> Future for WriteFuture<'a, '_, T> {
             }
             // Dequeued - we were pre-granted the lock!
 
-            // Record lock acquisition for ordering tracking
+            // Check and record lock acquisition for ordering tracking.
+            // Queued handoffs must enforce the same E->D->B->A->C
+            // ordering as immediate acquisition.
             if let Some(rank) = this.lock.rank {
+                lock_ordering::check_acquire(this.lock.name, rank);
                 lock_ordering::record_acquire(rank);
             }
 
@@ -1228,8 +1234,11 @@ impl<T> Future for OwnedReadFuture<'_, T> {
             // Dequeued - we were pre-granted the lock by release_writer!
             // `state.readers` was already incremented for us.
 
-            // Record lock acquisition for ordering tracking
+            // Check and record lock acquisition for ordering tracking.
+            // Queued handoffs must enforce the same E->D->B->A->C
+            // ordering as immediate acquisition.
             if let Some(rank) = this.lock.rank {
+                lock_ordering::check_acquire(this.lock.name, rank);
                 lock_ordering::record_acquire(rank);
             }
 
@@ -1330,8 +1339,11 @@ impl<T> Future for OwnedWriteFuture<'_, T> {
             }
             // Dequeued - we were pre-granted the lock!
 
-            // Record lock acquisition for ordering tracking
+            // Check and record lock acquisition for ordering tracking.
+            // Queued handoffs must enforce the same E->D->B->A->C
+            // ordering as immediate acquisition.
             if let Some(rank) = this.lock.rank {
+                lock_ordering::check_acquire(this.lock.name, rank);
                 lock_ordering::record_acquire(rank);
             }
 
@@ -4423,5 +4435,80 @@ mod metamorphic_tests {
         }
 
         crate::test_complete!("abandon_waiter_calls_lock_ordering_record_release");
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn queued_read_handoff_checks_lock_order_before_recording_grant() {
+        init_test("queued_read_handoff_checks_lock_order_before_recording_grant");
+        crate::sync::lock_ordering::clear_held_locks();
+        let cx = test_cx();
+
+        let regions_lock = RwLock::with_name("regions_table", 0_u32);
+        let tasks_lock = RwLock::with_name("tasks_queue", 0_u32);
+
+        let active_region_writer = block_on(regions_lock.write(&cx)).expect("region writer");
+        let tasks_guard = block_on(tasks_lock.write(&cx)).expect("tasks writer");
+
+        let mut read_fut = regions_lock.read(&cx);
+        let queued = poll_once(&mut read_fut).is_none();
+        crate::assert_with_log!(queued, "reader queued behind writer", true, queued);
+
+        drop(active_region_writer);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = poll_once(&mut read_fut);
+        }));
+        assert!(
+            result.is_err(),
+            "pre-granted read waiter must reject Regions acquisition while Tasks is held"
+        );
+
+        drop(read_fut);
+        drop(tasks_guard);
+        crate::sync::lock_ordering::clear_held_locks();
+
+        let state = regions_lock.debug_state();
+        assert_eq!(state.readers, 0);
+        assert!(!state.writer_active);
+        crate::test_complete!("queued_read_handoff_checks_lock_order_before_recording_grant");
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn queued_write_handoff_checks_lock_order_before_recording_grant() {
+        init_test("queued_write_handoff_checks_lock_order_before_recording_grant");
+        crate::sync::lock_ordering::clear_held_locks();
+        let cx = test_cx();
+
+        let regions_lock = RwLock::with_name("regions_table", 0_u32);
+        let tasks_lock = RwLock::with_name("tasks_queue", 0_u32);
+
+        let active_region_reader = block_on(regions_lock.read(&cx)).expect("region reader");
+        let tasks_guard = block_on(tasks_lock.write(&cx)).expect("tasks writer");
+
+        let mut write_fut = regions_lock.write(&cx);
+        let queued = poll_once(&mut write_fut).is_none();
+        crate::assert_with_log!(queued, "writer queued behind reader", true, queued);
+
+        drop(active_region_reader);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = poll_once(&mut write_fut);
+        }));
+        assert!(
+            result.is_err(),
+            "pre-granted write waiter must reject Regions acquisition while Tasks is held"
+        );
+
+        drop(write_fut);
+        drop(tasks_guard);
+        crate::sync::lock_ordering::clear_held_locks();
+
+        let state = regions_lock.debug_state();
+        assert_eq!(state.readers, 0);
+        assert_eq!(state.writer_waiters, 0);
+        assert!(!state.writer_active);
+        crate::test_complete!("queued_write_handoff_checks_lock_order_before_recording_grant");
     }
 }
