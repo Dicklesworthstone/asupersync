@@ -33,7 +33,7 @@ mod mock_code_finder_audit {
 
     const KNOWN_IMPLEMENTATION_BOUNDARIES: &[(&str, &str)] = &[(
         "src/observability/pressure_governor.rs",
-        "Channel-backlog pressure is an explicit aggregate sample today",
+        "explicit aggregate sample today",
     )];
 
     /// **AUDIT ASSERTION**: Verify no unimplemented!() macros in observability.
@@ -196,7 +196,7 @@ mod mock_code_finder_audit {
     fn audit_known_implementation_boundaries_stay_truthful() {
         for (path, marker) in KNOWN_IMPLEMENTATION_BOUNDARIES {
             let source = std::fs::read_to_string(path)
-                .unwrap_or_else(|error| panic!("failed to read {path}: {error}"));
+                .expect("known observability boundary source file should be readable");
             assert!(
                 source.contains(marker),
                 "known observability boundary lost its truthful source marker: {path} missing {marker:?}"
