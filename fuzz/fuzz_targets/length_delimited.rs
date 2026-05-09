@@ -459,6 +459,36 @@ fn prefixed_buffer(prefix_seed: u8, prefix_len: usize) -> BytesMut {
     prefix
 }
 
+fn observe_stress_decode(
+    result: Result<Option<BytesMut>, std::io::Error>,
+    before_len: usize,
+    buffer_after: &BytesMut,
+) {
+    assert!(buffer_after.len() <= before_len);
+
+    match result {
+        Ok(Some(decoded)) => {
+            let consumed = before_len - buffer_after.len();
+            assert!(consumed > 0, "decoded frame without consuming input");
+            assert!(
+                decoded.len() <= consumed,
+                "decoded frame longer than consumed wire bytes"
+            );
+        }
+        Ok(None) => {
+            // Incomplete frames and active skip-state draining are valid for
+            // arbitrary fuzz bytes; the important invariant is bounded input.
+        }
+        Err(err) => {
+            assert_eq!(err.kind(), ErrorKind::InvalidData);
+            assert!(
+                !err.to_string().is_empty(),
+                "length-delimited decode error should be diagnostic"
+            );
+        }
+    }
+}
+
 fuzz_target!(|input: FuzzInput| {
     let frame_bytes = input.construct_frame_bytes();
     if frame_bytes.len() > MAX_FUZZ_INPUT_SIZE {
@@ -470,7 +500,9 @@ fuzz_target!(|input: FuzzInput| {
         Err(_) => return,
     };
     let mut stress_frame = frame_bytes.clone();
-    let _ = codec.decode(&mut stress_frame);
+    let stress_len = stress_frame.len();
+    let stress_result = codec.decode(&mut stress_frame);
+    observe_stress_decode(stress_result, stress_len, &stress_frame);
 
     let (roundtrip_config, roundtrip_payload) = normalized_roundtrip_case(&input);
 
