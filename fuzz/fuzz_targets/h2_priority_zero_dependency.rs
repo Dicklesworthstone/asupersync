@@ -1,4 +1,5 @@
 #![no_main]
+#![allow(dead_code)]
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
@@ -133,7 +134,7 @@ struct TestScenario {
     error_handling: ErrorHandling,
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Debug, Clone)]
 enum TreeValidation {
     /// Validate complete priority tree
     Full,
@@ -143,7 +144,7 @@ enum TreeValidation {
     None,
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Debug, Clone)]
 enum CycleDetection {
     /// Detect and prevent dependency cycles
     Enabled,
@@ -385,7 +386,13 @@ impl PriorityTree {
         }
     }
 
-    fn add_priority(&mut self, stream_id: u32, dependency: u32, weight: u16, exclusive: bool) -> Result<TreePosition, PriorityParsingError> {
+    fn add_priority(
+        &mut self,
+        stream_id: u32,
+        dependency: u32,
+        weight: u16,
+        exclusive: bool,
+    ) -> Result<TreePosition, PriorityParsingError> {
         // Validate inputs
         if stream_id == ROOT_STREAM_ID {
             return Err(PriorityParsingError::PriorityOnConnectionStream);
@@ -396,10 +403,10 @@ impl PriorityTree {
         }
 
         // Check for cycles (except root dependency)
-        if dependency != ROOT_STREAM_ID {
-            if let Some(cycle) = self.detect_cycle(stream_id, dependency) {
-                return Err(PriorityParsingError::DependencyCycle { cycle });
-            }
+        if dependency != ROOT_STREAM_ID
+            && let Some(cycle) = self.detect_cycle(stream_id, dependency)
+        {
+            return Err(PriorityParsingError::DependencyCycle { cycle });
         }
 
         // Remove existing node if it exists
@@ -421,7 +428,9 @@ impl PriorityTree {
             // Root dependency
             if exclusive {
                 // All current root dependencies become children of this stream
-                let current_root_deps: Vec<u32> = self.root_dependencies.iter()
+                let current_root_deps: Vec<u32> = self
+                    .root_dependencies
+                    .iter()
                     .map(|node| node.stream_id)
                     .collect();
 
@@ -496,10 +505,10 @@ impl PriorityTree {
         visited.insert(current);
         path.push(current);
 
-        if let Some(node) = self.get_node(current) {
-            if let Some(cycle) = self.dfs_cycle_detection(node.parent, target, visited, path) {
-                return Some(cycle);
-            }
+        if let Some(node) = self.get_node(current)
+            && let Some(cycle) = self.dfs_cycle_detection(node.parent, target, visited, path)
+        {
+            return Some(cycle);
         }
 
         path.pop();
@@ -534,7 +543,8 @@ impl PriorityTree {
         // Remove from root dependencies
         self.root_dependencies.retain(|node| {
             if node.stream_id == stream_id {
-                self.tree_stats.root_dependent_count = self.tree_stats.root_dependent_count.saturating_sub(1);
+                self.tree_stats.root_dependent_count =
+                    self.tree_stats.root_dependent_count.saturating_sub(1);
                 false
             } else {
                 true
@@ -557,22 +567,31 @@ impl PriorityTree {
     }
 
     fn remove_from_root(&mut self, stream_id: u32) -> Option<PriorityNode> {
-        let position = self.root_dependencies.iter().position(|node| node.stream_id == stream_id)?;
+        let position = self
+            .root_dependencies
+            .iter()
+            .position(|node| node.stream_id == stream_id)?;
         let removed = self.root_dependencies.remove(position);
-        self.tree_stats.root_dependent_count = self.tree_stats.root_dependent_count.saturating_sub(1);
+        self.tree_stats.root_dependent_count =
+            self.tree_stats.root_dependent_count.saturating_sub(1);
         Some(removed)
     }
 
     fn get_node(&self, stream_id: u32) -> Option<&PriorityNode> {
-        self.dependencies.get(&stream_id)
-            .or_else(|| self.root_dependencies.iter().find(|node| node.stream_id == stream_id))
+        self.dependencies.get(&stream_id).or_else(|| {
+            self.root_dependencies
+                .iter()
+                .find(|node| node.stream_id == stream_id)
+        })
     }
 
     fn get_node_mut(&mut self, stream_id: u32) -> Option<&mut PriorityNode> {
         if self.dependencies.contains_key(&stream_id) {
             self.dependencies.get_mut(&stream_id)
         } else {
-            self.root_dependencies.iter_mut().find(|node| node.stream_id == stream_id)
+            self.root_dependencies
+                .iter_mut()
+                .find(|node| node.stream_id == stream_id)
         }
     }
 
@@ -621,7 +640,12 @@ impl MockH2PriorityParser {
         }
     }
 
-    fn parse_priority_frame(&mut self, frame_data: &[u8], stream_id: u32, flags: u8) -> Result<ParsedPriorityFrame, PriorityParsingError> {
+    fn parse_priority_frame(
+        &mut self,
+        frame_data: &[u8],
+        stream_id: u32,
+        flags: u8,
+    ) -> Result<ParsedPriorityFrame, PriorityParsingError> {
         self.parsing_stats.frames_processed += 1;
 
         // Validate frame size
@@ -637,17 +661,19 @@ impl MockH2PriorityParser {
         }
 
         // Parse frame payload
-        let dependency_raw = u32::from_be_bytes([frame_data[0], frame_data[1], frame_data[2], frame_data[3]]);
+        let dependency_raw =
+            u32::from_be_bytes([frame_data[0], frame_data[1], frame_data[2], frame_data[3]]);
         let exclusive = (dependency_raw & 0x80000000) != 0;
         let dependency = dependency_raw & 0x7FFFFFFF; // Clear exclusive bit
         let weight_raw = frame_data[4];
         let weight = (weight_raw as u16) + 1; // RFC 7540: weight is transmitted as 0-255, represents 1-256
 
         // Validate dependency
-        if matches!(self.cycle_detection, CycleDetection::Enabled) && dependency != ROOT_STREAM_ID {
-            if stream_id == dependency {
-                return Err(PriorityParsingError::SelfDependency(stream_id));
-            }
+        if matches!(self.cycle_detection, CycleDetection::Enabled)
+            && dependency != ROOT_STREAM_ID
+            && stream_id == dependency
+        {
+            return Err(PriorityParsingError::SelfDependency(stream_id));
         }
 
         // Track root dependencies
@@ -657,7 +683,10 @@ impl MockH2PriorityParser {
         }
 
         // Add to priority tree
-        let tree_position = match self.priority_tree.add_priority(stream_id, dependency, weight, exclusive) {
+        let tree_position = match self
+            .priority_tree
+            .add_priority(stream_id, dependency, weight, exclusive)
+        {
             Ok(position) => position,
             Err(error) => {
                 match error {
@@ -684,11 +713,14 @@ impl MockH2PriorityParser {
         };
 
         // Update stream state
-        self.stream_states.priorities.insert(stream_id, StreamPriority {
-            dependency,
-            weight: weight as u8, // Store as 1-256 but transmit as 0-255
-            exclusive,
-        });
+        self.stream_states.priorities.insert(
+            stream_id,
+            StreamPriority {
+                dependency,
+                weight: weight as u8, // Store as 1-256 but transmit as 0-255
+                exclusive,
+            },
+        );
 
         // Create parsed result
         let parsed_priority = ParsedPriority {
@@ -704,7 +736,9 @@ impl MockH2PriorityParser {
             // Additional validation for non-root dependencies
             match self.validation_mode {
                 TreeValidation::Full => {
-                    if self.priority_tree.get_node(dependency).is_some() || dependency == ROOT_STREAM_ID {
+                    if self.priority_tree.get_node(dependency).is_some()
+                        || dependency == ROOT_STREAM_ID
+                    {
                         PriorityValidationResult::Valid
                     } else {
                         PriorityValidationResult::InvalidDependency {
@@ -777,25 +811,37 @@ fuzz_target!(|input: H2PriorityZeroDependencyInput| {
     let primary_result = parser.parse_priority_frame(
         &frame_data,
         input.priority_frame.stream_id,
-        input.priority_frame.flags
+        input.priority_frame.flags,
     );
 
     // Test zero dependency handling
     if input.priority_frame.stream_dependency == ROOT_STREAM_ID {
-        match primary_result {
+        match &primary_result {
             Ok(parsed) => {
                 // Root dependency should be accepted per RFC 7540 §5.3.1
-                assert!(parsed.priority.is_root_dependent,
-                    "Priority frame with dependency=0 should be marked as root-dependent");
-                assert_eq!(parsed.tree_position.parent, ROOT_STREAM_ID,
-                    "Root dependency should have parent=0");
-                assert_eq!(parsed.tree_position.position, TreePositionType::RootChild,
-                    "Root dependency should be positioned as root child");
-                assert_eq!(parsed.priority.dependency, ROOT_STREAM_ID,
-                    "Parsed dependency should be 0 for root dependency");
+                assert!(
+                    parsed.priority.is_root_dependent,
+                    "Priority frame with dependency=0 should be marked as root-dependent"
+                );
+                assert_eq!(
+                    parsed.tree_position.parent, ROOT_STREAM_ID,
+                    "Root dependency should have parent=0"
+                );
+                assert_eq!(
+                    parsed.tree_position.position,
+                    TreePositionType::RootChild,
+                    "Root dependency should be positioned as root child"
+                );
+                assert_eq!(
+                    parsed.priority.dependency, ROOT_STREAM_ID,
+                    "Parsed dependency should be 0 for root dependency"
+                );
             }
             Err(error) => {
-                panic!("Root dependency (stream_dependency=0) should be valid per RFC 7540 §5.3.1: {:?}", error);
+                panic!(
+                    "Root dependency (stream_dependency=0) should be valid per RFC 7540 §5.3.1: {:?}",
+                    error
+                );
             }
         }
     }
@@ -807,17 +853,180 @@ fuzz_target!(|input: H2PriorityZeroDependencyInput| {
         }
 
         let additional_frame_data = MockH2PriorityParser::build_priority_frame(additional_frame);
-        let _additional_result = parser.parse_priority_frame(
+        let additional_result = parser.parse_priority_frame(
             &additional_frame_data,
             additional_frame.stream_id,
-            additional_frame.flags
+            additional_frame.flags,
         );
-        // Continue processing regardless of result for tree building
+        observe_additional_priority_result(additional_frame, additional_result);
+        // Continue processing regardless of result for tree building.
     }
 
     // Test priority tree invariants
     test_priority_tree_invariants(&input, &parser, &primary_result);
 });
+
+fn observe_additional_priority_result(
+    frame: &PriorityFrame,
+    result: Result<ParsedPriorityFrame, PriorityParsingError>,
+) {
+    match result {
+        Ok(parsed) => {
+            assert_eq!(
+                parsed.frame_info.stream_id, frame.stream_id,
+                "accepted PRIORITY frame should preserve the stream id"
+            );
+            assert_eq!(
+                parsed.frame_info.flags, frame.flags,
+                "accepted PRIORITY frame should preserve flags"
+            );
+            assert_eq!(
+                parsed.frame_info.size, PRIORITY_FRAME_SIZE,
+                "accepted PRIORITY frame should have the fixed RFC 7540 PRIORITY payload size"
+            );
+            assert_eq!(
+                parsed.frame_info.payload.len(),
+                PRIORITY_FRAME_SIZE as usize,
+                "accepted PRIORITY frame payload should be exactly five bytes"
+            );
+            assert_eq!(
+                parsed.priority.dependency,
+                frame.stream_dependency & 0x7FFF_FFFF,
+                "accepted PRIORITY frame should clear only the exclusive bit from dependency"
+            );
+            assert_eq!(
+                parsed.priority.weight,
+                u16::from(frame.weight) + 1,
+                "accepted PRIORITY frame should decode weight as transmitted + 1"
+            );
+            assert_eq!(
+                parsed.priority.exclusive, frame.exclusive,
+                "accepted PRIORITY frame should preserve the exclusive flag"
+            );
+            assert_eq!(
+                parsed.priority.is_root_dependent,
+                parsed.priority.dependency == ROOT_STREAM_ID,
+                "root-dependent marker should match dependency zero"
+            );
+            observe_priority_validation_result(&parsed.validation_result);
+        }
+        Err(error) => observe_priority_parse_error(frame, &error),
+    }
+}
+
+fn observe_priority_validation_result(result: &PriorityValidationResult) {
+    match result {
+        PriorityValidationResult::Valid => {}
+        PriorityValidationResult::InvalidDependency { dependency, reason } => {
+            assert_ne!(
+                *dependency, ROOT_STREAM_ID,
+                "root dependency should not be reported as invalid"
+            );
+            assert!(
+                !reason.trim().is_empty(),
+                "invalid dependency should include a diagnostic reason"
+            );
+        }
+        PriorityValidationResult::CycleDetected { cycle_path } => {
+            assert!(
+                cycle_path.len() >= 2,
+                "cycle diagnostics should include at least two stream ids"
+            );
+        }
+        PriorityValidationResult::InvalidFrame(reason)
+        | PriorityValidationResult::StreamIdError(reason) => {
+            assert!(
+                !reason.trim().is_empty(),
+                "invalid priority frame diagnostics should be non-empty"
+            );
+        }
+        PriorityValidationResult::FrameSizeError { expected, actual } => {
+            assert_eq!(
+                *expected, PRIORITY_FRAME_SIZE,
+                "PRIORITY frame-size diagnostics should name the fixed expected size"
+            );
+            assert_ne!(
+                *actual, *expected,
+                "frame-size diagnostics should report a differing actual size"
+            );
+        }
+    }
+}
+
+fn observe_priority_parse_error(frame: &PriorityFrame, error: &PriorityParsingError) {
+    match error {
+        PriorityParsingError::InvalidStreamDependency {
+            stream_id,
+            dependency,
+        } => {
+            assert_eq!(
+                *stream_id, frame.stream_id,
+                "invalid dependency errors should reference the parsed stream"
+            );
+            assert_eq!(
+                *dependency,
+                frame.stream_dependency & 0x7FFF_FFFF,
+                "invalid dependency errors should reference the parsed dependency"
+            );
+        }
+        PriorityParsingError::SelfDependency(stream_id) => {
+            assert_eq!(
+                *stream_id, frame.stream_id,
+                "self-dependency errors should identify the stream"
+            );
+            assert_eq!(
+                frame.stream_id,
+                frame.stream_dependency & 0x7FFF_FFFF,
+                "self-dependency errors should correspond to stream == dependency"
+            );
+        }
+        PriorityParsingError::DependencyCycle { cycle } => {
+            assert!(
+                cycle.len() >= 2,
+                "dependency-cycle errors should include a cycle path"
+            );
+            assert!(
+                cycle.contains(&frame.stream_id),
+                "dependency-cycle diagnostics should include the stream being updated"
+            );
+        }
+        PriorityParsingError::InvalidFrameSize { size } => {
+            assert_ne!(
+                *size, PRIORITY_FRAME_SIZE,
+                "invalid frame-size errors should report a non-standard payload size"
+            );
+        }
+        PriorityParsingError::PriorityOnConnectionStream => {
+            assert_eq!(
+                frame.stream_id, ROOT_STREAM_ID,
+                "connection-stream priority errors should come from stream zero"
+            );
+        }
+        PriorityParsingError::InvalidWeight { weight } => {
+            assert_eq!(
+                *weight, frame.weight,
+                "invalid weight errors should report the transmitted weight byte"
+            );
+        }
+        PriorityParsingError::NonExistentDependency { dependency } => {
+            assert_eq!(
+                *dependency,
+                frame.stream_dependency & 0x7FFF_FFFF,
+                "missing dependency errors should report the parsed dependency"
+            );
+            assert_ne!(
+                *dependency, ROOT_STREAM_ID,
+                "root dependency should not be reported as missing"
+            );
+        }
+        PriorityParsingError::FrameFormatError(reason) => {
+            assert!(
+                !reason.trim().is_empty(),
+                "frame format errors should include a diagnostic reason"
+            );
+        }
+    }
+}
 
 fn test_priority_tree_invariants(
     input: &H2PriorityZeroDependencyInput,
@@ -828,22 +1037,27 @@ fn test_priority_tree_invariants(
     let parsing_stats = parser.get_parsing_stats();
 
     // Invariant: Root dependencies should be tracked correctly
-    if input.priority_frame.stream_dependency == ROOT_STREAM_ID {
-        if let Ok(_) = primary_result {
-            assert!(tree_stats.root_dependent_count >= 1,
-                "Root dependency should increase root_dependent_count");
-            assert!(parsing_stats.root_dependency_frames >= 1,
-                "Root dependency frame should be counted");
-        }
+    if input.priority_frame.stream_dependency == ROOT_STREAM_ID && primary_result.is_ok() {
+        assert!(
+            tree_stats.root_dependent_count >= 1,
+            "Root dependency should increase root_dependent_count"
+        );
+        assert!(
+            parsing_stats.root_dependency_frames >= 1,
+            "Root dependency frame should be counted"
+        );
     }
 
     // Invariant: Stream cannot depend on itself
-    if input.priority_frame.stream_id == input.priority_frame.stream_dependency &&
-       input.priority_frame.stream_dependency != ROOT_STREAM_ID {
+    if input.priority_frame.stream_id == input.priority_frame.stream_dependency
+        && input.priority_frame.stream_dependency != ROOT_STREAM_ID
+    {
         match primary_result {
             Err(PriorityParsingError::SelfDependency(stream_id)) => {
-                assert_eq!(*stream_id, input.priority_frame.stream_id,
-                    "Self-dependency error should reference correct stream");
+                assert_eq!(
+                    *stream_id, input.priority_frame.stream_id,
+                    "Self-dependency error should reference correct stream"
+                );
             }
             _ => {
                 panic!("Stream depending on itself should be rejected");
@@ -852,91 +1066,132 @@ fn test_priority_tree_invariants(
     }
 
     // Invariant: Tree depth should be reasonable
-    assert!(tree_stats.max_depth <= 100,
-        "Maximum tree depth should be reasonable: {}", tree_stats.max_depth);
+    assert!(
+        tree_stats.max_depth <= 100,
+        "Maximum tree depth should be reasonable: {}",
+        tree_stats.max_depth
+    );
 
     // Invariant: Total nodes should equal sum of dependencies
-    let expected_nodes = tree_stats.root_dependent_count +
-        (tree_stats.total_nodes - tree_stats.root_dependent_count);
-    assert_eq!(tree_stats.total_nodes, expected_nodes,
-        "Total nodes should equal root dependencies plus other dependencies");
+    let expected_nodes = tree_stats.root_dependent_count
+        + (tree_stats.total_nodes - tree_stats.root_dependent_count);
+    assert_eq!(
+        tree_stats.total_nodes, expected_nodes,
+        "Total nodes should equal root dependencies plus other dependencies"
+    );
 
     // Invariant: Parsing stats should be consistent
-    assert!(parsing_stats.frames_processed >= 1,
-        "Should have processed at least one frame");
-    assert!(parsing_stats.frames_processed >= parsing_stats.root_dependency_frames,
-        "Total frames should be >= root dependency frames");
+    assert!(
+        parsing_stats.frames_processed >= 1,
+        "Should have processed at least one frame"
+    );
+    assert!(
+        parsing_stats.frames_processed >= parsing_stats.root_dependency_frames,
+        "Total frames should be >= root dependency frames"
+    );
 
     // Invariant: Zero dependency is always valid (RFC 7540 §5.3.1)
-    let has_zero_dependency = input.priority_frame.stream_dependency == ROOT_STREAM_ID ||
-        input.additional_frames.iter().any(|f| f.stream_dependency == ROOT_STREAM_ID);
+    let has_zero_dependency = input.priority_frame.stream_dependency == ROOT_STREAM_ID
+        || input
+            .additional_frames
+            .iter()
+            .any(|f| f.stream_dependency == ROOT_STREAM_ID);
 
     if has_zero_dependency && input.priority_frame.stream_id != ROOT_STREAM_ID {
         // At least one zero dependency should be processed successfully
-        let has_successful_zero_dep = matches!(primary_result, Ok(ref parsed) if parsed.priority.is_root_dependent) ||
-            parsing_stats.root_dependency_frames > 0;
+        let has_successful_zero_dep = matches!(primary_result, Ok(parsed) if parsed.priority.is_root_dependent)
+            || parsing_stats.root_dependency_frames > 0;
 
-        if !has_successful_zero_dep && matches!(input.test_scenario.cycle_detection, CycleDetection::Enabled) {
+        if !has_successful_zero_dep
+            && matches!(input.test_scenario.cycle_detection, CycleDetection::Enabled)
+        {
             // Zero dependencies should generally succeed unless there are other issues
-            eprintln!("WARNING: Zero dependency frame may have been rejected for non-dependency reasons");
+            eprintln!(
+                "WARNING: Zero dependency frame may have been rejected for non-dependency reasons"
+            );
         }
     }
 
     // Invariant: Cycle detection should prevent cycles when enabled
-    if matches!(input.test_scenario.cycle_detection, CycleDetection::Enabled) {
-        if parsing_stats.cycles_prevented > 0 {
-            // If cycles were prevented, should be reflected in invalid frames or specific errors
-            assert!(parsing_stats.invalid_frames > 0 ||
-                   matches!(primary_result, Err(PriorityParsingError::DependencyCycle { .. })),
-                "Cycles prevented should result in errors or invalid frame count");
-        }
+    if matches!(input.test_scenario.cycle_detection, CycleDetection::Enabled)
+        && parsing_stats.cycles_prevented > 0
+    {
+        // If cycles were prevented, should be reflected in invalid frames or specific errors
+        assert!(
+            parsing_stats.invalid_frames > 0
+                || matches!(
+                    primary_result,
+                    Err(PriorityParsingError::DependencyCycle { .. })
+                ),
+            "Cycles prevented should result in errors or invalid frame count"
+        );
     }
 
     // Invariant: Tree statistics should be non-negative and bounded
-    assert!(tree_stats.total_nodes <= 1000,
-        "Total nodes should be bounded for fuzzing");
-    assert!(tree_stats.root_dependent_count <= tree_stats.total_nodes,
-        "Root dependents should not exceed total nodes");
-    assert!(tree_stats.cycles_detected <= parsing_stats.frames_processed,
-        "Cycles detected should not exceed frames processed");
+    assert!(
+        tree_stats.total_nodes <= 1000,
+        "Total nodes should be bounded for fuzzing"
+    );
+    assert!(
+        tree_stats.root_dependent_count <= tree_stats.total_nodes,
+        "Root dependents should not exceed total nodes"
+    );
+    assert!(
+        tree_stats.cycles_detected <= parsing_stats.frames_processed,
+        "Cycles detected should not exceed frames processed"
+    );
 
     // Invariant: Root dependency frames should have valid stream IDs
-    if parsing_stats.root_dependency_frames > 0 {
+    if parsing_stats.root_dependency_frames > 0
+        && let Ok(parsed) = primary_result
+        && parsed.priority.is_root_dependent
+    {
         // Should not include any PRIORITY frames on stream 0
-        if let Ok(parsed) = primary_result {
-            if parsed.priority.is_root_dependent {
-                assert_ne!(parsed.frame_info.stream_id, ROOT_STREAM_ID,
-                    "Root dependency frame should not be on stream 0");
-            }
-        }
+        assert_ne!(
+            parsed.frame_info.stream_id, ROOT_STREAM_ID,
+            "Root dependency frame should not be on stream 0"
+        );
     }
 
     // Invariant: Frame size should be exactly 5 bytes for valid frames
     if let Ok(parsed) = primary_result {
-        assert_eq!(parsed.frame_info.size, PRIORITY_FRAME_SIZE,
-            "Valid PRIORITY frame should be exactly 5 bytes");
-        assert_eq!(parsed.frame_info.payload.len(), PRIORITY_FRAME_SIZE as usize,
-            "Payload size should match frame size");
+        assert_eq!(
+            parsed.frame_info.size, PRIORITY_FRAME_SIZE,
+            "Valid PRIORITY frame should be exactly 5 bytes"
+        );
+        assert_eq!(
+            parsed.frame_info.payload.len(),
+            PRIORITY_FRAME_SIZE as usize,
+            "Payload size should match frame size"
+        );
     }
 
     // Invariant: Weight should be in valid range (1-256)
     if let Ok(parsed) = primary_result {
-        assert!(parsed.priority.weight >= MIN_WEIGHT,
-            "Weight should be >= 1: {}", parsed.priority.weight);
-        assert!(parsed.priority.weight <= MAX_WEIGHT,
-            "Weight should be <= 256: {}", parsed.priority.weight);
+        assert!(
+            parsed.priority.weight >= MIN_WEIGHT,
+            "Weight should be >= 1: {}",
+            parsed.priority.weight
+        );
+        assert!(
+            parsed.priority.weight <= MAX_WEIGHT,
+            "Weight should be <= 256: {}",
+            parsed.priority.weight
+        );
     }
 
     // Invariant: Exclusive dependencies should be handled correctly
-    if input.priority_frame.exclusive && input.priority_frame.stream_dependency == ROOT_STREAM_ID {
-        if let Ok(parsed) = primary_result {
-            if parsed.priority.exclusive {
-                // Exclusive root dependency might affect other root dependencies
-                assert!(parsed.tree_position.affected_children.len() == 0 ||
-                       tree_stats.root_dependent_count == 1,
-                    "Exclusive root dependency should handle other root dependencies correctly");
-            }
-        }
+    if input.priority_frame.exclusive
+        && input.priority_frame.stream_dependency == ROOT_STREAM_ID
+        && let Ok(parsed) = primary_result
+        && parsed.priority.exclusive
+    {
+        // Exclusive root dependency might affect other root dependencies
+        assert!(
+            parsed.tree_position.affected_children.is_empty()
+                || tree_stats.root_dependent_count == 1,
+            "Exclusive root dependency should handle other root dependencies correctly"
+        );
     }
 }
 
@@ -1004,7 +1259,10 @@ mod tests {
         let parsed = result.unwrap();
         assert_eq!(parsed.priority.dependency, 1);
         assert!(!parsed.priority.is_root_dependent);
-        assert_eq!(parsed.tree_position.position, TreePositionType::StreamChild(1));
+        assert_eq!(
+            parsed.tree_position.position,
+            TreePositionType::StreamChild(1)
+        );
     }
 
     #[test]
@@ -1018,7 +1276,10 @@ mod tests {
         ];
 
         let result = parser.parse_priority_frame(&frame_data, 5, 0); // stream_id = dependency
-        assert!(matches!(result, Err(PriorityParsingError::SelfDependency(5))));
+        assert!(matches!(
+            result,
+            Err(PriorityParsingError::SelfDependency(5))
+        ));
     }
 
     #[test]
@@ -1028,12 +1289,18 @@ mod tests {
         // Frame too short
         let short_frame = vec![0x00, 0x00, 0x00]; // Only 3 bytes
         let result = parser.parse_priority_frame(&short_frame, 1, 0);
-        assert!(matches!(result, Err(PriorityParsingError::InvalidFrameSize { size: 3 })));
+        assert!(matches!(
+            result,
+            Err(PriorityParsingError::InvalidFrameSize { size: 3 })
+        ));
 
         // Frame too long
         let long_frame = vec![0x00, 0x00, 0x00, 0x00, 0x0F, 0xFF]; // 6 bytes
         let result = parser.parse_priority_frame(&long_frame, 1, 0);
-        assert!(matches!(result, Err(PriorityParsingError::InvalidFrameSize { size: 6 })));
+        assert!(matches!(
+            result,
+            Err(PriorityParsingError::InvalidFrameSize { size: 6 })
+        ));
     }
 
     #[test]
@@ -1042,7 +1309,10 @@ mod tests {
 
         let frame_data = vec![0x00, 0x00, 0x00, 0x00, 0x0F];
         let result = parser.parse_priority_frame(&frame_data, 0, 0); // stream_id = 0
-        assert!(matches!(result, Err(PriorityParsingError::PriorityOnConnectionStream)));
+        assert!(matches!(
+            result,
+            Err(PriorityParsingError::PriorityOnConnectionStream)
+        ));
     }
 
     #[test]
@@ -1062,9 +1332,11 @@ mod tests {
             assert!(result.is_ok());
 
             let parsed = result.unwrap();
-            assert_eq!(parsed.priority.weight, expected_weight,
+            assert_eq!(
+                parsed.priority.weight, expected_weight,
                 "Weight encoding: transmitted {} should represent {}",
-                transmitted, expected_weight);
+                transmitted, expected_weight
+            );
         }
     }
 
@@ -1095,14 +1367,23 @@ mod tests {
         let mut parser = MockH2PriorityParser::new(TreeValidation::Full, CycleDetection::Enabled);
 
         // Create chain: 1 -> 0, 3 -> 1, 5 -> 3
-        parser.parse_priority_frame(&vec![0x00, 0x00, 0x00, 0x00, 0x0F], 1, 0).unwrap(); // 1 -> root
-        parser.parse_priority_frame(&vec![0x00, 0x00, 0x00, 0x01, 0x0F], 3, 0).unwrap(); // 3 -> 1
-        parser.parse_priority_frame(&vec![0x00, 0x00, 0x00, 0x03, 0x0F], 5, 0).unwrap(); // 5 -> 3
+        parser
+            .parse_priority_frame(&vec![0x00, 0x00, 0x00, 0x00, 0x0F], 1, 0)
+            .unwrap(); // 1 -> root
+        parser
+            .parse_priority_frame(&vec![0x00, 0x00, 0x00, 0x01, 0x0F], 3, 0)
+            .unwrap(); // 3 -> 1
+        parser
+            .parse_priority_frame(&vec![0x00, 0x00, 0x00, 0x03, 0x0F], 5, 0)
+            .unwrap(); // 5 -> 3
 
         // Try to create cycle: 1 -> 5 (would create cycle 1 -> 5 -> 3 -> 1)
         let cycle_frame = vec![0x00, 0x00, 0x00, 0x05, 0x0F]; // 1 -> 5
         let result = parser.parse_priority_frame(&cycle_frame, 1, 0);
-        assert!(matches!(result, Err(PriorityParsingError::DependencyCycle { .. })));
+        assert!(matches!(
+            result,
+            Err(PriorityParsingError::DependencyCycle { .. })
+        ));
     }
 
     #[test]
@@ -1110,8 +1391,12 @@ mod tests {
         let mut parser = MockH2PriorityParser::new(TreeValidation::Full, CycleDetection::Enabled);
 
         // Create some root dependencies
-        parser.parse_priority_frame(&vec![0x00, 0x00, 0x00, 0x00, 0x0F], 1, 0).unwrap(); // 1 -> root
-        parser.parse_priority_frame(&vec![0x00, 0x00, 0x00, 0x00, 0x0F], 3, 0).unwrap(); // 3 -> root
+        parser
+            .parse_priority_frame(&vec![0x00, 0x00, 0x00, 0x00, 0x0F], 1, 0)
+            .unwrap(); // 1 -> root
+        parser
+            .parse_priority_frame(&vec![0x00, 0x00, 0x00, 0x00, 0x0F], 3, 0)
+            .unwrap(); // 3 -> root
 
         // Create exclusive root dependency
         let exclusive_frame = vec![0x80, 0x00, 0x00, 0x00, 0x1F]; // exclusive dependency on root
@@ -1149,7 +1434,7 @@ mod tests {
         assert_eq!(frame_data[1], 0x00);
         assert_eq!(frame_data[2], 0x00);
         assert_eq!(frame_data[3], 0x00); // dependency = 0
-        assert_eq!(frame_data[4], 15);   // weight transmitted as 15
+        assert_eq!(frame_data[4], 15); // weight transmitted as 15
     }
 
     #[test]
@@ -1157,9 +1442,15 @@ mod tests {
         let mut parser = MockH2PriorityParser::new(TreeValidation::Full, CycleDetection::Enabled);
 
         // Build a chain: 1 -> root, 3 -> 1, 5 -> 3
-        parser.parse_priority_frame(&vec![0x00, 0x00, 0x00, 0x00, 0x0F], 1, 0).unwrap();
-        let result3 = parser.parse_priority_frame(&vec![0x00, 0x00, 0x00, 0x01, 0x0F], 3, 0).unwrap();
-        let result5 = parser.parse_priority_frame(&vec![0x00, 0x00, 0x00, 0x03, 0x0F], 5, 0).unwrap();
+        parser
+            .parse_priority_frame(&vec![0x00, 0x00, 0x00, 0x00, 0x0F], 1, 0)
+            .unwrap();
+        let result3 = parser
+            .parse_priority_frame(&vec![0x00, 0x00, 0x00, 0x01, 0x0F], 3, 0)
+            .unwrap();
+        let result5 = parser
+            .parse_priority_frame(&vec![0x00, 0x00, 0x00, 0x03, 0x0F], 5, 0)
+            .unwrap();
 
         // Check depths
         assert_eq!(result3.tree_position.depth, 2); // 3 -> 1 -> root (depth 2)
