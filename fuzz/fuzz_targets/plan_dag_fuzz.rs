@@ -11,10 +11,9 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use asupersync::plan::{PlanDag, PlanError, PlanId, PlanNode};
+use asupersync::plan::{PlanDag, PlanError, PlanId};
 
 /// Fuzz input for plan DAG construction and analysis
 #[derive(Arbitrary, Debug, Clone)]
@@ -162,15 +161,11 @@ fn execute_dag_operations(
 ) -> Result<(), String> {
     let mut dag = PlanDag::new();
     let mut node_ids = Vec::new();
-    let mut operation_count = 0;
+    let max_operations = input.config.max_operations as usize;
+    let validation_stride = (input.seed as usize % 10) + 1;
 
     // Execute operation sequence
-    for (op_index, operation) in input.operations.iter().enumerate() {
-        if operation_count >= input.config.max_operations {
-            break;
-        }
-        operation_count += 1;
-
+    for (op_index, operation) in input.operations.iter().take(max_operations).enumerate() {
         match operation {
             DagOperation::CreateLeaf { label } => {
                 let node_id = dag.leaf(label.clone());
@@ -236,7 +231,7 @@ fn execute_dag_operations(
             }
 
             DagOperation::ValidateStructure => {
-                shadow.record_validation(validate_dag_structure(&dag, shadow)?);
+                shadow.record_validation(validate_dag_structure(&dag)?);
             }
 
             DagOperation::CreateCycle { from, to } => {
@@ -250,7 +245,7 @@ fn execute_dag_operations(
             DagOperation::CreateOrphan { label } => {
                 if input.config.test_orphans {
                     // Create a node that's not connected to the main graph
-                    let orphan_id = dag.leaf(format!("orphan_{}", label));
+                    dag.leaf(format!("orphan_{label}"));
                     // Don't add to node_ids - this creates an orphan
                     shadow.add_node();
                 }
@@ -263,41 +258,66 @@ fn execute_dag_operations(
         }
 
         // Verify shadow model consistency every 10 operations
-        if op_index % 10 == 0 {
+        if op_index % validation_stride == 0 {
             shadow.verify_node_count(&dag)?;
         }
     }
 
     // Final validation
-    shadow.record_validation(validate_dag_structure(&dag, shadow)?);
+    shadow.record_validation(validate_dag_structure(&dag)?);
     shadow.verify_node_count(&dag)?;
 
     // Check for any recorded violations
     let violations = shadow.get_violations();
     if !violations.is_empty() {
-        return Err(format!("Shadow model violations: {:?}", violations));
+        return Err(format!("Shadow model violations: {violations:?}"));
     }
 
     Ok(())
 }
 
 /// Validate DAG structure and test error handling
-fn validate_dag_structure(dag: &PlanDag, shadow: &DagShadowModel) -> Result<bool, String> {
+fn validate_dag_structure(dag: &PlanDag) -> Result<bool, String> {
     match dag.validate() {
         Ok(()) => {
             // Validation succeeded
             Ok(true)
         }
         Err(PlanError::Cycle { at }) => {
-            // Expected cycle detection
+            if at.index() >= dag.node_count() {
+                return Err(format!(
+                    "Cycle error referenced missing node {} in {}-node DAG",
+                    at.index(),
+                    dag.node_count()
+                ));
+            }
             Ok(false)
         }
         Err(PlanError::MissingNode { parent, child }) => {
-            // Expected missing node detection
+            if parent.index() >= dag.node_count() {
+                return Err(format!(
+                    "Missing-node error referenced missing parent {} in {}-node DAG",
+                    parent.index(),
+                    dag.node_count()
+                ));
+            }
+            if child.index() < dag.node_count() {
+                return Err(format!(
+                    "Missing-node error referenced present child {} in {}-node DAG",
+                    child.index(),
+                    dag.node_count()
+                ));
+            }
             Ok(false)
         }
         Err(PlanError::EmptyChildren { parent }) => {
-            // Expected empty children detection
+            if parent.index() >= dag.node_count() {
+                return Err(format!(
+                    "Empty-children error referenced missing parent {} in {}-node DAG",
+                    parent.index(),
+                    dag.node_count()
+                ));
+            }
             Ok(false)
         }
     }
@@ -315,8 +335,19 @@ fn test_cycle_detection(
         return Ok(()); // Not enough nodes for cycle
     }
 
-    // Simple cycle detection test: validation should catch cycles
-    // We don't actually modify the DAG here, just test that validation works
+    let from = node_ids[from_idx as usize % node_ids.len()];
+    let to = node_ids[to_idx as usize % node_ids.len()];
+
+    let validation = validate_dag_structure(dag)?;
+    shadow.record_validation(validation);
+
+    if from == to && !validation {
+        shadow.add_violation(format!(
+            "Cycle probe selected node {} as both endpoints but validation failed",
+            from.index()
+        ));
+    }
+
     Ok(())
 }
 
@@ -406,5 +437,14 @@ fuzz_target!(|data: &[u8]| {
     };
 
     // Run plan DAG fuzzing
-    let _ = fuzz_plan_dag(input);
+    match fuzz_plan_dag(input) {
+        Ok(()) => {}
+        Err(err) => {
+            assert!(!err.is_empty(), "Plan DAG error must be diagnostic");
+            assert!(
+                err.len() <= 4096,
+                "Plan DAG diagnostic grew unexpectedly: {err}"
+            );
+        }
+    }
 });
