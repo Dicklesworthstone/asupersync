@@ -2,13 +2,10 @@
 
 use arbitrary::Arbitrary;
 use asupersync::net::quic_native::forensic_log::{
-    FORENSIC_MANIFEST_SCHEMA_ID, FORENSIC_SCHEMA_VERSION, QuicH3Event, QuicH3ForensicLogger,
-    QuicH3ScenarioManifest, SUBSYSTEM,
+    QuicH3Event, QuicH3ForensicLogger, QuicH3ScenarioManifest,
 };
 use libfuzzer_sys::fuzz_target;
-use serde_json;
 use std::collections::BTreeMap;
-use std::io::Write;
 use tempfile::TempDir;
 
 /// Comprehensive fuzz target for QUIC/H3 forensic log trace parsing
@@ -133,6 +130,43 @@ fuzz_target!(|input: ForensicLogFuzz| {
     test_edge_cases();
 });
 
+fn assert_json_error_observable(error: &serde_json::Error, context: &str) {
+    assert!(
+        !error.to_string().is_empty(),
+        "{context} JSON parser errors should remain observable"
+    );
+}
+
+fn observe_json_value_parse(line: &str, context: &str) -> Option<serde_json::Value> {
+    match serde_json::from_str::<serde_json::Value>(line) {
+        Ok(value) => {
+            assert!(
+                !value.to_string().is_empty(),
+                "{context} successful JSON parse should remain visible"
+            );
+            Some(value)
+        }
+        Err(error) => {
+            assert_json_error_observable(&error, context);
+            None
+        }
+    }
+}
+
+fn observe_forensic_line_parse(line: &str) {
+    match serde_json::from_str::<ForensicLineTest>(line) {
+        Ok(parsed) => parsed.assert_string_fields_bounded(line.len()),
+        Err(error) => assert_json_error_observable(&error, "forensic line"),
+    }
+}
+
+fn observe_manifest_parse(manifest: &str) {
+    match serde_json::from_str::<ManifestTest>(manifest) {
+        Ok(parsed) => parsed.assert_string_fields_bounded(manifest.len()),
+        Err(error) => assert_json_error_observable(&error, "forensic manifest"),
+    }
+}
+
 fn test_ndjson_parsing(lines: &[String]) {
     let limited_lines = if lines.len() > MAX_NDJSON_LINES {
         &lines[..MAX_NDJSON_LINES]
@@ -158,15 +192,15 @@ fn test_ndjson_parsing(lines: &[String]) {
 
 fn test_safe_json_parsing(line: &str) {
     // Basic JSON parsing should handle all malformed input gracefully
-    let _ = serde_json::from_str::<serde_json::Value>(line);
+    observe_json_value_parse(line, "generic NDJSON");
 
     // Test parsing as potential forensic log line
-    let _ = serde_json::from_str::<ForensicLineTest>(line);
+    observe_forensic_line_parse(line);
 }
 
 fn test_forensic_line_parsing(line: &str) {
     // If it parses as JSON, verify structure expectations
-    if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(line) {
+    if let Some(json_value) = observe_json_value_parse(line, "forensic line field scan") {
         // Check for expected forensic log fields
         let _ = json_value.get("v");
         let _ = json_value.get("ts_us");
@@ -181,22 +215,22 @@ fn test_forensic_line_parsing(line: &str) {
         let _ = json_value.get("data");
 
         // Test field type expectations
-        if let Some(v) = json_value.get("v") {
-            if v.is_number() {
-                let _ = v.as_u64();
-            }
+        if let Some(v) = json_value.get("v")
+            && v.is_number()
+        {
+            let _ = v.as_u64();
         }
 
-        if let Some(ts) = json_value.get("ts_us") {
-            if ts.is_number() {
-                let _ = ts.as_u64();
-            }
+        if let Some(ts) = json_value.get("ts_us")
+            && ts.is_number()
+        {
+            let _ = ts.as_u64();
         }
 
-        if let Some(thread_id) = json_value.get("thread_id") {
-            if thread_id.is_number() {
-                let _ = thread_id.as_u64();
-            }
+        if let Some(thread_id) = json_value.get("thread_id")
+            && thread_id.is_number()
+        {
+            let _ = thread_id.as_u64();
         }
     }
 }
@@ -241,12 +275,12 @@ fn test_event_serialization(event: &QuicH3Event) {
             );
 
             // Type should match event name
-            if let Some(type_val) = json_value.get("type") {
-                if let Some(type_str) = type_val.as_str() {
-                    // Event name should be snake_case version of type
-                    let event_name = event.event_name();
-                    assert!(!event_name.is_empty());
-                }
+            if let Some(type_val) = json_value.get("type")
+                && type_val.as_str().is_some()
+            {
+                // Event name should be snake_case version of type
+                let event_name = event.event_name();
+                assert!(!event_name.is_empty());
             }
         }
     }
@@ -260,11 +294,11 @@ fn test_manifest_parsing(manifest_data: &str) {
     };
 
     // Manifest parsing should handle malformed JSON gracefully
-    let _ = serde_json::from_str::<serde_json::Value>(safe_data);
-    let _ = serde_json::from_str::<ManifestTest>(safe_data);
+    observe_json_value_parse(safe_data, "manifest JSON");
+    observe_manifest_parse(safe_data);
 
     // Test specific manifest expectations
-    if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(safe_data) {
+    if let Some(json_value) = observe_json_value_parse(safe_data, "manifest field scan") {
         // Check expected manifest fields
         let _ = json_value.get("schema_id");
         let _ = json_value.get("passed");
@@ -275,16 +309,16 @@ fn test_manifest_parsing(manifest_data: &str) {
         let _ = json_value.get("artifacts");
 
         // Validate field types
-        if let Some(passed) = json_value.get("passed") {
-            if passed.is_boolean() {
-                let _ = passed.as_bool();
-            }
+        if let Some(passed) = json_value.get("passed")
+            && passed.is_boolean()
+        {
+            let _ = passed.as_bool();
         }
 
-        if let Some(exit_code) = json_value.get("exit_code") {
-            if exit_code.is_number() {
-                let _ = exit_code.as_i64();
-            }
+        if let Some(exit_code) = json_value.get("exit_code")
+            && exit_code.is_number()
+        {
+            let _ = exit_code.as_i64();
         }
     }
 }
@@ -301,44 +335,49 @@ fn test_logger_operations(operations: &[LoggerOperation]) {
         operations
     };
 
-    let mut logger = QuicH3ForensicLogger::new(
-        temp_dir.path(),
-        "fuzz_scenario",
-        "fuzz_test",
-        "fuzz_function",
-        0xFUZZ,
-    );
+    let logger = QuicH3ForensicLogger::new("fuzz_scenario", 0xF0A5, "fuzz_function");
 
-    for operation in limited_operations {
+    for (index, operation) in limited_operations.iter().enumerate() {
         match operation {
             LoggerOperation::LogEvent { category, event } => {
                 let safe_category = limit_string(category, MAX_STRING_LEN);
                 let converted_event = convert_event_fuzz(event);
+                let ts_us = index as u64;
 
                 // Logging should never panic
-                logger.log(&safe_category, converted_event);
+                logger.log(ts_us, &safe_category, converted_event);
             }
             LoggerOperation::EmitNdjson => {
                 // Emission should handle any internal state gracefully
-                let result = logger.emit_ndjson();
-                if let Err(_) = result {
-                    // Emission can fail (e.g., I/O errors) but shouldn't panic
+                let path = temp_dir.path().join(format!("fuzz-log-{index}.ndjson"));
+                if let Err(error) = logger.write_ndjson(&path) {
+                    assert!(
+                        !error.to_string().is_empty(),
+                        "NDJSON write errors should remain observable"
+                    );
                 }
             }
             LoggerOperation::CreateManifest { passed, exit_code } => {
                 // Manifest creation should never panic
-                let manifest = logger.create_scenario_manifest(*passed, *exit_code);
+                let duration_us = u64::from(exit_code.unsigned_abs()).saturating_add(1);
+                let manifest = QuicH3ScenarioManifest::from_logger(&logger, *passed, duration_us);
 
                 // Manifest should have expected properties
-                assert_eq!(manifest.scenario_id(), "fuzz_scenario");
-                assert_eq!(manifest.passed(), *passed);
-                assert_eq!(manifest.exit_code(), *exit_code);
+                assert_eq!(manifest.scenario_id, "fuzz_scenario");
+                assert_eq!(manifest.passed, *passed);
+                assert_eq!(manifest.duration_us, duration_us);
             }
         }
     }
 
     // Final emission test
-    let _ = logger.emit_ndjson();
+    let final_path = temp_dir.path().join("fuzz-log-final.ndjson");
+    if let Err(error) = logger.write_ndjson(&final_path) {
+        assert!(
+            !error.to_string().is_empty(),
+            "final NDJSON write errors should remain observable"
+        );
+    }
 }
 
 fn test_edge_cases() {
@@ -581,6 +620,18 @@ struct ForensicLineTest {
     data: Option<serde_json::Value>,
 }
 
+impl ForensicLineTest {
+    fn assert_string_fields_bounded(&self, input_len: usize) {
+        assert_optional_string_bounded(&self.subsystem, input_len, "subsystem");
+        assert_optional_string_bounded(&self.test_id, input_len, "test_id");
+        assert_optional_string_bounded(&self.seed, input_len, "seed");
+        assert_optional_string_bounded(&self.event, input_len, "event");
+        assert_optional_string_bounded(&self.category, input_len, "category");
+        assert_optional_string_bounded(&self.level, input_len, "level");
+        assert_optional_string_bounded(&self.message, input_len, "message");
+    }
+}
+
 /// Test structure for parsing manifest files
 #[derive(serde::Deserialize)]
 struct ManifestTest {
@@ -598,4 +649,34 @@ struct ManifestTest {
     duration_us: Option<u64>,
     #[allow(dead_code)]
     artifacts: Option<BTreeMap<String, String>>,
+}
+
+impl ManifestTest {
+    fn assert_string_fields_bounded(&self, input_len: usize) {
+        assert_optional_string_bounded(&self.schema_id, input_len, "schema_id");
+        assert_optional_string_bounded(&self.scenario_id, input_len, "scenario_id");
+        assert_optional_string_bounded(&self.seed, input_len, "seed");
+
+        if let Some(artifacts) = &self.artifacts {
+            for (key, value) in artifacts {
+                assert!(
+                    key.len() <= input_len,
+                    "manifest artifact key should be input-bounded"
+                );
+                assert!(
+                    value.len() <= input_len,
+                    "manifest artifact value should be input-bounded"
+                );
+            }
+        }
+    }
+}
+
+fn assert_optional_string_bounded(value: &Option<String>, input_len: usize, field: &str) {
+    if let Some(value) = value {
+        assert!(
+            value.len() <= input_len,
+            "{field} parsed string should be input-bounded"
+        );
+    }
 }
