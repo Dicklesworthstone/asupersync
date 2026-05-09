@@ -42,17 +42,38 @@ fuzz_target!(|input: Input| {
     let default_policy = RewritePolicy::default();
     let idx = (input.rule_index as usize) % rules.len();
     let target_rule = rules[idx];
-    let _ = default_policy.permits(target_rule);
+    let target_allowed = default_policy.permits(target_rule);
+    assert_eq!(
+        target_allowed,
+        default_policy.permits(target_rule),
+        "RewritePolicy::permits changed for selected rule {target_rule:?}"
+    );
 
     // Build a few synthesised policies via the public construction
     // surface. RewritePolicy may not be Arbitrary; we exercise what
     // the public API exposes — the default constructor + permits call.
     // The fuzzer's coverage feedback drives variation through the
     // policy_seed as a stand-in for richer policy state.
-    let _ = (input.policy_seed, default_policy.permits(target_rule));
+    let seeded_projection = input.policy_seed ^ u32::from(target_allowed);
+    assert_eq!(
+        seeded_projection,
+        input.policy_seed ^ u32::from(default_policy.permits(target_rule)),
+        "RewritePolicy::permits changed across seed projection"
+    );
 
     // Cross-product: every default-policy + every rule yields a bool.
+    let mut permitted_count = 0usize;
     for rule in rules {
-        let _ = default_policy.permits(*rule);
+        let first = default_policy.permits(*rule);
+        let second = default_policy.permits(*rule);
+        assert_eq!(
+            first, second,
+            "RewritePolicy::permits changed for rule {rule:?}"
+        );
+        permitted_count += usize::from(first);
     }
+    assert!(
+        permitted_count <= rules.len(),
+        "permitted rule count exceeded rule table length"
+    );
 });
