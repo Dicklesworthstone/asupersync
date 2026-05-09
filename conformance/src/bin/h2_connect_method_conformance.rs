@@ -1,8 +1,8 @@
 //! HTTP/2 CONNECT Method Handling Conformance Test Runner
 //!
-//! Tests RFC 7540 §8.3 compliance: CONNECT method handling for tunnel establishment.
-//! Compares asupersync HTTP/2 implementation against h2 reference implementation
-//! to ensure identical tunnel-establish behavior for same CONNECT requests.
+//! Tests RFC 7540 §8.3 CONNECT method case definitions.
+//! The live asupersync and h2 backends are not wired yet, so this runner
+//! must report skipped coverage and fail closed instead of claiming parity.
 //!
 //! Usage:
 //!   rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_bin_docs cargo run --bin h2_connect_method_conformance
@@ -44,6 +44,10 @@ enum OutputFormat {
     Summary,
 }
 
+fn reference_scope_line() -> &'static str {
+    "Live CONNECT backends are unavailable; skipped coverage fails closed"
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
@@ -54,7 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("🔧 HTTP/2 CONNECT Method Handling Conformance Tester");
-    println!("   Testing asupersync against h2 reference");
+    println!("   {}", reference_scope_line());
     println!("   Focus: Identical tunnel-establish behavior for same CONNECT request");
     println!();
 
@@ -312,6 +316,16 @@ mod tests {
 
         assert!(status.contains("NO EXECUTABLE COVERAGE"));
         assert!(!status.contains("ALL TESTS PASSED"));
+    }
+
+    #[test]
+    fn reference_scope_does_not_claim_live_h2_reference_parity() {
+        let line = reference_scope_line();
+
+        assert!(line.contains("unavailable"));
+        assert!(line.contains("fails closed"));
+        assert!(!line.contains("h2 reference"));
+        assert!(!line.contains("Testing asupersync against"));
     }
 
     #[test]

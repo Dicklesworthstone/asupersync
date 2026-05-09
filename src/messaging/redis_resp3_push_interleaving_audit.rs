@@ -12,6 +12,9 @@
 
 use super::RespValue;
 
+const REDIS_RESP3_PUSH_INTERLEAVING_RCH_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_redis_resp3_push_interleaving_audit cargo test -p asupersync --lib redis_resp3_push_interleaving --features test-internals -- --nocapture";
+const STALE_REDIS_RESP3_PUSH_INTERLEAVING_RCH_COMMAND: &str = "rch exec -- cargo test -p asupersync --lib redis_resp3_push_interleaving --features test-internals -- --nocapture";
+
 fn init_test(name: &str) {
     crate::test_utils::init_test_logging();
     crate::test_phase!(name);
@@ -78,7 +81,7 @@ fn audit_resp3_push_frame_interleaving_behavior() {
 
     // Test scenario: Complete PING response with interleaved push frame
     let ping_response_complete = b":1\r\n"; // Complete PING response
-    let push_frame_complete = b">2\r\ninvalidate\r\n*1\r\n$3\r\nkey\r\n"; // Complete push frame
+    let push_frame_complete = b">2\r\n$10\r\ninvalidate\r\n*1\r\n$3\r\nkey\r\n"; // Complete push frame
 
     // Combined buffer with push frame followed by response (order Redis might send)
     let mut interleaved_buffer = Vec::new();
@@ -92,12 +95,17 @@ fn audit_resp3_push_frame_interleaving_behavior() {
     let (first_decoded, first_consumed) = RespValue::try_decode(&interleaved_buffer)
         .expect("interleaved buffer should decode")
         .expect("should have complete frame");
+    assert!(REDIS_RESP3_PUSH_INTERLEAVING_RCH_COMMAND.contains("CARGO_TARGET_DIR="));
+    assert_ne!(
+        REDIS_RESP3_PUSH_INTERLEAVING_RCH_COMMAND,
+        STALE_REDIS_RESP3_PUSH_INTERLEAVING_RCH_COMMAND
+    );
     tracing::info!(
         test_name = "audit_resp3_push_frame_interleaving_behavior",
         first_frame_kind = frame_kind(&first_decoded),
         first_consumed,
         buffer_fingerprint = %buffer_fingerprint(&interleaved_buffer),
-        exact_rch_command = "rch exec -- cargo test -p asupersync --lib redis_resp3_push_interleaving --features test-internals -- --nocapture",
+        exact_rch_command = REDIS_RESP3_PUSH_INTERLEAVING_RCH_COMMAND,
         "redis RESP3 push interleaving first decode"
     );
 
@@ -177,9 +185,9 @@ fn audit_command_client_push_frame_isolation() {
     // Multi-command pipeline with interleaved push frames
     let commands_and_pushes: [&[u8]; 5] = [
         b"+OK\r\n".as_slice(), // Command 1 response: SET result
-        b">2\r\ninvalidate\r\n*1\r\n$4\r\nkey1\r\n".as_slice(), // Push frame 1: cache invalidation
+        b">2\r\n$10\r\ninvalidate\r\n*1\r\n$4\r\nkey1\r\n".as_slice(), // Push frame 1: cache invalidation
         b":42\r\n".as_slice(), // Command 2 response: GET result
-        b">3\r\nmonitoring\r\n+event\r\n:123\r\n".as_slice(), // Push frame 2: monitoring event
+        b">3\r\n$10\r\nmonitoring\r\n+event\r\n:123\r\n".as_slice(), // Push frame 2: monitoring event
         b"$5\r\nhello\r\n".as_slice(), // Command 3 response: bulk string
     ];
 

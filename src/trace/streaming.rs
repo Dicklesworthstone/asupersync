@@ -221,7 +221,7 @@ pub struct TraceEvidenceStreamStats {
     pub records_seen: u64,
     /// Records accepted by the sink.
     pub records_emitted: u64,
-    /// Records dropped by overflow/backpressure policy.
+    /// Records not emitted because of overflow, backpressure, or sink closure.
     pub records_dropped: u64,
     /// Bytes accepted by the sink.
     pub bytes_emitted: u64,
@@ -245,6 +245,7 @@ pub struct TraceEvidenceStreamer {
     event: Vec<u8>,
     first_sequence_in_chunk: u64,
     pending_records: u64,
+    halted: bool,
     stats: TraceEvidenceStreamStats,
 }
 
@@ -261,6 +262,7 @@ impl TraceEvidenceStreamer {
             event: Vec::new(),
             first_sequence_in_chunk: 0,
             pending_records: 0,
+            halted: false,
             stats: TraceEvidenceStreamStats::default(),
         }
     }
@@ -295,9 +297,13 @@ impl TraceEvidenceStreamer {
     fn handle_record_overflow(&mut self, record_len: usize) -> StreamingReplayResult<bool> {
         self.stats.overflow_events = self.stats.overflow_events.saturating_add(1);
         match self.config.overflow_policy {
-            EvidenceOverflowPolicy::Stop => Ok(false),
+            EvidenceOverflowPolicy::Stop => {
+                self.halted = true;
+                self.drop_current_record();
+                Ok(false)
+            }
             EvidenceOverflowPolicy::DropNewest => {
-                self.stats.records_dropped = self.stats.records_dropped.saturating_add(1);
+                self.drop_current_record();
                 Ok(true)
             }
             EvidenceOverflowPolicy::Error => Err(StreamingReplayError::EvidenceRecordTooLarge {
@@ -319,6 +325,20 @@ impl TraceEvidenceStreamer {
         self.pending_records = self.pending_records.saturating_add(1);
         self.update_buffer_watermark();
         Ok(())
+    }
+
+    fn drop_current_record(&mut self) {
+        self.stats.records_dropped = self.stats.records_dropped.saturating_add(1);
+        self.event.clear();
+    }
+
+    fn discard_pending_chunk(&mut self) {
+        self.stats.records_dropped = self
+            .stats
+            .records_dropped
+            .saturating_add(self.pending_records);
+        self.chunk.clear();
+        self.pending_records = 0;
     }
 
     fn flush_pending<S>(&mut self, sink: &mut S) -> StreamingReplayResult<bool>
@@ -349,12 +369,13 @@ impl TraceEvidenceStreamer {
             EvidenceSinkDecision::Backpressured => {
                 self.stats.backpressure_events = self.stats.backpressure_events.saturating_add(1);
                 match self.config.overflow_policy {
-                    EvidenceOverflowPolicy::Stop => Ok(false),
+                    EvidenceOverflowPolicy::Stop => {
+                        self.halted = true;
+                        self.discard_pending_chunk();
+                        Ok(false)
+                    }
                     EvidenceOverflowPolicy::DropNewest => {
-                        self.stats.records_dropped =
-                            self.stats.records_dropped.saturating_add(records);
-                        self.chunk.clear();
-                        self.pending_records = 0;
+                        self.discard_pending_chunk();
                         Ok(true)
                     }
                     EvidenceOverflowPolicy::Error => {
@@ -364,7 +385,11 @@ impl TraceEvidenceStreamer {
                     }
                 }
             }
-            EvidenceSinkDecision::Closed => Ok(false),
+            EvidenceSinkDecision::Closed => {
+                self.halted = true;
+                self.discard_pending_chunk();
+                Ok(false)
+            }
         }
     }
 
@@ -383,6 +408,10 @@ impl TraceEvidenceStreamer {
         I: IntoIterator<Item = &'a ReplayEvent>,
         S: TraceEvidenceSink,
     {
+        if self.halted {
+            return Ok(self.stats);
+        }
+
         for event in events {
             let sequence = self.stats.records_seen;
             self.stats.records_seen = self.stats.records_seen.saturating_add(1);
@@ -399,6 +428,7 @@ impl TraceEvidenceStreamer {
                 && self.chunk.len().saturating_add(record_len) > self.config.max_chunk_bytes
                 && !self.flush_pending(sink)?
             {
+                self.drop_current_record();
                 return Ok(self.stats);
             }
 
@@ -424,6 +454,10 @@ impl TraceEvidenceStreamer {
     where
         S: TraceEvidenceSink,
     {
+        if self.halted {
+            return Ok(self.stats);
+        }
+
         while let Some(event) = replayer.next_event()? {
             let sequence = self.stats.records_seen;
             self.stats.records_seen = self.stats.records_seen.saturating_add(1);
@@ -440,6 +474,7 @@ impl TraceEvidenceStreamer {
                 && self.chunk.len().saturating_add(record_len) > self.config.max_chunk_bytes
                 && !self.flush_pending(sink)?
             {
+                self.drop_current_record();
                 return Ok(self.stats);
             }
 
@@ -462,6 +497,10 @@ impl TraceEvidenceStreamer {
     where
         S: TraceEvidenceSink,
     {
+        if self.halted {
+            return Ok(self.stats);
+        }
+
         let _ = self.flush_pending(sink)?;
         Ok(self.stats)
     }
@@ -1141,6 +1180,22 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Default)]
+    struct ClosingEvidenceSink {
+        calls: u64,
+    }
+
+    impl TraceEvidenceSink for ClosingEvidenceSink {
+        fn push_trace_evidence(
+            &mut self,
+            chunk: TraceEvidenceChunk<'_>,
+        ) -> StreamingReplayResult<EvidenceSinkDecision> {
+            assert!(!chunk.is_empty());
+            self.calls = self.calls.saturating_add(1);
+            Ok(EvidenceSinkDecision::Closed)
+        }
+    }
+
     #[test]
     fn evidence_stream_chunks_respect_capacity_and_ordering() {
         let events = sample_events(8);
@@ -1190,6 +1245,58 @@ mod tests {
         assert_eq!(accepted_ticks.first(), Some(&0));
         assert_eq!(accepted_ticks.len() as u64, stats.records_emitted);
         assert!(accepted_ticks.len() < events.len());
+    }
+
+    #[test]
+    fn evidence_stream_closed_sink_drops_pending_and_halts() {
+        let events = sample_events(8);
+        let config = TraceEvidenceStreamConfig::new().with_max_chunk_bytes(256);
+        let mut streamer = TraceEvidenceStreamer::new(config);
+        let mut closing_sink = ClosingEvidenceSink::default();
+
+        let stats = streamer
+            .stream_events(events.iter(), &mut closing_sink)
+            .unwrap();
+
+        assert_eq!(closing_sink.calls, 1);
+        assert_eq!(stats.records_seen, 8);
+        assert_eq!(stats.records_emitted, 0);
+        assert_eq!(stats.records_dropped, 8);
+        assert_eq!(stats.records_seen, stats.records_dropped);
+
+        let mut accepting_sink = CapturingEvidenceSink::default();
+        let after_halt = streamer.finish(&mut accepting_sink).unwrap();
+        assert_eq!(after_halt, stats);
+        assert!(accepting_sink.chunks.is_empty());
+    }
+
+    #[test]
+    fn evidence_stream_stop_backpressure_drops_pending_and_current_record() {
+        let events = sample_events(8);
+        let config = TraceEvidenceStreamConfig::new()
+            .with_max_chunk_bytes(48)
+            .with_overflow_policy(EvidenceOverflowPolicy::Stop);
+        let mut streamer = TraceEvidenceStreamer::new(config);
+        let mut sink = CapturingEvidenceSink::with_backpressure_after_chunks(1);
+
+        let stats = streamer.stream_events(events.iter(), &mut sink).unwrap();
+
+        assert_eq!(sink.chunks.len(), 1);
+        assert!(stats.records_seen > stats.records_emitted);
+        assert_eq!(
+            stats.records_seen,
+            stats.records_emitted + stats.records_dropped
+        );
+        assert_eq!(stats.backpressure_events, 1);
+
+        let emitted_before_retry = stats.records_emitted;
+        let mut retry_sink = CapturingEvidenceSink::default();
+        let retry_stats = streamer
+            .stream_events(events.iter(), &mut retry_sink)
+            .unwrap();
+        assert_eq!(retry_stats, stats);
+        assert_eq!(retry_stats.records_emitted, emitted_before_retry);
+        assert!(retry_sink.chunks.is_empty());
     }
 
     #[test]

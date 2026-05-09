@@ -288,7 +288,7 @@ pub struct MinimizedCounterexamplePacket {
     pub scenario_id: String,
     /// Stable reason for the packet.
     pub reason: String,
-    /// Number of fault-log entries retained in the minimized prefix.
+    /// Number of fault-log entries retained in the minimized packet.
     pub prefix_len: usize,
     /// Total scheduled fault count from the original scenario run.
     pub fault_count: usize,
@@ -296,7 +296,7 @@ pub struct MinimizedCounterexamplePacket {
     pub max_counterexample_events: usize,
     /// Participants still stalled at the end of the scheduled fault stream.
     pub active_stalled_participants: Vec<String>,
-    /// Redacted fault-log prefix retained for replay/debugging.
+    /// Redacted fault-log entries retained for replay/debugging.
     pub fault_log_prefix: Vec<FaultInjectionLogEntry>,
     /// Whether the source scenario requested redacted projection.
     pub redacted: bool,
@@ -784,30 +784,40 @@ impl ScenarioRunner {
             .keys()
             .cloned()
             .collect::<Vec<_>>();
-        let first_stalled = active_stalled_participants.first()?;
-        let host_arg = format!("host={first_stalled}");
         let first_stall_index = fault_log
             .iter()
-            .position(|entry| {
-                entry.action == "process_stall"
-                    && entry.args_summary.split(',').any(|arg| arg == host_arg)
-            })
-            .unwrap_or(0);
+            .enumerate()
+            .find_map(|(index, entry)| {
+                if entry.action != "process_stall" {
+                    return None;
+                }
+                let host_is_still_stalled = entry.args_summary.split(',').any(|arg| {
+                    arg.strip_prefix("host=").is_some_and(|host| {
+                        fault_effect_summary
+                            .stalled_participants_until_ms
+                            .contains_key(host)
+                    })
+                });
+                host_is_still_stalled.then_some(index)
+            })?;
         let max_counterexample_events = scenario
             .minimization
             .max_counterexample_events
             .or(scenario.resource_caps.max_counterexample_events)
             .unwrap_or(fault_log.len())
             .max(1);
-        let prefix_len = first_stall_index
+        let required_prefix_len = first_stall_index
             .saturating_add(1)
-            .min(fault_log.len())
-            .min(max_counterexample_events);
+            .min(fault_log.len());
+        let retained_len = required_prefix_len.min(max_counterexample_events);
+        let retained_start = required_prefix_len.saturating_sub(retained_len);
         let fault_log_prefix = fault_log
             .iter()
-            .take(prefix_len)
+            .skip(retained_start)
+            .take(retained_len)
             .cloned()
             .collect::<Vec<_>>();
+        let prefix_len = fault_log_prefix.len();
 
         Some(MinimizedCounterexamplePacket {
             scenario_id: scenario.id.clone(),
@@ -1074,7 +1084,8 @@ mod tests {
     )]
     use super::*;
     use crate::lab::scenario::{
-        ChaosSection, FaultAction, FaultEvent, LabSection, NetworkSection, Scenario,
+        ChaosSection, FaultAction, FaultEvent, LabSection, MinimizationSection, NetworkSection,
+        Scenario,
     };
     use std::collections::BTreeMap;
 
@@ -1311,6 +1322,70 @@ mod tests {
         assert!(result.passed());
         assert_eq!(result.faults_injected, 11);
         crate::test_complete!("run_with_all_fault_types");
+    }
+
+    #[test]
+    fn process_stall_counterexample_keeps_causal_event_under_small_cap() {
+        init_test("process_stall_counterexample_keeps_causal_event_under_small_cap");
+        let mut scenario = minimal_scenario();
+        scenario.participants = vec![crate::lab::scenario::Participant {
+            name: "alice".to_string(),
+            role: "worker".to_string(),
+            properties: BTreeMap::new(),
+        }];
+        scenario.minimization = MinimizationSection {
+            enabled: true,
+            max_counterexample_events: Some(1),
+            ..MinimizationSection::default()
+        };
+        scenario.faults = vec![
+            FaultEvent {
+                at_ms: 10,
+                action: FaultAction::DiskPressure,
+                args: {
+                    let mut m = BTreeMap::new();
+                    m.insert("path".into(), serde_json::json!("target/proof"));
+                    m.insert("bytes".into(), serde_json::json!(4096));
+                    m
+                },
+            },
+            FaultEvent {
+                at_ms: 20,
+                action: FaultAction::DelayedCleanup,
+                args: {
+                    let mut m = BTreeMap::new();
+                    m.insert("phase".into(), serde_json::json!("finalizers"));
+                    m.insert("delay_ms".into(), serde_json::json!(25));
+                    m
+                },
+            },
+            FaultEvent {
+                at_ms: 30,
+                action: FaultAction::ProcessStall,
+                args: {
+                    let mut m = BTreeMap::new();
+                    m.insert("host".into(), serde_json::json!("alice"));
+                    m.insert("duration_ms".into(), serde_json::json!(1_000));
+                    m
+                },
+            },
+        ];
+
+        let result = ScenarioRunner::run(&scenario).unwrap();
+        let counterexample = result
+            .minimized_counterexample
+            .expect("active process stall should emit a counterexample");
+
+        assert_eq!(counterexample.max_counterexample_events, 1);
+        assert_eq!(counterexample.prefix_len, 1);
+        assert_eq!(counterexample.fault_log_prefix.len(), 1);
+        let retained = &counterexample.fault_log_prefix[0];
+        assert_eq!(retained.action, "process_stall");
+        assert!(
+            retained.args_summary.split(',').any(|arg| arg == "host=alice"),
+            "counterexample must retain the causal stalled host"
+        );
+        crate::test_complete!("process_stall_counterexample_keeps_causal_event_under_small_cap");
     }
 
     #[test]

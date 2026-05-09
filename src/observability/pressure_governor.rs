@@ -732,10 +732,78 @@ impl Default for PressureThresholds {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lab::{LabConfig, LabRunReport, LabRuntime};
     use crate::observability::metrics::Metrics;
     use crate::runtime::RuntimeBuilder;
     use crate::types::Budget;
     use std::time::Duration;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct PressureLabTransition {
+        pending_items: usize,
+        total_capacity: usize,
+        channel_backlog_pressure_scaled: i64,
+        decision: AdmissionDecision,
+        fallback_verdict: PressureFallbackVerdict,
+        channel_backlog_live: bool,
+    }
+
+    fn run_lab_pressure_transition_projection(
+        seed: u64,
+    ) -> (Vec<PressureLabTransition>, LabRunReport) {
+        let mut lab = LabRuntime::new(LabConfig::new(seed).worker_count(2).max_steps(10_000));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        for _ in 0..3 {
+            let (task_id, _handle) = lab
+                .state
+                .create_task(root, Budget::INFINITE, async {
+                    crate::runtime::yield_now::yield_now().await;
+                })
+                .expect("lab pressure task should be created");
+            lab.scheduler.lock().schedule(task_id, 0);
+        }
+
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .global_queue_limit(4)
+                .build()
+                .expect("Failed to create pressure transition runtime"),
+        );
+        let config = PressureGovernorConfig {
+            enabled: true,
+            admission_control: true,
+            sample_interval: Duration::ZERO,
+            ..Default::default()
+        };
+        let metrics = Metrics::new();
+        let governor = PressureGovernor::new(config, std::sync::Arc::clone(&runtime), metrics)
+            .expect("pressure governor should initialize");
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+
+        let mut transitions = Vec::new();
+        for (pending_items, total_capacity) in [(0, 4), (3, 4), (5, 4)] {
+            governor.record_channel_backlog_sample(pending_items, total_capacity);
+            let snapshot = governor
+                .sample_pressure(&cx)
+                .expect("pressure snapshot should not fail");
+            let decision = governor
+                .check_admission(&cx)
+                .expect("pressure admission should not fail");
+            transitions.push(PressureLabTransition {
+                pending_items,
+                total_capacity,
+                channel_backlog_pressure_scaled: (snapshot.channel_backlog_pressure * 10_000.0)
+                    as i64,
+                decision,
+                fallback_verdict: snapshot.fallback_verdict,
+                channel_backlog_live: snapshot.signal_availability.channel_backlog,
+            });
+        }
+
+        let report = lab.run_until_quiescent_with_report();
+        (transitions, report)
+    }
 
     #[test]
     fn test_pressure_governor_config_defaults() {
@@ -1581,6 +1649,66 @@ mod tests {
             governor.fallback_verdict_metric(),
             PressureFallbackVerdict::PartialSignalsUnavailable.as_metric_value()
         );
+    }
+
+    #[test]
+    fn pressure_governor_lab_runtime_pressure_transitions_are_deterministic() {
+        let (first_trace, first_report) = run_lab_pressure_transition_projection(0x5A17);
+        let (second_trace, second_report) = run_lab_pressure_transition_projection(0x5A17);
+
+        assert_eq!(
+            first_trace,
+            vec![
+                PressureLabTransition {
+                    pending_items: 0,
+                    total_capacity: 4,
+                    channel_backlog_pressure_scaled: 0,
+                    decision: AdmissionDecision::Admit,
+                    fallback_verdict: PressureFallbackVerdict::PartialSignalsUnavailable,
+                    channel_backlog_live: true,
+                },
+                PressureLabTransition {
+                    pending_items: 3,
+                    total_capacity: 4,
+                    channel_backlog_pressure_scaled: 7_500,
+                    decision: AdmissionDecision::AdmitWithBackpressure,
+                    fallback_verdict: PressureFallbackVerdict::PartialSignalsUnavailable,
+                    channel_backlog_live: true,
+                },
+                PressureLabTransition {
+                    pending_items: 5,
+                    total_capacity: 4,
+                    channel_backlog_pressure_scaled: 12_500,
+                    decision: AdmissionDecision::Reject,
+                    fallback_verdict: PressureFallbackVerdict::PartialSignalsUnavailable,
+                    channel_backlog_live: true,
+                },
+            ]
+        );
+        assert_eq!(first_trace, second_trace);
+
+        assert!(first_report.quiescent);
+        assert!(second_report.quiescent);
+        assert_eq!(
+            first_report.trace_fingerprint, second_report.trace_fingerprint,
+            "matching LabRuntime pressure scenarios should replay to the same trace fingerprint"
+        );
+        assert_eq!(
+            first_report.trace_certificate, second_report.trace_certificate,
+            "matching LabRuntime pressure scenarios should keep certificate evidence stable"
+        );
+        assert_eq!(
+            first_report.oracle_report.to_json(),
+            second_report.oracle_report.to_json()
+        );
+        assert_eq!(
+            first_report.invariant_violations,
+            second_report.invariant_violations
+        );
+        assert!(first_report.oracle_report.all_passed());
+        assert!(second_report.oracle_report.all_passed());
+        assert!(first_report.invariant_violations.is_empty());
+        assert!(second_report.invariant_violations.is_empty());
     }
 
     #[test]

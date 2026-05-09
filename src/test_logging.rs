@@ -1386,8 +1386,29 @@ fn default_trace_fingerprint(seed: u64, scenario_id: &str) -> String {
     format!("pending:{scenario_id}:{seed:016x}")
 }
 
+fn replay_target_slug(scenario_id: &str) -> String {
+    let mut slug = String::with_capacity(scenario_id.len().max(1));
+    for ch in scenario_id.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+        } else if !slug.ends_with('_') {
+            slug.push('_');
+        }
+    }
+
+    let slug = slug.trim_matches('_');
+    if slug.is_empty() {
+        "scenario".to_string()
+    } else {
+        slug.to_string()
+    }
+}
+
 fn default_replay_command(seed: u64, scenario_id: &str) -> String {
-    format!("ASUPERSYNC_SEED=0x{seed:X} rch exec -- cargo test {scenario_id} -- --nocapture")
+    let target_slug = replay_target_slug(scenario_id);
+    format!(
+        "rch exec -- env CARGO_TARGET_DIR=${{TMPDIR:-/tmp}}/rch_target_test_logging_{target_slug} ASUPERSYNC_SEED=0x{seed:X} cargo test {scenario_id} -- --nocapture"
+    )
 }
 
 fn normalize_string_ids(ids: impl IntoIterator<Item = String>) -> Vec<String> {
@@ -4052,11 +4073,14 @@ mod tests {
         );
         assert_eq!(manifest.subsystem.as_deref(), Some("obligation"));
         assert_eq!(manifest.failure_class, FAILURE_CLASS_ASSERTION_FAILURE);
+        assert_eq!(
+            manifest.replay_command,
+            "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_test_logging_obligation_leak ASUPERSYNC_SEED=0x2A cargo test obligation_leak -- --nocapture",
+            "default replay command should be deterministic and target-dir qualified"
+        );
         assert!(
-            manifest
-                .replay_command
-                .contains("rch exec -- cargo test obligation_leak -- --nocapture"),
-            "default replay command should be deterministic"
+            !manifest.replay_command.contains("rch exec -- cargo test"),
+            "default replay command must not use bare rch cargo routing"
         );
         assert!(!manifest.trace_fingerprint.is_empty());
         assert!(!manifest.passed);
@@ -4076,7 +4100,7 @@ mod tests {
             .with_invariant("no_leaks")
             .with_invariant_ids(["quiescence", "no_leaks", "quiescence"])
             .with_replay_command(
-                "ASUPERSYNC_SEED=0xBEEF rch exec -- cargo test helper_test -- --nocapture",
+                "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_test_logging_helper_test ASUPERSYNC_SEED=0xBEEF cargo test helper_test -- --nocapture",
             )
             .with_failure_class("assertion_failure")
             .with_artifact_paths(["b.json", "a.json", "b.json"])
@@ -4096,9 +4120,13 @@ mod tests {
         );
         assert_eq!(manifest.failure_class, "assertion_failure");
         assert!(
-            manifest
-                .replay_command
-                .contains("rch exec -- cargo test helper_test -- --nocapture")
+            manifest.replay_command.contains(
+                "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_test_logging_helper_test ASUPERSYNC_SEED=0xBEEF cargo test helper_test -- --nocapture"
+            )
+        );
+        assert!(
+            !manifest.replay_command.contains("rch exec -- cargo test"),
+            "explicit replay command fixture must not use bare rch cargo routing"
         );
         assert_eq!(
             manifest.artifact_paths,
@@ -4263,7 +4291,7 @@ mod tests {
             .with_trace_fingerprint("fp_1234")
             .with_invariant_ids(["cancel_protocol", "no_obligation_leaks"])
             .with_replay_command(
-                "ASUPERSYNC_SEED=0x1234 rch exec -- cargo test contract_ok -- --nocapture",
+                "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_test_logging_contract_ok ASUPERSYNC_SEED=0x1234 cargo test contract_ok -- --nocapture",
             )
             .with_failure_class(FAILURE_CLASS_ASSERTION_FAILURE)
             .with_artifact_paths([
@@ -4286,7 +4314,7 @@ mod tests {
         let mut manifest = ReproManifest::new(0x9999, "contract_bad", false)
             .with_trace_fingerprint("fp_9999")
             .with_replay_command(
-                "ASUPERSYNC_SEED=0x9999 rch exec -- cargo test contract_bad -- --nocapture",
+                "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_test_logging_contract_bad ASUPERSYNC_SEED=0x9999 cargo test contract_bad -- --nocapture",
             )
             .with_failure_class(FAILURE_CLASS_ASSERTION_FAILURE)
             .with_artifact_paths([
@@ -4381,14 +4409,20 @@ mod tests {
             manifest.failure_class
         );
         crate::assert_with_log!(
-            manifest
-                .replay_command
-                .contains("rch exec -- cargo test harness_failure_test -- --nocapture"),
+            manifest.replay_command.contains(
+                "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_test_logging_harness_failure_test ASUPERSYNC_SEED=0xF00D cargo test harness_failure_test -- --nocapture"
+            ),
             "replay command populated",
             true,
-            manifest
-                .replay_command
-                .contains("rch exec -- cargo test harness_failure_test -- --nocapture")
+            manifest.replay_command.contains(
+                "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_test_logging_harness_failure_test ASUPERSYNC_SEED=0xF00D cargo test harness_failure_test -- --nocapture"
+            )
+        );
+        crate::assert_with_log!(
+            !manifest.replay_command.contains("rch exec -- cargo test"),
+            "replay command target-dir qualified",
+            true,
+            manifest.replay_command
         );
         crate::test_complete!("test_harness_repro_manifest_on_failure");
     }
