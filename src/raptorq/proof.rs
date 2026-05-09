@@ -415,6 +415,15 @@ pub enum ProofArtifactDistributionError {
         /// Hash recomputed from manifest fields.
         actual: ProofHash,
     },
+    /// RFC 6330 parameters in the manifest do not match the source block.
+    ManifestParameterMismatch {
+        /// Manifest field that did not match recomputed parameters.
+        field: &'static str,
+        /// Value stored in the manifest.
+        expected: usize,
+        /// Value recomputed from `source_symbols` and `symbol_size`.
+        actual: usize,
+    },
     /// A shard belongs to a different manifest.
     ManifestMismatch {
         /// Manifest hash expected by the recovery operation.
@@ -473,6 +482,14 @@ impl fmt::Display for ProofArtifactDistributionError {
             Self::ManifestHashMismatch { expected, actual } => write!(
                 f,
                 "manifest hash mismatch: stored {expected}, recomputed {actual}"
+            ),
+            Self::ManifestParameterMismatch {
+                field,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "manifest {field} mismatch: stored {expected}, recomputed {actual}"
             ),
             Self::ManifestMismatch { expected, actual } => {
                 write!(
@@ -670,8 +687,11 @@ fn validate_manifest(
     if manifest.symbol_size == 0 {
         return Err(ProofArtifactDistributionError::InvalidSymbolSize);
     }
-    SystematicParams::try_for_source_block(manifest.source_symbols, manifest.symbol_size)
-        .map_err(map_systematic_param_error)?;
+    let params =
+        SystematicParams::try_for_source_block(manifest.source_symbols, manifest.symbol_size)
+            .map_err(map_systematic_param_error)?;
+    validate_manifest_parameter("k_prime", manifest.k_prime, params.k_prime)?;
+    validate_manifest_parameter("l", manifest.l, params.l)?;
     let actual = manifest.recompute_hash();
     if actual != manifest.manifest_hash {
         return Err(ProofArtifactDistributionError::ManifestHashMismatch {
@@ -680,6 +700,21 @@ fn validate_manifest(
         });
     }
     Ok(())
+}
+
+fn validate_manifest_parameter(
+    field: &'static str,
+    expected: usize,
+    actual: usize,
+) -> Result<(), ProofArtifactDistributionError> {
+    if expected == actual {
+        return Ok(());
+    }
+    Err(ProofArtifactDistributionError::ManifestParameterMismatch {
+        field,
+        expected,
+        actual,
+    })
 }
 
 fn verify_shard(
@@ -3388,6 +3423,42 @@ mod tests {
                 ProofArtifactDistributionError::ShardPayloadHashMismatch { esi: 0 }
             ),
             "unexpected corruption error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn proof_artifact_distribution_rejects_false_manifest_parameters() {
+        let payload = deterministic_artifact_payload(384);
+        let distribution = package_proof_artifact_for_distribution(
+            &payload,
+            64,
+            10,
+            0xF015_EC0D,
+            ObjectId::new_for_test(0xF015),
+            4,
+        )
+        .expect("proof artifact should package");
+
+        let mut forged_manifest = distribution.manifest.clone();
+        forged_manifest.k_prime = forged_manifest.k_prime.saturating_add(1);
+        forged_manifest.manifest_hash = forged_manifest.recompute_hash();
+        assert!(
+            forged_manifest.hash_is_valid(),
+            "test must cover a self-consistent but semantically false manifest"
+        );
+
+        let err = recover_proof_artifact_from_shards(&forged_manifest, &distribution.shards)
+            .expect_err("false RFC 6330 metadata must fail before decode");
+
+        assert!(
+            matches!(
+                err,
+                ProofArtifactDistributionError::ManifestParameterMismatch {
+                    field: "k_prime",
+                    ..
+                }
+            ),
+            "unexpected manifest validation error: {err:?}"
         );
     }
 

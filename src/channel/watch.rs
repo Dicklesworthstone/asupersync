@@ -536,7 +536,7 @@ impl<T> Sender<T> {
     #[inline]
     #[must_use]
     pub fn receiver_count(&self) -> usize {
-        self.inner.receiver_count.load(Ordering::Acquire)
+        self.inner.receiver_count.load(Ordering::Relaxed)
     }
 
     /// Returns true if all receivers have been dropped.

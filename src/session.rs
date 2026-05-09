@@ -664,7 +664,10 @@ mod tests {
         runtime.scheduler.lock().schedule(server_id, 0);
         runtime.run_until_quiescent();
 
-        assert!(left_taken.load(Ordering::Relaxed), "server took left branch");
+        assert!(
+            left_taken.load(Ordering::Relaxed),
+            "server took left branch"
+        );
         assert_eq!(value_sent.load(Ordering::Relaxed), 99, "server received 99");
 
         crate::test_complete!("session_choose_offer_e2e");

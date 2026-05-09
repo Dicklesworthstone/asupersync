@@ -209,23 +209,28 @@ impl ThreadLocalEntropy {
 
 static STRICT_ENTROPY: AtomicBool = AtomicBool::new(false);
 
+// The strict entropy bit is a standalone policy gate. It does not publish
+// side data, so atomicity alone is sufficient; no cross-location ordering is
+// required.
+const STRICT_ENTROPY_ORDERING: Ordering = Ordering::Relaxed;
+
 /// Enable strict entropy isolation globally.
 #[inline]
 pub fn enable_strict_entropy() {
-    STRICT_ENTROPY.store(true, Ordering::SeqCst);
+    STRICT_ENTROPY.store(true, STRICT_ENTROPY_ORDERING);
 }
 
 /// Disable strict entropy isolation globally.
 #[inline]
 pub fn disable_strict_entropy() {
-    STRICT_ENTROPY.store(false, Ordering::SeqCst);
+    STRICT_ENTROPY.store(false, STRICT_ENTROPY_ORDERING);
 }
 
 /// Returns true if strict entropy isolation is enabled.
 #[inline]
 #[must_use]
 pub fn strict_entropy_enabled() -> bool {
-    STRICT_ENTROPY.load(Ordering::SeqCst)
+    STRICT_ENTROPY.load(STRICT_ENTROPY_ORDERING)
 }
 
 /// Panic if strict entropy isolation is enabled.
@@ -248,7 +253,7 @@ impl StrictEntropyGuard {
     #[must_use]
     #[inline]
     pub fn new() -> Self {
-        let previous = STRICT_ENTROPY.swap(true, Ordering::SeqCst);
+        let previous = STRICT_ENTROPY.swap(true, STRICT_ENTROPY_ORDERING);
         Self { previous }
     }
 }
@@ -261,7 +266,7 @@ impl Default for StrictEntropyGuard {
 
 impl Drop for StrictEntropyGuard {
     fn drop(&mut self) {
-        STRICT_ENTROPY.store(self.previous, Ordering::SeqCst);
+        STRICT_ENTROPY.store(self.previous, STRICT_ENTROPY_ORDERING);
     }
 }
 

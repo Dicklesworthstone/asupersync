@@ -3,9 +3,9 @@
 //! Measures performance impact of different atomic ordering choices
 //! to validate optimization benefits.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use std::sync::atomic::{AtomicU64, Ordering};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
 fn bench_counter_orderings(c: &mut Criterion) {

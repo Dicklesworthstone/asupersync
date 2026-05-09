@@ -2977,6 +2977,10 @@ mod platform {
 #[allow(dead_code)]
 pub struct SystemResourceCollector {
     /// Whether monitoring is active.
+    ///
+    /// This is a lifecycle gate for start/stop/status observers, not a
+    /// publication point for sampled resource data, so acquire/release
+    /// ordering is enough and avoids a global `SeqCst` fence here.
     active: AtomicBool,
     /// Collection interval.
     interval: Duration,
@@ -3001,7 +3005,7 @@ impl SystemResourceCollector {
     pub fn start(&self) -> Result<(), ResourceMonitorError> {
         if self
             .active
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed)
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
             .is_err()
         {
             return Err(ResourceMonitorError::AlreadyActive);
@@ -3014,7 +3018,7 @@ impl SystemResourceCollector {
 
     /// Stop monitoring.
     pub fn stop(&self) {
-        self.active.store(false, Ordering::SeqCst);
+        self.active.store(false, Ordering::Release);
     }
 
     /// Manually collect current system resource measurements.
@@ -3219,7 +3223,7 @@ impl SystemResourceCollector {
 
     /// Check if monitoring is active.
     pub fn is_active(&self) -> bool {
-        self.active.load(Ordering::Relaxed)
+        self.active.load(Ordering::Acquire)
     }
 }
 
@@ -3677,6 +3681,29 @@ mod tests {
             status.platform_probe_report.platform,
             current_platform_fingerprint()
         );
+    }
+
+    #[test]
+    fn rz7cpt_system_resource_collector_active_flag_tracks_lifecycle() {
+        let pressure = Arc::new(ResourcePressure::new());
+        let collector = SystemResourceCollector::new(pressure, Duration::from_millis(50));
+
+        assert!(!collector.is_active());
+        collector.start().expect("collector should start once");
+        assert!(collector.is_active());
+        assert!(matches!(
+            collector.start(),
+            Err(ResourceMonitorError::AlreadyActive)
+        ));
+        assert!(collector.is_active());
+
+        collector.stop();
+        assert!(!collector.is_active());
+        collector
+            .start()
+            .expect("collector should restart after stop");
+        assert!(collector.is_active());
+        collector.stop();
     }
 
     #[test]

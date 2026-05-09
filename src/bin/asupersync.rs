@@ -5741,13 +5741,13 @@ fn lab_semaphore_cancel_recovery_observation(seed: u64) -> SemaphoreCancelRecove
         .create_task(region, Budget::INFINITE, async move {
             match semaphore_for_waiter.acquire(&waiter_cx, 1).await {
                 Err(AcquireError::Cancelled) => {
-                    waiter_result.fetch_add(1, Ordering::SeqCst);
+                    waiter_result.fetch_add(1, Ordering::Relaxed);
                 }
                 Ok(_permit) => {
-                    unexpected_acquires.fetch_add(1, Ordering::SeqCst);
+                    unexpected_acquires.fetch_add(1, Ordering::Relaxed);
                 }
                 Err(_err) => {
-                    unexpected_errors.fetch_add(1, Ordering::SeqCst);
+                    unexpected_errors.fetch_add(1, Ordering::Relaxed);
                 }
             }
         })
@@ -5774,12 +5774,12 @@ fn lab_semaphore_cancel_recovery_observation(seed: u64) -> SemaphoreCancelRecove
     });
 
     SemaphoreCancelRecoveryObservation {
-        cancelled_waiters: cancelled_waiters.load(Ordering::SeqCst),
+        cancelled_waiters: cancelled_waiters.load(Ordering::Relaxed),
         recovered_acquisitions,
         available_after_cancel,
         final_available_permits: semaphore.available_permits(),
-        unexpected_cancel_acquisitions: unexpected_cancel_acquisitions.load(Ordering::SeqCst),
-        unexpected_cancel_errors: unexpected_cancel_errors.load(Ordering::SeqCst),
+        unexpected_cancel_acquisitions: unexpected_cancel_acquisitions.load(Ordering::Relaxed),
+        unexpected_cancel_errors: unexpected_cancel_errors.load(Ordering::Relaxed),
     }
 }
 

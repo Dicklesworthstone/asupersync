@@ -147,7 +147,7 @@ mod inline_tests {
 
     impl Wake for FlagWake {
         fn wake(self: Arc<Self>) {
-            self.flag.store(true, Ordering::SeqCst);
+            self.flag.store(true, Ordering::Release);
         }
     }
 

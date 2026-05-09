@@ -4257,7 +4257,7 @@ mod tests {
             runtime: &Arc<RuntimeInner>,
             workers: Vec<ThreeLaneWorker>,
         ) -> io::Result<Vec<std::thread::JoinHandle<()>>> {
-            self.worker_bootstrap_calls.fetch_add(1, Ordering::SeqCst);
+            self.worker_bootstrap_calls.fetch_add(1, Ordering::Relaxed);
             NativeThreadHostServices::spawn_worker_threads(runtime, workers)
         }
 
@@ -4266,7 +4266,7 @@ mod tests {
             config: &RuntimeConfig,
             state: &Arc<crate::sync::ContendedMutex<RuntimeState>>,
         ) -> DeadlineMonitorHostService {
-            self.deadline_monitor_calls.fetch_add(1, Ordering::SeqCst);
+            self.deadline_monitor_calls.fetch_add(1, Ordering::Relaxed);
             NativeThreadHostServices::start_deadline_monitor(config, state)
         }
     }
@@ -6116,10 +6116,10 @@ worker_threads = 16
         let runtime = RuntimeBuilder::new()
             .worker_threads(1)
             .on_thread_start(move || {
-                started_for_callback.fetch_add(1, Ordering::SeqCst);
+                started_for_callback.fetch_add(1, Ordering::Relaxed);
             })
             .on_thread_stop(move || {
-                stopped_for_callback.fetch_add(1, Ordering::SeqCst);
+                stopped_for_callback.fetch_add(1, Ordering::Relaxed);
             })
             .build()
             .expect("runtime build");

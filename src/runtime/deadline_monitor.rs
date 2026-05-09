@@ -645,7 +645,9 @@ mod tests {
     }
 
     fn set_test_time(nanos: u64) {
-        TEST_NOW_OFFSET_NS.store(nanos, Ordering::SeqCst);
+        // Test clock access is serialized by lock_test_clock and carries no
+        // side data, so atomicity is sufficient here.
+        TEST_NOW_OFFSET_NS.store(nanos, Ordering::Relaxed);
     }
 
     fn test_now() -> Instant {
@@ -656,7 +658,7 @@ mod tests {
                     .unwrap_or_else(Instant::now)
             })
             .checked_add(Duration::from_nanos(
-                TEST_NOW_OFFSET_NS.load(Ordering::SeqCst),
+                TEST_NOW_OFFSET_NS.load(Ordering::Relaxed),
             ))
             .expect("deadline monitor test instant overflow")
     }

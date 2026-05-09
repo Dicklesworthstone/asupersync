@@ -4120,7 +4120,7 @@ mod tests {
             }
 
             fn phase(&self, phase_name: &str) {
-                let phase_num = self.phase_count.fetch_add(1, Ordering::SeqCst);
+                let phase_num = self.phase_count.fetch_add(1, Ordering::Relaxed);
                 let elapsed_ms = self.start_time.elapsed().as_millis();
 
                 eprintln!(
@@ -4205,7 +4205,7 @@ mod tests {
             }
 
             fn create_user_record(&self) -> (i64, String, String) {
-                let id = self.counter.fetch_add(1, Ordering::SeqCst) as i64;
+                let id = self.counter.fetch_add(1, Ordering::Relaxed) as i64;
                 let name = format!("user_{}", id);
                 let email = format!("user{}@test-domain.com", id);
                 (id, name, email)
@@ -4227,7 +4227,7 @@ mod tests {
             ) -> Vec<(i64, String, f64)> {
                 (0..count)
                     .map(|i| {
-                        let tx_id = self.counter.fetch_add(1, Ordering::SeqCst) as i64;
+                        let tx_id = self.counter.fetch_add(1, Ordering::Relaxed) as i64;
                         let description = format!("Transaction {} for user {}", i, user_id);
                         let amount = (i as f64) * 10.5 + 1.0; // Realistic amounts
                         (tx_id, description, amount)

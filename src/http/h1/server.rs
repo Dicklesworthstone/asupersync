@@ -169,7 +169,7 @@ fn parse_host_header_host(value: &str) -> Option<String> {
         }
         if !remainder.is_empty() {
             let port = remainder.strip_prefix(':')?;
-            if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+            if !is_valid_host_port(port) {
                 return None;
             }
         }
@@ -178,16 +178,16 @@ fn parse_host_header_host(value: &str) -> Option<String> {
     // Plain host or `host:port` — split on the last ':' and reject
     // malformed suffixes rather than silently truncating them.
     if let Some((host, port)) = value.rsplit_once(':') {
-        if host.is_empty()
-            || host.contains(':')
-            || port.is_empty()
-            || !port.bytes().all(|b| b.is_ascii_digit())
-        {
+        if host.is_empty() || host.contains(':') || !is_valid_host_port(port) {
             return None;
         }
         return Some(host.to_ascii_lowercase());
     }
     Some(value.to_ascii_lowercase())
+}
+
+fn is_valid_host_port(port: &str) -> bool {
+    !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) && port.parse::<u16>().is_ok()
 }
 
 fn single_host_header_value(headers: &[(String, String)]) -> Result<Option<&str>, String> {
@@ -1372,6 +1372,12 @@ mod tests {
         let headers = vec![("Host".to_string(), "[::1]evil.test".to_string())];
         let err = validate_host_header(&headers, &policy).unwrap_err();
         assert_eq!(err, "[::1]evil.test");
+
+        // Out-of-range ports are malformed authorities and must not be
+        // canonicalized to the allow-listed IPv6 literal.
+        let headers = vec![("Host".to_string(), "[::1]:65536".to_string())];
+        let err = validate_host_header(&headers, &policy).unwrap_err();
+        assert_eq!(err, "[::1]:65536");
     }
 
     /// br-asupersync-t9yqht: parse_host_header_host handles edge
@@ -1391,8 +1397,21 @@ mod tests {
             Some("example.com")
         );
         assert_eq!(
+            parse_host_header_host("example.com:65535").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(parse_host_header_host("example.com:65536").as_deref(), None);
+        assert_eq!(
             parse_host_header_host("[2001:db8::1]:443").as_deref(),
             Some("2001:db8::1")
+        );
+        assert_eq!(
+            parse_host_header_host("[2001:db8::1]:65535").as_deref(),
+            Some("2001:db8::1")
+        );
+        assert_eq!(
+            parse_host_header_host("[2001:db8::1]:65536").as_deref(),
+            None
         );
         assert_eq!(parse_host_header_host("[2001:db8::1]evil").as_deref(), None);
         assert_eq!(

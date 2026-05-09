@@ -2771,7 +2771,7 @@ mod tests {
                         + 1;
 
                     // Update max concurrent
-                    let mut max = tracker_clone.max_concurrent.load(Ordering::SeqCst);
+                    let mut max = tracker_clone.max_concurrent.load(Ordering::Relaxed);
                     while current > max {
                         match tracker_clone.max_concurrent.compare_exchange_weak(
                             max,
@@ -2810,23 +2810,23 @@ mod tests {
 
             // Verify budget accounting
             assert_eq!(
-                tracker.task_starts.load(Ordering::SeqCst),
+                tracker.task_starts.load(Ordering::Relaxed),
                 3,
                 "All tasks should start"
             );
             assert_eq!(
-                tracker.task_ends.load(Ordering::SeqCst),
+                tracker.task_ends.load(Ordering::Relaxed),
                 3,
                 "All tasks should end"
             );
             assert_eq!(
-                tracker.current_concurrent.load(Ordering::SeqCst),
+                tracker.current_concurrent.load(Ordering::Relaxed),
                 0,
                 "No tasks should be running"
             );
 
             // Verify resource limits were respected (pool has max 4 threads, so max 3 concurrent is reasonable)
-            let max_concurrent = tracker.max_concurrent.load(Ordering::SeqCst);
+            let max_concurrent = tracker.max_concurrent.load(Ordering::Relaxed);
             assert!(max_concurrent <= 4, "Should not exceed pool thread limit");
             assert!(max_concurrent >= 1, "At least one task should run");
 

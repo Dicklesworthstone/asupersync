@@ -753,13 +753,6 @@ impl ReplayCheckpoint {
             )));
         }
 
-        // Check for timestamp overflow/underflow
-        if checkpoint.created_at == 0 {
-            return Err(StreamingReplayError::InvalidCheckpoint(
-                "created_at timestamp cannot be zero".to_string(),
-            ));
-        }
-
         Ok(())
     }
 }
@@ -1546,6 +1539,34 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_deserialization_accepts_initial_deterministic_checkpoint() {
+        let temp = NamedTempFile::new().unwrap();
+        let path = temp.path();
+
+        let metadata = TraceMetadata::new(42);
+        let events = sample_events(3);
+        write_trace(path, &metadata, &events).unwrap();
+
+        let replayer = StreamingReplayer::open(path).unwrap();
+        let checkpoint = replayer.checkpoint();
+
+        assert_eq!(checkpoint.events_processed, 0);
+        assert_eq!(checkpoint.total_events, 3);
+        assert_eq!(
+            checkpoint.created_at, 0,
+            "recorded_at=0 is the deterministic no-wall-clock trace stamp"
+        );
+
+        let checkpoint_bytes = checkpoint.to_bytes().unwrap();
+        let restored_checkpoint = ReplayCheckpoint::from_bytes(&checkpoint_bytes).unwrap();
+        assert_eq!(restored_checkpoint.events_processed, 0);
+        assert_eq!(restored_checkpoint.created_at, 0);
+
+        let resumed = StreamingReplayer::resume(path, restored_checkpoint).unwrap();
+        assert_eq!(resumed.events_consumed(), 0);
+    }
+
+    #[test]
     fn checkpoint_validation() {
         let temp1 = NamedTempFile::new().unwrap();
         let temp2 = NamedTempFile::new().unwrap();
@@ -1966,20 +1987,44 @@ mod tests {
         // Test oversized input rejection
         let large_input = vec![0u8; 2048]; // Exceeds MAX_CHECKPOINT_SIZE
         let result = ReplayCheckpoint::from_bytes(&large_input);
-        assert!(matches!(result, Err(StreamingReplayError::InvalidCheckpoint(_))));
-        assert!(result.unwrap_err().to_string().contains("checkpoint too large"));
+        assert!(matches!(
+            result,
+            Err(StreamingReplayError::InvalidCheckpoint(_))
+        ));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("checkpoint too large")
+        );
 
         // Test undersized input rejection
         let small_input = vec![0u8; 8]; // Below MIN_CHECKPOINT_SIZE
         let result = ReplayCheckpoint::from_bytes(&small_input);
-        assert!(matches!(result, Err(StreamingReplayError::InvalidCheckpoint(_))));
-        assert!(result.unwrap_err().to_string().contains("checkpoint too small"));
+        assert!(matches!(
+            result,
+            Err(StreamingReplayError::InvalidCheckpoint(_))
+        ));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("checkpoint too small")
+        );
 
         // Test malformed MessagePack rejection
         let malformed_input = vec![0xFF; 64]; // Invalid MessagePack
         let result = ReplayCheckpoint::from_bytes(&malformed_input);
-        assert!(matches!(result, Err(StreamingReplayError::InvalidCheckpoint(_))));
-        assert!(result.unwrap_err().to_string().contains("deserialization failed"));
+        assert!(matches!(
+            result,
+            Err(StreamingReplayError::InvalidCheckpoint(_))
+        ));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("deserialization failed")
+        );
     }
 
     #[test]
@@ -1987,7 +2032,7 @@ mod tests {
         // Create a checkpoint with invalid bounds (events_processed > total_events)
         let bad_checkpoint = ReplayCheckpoint {
             events_processed: 100,
-            total_events: 50,  // Invalid: less than events_processed
+            total_events: 50, // Invalid: less than events_processed
             seed: 12345,
             metadata_hash: 0xABCD,
             created_at: 1000,
@@ -1998,33 +2043,47 @@ mod tests {
 
         // from_bytes should reject it due to bounds validation
         let result = ReplayCheckpoint::from_bytes(&bytes);
-        assert!(matches!(result, Err(StreamingReplayError::InvalidCheckpoint(_))));
-        assert!(result.unwrap_err().to_string().contains("exceeds total_events"));
+        assert!(matches!(
+            result,
+            Err(StreamingReplayError::InvalidCheckpoint(_))
+        ));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("exceeds total_events")
+        );
 
         // Test excessive event count
         let excessive_checkpoint = ReplayCheckpoint {
             events_processed: 0,
-            total_events: u64::MAX,  // Too large
+            total_events: u64::MAX, // Too large
             seed: 12345,
             metadata_hash: 0xABCD,
             created_at: 1000,
         };
         let bytes = rmp_serde::to_vec(&excessive_checkpoint).unwrap();
         let result = ReplayCheckpoint::from_bytes(&bytes);
-        assert!(matches!(result, Err(StreamingReplayError::InvalidCheckpoint(_))));
-        assert!(result.unwrap_err().to_string().contains("total_events too large"));
+        assert!(matches!(
+            result,
+            Err(StreamingReplayError::InvalidCheckpoint(_))
+        ));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("total_events too large")
+        );
 
-        // Test zero timestamp
-        let zero_timestamp_checkpoint = ReplayCheckpoint {
+        let deterministic_epoch_checkpoint = ReplayCheckpoint {
             events_processed: 0,
             total_events: 10,
             seed: 12345,
             metadata_hash: 0xABCD,
-            created_at: 0,  // Invalid: zero timestamp
+            created_at: 0,
         };
-        let bytes = rmp_serde::to_vec(&zero_timestamp_checkpoint).unwrap();
-        let result = ReplayCheckpoint::from_bytes(&bytes);
-        assert!(matches!(result, Err(StreamingReplayError::InvalidCheckpoint(_))));
-        assert!(result.unwrap_err().to_string().contains("created_at timestamp cannot be zero"));
+        let bytes = rmp_serde::to_vec(&deterministic_epoch_checkpoint).unwrap();
+        let restored = ReplayCheckpoint::from_bytes(&bytes).unwrap();
+        assert_eq!(restored.created_at, 0);
     }
 }

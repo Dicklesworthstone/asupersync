@@ -271,6 +271,9 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+    /// Test reactor atomics are assertion counters/flags and publish no side data.
+    const TEST_REACTOR_ORDERING: Ordering = Ordering::Relaxed;
+
     /// Test reactor for testing Registration RAII behavior.
     struct TestReactor {
         deregistered: AtomicBool,
@@ -290,18 +293,18 @@ mod tests {
         }
 
         fn was_deregistered(&self) -> bool {
-            self.deregistered.load(Ordering::SeqCst)
+            self.deregistered.load(TEST_REACTOR_ORDERING)
         }
 
         fn deregister_count(&self) -> usize {
-            self.deregister_count.load(Ordering::SeqCst)
+            self.deregister_count.load(TEST_REACTOR_ORDERING)
         }
     }
 
     impl ReactorHandle for TestReactor {
         fn deregister_by_token(&self, token: Token) -> io::Result<()> {
-            self.deregistered.store(true, Ordering::SeqCst);
-            self.deregister_count.fetch_add(1, Ordering::SeqCst);
+            self.deregistered.store(true, TEST_REACTOR_ORDERING);
+            self.deregister_count.fetch_add(1, TEST_REACTOR_ORDERING);
             *self.last_token.lock() = Some(token);
             Ok(())
         }
@@ -325,13 +328,13 @@ mod tests {
         }
 
         fn deregister_count(&self) -> usize {
-            self.deregister_count.load(Ordering::SeqCst)
+            self.deregister_count.load(TEST_REACTOR_ORDERING)
         }
     }
 
     impl ReactorHandle for FlakyReactor {
         fn deregister_by_token(&self, _token: Token) -> io::Result<()> {
-            let call = self.deregister_count.fetch_add(1, Ordering::SeqCst);
+            let call = self.deregister_count.fetch_add(1, TEST_REACTOR_ORDERING);
             if call == 0 {
                 Err(io::Error::other("injected failure"))
             } else {
@@ -356,13 +359,13 @@ mod tests {
         }
 
         fn deregister_count(&self) -> usize {
-            self.deregister_count.load(Ordering::SeqCst)
+            self.deregister_count.load(TEST_REACTOR_ORDERING)
         }
     }
 
     impl ReactorHandle for AlwaysFailReactor {
         fn deregister_by_token(&self, _token: Token) -> io::Result<()> {
-            self.deregister_count.fetch_add(1, Ordering::SeqCst);
+            self.deregister_count.fetch_add(1, TEST_REACTOR_ORDERING);
             Err(io::Error::other("persistent failure"))
         }
 
@@ -385,21 +388,21 @@ mod tests {
         }
 
         fn was_deregistered(&self) -> bool {
-            self.deregistered.load(Ordering::SeqCst)
+            self.deregistered.load(TEST_REACTOR_ORDERING)
         }
 
         fn deregister_count(&self) -> usize {
-            self.deregister_count.load(Ordering::SeqCst)
+            self.deregister_count.load(TEST_REACTOR_ORDERING)
         }
     }
 
     impl ReactorHandle for ThirdTryReactor {
         fn deregister_by_token(&self, _token: Token) -> io::Result<()> {
-            let call = self.deregister_count.fetch_add(1, Ordering::SeqCst);
+            let call = self.deregister_count.fetch_add(1, TEST_REACTOR_ORDERING);
             if call < 2 {
                 Err(io::Error::other("injected failure"))
             } else {
-                self.deregistered.store(true, Ordering::SeqCst);
+                self.deregistered.store(true, TEST_REACTOR_ORDERING);
                 Ok(())
             }
         }
@@ -421,13 +424,13 @@ mod tests {
         }
 
         fn deregister_count(&self) -> usize {
-            self.deregister_count.load(Ordering::SeqCst)
+            self.deregister_count.load(TEST_REACTOR_ORDERING)
         }
     }
 
     impl ReactorHandle for PanickingReactor {
         fn deregister_by_token(&self, _token: Token) -> io::Result<()> {
-            self.deregister_count.fetch_add(1, Ordering::SeqCst);
+            self.deregister_count.fetch_add(1, TEST_REACTOR_ORDERING);
             unreachable!("injected deregister panic")
         }
 

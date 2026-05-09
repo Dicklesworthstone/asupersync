@@ -1,7 +1,8 @@
 //! HPACK Encoder Conformance Test Runner
 //!
-//! Runs differential conformance testing for HPACK encoder comparing
-//! asupersync against the h2 reference implementation.
+//! Runs HPACK encoder conformance testing against explicit h2 golden bytes.
+//! Most cases currently skip because h2 encoder internals are private, so this
+//! runner must report partial coverage instead of claiming live reference parity.
 //!
 //! Usage:
 //!   rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_conformance_bin_docs cargo run --bin hpack_encoder_conformance
@@ -43,6 +44,10 @@ enum OutputFormat {
     Summary,
 }
 
+fn reference_scope_line() -> &'static str {
+    "Testing explicit h2 golden bytes; missing h2 goldens fail closed"
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
@@ -53,7 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("🔧 HPACK Encoder Conformance Tester");
-    println!("   Testing asupersync against h2 reference implementation");
+    println!("   {}", reference_scope_line());
     println!("   Focus: Wire format compatibility, dynamic table state");
     println!();
 
@@ -277,6 +282,16 @@ mod tests {
     #[test]
     fn final_status_claims_all_passed_only_for_full_green_results() {
         assert_eq!(final_status_line(0, 0), "✅ ALL TESTS PASSED");
+    }
+
+    #[test]
+    fn reference_scope_does_not_claim_live_h2_reference_parity() {
+        let line = reference_scope_line();
+
+        assert!(line.contains("h2 golden"));
+        assert!(line.contains("fail closed"));
+        assert!(!line.contains("h2 reference implementation"));
+        assert!(!line.contains("Testing asupersync against"));
     }
 
     #[tokio::test]

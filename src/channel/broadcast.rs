@@ -270,8 +270,8 @@ impl<T> Channel<T> {
         receiver_next_index: Option<u64>,
     ) -> BroadcastTelemetrySnapshot {
         let inner = self.inner.lock();
-        let receiver_count = self.receiver_count.load(Ordering::Acquire);
-        let sender_count = self.sender_count.load(Ordering::Acquire);
+        let receiver_count = self.receiver_count.load(Ordering::Relaxed);
+        let sender_count = self.sender_count.load(Ordering::Relaxed);
         let queued_messages = inner.buffer.len();
         let recv_waiter_count = inner.wakers.len();
         let lagged_receiver_count = inner.lagged_receiver_count();
@@ -373,7 +373,7 @@ impl<T: Clone> Sender<T> {
     #[must_use]
     #[inline]
     pub fn receiver_count(&self) -> usize {
-        self.channel.receiver_count.load(Ordering::Acquire)
+        self.channel.receiver_count.load(Ordering::Relaxed)
     }
 
     /// Returns the number of messages currently buffered in the channel.

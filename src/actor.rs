@@ -1332,11 +1332,11 @@ mod tests {
 
         impl std::task::Wake for CountingWaker {
             fn wake(self: Arc<Self>) {
-                self.counter.fetch_add(1, Ordering::SeqCst);
+                self.counter.fetch_add(1, Ordering::Relaxed);
             }
 
             fn wake_by_ref(self: &Arc<Self>) {
-                self.counter.fetch_add(1, Ordering::SeqCst);
+                self.counter.fetch_add(1, Ordering::Relaxed);
             }
         }
 
@@ -2015,7 +2015,7 @@ mod tests {
                 &mut runtime.state,
                 &cx,
                 move || {
-                    rc.fetch_add(1, Ordering::SeqCst);
+                    rc.fetch_add(1, Ordering::Relaxed);
                     PanickingCounter {
                         count: 0,
                         panic_on: 999,
@@ -2155,7 +2155,7 @@ mod tests {
                 &mut runtime.state,
                 &cx,
                 move || {
-                    rc.fetch_add(1, Ordering::SeqCst);
+                    rc.fetch_add(1, Ordering::Relaxed);
                     StopThenPanicActor
                 },
                 strategy,
@@ -2207,7 +2207,7 @@ mod tests {
             fn on_start(&mut self, _cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
                 let starts = Arc::clone(&self.starts);
                 Box::pin(async move {
-                    starts.fetch_add(1, Ordering::SeqCst);
+                    starts.fetch_add(1, Ordering::Relaxed);
                 })
             }
 
@@ -2242,7 +2242,7 @@ mod tests {
                 &mut runtime.state,
                 &cx,
                 move || {
-                    fc.fetch_add(1, Ordering::SeqCst);
+                    fc.fetch_add(1, Ordering::Relaxed);
                     DelayedRestartActor {
                         starts: Arc::clone(&starts_for_factory),
                     }

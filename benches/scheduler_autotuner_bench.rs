@@ -5,12 +5,11 @@
 
 #![cfg(feature = "test-internals")]
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::time::{Duration, Instant};
 
 use asupersync::runtime::scheduler::{
-    AutotunerConfig, SchedulerAutotuner, HotPathObservation,
-    three_lane::AdaptiveReadyProfile,
+    AutotunerConfig, HotPathObservation, SchedulerAutotuner, three_lane::AdaptiveReadyProfile,
 };
 
 /// Workload patterns for autotuner benchmarking.
@@ -33,7 +32,7 @@ impl WorkloadPattern {
         let (cancel_ratio, timed_ratio, ready_ratio) = match self {
             WorkloadPattern::HighCancel => (4000, 2000, 4000), // High cancel pressure
             WorkloadPattern::HighThroughput => (500, 500, 9000), // High ready throughput
-            WorkloadPattern::Mixed => (2000, 2000, 6000), // Balanced
+            WorkloadPattern::Mixed => (2000, 2000, 6000),      // Balanced
         };
 
         // Estimate latency based on progress and workload
@@ -55,7 +54,9 @@ impl WorkloadPattern {
             adaptive_scale_up_events: ((progress * 10.0) as u64).min(5),
             cancel_debt_floor_hits: if matches!(self, WorkloadPattern::HighCancel) {
                 ((progress * 20.0) as u64).min(15)
-            } else { 0 },
+            } else {
+                0
+            },
             estimated_p95_latency_us: (base_latency as f64 * latency_factor) as u64,
         }
     }
@@ -105,8 +106,16 @@ fn simulate_scheduler_performance(
         // Simulate performance impact based on parameters
         let performance_factor = if enable_autotuner {
             // Better parameters improve performance
-            let batch_efficiency = if current_batch_size >= 4 && current_batch_size <= 16 { 1.0 } else { 0.8 };
-            let handoff_efficiency = if current_handoff_limit >= 2 && current_handoff_limit <= 8 { 1.0 } else { 0.9 };
+            let batch_efficiency = if current_batch_size >= 4 && current_batch_size <= 16 {
+                1.0
+            } else {
+                0.8
+            };
+            let handoff_efficiency = if current_handoff_limit >= 2 && current_handoff_limit <= 8 {
+                1.0
+            } else {
+                0.9
+            };
             batch_efficiency * handoff_efficiency
         } else {
             1.0 // Baseline performance
@@ -202,7 +211,10 @@ fn bench_autotuner_vs_baseline(c: &mut Criterion) {
 
                     // Log adjustments for analysis
                     if adjustments > 0 {
-                        eprintln!("Autotuner made {} adjustments for {:?}", adjustments, workload);
+                        eprintln!(
+                            "Autotuner made {} adjustments for {:?}",
+                            adjustments, workload
+                        );
                     }
 
                     duration

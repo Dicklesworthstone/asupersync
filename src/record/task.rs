@@ -1222,7 +1222,7 @@ mod tests {
             let successes = Arc::clone(&successes);
             handles.push(std::thread::spawn(move || {
                 if state.notify() {
-                    successes.fetch_add(1, Ordering::SeqCst);
+                    successes.fetch_add(1, Ordering::Relaxed);
                 }
             }));
         }

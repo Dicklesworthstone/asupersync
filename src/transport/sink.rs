@@ -758,7 +758,7 @@ mod tests {
     use std::task::Wake;
     impl Wake for FlagWake {
         fn wake(self: Arc<Self>) {
-            self.flag.store(true, Ordering::SeqCst);
+            self.flag.store(true, Ordering::Release);
         }
     }
 
