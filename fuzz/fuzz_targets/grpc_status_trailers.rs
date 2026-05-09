@@ -18,11 +18,12 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use asupersync::grpc::status::Code;
+use asupersync::bytes::Bytes;
+use asupersync::grpc::status::{Code, MAX_STATUS_DETAILS_LEN, MAX_STATUS_MESSAGE_LEN, Status};
 use base64::Engine;
 use libfuzzer_sys::fuzz_target;
 
-const MAX_INPUT_LEN: usize = 4096;
+const MAX_INPUT_LEN: usize = MAX_STATUS_MESSAGE_LEN + 1024;
 
 fuzz_target!(|data: &[u8]| {
     if data.is_empty() || data.len() > MAX_INPUT_LEN {
@@ -42,6 +43,48 @@ fuzz_target!(|data: &[u8]| {
         // Path 2: Code::from_i32 must accept any i32.
         let code_result = catch_unwind(AssertUnwindSafe(|| Code::from_i32(code_i32)));
         assert!(code_result.is_ok(), "Code::from_i32 panicked on {code_i32}");
+
+        let code = code_result.expect("checked above");
+        assert_eq!(
+            Code::from_i32(code.as_i32()),
+            code,
+            "canonical status code integer must round-trip for {code:?}"
+        );
+
+        let msg = String::from_utf8_lossy(data).into_owned();
+        let status = Status::with_details(code, msg.clone(), Bytes::from(data.to_vec()));
+        assert_eq!(status.code(), code, "Status must preserve decoded code");
+        assert!(
+            status.message().len() <= MAX_STATUS_MESSAGE_LEN,
+            "Status message exceeded cap: {} > {}",
+            status.message().len(),
+            MAX_STATUS_MESSAGE_LEN
+        );
+        assert!(
+            msg.len() > MAX_STATUS_MESSAGE_LEN || status.message() == msg,
+            "Status message below cap must be preserved exactly"
+        );
+        assert!(
+            status.message().is_char_boundary(status.message().len()),
+            "Status message cap must preserve UTF-8 boundaries"
+        );
+
+        let details = status
+            .details()
+            .expect("with_details must retain a bounded details payload");
+        assert!(
+            details.len() <= MAX_STATUS_DETAILS_LEN,
+            "Status details exceeded cap: {} > {}",
+            details.len(),
+            MAX_STATUS_DETAILS_LEN
+        );
+        if data.len() <= MAX_STATUS_DETAILS_LEN {
+            assert_eq!(
+                details.as_ref(),
+                data,
+                "details below cap must be preserved exactly"
+            );
+        }
     }
 
     // === grpc-status-details-bin header: base64 of arbitrary bytes ===
