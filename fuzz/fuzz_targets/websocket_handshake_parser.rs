@@ -2,11 +2,12 @@
 
 use arbitrary::Arbitrary;
 use asupersync::net::websocket::{
-    ClientHandshake, HandshakeError, HttpRequest, HttpResponse, ServerHandshake, WsUrl,
-    compute_accept_key,
+    AcceptResponse, ClientHandshake, HandshakeError, HttpRequest, HttpResponse, ServerHandshake,
+    WsUrl,
 };
 use asupersync::util::DetEntropy;
 use libfuzzer_sys::fuzz_target;
+use std::collections::BTreeMap;
 
 /// RFC 6455 focused fuzz target for WebSocket handshake parsing.
 ///
@@ -25,14 +26,14 @@ struct WebSocketHandshakeInput {
 #[derive(Arbitrary, Debug)]
 enum HandshakeParseOperation {
     /// Test Sec-WebSocket-Key validation edge cases
-    WebSocketKeyTest {
+    WebSocketKey {
         key_data: Vec<u8>,
         force_padding: Option<u8>, // 0-4 padding chars
         inject_invalid_chars: bool,
         mutate_length: Option<u8>, // Target length deviation
     },
     /// Test Connection/Upgrade header parsing and injection attempts
-    ConnectionUpgradeTest {
+    ConnectionUpgrade {
         connection_header: Vec<u8>,
         upgrade_header: Vec<u8>,
         inject_crlf: bool,
@@ -40,7 +41,7 @@ enum HandshakeParseOperation {
         extra_tokens: Vec<String>,
     },
     /// Test protocol/extension negotiation with malicious payloads
-    ProtocolNegotiationTest {
+    ProtocolNegotiation {
         protocols: Vec<String>,
         extensions: Vec<String>,
         oversized_count: u8, // Generate 0-255 protocol entries
@@ -48,7 +49,7 @@ enum HandshakeParseOperation {
         duplicate_protocols: bool,
     },
     /// Test HTTP request parsing boundary conditions
-    HttpRequestBoundaryTest {
+    HttpRequestBoundary {
         method: String,
         path: String,
         headers: Vec<(String, String)>,
@@ -58,7 +59,7 @@ enum HandshakeParseOperation {
         inject_null_bytes: bool,
     },
     /// Test HTTP response parsing for client validation
-    HttpResponseBoundaryTest {
+    HttpResponseBoundary {
         status_code: u16,
         reason_phrase: String,
         headers: Vec<(String, String)>,
@@ -66,7 +67,7 @@ enum HandshakeParseOperation {
         inject_response_splitting: bool,
     },
     /// Test complete handshake flow with mutated sequences
-    FullHandshakeFlowTest {
+    FullHandshakeFlow {
         url: String,
         client_protocols: Vec<String>,
         client_extensions: Vec<String>,
@@ -76,7 +77,7 @@ enum HandshakeParseOperation {
         inject_extra_headers: bool,
     },
     /// Test URL parsing edge cases (ws:// and wss://)
-    UrlParsingTest {
+    UrlParsing {
         scheme: String,
         host: String,
         port: Option<u16>,
@@ -87,9 +88,11 @@ enum HandshakeParseOperation {
 }
 
 fuzz_target!(|input: WebSocketHandshakeInput| {
+    assert_known_handshake_outcomes();
+
     for operation in input.operations {
         match operation {
-            HandshakeParseOperation::WebSocketKeyTest {
+            HandshakeParseOperation::WebSocketKey {
                 key_data,
                 force_padding,
                 inject_invalid_chars,
@@ -102,7 +105,7 @@ fuzz_target!(|input: WebSocketHandshakeInput| {
                     mutate_length,
                 );
             }
-            HandshakeParseOperation::ConnectionUpgradeTest {
+            HandshakeParseOperation::ConnectionUpgrade {
                 connection_header,
                 upgrade_header,
                 inject_crlf,
@@ -117,7 +120,7 @@ fuzz_target!(|input: WebSocketHandshakeInput| {
                     &extra_tokens,
                 );
             }
-            HandshakeParseOperation::ProtocolNegotiationTest {
+            HandshakeParseOperation::ProtocolNegotiation {
                 protocols,
                 extensions,
                 oversized_count,
@@ -132,7 +135,7 @@ fuzz_target!(|input: WebSocketHandshakeInput| {
                     duplicate_protocols,
                 );
             }
-            HandshakeParseOperation::HttpRequestBoundaryTest {
+            HandshakeParseOperation::HttpRequestBoundary {
                 method,
                 path,
                 headers,
@@ -151,7 +154,7 @@ fuzz_target!(|input: WebSocketHandshakeInput| {
                     inject_null_bytes,
                 );
             }
-            HandshakeParseOperation::HttpResponseBoundaryTest {
+            HandshakeParseOperation::HttpResponseBoundary {
                 status_code,
                 reason_phrase,
                 headers,
@@ -166,7 +169,7 @@ fuzz_target!(|input: WebSocketHandshakeInput| {
                     inject_response_splitting,
                 );
             }
-            HandshakeParseOperation::FullHandshakeFlowTest {
+            HandshakeParseOperation::FullHandshakeFlow {
                 url,
                 client_protocols,
                 client_extensions,
@@ -185,7 +188,7 @@ fuzz_target!(|input: WebSocketHandshakeInput| {
                     inject_extra_headers,
                 );
             }
-            HandshakeParseOperation::UrlParsingTest {
+            HandshakeParseOperation::UrlParsing {
                 scheme,
                 host,
                 port,
@@ -206,6 +209,205 @@ fuzz_target!(|input: WebSocketHandshakeInput| {
     }
 });
 
+fn assert_known_handshake_outcomes() {
+    let server = ServerHandshake::new().protocol("chat");
+    let valid_request = b"GET /chat HTTP/1.1\r\n\
+        Host: example.com\r\n\
+        Upgrade: websocket\r\n\
+        Connection: keep-alive, Upgrade\r\n\
+        Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+        Sec-WebSocket-Version: 13\r\n\
+        Sec-WebSocket-Protocol: chat\r\n\
+        \r\n";
+    let accept = expect_server_accept(&server, valid_request);
+    assert_eq!(
+        accept.accept_key, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=",
+        "RFC 6455 sample key must compute the sample accept key"
+    );
+    assert_eq!(
+        accept.protocol.as_deref(),
+        Some("chat"),
+        "server must select an offered supported protocol"
+    );
+
+    let invalid_key_request = b"GET /chat HTTP/1.1\r\n\
+        Host: example.com\r\n\
+        Upgrade: websocket\r\n\
+        Connection: Upgrade\r\n\
+        Sec-WebSocket-Key: not-a-valid-16-byte-key\r\n\
+        Sec-WebSocket-Version: 13\r\n\
+        \r\n";
+    let invalid_key = expect_server_reject(&ServerHandshake::new(), invalid_key_request);
+    assert!(
+        matches!(invalid_key, HandshakeError::InvalidKey),
+        "invalid Sec-WebSocket-Key must reject as InvalidKey"
+    );
+
+    let canary_url = match WsUrl::parse("ws://example.com/chat") {
+        Ok(url) => url,
+        Err(error) => panic!("canary URL must parse: {error:?}"),
+    };
+    let client = ClientHandshake::new_for_test(
+        canary_url,
+        "dGhlIHNhbXBsZSBub25jZQ==".to_string(),
+        Vec::new(),
+        Vec::new(),
+        BTreeMap::new(),
+    );
+    let valid_response = expect_response_parse(
+        b"HTTP/1.1 101 Switching Protocols\r\n\
+          Upgrade: websocket\r\n\
+          Connection: Upgrade\r\n\
+          Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\
+          \r\n",
+    );
+    assert!(
+        client.validate_response(&valid_response).is_ok(),
+        "valid server response must validate against the client key"
+    );
+    let invalid_response = expect_response_parse(
+        b"HTTP/1.1 101 Switching Protocols\r\n\
+          Upgrade: websocket\r\n\
+          Connection: Upgrade\r\n\
+          Sec-WebSocket-Accept: wrong-accept-key\r\n\
+          \r\n",
+    );
+    let invalid_accept = match client.validate_response(&invalid_response) {
+        Ok(()) => panic!("wrong accept key must fail validation"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(invalid_accept, HandshakeError::InvalidAccept { .. }),
+        "wrong Sec-WebSocket-Accept must reject as InvalidAccept"
+    );
+
+    let url = expect_url_parse("wss://example.com:8443/socket");
+    assert_eq!(url.host, "example.com");
+    assert_eq!(url.port, 8443);
+    assert_eq!(url.path, "/socket");
+    assert!(url.tls);
+}
+
+fn expect_server_accept(server: &ServerHandshake, request_data: &[u8]) -> AcceptResponse {
+    let request = expect_request_parse(request_data);
+    let accept = server
+        .accept(&request)
+        .unwrap_or_else(|error| panic!("expected WebSocket request to be accepted: {error:?}"));
+    assert!(
+        !accept.accept_key.is_empty(),
+        "accepted request must compute a non-empty accept key"
+    );
+    let response = accept.response_bytes();
+    let parsed_response = expect_response_parse(&response);
+    assert_eq!(
+        parsed_response.status, 101,
+        "accept response bytes must parse as HTTP 101"
+    );
+    accept
+}
+
+fn expect_server_reject(server: &ServerHandshake, request_data: &[u8]) -> HandshakeError {
+    let request = expect_request_parse(request_data);
+    match server.accept(&request) {
+        Ok(_) => panic!("request must be rejected by the WebSocket server"),
+        Err(error) => error,
+    }
+}
+
+fn observe_server_accept(server: &ServerHandshake, request_data: &[u8]) {
+    if let Ok(request) = HttpRequest::parse(request_data) {
+        assert!(
+            !request.method.is_empty(),
+            "parsed HTTP request must contain a method"
+        );
+        assert!(
+            !request.path.is_empty(),
+            "parsed HTTP request must contain a path"
+        );
+        if let Ok(accept) = server.accept(&request) {
+            assert!(
+                !accept.accept_key.is_empty(),
+                "accepted request must compute a non-empty accept key"
+            );
+            let response = accept.response_bytes();
+            observe_response_parse(&response);
+        }
+    }
+}
+
+fn expect_request_parse(request_data: &[u8]) -> HttpRequest {
+    let request = HttpRequest::parse(request_data)
+        .unwrap_or_else(|error| panic!("expected HTTP request to parse: {error:?}"));
+    assert!(
+        !request.method.is_empty(),
+        "parsed HTTP request must contain a method"
+    );
+    assert!(
+        !request.path.is_empty(),
+        "parsed HTTP request must contain a path"
+    );
+    request
+}
+
+fn observe_request_parse(request_data: &[u8]) {
+    if let Ok(request) = HttpRequest::parse(request_data) {
+        assert!(
+            !request.method.is_empty(),
+            "parsed HTTP request must contain a method"
+        );
+        assert!(
+            !request.path.is_empty(),
+            "parsed HTTP request must contain a path"
+        );
+    }
+}
+
+fn expect_response_parse(response_data: &[u8]) -> HttpResponse {
+    let response = HttpResponse::parse(response_data)
+        .unwrap_or_else(|error| panic!("expected HTTP response to parse: {error:?}"));
+    assert!(
+        response.status >= 100,
+        "parsed HTTP response status must be at least 100"
+    );
+    response
+}
+
+fn observe_response_parse(response_data: &[u8]) {
+    if let Ok(response) = HttpResponse::parse(response_data) {
+        assert!(
+            response.status >= 100,
+            "parsed HTTP response status must be at least 100"
+        );
+    }
+}
+
+fn expect_url_parse(url: &str) -> WsUrl {
+    let parsed = WsUrl::parse(url)
+        .unwrap_or_else(|error| panic!("expected WebSocket URL to parse: {error:?}"));
+    assert!(
+        !parsed.host.is_empty(),
+        "parsed WebSocket URL must contain a host"
+    );
+    assert!(
+        parsed.path.starts_with('/'),
+        "parsed WebSocket URL path must be absolute"
+    );
+    parsed
+}
+
+fn observe_url_parse(url: &str) {
+    if let Ok(parsed) = WsUrl::parse(url) {
+        assert!(
+            !parsed.host.is_empty(),
+            "parsed WebSocket URL must contain a host"
+        );
+        assert!(
+            parsed.path.starts_with('/'),
+            "parsed WebSocket URL path must be absolute"
+        );
+    }
+}
+
 /// Fuzz Sec-WebSocket-Key validation edge cases
 fn fuzz_websocket_key_validation(
     key_data: &[u8],
@@ -219,7 +421,7 @@ fn fuzz_websocket_key_validation(
 
     // Mutate length if requested
     if let Some(target_len) = mutate_length {
-        raw_key.resize(target_len as usize, 0x42);
+        raw_key.resize(usize::from(target_len), 0x42);
     }
 
     // Start with base64 encoding
@@ -252,8 +454,7 @@ fn fuzz_websocket_key_validation(
         encoded_key
     );
 
-    // Should not panic - may accept or reject based on validation rules
-    let _ = HttpRequest::parse(request_data.as_bytes()).map(|req| server.accept(&req));
+    observe_server_accept(&server, request_data.as_bytes());
 
     // Test edge case: extremely long keys
     if encoded_key.len() < 10000 {
@@ -267,7 +468,7 @@ fn fuzz_websocket_key_validation(
              Sec-WebSocket-Version: 13\r\n\r\n",
             oversized_key
         );
-        let _ = HttpRequest::parse(oversized_request.as_bytes()).map(|req| server.accept(&req));
+        observe_server_accept(&server, oversized_request.as_bytes());
     }
 }
 
@@ -311,8 +512,7 @@ fn fuzz_connection_upgrade_headers(
         upgrade, connection
     );
 
-    // Should not panic - may accept or reject based on header validation
-    let _ = HttpRequest::parse(request_data.as_bytes()).map(|req| server.accept(&req));
+    observe_server_accept(&server, request_data.as_bytes());
 }
 
 /// Fuzz protocol and extension negotiation with malicious payloads
@@ -377,8 +577,7 @@ fn fuzz_protocol_negotiation(
         protocol_header, extension_header
     );
 
-    // Should not panic - negotiation may succeed or fail gracefully
-    let _ = HttpRequest::parse(request_data.as_bytes()).map(|req| server.accept(&req));
+    observe_server_accept(&server, request_data.as_bytes());
 }
 
 /// Fuzz HTTP request parsing boundary conditions
@@ -426,8 +625,7 @@ fn fuzz_http_request_parsing(
         request_data.push_str("\r\n");
     }
 
-    // Test parsing - should not panic
-    let _ = HttpRequest::parse(request_data.as_bytes());
+    observe_request_parse(request_data.as_bytes());
 }
 
 /// Fuzz HTTP response parsing for client-side validation
@@ -463,8 +661,7 @@ fn fuzz_http_response_parsing(
 
     response_data.push_str("\r\n");
 
-    // Test parsing - should not panic
-    let _ = HttpResponse::parse(response_data.as_bytes());
+    observe_response_parse(response_data.as_bytes());
 }
 
 /// Fuzz complete handshake flow with mutations
@@ -512,27 +709,27 @@ fn fuzz_full_handshake_flow(
             let request_bytes = client.request_bytes();
 
             // Parse and process on server
-            if let Ok(request) = HttpRequest::parse(&request_bytes) {
-                if let Ok(mut accept) = server.accept(&request) {
-                    // Potentially mutate accept key
-                    if mutate_accept_key {
-                        accept.accept_key = "invalid-accept-key".to_string();
-                    }
+            if let Ok(request) = HttpRequest::parse(&request_bytes)
+                && let Ok(mut accept) = server.accept(&request)
+            {
+                // Potentially mutate accept key
+                if mutate_accept_key {
+                    accept.accept_key = "invalid-accept-key".to_string();
+                }
 
-                    let mut response_bytes = accept.response_bytes();
+                let mut response_bytes = accept.response_bytes();
 
-                    // Inject extra headers
-                    if inject_extra_headers {
-                        let injection = b"X-Malicious: value\r\n";
-                        let mut modified = response_bytes.clone();
-                        modified.extend_from_slice(injection);
-                        response_bytes = modified;
-                    }
+                // Inject extra headers
+                if inject_extra_headers {
+                    let injection = b"X-Malicious: value\r\n";
+                    let mut modified = response_bytes.clone();
+                    modified.extend_from_slice(injection);
+                    response_bytes = modified;
+                }
 
-                    // Parse response on client and validate
-                    if let Ok(response) = HttpResponse::parse(&response_bytes) {
-                        let _ = client.validate_response(&response);
-                    }
+                // Parse response on client and validate
+                if let Ok(response) = HttpResponse::parse(&response_bytes) {
+                    let _ = client.validate_response(&response);
                 }
             }
         }
@@ -575,13 +772,12 @@ fn fuzz_url_parsing(
         format!("{}://{}{}", scheme, host_port, path)
     };
 
-    // Test URL parsing - should not panic
-    let _ = WsUrl::parse(&url);
+    observe_url_parse(&url);
 
     // Test extremely long URLs
     if url.len() < 1000 {
         let long_path = "/".to_string() + &"x".repeat(5000);
         let long_url = format!("{}://{}{}", scheme, host_port, long_path);
-        let _ = WsUrl::parse(&long_url);
+        observe_url_parse(&long_url);
     }
 }
