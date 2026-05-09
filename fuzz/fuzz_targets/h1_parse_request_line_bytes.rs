@@ -22,7 +22,7 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    let _ = fuzz_parse_request_line_bytes(data);
+    observe_request_line_parse(data);
 
     assert_parse_ok(b"GET / HTTP/1.1", "GET", "/", Version::Http11);
     assert_parse_ok(b"POST /path HTTP/1.0", "POST", "/path", Version::Http10);
@@ -86,6 +86,52 @@ fn assert_parse_ok(
     );
     assert_eq!(uri, expected_uri, "uri mismatch for {line:?}");
     assert_eq!(version, expected_version, "version mismatch for {line:?}");
+}
+
+fn observe_request_line_parse(line: &[u8]) {
+    match fuzz_parse_request_line_bytes(line) {
+        Ok((method, uri, version)) => {
+            assert!(
+                is_method_token(method.as_str()),
+                "accepted invalid method token {:?} for {line:?}",
+                method.as_str()
+            );
+            assert!(
+                is_visible_uri(&uri),
+                "accepted invalid request target {uri:?} for {line:?}"
+            );
+            assert!(
+                matches!(version, Version::Http10 | Version::Http11),
+                "accepted unsupported HTTP version {version:?} for {line:?}"
+            );
+        }
+        Err(err) => {
+            assert!(
+                !err.to_string().is_empty(),
+                "request-line parser errors should be observable"
+            );
+        }
+    }
+}
+
+fn is_method_token(method: &str) -> bool {
+    !method.is_empty() && method.bytes().all(is_http_token_byte)
+}
+
+fn is_http_token_byte(byte: u8) -> bool {
+    matches!(
+        byte,
+        b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'-' | b'.' | b'^' | b'_'
+            | b'`' | b'|' | b'~' | b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z'
+    )
+}
+
+fn is_visible_uri(uri: &str) -> bool {
+    !uri.is_empty()
+        && uri.len() <= MAX_INPUT_LEN
+        && uri
+            .bytes()
+            .all(|byte| !byte.is_ascii_control() && byte != b' ')
 }
 
 fn assert_bad_request_line(line: &[u8]) {
