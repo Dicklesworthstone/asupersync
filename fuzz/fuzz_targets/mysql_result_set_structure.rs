@@ -150,7 +150,7 @@ enum CorruptionSpec {
 
 fuzz_target!(|data: &[u8]| {
     // Test raw byte parsing first (existing coverage)
-    let _ = try_parse_raw_result_set_start(data);
+    observe_raw_result_set_start(data);
 
     // Test structure-aware generation
     let Ok(scenario) = ResultSetScenario::arbitrary(&mut Unstructured::new(data)) else {
@@ -176,6 +176,28 @@ fuzz_target!(|data: &[u8]| {
     // Test sequence of packets for protocol state machine violations
     test_result_set_sequence(&packets, &scenario);
 });
+
+fn observe_raw_result_set_start(data: &[u8]) {
+    match try_parse_raw_result_set_start(data) {
+        Ok(column_count) => {
+            assert!(
+                column_count <= 16_384,
+                "accepted raw result-set column count must stay bounded"
+            );
+            assert!(
+                !column_count.to_string().is_empty(),
+                "successful raw result-set parse should stay visible"
+            );
+        }
+        Err(error) => {
+            let diagnostic = format!("{error:?}");
+            assert!(
+                !diagnostic.is_empty(),
+                "raw result-set parse errors should stay visible"
+            );
+        }
+    }
+}
 
 fn try_parse_raw_result_set_start(data: &[u8]) -> Result<u64, MySqlError> {
     if data.is_empty() {
