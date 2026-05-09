@@ -8,23 +8,19 @@
 //!
 //! This target is structure-aware: a 5-arm enum (`Scenario`) drives the
 //! decoder through the corner cases the bead requested:
-//!   1. RandomBytes        — purely arbitrary input (covers fixed-cost
-//!                           dispatch + the all-zero / all-ones edges).
-//!   2. LengthPrefixOverflow — header advertises a length near or past
-//!                             u32::MAX so the implicit `as usize` /
-//!                             `saturating_add(MESSAGE_HEADER_SIZE)`
-//!                             arithmetic is exercised at the rim.
-//!   3. CompressedFlagMismatch — every byte value in 0..=255 for the
-//!                               compression flag, including the legal
-//!                               {0, 1} and the protocol-error path.
-//!   4. ZeroLengthMessage  — header with length=0 (must yield Some
-//!                           with empty Bytes payload, not None or Err).
-//!   5. SizeLimitEnforcement — message length straddles the configured
-//!                              max_decode_message_size cap.
+//!   1. RandomBytes: arbitrary input for dispatch and all-zero/all-ones edges.
+//!   2. LengthPrefixOverflow: length near `u32::MAX` to exercise cast and
+//!      `saturating_add(MESSAGE_HEADER_SIZE)` rim behavior.
+//!   3. CompressedFlagMismatch: every compression-flag byte, including the
+//!      legal `{0, 1}` values and the protocol-error path.
+//!   4. ZeroLengthMessage: length=0 must yield an empty message, not `None`.
+//!   5. SizeLimitEnforcement: length straddles `max_decode_message_size`.
 //!
-//! The harness must never panic. Decoder `Err` is expected and ignored;
-//! `Ok(Some)` and `Ok(None)` are both legal outcomes per the codec
-//! contract (None = need more bytes). Crashes / aborts are findings.
+//! Decoder outcomes are contract-checked at the framing boundary:
+//! `Ok(Some)` must preserve the compressed flag, payload length, and
+//! consumption amount; `Ok(None)` is only legal for incomplete in-cap frames;
+//! `Err(MessageTooLarge)` is required for over-cap lengths; and invalid
+//! compression flags must be consumed as protocol errors.
 //!
 //! ```bash
 //! cargo +nightly fuzz run grpc_codec_decode -- -max_total_time=120
@@ -35,6 +31,7 @@
 use arbitrary::Arbitrary;
 use asupersync::bytes::BytesMut;
 use asupersync::codec::Decoder;
+use asupersync::grpc::GrpcError;
 use asupersync::grpc::codec::{GrpcCodec, MESSAGE_HEADER_SIZE};
 use libfuzzer_sys::fuzz_target;
 
@@ -93,27 +90,154 @@ enum Scenario {
     },
 }
 
-fuzz_target!(|s: Scenario| match s {
-    Scenario::RandomBytes(buf) => fuzz_random_bytes(&buf),
-    Scenario::LengthPrefixOverflow {
-        bump,
-        compressed_flag,
-        payload,
-        chain_second_frame,
-    } => fuzz_length_prefix_overflow(bump, compressed_flag, &payload, chain_second_frame),
-    Scenario::CompressedFlagMismatch {
-        flag,
-        length,
-        payload,
-    } => fuzz_compressed_flag_mismatch(flag, length, &payload),
-    Scenario::ZeroLengthMessage { compressed } => fuzz_zero_length_message(compressed),
-    Scenario::SizeLimitEnforcement {
-        cap,
-        length_offset,
-        compressed,
-        payload,
-    } => fuzz_size_limit_enforcement(cap, length_offset, compressed, &payload),
+fuzz_target!(|s: Scenario| {
+    assert_known_decode_outcomes();
+
+    match s {
+        Scenario::RandomBytes(buf) => fuzz_random_bytes(&buf),
+        Scenario::LengthPrefixOverflow {
+            bump,
+            compressed_flag,
+            payload,
+            chain_second_frame,
+        } => fuzz_length_prefix_overflow(bump, compressed_flag, &payload, chain_second_frame),
+        Scenario::CompressedFlagMismatch {
+            flag,
+            length,
+            payload,
+        } => fuzz_compressed_flag_mismatch(flag, length, &payload),
+        Scenario::ZeroLengthMessage { compressed } => fuzz_zero_length_message(compressed),
+        Scenario::SizeLimitEnforcement {
+            cap,
+            length_offset,
+            compressed,
+            payload,
+        } => fuzz_size_limit_enforcement(cap, length_offset, compressed, &payload),
+    }
 });
+
+fn assert_known_decode_outcomes() {
+    let mut empty = frame(0, b"");
+    assert_decode_contract(&mut GrpcCodec::with_max_size(4), &mut empty, 0, 0);
+
+    let mut compressed_empty = frame(1, b"");
+    assert_decode_contract(
+        &mut GrpcCodec::with_max_size(4),
+        &mut compressed_empty,
+        1,
+        0,
+    );
+
+    let mut exact_cap = frame(0, b"1234");
+    assert_decode_contract(&mut GrpcCodec::with_max_size(4), &mut exact_cap, 0, 4);
+
+    let mut over_cap = frame(0, b"12345");
+    assert_decode_contract(&mut GrpcCodec::with_max_size(4), &mut over_cap, 0, 5);
+
+    let mut invalid_then_valid = frame(7, b"z");
+    invalid_then_valid.extend_from_slice(&frame(0, b"ok"));
+    assert_decode_contract(
+        &mut GrpcCodec::with_max_size(8),
+        &mut invalid_then_valid,
+        7,
+        1,
+    );
+    assert_decode_contract(
+        &mut GrpcCodec::with_max_size(8),
+        &mut invalid_then_valid,
+        0,
+        2,
+    );
+
+    let mut truncated = BytesMut::new();
+    truncated.extend_from_slice(&[0, 0, 0, 0, 3, b'a', b'b']);
+    assert_decode_contract(&mut GrpcCodec::with_max_size(8), &mut truncated, 0, 3);
+}
+
+fn frame(flag: u8, payload: &[u8]) -> BytesMut {
+    let mut buf = BytesMut::with_capacity(MESSAGE_HEADER_SIZE + payload.len());
+    buf.extend_from_slice(&[flag]);
+    let advertised_len = u32::try_from(payload.len()).unwrap_or(u32::MAX);
+    buf.extend_from_slice(&advertised_len.to_be_bytes());
+    buf.extend_from_slice(payload);
+    buf
+}
+
+fn assert_decode_contract(
+    codec: &mut GrpcCodec,
+    buf: &mut BytesMut,
+    flag: u8,
+    advertised_len: usize,
+) {
+    let before_len = buf.len();
+    let available_payload_len = before_len.saturating_sub(MESSAGE_HEADER_SIZE);
+    let max_decode_size = codec.max_decode_message_size();
+    let result = codec.decode(buf);
+
+    if advertised_len > max_decode_size {
+        assert!(
+            matches!(&result, Err(GrpcError::MessageTooLarge)),
+            "over-cap gRPC frame length {advertised_len} must reject with MessageTooLarge; got {result:?}"
+        );
+        assert_eq!(
+            buf.len(),
+            before_len,
+            "over-cap gRPC frame must reject before consuming buffered bytes"
+        );
+        return;
+    }
+
+    if available_payload_len < advertised_len {
+        assert!(
+            matches!(&result, Ok(None)),
+            "incomplete in-cap gRPC frame length {advertised_len} with {available_payload_len} bytes must wait; got {result:?}"
+        );
+        assert_eq!(
+            buf.len(),
+            before_len,
+            "incomplete gRPC frame must remain buffered"
+        );
+        return;
+    }
+
+    let expected_remaining = before_len - MESSAGE_HEADER_SIZE - advertised_len;
+    match flag {
+        0 | 1 => {
+            let message = match result {
+                Ok(Some(message)) => message,
+                other => panic!(
+                    "complete valid gRPC frame flag={flag} len={advertised_len} must decode; got {other:?}"
+                ),
+            };
+            assert_eq!(
+                message.compressed,
+                flag == 1,
+                "decoded compressed flag must mirror the frame header"
+            );
+            assert_eq!(
+                message.data.len(),
+                advertised_len,
+                "decoded payload length must match the advertised length"
+            );
+            assert_eq!(
+                buf.len(),
+                expected_remaining,
+                "complete valid gRPC frame must consume exactly header + payload"
+            );
+        }
+        _ => {
+            assert!(
+                matches!(&result, Err(GrpcError::Protocol(_))),
+                "invalid gRPC compression flag {flag} must reject as Protocol; got {result:?}"
+            );
+            assert_eq!(
+                buf.len(),
+                expected_remaining,
+                "invalid complete gRPC frame must consume only the malformed frame"
+            );
+        }
+    }
+}
 
 // =========================================================================
 // Vector 1: random byte stream
@@ -171,7 +295,8 @@ fn fuzz_length_prefix_overflow(
 
     let mut codec = GrpcCodec::new();
     let mut bm = BytesMut::from(buf.as_slice());
-    let _ = codec.decode(&mut bm);
+    let advertised_len = usize::try_from(advertised_len).unwrap_or(usize::MAX);
+    assert_decode_contract(&mut codec, &mut bm, compressed_flag, advertised_len);
 }
 
 // =========================================================================
@@ -191,7 +316,7 @@ fn fuzz_compressed_flag_mismatch(flag: u8, length: u16, payload: &[u8]) {
 
     let mut codec = GrpcCodec::new();
     let mut bm = BytesMut::from(buf.as_slice());
-    let _ = codec.decode(&mut bm);
+    assert_decode_contract(&mut codec, &mut bm, flag, len);
 }
 
 // =========================================================================
@@ -204,28 +329,7 @@ fn fuzz_zero_length_message(compressed: bool) {
     buf.extend_from_slice(&0_u32.to_be_bytes());
     let mut codec = GrpcCodec::new();
     let mut bm = BytesMut::from(buf.as_slice());
-    let result = codec.decode(&mut bm);
-    // Per the codec contract, length=0 with a valid compression flag
-    // MUST yield Some(message with empty data). Anything else (None,
-    // Err) is a finding — assert via panic so libfuzzer captures the
-    // seed.
-    if let Ok(Some(msg)) = result {
-        assert!(
-            msg.data.is_empty(),
-            "zero-length frame must have empty data"
-        );
-    } else {
-        // Ok(None) or Err on a complete zero-length frame is a real bug.
-        // We only assert this for the compressed=false case; compressed
-        // empty frames may have additional decompression invariants that
-        // the codec layer above us validates.
-        if !compressed {
-            // Don't panic on the rare malformed seed — but a Err here
-            // would be a real codec contract violation, so we must
-            // surface it. libfuzzer's panic = finding.
-            panic!("zero-length uncompressed frame must decode to Ok(Some(empty)); got {result:?}");
-        }
-    }
+    assert_decode_contract(&mut codec, &mut bm, u8::from(compressed), 0);
 }
 
 // =========================================================================
@@ -251,5 +355,5 @@ fn fuzz_size_limit_enforcement(cap: u16, length_offset: i32, compressed: bool, p
     buf.extend_from_slice(&payload[..body_len]);
 
     let mut bm = BytesMut::from(buf.as_slice());
-    let _ = codec.decode(&mut bm);
+    assert_decode_contract(&mut codec, &mut bm, u8::from(compressed), advertised);
 }
