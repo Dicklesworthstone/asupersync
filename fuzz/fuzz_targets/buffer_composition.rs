@@ -7,8 +7,8 @@
 //! The goal is to catch boundary calculation errors, remaining() inconsistencies,
 //! and edge cases in composed buffer access patterns.
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug)]
 struct CompositionSequence {
@@ -83,12 +83,12 @@ fn test_buffer_composition(sequence: CompositionSequence) {
             }
 
             CompositionOperation::TestChainRemaining => {
-                let chain = buf1.clone().chain(buf2.clone());
+                let chain = buf1.clone().reader().chain(buf2.clone().reader());
                 assert_eq!(chain.remaining(), buf1.len() + buf2.len());
             }
 
             CompositionOperation::TestChainAdvance { cnt } => {
-                let mut chain = buf1.clone().chain(buf2.clone());
+                let mut chain = buf1.clone().reader().chain(buf2.clone().reader());
                 let initial_remaining = chain.remaining();
                 let advance_amount = cnt.min(initial_remaining);
 
@@ -97,28 +97,44 @@ fn test_buffer_composition(sequence: CompositionSequence) {
             }
 
             CompositionOperation::TestChainReadBytes { cnt } => {
-                let mut chain = buf1.clone().chain(buf2.clone());
+                let mut chain = buf1.clone().reader().chain(buf2.clone().reader());
                 let read_amount = cnt.min(chain.remaining());
 
                 // Test reading across buffer boundaries
                 if read_amount > 0 {
                     let original_remaining = chain.remaining();
+                    let max_observations = read_amount.min(16);
+                    let mut observed = 0usize;
 
                     // Read bytes one by one to test boundary crossing
-                    for _ in 0..read_amount.min(16) {  // Limit iterations
+                    for _ in 0..max_observations {
                         if chain.remaining() > 0 {
+                            let before_read = chain.remaining();
                             let byte = chain.get_u8();
-                            // Verify the byte came from the correct buffer
-                            let _ = byte; // Just ensure no panic
+                            let expected = if observed < buf1.len() {
+                                buf1[observed]
+                            } else {
+                                buf2[observed - buf1.len()]
+                            };
+                            assert_eq!(
+                                byte, expected,
+                                "chain byte read diverged from source buffer order"
+                            );
+                            assert_eq!(
+                                chain.remaining(),
+                                before_read - 1,
+                                "get_u8 must consume exactly one byte"
+                            );
+                            observed += 1;
                         }
                     }
 
-                    assert!(chain.remaining() <= original_remaining);
+                    assert_eq!(chain.remaining(), original_remaining - observed);
                 }
             }
 
             CompositionOperation::TestChainCopyToSlice { len } => {
-                let mut chain = buf1.clone().chain(buf2.clone());
+                let mut chain = buf1.clone().reader().chain(buf2.clone().reader());
                 let copy_amount = len.min(chain.remaining()).min(1024); // Limit to prevent OOM
 
                 if copy_amount > 0 {
@@ -129,21 +145,23 @@ fn test_buffer_composition(sequence: CompositionSequence) {
             }
 
             CompositionOperation::CreateLimit { limit } => {
-                if limit <= 16 * 1024 {  // Reasonable limit
+                if limit <= 16 * 1024 {
+                    // Reasonable limit
                     test_limit_basic(limit);
                 }
             }
 
             CompositionOperation::TestLimitRemaining => {
-                let mut buf_mut = BytesMut::with_capacity(1024);
+                let buf_mut = BytesMut::with_capacity(1024);
                 let limit = 512;
+                let original_remaining_mut = buf_mut.remaining_mut();
                 let limited = buf_mut.limit(limit);
-                assert_eq!(limited.remaining_mut(), limit.min(buf_mut.remaining_mut()));
+                assert_eq!(limited.remaining_mut(), limit.min(original_remaining_mut));
             }
 
             CompositionOperation::TestLimitWrite { data } => {
                 if data.len() <= 1024 {
-                    let mut buf_mut = BytesMut::with_capacity(2048);
+                    let buf_mut = BytesMut::with_capacity(2048);
                     let limit = data.len() + 100;
                     let mut limited = buf_mut.limit(limit);
 
@@ -154,7 +172,7 @@ fn test_buffer_composition(sequence: CompositionSequence) {
             }
 
             CompositionOperation::TestLimitPutU32 { val } => {
-                let mut buf_mut = BytesMut::with_capacity(1024);
+                let buf_mut = BytesMut::with_capacity(1024);
                 let mut limited = buf_mut.limit(100);
 
                 if limited.remaining_mut() >= 4 {
@@ -165,7 +183,7 @@ fn test_buffer_composition(sequence: CompositionSequence) {
 
             CompositionOperation::TestLimitPutSlice { data } => {
                 if data.len() <= 512 {
-                    let mut buf_mut = BytesMut::with_capacity(1024);
+                    let buf_mut = BytesMut::with_capacity(1024);
                     let limit = data.len() * 2; // Ensure room
                     let mut limited = buf_mut.limit(limit);
 
@@ -184,13 +202,13 @@ fn test_buffer_composition(sequence: CompositionSequence) {
 
             CompositionOperation::TestTakeRemaining => {
                 let limit = 100.min(buf1.len());
-                let taken = buf1.clone().take(limit);
+                let taken = buf1.clone().reader().take(limit);
                 assert_eq!(taken.remaining(), limit);
             }
 
             CompositionOperation::TestTakeAdvance { cnt } => {
                 let limit = 100.min(buf1.len());
-                let mut taken = buf1.clone().take(limit);
+                let mut taken = buf1.clone().reader().take(limit);
                 let advance_amount = cnt.min(taken.remaining());
 
                 taken.advance(advance_amount);
@@ -199,7 +217,7 @@ fn test_buffer_composition(sequence: CompositionSequence) {
 
             CompositionOperation::TestTakeReadBytes { cnt } => {
                 let limit = 50.min(buf1.len());
-                let mut taken = buf1.clone().take(limit);
+                let mut taken = buf1.clone().reader().take(limit);
                 let read_amount = cnt.min(taken.remaining()).min(16);
 
                 for _ in 0..read_amount {
@@ -211,14 +229,14 @@ fn test_buffer_composition(sequence: CompositionSequence) {
 
             CompositionOperation::TestTakeHasRemaining => {
                 let limit = 25.min(buf1.len());
-                let taken = buf1.clone().take(limit);
+                let taken = buf1.clone().reader().take(limit);
                 assert_eq!(taken.has_remaining(), limit > 0);
             }
 
             CompositionOperation::ChainOfLimits { limit1, limit2 } => {
                 if limit1 <= 1024 && limit2 <= 1024 {
-                    let mut buf1_mut = BytesMut::with_capacity(2048);
-                    let mut buf2_mut = BytesMut::with_capacity(2048);
+                    let buf1_mut = BytesMut::with_capacity(2048);
+                    let buf2_mut = BytesMut::with_capacity(2048);
 
                     let limited1 = buf1_mut.limit(limit1);
                     let limited2 = buf2_mut.limit(limit2);
@@ -233,7 +251,7 @@ fn test_buffer_composition(sequence: CompositionSequence) {
             CompositionOperation::LimitOfChain { limit } => {
                 if limit <= total_original_len && limit <= 2048 {
                     // Create a chain first, then limit it
-                    let chain = buf1.clone().chain(buf2.clone());
+                    let chain = buf1.clone().reader().chain(buf2.clone().reader());
                     let limited_chain = chain.take(limit);
                     assert_eq!(limited_chain.remaining(), limit);
                 }
@@ -241,7 +259,7 @@ fn test_buffer_composition(sequence: CompositionSequence) {
 
             CompositionOperation::TakeOfChain { limit } => {
                 if limit <= total_original_len && limit <= 1024 {
-                    let chain = buf1.clone().chain(buf2.clone());
+                    let chain = buf1.clone().reader().chain(buf2.clone().reader());
                     let taken = chain.take(limit);
                     assert_eq!(taken.remaining(), limit);
 
@@ -256,7 +274,7 @@ fn test_buffer_composition(sequence: CompositionSequence) {
 fn test_chain_basic(buf1: asupersync::bytes::Bytes, buf2: asupersync::bytes::Bytes) {
     use asupersync::bytes::Buf;
 
-    let mut chain = buf1.clone().chain(buf2.clone());
+    let mut chain = buf1.clone().reader().chain(buf2.clone().reader());
     let expected_len = buf1.len() + buf2.len();
 
     // Test basic properties
@@ -276,18 +294,19 @@ fn test_chain_basic(buf1: asupersync::bytes::Bytes, buf2: asupersync::bytes::Byt
 fn test_limit_basic(limit: usize) {
     use asupersync::bytes::{BufMut, BytesMut};
 
-    let mut buf = BytesMut::with_capacity(limit * 2);
+    let buf = BytesMut::with_capacity(limit * 2);
+    let capacity = buf.capacity();
     let limited = buf.limit(limit);
 
     // Test basic properties
     assert!(limited.remaining_mut() <= limit);
-    assert!(limited.remaining_mut() <= buf.capacity());
+    assert!(limited.remaining_mut() <= capacity);
 }
 
 fn test_take_basic(buf: asupersync::bytes::Bytes, limit: usize) {
     use asupersync::bytes::Buf;
 
-    let taken = buf.clone().take(limit);
+    let taken = buf.clone().reader().take(limit);
     let expected_len = limit.min(buf.len());
 
     // Test basic properties
@@ -296,4 +315,4 @@ fn test_take_basic(buf: asupersync::bytes::Bytes, limit: usize) {
 
     // Test that take doesn't exceed original buffer
     assert!(taken.remaining() <= buf.len());
-});
+}
