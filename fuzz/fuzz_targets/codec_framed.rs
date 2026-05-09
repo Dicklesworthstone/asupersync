@@ -130,7 +130,12 @@ impl Decoder for TestCodec {
         }
 
         // We have a complete frame
-        let _ = src.split_to(4); // Remove length header
+        let header = src.split_to(4); // Remove length header
+        assert_eq!(
+            header.len(),
+            4,
+            "complete frames must expose a 4-byte header"
+        );
         let data = src.split_to(length); // Extract frame data
         Ok(Some(data.freeze()))
     }
