@@ -63,6 +63,30 @@ fn observe_decode(
     result
 }
 
+fn assert_observed_upgrade_decode(
+    context: &str,
+    result: Result<Option<Request>, HttpError>,
+    remaining_len: usize,
+) {
+    assert!(
+        remaining_len <= MAX_DATA_SIZE,
+        "{context}: remaining buffer exceeded fuzz size guard"
+    );
+
+    match result {
+        Ok(Some(request)) => {
+            validate_upgrade_request(&request);
+        }
+        Ok(None) => {}
+        Err(err) => {
+            assert!(
+                !err.to_string().trim().is_empty(),
+                "{context}: HTTP/1 decode error should expose diagnostics"
+            );
+        }
+    }
+}
+
 fn expect_complete_request(raw: &[u8]) -> Request {
     decode_once(raw)
         .expect("valid upgrade request must not return a parser error")
@@ -152,30 +176,23 @@ fuzz_target!(|data: &[u8]| {
     let mut buf = BytesMut::from(data);
 
     // Test request parsing focusing on upgrade scenarios
-    match codec.decode(&mut buf) {
-        Ok(Some(request)) => {
-            // Successfully parsed a request - now validate upgrade handling
-            validate_upgrade_request(&request);
-        }
-        Ok(None) => {
-            // Incomplete request - this is fine for fuzzing
-        }
-        Err(_) => {
-            // Parse error - this is expected for invalid input and is fine
-        }
-    }
+    let primary_result = observe_decode(&mut codec, &mut buf);
+    assert_observed_upgrade_decode("primary decode", primary_result, buf.len());
 
     // Test with different codec configurations for upgrade scenarios
     let mut small_headers_codec = Http1Codec::new().max_headers_size(256);
     let mut buf_copy = BytesMut::from(data);
-    let _ = observe_decode(&mut small_headers_codec, &mut buf_copy);
+    let small_headers_result = observe_decode(&mut small_headers_codec, &mut buf_copy);
+    assert_observed_upgrade_decode("small-headers decode", small_headers_result, buf_copy.len());
 
     // Test multiple decode calls to simulate pipelined upgrade requests
     if data.len() > 10 {
         let mut multi_codec = Http1Codec::new();
         let mut multi_buf = BytesMut::from(data);
-        let _ = observe_decode(&mut multi_codec, &mut multi_buf);
-        let _ = observe_decode(&mut multi_codec, &mut multi_buf);
+        let first_result = observe_decode(&mut multi_codec, &mut multi_buf);
+        assert_observed_upgrade_decode("pipelined first decode", first_result, multi_buf.len());
+        let second_result = observe_decode(&mut multi_codec, &mut multi_buf);
+        assert_observed_upgrade_decode("pipelined second decode", second_result, multi_buf.len());
     }
 
     // Test specific upgrade-related edge cases
@@ -337,7 +354,8 @@ fn test_upgrade_edge_cases(data: &[u8]) {
             // Found upgrade-related pattern - test codec robustness
             let mut test_codec = Http1Codec::new();
             let mut test_buf = BytesMut::from(data);
-            let _ = observe_decode(&mut test_codec, &mut test_buf);
+            let result = observe_decode(&mut test_codec, &mut test_buf);
+            assert_observed_upgrade_decode("upgrade-pattern decode", result, test_buf.len());
         }
     }
 
@@ -347,11 +365,17 @@ fn test_upgrade_edge_cases(data: &[u8]) {
         if point < data.len() {
             let mut boundary_codec = Http1Codec::new();
             let mut boundary_buf = BytesMut::from(&data[..point]);
-            let _ = observe_decode(&mut boundary_codec, &mut boundary_buf);
+            let prefix_result = observe_decode(&mut boundary_codec, &mut boundary_buf);
+            assert_observed_upgrade_decode(
+                "boundary prefix decode",
+                prefix_result,
+                boundary_buf.len(),
+            );
 
             // Add remaining data
             boundary_buf.extend_from_slice(&data[point..]);
-            let _ = observe_decode(&mut boundary_codec, &mut boundary_buf);
+            let full_result = observe_decode(&mut boundary_codec, &mut boundary_buf);
+            assert_observed_upgrade_decode("boundary full decode", full_result, boundary_buf.len());
         }
     }
 }
