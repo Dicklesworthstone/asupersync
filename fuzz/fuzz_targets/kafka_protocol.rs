@@ -11,9 +11,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::messaging::kafka::{KafkaError, KafkaProducer, KafkaConfig};
-use asupersync::cx::Cx;
-use asupersync::types::Time;
+use asupersync::messaging::kafka::KafkaError;
 use libfuzzer_sys::fuzz_target;
 use std::io::Cursor;
 
@@ -180,19 +178,14 @@ enum KafkaProtocolOperation {
         supported_versions: Vec<i16>,
     },
     /// Test correlation ID echo
-    TestCorrelationEcho {
-        requests: Vec<KafkaRequest>,
-    },
+    TestCorrelationEcho { requests: Vec<KafkaRequest> },
     /// Test tagged fields parsing
     TestTaggedFields {
         fields: Vec<TaggedField>,
         malform_varint: bool,
     },
     /// Test oversized message rejection
-    TestOversizedMessage {
-        message_size: u32,
-        max_bytes: u32,
-    },
+    TestOversizedMessage { message_size: u32, max_bytes: u32 },
 }
 
 /// Complete fuzz input structure
@@ -290,7 +283,10 @@ fn read_varint(cursor: &mut Cursor<&[u8]>) -> Result<u32, &'static str> {
 }
 
 /// Parse Kafka request from wire format
-fn parse_request(data: &[u8], max_message_bytes: u32) -> Result<(KafkaRequestHeader, Vec<u8>), KafkaError> {
+fn parse_request(
+    data: &[u8],
+    max_message_bytes: u32,
+) -> Result<(KafkaRequestHeader, Vec<u8>), KafkaError> {
     let mut cursor = Cursor::new(data);
 
     // Check minimum size
@@ -320,7 +316,7 @@ fn parse_request(data: &[u8], max_message_bytes: u32) -> Result<(KafkaRequestHea
     }
 
     // Header fields
-    if cursor.get_ref().len() - cursor.position() as usize < 8 {
+    if cursor.get_ref().len() - (cursor.position() as usize) < 8 {
         return Err(KafkaError::Protocol("Incomplete header".to_string()));
     }
 
@@ -374,7 +370,12 @@ fn parse_request(data: &[u8], max_message_bytes: u32) -> Result<(KafkaRequestHea
             cursor.set_position(cursor.position() + str_len as u64);
             Some(String::from_utf8_lossy(client_id_bytes).to_string())
         }
-        Err(e) => return Err(KafkaError::Protocol(format!("Invalid client_id length: {}", e))),
+        Err(e) => {
+            return Err(KafkaError::Protocol(format!(
+                "Invalid client_id length: {}",
+                e
+            )));
+        }
     };
 
     // Assertion 4: tagged fields (KIP-482) handled
@@ -390,7 +391,9 @@ fn parse_request(data: &[u8], max_message_bytes: u32) -> Result<(KafkaRequestHea
 
         let pos = cursor.position() as usize;
         if cursor.get_ref().len() < pos + data_len as usize {
-            return Err(KafkaError::Protocol("Incomplete tagged field data".to_string()));
+            return Err(KafkaError::Protocol(
+                "Incomplete tagged field data".to_string(),
+            ));
         }
 
         let data = cursor.get_ref()[pos..pos + data_len as usize].to_vec();
@@ -419,11 +422,78 @@ fn create_response_header(request_header: &KafkaRequestHeader) -> KafkaResponseH
     // Assertion 2: CorrelationId echo
     KafkaResponseHeader {
         correlation_id: request_header.correlation_id, // Must echo exactly
-        tagged_fields: Vec::new(), // Simple response
+        tagged_fields: Vec::new(),                     // Simple response
     }
 }
 
-/// Main fuzz target
+fn observe_parse_request_result(
+    result: Result<(KafkaRequestHeader, Vec<u8>), KafkaError>,
+    max_message_bytes: u32,
+    context: &str,
+) {
+    match result {
+        Ok((header, body)) => {
+            let api_key = ApiKey::from_i16(header.api_key);
+            assert!(
+                !matches!(api_key, ApiKey::Invalid | ApiKey::OutOfRange),
+                "{context} accepted invalid ApiKey"
+            );
+            assert!(
+                api_key.is_valid_version(header.api_version),
+                "{context} accepted incompatible ApiVersion"
+            );
+            assert!(
+                body.len() <= max_message_bytes as usize,
+                "{context} accepted body larger than message.max.bytes"
+            );
+
+            let summary = format!(
+                "{context}:{}:{}:{}:{}:{}",
+                header.api_key,
+                header.api_version,
+                header.correlation_id,
+                header.tagged_fields.len(),
+                body.len()
+            );
+            assert!(
+                !summary.is_empty(),
+                "{context} successful parse should stay visible"
+            );
+        }
+        Err(error) => observe_kafka_parse_error(error, context),
+    }
+}
+
+fn observe_kafka_parse_error(error: KafkaError, context: &str) {
+    let debug = format!("{error:?}");
+    assert!(
+        !debug.is_empty(),
+        "{context} parse error should expose Debug diagnostics"
+    );
+
+    match error {
+        KafkaError::Protocol(message)
+        | KafkaError::Broker(message)
+        | KafkaError::InvalidTopic(message)
+        | KafkaError::Transaction(message)
+        | KafkaError::Config(message)
+        | KafkaError::Authentication(message) => {
+            assert!(
+                !message.is_empty(),
+                "{context} parse error should expose a diagnostic message"
+            );
+        }
+        KafkaError::MessageTooLarge { size, max_size } => {
+            assert!(
+                size > max_size,
+                "{context} MessageTooLarge should preserve an exceeded bound"
+            );
+        }
+        _ => {}
+    }
+}
+
+// Main fuzz target
 fuzz_target!(|data: KafkaProtocolFuzz| {
     // Clamp max_message_bytes to reasonable range
     let max_message_bytes = data.max_message_bytes.clamp(1024, 100_000_000);
@@ -437,7 +507,10 @@ fuzz_target!(|data: KafkaProtocolFuzz| {
                     Ok((header, _body)) => {
                         // If parsing succeeds, verify invariants
                         assert!(
-                            !matches!(ApiKey::from_i16(header.api_key), ApiKey::Invalid | ApiKey::OutOfRange),
+                            !matches!(
+                                ApiKey::from_i16(header.api_key),
+                                ApiKey::Invalid | ApiKey::OutOfRange
+                            ),
                             "Invalid ApiKey should be rejected"
                         );
                         assert!(
@@ -448,9 +521,12 @@ fuzz_target!(|data: KafkaProtocolFuzz| {
                         // Test response correlation echo
                         let response_header = create_response_header(&header);
                         assert_eq!(
-                            response_header.correlation_id,
-                            header.correlation_id,
+                            response_header.correlation_id, header.correlation_id,
                             "Response must echo request correlation ID"
+                        );
+                        assert!(
+                            response_header.tagged_fields.is_empty(),
+                            "Simple response header should not add tagged fields"
                         );
                     }
                     Err(e) => {
@@ -507,19 +583,25 @@ fuzz_target!(|data: KafkaProtocolFuzz| {
                     if let Ok((header, _)) = parse_request(&wire_data, max_message_bytes) {
                         let response_header = create_response_header(&header);
                         assert_eq!(
-                            response_header.correlation_id,
-                            header.correlation_id,
+                            response_header.correlation_id, header.correlation_id,
                             "Correlation ID must be echoed exactly"
+                        );
+                        assert!(
+                            response_header.tagged_fields.is_empty(),
+                            "Simple response header should not add tagged fields"
                         );
                     }
                 }
             }
 
-            KafkaProtocolOperation::TestTaggedFields { fields, malform_varint } => {
+            KafkaProtocolOperation::TestTaggedFields {
+                fields,
+                malform_varint,
+            } => {
                 // Test tagged fields parsing
                 let mut test_request = KafkaRequest {
                     header: KafkaRequestHeader {
-                        api_key: 18, // ApiVersions
+                        api_key: 18,    // ApiVersions
                         api_version: 3, // v3+ supports tagged fields
                         correlation_id: 54321,
                         client_id: None,
@@ -533,17 +615,23 @@ fuzz_target!(|data: KafkaProtocolFuzz| {
                 if malform_varint {
                     // Add invalid varint that could cause parsing issues
                     test_request.header.tagged_fields.push(TaggedField {
-                        tag: u32::MAX, // Large tag that becomes invalid varint
+                        tag: u32::MAX,         // Large tag that becomes invalid varint
                         data: vec![0xFF; 100], // Large data
                     });
                 }
 
                 let wire_data = serialize_request(&test_request);
-                // Should either parse successfully or fail gracefully
-                let _ = parse_request(&wire_data, max_message_bytes);
+                observe_parse_request_result(
+                    parse_request(&wire_data, max_message_bytes),
+                    max_message_bytes,
+                    "tagged-fields request parse",
+                );
             }
 
-            KafkaProtocolOperation::TestOversizedMessage { message_size, max_bytes } => {
+            KafkaProtocolOperation::TestOversizedMessage {
+                message_size,
+                max_bytes,
+            } => {
                 // Test oversized message rejection
                 let oversized_request = KafkaRequest {
                     header: KafkaRequestHeader {
@@ -563,10 +651,7 @@ fuzz_target!(|data: KafkaProtocolFuzz| {
 
                 if message_size > max_bytes {
                     // Should be rejected
-                    assert!(
-                        result.is_err(),
-                        "Oversized message should be rejected"
-                    );
+                    assert!(result.is_err(), "Oversized message should be rejected");
                     if let Err(KafkaError::MessageTooLarge { size, max_size }) = result {
                         assert!(size > max_size, "Size limits should be enforced");
                     }
