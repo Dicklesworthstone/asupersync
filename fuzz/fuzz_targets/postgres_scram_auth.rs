@@ -6,6 +6,10 @@ use libfuzzer_sys::fuzz_target;
 // Note: ScramAuth is internal, so we'll test through the exposed parser functions
 
 const MAX_SAFE_ITERATIONS: u32 = 600_000;
+const MAX_SCRAM_DIAGNOSTIC_SIZE: usize = 2048;
+const MAX_CLIENT_FIRST_SIZE: usize = 256;
+const MAX_NONCE_COMBINED_SIZE: usize = 256;
+const MAX_CHANNEL_BINDING_SIZE: usize = 2048;
 
 #[derive(Debug, Clone, Arbitrary)]
 enum ClientFinalChannelBinding {
@@ -279,6 +283,12 @@ fn assert_visible_error(context: &str, error: &str) {
         !diagnostic.is_empty(),
         "{context} failures should expose diagnostics"
     );
+    assert!(
+        diagnostic.len() <= MAX_SCRAM_DIAGNOSTIC_SIZE,
+        "{context} diagnostic size {} exceeds maximum {}",
+        diagnostic.len(),
+        MAX_SCRAM_DIAGNOSTIC_SIZE
+    );
 }
 
 fn observe_sasl_mechanisms_parse(result: Result<Vec<String>, String>, context: &str) {
@@ -341,6 +351,64 @@ fn observe_client_final_parse(result: Result<(String, String, Vec<u8>), String>,
                 proof.len(),
                 32,
                 "{context} accepted a non-SHA-256 client proof length"
+            );
+        }
+        Err(error) => assert_visible_error(context, &error),
+    }
+}
+
+fn observe_client_first_generation(result: Result<Vec<u8>, String>, context: &str) {
+    match result {
+        Ok(message) => {
+            assert!(
+                !message.is_empty(),
+                "{context} generated an empty client-first message"
+            );
+            assert!(
+                message.len() <= MAX_CLIENT_FIRST_SIZE,
+                "{context} generated client-first size {} exceeds maximum {}",
+                message.len(),
+                MAX_CLIENT_FIRST_SIZE
+            );
+            assert!(
+                message.starts_with(b"n,,n="),
+                "{context} generated an invalid SCRAM client-first prefix"
+            );
+        }
+        Err(error) => assert_visible_error(context, &error),
+    }
+}
+
+fn observe_nonce_concatenation(result: Result<Vec<u8>, String>, context: &str) {
+    match result {
+        Ok(combined) => {
+            assert!(
+                !combined.is_empty(),
+                "{context} produced an empty combined nonce"
+            );
+            assert!(
+                combined.len() <= MAX_NONCE_COMBINED_SIZE,
+                "{context} combined nonce size {} exceeds maximum {}",
+                combined.len(),
+                MAX_NONCE_COMBINED_SIZE
+            );
+        }
+        Err(error) => assert_visible_error(context, &error),
+    }
+}
+
+fn observe_channel_binding(result: Result<String, String>, context: &str) {
+    match result {
+        Ok(binding) => {
+            assert!(
+                !binding.is_empty(),
+                "{context} produced an empty channel-binding payload"
+            );
+            assert!(
+                binding.len() <= MAX_CHANNEL_BINDING_SIZE,
+                "{context} channel-binding payload size {} exceeds maximum {}",
+                binding.len(),
+                MAX_CHANNEL_BINDING_SIZE
             );
         }
         Err(error) => assert_visible_error(context, &error),
@@ -653,28 +721,49 @@ fn test_nonce_scenarios(data: &[u8]) {
     let (client_part, server_part) = data.split_at(split_point);
 
     // Test nonce concatenation boundary conditions
-    let _ = test_nonce_concatenation(client_part, server_part);
+    observe_nonce_concatenation(
+        test_nonce_concatenation(client_part, server_part),
+        "fuzzed nonce parts",
+    );
 
     // Test edge cases
-    let _ = test_nonce_concatenation(b"", server_part);
-    let _ = test_nonce_concatenation(client_part, b"");
-    let _ = test_nonce_concatenation(b"short", b"shortlong");
-    let _ = test_nonce_concatenation(b"long", b"short");
+    observe_nonce_concatenation(
+        test_nonce_concatenation(b"", server_part),
+        "empty client nonce",
+    );
+    observe_nonce_concatenation(
+        test_nonce_concatenation(client_part, b""),
+        "empty server nonce",
+    );
+    observe_nonce_concatenation(
+        test_nonce_concatenation(b"short", b"shortlong"),
+        "server nonce extends client nonce",
+    );
+    observe_nonce_concatenation(
+        test_nonce_concatenation(b"long", b"short"),
+        "server nonce missing client prefix",
+    );
 
     // Test with repeated client nonce pattern
     if !client_part.is_empty() {
         let mut server_with_client = client_part.to_vec();
         server_with_client.extend_from_slice(server_part);
-        let _ = test_nonce_concatenation(client_part, &server_with_client);
+        observe_nonce_concatenation(
+            test_nonce_concatenation(client_part, &server_with_client),
+            "server nonce with client prefix",
+        );
     }
 }
 
 /// Test channel binding extension scenarios
 fn test_channel_binding_scenarios(data: &[u8]) {
     // Test various channel binding data sizes and formats
-    let _ = test_channel_binding(data);
-    let _ = test_channel_binding(b"");
-    let _ = test_channel_binding(b"tls-unique-data");
+    observe_channel_binding(test_channel_binding(data), "fuzzed channel binding");
+    observe_channel_binding(test_channel_binding(b""), "empty channel binding");
+    observe_channel_binding(
+        test_channel_binding(b"tls-unique-data"),
+        "tls-unique channel binding",
+    );
 
     // Test channel binding with fuzzer data
     if !data.is_empty() {
@@ -686,7 +775,7 @@ fn test_channel_binding_scenarios(data: &[u8]) {
         ];
 
         for chunk in chunks {
-            let _ = test_channel_binding(chunk);
+            observe_channel_binding(test_channel_binding(chunk), "chunked channel binding");
         }
     }
 }
@@ -752,7 +841,10 @@ fn test_full_scram_flow(data: &[u8]) {
     {
         // Simulate client-first generation
         let client_nonce = "fuzzed_nonce";
-        let _ = generate_client_first(username, client_nonce);
+        observe_client_first_generation(
+            generate_client_first(username, client_nonce),
+            "generated client-first",
+        );
 
         // Simulate server-first parsing with generated salt
         use base64::Engine;
@@ -838,7 +930,10 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(s) = std::str::from_utf8(data) {
         let parts: Vec<&str> = s.splitn(2, ',').collect();
         if parts.len() == 2 {
-            let _ = generate_client_first(parts[0], parts[1]);
+            observe_client_first_generation(
+                generate_client_first(parts[0], parts[1]),
+                "raw client-first",
+            );
         }
     }
 
@@ -893,7 +988,10 @@ fuzz_target!(|data: &[u8]| {
         Ok(valid_utf8) => {
             // Test with valid UTF-8 strings
             if !valid_utf8.is_empty() && valid_utf8.len() <= 63 {
-                let _ = generate_client_first(valid_utf8, "test_nonce");
+                observe_client_first_generation(
+                    generate_client_first(valid_utf8, "test_nonce"),
+                    "UTF-8 client-first",
+                );
             }
         }
         Err(_) => {
