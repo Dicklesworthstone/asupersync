@@ -35,13 +35,11 @@
 //!      `MESSAGE_HEADER_SIZE + length` and used the result for
 //!      capacity) would surface here.
 //!
-//!   4. **Decoder advances the buffer correctly on rejection.**
-//!      When a frame is rejected (oversize, invalid flag), the
-//!      decoder must consume the bytes it processed so the next
-//!      decode call doesn't infinite-loop on the same prefix
-//!      (the regression `br-asupersync-o7e5xu` documented in
-//!      codec.rs:36-49). This target re-verifies that fix
-//!      structurally.
+//!   4. **Decoder rejection progress is precise.** Complete
+//!      invalid compression-flag frames are consumed so the caller
+//!      cannot infinite-loop on the same prefix. Oversized declared
+//!      lengths are rejected before consuming bytes, so callers can
+//!      fail closed without dropping buffered data.
 //!
 //! ```bash
 //! cargo +nightly fuzz run grpc_codec_lpm_stream_boundary -- -max_total_time=120
@@ -50,8 +48,10 @@
 use arbitrary::Arbitrary;
 use asupersync::bytes::BytesMut;
 use asupersync::codec::{Decoder, Encoder};
-use asupersync::grpc::{GrpcCodec, GrpcMessage};
+use asupersync::grpc::codec::MESSAGE_HEADER_SIZE;
+use asupersync::grpc::{GrpcCodec, GrpcError, GrpcMessage};
 use libfuzzer_sys::fuzz_target;
+use std::sync::OnceLock;
 
 /// Per-iteration cap on total stream size. Each iteration assembles
 /// a multi-frame stream up to MAX_BUF_BYTES, splits it at an
@@ -64,6 +64,8 @@ const MAX_FRAME_BODY: usize = 8 * 1024;
 const CODEC_MAX_FRAME: usize = 16 * 1024;
 /// Cap on number of frames per stream.
 const MAX_FRAMES: usize = 32;
+
+static FIXED_CANARIES: OnceLock<()> = OnceLock::new();
 
 #[derive(Arbitrary, Debug)]
 struct Stream {
@@ -120,17 +122,16 @@ fn assemble(frames: &[FrameSpec]) -> Vec<u8> {
     out
 }
 
-fn drain<C: Decoder<Item = GrpcMessage>>(codec: &mut C, src: &mut BytesMut) -> Vec<GrpcMessage> {
+fn drain(codec: &mut GrpcCodec, src: &mut BytesMut) -> Vec<GrpcMessage> {
     let mut out = Vec::new();
     while !src.is_empty() {
-        match codec.decode(src) {
+        match observe_decode(codec, src) {
             Ok(Some(msg)) => out.push(msg),
             Ok(None) => break, // need more bytes
             Err(_) => {
-                // The codec must consume the bad frame so the next
-                // decode attempt doesn't infinite-loop on the same
-                // prefix. If src.is_empty() now, the decoder
-                // correctly advanced past the bad frame.
+                // Some rejection paths consume a complete bad frame
+                // and others preserve buffered bytes for fail-closed
+                // handling. Either way, the drain terminates here.
                 break;
             }
         }
@@ -138,7 +139,100 @@ fn drain<C: Decoder<Item = GrpcMessage>>(codec: &mut C, src: &mut BytesMut) -> V
     out
 }
 
+fn observe_decode(
+    codec: &mut GrpcCodec,
+    src: &mut BytesMut,
+) -> Result<Option<GrpcMessage>, GrpcError> {
+    let before_len = src.len();
+    let result = codec.decode(src);
+    assert!(
+        src.len() <= before_len,
+        "GrpcCodec::decode must never grow its source buffer"
+    );
+
+    match &result {
+        Ok(Some(message)) => {
+            let consumed = before_len - src.len();
+            assert_eq!(
+                consumed,
+                MESSAGE_HEADER_SIZE + message.data.len(),
+                "decoded frame consumed {consumed} bytes for payload length {}",
+                message.data.len()
+            );
+        }
+        Ok(None) => {
+            assert_eq!(
+                src.len(),
+                before_len,
+                "incomplete LPM frame should remain buffered"
+            );
+        }
+        Err(GrpcError::MessageTooLarge) => {
+            assert_eq!(
+                src.len(),
+                before_len,
+                "oversized LPM frame should be rejected before consuming bytes"
+            );
+        }
+        Err(GrpcError::Protocol(message)) => {
+            assert!(
+                !message.is_empty(),
+                "protocol rejection should carry an explanatory message"
+            );
+        }
+        Err(error) => {
+            assert!(
+                !error.to_string().is_empty(),
+                "decode error should have a non-empty description: {error:?}"
+            );
+        }
+    }
+
+    result
+}
+
+fn assert_fixed_rejection_canaries() {
+    let mut complete_invalid = BytesMut::from(&b"\x02\0\0\0\x02no"[..]);
+    let mut codec = GrpcCodec::with_max_size(CODEC_MAX_FRAME);
+    assert!(matches!(
+        observe_decode(&mut codec, &mut complete_invalid),
+        Err(GrpcError::Protocol(_))
+    ));
+    assert!(
+        complete_invalid.is_empty(),
+        "complete invalid compression-flag frames should be consumed"
+    );
+
+    let mut incomplete_invalid = BytesMut::from(&b"\x02\0\0\0\x02n"[..]);
+    let mut codec = GrpcCodec::with_max_size(CODEC_MAX_FRAME);
+    assert!(matches!(
+        observe_decode(&mut codec, &mut incomplete_invalid),
+        Ok(None)
+    ));
+    assert_eq!(incomplete_invalid.as_ref(), b"\x02\0\0\0\x02n");
+
+    let oversize_len = (CODEC_MAX_FRAME as u32).saturating_add(1);
+    let mut oversized = BytesMut::from(
+        &[
+            0,
+            (oversize_len >> 24) as u8,
+            (oversize_len >> 16) as u8,
+            (oversize_len >> 8) as u8,
+            oversize_len as u8,
+        ][..],
+    );
+    let before = oversized.clone();
+    let mut codec = GrpcCodec::with_max_size(CODEC_MAX_FRAME);
+    assert!(matches!(
+        observe_decode(&mut codec, &mut oversized),
+        Err(GrpcError::MessageTooLarge)
+    ));
+    assert_eq!(oversized, before);
+}
+
 fuzz_target!(|stream: Stream| {
+    FIXED_CANARIES.get_or_init(assert_fixed_rejection_canaries);
+
     let assembled = assemble(&stream.frames);
     if assembled.len() > MAX_BUF_BYTES {
         return;
@@ -157,7 +251,7 @@ fuzz_target!(|stream: Stream| {
     // returns Err — and consumes some bytes either way (or
     // returns Ok(None) cleanly).
     let pre_len = buf_single.len();
-    let _ = codec_single.decode(&mut buf_single); // must not loop
+    let _ = observe_decode(&mut codec_single, &mut buf_single); // must not loop
     assert!(
         buf_single.len() <= pre_len,
         "decoder must not increase buffer length",
@@ -242,7 +336,7 @@ fuzz_target!(|stream: Stream| {
             let msg = GrpcMessage::new(body.clone().into());
             if enc.encode(msg, &mut wire).is_ok() {
                 let mut dec = GrpcCodec::with_max_size(CODEC_MAX_FRAME);
-                if let Ok(Some(decoded)) = dec.decode(&mut wire) {
+                if let Ok(Some(decoded)) = observe_decode(&mut dec, &mut wire) {
                     assert_eq!(decoded.data.as_ref(), &body[..], "round-trip body mismatch",);
                 }
             }
