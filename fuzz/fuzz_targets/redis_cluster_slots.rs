@@ -266,8 +266,39 @@ fn exercise_malformed(case: MalformedCase) {
 }
 
 fn exercise_raw_resp(data: &[u8]) {
-    if let Ok(Some((value, _))) = RespValue::try_decode(data) {
-        let _ = observe_cluster_slots_parse(&value);
+    if let Ok(Some((value, decoded_len))) = RespValue::try_decode(data) {
+        let result = observe_cluster_slots_parse(&value);
+        assert_raw_cluster_slots_parse_observation(&value, decoded_len, data.len(), &result);
+    }
+}
+
+fn assert_raw_cluster_slots_parse_observation(
+    value: &RespValue,
+    decoded_len: usize,
+    input_len: usize,
+    result: &Result<Vec<RedisClusterSlotRange>, RedisError>,
+) {
+    assert!(
+        decoded_len <= input_len,
+        "RESP decoder consumed more bytes than raw input: {decoded_len} > {input_len}"
+    );
+
+    match result {
+        Ok(ranges) => {
+            let RespValue::Array(Some(entries)) = value else {
+                panic!("raw CLUSTER SLOTS parse accepted a non-array RESP value");
+            };
+            assert!(
+                ranges.len() <= entries.len(),
+                "raw CLUSTER SLOTS parse produced more ranges than RESP entries"
+            );
+        }
+        Err(err) => {
+            assert!(
+                !format!("{err:?}").is_empty(),
+                "raw CLUSTER SLOTS parser errors must remain observable"
+            );
+        }
     }
 }
 
