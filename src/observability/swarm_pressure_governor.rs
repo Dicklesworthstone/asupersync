@@ -406,8 +406,12 @@ impl SwarmPressureGovernor {
         self.total_admission_checks.fetch_add(1, Ordering::Relaxed);
 
         if !self.config.enabled {
-            // Swarm governance disabled, always admit with default envelope
-            let envelope = self.create_default_envelope(next_bootstrap_region_id())?;
+            // Swarm governance disabled, always admit while still preserving
+            // requested-memory accounting in the returned envelope.
+            let envelope = self.create_disabled_governance_envelope(
+                next_bootstrap_region_id(),
+                requested_memory,
+            )?;
             self.regions_admitted.fetch_add(1, Ordering::Relaxed);
             return Ok(SwarmAdmissionDecision {
                 decision: AdmissionDecision::Admit,
@@ -759,11 +763,26 @@ impl SwarmPressureGovernor {
         Ok(envelope)
     }
 
-    fn create_default_envelope(
+    fn create_disabled_governance_envelope(
         &self,
         region_id: RegionId,
+        requested_memory: Option<u64>,
     ) -> Result<ResourceEnvelope, SwarmPressureError> {
-        self.create_envelope_for_region(region_id, None)
+        let memory_budget = requested_memory
+            .map_or(self.config.default_memory_budget_bytes, |requested| {
+                requested.max(self.config.default_memory_budget_bytes)
+            });
+
+        let envelope = ResourceEnvelope::new(
+            region_id,
+            memory_budget,
+            self.config.default_cpu_budget_ns_per_sec,
+            self.config.default_io_budget_ops_per_sec,
+        );
+        if let Some(requested_memory) = requested_memory {
+            envelope.reserve_memory(requested_memory)?;
+        }
+        Ok(envelope)
     }
 
     fn get_default_pressure_snapshot(&self) -> PressureSnapshot {
@@ -1092,13 +1111,21 @@ mod tests {
         let governor =
             SwarmPressureGovernor::new(config, runtime.resource_monitor(), pressure_governor);
         let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+        let requested_memory = governor.config.default_memory_budget_bytes + 4096;
 
         let decision = governor
-            .check_region_admission(&cx, RegionPriority::BestEffort, Some(u64::MAX))
+            .check_region_admission(&cx, RegionPriority::BestEffort, Some(requested_memory))
             .expect("disabled governance should always produce an admission decision");
 
         assert!(matches!(decision.decision, AdmissionDecision::Admit));
-        assert!(decision.envelope.is_some());
+        let envelope = decision
+            .envelope
+            .expect("disabled governance should still return an envelope");
+        assert_eq!(envelope.memory_budget, requested_memory);
+        assert_eq!(
+            envelope.memory_used.load(Ordering::Relaxed),
+            requested_memory
+        );
         assert_eq!(decision.reason, "Swarm governance disabled");
 
         let metrics = governor.metrics();
