@@ -168,6 +168,7 @@ enum EdgeCaseOperation {
 const MAX_FRAME_SIZE: usize = 65536; // 64KB
 const MAX_PAYLOAD_SIZE: usize = 16384; // 16KB
 const MAX_OPERATIONS: usize = 100;
+const MAX_QPACK_DECODED_FIELDS: usize = 1000;
 
 fuzz_target!(|input: H3ProtocolFuzz| {
     // Limit operations to prevent timeout
@@ -463,7 +464,7 @@ fn test_qpack_operation(operation: QpackOperation) {
             // Construct QPACK payload from structured patterns
             let payload = construct_qpack_payload(&field_patterns);
             if payload.len() <= MAX_PAYLOAD_SIZE {
-                let _ = qpack_decode_field_section(&payload, h3_mode);
+                observe_qpack_field_section_decode("structured field section", &payload, h3_mode);
             }
         }
 
@@ -478,9 +479,21 @@ fn test_qpack_operation(operation: QpackOperation) {
             let h3_mode = convert_qpack_mode(mode);
 
             // Should handle malformed QPACK data gracefully
-            let _ = qpack_decode_field_section(&malformed_data, h3_mode);
-            let _ = qpack_decode_request_field_section(&malformed_data, h3_mode, None);
-            let _ = qpack_decode_response_field_section(&malformed_data, h3_mode, None);
+            observe_qpack_field_section_decode(
+                "malformed generic field section",
+                &malformed_data,
+                h3_mode,
+            );
+            observe_qpack_request_decode(
+                "malformed request field section",
+                &malformed_data,
+                h3_mode,
+            );
+            observe_qpack_response_decode(
+                "malformed response field section",
+                &malformed_data,
+                h3_mode,
+            );
         }
     }
 }
@@ -640,6 +653,56 @@ fn observe_h3_settings_decode(context: &str, payload: &[u8]) {
         }
         Err(err) => {
             verify_settings_error_consistency(&err, payload);
+            observe_h3_error(context, &err);
+        }
+    }
+}
+
+fn observe_qpack_field_section_decode(context: &str, payload: &[u8], mode: H3QpackMode) {
+    match qpack_decode_field_section(payload, mode) {
+        Ok(field_plan) => {
+            assert!(
+                field_plan.len() <= MAX_QPACK_DECODED_FIELDS,
+                "{context}: decoded too many QPACK fields"
+            );
+            verify_qpack_field_plan_consistency(&field_plan);
+        }
+        Err(err) => {
+            verify_qpack_error_consistency(&err, payload);
+            observe_h3_error(context, &err);
+            if mode == H3QpackMode::StaticOnly {
+                assert!(
+                    !matches!(
+                        err,
+                        H3NativeError::InvalidRequestPseudoHeader(_)
+                            | H3NativeError::InvalidResponsePseudoHeader(_)
+                    ),
+                    "{context}: raw static QPACK field decode should not classify pseudo headers"
+                );
+            }
+        }
+    }
+}
+
+fn observe_qpack_request_decode(context: &str, payload: &[u8], mode: H3QpackMode) {
+    match qpack_decode_request_field_section(payload, mode, None) {
+        Ok(request_head) => {
+            verify_request_head_consistency(&request_head);
+        }
+        Err(err) => {
+            verify_qpack_error_consistency(&err, payload);
+            observe_h3_error(context, &err);
+        }
+    }
+}
+
+fn observe_qpack_response_decode(context: &str, payload: &[u8], mode: H3QpackMode) {
+    match qpack_decode_response_field_section(payload, mode, None) {
+        Ok(response_head) => {
+            verify_response_head_consistency(&response_head);
+        }
+        Err(err) => {
+            verify_qpack_error_consistency(&err, payload);
             observe_h3_error(context, &err);
         }
     }
@@ -900,19 +963,91 @@ fn convert_qpack_mode(mode: QpackMode) -> H3QpackMode {
     }
 }
 
-fn verify_qpack_field_plan_consistency(_field_plan: &Vec<QpackFieldPlan>) {
-    // Verify that the field plan is internally consistent
-    // This could check for reasonable field names/values, proper encoding, etc.
+fn verify_qpack_field_plan_consistency(field_plan: &[QpackFieldPlan]) {
+    assert!(
+        field_plan.len() <= MAX_QPACK_DECODED_FIELDS,
+        "QPACK field plan exceeds decoded-field safety cap"
+    );
+
+    for field in field_plan {
+        match field {
+            QpackFieldPlan::StaticIndex(index) | QpackFieldPlan::DynamicIndex(index) => {
+                assert!(
+                    *index <= QUIC_VARINT_MAX,
+                    "QPACK index should stay within QUIC varint range"
+                );
+            }
+            QpackFieldPlan::Literal { name, value } => {
+                assert!(
+                    name.len() <= MAX_PAYLOAD_SIZE,
+                    "literal QPACK name should stay input-bounded"
+                );
+                assert!(
+                    value.len() <= MAX_PAYLOAD_SIZE,
+                    "literal QPACK value should stay input-bounded"
+                );
+            }
+            QpackFieldPlan::DynamicNameLiteral { name_index, value } => {
+                assert!(
+                    *name_index <= QUIC_VARINT_MAX,
+                    "dynamic QPACK name index should stay within QUIC varint range"
+                );
+                assert!(
+                    value.len() <= MAX_PAYLOAD_SIZE,
+                    "dynamic-name literal value should stay input-bounded"
+                );
+            }
+        }
+    }
 }
 
-fn verify_request_head_consistency(_request_head: &H3RequestHead) {
-    // Verify that the request head is consistent
-    // This could check for valid method, scheme, authority, path, etc.
+fn verify_request_head_consistency(request_head: &H3RequestHead) {
+    assert!(
+        request_head.headers.len() <= MAX_QPACK_DECODED_FIELDS,
+        "request head decoded too many regular headers"
+    );
+    assert!(
+        request_head.pseudo.status.is_none(),
+        "request head must not carry a response :status pseudo header"
+    );
+    verify_header_pairs_are_regular("request", &request_head.headers);
 }
 
-fn verify_response_head_consistency(_response_head: &H3ResponseHead) {
-    // Verify that the response head is consistent
-    // This could check for valid status code, headers, etc.
+fn verify_response_head_consistency(response_head: &H3ResponseHead) {
+    assert!(
+        (100..=999).contains(&response_head.status),
+        "response status should stay in the validated HTTP status range"
+    );
+    assert!(
+        response_head.headers.len() <= MAX_QPACK_DECODED_FIELDS,
+        "response head decoded too many regular headers"
+    );
+    verify_header_pairs_are_regular("response", &response_head.headers);
+}
+
+fn verify_header_pairs_are_regular(context: &str, headers: &[(String, String)]) {
+    for (name, value) in headers {
+        assert!(
+            !name.starts_with(':'),
+            "{context} regular headers must not include pseudo-header names"
+        );
+        assert!(
+            !name.is_empty(),
+            "{context} regular header names must not be empty"
+        );
+        assert!(
+            !name.bytes().any(|b| matches!(b, b'\r' | b'\n' | 0)),
+            "{context} regular header name must not contain line breaks or NUL"
+        );
+        assert!(
+            !value.bytes().any(|b| matches!(b, b'\r' | b'\n' | 0)),
+            "{context} regular header value must not contain line breaks or NUL"
+        );
+        assert!(
+            name.len() <= MAX_PAYLOAD_SIZE && value.len() <= MAX_PAYLOAD_SIZE,
+            "{context} decoded header pair should remain input-bounded"
+        );
+    }
 }
 
 fn verify_qpack_error_consistency(err: &H3NativeError, _payload: &[u8]) {
