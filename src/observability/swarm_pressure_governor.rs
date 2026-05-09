@@ -597,6 +597,10 @@ impl SwarmPressureGovernor {
             // Always admit critical regions regardless of pressure
             (_, _, RegionPriority::Critical) => AdmissionDecision::Admit,
 
+            // A runtime-local hard rejection must not be downgraded by softer
+            // swarm/system backpressure rules for non-critical work.
+            (AdmissionDecision::Reject, _, _) => AdmissionDecision::Reject,
+
             // Peer pressure is a swarm-wide signal: keep background work out of
             // the system and slow normal work before all runtimes stampede.
             (_, _, RegionPriority::Low | RegionPriority::BestEffort) if peer_pressure_high => {
@@ -605,13 +609,6 @@ impl SwarmPressureGovernor {
             (_, _, RegionPriority::Normal) if peer_pressure_high => {
                 AdmissionDecision::AdmitWithBackpressure
             }
-
-            // Reject if pressure governor rejected and system is under stress
-            (
-                AdmissionDecision::Reject,
-                DegradationLevel::Heavy | DegradationLevel::Emergency,
-                _,
-            ) => AdmissionDecision::Reject,
 
             // Apply backpressure for moderate system stress
             (_, DegradationLevel::Moderate | DegradationLevel::Heavy, RegionPriority::Normal) => {
@@ -1083,6 +1080,48 @@ mod tests {
         assert!(matches!(decision.decision, AdmissionDecision::Reject));
         assert!(decision.envelope.is_none());
         assert!(decision.reason.contains("peer pressure"));
+        assert_eq!(governor.metrics().regions_rejected, 1);
+    }
+
+    #[test]
+    fn test_hard_pressure_reject_is_not_downgraded_by_moderate_degradation() {
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create test runtime"),
+        );
+        let mut config = SwarmPressureGovernorConfig::default();
+        config.pressure_config.enabled = true;
+        config.pressure_config.admission_control = true;
+        config.pressure_config.sample_interval = Duration::ZERO;
+
+        let pressure_governor = PressureGovernor::new(
+            config.pressure_config.clone(),
+            std::sync::Arc::clone(&runtime),
+            Metrics::new(),
+        )
+        .expect("Failed to create pressure governor");
+        pressure_governor.record_channel_backlog_sample(5, 4);
+
+        let governor =
+            SwarmPressureGovernor::new(config, runtime.resource_monitor(), pressure_governor);
+        governor
+            .resource_monitor
+            .pressure()
+            .update_degradation_level(
+                crate::runtime::resource_monitor::ResourceType::Memory,
+                DegradationLevel::Moderate,
+            );
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+
+        let decision = governor
+            .check_region_admission(&cx, RegionPriority::Normal, None)
+            .expect("hard pressure rejection should produce a decision");
+
+        assert!(matches!(decision.decision, AdmissionDecision::Reject));
+        assert!(decision.envelope.is_none());
+        assert!(decision.reason.contains("Rejected due to pressure"));
         assert_eq!(governor.metrics().regions_rejected, 1);
     }
 
