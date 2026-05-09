@@ -692,7 +692,7 @@ fuzz_target!(|input: FuzzInput| {
                 }
                 Err(e) => {
                     // Other error types are acceptable for malformed input
-                    let _ = e;
+                    observe_nats_parse_error(e, "main parse");
                 }
             }
         }
@@ -757,6 +757,14 @@ fuzz_target!(|input: FuzzInput| {
     // AddressSanitizer will detect any memory safety violations.
 });
 
+fn observe_nats_parse_error(error: NatsError, context: &str) {
+    let message = error.to_string();
+    assert!(
+        !message.trim().is_empty(),
+        "{context} error must expose diagnostics"
+    );
+}
+
 fn observe_sid_setup_parse(result: Result<(), NatsError>, parser: &MockNatsParser, sid: u64) {
     match result {
         Ok(()) => {
@@ -772,11 +780,7 @@ fn observe_sid_setup_parse(result: Result<(), NatsError>, parser: &MockNatsParse
             );
         }
         Err(error) => {
-            let message = error.to_string();
-            assert!(
-                !message.trim().is_empty(),
-                "SID collision setup error must expose diagnostics"
-            );
+            observe_nats_parse_error(error, "SID collision setup parse");
         }
     }
 }
