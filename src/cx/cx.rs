@@ -976,10 +976,20 @@ impl<Caps> Cx<Caps> {
     /// context is unchanged. This does **not** require the root key —
     /// any holder can add caveats (but nobody can remove them).
     ///
-    /// Returns `None` if no macaroon is attached.
+    /// Returns `None` if no macaroon is attached or the caveat cannot be
+    /// encoded in the macaroon wire format.
     #[must_use]
     pub fn attenuate(&self, predicate: super::macaroon::CaveatPredicate) -> Option<Self> {
         let token = self.handles.macaroon.as_ref()?;
+        if let Err(error) = predicate.validate() {
+            error!(
+                token_id = %token.identifier(),
+                error = %error,
+                "macaroon attenuation rejected unencodable caveat"
+            );
+            return None;
+        }
+
         let attenuated = MacaroonToken::clone(token).add_caveat(predicate.clone());
         if !attenuated.is_direct_attenuation_of(token, &predicate) {
             error!(
@@ -1016,7 +1026,8 @@ impl<Caps> Cx<Caps> {
     /// The `pattern` uses simple glob syntax: `*` matches any single segment,
     /// `**` matches any number of segments.
     ///
-    /// Returns `None` if no macaroon is attached.
+    /// Returns `None` if no macaroon is attached or `pattern` exceeds the
+    /// macaroon wire-format length cap.
     #[must_use]
     pub fn attenuate_scope(&self, pattern: impl Into<String>) -> Option<Self> {
         self.attenuate(super::macaroon::CaveatPredicate::ResourceScope(
@@ -4323,6 +4334,22 @@ mod tests {
     fn cx_attenuate_returns_none_without_macaroon() {
         let cx = test_cx();
         assert!(cx.attenuate(CaveatPredicate::MaxUses(10)).is_none());
+    }
+
+    #[test]
+    fn cx_attenuate_scope_rejects_oversized_pattern() {
+        let key = test_root_key();
+        let token = MacaroonToken::mint(&key, "spawn:r1", "cx/scheduler");
+        let cx = test_cx().with_macaroon(token);
+        let pattern = "x".repeat(u16::MAX as usize + 1);
+
+        let attenuated = cx.attenuate_scope(pattern);
+
+        assert!(
+            attenuated.is_none(),
+            "oversized caveat content must fail closed instead of reaching the encoder"
+        );
+        assert_eq!(cx.macaroon().unwrap().caveat_count(), 0);
     }
 
     #[test]
