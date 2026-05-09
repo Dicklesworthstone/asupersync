@@ -482,19 +482,40 @@ fn test_grpc_codec_roundtrip(message: GrpcMessage) {
     }
 }
 
+fn observe_protobuf_decode<C>(codec: &mut C, data: &Bytes, message_type: &str)
+where
+    C: GrpcCodec_,
+    C::Decode: prost::Message,
+{
+    match codec.decode(data) {
+        Ok(decoded) => {
+            assert!(
+                prost::Message::encoded_len(&decoded) <= MAX_FUZZ_MESSAGE_SIZE,
+                "{message_type} protobuf decode exceeded fuzz message bound"
+            );
+        }
+        Err(err) => {
+            assert!(
+                !err.to_string().is_empty(),
+                "{message_type} protobuf decode errors must remain observable"
+            );
+        }
+    }
+}
+
 /// Test protobuf parsing with various codecs.
 fn test_protobuf_parsing(data: &Bytes) {
     // Test with a simple message type
     let mut codec = TestMessageCodec::new();
-    let _ = codec.decode(data);
+    observe_protobuf_decode(&mut codec, data, "TestMessage");
 
     // Test with complex message type (all wire types)
     let mut all_types_codec = AllTypesCodec::new();
-    let _ = all_types_codec.decode(data);
+    observe_protobuf_decode(&mut all_types_codec, data, "AllTypesMessage");
 
     // Test with nested message type
     let mut nested_codec = NestedMessageCodec::new();
-    let _ = nested_codec.decode(data);
+    observe_protobuf_decode(&mut nested_codec, data, "NestedMessage");
 }
 
 /// Test gRPC frame parsing with raw data.
