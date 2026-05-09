@@ -53,6 +53,7 @@
 
 use arbitrary::Arbitrary;
 use asupersync::grpc::health::{HealthError, MAX_SERVICE_NAME_LEN};
+use asupersync::grpc::status::Code;
 use asupersync::grpc::{HealthCheckRequest, HealthService, ServingStatus};
 use libfuzzer_sys::fuzz_target;
 
@@ -263,7 +264,25 @@ fuzz_target!(|shape: NameShape| {
     // br-asupersync-doa4lv; the registered path returns the status.
     let missing_service_name = format!("never-registered-{name}");
     let missing_request = HealthCheckRequest::new(missing_service_name);
-    let _ = svc.check(&missing_request); // must not panic
+    let missing_check = svc.check(&missing_request);
+    match missing_check {
+        Err(status) => assert_eq!(
+            status.code(),
+            Code::PermissionDenied,
+            "missing non-empty health service must fail closed with PermissionDenied: \
+             name_len={}, missing_name_len={}, msg={:?}",
+            name.len(),
+            missing_request.service.len(),
+            status.message(),
+        ),
+        Ok(response) => panic!(
+            "missing non-empty health service unexpectedly returned success: \
+             name_len={}, missing_name_len={}, status={:?}",
+            name.len(),
+            missing_request.service.len(),
+            response.status,
+        ),
+    }
 
     let registered_request = HealthCheckRequest::new(name.clone());
     let registered_check = svc.check(&registered_request);
