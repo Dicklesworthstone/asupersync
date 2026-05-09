@@ -15,12 +15,58 @@ use libfuzzer_sys::fuzz_target;
 
 const MAX_INPUT_LEN: usize = 4096;
 
+fn observe_chunk_size_parse(data: &[u8]) {
+    match fuzz_parse_chunk_size_line(data) {
+        Ok(parsed) => {
+            let text = std::str::from_utf8(data).expect("successful parse requires UTF-8");
+            let size_part = text
+                .split(';')
+                .next()
+                .expect("split always yields a first chunk-size field");
+
+            assert!(
+                !size_part.is_empty(),
+                "successful parse must have a non-empty chunk-size"
+            );
+            assert!(
+                !size_part
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_whitespace),
+                "successful parse must reject leading whitespace"
+            );
+            assert!(
+                !size_part
+                    .as_bytes()
+                    .last()
+                    .is_some_and(u8::is_ascii_whitespace),
+                "successful parse must reject trailing whitespace"
+            );
+            assert!(
+                size_part.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                "successful parse must only accept hex chunk-size digits"
+            );
+            assert_eq!(
+                usize::from_str_radix(size_part, 16).expect("validated hex size should fit"),
+                parsed,
+                "parser result should match the hexadecimal chunk-size field"
+            );
+        }
+        Err(error) => {
+            assert!(
+                matches!(error, HttpError::BadChunkedEncoding),
+                "chunk-size parser should fail closed with BadChunkedEncoding, got {error:?}"
+            );
+        }
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
     if data.len() > MAX_INPUT_LEN {
         return;
     }
 
-    let _ = fuzz_parse_chunk_size_line(data);
+    observe_chunk_size_parse(data);
 
     // The parser receives the field bytes after CRLF splitting.
     for (candidate, expected) in [
@@ -29,13 +75,24 @@ fuzz_target!(|data: &[u8]| {
         (b"ff".as_ref(), 255),
         (b"FF".as_ref(), 255),
         (b"aA; ext=val".as_ref(), 170),
+        (b"1;\0ignored-extension".as_ref(), 1),
     ] {
         assert_eq!(
             fuzz_parse_chunk_size_line(candidate).expect("valid chunk-size candidate"),
             expected
         );
+        observe_chunk_size_parse(candidate);
     }
 
+    let max_usize = format!("{:X}", usize::MAX);
+    assert_eq!(
+        fuzz_parse_chunk_size_line(max_usize.as_bytes())
+            .expect("usize::MAX hexadecimal chunk-size should parse"),
+        usize::MAX
+    );
+    observe_chunk_size_parse(max_usize.as_bytes());
+
+    let overflow = format!("{max_usize}0");
     for candidate in [
         b"".as_ref(),
         b"\r\n".as_ref(),
@@ -45,11 +102,14 @@ fuzz_target!(|data: &[u8]| {
         b"1 ".as_ref(),
         b"xyz".as_ref(),
         b"1\0".as_ref(),
+        b"\xff".as_ref(),
         b"100000000000000000000000000000000".as_ref(),
+        overflow.as_bytes(),
     ] {
         assert!(matches!(
             fuzz_parse_chunk_size_line(candidate),
             Err(HttpError::BadChunkedEncoding)
         ));
+        observe_chunk_size_parse(candidate);
     }
 });
