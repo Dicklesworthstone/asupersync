@@ -174,7 +174,7 @@
     "mode": "deterministic fail-closed runtime application of compiled policy outputs",
     "source": "SloRuntimePolicyApplication::from_compiled_policy",
     "compiler_schema_version": "slo-budget-admission-compiler-v1",
-    "proof_command_rendering": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals runtime_slo_policy_application -- --nocapture",
+    "proof_command_rendering": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_runtime_application cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals runtime_slo_policy_application -- --nocapture",
     "required_fields": [
       "schema_version",
       "compiler_schema_version",
@@ -1477,7 +1477,7 @@
     {
       "scenario_id": "runtime-enforcement-unsupported-optional-work",
       "policy_id": "agent-swarm-standard",
-      "proof_command": "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals runtime_slo_admission_evaluation_browns_out_optional_work -- --nocapture",
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_runtime_application cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals runtime_slo_admission_evaluation_browns_out_optional_work -- --nocapture",
       "proof_command_source": "runtime_slo_admission_evaluation_browns_out_optional_work",
       "redaction": {
         "policy_id": "slo-runtime-enforcement-redaction-v1",
@@ -1564,8 +1564,8 @@
     "bash -n scripts/validate_slo_policy_bundle.sh",
     "bash scripts/validate_slo_policy_bundle.sh --output-root target/slo-policy-bundle --run-id asupersync-w5n9qp.4",
     "bash scripts/validate_slo_policy_bundle.sh --output-root target/slo-policy-bundle --run-id asupersync-w5n9qp.4 --check-rch-log target/slo-policy-bundle/rch.log",
-    "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals runtime_slo_policy_application -- --nocapture",
-    "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals runtime_slo_admission_evaluation -- --nocapture",
+    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_runtime_application cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals runtime_slo_policy_application -- --nocapture",
+    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_runtime_application cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals runtime_slo_admission_evaluation -- --nocapture",
     "rch exec -- rustfmt --edition 2024 --check src/types/slo_policy.rs src/types/mod.rs tests/slo_policy_bundle_contract.rs",
     "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_report CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals -- --nocapture",
     "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_policy_report_check CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo check -p asupersync --test slo_policy_bundle_contract --features test-internals",

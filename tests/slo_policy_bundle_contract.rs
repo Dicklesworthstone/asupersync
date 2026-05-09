@@ -1165,6 +1165,11 @@ fn artifact_catalog_matches_rust_tags_and_required_fields() {
         .as_str()
         .expect("runtime proof command rendering");
     assert!(runtime_command.contains("rch exec --"));
+    assert!(
+        runtime_command
+            .contains("CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_runtime_application")
+    );
+    assert!(!runtime_command.contains("rch exec -- cargo"));
     assert!(runtime_command.contains("runtime_slo_policy_application"));
     let runtime_fail_closed = artifact["runtime_application_contract"]["fail_closed_for"]
         .as_array()
@@ -1493,7 +1498,10 @@ fn runtime_slo_policy_application_serializes_validates_and_renders_command() {
 
     let command =
         SloRuntimePolicyApplication::render_application_proof_command("runtime_slo_policy");
-    assert!(command.starts_with("rch exec -- cargo test -p asupersync"));
+    assert!(command.starts_with(
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_slo_runtime_application cargo test -p asupersync"
+    ));
+    assert!(!command.contains("rch exec -- cargo"));
     assert!(command.contains("--test slo_policy_bundle_contract"));
     assert!(command.contains("runtime_slo_policy"));
 }

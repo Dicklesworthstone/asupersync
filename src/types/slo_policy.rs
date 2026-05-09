@@ -1086,7 +1086,7 @@ impl SloRuntimePolicyApplication {
             test_filter
         };
         format!(
-            "rch exec -- cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals {filter} -- --nocapture"
+            "rch exec -- env CARGO_TARGET_DIR=${{TMPDIR:-/tmp}}/rch_target_slo_runtime_application cargo test -p asupersync --test slo_policy_bundle_contract --features test-internals {filter} -- --nocapture"
         )
     }
 
