@@ -286,6 +286,28 @@ fn observe_trailer_result(
     }
 }
 
+fn observe_base64_finish_result(
+    result: Result<Vec<u8>, impl core::fmt::Debug>,
+    context: &str,
+) {
+    match result {
+        Ok(decoded) => {
+            assert!(
+                decoded.len() <= 2,
+                "{context}: finish decoded more than one trailing base64 quartet: {} bytes",
+                decoded.len()
+            );
+        }
+        Err(err) => {
+            let diagnostic = format!("{err:?}");
+            assert!(
+                !diagnostic.trim().is_empty(),
+                "{context}: finish failure should expose diagnostics"
+            );
+        }
+    }
+}
+
 /// Fuzz WebFrameCodec::decode() with structured frame data
 fn fuzz_frame_codec(fuzz_frame: &FuzzWebFrame) {
     let frame_bytes = fuzz_frame.to_bytes();
@@ -367,8 +389,8 @@ fn fuzz_base64_decoders(fuzz_frame: &FuzzWebFrame) {
     }
 
     // Finish the decoder (should not panic regardless of state)
-    let _ = decoder.finish();
+    observe_base64_finish_result(decoder.finish(), "base64 stream finish");
 
     // Test finish() on already-sealed decoder
-    let _ = decoder.finish(); // Should be idempotent
+    observe_base64_finish_result(decoder.finish(), "base64 stream repeated finish");
 }
