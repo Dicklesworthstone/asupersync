@@ -10,6 +10,7 @@ use asupersync::http::h3_native::{
     qpack_decode_field_section, qpack_decode_request_field_section,
     qpack_decode_response_field_section, qpack_encode_field_section,
 };
+use asupersync::net::quic_core::{QUIC_VARINT_MAX, QuicCoreError, decode_varint};
 
 /// Fuzz input for HTTP/3 native protocol parsing
 #[derive(Arbitrary, Debug)]
@@ -246,7 +247,7 @@ fn test_frame_operation(operation: FrameOperation) {
 
                 // Parse and verify each frame independently
                 let config = h3_decode_config();
-                let _ = H3Frame::decode(&data, &config);
+                observe_h3_frame_decode("multiple frame", &data, &config);
             }
         }
 
@@ -261,7 +262,7 @@ fn test_frame_operation(operation: FrameOperation) {
             // Construct frame with specific type
             let frame_bytes = construct_frame_bytes(frame_type, &payload);
             let config = h3_decode_config();
-            let _ = H3Frame::decode(&frame_bytes, &config);
+            observe_h3_frame_decode("typed frame", &frame_bytes, &config);
         }
 
         FrameOperation::TruncatedFrame {
@@ -321,7 +322,7 @@ fn test_settings_operation(operation: SettingsOperation) {
         SettingsOperation::KnownSettings { settings } => {
             // Construct settings payload with known setting IDs
             let payload = construct_settings_payload(&settings);
-            let _ = H3Settings::decode_payload(&payload);
+            observe_h3_settings_decode("known settings", &payload);
         }
 
         SettingsOperation::DuplicateSettings { setting_id, values } => {
@@ -350,7 +351,7 @@ fn test_settings_operation(operation: SettingsOperation) {
             }
 
             // Should handle malformed data gracefully
-            let _ = H3Settings::decode_payload(&malformed_data);
+            observe_h3_settings_decode("malformed settings", &malformed_data);
         }
     }
 }
@@ -365,7 +366,7 @@ fn test_stream_operation(operation: StreamOperation) {
             // Test stream type parsing
             if !stream_data.is_empty() {
                 // Try to decode as varint for stream type
-                let _ = decode_varint_safe(&stream_data);
+                observe_quic_varint_decode("stream type", &stream_data);
             }
         }
 
@@ -557,14 +558,14 @@ fn test_edge_case_operation(operation: EdgeCaseOperation) {
         EdgeCaseOperation::SingleByte { byte } => {
             // Test single byte input
             let config = h3_decode_config();
-            let _ = H3Frame::decode(&[byte], &config);
+            observe_h3_frame_decode("single byte frame", &[byte], &config);
         }
 
         EdgeCaseOperation::LargeVarint { value } => {
             // Test large varint values
             let mut data = Vec::new();
             encode_varint(value, &mut data);
-            let _ = decode_varint_safe(&data);
+            observe_quic_varint_decode("large varint", &data);
         }
 
         EdgeCaseOperation::OverlappingFrames {
@@ -578,7 +579,7 @@ fn test_edge_case_operation(operation: EdgeCaseOperation) {
                 let mut combined = frame1;
                 combined.extend_from_slice(&frame2[overlap..]);
                 let config = h3_decode_config();
-                let _ = H3Frame::decode(&combined, &config);
+                observe_h3_frame_decode("overlapping frames", &combined, &config);
             }
         }
 
@@ -590,7 +591,7 @@ fn test_edge_case_operation(operation: EdgeCaseOperation) {
             // Create a frame with potentially invalid UTF-8 payload
             let frame_bytes = construct_frame_bytes(FrameType::Data, &payload);
             let config = h3_decode_config();
-            let _ = H3Frame::decode(&frame_bytes, &config);
+            observe_h3_frame_decode("invalid utf8 payload", &frame_bytes, &config);
         }
 
         EdgeCaseOperation::MaxSizeFrame {
@@ -601,7 +602,7 @@ fn test_edge_case_operation(operation: EdgeCaseOperation) {
             let payload = vec![fill_byte; MAX_PAYLOAD_SIZE];
             let frame_bytes = construct_frame_bytes(frame_type, &payload);
             let config = h3_decode_config();
-            let _ = H3Frame::decode(&frame_bytes, &config);
+            observe_h3_frame_decode("max size frame", &frame_bytes, &config);
         }
     }
 }
@@ -611,6 +612,101 @@ fn h3_decode_config() -> H3ConnectionConfig {
         max_frame_payload_size: MAX_FRAME_SIZE,
         ..H3ConnectionConfig::default()
     }
+}
+
+fn observe_h3_frame_decode(context: &str, data: &[u8], config: &H3ConnectionConfig) {
+    match H3Frame::decode(data, config) {
+        Ok((frame, consumed)) => {
+            assert!(
+                consumed <= data.len(),
+                "{context}: consumed more bytes than available"
+            );
+            assert!(consumed > 0, "{context}: frame consumed zero bytes");
+            verify_frame_consistency(&frame);
+            test_frame_roundtrip(&frame);
+        }
+        Err(err) => {
+            verify_error_consistency(&err, data);
+            observe_h3_error(context, &err);
+        }
+    }
+}
+
+fn observe_h3_settings_decode(context: &str, payload: &[u8]) {
+    match H3Settings::decode_payload(payload) {
+        Ok(settings) => {
+            verify_settings_consistency(&settings);
+            test_settings_roundtrip(&settings);
+        }
+        Err(err) => {
+            verify_settings_error_consistency(&err, payload);
+            observe_h3_error(context, &err);
+        }
+    }
+}
+
+fn observe_quic_varint_decode(context: &str, data: &[u8]) {
+    match decode_varint(data) {
+        Ok((value, consumed)) => {
+            assert!(
+                consumed <= data.len(),
+                "{context}: consumed more bytes than available"
+            );
+            assert!(
+                (1..=8).contains(&consumed),
+                "{context}: invalid QUIC varint width: {consumed}"
+            );
+            assert!(
+                value <= QUIC_VARINT_MAX,
+                "{context}: decoded varint exceeds QUIC max"
+            );
+            if let Some(expected) = required_quic_varint_width(data) {
+                assert_eq!(
+                    consumed, expected,
+                    "{context}: consumed width must follow QUIC prefix bits"
+                );
+            }
+        }
+        Err(err) => {
+            observe_quic_core_error(context, &err);
+            if matches!(err, QuicCoreError::UnexpectedEof) {
+                assert!(
+                    data.is_empty() || data.len() < required_quic_varint_width(data).unwrap_or(1),
+                    "{context}: unexpected EOF must be length-driven"
+                );
+            }
+        }
+    }
+}
+
+fn required_quic_varint_width(data: &[u8]) -> Option<usize> {
+    data.first().map(|first| 1usize << (first >> 6))
+}
+
+fn observe_h3_error(context: &str, err: &H3NativeError) {
+    let display = err.to_string();
+    assert!(
+        !display.trim().is_empty(),
+        "{context}: H3 error display should not be empty"
+    );
+    let debug = format!("{err:?}");
+    assert!(
+        !debug.trim().is_empty(),
+        "{context}: H3 error debug should not be empty"
+    );
+}
+
+fn observe_quic_core_error(context: &str, err: &QuicCoreError) {
+    let display = err.to_string();
+    assert!(
+        !display.trim().is_empty(),
+        "{context}: QUIC core error display should not be empty"
+    );
+    let debug = format!("{err:?}");
+    assert!(
+        !debug.trim().is_empty(),
+        "{context}: QUIC core error debug should not be empty"
+    );
 }
 
 fn verify_frame_consistency(frame: &H3Frame) {
@@ -789,12 +885,6 @@ fn construct_settings_payload(settings: &[SettingPair]) -> Vec<u8> {
     }
 
     payload
-}
-
-fn decode_varint_safe(data: &[u8]) -> Option<(u64, usize)> {
-    // Safe varint decoding that doesn't panic
-    use asupersync::net::quic_core::decode_varint;
-    decode_varint(data).ok()
 }
 
 fn encode_varint(value: u64, output: &mut Vec<u8>) {
