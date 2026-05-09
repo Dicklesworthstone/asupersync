@@ -712,7 +712,11 @@ fuzz_target!(|input: FuzzInput| {
             let sub_line1 = format!("SUB test.subject1 {}\r\n", duplicate_sid);
             let sub_line2 = format!("SUB test.subject2 {}\r\n", duplicate_sid);
 
-            let _ = parser.parse_line(sub_line1.as_bytes());
+            observe_sid_setup_parse(
+                parser.parse_line(sub_line1.as_bytes()),
+                &parser,
+                *duplicate_sid,
+            );
             let result = parser.parse_line(sub_line2.as_bytes());
 
             if result.is_ok() {
@@ -752,3 +756,27 @@ fuzz_target!(|input: FuzzInput| {
     // **MEMORY SAFETY: No buffer overflows**
     // AddressSanitizer will detect any memory safety violations.
 });
+
+fn observe_sid_setup_parse(result: Result<(), NatsError>, parser: &MockNatsParser, sid: u64) {
+    match result {
+        Ok(()) => {
+            assert!(
+                parser.active_sids.contains(&sid),
+                "SID collision setup parse succeeded without registering SID {sid}"
+            );
+        }
+        Err(NatsError::Protocol(msg)) => {
+            assert!(
+                !msg.trim().is_empty(),
+                "SID collision setup protocol error must expose diagnostics"
+            );
+        }
+        Err(error) => {
+            let message = error.to_string();
+            assert!(
+                !message.trim().is_empty(),
+                "SID collision setup error must expose diagnostics"
+            );
+        }
+    }
+}
