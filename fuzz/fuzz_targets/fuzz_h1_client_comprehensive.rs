@@ -31,6 +31,9 @@ const MAX_RESPONSE_SIZE: usize = 64 * 1024;
 /// Maximum number of redirects to test (keep low for performance)
 const MAX_FUZZ_REDIRECTS: u32 = 5;
 
+/// Maximum diagnostic size accepted from expected rejected fuzz scenarios.
+const MAX_H1_CLIENT_ERROR_DIAGNOSTIC: usize = 512;
+
 /// Wrapper for Method to implement Arbitrary
 #[derive(Debug, Clone, Arbitrary)]
 enum FuzzMethod {
@@ -357,11 +360,11 @@ enum RedirectTest {
 #[derive(Debug, Clone, Arbitrary)]
 enum LoopDetectionTest {
     /// Exact URL loop
-    ExactLoop,
+    Exact,
     /// Normalized URL loop (different representations, same resource)
-    NormalizedLoop,
+    Normalized,
     /// Near-loop (one URL different)
-    NearLoop,
+    Near,
 }
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -573,14 +576,11 @@ fn normalize_response_spec(resp: &mut ResponseSpec) {
     }
 
     // Normalize body encoding
-    match &mut resp.body_encoding {
-        BodyEncoding::Chunked { chunk_sizes } => {
-            chunk_sizes.truncate(10);
-            for size in chunk_sizes {
-                *size = (*size).clamp(0, 8192);
-            }
+    if let BodyEncoding::Chunked { chunk_sizes } = &mut resp.body_encoding {
+        chunk_sizes.truncate(10);
+        for size in chunk_sizes {
+            *size = (*size).clamp(0, 8192);
         }
-        _ => {}
     }
 }
 
@@ -725,6 +725,178 @@ fn normalize_url(url: &mut String) {
 fn test_client_codec_response_parsing(config: &H1ClientFuzzConfig) -> Result<(), String> {
     for scenario in &config.response_scenarios {
         test_response_scenario(scenario)?;
+    }
+    Ok(())
+}
+
+fn test_client_operations(config: &H1ClientFuzzConfig) -> Result<(), String> {
+    for operation in &config.client_operations {
+        test_client_operation(operation)?;
+    }
+    Ok(())
+}
+
+fn test_client_operation(operation: &ClientOperation) -> Result<(), String> {
+    match operation {
+        ClientOperation::SingleRequest {
+            request_spec,
+            response_spec,
+        } => {
+            validate_request_spec(request_spec)?;
+            validate_response_spec_bounds(response_spec)?;
+        }
+        ClientOperation::SequentialRequests {
+            requests,
+            responses,
+            connection_behavior,
+        } => {
+            for request in requests {
+                validate_request_spec(request)?;
+            }
+            for response in responses {
+                validate_response_spec_bounds(response)?;
+            }
+            observe_connection_behavior(connection_behavior)?;
+        }
+        ClientOperation::PipelinedRequests {
+            requests,
+            responses,
+            pipeline_corruption,
+        } => {
+            for request in requests {
+                validate_request_spec(request)?;
+            }
+            for response in responses {
+                validate_response_spec_bounds(response)?;
+            }
+            if let Some(corruption) = pipeline_corruption {
+                observe_pipeline_corruption(corruption, requests.len(), responses.len())?;
+            }
+        }
+        ClientOperation::ContinueRequest {
+            request_spec,
+            continue_response,
+            final_response,
+        } => {
+            validate_request_spec(request_spec)?;
+            observe_continue_response(continue_response)?;
+            validate_response_spec_bounds(final_response)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_request_spec(request: &RequestSpec) -> Result<(), String> {
+    let method: Method = request.method.clone().into();
+    if matches!(method, Method::Extension(ref name) if name.is_empty()) {
+        return Err("empty extension method".to_string());
+    }
+
+    let version: Version = request.version.clone().into();
+    if request.expect_continue && matches!(version, Version::Http10) {
+        return Err("HTTP/1.0 request used expect-continue".to_string());
+    }
+    if request.expect_continue && request.body.is_empty() {
+        return Err("expect-continue request has no body".to_string());
+    }
+
+    Ok(())
+}
+
+fn validate_response_spec_bounds(response: &ResponseSpec) -> Result<(), String> {
+    let encoded = build_response_from_spec(response);
+    if encoded.len() > MAX_RESPONSE_SIZE {
+        return Err(format!(
+            "encoded response exceeded fuzz bound: {}",
+            encoded.len()
+        ));
+    }
+    Ok(())
+}
+
+fn observe_connection_behavior(behavior: &ConnectionBehavior) -> Result<(), String> {
+    match behavior {
+        ConnectionBehavior::KeepAlive | ConnectionBehavior::ForceClose => {}
+        ConnectionBehavior::PrematureClose { after_bytes } => {
+            if *after_bytes > MAX_RESPONSE_SIZE {
+                return Err("premature-close byte offset exceeded fuzz bound".to_string());
+            }
+        }
+        ConnectionBehavior::Timeout { at_stage } => match at_stage {
+            TimeoutStage::DuringHeaders
+            | TimeoutStage::DuringBody
+            | TimeoutStage::BetweenRequests
+            | TimeoutStage::DuringChunkedBody => {}
+        },
+        ConnectionBehavior::Error {
+            at_stage,
+            error_type,
+        } => match (at_stage, error_type) {
+            (
+                ErrorStage::AfterHeaders
+                | ErrorStage::DuringBodyRead
+                | ErrorStage::AfterFirstChunk
+                | ErrorStage::DuringTrailers,
+                ErrorType::ConnectionReset
+                | ErrorType::UnexpectedEof
+                | ErrorType::InvalidData
+                | ErrorType::ProtocolViolation,
+            ) => {}
+        },
+    }
+    Ok(())
+}
+
+fn observe_pipeline_corruption(
+    corruption: &PipelineCorruption,
+    request_count: usize,
+    response_count: usize,
+) -> Result<(), String> {
+    match corruption {
+        PipelineCorruption::OutOfOrder => {}
+        PipelineCorruption::MissingResponse { skip_index } => {
+            if (*skip_index as usize) >= response_count.max(1) {
+                return Err("pipeline missing-response index exceeded response count".to_string());
+            }
+        }
+        PipelineCorruption::DuplicateResponse { duplicate_index } => {
+            if (*duplicate_index as usize) >= response_count.max(1) {
+                return Err("pipeline duplicate-response index exceeded response count".to_string());
+            }
+        }
+        PipelineCorruption::PartialThenNew { split_at } => {
+            if *split_at > MAX_RESPONSE_SIZE.saturating_mul(request_count.max(1)) {
+                return Err("pipeline split offset exceeded fuzz bound".to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn observe_continue_response(response: &ContinueResponseType) -> Result<(), String> {
+    match response {
+        ContinueResponseType::Normal | ContinueResponseType::SkipContinue => {}
+        ContinueResponseType::Multiple { count } => {
+            if *count == 0 {
+                return Err("multiple continue response count was zero".to_string());
+            }
+        }
+        ContinueResponseType::Malformed { corruption_type } => match corruption_type {
+            ContinueCorruption::InvalidStatusLine
+            | ContinueCorruption::ExtraHeaders
+            | ContinueCorruption::MissingCrlf
+            | ContinueCorruption::InvalidVersion => {}
+        },
+        ContinueResponseType::WrongStatus { status } => {
+            if *status == 100 {
+                return Err("wrong-status continue response used status 100".to_string());
+            }
+        }
+        ContinueResponseType::WithBody { body_data } => {
+            if body_data.len() > MAX_RESPONSE_SIZE {
+                return Err("continue response body exceeded fuzz bound".to_string());
+            }
+        }
     }
     Ok(())
 }
@@ -968,18 +1140,14 @@ fn validate_parsed_response(
     }
 
     match scenario {
-        ResponseScenario::Normal { spec } => {
-            if response.status != spec.status {
-                return Err(format!(
-                    "Status mismatch: {} vs {}",
-                    response.status, spec.status
-                ));
-            }
+        ResponseScenario::Normal { spec } if response.status != spec.status => {
+            return Err(format!(
+                "Status mismatch: {} vs {}",
+                response.status, spec.status
+            ));
         }
-        ResponseScenario::EmptyBody { .. } => {
-            if !response.body.is_empty() {
-                return Err("Expected empty body".to_string());
-            }
+        ResponseScenario::EmptyBody { .. } if !response.body.is_empty() => {
+            return Err("Expected empty body".to_string());
         }
         _ => {} // Other scenarios may have various valid outcomes
     }
@@ -1019,12 +1187,20 @@ fn test_connection_management(config: &H1ClientFuzzConfig) -> Result<(), String>
 fn test_connection_scenario(test: &ConnectionTest) -> Result<(), String> {
     match test {
         ConnectionTest::KeepAliveBoundary {
-            boundary_condition, ..
+            request_count,
+            boundary_condition,
         } => {
+            if *request_count == 0 {
+                return Err("keep-alive request count 0".to_string());
+            }
             test_keep_alive_boundary(boundary_condition)?;
         }
-        ConnectionTest::ReuseAfterError { error_scenario, .. } => {
+        ConnectionTest::ReuseAfterError {
+            error_scenario,
+            reuse_attempt,
+        } => {
             test_connection_reuse_after_error(error_scenario)?;
+            observe_reuse_attempt(reuse_attempt);
         }
         ConnectionTest::VersionMismatch {
             request_version,
@@ -1066,7 +1242,10 @@ fn test_keep_alive_boundary(boundary: &KeepAliveBoundary) -> Result<(), String> 
 fn test_connection_reuse_after_error(scenario: &ErrorScenario) -> Result<(), String> {
     // Test that connections are properly handled after errors
     match scenario {
-        ErrorScenario::PartialBodyRead { .. } => {
+        ErrorScenario::PartialBodyRead { bytes_read } => {
+            if *bytes_read > MAX_RESPONSE_SIZE {
+                return Err("partial body read exceeded fuzz bound".to_string());
+            }
             // Partial reads should prevent reuse
         }
         ErrorScenario::ChunkedTimeout => {
@@ -1080,6 +1259,12 @@ fn test_connection_reuse_after_error(scenario: &ErrorScenario) -> Result<(), Str
         }
     }
     Ok(())
+}
+
+fn observe_reuse_attempt(reuse_attempt: &ReuseAttempt) {
+    match reuse_attempt {
+        ReuseAttempt::Immediate | ReuseAttempt::Delayed | ReuseAttempt::ForceNew => {}
+    }
 }
 
 fn test_invalid_chunk_size(corruption: &ChunkSizeCorruption) -> Result<(), String> {
@@ -1221,13 +1406,13 @@ fn test_redirect_loop(
     }
 
     match loop_detection {
-        LoopDetectionTest::ExactLoop => {
+        LoopDetectionTest::Exact => {
             // Exact URL repetition should be detected
         }
-        LoopDetectionTest::NormalizedLoop => {
+        LoopDetectionTest::Normalized => {
             // Normalized URL loop should be detected
         }
-        LoopDetectionTest::NearLoop => {
+        LoopDetectionTest::Near => {
             // Near-loop might or might not be detected
         }
     }
@@ -1278,12 +1463,19 @@ fn extract_origin(url: &str) -> Option<String> {
 }
 
 fn test_malformed_location(
-    _base_url: &str,
+    base_url: &str,
     location_values: &[LocationValue],
 ) -> Result<(), String> {
+    if base_url.len() > 512 {
+        return Err("redirect base URL exceeded fuzz bound".to_string());
+    }
+
     for location in location_values {
         match location {
-            LocationValue::Valid { .. } => {
+            LocationValue::Valid { url } => {
+                if url.is_empty() {
+                    return Err("valid redirect location was empty".to_string());
+                }
                 // Valid location should work
             }
             LocationValue::Malformed { value } => {
@@ -1295,10 +1487,19 @@ fn test_malformed_location(
             LocationValue::Empty => {
                 // Empty location should be handled
             }
-            LocationValue::TooLong { .. } => {
+            LocationValue::TooLong {
+                base_url,
+                extension,
+            } => {
+                if base_url.len().saturating_add(extension.len()) <= 512 {
+                    return Err("too-long redirect location stayed within bound".to_string());
+                }
                 // Too long location should be limited
             }
-            LocationValue::WithInjection { .. } => {
+            LocationValue::WithInjection { base, injection } => {
+                if base.is_empty() || injection.is_empty() {
+                    return Err("injection redirect location missing a component".to_string());
+                }
                 // Injection attempts should be sanitized
             }
         }
@@ -1490,19 +1691,39 @@ fn fuzz_h1_client(mut config: H1ClientFuzzConfig) -> Result<(), String> {
         return Ok(());
     }
 
-    // Test 1: HTTP/1.1 client codec response parsing
+    // Test 1: Client request/response operation scenarios
+    test_client_operations(&config)?;
+
+    // Test 2: HTTP/1.1 client codec response parsing
     test_client_codec_response_parsing(&config)?;
 
-    // Test 2: Connection management and keep-alive behavior
+    // Test 3: Connection management and keep-alive behavior
     test_connection_management(&config)?;
 
-    // Test 3: Redirect handling and loop detection
+    // Test 4: Redirect handling and loop detection
     test_redirect_handling(&config)?;
 
-    // Test 4: Edge cases and boundary conditions
+    // Test 5: Edge cases and boundary conditions
     test_edge_cases(&config)?;
 
     Ok(())
+}
+
+fn observe_h1_client_fuzz_result(result: Result<(), String>) {
+    match result {
+        Ok(()) => {}
+        Err(error) => {
+            assert!(
+                !error.is_empty(),
+                "H1 client rejected a fuzz scenario without diagnostics"
+            );
+            assert!(
+                error.len() <= MAX_H1_CLIENT_ERROR_DIAGNOSTIC,
+                "H1 client rejection diagnostic escaped the fuzz bound: len={}",
+                error.len()
+            );
+        }
+    }
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -1521,5 +1742,5 @@ fuzz_target!(|data: &[u8]| {
     };
 
     // Run HTTP/1.1 client fuzzing
-    let _ = fuzz_h1_client(config);
+    observe_h1_client_fuzz_result(fuzz_h1_client(config));
 });
