@@ -11,7 +11,8 @@
 
 #![no_main]
 
-use asupersync::http::h1::codec::fuzz_parse_request_line_bytes;
+use asupersync::http::h1::codec::{HttpError, fuzz_parse_request_line_bytes};
+use asupersync::http::h1::types::Version;
 use libfuzzer_sys::fuzz_target;
 
 const MAX_INPUT_LEN: usize = 8192; // HTTP/1.1 request line limit
@@ -23,36 +24,96 @@ fuzz_target!(|data: &[u8]| {
 
     let _ = fuzz_parse_request_line_bytes(data);
 
-    // Boundary candidates: well-formed request lines.
-    for candidate in &[
-        b"GET / HTTP/1.1".as_ref(),
-        b"POST /path HTTP/1.0".as_ref(),
-        b"HEAD /index.html HTTP/1.1".as_ref(),
-        b"PUT /api/v1/data HTTP/1.1".as_ref(),
-        b"DELETE /resource HTTP/1.0".as_ref(),
-        b"OPTIONS * HTTP/1.1".as_ref(),
-        b"CONNECT proxy.example.com:8080 HTTP/1.1".as_ref(),
-        b"TRACE / HTTP/1.1".as_ref(),
-        b"PATCH /item/123 HTTP/1.1".as_ref(),
-        b"CUSTOM /custom HTTP/1.1".as_ref(), // Extension method
-        b"GET /long".repeat(100).as_bytes(), // Long URI path
-        b"VERY-LONG-METHOD-NAME-FOR-EDGE-CASE /path HTTP/1.1".as_ref(),
-        b"GET / HTTP/2.0".as_ref(), // Unsupported version
-        b"get /path http/1.1".as_ref(), // Lowercase (invalid)
-        b"GET  /path  HTTP/1.1".as_ref(), // Extra spaces
-        b"GET\t/path\tHTTP/1.1".as_ref(), // Tabs instead of spaces
-        b"GET /path%20with%20encoded%20spaces HTTP/1.1".as_ref(), // URL encoding
-        b"".as_ref(), // Empty input
-        b"GET".as_ref(), // Incomplete
-        b"GET /".as_ref(), // Missing version
-        b"GET / HTTP".as_ref(), // Incomplete version
-        b"GET\r/path HTTP/1.1".as_ref(), // Embedded CR
-        b"GET\n/path HTTP/1.1".as_ref(), // Embedded LF
-        b"GET\0/path HTTP/1.1".as_ref(), // Null byte
-        b"GET /path\xFF HTTP/1.1".as_ref(), // High byte
-        b"GET /path/\x01\x02\x03 HTTP/1.1".as_ref(), // Control chars
-        b"METHOD /very/long/path/that/exceeds/normal/uri/length/limits/and/should/test/boundary/conditions/in/parser HTTP/1.1".as_ref(),
-    ] {
-        let _ = fuzz_parse_request_line_bytes(candidate);
-    }
+    assert_parse_ok(b"GET / HTTP/1.1", "GET", "/", Version::Http11);
+    assert_parse_ok(b"POST /path HTTP/1.0", "POST", "/path", Version::Http10);
+    assert_parse_ok(
+        b"HEAD /index.html HTTP/1.1",
+        "HEAD",
+        "/index.html",
+        Version::Http11,
+    );
+    assert_parse_ok(b"OPTIONS * HTTP/1.1", "OPTIONS", "*", Version::Http11);
+    assert_parse_ok(
+        b"CONNECT proxy.example.com:8080 HTTP/1.1",
+        "CONNECT",
+        "proxy.example.com:8080",
+        Version::Http11,
+    );
+    assert_parse_ok(
+        b"GET http://example.com/path HTTP/1.1",
+        "GET",
+        "http://example.com/path",
+        Version::Http11,
+    );
+    assert_parse_ok(
+        b"CUSTOM /custom HTTP/1.1",
+        "CUSTOM",
+        "/custom",
+        Version::Http11,
+    );
+
+    assert_bad_request_line(b"");
+    assert_bad_request_line(b"GET");
+    assert_bad_request_line(b"GET /");
+    assert_bad_request_line(b"GET  /path  HTTP/1.1");
+    assert_bad_request_line(b"GET\t/path\tHTTP/1.1");
+    assert_bad_request_line(b"GET //ambiguous HTTP/1.1");
+    assert_bad_request_line(b"POST * HTTP/1.1");
+    assert_bad_request_line(b"CONNECT /path HTTP/1.1");
+    assert_bad_request_line(b"GET\r/path HTTP/1.1");
+    assert_bad_request_line(b"GET /\npath HTTP/1.1");
+    assert_bad_request_line(b"GET /\0path HTTP/1.1");
+    assert_bad_request_line(b"GET /path\xFF HTTP/1.1");
+    assert_bad_request_line(b"GET /path/\x01\x02\x03 HTTP/1.1");
+
+    assert_bad_method(b"BAD() / HTTP/1.1");
+    assert_unsupported_version(b"GET / HTTP/2.0");
+    assert_unsupported_version(b"GET / HTTP");
 });
+
+fn assert_parse_ok(
+    line: &[u8],
+    expected_method: &str,
+    expected_uri: &str,
+    expected_version: Version,
+) {
+    let (method, uri, version) =
+        fuzz_parse_request_line_bytes(line).expect("valid request line candidate");
+    assert_eq!(
+        method.as_str(),
+        expected_method,
+        "method mismatch for {line:?}"
+    );
+    assert_eq!(uri, expected_uri, "uri mismatch for {line:?}");
+    assert_eq!(version, expected_version, "version mismatch for {line:?}");
+}
+
+fn assert_bad_request_line(line: &[u8]) {
+    assert!(
+        matches!(
+            fuzz_parse_request_line_bytes(line),
+            Err(HttpError::BadRequestLine)
+        ),
+        "expected BadRequestLine for {line:?}",
+    );
+}
+
+fn assert_bad_method(line: &[u8]) {
+    assert!(
+        matches!(
+            fuzz_parse_request_line_bytes(line),
+            Err(HttpError::BadMethod)
+        ),
+        "expected BadMethod for {line:?}",
+    );
+}
+
+fn assert_unsupported_version(line: &[u8]) {
+    assert!(
+        matches!(
+            fuzz_parse_request_line_bytes(line),
+            Err(HttpError::UnsupportedVersion)
+        ),
+        "expected UnsupportedVersion for {line:?}",
+    );
+}
