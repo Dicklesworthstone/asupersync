@@ -4,7 +4,8 @@
 //! and malformed frame variants. The key invariants are:
 //! - valid frames roundtrip through `GrpcCodec` without reordering
 //! - partial frames remain pending until the declared payload is complete
-//! - invalid compression flags reject without consuming the buffer
+//! - complete invalid compression-flag frames are consumed and rejected
+//! - incomplete invalid compression-flag frames remain buffered
 //! - declared lengths above the configured decode limit fail closed
 
 #![no_main]
@@ -15,11 +16,14 @@ use asupersync::codec::{Decoder, Encoder};
 use asupersync::grpc::codec::MESSAGE_HEADER_SIZE;
 use asupersync::grpc::{GrpcCodec, GrpcError, GrpcMessage};
 use libfuzzer_sys::fuzz_target;
+use std::sync::OnceLock;
 
 const MAX_INPUT_LEN: usize = 4096;
 const MAX_MESSAGES: usize = 24;
 const MAX_PAYLOAD_LEN: usize = 1024;
 const MAX_CODEC_LIMIT: usize = 2048;
+
+static FIXED_CANARIES: OnceLock<()> = OnceLock::new();
 
 #[derive(Arbitrary, Debug, Clone)]
 struct FuzzInput {
@@ -59,6 +63,8 @@ enum MalformedFrame {
 }
 
 fuzz_target!(|data: &[u8]| {
+    FIXED_CANARIES.get_or_init(assert_fixed_decode_canaries);
+
     if data.len() > MAX_INPUT_LEN {
         return;
     }
@@ -109,7 +115,8 @@ fn exercise_roundtrip_and_partial(input: &FuzzInput, encode_limit: usize, decode
             let mut oversized_decode_buf = frame.clone();
             let mut rejecting_decoder =
                 GrpcCodec::with_message_size_limits(encode_limit, decode_limit);
-            let decode_result = rejecting_decoder.decode(&mut oversized_decode_buf);
+            let decode_result =
+                observe_framing_decode(&mut rejecting_decoder, &mut oversized_decode_buf);
             assert!(
                 matches!(decode_result, Err(GrpcError::MessageTooLarge)),
                 "payload larger than decode limit must fail closed"
@@ -125,14 +132,17 @@ fn exercise_roundtrip_and_partial(input: &FuzzInput, encode_limit: usize, decode
     let mut decoder = GrpcCodec::with_message_size_limits(encode_limit, decode_limit);
     let mut decode_buf = stream.clone();
     for expected_message in &expected {
-        let decoded = decoder
-            .decode(&mut decode_buf)
+        let decoded = observe_framing_decode(&mut decoder, &mut decode_buf)
             .expect("encoded stream should decode")
             .expect("encoded frame should be available");
         assert_eq!(decoded.compressed, expected_message.compressed);
         assert_eq!(decoded.data, expected_message.data);
     }
-    assert!(decoder.decode(&mut decode_buf).unwrap().is_none());
+    assert!(
+        observe_framing_decode(&mut decoder, &mut decode_buf)
+            .unwrap()
+            .is_none()
+    );
     assert!(decode_buf.is_empty(), "decoder should drain encoded stream");
 
     if let (Some(frame), Some(expected_message)) = (encoded_frames.first(), expected.first()) {
@@ -144,7 +154,9 @@ fn exercise_roundtrip_and_partial(input: &FuzzInput, encode_limit: usize, decode
         let partial_len_before = partial.len();
         let mut partial_decoder = GrpcCodec::with_message_size_limits(encode_limit, decode_limit);
         assert!(
-            partial_decoder.decode(&mut partial).unwrap().is_none(),
+            observe_framing_decode(&mut partial_decoder, &mut partial)
+                .unwrap()
+                .is_none(),
             "incomplete frame must stay pending"
         );
         assert_eq!(
@@ -154,8 +166,7 @@ fn exercise_roundtrip_and_partial(input: &FuzzInput, encode_limit: usize, decode
         );
 
         partial.extend_from_slice(&frame[split..]);
-        let decoded = partial_decoder
-            .decode(&mut partial)
+        let decoded = observe_framing_decode(&mut partial_decoder, &mut partial)
             .expect("completed partial frame should decode")
             .expect("completed partial frame should be available");
         assert_eq!(decoded.compressed, expected_message.compressed);
@@ -177,13 +188,13 @@ fn exercise_malformed(frame: &MalformedFrame, decode_limit: usize) {
             };
             let payload = truncate_bytes(payload);
             encode_frame(invalid_flag, payload.len(), &payload, &mut buf);
-            let before = buf.clone();
 
-            let result = codec.decode(&mut buf);
+            let result = observe_framing_decode(&mut codec, &mut buf);
             assert!(matches!(result, Err(GrpcError::Protocol(_))));
             assert_eq!(
-                buf, before,
-                "invalid compression flag should leave buffer untouched"
+                buf.len(),
+                0,
+                "complete invalid compression flag should consume its frame"
             );
         }
         MalformedFrame::OversizedLength { compressed, excess } => {
@@ -192,7 +203,7 @@ fn exercise_malformed(frame: &MalformedFrame, decode_limit: usize) {
             buf.put_u8(u8::from(*compressed));
             buf.put_u32(capped_len);
 
-            let result = codec.decode(&mut buf);
+            let result = observe_framing_decode(&mut codec, &mut buf);
             assert!(matches!(result, Err(GrpcError::MessageTooLarge)));
         }
         MalformedFrame::TruncatedPayload {
@@ -211,7 +222,7 @@ fn exercise_malformed(frame: &MalformedFrame, decode_limit: usize) {
             encode_frame(u8::from(*compressed), declared_len, &actual, &mut buf);
             let before_len = buf.len();
 
-            let result = codec.decode(&mut buf);
+            let result = observe_framing_decode(&mut codec, &mut buf);
             assert!(matches!(result, Ok(None)));
             assert_eq!(
                 buf.len(),
@@ -220,6 +231,99 @@ fn exercise_malformed(frame: &MalformedFrame, decode_limit: usize) {
             );
         }
     }
+}
+
+fn observe_framing_decode(
+    codec: &mut GrpcCodec,
+    buf: &mut BytesMut,
+) -> Result<Option<GrpcMessage>, GrpcError> {
+    let before_len = buf.len();
+    let result = codec.decode(buf);
+    assert!(
+        buf.len() <= before_len,
+        "GrpcCodec::decode grew the source buffer"
+    );
+
+    match &result {
+        Ok(Some(message)) => {
+            let consumed = before_len - buf.len();
+            assert_eq!(
+                consumed,
+                MESSAGE_HEADER_SIZE + message.data.len(),
+                "decoded frame consumed {consumed} bytes for payload length {}",
+                message.data.len()
+            );
+        }
+        Ok(None) => {
+            assert_eq!(
+                buf.len(),
+                before_len,
+                "incomplete frame should remain buffered"
+            );
+        }
+        Err(GrpcError::MessageTooLarge) => {
+            assert_eq!(
+                buf.len(),
+                before_len,
+                "oversized frame should be rejected before consuming bytes"
+            );
+        }
+        Err(GrpcError::Protocol(message)) => {
+            assert!(
+                !message.is_empty(),
+                "protocol errors should explain the invalid frame"
+            );
+        }
+        Err(error) => {
+            assert!(
+                !error.to_string().is_empty(),
+                "decode error should have a non-empty description: {error:?}"
+            );
+        }
+    }
+
+    result
+}
+
+fn assert_fixed_decode_canaries() {
+    let mut complete_invalid = BytesMut::new();
+    encode_frame(2, 2, b"no", &mut complete_invalid);
+    let mut codec = GrpcCodec::new();
+    assert!(matches!(
+        observe_framing_decode(&mut codec, &mut complete_invalid),
+        Err(GrpcError::Protocol(_))
+    ));
+    assert!(
+        complete_invalid.is_empty(),
+        "complete invalid-flag frames should be consumed"
+    );
+
+    let mut incomplete_invalid_header = BytesMut::from(&[2, 0, 0][..]);
+    let mut codec = GrpcCodec::new();
+    assert!(matches!(
+        observe_framing_decode(&mut codec, &mut incomplete_invalid_header),
+        Ok(None)
+    ));
+    assert_eq!(incomplete_invalid_header.as_ref(), &[2, 0, 0]);
+
+    let mut incomplete_invalid_payload = BytesMut::new();
+    encode_frame(2, 3, b"no", &mut incomplete_invalid_payload);
+    let mut codec = GrpcCodec::new();
+    assert!(matches!(
+        observe_framing_decode(&mut codec, &mut incomplete_invalid_payload),
+        Ok(None)
+    ));
+    assert_eq!(incomplete_invalid_payload.as_ref(), b"\x02\0\0\0\x03no");
+
+    let mut oversized = BytesMut::new();
+    oversized.put_u8(0);
+    oversized.put_u32(3);
+    let mut codec = GrpcCodec::with_max_size(2);
+    assert!(matches!(
+        observe_framing_decode(&mut codec, &mut oversized),
+        Err(GrpcError::MessageTooLarge)
+    ));
+    assert_eq!(oversized.as_ref(), b"\0\0\0\0\x03");
 }
 
 fn encode_frame(flag: u8, declared_len: usize, payload: &[u8], dst: &mut BytesMut) {
