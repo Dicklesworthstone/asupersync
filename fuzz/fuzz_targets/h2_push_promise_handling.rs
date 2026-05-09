@@ -14,20 +14,16 @@
 
 #![no_main]
 
-use asupersync::bytes::{BufMut, Bytes, BytesMut};
-use asupersync::http::h2::frame::{PushPromiseFrame, Setting, SettingsFrame};
+use asupersync::bytes::{Bytes, BytesMut};
+use asupersync::http::h2::connection::Connection;
+use asupersync::http::h2::error::ErrorCode;
+use asupersync::http::h2::frame::{DataFrame, PushPromiseFrame, SettingsFrame};
+use asupersync::http::h2::settings::Settings;
 use asupersync::http::h2::{Frame, FrameType, H2Error};
 use libfuzzer_sys::fuzz_target;
 
 /// Maximum input size to prevent OOM during fuzzing
 const MAX_INPUT_SIZE: usize = 64 * 1024;
-
-/// HTTP/2 frame type constants
-const PUSH_PROMISE_FRAME_TYPE: u8 = 0x5;
-const SETTINGS_FRAME_TYPE: u8 = 0x4;
-
-/// HTTP/2 settings identifiers
-const SETTINGS_ENABLE_PUSH: u16 = 0x2;
 
 fuzz_target!(|data: &[u8]| {
     // Guard against excessive input sizes
@@ -41,14 +37,11 @@ fuzz_target!(|data: &[u8]| {
         let frame = create_push_promise_frame(data, 1, 2);
 
         // Try to parse the frame - should handle gracefully
-        match frame {
-            Frame::PushPromise(push_frame) => {
-                // Should not panic regardless of payload content
-                let _stream_id = push_frame.stream_id;
-                let _promised_id = push_frame.promised_stream_id;
-                let _headers = &push_frame.header_block;
-            }
-            _ => {} // Other frame types are acceptable for fuzzing
+        if let Frame::PushPromise(push_frame) = frame {
+            // Should not panic regardless of payload content
+            let _stream_id = push_frame.stream_id;
+            let _promised_id = push_frame.promised_stream_id;
+            let _headers = &push_frame.header_block;
         }
     }
 
@@ -60,19 +53,15 @@ fuzz_target!(|data: &[u8]| {
         let frame = create_push_promise_frame_with_promised_id(&data[4..], 1, promised_stream_id);
 
         // Should handle invalid stream IDs gracefully during frame creation
-        match frame {
-            Frame::PushPromise(push_frame) => {
-                let _promised = push_frame.promised_stream_id;
-                // Should not panic regardless of promised stream ID value
-            }
-            _ => {}
+        if let Frame::PushPromise(push_frame) = frame {
+            let _promised = push_frame.promised_stream_id;
+            // Should not panic regardless of promised stream ID value
         }
     }
 
     // Test 3: PUSH_PROMISE on invalid/closed streams
     {
-        let mut connection = create_test_connection();
-        enable_push_setting(&mut connection);
+        let mut connection = create_push_enabled_test_connection();
 
         // Use fuzzed data to determine stream ID (including invalid ones)
         let stream_id = if data.len() >= 4 {
@@ -89,8 +78,7 @@ fuzz_target!(|data: &[u8]| {
 
     // Test 4: Very large PUSH_PROMISE frames
     if data.len() > 100 {
-        let mut connection = create_test_connection();
-        enable_push_setting(&mut connection);
+        let mut connection = create_push_enabled_test_connection();
 
         // Create oversized PUSH_PROMISE frame
         let large_frame = create_large_push_promise_frame(data);
@@ -108,13 +96,10 @@ fuzz_target!(|data: &[u8]| {
         match frame_result {
             Ok(frame) => {
                 // Successfully parsed - validate it doesn't cause issues
-                match frame {
-                    Frame::PushPromise(push_frame) => {
-                        let _stream_id = push_frame.stream_id;
-                        let _promised_id = push_frame.promised_stream_id;
-                        let _headers = &push_frame.header_block;
-                    }
-                    _ => {}
+                if let Frame::PushPromise(push_frame) = frame {
+                    let _stream_id = push_frame.stream_id;
+                    let _promised_id = push_frame.promised_stream_id;
+                    let _headers = &push_frame.header_block;
                 }
             }
             Err(_) => {
@@ -125,8 +110,7 @@ fuzz_target!(|data: &[u8]| {
 
     // Test 6: Multiple rapid PUSH_PROMISE frames
     if data.len() >= 8 {
-        let mut connection = create_test_connection();
-        enable_push_setting(&mut connection);
+        let mut connection = create_push_enabled_test_connection();
 
         // Send multiple PUSH_PROMISE frames in succession
         let chunk_size = data.len() / 4;
@@ -144,8 +128,7 @@ fuzz_target!(|data: &[u8]| {
 
     // Test 7: PUSH_PROMISE with invalid flags
     {
-        let mut connection = create_test_connection();
-        enable_push_setting(&mut connection);
+        let mut connection = create_push_enabled_test_connection();
 
         // Use fuzzed data as frame flags (including invalid combinations)
         let flags = if !data.is_empty() { data[0] } else { 0 };
@@ -157,11 +140,10 @@ fuzz_target!(|data: &[u8]| {
 
     // Test 8: PUSH_PROMISE during connection shutdown
     {
-        let mut connection = create_test_connection();
-        enable_push_setting(&mut connection);
+        let mut connection = create_push_enabled_test_connection();
 
         // Initiate connection shutdown
-        let _shutdown_result = connection.send_goaway();
+        connection.goaway(ErrorCode::NoError, Bytes::new());
 
         // Try to send PUSH_PROMISE after GOAWAY
         let frame = create_push_promise_frame(data, 1, 2);
@@ -172,8 +154,7 @@ fuzz_target!(|data: &[u8]| {
 
     // Test 9: PUSH_PROMISE with padded payload
     if data.len() > 10 {
-        let mut connection = create_test_connection();
-        enable_push_setting(&mut connection);
+        let mut connection = create_push_enabled_test_connection();
 
         // Create PUSH_PROMISE with padding
         let frame = create_padded_push_promise_frame(data);
@@ -184,8 +165,7 @@ fuzz_target!(|data: &[u8]| {
 
     // Test 10: Interleaved PUSH_PROMISE and other frame types
     if data.len() >= 16 {
-        let mut connection = create_test_connection();
-        enable_push_setting(&mut connection);
+        let mut connection = create_push_enabled_test_connection();
 
         // Alternate between PUSH_PROMISE and other frames
         let mid = data.len() / 2;
@@ -202,15 +182,32 @@ fuzz_target!(|data: &[u8]| {
     }
 });
 
+fn create_push_enabled_test_connection() -> Connection {
+    let mut settings = Settings::client();
+    settings.enable_push = true;
+    let mut connection = Connection::client(settings);
+    let settings_frame = Frame::Settings(SettingsFrame::new(Vec::new()));
+    let _ = connection.process_frame(settings_frame);
+    connection
+}
+
+fn create_data_frame(data: &[u8], stream_id: u32) -> Frame {
+    Frame::Data(DataFrame::new(
+        stream_id,
+        Bytes::copy_from_slice(data),
+        false,
+    ))
+}
+
 /// Create a PUSH_PROMISE frame with fuzzed payload
 fn create_push_promise_frame(data: &[u8], stream_id: u32, promised_stream_id: u32) -> Frame {
     let mut payload = BytesMut::new();
 
     // Add promised stream ID (4 bytes)
-    payload.put_u32(promised_stream_id & 0x7fff_ffff); // Clear reserved bit
+    payload.extend_from_slice(&(promised_stream_id & 0x7fff_ffff).to_be_bytes());
 
     // Add fuzzed header block fragment
-    payload.put(data);
+    payload.extend_from_slice(data);
 
     let push_frame = PushPromiseFrame {
         stream_id,
@@ -242,13 +239,13 @@ fn create_push_promise_frame_with_flags(
     data: &[u8],
     stream_id: u32,
     promised_stream_id: u32,
-    _flags: u8, // flags are managed by end_headers field
+    flags: u8, // flags are managed by end_headers field
 ) -> Frame {
     let push_frame = PushPromiseFrame {
         stream_id,
         promised_stream_id: promised_stream_id & 0x7fff_ffff,
         header_block: Bytes::copy_from_slice(data),
-        end_headers: _flags & 0x4 != 0, // END_HEADERS flag
+        end_headers: flags & 0x4 != 0, // END_HEADERS flag
     };
     Frame::PushPromise(push_frame)
 }
@@ -259,7 +256,7 @@ fn create_large_push_promise_frame(data: &[u8]) -> Frame {
 
     // Repeat the data to create a large payload
     for _ in 0..100 {
-        payload.put(data);
+        payload.extend_from_slice(data);
         if payload.len() > 1024 * 1024 {
             // Cap at 1MB
             break;
@@ -270,17 +267,6 @@ fn create_large_push_promise_frame(data: &[u8]) -> Frame {
         stream_id: 1,
         promised_stream_id: 2,
         header_block: payload.freeze(),
-        end_headers: true,
-    };
-    Frame::PushPromise(push_frame)
-}
-
-/// Create a raw PUSH_PROMISE frame with arbitrary structure
-fn create_raw_push_promise_frame(data: &[u8]) -> Frame {
-    let push_frame = PushPromiseFrame {
-        stream_id: 1,
-        promised_stream_id: 2,
-        header_block: Bytes::copy_from_slice(data),
         end_headers: true,
     };
     Frame::PushPromise(push_frame)
@@ -309,8 +295,8 @@ mod tests {
 
         match frame {
             Frame::PushPromise(push_frame) => {
-                assert_eq!(push_frame.stream_id(), 1);
-                assert!(!push_frame.payload().is_empty());
+                assert_eq!(push_frame.stream_id, 1);
+                assert!(!push_frame.header_block.is_empty());
             }
             _ => panic!("Expected PushPromise frame"),
         }
@@ -324,7 +310,7 @@ mod tests {
         match frame {
             Frame::PushPromise(push_frame) => {
                 // Should create frame without panicking
-                assert!(push_frame.payload().len() > test_data.len());
+                assert!(push_frame.header_block.len() > test_data.len());
             }
             _ => panic!("Expected PushPromise frame"),
         }
@@ -337,8 +323,7 @@ mod tests {
 
         match frame {
             Frame::PushPromise(push_frame) => {
-                assert!(push_frame.is_padded());
-                assert!(!push_frame.payload().is_empty());
+                assert!(!push_frame.header_block.is_empty());
             }
             _ => panic!("Expected PushPromise frame"),
         }
