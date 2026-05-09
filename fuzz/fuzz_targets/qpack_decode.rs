@@ -5,7 +5,8 @@ use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
 use asupersync::http::h3_native::{
-    H3NativeError, H3QpackMode, qpack_decode_field_section, qpack_plan_to_header_fields,
+    H3NativeError, H3QpackMode, QpackFieldPlan, qpack_decode_field_section,
+    qpack_encode_field_section, qpack_plan_to_header_fields,
 };
 
 /// Structure-aware fuzz input for QPACK operations
@@ -122,16 +123,21 @@ impl QpackTestEnvironment {
         // Test core QPACK decode function
         match qpack_decode_field_section(&input.field_section, mode) {
             Ok(plan) => {
+                validate_decoded_plan(&plan, mode, "fuzz input")?;
                 self.shadow.field_count += plan.len();
 
                 // Analyze the decoded plan for static table coverage
                 for item in &plan {
                     match item {
-                        asupersync::http::h3_native::QpackFieldPlan::StaticIndex(index) => {
+                        QpackFieldPlan::StaticIndex(index) => {
                             self.shadow.record_static_ref(*index);
                         }
-                        asupersync::http::h3_native::QpackFieldPlan::Literal { .. } => {
+                        QpackFieldPlan::Literal { .. } => {
                             // Literal fields are valid
+                        }
+                        QpackFieldPlan::DynamicIndex(_)
+                        | QpackFieldPlan::DynamicNameLiteral { .. } => {
+                            self.shadow.record_dynamic_op();
                         }
                     }
                 }
@@ -141,8 +147,7 @@ impl QpackTestEnvironment {
                     self.shadow.record_dynamic_op();
                 }
 
-                // Test header field expansion
-                let _ = qpack_plan_to_header_fields(&plan);
+                validate_header_expansion(&plan, "fuzz input")?;
             }
             Err(H3NativeError::QpackPolicy(_)) => {
                 // Policy violations are expected for certain mode/input combinations
@@ -179,6 +184,105 @@ impl QpackTestEnvironment {
     }
 }
 
+fn validate_decoded_plan(
+    plan: &[QpackFieldPlan],
+    mode: H3QpackMode,
+    context: &str,
+) -> Result<(), String> {
+    for item in plan {
+        match item {
+            QpackFieldPlan::StaticIndex(index) => {
+                if *index > 98 {
+                    return Err(format!(
+                        "{context}: decoded static qpack index out of bounds: {index}"
+                    ));
+                }
+            }
+            QpackFieldPlan::Literal { .. } => {}
+            QpackFieldPlan::DynamicIndex(_) | QpackFieldPlan::DynamicNameLiteral { .. }
+                if mode == H3QpackMode::StaticOnly =>
+            {
+                return Err(format!(
+                    "{context}: static-only decode produced a dynamic qpack plan item"
+                ));
+            }
+            QpackFieldPlan::DynamicIndex(_) | QpackFieldPlan::DynamicNameLiteral { .. } => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_header_expansion(plan: &[QpackFieldPlan], context: &str) -> Result<(), String> {
+    let has_dynamic_reference = plan.iter().any(|item| {
+        matches!(
+            item,
+            QpackFieldPlan::DynamicIndex(_) | QpackFieldPlan::DynamicNameLiteral { .. }
+        )
+    });
+
+    match qpack_plan_to_header_fields(plan, None) {
+        Ok(headers) => {
+            if headers.len() != plan.len() {
+                return Err(format!(
+                    "{context}: expanded {} headers from {} qpack plan items",
+                    headers.len(),
+                    plan.len()
+                ));
+            }
+            if has_dynamic_reference {
+                return Err(format!(
+                    "{context}: expanded dynamic qpack references without a dynamic table context"
+                ));
+            }
+            Ok(())
+        }
+        Err(H3NativeError::InvalidFrame(_)) if has_dynamic_reference => Ok(()),
+        Err(error) => Err(format!(
+            "{context}: qpack header expansion failed for a context-free plan: {error:?}"
+        )),
+    }
+}
+
+fn assert_decode_ok(
+    section: &[u8],
+    mode: H3QpackMode,
+    context: &str,
+) -> Result<Vec<QpackFieldPlan>, String> {
+    let plan = qpack_decode_field_section(section, mode)
+        .map_err(|error| format!("{context}: expected qpack decode success, got {error:?}"))?;
+    validate_decoded_plan(&plan, mode, context)?;
+    validate_header_expansion(&plan, context)?;
+    Ok(plan)
+}
+
+fn observe_decode_result(section: &[u8], mode: H3QpackMode, context: &str) -> Result<(), String> {
+    match qpack_decode_field_section(section, mode) {
+        Ok(plan) => {
+            validate_decoded_plan(&plan, mode, context)?;
+            validate_header_expansion(&plan, context)
+        }
+        Err(H3NativeError::QpackPolicy(_))
+        | Err(H3NativeError::InvalidFrame(_))
+        | Err(H3NativeError::UnexpectedEof) => Ok(()),
+        Err(error) => Err(format!(
+            "{context}: unexpected qpack decode error: {error:?}"
+        )),
+    }
+}
+
+fn ascii_fragment(data: &[u8], offset: usize, max_len: usize, fallback: &str) -> String {
+    if offset >= data.len() || max_len == 0 {
+        return fallback.to_string();
+    }
+
+    let available = data.len() - offset;
+    let len = available.min(max_len).max(1);
+    data[offset..offset + len]
+        .iter()
+        .map(|byte| char::from(b'a' + (byte % 26)))
+        .collect()
+}
+
 /// Test specific QPACK scenarios
 fn test_qpack_edge_cases(data: &[u8]) -> Result<(), String> {
     if data.is_empty() {
@@ -187,45 +291,72 @@ fn test_qpack_edge_cases(data: &[u8]) -> Result<(), String> {
 
     // Test 1: Empty field section with just prefix
     let empty_section = vec![0x00, 0x00]; // RIC=0, Delta Base=0
-    let _ = qpack_decode_field_section(&empty_section, H3QpackMode::StaticOnly);
+    let empty_plan = assert_decode_ok(&empty_section, H3QpackMode::StaticOnly, "empty section")?;
+    if !empty_plan.is_empty() {
+        return Err(format!(
+            "empty section decoded {} qpack plan items",
+            empty_plan.len()
+        ));
+    }
 
     // Test 2: Single static table reference (if we have at least 3 bytes)
     if data.len() >= 3 {
         let index = (data[0] % 99) as u64; // 0-98 range
-        let mut single_ref = vec![0x00, 0x00]; // Prefix
-        single_ref.push(0xC0 | (index as u8 & 0x3F)); // Indexed field line
-        if index >= 64 {
-            single_ref.push((index >> 6) as u8); // Continuation if needed
+        let expected = vec![QpackFieldPlan::StaticIndex(index)];
+        let single_ref = qpack_encode_field_section(&expected)
+            .map_err(|error| format!("single static reference encode failed: {error:?}"))?;
+        let decoded = assert_decode_ok(
+            &single_ref,
+            H3QpackMode::StaticOnly,
+            "single static reference",
+        )?;
+        if decoded != expected {
+            return Err(format!(
+                "single static reference roundtrip mismatch: expected {expected:?}, got {decoded:?}"
+            ));
         }
-        let _ = qpack_decode_field_section(&single_ref, H3QpackMode::StaticOnly);
     }
 
     // Test 3: Literal field line with known name
     if data.len() >= 10 {
+        let value = ascii_fragment(data, 2, 32, "value");
         let mut literal_known = vec![0x00, 0x00]; // Prefix
-        literal_known.push(0x50); // Literal with name reference
-        literal_known.push(data[0] % 99); // Name index
-        literal_known.push(data[1] & 0x7F); // Value length (non-Huffman)
-        let value_len = (data[1] & 0x7F).min(data.len() as u8 - 6);
-        literal_known.extend_from_slice(&data[2..2 + value_len as usize]);
-        let _ = qpack_decode_field_section(&literal_known, H3QpackMode::StaticOnly);
+        literal_known.push(0x50); // Literal with static name reference index 0 (:authority)
+        literal_known.push(value.len() as u8); // Value length (non-Huffman)
+        literal_known.extend_from_slice(value.as_bytes());
+        let decoded = assert_decode_ok(
+            &literal_known,
+            H3QpackMode::StaticOnly,
+            "literal static-name reference",
+        )?;
+        let expected = vec![QpackFieldPlan::Literal {
+            name: ":authority".to_string(),
+            value,
+        }];
+        if decoded != expected {
+            return Err(format!(
+                "literal static-name reference mismatch: expected {expected:?}, got {decoded:?}"
+            ));
+        }
     }
 
     // Test 4: Literal field line with literal name
     if data.len() >= 8 {
+        let name = ascii_fragment(data, 1, 7, "x");
+        let value = ascii_fragment(data, 1 + name.len(), 32, "v");
         let mut literal_name = vec![0x00, 0x00]; // Prefix
-        literal_name.push(0x20); // Literal with literal name
-        let name_len = (data[0] & 0x0F).min(data.len() as u8 - 5);
-        literal_name.push(name_len); // Name length
-        literal_name.extend_from_slice(&data[1..1 + name_len as usize]);
-        let value_start = 1 + name_len as usize;
-        if value_start < data.len() {
-            let value_len = data[value_start].min(data.len() as u8 - value_start as u8 - 1);
-            literal_name.push(value_len); // Value length
-            literal_name
-                .extend_from_slice(&data[value_start + 1..value_start + 1 + value_len as usize]);
+        literal_name.push(0x20 | name.len() as u8); // Literal with literal name
+        literal_name.extend_from_slice(name.as_bytes());
+        literal_name.push(value.len() as u8); // Value length (non-Huffman)
+        literal_name.extend_from_slice(value.as_bytes());
+        let decoded =
+            assert_decode_ok(&literal_name, H3QpackMode::StaticOnly, "literal name field")?;
+        let expected = vec![QpackFieldPlan::Literal { name, value }];
+        if decoded != expected {
+            return Err(format!(
+                "literal name field mismatch: expected {expected:?}, got {decoded:?}"
+            ));
         }
-        let _ = qpack_decode_field_section(&literal_name, H3QpackMode::StaticOnly);
     }
 
     Ok(())
@@ -276,13 +407,15 @@ fn test_ric_delta_base_scenarios(data: &[u8], shadow: &mut QpackShadowModel) -> 
 
             // Test with static-only mode (should reject non-zero RIC)
             let result = qpack_decode_field_section(&section, H3QpackMode::StaticOnly);
-            if ric != 0 {
-                // Should fail with policy error
+            if ric != 0 || delta_base != 0 {
+                // Static-only mode permits only the all-zero field-section prefix.
                 assert!(matches!(result, Err(H3NativeError::QpackPolicy(_))));
+            } else {
+                assert_decode_ok(&section, H3QpackMode::StaticOnly, "static zero prefix")?;
             }
 
             // Test with dynamic mode allowed
-            let _ = qpack_decode_field_section(&section, H3QpackMode::DynamicTableAllowed);
+            observe_decode_result(&section, H3QpackMode::DynamicTableAllowed, "dynamic prefix")?;
         }
     }
 
@@ -334,9 +467,35 @@ fuzz_target!(|input: QpackFuzzInput| {
         let dynamic_result =
             qpack_decode_field_section(&input.field_section, H3QpackMode::DynamicTableAllowed);
 
-        // If static mode succeeds, dynamic mode should also succeed
-        if static_result.is_ok() && dynamic_result.is_err() {
-            panic!("Dynamic mode failed where static mode succeeded");
+        // Static-only successes contain only context-free field lines, so dynamic mode
+        // without a table context must decode the same plan.
+        if let Ok(static_plan) = static_result {
+            validate_decoded_plan(&static_plan, H3QpackMode::StaticOnly, "mode switch static")
+                .unwrap_or_else(|e| panic!("Mode switch static plan failed validation: {}", e));
+            match dynamic_result {
+                Ok(dynamic_plan) => {
+                    validate_decoded_plan(
+                        &dynamic_plan,
+                        H3QpackMode::DynamicTableAllowed,
+                        "mode switch dynamic",
+                    )
+                    .unwrap_or_else(|e| {
+                        panic!("Mode switch dynamic plan failed validation: {}", e);
+                    });
+                    if dynamic_plan != static_plan {
+                        panic!(
+                            "Dynamic mode changed a static-only qpack plan: static={:?}, dynamic={:?}",
+                            static_plan, dynamic_plan
+                        );
+                    }
+                }
+                Err(error) => {
+                    panic!(
+                        "Dynamic mode failed where static mode succeeded: {:?}",
+                        error
+                    );
+                }
+            }
         }
     }
 });
