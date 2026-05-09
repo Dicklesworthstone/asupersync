@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use asupersync::messaging::redis::{RedisProtocolLimits, RespValue};
+use asupersync::messaging::redis::{RedisError, RedisProtocolLimits, RespValue};
 
 const MAX_WIRE_LEN: usize = 16 * 1024;
 const MAX_PAYLOAD_LEN: usize = 256;
@@ -71,12 +71,14 @@ enum LengthPrefix {
 fuzz_target!(|case: MapParseCase| {
     let limits = case.limits.normalized();
 
-    parse_without_harness_panic(b"%0\r\n", &limits);
-    parse_without_harness_panic(b"%?\r\n.\r\n", &limits);
-    parse_without_harness_panic(b"%?\r\n+odd\r\n.\r\n", &limits);
-    parse_without_harness_panic(deep_map_wire(24, b"seed").as_slice(), &limits);
-    parse_without_harness_panic(b"%-1\r\n", &limits);
-    parse_without_harness_panic(b"%999999999999999999999999\r\n", &limits);
+    assert_map_parse_canaries();
+
+    observe_map_decode(b"%0\r\n", &limits);
+    observe_map_decode(b"%?\r\n.\r\n", &limits);
+    observe_map_decode(b"%?\r\n+odd\r\n.\r\n", &limits);
+    observe_map_decode(deep_map_wire(24, b"seed").as_slice(), &limits);
+    observe_map_decode(b"%-1\r\n", &limits);
+    observe_map_decode(b"%999999999999999999999999\r\n", &limits);
 
     fuzz_map_parse(case.scenario, &limits);
 });
@@ -111,16 +113,93 @@ fn fuzz_map_parse(scenario: MapScenario, limits: &RedisProtocolLimits) {
         }
     };
 
-    parse_without_harness_panic(&wire, limits);
+    observe_map_decode(&wire, limits);
 }
 
-fn parse_without_harness_panic(wire: &[u8], limits: &RedisProtocolLimits) {
+fn observe_map_decode(wire: &[u8], limits: &RedisProtocolLimits) {
     let wire = if wire.len() > MAX_WIRE_LEN {
         &wire[..MAX_WIRE_LEN]
     } else {
         wire
     };
-    let _ = RespValue::try_decode_with_limits(wire, limits);
+    match RespValue::try_decode_with_limits(wire, limits) {
+        Ok(Some((RespValue::Map(pairs), consumed))) => {
+            assert!(
+                consumed <= wire.len(),
+                "RESP3 map decoder consumed {consumed} bytes from {} byte input",
+                wire.len()
+            );
+            assert!(
+                pairs.len() <= limits.max_array_len,
+                "RESP3 map decoded {} pairs beyond configured max {}",
+                pairs.len(),
+                limits.max_array_len
+            );
+        }
+        Ok(Some((other, _consumed))) => {
+            panic!("RESP3 map wire decoded as non-map value: {other:?}");
+        }
+        Ok(None) | Err(RedisError::Protocol(_)) => {}
+        Err(error) => panic!("RESP3 map parser returned non-protocol error: {error}"),
+    }
+}
+
+fn assert_map_parse_canaries() {
+    let limits = RedisProtocolLimits::new()
+        .max_frame_size(MAX_WIRE_LEN)
+        .max_array_len(MAX_PAIRS)
+        .max_nesting_depth(MAX_DEPTH)
+        .max_bulk_string_len(MAX_PAYLOAD_LEN);
+
+    assert_map_decodes_to_pair_count(b"%0\r\n", &limits, 0, "empty map");
+    assert_map_decodes_to_pair_count(b"%?\r\n.\r\n", &limits, 0, "streamed empty map");
+    assert_map_decodes_to_pair_count(
+        deep_map_wire(3, b"seed").as_slice(),
+        &limits,
+        1,
+        "nested map",
+    );
+    assert_protocol_error(
+        b"%?\r\n+odd\r\n.\r\n",
+        &limits,
+        "streamed map key without value",
+    );
+    assert_protocol_error(b"%-1\r\n", &limits, "negative map length");
+    assert_protocol_error(
+        b"%999999999999999999999999\r\n",
+        &limits,
+        "overflow map length",
+    );
+}
+
+fn assert_map_decodes_to_pair_count(
+    wire: &[u8],
+    limits: &RedisProtocolLimits,
+    expected_pairs: usize,
+    label: &str,
+) {
+    match RespValue::try_decode_with_limits(wire, limits) {
+        Ok(Some((RespValue::Map(pairs), consumed))) => {
+            assert_eq!(
+                consumed,
+                wire.len(),
+                "{label} should consume the complete RESP3 map frame"
+            );
+            assert_eq!(
+                pairs.len(),
+                expected_pairs,
+                "{label} should decode to {expected_pairs} map pair(s)"
+            );
+        }
+        other => panic!("{label} should decode as a complete RESP3 map, got {other:?}"),
+    }
+}
+
+fn assert_protocol_error(wire: &[u8], limits: &RedisProtocolLimits, label: &str) {
+    match RespValue::try_decode_with_limits(wire, limits) {
+        Err(RedisError::Protocol(_)) => {}
+        other => panic!("{label} should be rejected as a RESP protocol error, got {other:?}"),
+    }
 }
 
 impl FuzzLimits {
@@ -248,7 +327,7 @@ fn odd_length_payload(mut bytes: Vec<u8>) -> Vec<u8> {
     if bytes.is_empty() {
         bytes.push(b'k');
     }
-    if bytes.len() % 2 == 0 {
+    if bytes.len().is_multiple_of(2) {
         bytes.push(b'x');
     }
     bytes
