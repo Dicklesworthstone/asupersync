@@ -1,14 +1,99 @@
 #![no_main]
 
 use asupersync::bytes::BytesMut;
-use asupersync::http::h1::codec::Http1Codec;
-use asupersync::http::h1::types::{Method, Request};
+use asupersync::codec::Decoder;
+use asupersync::http::h1::codec::{Http1Codec, HttpError};
+use asupersync::http::h1::types::{Method, Request, Version};
 use libfuzzer_sys::fuzz_target;
 
 // Maximum data size to prevent timeouts on extremely large inputs
 const MAX_DATA_SIZE: usize = 10 * 1024 * 1024; // 10MB
 
+fn decode_once(raw: &[u8]) -> Result<Option<Request>, HttpError> {
+    let mut codec = Http1Codec::new();
+    let mut buf = BytesMut::from(raw);
+    codec.decode(&mut buf)
+}
+
+fn expect_complete_request(raw: &[u8]) -> Request {
+    decode_once(raw)
+        .expect("valid upgrade request must not return a parser error")
+        .expect("valid upgrade request must decode completely")
+}
+
+fn header_values<'a>(request: &'a Request, name: &str) -> impl Iterator<Item = &'a str> {
+    request
+        .headers
+        .iter()
+        .filter(move |(header_name, _)| header_name.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+}
+
+fn has_header_value(request: &Request, name: &str, value: &str) -> bool {
+    header_values(request, name).any(|header_value| header_value.eq_ignore_ascii_case(value))
+}
+
+fn has_connection_token(request: &Request, token: &str) -> bool {
+    header_values(request, "Connection").any(|value| {
+        value
+            .split(',')
+            .any(|part| part.trim().eq_ignore_ascii_case(token))
+    })
+}
+
+fn run_fixed_canaries() {
+    let websocket = expect_complete_request(
+        b"GET /chat HTTP/1.1\r\nHost: example.com\r\nConnection: keep-alive, Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
+    );
+    assert_eq!(websocket.method, Method::Get);
+    assert_eq!(websocket.uri, "/chat");
+    assert_eq!(websocket.version, Version::Http11);
+    assert!(websocket.body.is_empty());
+    assert!(has_connection_token(&websocket, "upgrade"));
+    assert!(has_header_value(&websocket, "Upgrade", "websocket"));
+    assert!(has_header_value(&websocket, "Sec-WebSocket-Version", "13"));
+    validate_upgrade_request(&websocket);
+
+    let h2c = expect_complete_request(
+        b"OPTIONS * HTTP/1.1\r\nHost: example.com\r\nConnection: Upgrade, HTTP2-Settings\r\nUpgrade: h2c\r\nHTTP2-Settings: AAMAAABkAAQAAP__\r\n\r\n",
+    );
+    assert_eq!(h2c.method, Method::Options);
+    assert_eq!(h2c.uri, "*");
+    assert!(has_connection_token(&h2c, "upgrade"));
+    assert!(has_connection_token(&h2c, "http2-settings"));
+    assert!(has_header_value(&h2c, "Upgrade", "h2c"));
+    validate_upgrade_request(&h2c);
+
+    let upgrade_with_body = expect_complete_request(
+        b"POST /chat HTTP/1.1\r\nHost: example.com\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nContent-Length: 4\r\n\r\nping",
+    );
+    assert_eq!(upgrade_with_body.method, Method::Post);
+    assert_eq!(upgrade_with_body.body, b"ping");
+    assert!(has_connection_token(&upgrade_with_body, "upgrade"));
+    validate_upgrade_request(&upgrade_with_body);
+
+    let partial =
+        decode_once(b"GET /chat HTTP/1.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n")
+            .expect("partial upgrade head must wait for more bytes, not error");
+    assert!(partial.is_none(), "partial upgrade head must not decode");
+
+    let malformed_line = decode_once(b"GET  /chat HTTP/1.1\r\nUpgrade: websocket\r\n\r\n");
+    assert!(
+        matches!(malformed_line, Err(HttpError::BadRequestLine)),
+        "repeated request-line delimiter must reject, got {malformed_line:?}"
+    );
+
+    let invalid_upgrade_value =
+        decode_once(b"GET /chat HTTP/1.1\r\nConnection: Upgrade\r\nUpgrade: web\0socket\r\n\r\n");
+    assert!(
+        matches!(invalid_upgrade_value, Err(HttpError::InvalidHeaderValue)),
+        "NUL inside Upgrade value must reject, got {invalid_upgrade_value:?}"
+    );
+}
+
 fuzz_target!(|data: &[u8]| {
+    run_fixed_canaries();
+
     // Size guard to prevent timeout on massive inputs
     if data.len() > MAX_DATA_SIZE {
         return;
@@ -81,7 +166,7 @@ fn validate_upgrade_request(request: &Request) {
 
         // Assert: Body data should be available to the application layer
         // and not lost or corrupted during upgrade processing
-        assert!(request.body.len() > 0, "Body should be preserved");
+        assert!(!request.body.is_empty(), "Body should be preserved");
     }
 
     // Validate upgrade request invariants
@@ -184,7 +269,7 @@ fn test_upgrade_edge_cases(data: &[u8]) {
     }
 
     // Test with crafted upgrade-like patterns
-    let upgrade_patterns = [
+    let upgrade_patterns: &[&[u8]] = &[
         b"Connection: upgrade",
         b"Connection: Upgrade",
         b"Connection: UPGRADE",
@@ -199,7 +284,7 @@ fn test_upgrade_edge_cases(data: &[u8]) {
         b"Connection: upgrade\r\n",
     ];
 
-    for pattern in &upgrade_patterns {
+    for pattern in upgrade_patterns {
         if data.windows(pattern.len()).any(|window| window == *pattern) {
             // Found upgrade-related pattern - test codec robustness
             let mut test_codec = Http1Codec::new();
