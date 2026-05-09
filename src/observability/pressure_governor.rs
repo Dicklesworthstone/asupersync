@@ -13,6 +13,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+const CHANNEL_BACKLOG_SAMPLE_UNAVAILABLE: u64 = u64::MAX;
+
 /// Configuration for the pressure governor.
 #[derive(Debug, Clone)]
 pub struct PressureGovernorConfig {
@@ -222,6 +224,7 @@ pub struct PressureGovernor {
     started_at: Instant,
     last_sample: AtomicU64, // Nanoseconds elapsed since started_at
     last_signal_availability_mask: AtomicU64,
+    channel_backlog_sample_bits: AtomicU64,
     sample_count: AtomicU64,
     decision_latency_summary: Arc<Summary>,
     decision_latency_p95_gauge: Arc<Gauge>,
@@ -284,6 +287,7 @@ impl PressureGovernor {
             started_at,
             last_sample: AtomicU64::new(0),
             last_signal_availability_mask: AtomicU64::new(PressureSignalAvailability::NONE.mask()),
+            channel_backlog_sample_bits: AtomicU64::new(CHANNEL_BACKLOG_SAMPLE_UNAVAILABLE),
             sample_count: AtomicU64::new(0),
             decision_latency_summary,
             decision_latency_p95_gauge,
@@ -390,6 +394,30 @@ impl PressureGovernor {
     /// Get total samples collected.
     pub fn sample_count(&self) -> u64 {
         self.sample_count.load(Ordering::Relaxed)
+    }
+
+    /// Records an explicit aggregate channel backlog sample.
+    ///
+    /// `pending_items` should include committed queued messages plus any
+    /// reserved-but-uncommitted send obligations across the sampled channels.
+    /// `total_capacity` is the summed capacity for those channels. A zero
+    /// capacity clears the signal because no meaningful pressure ratio exists.
+    pub fn record_channel_backlog_sample(&self, pending_items: usize, total_capacity: usize) {
+        let bits = if total_capacity == 0 {
+            CHANNEL_BACKLOG_SAMPLE_UNAVAILABLE
+        } else {
+            (pending_items as f64 / total_capacity as f64).to_bits()
+        };
+        self.channel_backlog_sample_bits
+            .store(bits, Ordering::Release);
+        self.last_sample.store(0, Ordering::Release);
+    }
+
+    /// Clears the explicit aggregate channel backlog sample.
+    pub fn clear_channel_backlog_sample(&self) {
+        self.channel_backlog_sample_bits
+            .store(CHANNEL_BACKLOG_SAMPLE_UNAVAILABLE, Ordering::Release);
+        self.last_sample.store(0, Ordering::Release);
     }
 
     /// Returns the latest fallback verdict metric value.
@@ -567,13 +595,17 @@ impl PressureGovernor {
     }
 
     fn sample_channel_backlog_pressure(&self) -> PressureSignalSample {
-        // TODO: Access channel registry from runtime for global channel monitoring
-        // In a full implementation, we would:
-        // 1. Iterate through all active mpsc/broadcast/oneshot channels
-        // 2. Sum pending message counts across all channels
-        // 3. Calculate pressure relative to total buffer capacity
+        let bits = self.channel_backlog_sample_bits.load(Ordering::Acquire);
+        if bits != CHANNEL_BACKLOG_SAMPLE_UNAVAILABLE {
+            let pressure = f64::from_bits(bits);
+            if pressure.is_finite() && pressure >= 0.0 {
+                return PressureSignalSample::available(pressure);
+            }
+        }
 
-        // This requires a channel registry that doesn't exist yet
+        // A full registry can replace this explicit aggregate sample once the
+        // runtime owns one. Until then, channel owners can feed deterministic
+        // telemetry through `record_channel_backlog_sample`.
         PressureSignalSample::unavailable()
     }
 
@@ -1454,6 +1486,66 @@ mod tests {
         );
         assert_eq!(cached.memory_budget_pressure, 0.5);
         assert_eq!(cached.overall_pressure, fresh.overall_pressure);
+    }
+
+    #[test]
+    fn pressure_governor_samples_explicit_channel_backlog_telemetry() {
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .global_queue_limit(4)
+                .build()
+                .expect("Failed to create channel-backlog runtime"),
+        );
+        let config = PressureGovernorConfig {
+            enabled: true,
+            admission_control: true,
+            sample_interval: Duration::from_secs(60),
+            ..Default::default()
+        };
+        let metrics = Metrics::new();
+        let governor = PressureGovernor::new(config, std::sync::Arc::clone(&runtime), metrics)
+            .expect("pressure governor should initialize");
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+
+        let initial = governor
+            .sample_pressure(&cx)
+            .expect("initial pressure snapshot should not fail");
+        assert!(!initial.signal_availability.channel_backlog);
+        assert_eq!(governor.sample_count(), 1);
+
+        let (tx, _rx) = crate::channel::mpsc::channel::<u8>(4);
+        tx.try_send(1).expect("first queued message should fit");
+        tx.try_send(2).expect("second queued message should fit");
+        let permit = tx.try_reserve().expect("reserved obligation should fit");
+        let telemetry = tx.telemetry_snapshot(17);
+
+        governor.record_channel_backlog_sample(
+            telemetry.queued_messages + telemetry.reserved_uncommitted_obligations,
+            telemetry.capacity,
+        );
+        let sampled = governor
+            .sample_pressure(&cx)
+            .expect("channel backlog pressure snapshot should not fail");
+
+        assert_eq!(governor.sample_count(), 2);
+        assert!(sampled.signal_availability.channel_backlog);
+        assert_eq!(sampled.channel_backlog_pressure, 0.75);
+        assert_eq!(sampled.overall_pressure, 0.75);
+        assert_eq!(
+            sampled.fallback_verdict,
+            PressureFallbackVerdict::PartialSignalsUnavailable
+        );
+
+        permit.abort();
+        governor.clear_channel_backlog_sample();
+        let cleared = governor
+            .sample_pressure(&cx)
+            .expect("cleared channel backlog snapshot should not fail");
+
+        assert_eq!(governor.sample_count(), 3);
+        assert!(!cleared.signal_availability.channel_backlog);
+        assert_eq!(cleared.channel_backlog_pressure, 0.0);
     }
 
     #[test]
