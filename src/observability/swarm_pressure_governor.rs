@@ -405,6 +405,7 @@ impl SwarmPressureGovernor {
         if !self.config.enabled {
             // Swarm governance disabled, always admit with default envelope
             let envelope = self.create_default_envelope(next_bootstrap_region_id())?;
+            self.regions_admitted.fetch_add(1, Ordering::Relaxed);
             return Ok(SwarmAdmissionDecision {
                 decision: AdmissionDecision::Admit,
                 envelope: Some(envelope),
@@ -970,6 +971,41 @@ mod tests {
             .expect("Third admission check should succeed");
         assert!(matches!(decision3.decision, AdmissionDecision::Reject));
         assert!(decision3.reason.contains("Region limit exceeded"));
+    }
+
+    #[test]
+    fn test_disabled_governance_admissions_update_metrics() {
+        let mut config = SwarmPressureGovernorConfig::default();
+        config.enabled = false;
+
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create test runtime"),
+        );
+        let pressure_governor = PressureGovernor::new(
+            config.pressure_config.clone(),
+            std::sync::Arc::clone(&runtime),
+            Metrics::new(),
+        )
+        .expect("Failed to create pressure governor");
+        let governor =
+            SwarmPressureGovernor::new(config, runtime.resource_monitor(), pressure_governor);
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+
+        let decision = governor
+            .check_region_admission(&cx, RegionPriority::BestEffort, Some(u64::MAX))
+            .expect("disabled governance should always produce an admission decision");
+
+        assert!(matches!(decision.decision, AdmissionDecision::Admit));
+        assert!(decision.envelope.is_some());
+        assert_eq!(decision.reason, "Swarm governance disabled");
+
+        let metrics = governor.metrics();
+        assert_eq!(metrics.total_admission_checks, 1);
+        assert_eq!(metrics.regions_admitted, 1);
+        assert_eq!(metrics.regions_rejected, 0);
     }
 
     #[test]
