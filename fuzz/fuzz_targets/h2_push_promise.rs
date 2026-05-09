@@ -15,11 +15,10 @@ use libfuzzer_sys::fuzz_target;
 use std::collections::HashSet;
 
 use asupersync::bytes::{Bytes, BytesMut};
-use asupersync::http::h2::error::{ErrorCode, H2Error};
+use asupersync::http::h2::error::ErrorCode;
 use asupersync::http::h2::frame::{
-    FrameHeader, FrameType, MAX_FRAME_SIZE, PushPromiseFrame, Setting, SettingsFrame, headers_flags,
+    FrameHeader, FrameType, MAX_FRAME_SIZE, PushPromiseFrame, headers_flags,
 };
-use asupersync::http::h2::settings::{DEFAULT_ENABLE_PUSH, Settings};
 
 /// Maximum reasonable payload size for testing
 const MAX_PAYLOAD_SIZE: usize = 65536;
@@ -80,12 +79,16 @@ impl H2ConnectionState {
 
     fn is_valid_promised_stream_id(&self, promised_id: u32) -> bool {
         // RFC 7540 Section 6.6: Promised stream ID must be even (server-initiated)
-        if promised_id % 2 != 0 {
+        if !promised_id.is_multiple_of(2) {
             return false;
         }
 
         // Promised stream ID must be greater than any existing stream ID
         if promised_id <= self.max_stream_id {
+            return false;
+        }
+
+        if self.existing_streams.contains(&promised_id) {
             return false;
         }
 
@@ -163,7 +166,99 @@ fn build_push_promise_frame(input: &PushPromiseFuzzInput) -> BytesMut {
     frame_data
 }
 
+fn push_promise_header(length: u32, flags: u8, stream_id: u32) -> FrameHeader {
+    FrameHeader {
+        length,
+        frame_type: FrameType::PushPromise as u8,
+        flags,
+        stream_id,
+    }
+}
+
+fn observe_push_promise_parse(header: &FrameHeader, payload: Bytes, context: &str) {
+    let payload_len = payload.len();
+    match PushPromiseFrame::parse(header, payload) {
+        Ok(frame) => {
+            assert_eq!(
+                frame.stream_id, header.stream_id,
+                "{context}: parsed stream ID must match frame header"
+            );
+            assert_ne!(
+                frame.stream_id, 0,
+                "{context}: PUSH_PROMISE must not parse on stream 0"
+            );
+            assert_ne!(
+                frame.promised_stream_id, 0,
+                "{context}: promised stream ID must not parse as 0"
+            );
+            assert_eq!(
+                frame.end_headers,
+                header.has_flag(headers_flags::END_HEADERS),
+                "{context}: END_HEADERS flag must be preserved"
+            );
+
+            let min_payload_prefix = if header.has_flag(headers_flags::PADDED) {
+                5
+            } else {
+                4
+            };
+            assert!(
+                payload_len >= min_payload_prefix,
+                "{context}: successful parse requires promised-stream prefix"
+            );
+            assert!(
+                frame.header_block.len() <= payload_len.saturating_sub(min_payload_prefix),
+                "{context}: parsed header block must come from the payload"
+            );
+        }
+        Err(err) => {
+            assert_eq!(
+                err.code,
+                ErrorCode::ProtocolError,
+                "{context}: PUSH_PROMISE parser should classify malformed payloads as ProtocolError"
+            );
+        }
+    }
+}
+
+fn expect_push_promise_protocol_error(header: &FrameHeader, payload: Bytes, context: &str) {
+    match PushPromiseFrame::parse(header, payload) {
+        Ok(frame) => panic!("{context}: expected ProtocolError, parsed {frame:?}"),
+        Err(err) => assert_eq!(
+            err.code,
+            ErrorCode::ProtocolError,
+            "{context}: expected ProtocolError"
+        ),
+    }
+}
+
+fn test_push_promise_parser_canaries() {
+    observe_push_promise_parse(
+        &push_promise_header(7, headers_flags::END_HEADERS, 1),
+        Bytes::from_static(&[0, 0, 0, 2, b'a', b'b', b'c']),
+        "valid PUSH_PROMISE",
+    );
+
+    expect_push_promise_protocol_error(
+        &push_promise_header(4, headers_flags::END_HEADERS, 0),
+        Bytes::from_static(&[0, 0, 0, 2]),
+        "stream ID zero",
+    );
+    expect_push_promise_protocol_error(
+        &push_promise_header(4, headers_flags::END_HEADERS, 1),
+        Bytes::from_static(&[0, 0, 0, 0]),
+        "promised stream ID zero",
+    );
+    expect_push_promise_protocol_error(
+        &push_promise_header(5, headers_flags::PADDED | headers_flags::END_HEADERS, 1),
+        Bytes::from_static(&[2, 0, 0, 0, 2]),
+        "padding length exceeds header block",
+    );
+}
+
 fuzz_target!(|input: PushPromiseFuzzInput| {
+    test_push_promise_parser_canaries();
+
     // Limit input sizes to reasonable bounds
     if input.header_block.len() > MAX_PAYLOAD_SIZE {
         return;
@@ -182,21 +277,21 @@ fuzz_target!(|input: PushPromiseFuzzInput| {
     );
 
     // Build frame bytes
-    let mut frame_bytes = build_push_promise_frame(&input);
+    let frame_bytes = build_push_promise_frame(&input);
 
     // ASSERTION 1: Promised stream ID must be even (server-initiated streams)
     // RFC 7540 Section 5.1.1: Server-initiated streams have even identifiers
-    if input.promised_stream_id != 0 && input.promised_stream_id % 2 != 0 {
+    if input.promised_stream_id != 0 && !input.promised_stream_id.is_multiple_of(2) {
         // Parse the frame - should reject odd promised stream IDs
         if let Ok(header) = FrameHeader::parse(&mut frame_bytes.clone()) {
             let payload =
                 frame_bytes.slice(9..9 + header.length.min(frame_bytes.len() as u32 - 9) as usize);
-            let result = PushPromiseFrame::parse(&header, payload);
+            let result = PushPromiseFrame::parse(&header, Bytes::copy_from_slice(payload));
 
             // Implementation should reject odd promised stream IDs
             // Note: Current implementation may not check this, so we document the requirement
             assert!(
-                result.is_err() || input.promised_stream_id % 2 == 0,
+                result.is_err() || input.promised_stream_id.is_multiple_of(2),
                 "PUSH_PROMISE with odd promised stream ID {} should be rejected (RFC 7540 §5.1.1)",
                 input.promised_stream_id
             );
@@ -205,21 +300,23 @@ fuzz_target!(|input: PushPromiseFuzzInput| {
 
     // ASSERTION 2: Promised stream ID must be greater than existing streams
     // RFC 7540 Section 6.6: Promised stream ID must exceed any existing stream ID
-    let max_existing = input.existing_streams.iter().copied().max().unwrap_or(0);
-    if input.promised_stream_id != 0 && input.promised_stream_id <= max_existing {
-        if let Ok(header) = FrameHeader::parse(&mut frame_bytes.clone()) {
-            let payload =
-                frame_bytes.slice(9..9 + header.length.min(frame_bytes.len() as u32 - 9) as usize);
+    let max_existing = connection_state.max_stream_id;
+    if input.promised_stream_id != 0
+        && !connection_state.is_valid_promised_stream_id(input.promised_stream_id)
+        && let Ok(header) = FrameHeader::parse(&mut frame_bytes.clone())
+    {
+        let payload =
+            frame_bytes.slice(9..9 + header.length.min(frame_bytes.len() as u32 - 9) as usize);
 
-            // Should reject promised stream ID <= existing streams
-            if let Ok(parsed_frame) = PushPromiseFrame::parse(&header, payload) {
-                assert!(
-                    parsed_frame.promised_stream_id > max_existing,
-                    "PUSH_PROMISE promised stream ID {} must be > max existing stream ID {} (RFC 7540 §6.6)",
-                    parsed_frame.promised_stream_id,
-                    max_existing
-                );
-            }
+        // Should reject promised stream ID <= existing streams
+        if let Ok(parsed_frame) = PushPromiseFrame::parse(&header, Bytes::copy_from_slice(payload))
+        {
+            assert!(
+                connection_state.is_valid_promised_stream_id(parsed_frame.promised_stream_id),
+                "PUSH_PROMISE promised stream ID {} must be > max existing stream ID {} (RFC 7540 §6.6)",
+                parsed_frame.promised_stream_id,
+                max_existing
+            );
         }
     }
 
@@ -239,31 +336,34 @@ fuzz_target!(|input: PushPromiseFuzzInput| {
     // ASSERTION 4: PADDED flag handling and validation
     // RFC 7540 Section 6.1: PADDED frames must have valid padding
     let padded = (input.flags & headers_flags::PADDED) != 0;
-    if padded {
-        if let Ok(header) = FrameHeader::parse(&mut frame_bytes.clone()) {
-            let payload_len = (frame_bytes.len() - 9).min(header.length as usize);
-            let payload = frame_bytes.slice(9..9 + payload_len);
-            let result = PushPromiseFrame::parse(&header, payload);
+    if padded && let Ok(header) = FrameHeader::parse(&mut frame_bytes.clone()) {
+        let payload_len = (frame_bytes.len() - 9).min(header.length as usize);
+        let payload = frame_bytes.slice(9..9 + payload_len);
+        let result = PushPromiseFrame::parse(&header, Bytes::copy_from_slice(payload));
 
-            match result {
-                Ok(parsed_frame) => {
-                    // If parsing succeeded, padding was valid
+        match result {
+            Ok(parsed_frame) => {
+                // If parsing succeeded, padding was valid
+                assert!(
+                    header.has_flag(headers_flags::PADDED),
+                    "PADDED flag correctly handled for PUSH_PROMISE"
+                );
+                assert_eq!(
+                    parsed_frame.stream_id, header.stream_id,
+                    "Padded PUSH_PROMISE stream ID must match the frame header"
+                );
+            }
+            Err(err) => {
+                // Should fail with protocol error for invalid padding
+                let invalid_padding_shape = payload.is_empty()
+                    || payload.len() < 5
+                    || usize::from(payload[0]) > payload.len() - 5;
+                if invalid_padding_shape {
                     assert!(
-                        header.has_flag(headers_flags::PADDED),
-                        "PADDED flag correctly handled for PUSH_PROMISE"
+                        err.code == ErrorCode::ProtocolError,
+                        "Invalid padding should cause ProtocolError, got: {:?}",
+                        err
                     );
-                }
-                Err(err) => {
-                    // Should fail with protocol error for invalid padding
-                    if payload.is_empty()
-                        || (payload.len() >= 1 && payload[0] as usize >= payload.len() - 4)
-                    {
-                        assert!(
-                            err.code == ErrorCode::ProtocolError,
-                            "Invalid padding should cause ProtocolError, got: {:?}",
-                            err
-                        );
-                    }
                 }
             }
         }
@@ -276,7 +376,8 @@ fuzz_target!(|input: PushPromiseFuzzInput| {
         let payload_len = (frame_bytes.len() - 9).min(header.length as usize);
         let payload = frame_bytes.slice(9..9 + payload_len);
 
-        if let Ok(parsed_frame) = PushPromiseFrame::parse(&header, payload) {
+        if let Ok(parsed_frame) = PushPromiseFrame::parse(&header, Bytes::copy_from_slice(payload))
+        {
             // END_HEADERS flag should be preserved in parsed frame
             assert_eq!(
                 parsed_frame.end_headers, end_headers,
@@ -308,15 +409,15 @@ fuzz_target!(|input: PushPromiseFuzzInput| {
 
         // Additional check: if we try to parse a PUSH_PROMISE when ENABLE_PUSH=0,
         // the higher-level protocol should reject it (documented requirement)
-        if let Ok(header) = FrameHeader::parse(&mut frame_bytes.clone()) {
-            if header.frame_type == FrameType::PushPromise as u8 {
-                // This represents the protocol-level check that should happen
-                // before frame parsing in a real HTTP/2 implementation
-                assert!(
-                    !input.enable_push || connection_state.role != ConnectionRole::Server,
-                    "PUSH_PROMISE frames should be rejected at protocol level when ENABLE_PUSH=0"
-                );
-            }
+        if let Ok(header) = FrameHeader::parse(&mut frame_bytes.clone())
+            && header.frame_type == FrameType::PushPromise as u8
+        {
+            // This represents the protocol-level check that should happen
+            // before frame parsing in a real HTTP/2 implementation
+            assert!(
+                !input.enable_push || connection_state.role != ConnectionRole::Server,
+                "PUSH_PROMISE frames should be rejected at protocol level when ENABLE_PUSH=0"
+            );
         }
     }
 
@@ -326,7 +427,11 @@ fuzz_target!(|input: PushPromiseFuzzInput| {
         let remaining_len = parse_frame_bytes.len().min(header.length as usize);
         if remaining_len > 0 {
             let payload = parse_frame_bytes.slice(..remaining_len);
-            let _ = PushPromiseFrame::parse(&header, payload);
+            observe_push_promise_parse(
+                &header,
+                Bytes::copy_from_slice(payload),
+                "fuzzed PUSH_PROMISE",
+            );
         }
     }
 
@@ -337,7 +442,7 @@ fuzz_target!(|input: PushPromiseFuzzInput| {
             let payload_len = validate_bytes.len().min(header.length as usize);
             if payload_len > 0 {
                 let payload = validate_bytes.slice(..payload_len);
-                let result = PushPromiseFrame::parse(&header, payload);
+                let result = PushPromiseFrame::parse(&header, Bytes::copy_from_slice(payload));
 
                 // Should fail with protocol error for stream ID 0
                 if let Err(err) = result {
@@ -358,7 +463,7 @@ fuzz_target!(|input: PushPromiseFuzzInput| {
             let payload_len = validate_bytes.len().min(header.length as usize);
             if payload_len > 0 {
                 let payload = validate_bytes.slice(..payload_len);
-                let result = PushPromiseFrame::parse(&header, payload);
+                let result = PushPromiseFrame::parse(&header, Bytes::copy_from_slice(payload));
 
                 // Should fail with protocol error for promised stream ID 0
                 if let Err(err) = result {
@@ -379,7 +484,7 @@ fuzz_target!(|input: PushPromiseFuzzInput| {
         if header.length > available_payload {
             // Should handle incomplete frames gracefully
             let payload = frame_bytes.slice(9..);
-            let result = PushPromiseFrame::parse(&header, payload);
+            let result = PushPromiseFrame::parse(&header, Bytes::copy_from_slice(payload));
 
             // May fail or succeed depending on how much data is available
             // Key requirement: should not panic or cause memory safety issues
