@@ -3,7 +3,13 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use asupersync::net::quic_core::{QuicCoreError, TransportParameters, UnknownTransportParameter};
+use asupersync::net::quic_core::{
+    QuicCoreError, TP_ACK_DELAY_EXPONENT, TP_DISABLE_ACTIVE_MIGRATION, TP_INITIAL_MAX_DATA,
+    TP_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL, TP_INITIAL_MAX_STREAM_DATA_BIDI_REMOTE,
+    TP_INITIAL_MAX_STREAM_DATA_UNI, TP_INITIAL_MAX_STREAMS_BIDI, TP_INITIAL_MAX_STREAMS_UNI,
+    TP_MAX_ACK_DELAY, TP_MAX_IDLE_TIMEOUT, TP_MAX_UDP_PAYLOAD_SIZE, TransportParameters,
+    UnknownTransportParameter, encode_varint,
+};
 
 /// Fuzz input for QUIC transport parameters TLV codec testing
 #[derive(Arbitrary, Debug)]
@@ -92,6 +98,127 @@ impl From<FuzzTransportParams> for TransportParameters {
     }
 }
 
+fn is_known_transport_parameter_id(id: u64) -> bool {
+    matches!(
+        id,
+        TP_MAX_IDLE_TIMEOUT
+            | TP_MAX_UDP_PAYLOAD_SIZE
+            | TP_INITIAL_MAX_DATA
+            | TP_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL
+            | TP_INITIAL_MAX_STREAM_DATA_BIDI_REMOTE
+            | TP_INITIAL_MAX_STREAM_DATA_UNI
+            | TP_INITIAL_MAX_STREAMS_BIDI
+            | TP_INITIAL_MAX_STREAMS_UNI
+            | TP_ACK_DELAY_EXPONENT
+            | TP_MAX_ACK_DELAY
+            | TP_DISABLE_ACTIVE_MIGRATION
+    )
+}
+
+fn can_assert_exact_round_trip(params: &TransportParameters) -> bool {
+    let mut ids = Vec::with_capacity(11 + params.unknown.len());
+    for id in known_ids_present(params) {
+        ids.push(id);
+    }
+    for unknown in &params.unknown {
+        if is_known_transport_parameter_id(unknown.id) || ids.contains(&unknown.id) {
+            return false;
+        }
+        ids.push(unknown.id);
+    }
+    true
+}
+
+fn known_ids_present(params: &TransportParameters) -> Vec<u64> {
+    let mut ids = Vec::with_capacity(11);
+    push_present(&mut ids, params.max_idle_timeout, TP_MAX_IDLE_TIMEOUT);
+    push_present(
+        &mut ids,
+        params.max_udp_payload_size,
+        TP_MAX_UDP_PAYLOAD_SIZE,
+    );
+    push_present(&mut ids, params.initial_max_data, TP_INITIAL_MAX_DATA);
+    push_present(
+        &mut ids,
+        params.initial_max_stream_data_bidi_local,
+        TP_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL,
+    );
+    push_present(
+        &mut ids,
+        params.initial_max_stream_data_bidi_remote,
+        TP_INITIAL_MAX_STREAM_DATA_BIDI_REMOTE,
+    );
+    push_present(
+        &mut ids,
+        params.initial_max_stream_data_uni,
+        TP_INITIAL_MAX_STREAM_DATA_UNI,
+    );
+    push_present(
+        &mut ids,
+        params.initial_max_streams_bidi,
+        TP_INITIAL_MAX_STREAMS_BIDI,
+    );
+    push_present(
+        &mut ids,
+        params.initial_max_streams_uni,
+        TP_INITIAL_MAX_STREAMS_UNI,
+    );
+    push_present(&mut ids, params.ack_delay_exponent, TP_ACK_DELAY_EXPONENT);
+    push_present(&mut ids, params.max_ack_delay, TP_MAX_ACK_DELAY);
+    if params.disable_active_migration {
+        ids.push(TP_DISABLE_ACTIVE_MIGRATION);
+    }
+    ids
+}
+
+fn push_present(ids: &mut Vec<u64>, value: Option<u64>, id: u64) {
+    if value.is_some() {
+        ids.push(id);
+    }
+}
+
+fn assert_valid_decoded_params(params: &TransportParameters) {
+    if let Some(udp_size) = params.max_udp_payload_size {
+        assert!(
+            udp_size >= 1200,
+            "UDP payload size should be >= 1200 if set"
+        );
+    }
+    if let Some(ack_exp) = params.ack_delay_exponent {
+        assert!(ack_exp <= 20, "ACK delay exponent should be <= 20");
+    }
+}
+
+fn encode_parameter(out: &mut Vec<u8>, id: u64, value: &[u8]) {
+    encode_varint(id, out).expect("fuzz transport parameter id should fit QUIC varint");
+    encode_varint(value.len() as u64, out)
+        .expect("fuzz transport parameter length should fit QUIC varint");
+    out.extend_from_slice(value);
+}
+
+fn encode_u64_value(value: u64) -> Vec<u8> {
+    let mut encoded = Vec::new();
+    encode_varint(value, &mut encoded).expect("fuzz value should fit QUIC varint");
+    encoded
+}
+
+fn valid_value_for_parameter(id: u64) -> Vec<u8> {
+    match id {
+        TP_MAX_UDP_PAYLOAD_SIZE => encode_u64_value(1200),
+        TP_ACK_DELAY_EXPONENT => encode_u64_value(20),
+        TP_DISABLE_ACTIVE_MIGRATION => Vec::new(),
+        TP_MAX_IDLE_TIMEOUT
+        | TP_INITIAL_MAX_DATA
+        | TP_INITIAL_MAX_STREAM_DATA_BIDI_LOCAL
+        | TP_INITIAL_MAX_STREAM_DATA_BIDI_REMOTE
+        | TP_INITIAL_MAX_STREAM_DATA_UNI
+        | TP_INITIAL_MAX_STREAMS_BIDI
+        | TP_INITIAL_MAX_STREAMS_UNI
+        | TP_MAX_ACK_DELAY => encode_u64_value(1),
+        _ => vec![0xa5, 0x5a],
+    }
+}
+
 /// Attack scenarios to test specific edge cases
 #[derive(Arbitrary, Debug, Clone)]
 enum AttackScenario {
@@ -165,16 +292,20 @@ fuzz_target!(|input: TransportParamsFuzzInput| {
 /// Property 1: No panic on any input
 fn test_no_panic(input: &TransportParamsFuzzInput) {
     for operation in &input.operations {
-        let _result = std::panic::catch_unwind(|| {
+        let result = std::panic::catch_unwind(|| {
             process_tlv_operation(operation);
         });
+        assert!(result.is_ok(), "TLV operation panicked: {operation:?}");
     }
 
-    let _result = std::panic::catch_unwind(|| {
+    let result = std::panic::catch_unwind(|| {
         process_attack_scenario(&input.attack_scenario);
     });
-
-    assert!(true, "TLV codec handled all inputs without panic");
+    assert!(
+        result.is_ok(),
+        "TLV attack scenario panicked: {:?}",
+        input.attack_scenario
+    );
 }
 
 /// Property 2: Valid parameters round-trip correctly
@@ -190,26 +321,29 @@ fn test_round_trip_consistency(input: &TransportParamsFuzzInput) {
                     // Decode back
                     match TransportParameters::decode(&encoded) {
                         Ok(decoded) => {
-                            // Should match original (modulo validation constraints)
-                            // Note: Some fuzz values may be adjusted during construction
-                            assert_eq!(
-                                decoded.disable_active_migration,
-                                tp.disable_active_migration
-                            );
-                            // Unknown params should be preserved
-                            assert_eq!(decoded.unknown.len(), tp.unknown.len());
+                            assert_valid_decoded_params(&decoded);
+                            if can_assert_exact_round_trip(&tp) {
+                                assert_eq!(decoded, tp, "valid transport parameters round-trip");
+                            }
                         }
-                        Err(_) => {
-                            // Decoding can fail for invalid parameter combinations
-                            // This is acceptable - the encoder may produce valid TLV
-                            // but the decoder may reject semantically invalid combinations
-                            assert!(true, "Decoder correctly rejected invalid combination");
+                        Err(err) => {
+                            assert!(
+                                matches!(
+                                    err,
+                                    QuicCoreError::DuplicateTransportParameter(_)
+                                        | QuicCoreError::InvalidTransportParameter(_)
+                                        | QuicCoreError::UnexpectedEof
+                                ),
+                                "unexpected round-trip decode error: {err:?}"
+                            );
                         }
                     }
                 }
-                Err(_) => {
-                    // Encoding can fail for invalid values
-                    assert!(true, "Encoder correctly rejected invalid values");
+                Err(err) => {
+                    assert!(
+                        matches!(err, QuicCoreError::VarIntOutOfRange(_)),
+                        "unexpected round-trip encode error: {err:?}"
+                    );
                 }
             }
         }
@@ -222,34 +356,13 @@ fn test_invalid_input_rejection(input: &TransportParamsFuzzInput) {
         if let TlvOperation::Decode { bytes } = operation {
             match TransportParameters::decode(bytes) {
                 Ok(params) => {
-                    // If decoding succeeded, result should be valid
-                    // Check some basic constraints
-                    if let Some(udp_size) = params.max_udp_payload_size {
-                        assert!(
-                            udp_size >= 1200,
-                            "UDP payload size should be >= 1200 if set"
-                        );
-                    }
-                    if let Some(ack_exp) = params.ack_delay_exponent {
-                        assert!(ack_exp <= 20, "ACK delay exponent should be <= 20");
-                    }
-                    assert!(true, "Valid decoded parameters passed constraints");
+                    assert_valid_decoded_params(&params);
                 }
-                Err(QuicCoreError::DuplicateTransportParameter(_)) => {
-                    assert!(true, "Correctly rejected duplicate parameter");
-                }
-                Err(QuicCoreError::InvalidTransportParameter(_)) => {
-                    assert!(true, "Correctly rejected invalid parameter");
-                }
-                Err(QuicCoreError::UnexpectedEof) => {
-                    assert!(true, "Correctly rejected truncated input");
-                }
-                Err(QuicCoreError::VarIntOutOfRange(_)) => {
-                    assert!(true, "Correctly rejected out-of-range varint");
-                }
-                Err(_) => {
-                    assert!(true, "Other error is acceptable");
-                }
+                Err(QuicCoreError::DuplicateTransportParameter(_))
+                | Err(QuicCoreError::InvalidTransportParameter(_))
+                | Err(QuicCoreError::UnexpectedEof)
+                | Err(QuicCoreError::VarIntOutOfRange(_)) => {}
+                Err(err) => panic!("unexpected transport parameter decode error: {err:?}"),
             }
         }
     }
@@ -258,12 +371,49 @@ fn test_invalid_input_rejection(input: &TransportParamsFuzzInput) {
 /// Property 4: Attack scenarios are handled robustly
 fn test_attack_scenarios(input: &TransportParamsFuzzInput) {
     match &input.attack_scenario {
+        AttackScenario::Normal => {
+            let params = TransportParameters {
+                max_idle_timeout: Some(30_000),
+                max_udp_payload_size: Some(1500),
+                initial_max_data: Some(1_000_000),
+                disable_active_migration: true,
+                ..TransportParameters::default()
+            };
+            let mut encoded = Vec::new();
+            params
+                .encode(&mut encoded)
+                .expect("normal transport parameters should encode");
+            let decoded = TransportParameters::decode(&encoded)
+                .expect("normal transport parameters should decode");
+            assert_eq!(decoded, params);
+        }
         AttackScenario::MalformedTlv { malformed_bytes } => {
             // Should handle malformed TLV gracefully
             match TransportParameters::decode(malformed_bytes) {
-                Ok(_) => assert!(true, "Malformed bytes were actually valid"),
-                Err(_) => assert!(true, "Correctly rejected malformed TLV"),
+                Ok(params) => assert_valid_decoded_params(&params),
+                Err(
+                    QuicCoreError::DuplicateTransportParameter(_)
+                    | QuicCoreError::InvalidTransportParameter(_)
+                    | QuicCoreError::UnexpectedEof
+                    | QuicCoreError::VarIntOutOfRange(_),
+                ) => {}
+                Err(err) => panic!("unexpected malformed TLV error: {err:?}"),
             }
+        }
+        AttackScenario::DuplicateParams {
+            param_id,
+            duplicate_count,
+        } => {
+            let id = u64::from(*param_id);
+            let value = valid_value_for_parameter(id);
+            let duplicate_count = usize::from((*duplicate_count).clamp(2, 5));
+            let mut encoded = Vec::new();
+            for _ in 0..duplicate_count {
+                encode_parameter(&mut encoded, id, &value);
+            }
+            let err = TransportParameters::decode(&encoded)
+                .expect_err("duplicate transport parameter should fail");
+            assert_eq!(err, QuicCoreError::DuplicateTransportParameter(id));
         }
         AttackScenario::InvalidValues { invalid_type } => {
             // Test specific invalid value scenarios
@@ -274,38 +424,88 @@ fn test_attack_scenarios(input: &TransportParamsFuzzInput) {
                         max_udp_payload_size: Some(1199), // Invalid: < 1200
                         ..TransportParameters::default()
                     };
-                    if params.encode(&mut encoded).is_ok() {
-                        let result = TransportParameters::decode(&encoded);
-                        // Should be rejected during decode validation
-                        assert!(result.is_err(), "Small UDP payload should be rejected");
-                    }
+                    params
+                        .encode(&mut encoded)
+                        .expect("small UDP payload should encode as TLV");
+                    let err = TransportParameters::decode(&encoded)
+                        .expect_err("small UDP payload should be rejected");
+                    assert_eq!(
+                        err,
+                        QuicCoreError::InvalidTransportParameter(TP_MAX_UDP_PAYLOAD_SIZE)
+                    );
                 }
                 InvalidValueType::LargeAckDelayExponent => {
                     let params = TransportParameters {
                         ack_delay_exponent: Some(25), // Invalid: > 20
                         ..TransportParameters::default()
                     };
-                    if params.encode(&mut encoded).is_ok() {
-                        let result = TransportParameters::decode(&encoded);
-                        assert!(
-                            result.is_err(),
-                            "Large ACK delay exponent should be rejected"
-                        );
-                    }
+                    params
+                        .encode(&mut encoded)
+                        .expect("large ACK delay exponent should encode as TLV");
+                    let err = TransportParameters::decode(&encoded)
+                        .expect_err("large ACK delay exponent should be rejected");
+                    assert_eq!(
+                        err,
+                        QuicCoreError::InvalidTransportParameter(TP_ACK_DELAY_EXPONENT)
+                    );
                 }
                 InvalidValueType::NonEmptyDisableActiveMigration => {
-                    // This would require raw TLV manipulation since the struct doesn't allow it
-                    // Just test that normal case works
-                    let params = TransportParameters {
-                        disable_active_migration: true,
-                        ..TransportParameters::default()
-                    };
-                    assert!(params.encode(&mut encoded).is_ok());
+                    encode_parameter(&mut encoded, TP_DISABLE_ACTIVE_MIGRATION, &[0x01]);
+                    let err = TransportParameters::decode(&encoded)
+                        .expect_err("non-empty disable_active_migration should be rejected");
+                    assert_eq!(
+                        err,
+                        QuicCoreError::InvalidTransportParameter(TP_DISABLE_ACTIVE_MIGRATION)
+                    );
                 }
             }
         }
-        _ => {
-            // Other scenarios tested elsewhere or are implementation details
+        AttackScenario::LargeValues { large_param, scale } => {
+            let out_of_range_value = u64::MAX - u64::from(*scale);
+            let unknown_value_len = usize::from((*scale).max(1)).min(64);
+            let params = match large_param {
+                LargeParamType::MaxIdleTimeout => TransportParameters {
+                    max_idle_timeout: Some(out_of_range_value),
+                    ..TransportParameters::default()
+                },
+                LargeParamType::InitialMaxData => TransportParameters {
+                    initial_max_data: Some(out_of_range_value),
+                    ..TransportParameters::default()
+                },
+                LargeParamType::UnknownParamValue => TransportParameters {
+                    unknown: vec![UnknownTransportParameter {
+                        id: 0x1f,
+                        value: vec![0xff; unknown_value_len],
+                    }],
+                    ..TransportParameters::default()
+                },
+            };
+            let mut encoded = Vec::new();
+            match large_param {
+                LargeParamType::MaxIdleTimeout | LargeParamType::InitialMaxData => {
+                    let err = params
+                        .encode(&mut encoded)
+                        .expect_err("u64::MAX exceeds QUIC varint range");
+                    assert_eq!(err, QuicCoreError::VarIntOutOfRange(out_of_range_value));
+                }
+                LargeParamType::UnknownParamValue => {
+                    params
+                        .encode(&mut encoded)
+                        .expect("bounded unknown parameter should encode");
+                    let decoded = TransportParameters::decode(&encoded)
+                        .expect("bounded unknown parameter should decode");
+                    assert_eq!(decoded, params);
+                }
+            }
+        }
+        AttackScenario::TruncatedData { truncate_bytes } => {
+            let value = encode_u64_value(5000);
+            let mut encoded = Vec::new();
+            encode_parameter(&mut encoded, TP_MAX_IDLE_TIMEOUT, &value);
+            let truncate_amount = usize::from(*truncate_bytes).clamp(1, encoded.len() - 1);
+            encoded.truncate(encoded.len() - truncate_amount);
+            let err = TransportParameters::decode(&encoded).expect_err("truncated TLV should fail");
+            assert_eq!(err, QuicCoreError::UnexpectedEof);
         }
     }
 }
