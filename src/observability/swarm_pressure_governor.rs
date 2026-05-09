@@ -37,8 +37,8 @@ use crate::error::Error;
 use crate::observability::pressure_governor::{
     AdmissionDecision, PressureGovernor, PressureGovernorConfig, PressureSnapshot,
 };
-use crate::runtime::resource_monitor::{DegradationLevel, ResourceMonitor, RegionPriority};
-use crate::types::{id::next_bootstrap_region_id, RegionId};
+use crate::runtime::resource_monitor::{DegradationLevel, RegionPriority, ResourceMonitor};
+use crate::types::{RegionId, id::next_bootstrap_region_id};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -50,18 +50,27 @@ pub enum SwarmPressureError {
     /// Resource envelope budget exceeded.
     #[error("resource envelope budget exceeded: {resource} usage {current} exceeds limit {limit}")]
     EnvelopeBudgetExceeded {
+        /// Budget class that exceeded its envelope.
         resource: String,
+        /// Usage after applying the attempted reservation.
         current: u64,
+        /// Configured maximum for the resource envelope.
         limit: u64,
     },
 
     /// Swarm coordination failed.
     #[error("swarm coordination error: {reason}")]
-    SwarmCoordinationFailed { reason: String },
+    SwarmCoordinationFailed {
+        /// Coordination failure detail.
+        reason: String,
+    },
 
     /// Admission rejected due to pressure.
     #[error("admission rejected: {reason}")]
-    AdmissionRejected { reason: String },
+    AdmissionRejected {
+        /// Human-readable rejection reason.
+        reason: String,
+    },
 
     /// Underlying pressure governor error.
     #[error("pressure governor error: {0}")]
@@ -91,7 +100,12 @@ pub struct ResourceEnvelope {
 
 impl ResourceEnvelope {
     /// Creates a new resource envelope for the given region.
-    pub fn new(region_id: RegionId, memory_budget: u64, cpu_budget_ns_per_sec: u64, io_budget_ops_per_sec: u64) -> Self {
+    pub fn new(
+        region_id: RegionId,
+        memory_budget: u64,
+        cpu_budget_ns_per_sec: u64,
+        io_budget_ops_per_sec: u64,
+    ) -> Self {
         Self {
             region_id,
             memory_budget,
@@ -169,8 +183,8 @@ impl Default for SwarmPressureGovernorConfig {
             pressure_config: PressureGovernorConfig::default(),
             max_regions_per_instance: 1000,
             default_memory_budget_bytes: 100 * 1024 * 1024, // 100MB per region
-            default_cpu_budget_ns_per_sec: 100_000_000,      // 100ms per second
-            default_io_budget_ops_per_sec: 1000,             // 1000 ops per second
+            default_cpu_budget_ns_per_sec: 100_000_000,     // 100ms per second
+            default_io_budget_ops_per_sec: 1000,            // 1000 ops per second
             envelope_enforcement_enabled: true,
             swarm_coordination_timeout: Duration::from_millis(50),
         }
@@ -253,7 +267,10 @@ impl SwarmPressureGovernor {
         }
 
         // Check system-level resource pressure
-        let degradation_level = self.resource_monitor.pressure().composite_degradation_level();
+        let degradation_level = self
+            .resource_monitor
+            .pressure()
+            .composite_degradation_level();
 
         // Check runtime-internal pressure via pressure governor
         let pressure_snapshot = self.pressure_governor.sample_pressure(cx)?;
@@ -346,7 +363,10 @@ impl SwarmPressureGovernor {
         if active_count >= self.config.max_regions_per_instance {
             return Ok(SwarmAdmissionDecisionInternal {
                 decision: AdmissionDecision::Reject,
-                reason: format!("Region limit exceeded: {} >= {}", active_count, self.config.max_regions_per_instance),
+                reason: format!(
+                    "Region limit exceeded: {} >= {}",
+                    active_count, self.config.max_regions_per_instance
+                ),
             });
         }
 
@@ -356,9 +376,11 @@ impl SwarmPressureGovernor {
             (_, _, RegionPriority::Critical) => AdmissionDecision::Admit,
 
             // Reject if pressure governor rejected and system is under stress
-            (AdmissionDecision::Reject, DegradationLevel::Heavy | DegradationLevel::Emergency, _) => {
-                AdmissionDecision::Reject
-            }
+            (
+                AdmissionDecision::Reject,
+                DegradationLevel::Heavy | DegradationLevel::Emergency,
+                _,
+            ) => AdmissionDecision::Reject,
 
             // Apply backpressure for moderate system stress
             (_, DegradationLevel::Moderate | DegradationLevel::Heavy, RegionPriority::Normal) => {
@@ -366,10 +388,11 @@ impl SwarmPressureGovernor {
             }
 
             // Reject low-priority regions under any stress
-            (_, DegradationLevel::Moderate | DegradationLevel::Heavy | DegradationLevel::Emergency,
-             RegionPriority::Low | RegionPriority::BestEffort) => {
-                AdmissionDecision::Reject
-            }
+            (
+                _,
+                DegradationLevel::Moderate | DegradationLevel::Heavy | DegradationLevel::Emergency,
+                RegionPriority::Low | RegionPriority::BestEffort,
+            ) => AdmissionDecision::Reject,
 
             // Otherwise follow pressure governor decision
             (decision, _, _) => *decision,
@@ -377,8 +400,14 @@ impl SwarmPressureGovernor {
 
         let reason = match decision {
             AdmissionDecision::Admit => "Admission approved".to_string(),
-            AdmissionDecision::Reject => format!("Rejected due to pressure: {:?} degradation, {:?} priority", degradation_level, priority),
-            AdmissionDecision::AdmitWithBackpressure => format!("Admitted with backpressure: {:?} degradation", degradation_level),
+            AdmissionDecision::Reject => format!(
+                "Rejected due to pressure: {:?} degradation, {:?} priority",
+                degradation_level, priority
+            ),
+            AdmissionDecision::AdmitWithBackpressure => format!(
+                "Admitted with backpressure: {:?} degradation",
+                degradation_level
+            ),
         };
 
         Ok(SwarmAdmissionDecisionInternal { decision, reason })
@@ -399,7 +428,10 @@ impl SwarmPressureGovernor {
         ))
     }
 
-    fn create_default_envelope(&self, region_id: RegionId) -> Result<ResourceEnvelope, SwarmPressureError> {
+    fn create_default_envelope(
+        &self,
+        region_id: RegionId,
+    ) -> Result<ResourceEnvelope, SwarmPressureError> {
         self.create_envelope_for_region(region_id, None)
     }
 
@@ -413,8 +445,10 @@ impl SwarmPressureGovernor {
             cleanup_debt_pressure: 0.0,
             memory_budget_pressure: 0.0,
             overall_pressure: 0.0,
-            signal_availability: crate::observability::pressure_governor::PressureSignalAvailability::NONE,
-            fallback_verdict: crate::observability::pressure_governor::PressureFallbackVerdict::Complete,
+            signal_availability:
+                crate::observability::pressure_governor::PressureSignalAvailability::NONE,
+            fallback_verdict:
+                crate::observability::pressure_governor::PressureFallbackVerdict::Complete,
         }
     }
 }
@@ -444,7 +478,7 @@ pub struct SwarmPressureMetrics {
 mod tests {
     use super::*;
     use crate::observability::metrics::Metrics;
-    use crate::runtime::{RuntimeBuilder, Runtime};
+    use crate::runtime::RuntimeBuilder;
     use crate::types::Budget;
 
     fn create_test_swarm_governor() -> SwarmPressureGovernor {
@@ -452,7 +486,7 @@ mod tests {
             RuntimeBuilder::new()
                 .worker_threads(1)
                 .build()
-                .expect("Failed to create test runtime")
+                .expect("Failed to create test runtime"),
         );
 
         let config = SwarmPressureGovernorConfig::default();
@@ -461,14 +495,15 @@ mod tests {
             config.pressure_config.clone(),
             std::sync::Arc::clone(&runtime),
             Metrics::new(),
-        ).expect("Failed to create pressure governor");
+        )
+        .expect("Failed to create pressure governor");
 
         SwarmPressureGovernor::new(config, resource_monitor, pressure_governor)
     }
 
     #[test]
     fn test_resource_envelope_budget_enforcement() {
-        let envelope = ResourceEnvelope::new(RegionId::PLACEHOLDER, 1000, 1000000, 100);
+        let envelope = ResourceEnvelope::new(RegionId::new_for_test(1, 1), 1000, 1000000, 100);
 
         // Should allow allocation within budget
         assert!(envelope.reserve_memory(500).is_ok());
@@ -492,38 +527,41 @@ mod tests {
             RuntimeBuilder::new()
                 .worker_threads(1)
                 .build()
-                .expect("Failed to create test runtime")
+                .expect("Failed to create test runtime"),
         );
 
         let pressure_governor = PressureGovernor::new(
             config.pressure_config.clone(),
             std::sync::Arc::clone(&runtime),
             Metrics::new(),
-        ).expect("Failed to create pressure governor");
+        )
+        .expect("Failed to create pressure governor");
 
-        let governor = SwarmPressureGovernor::new(
-            config,
-            runtime.resource_monitor(),
-            pressure_governor,
-        );
+        let governor =
+            SwarmPressureGovernor::new(config, runtime.resource_monitor(), pressure_governor);
 
         let cx = runtime.request_cx_with_budget(Budget::INFINITE);
 
         // First two admissions should succeed
-        let decision1 = governor.check_region_admission(&cx, RegionPriority::Normal, None)
+        let decision1 = governor
+            .check_region_admission(&cx, RegionPriority::Normal, None)
             .expect("First admission should succeed");
         assert!(matches!(decision1.decision, AdmissionDecision::Admit));
 
-        let decision2 = governor.check_region_admission(&cx, RegionPriority::Normal, None)
+        let decision2 = governor
+            .check_region_admission(&cx, RegionPriority::Normal, None)
             .expect("Second admission should succeed");
         assert!(matches!(decision2.decision, AdmissionDecision::Admit));
 
         // Add envelopes to simulate active regions
-        governor.register_region_envelope(RegionId::PLACEHOLDER, decision1.envelope.unwrap());
-        governor.register_region_envelope(RegionId::from_raw(2), decision2.envelope.unwrap());
+        governor
+            .register_region_envelope(RegionId::new_for_test(1, 1), decision1.envelope.unwrap());
+        governor
+            .register_region_envelope(RegionId::new_for_test(2, 1), decision2.envelope.unwrap());
 
         // Third admission should be rejected
-        let decision3 = governor.check_region_admission(&cx, RegionPriority::Normal, None)
+        let decision3 = governor
+            .check_region_admission(&cx, RegionPriority::Normal, None)
             .expect("Third admission check should succeed");
         assert!(matches!(decision3.decision, AdmissionDecision::Reject));
         assert!(decision3.reason.contains("Region limit exceeded"));
@@ -536,11 +574,12 @@ mod tests {
             RuntimeBuilder::new()
                 .worker_threads(1)
                 .build()
-                .expect("Failed to create test runtime")
+                .expect("Failed to create test runtime"),
         );
         let cx = runtime.request_cx_with_budget(Budget::INFINITE);
 
-        let decision = governor.check_region_admission(&cx, RegionPriority::Critical, None)
+        let decision = governor
+            .check_region_admission(&cx, RegionPriority::Critical, None)
             .expect("Critical admission should succeed");
 
         assert!(matches!(decision.decision, AdmissionDecision::Admit));

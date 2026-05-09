@@ -117,7 +117,6 @@ pub mod otlp_unexpected_status_audit_test;
 pub mod otlp_upgrade_required_audit_test;
 pub mod performance_budget_monitor;
 pub mod pressure_governor;
-pub mod swarm_pressure_governor;
 pub mod resource_accounting;
 #[cfg(all(test, feature = "metrics"))]
 pub mod resource_attribute_merging_audit_test;
@@ -136,6 +135,7 @@ pub mod spectral_health;
 pub mod structured_cancellation_analyzer;
 #[cfg(test)]
 pub mod subscriber_installation_order_audit_test;
+pub mod swarm_pressure_governor;
 pub mod task_inspector;
 #[cfg(all(test, feature = "metrics"))]
 pub mod tls_configuration_audit_test;
@@ -231,16 +231,16 @@ pub use pressure_governor::{
     AdmissionDecision, PressureGovernor, PressureGovernorConfig, PressureSnapshot,
     PressureThresholds,
 };
-pub use swarm_pressure_governor::{
-    ResourceEnvelope, SwarmAdmissionDecision, SwarmPressureError, SwarmPressureGovernor,
-    SwarmPressureGovernorConfig, SwarmPressureMetrics,
-};
 pub use resource_accounting::{
     AdmissionKindStats, ObligationKindStats, ResourceAccounting, ResourceAccountingSnapshot,
 };
 pub use structured_cancellation_analyzer::{
     AlertSeverity, AlertType, CancellationAlert, LabRuntimeIntegration, RealTimeStats,
     StructuredCancellationAnalyzer, StructuredCancellationConfig,
+};
+pub use swarm_pressure_governor::{
+    ResourceEnvelope, SwarmAdmissionDecision, SwarmPressureError, SwarmPressureGovernor,
+    SwarmPressureGovernorConfig, SwarmPressureMetrics,
 };
 pub use task_inspector::{
     TASK_CONSOLE_WIRE_SCHEMA_V1, TaskConsoleWireSnapshot, TaskDetails, TaskDetailsWire,
