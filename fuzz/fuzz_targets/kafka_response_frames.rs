@@ -16,7 +16,7 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::messaging::kafka::{
-    Acks, Compression, KafkaError, fuzz_parse_delivery_result, fuzz_parse_kafka_error_response,
+    KafkaError, RecordMetadata, fuzz_parse_delivery_result, fuzz_parse_kafka_error_response,
     fuzz_parse_response_metadata, fuzz_validate_response_frame,
 };
 use libfuzzer_sys::fuzz_target;
@@ -433,6 +433,84 @@ enum ExpectedResult {
     ParseFailure,
 }
 
+fn observe_frame_validation(result: Result<(), String>, context: &str) {
+    if let Err(message) = result {
+        observe_parser_message(&message, context);
+    }
+}
+
+fn observe_kafka_error_response(result: Result<KafkaError, String>, context: &str) {
+    match result {
+        Ok(err) => observe_kafka_error(&err, context),
+        Err(message) => observe_parser_message(&message, context),
+    }
+}
+
+fn observe_metadata_parse(result: Result<RecordMetadata, String>, context: &str) {
+    match result {
+        Ok(metadata) => observe_metadata(&metadata, context),
+        Err(message) => observe_parser_message(&message, context),
+    }
+}
+
+fn observe_delivery_parse(result: Result<RecordMetadata, KafkaError>, context: &str) {
+    match result {
+        Ok(metadata) => observe_metadata(&metadata, context),
+        Err(err) => observe_kafka_error(&err, context),
+    }
+}
+
+fn observe_metadata(metadata: &RecordMetadata, context: &str) {
+    assert!(
+        !metadata.topic.is_empty(),
+        "{context} metadata topic must be non-empty"
+    );
+    assert!(
+        metadata.partition >= 0,
+        "{context} metadata partition must be non-negative"
+    );
+    assert!(
+        metadata.offset >= 0,
+        "{context} metadata offset must be non-negative"
+    );
+    if let Some(timestamp) = metadata.timestamp {
+        assert!(
+            timestamp >= 0,
+            "{context} metadata timestamp must be non-negative when present"
+        );
+    }
+}
+
+fn observe_kafka_error(err: &KafkaError, context: &str) {
+    let diagnostic = format!("{err:?}");
+    assert!(
+        !diagnostic.is_empty(),
+        "{context} Kafka error must be observable"
+    );
+    match err {
+        KafkaError::Protocol(message)
+        | KafkaError::Broker(message)
+        | KafkaError::InvalidTopic(message)
+        | KafkaError::Transaction(message)
+        | KafkaError::Config(message)
+        | KafkaError::Authentication(message) => observe_parser_message(message, context),
+        KafkaError::MessageTooLarge { size, max_size } => {
+            assert!(
+                *size > 0 || *max_size > 0,
+                "{context} message-size error must expose a bound"
+            );
+        }
+        _ => {}
+    }
+}
+
+fn observe_parser_message(message: &str, context: &str) {
+    assert!(
+        !message.is_empty(),
+        "{context} parser diagnostic must be visible"
+    );
+}
+
 fuzz_target!(|data: &[u8]| {
     // Limit input size to prevent excessive memory usage
     if data.len() > MAX_FRAME_SIZE {
@@ -440,10 +518,13 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Test 1: Direct raw bytes fuzzing
-    let _ = fuzz_validate_response_frame(data);
-    let _ = fuzz_parse_kafka_error_response(data);
-    let _ = fuzz_parse_response_metadata(data);
-    let _ = fuzz_parse_delivery_result(data);
+    observe_frame_validation(fuzz_validate_response_frame(data), "raw frame validation");
+    observe_kafka_error_response(
+        fuzz_parse_kafka_error_response(data),
+        "raw error response parse",
+    );
+    observe_metadata_parse(fuzz_parse_response_metadata(data), "raw metadata parse");
+    observe_delivery_parse(fuzz_parse_delivery_result(data), "raw delivery parse");
 
     // Test 2: Structure-aware fuzzing if we can parse the input
     let mut u = Unstructured::new(data);
@@ -467,7 +548,7 @@ fuzz_target!(|data: &[u8]| {
         match expected {
             ExpectedResult::Success => {
                 // Well-formed success frames should pass frame validation
-                if let Err(e) = frame_validation {
+                if let Err(e) = &frame_validation {
                     panic!(
                         "Well-formed success frame failed validation: {}\nFrame: {:?}",
                         e,
@@ -477,7 +558,7 @@ fuzz_target!(|data: &[u8]| {
             }
             ExpectedResult::Error => {
                 // Well-formed error frames should be parseable as errors
-                if let Ok(parsed_error) = error_parsing {
+                if let Ok(parsed_error) = &error_parsing {
                     // Error parsing succeeded, verify it's a reasonable error
                     match parsed_error {
                         KafkaError::Protocol(_)
@@ -504,12 +585,10 @@ fuzz_target!(|data: &[u8]| {
 
         // Test invariants that should always hold
         // No function should panic on any input
-        let _ = (
-            frame_validation,
-            error_parsing,
-            metadata_parsing,
-            delivery_parsing,
-        );
+        observe_frame_validation(frame_validation, "generated frame validation");
+        observe_kafka_error_response(error_parsing, "generated error response parse");
+        observe_metadata_parse(metadata_parsing, "generated metadata parse");
+        observe_delivery_parse(delivery_parsing, "generated delivery parse");
     }
 
     // Test 3: Boundary condition fuzzing
@@ -520,8 +599,8 @@ fuzz_target!(|data: &[u8]| {
 fn fuzz_boundary_conditions(data: &[u8]) {
     // Test very short inputs
     if data.len() <= 16 {
-        let _ = fuzz_validate_response_frame(data);
-        let _ = fuzz_parse_response_metadata(data);
+        observe_frame_validation(fuzz_validate_response_frame(data), "short frame validation");
+        observe_metadata_parse(fuzz_parse_response_metadata(data), "short metadata parse");
     }
 
     // Test correlation ID boundary values
@@ -529,7 +608,10 @@ fn fuzz_boundary_conditions(data: &[u8]) {
         let mut frame = vec![0u8; 8];
         frame[0..4].copy_from_slice(&data[0..4]); // Use input as correlation ID
         frame[4..8].copy_from_slice(&0i32.to_be_bytes()); // Zero length
-        let _ = fuzz_validate_response_frame(&frame);
+        observe_frame_validation(
+            fuzz_validate_response_frame(&frame),
+            "correlation-id boundary frame validation",
+        );
     }
 
     // Test length prefix attacks
@@ -538,14 +620,23 @@ fn fuzz_boundary_conditions(data: &[u8]) {
         frame[0..4].copy_from_slice(&1i32.to_be_bytes()); // correlation_id = 1
         frame[4..8].copy_from_slice(&data[0..4]); // Use input as length
         frame.extend_from_slice(&data[4..]); // Rest as payload
-        let _ = fuzz_validate_response_frame(&frame);
-        let _ = fuzz_parse_delivery_result(&frame);
+        observe_frame_validation(
+            fuzz_validate_response_frame(&frame),
+            "length-prefix attack frame validation",
+        );
+        observe_delivery_parse(
+            fuzz_parse_delivery_result(&frame),
+            "length-prefix attack delivery parse",
+        );
     }
 
     // Test metadata parsing with various payload sizes
     for chunk_size in [1, 2, 4, 8, 16, 32] {
         if data.len() >= chunk_size {
-            let _ = fuzz_parse_response_metadata(&data[..chunk_size]);
+            observe_metadata_parse(
+                fuzz_parse_response_metadata(&data[..chunk_size]),
+                "chunked metadata parse",
+            );
         }
     }
 }
