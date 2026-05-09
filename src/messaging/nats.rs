@@ -1850,99 +1850,13 @@ impl NatsClient {
 
     /// Parse HMSG message.
     fn parse_hmsg(&mut self) -> Result<Option<NatsMessage>, NatsError> {
-        let buf = self.read_buf.available();
-        let Some(header_end) = self.read_buf.find_crlf() else {
+        let Some((message, total_frame_len)) =
+            parse_hmsg_frame(self.read_buf.available(), self.config.max_read_buffer)?
+        else {
             return Ok(None);
         };
-
-        let header = std::str::from_utf8(&buf[..header_end])
-            .map_err(|_| NatsError::Protocol("invalid UTF-8 in HMSG header".to_string()))?;
-
-        // HMSG <subject> <sid> [reply-to] <#header bytes> <#total bytes>
-        let mut parts = header.split_whitespace();
-        let _hmsg = parts.next(); // "HMSG"
-        let subject_str = parts
-            .next()
-            .ok_or_else(|| NatsError::Protocol(format!("malformed HMSG header: {header}")))?;
-        let sid_str = parts
-            .next()
-            .ok_or_else(|| NatsError::Protocol(format!("malformed HMSG header: {header}")))?;
-        let remaining: Vec<_> = parts.collect();
-
-        let (reply_to, header_len_str, total_len_str) = match remaining.as_slice() {
-            [header_len_str, total_len_str] => (None, *header_len_str, *total_len_str),
-            [reply_to, header_len_str, total_len_str] => (
-                Some((*reply_to).to_string()),
-                *header_len_str,
-                *total_len_str,
-            ),
-            _ => {
-                return Err(NatsError::Protocol(format!(
-                    "malformed HMSG header: {header}"
-                )));
-            }
-        };
-
-        let subject = subject_str.to_string();
-        let sid: u64 = sid_str
-            .parse()
-            .map_err(|_| NatsError::Protocol(format!("invalid SID: {sid_str}")))?;
-        let header_len = header_len_str.parse::<usize>().map_err(|_| {
-            NatsError::Protocol(format!("invalid HMSG header length: {header_len_str}"))
-        })?;
-        let total_len = total_len_str.parse::<usize>().map_err(|_| {
-            NatsError::Protocol(format!("invalid HMSG total length: {total_len_str}"))
-        })?;
-
-        if header_len == 0 || header_len > total_len {
-            return Err(NatsError::Protocol(format!(
-                "invalid HMSG lengths: header_len={header_len}, total_len={total_len}"
-            )));
-        }
-
-        let max_buf = self.config.max_read_buffer;
-        if total_len > max_buf {
-            return Err(NatsError::Protocol(format!(
-                "HMSG total length {total_len} exceeds maximum ({max_buf} bytes)"
-            )));
-        }
-
-        let body_start = header_end + 2;
-        let body_end = body_start
-            .checked_add(total_len)
-            .ok_or_else(|| NatsError::Protocol("HMSG body length overflow".to_string()))?;
-        let total_frame_len = body_end
-            .checked_add(2)
-            .ok_or_else(|| NatsError::Protocol("HMSG frame length overflow".to_string()))?;
-
-        if buf.len() < total_frame_len {
-            return Ok(None);
-        }
-        if buf[body_end] != b'\r' || buf[body_end + 1] != b'\n' {
-            return Err(NatsError::Protocol(
-                "malformed HMSG payload terminator".to_string(),
-            ));
-        }
-
-        let header_block_end = body_start + header_len;
-        let header_block = buf[body_start..header_block_end].to_vec();
-        if !is_valid_nats_header_block(&header_block) {
-            return Err(NatsError::Protocol(
-                "malformed HMSG header block".to_string(),
-            ));
-        }
-
-        let payload = buf[header_block_end..body_end].to_vec();
-
         self.read_buf.consume(total_frame_len);
-
-        Ok(Some(NatsMessage::Msg(Message {
-            subject,
-            sid,
-            reply_to,
-            headers: Some(header_block),
-            payload,
-        })))
+        Ok(Some(NatsMessage::Msg(message)))
     }
 
     /// Parse -ERR message.
@@ -2704,6 +2618,126 @@ impl NatsClient {
     pub fn server_info(&self) -> Option<ServerInfo> {
         self.state.server_info.lock().clone()
     }
+}
+
+fn parse_hmsg_frame(
+    buf: &[u8],
+    max_read_buffer: usize,
+) -> Result<Option<(Message, usize)>, NatsError> {
+    let Some(header_end) = find_crlf(buf) else {
+        return Ok(None);
+    };
+
+    let header = std::str::from_utf8(&buf[..header_end])
+        .map_err(|_| NatsError::Protocol("invalid UTF-8 in HMSG header".to_string()))?;
+
+    // HMSG <subject> <sid> [reply-to] <#header bytes> <#total bytes>
+    let mut parts = header.split_whitespace();
+    if parts.next() != Some("HMSG") {
+        return Err(NatsError::Protocol(format!(
+            "malformed HMSG header: {header}"
+        )));
+    }
+    let subject_str = parts
+        .next()
+        .ok_or_else(|| NatsError::Protocol(format!("malformed HMSG header: {header}")))?;
+    let sid_str = parts
+        .next()
+        .ok_or_else(|| NatsError::Protocol(format!("malformed HMSG header: {header}")))?;
+    let remaining: Vec<_> = parts.collect();
+
+    let (reply_to, header_len_str, total_len_str) = match remaining.as_slice() {
+        [header_len_str, total_len_str] => (None, *header_len_str, *total_len_str),
+        [reply_to, header_len_str, total_len_str] => (
+            Some((*reply_to).to_string()),
+            *header_len_str,
+            *total_len_str,
+        ),
+        _ => {
+            return Err(NatsError::Protocol(format!(
+                "malformed HMSG header: {header}"
+            )));
+        }
+    };
+
+    let subject = subject_str.to_string();
+    let sid: u64 = sid_str
+        .parse()
+        .map_err(|_| NatsError::Protocol(format!("invalid SID: {sid_str}")))?;
+    let header_len = header_len_str.parse::<usize>().map_err(|_| {
+        NatsError::Protocol(format!("invalid HMSG header length: {header_len_str}"))
+    })?;
+    let total_len = total_len_str
+        .parse::<usize>()
+        .map_err(|_| NatsError::Protocol(format!("invalid HMSG total length: {total_len_str}")))?;
+
+    if header_len == 0 || header_len > total_len {
+        return Err(NatsError::Protocol(format!(
+            "invalid HMSG lengths: header_len={header_len}, total_len={total_len}"
+        )));
+    }
+
+    if total_len > max_read_buffer {
+        return Err(NatsError::Protocol(format!(
+            "HMSG total length {total_len} exceeds maximum ({max_read_buffer} bytes)"
+        )));
+    }
+
+    let body_start = header_end + 2;
+    let body_end = body_start
+        .checked_add(total_len)
+        .ok_or_else(|| NatsError::Protocol("HMSG body length overflow".to_string()))?;
+    let total_frame_len = body_end
+        .checked_add(2)
+        .ok_or_else(|| NatsError::Protocol("HMSG frame length overflow".to_string()))?;
+
+    if buf.len() < total_frame_len {
+        return Ok(None);
+    }
+    if buf[body_end] != b'\r' || buf[body_end + 1] != b'\n' {
+        return Err(NatsError::Protocol(
+            "malformed HMSG payload terminator".to_string(),
+        ));
+    }
+
+    let header_block_end = body_start + header_len;
+    let header_block = buf[body_start..header_block_end].to_vec();
+    if !is_valid_nats_header_block(&header_block) {
+        return Err(NatsError::Protocol(
+            "malformed HMSG header block".to_string(),
+        ));
+    }
+
+    let payload = buf[header_block_end..body_end].to_vec();
+    Ok(Some((
+        Message {
+            subject,
+            sid,
+            reply_to,
+            headers: Some(header_block),
+            payload,
+        },
+        total_frame_len,
+    )))
+}
+
+fn find_crlf(buf: &[u8]) -> Option<usize> {
+    (0..buf.len().saturating_sub(1)).find(|&i| buf[i] == b'\r' && buf[i + 1] == b'\n')
+}
+
+/// Parse a NATS server INFO payload through the production parser for fuzzing.
+#[cfg(any(test, feature = "fuzz"))]
+pub fn fuzz_parse_nats_server_info(json: &str) -> Result<ServerInfo, NatsError> {
+    ServerInfo::parse(json)
+}
+
+/// Parse an HMSG frame through the production parser for fuzzing.
+#[cfg(any(test, feature = "fuzz"))]
+pub fn fuzz_parse_nats_hmsg_frame(
+    frame: &[u8],
+    max_read_buffer: usize,
+) -> Result<Option<Message>, NatsError> {
+    parse_hmsg_frame(frame, max_read_buffer).map(|parsed| parsed.map(|(message, _)| message))
 }
 
 fn is_valid_nats_header_block(header_block: &[u8]) -> bool {

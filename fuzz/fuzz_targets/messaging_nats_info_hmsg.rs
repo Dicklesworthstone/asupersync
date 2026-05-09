@@ -28,149 +28,116 @@
 
 use libfuzzer_sys::fuzz_target;
 
+use asupersync::messaging::nats::{fuzz_parse_nats_hmsg_frame, fuzz_parse_nats_server_info};
+
 const MAX_INPUT: usize = 64 * 1024;
 
-/// Mirror of asupersync::messaging::nats::extract_json_string.
-fn extract_json_string(json: &str, key: &str) -> Option<String> {
-    let pattern = format!("\"{key}\":\"");
-    let start = json.find(&pattern)? + pattern.len();
-    let slice = &json[start..];
-    let mut out = String::with_capacity(slice.len());
-    let mut chars = slice.chars();
-    loop {
-        match chars.next()? {
-            '"' => return Some(out),
-            '\\' => {
-                let next = chars.next()?;
-                match next {
-                    'b' => out.push('\x08'),
-                    'f' => out.push('\x0C'),
-                    'n' => out.push('\n'),
-                    'r' => out.push('\r'),
-                    't' => out.push('\t'),
-                    'u' => {
-                        let mut hex = String::with_capacity(4);
-                        for _ in 0..4 {
-                            hex.push(chars.next()?);
-                        }
-                        if let Ok(cp) = u32::from_str_radix(&hex, 16)
-                            && let Some(c) = char::from_u32(cp)
-                        {
-                            out.push(c);
-                        }
-                    }
-                    other => out.push(other),
-                }
-            }
-            c => out.push(c),
-        }
-    }
-}
-
-fn extract_json_i64(json: &str, key: &str) -> Option<i64> {
-    let pattern = format!("\"{key}\":");
-    let start = json.find(&pattern)? + pattern.len();
-    let slice = json[start..].trim_start();
-    let end = slice
-        .find(|c: char| !c.is_ascii_digit() && c != '-')
-        .unwrap_or(slice.len());
-    slice[..end].parse::<i64>().ok()
-}
-
-fn extract_json_bool(json: &str, key: &str) -> Option<bool> {
-    let pattern = format!("\"{key}\":");
-    let start = json.find(&pattern)? + pattern.len();
-    let slice = &json[start..].trim_start();
-    if slice.starts_with("true") {
-        Some(true)
-    } else if slice.starts_with("false") {
-        Some(false)
-    } else {
-        None
-    }
-}
-
-/// Mirror of the HMSG header-block decoder. Header block format:
-/// `NATS/1.0\r\n<name>: <value>\r\n<name>: <value>\r\n\r\n`.
-fn parse_hmsg_headers(block: &[u8]) -> Option<Vec<(String, String)>> {
-    // Reject any byte outside printable-ASCII + HTAB + CR/LF (the
-    // production sanitiser applies the same allowlist when emitting,
-    // and the parser must tolerate decoder input that contains the
-    // CR/LF separators).
-    let text = std::str::from_utf8(block).ok()?;
-    let mut lines = text.split("\r\n");
-    let first = lines.next()?;
-    if !first.starts_with("NATS/") {
-        return None;
-    }
-    let mut out = Vec::new();
-    for line in lines {
-        if line.is_empty() {
-            break;
-        }
-        if let Some((name, value)) = line.split_once(':') {
-            // Reject names with CR/LF/NUL — these MUST have been
-            // stripped by the encoder.
-            if name.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0) {
-                return None;
-            }
-            // Trim the leading space the encoder emits after `:`.
-            let value = value.strip_prefix(' ').unwrap_or(value);
-            // Reject values with CR/LF/NUL.
-            if value.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0) {
-                return None;
-            }
-            out.push((name.to_string(), value.to_string()));
-        } else {
-            return None;
-        }
-    }
-    Some(out)
-}
-
 fn assert_fixed_oracles() {
-    assert_eq!(
-        extract_json_string(
-            r#"{"server_id":"line\nquote\"slash\/unknown\zunicode\u0041bad\uZZZZsurrogate\uD800end"}"#,
-            "server_id"
+    let info = fuzz_parse_nats_server_info(
+        r#"{"server_id":"srv-A","server_name":"node-1","version":"2.10.0","proto":1,"max_payload":42,"tls_required":false,"tls_available":true,"headers":true,"nonce":"abc"}"#,
+    )
+    .expect("valid INFO JSON should parse through production ServerInfo");
+    assert_eq!(info.server_id, "srv-A");
+    assert_eq!(info.server_name, "node-1");
+    assert_eq!(info.version, "2.10.0");
+    assert_eq!(info.proto, 1);
+    assert_eq!(info.max_payload, 42);
+    assert!(!info.tls_required);
+    assert!(info.tls_available);
+    assert!(info.headers);
+    assert_eq!(info.nonce.as_deref(), Some("abc"));
+
+    assert!(fuzz_parse_nats_server_info("[]").is_err());
+    assert!(fuzz_parse_nats_server_info(r#"{"server_id":"truncated\u12"}"#).is_err());
+
+    let headers = b"NATS/1.0\r\nStatus: 503\r\nDescription: No Responders\r\n\r\n";
+    let payload = b"hello";
+    let frame = build_hmsg_frame("updates", 7, None, headers, payload);
+    let parsed = fuzz_parse_nats_hmsg_frame(&frame, MAX_INPUT)
+        .expect("valid HMSG frame should not error")
+        .expect("valid HMSG frame should be complete");
+    assert_eq!(parsed.subject, "updates");
+    assert_eq!(parsed.sid, 7);
+    assert!(parsed.reply_to.is_none());
+    assert_eq!(parsed.headers.as_deref(), Some(headers.as_slice()));
+    assert_eq!(parsed.payload, payload);
+
+    let status_headers = b"NATS/1.0 408 Request Timeout\r\n\r\n";
+    let parsed = fuzz_parse_nats_hmsg_frame(
+        &build_hmsg_frame("status", 8, Some("_INBOX.reply"), status_headers, b""),
+        MAX_INPUT,
+    )
+    .expect("status-line HMSG should not error")
+    .expect("status-line HMSG should be complete");
+    assert_eq!(parsed.reply_to.as_deref(), Some("_INBOX.reply"));
+    assert_eq!(parsed.headers.as_deref(), Some(status_headers.as_slice()));
+    assert!(parsed.payload.is_empty());
+
+    let incomplete = b"HMSG s 1 12 16\r\nNATS/1.0\r\n";
+    assert!(
+        fuzz_parse_nats_hmsg_frame(incomplete, MAX_INPUT)
+            .expect("incomplete HMSG should wait for more bytes")
+            .is_none()
+    );
+    assert!(
+        fuzz_parse_nats_hmsg_frame(b"HMSG s 1 8 4\r\nNATS/1.0\r\n\r\n\r\n", MAX_INPUT).is_err()
+    );
+    assert!(fuzz_parse_nats_hmsg_frame(&frame, 1).is_err());
+}
+
+fn build_hmsg_frame(
+    subject: &str,
+    sid: u64,
+    reply_to: Option<&str>,
+    headers: &[u8],
+    payload: &[u8],
+) -> Vec<u8> {
+    let total_len = headers.len() + payload.len();
+    let head = if let Some(reply_to) = reply_to {
+        format!(
+            "HMSG {subject} {sid} {reply_to} {} {total_len}\r\n",
+            headers.len()
         )
-        .as_deref(),
-        Some("line\nquote\"slash/unknownzunicodeAbadsurrogateend")
-    );
-    assert_eq!(
-        extract_json_string(r#"{"server_id":"truncated\u12"}"#, "server_id"),
-        None
-    );
-    assert_eq!(extract_json_i64(r#"{"proto": -12x}"#, "proto"), Some(-12));
-    assert_eq!(
-        extract_json_i64(r#"{"max_payload": 42,"#, "max_payload"),
-        Some(42)
-    );
-    assert_eq!(extract_json_i64(r#"{"proto": +1}"#, "proto"), None);
-    assert_eq!(
-        extract_json_bool(r#"{"headers": trueish}"#, "headers"),
-        Some(true)
-    );
-    assert_eq!(
-        extract_json_bool(r#"{"tls_required": falsehood}"#, "tls_required"),
-        Some(false)
-    );
-    assert_eq!(
-        parse_hmsg_headers(b"NATS/1.0\r\nStatus: 503\r\nDescription: No Responders\r\n\r\n"),
-        Some(vec![
-            ("Status".to_string(), "503".to_string()),
-            ("Description".to_string(), "No Responders".to_string()),
-        ])
-    );
-    assert_eq!(
-        parse_hmsg_headers(b"NATS/1.0 408 Request Timeout\r\n\r\n"),
-        Some(Vec::new())
-    );
-    assert_eq!(parse_hmsg_headers(b"HTTP/1.1\r\nFoo: bar\r\n\r\n"), None);
-    assert_eq!(
-        parse_hmsg_headers(b"NATS/1.0\r\nBad: va\0lue\r\n\r\n"),
-        None
-    );
+    } else {
+        format!("HMSG {subject} {sid} {} {total_len}\r\n", headers.len())
+    };
+    let mut frame = Vec::with_capacity(head.len() + total_len + 2);
+    frame.extend_from_slice(head.as_bytes());
+    frame.extend_from_slice(headers);
+    frame.extend_from_slice(payload);
+    frame.extend_from_slice(b"\r\n");
+    frame
+}
+
+fn observe_info_json(json: &str) {
+    if let Ok(info) = fuzz_parse_nats_server_info(json) {
+        assert!(
+            info.connect_urls.is_empty(),
+            "INFO parser does not currently materialize connect_urls"
+        );
+    }
+}
+
+fn observe_hmsg_frame(frame: &[u8]) {
+    if let Ok(Some(message)) = fuzz_parse_nats_hmsg_frame(frame, MAX_INPUT) {
+        assert!(!message.subject.is_empty());
+        let headers = message
+            .headers
+            .as_deref()
+            .expect("HMSG parser must attach the accepted header block");
+        assert!(
+            headers.ends_with(b"\r\n\r\n"),
+            "accepted HMSG headers must retain their CRLF terminator"
+        );
+        assert!(
+            headers == b"NATS/1.0\r\n\r\n" || headers.starts_with(b"NATS/1.0"),
+            "accepted HMSG headers must carry the NATS/1.0 status line"
+        );
+        assert!(
+            headers.len() + message.payload.len() <= MAX_INPUT,
+            "accepted HMSG body must respect the configured read bound"
+        );
+    }
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -187,43 +154,25 @@ fuzz_target!(|data: &[u8]| {
 
     match mode {
         0 => {
-            // INFO JSON string-extraction: feed arbitrary bytes,
-            // attempt to extract every well-known field, panic-free.
             if let Ok(json) = std::str::from_utf8(payload) {
-                let _ = extract_json_string(json, "server_id");
-                let _ = extract_json_string(json, "server_name");
-                let _ = extract_json_string(json, "version");
-                // String key with embedded escapes / NUL / unicode-escape
-                // surrogate that didn't match \uXXXX shape.
-                let _ = extract_json_string(json, "connect_urls");
+                observe_info_json(json);
             }
         }
         1 => {
-            // INFO JSON int / bool extractors: same shape.
-            if let Ok(json) = std::str::from_utf8(payload) {
-                let _ = extract_json_i64(json, "proto");
-                let _ = extract_json_i64(json, "max_payload");
-                let _ = extract_json_bool(json, "tls_required");
-                let _ = extract_json_bool(json, "tls_available");
-                let _ = extract_json_bool(json, "headers");
-            }
+            observe_hmsg_frame(payload);
         }
         2 => {
-            // HMSG header block: feed arbitrary bytes; parser must
-            // either return Some(headers) or None — never panic.
-            let _ = parse_hmsg_headers(payload);
+            let frame = build_hmsg_frame("fuzz.subject", 1, None, payload, b"");
+            observe_hmsg_frame(&frame);
         }
         _ => {
-            // Combined: treat first half as JSON, second half as
-            // header block. Useful for cross-state confusion attacks
-            // where a single input is parsed as both shapes by
-            // different state-machine branches.
             let half = payload.len() / 2;
             let (a, b) = payload.split_at(half);
             if let Ok(json) = std::str::from_utf8(a) {
-                let _ = extract_json_string(json, "server_id");
+                observe_info_json(json);
             }
-            let _ = parse_hmsg_headers(b);
+            let frame = build_hmsg_frame("fuzz.reply", 2, Some("_INBOX.fuzz"), b, a);
+            observe_hmsg_frame(&frame);
         }
     }
 });
