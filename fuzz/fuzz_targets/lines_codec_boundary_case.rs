@@ -39,10 +39,6 @@ impl LineEnding {
             LineEnding::None => b"",
         }
     }
-
-    fn expected_termination(self) -> bool {
-        matches!(self, LineEnding::Lf | LineEnding::Crlf)
-    }
 }
 
 /// A single line segment with specific length and ending
@@ -100,7 +96,7 @@ impl BoundaryFuzzInput {
             };
 
             // Add content
-            buffer.extend(std::iter::repeat(fill_byte).take(content_len));
+            buffer.extend(std::iter::repeat_n(fill_byte, content_len));
 
             // Add line ending
             buffer.extend_from_slice(segment.ending.bytes());
@@ -115,6 +111,8 @@ fuzz_target!(|input: BoundaryFuzzInput| {
     if input.segments.len() > 20 {
         return;
     }
+
+    assert_known_decode_eof_outputs();
 
     let max_length = input.actual_max_length();
     let buffer = input.generate_buffer();
@@ -211,15 +209,10 @@ fn test_state_transitions(_input: &BoundaryFuzzInput, max_length: usize, buffer:
 
     // Track whether we can recover after hitting max length
     let mut hit_error = false;
-    let mut recovered_after_error = false;
 
     loop {
         match codec.decode(&mut buf) {
-            Ok(Some(_line)) => {
-                if hit_error {
-                    recovered_after_error = true;
-                }
-            }
+            Ok(Some(_line)) => {}
             Ok(None) => break,
             Err(LinesCodecError::MaxLineLengthExceeded) => {
                 hit_error = true;
@@ -246,7 +239,7 @@ fn test_state_transitions(_input: &BoundaryFuzzInput, max_length: usize, buffer:
 }
 
 /// Test that different line endings are handled consistently
-fn test_mixed_endings(input: &BoundaryFuzzInput, max_length: usize, buffer: &[u8]) {
+fn test_mixed_endings(_input: &BoundaryFuzzInput, max_length: usize, _buffer: &[u8]) {
     // Test with a known mix of line endings to verify consistent behavior
     let test_patterns = [
         format!(
@@ -325,6 +318,107 @@ fn test_chunked_boundary(_input: &BoundaryFuzzInput, max_length: usize, buffer: 
 
     // Handle any remaining data
     if !buf.is_empty() {
-        let _ = codec.decode_eof(&mut buf);
+        match observe_decode_eof(&mut codec, &mut buf, max_length) {
+            Ok(_) | Err(LinesCodecError::MaxLineLengthExceeded | LinesCodecError::InvalidUtf8) => {}
+            Err(LinesCodecError::Io(error)) => {
+                panic!("decode_eof should not surface transport I/O here: {error}");
+            }
+        }
     }
+}
+
+fn assert_known_decode_eof_outputs() {
+    let mut codec = LinesCodec::new_with_max_length(8);
+    let mut buf = BytesMut::from("tail");
+    assert!(matches!(
+        observe_decode_eof(&mut codec, &mut buf, 8),
+        Ok(Some(line)) if line == "tail"
+    ));
+    assert!(buf.is_empty());
+    assert!(matches!(
+        observe_decode_eof(&mut codec, &mut buf, 8),
+        Ok(None)
+    ));
+
+    let mut codec = LinesCodec::new_with_max_length(8);
+    let mut buf = BytesMut::from("tail\r");
+    assert!(matches!(
+        observe_decode_eof(&mut codec, &mut buf, 8),
+        Ok(Some(line)) if line == "tail"
+    ));
+    assert!(buf.is_empty());
+
+    let mut codec = LinesCodec::new_with_max_length(8);
+    let mut buf = BytesMut::from("one\ntwo");
+    assert!(matches!(
+        observe_decode_eof(&mut codec, &mut buf, 8),
+        Ok(Some(line)) if line == "one"
+    ));
+    assert_eq!(&buf[..], b"two");
+    assert!(matches!(
+        observe_decode_eof(&mut codec, &mut buf, 8),
+        Ok(Some(line)) if line == "two"
+    ));
+    assert!(buf.is_empty());
+
+    let mut codec = LinesCodec::new_with_max_length(3);
+    let mut buf = BytesMut::from("abcd");
+    assert!(matches!(
+        observe_decode_eof(&mut codec, &mut buf, 3),
+        Err(LinesCodecError::MaxLineLengthExceeded)
+    ));
+
+    let mut codec = LinesCodec::new_with_max_length(8);
+    let mut buf = BytesMut::from(&b"\xFF"[..]);
+    assert!(matches!(
+        observe_decode_eof(&mut codec, &mut buf, 8),
+        Err(LinesCodecError::InvalidUtf8)
+    ));
+}
+
+fn observe_decode_eof(
+    codec: &mut LinesCodec,
+    buf: &mut BytesMut,
+    max_length: usize,
+) -> Result<Option<String>, LinesCodecError> {
+    let before_len = buf.len();
+    let result = codec.decode_eof(buf);
+
+    assert!(
+        buf.len() <= before_len,
+        "decode_eof grew source buffer from {} to {} bytes",
+        before_len,
+        buf.len()
+    );
+
+    match &result {
+        Ok(Some(line)) => {
+            assert!(
+                line.len() <= max_length,
+                "decode_eof line length {} exceeds max_length {}",
+                line.len(),
+                max_length
+            );
+            assert!(
+                !line.contains('\n') && !line.contains('\r'),
+                "decode_eof returned line with terminator bytes: {:?}",
+                line
+            );
+        }
+        Ok(None) => {
+            assert!(
+                buf.is_empty(),
+                "decode_eof returned None while {} buffered bytes remained",
+                buf.len()
+            );
+        }
+        Err(error) => {
+            assert!(
+                !error.to_string().is_empty(),
+                "decode_eof errors should carry non-empty diagnostics"
+            );
+        }
+    }
+
+    result
 }
