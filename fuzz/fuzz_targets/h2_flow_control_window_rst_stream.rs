@@ -14,10 +14,11 @@
 use arbitrary::Arbitrary;
 use asupersync::bytes::Bytes;
 use asupersync::http::h2::{
-    connection::Connection,
+    connection::{Connection, ConnectionState},
     error::{ErrorCode, H2Error},
     frame::{DataFrame, Frame, HeadersFrame, RstStreamFrame, WindowUpdateFrame},
     settings::Settings,
+    stream::StreamState,
 };
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
@@ -113,6 +114,7 @@ impl RstErrorCode {
 #[derive(Debug)]
 struct WindowTracker {
     connection_window: i32,
+    initial_stream_window: i32,
     stream_windows: HashMap<u32, i32>,
     pending_data: HashMap<u32, u32>, // stream_id -> pending bytes
 }
@@ -121,9 +123,14 @@ impl WindowTracker {
     fn new(initial_connection_window: i32, initial_stream_window: i32) -> Self {
         Self {
             connection_window: initial_connection_window,
+            initial_stream_window,
             stream_windows: HashMap::new(),
             pending_data: HashMap::new(),
         }
+    }
+
+    fn track_default_stream(&mut self, stream_id: u32) {
+        self.track_stream(stream_id, self.initial_stream_window);
     }
 
     fn track_stream(&mut self, stream_id: u32, window: i32) {
@@ -190,6 +197,9 @@ fuzz_target!(|data: &[u8]| {
     // Test the main flow control scenario
     test_flow_control_window_rst_stream(&test_case);
 
+    // Test connection-level window operations
+    test_connection_window_operations(&test_case);
+
     // Test specific edge cases
     test_window_credit_recovery(&test_case);
 
@@ -220,6 +230,7 @@ fn test_flow_control_window_rst_stream(test_case: &FlowControlTest) {
     // Execute stream operations
     for stream_op in &test_case.stream_operations {
         let stream_id = normalize_stream_id(stream_op.stream_id);
+        observe_operation_timing(&stream_op.timing, &connection);
 
         let operation_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             execute_stream_operation(
@@ -239,6 +250,62 @@ fn test_flow_control_window_rst_stream(test_case: &FlowControlTest) {
 
     // Verify final window state consistency
     verify_window_consistency(&connection, &window_tracker);
+}
+
+/// Test connection-level WINDOW_UPDATE and DATA consumption paths.
+fn test_connection_window_operations(test_case: &FlowControlTest) {
+    let connection_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        create_test_connection(test_case.initial_window_size)
+    }));
+
+    let mut connection = match connection_result {
+        Ok(conn) => conn,
+        Err(_) => return,
+    };
+
+    let stream_id = normalize_stream_id(1);
+    let mut window_tracker = WindowTracker::new(
+        65535,
+        i32::try_from(bounded_initial_window_size(test_case.initial_window_size)).unwrap_or(65535),
+    );
+
+    if open_test_stream(&mut connection, stream_id).is_ok() {
+        window_tracker.track_default_stream(stream_id);
+    }
+
+    for op in test_case.connection_window_ops.iter().take(20) {
+        match op.operation {
+            WindowOperation::WindowUpdate => {
+                let increment = op.increment.clamp(1, 65_535);
+                let result = connection
+                    .process_frame(Frame::WindowUpdate(WindowUpdateFrame::new(0, increment)))
+                    .map(|_| ());
+                observe_h2_result("connection WINDOW_UPDATE", &result);
+                if result.is_ok() {
+                    let increment_i32 = i32::try_from(increment).unwrap_or(i32::MAX);
+                    window_tracker.connection_window = window_tracker
+                        .connection_window
+                        .saturating_add(increment_i32);
+                }
+            }
+            WindowOperation::ConsumeWindow => {
+                let size = op.increment.clamp(1, 16 * 1024);
+                let result = send_data_frame(&mut connection, stream_id, size, false);
+                observe_h2_result("connection-window DATA consumption", &result);
+                if result.is_ok()
+                    && let Err(error) = window_tracker.consume_window(stream_id, size)
+                {
+                    assert!(
+                        !error.is_empty(),
+                        "connection-window tracker produced an empty diagnostic"
+                    );
+                }
+            }
+            WindowOperation::CheckWindow => {
+                verify_window_consistency(&connection, &window_tracker);
+            }
+        }
+    }
 }
 
 /// Test window credit recovery when RST_STREAM clears pending data
@@ -262,12 +329,16 @@ fn test_window_credit_recovery(test_case: &FlowControlTest) {
 
     // Step 2: Send DATA frames to consume window
     let data_sizes = [1024, 2048, 4096]; // Various sizes to consume window
-    let mut total_consumed = 0u32;
 
     for &size in &data_sizes {
         let data_result = send_data_frame(&mut connection, stream_id, size, false);
         if data_result.is_ok() {
-            total_consumed += size;
+            assert!(
+                connection.recv_window() >= 0,
+                "DATA frame consumption drove connection receive window negative"
+            );
+        } else {
+            observe_h2_result("window credit recovery DATA frame", &data_result);
         }
     }
 
@@ -312,7 +383,10 @@ fn test_concurrent_rst_stream_operations(test_case: &FlowControlTest) {
 
     // Send DATA on all streams
     for &stream_id in &active_streams {
-        let _ = send_data_frame(&mut connection, stream_id, 1024, false);
+        observe_h2_result(
+            "concurrent_rst_stream send_data_frame",
+            &send_data_frame(&mut connection, stream_id, 1024, false),
+        );
     }
 
     // Send RST_STREAM on all streams concurrently
@@ -360,14 +434,17 @@ fn test_window_exhaustion_with_rst(_test_case: &FlowControlTest) {
 
     match exhaustion_result {
         Ok(()) => {
-            // Data was accepted (unexpected for window exhaustion test)
-            eprintln!("Large DATA frame unexpectedly accepted");
+            panic!(
+                "large DATA frame accepted despite initial stream window: size={large_data_size}"
+            );
         }
         Err(ref error) if is_flow_control_error(error) => {
             // Expected flow control error
+            observe_h2_error("window exhaustion DATA frame", error);
         }
         Err(_) => {
             // Other errors acceptable
+            observe_h2_result("window exhaustion DATA frame", &exhaustion_result);
         }
     }
 
@@ -384,19 +461,23 @@ fn test_window_exhaustion_with_rst(_test_case: &FlowControlTest) {
 // Helper functions for connection management and frame operations
 
 /// Create a test connection with specified initial window size
-fn create_test_connection(_initial_window_size: u32) -> Connection {
-    let settings = Settings::default();
-    // Note: In a real implementation, initial_window_size would be configured here
+fn create_test_connection(initial_window_size: u32) -> Connection {
+    let settings = Settings {
+        initial_window_size: bounded_initial_window_size(initial_window_size),
+        ..Settings::default()
+    };
 
-    let connection = Connection::server(settings);
-    // Note: Connection state management would be handled properly in real implementation
-    connection
+    Connection::server(settings)
+}
+
+fn bounded_initial_window_size(initial_window_size: u32) -> u32 {
+    initial_window_size.min(asupersync::http::h2::settings::MAX_INITIAL_WINDOW_SIZE)
 }
 
 /// Normalize stream ID to be odd (client-initiated)
 fn normalize_stream_id(raw_stream_id: u32) -> u32 {
     let normalized = raw_stream_id % 0x7FFF_FFFF; // Keep within valid range
-    if normalized == 0 || normalized % 2 == 0 {
+    if normalized == 0 || normalized.is_multiple_of(2) {
         normalized + 1 // Make odd (client stream)
     } else {
         normalized
@@ -484,16 +565,75 @@ fn create_basic_header_block() -> Bytes {
 
 /// Verify stream is in closed state
 fn verify_stream_closed(connection: &Connection, stream_id: u32) {
-    // In a full implementation, we'd check the actual stream state
-    // For now, we just verify the operation doesn't panic
-    let _ = connection.stream(stream_id);
+    if let Some(stream) = connection.stream(stream_id) {
+        assert!(
+            matches!(stream.state(), StreamState::Closed),
+            "RST_STREAM left stream {stream_id} in non-closed state: {:?}",
+            stream.state()
+        );
+    }
 }
 
 /// Verify window consistency between connection and tracker
 fn verify_window_consistency(connection: &Connection, _window_tracker: &WindowTracker) {
-    // In a full implementation, we'd compare actual vs expected window state
-    // For now, we just verify the connection is in a valid state
-    let _ = connection.state();
+    assert!(
+        connection.recv_window() >= 0,
+        "connection receive window went negative: {}",
+        connection.recv_window()
+    );
+    assert!(
+        connection.send_window() >= 0,
+        "connection send window went negative: {}",
+        connection.send_window()
+    );
+    assert_valid_connection_state("flow-control consistency check", connection.state());
+}
+
+fn observe_operation_timing(timing: &OperationTiming, connection: &Connection) {
+    match timing {
+        OperationTiming::Immediate => {}
+        OperationTiming::Delayed => {
+            assert!(
+                connection.recv_window() >= 0,
+                "delayed operation observed a negative receive window"
+            );
+        }
+        OperationTiming::Concurrent => {
+            assert_valid_connection_state("concurrent operation", connection.state());
+        }
+    }
+}
+
+fn assert_valid_connection_state(context: &str, state: ConnectionState) {
+    assert!(
+        matches!(
+            state,
+            ConnectionState::Handshaking
+                | ConnectionState::Open
+                | ConnectionState::Closing
+                | ConnectionState::Closed
+        ),
+        "{context} observed invalid connection state: {state:?}"
+    );
+}
+
+fn observe_h2_result(context: &str, result: &Result<(), H2Error>) {
+    if let Err(error) = result {
+        observe_h2_error(context, error);
+    }
+}
+
+fn observe_h2_error(context: &str, error: &H2Error) {
+    let message = error.to_string();
+    assert!(
+        !message.is_empty(),
+        "{context} produced an empty H2 error diagnostic"
+    );
+    assert!(
+        message.len() <= 512,
+        "{context} produced an oversized H2 error diagnostic: {} bytes",
+        message.len()
+    );
 }
 
 /// Check if error is a flow control error
