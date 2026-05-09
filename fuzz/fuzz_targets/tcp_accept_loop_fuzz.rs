@@ -150,7 +150,8 @@ impl AcceptLoopShadowModel {
 /// Normalize fuzz input to valid ranges
 fn normalize_fuzz_input(input: &mut TcpAcceptFuzzInput) {
     // Limit operations to prevent timeouts
-    input.operations.truncate(20);
+    let seed_operation_limit = 1 + (input.seed as usize % 20);
+    input.operations.truncate(seed_operation_limit);
 
     // Bound configuration values
     input.config.max_operations = input.config.max_operations.min(1000);
@@ -321,7 +322,7 @@ fn test_fd_exhaustion(
                 shadow.record_accept_attempt(true);
 
                 // Simulate occasional FD closure
-                if successful_accepts % 10 == 0 && active_fds > 0 {
+                if successful_accepts.is_multiple_of(10) && active_fds > 0 {
                     active_fds -= 1;
                 }
             } else {
@@ -393,7 +394,7 @@ fn test_cancel_during_accept(
             }
 
             // Simulate accept polling
-            if start.elapsed().as_millis() % 10 == 0 {
+            if start.elapsed().as_millis().is_multiple_of(10) {
                 shadow.record_accept_attempt(true);
             }
         }
@@ -402,11 +403,9 @@ fn test_cancel_during_accept(
         if shadow.is_cancelled() {
             // Verify cancellation is respected
             for _ in 0..5 {
-                if shadow.is_cancelled() {
-                    break; // Good - cancellation respected
+                if !shadow.is_cancelled() {
+                    return Err("Accept operations continued after cancellation".to_string());
                 }
-                // If we reach here, cancellation wasn't respected
-                return Err("Accept operations continued after cancellation".to_string());
             }
         }
     }
@@ -477,6 +476,9 @@ fn execute_tcp_accept_operations(input: &TcpAcceptFuzzInput) -> Result<(), Strin
 
         let result = match operation {
             TcpAcceptOperation::AcceptBurst { .. } => test_accept_burst(operation, &shadow),
+            TcpAcceptOperation::ReusePortSetup { .. } if !input.config.enable_fairness_tracking => {
+                Ok(())
+            }
             TcpAcceptOperation::ReusePortSetup { .. } => {
                 test_reuseport_fairness(operation, &shadow)
             }
@@ -486,6 +488,9 @@ fn execute_tcp_accept_operations(input: &TcpAcceptFuzzInput) -> Result<(), Strin
             }
             TcpAcceptOperation::CancelDuringAccept { .. } => {
                 test_cancel_during_accept(operation, &shadow)
+            }
+            TcpAcceptOperation::AcceptStorm { .. } if !input.config.enable_storm_detection => {
+                Ok(())
             }
             TcpAcceptOperation::AcceptStorm { .. } => test_accept_storm_backoff(operation, &shadow),
         };
@@ -534,6 +539,16 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
 
-    // Run TCP accept loop fuzzing
-    let _ = fuzz_tcp_accept_loop(input);
+    // Run TCP accept loop fuzzing and require rejected scenarios to expose
+    // bounded diagnostics instead of becoming no-panic-only probes.
+    match fuzz_tcp_accept_loop(input) {
+        Ok(()) => {}
+        Err(err) => {
+            assert!(!err.is_empty(), "TCP accept loop error must be diagnostic");
+            assert!(
+                err.len() <= 256,
+                "TCP accept loop diagnostic grew unexpectedly: {err}"
+            );
+        }
+    }
 });
