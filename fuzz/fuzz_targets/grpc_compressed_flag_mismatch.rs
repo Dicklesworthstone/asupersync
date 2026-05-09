@@ -34,21 +34,21 @@ struct GrpcCompressedFlagConfig {
 #[derive(Debug, Arbitrary, Clone)]
 enum CompressionScenario {
     /// Flag=1, payload=uncompressed
-    FlagCompressedPayloadRaw,
+    CompressedPayloadRaw,
     /// Flag=0, payload=gzip compressed
-    FlagUncompressedPayloadGzip,
+    UncompressedPayloadGzip,
     /// Flag=0, payload=deflate compressed
-    FlagUncompressedPayloadDeflate,
+    UncompressedPayloadDeflate,
     /// Flag=1, payload=malformed compression
-    FlagCompressedPayloadMalformed,
+    CompressedPayloadMalformed,
     /// Flag=1, payload=partially compressed
-    FlagCompressedPayloadPartial,
+    CompressedPayloadPartial,
     /// Flag=invalid value (2-255)
-    FlagInvalidValue,
+    InvalidValue,
     /// Flag=0, payload=mixed compressed/uncompressed
-    FlagUncompressedPayloadMixed,
+    UncompressedPayloadMixed,
     /// Flag=1, payload=double compressed
-    FlagCompressedPayloadDouble,
+    CompressedPayloadDouble,
 }
 
 #[derive(Debug, Arbitrary, Clone)]
@@ -69,13 +69,13 @@ impl GrpcCompressedFlagConfig {
 
         // Ensure length field matches scenario requirements
         match self.scenario {
-            CompressionScenario::FlagInvalidValue => {
+            CompressionScenario::InvalidValue => {
                 // Force invalid compressed flag
                 self.compressed_flag = (self.compressed_flag % 254) + 2; // 2-255
             }
             _ => {
                 // Normal flag values 0 or 1
-                self.compressed_flag = self.compressed_flag % 2;
+                self.compressed_flag %= 2;
             }
         }
 
@@ -85,29 +85,29 @@ impl GrpcCompressedFlagConfig {
 
     fn generate_test_payload(&self) -> Vec<u8> {
         match &self.scenario {
-            CompressionScenario::FlagCompressedPayloadRaw => {
+            CompressionScenario::CompressedPayloadRaw => {
                 // Flag=1 but payload is raw uncompressed data
                 self.payload.clone()
             }
 
-            CompressionScenario::FlagUncompressedPayloadGzip => {
+            CompressionScenario::UncompressedPayloadGzip => {
                 // Flag=0 but payload is actually gzip compressed
                 compress_gzip(&self.payload)
             }
 
-            CompressionScenario::FlagUncompressedPayloadDeflate => {
+            CompressionScenario::UncompressedPayloadDeflate => {
                 // Flag=0 but payload is actually deflate compressed
                 compress_deflate(&self.payload)
             }
 
-            CompressionScenario::FlagCompressedPayloadMalformed => {
+            CompressionScenario::CompressedPayloadMalformed => {
                 // Flag=1 but payload has invalid compression headers
                 let mut malformed = vec![0x1f, 0x8b]; // Partial gzip header
                 malformed.extend(&self.payload[..self.payload.len().min(10)]);
                 malformed
             }
 
-            CompressionScenario::FlagCompressedPayloadPartial => {
+            CompressionScenario::CompressedPayloadPartial => {
                 // Flag=1 but payload is only partially compressed
                 let compressed = compress_gzip(&self.payload);
                 let split_point = compressed.len() / 2;
@@ -116,19 +116,19 @@ impl GrpcCompressedFlagConfig {
                 partial
             }
 
-            CompressionScenario::FlagInvalidValue => {
+            CompressionScenario::InvalidValue => {
                 // Invalid flag value with regular payload
                 self.payload.clone()
             }
 
-            CompressionScenario::FlagUncompressedPayloadMixed => {
+            CompressionScenario::UncompressedPayloadMixed => {
                 // Flag=0 but payload contains mixed compression
                 let mut mixed = compress_gzip(&self.payload[..self.payload.len() / 2]);
                 mixed.extend(&self.payload[self.payload.len() / 2..]);
                 mixed
             }
 
-            CompressionScenario::FlagCompressedPayloadDouble => {
+            CompressionScenario::CompressedPayloadDouble => {
                 // Flag=1 with double-compressed payload
                 let first_compression = compress_gzip(&self.payload);
                 compress_gzip(&first_compression)
@@ -160,7 +160,7 @@ fn compress_gzip(data: &[u8]) -> Vec<u8> {
     use std::io::Write;
 
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-    let _ = encoder.write_all(data);
+    observe_compression_write(encoder.write_all(data), "gzip encoder write", data.len());
     encoder.finish().unwrap_or_else(|_| data.to_vec())
 }
 
@@ -170,8 +170,65 @@ fn compress_deflate(data: &[u8]) -> Vec<u8> {
 
     let mut encoder =
         flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
-    let _ = encoder.write_all(data);
+    observe_compression_write(encoder.write_all(data), "deflate encoder write", data.len());
     encoder.finish().unwrap_or_else(|_| data.to_vec())
+}
+
+fn observe_compression_write(
+    result: Result<(), std::io::Error>,
+    context: &str,
+    input_len: usize,
+) {
+    match result {
+        Ok(()) => {
+            assert!(
+                input_len <= 1024 * 1024,
+                "{context} accepted an unbounded fuzz payload"
+            );
+        }
+        Err(error) => {
+            assert!(
+                !format!("{error:?}").is_empty(),
+                "{context} failures must expose diagnostics"
+            );
+            assert!(
+                !error.to_string().trim().is_empty(),
+                "{context} display diagnostics must not be empty"
+            );
+        }
+    }
+}
+
+fn observe_header_options(include_headers: bool, header_encoding: &Option<CompressionEncoding>) {
+    let Some(header_encoding) = header_encoding else {
+        return;
+    };
+
+    let encoding_label = match header_encoding {
+        CompressionEncoding::Gzip => "gzip",
+        CompressionEncoding::Deflate => "deflate",
+        CompressionEncoding::Brotli => "br",
+        CompressionEncoding::Identity => "identity",
+        CompressionEncoding::Invalid(value) => value.as_str(),
+    };
+
+    if include_headers {
+        match header_encoding {
+            CompressionEncoding::Invalid(value) => {
+                assert_eq!(
+                    encoding_label.len(),
+                    value.len(),
+                    "invalid compression header label should be observed verbatim"
+                );
+            }
+            _ => assert!(
+                !encoding_label.is_empty(),
+                "known compression header labels must not be empty"
+            ),
+        }
+    } else {
+        let _observed_len = encoding_label.len();
+    }
 }
 
 /// Test structure to track decompression attempts and results
@@ -301,6 +358,7 @@ fuzz_target!(|data: &[u8]| {
             Err(_) => return, // Invalid input, skip
         };
     config.normalize();
+    observe_header_options(config.include_headers, &config.header_encoding);
 
     // Generate gRPC frame with potential compression flag mismatch
     let frame = config.generate_grpc_frame();
@@ -327,21 +385,21 @@ fuzz_target!(|data: &[u8]| {
                 // - Could pass through with warning
 
                 match config.scenario {
-                    CompressionScenario::FlagInvalidValue => {
+                    CompressionScenario::InvalidValue => {
                         assert!(
                             results.flag_value > 1,
                             "Invalid flag values should be detected"
                         );
                     }
-                    CompressionScenario::FlagCompressedPayloadRaw => {
+                    CompressionScenario::CompressedPayloadRaw => {
                         assert_eq!(results.flag_value, 1);
                         assert!(
                             !results.compression_detected,
                             "Raw payload should not appear compressed"
                         );
                     }
-                    CompressionScenario::FlagUncompressedPayloadGzip
-                    | CompressionScenario::FlagUncompressedPayloadDeflate => {
+                    CompressionScenario::UncompressedPayloadGzip
+                    | CompressionScenario::UncompressedPayloadDeflate => {
                         assert_eq!(results.flag_value, 0);
                         assert!(
                             results.compression_detected,
