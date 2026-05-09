@@ -11,11 +11,12 @@
 //! - Edge cases and protocol compliance
 
 #![no_main]
+#![allow(clippy::enum_variant_names)]
 
 use arbitrary::Arbitrary;
 use asupersync::bytes::BytesMut;
 use asupersync::codec::Encoder;
-use asupersync::http::h1::{Http1Codec, types::Response};
+use asupersync::http::h1::{Http1Codec, HttpError, types::Response};
 use libfuzzer_sys::fuzz_target;
 
 /// Comprehensive HTTP/1.1 response encoding fuzz structure.
@@ -229,6 +230,57 @@ enum HexFormat {
 const MAX_OPERATIONS: usize = 30;
 const MAX_PAYLOAD_SIZE: usize = 100_000;
 
+fn assert_visible_http_error(context: &str, error: &HttpError) {
+    let rendered = error.to_string();
+    assert!(
+        !rendered.is_empty(),
+        "{context} encode error must have a visible display message: {error:?}"
+    );
+
+    let debug = format!("{error:?}");
+    assert!(
+        !debug.is_empty(),
+        "{context} encode error must have visible debug diagnostics"
+    );
+}
+
+fn observe_response_encode(
+    result: Result<(), HttpError>,
+    emitted: &[u8],
+    context: &str,
+) -> Result<(), HttpError> {
+    match &result {
+        Ok(()) => {
+            assert!(
+                !emitted.is_empty(),
+                "{context} successful response encode emitted no bytes"
+            );
+            assert!(
+                emitted.starts_with(b"HTTP/"),
+                "{context} successful response encode missing status line"
+            );
+            assert!(
+                emitted.windows(2).any(|window| window == b"\r\n"),
+                "{context} successful response encode missing CRLF framing"
+            );
+        }
+        Err(error) => assert_visible_http_error(context, error),
+    }
+
+    result
+}
+
+fn observe_encode(
+    codec: &mut Http1Codec,
+    response: Response,
+    buf: &mut BytesMut,
+    context: &str,
+) -> Result<(), HttpError> {
+    let before_len = buf.len();
+    let result = codec.encode(response, buf);
+    observe_response_encode(result, &buf[before_len..], context)
+}
+
 fuzz_target!(|input: Http1ResponseFuzz| {
     // Limit operations to prevent timeout
     let total_ops = input.response_operations.len()
@@ -267,7 +319,12 @@ fn test_response_operation(operation: ResponseOperation) {
             if let Ok(response) = construct_response(&response_spec) {
                 let mut codec = Http1Codec::new();
                 let mut buf = BytesMut::new();
-                let _ = codec.encode(response, &mut buf);
+                let _ = observe_encode(
+                    &mut codec,
+                    response,
+                    &mut buf,
+                    "ResponseOperation::EncodeValid",
+                );
             }
         }
 
@@ -282,7 +339,12 @@ fn test_response_operation(operation: ResponseOperation) {
             if let Ok(response) = construct_response(&response_spec) {
                 let mut codec = Http1Codec::new();
                 let mut buf = BytesMut::new();
-                let _ = codec.encode(response, &mut buf);
+                let _ = observe_encode(
+                    &mut codec,
+                    response,
+                    &mut buf,
+                    "ResponseOperation::EncodeEdgeStatus",
+                );
             }
         }
 
@@ -292,7 +354,12 @@ fn test_response_operation(operation: ResponseOperation) {
             for response_spec in responses.iter().take(5) {
                 if let Ok(response) = construct_response(response_spec) {
                     let mut buf = BytesMut::new();
-                    let _ = codec.encode(response, &mut buf);
+                    let _ = observe_encode(
+                        &mut codec,
+                        response,
+                        &mut buf,
+                        "ResponseOperation::EncodeSequence",
+                    );
 
                     if buf.len() > MAX_PAYLOAD_SIZE {
                         break;
@@ -318,7 +385,12 @@ fn test_response_operation(operation: ResponseOperation) {
             if let Ok(response) = construct_response(&response_spec) {
                 let mut codec = Http1Codec::new();
                 let mut buf = BytesMut::new();
-                let _ = codec.encode(response, &mut buf);
+                let _ = observe_encode(
+                    &mut codec,
+                    response,
+                    &mut buf,
+                    "ResponseOperation::EncodeLargeBody",
+                );
             }
         }
     }
@@ -338,7 +410,12 @@ fn test_header_operation(operation: HeaderOperation) {
             if let Ok(response) = construct_response(&base_response) {
                 let mut codec = Http1Codec::new();
                 let mut buf = BytesMut::new();
-                let _ = codec.encode(response, &mut buf);
+                let _ = observe_encode(
+                    &mut codec,
+                    response,
+                    &mut buf,
+                    "HeaderOperation::SpecialCharHeaders",
+                );
             }
         }
 
@@ -362,7 +439,12 @@ fn test_header_operation(operation: HeaderOperation) {
             if let Ok(response) = construct_response(&base_response) {
                 let mut codec = Http1Codec::new();
                 let mut buf = BytesMut::new();
-                let _ = codec.encode(response, &mut buf);
+                let _ = observe_encode(
+                    &mut codec,
+                    response,
+                    &mut buf,
+                    "HeaderOperation::LongHeaders",
+                );
             }
         }
 
@@ -380,7 +462,12 @@ fn test_header_operation(operation: HeaderOperation) {
             if let Ok(response) = construct_response(&base_response) {
                 let mut codec = Http1Codec::new();
                 let mut buf = BytesMut::new();
-                let _ = codec.encode(response, &mut buf);
+                let _ = observe_encode(
+                    &mut codec,
+                    response,
+                    &mut buf,
+                    "HeaderOperation::DuplicateHeaders",
+                );
             }
         }
 
@@ -398,7 +485,12 @@ fn test_header_operation(operation: HeaderOperation) {
             if let Ok(response) = construct_response(&base_response) {
                 let mut codec = Http1Codec::new();
                 let mut buf = BytesMut::new();
-                let _ = codec.encode(response, &mut buf);
+                let _ = observe_encode(
+                    &mut codec,
+                    response,
+                    &mut buf,
+                    "HeaderOperation::CaseSensitivity",
+                );
             }
         }
     }
@@ -426,7 +518,12 @@ fn test_body_operation(operation: BodyOperation) {
             if let Ok(response) = construct_response(&response_spec) {
                 let mut codec = Http1Codec::new();
                 let mut buf = BytesMut::new();
-                let _ = codec.encode(response, &mut buf);
+                let _ = observe_encode(
+                    &mut codec,
+                    response,
+                    &mut buf,
+                    "BodyOperation::ContentLengthBody",
+                );
             }
         }
 
@@ -441,14 +538,24 @@ fn test_body_operation(operation: BodyOperation) {
 
             // Build chunked body
             let mut chunked_body = Vec::new();
-            for chunk in chunks.iter().take(10) {
+            for (i, chunk) in chunks.iter().take(10).enumerate() {
+                let requested_size = chunk.size_override.unwrap_or(chunk.data.len());
                 let chunk_data = chunk
                     .data
                     .iter()
-                    .take(MAX_PAYLOAD_SIZE / 20)
+                    .take(requested_size.min(MAX_PAYLOAD_SIZE / 20))
                     .copied()
                     .collect::<Vec<_>>();
                 chunked_body.extend_from_slice(&chunk_data);
+
+                let hex_format = match &chunk.hex_format {
+                    HexFormat::Lowercase => "lowercase",
+                    HexFormat::Uppercase => "uppercase",
+                    HexFormat::Mixed => "mixed",
+                };
+                response_spec
+                    .headers
+                    .push((format!("X-Fuzz-Chunk-Hex-{}", i), hex_format.to_string()));
 
                 if chunked_body.len() > MAX_PAYLOAD_SIZE / 2 {
                     break;
@@ -472,7 +579,8 @@ fn test_body_operation(operation: BodyOperation) {
 
                 let mut codec = Http1Codec::new();
                 let mut buf = BytesMut::new();
-                let _ = codec.encode(response, &mut buf);
+                let _ =
+                    observe_encode(&mut codec, response, &mut buf, "BodyOperation::ChunkedBody");
             }
         }
 
@@ -487,7 +595,8 @@ fn test_body_operation(operation: BodyOperation) {
                 if let Ok(response) = construct_response(&base_response) {
                     let mut codec = Http1Codec::new();
                     let mut buf = BytesMut::new();
-                    let _ = codec.encode(response, &mut buf);
+                    let _ =
+                        observe_encode(&mut codec, response, &mut buf, "BodyOperation::EmptyBody");
                 }
             }
         }
@@ -501,7 +610,7 @@ fn test_body_operation(operation: BodyOperation) {
             if let Ok(response) = construct_response(&response_spec) {
                 let mut codec = Http1Codec::new();
                 let mut buf = BytesMut::new();
-                let _ = codec.encode(response, &mut buf);
+                let _ = observe_encode(&mut codec, response, &mut buf, "BodyOperation::BinaryBody");
             }
         }
     }
@@ -521,7 +630,12 @@ fn test_validation_operation(operation: ValidationOperation) {
             if let Ok(response) = construct_response(&base_response) {
                 let mut codec = Http1Codec::new();
                 let mut buf = BytesMut::new();
-                let _ = codec.encode(response, &mut buf);
+                let _ = observe_encode(
+                    &mut codec,
+                    response,
+                    &mut buf,
+                    "ValidationOperation::InvalidHeaders",
+                );
             }
         }
 
@@ -542,7 +656,12 @@ fn test_validation_operation(operation: ValidationOperation) {
                 if let Ok(response) = construct_response(&base_response) {
                     let mut codec = Http1Codec::new();
                     let mut buf = BytesMut::new();
-                    let _ = codec.encode(response, &mut buf);
+                    let _ = observe_encode(
+                        &mut codec,
+                        response,
+                        &mut buf,
+                        "ValidationOperation::StatusCodeValidation",
+                    );
                 }
             }
         }
@@ -560,7 +679,12 @@ fn test_validation_operation(operation: ValidationOperation) {
             if let Ok(response) = construct_response(&response_spec) {
                 let mut codec = Http1Codec::new();
                 let mut buf = BytesMut::new();
-                let _ = codec.encode(response, &mut buf);
+                let _ = observe_encode(
+                    &mut codec,
+                    response,
+                    &mut buf,
+                    "ValidationOperation::ContentLengthMismatch",
+                );
             }
         }
 
@@ -576,7 +700,12 @@ fn test_validation_operation(operation: ValidationOperation) {
 
                 let mut codec = Http1Codec::new();
                 let mut buf = BytesMut::new();
-                let _ = codec.encode(response, &mut buf);
+                let _ = observe_encode(
+                    &mut codec,
+                    response,
+                    &mut buf,
+                    "ValidationOperation::TrailerValidation",
+                );
             }
         }
     }
