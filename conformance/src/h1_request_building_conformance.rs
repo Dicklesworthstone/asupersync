@@ -355,10 +355,8 @@ impl RequestBuildingConformanceTester {
             _ => None,
         };
 
-        let verdict = if case.expected_identical && bytes_match && error.is_none() {
+        let verdict = if !case.expected_identical || (bytes_match && error.is_none()) {
             RequestBuildingTestVerdict::Pass
-        } else if !case.expected_identical {
-            RequestBuildingTestVerdict::Pass // Not expecting identical output
         } else {
             RequestBuildingTestVerdict::Fail
         };

@@ -303,10 +303,8 @@ impl ResponseBuildingConformanceTester {
             _ => None,
         };
 
-        let verdict = if case.expected_identical && bytes_match && error.is_none() {
+        let verdict = if !case.expected_identical || (bytes_match && error.is_none()) {
             ResponseBuildingTestVerdict::Pass
-        } else if !case.expected_identical {
-            ResponseBuildingTestVerdict::Pass // Not expecting identical output
         } else {
             ResponseBuildingTestVerdict::Fail
         };
