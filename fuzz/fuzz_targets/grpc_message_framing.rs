@@ -40,6 +40,7 @@ use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::codec::{Decoder, Encoder};
 use asupersync::grpc::codec::{Codec as GrpcCodec_, GrpcCodec, GrpcMessage, MESSAGE_HEADER_SIZE};
 use asupersync::grpc::{Code, GrpcError, ProstCodec};
+use std::sync::OnceLock;
 
 /// Maximum message size for fuzzing (16MB to stay within reasonable limits).
 const MAX_FUZZ_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
@@ -48,6 +49,8 @@ const MAX_FUZZ_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
 const MAX_NESTING_DEPTH: usize = 32;
 /// Small upper bound used for explicit codec limit probes.
 const MAX_STATUS_PROBE_SIZE: usize = 256;
+
+static FIXED_CANARIES: OnceLock<()> = OnceLock::new();
 
 /// protobuf wire types for structured fuzzing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Arbitrary)]
@@ -107,6 +110,8 @@ enum FuzzInput {
 }
 
 fuzz_target!(|input: FuzzInput| {
+    FIXED_CANARIES.get_or_init(assert_fixed_decode_canaries);
+
     fuzz_grpc_message_framing(input);
 });
 
@@ -256,8 +261,117 @@ fn fuzz_grpc_framing(compression_flag: u8, declared_length: u32, actual_payload:
         // This tests length validation in the decoder
         let mut buf = BytesMut::from(&frame_data[..]);
         let mut codec = GrpcCodec::new();
-        let _ = codec.decode(&mut buf); // Should handle length mismatches gracefully
+        let _ = observe_grpc_decode(&mut codec, &mut buf);
     }
+}
+
+fn observe_grpc_decode(
+    codec: &mut GrpcCodec,
+    buf: &mut BytesMut,
+) -> Result<Option<GrpcMessage>, GrpcError> {
+    let before_len = buf.len();
+    let result = codec.decode(buf);
+    assert!(
+        buf.len() <= before_len,
+        "GrpcCodec::decode grew the input buffer"
+    );
+
+    match &result {
+        Ok(Some(message)) => {
+            let consumed = before_len - buf.len();
+            assert_eq!(
+                consumed,
+                MESSAGE_HEADER_SIZE + message.data.len(),
+                "decoded gRPC frame consumed {consumed} bytes for payload length {}",
+                message.data.len()
+            );
+        }
+        Ok(None) => {
+            assert_eq!(
+                buf.len(),
+                before_len,
+                "incomplete gRPC frame should remain buffered"
+            );
+        }
+        Err(GrpcError::MessageTooLarge) => {
+            assert_eq!(
+                buf.len(),
+                before_len,
+                "oversized gRPC frame should be rejected before consuming bytes"
+            );
+        }
+        Err(GrpcError::Protocol(message)) => {
+            assert!(
+                !message.is_empty(),
+                "protocol errors should explain the invalid gRPC frame"
+            );
+        }
+        Err(error) => {
+            assert!(
+                !error.to_string().is_empty(),
+                "gRPC decode error should have a non-empty description: {error:?}"
+            );
+        }
+    }
+
+    result
+}
+
+fn assert_fixed_decode_canaries() {
+    let mut incomplete_header = BytesMut::from(&b"\0\0"[..]);
+    let mut codec = GrpcCodec::new();
+    assert!(matches!(
+        observe_grpc_decode(&mut codec, &mut incomplete_header),
+        Ok(None)
+    ));
+    assert_eq!(incomplete_header.as_ref(), b"\0\0");
+
+    let mut incomplete_payload = BytesMut::new();
+    incomplete_payload.extend_from_slice(&[0]);
+    incomplete_payload.extend_from_slice(&5u32.to_be_bytes());
+    incomplete_payload.extend_from_slice(b"he");
+    let mut codec = GrpcCodec::new();
+    assert!(matches!(
+        observe_grpc_decode(&mut codec, &mut incomplete_payload),
+        Ok(None)
+    ));
+    assert_eq!(incomplete_payload.as_ref(), b"\0\0\0\0\x05he");
+
+    let mut valid_frame = BytesMut::new();
+    valid_frame.extend_from_slice(&[0]);
+    valid_frame.extend_from_slice(&5u32.to_be_bytes());
+    valid_frame.extend_from_slice(b"hello");
+    let mut codec = GrpcCodec::new();
+    let decoded = observe_grpc_decode(&mut codec, &mut valid_frame)
+        .expect("valid gRPC frame should decode")
+        .expect("valid gRPC frame should produce a message");
+    assert!(!decoded.compressed);
+    assert_eq!(decoded.data.as_ref(), b"hello");
+    assert!(valid_frame.is_empty());
+
+    let mut invalid_flag = BytesMut::new();
+    invalid_flag.extend_from_slice(&[2]);
+    invalid_flag.extend_from_slice(&2u32.to_be_bytes());
+    invalid_flag.extend_from_slice(b"no");
+    let mut codec = GrpcCodec::new();
+    assert_protocol_status(
+        observe_grpc_decode(&mut codec, &mut invalid_flag),
+        Code::Internal,
+    );
+    assert!(
+        invalid_flag.is_empty(),
+        "complete invalid-flag frames should be consumed"
+    );
+
+    let mut oversized = BytesMut::new();
+    oversized.extend_from_slice(&[0]);
+    oversized.extend_from_slice(&3u32.to_be_bytes());
+    let mut codec = GrpcCodec::with_max_size(2);
+    let oversized_err =
+        observe_grpc_decode(&mut codec, &mut oversized).expect_err("oversized frame should fail");
+    assert!(matches!(oversized_err, GrpcError::MessageTooLarge));
+    assert_eq!(oversized_err.into_status().code(), Code::ResourceExhausted);
+    assert_eq!(oversized.as_ref(), b"\0\0\0\0\x03");
 }
 
 fn assert_protocol_status(result: Result<Option<GrpcMessage>, GrpcError>, expected_code: Code) {
@@ -277,9 +391,10 @@ fn test_invalid_compression_flag_status(data: &[u8]) {
     let original = buf.clone();
 
     let mut codec = GrpcCodec::new();
-    let result = codec.decode(&mut buf);
+    let result = observe_grpc_decode(&mut codec, &mut buf);
     assert_protocol_status(result, Code::Internal);
-    assert_eq!(buf, original);
+    assert!(buf.is_empty());
+    assert_eq!(original.len(), MESSAGE_HEADER_SIZE + payload.len());
 }
 
 fn test_frame_limit_status_mapping(data: &[u8]) {
@@ -302,7 +417,7 @@ fn test_frame_limit_status_mapping(data: &[u8]) {
     let mut decode_buf = BytesMut::new();
     decode_buf.extend_from_slice(&[0]);
     decode_buf.extend_from_slice(&(oversized_len as u32).to_be_bytes());
-    let decode_result = decode_codec.decode(&mut decode_buf);
+    let decode_result = observe_grpc_decode(&mut decode_codec, &mut decode_buf);
     let decode_err = decode_result.expect_err("oversized decode should fail");
     assert!(matches!(decode_err, GrpcError::MessageTooLarge));
     assert_eq!(decode_err.into_status().code(), Code::ResourceExhausted);
@@ -320,9 +435,10 @@ fn test_explicit_framing_statuses(
         invalid_flag_frame.extend_from_slice(actual_payload);
         let original = invalid_flag_frame.clone();
         let mut codec = GrpcCodec::new();
-        let result = codec.decode(&mut invalid_flag_frame);
+        let result = observe_grpc_decode(&mut codec, &mut invalid_flag_frame);
         assert_protocol_status(result, Code::Internal);
-        assert_eq!(invalid_flag_frame, original);
+        assert!(invalid_flag_frame.is_empty());
+        assert_eq!(original.len(), MESSAGE_HEADER_SIZE + actual_payload.len());
     }
 
     let status_probe_limit = actual_payload
@@ -334,7 +450,7 @@ fn test_explicit_framing_statuses(
     let mut oversized_frame = BytesMut::new();
     oversized_frame.extend_from_slice(&[compression_flag & 0x01]);
     oversized_frame.extend_from_slice(&oversized_length.to_be_bytes());
-    let result = limited_codec.decode(&mut oversized_frame);
+    let result = observe_grpc_decode(&mut limited_codec, &mut oversized_frame);
     let err = result.expect_err("oversized declared frame should fail");
     assert!(matches!(err, GrpcError::MessageTooLarge));
     assert_eq!(err.into_status().code(), Code::ResourceExhausted);
@@ -349,7 +465,7 @@ fn test_grpc_codec_roundtrip(message: GrpcMessage) {
     if codec.encode(message.clone(), &mut encode_buf).is_ok() {
         // Test decoding
         let mut decode_buf = encode_buf;
-        match codec.decode(&mut decode_buf) {
+        match observe_grpc_decode(&mut codec, &mut decode_buf) {
             Ok(Some(decoded)) => {
                 // Verify basic properties are preserved
                 assert_eq!(decoded.compressed, message.compressed);
@@ -390,7 +506,7 @@ fn test_grpc_frame_parsing(data: &[u8]) {
     let mut frames_parsed = 0;
     while !buf.is_empty() && frames_parsed < 100 {
         // Limit to prevent infinite loops
-        match codec.decode(&mut buf) {
+        match observe_grpc_decode(&mut codec, &mut buf) {
             Ok(Some(_message)) => {
                 frames_parsed += 1;
                 // Successfully parsed a frame, continue with remaining data
