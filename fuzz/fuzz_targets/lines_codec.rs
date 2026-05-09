@@ -95,6 +95,46 @@ fn observe_decode(
     result
 }
 
+fn assert_general_decode_observation(
+    context: &str,
+    result: Result<Option<String>, LinesCodecError>,
+    before_len: usize,
+    remaining_len: usize,
+    eof: bool,
+    max_length: usize,
+) {
+    assert!(
+        remaining_len <= before_len,
+        "{context}: LinesCodec left more bytes than it started with"
+    );
+
+    match result {
+        Ok(Some(line)) => {
+            assert!(
+                before_len > remaining_len,
+                "{context}: successful decode should consume input"
+            );
+            assert_decoded_line_shape(&line, max_length);
+        }
+        Ok(None) => {
+            assert!(
+                !eof || remaining_len <= max_length || max_length == usize::MAX,
+                "{context}: EOF without a line should not retain an overlong bounded buffer"
+            );
+        }
+        Err(error) => {
+            assert!(
+                !matches!(error, LinesCodecError::Io(_)),
+                "{context}: in-memory LinesCodec decode should not report I/O errors"
+            );
+            assert!(
+                !error.to_string().trim().is_empty(),
+                "{context}: LinesCodec errors should expose diagnostics"
+            );
+        }
+    }
+}
+
 fn expect_line(result: Result<Option<String>, LinesCodecError>, expected: &str) {
     match result {
         Ok(Some(line)) => assert_eq!(line, expected),
@@ -266,14 +306,34 @@ fuzz_target!(|input: FuzzInput| {
                 data_consumed = end;
 
                 // Try to decode after each chunk
-                let _ = observe_decode(&mut fresh_codec, &mut buf, false);
+                let before_len = buf.len();
+                let max_length = fresh_codec.max_length();
+                let result = observe_decode(&mut fresh_codec, &mut buf, false);
+                assert_general_decode_observation(
+                    "split chunk decode",
+                    result,
+                    before_len,
+                    buf.len(),
+                    false,
+                    max_length,
+                );
             }
         }
 
         // Process any remaining data
         if data_consumed < input.data.len() {
             buf.extend_from_slice(&input.data[data_consumed..]);
-            let _ = observe_decode(&mut fresh_codec, &mut buf, true);
+            let before_len = buf.len();
+            let max_length = fresh_codec.max_length();
+            let result = observe_decode(&mut fresh_codec, &mut buf, true);
+            assert_general_decode_observation(
+                "split trailing EOF decode",
+                result,
+                before_len,
+                buf.len(),
+                true,
+                max_length,
+            );
         }
     }
 
@@ -283,13 +343,33 @@ fuzz_target!(|input: FuzzInput| {
 
         // Test with buffer that gets cleared/replaced between calls
         let mut buf = BytesMut::from(&input.data[..std::cmp::min(input.data.len(), 5)]);
-        let _ = observe_decode(&mut edge_codec, &mut buf, false);
+        let before_len = buf.len();
+        let max_length = edge_codec.max_length();
+        let result = observe_decode(&mut edge_codec, &mut buf, false);
+        assert_general_decode_observation(
+            "short edge decode",
+            result,
+            before_len,
+            buf.len(),
+            false,
+            max_length,
+        );
 
         // Replace buffer entirely
         buf.clear();
         if input.data.len() > 5 {
             buf.extend_from_slice(&input.data[5..]);
-            let _ = observe_decode(&mut edge_codec, &mut buf, false);
+            let before_len = buf.len();
+            let max_length = edge_codec.max_length();
+            let result = observe_decode(&mut edge_codec, &mut buf, false);
+            assert_general_decode_observation(
+                "replaced edge decode",
+                result,
+                before_len,
+                buf.len(),
+                false,
+                max_length,
+            );
         }
     }
 
@@ -302,7 +382,17 @@ fuzz_target!(|input: FuzzInput| {
         if !input.data.is_empty() {
             let mut cloned_codec = codec_copy;
             let mut buf = BytesMut::from(&input.data[..std::cmp::min(input.data.len(), 10)]);
-            let _ = observe_decode(&mut cloned_codec, &mut buf, false);
+            let before_len = buf.len();
+            let max_length = cloned_codec.max_length();
+            let result = observe_decode(&mut cloned_codec, &mut buf, false);
+            assert_general_decode_observation(
+                "cloned codec decode",
+                result,
+                before_len,
+                buf.len(),
+                false,
+                max_length,
+            );
         }
     }
 
@@ -338,7 +428,17 @@ fuzz_target!(|input: FuzzInput| {
 
         for test_case in &test_cases {
             let mut test_buf = BytesMut::from(*test_case);
-            let _ = observe_decode(&mut newline_codec, &mut test_buf, false);
+            let before_len = test_buf.len();
+            let max_length = newline_codec.max_length();
+            let result = observe_decode(&mut newline_codec, &mut test_buf, false);
+            assert_general_decode_observation(
+                "newline case decode",
+                result,
+                before_len,
+                test_buf.len(),
+                false,
+                max_length,
+            );
         }
     }
 
@@ -449,7 +549,17 @@ fuzz_target!(|input: FuzzInput| {
 
         // Handle trailing data
         if !mixed_buf.is_empty() {
-            let _ = observe_decode(&mut mixed_codec, &mut mixed_buf, true);
+            let before_len = mixed_buf.len();
+            let max_length = mixed_codec.max_length();
+            let result = observe_decode(&mut mixed_codec, &mut mixed_buf, true);
+            assert_general_decode_observation(
+                "mixed trailing EOF decode",
+                result,
+                before_len,
+                mixed_buf.len(),
+                true,
+                max_length,
+            );
         }
     }
 });
