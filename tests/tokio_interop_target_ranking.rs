@@ -86,6 +86,18 @@ fn ranking_doc_has_before_after_patterns_and_edge_cases() {
 fn ranking_doc_has_rch_validation_command_bundle() {
     let doc = load_doc();
     for token in [
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_interop_ranking_docs cargo test -p asupersync-tokio-compat --features hyper-bridge --lib -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_interop_ranking_docs cargo test -p asupersync-tokio-compat --features tokio-io --lib -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_interop_ranking_docs cargo test --test native_seam_parity -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_interop_ranking_docs cargo test --test semantic_conformance_harness -- --nocapture",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_interop_ranking_docs cargo test --test tokio_executable_conformance_contracts -- --nocapture",
+    ] {
+        assert!(
+            doc.contains(token),
+            "missing validation command token: {token}"
+        );
+    }
+    for stale in [
         "rch exec -- cargo test -p asupersync-tokio-compat --features hyper-bridge --lib -- --nocapture",
         "rch exec -- cargo test -p asupersync-tokio-compat --features tokio-io --lib -- --nocapture",
         "rch exec -- cargo test --test native_seam_parity -- --nocapture",
@@ -93,8 +105,8 @@ fn ranking_doc_has_rch_validation_command_bundle() {
         "rch exec -- cargo test --test tokio_executable_conformance_contracts -- --nocapture",
     ] {
         assert!(
-            doc.contains(token),
-            "missing validation command token: {token}"
+            !doc.contains(stale),
+            "ranking doc must not reintroduce bare rch cargo routing: {stale}"
         );
     }
 }
