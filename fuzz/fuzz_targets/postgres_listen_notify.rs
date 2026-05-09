@@ -239,10 +239,10 @@ fn normalize_operation(operation: &mut ListenNotifyOperation, config: &ListenNot
             truncate_string(channel, config.max_channel_length as usize);
             truncate_string(payload, config.max_payload_size as usize);
         }
-        ListenNotifyOperation::ParseNotificationResponse { raw_data } => {
-            if raw_data.len() > config.max_payload_size as usize + 100 {
-                raw_data.truncate(config.max_payload_size as usize + 100);
-            }
+        ListenNotifyOperation::ParseNotificationResponse { raw_data }
+            if raw_data.len() > config.max_payload_size as usize + 100 =>
+        {
+            raw_data.truncate(config.max_payload_size as usize + 100);
         }
         ListenNotifyOperation::ValidateChannelName { name } => {
             truncate_string(name, config.max_channel_length as usize);
@@ -278,14 +278,12 @@ fn execute_listen_notify_operations(
     input: &ListenNotifyFuzzInput,
     shadow: &ListenNotifyShadowModel,
 ) -> Result<(), String> {
-    let mut operation_count = 0;
-
-    for (op_index, operation) in input.operations.iter().enumerate() {
-        if operation_count >= input.config.max_operations {
-            break;
-        }
-        operation_count += 1;
-
+    for (op_index, operation) in input
+        .operations
+        .iter()
+        .take(input.config.max_operations as usize)
+        .enumerate()
+    {
         match operation {
             ListenNotifyOperation::Listen { channel } => {
                 test_listen_operation(channel, shadow)?;
@@ -507,6 +505,23 @@ fn test_parse_notification_response(
     Ok(())
 }
 
+fn observe_shadow_operation_result(context: &str, result: Result<(), String>) {
+    match result {
+        Ok(()) => {
+            assert!(
+                !context.is_empty(),
+                "successful LISTEN/NOTIFY operation should stay labeled"
+            );
+        }
+        Err(error) => {
+            assert!(
+                !error.is_empty(),
+                "{context} failure should expose diagnostics"
+            );
+        }
+    }
+}
+
 /// Test channel name validation
 fn test_channel_name_validation(
     name: &str,
@@ -540,10 +555,16 @@ fn test_concurrent_operations(
     for op in ops {
         match op {
             ListenNotifyOperation::Listen { channel } => {
-                let _ = test_listen_operation(channel, shadow);
+                observe_shadow_operation_result(
+                    "concurrent LISTEN operation",
+                    test_listen_operation(channel, shadow),
+                );
             }
             ListenNotifyOperation::Notify { channel, payload } => {
-                let _ = test_notify_operation(channel, payload, shadow);
+                observe_shadow_operation_result(
+                    "concurrent NOTIFY operation",
+                    test_notify_operation(channel, payload, shadow),
+                );
             }
             _ => {} // Only test basic operations for concurrency
         }
@@ -575,7 +596,10 @@ fn test_error_condition(
 
         ErrorType::MalformedResponse(data) => {
             // Attempt to parse malformed response
-            let _ = test_parse_notification_response(data, shadow);
+            observe_shadow_operation_result(
+                "malformed notification response parse",
+                test_parse_notification_response(data, shadow),
+            );
             shadow.record_error();
         }
 
