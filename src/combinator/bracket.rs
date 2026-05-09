@@ -11,12 +11,14 @@
 //! synchronously during drop if the returned future is cancelled during the
 //! use or release phases. Release futures that can make progress under a
 //! noop waker complete during this drop path; futures that require external
-//! wakeups may not finish before the bounded drop loop gives up.
+//! wakeups fail closed if they exhaust the bounded drop loop.
 
 use crate::cx::Cx;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
+
+const DROP_RELEASE_POLL_BUDGET: usize = 10_000;
 
 /// Error returned by [`Bracket`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,7 +81,7 @@ struct BracketState<Res, T, E, A, UF, R, RF> {
 /// implementation makes a bounded best-effort attempt to synchronously
 /// drive the release future to completion. Immediately-progressable release
 /// futures are cleaned up even on cancellation; externally-woken release
-/// futures may still outlive that bounded drop loop.
+/// futures fail closed if they exhaust that bounded drop loop.
 ///
 /// # Example
 /// ```ignore
@@ -327,7 +329,7 @@ where
 
             // Poll until complete (bounded iteration to prevent infinite loops)
             // Most release futures complete quickly or immediately.
-            for _ in 0..10_000 {
+            for _ in 0..DROP_RELEASE_POLL_BUDGET {
                 let poll_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     release_fut.as_mut().poll(&mut cx)
                 }));
@@ -353,9 +355,15 @@ where
                 }
             }
 
-            // If we get here, release is taking too long.
-            // In production, this would log a warning. For Phase 0, we accept
-            // potential resource leak for pathologically long-running release.
+            if !std::thread::panicking() {
+                if let Some(Err(payload)) = self.state.use_result.take() {
+                    std::panic::resume_unwind(payload);
+                }
+                panic!(
+                    "bracket release future did not complete within drop-time cleanup poll budget"
+                );
+            }
+            return;
         }
 
         // Ensure we don't swallow a use-phase panic if release times out or is absent.
@@ -382,7 +390,8 @@ where
 /// This function attempts synchronous release during drop when cancellation
 /// interrupts the use or release phases. Release futures that can complete
 /// under the bounded noop-waker drop loop will be cleaned up; release
-/// futures that require external wakeups may not finish in that path.
+/// futures that require external wakeups fail closed if they exhaust that
+/// bounded cleanup budget.
 ///
 /// # Arguments
 /// * `acquire` - Future that acquires the resource
@@ -1143,6 +1152,19 @@ mod tests {
         }
     }
 
+    struct NeverReadyRelease {
+        polls: Arc<AtomicUsize>,
+    }
+
+    impl Future for NeverReadyRelease {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            Poll::Pending
+        }
+    }
+
     struct PanicOnPollUse;
 
     impl Future for PanicOnPollUse {
@@ -1191,6 +1213,39 @@ mod tests {
         assert!(
             released.load(Ordering::SeqCst),
             "release must complete even when bracket is dropped during Releasing phase"
+        );
+    }
+
+    #[test]
+    fn bracket_drop_during_releasing_panics_when_release_exhausts_poll_budget() {
+        let polls = Arc::new(AtomicUsize::new(0));
+        let release_polls = polls.clone();
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut fut = Box::pin(bracket(
+            async { Ok::<_, ()>(42_i32) },
+            |x| async move { Ok::<_, ()>(x) },
+            move |_| NeverReadyRelease {
+                polls: release_polls,
+            },
+        ));
+
+        assert!(
+            matches!(fut.as_mut().poll(&mut cx), Poll::Pending),
+            "release future should require an external wake before drop"
+        );
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(fut)));
+        assert!(
+            panic.is_err(),
+            "drop must fail closed when release cannot complete under the cleanup poll budget"
+        );
+        assert_eq!(
+            polls.load(Ordering::SeqCst),
+            DROP_RELEASE_POLL_BUDGET + 1,
+            "drop should exhaust the bounded cleanup budget after the initial pending poll"
         );
     }
 
