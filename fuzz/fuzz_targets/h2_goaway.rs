@@ -12,8 +12,8 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use asupersync::bytes::{BufMut, Bytes, BytesMut};
-use asupersync::http::h2::error::{ErrorCode, H2Error};
+use asupersync::bytes::{Bytes, BytesMut};
+use asupersync::http::h2::error::ErrorCode;
 use asupersync::http::h2::frame::{Frame, FrameHeader, FrameType, GoAwayFrame, parse_frame};
 
 /// Maximum fuzz input size to prevent timeouts.
@@ -250,18 +250,20 @@ fn test_goaway_frame_pipeline(input: &GoAwayFuzzInput) -> Result<(), String> {
 
     // Frame header (9 bytes).
     let frame_length = payload_bytes.len() as u32;
-    frame_bytes.put_u8((frame_length >> 16) as u8);
-    frame_bytes.put_u8((frame_length >> 8) as u8);
-    frame_bytes.put_u8(frame_length as u8);
-    frame_bytes.put_u8(FrameType::GoAway as u8);
-    frame_bytes.put_u8(input.frame_flags);
-    frame_bytes.put_u32(input.frame_stream_id);
+    let frame_header = FrameHeader {
+        length: frame_length,
+        frame_type: FrameType::GoAway as u8,
+        flags: input.frame_flags,
+        stream_id: input.frame_stream_id,
+    };
+    frame_header.write(&mut frame_bytes);
 
     // Payload.
     frame_bytes.extend_from_slice(&payload_bytes);
 
-    // Parse complete frame.
-    let parse_result = parse_frame(frame_bytes.freeze());
+    // Parse complete frame through the live header/payload pipeline.
+    let parse_result = FrameHeader::parse(&mut frame_bytes)
+        .and_then(|header| parse_frame(&header, frame_bytes.freeze()));
 
     match parse_result {
         Ok(Frame::GoAway(goaway_frame)) => {
@@ -273,9 +275,9 @@ fn test_goaway_frame_pipeline(input: &GoAwayFuzzInput) -> Result<(), String> {
             // Verify the frame contents match our expectations.
             let expected_last_stream_id = input.raw_last_stream_id & 0x7FFFFFFF;
             if goaway_frame.last_stream_id != expected_last_stream_id {
-                return Err(format!(
-                    "ASSERTION 4/PIPELINE: Pipeline parsing altered last_stream_id"
-                ));
+                return Err(
+                    "ASSERTION 4/PIPELINE: Pipeline parsing altered last_stream_id".to_string(),
+                );
             }
 
             Ok(())
@@ -299,7 +301,7 @@ fn test_goaway_frame_pipeline(input: &GoAwayFuzzInput) -> Result<(), String> {
 }
 
 /// Test GOAWAY frame edge cases and boundary conditions.
-fn test_goaway_edge_cases(input: &GoAwayFuzzInput) -> Result<(), String> {
+fn test_goaway_edge_cases() -> Result<(), String> {
     // Test maximum last_stream_id value.
     let max_stream_payload = {
         let mut payload = Vec::new();
@@ -317,10 +319,10 @@ fn test_goaway_edge_cases(input: &GoAwayFuzzInput) -> Result<(), String> {
     };
 
     let max_result = GoAwayFrame::parse(&max_header, &Bytes::from(max_stream_payload));
-    if let Ok(frame) = max_result {
-        if frame.last_stream_id != 0x7FFFFFFF {
-            return Err("EDGE CASE: Max stream ID not handled correctly".to_string());
-        }
+    if let Ok(frame) = max_result
+        && frame.last_stream_id != 0x7FFFFFFF
+    {
+        return Err("EDGE CASE: Max stream ID not handled correctly".to_string());
     }
 
     // Test R bit set in last_stream_id.
@@ -364,7 +366,7 @@ fn fuzz_goaway_frame(input: GoAwayFuzzInput) -> Result<(), String> {
     test_goaway_frame_pipeline(&normalized)?;
 
     // Test edge cases.
-    test_goaway_edge_cases(&normalized)?;
+    test_goaway_edge_cases()?;
 
     Ok(())
 }
