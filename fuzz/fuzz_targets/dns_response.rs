@@ -11,6 +11,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
+use asupersync::net::dns::parse_dns_response_for_fuzz;
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashSet;
 
@@ -104,6 +105,28 @@ fn build_dns_packet(fuzz: &FuzzDnsResponse) -> Vec<u8> {
     packet.extend_from_slice(&fuzz.payload);
 
     packet
+}
+
+fn observe_dns_response_parse(packet: &[u8], expected_id: u16) {
+    match parse_dns_response_for_fuzz(packet, expected_id) {
+        Ok(()) => {
+            assert!(
+                packet.len() >= 12,
+                "accepted DNS responses must include a complete header",
+            );
+            assert_eq!(
+                u16::from_be_bytes([packet[0], packet[1]]),
+                expected_id,
+                "accepted DNS responses must preserve the expected transaction id",
+            );
+        }
+        Err(err) => {
+            assert!(
+                !err.to_string().is_empty(),
+                "DNS parser rejections should expose a diagnostic",
+            );
+        }
+    }
 }
 
 /// Property 1: Validate no compression pointer loops exist in the packet
@@ -312,8 +335,6 @@ fn assert_rdlength_matches_rdata(packet: &[u8]) -> Result<(), String> {
     };
 
     for rr_index in 0..answer_count.min(20) {
-        let rr_start_offset = offset;
-
         // Skip RR name
         while offset < packet.len() {
             let len = packet[offset];
@@ -463,23 +484,6 @@ fuzz_target!(|fuzz: FuzzDnsResponse| {
         panic!("Property 5 violated (label length): {}", err);
     });
 
-    // Test DNS response parsing - should not crash or panic
-    // This exercises the actual parsing code with our validated input
-    let _ = std::panic::catch_unwind(|| {
-        // Note: We need to import the parse function or use it indirectly
-        // For now, we test general parsing robustness
-        if packet.len() >= 12 {
-            // Basic header validation that mirrors parse_dns_response
-            let _id = u16::from_be_bytes([packet[0], packet[1]]);
-            let flags = u16::from_be_bytes([packet[2], packet[3]]);
-
-            // Check QR bit (should be 1 for responses)
-            if flags & 0x8000 != 0 {
-                // Valid response bit - continue parsing simulation
-                let _question_count = u16::from_be_bytes([packet[4], packet[5]]);
-                let _answer_count = u16::from_be_bytes([packet[6], packet[7]]);
-                // The actual parse_dns_response would continue from here
-            }
-        }
-    });
+    // Exercise the real parser hook and observe both accepted and rejected outcomes.
+    observe_dns_response_parse(&packet, fuzz.id);
 });
