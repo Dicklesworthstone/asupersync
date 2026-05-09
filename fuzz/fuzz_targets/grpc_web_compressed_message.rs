@@ -33,7 +33,9 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::bytes::BytesMut;
-use asupersync::grpc::web::{WebFrameCodec, decode_trailers, base64_decode, Base64StreamDecoder};
+use asupersync::grpc::web::{
+    Base64StreamDecoder, WebFrame, WebFrameCodec, base64_decode, decode_trailers,
+};
 use libfuzzer_sys::fuzz_target;
 
 /// Maximum frame size for testing (16KB, reasonable for fuzzing)
@@ -137,6 +139,8 @@ impl FuzzWebFrame {
 }
 
 fuzz_target!(|data: &[u8]| {
+    run_fixed_canaries();
+
     // Fuzz target entry point with input size guard
     if data.is_empty() || data.len() > MAX_FUZZ_FRAME_SIZE {
         return;
@@ -162,16 +166,137 @@ fuzz_target!(|data: &[u8]| {
     }
 });
 
+fn run_fixed_canaries() {
+    let mut compressed = BytesMut::from(&b"\x01\x00\x00\x00\x03abc"[..]);
+    let codec = WebFrameCodec::with_max_size(MAX_FUZZ_FRAME_SIZE);
+    match codec
+        .decode(&mut compressed)
+        .expect("valid compressed data frame must decode")
+    {
+        Some(WebFrame::Data { compressed, data }) => {
+            assert!(compressed, "compression flag must be surfaced");
+            assert_eq!(data.as_ref(), b"abc");
+        }
+        other => panic!("expected compressed data frame, got {other:?}"),
+    }
+    assert!(
+        compressed.is_empty(),
+        "successful frame decode must consume exactly one frame"
+    );
+
+    let mut reserved_flags = BytesMut::from(&b"\x02\x00\x00\x00\x00"[..]);
+    let reserved_codec = WebFrameCodec::with_max_size(MAX_FUZZ_FRAME_SIZE);
+    assert!(
+        reserved_codec.decode(&mut reserved_flags).is_err(),
+        "reserved gRPC-Web flag bits must fail closed"
+    );
+    assert!(
+        reserved_codec.is_poisoned(),
+        "reserved-flag rejection must poison the codec"
+    );
+    assert!(
+        reserved_codec.decode(&mut reserved_flags).is_err(),
+        "poisoned codec must reject repeated decode attempts"
+    );
+
+    let trailer = decode_trailers(b"grpc-status: 5\r\ngrpc-message: nope\r\n")
+        .expect("well-formed trailers must decode");
+    assert_eq!(trailer.status.code().as_i32(), 5);
+
+    assert!(
+        decode_trailers(b"grpc-status: 0\r\ngrpc-status: 14\r\n").is_err(),
+        "duplicate grpc-status trailers must be rejected"
+    );
+    assert!(
+        decode_trailers(b"grpc-status: 0\r\ntrace-bin: not_base64!\r\n").is_err(),
+        "malformed binary metadata must reject the whole trailer block"
+    );
+
+    assert_eq!(
+        base64_decode("aGVsbG8=").expect("valid base64 must decode"),
+        b"hello"
+    );
+    assert!(
+        base64_decode("not valid base64!!!").is_err(),
+        "malformed base64 must be an observable error"
+    );
+
+    let mut stream = Base64StreamDecoder::new();
+    let mut decoded = Vec::new();
+    decoded.extend(
+        stream
+            .push(b"aG")
+            .expect("partial base64 quartet must buffer"),
+    );
+    decoded.extend(stream.push(b"Vs").expect("completed quartet must decode"));
+    decoded.extend(
+        stream
+            .push(b"bG8=")
+            .expect("padded final quartet must decode and seal"),
+    );
+    assert_eq!(decoded, b"hello");
+    assert!(stream.is_sealed(), "padding must seal the stream decoder");
+    assert!(
+        stream.push(b"extra").is_err(),
+        "sealed stream decoder must reject additional chunks"
+    );
+    assert!(
+        stream
+            .finish()
+            .expect("finish after seal must be idempotent")
+            .is_empty()
+    );
+    assert!(
+        stream
+            .finish()
+            .expect("second finish after seal must remain idempotent")
+            .is_empty()
+    );
+}
+
+fn observe_frame_result(
+    codec: &WebFrameCodec,
+    result: Result<Option<WebFrame>, impl core::fmt::Debug>,
+) {
+    match result {
+        Ok(Some(WebFrame::Data { data, .. })) => {
+            assert!(
+                data.len() <= MAX_FUZZ_FRAME_SIZE,
+                "decoded data frame exceeded fuzz max frame size"
+            );
+        }
+        Ok(Some(WebFrame::Trailers(trailer))) => {
+            let _ = trailer.status.code();
+        }
+        Ok(None) => {}
+        Err(_) => {
+            assert!(
+                codec.is_poisoned(),
+                "WebFrameCodec errors must leave the codec poisoned"
+            );
+        }
+    }
+}
+
+fn observe_trailer_result(
+    result: Result<asupersync::grpc::web::TrailerFrame, impl core::fmt::Debug>,
+) {
+    if let Ok(trailer) = result {
+        let _ = trailer.status.code();
+    }
+}
+
 /// Fuzz WebFrameCodec::decode() with structured frame data
 fn fuzz_frame_codec(fuzz_frame: &FuzzWebFrame) {
     let frame_bytes = fuzz_frame.to_bytes();
     let mut buf = BytesMut::from(frame_bytes.as_slice());
 
     // Create codec with reasonable limits
-    let codec = WebFrameCodec::new(MAX_FUZZ_FRAME_SIZE);
+    let codec = WebFrameCodec::with_max_size(MAX_FUZZ_FRAME_SIZE);
 
-    // Decode and verify no panics
-    let _ = codec.decode(&mut buf);
+    // Decode and verify both no panics and basic parser contract outcomes.
+    let result = codec.decode(&mut buf);
+    observe_frame_result(&codec, result);
 
     // Test poisoned state handling
     if codec.is_poisoned() {
@@ -179,7 +304,10 @@ fn fuzz_frame_codec(fuzz_frame: &FuzzWebFrame) {
         let mut buf2 = BytesMut::from(frame_bytes.as_slice());
         let result = codec.decode(&mut buf2);
         // Should be an error but not panic
-        assert!(result.is_err(), "poisoned codec should reject further decoding");
+        assert!(
+            result.is_err(),
+            "poisoned codec should reject further decoding"
+        );
     }
 }
 
@@ -188,27 +316,35 @@ fn fuzz_trailer_decoder(fuzz_frame: &FuzzWebFrame) {
     let headers = fuzz_frame.build_trailer_headers();
 
     // Test with valid UTF-8 headers
-    let _ = decode_trailers(headers.as_bytes());
+    observe_trailer_result(decode_trailers(headers.as_bytes()));
 
     // Test with the raw payload (might be invalid UTF-8)
-    let _ = decode_trailers(&fuzz_frame.payload);
+    observe_trailer_result(decode_trailers(&fuzz_frame.payload));
 
     // Test with empty input
-    let _ = decode_trailers(b"");
+    observe_trailer_result(decode_trailers(b""));
 
     // Test with headers that might have duplicate status/message
     let mut duplicate_headers = headers;
     duplicate_headers.push_str("grpc-status: 14\r\n"); // Duplicate status
     duplicate_headers.push_str("grpc-message: error\r\n");
     duplicate_headers.push_str("grpc-message: duplicate\r\n"); // Duplicate message
-    let _ = decode_trailers(duplicate_headers.as_bytes());
+    assert!(
+        decode_trailers(duplicate_headers.as_bytes()).is_err(),
+        "duplicate status/message trailer block must fail closed"
+    );
 }
 
 /// Fuzz base64 decoders (whole-input and streaming)
 fn fuzz_base64_decoders(fuzz_frame: &FuzzWebFrame) {
     // Test whole-input base64 decoder
-    if let Ok(base64_str) = std::str::from_utf8(&fuzz_frame.payload) {
-        let _ = base64_decode(base64_str);
+    if let Ok(base64_str) = std::str::from_utf8(&fuzz_frame.payload)
+        && let Ok(decoded) = base64_decode(base64_str)
+    {
+        assert!(
+            decoded.len() <= fuzz_frame.payload.len(),
+            "base64 decoded bytes cannot exceed encoded input length"
+        );
     }
 
     // Test streaming base64 decoder with chunked input
@@ -222,7 +358,12 @@ fn fuzz_base64_decoders(fuzz_frame: &FuzzWebFrame) {
             break;
         }
 
-        let _ = decoder.push(chunk);
+        if let Ok(decoded) = decoder.push(chunk) {
+            assert!(
+                decoded.len() <= chunk.len() + 3,
+                "stream base64 decoded chunk unexpectedly exceeded input plus carry"
+            );
+        }
     }
 
     // Finish the decoder (should not panic regardless of state)

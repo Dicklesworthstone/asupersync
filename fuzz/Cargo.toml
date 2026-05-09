@@ -2132,6 +2132,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "grpc_web_compressed_message"
+path = "fuzz_targets/grpc_web_compressed_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "raptorq_decoder_sm"
 path = "fuzz_targets/raptorq_decoder_sm.rs"
 test = false
