@@ -1,6 +1,9 @@
 #![no_main]
 
-use asupersync::types::typed_symbol::{TypeMismatchError, TypedSymbol};
+use asupersync::types::typed_symbol::{
+    SerializationFormat, TYPED_SYMBOL_HEADER_LEN, TYPED_SYMBOL_MAGIC, TypeMismatchError,
+    TypedSymbol,
+};
 use asupersync::types::{ObjectId, Symbol, SymbolId, SymbolKind};
 use libfuzzer_sys::fuzz_target;
 
@@ -11,36 +14,142 @@ struct TestData {
     message: String,
 }
 
+fn test_symbol_id() -> SymbolId {
+    let object_id = ObjectId::new_for_test(0x1234567890abcdef);
+    SymbolId::new(object_id, 0, 0)
+}
+
+fn assert_fixed_oracles() {
+    let value = TestData {
+        value: 42,
+        message: "typed-symbol-canary".to_string(),
+    };
+
+    for format in [
+        SerializationFormat::MessagePack,
+        SerializationFormat::Bincode,
+        SerializationFormat::Json,
+    ] {
+        let typed = TypedSymbol::from_value(&value, format).expect("fixture value must serialize");
+        assert_eq!(typed.format(), format);
+        assert_eq!(typed.version(), 1);
+        assert!(typed.payload_len() > 0);
+        assert_eq!(typed.value().expect("fixture value must decode"), value);
+
+        let raw = typed.clone().into_symbol();
+        assert!(raw.data().starts_with(&TYPED_SYMBOL_MAGIC));
+        let reparsed =
+            TypedSymbol::<TestData>::try_from_symbol(raw).expect("typed fixture must reparse");
+        assert_eq!(reparsed.format(), format);
+        assert_eq!(reparsed.value().expect("reparsed value must decode"), value);
+    }
+
+    let typed =
+        TypedSymbol::from_value(&value, SerializationFormat::Bincode).expect("fixture serialize");
+    let raw = typed.clone().into_symbol();
+    match TypedSymbol::<String>::try_from_symbol(raw.clone()) {
+        Err(TypeMismatchError::UnknownType { .. }) => {}
+        other => panic!("expected UnknownType for mismatched Rust type, got {other:?}"),
+    }
+
+    let mut invalid_magic = raw.clone();
+    invalid_magic.data_mut()[..4].copy_from_slice(b"XXXX");
+    assert!(matches!(
+        TypedSymbol::<TestData>::try_from_symbol(invalid_magic),
+        Err(TypeMismatchError::InvalidMagic)
+    ));
+
+    let mut invalid_format = raw.clone();
+    invalid_format.data_mut()[14] = 4;
+    assert!(matches!(
+        TypedSymbol::<TestData>::try_from_symbol(invalid_format),
+        Err(TypeMismatchError::UnsupportedFormatByte { value: 4 })
+    ));
+
+    let mut bad_schema = raw.clone();
+    bad_schema.data_mut()[15] ^= 0x80;
+    assert!(matches!(
+        TypedSymbol::<TestData>::try_from_symbol(bad_schema),
+        Err(TypeMismatchError::SchemaMismatch { .. })
+    ));
+
+    let truncated_payload = Symbol::from_slice(
+        test_symbol_id(),
+        &raw.data()[..TYPED_SYMBOL_HEADER_LEN],
+        SymbolKind::Source,
+    );
+    let reparsed = TypedSymbol::<TestData>::try_from_symbol(truncated_payload)
+        .expect("header remains valid after payload truncation");
+    assert!(reparsed.value().is_err());
+}
+
+fn expected_type_id_bytes() -> [u8; 8] {
+    let value = TestData {
+        value: 0,
+        message: String::new(),
+    };
+    let typed =
+        TypedSymbol::from_value(&value, SerializationFormat::Bincode).expect("fixture serialize");
+    let raw = typed.into_symbol();
+    let mut out = [0u8; 8];
+    out.copy_from_slice(&raw.data()[6..14]);
+    out
+}
+
+fn assert_header_prefix_model(
+    data: &[u8],
+    result: &Result<TypedSymbol<TestData>, TypeMismatchError>,
+) {
+    if data.len() < TYPED_SYMBOL_HEADER_LEN || data[..4] != TYPED_SYMBOL_MAGIC {
+        assert!(
+            matches!(result, Err(TypeMismatchError::InvalidMagic)),
+            "short or wrong-magic input must reject as InvalidMagic, got {result:?}"
+        );
+        return;
+    }
+
+    if !matches!(data[14], 1 | 2 | 3 | 255) {
+        assert!(
+            matches!(
+                result,
+                Err(TypeMismatchError::UnsupportedFormatByte { value }) if *value == data[14]
+            ),
+            "unsupported format byte must be preserved in error, got {result:?}"
+        );
+        return;
+    }
+
+    if data[6..14] != expected_type_id_bytes() {
+        assert!(
+            matches!(result, Err(TypeMismatchError::UnknownType { .. })),
+            "wrong type-id bytes must reject as UnknownType, got {result:?}"
+        );
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
+    assert_fixed_oracles();
+
     // Guard against excessively large inputs that would just waste time
     if data.len() > 100_000 {
         return;
     }
 
-    // Try to parse the input as a typed symbol
-    // Create a dummy symbol with the input data
-    let object_id = ObjectId::new_for_test(0x1234567890abcdef);
-    let symbol_id = SymbolId::new(object_id, 0, 0);
-    let symbol = Symbol::from_slice(symbol_id, data, SymbolKind::Source);
+    let symbol = Symbol::from_slice(test_symbol_id(), data, SymbolKind::Source);
 
-    // Attempt to parse as a typed symbol - this exercises the parser
     let result: Result<TypedSymbol<TestData>, TypeMismatchError> =
         TypedSymbol::try_from_symbol(symbol);
+    assert_header_prefix_model(data, &result);
 
-    // We don't care if it succeeds or fails, just that it doesn't crash
-    let _ = result;
-
-    // Also test direct header parsing if we have enough bytes
-    if data.len() >= asupersync::types::typed_symbol::TYPED_SYMBOL_HEADER_LEN {
-        // This exercises the TypedHeader::decode function directly
-        // We can't call it directly since it's private, but try_from_symbol calls it
+    if let Ok(typed) = result {
+        assert!(matches!(
+            typed.format(),
+            SerializationFormat::MessagePack
+                | SerializationFormat::Bincode
+                | SerializationFormat::Json
+                | SerializationFormat::Custom
+        ));
+        assert_eq!(typed.symbol().data()[..4], TYPED_SYMBOL_MAGIC);
+        let _ = typed.value();
     }
-
-    // Test some invariants - even malformed input should never cause undefined behavior
-    // The parser should gracefully handle:
-    // - Truncated headers
-    // - Invalid magic bytes
-    // - Out-of-range format values
-    // - Mismatched payload lengths
-    // - Invalid type IDs
 });
