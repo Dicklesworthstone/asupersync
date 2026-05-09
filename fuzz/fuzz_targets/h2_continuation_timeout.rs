@@ -422,22 +422,23 @@ impl MockH2Connection {
                 // These can be interleaved during CONTINUATION but may still violate protocol
                 if self.is_awaiting_continuation() {
                     match frame {
-                        TestFrame::WindowUpdate { stream_id, .. } => {
-                            if *stream_id != 0 && self.continuation_stream_id != Some(*stream_id) {
-                                // Stream-specific WINDOW_UPDATE during CONTINUATION for different stream
-                                self.frame_sequence_violations.push(FrameSequenceViolation {
-                                    violation_type: FrameSequenceViolationType::InterleavedFrame,
-                                    expected_stream_id: self.continuation_stream_id.unwrap_or(0),
-                                    actual_frame_type: "WINDOW_UPDATE".to_string(),
-                                    actual_stream_id: *stream_id,
-                                });
-                            }
+                        TestFrame::WindowUpdate { stream_id, .. }
+                            if *stream_id != 0
+                                && self.continuation_stream_id != Some(*stream_id) =>
+                        {
+                            // Stream-specific WINDOW_UPDATE during CONTINUATION for different stream
+                            self.frame_sequence_violations.push(FrameSequenceViolation {
+                                violation_type: FrameSequenceViolationType::InterleavedFrame,
+                                expected_stream_id: self.continuation_stream_id.unwrap_or(0),
+                                actual_frame_type: "WINDOW_UPDATE".to_string(),
+                                actual_stream_id: *stream_id,
+                            });
                         }
-                        TestFrame::RstStream { stream_id, .. } => {
-                            if self.continuation_stream_id == Some(*stream_id) {
-                                // RST_STREAM for the stream awaiting CONTINUATION
-                                self.clear_continuation_state();
-                            }
+                        TestFrame::RstStream { stream_id, .. }
+                            if self.continuation_stream_id == Some(*stream_id) =>
+                        {
+                            // RST_STREAM for the stream awaiting CONTINUATION
+                            self.clear_continuation_state();
                         }
                         TestFrame::GoAway { .. } => {
                             // GOAWAY clears all state
@@ -668,6 +669,57 @@ fuzz_target!(|data: &[u8]| {
     test_push_promise_continuation_timeout(&test_case);
 });
 
+fn observe_process_frame_outcome(
+    connection: &mut MockH2Connection,
+    frame: &TestFrame,
+    scenario: &str,
+) -> bool {
+    let before_timeout_violations = connection.timeout_violations.len();
+    let result = connection.process_frame(frame);
+
+    if connection.memory_usage_bytes > connection.max_memory_usage_bytes {
+        let new_memory_violation = connection
+            .timeout_violations
+            .iter()
+            .skip(before_timeout_violations)
+            .any(|violation| violation.violation_type == TimeoutViolationType::MemoryLeak);
+        let returned_memory_violation = match &result {
+            Ok(_) => false,
+            Err(violation) => violation.violation_type == TimeoutViolationType::MemoryLeak,
+        };
+
+        assert!(
+            new_memory_violation || returned_memory_violation,
+            "{scenario}: memory limit exceeded without a MemoryLeak violation"
+        );
+    }
+
+    match result {
+        Ok(completed) => {
+            if completed {
+                assert!(
+                    !connection.is_awaiting_continuation(),
+                    "{scenario}: completed frame left continuation state pending"
+                );
+            }
+            completed
+        }
+        Err(violation) => {
+            assert!(
+                violation.actual_elapsed_ms >= u64::from(violation.timeout_ms)
+                    || matches!(
+                        violation.violation_type,
+                        TimeoutViolationType::PrematureTimeout
+                            | TimeoutViolationType::MemoryLeak
+                            | TimeoutViolationType::InvalidTimeoutConfig
+                    ),
+                "{scenario}: timeout violation elapsed before timeout without explicit early-timeout type"
+            );
+            false
+        }
+    }
+}
+
 /// Test CONTINUATION timeout edge cases
 fn test_continuation_timeout_edge_cases(test_case: &ContinuationTimeoutTestCase) {
     let mut connection = MockH2Connection::new(
@@ -727,7 +779,15 @@ fn test_interleaved_frame_detection(test_case: &ContinuationTimeoutTestCase) {
         end_stream: false,
     };
 
-    let _ = connection.process_frame(&data_frame);
+    let completed = observe_process_frame_outcome(
+        &mut connection,
+        &data_frame,
+        "interleaved-data-during-continuation",
+    );
+    assert!(
+        !completed,
+        "interleaved DATA frame must not complete a pending CONTINUATION sequence"
+    );
 
     // Should detect interleaved frame violation
     let has_interleaved_violation = connection
@@ -756,7 +816,15 @@ fn test_push_promise_continuation_timeout(test_case: &ContinuationTimeoutTestCas
         end_headers: false,
     };
 
-    let _ = connection.process_frame(&push_promise);
+    let completed = observe_process_frame_outcome(
+        &mut connection,
+        &push_promise,
+        "push-promise-continuation-start",
+    );
+    assert!(
+        !completed,
+        "PUSH_PROMISE without END_HEADERS must not complete a continuation sequence"
+    );
     assert!(connection.is_awaiting_continuation());
 
     // Advance time beyond timeout
