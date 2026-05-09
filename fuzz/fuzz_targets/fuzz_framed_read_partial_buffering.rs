@@ -95,7 +95,17 @@ impl Decoder for LifecycleDecoder {
         }
 
         let mut frame = src.split_to(frame_len + 1);
-        let _ = frame.split_to(1);
+        let prefix = frame.split_to(1);
+        assert_eq!(
+            usize::from(prefix[0]),
+            frame_len,
+            "length prefix changed while draining complete frame"
+        );
+        assert_eq!(
+            frame.len(),
+            frame_len,
+            "payload length after prefix drain diverged from announced frame length"
+        );
         self.sources.push(EmitSource::Decode);
         Ok(Some(frame.to_vec()))
     }
