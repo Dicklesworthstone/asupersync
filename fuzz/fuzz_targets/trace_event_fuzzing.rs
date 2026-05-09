@@ -2,6 +2,7 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
+use std::hint::black_box;
 
 /// Comprehensive trace event fuzzing for sequence allocation and event serialization
 #[derive(Arbitrary, Debug)]
@@ -48,29 +49,29 @@ enum SequenceOperation {
 #[derive(Arbitrary, Debug)]
 enum EventOperation {
     /// Create task lifecycle event
-    CreateTaskEvent { kind: TaskEventKind, time_ns: u64 },
+    TaskEvent { kind: TaskEventKind, time_ns: u64 },
     /// Create obligation event
-    CreateObligationEvent {
+    ObligationEvent {
         kind: ObligationEventKind,
         state: ObligationStateVariant,
         duration_ns: Option<u64>,
     },
     /// Create timer event
-    CreateTimerEvent {
+    TimerEvent {
         timer_id: u64,
         deadline_ns: Option<u64>,
     },
     /// Create IO event
-    CreateIoEvent {
+    IoEvent {
         token: u64,
         interest: u8,
         readiness: u8,
         bytes: i64,
     },
     /// Create user trace message
-    CreateUserTrace { message: String },
+    UserTrace { message: String },
     /// Create malformed event data
-    CreateMalformedEvent { corrupted_data: Vec<u8> },
+    MalformedEvent { corrupted_data: Vec<u8> },
 }
 
 /// Task event kinds for fuzzing
@@ -366,11 +367,7 @@ fn test_sequence_wraparound(base_seq: u64) {
 fn test_sequence_gaps(expected_seq: u64, actual_seq: u64) {
     // Test detection of missing sequence numbers
     if expected_seq != actual_seq {
-        let gap_size = if actual_seq > expected_seq {
-            actual_seq - expected_seq
-        } else {
-            expected_seq - actual_seq
-        };
+        let gap_size = actual_seq.abs_diff(expected_seq);
 
         // Large gaps might indicate bugs
         if gap_size > 1000 {
@@ -388,7 +385,7 @@ fn test_event_operation(op: &EventOperation) {
     use asupersync::types::{RegionId, TaskId, Time};
 
     match op {
-        EventOperation::CreateTaskEvent { kind, time_ns } => {
+        EventOperation::TaskEvent { kind, time_ns } => {
             let event_kind = match kind {
                 TaskEventKind::Spawn => TraceEventKind::Spawn,
                 TaskEventKind::Schedule => TraceEventKind::Schedule,
@@ -419,20 +416,20 @@ fn test_event_operation(op: &EventOperation) {
                 panic!("Event data should be Task variant");
             }
         }
-        EventOperation::CreateObligationEvent {
+        EventOperation::ObligationEvent {
             kind,
             state,
             duration_ns,
         } => {
             test_obligation_event_creation(kind, state, *duration_ns);
         }
-        EventOperation::CreateTimerEvent {
+        EventOperation::TimerEvent {
             timer_id,
             deadline_ns,
         } => {
             test_timer_event_creation(*timer_id, *deadline_ns);
         }
-        EventOperation::CreateIoEvent {
+        EventOperation::IoEvent {
             token,
             interest,
             readiness,
@@ -440,7 +437,7 @@ fn test_event_operation(op: &EventOperation) {
         } => {
             test_io_event_creation(*token, *interest, *readiness, *bytes);
         }
-        EventOperation::CreateUserTrace { message } => {
+        EventOperation::UserTrace { message } => {
             let safe_message = if message.len() > MAX_STRING_LEN {
                 &message[..MAX_STRING_LEN]
             } else {
@@ -448,7 +445,7 @@ fn test_event_operation(op: &EventOperation) {
             };
             test_user_trace_creation(safe_message);
         }
-        EventOperation::CreateMalformedEvent { corrupted_data } => {
+        EventOperation::MalformedEvent { corrupted_data } => {
             test_malformed_event_handling(corrupted_data);
         }
     }
@@ -650,7 +647,7 @@ fn test_corrupted_timestamps(data: &[u8]) {
         let time = Time::from_nanos(corrupted_nanos);
 
         // Verify time handling doesn't crash
-        let _ = time.as_nanos();
+        observe_trace_time(time);
     }
 }
 
@@ -663,14 +660,43 @@ fn test_corrupted_event_kinds(data: &[u8]) {
 
         // Test all valid event kinds don't crash
         for kind in TraceEventKind::ALL {
-            let _ = kind.stable_name();
-            let _ = kind.required_fields();
+            observe_event_kind_metadata(kind);
         }
 
         // Test invalid discriminant handling
         // (The actual enum is well-defined, so this tests robustness)
         let _test_byte = corrupted_kind_byte; // Use corrupted byte in some way
     }
+}
+
+fn observe_trace_time(time: asupersync::types::Time) {
+    let nanos = time.as_nanos();
+    assert_eq!(
+        asupersync::types::Time::from_nanos(nanos).as_nanos(),
+        nanos,
+        "trace time nanos should round-trip through Time::from_nanos",
+    );
+    black_box(nanos);
+}
+
+fn observe_event_kind_metadata(kind: asupersync::trace::event::TraceEventKind) {
+    let stable_name = kind.stable_name();
+    let required_fields = kind.required_fields();
+    assert!(
+        !stable_name.is_empty(),
+        "trace event kind stable_name should be visible",
+    );
+    assert!(
+        !required_fields.is_empty(),
+        "trace event kind required_fields should be visible",
+    );
+    assert!(
+        stable_name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte == b'_'),
+        "trace event kind stable_name should stay grep-friendly",
+    );
+    black_box((stable_name, required_fields));
 }
 
 /// Test schema compatibility
@@ -731,15 +757,13 @@ fn test_corrupted_schema(corrupted_data: &[u8]) {
 /// Test stress scenarios
 fn test_stress_scenario(scenario: &StressScenario) {
     match scenario {
-        StressScenario::RapidEvents {
-            count,
-            interval_us: _,
-        } => {
+        StressScenario::RapidEvents { count, interval_us } => {
             let count = (*count as usize).min(MAX_EVENT_COUNT as usize);
-            test_rapid_event_generation(count);
+            let interval_us = (*interval_us).max(1);
+            test_rapid_event_generation(count, interval_us);
         }
         StressScenario::LargePayloads { payload_size } => {
-            let size = (*payload_size as usize).min(MAX_PAYLOAD_SIZE as usize);
+            let size = (*payload_size as usize).min(MAX_PAYLOAD_SIZE);
             test_large_payload_handling(size);
         }
         StressScenario::BufferThrashing { cycles } => {
@@ -757,7 +781,7 @@ fn test_stress_scenario(scenario: &StressScenario) {
 }
 
 /// Test rapid event generation
-fn test_rapid_event_generation(count: usize) {
+fn test_rapid_event_generation(count: usize, interval_us: u16) {
     use asupersync::trace::buffer::TraceBufferHandle;
     use asupersync::trace::event::{TraceData, TraceEvent, TraceEventKind};
     use asupersync::types::Time;
@@ -768,7 +792,11 @@ fn test_rapid_event_generation(count: usize) {
     for i in 0..count {
         let event = TraceEvent::new(
             i as u64,
-            Time::from_nanos((i * 1000) as u64),
+            Time::from_nanos(
+                (i as u64)
+                    .saturating_mul(interval_us as u64)
+                    .saturating_mul(1000),
+            ),
             TraceEventKind::UserTrace,
             TraceData::Message(format!("rapid_event_{}", i)),
         );
