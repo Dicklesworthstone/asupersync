@@ -76,6 +76,7 @@ fn rfc9112_6_1_both_headers_present_audit() {
                 other
             );
         }
+        Ok(None) => panic!("decoder returned EOF before evaluating ambiguous body framing"),
     }
 }
 
@@ -134,6 +135,7 @@ fn rfc9112_6_1_single_header_cases() {
             println!("✓ Content-Length only: Accepted");
             assert_eq!(req.body, b"hello");
         }
+        Ok(None) => panic!("Content-Length only request decoded as EOF"),
         Err(e) => panic!("Content-Length only request failed: {:?}", e),
     }
 
@@ -150,6 +152,7 @@ fn rfc9112_6_1_single_header_cases() {
             println!("✓ Transfer-Encoding only: Accepted");
             assert_eq!(req.body, b"hello");
         }
+        Ok(None) => panic!("Transfer-Encoding only request decoded as EOF"),
         Err(e) => panic!("Transfer-Encoding only request failed: {:?}", e),
     }
 }
@@ -178,6 +181,7 @@ fn rfc9112_6_1_smuggling_vector_prevention() {
         Ok(Some(_)) => {
             panic!("❌ CRITICAL: Request smuggling attempt not blocked!");
         }
+        Ok(None) => panic!("decoder returned EOF before evaluating smuggling attempt"),
         Err(other) => {
             println!("⚠ Blocked by different error: {:?}", other);
             println!("  Still secure, but not the expected AmbiguousBodyLength error");
