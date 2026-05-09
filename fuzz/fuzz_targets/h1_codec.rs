@@ -309,6 +309,10 @@ fn version_to_string(version: &HttpVersionInput) -> String {
 fn normalize_fuzz_input(input: &mut H1CodecFuzzInput) {
     // Limit operations to prevent timeouts
     input.operations.truncate(30);
+    if !input.operations.is_empty() {
+        let rotation = (input.seed as usize) % input.operations.len();
+        input.operations.rotate_left(rotation);
+    }
 
     // Bound configuration values
     input.config.max_operations = input.config.max_operations.min(50);
@@ -470,7 +474,7 @@ fn test_header_parsing(op: &H1CodecOperation, shadow: &H1CodecShadowModel) -> Re
                 }
             }
             Err(_) => {
-                shadow.record_security_violation(format!("Header parser panicked on input"));
+                shadow.record_security_violation("Header parser panicked on input".to_string());
                 return Err("Header parser panicked".to_string());
             }
         }
@@ -490,11 +494,11 @@ fn test_content_length(op: &H1CodecOperation, shadow: &H1CodecShadowModel) -> Re
         let http_data = create_content_length_test_data(content_length);
 
         // Check for large content length values
-        if let ContentLengthInput::Valid(size) = content_length {
-            if *size > 100 * 1024 * 1024 {
-                // 100MB
-                shadow.record_large_content_length(*size);
-            }
+        if let ContentLengthInput::Valid(size) = content_length
+            && *size > 100 * 1024 * 1024
+        {
+            // 100MB
+            shadow.record_large_content_length(*size);
         }
 
         let result = std::panic::catch_unwind(|| {
@@ -509,9 +513,9 @@ fn test_content_length(op: &H1CodecOperation, shadow: &H1CodecShadowModel) -> Re
                     Ok(_) => {
                         // Content-Length parsed successfully
                         if *expect_oom_protection {
-                            shadow.record_security_violation(format!(
-                                "Expected OOM protection but parsing succeeded"
-                            ));
+                            shadow.record_security_violation(
+                                "Expected OOM protection but parsing succeeded".to_string(),
+                            );
                         } else {
                             shadow.record_operation_success();
                         }
@@ -535,7 +539,7 @@ fn test_content_length(op: &H1CodecOperation, shadow: &H1CodecShadowModel) -> Re
                 }
             }
             Err(_) => {
-                shadow.record_security_violation(format!("Content-Length parser panicked"));
+                shadow.record_security_violation("Content-Length parser panicked".to_string());
                 return Err("Content-Length parser panicked".to_string());
             }
         }
@@ -573,7 +577,7 @@ fn test_chunked_bodies(op: &H1CodecOperation, shadow: &H1CodecShadowModel) -> Re
                 }
             }
             Err(_) => {
-                shadow.record_security_violation(format!("Chunked body parser panicked"));
+                shadow.record_security_violation("Chunked body parser panicked".to_string());
                 return Err("Chunked body parser panicked".to_string());
             }
         }
@@ -607,7 +611,7 @@ fn test_trailers(op: &H1CodecOperation, shadow: &H1CodecShadowModel) -> Result<(
                 }
             }
             Err(_) => {
-                shadow.record_security_violation(format!("Trailer parser panicked"));
+                shadow.record_security_violation("Trailer parser panicked".to_string());
                 return Err("Trailer parser panicked".to_string());
             }
         }
@@ -649,9 +653,9 @@ fn test_upgrades(op: &H1CodecOperation, shadow: &H1CodecShadowModel) -> Result<(
                             });
 
                             if *expect_valid_upgrade && (!has_upgrade || !has_connection_upgrade) {
-                                shadow.record_security_violation(format!(
-                                    "Expected valid upgrade but headers missing"
-                                ));
+                                shadow.record_security_violation(
+                                    "Expected valid upgrade but headers missing".to_string(),
+                                );
                             }
                         }
                         shadow.record_operation_success();
@@ -662,7 +666,7 @@ fn test_upgrades(op: &H1CodecOperation, shadow: &H1CodecShadowModel) -> Result<(
                 }
             }
             Err(_) => {
-                shadow.record_security_violation(format!("Upgrade parser panicked"));
+                shadow.record_security_violation("Upgrade parser panicked".to_string());
                 return Err("Upgrade parser panicked".to_string());
             }
         }
@@ -703,9 +707,9 @@ fn test_request_smuggling(
                     Ok(_) => {
                         // If both Content-Length and Transfer-Encoding were present, this should be rejected
                         if *has_content_length && *has_transfer_encoding {
-                            shadow.record_security_violation(format!(
-                                "Request smuggling vulnerability: both Content-Length and Transfer-Encoding accepted"
-                            ));
+                            shadow.record_security_violation(
+                                "Request smuggling vulnerability: both Content-Length and Transfer-Encoding accepted".to_string(),
+                            );
                             return Err("Request smuggling vulnerability".to_string());
                         }
                         shadow.record_operation_success();
@@ -725,7 +729,7 @@ fn test_request_smuggling(
                 }
             }
             Err(_) => {
-                shadow.record_security_violation(format!("Request smuggling parser panicked"));
+                shadow.record_security_violation("Request smuggling parser panicked".to_string());
                 return Err("Request smuggling parser panicked".to_string());
             }
         }
@@ -755,9 +759,9 @@ fn test_malformed_messages(
             Ok(decode_result) => match decode_result {
                 Ok(_) => {
                     if *expect_parse_error {
-                        shadow.record_security_violation(format!(
-                            "Expected parse error but malformed message succeeded"
-                        ));
+                        shadow.record_security_violation(
+                            "Expected parse error but malformed message succeeded".to_string(),
+                        );
                     } else {
                         shadow.record_operation_success();
                     }
@@ -767,7 +771,7 @@ fn test_malformed_messages(
                 }
             },
             Err(_) => {
-                shadow.record_security_violation(format!("Malformed message parser panicked"));
+                shadow.record_security_violation("Malformed message parser panicked".to_string());
                 return Err("Malformed message parser panicked".to_string());
             }
         }
@@ -1006,14 +1010,29 @@ fn execute_h1_codec_operations(input: &H1CodecFuzzInput) -> Result<(), String> {
 
         let result = match operation {
             H1CodecOperation::RequestLine { .. } => test_request_line_parsing(operation, &shadow),
-            H1CodecOperation::HeaderTest { .. } => test_header_parsing(operation, &shadow),
-            H1CodecOperation::ContentLengthTest { .. } => test_content_length(operation, &shadow),
+            H1CodecOperation::HeaderTest { injection_test, .. }
+                if input.config.test_header_injection
+                    || matches!(injection_test, HeaderInjectionType::None) =>
+            {
+                test_header_parsing(operation, &shadow)
+            }
+            H1CodecOperation::HeaderTest { .. } => continue,
+            H1CodecOperation::ContentLengthTest {
+                expect_oom_protection,
+                ..
+            } if input.config.test_oom_protection || !expect_oom_protection => {
+                test_content_length(operation, &shadow)
+            }
+            H1CodecOperation::ContentLengthTest { .. } => continue,
             H1CodecOperation::ChunkedBodyTest { .. } => test_chunked_bodies(operation, &shadow),
             H1CodecOperation::TrailerTest { .. } => test_trailers(operation, &shadow),
             H1CodecOperation::UpgradeTest { .. } => test_upgrades(operation, &shadow),
-            H1CodecOperation::RequestSmugglingTest { .. } => {
+            H1CodecOperation::RequestSmugglingTest { .. }
+                if input.config.test_request_smuggling =>
+            {
                 test_request_smuggling(operation, &shadow)
             }
+            H1CodecOperation::RequestSmugglingTest { .. } => continue,
             H1CodecOperation::MalformedMessage { .. } => {
                 test_malformed_messages(operation, &shadow)
             }
@@ -1063,8 +1082,20 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
 
-    // Run H1 codec fuzzing - catch any panics
-    let _ = std::panic::catch_unwind(|| {
-        let _ = fuzz_h1_codec(input);
-    });
+    // Run H1 codec fuzzing while preserving panic visibility.
+    match std::panic::catch_unwind(|| fuzz_h1_codec(input)) {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            assert!(
+                !error.trim().is_empty(),
+                "H1 codec rejection should expose a diagnostic"
+            );
+            assert!(
+                error.len() <= 768,
+                "H1 codec rejection diagnostic should stay bounded: {} bytes",
+                error.len()
+            );
+        }
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
 });
