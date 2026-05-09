@@ -15,8 +15,7 @@
 
 use arbitrary::Arbitrary;
 use asupersync::http::h3_native::{
-    H3NativeError, H3QpackMode, QpackContext, QpackFieldPlan, qpack_decode_field_section,
-    qpack_decode_request_field_section, qpack_decode_response_field_section,
+    H3QpackMode, QpackContext, QpackFieldPlan, qpack_decode_field_section,
     qpack_encode_field_section, qpack_encode_field_section_with_context,
     qpack_plan_to_header_fields, qpack_static_plan_for_request, qpack_static_plan_for_response,
 };
@@ -31,6 +30,8 @@ const MAX_FIELD_PLAN_SIZE: usize = 20;
 const MAX_HEADER_LENGTH: usize = 128;
 /// Maximum dynamic table capacity for testing
 const MAX_TABLE_CAPACITY: u64 = 4096;
+/// Maximum diagnostic size accepted from graceful integration rejections.
+const MAX_QPACK_DIAGNOSTIC_SIZE: usize = 2048;
 
 #[derive(Arbitrary, Debug)]
 struct QpackIntegrationInput {
@@ -143,8 +144,24 @@ fuzz_target!(|input: QpackIntegrationInput| {
     let mut input = input;
     normalize_input(&mut input);
 
-    let _ = test_qpack_integration(&input);
+    observe_qpack_integration_result(test_qpack_integration(&input));
 });
+
+fn observe_qpack_integration_result(result: Result<(), Box<dyn std::error::Error>>) {
+    if let Err(err) = result {
+        let diagnostic = err.to_string();
+        assert!(
+            !diagnostic.trim().is_empty(),
+            "QPACK integration rejection should include a diagnostic"
+        );
+        assert!(
+            diagnostic.len() <= MAX_QPACK_DIAGNOSTIC_SIZE,
+            "QPACK integration diagnostic size {} exceeds maximum {}",
+            diagnostic.len(),
+            MAX_QPACK_DIAGNOSTIC_SIZE
+        );
+    }
+}
 
 fn normalize_input(input: &mut QpackIntegrationInput) {
     // Clamp table capacity to reasonable range
@@ -292,7 +309,8 @@ fn test_qpack_integration(input: &QpackIntegrationInput) -> Result<(), Box<dyn s
 
             QpackOperation::ChangeDynamicTableSize { new_capacity } => {
                 // Create new context with different capacity to test size changes
-                let new_ctx = QpackContext::new(*new_capacity as usize);
+                let new_ctx =
+                    QpackContext::new((*new_capacity as usize).min(MAX_TABLE_CAPACITY as usize));
                 qpack_context = new_ctx;
             }
 
@@ -304,23 +322,26 @@ fn test_qpack_integration(input: &QpackIntegrationInput) -> Result<(), Box<dyn s
             QpackOperation::RoundTripTest { field_plan } => {
                 if let Ok(qpack_plan) = convert_field_plan_to_qpack(field_plan) {
                     // Test encoding then decoding for consistency
-                    if let Ok(encoded) = qpack_encode_field_section(&qpack_plan) {
-                        if let Ok(decoded_plan) = qpack_decode_field_section(&encoded, qpack_mode) {
-                            // Verify round-trip consistency
-                            let _ =
-                                qpack_plan_to_header_fields(&decoded_plan, Some(&qpack_context));
-                        }
+                    if let Ok(encoded) = qpack_encode_field_section(&qpack_plan)
+                        && let Ok(decoded_plan) = qpack_decode_field_section(&encoded, qpack_mode)
+                    {
+                        // Verify round-trip consistency
+                        let _ = qpack_plan_to_header_fields(&decoded_plan, Some(&qpack_context));
                     }
                 }
             }
 
             QpackOperation::ValidateState => {
                 // Test context state validation
-                let table = qpack_context.dynamic_table();
-                let _ = table.len();
-                let _ = table.size();
-                let _ = table.capacity();
-                let _ = table.insertion_counter();
+                if input.context_config.strict_validation {
+                    validate_qpack_context_state(&qpack_context)?;
+                } else {
+                    let table = qpack_context.dynamic_table();
+                    let _ = table.len();
+                    let _ = table.size();
+                    let _ = table.capacity();
+                    let _ = table.insertion_counter();
+                }
             }
 
             QpackOperation::EncodeRequest { request_config } => {
@@ -341,9 +362,46 @@ fn test_qpack_integration(input: &QpackIntegrationInput) -> Result<(), Box<dyn s
         }
     }
 
+    if input.context_config.strict_validation {
+        validate_qpack_context_state(&qpack_context)?;
+    }
+
     // Test header block ordering scenarios
     for scenario in &input.ordering_scenarios {
         test_ordering_scenario(scenario, &qpack_context, qpack_mode)?;
+    }
+
+    Ok(())
+}
+
+fn qpack_integration_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
+    Box::new(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        message.into(),
+    ))
+}
+
+fn validate_qpack_context_state(context: &QpackContext) -> Result<(), Box<dyn std::error::Error>> {
+    let table = context.dynamic_table();
+    let table_size = table.size();
+    let table_capacity = table.capacity();
+    let table_len = table.len();
+    let insertion_counter = table.insertion_counter();
+
+    if table_capacity > MAX_TABLE_CAPACITY as usize {
+        return Err(qpack_integration_error(format!(
+            "QPACK dynamic table capacity {table_capacity} exceeds maximum {MAX_TABLE_CAPACITY}"
+        )));
+    }
+    if table_size > table_capacity {
+        return Err(qpack_integration_error(format!(
+            "QPACK dynamic table size {table_size} exceeds capacity {table_capacity}"
+        )));
+    }
+    if insertion_counter < table_len as u64 {
+        return Err(qpack_integration_error(format!(
+            "QPACK insertion counter {insertion_counter} is below table length {table_len}"
+        )));
     }
 
     Ok(())
@@ -415,43 +473,81 @@ fn test_ordering_scenario(
     for block_op in &scenario.block_operations {
         match block_op {
             BlockOperation::StartBlock { block_id } => {
+                if scenario.validate_ordering && current_blocks.contains_key(block_id) {
+                    return Err(qpack_integration_error(format!(
+                        "QPACK header block {block_id} started more than once"
+                    )));
+                }
                 current_block_id = Some(*block_id);
                 current_blocks.insert(*block_id, Vec::new());
             }
 
             BlockOperation::AddField { name, value } => {
-                if let Some(block_id) = current_block_id {
-                    if let Some(block) = current_blocks.get_mut(&block_id) {
-                        block.push((name.clone(), value.clone()));
+                let Some(block_id) = current_block_id else {
+                    if scenario.validate_ordering {
+                        return Err(qpack_integration_error(
+                            "QPACK field added without an active header block",
+                        ));
                     }
+                    continue;
+                };
+
+                if let Some(block) = current_blocks.get_mut(&block_id) {
+                    block.push((name.clone(), value.clone()));
+                } else if scenario.validate_ordering {
+                    return Err(qpack_integration_error(format!(
+                        "QPACK field added to unknown header block {block_id}"
+                    )));
                 }
             }
 
             BlockOperation::FinishBlock => {
-                if let Some(block_id) = current_block_id {
-                    if let Some(block) = current_blocks.get(&block_id) {
-                        // Convert block to field plan and test encoding/decoding
-                        let field_plan: Vec<QpackFieldPlan> = block
-                            .iter()
-                            .map(|(name, value)| QpackFieldPlan::Literal {
-                                name: name.clone(),
-                                value: value.clone(),
-                            })
-                            .collect();
-
-                        if let Ok(encoded) = qpack_encode_field_section(&field_plan) {
-                            let _ = qpack_decode_field_section(&encoded, qpack_mode);
-                        }
+                let Some(block_id) = current_block_id else {
+                    if scenario.validate_ordering {
+                        return Err(qpack_integration_error(
+                            "QPACK header block finished without an active block",
+                        ));
                     }
+                    continue;
+                };
+
+                if let Some(block) = current_blocks.get(&block_id) {
+                    // Convert block to field plan and test encoding/decoding
+                    let field_plan: Vec<QpackFieldPlan> = block
+                        .iter()
+                        .map(|(name, value)| QpackFieldPlan::Literal {
+                            name: name.clone(),
+                            value: value.clone(),
+                        })
+                        .collect();
+
+                    if let Ok(encoded) = qpack_encode_field_section(&field_plan) {
+                        let _ = qpack_decode_field_section(&encoded, qpack_mode);
+                    }
+                } else if scenario.validate_ordering {
+                    return Err(qpack_integration_error(format!(
+                        "QPACK unknown header block {block_id} finished"
+                    )));
                 }
                 current_block_id = None;
             }
 
             BlockOperation::SwitchToBlock { block_id } => {
+                if scenario.validate_ordering && !current_blocks.contains_key(block_id) {
+                    return Err(qpack_integration_error(format!(
+                        "QPACK switched to unknown header block {block_id}"
+                    )));
+                }
                 current_block_id = Some(*block_id);
-                current_blocks.entry(*block_id).or_insert_with(Vec::new);
+                current_blocks.entry(*block_id).or_default();
             }
         }
+    }
+
+    if scenario.validate_ordering && current_block_id.is_some() {
+        return Err(qpack_integration_error(
+            "QPACK ordering scenario left a header block open",
+        ));
     }
 
     Ok(())
