@@ -204,8 +204,7 @@ fn try_parse_raw_result_set_start(data: &[u8]) -> Result<u64, MySqlError> {
         return Err(MySqlError::Protocol("empty data".to_string()));
     }
 
-    let mut pos = 0;
-    let mut reader = &data[pos..];
+    let mut reader = data;
 
     // Try to parse column count (length-encoded integer)
     let column_count = read_lenenc_int(&mut reader)?;
@@ -260,9 +259,6 @@ fn read_lenenc_int(data: &mut &[u8]) -> Result<u64, MySqlError> {
         }
         0xFB => Err(MySqlError::Protocol("NULL in lenenc int".to_string())),
         0xFF => Err(MySqlError::Protocol("reserved lenenc prefix".to_string())),
-        _ => Err(MySqlError::Protocol(format!(
-            "invalid lenenc prefix: {first}"
-        ))),
     }
 }
 
@@ -283,13 +279,10 @@ fn normalize_scenario(mut scenario: ResultSetScenario) -> ResultSetScenario {
     for row in &mut scenario.rows {
         row.values.truncate(scenario.columns.len().max(8));
         for value in &mut row.values {
-            if let RowValueSpec::Text(ref mut s) | RowValueSpec::Binary(ref mut data, _) = value {
-                if let RowValueSpec::Text(s) = value {
-                    s.raw_bytes.truncate(MAX_ROW_VALUE_BYTES);
-                }
-                if let RowValueSpec::Binary(data, _) = value {
-                    data.truncate(MAX_ROW_VALUE_BYTES);
-                }
+            match value {
+                RowValueSpec::Text(string) => string.raw_bytes.truncate(MAX_ROW_VALUE_BYTES),
+                RowValueSpec::Binary(bytes, _) => bytes.truncate(MAX_ROW_VALUE_BYTES),
+                RowValueSpec::Null | RowValueSpec::Empty => {}
             }
         }
     }
@@ -468,12 +461,9 @@ fn build_row_packet(row: &RowSpec, expected_columns: usize) -> Vec<u8> {
     }
 
     // Apply row-level corruption
-    match row.corruption {
-        RowCorruption::Truncated(at) => {
-            let truncate_pos = (usize::from(at) % (packet.len() + 1)).min(packet.len());
-            packet.truncate(truncate_pos);
-        }
-        _ => {}
+    if let RowCorruption::Truncated(at) = row.corruption {
+        let truncate_pos = (usize::from(at) % (packet.len() + 1)).min(packet.len());
+        packet.truncate(truncate_pos);
     }
 
     packet
@@ -608,19 +598,14 @@ fn test_column_definition_invariants(packet: &[u8]) {
             column.charset
         );
 
-        // Column type should be valid MySQL type
         assert!(
-            column.column_type <= 255,
-            "column type out of range: {}",
-            column.column_type
+            !render_column_parse_result(Ok(column)).is_empty(),
+            "successful column parse should stay visible"
         );
-
-        // Length should be reasonable
-        assert!(column.length <= 4_294_967_295, "column length overflow");
     }
 }
 
-fn test_result_set_sequence(packets: &[Vec<u8>], scenario: &ResultSetScenario) {
+fn test_result_set_sequence(packets: &[Vec<u8>], _scenario: &ResultSetScenario) {
     if packets.is_empty() {
         return;
     }
