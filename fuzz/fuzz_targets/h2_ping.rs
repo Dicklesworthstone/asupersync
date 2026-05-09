@@ -141,6 +141,110 @@ impl PingShadowModel {
     }
 }
 
+fn observe_ping_send(
+    shadow: &mut PingShadowModel,
+    opaque_data: [u8; 8],
+    context: &str,
+) -> Result<bool, String> {
+    let pending_before = shadow.pending_pings.len();
+    let sent_before = shadow.pings_sent;
+
+    match shadow.expect_ping(opaque_data) {
+        Ok(()) => {
+            if shadow.pings_sent != sent_before + 1 {
+                return Err(format!(
+                    "{context}: accepted PING did not increment sent count"
+                ));
+            }
+            if shadow.pending_pings.len() != pending_before + 1 {
+                return Err(format!(
+                    "{context}: accepted PING did not append exactly one pending entry"
+                ));
+            }
+            if shadow.pending_pings.last() != Some(&opaque_data) {
+                return Err(format!(
+                    "{context}: accepted PING did not preserve opaque data"
+                ));
+            }
+            Ok(true)
+        }
+        Err(error) => {
+            if !shadow.ping_rate_limit_exceeded {
+                return Err(format!(
+                    "{context}: rejected PING did not set rate-limit state: {error}"
+                ));
+            }
+            if pending_before as u32 != shadow.max_pending {
+                return Err(format!(
+                    "{context}: PING rejected before pending count reached max {}: {error}",
+                    shadow.max_pending
+                ));
+            }
+            if shadow.pings_sent != sent_before || shadow.pending_pings.len() != pending_before {
+                return Err(format!("{context}: rejected PING mutated shadow state"));
+            }
+            Ok(false)
+        }
+    }
+}
+
+fn observe_ping_ack(
+    shadow: &mut PingShadowModel,
+    opaque_data: [u8; 8],
+    context: &str,
+) -> Result<bool, String> {
+    let pending_before = shadow.pending_pings.len();
+    let ack_before = shadow.acks_received;
+    let had_match = shadow.pending_pings.contains(&opaque_data);
+
+    shadow
+        .expect_ping_ack(opaque_data)
+        .map_err(|error| format!("{context}: PING ACK shadow model rejected: {error}"))?;
+
+    if had_match {
+        if shadow.acks_received != ack_before + 1 {
+            return Err(format!(
+                "{context}: matched ACK did not increment ACK count"
+            ));
+        }
+        if shadow.pending_pings.len() + 1 != pending_before {
+            return Err(format!(
+                "{context}: matched ACK did not remove exactly one pending PING"
+            ));
+        }
+    } else {
+        if shadow.acks_received != ack_before {
+            return Err(format!("{context}: unmatched ACK incremented ACK count"));
+        }
+        if shadow.pending_pings.len() != pending_before {
+            return Err(format!("{context}: unmatched ACK mutated pending PINGs"));
+        }
+    }
+
+    Ok(had_match)
+}
+
+fn observe_ping_parse_outcome(
+    result: Option<PingFrame>,
+    expected_ack: bool,
+    context: &str,
+) -> Result<(), String> {
+    if let Some(frame) = result {
+        if frame.ack != expected_ack {
+            return Err(format!(
+                "{context}: parsed ACK flag {}, expected {}",
+                frame.ack, expected_ack
+            ));
+        }
+        if frame.opaque_data.len() != 8 {
+            return Err(format!(
+                "{context}: parsed PING opaque data length was not 8 bytes"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Normalize fuzz input to prevent timeouts and ensure valid ranges
 fn normalize_fuzz_input(input: &mut H2PingFuzz) {
     // Limit operations to prevent timeouts
@@ -369,9 +473,13 @@ fn test_ping_frame_parsing(input: &H2PingFuzz) -> Result<(), String> {
                         && let Some(parsed) = assert_ping_parse_contract(&header, &payload_bytes)?
                     {
                         if parsed.ack {
-                            let _ = shadow.expect_ping_ack(parsed.opaque_data);
+                            observe_ping_ack(
+                                &mut shadow,
+                                parsed.opaque_data,
+                                "raw parsed PING ACK",
+                            )?;
                         } else {
-                            let _ = shadow.expect_ping(parsed.opaque_data);
+                            observe_ping_send(&mut shadow, parsed.opaque_data, "raw parsed PING")?;
                         }
                     }
                 }
@@ -379,7 +487,7 @@ fn test_ping_frame_parsing(input: &H2PingFuzz) -> Result<(), String> {
 
             PingOperation::UnmatchedAck { opaque_data } => {
                 // Assertion 4: ACK without matching PING ignored
-                let _ = shadow.expect_ping_ack(*opaque_data);
+                observe_ping_ack(&mut shadow, *opaque_data, "unmatched ACK operation")?;
                 // This should not cause an error - just be ignored
                 // The shadow model tracks this correctly
             }
@@ -417,7 +525,7 @@ fn test_ping_frame_parsing(input: &H2PingFuzz) -> Result<(), String> {
 
             PingOperation::BoundaryPing { boundary_type } => {
                 let boundary_data = create_boundary_ping(boundary_type.clone());
-                let _ = shadow.expect_ping(boundary_data);
+                observe_ping_send(&mut shadow, boundary_data, "boundary PING")?;
             }
         }
     }
@@ -427,8 +535,15 @@ fn test_ping_frame_parsing(input: &H2PingFuzz) -> Result<(), String> {
         match scenario {
             PingFrameScenario::ValidRoundTrip { opaque_data } => {
                 // Test valid PING/ACK round trip
-                let _ = shadow.expect_ping(*opaque_data);
-                let _ = shadow.expect_ping_ack(*opaque_data);
+                let accepted =
+                    observe_ping_send(&mut shadow, *opaque_data, "valid round-trip PING")?;
+                if accepted {
+                    let matched =
+                        observe_ping_ack(&mut shadow, *opaque_data, "valid round-trip ACK")?;
+                    if !matched {
+                        return Err("valid round-trip ACK did not match its PING".to_string());
+                    }
+                }
             }
 
             PingFrameScenario::MalformedFrame {
@@ -498,7 +613,7 @@ fn test_ping_frame_parsing(input: &H2PingFuzz) -> Result<(), String> {
             } => {
                 // Test mixed valid and invalid PING frames
                 for ping_data in valid_pings {
-                    let _ = shadow.expect_ping(*ping_data);
+                    observe_ping_send(&mut shadow, *ping_data, "mixed valid PING")?;
                 }
 
                 for invalid_frame in invalid_raw_frames {
@@ -514,7 +629,12 @@ fn test_ping_frame_parsing(input: &H2PingFuzz) -> Result<(), String> {
                             let payload_bytes = Bytes::copy_from_slice(&frame_data[9..]);
 
                             if let Ok(header) = FrameHeader::parse(&mut header_buf) {
-                                let _ = assert_ping_parse_contract(&header, &payload_bytes)?;
+                                let result = assert_ping_parse_contract(&header, &payload_bytes)?;
+                                observe_ping_parse_outcome(
+                                    result,
+                                    false,
+                                    "mixed invalid raw frame",
+                                )?;
                             }
                         }
                     }
@@ -557,5 +677,7 @@ fuzz_target!(|data: &[u8]| {
     };
 
     // Run HTTP/2 PING fuzzing with comprehensive assertions
-    let _ = fuzz_h2_ping(input);
+    if let Err(error) = fuzz_h2_ping(input) {
+        panic!("HTTP/2 PING invariant violation: {error}");
+    }
 });
