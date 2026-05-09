@@ -20,11 +20,47 @@ fn parse_reply_subject(reply_subject: &str, payload: &[u8]) -> Option<FuzzJsAckM
     })
 }
 
+fn assert_visible_js_error(err: &JsError) {
+    assert!(
+        !err.to_string().is_empty(),
+        "JetStream parser errors should remain observable"
+    );
+}
+
+fn observe_stream_info_parse(bytes: &[u8]) {
+    match fuzz_parse_stream_info(bytes) {
+        Ok(info) => {
+            assert!(
+                info.config.name.len() <= bytes.len(),
+                "parsed StreamInfo name should be input-bounded"
+            );
+        }
+        Err(err) => assert_visible_js_error(&err),
+    }
+}
+
+fn observe_pub_ack_parse(bytes: &[u8]) {
+    match fuzz_parse_pub_ack(bytes) {
+        Ok(ack) => {
+            assert!(
+                ack.stream.len() <= bytes.len(),
+                "parsed PubAck stream should be input-bounded"
+            );
+        }
+        Err(err) => assert_visible_js_error(&err),
+    }
+}
+
+fn observe_api_error_parse(json_data: &str) {
+    let err = fuzz_parse_api_error(json_data);
+    assert_visible_js_error(&err);
+}
+
 fn observe_jetstream_api_parsers(json_data: &str) {
     let payload = json_data.as_bytes();
-    let _ = fuzz_parse_stream_info(payload);
-    let _ = fuzz_parse_pub_ack(payload);
-    let _ = fuzz_parse_api_error(json_data);
+    observe_stream_info_parse(payload);
+    observe_pub_ack_parse(payload);
+    observe_api_error_parse(json_data);
 }
 
 fn assert_known_json_parser_outputs() {
