@@ -2,8 +2,9 @@
 
 use arbitrary::Arbitrary;
 use asupersync::bytes::Bytes;
+use asupersync::http::h2::connection::ReceivedFrame;
 use asupersync::http::h2::frame::{HeadersFrame, SettingsFrame, WindowUpdateFrame};
-use asupersync::http::h2::{Connection, ErrorCode, Frame, Settings};
+use asupersync::http::h2::{Connection, ConnectionState, ErrorCode, Frame, H2Error, Settings};
 use libfuzzer_sys::fuzz_target;
 
 const ACTIVE_STREAM_ID: u32 = 1;
@@ -47,7 +48,15 @@ struct OutboundWindowUpdate {
 fn setup_connection() -> Connection {
     let mut connection = Connection::server(Settings::default());
 
-    let _ = connection.process_frame(Frame::Settings(SettingsFrame::new(vec![])));
+    let send_window_before = connection.send_window();
+    let recv_window_before = connection.recv_window();
+    let settings_result = connection.process_frame(Frame::Settings(SettingsFrame::new(Vec::new())));
+    assert_initial_settings_observed(
+        settings_result,
+        &connection,
+        send_window_before,
+        recv_window_before,
+    );
     drain_all_frames(&mut connection);
 
     let headers = Frame::Headers(HeadersFrame::new(
@@ -71,6 +80,43 @@ fn setup_connection() -> Connection {
     );
 
     connection
+}
+
+fn assert_initial_settings_observed(
+    result: Result<Option<ReceivedFrame>, H2Error>,
+    connection: &Connection,
+    send_window_before: i32,
+    recv_window_before: i32,
+) {
+    match result {
+        Ok(None) => {
+            assert_eq!(
+                connection.state(),
+                ConnectionState::Open,
+                "empty initial SETTINGS must complete the server-side H2 handshake"
+            );
+            assert!(
+                !connection.is_awaiting_continuation(),
+                "initial SETTINGS must not enter continuation state"
+            );
+            assert_eq!(
+                connection.send_window(),
+                send_window_before,
+                "empty initial SETTINGS must not mutate the connection send window"
+            );
+            assert_eq!(
+                connection.recv_window(),
+                recv_window_before,
+                "empty initial SETTINGS must not mutate the connection receive window"
+            );
+        }
+        Ok(Some(frame)) => {
+            panic!("empty initial SETTINGS unexpectedly produced a received event: {frame:?}");
+        }
+        Err(err) => {
+            panic!("empty initial SETTINGS must be accepted before WINDOW_UPDATE fuzzing: {err:?}");
+        }
+    }
 }
 
 fn drain_all_frames(connection: &mut Connection) {
