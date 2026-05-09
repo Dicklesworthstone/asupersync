@@ -6,6 +6,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 const SIGNOFF_PATH: &str = "artifacts/tokio_migration_proof_pack_signoff_v1.json";
+const NO_TOKIO_GRAPH_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_migsgn_no_tokio cargo tree -e normal -p asupersync -i tokio";
+const STALE_NO_TOKIO_GRAPH_COMMAND: &str =
+    "rch exec -- cargo tree -e normal -p asupersync -i tokio";
 
 #[derive(Debug, Deserialize)]
 struct Signoff {
@@ -260,8 +263,20 @@ fn validation_commands_and_no_tokio_proof_are_explicit() {
 
     assert!(commands.contains("rch exec -- rustfmt"));
     assert!(commands.contains("rch exec -- env CARGO_INCREMENTAL=0"));
-    assert!(commands.contains("rch exec -- cargo tree -e normal -p asupersync -i tokio"));
+    assert!(commands.contains(NO_TOKIO_GRAPH_COMMAND));
+    assert!(!commands.contains(STALE_NO_TOKIO_GRAPH_COMMAND));
     assert!(commands.contains("timeout 30s br dep cycles --json --blocking-only"));
+
+    for command in signoff
+        .validation_commands
+        .iter()
+        .filter(|command| command.starts_with("rch exec --") && command.contains(" cargo "))
+    {
+        assert!(
+            command.contains("CARGO_TARGET_DIR="),
+            "cargo validation commands must set CARGO_TARGET_DIR: {command}"
+        );
+    }
 
     for child in &signoff.child_evidence {
         assert!(
@@ -271,12 +286,23 @@ fn validation_commands_and_no_tokio_proof_are_explicit() {
                 .all(|command| command.starts_with("rch exec --")),
             "all expensive child proof commands must use rch: {child:?}"
         );
+        for command in child
+            .rch_commands
+            .iter()
+            .filter(|command| command.starts_with("rch exec --") && command.contains(" cargo "))
+        {
+            assert_ne!(
+                command, STALE_NO_TOKIO_GRAPH_COMMAND,
+                "child no-Tokio graph proof must not use stale bare cargo routing: {child:?}"
+            );
+            assert!(
+                command.contains("CARGO_TARGET_DIR="),
+                "child cargo proof commands must set CARGO_TARGET_DIR: {command}"
+            );
+        }
     }
 
-    assert_eq!(
-        signoff.no_tokio_graph_proof.command,
-        "rch exec -- cargo tree -e normal -p asupersync -i tokio"
-    );
+    assert_eq!(signoff.no_tokio_graph_proof.command, NO_TOKIO_GRAPH_COMMAND);
     assert_eq!(
         signoff.no_tokio_graph_proof.expected_stdout,
         "warning: nothing to print."

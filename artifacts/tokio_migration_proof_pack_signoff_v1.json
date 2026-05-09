@@ -75,7 +75,7 @@
       "rch_commands": [
         "rch exec -- bash -n scripts/run_tokio_migration_shadow_workload_smoke.sh",
         "rch exec -- rustfmt --edition 2024 --check tests/tokio_migration_shadow_workload_runner.rs",
-        "rch exec -- cargo tree -e normal -p asupersync -i tokio",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_migsgn_no_tokio cargo tree -e normal -p asupersync -i tokio",
         "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_shdwrk cargo test -p asupersync --test tokio_migration_shadow_workload_runner --features test-internals -- --nocapture"
       ],
       "local_commands": [
@@ -145,7 +145,7 @@
         ".beads/issues.jsonl"
       ],
       "rch_commands": [
-        "rch exec -- cargo tree -e normal -p asupersync -i tokio"
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_migsgn_no_tokio cargo tree -e normal -p asupersync -i tokio"
       ],
       "local_commands": [],
       "generated_artifact_paths": [
@@ -233,7 +233,7 @@
     }
   ],
   "no_tokio_graph_proof": {
-    "command": "rch exec -- cargo tree -e normal -p asupersync -i tokio",
+    "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_migsgn_no_tokio cargo tree -e normal -p asupersync -i tokio",
     "expected_stdout": "warning: nothing to print.",
     "observed_stdout": "warning: nothing to print."
   },
@@ -259,7 +259,7 @@
     "jq -e '.contract_version == \"tokio-migration-proof-pack-signoff-v1\" and (.child_evidence | length == 6)' artifacts/tokio_migration_proof_pack_signoff_v1.json",
     "rch exec -- rustfmt --edition 2024 --check tests/tokio_migration_proof_pack_signoff.rs",
     "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_migsgn cargo test -p asupersync --test tokio_migration_proof_pack_signoff --features test-internals -- --nocapture",
-    "rch exec -- cargo tree -e normal -p asupersync -i tokio",
+    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_migsgn_no_tokio cargo tree -e normal -p asupersync -i tokio",
     "timeout 30s br dep cycles --json --blocking-only"
   ],
   "residual_limitations": [
