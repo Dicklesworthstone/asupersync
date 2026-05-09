@@ -16,27 +16,30 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use asupersync::bytes::BytesMut;
 use asupersync::codec::Decoder;
 use asupersync::http::h1::codec::{Http1Codec, HttpError};
+use libfuzzer_sys::fuzz_target;
 
 /// Maximum input size to prevent OOM
 const MAX_INPUT_SIZE: usize = 64 * 1024;
 
 /// Chunked encoding test patterns
 const CHUNK_PATTERNS: &[&[u8]] = &[
-    b"5\r\nhello\r\n0\r\n\r\n",                    // Valid minimal chunk
-    b"5\r\nhello\r\n0\r\n",                        // Missing final CRLF
-    b"5\r\nhello\r\n0",                            // Missing CRLF after final chunk size
-    b"5\r\nhello\r\n",                             // Missing terminator entirely
-    b"5\r\nhello\r\n0\r\nTrailer: value\r\n",     // Missing final CRLF with trailer
-    b"a\r\nhelloworld\r\n0\r\n\r\n",              // Valid hex chunk size
-    b"A\r\nHELLOWORLD\r\n0\r\n\r\n",              // Valid uppercase hex
-    b"ff\r\n",                                      // Large chunk size but no data
+    b"5\r\nhello\r\n0\r\n\r\n",               // Valid minimal chunk
+    b"5\r\nhello\r\n0\r\n",                   // Missing final CRLF
+    b"5\r\nhello\r\n0",                       // Missing CRLF after final chunk size
+    b"5\r\nhello\r\n",                        // Missing terminator entirely
+    b"5\r\nhello\r\n0\r\nTrailer: value\r\n", // Missing final CRLF with trailer
+    b"a\r\nhelloworld\r\n0\r\n\r\n",          // Valid hex chunk size
+    b"A\r\nHELLOWORLD\r\n0\r\n\r\n",          // Valid uppercase hex
+    b"ff\r\n",                                // Large chunk size but no data
 ];
 
 fuzz_target!(|data: &[u8]| {
+    test_chunk_extension_parsing_canaries();
+    test_terminator_corruption();
+
     // Guard against excessive input sizes
     if data.is_empty() || data.len() > MAX_INPUT_SIZE {
         return;
@@ -119,14 +122,14 @@ fuzz_target!(|data: &[u8]| {
 
     // Test 6: Multiple chunk corruption
     if data.len() >= 12 {
-        let chunk1_size = data[0] % 16 + 1; // 1-16 bytes
-        let chunk2_size = data[1] % 16 + 1; // 1-16 bytes
+        let chunk1_size = usize::from(data[0] % 16 + 1); // 1-16 bytes
+        let chunk2_size = usize::from(data[1] % 16 + 1); // 1-16 bytes
 
         let mut chunked = Vec::new();
 
         // First chunk
         chunked.extend_from_slice(format!("{:x}\r\n", chunk1_size).as_bytes());
-        chunked.extend_from_slice(&data[2..2+chunk1_size.min(data.len()-2)]);
+        chunked.extend_from_slice(&data[2..2 + chunk1_size.min(data.len() - 2)]);
         chunked.extend_from_slice(b"\r\n");
 
         // Second chunk with potential corruption
@@ -144,7 +147,8 @@ fuzz_target!(|data: &[u8]| {
         // Add chunk data
         let data_start = crlf_pos + 2;
         if data_start < data.len() {
-            let chunk_data = &data[data_start..data_start+chunk2_size.min(data.len()-data_start)];
+            let chunk_data =
+                &data[data_start..data_start + chunk2_size.min(data.len() - data_start)];
             chunked.extend_from_slice(chunk_data);
         }
 
@@ -157,16 +161,16 @@ fuzz_target!(|data: &[u8]| {
 
     // Test 7: Zero-length chunk variations
     {
-        let zero_chunk_terminators = [
-            b"0\r\n\r\n",           // Valid
-            b"0\r\n",               // Missing final CRLF
-            b"0",                   // Missing all CRLF
-            b"0\n\n",               // LF only (invalid)
-            b"0\r",                 // Incomplete
-            b"0\r\n\r",             // Incomplete final
+        let zero_chunk_terminators: &[&[u8]] = &[
+            b"0\r\n\r\n", // Valid
+            b"0\r\n",     // Missing final CRLF
+            b"0",         // Missing all CRLF
+            b"0\n\n",     // LF only (invalid)
+            b"0\r",       // Incomplete
+            b"0\r\n\r",   // Incomplete final
         ];
 
-        for &terminator in &zero_chunk_terminators {
+        for &terminator in zero_chunk_terminators {
             if data.len() >= 4 {
                 let mut test_chunk = b"5\r\nhello\r\n".to_vec();
                 test_chunk.extend_from_slice(terminator);
@@ -183,12 +187,12 @@ fuzz_target!(|data: &[u8]| {
     // Test 8: Chunk size edge cases
     {
         let edge_sizes = [
-            "0",           // Terminal chunk
-            "1",           // Minimum
-            "ff",          // 255 bytes
-            "1000",        // 4096 bytes
-            "ffffffff",    // Large value
-            "",            // Empty (invalid)
+            "0",        // Terminal chunk
+            "1",        // Minimum
+            "ff",       // 255 bytes
+            "1000",     // 4096 bytes
+            "ffffffff", // Large value
+            "",         // Empty (invalid)
         ];
 
         for &size_str in &edge_sizes {
@@ -206,7 +210,7 @@ fuzz_target!(|data: &[u8]| {
 
                 // Add terminal chunk (potentially corrupted)
                 chunk.extend_from_slice(b"0\r\n");
-                if data.len() > 0 && data[0] & 0x80 != 0 {
+                if !data.is_empty() && data[0] & 0x80 != 0 {
                     // Sometimes add corrupted final CRLF
                     chunk.extend_from_slice(&data[..std::cmp::min(2, data.len())]);
                 } else {
@@ -221,7 +225,7 @@ fuzz_target!(|data: &[u8]| {
 
     // Test 9: Extension corruption in chunk size line
     if data.len() >= 8 {
-        let size = data[0] % 16 + 1;
+        let size = usize::from(data[0] % 16 + 1);
         let mut chunk = format!("{:x}", size).into_bytes();
 
         // Add potentially corrupted chunk extension
@@ -284,8 +288,11 @@ fn validate_chunked_result(result: Result<Vec<u8>, HttpError>, input_data: &[u8]
             // Body length should be reasonable (not unbounded)
             if body.len() > input_data.len() * 2 {
                 // Body suspiciously larger than input - possible amplification
-                panic!("Body size {} exceeds reasonable bounds for input size {}",
-                       body.len(), input_data.len());
+                panic!(
+                    "Body size {} exceeds reasonable bounds for input size {}",
+                    body.len(),
+                    input_data.len()
+                );
             }
         }
         Err(HttpError::BadChunkedEncoding) => {
@@ -316,18 +323,15 @@ fn test_terminator_corruption() {
     let test_cases = [
         // Valid cases
         (b"0\r\n\r\n".as_slice(), true),
-
         // Missing final CRLF
         (b"0\r\n\r".as_slice(), false),
         (b"0\r\n".as_slice(), false),
         (b"0\r".as_slice(), false),
         (b"0".as_slice(), false),
-
         // Wrong line endings
         (b"0\n\n".as_slice(), false),
         (b"0\r\n\n".as_slice(), false),
         (b"0\n\r\n".as_slice(), false),
-
         // With trailers
         (b"0\r\nX-Trailer: value\r\n\r\n".as_slice(), true),
         (b"0\r\nX-Trailer: value\r\n".as_slice(), false),
@@ -341,16 +345,64 @@ fn test_terminator_corruption() {
         let result = test_chunked_terminator(&chunk_data);
 
         match (result, should_succeed) {
-            (Ok(_), true) => {}, // Expected success
-            (Err(_), false) => {}, // Expected failure
+            (Ok(_), true) => {
+                // Expected success.
+            }
+            (Err(_), false) => {
+                // Expected failure.
+            }
             (Ok(_), false) => {
-                panic!("Expected failure for terminator {:?} but got success", terminator);
+                panic!(
+                    "Expected failure for terminator {:?} but got success",
+                    terminator
+                );
             }
             (Err(e), true) => {
-                panic!("Expected success for terminator {:?} but got error: {:?}", terminator, e);
+                panic!(
+                    "Expected success for terminator {:?} but got error: {:?}",
+                    terminator, e
+                );
             }
         }
     }
+}
+
+fn expect_chunked_body(chunked: &[u8], expected: &[u8]) {
+    match test_chunked_terminator(chunked) {
+        Ok(body) => assert_eq!(
+            body,
+            expected,
+            "chunked body mismatch for {:?}",
+            String::from_utf8_lossy(chunked)
+        ),
+        Err(err) => panic!(
+            "expected chunked body {:?} for {:?}, got {err:?}",
+            expected,
+            String::from_utf8_lossy(chunked)
+        ),
+    }
+}
+
+fn expect_bad_chunked(chunked: &[u8]) {
+    let result = test_chunked_terminator(chunked);
+    assert!(
+        matches!(result, Err(HttpError::BadChunkedEncoding)),
+        "expected BadChunkedEncoding for {:?}, got {result:?}",
+        String::from_utf8_lossy(chunked)
+    );
+}
+
+fn test_chunk_extension_parsing_canaries() {
+    expect_chunked_body(b"5;name=value\r\nhello\r\n0\r\n\r\n", b"hello");
+    expect_chunked_body(
+        b"5;name=value;flag\r\nhello\r\n0;done=true\r\n\r\n",
+        b"hello",
+    );
+
+    expect_bad_chunked(b" 5;name=value\r\nhello\r\n0\r\n\r\n");
+    expect_bad_chunked(b"+5;name=value\r\nhello\r\n0\r\n\r\n");
+    expect_bad_chunked(b"5 ;name=value\r\nhello\r\n0\r\n\r\n");
+    expect_bad_chunked(b"5;\xff\r\nhello\r\n0\r\n\r\n");
 }
 
 #[cfg(test)]
@@ -424,9 +476,6 @@ mod tests {
 
     #[test]
     fn test_chunk_extension_parsing() {
-        let with_extension = b"5;name=value\r\nhello\r\n0\r\n\r\n";
-        let result = test_chunked_terminator(with_extension);
-        // Should handle chunk extensions gracefully
-        assert!(result.is_ok() || result.is_err()); // Both are acceptable
+        test_chunk_extension_parsing_canaries();
     }
 }
