@@ -20,6 +20,8 @@ use std::time::{Duration, Instant};
 
 use asupersync::service::{ConcurrencyLimitLayer, Layer, Service};
 
+const MAX_CONCURRENCY_LIMIT_ERROR_DIAGNOSTIC: usize = 512;
+
 /// Simplified fuzz input for concurrency limit testing
 #[derive(Arbitrary, Debug, Clone)]
 struct ConcurrencyLimitFuzz {
@@ -192,7 +194,7 @@ impl Future for MockFuture {
             this.total_counter.fetch_add(1, Ordering::SeqCst);
 
             // Simulate occasional errors
-            if this.error_probability > 240 && (this.request_id % 7) == 0 {
+            if this.error_probability > 240 && this.request_id.is_multiple_of(7) {
                 Poll::Ready(Err(format!(
                     "simulated error for request {}",
                     this.request_id
@@ -285,11 +287,11 @@ impl ConcurrencyLimitShadowModel {
     }
 
     fn cancel_request(&mut self, request_id: u16) {
-        if let Some(state) = self.submitted_requests.get_mut(&request_id) {
-            if !state.cancelled {
-                state.cancelled = true;
-                self.cancelled_requests.insert(request_id, Instant::now());
-            }
+        if let Some(state) = self.submitted_requests.get_mut(&request_id)
+            && !state.cancelled
+        {
+            state.cancelled = true;
+            self.cancelled_requests.insert(request_id, Instant::now());
         }
     }
 
@@ -411,11 +413,12 @@ impl ConcurrencyLimitShadowModel {
                 && current_time.duration_since(state.submitted_at) > starvation_timeout
             {
                 return Err(format!(
-                    "Starvation detected: request {} waiting for {:.2}s without completion",
+                    "Starvation detected: request {} waiting for {:.2}s without completion (expected processing {:.2}s)",
                     request_id,
                     current_time
                         .duration_since(state.submitted_at)
-                        .as_secs_f64()
+                        .as_secs_f64(),
+                    state.processing_time.as_secs_f64()
                 ));
             }
         }
@@ -431,11 +434,7 @@ impl ConcurrencyLimitShadowModel {
             .filter(|s| !s.cancelled)
             .count();
 
-        let expected_available = if in_flight <= self.max_concurrency {
-            self.max_concurrency - in_flight
-        } else {
-            0
-        };
+        let expected_available = self.max_concurrency.saturating_sub(in_flight);
 
         // Allow some tolerance for timing between cancellation and permit release
         if available_permits < expected_available.saturating_sub(1) {
@@ -523,6 +522,7 @@ fn execute_concurrency_limit_operations(input: &ConcurrencyLimitFuzz) -> Result<
     let mut shadow = ConcurrencyLimitShadowModel::new(limit);
     let waker = test_waker();
     let mut cx = Context::from_waker(&waker);
+    let invariant_interval = 10 + (input.seed as usize % 20);
 
     // Track active futures for cleanup
     let mut active_futures: HashMap<u16, Pin<Box<dyn Future<Output = Result<_, _>>>>> =
@@ -576,6 +576,12 @@ fn execute_concurrency_limit_operations(input: &ConcurrencyLimitFuzz) -> Result<
                 for (request_id, future) in &mut active_futures {
                     match future.as_mut().poll(&mut cx) {
                         Poll::Ready(Ok(response)) => {
+                            if response.id != *request_id {
+                                return Err(format!(
+                                    "response id mismatch: active request {} completed as {}",
+                                    request_id, response.id
+                                ));
+                            }
                             completed_requests.push((*request_id, response.processing_duration));
                         }
                         Poll::Ready(Err(_)) => {
@@ -635,6 +641,12 @@ fn execute_concurrency_limit_operations(input: &ConcurrencyLimitFuzz) -> Result<
                     for (request_id, future) in &mut active_futures {
                         match future.as_mut().poll(&mut cx) {
                             Poll::Ready(Ok(response)) => {
+                                if response.id != *request_id {
+                                    return Err(format!(
+                                        "response id mismatch during quiescence: active request {} completed as {}",
+                                        request_id, response.id
+                                    ));
+                                }
                                 completed_requests
                                     .push((*request_id, response.processing_duration));
                             }
@@ -656,7 +668,7 @@ fn execute_concurrency_limit_operations(input: &ConcurrencyLimitFuzz) -> Result<
         }
 
         // Periodic invariant checks
-        if op_index % 20 == 0 {
+        if op_index % invariant_interval == 0 {
             let available = limited_service.available();
             shadow.verify_all_invariants(available)?;
         }
@@ -664,6 +676,22 @@ fn execute_concurrency_limit_operations(input: &ConcurrencyLimitFuzz) -> Result<
 
     // Final verification
     let available = limited_service.available();
+    let observed_active = mock_service.active_count();
+    if observed_active > limit {
+        shadow.record_permit_violation(format!(
+            "active request count {} exceeded concurrency limit {}",
+            observed_active, limit
+        ));
+    }
+
+    let observed_processed = mock_service.total_processed();
+    if observed_processed != shadow.total_completed {
+        shadow.record_permit_violation(format!(
+            "service processed {} requests but shadow completed {}",
+            observed_processed, shadow.total_completed
+        ));
+    }
+
     shadow.verify_all_invariants(available)?;
 
     Ok(())
@@ -684,6 +712,23 @@ fn fuzz_concurrency_limit_metamorphic(mut input: ConcurrencyLimitFuzz) -> Result
     Ok(())
 }
 
+fn observe_concurrency_limit_fuzz_result(result: Result<(), String>) {
+    match result {
+        Ok(()) => {}
+        Err(error) => {
+            assert!(
+                !error.is_empty(),
+                "concurrency-limit metamorphic rejection lacked diagnostics"
+            );
+            assert!(
+                error.len() <= MAX_CONCURRENCY_LIMIT_ERROR_DIAGNOSTIC,
+                "concurrency-limit metamorphic diagnostic escaped the fuzz bound: len={}",
+                error.len()
+            );
+        }
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
     // Limit input size for performance
     if data.len() > 8192 {
@@ -700,5 +745,5 @@ fuzz_target!(|data: &[u8]| {
     };
 
     // Run metamorphic testing
-    let _ = fuzz_concurrency_limit_metamorphic(input);
+    observe_concurrency_limit_fuzz_result(fuzz_concurrency_limit_metamorphic(input));
 });
