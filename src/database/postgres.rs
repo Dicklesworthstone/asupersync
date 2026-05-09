@@ -2984,6 +2984,12 @@ fn backend_message_body_len(len_i32: i32) -> Result<usize, PgError> {
     Ok(len_i32 as usize - 4)
 }
 
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn test_backend_message_body_len(len_i32: i32) -> Result<usize, PgError> {
+    backend_message_body_len(len_i32)
+}
+
 #[cfg(any(test, feature = "test-internals"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PgStartupMessage {

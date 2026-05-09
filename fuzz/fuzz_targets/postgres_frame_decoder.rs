@@ -22,7 +22,7 @@ use arbitrary::{Arbitrary, Result, Unstructured};
 use libfuzzer_sys::fuzz_target;
 
 use asupersync::cx::Cx;
-use asupersync::database::postgres::{PgConnectOptions, PgConnection, PgError};
+use asupersync::database::postgres::test_backend_message_body_len;
 use asupersync::test_utils::run_test_with_cx;
 
 /// PostgreSQL backend message types (subset for fuzzing)
@@ -230,7 +230,7 @@ impl PgFrame {
             let field_len: i32 = if u.ratio(1, 4)? {
                 -1 // NULL
             } else {
-                u.int_in_range(0..=256)? as i32
+                u.int_in_range(0..=256)?
             };
 
             body.extend_from_slice(&field_len.to_be_bytes());
@@ -250,7 +250,7 @@ impl PgFrame {
         let mut body = Vec::new();
 
         // Authentication type (4 bytes)
-        let auth_type: u32 = u.choose(&[0, 3, 5, 10, 12])?; // Various auth types
+        let auth_type: u32 = *u.choose(&[0_u32, 3, 5, 10, 12])?; // Various auth types
         body.extend_from_slice(&auth_type.to_be_bytes());
 
         // Additional auth data
@@ -269,7 +269,9 @@ impl PgFrame {
         // Error/notice fields (type byte + null-terminated string)
         let field_types = [b'S', b'C', b'M', b'D', b'F', b'L']; // Severity, Code, Message, etc.
 
-        for &field_type in u.choose_multiple(&field_types, u.int_in_range(1..=4)?)? {
+        let field_count = u.int_in_range(1_usize..=4)?;
+        for _ in 0..field_count {
+            let field_type = *u.choose(&field_types)?;
             body.push(field_type);
 
             let msg_len: usize = u.int_in_range(1..=128)?;
@@ -290,6 +292,24 @@ impl PgFrame {
 #[derive(Debug, Clone)]
 struct FuzzInput {
     frames: Vec<PgFrame>,
+}
+
+fn assert_parse_observation(
+    context: &str,
+    body_len: usize,
+    result: std::result::Result<(), Box<dyn std::error::Error>>,
+) {
+    assert!(
+        body_len <= 64 * 1024 * 1024,
+        "{context}: parser observed an oversized backend message body"
+    );
+
+    if let Err(error) = result {
+        assert!(
+            !error.to_string().trim().is_empty(),
+            "{context}: parser errors should expose diagnostics"
+        );
+    }
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
@@ -351,7 +371,7 @@ impl FuzzStream {
 }
 
 /// Test function that exercises the PostgreSQL frame decoder
-async fn test_postgres_frame_decoder(input: &FuzzInput, cx: &Cx) {
+async fn test_postgres_frame_decoder(input: &FuzzInput, _cx: &Cx) {
     let serialized = input.serialize();
 
     // Skip empty inputs
@@ -393,7 +413,7 @@ async fn test_postgres_frame_decoder(input: &FuzzInput, cx: &Cx) {
         let len_i32 = i32::from_be_bytes(len_buf);
 
         // Test backend_message_body_len function (this is the key target)
-        let body_len = match asupersync::database::postgres::backend_message_body_len(len_i32) {
+        let body_len = match test_backend_message_body_len(len_i32) {
             Ok(len) => len,
             Err(_) => {
                 // Expected for invalid lengths
@@ -417,15 +437,27 @@ async fn test_postgres_frame_decoder(input: &FuzzInput, cx: &Cx) {
             match msg_type {
                 0x54 => {
                     // RowDescription
-                    let _ = test_parse_row_description(&body);
+                    assert_parse_observation(
+                        "RowDescription parse",
+                        body.len(),
+                        test_parse_row_description(&body),
+                    );
                 }
                 0x44 => {
                     // DataRow
-                    let _ = test_parse_data_row(&body);
+                    assert_parse_observation(
+                        "DataRow parse",
+                        body.len(),
+                        test_parse_data_row(&body),
+                    );
                 }
                 0x45 | 0x4e => {
                     // Error/Notice Response
-                    let _ = test_parse_error_notice(&body);
+                    assert_parse_observation(
+                        "Error/Notice parse",
+                        body.len(),
+                        test_parse_error_notice(&body),
+                    );
                 }
                 _ => {
                     // Generic message body - just verify we can handle it
@@ -438,7 +470,7 @@ async fn test_postgres_frame_decoder(input: &FuzzInput, cx: &Cx) {
 }
 
 /// Test RowDescription parsing logic
-fn test_parse_row_description(data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+fn test_parse_row_description(data: &[u8]) -> std::result::Result<(), Box<dyn std::error::Error>> {
     if data.len() < 2 {
         return Ok(());
     }
@@ -478,7 +510,7 @@ fn test_parse_row_description(data: &[u8]) -> Result<(), Box<dyn std::error::Err
 }
 
 /// Test DataRow parsing logic
-fn test_parse_data_row(data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+fn test_parse_data_row(data: &[u8]) -> std::result::Result<(), Box<dyn std::error::Error>> {
     if data.len() < 2 {
         return Ok(());
     }
@@ -525,7 +557,7 @@ fn test_parse_data_row(data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Test Error/Notice response parsing
-fn test_parse_error_notice(data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+fn test_parse_error_notice(data: &[u8]) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut pos = 0;
 
     while pos < data.len() {
@@ -548,10 +580,6 @@ fn test_parse_error_notice(data: &[u8]) -> Result<(), Box<dyn std::error::Error>
 
     Ok(())
 }
-
-// Make the backend_message_body_len function accessible for testing
-// Note: This would normally be done by making it pub or pub(crate) in the main code
-use asupersync::database::postgres::backend_message_body_len;
 
 fuzz_target!(|input: FuzzInput| {
     run_test_with_cx(|cx| async move {
