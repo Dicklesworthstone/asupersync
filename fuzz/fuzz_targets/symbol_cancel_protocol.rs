@@ -90,7 +90,10 @@ fuzz_target!(|data: &[u8]| {
 
     // ── Property 5: `from_bytes` is total on truncated input ────────────
     for cap in 0..TOKEN_WIRE_SIZE {
-        let _ = SymbolCancelToken::from_bytes(&data[..cap.min(data.len())]);
+        assert_from_bytes_contract(
+            &data[..cap.min(data.len())],
+            "truncated SymbolCancelToken wire prefix",
+        );
     }
 
     // Use bytes after seed-prefix as the operation script.
@@ -153,6 +156,12 @@ fuzz_target!(|data: &[u8]| {
             // 3: wire round-trip on current token state
             3 => {
                 let bytes = token.to_bytes();
+                assert_from_bytes_contract(&bytes, "exact SymbolCancelToken wire bytes");
+
+                let mut overlong = bytes.to_vec();
+                overlong.extend_from_slice(&script[i..script.len().min(i + 4)]);
+                assert_from_bytes_contract(&overlong, "overlong SymbolCancelToken wire bytes");
+
                 let restored = SymbolCancelToken::from_bytes(&bytes)
                     .expect("to_bytes round-trips through from_bytes");
                 // Property 4: cancelled bit + identity must match
@@ -175,7 +184,7 @@ fuzz_target!(|data: &[u8]| {
 
             // 4: from_bytes on a slice of the script (fuzz the parser)
             4 => {
-                let _ = SymbolCancelToken::from_bytes(script);
+                assert_from_bytes_contract(script, "fuzzed SymbolCancelToken wire bytes");
             }
 
             // 5: spot-check is_cancelled is stable across calls
@@ -234,3 +243,67 @@ fuzz_target!(|data: &[u8]| {
         );
     }
 });
+
+fn assert_from_bytes_contract(data: &[u8], context: &str) {
+    match SymbolCancelToken::from_bytes(data) {
+        Some(token) => {
+            assert!(
+                data.len() >= TOKEN_WIRE_SIZE,
+                "{context}: parser accepted {} bytes, below wire size {TOKEN_WIRE_SIZE}",
+                data.len()
+            );
+
+            let expected_token_id = u64::from_be_bytes(
+                data[0..8]
+                    .try_into()
+                    .expect("validated token wire prefix has token id bytes"),
+            );
+            let expected_object_high = u64::from_be_bytes(
+                data[8..16]
+                    .try_into()
+                    .expect("validated token wire prefix has object high bytes"),
+            );
+            let expected_object_low = u64::from_be_bytes(
+                data[16..24]
+                    .try_into()
+                    .expect("validated token wire prefix has object low bytes"),
+            );
+            let expected_cancelled = data[24] != 0;
+
+            assert_eq!(
+                token.token_id(),
+                expected_token_id,
+                "{context}: token_id did not decode from the first 8 bytes"
+            );
+            assert_eq!(
+                token.object_id(),
+                ObjectId::new(expected_object_high, expected_object_low),
+                "{context}: object_id did not decode from bytes 8..24"
+            );
+            assert_eq!(
+                token.is_cancelled(),
+                expected_cancelled,
+                "{context}: cancelled byte did not decode as a boolean"
+            );
+
+            let encoded = token.to_bytes();
+            assert_eq!(
+                &encoded[..24],
+                &data[..24],
+                "{context}: re-encode did not preserve identity bytes"
+            );
+            assert_eq!(
+                encoded[24],
+                u8::from(expected_cancelled),
+                "{context}: re-encode did not normalize cancelled flag"
+            );
+        }
+        None => {
+            assert!(
+                data.len() < TOKEN_WIRE_SIZE,
+                "{context}: parser rejected {} bytes despite complete wire prefix",
+                data.len()
+            );
+        }
+    }
+}
