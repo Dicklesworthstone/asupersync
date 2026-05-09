@@ -36,9 +36,10 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use asupersync::grpc::{
+    ResponseStream, Streaming,
     client::{Channel, GrpcClient},
     status::{Code, Status},
-    streaming::{ResponseStream, ServerStreaming, Streaming, StreamingRequest},
+    streaming::{ServerStreaming, StreamingRequest},
 };
 
 /// Maximum input size to prevent memory exhaustion during fuzzing.
@@ -93,6 +94,19 @@ impl FuzzStatus {
         };
         Status::new(code, self.message)
     }
+}
+
+fn observe_status_code(status: &Status) {
+    let code = status.code();
+    assert_eq!(
+        Code::from_i32(code.as_i32()),
+        code,
+        "gRPC status codes should round-trip through their canonical numeric value"
+    );
+    assert!(
+        !code.as_str().is_empty(),
+        "gRPC status codes should expose canonical metadata"
+    );
 }
 
 /// Test message type for fuzzing.
@@ -360,6 +374,62 @@ impl StreamState {
     }
 }
 
+fn observe_stream_error_status(state: &mut StreamState, status: &Status) {
+    observe_status_code(status);
+
+    match status.code() {
+        Code::ResourceExhausted => {
+            state.backpressure_triggered = true;
+        }
+        Code::DeadlineExceeded => {
+            state.deadline_exceeded = true;
+        }
+        Code::Cancelled => {
+            state.client_cancelled = true;
+        }
+        _ => {}
+    }
+}
+
+fn observe_client_send_result(
+    state: &mut StreamState,
+    message: &TestMessage,
+    should_succeed: bool,
+    result: Result<(), Status>,
+) {
+    match result {
+        Ok(()) => {
+            if should_succeed {
+                state.client_sent.push_back(message.clone());
+            }
+        }
+        Err(status) => {
+            observe_stream_error_status(state, &status);
+        }
+    }
+}
+
+fn observe_client_half_close_result(state: &mut StreamState, result: Result<(), Status>) {
+    match result {
+        Ok(()) => {
+            state.client_closed = true;
+        }
+        Err(status) => {
+            observe_stream_error_status(state, &status);
+        }
+    }
+}
+
+fn observe_cancel_status(status: FuzzStatus) -> Status {
+    let status = status.into_status();
+    observe_status_code(&status);
+    assert!(
+        status.message().len() <= MAX_FUZZ_SIZE,
+        "fuzz-generated gRPC cancellation diagnostics should stay bounded"
+    );
+    status
+}
+
 fn exercise_server_streaming_backpressure(
     pattern: &ServerStreamingDemandPattern,
     state: &mut StreamState,
@@ -577,30 +647,7 @@ async fn simulate_streaming(
                 should_succeed,
             } => {
                 let result = request_sink.send(message.clone()).await;
-                if *should_succeed {
-                    if result.is_ok() {
-                        state.client_sent.push_back(message.clone());
-                    }
-                } else {
-                    // Expected failure case
-                    if result.is_err() {
-                        // Check for proper error codes (e.g., ResourceExhausted for backpressure)
-                        if let Err(status) = result {
-                            match status.code() {
-                                Code::ResourceExhausted => {
-                                    state.backpressure_triggered = true;
-                                }
-                                Code::DeadlineExceeded => {
-                                    state.deadline_exceeded = true;
-                                }
-                                Code::Cancelled => {
-                                    state.client_cancelled = true;
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                }
+                observe_client_send_result(state, message, *should_succeed, result);
             }
 
             StreamOperation::ServerSend {
@@ -618,9 +665,7 @@ async fn simulate_streaming(
 
             StreamOperation::ClientHalfClose => {
                 let result = request_sink.close().await;
-                if result.is_ok() {
-                    state.client_closed = true;
-                }
+                observe_client_half_close_result(state, result);
             }
 
             StreamOperation::ServerHalfClose => {
@@ -630,14 +675,14 @@ async fn simulate_streaming(
 
             StreamOperation::ClientCancel { status } => {
                 // Simulate client cancellation
-                let _ = status.clone().into_status();
+                observe_cancel_status(status.clone());
                 state.client_cancelled = true;
                 // In a real implementation, this would propagate the status
             }
 
             StreamOperation::ServerCancel { status } => {
                 // Simulate server cancellation
-                let _ = status.clone().into_status();
+                observe_cancel_status(status.clone());
                 state.server_cancelled = true;
                 // In a real implementation, this would propagate the status
             }
