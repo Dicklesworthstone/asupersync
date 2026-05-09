@@ -29,18 +29,19 @@ use arbitrary::Arbitrary;
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::http::h2::error::{ErrorCode, H2Error};
 use asupersync::http::h2::frame::{
-    ContinuationFrame, DEFAULT_MAX_FRAME_SIZE, FRAME_HEADER_SIZE, Frame, FrameHeader, FrameType,
-    HeadersFrame, PushPromiseFrame, SettingValue, SettingsFrame, continuation_flags, headers_flags,
-    parse_frame,
+    ContinuationFrame, FRAME_HEADER_SIZE, Frame, FrameHeader, HeadersFrame, PushPromiseFrame,
+    continuation_flags, headers_flags, parse_frame,
 };
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashMap;
 
 /// Maximum header list size for testing (16KB default)
 const DEFAULT_MAX_HEADER_LIST_SIZE: usize = 16_384;
 
 /// Maximum CONTINUATION flood length to prevent infinite loops
 const MAX_CONTINUATION_CHAIN: usize = 1000;
+
+/// Maximum diagnostic size for parser failures surfaced by the fuzz target
+const MAX_PARSE_DIAGNOSTIC_SIZE: usize = 512;
 
 /// CONTINUATION frame fuzzing input structure
 #[derive(Arbitrary, Debug, Clone)]
@@ -167,13 +168,18 @@ fuzz_target!(|input: ContinuationFuzzInput| {
 
 /// Main fuzzing entry point
 fn fuzz_continuation_sequence(input: ContinuationFuzzInput) {
-    let max_header_list_size = input.config.max_header_list_size as usize;
+    let max_frame_size = (input.config.max_frame_size as usize).max(FRAME_HEADER_SIZE);
+    let max_header_list_size = (input.config.max_header_list_size as usize)
+        .max(DEFAULT_MAX_HEADER_LIST_SIZE)
+        .min(max_frame_size.saturating_mul(MAX_CONTINUATION_CHAIN));
+    let base_stream_id = normalize_stream_id(input.config.base_stream_id);
     let mut state = ContinuationState::new(max_header_list_size.max(1024));
 
     // Limit operations to prevent infinite loops
     let operations = input.operations.into_iter().take(MAX_CONTINUATION_CHAIN);
 
-    for operation in operations {
+    for mut operation in operations {
+        apply_base_stream_id(&mut operation, base_stream_id);
         match input.strategy {
             FuzzStrategy::ValidSequence => fuzz_valid_sequence(&operation, &mut state),
             FuzzStrategy::ContinuationFlood => fuzz_continuation_flood(&operation, &mut state),
@@ -191,6 +197,35 @@ fn fuzz_continuation_sequence(input: ContinuationFuzzInput) {
         if state.error_count > 100 {
             break;
         }
+    }
+}
+
+fn normalize_stream_id(stream_id: u32) -> u32 {
+    if stream_id == 0 { 1 } else { stream_id | 1 }
+}
+
+fn apply_base_stream_id(operation: &mut FrameOperation, base_stream_id: u32) {
+    match operation {
+        FrameOperation::Headers { stream_id, .. }
+        | FrameOperation::Continuation { stream_id, .. }
+        | FrameOperation::UnrelatedFrame { stream_id, .. } => {
+            if *stream_id == 0 {
+                *stream_id = base_stream_id;
+            }
+        }
+        FrameOperation::PushPromise {
+            stream_id,
+            promised_stream_id,
+            ..
+        } => {
+            if *stream_id == 0 {
+                *stream_id = base_stream_id;
+            }
+            if *promised_stream_id == 0 {
+                *promised_stream_id = base_stream_id.saturating_add(2);
+            }
+        }
+        FrameOperation::UpdateSettings { .. } | FrameOperation::ResetState => {}
     }
 }
 
@@ -228,8 +263,7 @@ fn fuzz_valid_sequence(operation: &FrameOperation, state: &mut ContinuationState
             let continuation_after_valid_frame = expected_stream.is_some();
 
             // Assertion 3: Stream ID must match preceding frame
-            let stream_id_matches =
-                expected_stream.map_or(false, |expected| expected == *stream_id);
+            let stream_id_matches = expected_stream == Some(*stream_id);
 
             let flags = force_flags.unwrap_or(if *end_headers {
                 continuation_flags::END_HEADERS
@@ -292,7 +326,12 @@ fn fuzz_continuation_flood(operation: &FrameOperation, state: &mut ContinuationS
         } => {
             // Start with HEADERS that doesn't have END_HEADERS
             let frame = create_headers_frame(*stream_id, header_block.clone(), false, 0);
-            let _ = test_frame_parsing(&frame, state);
+            let setup_result = test_frame_parsing(&frame, state);
+            observe_frame_parse_result("CONTINUATION flood setup HEADERS", &setup_result);
+            log_frame_result("CONTINUATION_FLOOD_SETUP", &setup_result, state);
+            if setup_result.is_err() {
+                return;
+            }
 
             state.expecting_continuation_stream = Some(*stream_id);
             state.accumulated_header_size = header_block.len();
@@ -332,7 +371,12 @@ fn fuzz_stream_id_mismatch(operation: &FrameOperation, state: &mut ContinuationS
         } => {
             // Start normal sequence
             let frame = create_headers_frame(*stream_id, header_block.clone(), false, 0);
-            let _ = test_frame_parsing(&frame, state);
+            let setup_result = test_frame_parsing(&frame, state);
+            observe_frame_parse_result("STREAM_MISMATCH_SETUP", &setup_result);
+            log_frame_result("STREAM_MISMATCH_SETUP", &setup_result, state);
+            if setup_result.is_err() {
+                return;
+            }
             state.expecting_continuation_stream = Some(*stream_id);
 
             // Send CONTINUATION with different stream ID (assertion 3)
@@ -399,13 +443,19 @@ fn fuzz_oversized_headers(operation: &FrameOperation, state: &mut ContinuationSt
             // Start with large initial header block
             let large_header = vec![0xFF; state.max_header_list_size / 2];
             let frame = create_headers_frame(*stream_id, large_header.clone(), false, 0);
-            let _ = test_frame_parsing(&frame, state);
+            let setup_result = test_frame_parsing(&frame, state);
+            observe_frame_parse_result("OVERSIZED_HEADERS_SETUP", &setup_result);
+            log_frame_result("OVERSIZED_HEADERS_SETUP", &setup_result, state);
+            if setup_result.is_err() {
+                return;
+            }
 
             state.expecting_continuation_stream = Some(*stream_id);
             state.accumulated_header_size = large_header.len();
 
             // Add CONTINUATION that pushes over the limit
             let oversized_continuation = vec![0xAA; state.max_header_list_size];
+            let oversized_continuation_len = oversized_continuation.len();
             let continuation_frame = create_continuation_frame(
                 *stream_id,
                 oversized_continuation,
@@ -417,7 +467,7 @@ fn fuzz_oversized_headers(operation: &FrameOperation, state: &mut ContinuationSt
             assert!(
                 result.is_err(),
                 "Oversized header block not rejected: accumulated {} > limit {}",
-                state.accumulated_header_size + oversized_continuation.len(),
+                state.accumulated_header_size + oversized_continuation_len,
                 state.max_header_list_size
             );
 
@@ -497,25 +547,38 @@ fn handle_generic_operation(operation: &FrameOperation, state: &mut Continuation
             frame_type,
             stream_id,
             payload,
-        } => {
+        } if state.is_expecting_continuation() => {
             // Send frame that should interrupt CONTINUATION sequence
-            if state.is_expecting_continuation() {
-                let frame = create_generic_frame(*frame_type, *stream_id, payload.clone());
-                let _ = test_frame_parsing(&frame, state);
-                // This should break the CONTINUATION sequence expectation
-                state.expecting_continuation_stream = None;
-                state.accumulated_header_size = 0;
-            }
+            let frame = create_generic_frame(*frame_type, *stream_id, payload.clone());
+            let interrupt_result = test_frame_parsing(&frame, state);
+            observe_frame_parse_result("UNRELATED_FRAME_INTERRUPT", &interrupt_result);
+            log_frame_result("UNRELATED_FRAME_INTERRUPT", &interrupt_result, state);
+            // This should break the CONTINUATION sequence expectation
+            state.expecting_continuation_stream = None;
+            state.accumulated_header_size = 0;
+        }
+        FrameOperation::UnrelatedFrame {
+            frame_type: _,
+            stream_id: _,
+            payload: _,
+        } => {
+            // No active CONTINUATION sequence to interrupt.
         }
         FrameOperation::ResetState => {
             state.reset();
         }
         FrameOperation::UpdateSettings {
             max_header_list_size,
-            ..
+            max_frame_size,
         } => {
             if let Some(size) = max_header_list_size {
                 state.max_header_list_size = (*size as usize).max(1024);
+            }
+            if let Some(size) = max_frame_size {
+                let frame_limited_header_size =
+                    (*size as usize).max(FRAME_HEADER_SIZE) * MAX_CONTINUATION_CHAIN;
+                state.max_header_list_size =
+                    state.max_header_list_size.min(frame_limited_header_size);
             }
         }
         _ => {} // Already handled in strategy-specific functions
@@ -575,25 +638,45 @@ fn create_generic_frame(frame_type: u8, stream_id: u32, payload: Vec<u8>) -> Fra
 fn test_frame_parsing(frame: &Frame, state: &mut ContinuationState) -> Result<(), H2Error> {
     // Encode the frame to bytes
     let mut buf = BytesMut::new();
-    frame.encode(&mut buf);
+    frame.encode(&mut buf).inspect_err(|_| {
+        state.error_count += 1;
+    })?;
 
     // Parse the frame header
     if buf.len() < FRAME_HEADER_SIZE {
         return Err(H2Error::protocol("frame too small"));
     }
 
-    let header = FrameHeader::parse(&mut buf).map_err(|e| {
+    let header = FrameHeader::parse(&mut buf).inspect_err(|_| {
         state.error_count += 1;
-        e
     })?;
 
     let payload = buf.freeze();
 
     // Parse the complete frame
-    parse_frame(&header, payload).map(|_| ()).map_err(|e| {
+    parse_frame(&header, payload).map(|_| ()).inspect_err(|_| {
         state.error_count += 1;
-        e
     })
+}
+
+fn observe_frame_parse_result(context: &str, result: &Result<(), H2Error>) {
+    if let Err(error) = result {
+        assert!(
+            !error.message.is_empty(),
+            "{context} parser error should expose a message"
+        );
+        let diagnostic = format!("{context}: {error}");
+        assert!(
+            !diagnostic.is_empty(),
+            "{context} parser failures should expose diagnostics"
+        );
+        assert!(
+            diagnostic.len() <= MAX_PARSE_DIAGNOSTIC_SIZE,
+            "{context} diagnostic size {} exceeds maximum {}",
+            diagnostic.len(),
+            MAX_PARSE_DIAGNOSTIC_SIZE
+        );
+    }
 }
 
 /// Log frame parsing result for debugging
