@@ -36,7 +36,10 @@
 #![no_main]
 
 use asupersync::bytes::{Bytes, BytesMut};
-use asupersync::http::h2::frame::{FRAME_HEADER_SIZE, FrameHeader, parse_frame};
+use asupersync::http::h2::error::ErrorCode;
+use asupersync::http::h2::frame::{
+    FRAME_HEADER_SIZE, Frame, FrameHeader, FrameType, data_flags, parse_frame, settings_flags,
+};
 use libfuzzer_sys::fuzz_target;
 
 /// Frame generation strategies for structured fuzzing
@@ -64,6 +67,8 @@ impl FuzzStrategy {
 }
 
 fuzz_target!(|data: &[u8]| {
+    run_parser_contract_canaries();
+
     if data.len() < FRAME_HEADER_SIZE + 1 {
         return; // Need at least header + strategy byte
     }
@@ -79,6 +84,157 @@ fuzz_target!(|data: &[u8]| {
     }
 });
 
+fn run_parser_contract_canaries() {
+    assert_valid_data_frame_canary();
+    assert_unknown_extension_frame_canary();
+    assert_settings_ack_with_payload_rejected();
+    assert_ping_on_stream_rejected();
+    assert_window_update_zero_increment_rejected();
+}
+
+fn assert_valid_data_frame_canary() {
+    let payload = Bytes::from_static(b"hello");
+    let header = FrameHeader {
+        length: payload.len() as u32,
+        frame_type: FrameType::Data as u8,
+        flags: data_flags::END_STREAM,
+        stream_id: 1,
+    };
+
+    match parse_frame(&header, payload.clone()) {
+        Ok(Frame::Data(frame)) => {
+            assert_eq!(frame.stream_id, 1);
+            assert!(frame.end_stream);
+            assert_eq!(frame.data, payload);
+        }
+        other => panic!("valid DATA canary parsed incorrectly: {other:?}"),
+    }
+}
+
+fn assert_unknown_extension_frame_canary() {
+    let payload = Bytes::from_static(b"opaque-extension");
+    let header = FrameHeader {
+        length: payload.len() as u32,
+        frame_type: 0xff,
+        flags: 0xa5,
+        stream_id: 7,
+    };
+
+    match parse_frame(&header, payload.clone()) {
+        Ok(Frame::Unknown {
+            frame_type,
+            stream_id,
+            payload: parsed_payload,
+        }) => {
+            assert_eq!(frame_type, header.frame_type);
+            assert_eq!(stream_id, header.stream_id);
+            assert_eq!(parsed_payload, payload);
+        }
+        other => panic!("unknown extension frame must round-trip as Unknown, got {other:?}"),
+    }
+}
+
+fn assert_settings_ack_with_payload_rejected() {
+    let payload = Bytes::from_static(&[0, 1, 0, 0, 0, 1]);
+    let header = FrameHeader {
+        length: payload.len() as u32,
+        frame_type: FrameType::Settings as u8,
+        flags: settings_flags::ACK,
+        stream_id: 0,
+    };
+
+    let err = parse_frame(&header, payload)
+        .expect_err("SETTINGS ACK carrying a payload must be rejected");
+    assert_eq!(err.code, ErrorCode::FrameSizeError);
+}
+
+fn assert_ping_on_stream_rejected() {
+    let payload = Bytes::from_static(b"12345678");
+    let header = FrameHeader {
+        length: payload.len() as u32,
+        frame_type: FrameType::Ping as u8,
+        flags: 0,
+        stream_id: 1,
+    };
+
+    let err =
+        parse_frame(&header, payload).expect_err("PING with non-zero stream ID must be rejected");
+    assert_eq!(err.code, ErrorCode::ProtocolError);
+}
+
+fn assert_window_update_zero_increment_rejected() {
+    let payload = Bytes::from_static(&[0, 0, 0, 0]);
+    let header = FrameHeader {
+        length: payload.len() as u32,
+        frame_type: FrameType::WindowUpdate as u8,
+        flags: 0,
+        stream_id: 3,
+    };
+
+    let err = parse_frame(&header, payload)
+        .expect_err("WINDOW_UPDATE with a zero increment must be rejected");
+    assert_eq!(err.code, ErrorCode::ProtocolError);
+    assert_eq!(err.stream_id, Some(3));
+}
+
+fn observe_parse_result(header: &FrameHeader, payload: Bytes) {
+    let payload_snapshot = payload.clone();
+    let result = parse_frame(header, payload);
+
+    match FrameType::from_u8(header.frame_type) {
+        Some(expected) => match result {
+            Ok(frame) => assert_known_frame_variant(expected, header, &frame),
+            Err(err) => assert!(
+                matches!(
+                    err.code,
+                    ErrorCode::ProtocolError
+                        | ErrorCode::FrameSizeError
+                        | ErrorCode::FlowControlError
+                ),
+                "unexpected parser error code {:?} for header {:?} and payload len {}",
+                err.code,
+                header,
+                payload_snapshot.len()
+            ),
+        },
+        None => match result {
+            Ok(Frame::Unknown {
+                frame_type,
+                stream_id,
+                payload,
+            }) => {
+                assert_eq!(frame_type, header.frame_type);
+                assert_eq!(stream_id, header.stream_id);
+                assert_eq!(payload, payload_snapshot);
+            }
+            Ok(frame) => panic!("unknown frame type parsed as known frame: {frame:?}"),
+            Err(err) => panic!("unknown extension frame must not error: {err:?}"),
+        },
+    }
+}
+
+fn assert_known_frame_variant(expected: FrameType, header: &FrameHeader, frame: &Frame) {
+    let variant_matches = matches!(
+        (expected, frame),
+        (FrameType::Data, Frame::Data(_))
+            | (FrameType::Headers, Frame::Headers(_))
+            | (FrameType::Priority, Frame::Priority(_))
+            | (FrameType::RstStream, Frame::RstStream(_))
+            | (FrameType::Settings, Frame::Settings(_))
+            | (FrameType::PushPromise, Frame::PushPromise(_))
+            | (FrameType::Ping, Frame::Ping(_))
+            | (FrameType::GoAway, Frame::GoAway(_))
+            | (FrameType::WindowUpdate, Frame::WindowUpdate(_))
+            | (FrameType::Continuation, Frame::Continuation(_))
+    );
+    assert!(
+        variant_matches,
+        "parser returned wrong variant for {:?}: {:?}",
+        expected, frame
+    );
+    assert_eq!(frame.stream_id(), header.stream_id);
+}
+
 /// Fuzz with completely random frame bytes
 fn fuzz_raw_bytes(data: &[u8]) {
     if data.len() < FRAME_HEADER_SIZE {
@@ -90,8 +246,8 @@ fn fuzz_raw_bytes(data: &[u8]) {
     if let Ok(header) = FrameHeader::parse(&mut buf) {
         let remaining = buf.freeze();
 
-        // Attempt to parse the frame - should handle all error conditions gracefully
-        let _ = parse_frame(&header, remaining);
+        // Attempt to parse the frame - should handle all error conditions gracefully.
+        observe_parse_result(&header, remaining);
     }
 }
 
@@ -114,7 +270,7 @@ fn fuzz_valid_header_random_payload(data: &[u8]) {
         stream_id,
     };
 
-    let _ = parse_frame(&header, Bytes::copy_from_slice(payload));
+    observe_parse_result(&header, Bytes::copy_from_slice(payload));
 }
 
 /// Fuzz by generating valid frames and then corrupting specific fields
@@ -139,7 +295,7 @@ fn fuzz_valid_frame_corruption(data: &[u8]) {
         _ => header.frame_type = 255, // Unknown frame type
     }
 
-    let _ = parse_frame(&header, payload);
+    observe_parse_result(&header, payload);
 }
 
 /// Fuzz edge cases like boundary values and special combinations
@@ -171,7 +327,7 @@ fn fuzz_edge_cases(data: &[u8]) {
         _ => edge_case_continuation_without_headers(payload_data),
     };
 
-    let _ = parse_frame(&header, payload);
+    observe_parse_result(&header, payload);
 }
 
 /// Generate a structurally valid frame for the given type
@@ -204,7 +360,7 @@ fn generate_valid_frame(frame_type: u8, payload_data: &[u8]) -> (FrameHeader, By
         }
         4 => {
             // SETTINGS: must be multiple of 6 bytes
-            let settings_count = (payload.len() / 6).max(0);
+            let settings_count = payload.len() / 6;
             payload.truncate(settings_count * 6);
         }
         _ => {}
