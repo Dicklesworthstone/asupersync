@@ -13,8 +13,11 @@
 
 use arbitrary::Arbitrary;
 use asupersync::bytes::{Bytes, BytesMut};
-use asupersync::http::h2::{Header, HpackDecoder, HpackEncoder};
+use asupersync::http::h2::{ErrorCode, H2Error, Header, HpackDecoder, HpackEncoder};
 use libfuzzer_sys::fuzz_target;
+
+const MAX_DECODED_HEADERS: usize = 64;
+const MAX_DECODED_HEADER_BYTES: usize = 4096;
 
 #[derive(Arbitrary, Debug, Clone)]
 struct DynamicTableSequence {
@@ -53,7 +56,7 @@ fuzz_target!(|input: DynamicTableSequence| {
     let mut sequence = input;
     normalize_sequence(&mut sequence);
 
-    let _ = test_dynamic_table_consistency(&sequence);
+    test_dynamic_table_consistency(&sequence);
 });
 
 fn normalize_sequence(sequence: &mut DynamicTableSequence) {
@@ -137,7 +140,7 @@ fn normalize_sequence(sequence: &mut DynamicTableSequence) {
     }
 }
 
-fn test_dynamic_table_consistency(sequence: &DynamicTableSequence) -> Result<(), String> {
+fn test_dynamic_table_consistency(sequence: &DynamicTableSequence) {
     let mut encoder = HpackEncoder::new();
     let mut decoder = HpackDecoder::new();
 
@@ -165,11 +168,13 @@ fn test_dynamic_table_consistency(sequence: &DynamicTableSequence) -> Result<(),
                     value: value.clone(),
                 };
                 let mut encoded_buf = BytesMut::new();
-                encoder.encode(&[header.clone()], &mut encoded_buf);
+                encoder.encode(std::slice::from_ref(&header), &mut encoded_buf);
 
                 // Decode and verify
                 let mut encoded_bytes = encoded_buf.freeze();
-                if let Ok(decoded_headers) = decoder.decode(&mut encoded_bytes) {
+                if let Ok(decoded_headers) =
+                    observe_hpack_decode("insert header", &mut decoder, &mut encoded_bytes)
+                {
                     // Verify the decoded header matches what we sent
                     if !decoded_headers.is_empty() {
                         let decoded = &decoded_headers[0];
@@ -214,18 +219,21 @@ fn test_dynamic_table_consistency(sequence: &DynamicTableSequence) -> Result<(),
                     value: value.clone(),
                 };
                 let mut encoded_buf = BytesMut::new();
-                encoder.encode(&[header.clone()], &mut encoded_buf);
+                encoder.encode(std::slice::from_ref(&header), &mut encoded_buf);
 
                 let mut encoded_bytes = encoded_buf.freeze();
-                if let Ok(decoded_headers) = decoder.decode(&mut encoded_bytes) {
-                    if !decoded_headers.is_empty() {
-                        simulate_dynamic_table_insertion(
-                            &mut expected_dynamic_entries,
-                            name.to_string(),
-                            value.clone(),
-                            current_table_size,
-                        );
-                    }
+                if let Ok(decoded_headers) = observe_hpack_decode(
+                    "insert with indexed name",
+                    &mut decoder,
+                    &mut encoded_bytes,
+                ) && !decoded_headers.is_empty()
+                {
+                    simulate_dynamic_table_insertion(
+                        &mut expected_dynamic_entries,
+                        name.to_string(),
+                        value.clone(),
+                        current_table_size,
+                    );
                 }
             }
 
@@ -240,7 +248,15 @@ fn test_dynamic_table_consistency(sequence: &DynamicTableSequence) -> Result<(),
                 encode_integer(&mut size_update_buf, new_size_usize, 5, 0x20);
 
                 let mut size_update_bytes = size_update_buf.freeze();
-                if let Ok(_) = decoder.decode(&mut size_update_bytes) {
+                if let Ok(decoded_headers) = observe_hpack_decode(
+                    "dynamic table size update",
+                    &mut decoder,
+                    &mut size_update_bytes,
+                ) {
+                    assert!(
+                        decoded_headers.is_empty(),
+                        "dynamic table size update blocks should not decode headers"
+                    );
                     current_table_size = new_size_usize;
                     // Simulate eviction due to size reduction
                     simulate_table_eviction(&mut expected_dynamic_entries, current_table_size);
@@ -253,7 +269,16 @@ fn test_dynamic_table_consistency(sequence: &DynamicTableSequence) -> Result<(),
                 encode_integer(&mut reference_buf, *index as usize, 7, 0x80);
 
                 let mut reference_bytes = reference_buf.freeze();
-                let _ = decoder.decode(&mut reference_bytes);
+                if let Ok(decoded_headers) = observe_hpack_decode(
+                    "dynamic table indexed reference",
+                    &mut decoder,
+                    &mut reference_bytes,
+                ) {
+                    assert!(
+                        decoded_headers.len() <= 1,
+                        "indexed HPACK reference should decode at most one header"
+                    );
+                }
                 // We don't panic on invalid index references as they may legitimately fail
             }
 
@@ -268,7 +293,13 @@ fn test_dynamic_table_consistency(sequence: &DynamicTableSequence) -> Result<(),
                     encoder.encode(&[header], &mut encoded_buf);
                     {
                         let mut encoded_bytes = encoded_buf.freeze();
-                        if let Ok(_) = decoder.decode(&mut encoded_bytes) {
+                        if let Ok(decoded_headers) =
+                            observe_hpack_decode("burst insert", &mut decoder, &mut encoded_bytes)
+                        {
+                            assert!(
+                                !decoded_headers.is_empty(),
+                                "burst insert should decode at least one header on success"
+                            );
                             simulate_dynamic_table_insertion(
                                 &mut expected_dynamic_entries,
                                 name.clone(),
@@ -291,7 +322,9 @@ fn test_dynamic_table_consistency(sequence: &DynamicTableSequence) -> Result<(),
                 encoder.encode(&header_list, &mut encoded_buf);
                 {
                     let mut encoded_bytes = encoded_buf.freeze();
-                    if let Ok(decoded_headers) = decoder.decode(&mut encoded_bytes) {
+                    if let Ok(decoded_headers) =
+                        observe_hpack_decode("round trip", &mut decoder, &mut encoded_bytes)
+                    {
                         // Verify all headers round-tripped correctly
                         if decoded_headers.len() != header_list.len() {
                             panic!(
@@ -327,8 +360,92 @@ fn test_dynamic_table_consistency(sequence: &DynamicTableSequence) -> Result<(),
             }
         }
     }
+}
 
-    Ok(())
+fn observe_hpack_decode(
+    context: &str,
+    decoder: &mut HpackDecoder,
+    bytes: &mut Bytes,
+) -> Result<Vec<Header>, H2Error> {
+    let input_len = bytes.len();
+    match decoder.decode(bytes) {
+        Ok(headers) => {
+            assert!(
+                bytes.is_empty(),
+                "{context}: successful HPACK decode should consume the full input block"
+            );
+            assert!(
+                headers.len() <= MAX_DECODED_HEADERS,
+                "{context}: decoded too many headers from one HPACK block"
+            );
+            verify_decoded_headers(context, &headers);
+            Ok(headers)
+        }
+        Err(err) => {
+            assert_eq!(
+                err.code,
+                ErrorCode::CompressionError,
+                "{context}: HPACK failures should be compression errors"
+            );
+            assert!(
+                !err.message.is_empty(),
+                "{context}: HPACK decode failure should expose a diagnostic"
+            );
+            assert!(
+                bytes.len() <= input_len,
+                "{context}: decode failure should not increase remaining input"
+            );
+            Err(err)
+        }
+    }
+}
+
+fn verify_decoded_headers(context: &str, headers: &[Header]) {
+    for header in headers {
+        assert!(
+            !header.name.is_empty(),
+            "{context}: decoded header names must not be empty"
+        );
+        assert!(
+            header.name.len() + header.value.len() <= MAX_DECODED_HEADER_BYTES,
+            "{context}: decoded header pair should stay bounded"
+        );
+        assert!(
+            header
+                .name
+                .bytes()
+                .enumerate()
+                .all(|(idx, b)| is_valid_hpack_header_name_byte(idx, b)),
+            "{context}: decoded header name should satisfy HTTP/2 lowercase token rules"
+        );
+        assert!(
+            !header.value.bytes().any(|b| matches!(b, 0 | b'\r' | b'\n')),
+            "{context}: decoded header value should not contain NUL or line breaks"
+        );
+    }
+}
+
+fn is_valid_hpack_header_name_byte(index: usize, byte: u8) -> bool {
+    matches!(
+        byte,
+        b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'!'
+            | b'#'
+            | b'$'
+            | b'%'
+            | b'&'
+            | b'\''
+            | b'*'
+            | b'+'
+            | b'-'
+            | b'.'
+            | b'^'
+            | b'_'
+            | b'`'
+            | b'|'
+            | b'~'
+    ) || (byte == b':' && index == 0)
 }
 
 /// Simulate inserting an entry into the dynamic table with eviction
