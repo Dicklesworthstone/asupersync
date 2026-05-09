@@ -37,8 +37,7 @@ use libfuzzer_sys::fuzz_target;
 
 use asupersync::bytes::Bytes;
 use asupersync::web::extract::{
-    BodyLimits, Extensions, ExtractionError, Form, FromRequest, FromRequestParts, Json, Path,
-    Query, Request,
+    BodyLimits, Extensions, Form, FromRequest, FromRequestParts, Json, Path, Query, Request,
 };
 use asupersync::web::response::StatusCode;
 
@@ -281,7 +280,7 @@ fn test_individual_extractors(request: &Request) -> Result<(), String> {
     // Test Json extractor (if body appears to be JSON)
     if request
         .header("content-type")
-        .map_or(false, |ct| ct.contains("json"))
+        .is_some_and(|ct| ct.contains("json"))
     {
         match Json::<TestUser>::from_request(request.clone()) {
             Ok(Json(user_data)) => {
@@ -316,7 +315,7 @@ fn test_individual_extractors(request: &Request) -> Result<(), String> {
     // Test Form extractor (if body appears to be form data)
     if request
         .header("content-type")
-        .map_or(false, |ct| ct.contains("form"))
+        .is_some_and(|ct| ct.contains("form"))
     {
         match Form::<TestForm>::from_request(request.clone()) {
             Ok(Form(form_data)) => {
@@ -531,7 +530,7 @@ fn test_multi_extractor_composition(request: &Request) -> Result<(), String> {
 
     // Test that body-consuming extractors are exclusive
     // (Only one can succeed since body is consumed)
-    if request.body.len() > 0 {
+    if !request.body.is_empty() {
         let json_result = Json::<serde_json::Value>::from_request(request.clone());
         let form_result = Form::<HashMap<String, String>>::from_request(request.clone());
 
@@ -623,7 +622,31 @@ fn generate_edge_case_input(edge_case: &WebExtractEdgeCase) -> WebExtractFuzzInp
             path: "/api/json".to_string(),
             query_string: None,
             headers: vec![("content-type".to_string(), "application/json".to_string())],
-            body: data.clone(),
+            body: if data.is_empty() {
+                b"invalid{json}".to_vec()
+            } else {
+                data.iter().copied().take(MAX_FUZZ_INPUT_SIZE).collect()
+            },
+            path_params: HashMap::new(),
+            test_edge_cases: true,
+            test_oversized_bodies: false,
+            test_content_type_mismatch: false,
+            test_composition: false,
+        },
+
+        WebExtractEdgeCase::InvalidForm { data } => WebExtractFuzzInput {
+            method: HttpMethod::Post,
+            path: "/form".to_string(),
+            query_string: None,
+            headers: vec![(
+                "content-type".to_string(),
+                "application/x-www-form-urlencoded".to_string(),
+            )],
+            body: if data.is_empty() {
+                b"%FF=bad".to_vec()
+            } else {
+                data.iter().copied().take(MAX_FUZZ_INPUT_SIZE).collect()
+            },
             path_params: HashMap::new(),
             test_edge_cases: true,
             test_oversized_bodies: false,
@@ -655,12 +678,52 @@ fn generate_edge_case_input(edge_case: &WebExtractEdgeCase) -> WebExtractFuzzInp
             }
         }
 
-        _ => {
-            // Default case for other edge cases
+        WebExtractEdgeCase::PathInjection {
+            param_name,
+            param_value,
+        } => {
+            let key: String = param_name.chars().take(64).collect();
+            let value: String = param_value.chars().take(256).collect();
+            let mut path_params = HashMap::new();
+            path_params.insert(
+                if key.is_empty() {
+                    "user_id".to_string()
+                } else {
+                    key
+                },
+                value,
+            );
+
             WebExtractFuzzInput {
                 method: HttpMethod::Get,
-                path: "/test".to_string(),
-                query_string: Some("test=value".to_string()),
+                path: "/users/:user_id".to_string(),
+                query_string: None,
+                headers: vec![],
+                body: vec![],
+                path_params,
+                test_edge_cases: true,
+                test_oversized_bodies: false,
+                test_content_type_mismatch: false,
+                test_composition: true,
+            }
+        }
+
+        WebExtractEdgeCase::QueryEdgeCases { params } => {
+            let query_string = params
+                .iter()
+                .take(8)
+                .map(|(key, value)| {
+                    let key: String = key.chars().take(64).collect();
+                    let value: String = value.chars().take(128).collect();
+                    format!("{key}={value}")
+                })
+                .collect::<Vec<_>>()
+                .join("&");
+
+            WebExtractFuzzInput {
+                method: HttpMethod::Get,
+                path: "/search".to_string(),
+                query_string: Some(query_string),
                 headers: vec![],
                 body: vec![],
                 path_params: HashMap::new(),
@@ -670,6 +733,157 @@ fn generate_edge_case_input(edge_case: &WebExtractEdgeCase) -> WebExtractFuzzInp
                 test_composition: true,
             }
         }
+
+        WebExtractEdgeCase::MultiExtractor { extractors } => {
+            let wants_path = extractors
+                .iter()
+                .any(|extractor| matches!(extractor, ExtractorType::Path));
+            let wants_query = extractors
+                .iter()
+                .any(|extractor| matches!(extractor, ExtractorType::Query));
+            let wants_json = extractors
+                .iter()
+                .any(|extractor| matches!(extractor, ExtractorType::Json));
+            let wants_form = extractors
+                .iter()
+                .any(|extractor| matches!(extractor, ExtractorType::Form));
+            let wants_headers = extractors
+                .iter()
+                .any(|extractor| matches!(extractor, ExtractorType::Headers));
+
+            let mut path_params = HashMap::new();
+            if wants_path {
+                path_params.insert("user_id".to_string(), "42".to_string());
+            }
+
+            let mut headers = if wants_json {
+                vec![("content-type".to_string(), "application/json".to_string())]
+            } else if wants_form {
+                vec![(
+                    "content-type".to_string(),
+                    "application/x-www-form-urlencoded".to_string(),
+                )]
+            } else {
+                vec![]
+            };
+            if wants_headers {
+                headers.push(("x-fuzz-extractor".to_string(), "1".to_string()));
+            }
+
+            let body = if wants_json {
+                br#"{"id":42,"name":"fuzz"}"#.to_vec()
+            } else if wants_form {
+                b"username=fuzz&password=test".to_vec()
+            } else {
+                vec![]
+            };
+
+            WebExtractFuzzInput {
+                method: HttpMethod::Post,
+                path: "/compose".to_string(),
+                query_string: wants_query.then(|| "page=1&limit=10".to_string()),
+                headers,
+                body,
+                path_params,
+                test_edge_cases: true,
+                test_oversized_bodies: false,
+                test_content_type_mismatch: false,
+                test_composition: true,
+            }
+        }
+    }
+}
+
+fn observe_edge_case_result(
+    edge_case: &WebExtractEdgeCase,
+    edge_input: &WebExtractFuzzInput,
+    result: Result<String, String>,
+) {
+    assert!(
+        edge_input.body.len() <= MAX_FUZZ_INPUT_SIZE,
+        "Generated edge-case body exceeded fuzz input bound"
+    );
+    assert!(
+        edge_input.test_edge_cases,
+        "Generated edge-case input should preserve edge-case coverage flag"
+    );
+
+    match edge_case {
+        WebExtractEdgeCase::EmptyRequest => {
+            assert_eq!(edge_input.method.as_str(), "GET");
+            assert!(
+                edge_input.body.is_empty(),
+                "Empty request should have no body"
+            );
+            assert!(
+                edge_input.path_params.is_empty(),
+                "Empty request should not synthesize path parameters"
+            );
+        }
+        WebExtractEdgeCase::OversizedJson { .. } => {
+            assert!(
+                edge_input.test_oversized_bodies,
+                "Oversized JSON edge should exercise body limit checks"
+            );
+            assert!(
+                edge_input
+                    .headers
+                    .iter()
+                    .any(|(name, value)| name.eq_ignore_ascii_case("content-type")
+                        && value.contains("json")),
+                "Oversized JSON edge should advertise JSON content"
+            );
+        }
+        WebExtractEdgeCase::OversizedForm { .. } => {
+            assert!(
+                edge_input.test_oversized_bodies,
+                "Oversized form edge should exercise body limit checks"
+            );
+            assert!(
+                edge_input
+                    .headers
+                    .iter()
+                    .any(|(name, value)| name.eq_ignore_ascii_case("content-type")
+                        && value.contains("form")),
+                "Oversized form edge should advertise form content"
+            );
+        }
+        WebExtractEdgeCase::InvalidJson { .. } => {
+            assert!(
+                edge_input
+                    .headers
+                    .iter()
+                    .any(|(name, value)| name.eq_ignore_ascii_case("content-type")
+                        && value.contains("json")),
+                "Invalid JSON edge should advertise JSON content"
+            );
+            assert!(
+                !edge_input.body.is_empty(),
+                "Invalid JSON edge should provide a parser input"
+            );
+        }
+        WebExtractEdgeCase::ContentTypeMismatch { .. } => {
+            assert!(
+                edge_input.test_content_type_mismatch,
+                "Content-Type mismatch edge should exercise mismatch checks"
+            );
+            assert!(
+                edge_input
+                    .headers
+                    .iter()
+                    .any(|(name, _)| name.eq_ignore_ascii_case("content-type")),
+                "Content-Type mismatch edge should include a Content-Type header"
+            );
+        }
+        _ => {}
+    }
+
+    match result {
+        Ok(message) => assert!(
+            !message.is_empty(),
+            "Successful edge-case extraction should describe the outcome"
+        ),
+        Err(err) => panic!("Edge-case invariant failed for {edge_case:?}: {err}"),
     }
 }
 
@@ -684,7 +898,7 @@ fuzz_target!(|fuzz_input: WebExtractFuzzInput| {
         || fuzz_input
             .query_string
             .as_ref()
-            .map_or(false, |q| q.len() > 10000)
+            .is_some_and(|q| q.len() > 10000)
     {
         return;
     }
@@ -720,7 +934,8 @@ fuzz_target!(|fuzz_input: WebExtractFuzzInput| {
 
         for edge_case in &edge_cases {
             let edge_input = generate_edge_case_input(edge_case);
-            let _ = test_web_extractor_invariants(&edge_input);
+            let edge_result = test_web_extractor_invariants(&edge_input);
+            observe_edge_case_result(edge_case, &edge_input, edge_result);
         }
     }
 });
