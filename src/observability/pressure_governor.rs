@@ -2,7 +2,10 @@
 //!
 //! This module provides deterministic pressure monitoring and admission control
 //! based on runtime-local metrics including queue depths, pool saturation,
-//! channel backlogs, and memory budget signals.
+//! cleanup debt, and memory budget signals. Channel-backlog pressure is an
+//! explicit aggregate sample today: channel owners must feed it through
+//! [`PressureGovernor::record_channel_backlog_sample`] until the runtime owns a
+//! channel registry.
 
 use crate::cx::Cx;
 use crate::error::Error;
@@ -36,7 +39,8 @@ pub struct PressureThresholds {
     pub runnable_queue: f64,
     /// Blocking pool saturation threshold (active/capacity).
     pub blocking_pool: f64,
-    /// Channel backlog threshold (pending/buffer_size across all channels).
+    /// Channel backlog threshold for the explicit aggregate sample
+    /// (pending/buffer_size across sampled channels).
     pub channel_backlog: f64,
     /// Cleanup debt threshold (pending cleanup tasks/capacity).
     pub cleanup_debt: f64,
@@ -53,7 +57,7 @@ pub struct PressureSnapshot {
     pub runnable_queue_pressure: f64,
     /// Blocking pool saturation (0.0-1.0).
     pub blocking_pool_pressure: f64,
-    /// Channel backlog pressure (0.0-1.0+).
+    /// Channel backlog pressure (0.0-1.0+) when an explicit aggregate sample is live.
     pub channel_backlog_pressure: f64,
     /// Cleanup debt pressure (0.0-1.0+).
     pub cleanup_debt_pressure: f64,
@@ -290,9 +294,10 @@ pub struct SwarmCoordinationHints {
 /// Live swarm pressure governor.
 pub struct PressureGovernor {
     config: PressureGovernorConfig,
-    #[allow(dead_code)] // TODO: Used for accessing actual runtime metrics in full implementation
     runtime: Arc<Runtime>,
-    #[allow(dead_code)] // TODO: Used for additional metrics management in full implementation
+    #[allow(dead_code)]
+    // Retained so the metric handles registered above keep their owning
+    // registry/exporter state alive for the governor lifetime.
     metrics: Arc<Metrics>,
 
     // Metrics for pressure signals
@@ -761,8 +766,8 @@ impl PressureGovernor {
 
         let blocking_pool = self.sample_blocking_pool_pressure();
 
-        // Channel backlog pressure: sum of pending items across all channels
-        // TODO: Implement channel monitoring when channel registry is available
+        // Channel backlog pressure is unavailable until a caller records an
+        // explicit aggregate sample with `record_channel_backlog_sample`.
         let channel_backlog = self.sample_channel_backlog_pressure();
 
         // Cleanup debt pressure: pending cleanup work / region capacity.
