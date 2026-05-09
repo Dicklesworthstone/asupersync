@@ -253,8 +253,11 @@ fn test_window_update_operation(operation: WindowUpdateOperation) {
 
                     // Test WINDOW_UPDATE parsing
                     if header.frame_type == FrameType::WindowUpdate as u8 {
-                        let result =
-                            observe_window_update_parse("raw WINDOW_UPDATE frame", &header, &payload);
+                        let result = observe_window_update_parse(
+                            "raw WINDOW_UPDATE frame",
+                            &header,
+                            &payload,
+                        );
                         match result {
                             Ok(frame) => {
                                 verify_window_update_consistency(frame.stream_id, frame.increment);
@@ -467,11 +470,8 @@ fn test_window_update_edge_case(edge_case: WindowUpdateEdgeCase) {
             if let Ok(header) = FrameHeader::parse(&mut buf) {
                 let payload = buf.split_to(header.length as usize).freeze();
 
-                match observe_window_update_parse(
-                    "max-increment WINDOW_UPDATE",
-                    &header,
-                    &payload,
-                ) {
+                match observe_window_update_parse("max-increment WINDOW_UPDATE", &header, &payload)
+                {
                     Ok(frame) => {
                         assert_eq!(frame.stream_id, clamped_stream_id);
                         assert_eq!(frame.increment, max_increment);
@@ -1115,11 +1115,7 @@ fn test_window_update_reencode(stream_id: u32, increment: u32) {
         Ok(header) => {
             let payload = buf.split_to(header.length as usize).freeze();
 
-            match observe_window_update_parse(
-                "re-encoded WINDOW_UPDATE frame",
-                &header,
-                &payload,
-            ) {
+            match observe_window_update_parse("re-encoded WINDOW_UPDATE frame", &header, &payload) {
                 Ok(re_parsed) => {
                     assert_eq!(
                         re_parsed.stream_id, stream_id,
