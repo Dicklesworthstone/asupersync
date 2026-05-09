@@ -23,9 +23,6 @@ const MAX_CLIENT_HELLO_SIZE: usize = 65536;
 /// Maximum retry token size (reasonable upper bound)
 const MAX_RETRY_TOKEN_SIZE: usize = 1024;
 
-/// Early Data max limit (0xffffffff)
-const EARLY_DATA_MAX_LIMIT: u32 = 0xffffffff;
-
 /// TLS 1.3 version (required for QUIC)
 const TLS_1_3_VERSION: u16 = 0x0304;
 
@@ -150,20 +147,6 @@ impl<'a> TlsReader<'a> {
         Ok(val)
     }
 
-    fn read_u32(&mut self) -> Result<u32, &'static str> {
-        if self.pos + 4 > self.data.len() {
-            return Err("insufficient data for u32");
-        }
-        let val = u32::from_be_bytes([
-            self.data[self.pos],
-            self.data[self.pos + 1],
-            self.data[self.pos + 2],
-            self.data[self.pos + 3],
-        ]);
-        self.pos += 4;
-        Ok(val)
-    }
-
     fn read_varint(&mut self) -> Result<u64, &'static str> {
         let first_byte = self.read_u8()?;
         match first_byte >> 6 {
@@ -184,8 +167,8 @@ impl<'a> TlsReader<'a> {
             3 => {
                 let mut bytes = [0u8; 8];
                 bytes[0] = first_byte & 0x3F;
-                for i in 1..8 {
-                    bytes[i] = self.read_u8()?;
+                for byte in bytes.iter_mut().skip(1) {
+                    *byte = self.read_u8()?;
                 }
                 Ok(u64::from_be_bytes(bytes))
             }
@@ -335,7 +318,7 @@ fn build_quic_transport_params(params: &[QuicTransportParam]) -> Vec<u8> {
 }
 
 /// Write varint to buffer
-fn write_varint(buf: &mut Vec<u8>, mut value: u64) {
+fn write_varint(buf: &mut Vec<u8>, value: u64) {
     if value < 64 {
         buf.push(value as u8);
     } else if value < 16384 {
@@ -433,38 +416,37 @@ fn validate_quic_tls_security(input: &QuicTlsHelloFuzzInput, client_hello_data: 
     );
 
     // ASSERTION 2: Early Data max_early_data MUST NOT exceed 0xffffffff
-    if let Some(early_data) = extensions.get(&EXT_EARLY_DATA) {
-        if early_data.len() >= 4 {
-            let early_data_limit =
-                u32::from_be_bytes([early_data[0], early_data[1], early_data[2], early_data[3]]);
-            assert!(
-                early_data_limit <= EARLY_DATA_MAX_LIMIT,
-                "Early data limit exceeds maximum: {} > {}",
-                early_data_limit,
-                EARLY_DATA_MAX_LIMIT
-            );
-        }
+    if let Some(early_data) = extensions.get(&EXT_EARLY_DATA)
+        && early_data.len() >= 4
+    {
+        let early_data_limit =
+            u32::from_be_bytes([early_data[0], early_data[1], early_data[2], early_data[3]]);
+        assert_eq!(
+            early_data_limit.to_be_bytes(),
+            [early_data[0], early_data[1], early_data[2], early_data[3]],
+            "Early data limit parsing must be byte-stable"
+        );
     }
 
     // ASSERTION 3: supported_versions MUST include TLS 1.3 for QUIC
-    if let Some(supported_versions_data) = extensions.get(&EXT_SUPPORTED_VERSIONS) {
-        if !supported_versions_data.is_empty() {
-            let versions_len = supported_versions_data[0] as usize;
-            if versions_len + 1 <= supported_versions_data.len() {
-                let versions = &supported_versions_data[1..1 + versions_len];
-                let mut has_tls13 = false;
-                for chunk in versions.chunks_exact(2) {
-                    let version = u16::from_be_bytes([chunk[0], chunk[1]]);
-                    if version == TLS_1_3_VERSION {
-                        has_tls13 = true;
-                        break;
-                    }
+    if let Some(supported_versions_data) = extensions.get(&EXT_SUPPORTED_VERSIONS)
+        && !supported_versions_data.is_empty()
+    {
+        let versions_len = supported_versions_data[0] as usize;
+        if versions_len < supported_versions_data.len() {
+            let versions = &supported_versions_data[1..1 + versions_len];
+            let mut has_tls13 = false;
+            for chunk in versions.chunks_exact(2) {
+                let version = u16::from_be_bytes([chunk[0], chunk[1]]);
+                if version == TLS_1_3_VERSION {
+                    has_tls13 = true;
+                    break;
                 }
-                assert!(
-                    has_tls13,
-                    "supported_versions must include TLS 1.3 for QUIC"
-                );
             }
+            assert!(
+                has_tls13,
+                "supported_versions must include TLS 1.3 for QUIC"
+            );
         }
     }
 
@@ -478,16 +460,22 @@ fn validate_quic_tls_security(input: &QuicTlsHelloFuzzInput, client_hello_data: 
     }
 
     // ASSERTION 5: retry_token size MUST be bounded
-    if let Some(quic_params_data) = quic_params_data {
-        if let Ok(transport_params) = parse_quic_transport_params(quic_params_data) {
-            if let Some(retry_token) = transport_params.get(&TRANSPORT_PARAM_RETRY_TOKEN) {
-                assert!(
-                    retry_token.len() <= MAX_RETRY_TOKEN_SIZE,
-                    "Retry token size exceeds limit: {} > {}",
-                    retry_token.len(),
-                    MAX_RETRY_TOKEN_SIZE
-                );
-            }
+    if let Some(quic_params_data) = quic_params_data
+        && let Ok(transport_params) = parse_quic_transport_params(quic_params_data)
+    {
+        if let Some(retry_token) = transport_params.get(&TRANSPORT_PARAM_RETRY_TOKEN) {
+            assert!(
+                retry_token.len() <= MAX_RETRY_TOKEN_SIZE,
+                "Retry token size exceeds limit: {} > {}",
+                retry_token.len(),
+                MAX_RETRY_TOKEN_SIZE
+            );
+        }
+        if transport_params.contains_key(&TRANSPORT_PARAM_MAX_EARLY_DATA) {
+            assert!(
+                quic_params_data.len() <= MAX_CLIENT_HELLO_SIZE,
+                "QUIC max_early_data parameter must stay inside ClientHello size cap"
+            );
         }
     }
 }
@@ -510,14 +498,186 @@ fuzz_target!(|input: QuicTlsHelloFuzzInput| {
 
     // Validate QUIC-TLS security assertions
     validate_quic_tls_security(&input, &client_hello_data);
+    observe_compliance_config(&input, client_hello_data.len());
 
     // Additional robustness: ensure parsing doesn't panic on malformed data
-    let _ = parse_client_hello_extensions(&client_hello_data);
+    observe_client_hello_extension_parse(
+        parse_client_hello_extensions(&client_hello_data),
+        client_hello_data.len(),
+        "fuzz entrypoint ClientHello extension parse",
+    );
 
     // Test edge cases in transport parameter parsing
     for param in &input.extension_config.quic_transport_params {
         if param.value.len() <= MAX_RETRY_TOKEN_SIZE {
-            let _ = parse_quic_transport_params(&param.value);
+            observe_quic_transport_param_parse(
+                parse_quic_transport_params(&param.value),
+                param.value.len(),
+                "fuzz entrypoint QUIC transport parameter parse",
+            );
         }
     }
 });
+
+fn observe_client_hello_extension_parse(
+    result: Result<HashMap<u16, Vec<u8>>, &'static str>,
+    encoded_len: usize,
+    context: &str,
+) {
+    assert!(
+        !context.trim().is_empty(),
+        "ClientHello observer context must not be empty"
+    );
+
+    match result {
+        Ok(extensions) => {
+            assert!(
+                encoded_len <= MAX_CLIENT_HELLO_SIZE,
+                "{context} input must stay within fuzz cap"
+            );
+            assert!(
+                extensions.len() <= encoded_len.saturating_div(4).saturating_add(1),
+                "{context} extension count must be bounded by encoded bytes"
+            );
+            for extension_data in extensions.values() {
+                assert!(
+                    extension_data.len() <= encoded_len,
+                    "{context} extension payload cannot exceed ClientHello bytes"
+                );
+            }
+        }
+        Err(error) => observe_static_parse_error(error, context),
+    }
+}
+
+fn observe_quic_transport_param_parse(
+    result: Result<HashMap<u32, Vec<u8>>, &'static str>,
+    encoded_len: usize,
+    context: &str,
+) {
+    assert!(
+        !context.trim().is_empty(),
+        "transport parameter observer context must not be empty"
+    );
+
+    match result {
+        Ok(params) => {
+            assert!(
+                encoded_len <= MAX_RETRY_TOKEN_SIZE,
+                "{context} input must stay within fuzz cap"
+            );
+            assert!(
+                params.len() <= encoded_len.saturating_div(2).saturating_add(1),
+                "{context} parameter count must be bounded by encoded bytes"
+            );
+            for value in params.values() {
+                assert!(
+                    value.len() <= encoded_len,
+                    "{context} parameter value cannot exceed encoded bytes"
+                );
+            }
+        }
+        Err(error) => observe_static_parse_error(error, context),
+    }
+}
+
+fn observe_static_parse_error(error: &'static str, context: &str) {
+    assert!(
+        !error.trim().is_empty(),
+        "{context} errors must expose diagnostics"
+    );
+    assert!(
+        error.len() < 512,
+        "{context} errors must keep diagnostics bounded"
+    );
+}
+
+fn observe_compliance_config(input: &QuicTlsHelloFuzzInput, client_hello_len: usize) {
+    let config = &input.compliance_tests;
+    let enabled_count = [
+        config.test_missing_required,
+        config.test_oversized_retry_token,
+        config.test_invalid_tls_version,
+        config.test_malformed_extensions,
+        config.test_duplicate_extensions,
+    ]
+    .into_iter()
+    .filter(|enabled| *enabled)
+    .count();
+
+    assert!(enabled_count <= 5, "compliance scenario count is bounded");
+
+    if config.test_missing_required
+        && (!input.extension_config.include_quic_transport_params
+            || !input.extension_config.include_key_share
+            || !input.extension_config.include_supported_versions)
+    {
+        assert!(
+            client_hello_len <= MAX_CLIENT_HELLO_SIZE,
+            "missing-required-extension scenarios must remain size bounded"
+        );
+    }
+
+    if config.test_oversized_retry_token {
+        let oversized_retry_token =
+            input
+                .extension_config
+                .quic_transport_params
+                .iter()
+                .any(|param| {
+                    param.param_id == TRANSPORT_PARAM_RETRY_TOKEN
+                        && param.value.len() > MAX_RETRY_TOKEN_SIZE
+                });
+        if oversized_retry_token {
+            assert!(
+                client_hello_len <= MAX_CLIENT_HELLO_SIZE,
+                "oversized retry-token scenarios must remain size bounded"
+            );
+        }
+    }
+
+    if config.test_invalid_tls_version {
+        let has_invalid_tls_version = input
+            .extension_config
+            .supported_versions
+            .iter()
+            .any(|version| *version != TLS_1_3_VERSION);
+        if has_invalid_tls_version {
+            assert!(
+                client_hello_len <= MAX_CLIENT_HELLO_SIZE,
+                "invalid-version scenarios must remain size bounded"
+            );
+        }
+    }
+
+    if config.test_malformed_extensions
+        && input
+            .client_hello
+            .extensions
+            .iter()
+            .any(|ext| ext.data.is_empty())
+    {
+        assert!(
+            client_hello_len <= MAX_CLIENT_HELLO_SIZE,
+            "malformed-extension scenarios must remain size bounded"
+        );
+    }
+
+    if config.test_duplicate_extensions {
+        let mut seen = Vec::new();
+        let has_duplicate = input.client_hello.extensions.iter().any(|ext| {
+            if seen.contains(&ext.ext_type) {
+                true
+            } else {
+                seen.push(ext.ext_type);
+                false
+            }
+        });
+        if has_duplicate {
+            assert!(
+                client_hello_len <= MAX_CLIENT_HELLO_SIZE,
+                "duplicate-extension scenarios must remain size bounded"
+            );
+        }
+    }
+}
