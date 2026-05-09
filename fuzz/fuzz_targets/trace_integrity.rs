@@ -13,11 +13,10 @@
 //! - **Boundary conditions**: Empty files, minimal files, large files
 
 use arbitrary::{Arbitrary, Result, Unstructured};
-use asupersync::trace::integrity::{VerificationOptions, verify_trace};
+use asupersync::trace::integrity::{VerificationOptions, VerificationResult, verify_trace};
 use asupersync::trace::replay::{CompactTaskId, ReplayEvent, TraceMetadata};
 use libfuzzer_sys::fuzz_target;
-use std::env;
-use std::fs::{self, File};
+use std::fs;
 
 // =============================================================================
 // Constants from trace/file.rs
@@ -25,7 +24,6 @@ use std::fs::{self, File};
 
 const TRACE_MAGIC: &[u8; 11] = b"ASUP_TRACE\0";
 const TRACE_FILE_VERSION: u16 = 2;
-const FLAG_COMPRESSED: u16 = 1;
 const HEADER_SIZE: usize = 16; // magic(11) + version(2) + flags(2) + compression(1)
 
 // Fuzzing limits to prevent timeouts
@@ -128,19 +126,19 @@ enum EventOperation {
 
 #[derive(Debug, Arbitrary)]
 enum SizeAttackType {
-    OversizedMetadata,
-    OversizedEvent,
-    OversizedFile,
+    Metadata,
+    Event,
+    File,
 }
 
 #[derive(Debug, Arbitrary)]
 enum TruncationPoint {
-    InHeader,
-    InMetadataLength,
-    InMetadata,
-    InEventCount,
-    InEventLength,
-    InEventData,
+    Header,
+    MetadataLength,
+    Metadata,
+    EventCount,
+    EventLength,
+    EventData,
 }
 
 // =============================================================================
@@ -155,7 +153,7 @@ fn bounded_blob(u: &mut Unstructured) -> Result<Vec<u8>> {
 }
 
 fn small_offset(u: &mut Unstructured) -> Result<usize> {
-    Ok(u.int_in_range(0..=1024)?)
+    u.int_in_range(0..=1024)
 }
 
 // =============================================================================
@@ -178,7 +176,7 @@ fuzz_target!(|data: &[u8]| {
     let path = std::path::Path::new(&temp_path);
 
     // Generate the trace blob based on fuzzing operation
-    if let Err(_) = generate_trace_blob(&fuzz_input.operation, path) {
+    if generate_trace_blob(&fuzz_input.operation, path).is_err() {
         return; // Skip on generation failure
     }
 
@@ -391,20 +389,20 @@ fn generate_trace_blob(
             let size = (*size_multiplier as usize * 1024).min(MAX_BLOB_SIZE / 2);
 
             match attack_type {
-                SizeAttackType::OversizedMetadata => {
+                SizeAttackType::Metadata => {
                     // Claim huge metadata size
                     blob.extend_from_slice(&(size as u32).to_le_bytes());
                     blob.resize(blob.len() + size.min(8192), 0xAA); // Cap actual size
                 }
 
-                SizeAttackType::OversizedEvent => {
+                SizeAttackType::Event => {
                     write_valid_metadata(&mut blob);
                     blob.extend_from_slice(&1u64.to_le_bytes()); // 1 event
                     blob.extend_from_slice(&(size as u32).to_le_bytes()); // Huge event size
                     blob.resize(blob.len() + size.min(8192), 0xBB);
                 }
 
-                SizeAttackType::OversizedFile => {
+                SizeAttackType::File => {
                     write_valid_metadata(&mut blob);
                     blob.extend_from_slice(&(size as u64).to_le_bytes()); // Many events
                     for i in 0..(size.min(100)) {
@@ -440,17 +438,15 @@ fn generate_trace_blob(
 
             // Determine truncation point
             let truncate_pos = match truncate_at {
-                TruncationPoint::InHeader => (*offset).min(HEADER_SIZE - 1),
-                TruncationPoint::InMetadataLength => HEADER_SIZE + (*offset).min(3),
-                TruncationPoint::InMetadata => HEADER_SIZE + 4 + offset,
-                TruncationPoint::InEventCount => {
+                TruncationPoint::Header => (*offset).min(HEADER_SIZE - 1),
+                TruncationPoint::MetadataLength => HEADER_SIZE + (*offset).min(3),
+                TruncationPoint::Metadata => HEADER_SIZE + 4 + offset,
+                TruncationPoint::EventCount => {
                     let meta_len = get_metadata_length();
                     HEADER_SIZE + 4 + meta_len + (*offset).min(7)
                 }
-                TruncationPoint::InEventLength => {
-                    blob.len().saturating_sub(100) + (*offset).min(50)
-                }
-                TruncationPoint::InEventData => blob.len().saturating_sub(50) + (*offset).min(30),
+                TruncationPoint::EventLength => blob.len().saturating_sub(100) + (*offset).min(50),
+                TruncationPoint::EventData => blob.len().saturating_sub(50) + (*offset).min(30),
             };
 
             // Truncate the blob
@@ -504,20 +500,58 @@ fn get_metadata_length() -> usize {
 
 fn test_verification_modes(path: &std::path::Path) {
     // Test all verification modes - errors are expected and should not panic
-    let _ = verify_trace(path, &VerificationOptions::default());
-    let _ = verify_trace(path, &VerificationOptions::quick());
-    let _ = verify_trace(path, &VerificationOptions::strict());
+    observe_verification_result(
+        verify_trace(path, &VerificationOptions::default()),
+        "default",
+    );
+    observe_verification_result(verify_trace(path, &VerificationOptions::quick()), "quick");
+    observe_verification_result(verify_trace(path, &VerificationOptions::strict()), "strict");
 
     // Test with custom options
     let custom_opts = VerificationOptions::default()
         .with_monotonicity(true)
         .with_fail_fast(false);
-    let _ = verify_trace(path, &custom_opts);
+    observe_verification_result(verify_trace(path, &custom_opts), "custom");
 
     // Test utility functions
-    let _ = asupersync::trace::integrity::is_trace_valid_quick(path);
-    let _ = asupersync::trace::integrity::find_first_corruption(path);
+    observe_integrity_io_result(
+        asupersync::trace::integrity::is_trace_valid_quick(path),
+        "quick validity",
+    );
+    observe_integrity_io_result(
+        asupersync::trace::integrity::find_first_corruption(path),
+        "first corruption",
+    );
 
     // Clean up temp file
     let _ = std::fs::remove_file(path);
+}
+
+fn observe_verification_result(
+    result: std::io::Result<VerificationResult>,
+    verification_mode: &str,
+) {
+    match result {
+        Ok(result) => {
+            assert!(
+                result.completed || !result.issues().is_empty(),
+                "{verification_mode} verification stopped without issue diagnostics"
+            );
+        }
+        Err(error) => {
+            assert!(
+                !error.to_string().trim().is_empty(),
+                "{verification_mode} verification I/O error must expose diagnostics"
+            );
+        }
+    }
+}
+
+fn observe_integrity_io_result<T>(result: std::io::Result<T>, context: &str) {
+    if let Err(error) = result {
+        assert!(
+            !error.to_string().trim().is_empty(),
+            "{context} I/O error must expose diagnostics"
+        );
+    }
 }
