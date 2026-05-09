@@ -28,9 +28,6 @@ struct MockPriorityRequestConnection {
     /// Priority dependency tree
     priority_tree: PriorityTree,
 
-    /// Connection state
-    state: ConnectionState,
-
     /// Statistics tracking
     stats: PriorityStats,
 
@@ -50,10 +47,10 @@ struct StreamInfo {
 
 #[derive(Clone, Debug)]
 struct PriorityInfo {
-    weight: u8,           // 1-256 (stored as 0-255, actual = weight + 1)
-    dependency: u32,      // Stream ID this stream depends on
-    exclusive: bool,      // Whether this is exclusive dependency
-    advisory: bool,       // True if set before HEADERS (advisory)
+    weight: u8,      // 1-256 (stored as 0-255, actual = weight + 1)
+    dependency: u32, // Stream ID this stream depends on
+    exclusive: bool, // Whether this is exclusive dependency
+    advisory: bool,  // True if set before HEADERS (advisory)
 }
 
 #[derive(Clone, Debug)]
@@ -86,17 +83,8 @@ struct PriorityTree {
 #[derive(Clone, Debug)]
 enum StreamState {
     Idle,
-    Reserved,
     Open,
-    HalfClosedLocal,
     HalfClosedRemote,
-    Closed,
-}
-
-#[derive(Clone, Debug)]
-enum ConnectionState {
-    Open,
-    Closed,
 }
 
 #[derive(Default, Clone, Debug)]
@@ -104,29 +92,25 @@ struct PriorityStats {
     priority_frames_received: u32,
     headers_frames_received: u32,
     data_frames_received: u32,
-    priority_before_headers: u32,  // Advisory weightings
-    priority_after_headers: u32,   // Active weight updates
+    priority_before_headers: u32, // Advisory weightings
+    priority_after_headers: u32,  // Active weight updates
     priority_updates_during_data: u32,
     dependency_cycles_detected: u32,
-    invalid_weights: u32,
     exclusive_dependencies: u32,
 }
 
 #[derive(Clone, Debug)]
 enum ViolationType {
     DependencyCycle,
-    InvalidWeight,
     SelfDependency,
-    DependencyOnClosedStream,
-    PriorityOnInactiveStream,
     InvalidStreamState,
 }
 
 impl Default for PriorityInfo {
     fn default() -> Self {
         Self {
-            weight: 15,        // Default weight is 16 (stored as 15)
-            dependency: 0,     // Default dependency is stream 0
+            weight: 15,    // Default weight is 16 (stored as 15)
+            dependency: 0, // Default dependency is stream 0
             exclusive: false,
             advisory: false,
         }
@@ -138,14 +122,19 @@ impl MockPriorityRequestConnection {
         Self {
             streams: HashMap::new(),
             priority_tree: PriorityTree::default(),
-            state: ConnectionState::Open,
             stats: PriorityStats::default(),
             violations: Vec::new(),
         }
     }
 
     /// Process a PRIORITY frame
-    fn handle_priority(&mut self, stream_id: u32, weight: u8, dependency: u32, exclusive: bool) -> Result<(), H2Error> {
+    fn handle_priority(
+        &mut self,
+        stream_id: u32,
+        weight: u8,
+        dependency: u32,
+        exclusive: bool,
+    ) -> Result<(), H2Error> {
         self.stats.priority_frames_received += 1;
 
         // Validate weight (RFC 7540 §6.3: weight is 1-256, transmitted as 0-255)
@@ -221,7 +210,11 @@ impl MockPriorityRequestConnection {
     }
 
     /// Process a HEADERS frame
-    fn handle_headers(&mut self, stream_id: u32, headers: HashMap<String, String>) -> Result<(), H2Error> {
+    fn handle_headers(
+        &mut self,
+        stream_id: u32,
+        headers: HashMap<String, String>,
+    ) -> Result<(), H2Error> {
         self.stats.headers_frames_received += 1;
 
         // Get or create stream
@@ -254,10 +247,18 @@ impl MockPriorityRequestConnection {
     }
 
     /// Process a DATA frame
-    fn handle_data(&mut self, stream_id: u32, data_length: u32, end_stream: bool) -> Result<(), H2Error> {
+    fn handle_data(
+        &mut self,
+        stream_id: u32,
+        data_length: u32,
+        end_stream: bool,
+    ) -> Result<(), H2Error> {
         self.stats.data_frames_received += 1;
 
-        let stream = self.streams.get_mut(&stream_id).ok_or(H2Error::ProtocolError)?;
+        let stream = self
+            .streams
+            .get_mut(&stream_id)
+            .ok_or(H2Error::ProtocolError)?;
 
         // Validate stream state
         match stream.state {
@@ -287,7 +288,6 @@ impl MockPriorityRequestConnection {
         if end_stream {
             stream.state = match stream.state {
                 StreamState::Open => StreamState::HalfClosedRemote,
-                StreamState::HalfClosedLocal => StreamState::Closed,
                 _ => stream.state.clone(),
             };
         }
@@ -329,17 +329,28 @@ impl MockPriorityRequestConnection {
     }
 
     /// Update the priority tree with new dependency
-    fn update_priority_tree(&mut self, stream_id: u32, dependency: u32, exclusive: bool) -> Result<(), H2Error> {
+    fn update_priority_tree(
+        &mut self,
+        stream_id: u32,
+        dependency: u32,
+        exclusive: bool,
+    ) -> Result<(), H2Error> {
         // Remove from old parent's children
-        if let Some(old_dep) = self.priority_tree.dependencies.get(&stream_id) {
-            if let Some(children) = self.priority_tree.children.get_mut(old_dep) {
-                children.retain(|&x| x != stream_id);
-            }
+        if let Some(old_dep) = self.priority_tree.dependencies.get(&stream_id)
+            && let Some(children) = self.priority_tree.children.get_mut(old_dep)
+        {
+            children.retain(|&x| x != stream_id);
         }
 
         // Add to new parent
-        self.priority_tree.dependencies.insert(stream_id, dependency);
-        self.priority_tree.children.entry(dependency).or_insert_with(Vec::new).push(stream_id);
+        self.priority_tree
+            .dependencies
+            .insert(stream_id, dependency);
+        self.priority_tree
+            .children
+            .entry(dependency)
+            .or_default()
+            .push(stream_id);
 
         // Handle exclusive dependencies
         if exclusive {
@@ -347,14 +358,22 @@ impl MockPriorityRequestConnection {
 
             // Move existing children of dependency to be children of stream_id
             if let Some(existing_children) = self.priority_tree.children.get(&dependency).cloned() {
-                for child in existing_children {
+                for &child in &existing_children {
                     if child != stream_id {
                         self.priority_tree.dependencies.insert(child, stream_id);
                     }
                 }
                 // Clear old parent's children and add only this stream
-                self.priority_tree.children.insert(dependency, vec![stream_id]);
-                self.priority_tree.children.insert(stream_id, existing_children.into_iter().filter(|&x| x != stream_id).collect());
+                self.priority_tree
+                    .children
+                    .insert(dependency, vec![stream_id]);
+                self.priority_tree.children.insert(
+                    stream_id,
+                    existing_children
+                        .into_iter()
+                        .filter(|&x| x != stream_id)
+                        .collect(),
+                );
             }
         } else {
             self.priority_tree.exclusive_deps.insert(stream_id, false);
@@ -458,11 +477,129 @@ impl MockPriorityRequestConnection {
         // Count streams that don't have their dependencies in the tree
         let mut orphaned = 0;
         for stream in self.streams.values() {
-            if stream.priority.dependency != 0 && !self.streams.contains_key(&stream.priority.dependency) {
+            if stream.priority.dependency != 0
+                && !self.streams.contains_key(&stream.priority.dependency)
+            {
                 orphaned += 1;
             }
         }
         orphaned
+    }
+}
+
+fn observe_priority_result(
+    result: Result<(), H2Error>,
+    before_stats: &PriorityStats,
+    before_violations: usize,
+    connection: &MockPriorityRequestConnection,
+    stream_id: u32,
+    dependency: u32,
+) {
+    let stats = connection.get_stats();
+    assert_eq!(
+        stats.priority_frames_received,
+        before_stats.priority_frames_received + 1,
+        "PRIORITY handler must account every attempted frame"
+    );
+
+    match result {
+        Ok(()) => {
+            assert_ne!(
+                stream_id, dependency,
+                "accepted PRIORITY must not be self-dependent"
+            );
+            assert!(
+                connection.streams.contains_key(&stream_id),
+                "accepted PRIORITY must create or update the target stream"
+            );
+            assert_eq!(
+                connection.priority_tree.dependencies.get(&stream_id),
+                Some(&dependency),
+                "accepted PRIORITY must update the dependency tree"
+            );
+        }
+        Err(H2Error::ProtocolError) => {
+            assert!(
+                stream_id == dependency
+                    || stats.dependency_cycles_detected > before_stats.dependency_cycles_detected
+                    || connection.get_violations().len() > before_violations,
+                "rejected PRIORITY should be tied to a visible priority violation"
+            );
+        }
+        Err(err) => panic!("unexpected PRIORITY handler error: {err:?}"),
+    }
+}
+
+fn observe_headers_result(
+    result: Result<(), H2Error>,
+    before_stats: &PriorityStats,
+    connection: &MockPriorityRequestConnection,
+    stream_id: u32,
+) {
+    let stats = connection.get_stats();
+    assert_eq!(
+        stats.headers_frames_received,
+        before_stats.headers_frames_received + 1,
+        "HEADERS handler must account every attempted frame"
+    );
+
+    match result {
+        Ok(()) => {
+            let stream = connection
+                .streams
+                .get(&stream_id)
+                .expect("accepted HEADERS must create or update the target stream");
+            assert!(
+                stream.headers_received,
+                "accepted HEADERS must mark headers received"
+            );
+            assert!(
+                matches!(stream.state, StreamState::Open),
+                "accepted HEADERS must open the target stream"
+            );
+        }
+        Err(err) => {
+            let diagnostic = format!("{err:?}");
+            assert!(
+                !diagnostic.trim().is_empty(),
+                "rejected HEADERS should expose a visible diagnostic"
+            );
+        }
+    }
+}
+
+fn observe_data_result(
+    result: Result<(), H2Error>,
+    before_stats: &PriorityStats,
+    connection: &MockPriorityRequestConnection,
+    stream_id: u32,
+) {
+    let stats = connection.get_stats();
+    assert_eq!(
+        stats.data_frames_received,
+        before_stats.data_frames_received + 1,
+        "DATA handler must account every attempted frame"
+    );
+
+    match result {
+        Ok(()) => {
+            let stream = connection
+                .streams
+                .get(&stream_id)
+                .expect("accepted DATA must target an existing stream");
+            assert!(stream.headers_received, "accepted DATA must follow HEADERS");
+            assert!(
+                !stream.data_frames.is_empty(),
+                "accepted DATA must be retained in the stream record"
+            );
+        }
+        Err(err) => {
+            let diagnostic = format!("{err:?}");
+            assert!(
+                !diagnostic.trim().is_empty(),
+                "rejected DATA should expose a visible diagnostic"
+            );
+        }
     }
 }
 
@@ -491,7 +628,6 @@ struct TreeAnalysis {
 enum H2Error {
     ProtocolError,
     StreamClosed,
-    InvalidPriority,
 }
 
 /// Fuzz input structure
@@ -532,9 +668,7 @@ enum FrameOperation {
     },
 
     /// Test complete flow on stream
-    TestFlow {
-        stream_id: u32,
-    },
+    TestFlow { stream_id: u32 },
 }
 
 fuzz_target!(|input: FuzzInput| {
@@ -548,20 +682,48 @@ fuzz_target!(|input: FuzzInput| {
     // Process operations
     for operation in input.operations {
         match operation {
-            FrameOperation::Priority { stream_id, weight, dependency, exclusive } => {
+            FrameOperation::Priority {
+                stream_id,
+                weight,
+                dependency,
+                exclusive,
+            } => {
                 // Sanitize inputs
                 let safe_stream_id = (stream_id % 1000) + 1; // Stream IDs 1-1000
                 let safe_dependency = dependency % 1000; // Dependencies 0-999 (0 is root)
 
-                let _ = connection.handle_priority(safe_stream_id, weight, safe_dependency, exclusive);
+                let before_stats = connection.get_stats().clone();
+                let before_violations = connection.get_violations().len();
+                let result =
+                    connection.handle_priority(safe_stream_id, weight, safe_dependency, exclusive);
+                observe_priority_result(
+                    result,
+                    &before_stats,
+                    before_violations,
+                    &connection,
+                    safe_stream_id,
+                    safe_dependency,
+                );
             }
 
-            FrameOperation::Headers { stream_id, method, path } => {
+            FrameOperation::Headers {
+                stream_id,
+                method,
+                path,
+            } => {
                 let safe_stream_id = (stream_id % 1000) + 1;
 
                 // Sanitize method and path
-                let safe_method = if method.is_empty() { "GET".to_string() } else { method.chars().take(10).collect() };
-                let safe_path = if path.is_empty() { "/".to_string() } else { format!("/{}", path.chars().take(50).collect::<String>()) };
+                let safe_method = if method.is_empty() {
+                    "GET".to_string()
+                } else {
+                    method.chars().take(10).collect()
+                };
+                let safe_path = if path.is_empty() {
+                    "/".to_string()
+                } else {
+                    format!("/{}", path.chars().take(50).collect::<String>())
+                };
 
                 let mut headers = HashMap::new();
                 headers.insert(":method".to_string(), safe_method);
@@ -569,14 +731,22 @@ fuzz_target!(|input: FuzzInput| {
                 headers.insert(":scheme".to_string(), "https".to_string());
                 headers.insert(":authority".to_string(), "example.com".to_string());
 
-                let _ = connection.handle_headers(safe_stream_id, headers);
+                let before_stats = connection.get_stats().clone();
+                let result = connection.handle_headers(safe_stream_id, headers);
+                observe_headers_result(result, &before_stats, &connection, safe_stream_id);
             }
 
-            FrameOperation::Data { stream_id, data_length, end_stream } => {
+            FrameOperation::Data {
+                stream_id,
+                data_length,
+                end_stream,
+            } => {
                 let safe_stream_id = (stream_id % 1000) + 1;
                 let safe_length = data_length.min(1000000); // Max 1MB per frame
 
-                let _ = connection.handle_data(safe_stream_id, safe_length, end_stream);
+                let before_stats = connection.get_stats().clone();
+                let result = connection.handle_data(safe_stream_id, safe_length, end_stream);
+                observe_data_result(result, &before_stats, &connection, safe_stream_id);
             }
 
             FrameOperation::TestFlow { stream_id } => {
@@ -608,11 +778,8 @@ fuzz_target!(|input: FuzzInput| {
             ViolationType::SelfDependency => {
                 // Self-dependencies should be rejected
             }
-            ViolationType::InvalidWeight => {
-                // Invalid weights should be detected
-            }
-            _ => {
-                // Other violations are tracked but may be acceptable
+            ViolationType::InvalidStreamState => {
+                // DATA on idle or otherwise inactive streams should be rejected
             }
         }
     }
@@ -621,7 +788,28 @@ fuzz_target!(|input: FuzzInput| {
     let tree_analysis = connection.analyze_priority_tree();
 
     // Ensure tree depth is reasonable (prevent stack overflow in real implementation)
-    assert!(tree_analysis.dependency_depth < 1000, "Priority tree too deep: {}", tree_analysis.dependency_depth);
+    assert!(
+        tree_analysis.dependency_depth < 1000,
+        "Priority tree too deep: {}",
+        tree_analysis.dependency_depth
+    );
+    assert_eq!(
+        tree_analysis.total_streams as usize,
+        connection.streams.len(),
+        "tree analysis stream count should match connection stream map"
+    );
+    assert_eq!(
+        tree_analysis.cycles_detected, stats.dependency_cycles_detected,
+        "tree analysis should preserve detected cycle count"
+    );
+    assert_eq!(
+        tree_analysis.exclusive_count, stats.exclusive_dependencies,
+        "tree analysis should preserve exclusive dependency count"
+    );
+    assert!(
+        tree_analysis.orphaned_streams <= tree_analysis.total_streams,
+        "orphaned streams cannot exceed total streams"
+    );
 
     // Test priority semantics
     test_priority_semantics(&connection);
@@ -630,14 +818,41 @@ fuzz_target!(|input: FuzzInput| {
 /// Test priority semantic correctness
 fn test_priority_semantics(connection: &MockPriorityRequestConnection) {
     for stream in connection.streams.values() {
-        // Verify weight is in valid range (actual weight = stored + 1, so 1-256)
-        assert!(stream.priority.weight <= 255, "Weight out of range: {}", stream.priority.weight);
+        // Convert stored weight to HTTP/2's actual 1-256 range.
+        let actual_weight = usize::from(stream.priority.weight) + 1;
+        assert!(
+            (1..=usize::from(u8::MAX) + 1).contains(&actual_weight),
+            "actual priority weight out of range: {actual_weight}"
+        );
+
+        if stream.priority.exclusive {
+            assert_eq!(
+                connection
+                    .priority_tree
+                    .exclusive_deps
+                    .get(&stream.stream_id),
+                Some(&true),
+                "exclusive stream priority must be reflected in the tree"
+            );
+        }
 
         // Verify no self-dependency
-        assert_ne!(stream.stream_id, stream.priority.dependency, "Self-dependency detected");
+        assert_ne!(
+            stream.stream_id, stream.priority.dependency,
+            "Self-dependency detected"
+        );
 
         // Check priority update semantics
         for update in &stream.priority_updates {
+            assert!(
+                update.timestamp > 0,
+                "priority updates must retain ordering metadata"
+            );
+            assert_ne!(
+                stream.stream_id, update.old_priority.dependency,
+                "old priority snapshot must not contain self-dependency"
+            );
+
             if update.before_headers {
                 // Advisory priority - should be applied when stream becomes active
                 assert!(update.new_priority.advisory);
@@ -650,6 +865,24 @@ fn test_priority_semantics(connection: &MockPriorityRequestConnection) {
         // Verify HEADERS/DATA relationship
         if !stream.data_frames.is_empty() {
             assert!(stream.headers_received, "DATA received before HEADERS");
+        }
+
+        for data_frame in &stream.data_frames {
+            assert!(
+                data_frame.data_length <= 1_000_000,
+                "sanitized DATA length should stay bounded"
+            );
+            if data_frame.end_stream {
+                assert!(
+                    matches!(stream.state, StreamState::HalfClosedRemote),
+                    "END_STREAM DATA should half-close the receiving side"
+                );
+            }
+            assert_eq!(
+                data_frame.received_after_priority,
+                !stream.priority_updates.is_empty(),
+                "DATA priority marker should reflect the stream priority history"
+            );
         }
     }
 }
