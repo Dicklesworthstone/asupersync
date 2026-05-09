@@ -534,6 +534,11 @@ impl SwarmPressureGovernor {
             reported_at: Instant::now(),
         };
         let mut reports = self.peer_pressure_reports.lock().unwrap();
+        prune_stale_peer_pressure_reports_locked(
+            &mut reports,
+            self.config.peer_pressure_max_age,
+            report.reported_at,
+        );
         reports.insert(instance_id, report);
         Ok(())
     }
@@ -542,6 +547,16 @@ impl SwarmPressureGovernor {
     pub fn clear_peer_pressure(&self, instance_id: &str) -> Option<SwarmPeerPressureReport> {
         let mut reports = self.peer_pressure_reports.lock().unwrap();
         reports.remove(instance_id)
+    }
+
+    /// Remove stale peer pressure reports and return the number pruned.
+    pub fn prune_stale_peer_pressure_reports(&self) -> usize {
+        let mut reports = self.peer_pressure_reports.lock().unwrap();
+        prune_stale_peer_pressure_reports_locked(
+            &mut reports,
+            self.config.peer_pressure_max_age,
+            Instant::now(),
+        )
     }
 
     /// Returns current swarm governance metrics.
@@ -770,6 +785,16 @@ fn scale_pressure_for_metrics(pressure: f64) -> i64 {
     } else {
         (pressure * PRESSURE_SCALE) as i64
     }
+}
+
+fn prune_stale_peer_pressure_reports_locked(
+    reports: &mut HashMap<String, SwarmPeerPressureReport>,
+    max_age: Duration,
+    now: Instant,
+) -> usize {
+    let before = reports.len();
+    reports.retain(|_, report| now.saturating_duration_since(report.reported_at) <= max_age);
+    before.saturating_sub(reports.len())
 }
 
 #[cfg(test)]
@@ -1142,6 +1167,36 @@ mod tests {
             Err(SwarmPressureError::SwarmCoordinationFailed { .. })
         ));
         assert_eq!(governor.metrics().live_peer_pressure_reports, 0);
+    }
+
+    #[test]
+    fn test_prune_stale_peer_pressure_reports_removes_dead_peer_state() {
+        let governor = create_test_swarm_governor();
+        governor
+            .record_peer_pressure("stale-peer", 0.91, DegradationLevel::Heavy)
+            .expect("stale peer report should be accepted");
+        governor
+            .record_peer_pressure("fresh-peer", 0.40, DegradationLevel::Light)
+            .expect("fresh peer report should be accepted");
+
+        {
+            let mut reports = governor.peer_pressure_reports.lock().unwrap();
+            reports
+                .get_mut("stale-peer")
+                .expect("stale peer report should exist before pruning")
+                .reported_at = Instant::now() - governor.config.peer_pressure_max_age * 2;
+        }
+
+        assert_eq!(governor.prune_stale_peer_pressure_reports(), 1);
+        assert!(governor.clear_peer_pressure("stale-peer").is_none());
+
+        let metrics = governor.metrics();
+        assert_eq!(metrics.live_peer_pressure_reports, 1);
+        assert_eq!(
+            metrics.max_peer_degradation_level,
+            DegradationLevel::Light as u8
+        );
+        assert!(governor.clear_peer_pressure("fresh-peer").is_some());
     }
 
     #[test]
