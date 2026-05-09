@@ -126,6 +126,7 @@ struct MockAsyncReader {
     reads_count: u8,
     max_reads: u8,
     force_eof: bool,
+    injected_error: Option<io::ErrorKind>,
     pending_toggle: bool,
 }
 
@@ -140,12 +141,17 @@ impl MockAsyncReader {
             reads_count: 0,
             max_reads: config.max_reads.clamp(1, 100),
             force_eof: false,
+            injected_error: None,
             pending_toggle: false,
         }
     }
 
     fn force_eof(&mut self) {
         self.force_eof = true;
+    }
+
+    fn inject_error(&mut self, kind: io::ErrorKind) {
+        self.injected_error = Some(kind);
     }
 }
 
@@ -162,6 +168,10 @@ impl AsyncRead for MockAsyncReader {
         // Check for forced EOF or read limit
         if this.force_eof || this.reads_count > this.max_reads {
             return Poll::Ready(Ok(()));
+        }
+
+        if let Some(kind) = this.injected_error.take() {
+            return Poll::Ready(Err(io::Error::new(kind, "mock reader injected error")));
         }
 
         // Check for error injection
@@ -487,6 +497,11 @@ fn normalize_fuzz_input(input: &mut FramedReadFuzzInput) {
             .data_chunks
             .push(vec![b'a', input.decoder_config.delimiter, b'b']);
     }
+
+    if !input.operations.is_empty() {
+        let rotate_by = (input.seed as usize) % input.operations.len();
+        input.operations.rotate_left(rotate_by);
+    }
 }
 
 struct NoopWaker;
@@ -497,6 +512,17 @@ impl Wake for NoopWaker {
 
 fn noop_waker() -> Waker {
     Waker::from(Arc::new(NoopWaker))
+}
+
+fn reader_error_kind(raw: u8) -> io::ErrorKind {
+    match raw % 6 {
+        0 => io::ErrorKind::Interrupted,
+        1 => io::ErrorKind::InvalidData,
+        2 => io::ErrorKind::TimedOut,
+        3 => io::ErrorKind::UnexpectedEof,
+        4 => io::ErrorKind::ConnectionReset,
+        _ => io::ErrorKind::BrokenPipe,
+    }
 }
 
 /// Execute FramedRead operations and verify behavior
@@ -578,13 +604,31 @@ fn execute_framed_read_operations(input: &FramedReadFuzzInput) -> Result<(), Str
                 framed.get_mut().force_eof();
             }
 
-            FramedReadOperation::InjectReadError { error_kind: _ } => {
-                // Reader error injection is handled by MockAsyncReader
+            FramedReadOperation::InjectReadError { error_kind } => {
+                framed
+                    .get_mut()
+                    .inject_error(reader_error_kind(*error_kind));
                 let poll_result = Pin::new(&mut framed).poll_next(&mut cx);
 
-                if matches!(poll_result, Poll::Ready(Some(Err(_)))) {
-                    shadow.record_error();
+                match poll_result {
+                    Poll::Ready(Some(Err(error))) => {
+                        let diagnostic = error.to_string();
+                        if diagnostic.trim().is_empty() {
+                            return Err("FramedRead reader error had empty diagnostic".to_string());
+                        }
+                        shadow.record_error();
+                    }
+                    Poll::Ready(Some(Ok(_frame))) => {
+                        shadow.record_frame_decoded();
+                    }
+                    Poll::Ready(None) => {
+                        shadow.record_eof();
+                    }
+                    Poll::Pending => {
+                        shadow.record_cooperative_yield();
+                    }
                 }
+                shadow.update_buffer_size(framed.read_buffer().len());
             }
 
             FramedReadOperation::InjectDecodeError => {
@@ -635,5 +679,17 @@ fuzz_target!(|data: &[u8]| {
     };
 
     // Run FramedRead state machine fuzzing
-    let _ = fuzz_framed_read_state_machine(input);
+    match fuzz_framed_read_state_machine(input) {
+        Ok(()) => {}
+        Err(error) => {
+            assert!(
+                !error.trim().is_empty(),
+                "FramedRead rejection should expose a diagnostic"
+            );
+            assert!(
+                error.len() <= 4096,
+                "FramedRead diagnostic grew unexpectedly: {error}"
+            );
+        }
+    }
 });
