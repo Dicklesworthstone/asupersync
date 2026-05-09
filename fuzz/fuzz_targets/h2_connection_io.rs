@@ -29,12 +29,13 @@
 use arbitrary::Arbitrary;
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::codec::Decoder;
+use asupersync::http::h2::connection::ReceivedFrame;
 use asupersync::http::h2::error::ErrorCode;
 use asupersync::http::h2::frame::{
     DataFrame, GoAwayFrame, HeadersFrame, PingFrame, RstStreamFrame, Setting, SettingsFrame,
     WindowUpdateFrame,
 };
-use asupersync::http::h2::{Connection, Frame, FrameCodec, Settings};
+use asupersync::http::h2::{Connection, Frame, FrameCodec, H2Error, Settings};
 use libfuzzer_sys::fuzz_target;
 
 /// Cap on the total wire-bytes / frame-count any single seed can drive.
@@ -256,13 +257,79 @@ fn build_control_frame(cf: &ControlFrame) -> Option<Frame> {
     }
 }
 
+fn observe_process_frame(conn: &mut Connection, frame: Frame, context: &str) {
+    let result = conn.process_frame(frame);
+    observe_process_result(&result, context);
+}
+
+fn observe_process_result(result: &Result<Option<ReceivedFrame>, H2Error>, context: &str) {
+    match result {
+        Ok(None) => {}
+        Ok(Some(ReceivedFrame::Headers {
+            stream_id, headers, ..
+        })) => {
+            assert_ne!(*stream_id, 0, "{context}: HEADERS event stream id");
+            assert!(
+                headers.len() <= MAX_WIRE_BYTES,
+                "{context}: HEADERS event count should be bounded by input size"
+            );
+        }
+        Ok(Some(ReceivedFrame::PushPromise {
+            stream_id,
+            promised_stream_id,
+            headers,
+        })) => {
+            assert_ne!(*stream_id, 0, "{context}: PUSH_PROMISE stream id");
+            assert_ne!(
+                *promised_stream_id, 0,
+                "{context}: PUSH_PROMISE promised stream id"
+            );
+            assert_ne!(
+                stream_id, promised_stream_id,
+                "{context}: PUSH_PROMISE promised stream must differ"
+            );
+            assert!(
+                headers.len() <= MAX_WIRE_BYTES,
+                "{context}: PUSH_PROMISE header count should be bounded by input size"
+            );
+        }
+        Ok(Some(ReceivedFrame::Data {
+            stream_id, data, ..
+        })) => {
+            assert_ne!(*stream_id, 0, "{context}: DATA event stream id");
+            assert!(
+                data.len() <= MAX_WIRE_BYTES,
+                "{context}: DATA event payload should be bounded by input size"
+            );
+        }
+        Ok(Some(ReceivedFrame::Reset { stream_id, .. })) => {
+            assert_ne!(*stream_id, 0, "{context}: RST_STREAM event stream id");
+        }
+        Ok(Some(ReceivedFrame::GoAway { debug_data, .. })) => {
+            assert!(
+                debug_data.len() <= MAX_WIRE_BYTES,
+                "{context}: GOAWAY debug data should be bounded by input size"
+            );
+        }
+        Err(error) => {
+            assert!(
+                !error.message.is_empty(),
+                "{context}: H2 errors should carry diagnostic text"
+            );
+            if let Some(stream_id) = error.stream_id {
+                assert_ne!(
+                    stream_id, 0,
+                    "{context}: stream errors cannot target stream 0"
+                );
+            }
+        }
+    }
+}
+
 fn drive_frames(conn: &mut Connection, ops: &[FuzzFrame]) {
     for op in ops.iter().take(MAX_FRAMES_PER_SCENARIO) {
         if let Some(frame) = build_frame(op) {
-            // process_frame is the load-bearing state-machine entry
-            // point. We discard Ok/Err — the harness only cares that
-            // it never panics or aborts.
-            let _ = conn.process_frame(frame);
+            observe_process_frame(conn, frame, "structured frame sequence");
         }
     }
 }
@@ -283,7 +350,7 @@ fuzz_target!(|s: Scenario| match s {
             iters += 1;
             match codec.decode(&mut buf) {
                 Ok(Some(frame)) => {
-                    let _ = conn.process_frame(frame);
+                    observe_process_frame(&mut conn, frame, "raw wire decoded frame");
                 }
                 Ok(None) | Err(_) => break,
             }
@@ -314,21 +381,29 @@ fuzz_target!(|s: Scenario| match s {
         // First do a normal SETTINGS exchange so the connection leaves
         // Handshaking state — gives the CONTINUATION rule something to
         // bite on.
-        let _ = conn.process_frame(Frame::Settings(SettingsFrame::new(Vec::new())));
+        observe_process_frame(
+            &mut conn,
+            Frame::Settings(SettingsFrame::new(Vec::new())),
+            "continuation setup settings",
+        );
         // HEADERS without END_HEADERS: the connection must now expect
         // CONTINUATION on the SAME stream.
-        let _ = conn.process_frame(Frame::Headers(HeadersFrame::new(
-            headers_stream_id,
-            Bytes::from_static(&[]),
-            false,
-            false,
-        )));
+        observe_process_frame(
+            &mut conn,
+            Frame::Headers(HeadersFrame::new(
+                headers_stream_id,
+                Bytes::from_static(&[]),
+                false,
+                false,
+            )),
+            "continuation setup headers",
+        );
         // Optionally inject an intervening frame (anything other than
         // a CONTINUATION on the right stream is a PROTOCOL_ERROR).
-        if let Some(interv) = intervening.as_ref() {
-            if let Some(frame) = build_frame(interv) {
-                let _ = conn.process_frame(frame);
-            }
+        if let Some(interv) = intervening.as_ref()
+            && let Some(frame) = build_frame(interv)
+        {
+            observe_process_frame(&mut conn, frame, "continuation intervening frame");
         }
         // Now the (possibly mismatched) CONTINUATION.
         // We can't construct a ContinuationFrame directly via the
@@ -336,20 +411,28 @@ fuzz_target!(|s: Scenario| match s {
         // (HEADERS with END_HEADERS=true on the wrong stream still
         // exercises the "expected CONTINUATION on stream X, got HEADERS
         // on stream Y" branch).
-        let _ = conn.process_frame(Frame::Headers(HeadersFrame::new(
-            continuation_stream_id,
-            Bytes::from_static(&[]),
-            false,
-            true,
-        )));
+        observe_process_frame(
+            &mut conn,
+            Frame::Headers(HeadersFrame::new(
+                continuation_stream_id,
+                Bytes::from_static(&[]),
+                false,
+                true,
+            )),
+            "continuation final frame",
+        );
     }
     Scenario::ControlFrameBurst { is_client, burst } => {
         let mut conn = make_connection(is_client);
         // Exit handshake first so the rate limiter is observable.
-        let _ = conn.process_frame(Frame::Settings(SettingsFrame::new(Vec::new())));
+        observe_process_frame(
+            &mut conn,
+            Frame::Settings(SettingsFrame::new(Vec::new())),
+            "control burst setup settings",
+        );
         for cf in burst.iter().take(MAX_FRAMES_PER_SCENARIO) {
             if let Some(frame) = build_control_frame(cf) {
-                let _ = conn.process_frame(frame);
+                observe_process_frame(&mut conn, frame, "control burst frame");
             }
         }
     }
