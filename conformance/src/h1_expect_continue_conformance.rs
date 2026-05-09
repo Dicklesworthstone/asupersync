@@ -378,17 +378,11 @@ impl ExpectContinueConformanceTester {
 
     /// Parse HTTP status code from response bytes.
     fn parse_status_code(&self, response: &[u8]) -> Option<u16> {
-        if let Ok(response_str) = std::str::from_utf8(response) {
-            if let Some(status_line) = response_str.lines().next() {
-                let parts: Vec<&str> = status_line.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    if let Ok(status) = parts[1].parse::<u16>() {
-                        return Some(status);
-                    }
-                }
-            }
-        }
-        None
+        let response_str = std::str::from_utf8(response).ok()?;
+        let status_line = response_str.lines().next()?;
+        let mut parts = status_line.split_whitespace();
+        let _http_version = parts.next()?;
+        parts.next()?.parse::<u16>().ok()
     }
 
     /// Start asupersync HTTP server for testing.
