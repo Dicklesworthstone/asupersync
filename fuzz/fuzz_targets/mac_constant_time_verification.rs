@@ -21,6 +21,7 @@ use arbitrary::Arbitrary;
 use asupersync::security::{AuthKey, AuthenticationTag};
 use asupersync::types::{ObjectId, Symbol, SymbolId, SymbolKind};
 use libfuzzer_sys::fuzz_target;
+use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 const MAX_PAYLOAD_LEN: usize = 256;
@@ -184,8 +185,8 @@ fn test_prefix_matching_timing(
         for &pattern in suffix_patterns.iter().take(4) {
             // Create tag with matching prefix but different suffix
             let mut modified_bytes = *valid_tag.as_bytes();
-            for i in (prefix_len as usize)..32 {
-                modified_bytes[i] = pattern;
+            for byte in modified_bytes.iter_mut().skip(prefix_len as usize) {
+                *byte = pattern;
             }
 
             // Ensure it's actually different if prefix_len < 32
@@ -273,14 +274,14 @@ fn measure_verification_timing(
 ) -> Duration {
     // Warmup to stabilize timing
     for _ in 0..TIMING_WARMUP {
-        let _ = tag.verify(key, symbol);
+        observe_verify_result(tag, tag.verify(key, symbol));
     }
 
     // Measure multiple samples and take median to reduce noise
     let mut timings = Vec::with_capacity(TIMING_SAMPLES);
     for _ in 0..TIMING_SAMPLES {
         let start = Instant::now();
-        let _ = tag.verify(key, symbol);
+        observe_verify_result(tag, tag.verify(key, symbol));
         let elapsed = start.elapsed();
         timings.push(elapsed);
     }
@@ -292,19 +293,38 @@ fn measure_verification_timing(
 fn measure_partial_eq_timing(tag1: &AuthenticationTag, tag2: &AuthenticationTag) -> Duration {
     // Warmup
     for _ in 0..TIMING_WARMUP {
-        let _ = tag1 == tag2;
+        observe_partial_eq_result(tag1, tag2, tag1 == tag2);
     }
 
     let mut timings = Vec::with_capacity(TIMING_SAMPLES);
     for _ in 0..TIMING_SAMPLES {
         let start = Instant::now();
-        let _ = tag1 == tag2;
+        observe_partial_eq_result(tag1, tag2, tag1 == tag2);
         let elapsed = start.elapsed();
         timings.push(elapsed);
     }
 
     timings.sort();
     timings[TIMING_SAMPLES / 2] // Median timing
+}
+
+fn observe_verify_result(tag: &AuthenticationTag, verified: bool) {
+    if tag.is_zero() {
+        assert!(
+            !verified,
+            "AuthenticationTag::verify accepted the all-zero sentinel tag",
+        );
+    }
+    black_box(verified);
+}
+
+fn observe_partial_eq_result(tag1: &AuthenticationTag, tag2: &AuthenticationTag, equal: bool) {
+    let expected = tag1.as_bytes() == tag2.as_bytes();
+    assert_eq!(
+        equal, expected,
+        "AuthenticationTag PartialEq result diverged from byte equality",
+    );
+    black_box(equal);
 }
 
 fn apply_tag_mutation(base_tag: &AuthenticationTag, mutation: &TagMutation) -> AuthenticationTag {
@@ -389,7 +409,7 @@ fn assert_uniform_timing_distribution(timings: &[Duration], test_name: &str) {
     for &timing in &durations {
         let ratio = if median > 0.0 { timing / median } else { 1.0 };
         assert!(
-            ratio >= 0.1 && ratio <= 10.0, // No timing should be >10x faster/slower than median
+            (0.1..=10.0).contains(&ratio), // No timing should be >10x faster/slower than median
             "{} timing outlier detected: {:.1}ns vs median {:.1}ns (ratio: {:.2})",
             test_name,
             timing,
