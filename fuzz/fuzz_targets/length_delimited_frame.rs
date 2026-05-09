@@ -230,7 +230,7 @@ fn observe_decode_eof(
     config: RealizedConfig,
     codec: &mut LengthDelimitedCodec,
     buf: &mut BytesMut,
-) -> io::Result<Option<BytesMut>> {
+) {
     let before_len = buf.len();
     let result = codec.decode_eof(buf);
 
@@ -276,8 +276,6 @@ fn observe_decode_eof(
             );
         }
     }
-
-    result
 }
 
 fn drive_decoder(config: RealizedConfig, bytes: &[u8]) {
@@ -309,5 +307,5 @@ fn drive_decoder(config: RealizedConfig, bytes: &[u8]) {
         }
     }
 
-    let _ = observe_decode_eof(config, &mut codec, &mut buf);
+    observe_decode_eof(config, &mut codec, &mut buf);
 }
