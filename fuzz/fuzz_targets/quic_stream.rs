@@ -13,11 +13,10 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
-use asupersync::bytes::{BufMut, Bytes, BytesMut};
 use asupersync::net::quic_core::{QUIC_VARINT_MAX, QuicCoreError, decode_varint, encode_varint};
 use asupersync::net::quic_native::streams::{
-    FlowControlError, QuicStream, QuicStreamError, StreamDirection, StreamId, StreamRole,
-    StreamTable, StreamTableError,
+    FlowControlError, QuicStreamError, StreamDirection, StreamId, StreamRole, StreamTable,
+    StreamTableError,
 };
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
@@ -123,6 +122,170 @@ struct ExpectedStreamState {
     is_reset: bool,
     reset_error_code: Option<u64>,
     stop_sending_error_code: Option<u64>,
+}
+
+fn observe_error(label: &str, error: &impl std::fmt::Display) {
+    assert!(
+        !error.to_string().is_empty(),
+        "{label} errors should carry a deterministic diagnostic"
+    );
+}
+
+fn observe_decode_result(
+    label: &str,
+    result: Result<(u64, u64, usize, bool), QuicCoreError>,
+) -> Option<(u64, u64, usize, bool)> {
+    match result {
+        Ok((stream_id, offset, payload_len, fin)) => {
+            assert!(
+                stream_id <= QUIC_VARINT_MAX,
+                "{label} decoded a stream ID outside QUIC varint bounds"
+            );
+            assert!(
+                offset <= QUIC_VARINT_MAX,
+                "{label} decoded an offset outside QUIC varint bounds"
+            );
+            Some((stream_id, offset, payload_len, fin))
+        }
+        Err(error) => {
+            observe_error(label, &error);
+            None
+        }
+    }
+}
+
+fn observe_decode_probe(label: &str, result: Result<(u64, u64, usize, bool), QuicCoreError>) {
+    if let Some((stream_id, offset, payload_len, fin)) = observe_decode_result(label, result) {
+        assert!(
+            offset.checked_add(payload_len as u64).is_some(),
+            "{label} decoded payload length should not overflow offset arithmetic"
+        );
+        if fin {
+            assert!(
+                stream_id <= QUIC_VARINT_MAX,
+                "{label} FIN frame stream ID should remain within varint bounds"
+            );
+        }
+    }
+}
+
+fn observe_accept_remote_result(
+    label: &str,
+    table: &StreamTable,
+    before_len: usize,
+    stream_id: StreamId,
+    result: Result<(), StreamTableError>,
+) -> bool {
+    match result {
+        Ok(()) => {
+            assert_eq!(
+                table.len(),
+                before_len + 1,
+                "{label} should insert exactly one remote stream"
+            );
+            assert!(
+                table.stream(stream_id).is_ok(),
+                "{label} inserted stream should be readable from the table"
+            );
+            true
+        }
+        Err(error) => {
+            observe_error(label, &error);
+            false
+        }
+    }
+}
+
+fn ensure_remote_stream(label: &str, table: &mut StreamTable, stream_id: StreamId) -> bool {
+    if table.stream(stream_id).is_ok() {
+        return true;
+    }
+
+    let before_len = table.len();
+    let result = table.accept_remote_stream(stream_id);
+    observe_accept_remote_result(label, table, before_len, stream_id, result)
+}
+
+fn observe_receive_result(
+    label: &str,
+    table: &StreamTable,
+    stream_id: StreamId,
+    before_recv_remaining: u64,
+    result: Result<(), StreamTableError>,
+) {
+    match result {
+        Ok(()) => {
+            assert!(
+                table.connection_recv_remaining() <= before_recv_remaining,
+                "{label} should not increase receive credit while receiving"
+            );
+            let stream = table
+                .stream(stream_id)
+                .expect("successful receive should leave the stream present");
+            assert!(
+                stream.recv_offset <= stream.recv_credit.used(),
+                "{label} contiguous receive offset should not exceed consumed receive credit"
+            );
+            if let Some(final_size) = stream.final_size {
+                assert!(
+                    final_size >= stream.recv_credit.used(),
+                    "{label} final size should cover observed receive credit"
+                );
+            }
+        }
+        Err(error) => observe_error(label, &error),
+    }
+}
+
+fn observe_write_result(
+    label: &str,
+    table: &StreamTable,
+    stream_id: StreamId,
+    before_send_remaining: u64,
+    result: Result<(), StreamTableError>,
+) {
+    match result {
+        Ok(()) => {
+            assert!(
+                table.connection_send_remaining() <= before_send_remaining,
+                "{label} should not increase send credit while writing"
+            );
+            let stream = table
+                .stream(stream_id)
+                .expect("successful write should leave the stream present");
+            assert_eq!(
+                stream.send_offset,
+                stream.send_credit.used(),
+                "{label} send offset should mirror consumed send credit"
+            );
+        }
+        Err(error) => observe_error(label, &error),
+    }
+}
+
+fn observe_stream_reset_result(
+    label: &str,
+    stream_id: StreamId,
+    stream: &asupersync::net::quic_native::streams::QuicStream,
+    result: Result<(), QuicStreamError>,
+) {
+    match result {
+        Ok(()) => {
+            assert!(
+                stream.send_reset.is_some(),
+                "{label} should record reset state for stream {}",
+                stream_id.0
+            );
+            let (_, final_size) = stream
+                .send_reset
+                .expect("reset state was checked immediately above");
+            assert!(
+                final_size >= stream.send_offset,
+                "{label} final size should cover bytes already sent"
+            );
+        }
+        Err(error) => observe_error(label, &error),
+    }
 }
 
 impl QuicStreamShadowModel {
@@ -260,13 +423,18 @@ impl QuicStreamShadowModel {
             None => return,
         };
 
-        // Accept remote stream if not exists
-        if table.stream(stream_id).is_err() {
-            let _ = table.accept_remote_stream(stream_id);
-        }
+        ensure_remote_stream("accept remote stream for STREAM frame", table, stream_id);
 
+        let before_recv_remaining = table.connection_recv_remaining();
         match table.receive_stream_segment(stream_id, offset, payload.len() as u64, fin) {
             Ok(()) => {
+                observe_receive_result(
+                    "receive STREAM frame segment",
+                    table,
+                    stream_id,
+                    before_recv_remaining,
+                    Ok(()),
+                );
                 // Update expected state
                 let state = self
                     .expected_stream_states
@@ -282,6 +450,7 @@ impl QuicStreamShadowModel {
                         reset_error_code: None,
                         stop_sending_error_code: None,
                     });
+                state.recv_offset = state.recv_offset.max(offset + payload.len() as u64);
 
                 if fin {
                     let end_offset = offset + payload.len() as u64;
@@ -299,17 +468,30 @@ impl QuicStreamShadowModel {
                     }
                 }
             }
-            Err(StreamTableError::Stream(QuicStreamError::Flow(FlowControlError::Exhausted {
-                ..
-            }))) => {
+            Err(
+                error @ StreamTableError::Stream(QuicStreamError::Flow(
+                    FlowControlError::Exhausted { .. },
+                )),
+            ) => {
+                observe_receive_result(
+                    "receive STREAM frame segment",
+                    table,
+                    stream_id,
+                    before_recv_remaining,
+                    Err(error),
+                );
                 self.flow_control_violations.push(format!(
                     "Flow control violated for stream {} at offset {}",
                     stream_id.0, offset
                 ));
             }
-            Err(_) => {
-                // Other errors are expected in fuzzing
-            }
+            Err(error) => observe_receive_result(
+                "receive STREAM frame segment",
+                table,
+                stream_id,
+                before_recv_remaining,
+                Err(error),
+            ),
         }
     }
 
@@ -326,14 +508,12 @@ impl QuicStreamShadowModel {
             None => return,
         };
 
-        // Accept remote stream if not exists
-        if table.stream(stream_id).is_err() {
-            let _ = table.accept_remote_stream(stream_id);
-        }
+        ensure_remote_stream("accept remote stream for RESET_STREAM", table, stream_id);
 
         if let Ok(stream) = table.stream_mut(stream_id) {
             match stream.reset_send(error_code, final_size) {
                 Ok(()) => {
+                    observe_stream_reset_result("apply RESET_STREAM", stream_id, stream, Ok(()));
                     let state = self
                         .expected_stream_states
                         .entry(stream_id.0)
@@ -341,7 +521,7 @@ impl QuicStreamShadowModel {
                             id: stream_id,
                             direction: stream_id.direction(),
                             is_local: stream_id.is_local_for(self.role),
-                            send_offset: 0,
+                            send_offset: stream.send_offset,
                             recv_offset: 0,
                             final_size: None,
                             is_reset: false,
@@ -349,17 +529,14 @@ impl QuicStreamShadowModel {
                             stop_sending_error_code: None,
                         });
 
-                    if state.is_reset {
-                        if let Some(prev_error_code) = state.reset_error_code {
-                            if prev_error_code != error_code {
-                                self.reset_transition_violations.push(
-                                    format!(
-                                        "RESET_STREAM error code changed: stream {}, previous {}, new {}",
-                                        stream_id.0, prev_error_code, error_code
-                                    )
-                                );
-                            }
-                        }
+                    if state.is_reset
+                        && let Some(prev_error_code) = state.reset_error_code
+                        && prev_error_code != error_code
+                    {
+                        self.reset_transition_violations.push(format!(
+                            "RESET_STREAM error code changed: stream {}, previous {}, new {}",
+                            stream_id.0, prev_error_code, error_code
+                        ));
                     }
 
                     state.is_reset = true;
@@ -370,13 +547,22 @@ impl QuicStreamShadowModel {
                     previous_final_size,
                     new_final_size,
                 }) => {
+                    observe_stream_reset_result(
+                        "apply RESET_STREAM",
+                        stream_id,
+                        stream,
+                        Err(QuicStreamError::InconsistentReset {
+                            previous_final_size,
+                            new_final_size,
+                        }),
+                    );
                     self.reset_transition_violations.push(format!(
                         "Inconsistent RESET_STREAM final size: stream {}, previous {}, new {}",
                         stream_id.0, previous_final_size, new_final_size
                     ));
                 }
-                Err(_) => {
-                    // Other errors expected
+                Err(error) => {
+                    observe_stream_reset_result("apply RESET_STREAM", stream_id, stream, Err(error))
                 }
             }
         }
@@ -389,24 +575,37 @@ impl QuicStreamShadowModel {
             None => return,
         };
 
-        // Accept remote stream if not exists
-        if table.stream(stream_id).is_err() {
-            let _ = table.accept_remote_stream(stream_id);
-        }
+        ensure_remote_stream("accept remote stream for MAX_STREAM_DATA", table, stream_id);
 
         if let Ok(stream) = table.stream_mut(stream_id) {
+            let before_limit = stream.send_credit.limit();
+            let before_remaining = stream.send_credit.remaining();
             match stream.send_credit.increase_limit(max_data) {
                 Ok(()) => {
-                    // Flow control window increased successfully
+                    assert!(
+                        stream.send_credit.limit() >= before_limit,
+                        "MAX_STREAM_DATA should not regress stream send limit"
+                    );
+                    assert!(
+                        stream.send_credit.remaining() >= before_remaining,
+                        "MAX_STREAM_DATA should not reduce remaining stream send credit"
+                    );
                 }
                 Err(FlowControlError::LimitRegression { .. }) => {
+                    observe_error(
+                        "increase stream send credit from MAX_STREAM_DATA",
+                        &FlowControlError::LimitRegression {
+                            current: before_limit,
+                            requested: max_data,
+                        },
+                    );
                     self.flow_control_violations.push(format!(
                         "MAX_STREAM_DATA limit regression for stream {}",
                         stream_id.0
                     ));
                 }
-                Err(_) => {
-                    // Other flow control errors
+                Err(error) => {
+                    observe_error("increase stream send credit from MAX_STREAM_DATA", &error)
                 }
             }
         }
@@ -423,30 +622,42 @@ impl QuicStreamShadowModel {
         let table_id = 0;
 
         if let Some(table) = self.stream_tables.get_mut(&table_id) {
-            // Accept remote stream if not exists
-            if table.stream(stream_id).is_err() {
-                let _ = table.accept_remote_stream(stream_id);
-            }
+            ensure_remote_stream("accept remote stream for FIN idempotency", table, stream_id);
 
             // Send first payload with FIN
-            let _ = table.receive_stream_segment(stream_id, 0, payload1.len() as u64, true);
+            let before_recv_remaining = table.connection_recv_remaining();
+            let result = table.receive_stream_segment(stream_id, 0, payload1.len() as u64, true);
+            observe_receive_result(
+                "receive first FIN payload",
+                table,
+                stream_id,
+                before_recv_remaining,
+                result,
+            );
 
             // Send second payload with FIN at same final size - should be idempotent
+            let before_recv_remaining = table.connection_recv_remaining();
             let result2 = table.receive_stream_segment(
                 stream_id,
                 payload1.len() as u64,
                 payload2.len() as u64,
                 true,
             );
+            let result2_ok = result2.is_ok();
+            observe_receive_result(
+                "receive second FIN payload",
+                table,
+                stream_id,
+                before_recv_remaining,
+                result2,
+            );
 
             let expected_final = payload1.len() as u64 + payload2.len() as u64;
-            if expected_final != final_size {
-                if result2.is_ok() {
-                    self.fin_idempotency_violations.push(format!(
-                        "FIN idempotency violation: stream {}, expected final size {}, computed {}",
-                        stream_id.0, final_size, expected_final
-                    ));
-                }
+            if expected_final != final_size && result2_ok {
+                self.fin_idempotency_violations.push(format!(
+                    "FIN idempotency violation: stream {}, expected final size {}, computed {}",
+                    stream_id.0, final_size, expected_final
+                ));
             }
         }
     }
@@ -461,10 +672,11 @@ impl QuicStreamShadowModel {
         let table_id = 1;
 
         if let Some(table) = self.stream_tables.get_mut(&table_id) {
-            // Accept remote stream with limited window
-            if table.stream(stream_id).is_err() {
-                let _ = table.accept_remote_stream(stream_id);
-            }
+            ensure_remote_stream(
+                "accept remote stream for flow-control test",
+                table,
+                stream_id,
+            );
 
             if let Ok(stream) = table.stream_mut(stream_id) {
                 // Set limited receive window
@@ -480,19 +692,41 @@ impl QuicStreamShadowModel {
                     continue;
                 }
 
+                let before_recv_remaining = table.connection_recv_remaining();
                 let result = table.receive_stream_segment(stream_id, total_sent, data_len, false);
                 match result {
                     Ok(()) => {
+                        observe_receive_result(
+                            "receive flow-control test segment",
+                            table,
+                            stream_id,
+                            before_recv_remaining,
+                            Ok(()),
+                        );
                         total_sent += data_len;
                         if total_sent > initial_window {
                             violations += 1;
                         }
                     }
-                    Err(StreamTableError::Stream(QuicStreamError::Flow(_))) => {
+                    Err(error @ StreamTableError::Stream(QuicStreamError::Flow(_))) => {
+                        observe_receive_result(
+                            "receive flow-control test segment",
+                            table,
+                            stream_id,
+                            before_recv_remaining,
+                            Err(error),
+                        );
                         // Expected flow control rejection
                         break;
                     }
-                    Err(_) => {
+                    Err(error) => {
+                        observe_receive_result(
+                            "receive flow-control test segment",
+                            table,
+                            stream_id,
+                            before_recv_remaining,
+                            Err(error),
+                        );
                         // Other errors
                         break;
                     }
@@ -505,6 +739,65 @@ impl QuicStreamShadowModel {
                     stream_id.0, initial_window, violations
                 ));
             }
+        }
+    }
+
+    fn validate_shadow_state_consistency(&self) {
+        assert_eq!(
+            self.connection_flow_limits,
+            (MAX_FUZZ_WINDOW * 2, MAX_FUZZ_WINDOW * 2),
+            "shadow connection-flow limits should remain stable"
+        );
+        if self.varint_overflow_detected {
+            assert!(
+                self.expected_stream_states
+                    .values()
+                    .all(|state| state.recv_offset <= QUIC_VARINT_MAX),
+                "overflow detection should leave accepted receive offsets bounded"
+            );
+        }
+        for violation in &self.flow_control_violations {
+            assert!(
+                !violation.is_empty(),
+                "flow-control observations should include diagnostics"
+            );
+        }
+
+        for (stream_id, state) in &self.expected_stream_states {
+            assert_eq!(
+                *stream_id, state.id.0,
+                "shadow state key should match embedded stream ID"
+            );
+            assert_eq!(
+                state.direction,
+                state.id.direction(),
+                "shadow direction should match stream ID encoding"
+            );
+            assert_eq!(
+                state.is_local,
+                state.id.is_local_for(self.role),
+                "shadow locality should match endpoint role"
+            );
+            assert!(
+                state.recv_offset <= state.final_size.unwrap_or(u64::MAX),
+                "shadow receive offset should not exceed final size"
+            );
+            if state.is_reset {
+                assert!(
+                    state.reset_error_code.is_some(),
+                    "reset shadow state should record an error code"
+                );
+            }
+            if let Some(code) = state.stop_sending_error_code {
+                assert!(
+                    code <= QUIC_VARINT_MAX,
+                    "STOP_SENDING error code should stay within varint range"
+                );
+            }
+            assert!(
+                state.send_offset <= QUIC_VARINT_MAX && state.recv_offset <= QUIC_VARINT_MAX,
+                "shadow offsets should remain within QUIC varint range"
+            );
         }
     }
 }
@@ -600,13 +893,30 @@ fn encode_max_stream_data_frame(stream_id: u64, max_data: u64) -> Vec<u8> {
     frame
 }
 
+fn encode_stop_sending_frame(stream_id: u64, error_code: u64) -> Vec<u8> {
+    let mut frame = Vec::new();
+    frame.push(STOP_SENDING_FRAME_TYPE);
+
+    let mut temp_buf = Vec::new();
+    if encode_varint(stream_id, &mut temp_buf).is_ok() {
+        frame.extend_from_slice(&temp_buf);
+    }
+
+    temp_buf.clear();
+    if encode_varint(error_code, &mut temp_buf).is_ok() {
+        frame.extend_from_slice(&temp_buf);
+    }
+
+    frame
+}
+
 fn decode_stream_frame(data: &[u8]) -> Result<(u64, u64, usize, bool), QuicCoreError> {
     if data.is_empty() {
         return Err(QuicCoreError::UnexpectedEof);
     }
 
     let frame_type = data[0];
-    if frame_type < STREAM_FRAME_TYPE_BASE || frame_type > (STREAM_FRAME_TYPE_BASE | 0x07) {
+    if !(STREAM_FRAME_TYPE_BASE..=(STREAM_FRAME_TYPE_BASE | 0x07)).contains(&frame_type) {
         return Err(QuicCoreError::InvalidHeader("not a STREAM frame"));
     }
 
@@ -642,7 +952,17 @@ fn decode_stream_frame(data: &[u8]) -> Result<(u64, u64, usize, bool), QuicCoreE
         }
         let (length, consumed) = decode_varint(&data[pos..])?;
         pos += consumed;
-        length as usize
+        let payload_len = usize::try_from(length)
+            .map_err(|_| QuicCoreError::InvalidHeader("STREAM length does not fit usize"))?;
+        let payload_end = pos
+            .checked_add(payload_len)
+            .ok_or(QuicCoreError::InvalidHeader(
+                "STREAM payload length overflow",
+            ))?;
+        if payload_end > data.len() {
+            return Err(QuicCoreError::UnexpectedEof);
+        }
+        payload_len
     } else {
         data.len() - pos
     };
@@ -692,13 +1012,22 @@ fuzz_target!(|data: &[u8]| {
                 );
 
                 // Test frame decoding
-                if let Ok((decoded_stream_id, decoded_offset, decoded_len, decoded_fin)) =
-                    decode_stream_frame(&frame_data)
+                if let Some((decoded_stream_id, decoded_offset, decoded_len, decoded_fin)) =
+                    observe_decode_result(
+                        "decode encoded STREAM frame",
+                        decode_stream_frame(&frame_data),
+                    )
                 {
                     // Assertion 1: Stream ID bit encoding correctly decoded
                     let stream_id_obj = StreamId(decoded_stream_id);
                     let direction = stream_id_obj.direction();
                     let is_local = stream_id_obj.is_local_for(StreamRole::Client);
+                    let expected_local_for_client = (decoded_stream_id & 0x1) == 0;
+                    assert_eq!(
+                        is_local, expected_local_for_client,
+                        "Stream ID {} locality mismatch for client role",
+                        decoded_stream_id
+                    );
 
                     // Direction should be consistent with low bit 1
                     let expected_unidirectional = (decoded_stream_id & 0x2) != 0;
@@ -720,22 +1049,19 @@ fuzz_target!(|data: &[u8]| {
                     }
 
                     // Assertion 2: Varint offsets do not overflow
-                    if decoded_offset > QUIC_VARINT_MAX || decoded_len > usize::MAX {
+                    let Some(end_offset) = decoded_offset.checked_add(decoded_len as u64) else {
                         panic!(
-                            "Varint overflow detected: offset={}, len={}",
+                            "Offset + length overflowed u64: {}+{}",
                             decoded_offset, decoded_len
                         );
-                    }
-
-                    if let Some(end_offset) = decoded_offset.checked_add(decoded_len as u64) {
-                        assert!(
-                            end_offset <= QUIC_VARINT_MAX,
-                            "Offset + length overflow: {}+{} > {}",
-                            decoded_offset,
-                            decoded_len,
-                            QUIC_VARINT_MAX
-                        );
-                    }
+                    };
+                    assert!(
+                        end_offset <= QUIC_VARINT_MAX,
+                        "Offset + length overflow: {}+{} > {}",
+                        decoded_offset,
+                        decoded_len,
+                        QUIC_VARINT_MAX
+                    );
 
                     shadow_model.process_stream_frame(
                         decoded_stream_id,
@@ -749,7 +1075,10 @@ fuzz_target!(|data: &[u8]| {
 
             QuicStreamOperation::SendMalformedStreamFrame { raw_bytes } => {
                 // Test robustness against malformed frames
-                let _ = decode_stream_frame(&raw_bytes);
+                observe_decode_probe(
+                    "decode malformed STREAM frame bytes",
+                    decode_stream_frame(&raw_bytes),
+                );
             }
 
             QuicStreamOperation::SendResetStreamFrame {
@@ -757,6 +1086,17 @@ fuzz_target!(|data: &[u8]| {
                 error_code,
                 final_size,
             } => {
+                let frame_data = encode_reset_stream_frame(
+                    stream_id % 1000,
+                    error_code,
+                    final_size % QUIC_VARINT_MAX,
+                );
+                assert_eq!(
+                    frame_data.first().copied(),
+                    Some(RESET_STREAM_FRAME_TYPE),
+                    "RESET_STREAM encoder should preserve the frame type"
+                );
+
                 // Assertion 6: RESET_STREAM transitions are valid
                 shadow_model.process_reset_stream(
                     stream_id % 1000,
@@ -770,6 +1110,14 @@ fuzz_target!(|data: &[u8]| {
                 stream_id,
                 max_data,
             } => {
+                let frame_data =
+                    encode_max_stream_data_frame(stream_id % 1000, max_data % QUIC_VARINT_MAX);
+                assert_eq!(
+                    frame_data.first().copied(),
+                    Some(MAX_STREAM_DATA_FRAME_TYPE),
+                    "MAX_STREAM_DATA encoder should preserve the frame type"
+                );
+
                 // Assertion 5: MAX_STREAM_DATA flow control enforced
                 shadow_model.process_max_stream_data(
                     stream_id % 1000,
@@ -783,12 +1131,23 @@ fuzz_target!(|data: &[u8]| {
                 error_code,
             } => {
                 let stream_id = StreamId(stream_id % 1000);
+                let frame_data = encode_stop_sending_frame(stream_id.0, error_code);
+                assert_eq!(
+                    frame_data.first().copied(),
+                    Some(STOP_SENDING_FRAME_TYPE),
+                    "STOP_SENDING encoder should preserve the frame type"
+                );
                 if let Some(table) = shadow_model.stream_tables.get_mut(&0) {
-                    if table.stream(stream_id).is_err() {
-                        let _ = table.accept_remote_stream(stream_id);
-                    }
-                    if let Ok(stream) = table.stream_mut(stream_id) {
-                        stream.on_stop_sending(error_code);
+                    ensure_remote_stream("accept remote stream for STOP_SENDING", table, stream_id);
+                    match table.stream_mut(stream_id) {
+                        Ok(stream) => {
+                            stream.on_stop_sending(error_code);
+                            assert!(
+                                stream.stop_sending_error_code.is_some(),
+                                "STOP_SENDING should record an error code"
+                            );
+                        }
+                        Err(error) => observe_error("lookup stream for STOP_SENDING", &error),
                     }
                 }
             }
@@ -858,25 +1217,50 @@ fuzz_target!(|data: &[u8]| {
                 // Assertion 6: RESET_STREAM transitions are valid
                 let stream_id = StreamId(stream_id % 1000);
                 if let Some(table) = shadow_model.stream_tables.get_mut(&2) {
-                    if table.stream(stream_id).is_err() {
-                        let _ = table.accept_remote_stream(stream_id);
-                    }
+                    ensure_remote_stream(
+                        "accept remote stream for reset-transition test",
+                        table,
+                        stream_id,
+                    );
 
                     // Write some data first
                     let write_len = write_data_len % 10000;
-                    let _ = table.write_stream(stream_id, write_len);
+                    let before_send_remaining = table.connection_send_remaining();
+                    let write_result = table.write_stream(stream_id, write_len);
+                    observe_write_result(
+                        "write before reset-transition test",
+                        table,
+                        stream_id,
+                        before_send_remaining,
+                        write_result,
+                    );
 
                     // Reset stream
-                    if let Ok(stream) = table.stream_mut(stream_id) {
-                        let _ = stream.reset_send(error_code, reset_final_size % QUIC_VARINT_MAX);
+                    match table.stream_mut(stream_id) {
+                        Ok(stream) => {
+                            let reset_result =
+                                stream.reset_send(error_code, reset_final_size % QUIC_VARINT_MAX);
+                            observe_stream_reset_result(
+                                "apply reset-transition test reset",
+                                stream_id,
+                                stream,
+                                reset_result,
+                            );
 
-                        // Try second reset with potentially different final size
-                        if let Some(second_final_size) = second_reset_final_size {
-                            let result =
-                                stream.reset_send(error_code, second_final_size % QUIC_VARINT_MAX);
-                            if let Err(QuicStreamError::InconsistentReset { .. }) = result {
-                                // This is expected behavior
+                            // Try second reset with potentially different final size
+                            if let Some(second_final_size) = second_reset_final_size {
+                                let result = stream
+                                    .reset_send(error_code, second_final_size % QUIC_VARINT_MAX);
+                                observe_stream_reset_result(
+                                    "apply reset-transition test second reset",
+                                    stream_id,
+                                    stream,
+                                    result,
+                                );
                             }
+                        }
+                        Err(error) => {
+                            observe_error("lookup stream for reset-transition test", &error)
                         }
                     }
                 }
@@ -912,4 +1296,6 @@ fuzz_target!(|data: &[u8]| {
         "RESET_STREAM transition violations: {:?}",
         shadow_model.reset_transition_violations
     );
+
+    shadow_model.validate_shadow_state_consistency();
 });
