@@ -1064,8 +1064,13 @@ fn qpack_decode_base(
     delta_base: u64,
 ) -> Result<u64, H3NativeError> {
     if sign {
+        let signed_delta = delta_base
+            .checked_add(1)
+            .ok_or(H3NativeError::InvalidFrame(
+                "delta base exceeds required insert count",
+            ))?;
         required_insert_count
-            .checked_sub(delta_base + 1)
+            .checked_sub(signed_delta)
             .ok_or(H3NativeError::InvalidFrame(
                 "delta base exceeds required insert count",
             ))
