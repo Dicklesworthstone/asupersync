@@ -65,7 +65,7 @@ struct ExpectedColumn {
 }
 
 fuzz_target!(|data: &[u8]| {
-    let _ = fuzz_parse_column_definition(data);
+    observe_column_definition_parse(data);
 
     let Ok(scenario) = ColumnDefinitionScenario::arbitrary(&mut Unstructured::new(data)) else {
         return;
@@ -81,6 +81,25 @@ fuzz_target!(|data: &[u8]| {
         assert_matches(&parsed, &expected);
     }
 });
+
+fn observe_column_definition_parse(data: &[u8]) {
+    match fuzz_parse_column_definition(data) {
+        Ok(column) => {
+            let rendered = render_parse_result(Ok(column));
+            assert!(
+                !rendered.is_empty(),
+                "successful column-definition parse should be visible"
+            );
+        }
+        Err(err) => {
+            let rendered = format!("{err:?}");
+            assert!(
+                !rendered.is_empty(),
+                "column-definition parse error should be visible"
+            );
+        }
+    }
+}
 
 fn normalize_scenario(mut scenario: ColumnDefinitionScenario) -> ColumnDefinitionScenario {
     for spec in [
@@ -142,7 +161,7 @@ fn build_column_definition(
         honest = false;
     }
 
-    let expected = honest.then(|| ExpectedColumn {
+    let expected = honest.then_some(ExpectedColumn {
         catalog,
         schema,
         table,
