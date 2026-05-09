@@ -109,34 +109,48 @@ fn build_hmsg_frame(
     frame
 }
 
+fn assert_visible_parse_error(error: &impl std::fmt::Display, context: &str) {
+    assert!(
+        !error.to_string().is_empty(),
+        "{context} parser errors should remain observable"
+    );
+}
+
 fn observe_info_json(json: &str) {
-    if let Ok(info) = fuzz_parse_nats_server_info(json) {
-        assert!(
-            info.connect_urls.is_empty(),
-            "INFO parser does not currently materialize connect_urls"
-        );
+    match fuzz_parse_nats_server_info(json) {
+        Ok(info) => {
+            assert!(
+                info.connect_urls.is_empty(),
+                "INFO parser does not currently materialize connect_urls"
+            );
+        }
+        Err(error) => assert_visible_parse_error(&error, "NATS INFO"),
     }
 }
 
 fn observe_hmsg_frame(frame: &[u8]) {
-    if let Ok(Some(message)) = fuzz_parse_nats_hmsg_frame(frame, MAX_INPUT) {
-        assert!(!message.subject.is_empty());
-        let headers = message
-            .headers
-            .as_deref()
-            .expect("HMSG parser must attach the accepted header block");
-        assert!(
-            headers.ends_with(b"\r\n\r\n"),
-            "accepted HMSG headers must retain their CRLF terminator"
-        );
-        assert!(
-            headers == b"NATS/1.0\r\n\r\n" || headers.starts_with(b"NATS/1.0"),
-            "accepted HMSG headers must carry the NATS/1.0 status line"
-        );
-        assert!(
-            headers.len() + message.payload.len() <= MAX_INPUT,
-            "accepted HMSG body must respect the configured read bound"
-        );
+    match fuzz_parse_nats_hmsg_frame(frame, MAX_INPUT) {
+        Ok(Some(message)) => {
+            assert!(!message.subject.is_empty());
+            let headers = message
+                .headers
+                .as_deref()
+                .expect("HMSG parser must attach the accepted header block");
+            assert!(
+                headers.ends_with(b"\r\n\r\n"),
+                "accepted HMSG headers must retain their CRLF terminator"
+            );
+            assert!(
+                headers == b"NATS/1.0\r\n\r\n" || headers.starts_with(b"NATS/1.0"),
+                "accepted HMSG headers must carry the NATS/1.0 status line"
+            );
+            assert!(
+                headers.len() + message.payload.len() <= MAX_INPUT,
+                "accepted HMSG body must respect the configured read bound"
+            );
+        }
+        Ok(None) => {}
+        Err(error) => assert_visible_parse_error(&error, "NATS HMSG"),
     }
 }
 
