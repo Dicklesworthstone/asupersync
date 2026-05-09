@@ -105,12 +105,20 @@ fn assert_invalid_header_value(line: &[u8]) {
 }
 
 fn assert_consistent_bounds(line: &[u8]) {
-    if let Ok((name_end, value_start, value_end)) = fuzz_parse_header_line_bounds(line) {
-        assert!(
-            name_end <= value_start && value_start <= value_end && value_end <= line.len(),
-            "parse_header_line_bounds returned inconsistent indices: \
-             name_end={name_end}, value_start={value_start}, value_end={value_end}, len={}",
-            line.len()
-        );
+    match fuzz_parse_header_line_bounds(line) {
+        Ok((name_end, value_start, value_end)) => {
+            assert!(
+                name_end <= value_start && value_start <= value_end && value_end <= line.len(),
+                "parse_header_line_bounds returned inconsistent indices: \
+                 name_end={name_end}, value_start={value_start}, value_end={value_end}, len={}",
+                line.len()
+            );
+        }
+        Err(err) => {
+            assert!(
+                !err.to_string().is_empty(),
+                "header-line parser errors should be observable"
+            );
+        }
     }
 }
