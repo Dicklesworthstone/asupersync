@@ -205,6 +205,59 @@ fn observe_transport_parameters_decode(bytes: &[u8]) -> Result<TransportParamete
     result
 }
 
+fn has_any_transport_parameter(params: &TransportParameters) -> bool {
+    params.max_idle_timeout.is_some()
+        || params.max_udp_payload_size.is_some()
+        || params.initial_max_data.is_some()
+        || params.initial_max_stream_data_bidi_local.is_some()
+        || params.initial_max_stream_data_bidi_remote.is_some()
+        || params.initial_max_stream_data_uni.is_some()
+        || params.initial_max_streams_bidi.is_some()
+        || params.initial_max_streams_uni.is_some()
+        || params.ack_delay_exponent.is_some()
+        || params.max_ack_delay.is_some()
+        || params.disable_active_migration
+        || !params.unknown.is_empty()
+}
+
+fn observe_transport_parameters_encode(
+    params: &TransportParameters,
+    encoded: &mut Vec<u8>,
+) -> Result<(), QuicCoreError> {
+    let start_len = encoded.len();
+    let result = params.encode(encoded);
+
+    match &result {
+        Ok(()) => {
+            if has_any_transport_parameter(params) {
+                assert!(
+                    encoded.len() > start_len,
+                    "transport parameter encode succeeded without emitting TLV bytes"
+                );
+            } else {
+                assert_eq!(
+                    encoded.len(),
+                    start_len,
+                    "empty transport parameter set should not emit TLV bytes"
+                );
+            }
+        }
+        Err(err) => {
+            let message = err.to_string();
+            assert!(
+                !message.trim().is_empty(),
+                "transport parameter encode errors must expose diagnostics"
+            );
+            assert!(
+                encoded.len() >= start_len,
+                "transport parameter encode error must not shrink caller buffer"
+            );
+        }
+    }
+
+    result
+}
+
 fn encode_parameter(out: &mut Vec<u8>, id: u64, value: &[u8]) {
     encode_varint(id, out).expect("fuzz transport parameter id should fit QUIC varint");
     encode_varint(value.len() as u64, out)
@@ -548,7 +601,7 @@ fn process_tlv_operation(operation: &TlvOperation) {
         TlvOperation::Encode { params } => {
             let tp: TransportParameters = params.clone().into();
             let mut encoded = Vec::new();
-            let _ = tp.encode(&mut encoded);
+            let _ = observe_transport_parameters_encode(&tp, &mut encoded);
         }
         TlvOperation::Decode { bytes } => {
             let _ = observe_transport_parameters_decode(bytes);
