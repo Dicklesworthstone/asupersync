@@ -458,6 +458,53 @@ impl RowPacketScenario {
     }
 }
 
+fn observe_row_parse(
+    result: Result<Vec<MySqlValue>, MySqlError>,
+    columns: &[MySqlColumn],
+    context: &str,
+) {
+    match result {
+        Ok(values) => {
+            assert_eq!(
+                values.len(),
+                columns.len(),
+                "{context} returned {} values for {} columns",
+                values.len(),
+                columns.len()
+            );
+        }
+        Err(err) => observe_mysql_error(&err, context),
+    }
+}
+
+fn observe_data_row_or_terminator(
+    result: Result<Option<Vec<MySqlValue>>, MySqlError>,
+    columns: &[MySqlColumn],
+    context: &str,
+) {
+    match result {
+        Ok(Some(values)) => {
+            assert_eq!(
+                values.len(),
+                columns.len(),
+                "{context} returned {} values for {} columns",
+                values.len(),
+                columns.len()
+            );
+        }
+        Ok(None) => {}
+        Err(err) => observe_mysql_error(&err, context),
+    }
+}
+
+fn observe_mysql_error(err: &MySqlError, context: &str) {
+    let diagnostic = format!("{err:?}");
+    assert!(
+        !diagnostic.is_empty(),
+        "{context} parser error must be observable"
+    );
+}
+
 fuzz_target!(|data: &[u8]| {
     // Limit input size to prevent excessive memory usage
     if data.len() > MAX_ROW_SIZE {
@@ -468,89 +515,118 @@ fuzz_target!(|data: &[u8]| {
     let columns = create_test_columns();
 
     // Test text row parsing
-    let _ = fuzz_parse_text_row(data, &columns);
+    observe_row_parse(
+        fuzz_parse_text_row(data, &columns),
+        &columns,
+        "raw text row",
+    );
 
     // Test binary row parsing
-    let _ = fuzz_parse_binary_row(data, &columns);
+    observe_row_parse(
+        fuzz_parse_binary_row(data, &columns),
+        &columns,
+        "raw binary row",
+    );
 
     // Test data row or terminator parsing
-    let _ = fuzz_parse_data_row_or_terminator(data, &columns, true);
-    let _ = fuzz_parse_data_row_or_terminator(data, &columns, false);
+    observe_data_row_or_terminator(
+        fuzz_parse_data_row_or_terminator(data, &columns, true),
+        &columns,
+        "raw data row or terminator with deprecated EOF",
+    );
+    observe_data_row_or_terminator(
+        fuzz_parse_data_row_or_terminator(data, &columns, false),
+        &columns,
+        "raw data row or terminator",
+    );
 
     // Test 2: Structure-aware fuzzing if we can parse the input
-    if let Ok(mut u) = Unstructured::new(data) {
-        if let Ok(mut scenario) = RowPacketScenario::arbitrary(&mut u) {
-            // Limit the number of columns to prevent resource exhaustion
-            scenario.columns.truncate(MAX_COLUMNS);
+    let mut u = Unstructured::new(data);
+    if let Ok(mut scenario) = RowPacketScenario::arbitrary(&mut u) {
+        // Limit the number of columns to prevent resource exhaustion
+        scenario.columns.truncate(MAX_COLUMNS);
 
-            // Skip empty column sets for meaningful testing
-            if scenario.columns.is_empty() {
-                return;
-            }
+        // Skip empty column sets for meaningful testing
+        if scenario.columns.is_empty() {
+            return;
+        }
 
-            let generated_bytes = scenario.materialize();
+        let generated_bytes = scenario.materialize();
 
-            // Don't fuzz empty packets (not interesting)
-            if generated_bytes.is_empty() {
-                return;
-            }
+        // Don't fuzz empty packets (not interesting)
+        if generated_bytes.is_empty() {
+            return;
+        }
 
-            let mysql_columns = scenario.to_mysql_columns();
+        let mysql_columns = scenario.to_mysql_columns();
 
-            // Test the generated packet with all parsers
-            match scenario.row_type {
-                RowType::Text(_) => {
-                    let result = fuzz_parse_text_row(&generated_bytes, &mysql_columns);
+        // Test the generated packet with all parsers
+        match scenario.row_type {
+            RowType::Text(_) => {
+                let result = fuzz_parse_text_row(&generated_bytes, &mysql_columns);
 
-                    // For well-formed text rows, verify basic structure
-                    if scenario.params.leading_junk.is_empty()
-                        && scenario.params.trailing_junk.is_empty()
-                        && !scenario.params.corrupt_lenenc
-                        && scenario.params.truncate_at.is_none()
-                    {
-                        if let Ok(values) = result {
-                            // Should have values for each column (or less if truncated data)
-                            assert!(
-                                values.len() <= mysql_columns.len(),
-                                "Text row returned more values than columns: {} > {}",
-                                values.len(),
-                                mysql_columns.len()
-                            );
-                        }
+                // For well-formed text rows, verify basic structure
+                if scenario.params.leading_junk.is_empty()
+                    && scenario.params.trailing_junk.is_empty()
+                    && !scenario.params.corrupt_lenenc
+                    && scenario.params.truncate_at.is_none()
+                {
+                    if let Ok(values) = &result {
+                        assert_eq!(
+                            values.len(),
+                            mysql_columns.len(),
+                            "Text row value count mismatch: got {}, expected {}",
+                            values.len(),
+                            mysql_columns.len()
+                        );
                     }
                 }
-                RowType::Binary(_) => {
-                    let result = fuzz_parse_binary_row(&generated_bytes, &mysql_columns);
+                observe_row_parse(result, &mysql_columns, "generated text row");
+            }
+            RowType::Binary(_) => {
+                let result = fuzz_parse_binary_row(&generated_bytes, &mysql_columns);
 
-                    // For well-formed binary rows, verify basic structure
-                    if scenario.params.leading_junk.is_empty()
-                        && scenario.params.trailing_junk.is_empty()
-                        && scenario.params.force_null_pattern.is_none()
-                        && scenario.params.truncate_at.is_none()
-                    {
-                        if let Ok(values) = result {
-                            assert_eq!(
-                                values.len(),
-                                mysql_columns.len(),
-                                "Binary row value count mismatch: got {}, expected {}",
-                                values.len(),
-                                mysql_columns.len()
-                            );
-                        }
+                // For well-formed binary rows, verify basic structure
+                if scenario.params.leading_junk.is_empty()
+                    && scenario.params.trailing_junk.is_empty()
+                    && scenario.params.force_null_pattern.is_none()
+                    && scenario.params.truncate_at.is_none()
+                {
+                    if let Ok(values) = &result {
+                        assert_eq!(
+                            values.len(),
+                            mysql_columns.len(),
+                            "Binary row value count mismatch: got {}, expected {}",
+                            values.len(),
+                            mysql_columns.len()
+                        );
                     }
                 }
-                RowType::DataOrTerminator { deprecate_eof } => {
-                    let _ = fuzz_parse_data_row_or_terminator(
+                observe_row_parse(result, &mysql_columns, "generated binary row");
+            }
+            RowType::DataOrTerminator { deprecate_eof } => {
+                observe_data_row_or_terminator(
+                    fuzz_parse_data_row_or_terminator(
                         &generated_bytes,
                         &mysql_columns,
                         deprecate_eof,
-                    );
-                }
-                RowType::Malformed(_) => {
-                    // Malformed data should be handled gracefully (not crash)
-                    let _ = fuzz_parse_text_row(&generated_bytes, &mysql_columns);
-                    let _ = fuzz_parse_binary_row(&generated_bytes, &mysql_columns);
-                }
+                    ),
+                    &mysql_columns,
+                    "generated data row or terminator",
+                );
+            }
+            RowType::Malformed(_) => {
+                // Malformed data should be handled gracefully (not crash)
+                observe_row_parse(
+                    fuzz_parse_text_row(&generated_bytes, &mysql_columns),
+                    &mysql_columns,
+                    "malformed text row",
+                );
+                observe_row_parse(
+                    fuzz_parse_binary_row(&generated_bytes, &mysql_columns),
+                    &mysql_columns,
+                    "malformed binary row",
+                );
             }
         }
     }
@@ -610,8 +686,16 @@ fn fuzz_boundary_conditions(data: &[u8]) {
 
     // Test very short inputs
     if data.len() <= 16 {
-        let _ = fuzz_parse_text_row(data, &columns);
-        let _ = fuzz_parse_binary_row(data, &columns);
+        observe_row_parse(
+            fuzz_parse_text_row(data, &columns),
+            &columns,
+            "short text row",
+        );
+        observe_row_parse(
+            fuzz_parse_binary_row(data, &columns),
+            &columns,
+            "short binary row",
+        );
     }
 
     // Test inputs that start with specific bytes
@@ -619,23 +703,43 @@ fn fuzz_boundary_conditions(data: &[u8]) {
         match data[0] {
             0x00 => {
                 // Potential binary row
-                let _ = fuzz_parse_binary_row(data, &columns);
+                observe_row_parse(
+                    fuzz_parse_binary_row(data, &columns),
+                    &columns,
+                    "0x00 binary row",
+                );
             }
             0xFB => {
                 // NULL marker in text protocol
-                let _ = fuzz_parse_text_row(data, &columns);
+                observe_row_parse(
+                    fuzz_parse_text_row(data, &columns),
+                    &columns,
+                    "0xfb text row",
+                );
             }
             0xFC | 0xFD | 0xFE => {
                 // Length encoding prefixes
-                let _ = fuzz_parse_text_row(data, &columns);
+                observe_row_parse(
+                    fuzz_parse_text_row(data, &columns),
+                    &columns,
+                    "length-encoded text row",
+                );
             }
             0xFF => {
                 // Often indicates error packet or invalid state
-                let _ = fuzz_parse_data_row_or_terminator(data, &columns, false);
+                observe_data_row_or_terminator(
+                    fuzz_parse_data_row_or_terminator(data, &columns, false),
+                    &columns,
+                    "0xff data row or terminator",
+                );
             }
             _ => {
                 // Regular data
-                let _ = fuzz_parse_text_row(data, &columns);
+                observe_row_parse(
+                    fuzz_parse_text_row(data, &columns),
+                    &columns,
+                    "regular text row",
+                );
             }
         }
     }
@@ -644,8 +748,16 @@ fn fuzz_boundary_conditions(data: &[u8]) {
     if data.len() > 4 {
         // Single column
         let single_col = vec![columns[0].clone()];
-        let _ = fuzz_parse_text_row(data, &single_col);
-        let _ = fuzz_parse_binary_row(data, &single_col);
+        observe_row_parse(
+            fuzz_parse_text_row(data, &single_col),
+            &single_col,
+            "single-column text row",
+        );
+        observe_row_parse(
+            fuzz_parse_binary_row(data, &single_col),
+            &single_col,
+            "single-column binary row",
+        );
 
         // Many columns
         let many_cols: Vec<MySqlColumn> = (0..10)
@@ -655,7 +767,15 @@ fn fuzz_boundary_conditions(data: &[u8]) {
                 col
             })
             .collect();
-        let _ = fuzz_parse_text_row(data, &many_cols);
-        let _ = fuzz_parse_binary_row(data, &many_cols);
+        observe_row_parse(
+            fuzz_parse_text_row(data, &many_cols),
+            &many_cols,
+            "many-column text row",
+        );
+        observe_row_parse(
+            fuzz_parse_binary_row(data, &many_cols),
+            &many_cols,
+            "many-column binary row",
+        );
     }
 }
