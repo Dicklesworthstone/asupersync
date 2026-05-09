@@ -36,7 +36,14 @@ fuzz_target!(|data: &[u8]| {
         auth.len()
     );
 
-    if let Ok(Some(token)) = result {
+    let parsed = result.expect("checked above");
+    let expected = reference_bearer_token(&auth);
+    assert_eq!(
+        parsed, expected,
+        "bearer parser diverged from reference contract for {auth:?}"
+    );
+
+    if let Some(token) = parsed {
         // Documented contract: the returned token has its leading
         // spaces trimmed.
         assert!(
@@ -72,3 +79,17 @@ fuzz_target!(|data: &[u8]| {
         );
     }
 });
+
+fn reference_bearer_token(auth: &str) -> Option<&str> {
+    let (scheme, token) = auth.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+
+    let token = token.trim_start_matches(' ');
+    if token.is_empty() {
+        return None;
+    }
+
+    Some(token)
+}
