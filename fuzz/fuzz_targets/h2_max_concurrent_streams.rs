@@ -372,6 +372,17 @@ fn observe_frame_encode(
     }
 }
 
+fn expect_interleaved_frame_encode(
+    context: &str,
+    codec: &mut FrameCodec,
+    frame: Frame,
+    buffer: &mut BytesMut,
+) {
+    if let Err(err) = observe_frame_encode(context, codec, frame, buffer) {
+        panic!("{context}: expected interleaved frame to encode, got {err}");
+    }
+}
+
 /// Test interleaved frame processing
 fn test_interleaved_frame(
     interleaved: &InterleavedFrame,
@@ -388,7 +399,7 @@ fn test_interleaved_frame(
                 .collect();
 
             let frame = Frame::Settings(SettingsFrame::new(settings_list));
-            let _ = observe_frame_encode("interleaved SETTINGS frame", codec, frame, buffer);
+            expect_interleaved_frame_encode("interleaved SETTINGS frame", codec, frame, buffer);
         }
         InterleavedFrame::RstStream {
             stream_id,
@@ -418,7 +429,12 @@ fn test_interleaved_frame(
                 normalize_stream_id(*stream_id),
                 normalized_increment,
             ));
-            let _ = observe_frame_encode("interleaved WINDOW_UPDATE frame", codec, frame, buffer);
+            expect_interleaved_frame_encode(
+                "interleaved WINDOW_UPDATE frame",
+                codec,
+                frame,
+                buffer,
+            );
         }
         InterleavedFrame::Ping { ack } => {
             let ping_frame = if ack == &true {
@@ -427,7 +443,7 @@ fn test_interleaved_frame(
                 asupersync::http::h2::frame::PingFrame::new([0u8; 8])
             };
             let frame = Frame::Ping(ping_frame);
-            let _ = observe_frame_encode("interleaved PING frame", codec, frame, buffer);
+            expect_interleaved_frame_encode("interleaved PING frame", codec, frame, buffer);
         }
     }
 }
