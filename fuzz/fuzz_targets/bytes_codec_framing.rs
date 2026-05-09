@@ -194,8 +194,9 @@ fn test_bytes_codec_operations(input: &FuzzInput) {
     for operation in &input.operations {
         match operation {
             CodecOperation::Decode => {
+                let before_len = buffer.len();
                 let result = codec.decode(&mut buffer);
-                verify_decode_result(&result, &buffer);
+                observe_bytes_decode(result, before_len, &buffer);
             }
 
             CodecOperation::EncodeDecodeBytes(data) => {
@@ -238,7 +239,9 @@ fn test_bytes_codec_operations(input: &FuzzInput) {
                     if small_data.len() <= 64 && buffer.len() + small_data.len() <= MAX_BUFFER_SIZE
                     {
                         buffer.extend_from_slice(small_data);
-                        let _ = codec.decode(&mut buffer);
+                        let before_len = buffer.len();
+                        let result = codec.decode(&mut buffer);
+                        observe_bytes_decode(result, before_len, &buffer);
                     }
                 }
             }
@@ -252,19 +255,23 @@ fn test_bytes_codec_operations(input: &FuzzInput) {
 /// Test BytesCodec encoding and decoding of Bytes.
 fn test_bytes_codec_encode_decode(codec: &mut BytesCodec, buffer: &mut BytesMut, data: Vec<u8>) {
     let original_len = buffer.len();
+    let original_buffer = buffer.clone();
     let bytes_data = asupersync::bytes::Bytes::from(data.clone());
 
     // Test encoding
     if let Ok(()) = codec.encode(bytes_data, buffer) {
         // Verify buffer grew by expected amount
-        assert!(buffer.len() >= original_len + data.len());
+        assert_eq!(buffer.len(), original_len + data.len());
+        assert_eq!(&buffer[..original_len], &original_buffer[..]);
+        assert_eq!(&buffer[original_len..], &data[..]);
 
         // Test decoding
-        if let Ok(Some(decoded)) = codec.decode(buffer) {
-            // Verify some data was decoded
-            assert!(!decoded.is_empty());
-            // BytesCodec should return all available data
-            assert_eq!(decoded.len(), buffer.len() + decoded.len() - buffer.len());
+        let decode_len = buffer.len();
+        let result = codec.decode(buffer);
+        if let Some(decoded) = observe_bytes_decode(result, decode_len, buffer) {
+            assert_eq!(decoded.len(), original_len + data.len());
+            assert_eq!(&decoded[..original_len], &original_buffer[..]);
+            assert_eq!(&decoded[original_len..], &data[..]);
         }
     }
 }
@@ -276,13 +283,20 @@ fn test_bytes_codec_encode_decode_mut(
     data: Vec<u8>,
 ) {
     let original_len = buffer.len();
+    let original_buffer = buffer.clone();
     let bytes_mut_data = BytesMut::from(&data[..]);
 
     if let Ok(()) = codec.encode(bytes_mut_data, buffer) {
-        assert!(buffer.len() >= original_len + data.len());
+        assert_eq!(buffer.len(), original_len + data.len());
+        assert_eq!(&buffer[..original_len], &original_buffer[..]);
+        assert_eq!(&buffer[original_len..], &data[..]);
 
-        if let Ok(Some(decoded)) = codec.decode(buffer) {
-            assert!(!decoded.is_empty());
+        let decode_len = buffer.len();
+        let result = codec.decode(buffer);
+        if let Some(decoded) = observe_bytes_decode(result, decode_len, buffer) {
+            assert_eq!(decoded.len(), original_len + data.len());
+            assert_eq!(&decoded[..original_len], &original_buffer[..]);
+            assert_eq!(&decoded[original_len..], &data[..]);
         }
     }
 }
@@ -294,28 +308,32 @@ fn test_bytes_codec_encode_decode_vec(
     data: Vec<u8>,
 ) {
     let original_len = buffer.len();
+    let original_buffer = buffer.clone();
     let data_len = data.len();
+    let data_copy = data.clone();
 
     if let Ok(()) = codec.encode(data, buffer) {
-        assert!(buffer.len() >= original_len + data_len);
+        assert_eq!(buffer.len(), original_len + data_len);
+        assert_eq!(&buffer[..original_len], &original_buffer[..]);
+        assert_eq!(&buffer[original_len..], &data_copy[..]);
 
-        if let Ok(Some(decoded)) = codec.decode(buffer) {
-            assert!(!decoded.is_empty());
+        let decode_len = buffer.len();
+        let result = codec.decode(buffer);
+        if let Some(decoded) = observe_bytes_decode(result, decode_len, buffer) {
+            assert_eq!(decoded.len(), original_len + data_len);
+            assert_eq!(&decoded[..original_len], &original_buffer[..]);
+            assert_eq!(&decoded[original_len..], &data_copy[..]);
         }
     }
 }
 
 /// Test FramedRead operations with mock async reader.
 fn test_framed_read_operations(input: &FuzzInput) {
-    let chunk_size = (input.config.mock_read_chunk_size as usize)
-        .max(1)
-        .min(MAX_CHUNK_SIZE);
+    let chunk_size = (input.config.mock_read_chunk_size as usize).clamp(1, MAX_CHUNK_SIZE);
     let mock_reader = MockAsyncRead::new(input.framed_read_data.clone(), chunk_size);
     let codec = BytesCodec::new();
 
-    let capacity = (input.config.framed_buffer_capacity as usize)
-        .max(64)
-        .min(MAX_BUFFER_SIZE);
+    let capacity = (input.config.framed_buffer_capacity as usize).clamp(64, MAX_BUFFER_SIZE);
     let mut framed_read = FramedRead::with_capacity(mock_reader, codec, capacity);
 
     // Test basic FramedRead operations
@@ -364,12 +382,16 @@ fn test_codec_composition(input: &FuzzInput) {
     let mut buffer2 = BytesMut::new();
 
     // Decode with first codec
-    if let Ok(Some(decoded1)) = codec1.decode(&mut buffer1) {
+    let buffer1_len = buffer1.len();
+    let result = codec1.decode(&mut buffer1);
+    if let Some(decoded1) = observe_bytes_decode(result, buffer1_len, &buffer1) {
         let decoded1_len = decoded1.len();
         // Encode with second codec
         if codec2.encode(decoded1.freeze(), &mut buffer2).is_ok() {
             // Decode again with second codec
-            if let Ok(Some(decoded2)) = codec2.decode(&mut buffer2) {
+            let buffer2_len = buffer2.len();
+            let result = codec2.decode(&mut buffer2);
+            if let Some(decoded2) = observe_bytes_decode(result, buffer2_len, &buffer2) {
                 // The data should be the same (BytesCodec is pass-through)
                 assert_eq!(decoded1_len, decoded2.len());
             }
@@ -393,11 +415,20 @@ fn test_nested_codec_operations(data: &[u8]) {
     let mut inner_buffer = BytesMut::from(data);
 
     // Inner decode
-    if let Ok(Some(inner_decoded)) = inner_codec.decode(&mut inner_buffer) {
+    let inner_len = inner_buffer.len();
+    let result = inner_codec.decode(&mut inner_buffer);
+    if let Some(inner_decoded) = observe_bytes_decode(result, inner_len, &inner_buffer) {
+        assert_eq!(inner_decoded.len(), data.len());
+
         // Outer encode
         if outer_codec.encode(inner_decoded, &mut outer_buffer).is_ok() {
             // Outer decode
-            let _ = outer_codec.decode(&mut outer_buffer);
+            let before_len = outer_buffer.len();
+            let result = outer_codec.decode(&mut outer_buffer);
+            if let Some(decoded) = observe_bytes_decode(result, before_len, &outer_buffer) {
+                assert_eq!(decoded.len(), data.len());
+                assert_eq!(&decoded[..], data);
+            }
         }
     }
 }
@@ -420,16 +451,14 @@ fn test_round_trip_properties(input: &FuzzInput) {
         .is_ok()
     {
         // Decode
-        if let Ok(Some(decoded)) = codec.decode(&mut encode_buffer) {
+        let decode_len = encode_buffer.len();
+        let result = codec.decode(&mut encode_buffer);
+        if let Some(decoded) = observe_bytes_decode(result, decode_len, &encode_buffer) {
             // BytesCodec should preserve data exactly (it's pass-through)
             assert_eq!(decoded.len(), original_data.len());
+            assert_eq!(&decoded[..], &original_data[..]);
 
-            // Since BytesCodec returns all available data, and we just encoded
-            // the original data, the decoded should match
-            if !decoded.is_empty() && !original_data.is_empty() {
-                // At minimum, the length should be preserved
-                assert!(decoded.len() >= original_data.len());
-            }
+            assert!(encode_buffer.is_empty());
         }
     }
 }
@@ -455,36 +484,39 @@ fn test_eof_handling(input: &FuzzInput) {
 
     // Test EOF after partial operations
     for operation in &input.operations {
-        if let CodecOperation::AddData(data) = operation {
-            if !data.is_empty() && data.len() <= 1024 {
-                let mut test_buffer = BytesMut::from(&data[..]);
-                let _ = codec.decode(&mut test_buffer); // Partial decode
-                let eof_result = codec.decode_eof(&mut test_buffer);
-                verify_eof_result(&eof_result, &test_buffer);
-            }
+        if let CodecOperation::AddData(data) = operation
+            && !data.is_empty()
+            && data.len() <= 1024
+        {
+            let mut test_buffer = BytesMut::from(&data[..]);
+            let before_len = test_buffer.len();
+            let result = codec.decode(&mut test_buffer);
+            observe_bytes_decode(result, before_len, &test_buffer);
+            let eof_result = codec.decode_eof(&mut test_buffer);
+            verify_eof_result(&eof_result, &test_buffer);
         }
     }
 }
 
-/// Verify decode result meets expected invariants.
-fn verify_decode_result(result: &Result<Option<BytesMut>, io::Error>, buffer: &BytesMut) {
+/// Observe a `BytesCodec` decode and assert its pass-through contract.
+fn observe_bytes_decode(
+    result: Result<Option<BytesMut>, io::Error>,
+    before_len: usize,
+    buffer_after: &BytesMut,
+) -> Option<BytesMut> {
     match result {
         Ok(Some(decoded)) => {
-            // Decoded data should not be larger than original buffer was
-            // Note: This might not hold for all codecs, but for BytesCodec it should
-            assert!(decoded.len() <= buffer.len() + decoded.len());
-
-            // Should not be empty if buffer had data
-            if !buffer.is_empty() || !decoded.is_empty() {
-                // At least one of them had data
-            }
+            assert!(before_len > 0);
+            assert_eq!(decoded.len(), before_len);
+            assert!(buffer_after.is_empty());
+            Some(decoded)
         }
         Ok(None) => {
-            // No complete frame available - this is valid
+            assert_eq!(before_len, 0);
+            assert!(buffer_after.is_empty());
+            None
         }
-        Err(_) => {
-            // Error occurred - also valid for fuzz testing
-        }
+        Err(err) => panic!("BytesCodec decode should be infallible: {err}"),
     }
 }
 
@@ -529,7 +561,7 @@ fn verify_buffer_invariants(buffer: &BytesMut) {
 fn test_codec_creation_invariants() {
     // BytesCodec creation should always succeed
     let codec1 = BytesCodec::new();
-    let _codec2 = BytesCodec::default();
+    let _codec2 = BytesCodec;
 
     // Should be able to create multiple instances
     let _many_codecs: Vec<BytesCodec> = (0..100).map(|_| BytesCodec::new()).collect();
@@ -538,7 +570,6 @@ fn test_codec_creation_invariants() {
     let debug_str = format!("{:?}", codec1);
     assert!(!debug_str.is_empty());
 
-    // Clone and Copy should work
-    let _cloned = codec1.clone();
+    // Copy should work
     let _copied = codec1;
 }
