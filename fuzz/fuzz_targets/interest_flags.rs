@@ -1,8 +1,4 @@
-//! Fuzz target for Interest flags operations.
-//!
-//! This is a simple fuzz target that exercises the Interest bitflag type
-//! from the reactor module. It ensures all bitwise operations are safe
-//! and don't cause panics or undefined behavior.
+//! Fuzz target for reactor Interest flag operations.
 //!
 //! # Running
 //! ```bash
@@ -11,90 +7,110 @@
 
 #![no_main]
 
+use asupersync::runtime::reactor::Interest;
 use libfuzzer_sys::fuzz_target;
 
-/// Simulated Interest flags (mirrors reactor::Interest).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Interest(u8);
+const DEFINED_FLAGS: [(Interest, u8); 8] = [
+    (Interest::READABLE, 1 << 0),
+    (Interest::WRITABLE, 1 << 1),
+    (Interest::ERROR, 1 << 2),
+    (Interest::HUP, 1 << 3),
+    (Interest::PRIORITY, 1 << 4),
+    (Interest::ONESHOT, 1 << 5),
+    (Interest::EDGE_TRIGGERED, 1 << 6),
+    (Interest::DISPATCH, 1 << 7),
+];
 
-impl Interest {
-    const NONE: Self = Self(0);
-    const READABLE: Self = Self(1 << 0);
-    const WRITABLE: Self = Self(1 << 1);
-    const ERROR: Self = Self(1 << 2);
-    const HUP: Self = Self(1 << 3);
-    const EDGE_TRIGGERED: Self = Self(1 << 7);
+fn assert_fixed_oracles() {
+    assert_eq!(Interest::NONE.bits(), 0);
+    assert_eq!(Interest::empty(), Interest::NONE);
+    assert_eq!(Interest::ALL.bits(), u8::MAX);
+    assert_eq!(Interest::SOCKET.bits(), 0b0000_1111);
+    assert_eq!(Interest::both().bits(), 0b0000_0011);
+    assert_eq!(Interest::oneshot().bits(), 0b0010_0001);
+    assert_eq!(Interest::clear().bits(), 0b0100_0001);
+    assert_eq!(Interest::dispatch().bits(), 0b1000_0001);
+    assert_eq!((!Interest::NONE).bits(), Interest::ALL.bits());
+    assert_eq!((!Interest::ALL).bits(), 0);
 
-    fn is_readable(self) -> bool {
-        self.0 & Self::READABLE.0 != 0
-    }
-
-    fn is_writable(self) -> bool {
-        self.0 & Self::WRITABLE.0 != 0
-    }
-
-    fn is_error(self) -> bool {
-        self.0 & Self::ERROR.0 != 0
-    }
-
-    fn is_hup(self) -> bool {
-        self.0 & Self::HUP.0 != 0
-    }
-
-    fn add(self, other: Self) -> Self {
-        Self(self.0 | other.0)
-    }
-
-    fn remove(self, other: Self) -> Self {
-        Self(self.0 & !other.0)
-    }
-
-    fn contains(self, other: Self) -> bool {
-        self.0 & other.0 == other.0
-    }
-
-    fn both() -> Self {
-        Self::READABLE.add(Self::WRITABLE)
+    for (flag, bit) in DEFINED_FLAGS {
+        assert_eq!(flag.bits(), bit);
+        assert!(Interest::ALL.contains(flag));
     }
 }
 
+fn assert_interest_matches_model(bits: u8) {
+    let interest = Interest::from_bits(bits);
+    assert_eq!(interest.bits(), bits);
+    assert_eq!(interest.is_empty(), bits == 0);
+    assert_eq!(
+        interest.is_readable(),
+        bits & Interest::READABLE.bits() != 0
+    );
+    assert_eq!(
+        interest.is_writable(),
+        bits & Interest::WRITABLE.bits() != 0
+    );
+    assert_eq!(interest.is_error(), bits & Interest::ERROR.bits() != 0);
+    assert_eq!(interest.is_hup(), bits & Interest::HUP.bits() != 0);
+    assert_eq!(
+        interest.is_priority(),
+        bits & Interest::PRIORITY.bits() != 0
+    );
+    assert_eq!(interest.is_oneshot(), bits & Interest::ONESHOT.bits() != 0);
+    assert_eq!(
+        interest.is_edge_triggered(),
+        bits & Interest::EDGE_TRIGGERED.bits() != 0
+    );
+    assert_eq!(
+        interest.is_dispatch(),
+        bits & Interest::DISPATCH.bits() != 0
+    );
+
+    for (flag, bit) in DEFINED_FLAGS {
+        assert_eq!(interest.contains(flag), bits & bit == bit);
+    }
+}
+
+fn assert_pairwise_operations(a_bits: u8, b_bits: u8) {
+    let a = Interest::from_bits(a_bits);
+    let b = Interest::from_bits(b_bits);
+
+    assert_eq!(a.add(b).bits(), a_bits | b_bits);
+    assert_eq!((a | b).bits(), a_bits | b_bits);
+    assert_eq!((a & b).bits(), a_bits & b_bits);
+    assert_eq!(a.remove(b).bits(), a_bits & !b_bits);
+    assert_eq!((!a).bits(), !a_bits & Interest::ALL.bits());
+    assert_eq!(a.contains(b), a_bits & b_bits == b_bits);
+
+    let mut union = a;
+    union |= b;
+    assert_eq!(union.bits(), a_bits | b_bits);
+
+    let mut intersection = a;
+    intersection &= b;
+    assert_eq!(intersection.bits(), a_bits & b_bits);
+
+    assert_eq!(a.with_oneshot().bits(), a_bits | Interest::ONESHOT.bits());
+    assert_eq!(
+        a.with_edge_triggered().bits(),
+        a_bits | Interest::EDGE_TRIGGERED.bits()
+    );
+    assert_eq!(a.with_dispatch().bits(), a_bits | Interest::DISPATCH.bits());
+}
+
 fuzz_target!(|data: &[u8]| {
+    assert_fixed_oracles();
+
     if data.is_empty() {
         return;
     }
 
-    // Create interest from first byte
-    let interest = Interest(data[0]);
+    assert_interest_matches_model(data[0]);
 
-    // Exercise all operations
-    let _ = interest.is_readable();
-    let _ = interest.is_writable();
-    let _ = interest.is_error();
-    let _ = interest.is_hup();
-
-    // Combine with known flags
-    let combined = interest.add(Interest::READABLE);
-    let _ = combined.contains(Interest::READABLE);
-
-    let removed = combined.remove(Interest::WRITABLE);
-    let _ = removed.is_writable();
-
-    // Test both()
-    let both = Interest::both();
-    let _ = both.is_readable();
-    let _ = both.is_writable();
-
-    // If we have more bytes, do pairwise operations
     for window in data.windows(2) {
-        let a = Interest(window[0]);
-        let b = Interest(window[1]);
-
-        let _ = a.add(b);
-        let _ = a.remove(b);
-        let _ = a.contains(b);
-
-        // Verify invariants
-        assert!((a.add(b)).contains(a) || a.0 == 0);
-        assert!((a.add(b)).contains(b) || b.0 == 0);
+        assert_interest_matches_model(window[0]);
+        assert_interest_matches_model(window[1]);
+        assert_pairwise_operations(window[0], window[1]);
     }
 });
