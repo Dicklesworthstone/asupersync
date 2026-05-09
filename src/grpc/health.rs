@@ -176,11 +176,25 @@ pub type HealthAuthCallback = Arc<dyn HealthAuthValidator>;
 pub enum HealthAuthMode {
     /// Explicit opt-in to unauthenticated health checks.
     None,
-    /// Require a bearer-style authorization header.
+    /// Fail closed until a concrete token or custom validator is configured.
+    ///
+    /// This variant is the default so RPC-facing health endpoints are not
+    /// accidentally exposed. Use [`Self::bearer_token`] or [`Self::Custom`]
+    /// for authenticated deployments.
     #[default]
     RequireAuth,
+    /// Require an exact bearer token match.
+    BearerToken(String),
     /// Delegate to a caller-provided validator.
     Custom(HealthAuthCallback),
+}
+
+impl HealthAuthMode {
+    /// Require an exact bearer token for RPC-facing health endpoints.
+    #[must_use]
+    pub fn bearer_token(token: impl Into<String>) -> Self {
+        Self::BearerToken(token.into())
+    }
 }
 
 impl std::fmt::Debug for HealthAuthMode {
@@ -188,9 +202,21 @@ impl std::fmt::Debug for HealthAuthMode {
         match self {
             Self::None => f.write_str("HealthAuthMode::None"),
             Self::RequireAuth => f.write_str("HealthAuthMode::RequireAuth"),
+            Self::BearerToken(_) => f.write_str("HealthAuthMode::BearerToken(<redacted>)"),
             Self::Custom(_) => f.write_str("HealthAuthMode::Custom(<validator>)"),
         }
     }
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    let mut diff = left.len() ^ right.len();
+    let max_len = left.len().max(right.len());
+    for index in 0..max_len {
+        let left_byte = left.get(index).copied().unwrap_or(0);
+        let right_byte = right.get(index).copied().unwrap_or(0);
+        diff |= usize::from(left_byte ^ right_byte);
+    }
+    diff == 0
 }
 
 /// Health checking service.
@@ -249,8 +275,8 @@ impl HealthService {
         self.version.load(Ordering::Acquire)
     }
 
-    /// Validate required bearer authentication metadata from a gRPC request.
-    fn validate_required_auth_metadata(metadata: &Metadata) -> Result<(), Status> {
+    /// Extract required bearer authentication metadata from a gRPC request.
+    fn bearer_token_from_metadata(metadata: &Metadata) -> Result<&str, Status> {
         let auth_header = metadata.get("authorization").ok_or_else(|| {
             Status::unauthenticated("health check endpoint requires authentication")
         })?;
@@ -280,7 +306,26 @@ impl HealthService {
             return Err(Status::unauthenticated("empty bearer token"));
         }
 
-        Ok(())
+        Ok(bearer_token)
+    }
+
+    /// Validate required bearer authentication metadata from a gRPC request.
+    fn validate_bearer_token_metadata(
+        metadata: &Metadata,
+        expected_token: &str,
+    ) -> Result<(), Status> {
+        if expected_token.is_empty() {
+            return Err(Status::unauthenticated(
+                "health check bearer token is not configured",
+            ));
+        }
+
+        let bearer_token = Self::bearer_token_from_metadata(metadata)?;
+        if constant_time_eq(bearer_token.as_bytes(), expected_token.as_bytes()) {
+            Ok(())
+        } else {
+            Err(Status::unauthenticated("invalid bearer token"))
+        }
     }
 
     /// Validate transport authentication for a health RPC.
@@ -295,11 +340,14 @@ impl HealthService {
                 );
                 Ok(())
             }
-            HealthAuthMode::RequireAuth => {
-                Self::validate_required_auth_metadata(metadata)?;
+            HealthAuthMode::RequireAuth => Err(Status::unauthenticated(
+                "health check endpoint requires configured authentication",
+            )),
+            HealthAuthMode::BearerToken(expected_token) => {
+                Self::validate_bearer_token_metadata(metadata, expected_token)?;
                 crate::tracing_compat::debug!(
                     method,
-                    auth_mode = "RequireAuth",
+                    auth_mode = "BearerToken",
                     metadata_count = metadata.len(),
                     "gRPC health authentication accepted"
                 );
@@ -1013,6 +1061,10 @@ mod tests {
         request
     }
 
+    fn bearer_token_health_service() -> HealthService {
+        HealthService::with_auth_mode(HealthAuthMode::bearer_token("test-token"))
+    }
+
     fn health_auth_token_request(
         service: &str,
         key: &str,
@@ -1273,18 +1325,57 @@ mod tests {
             watch_err.code()
         );
         crate::assert_with_log!(
-            check_err.message() == "health check endpoint requires authentication",
+            check_err.message() == "health check endpoint requires configured authentication",
             "default check message",
-            "health check endpoint requires authentication",
+            "health check endpoint requires configured authentication",
             check_err.message()
         );
         crate::assert_with_log!(
-            watch_err.message() == "health check endpoint requires authentication",
+            watch_err.message() == "health check endpoint requires configured authentication",
             "default watch message",
-            "health check endpoint requires authentication",
+            "health check endpoint requires configured authentication",
             watch_err.message()
         );
+
+        let arbitrary_bearer = authed_health_request("svc");
+        let token_err = futures_lite::future::block_on(service.check_async(&arbitrary_bearer))
+            .expect_err("default RequireAuth must not accept arbitrary bearer tokens");
+        crate::assert_with_log!(
+            token_err.message() == "health check endpoint requires configured authentication",
+            "default arbitrary bearer message",
+            "health check endpoint requires configured authentication",
+            token_err.message()
+        );
         crate::test_complete!("health_auth_mode_default_requires_auth_for_async_endpoints");
+    }
+
+    #[test]
+    fn health_auth_mode_bearer_token_requires_exact_secret() {
+        init_test("health_auth_mode_bearer_token_requires_exact_secret");
+        let service = bearer_token_health_service();
+        service.set_status("svc", ServingStatus::Serving);
+
+        let allowed = authed_health_request("svc");
+        let check = futures_lite::future::block_on(service.check_async(&allowed))
+            .expect("configured bearer token must allow Check");
+        let allowed_status = check.into_inner().status;
+        crate::assert_with_log!(
+            allowed_status == ServingStatus::Serving,
+            "configured bearer token check status",
+            ServingStatus::Serving,
+            allowed_status
+        );
+
+        let wrong = health_auth_token_request("svc", "authorization", "Bearer wrong-token");
+        let err = futures_lite::future::block_on(service.watch_async(&wrong))
+            .expect_err("wrong bearer token must fail closed");
+        crate::assert_with_log!(
+            err.message() == "invalid bearer token",
+            "wrong bearer token rejected",
+            "invalid bearer token",
+            err.message()
+        );
+        crate::test_complete!("health_auth_mode_bearer_token_requires_exact_secret");
     }
 
     #[test]
@@ -1642,7 +1733,7 @@ mod tests {
     #[test]
     fn health_watch_async_emits_initial_status_and_wakes_on_change() {
         init_test("health_watch_async_emits_initial_status_and_wakes_on_change");
-        let service = HealthService::new();
+        let service = bearer_token_health_service();
         service.set_status("svc", ServingStatus::Serving);
 
         let request = authed_health_request("svc");
@@ -1713,7 +1804,7 @@ mod tests {
     #[test]
     fn differential_health_watch_send_half_close_semantics_vs_grpc_go() {
         init_test("differential_health_watch_send_half_close_semantics_vs_grpc_go");
-        let service = HealthService::new();
+        let service = bearer_token_health_service();
         service.set_status("svc", ServingStatus::Serving);
 
         let request = authed_health_request("svc");
@@ -1836,7 +1927,7 @@ mod tests {
     #[test]
     fn health_check_async_rejects_empty_bearer_token() {
         init_test("health_check_async_rejects_empty_bearer_token");
-        let service = HealthService::new();
+        let service = bearer_token_health_service();
         service.set_status("svc", ServingStatus::Serving);
 
         let mut request = Request::new(HealthCheckRequest::new("svc"));
@@ -1857,7 +1948,7 @@ mod tests {
     #[test]
     fn health_watch_async_drop_unregisters_pending_waiter() {
         init_test("health_watch_async_drop_unregisters_pending_waiter");
-        let service = HealthService::new();
+        let service = bearer_token_health_service();
         service.set_status("svc", ServingStatus::Serving);
 
         let request = authed_health_request("svc");
@@ -1908,7 +1999,7 @@ mod tests {
     #[test]
     fn health_watch_async_rechecks_after_waiter_registration() {
         init_test("health_watch_async_rechecks_after_waiter_registration");
-        let service = HealthService::new();
+        let service = bearer_token_health_service();
         service.set_status("svc", ServingStatus::Serving);
 
         let request = authed_health_request("svc");
