@@ -120,7 +120,7 @@ fn parse_certificate_handshake(data: &[u8]) -> Result<Vec<Vec<u8>>, String> {
 }
 
 /// Parse TLS ServerHello message
-fn parse_server_hello(data: &[u8]) -> Result<(), String> {
+fn parse_server_hello(data: &[u8]) -> Result<usize, String> {
     let mut reader = TlsReader::new(data);
 
     // Protocol version
@@ -150,11 +150,11 @@ fn parse_server_hello(data: &[u8]) -> Result<(), String> {
         let _extensions = reader.read_bytes(extensions_len as usize)?;
     }
 
-    Ok(())
+    Ok(reader.pos)
 }
 
 /// Parse ClientHello message
-fn parse_client_hello(data: &[u8]) -> Result<(), String> {
+fn parse_client_hello(data: &[u8]) -> Result<usize, String> {
     let mut reader = TlsReader::new(data);
 
     // Protocol version
@@ -172,7 +172,7 @@ fn parse_client_hello(data: &[u8]) -> Result<(), String> {
 
     // Cipher suites
     let cipher_suites_len = reader.read_u16()? as usize;
-    if cipher_suites_len % 2 != 0 {
+    if !cipher_suites_len.is_multiple_of(2) {
         return Err("Invalid cipher suites length".to_string());
     }
     let _cipher_suites = reader.read_bytes(cipher_suites_len)?;
@@ -187,7 +187,7 @@ fn parse_client_hello(data: &[u8]) -> Result<(), String> {
         let _extensions = reader.read_bytes(extensions_len as usize)?;
     }
 
-    Ok(())
+    Ok(reader.pos)
 }
 
 /// Parse TLS extension
@@ -233,30 +233,191 @@ fn parse_sni_extension(data: &[u8]) -> Result<Vec<String>, String> {
     Ok(names)
 }
 
+fn assert_visible_string_error(error: &str, context: &str) {
+    assert!(
+        !error.is_empty(),
+        "{context} parser errors should stay visible"
+    );
+}
+
+fn assert_visible_debug<T: std::fmt::Debug>(value: &T, context: &str) {
+    let rendered = format!("{value:?}");
+    assert!(
+        !rendered.is_empty(),
+        "{context} successful parser output should stay visible"
+    );
+}
+
+fn observe_string_result<T: std::fmt::Debug>(
+    result: Result<T, String>,
+    context: &str,
+) -> Option<T> {
+    match result {
+        Ok(value) => {
+            assert_visible_debug(&value, context);
+            Some(value)
+        }
+        Err(error) => {
+            assert_visible_string_error(&error, context);
+            None
+        }
+    }
+}
+
+fn observe_tls_result<T, E: std::fmt::Debug>(
+    result: Result<T, E>,
+    context: &str,
+    on_success: impl FnOnce(T),
+) {
+    match result {
+        Ok(value) => on_success(value),
+        Err(error) => assert_visible_debug(&error, context),
+    }
+}
+
+fn observe_handshake_message(data: &[u8]) {
+    if let Some((_message_type, length, body)) =
+        observe_string_result(parse_handshake_message(data), "TLS handshake message")
+    {
+        assert_eq!(
+            body.len(),
+            length as usize,
+            "TLS handshake body length should match declared length"
+        );
+        assert!(
+            body.len() + 4 <= data.len(),
+            "TLS handshake parser should not consume beyond input"
+        );
+    }
+}
+
+fn observe_certificate_handshake(data: &[u8]) {
+    if let Some(certificates) = observe_string_result(
+        parse_certificate_handshake(data),
+        "TLS certificate handshake",
+    ) {
+        assert!(
+            certificates.len() <= 10,
+            "TLS certificate handshake should keep certificate count bounded"
+        );
+        let total_bytes: usize = certificates.iter().map(Vec::len).sum();
+        assert!(
+            total_bytes <= data.len(),
+            "TLS certificate handshake output should stay input-bounded"
+        );
+    }
+}
+
+fn observe_hello_parse(result: Result<usize, String>, data_len: usize, context: &str) {
+    if let Some(consumed) = observe_string_result(result, context) {
+        assert!(
+            consumed <= data_len,
+            "{context} parser should not consume beyond input"
+        );
+        assert!(
+            consumed >= 35,
+            "{context} success should include the fixed hello prefix"
+        );
+    }
+}
+
+fn observe_extension_parse(data: &[u8]) {
+    if let Some((_extension_type, extension_data)) =
+        observe_string_result(parse_extension(data), "TLS extension")
+    {
+        assert!(
+            extension_data.len() + 4 <= data.len(),
+            "TLS extension output should stay input-bounded"
+        );
+    }
+}
+
+fn observe_sni_extension(data: &[u8]) {
+    if let Some(names) = observe_string_result(parse_sni_extension(data), "TLS SNI extension") {
+        assert!(
+            names.len() <= 10,
+            "TLS SNI parser should keep hostname count bounded"
+        );
+        for name in names {
+            assert!(
+                name.len() <= 255,
+                "TLS SNI parser should keep hostname length bounded"
+            );
+        }
+    }
+}
+
 /// Test certificate parsing with asupersync types
 fn test_certificate_parsing(data: &[u8]) {
     use asupersync::tls::{Certificate, CertificateChain, CertificatePin, CertificatePinSet};
 
     // Test DER parsing
-    let _ = Certificate::from_der(data.to_vec());
+    let cert = Certificate::from_der(data.to_vec());
+    assert_eq!(
+        cert.as_der().len(),
+        data.len(),
+        "DER certificate wrapper should preserve input length"
+    );
 
     // Test PEM parsing
     if let Ok(s) = std::str::from_utf8(data) {
-        let _ = Certificate::from_pem(s.as_bytes());
+        observe_tls_result(
+            Certificate::from_pem(s.as_bytes()),
+            "TLS certificate PEM",
+            |certs| {
+                assert!(
+                    !certs.is_empty(),
+                    "successful certificate PEM parse should yield certificates"
+                );
+            },
+        );
     }
 
     // Test chain operations
-    let cert = Certificate::from_der(data.to_vec());
     let mut chain = CertificateChain::new();
     chain.push(cert.clone());
+    assert_eq!(
+        chain.len(),
+        1,
+        "certificate chain should retain pushed certificate"
+    );
 
     // Test pin computation
-    let _ = CertificatePin::compute_spki_sha256(&cert);
-    let _ = CertificatePin::compute_cert_sha256(&cert);
+    observe_tls_result(
+        CertificatePin::compute_spki_sha256(&cert),
+        "TLS SPKI pin computation",
+        |pin| {
+            assert_eq!(
+                pin.hash_bytes().len(),
+                32,
+                "SPKI pin should be SHA-256 sized"
+            );
+        },
+    );
+    observe_tls_result(
+        CertificatePin::compute_cert_sha256(&cert),
+        "TLS certificate pin computation",
+        |pin| {
+            assert_eq!(
+                pin.hash_bytes().len(),
+                32,
+                "certificate pin should be SHA-256 sized"
+            );
+        },
+    );
 
     // Test pin set validation
     let pin_set = CertificatePinSet::new();
-    let _ = pin_set.validate(&cert);
+    observe_tls_result(
+        pin_set.validate(&cert),
+        "TLS pin set validation",
+        |matched| {
+            assert!(
+                !matched.to_string().is_empty(),
+                "pin set validation result should stay visible"
+            );
+        },
+    );
 }
 
 /// Test private key parsing
@@ -264,14 +425,31 @@ fn test_private_key_parsing(data: &[u8]) {
     use asupersync::tls::PrivateKey;
 
     // Test PKCS#8 DER
-    let _ = PrivateKey::from_pkcs8_der(data.to_vec());
+    let pkcs8_key = PrivateKey::from_pkcs8_der(data.to_vec());
+    assert!(
+        std::mem::size_of_val(&pkcs8_key) > 0,
+        "PKCS#8 key wrapper should be materialized"
+    );
 
     // Test SEC1 DER
-    let _ = PrivateKey::from_sec1_der(data.to_vec());
+    let sec1_key = PrivateKey::from_sec1_der(data.to_vec());
+    assert!(
+        std::mem::size_of_val(&sec1_key) > 0,
+        "SEC1 key wrapper should be materialized"
+    );
 
     // Test PEM parsing
     if let Ok(s) = std::str::from_utf8(data) {
-        let _ = PrivateKey::from_pem(s.as_bytes());
+        observe_tls_result(
+            PrivateKey::from_pem(s.as_bytes()),
+            "TLS private key PEM",
+            |key| {
+                assert!(
+                    std::mem::size_of_val(&key) > 0,
+                    "successful private key PEM parse should materialize a key"
+                );
+            },
+        );
     }
 }
 
@@ -281,20 +459,61 @@ fn test_certificate_pin_operations(data: &[u8]) {
 
     // Test base64 decoding
     if let Ok(s) = std::str::from_utf8(data) {
-        let _ = CertificatePin::spki_sha256_base64(s);
-        let _ = CertificatePin::cert_sha256_base64(s);
+        observe_tls_result(
+            CertificatePin::spki_sha256_base64(s),
+            "TLS SPKI base64 pin",
+            |pin| {
+                assert_eq!(
+                    pin.hash_bytes().len(),
+                    32,
+                    "base64 SPKI pin should be SHA-256 sized"
+                );
+            },
+        );
+        observe_tls_result(
+            CertificatePin::cert_sha256_base64(s),
+            "TLS certificate base64 pin",
+            |pin| {
+                assert_eq!(
+                    pin.hash_bytes().len(),
+                    32,
+                    "base64 certificate pin should be SHA-256 sized"
+                );
+            },
+        );
     }
 
     // Test raw bytes
     if data.len() >= 32 {
-        let _ = CertificatePin::spki_sha256(&data[..32]);
-        let _ = CertificatePin::cert_sha256(&data[..32]);
+        observe_tls_result(
+            CertificatePin::spki_sha256(&data[..32]),
+            "TLS raw SPKI pin",
+            |pin| {
+                assert_eq!(
+                    pin.hash_bytes().len(),
+                    32,
+                    "raw SPKI pin should be SHA-256 sized"
+                );
+            },
+        );
+        observe_tls_result(
+            CertificatePin::cert_sha256(&data[..32]),
+            "TLS raw certificate pin",
+            |pin| {
+                assert_eq!(
+                    pin.hash_bytes().len(),
+                    32,
+                    "raw certificate pin should be SHA-256 sized"
+                );
+            },
+        );
     }
 
     // Test pin set operations
     let mut pin_set = CertificatePinSet::new();
     if let Ok(pin) = CertificatePin::spki_sha256(vec![0u8; 32]) {
         pin_set.add(pin);
+        assert_eq!(pin_set.len(), 1, "pin set should retain inserted pin");
     }
 }
 
@@ -306,32 +525,32 @@ fuzz_target!(|data: &[u8]| {
 
     // Test 1: Parse as TLS handshake message
     if data.len() >= 4 {
-        let _ = parse_handshake_message(data);
+        observe_handshake_message(data);
     }
 
     // Test 2: Parse as Certificate handshake message
     if data.len() >= 3 {
-        let _ = parse_certificate_handshake(data);
+        observe_certificate_handshake(data);
     }
 
     // Test 3: Parse as ServerHello message
     if data.len() >= 35 {
-        let _ = parse_server_hello(data);
+        observe_hello_parse(parse_server_hello(data), data.len(), "TLS ServerHello");
     }
 
     // Test 4: Parse as ClientHello message
     if data.len() >= 35 {
-        let _ = parse_client_hello(data);
+        observe_hello_parse(parse_client_hello(data), data.len(), "TLS ClientHello");
     }
 
     // Test 5: Parse as TLS extension
     if data.len() >= 4 {
-        let _ = parse_extension(data);
+        observe_extension_parse(data);
     }
 
     // Test 6: Parse as SNI extension
     if data.len() >= 2 {
-        let _ = parse_sni_extension(data);
+        observe_sni_extension(data);
     }
 
     // Test 7: Certificate parsing with asupersync types
@@ -345,10 +564,19 @@ fuzz_target!(|data: &[u8]| {
 
     // Test 10: TLS message structure parsing
     let mut reader = TlsReader::new(data);
-    let _ = reader.read_u8();
-    let _ = reader.read_u16();
-    let _ = reader.read_u24();
-    let _ = reader.read_variable_length_vector(1);
-    let _ = reader.read_variable_length_vector(2);
-    let _ = reader.read_variable_length_vector(3);
+    observe_string_result(reader.read_u8(), "TLS reader u8");
+    observe_string_result(reader.read_u16(), "TLS reader u16");
+    observe_string_result(reader.read_u24(), "TLS reader u24");
+    observe_string_result(
+        reader.read_variable_length_vector(1),
+        "TLS reader one-byte vector",
+    );
+    observe_string_result(
+        reader.read_variable_length_vector(2),
+        "TLS reader two-byte vector",
+    );
+    observe_string_result(
+        reader.read_variable_length_vector(3),
+        "TLS reader three-byte vector",
+    );
 });
