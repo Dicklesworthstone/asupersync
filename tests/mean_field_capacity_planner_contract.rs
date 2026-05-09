@@ -20,6 +20,8 @@ use std::process::Command;
 const DEFAULT_SCENARIO_ID: &str = "AA-MEAN-FIELD-CAPACITY-PLANNER-64C-256G";
 const RUNNER_PATH: &str = "scripts/run_mean_field_capacity_planner_smoke.sh";
 const CAPACITY_CERT_HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const MEAN_FIELD_VALIDATION_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_mean_field_capacity_planner cargo test capacity";
+const MEAN_FIELD_REPLAY_COMMAND: &str = "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_mean_field_capacity_planner cargo test -p asupersync --test mean_field_capacity_planner_contract --features test-internals -- --nocapture";
 
 #[derive(Debug, Deserialize)]
 struct MeanFieldContract {
@@ -130,7 +132,7 @@ fn capacity_request() -> CapacityEnvelopePlannerRequest {
         budget: CapacityEnvelopeBudget::default(),
         budget_overrides: Default::default(),
         environment_note: Some("ticket=OPS-CAP api_token=redacted".to_string()),
-        validation_command: Some("rch exec -- cargo test capacity".to_string()),
+        validation_command: Some(MEAN_FIELD_VALIDATION_COMMAND.to_string()),
     }
 }
 
@@ -146,9 +148,7 @@ fn planner_request() -> MeanFieldCapacityPlannerRequest {
         capacity_certificate_id: "artifacts/capacity_envelope_planner_smoke_contract_v1.json"
             .to_string(),
         capacity_certificate_hash: CAPACITY_CERT_HASH.to_string(),
-        replay_command:
-            "rch exec -- cargo test -p asupersync --test mean_field_capacity_planner_contract"
-                .to_string(),
+        replay_command: MEAN_FIELD_REPLAY_COMMAND.to_string(),
     }
 }
 
@@ -311,6 +311,37 @@ fn mean_field_planner_disabled_mode_matches_conservative_baseline() {
     assert_eq!(
         plan.recommended_capacity_hints,
         baseline.resolved_capacity_hints()
+    );
+}
+
+#[test]
+fn mean_field_planner_commands_use_target_dirs() {
+    let certificate = capacity_request().plan();
+    let validation_command = certificate
+        .sanitized_validation_command
+        .as_deref()
+        .expect("validation command is retained");
+    assert_eq!(validation_command, MEAN_FIELD_VALIDATION_COMMAND);
+    assert!(
+        validation_command
+            .contains("CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_mean_field_capacity_planner"),
+        "validation command must isolate cargo target output"
+    );
+    assert!(
+        !validation_command.contains("rch exec -- cargo "),
+        "validation command must not use bare rch cargo routing"
+    );
+
+    let plan = planner_request().plan();
+    assert_eq!(plan.replay_command, MEAN_FIELD_REPLAY_COMMAND);
+    assert!(
+        plan.replay_command
+            .contains("CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_mean_field_capacity_planner"),
+        "replay command must isolate cargo target output"
+    );
+    assert!(
+        !plan.replay_command.contains("rch exec -- cargo "),
+        "replay command must not use bare rch cargo routing"
     );
 }
 
