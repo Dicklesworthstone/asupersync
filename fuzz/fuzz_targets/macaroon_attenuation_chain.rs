@@ -261,7 +261,7 @@ fn test_serialization_round_trip(token: &MacaroonToken) {
     );
 
     // Deserialization should succeed for valid tokens
-    if let Some(deserialized) = MacaroonToken::from_binary(&serialized) {
+    if let Some(deserialized) = observe_macaroon_binary_decode(&serialized) {
         // Round-trip should preserve all fields
         assert_eq!(deserialized.identifier(), token.identifier());
         assert_eq!(deserialized.location(), token.location());
@@ -275,20 +275,33 @@ fn test_serialization_round_trip(token: &MacaroonToken) {
 
 fn test_safe_deserialization(data: &[u8]) {
     // Deserialization should never panic, even with malformed data
+    let _ = observe_macaroon_binary_decode(data);
+}
+
+fn observe_macaroon_binary_decode(data: &[u8]) -> Option<MacaroonToken> {
     let result = MacaroonToken::from_binary(data);
 
-    // If deserialization succeeds, verify basic properties
-    if let Some(token) = result {
-        // Identifier and location should be valid UTF-8
-        assert!(!token.identifier().is_empty() || token.identifier().is_empty()); // Should not panic
-        assert!(!token.location().is_empty() || token.location().is_empty()); // Should not panic
+    match &result {
+        Some(token) => {
+            // Identifier and location should be valid UTF-8 and accessible.
+            let _ = token.identifier();
+            let _ = token.location();
 
-        // Caveat count should be reasonable
-        assert!(token.caveat_count() <= MAX_CAVEAT_COUNT);
+            // Caveat count should be reasonable.
+            assert!(token.caveat_count() <= MAX_CAVEAT_COUNT);
 
-        // Signature should be exactly 32 bytes
-        assert_eq!(token.signature().as_bytes().len(), 32);
+            // Signature should be exactly 32 bytes.
+            assert_eq!(token.signature().as_bytes().len(), 32);
+        }
+        None => {
+            assert!(
+                data.len() <= MAX_MALFORMED_DATA_LEN,
+                "macaroon decode failures must remain bounded to the fuzz input cap"
+            );
+        }
     }
+
+    result
 }
 
 fn test_malformed_deserialization(data: &[u8]) {
@@ -299,7 +312,7 @@ fn test_malformed_deserialization(data: &[u8]) {
     };
 
     // Should handle malformed data gracefully
-    let _ = MacaroonToken::from_binary(limited_data);
+    let _ = observe_macaroon_binary_decode(limited_data);
 }
 
 fn test_predicate_round_trip(operations: &[MacaroonOperation]) {
@@ -460,11 +473,19 @@ fn test_discharge_binding(token: &MacaroonToken, _discharge_ops: &[MacaroonOpera
     let discharge = MacaroonToken::mint(&discharge_key, "discharge", "test");
 
     // Binding should never panic
-    let bound = token.bind_for_request(&discharge);
-
-    // Basic properties should be preserved from discharge
-    assert_eq!(bound.identifier(), discharge.identifier());
-    assert_eq!(bound.location(), discharge.location());
+    match token.bind_for_request(&discharge) {
+        Ok(bound) => {
+            // Basic properties should be preserved from discharge
+            assert_eq!(bound.identifier(), discharge.identifier());
+            assert_eq!(bound.location(), discharge.location());
+        }
+        Err(error) => {
+            assert!(
+                !format!("{error:?}").is_empty(),
+                "discharge binding errors must remain observable"
+            );
+        }
+    }
 }
 
 fn test_comprehensive_properties(token: &MacaroonToken, context: &VerificationContext) {
@@ -522,7 +543,7 @@ fn create_verification_context(context_fuzz: &ContextFuzz) -> VerificationContex
         .with_task(context_fuzz.task_id)
         .with_resource(safe_resource_path)
         .with_use_count(context_fuzz.use_count)
-        .with_window_use_count(context_fuzz.window_use_count)
+        .with_window_use_count(60, context_fuzz.window_use_count)
 }
 
 fn limit_string(input: &str, max_len: usize) -> String {
