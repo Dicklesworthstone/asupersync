@@ -655,7 +655,19 @@ fuzz_target!(|data: &[u8]| {
     };
 
     // Run RFC 6330 OTI fuzzing with all required assertions
-    let _ = fuzz_rfc6330_oti(input);
+    match fuzz_rfc6330_oti(input) {
+        Ok(()) => {}
+        Err(error) => {
+            assert!(
+                !error.trim().is_empty(),
+                "RFC 6330 OTI rejection should expose a diagnostic"
+            );
+            assert!(
+                error.len() <= 4096,
+                "RFC 6330 OTI diagnostic grew unexpectedly: {error}"
+            );
+        }
+    }
 });
 
 #[cfg(test)]
