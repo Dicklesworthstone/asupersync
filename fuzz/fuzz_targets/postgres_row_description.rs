@@ -328,7 +328,31 @@ fn assert_deterministic(body: &[u8]) -> ParseSummary {
         first, second,
         "RowDescription parsing must be deterministic for identical bytes"
     );
+    observe_parse_summary(&first);
     first
+}
+
+fn observe_parse_summary(summary: &ParseSummary) {
+    match summary {
+        ParseSummary::Ok { columns, indices } => {
+            assert!(columns.len() <= MAX_COLUMNS);
+            assert!(indices.len() <= columns.len());
+            for (name, index) in indices {
+                assert!(
+                    *index < columns.len(),
+                    "RowDescription index {index} must point into {} columns",
+                    columns.len()
+                );
+                assert_eq!(
+                    columns[*index].name, *name,
+                    "RowDescription index map must point at the named column"
+                );
+            }
+        }
+        ParseSummary::Err(message) => {
+            assert!(!message.is_empty(), "parser errors must be observable");
+        }
+    }
 }
 
 fn assert_valid_body_round_trips(columns: &[PgColumn]) {
@@ -380,7 +404,7 @@ fn apply_malformed_body(body: &mut Vec<u8>, malformed: MalformedBody, column_cou
 fn exercise_malformed_body(columns: &[PgColumn], malformed: MalformedBody) {
     let mut body = build_row_description_body(columns, columns.len() as i16);
     apply_malformed_body(&mut body, malformed, columns.len());
-    let _ = assert_deterministic(&body);
+    assert_deterministic(&body);
 }
 
 fuzz_target!(|scenario: Scenario| {
@@ -403,7 +427,7 @@ fuzz_target!(|scenario: Scenario| {
         }
         Scenario::RawBody { mut bytes } => {
             bytes.truncate(MAX_RAW_BODY);
-            let _ = assert_deterministic(&bytes);
+            assert_deterministic(&bytes);
         }
     }
 });
