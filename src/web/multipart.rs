@@ -21,7 +21,9 @@
 
 use std::collections::HashMap;
 
-use super::extract::{ExtractionError, FromRequest, Request};
+use super::extract::{
+    ExtractionError, FromRequest, Request, header_value_ci, parse_content_length,
+};
 use super::response::StatusCode;
 use crate::bytes::Bytes;
 use crate::time::wall_now;
@@ -249,6 +251,8 @@ impl FromRequest for Multipart {
             .copied()
             .unwrap_or_default();
 
+        check_request_content_length_limit(&req, limits.max_total_size)?;
+
         // Size check.
         if req.body.len() > limits.max_total_size {
             return Err(ExtractionError::new(
@@ -260,6 +264,8 @@ impl FromRequest for Multipart {
                 ),
             ));
         }
+
+        validate_request_content_length(&req)?;
 
         // Content-Type validation and boundary extraction (case-insensitive lookup).
         let content_type = req
@@ -294,6 +300,37 @@ impl FromRequest for Multipart {
 }
 
 // ─── Parsing ────────────────────────────────────────────────────────────────
+
+fn check_request_content_length_limit(req: &Request, limit: usize) -> Result<(), ExtractionError> {
+    let Some(value) = header_value_ci(req, "content-length") else {
+        return Ok(());
+    };
+    let declared_len = parse_content_length(value)?;
+    if declared_len > limit {
+        return Err(ExtractionError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("multipart Content-Length {declared_len} bytes exceeds limit {limit} bytes"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_request_content_length(req: &Request) -> Result<(), ExtractionError> {
+    let Some(value) = header_value_ci(req, "content-length") else {
+        return Ok(());
+    };
+    let declared_len = parse_content_length(value)?;
+    let actual_len = req.body.len();
+    if declared_len != actual_len {
+        return Err(ExtractionError::new(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "multipart Content-Length mismatch: declared {declared_len} bytes, received {actual_len} bytes"
+            ),
+        ));
+    }
+    Ok(())
+}
 
 /// Maximum multipart boundary length per RFC 2046 §5.1.1.
 ///
@@ -1073,6 +1110,12 @@ mod tests {
         Bytes::from(buf)
     }
 
+    fn multipart_request(body: Bytes) -> Request {
+        Request::new("POST", "/upload")
+            .with_header("content-type", "multipart/form-data; boundary=BOUNDARY")
+            .with_body(body)
+    }
+
     #[test]
     fn parse_single_text_field() {
         let body = make_multipart_body(
@@ -1088,6 +1131,77 @@ mod tests {
         assert_eq!(fields[0].name(), "username");
         assert_eq!(fields[0].text().unwrap(), "alice");
         assert!(fields[0].filename().is_none());
+    }
+
+    #[test]
+    fn multipart_extractor_rejects_request_content_length_mismatch() {
+        let body = make_multipart_body(
+            "BOUNDARY",
+            &[(
+                "Content-Disposition: form-data; name=\"username\"",
+                b"alice",
+            )],
+        );
+        let actual_len = body.len();
+        let req =
+            multipart_request(body).with_header("content-length", (actual_len + 1).to_string());
+
+        let err = Multipart::from_request(req).unwrap_err();
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(
+            err.message.contains("Content-Length mismatch"),
+            "unexpected error: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn multipart_extractor_rejects_conflicting_request_content_lengths() {
+        let body = make_multipart_body(
+            "BOUNDARY",
+            &[(
+                "Content-Disposition: form-data; name=\"username\"",
+                b"alice",
+            )],
+        );
+        let actual_len = body.len();
+        let req = multipart_request(body).with_header(
+            "content-length",
+            format!("{actual_len}, {}", actual_len + 1),
+        );
+
+        let err = Multipart::from_request(req).unwrap_err();
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(
+            err.message.contains("conflicting Content-Length"),
+            "unexpected error: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn multipart_extractor_rejects_declared_length_over_limit_before_parsing() {
+        let body = make_multipart_body(
+            "BOUNDARY",
+            &[(
+                "Content-Disposition: form-data; name=\"username\"",
+                b"alice",
+            )],
+        );
+        let mut req = multipart_request(body).with_header("content-length", "64");
+        req.extensions
+            .insert_typed(MultipartLimits::new().max_total_size(16));
+
+        let err = Multipart::from_request(req).unwrap_err();
+
+        assert_eq!(err.status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(
+            err.message.contains("Content-Length"),
+            "unexpected error: {}",
+            err.message
+        );
     }
 
     #[test]
