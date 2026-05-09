@@ -25,9 +25,7 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use asupersync::bytes::{BufMut, Bytes, BytesMut};
-use asupersync::http::h3_native::{H3NativeError, H3QpackMode};
-use asupersync::net::quic_core::{decode_varint, encode_varint};
+use asupersync::net::quic_core::{QUIC_VARINT_MAX, QuicCoreError, decode_varint, encode_varint};
 
 /// Maximum fuzz input size to prevent timeouts (16KB)
 const MAX_FUZZ_INPUT_SIZE: usize = 16_384;
@@ -39,7 +37,7 @@ const MAX_DYNAMIC_TABLE_CAPACITY: usize = 4096;
 const MAX_OPERATIONS: usize = 1000;
 
 /// QPACK instruction types for encoder streams (RFC 9204 Section 4.3)
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum QpackEncoderInstruction {
     /// Insert With Name Reference: T=1 N=... name_index (literal) value
     InsertWithNameReference { name_index: u64, value: String },
@@ -385,7 +383,7 @@ struct QpackStreamFuzzInput {
     stream_operations: Vec<QpackStreamOperation>,
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Debug, Clone)]
 enum QpackEncoderInstructionFuzz {
     InsertWithNameReference { name_index: u8, value: Vec<u8> },
     InsertWithLiteralName { name: Vec<u8>, value: Vec<u8> },
@@ -422,7 +420,7 @@ impl From<QpackEncoderInstructionFuzz> for QpackEncoderInstruction {
     }
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Debug, Clone)]
 enum QpackDecoderInstructionFuzz {
     SectionAcknowledgment { stream_id: u16 },
     StreamCancellation { stream_id: u16 },
@@ -463,8 +461,69 @@ enum QpackStreamOperation {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VarintObservation {
+    Decoded { value: u64, consumed: usize },
+    Rejected,
+}
+
+fn observe_decode_varint(context: &str, input: &[u8]) -> VarintObservation {
+    match decode_varint(input) {
+        Ok((value, consumed)) => {
+            assert!(
+                value <= QUIC_VARINT_MAX,
+                "{context} decoded value exceeded QUIC varint max: {value}"
+            );
+            assert!(consumed > 0, "{context} decoded zero bytes");
+            assert!(
+                consumed <= input.len(),
+                "{context} consumed {consumed} bytes from {} available",
+                input.len()
+            );
+            assert!(consumed <= 8, "{context} consumed more than eight bytes");
+            assert_eq!(
+                Some(consumed),
+                required_decode_len(input),
+                "{context} consumed bytes must match the prefix-selected width"
+            );
+            VarintObservation::Decoded { value, consumed }
+        }
+        Err(QuicCoreError::UnexpectedEof) => {
+            assert!(
+                input.len() < required_decode_len(input).unwrap_or(1),
+                "{context} UnexpectedEof should mean the prefix-selected varint is incomplete"
+            );
+            observe_quic_core_error(context, &QuicCoreError::UnexpectedEof);
+            VarintObservation::Rejected
+        }
+        Err(error) => {
+            observe_quic_core_error(context, &error);
+            VarintObservation::Rejected
+        }
+    }
+}
+
+fn required_decode_len(input: &[u8]) -> Option<usize> {
+    input.first().map(|first| 1usize << (first >> 6))
+}
+
+fn observe_quic_core_error(context: &str, error: &QuicCoreError) {
+    let display = error.to_string();
+    assert!(
+        !display.trim().is_empty(),
+        "{context} decode error must expose display diagnostics"
+    );
+
+    let debug = format!("{error:?}");
+    assert!(
+        !debug.trim().is_empty(),
+        "{context} decode error must expose debug diagnostics"
+    );
+}
+
 /// Test QPACK varint integer encoding/decoding bounds (Assertion 1)
 fn test_varint_bounds(data: &[u8]) -> Result<(), String> {
+    let data = &data[..data.len().min(MAX_FUZZ_INPUT_SIZE)];
     if data.is_empty() {
         return Ok(());
     }
@@ -488,19 +547,20 @@ fn test_varint_bounds(data: &[u8]) -> Result<(), String> {
     let prefix_sizes = [1u8, 2, 3, 4, 5, 6, 7, 8];
 
     for &value in &test_values {
-        for &prefix_bits in &prefix_sizes {
-            let max_prefix = (1u64 << prefix_bits) - 1;
-
+        for &_prefix_bits in &prefix_sizes {
             // Encode
             let mut encoded = Vec::new();
-            if let Err(_) = encode_varint(&mut encoded, value) {
+            if encode_varint(value, &mut encoded).is_err() {
                 // Encoding failure is acceptable for extreme values
                 continue;
             }
 
             // Decode and verify round-trip
-            match decode_varint(&encoded) {
-                Ok((decoded_value, consumed)) => {
+            match observe_decode_varint("encoded QPACK varint", &encoded) {
+                VarintObservation::Decoded {
+                    value: decoded_value,
+                    consumed,
+                } => {
                     if decoded_value != value {
                         return Err(format!(
                             "Varint round-trip mismatch: {} != {}",
@@ -508,10 +568,10 @@ fn test_varint_bounds(data: &[u8]) -> Result<(), String> {
                         ));
                     }
                     if consumed > encoded.len() {
-                        return Err(format!("Varint decode consumed more bytes than available"));
+                        return Err("Varint decode consumed more bytes than available".to_string());
                     }
                 }
-                Err(_) => {
+                VarintObservation::Rejected => {
                     // Decode failure is acceptable for malformed input
                 }
             }
@@ -519,7 +579,7 @@ fn test_varint_bounds(data: &[u8]) -> Result<(), String> {
     }
 
     // Test with fuzz input data
-    let _ = decode_varint(data);
+    observe_decode_varint("fuzz input QPACK varint", data);
 
     Ok(())
 }
@@ -527,7 +587,7 @@ fn test_varint_bounds(data: &[u8]) -> Result<(), String> {
 /// Test duplicate name reference handling (Assertion 2)
 fn test_duplicate_handling(
     state: &mut QpackStreamState,
-    operations: &[QpackStreamOperation],
+    _operations: &[QpackStreamOperation],
 ) -> Result<(), String> {
     // Insert some entries to create duplicates
     let _ = state
@@ -545,12 +605,12 @@ fn test_duplicate_handling(
     match duplicate_result {
         Ok(()) => {
             // Duplicate should create a new entry with the same name/value as index 0
-            if let Some(original) = state.dynamic_table.get_entry(0) {
-                if let Some(duplicate) = state.dynamic_table.get_entry(1) {
-                    // Note: after insertion, indices shift
-                    if original.name != duplicate.name || original.value != duplicate.value {
-                        return Err("Duplicate entry does not match original".to_string());
-                    }
+            if let Some(original) = state.dynamic_table.get_entry(0)
+                && let Some(duplicate) = state.dynamic_table.get_entry(1)
+            {
+                // Note: after insertion, indices shift
+                if original.name != duplicate.name || original.value != duplicate.value {
+                    return Err("Duplicate entry does not match original".to_string());
                 }
             }
         }
@@ -683,7 +743,7 @@ fuzz_target!(|input: QpackStreamFuzzInput| {
     // Test varint bounds (Assertion 1)
     let varint_test_data = input
         .encoder_instructions
-        .get(0)
+        .first()
         .map(|instr| match instr {
             QpackEncoderInstructionFuzz::InsertWithLiteralName { name, .. } => name.as_slice(),
             QpackEncoderInstructionFuzz::InsertWithNameReference { value, .. } => value.as_slice(),
@@ -732,7 +792,7 @@ fuzz_target!(|input: QpackStreamFuzzInput| {
             } => {
                 // Simulate field processing that may require dynamic table entries
                 if !field_data.is_empty() && *stream_id < 1000 {
-                    let _ = decode_varint(field_data);
+                    observe_decode_varint("field data QPACK varint", field_data);
                 }
             }
         }
