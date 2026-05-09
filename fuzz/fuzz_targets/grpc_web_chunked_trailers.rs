@@ -183,12 +183,13 @@ fn apply_edge_cases(stream: &str, edge_cases: &EdgeCases) -> String {
     let mut modified = stream.to_string();
 
     // Inject boundary corruption if requested
-    if let Some(bad_char) = edge_cases.boundary_corruption {
-        if !modified.is_empty() && (bad_char as char).is_ascii() {
-            // Insert invalid character at a strategic position
-            let pos = (bad_char as usize) % modified.len();
-            modified.insert(pos, bad_char as char);
-        }
+    if let Some(bad_char) = edge_cases.boundary_corruption
+        && !modified.is_empty()
+        && (bad_char as char).is_ascii()
+    {
+        // Insert invalid character at a strategic position
+        let pos = (bad_char as usize) % modified.len();
+        modified.insert(pos, bad_char as char);
     }
 
     modified
@@ -279,7 +280,7 @@ fn exercise_chunked_decoding(chunks: Vec<String>, edge_cases: &EdgeCases) {
     for (i, chunk) in chunks.iter().enumerate().take(MAX_CHUNKS) {
         // Insert empty chunks if edge case is enabled
         if edge_cases.empty_chunks && i > 0 {
-            let _ = decoder.push(b"");
+            observe_stream_push_result(decoder.push(b""), "empty chunk push", 0);
         }
 
         match decoder.push(chunk.as_bytes()) {
@@ -304,7 +305,7 @@ fn exercise_chunked_decoding(chunks: Vec<String>, edge_cases: &EdgeCases) {
 
         // Test split padding edge case - try to push padding character separately
         if edge_cases.split_padding && chunk.contains('=') && !decoder.is_sealed() {
-            let _ = decoder.push(b"=");
+            observe_stream_push_result(decoder.push(b"="), "split padding push", 2);
         }
     }
 
@@ -315,30 +316,50 @@ fn exercise_chunked_decoding(chunks: Vec<String>, edge_cases: &EdgeCases) {
     }
 
     // Test double finish edge case
-    if edge_cases.double_finish {
-        match decoder.finish() {
-            Ok(data) => {
-                // Second finish should return empty and not panic
-                if !data.is_empty() {
-                    panic!("Second finish() returned non-empty data");
-                }
-            }
-            Err(_) => {} // Acceptable
+    if edge_cases.double_finish
+        && let Ok(data) = decoder.finish()
+    {
+        // Second finish should return empty and not panic
+        if !data.is_empty() {
+            panic!("Second finish() returned non-empty data");
         }
     }
 
     // Test push after seal edge case
     if edge_cases.push_after_seal && decoder.is_sealed() {
-        let result = decoder.push(b"extra");
-        match result {
-            Ok(_) => panic!("Push after seal should fail"),
-            Err(_) => {} // Expected behavior
-        }
+        assert!(
+            decoder.push(b"extra").is_err(),
+            "Push after seal should fail"
+        );
     }
 
     // If we got valid base64 data, try to decode it as a gRPC-Web frame
     if !decoded_data.is_empty() {
         validate_decoded_trailer_frame(&decoded_data);
+    }
+}
+
+fn observe_stream_push_result(
+    result: Result<Vec<u8>, impl core::fmt::Debug>,
+    context: &str,
+    max_decoded_len: usize,
+) {
+    match result {
+        Ok(decoded) => {
+            assert!(
+                decoded.len() <= max_decoded_len,
+                "{context}: decoded {} bytes, expected at most {}",
+                decoded.len(),
+                max_decoded_len
+            );
+        }
+        Err(err) => {
+            let diagnostic = format!("{err:?}");
+            assert!(
+                !diagnostic.trim().is_empty(),
+                "{context}: push failure should expose diagnostics"
+            );
+        }
     }
 }
 
@@ -360,7 +381,7 @@ fn validate_decoded_trailer_frame(data: &[u8]) {
                 for (key, _value) in trailers.metadata.iter() {
                     // Key should be valid metadata key format
                     assert!(
-                        !key.is_empty() && key.chars().all(|c| c.is_ascii()),
+                        !key.is_empty() && key.is_ascii(),
                         "Invalid metadata key format after chunked decoding: {:?}",
                         key
                     );
