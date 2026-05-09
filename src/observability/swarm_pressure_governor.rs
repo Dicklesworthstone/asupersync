@@ -1221,6 +1221,49 @@ mod tests {
     }
 
     #[test]
+    fn test_invalid_peer_pressure_threshold_falls_back_to_default() {
+        for invalid_threshold in [f64::NAN, -0.01] {
+            let mut config = SwarmPressureGovernorConfig::default();
+            config.peer_pressure_backpressure_threshold = invalid_threshold;
+            let runtime = std::sync::Arc::new(
+                RuntimeBuilder::new()
+                    .worker_threads(1)
+                    .build()
+                    .expect("Failed to create test runtime"),
+            );
+            let pressure_governor = PressureGovernor::new(
+                config.pressure_config.clone(),
+                std::sync::Arc::clone(&runtime),
+                Metrics::new(),
+            )
+            .expect("Failed to create pressure governor");
+            let governor =
+                SwarmPressureGovernor::new(config, runtime.resource_monitor(), pressure_governor);
+            let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+
+            governor
+                .record_peer_pressure("peer-below-default", 0.75, DegradationLevel::Light)
+                .expect("peer pressure report should be accepted");
+            let below_default = governor
+                .check_region_admission(&cx, RegionPriority::Normal, None)
+                .expect("admission should use fallback peer threshold");
+            assert!(matches!(below_default.decision, AdmissionDecision::Admit));
+
+            assert!(governor.clear_peer_pressure("peer-below-default").is_some());
+            governor
+                .record_peer_pressure("peer-above-default", 0.85, DegradationLevel::Light)
+                .expect("peer pressure report should be accepted");
+            let above_default = governor
+                .check_region_admission(&cx, RegionPriority::Normal, None)
+                .expect("admission should use fallback peer threshold");
+            assert!(matches!(
+                above_default.decision,
+                AdmissionDecision::AdmitWithBackpressure
+            ));
+        }
+    }
+
+    #[test]
     fn test_peer_pressure_rejects_low_priority_admission() {
         let governor = create_test_swarm_governor();
         governor
