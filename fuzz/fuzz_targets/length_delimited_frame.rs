@@ -11,6 +11,7 @@ use arbitrary::Arbitrary;
 use asupersync::bytes::BytesMut;
 use asupersync::codec::{Decoder, LengthDelimitedCodec};
 use libfuzzer_sys::fuzz_target;
+use std::io;
 
 const MAX_INPUT_LEN: usize = 4 * 1024;
 const MAX_OFFSET: usize = 16;
@@ -225,6 +226,60 @@ fn build_codec(config: RealizedConfig) -> LengthDelimitedCodec {
     builder.new_codec()
 }
 
+fn observe_decode_eof(
+    config: RealizedConfig,
+    codec: &mut LengthDelimitedCodec,
+    buf: &mut BytesMut,
+) -> io::Result<Option<BytesMut>> {
+    let before_len = buf.len();
+    let result = codec.decode_eof(buf);
+
+    assert!(
+        buf.len() <= before_len,
+        "decode_eof must not grow the source buffer"
+    );
+
+    match &result {
+        Ok(Some(frame)) => {
+            assert!(
+                buf.len() < before_len,
+                "successful EOF decode must consume buffered bytes"
+            );
+
+            let header_len = config.length_field_offset + config.length_field_length;
+            let retained_header_len = header_len.saturating_sub(config.num_skip);
+            let max_visible_len = config.max_frame_length.saturating_add(retained_header_len);
+            assert!(
+                frame.len() <= max_visible_len,
+                "EOF frame length {} exceeds visible bound {}",
+                frame.len(),
+                max_visible_len
+            );
+        }
+        Ok(None) => {
+            assert!(
+                buf.is_empty(),
+                "Ok(None) at EOF must leave no buffered bytes"
+            );
+        }
+        Err(error) => {
+            assert!(
+                matches!(
+                    error.kind(),
+                    io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof
+                ),
+                "decode_eof returned unexpected error kind: {error:?}"
+            );
+            assert!(
+                !error.to_string().is_empty(),
+                "decode_eof errors must have a non-empty description"
+            );
+        }
+    }
+
+    result
+}
+
 fn drive_decoder(config: RealizedConfig, bytes: &[u8]) {
     let mut codec = build_codec(config);
     let mut buf = BytesMut::from(bytes);
@@ -254,5 +309,5 @@ fn drive_decoder(config: RealizedConfig, bytes: &[u8]) {
         }
     }
 
-    let _ = codec.decode_eof(&mut buf);
+    let _ = observe_decode_eof(config, &mut codec, &mut buf);
 }
