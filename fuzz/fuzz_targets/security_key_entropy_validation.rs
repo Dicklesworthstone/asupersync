@@ -62,7 +62,7 @@ fuzz_target!(|data: &[u8]| {
         }
         count
     };
-    let hamming: u32 = bytes.iter().map(|b| u32::from(b.count_ones())).sum();
+    let hamming: u32 = bytes.iter().map(|b| b.count_ones()).sum();
 
     let result = asupersync::security::key::AuthKey::from_bytes(bytes);
 
@@ -127,8 +127,51 @@ fuzz_target!(|data: &[u8]| {
 
             // Invariant 5: error Debug/Display must not panic on any
             // weak-key reason — these strings show up in operator logs.
-            let _ = format!("{err}");
-            let _ = format!("{err:?}");
+            assert_weak_key_diagnostics_visible(&err);
         }
     }
 });
+
+fn assert_weak_key_diagnostics_visible(err: &asupersync::security::key::AuthKeyError) {
+    let display = format!("{err}");
+    let debug = format!("{err:?}");
+    assert!(
+        !display.is_empty(),
+        "weak-key Display diagnostic must be visible"
+    );
+    assert!(
+        !debug.is_empty(),
+        "weak-key Debug diagnostic must be visible"
+    );
+    let asupersync::security::key::AuthKeyError::WeakKey { reason } = err;
+    let reason_display = format!("{reason}");
+    let reason_debug = format!("{reason:?}");
+    match reason {
+        asupersync::security::key::WeakKeyReason::InsufficientByteDiversity { .. } => {
+            assert!(
+                display.contains("distinct")
+                    || debug.contains("distinct")
+                    || reason_display.contains("distinct")
+                    || reason_debug.contains("distinct")
+                    || display.contains("diversity")
+                    || debug.contains("diversity")
+                    || reason_display.contains("diversity")
+                    || reason_debug.contains("diversity"),
+                "low distinct-byte rejection should describe distinct-byte weakness"
+            );
+        }
+        asupersync::security::key::WeakKeyReason::ExtremeHammingWeight { .. } => {
+            assert!(
+                display.contains("Hamming")
+                    || debug.contains("Hamming")
+                    || reason_display.contains("Hamming")
+                    || reason_debug.contains("Hamming")
+                    || display.contains("hamming")
+                    || debug.contains("hamming")
+                    || reason_display.contains("hamming")
+                    || reason_debug.contains("hamming"),
+                "weak Hamming-weight rejection should describe Hamming-weight weakness"
+            );
+        }
+    }
+}
