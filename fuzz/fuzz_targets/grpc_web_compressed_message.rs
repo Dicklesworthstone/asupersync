@@ -266,7 +266,7 @@ fn observe_frame_result(
             );
         }
         Ok(Some(WebFrame::Trailers(trailer))) => {
-            let _ = trailer.status.code();
+            assert_trailer_status_observation(&trailer, "decoded trailer frame");
         }
         Ok(None) => {}
         Err(_) => {
@@ -282,14 +282,24 @@ fn observe_trailer_result(
     result: Result<asupersync::grpc::web::TrailerFrame, impl core::fmt::Debug>,
 ) {
     if let Ok(trailer) = result {
-        let _ = trailer.status.code();
+        assert_trailer_status_observation(&trailer, "direct trailer decode");
     }
 }
 
-fn observe_base64_finish_result(
-    result: Result<Vec<u8>, impl core::fmt::Debug>,
-    context: &str,
-) {
+fn assert_trailer_status_observation(trailer: &asupersync::grpc::web::TrailerFrame, context: &str) {
+    let code = trailer.status.code();
+    let code_value = code.as_i32();
+    assert!(
+        (0..=16).contains(&code_value),
+        "{context}: gRPC status code must stay in canonical range: {code_value}"
+    );
+    assert!(
+        !code.as_str().is_empty(),
+        "{context}: gRPC status code must expose a canonical name"
+    );
+}
+
+fn observe_base64_finish_result(result: Result<Vec<u8>, impl core::fmt::Debug>, context: &str) {
     match result {
         Ok(decoded) => {
             assert!(
