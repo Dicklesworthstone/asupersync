@@ -18,6 +18,44 @@ fn concrete_subject_for(pattern: &SubjectPattern) -> String {
         .join(".")
 }
 
+fn observe_pattern_methods(pattern: &SubjectPattern) {
+    let segments = pattern.segments();
+    let expected_has_wildcards = segments
+        .iter()
+        .any(|segment| !matches!(segment, SubjectToken::Literal(_)));
+    let has_wildcards = pattern.has_wildcards();
+    assert_eq!(
+        has_wildcards, expected_has_wildcards,
+        "has_wildcards should mirror parsed token shape"
+    );
+
+    let expected_full_wildcard = matches!(segments.last(), Some(SubjectToken::Tail));
+    let is_full_wildcard = pattern.is_full_wildcard();
+    assert_eq!(
+        is_full_wildcard, expected_full_wildcard,
+        "is_full_wildcard should track a terminal tail wildcard"
+    );
+    if is_full_wildcard {
+        assert!(
+            has_wildcards,
+            "a terminal tail wildcard should also count as a wildcard"
+        );
+    }
+
+    assert_eq!(
+        pattern.canonical_key(),
+        pattern.as_str(),
+        "canonical_key should mirror as_str"
+    );
+}
+
+fn observe_parse_error(input: &str, error: &impl std::fmt::Display) {
+    assert!(
+        !error.to_string().is_empty(),
+        "rejected subject pattern should expose a diagnostic for {input:?}"
+    );
+}
+
 // Fuzz target for messaging subject pattern parser.
 //
 // Tests the SubjectPattern::parse function with arbitrary byte inputs,
@@ -66,10 +104,8 @@ fuzz_target!(|data: &[u8]| {
             "canonical key must mirror as_str"
         );
 
-        // Property 4: Pattern methods should not panic
-        let _ = pattern.has_wildcards();
-        let _ = pattern.is_full_wildcard();
-        let _ = pattern.canonical_key();
+        // Property 4: Pattern helpers should agree with parsed tokens.
+        observe_pattern_methods(pattern);
 
         // Property 5: A synthesized concrete subject should match the
         // parsed pattern, and overlap must be symmetric against the
@@ -99,8 +135,8 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Property 6: Error cases should return proper errors, not panics
-    if let Ok(Err(error)) = parse_result {
+    if let Ok(Err(ref error)) = parse_result {
         // This is expected for malformed input - the parser correctly rejected it
-        let _ = error;
+        observe_parse_error(&input, error);
     }
 });
