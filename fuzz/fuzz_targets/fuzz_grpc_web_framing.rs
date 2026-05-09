@@ -211,7 +211,15 @@ fn build_structured_stream(stream: &StructuredStream) -> Vec<u8> {
                 payload,
             } => {
                 let payload = truncate_bytes(payload.clone(), MAX_STRUCTURED_PAYLOAD);
-                let _ = codec.encode_data(&payload, *compressed, &mut out);
+                let before_len = out.len();
+                let result = codec.encode_data(&payload, *compressed, &mut out);
+                observe_frame_encode_result(
+                    result,
+                    "data frame encode",
+                    before_len,
+                    out.len(),
+                    Some(5 + payload.len()),
+                );
             }
             StructuredFrame::StructuredTrailers {
                 compressed_flag,
@@ -237,7 +245,8 @@ fn build_structured_stream(stream: &StructuredStream) -> Vec<u8> {
                 }
 
                 let start = out.len();
-                let _ = codec.encode_trailers(&status, &metadata, &mut out);
+                let result = codec.encode_trailers(&status, &metadata, &mut out);
+                observe_frame_encode_result(result, "trailer frame encode", start, out.len(), None);
                 if *compressed_flag && out.len() > start {
                     out[start] |= 0x01;
                 }
@@ -266,6 +275,37 @@ fn build_structured_stream(stream: &StructuredStream) -> Vec<u8> {
     }
 
     out.to_vec()
+}
+
+fn observe_frame_encode_result(
+    result: Result<(), GrpcError>,
+    context: &str,
+    before_len: usize,
+    after_len: usize,
+    expected_growth: Option<usize>,
+) {
+    match result {
+        Ok(()) => {
+            let growth = after_len
+                .checked_sub(before_len)
+                .expect("encoder shortened output buffer");
+            if let Some(expected_growth) = expected_growth {
+                assert_eq!(
+                    growth, expected_growth,
+                    "{context} wrote an unexpected frame length"
+                );
+            } else {
+                assert!(growth >= 5, "{context} should write a frame header");
+            }
+        }
+        Err(error) => {
+            assert_grpc_error_observable(&error, context);
+            assert_eq!(
+                before_len, after_len,
+                "{context} failure should not mutate output"
+            );
+        }
+    }
 }
 
 fn exercise_binary_stream(max_frame_size: usize, bytes: Vec<u8>) {
