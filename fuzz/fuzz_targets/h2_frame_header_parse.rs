@@ -16,7 +16,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use asupersync::bytes::BytesMut;
-use asupersync::http::h2::FrameHeader;
+use asupersync::http::h2::frame::{FRAME_HEADER_SIZE, FrameHeader};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_INPUT_LEN: usize = 4096;
@@ -30,25 +30,41 @@ fuzz_target!(|data: &[u8]| {
     buf.extend_from_slice(data);
 
     let r = catch_unwind(AssertUnwindSafe(|| FrameHeader::parse(&mut buf)));
-    assert!(
-        r.is_ok(),
-        "FrameHeader::parse panicked on {} bytes",
-        data.len()
-    );
 
-    // If parse succeeded, the documented invariants hold.
-    if let Ok(Ok(header)) = r {
-        // length is a 24-bit field per RFC 9113 §4.1.
-        assert!(
-            header.length <= 0x00FF_FFFF,
-            "FrameHeader::parse returned length > 2^24-1: {}",
-            header.length
-        );
-        // stream_id MUST have the reserved high bit cleared.
-        assert!(
-            header.stream_id & 0x8000_0000 == 0,
-            "FrameHeader::parse returned stream_id with reserved bit set: {:#x}",
-            header.stream_id
-        );
+    match r {
+        Ok(Ok(header)) => {
+            // length is a 24-bit field per RFC 9113 §4.1.
+            assert!(
+                header.length <= 0x00FF_FFFF,
+                "FrameHeader::parse returned length > 2^24-1: {}",
+                header.length
+            );
+            // stream_id MUST have the reserved high bit cleared.
+            assert!(
+                header.stream_id & 0x8000_0000 == 0,
+                "FrameHeader::parse returned stream_id with reserved bit set: {:#x}",
+                header.stream_id
+            );
+        }
+        Ok(Err(error)) => {
+            let diagnostic = error.to_string();
+            assert!(
+                !diagnostic.trim().is_empty(),
+                "FrameHeader::parse error diagnostics must be non-empty"
+            );
+            if data.len() < FRAME_HEADER_SIZE {
+                assert!(
+                    diagnostic.contains("Incomplete")
+                        || diagnostic.contains("incomplete")
+                        || diagnostic.contains("Insufficient")
+                        || diagnostic.contains("insufficient")
+                        || diagnostic.contains("header"),
+                    "short frame-header input should expose a short-read diagnostic: {diagnostic}"
+                );
+            }
+        }
+        Err(_) => {
+            panic!("FrameHeader::parse panicked on {} bytes", data.len());
+        }
     }
 });
