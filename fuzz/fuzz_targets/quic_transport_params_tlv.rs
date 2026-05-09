@@ -189,6 +189,22 @@ fn assert_valid_decoded_params(params: &TransportParameters) {
     }
 }
 
+fn observe_transport_parameters_decode(bytes: &[u8]) -> Result<TransportParameters, QuicCoreError> {
+    let result = TransportParameters::decode(bytes);
+
+    match &result {
+        Ok(params) => assert_valid_decoded_params(params),
+        Err(err) => {
+            assert!(
+                !format!("{err:?}").is_empty(),
+                "transport parameter decode errors must remain observable"
+            );
+        }
+    }
+
+    result
+}
+
 fn encode_parameter(out: &mut Vec<u8>, id: u64, value: &[u8]) {
     encode_varint(id, out).expect("fuzz transport parameter id should fit QUIC varint");
     encode_varint(value.len() as u64, out)
@@ -535,13 +551,13 @@ fn process_tlv_operation(operation: &TlvOperation) {
             let _ = tp.encode(&mut encoded);
         }
         TlvOperation::Decode { bytes } => {
-            let _ = TransportParameters::decode(bytes);
+            let _ = observe_transport_parameters_decode(bytes);
         }
         TlvOperation::RoundTrip { params } => {
             let tp: TransportParameters = params.clone().into();
             let mut encoded = Vec::new();
             if tp.encode(&mut encoded).is_ok() {
-                let _ = TransportParameters::decode(&encoded);
+                let _ = observe_transport_parameters_decode(&encoded);
             }
         }
     }
@@ -561,7 +577,7 @@ fn process_attack_scenario(scenario: &AttackScenario) {
             };
             let mut encoded = Vec::new();
             if params.encode(&mut encoded).is_ok() {
-                let _ = TransportParameters::decode(&encoded);
+                let _ = observe_transport_parameters_decode(&encoded);
             }
         }
         AttackScenario::TruncatedData { truncate_bytes } => {
@@ -575,7 +591,7 @@ fn process_attack_scenario(scenario: &AttackScenario) {
             if params.encode(&mut encoded).is_ok() {
                 let truncate_amount = (*truncate_bytes as usize).min(encoded.len());
                 encoded.truncate(encoded.len().saturating_sub(truncate_amount));
-                let _ = TransportParameters::decode(&encoded);
+                let _ = observe_transport_parameters_decode(&encoded);
             }
         }
         _ => {
