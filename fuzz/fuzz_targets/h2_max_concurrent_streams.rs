@@ -6,7 +6,7 @@ use libfuzzer_sys::fuzz_target;
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::codec::Encoder;
 use asupersync::http::h2::connection::FrameCodec;
-use asupersync::http::h2::error::ErrorCode;
+use asupersync::http::h2::error::{ErrorCode, H2Error};
 use asupersync::http::h2::frame::{FRAME_HEADER_SIZE, Frame, HeadersFrame, Setting, SettingsFrame};
 
 /// HTTP/2 MAX_CONCURRENT_STREAMS enforcement test sequence
@@ -140,14 +140,13 @@ fn test_max_concurrent_streams_enforcement(test_seq: &MaxConcurrentStreamsSequen
 
     // Send initial SETTINGS frame to establish MAX_CONCURRENT_STREAMS
     let settings_frame = create_settings_frame(max_streams);
-    match codec.encode(settings_frame, &mut buffer) {
-        Ok(()) => {
-            // Settings frame should encode successfully
-            assert!(
-                buffer.len() >= FRAME_HEADER_SIZE,
-                "SETTINGS frame should produce output"
-            );
-        }
+    match observe_frame_encode(
+        "initial MAX_CONCURRENT_STREAMS SETTINGS frame",
+        &mut codec,
+        settings_frame,
+        &mut buffer,
+    ) {
+        Ok(()) => {}
         Err(_) => {
             // Settings encoding failed - skip this test
             return;
@@ -174,7 +173,12 @@ fn test_max_concurrent_streams_enforcement(test_seq: &MaxConcurrentStreamsSequen
         // Test expected behavior based on current stream count
         let expected_result = state.open_stream(stream_id);
 
-        match codec.encode(headers_frame, &mut buffer) {
+        match observe_frame_encode(
+            "stream-opening HEADERS frame",
+            &mut codec,
+            headers_frame,
+            &mut buffer,
+        ) {
             Ok(()) => {
                 match expected_result {
                     Ok(()) => {
@@ -188,10 +192,16 @@ fn test_max_concurrent_streams_enforcement(test_seq: &MaxConcurrentStreamsSequen
                         // Send DATA frame if specified
                         if let Some(data_spec) = &attempt.data_frame {
                             let data_frame = create_data_frame(stream_id, data_spec);
-                            let _ = codec.encode(data_frame, &mut buffer);
+                            let data_encoded = observe_frame_encode(
+                                "DATA frame for successfully opened stream",
+                                &mut codec,
+                                data_frame,
+                                &mut buffer,
+                            )
+                            .is_ok();
 
                             // Close stream if END_STREAM was set
-                            if data_spec.end_stream {
+                            if data_encoded && data_spec.end_stream {
                                 state.close_stream(stream_id);
                             }
                         } else if attempt.end_stream {
@@ -274,7 +284,7 @@ fn test_stream_lifecycle_with_limits(test_seq: &MaxConcurrentStreamsSequence) {
 
     // Test rapid open/close cycles
     for i in 0..max_streams.min(10) {
-        let stream_id = (i * 2 + 1) as u32; // Client streams (odd)
+        let stream_id = i * 2 + 1; // Client streams (odd)
 
         // Open stream
         let result = state.open_stream(stream_id);
@@ -300,7 +310,7 @@ fn test_stream_lifecycle_with_limits(test_seq: &MaxConcurrentStreamsSequence) {
 
     // Test exceeding the limit
     for i in 0..max_streams + 5 {
-        let stream_id = (i * 2 + 101) as u32; // Different range to avoid conflicts
+        let stream_id = i * 2 + 101; // Different range to avoid conflicts
 
         let result = state.open_stream(stream_id);
         if i < max_streams {
@@ -315,6 +325,49 @@ fn test_stream_lifecycle_with_limits(test_seq: &MaxConcurrentStreamsSequence) {
                 "Stream {} should be refused beyond limit",
                 stream_id
             );
+        }
+    }
+}
+
+fn observe_frame_encode(
+    context: &str,
+    codec: &mut FrameCodec,
+    frame: Frame,
+    buffer: &mut BytesMut,
+) -> Result<(), H2Error> {
+    let before_len = buffer.len();
+    match codec.encode(frame, buffer) {
+        Ok(()) => {
+            let appended = buffer
+                .len()
+                .checked_sub(before_len)
+                .expect("buffer length should not shrink on encode success");
+            assert!(
+                appended >= FRAME_HEADER_SIZE,
+                "{context}: encoded frame should include an HTTP/2 frame header"
+            );
+
+            let header = &buffer[before_len..before_len + FRAME_HEADER_SIZE];
+            let declared_len =
+                ((header[0] as usize) << 16) | ((header[1] as usize) << 8) | header[2] as usize;
+            assert_eq!(
+                appended,
+                FRAME_HEADER_SIZE + declared_len,
+                "{context}: encoded byte count should match declared frame length"
+            );
+            Ok(())
+        }
+        Err(err) => {
+            assert_eq!(
+                buffer.len(),
+                before_len,
+                "{context}: failed encode should not append a partial frame"
+            );
+            assert!(
+                !err.message.is_empty(),
+                "{context}: encode failure should expose a diagnostic"
+            );
+            Err(err)
         }
     }
 }
@@ -335,23 +388,25 @@ fn test_interleaved_frame(
                 .collect();
 
             let frame = Frame::Settings(SettingsFrame::new(settings_list));
-            let _ = codec.encode(frame, buffer);
+            let _ = observe_frame_encode("interleaved SETTINGS frame", codec, frame, buffer);
         }
         InterleavedFrame::RstStream {
             stream_id,
-            error_code: _,
+            error_code,
         } => {
             let normalized_stream_id = normalize_stream_id(*stream_id);
             if normalized_stream_id != 0 {
-                // Close the stream in our state tracking
-                state.close_stream(normalized_stream_id);
-
                 // Create RST_STREAM frame
                 let frame = Frame::RstStream(asupersync::http::h2::frame::RstStreamFrame::new(
                     normalized_stream_id,
-                    ErrorCode::Cancel,
+                    ErrorCode::from_u32(u32::from(*error_code)),
                 ));
-                let _ = codec.encode(frame, buffer);
+                if observe_frame_encode("interleaved RST_STREAM frame", codec, frame, buffer)
+                    .is_ok()
+                {
+                    // Close the stream in our state tracking only after the frame is observable.
+                    state.close_stream(normalized_stream_id);
+                }
             }
         }
         InterleavedFrame::WindowUpdate {
@@ -363,7 +418,7 @@ fn test_interleaved_frame(
                 normalize_stream_id(*stream_id),
                 normalized_increment,
             ));
-            let _ = codec.encode(frame, buffer);
+            let _ = observe_frame_encode("interleaved WINDOW_UPDATE frame", codec, frame, buffer);
         }
         InterleavedFrame::Ping { ack } => {
             let ping_frame = if ack == &true {
@@ -372,7 +427,7 @@ fn test_interleaved_frame(
                 asupersync::http::h2::frame::PingFrame::new([0u8; 8])
             };
             let frame = Frame::Ping(ping_frame);
-            let _ = codec.encode(frame, buffer);
+            let _ = observe_frame_encode("interleaved PING frame", codec, frame, buffer);
         }
     }
 }
@@ -446,7 +501,7 @@ fn normalize_stream_id(stream_id: u32) -> u32 {
     let normalized = stream_id & 0x7FFFFFFF; // Clear reserved bit
     if normalized == 0 {
         1 // Default to stream 1
-    } else if normalized % 2 == 0 {
+    } else if normalized.is_multiple_of(2) {
         normalized + 1 // Make odd (client-initiated)
     } else {
         normalized
@@ -456,7 +511,7 @@ fn normalize_stream_id(stream_id: u32) -> u32 {
 /// Normalize setting identifier to valid range
 fn normalize_setting_id(id: u16) -> u16 {
     match id {
-        1..=6 => id,                // Standard settings
-        _ => ((id % 6) + 1) as u16, // Map to standard settings
+        1..=6 => id,       // Standard settings
+        _ => (id % 6) + 1, // Map to standard settings
     }
 }
