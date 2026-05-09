@@ -367,8 +367,7 @@ fn test_body_parsing(
         response.extend(String::from_utf8_lossy(&body_data).chars());
     }
 
-    // Test that parsing doesn't panic or cause undefined behavior
-    let _ = decode_response_bytes(response.as_bytes());
+    observe_response_decode(response.as_bytes());
 }
 
 /// Test header injection attacks
@@ -411,6 +410,67 @@ fn decode_response_bytes(input: &[u8]) -> Result<Option<Response>, HttpError> {
     codec.decode(&mut buf)
 }
 
+fn observe_response_decode(input: &[u8]) {
+    let mut codec = Http1ClientCodec::new();
+    let mut buf = BytesMut::from(input);
+    let before_len = buf.len();
+    let result = codec.decode(&mut buf);
+
+    assert!(
+        buf.len() <= before_len,
+        "client response decoder grew source buffer from {} to {} bytes",
+        before_len,
+        buf.len()
+    );
+
+    match &result {
+        Ok(Some(response)) => validate_decoded_response(response),
+        Ok(None) => {
+            assert!(
+                buf.len() <= before_len,
+                "incomplete client response decode should not grow source buffer"
+            );
+        }
+        Err(error) => {
+            assert!(
+                !error.to_string().is_empty(),
+                "client response parser errors should carry non-empty diagnostics"
+            );
+        }
+    }
+}
+
+fn validate_decoded_response(response: &Response) {
+    assert!(
+        (100..=999).contains(&response.status),
+        "decoded status {} outside accepted client range",
+        response.status
+    );
+    validate_reason_phrase_termination(response.reason.as_bytes());
+
+    for (name, value) in &response.headers {
+        validate_header_name_token_grammar(name);
+        validate_header_value_visible_ascii(value.as_bytes());
+    }
+
+    if let Some(cl_header) = header_value(&response.headers, "content-length") {
+        validate_content_length_bounds(cl_header);
+    }
+    if status_has_no_body(response.status) {
+        assert!(
+            response.body.is_empty(),
+            "status {} must not carry a decoded response body",
+            response.status
+        );
+    }
+    assert!(
+        response.body.len() as u64 <= MAX_BODY_SIZE,
+        "decoded response body {} exceeds fuzz body limit {}",
+        response.body.len(),
+        MAX_BODY_SIZE
+    );
+}
+
 fn assert_known_client_response_outputs() {
     let response = decode_response_bytes(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello")
         .expect("valid response should decode")
@@ -439,6 +499,20 @@ fn assert_known_client_response_outputs() {
         decode_response_bytes(b"HTTP/1.1 200 OK\r\nContent-Length: 16777217\r\n\r\n"),
         Err(HttpError::BodyTooLarge)
     ));
+    assert!(matches!(
+        decode_response_bytes(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhe"),
+        Ok(None)
+    ));
+
+    for candidate in [
+        b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello".as_ref(),
+        b"HTTP/1.1 204 No Content\r\n\r\n".as_ref(),
+        b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhe".as_ref(),
+        b"HTTP/1.1 99 Nope\r\n\r\n".as_ref(),
+        b"HTTP/1.1 200 OK\r\nBad Name: x\r\n\r\n".as_ref(),
+    ] {
+        observe_response_decode(candidate);
+    }
 }
 
 /// Helper: Validate reason phrase CRLF termination
@@ -545,8 +619,7 @@ fn validate_no_header_injection(headers: &[(String, String)], injection_payload:
 
 /// Test raw data as HTTP response parsing
 fn test_raw_response_parsing(input: &[u8]) {
-    // Test that parsing arbitrary input doesn't cause crashes
-    let _ = decode_response_bytes(input);
+    observe_response_decode(input);
 
     // Test with common HTTP prefixes
     if input.len() > 4 {
@@ -555,7 +628,7 @@ fn test_raw_response_parsing(input: &[u8]) {
         for prefix in &prefixes {
             let mut test_input = prefix.to_vec();
             test_input.extend_from_slice(input);
-            let _ = decode_response_bytes(&test_input);
+            observe_response_decode(&test_input);
         }
     }
 }
