@@ -84,6 +84,24 @@ fn observe_dns_name_decode(packet: &[u8], offset: &mut usize) -> Result<String, 
     result
 }
 
+fn observe_dns_response_outcome(result: Result<(), DnsError>) {
+    if let Err(err) = result {
+        assert!(
+            !format!("{err:?}").is_empty(),
+            "DNS response parser errors must stay observable after dispatch"
+        );
+    }
+}
+
+fn observe_dns_name_outcome(result: Result<String, DnsError>) {
+    if let Err(err) = result {
+        assert!(
+            !format!("{err:?}").is_empty(),
+            "DNS name decoder errors must stay observable after dispatch"
+        );
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
     if data.len() < 4 {
         return;
@@ -105,7 +123,7 @@ fuzz_target!(|data: &[u8]| {
             // The parser MUST return Ok or Err; anything else (panic,
             // hang) is a bug. Observe both successful parses and typed
             // errors so parser outcomes do not disappear.
-            let _ = observe_dns_response_parse(packet, expected_id);
+            observe_dns_response_outcome(observe_dns_response_parse(packet, expected_id));
         }
         _ => {
             // ── Property 1, 2 on decode_dns_name standalone ───────────
@@ -117,7 +135,7 @@ fuzz_target!(|data: &[u8]| {
                 return;
             }
             let mut offset = (packet[0] as usize) % packet.len().max(1);
-            let _ = observe_dns_name_decode(packet, &mut offset);
+            observe_dns_name_outcome(observe_dns_name_decode(packet, &mut offset));
         }
     }
 
@@ -131,7 +149,7 @@ fuzz_target!(|data: &[u8]| {
         .chain([0xC0u8, 0x00].iter().copied())
         .collect::<Vec<u8>>();
     let mut off = 12;
-    let _ = observe_dns_name_decode(&bomb_self_loop, &mut off);
+    observe_dns_name_outcome(observe_dns_name_decode(&bomb_self_loop, &mut off));
 
     // 2-step cycle: offset 12 points to 14, offset 14 points to 12
     let mut bomb_two_cycle = vec![0u8; 16];
@@ -140,5 +158,5 @@ fuzz_target!(|data: &[u8]| {
     bomb_two_cycle[14] = 0xC0;
     bomb_two_cycle[15] = 0x0C; // -> offset 12
     let mut off = 12;
-    let _ = observe_dns_name_decode(&bomb_two_cycle, &mut off);
+    observe_dns_name_outcome(observe_dns_name_decode(&bomb_two_cycle, &mut off));
 });
