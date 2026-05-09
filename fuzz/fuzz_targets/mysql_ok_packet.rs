@@ -17,26 +17,55 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    let _ = fuzz_parse_ok_packet_fields(data);
+    let raw_result = observe_ok_packet_fields(data);
+    if data.first() != Some(&0x00) {
+        assert!(
+            raw_result.is_none(),
+            "non-OK header should not parse as a MySQL OK packet"
+        );
+    }
 
     if let Some(packet) = build_structured_packet(data) {
-        let result = fuzz_parse_ok_packet_fields(&packet.bytes);
+        let result = observe_ok_packet_fields(&packet.bytes);
         if let Some(expected) = packet.expected {
             assert_eq!(result.expect("structured OK packet should parse"), expected);
+        } else if packet.bytes.first() != Some(&0x00) {
+            assert!(
+                result.is_none(),
+                "structured non-OK header should not parse as a MySQL OK packet"
+            );
         }
     }
 });
 
-fn build_structured_packet(seed: &[u8]) -> Option<StructuredPacket> {
-    if seed.is_empty() {
-        return None;
+fn observe_ok_packet_fields(data: &[u8]) -> Option<(u64, u16)> {
+    match fuzz_parse_ok_packet_fields(data) {
+        Ok(fields) => {
+            assert_eq!(
+                data.first(),
+                Some(&0x00),
+                "OK packet parser accepted a non-OK header"
+            );
+            Some(fields)
+        }
+        Err(err) => {
+            assert!(
+                !err.to_string().is_empty(),
+                "OK packet parser returned an empty error diagnostic"
+            );
+            None
+        }
     }
+}
 
-    let header = match seed[0] & 0x03 {
+fn build_structured_packet(seed: &[u8]) -> Option<StructuredPacket> {
+    let first = seed.first().copied()?;
+
+    let header = match first & 0x03 {
         0 => 0x00,
         1 => 0xFE,
         2 => 0xFF,
-        _ => seed[0],
+        _ => first,
     };
     let (affected_bytes, affected_rows) =
         encode_lenenc(seed.get(1).copied().unwrap_or(0), take_window(seed, 2));
@@ -52,7 +81,8 @@ fn build_structured_packet(seed: &[u8]) -> Option<StructuredPacket> {
         seed.get(5).copied().unwrap_or(0),
         seed.get(6).copied().unwrap_or(0),
     ]);
-    let tail_len = usize::from(seed.get(7).copied().unwrap_or(0) & 0x0F);
+    let truncate_selector = seed.get(7).copied().unwrap_or(0);
+    let tail_len = usize::from(truncate_selector & 0x0F);
 
     let mut bytes =
         Vec::with_capacity(1 + affected_bytes.len() + last_insert_id_bytes.len() + 4 + tail_len);
@@ -64,8 +94,8 @@ fn build_structured_packet(seed: &[u8]) -> Option<StructuredPacket> {
     bytes.extend(seed.iter().copied().skip(TAIL_SOURCE_OFFSET).take(tail_len));
 
     let required_len = 1 + affected_bytes.len() + last_insert_id_bytes.len() + 4;
-    let truncate_to = if seed.get(7).copied().unwrap_or(0) & 0x80 != 0 {
-        usize::from(seed[7] & 0x3F).min(bytes.len())
+    let truncate_to = if truncate_selector & 0x80 != 0 {
+        usize::from(truncate_selector & 0x3F).min(bytes.len())
     } else {
         bytes.len()
     };
@@ -84,8 +114,9 @@ fn build_structured_packet(seed: &[u8]) -> Option<StructuredPacket> {
 }
 
 fn take_window(seed: &[u8], start: usize) -> &[u8] {
+    let start = start.min(seed.len());
     let end = start.saturating_add(LENENC_SOURCE_WIDTH).min(seed.len());
-    &seed[start.min(seed.len())..end]
+    seed.get(start..end).unwrap_or(&[])
 }
 
 fn encode_lenenc(selector: u8, source: &[u8]) -> (Vec<u8>, Option<u64>) {
@@ -105,8 +136,9 @@ fn encode_lenenc(selector: u8, source: &[u8]) -> (Vec<u8>, Option<u64>) {
         2 => {
             let mut bytes = [0u8; 3];
             fill_prefix(&mut bytes, source);
-            let value =
-                u64::from(bytes[0]) | (u64::from(bytes[1]) << 8) | (u64::from(bytes[2]) << 16);
+            let value = bytes.iter().enumerate().fold(0u64, |acc, (offset, byte)| {
+                acc | (u64::from(*byte) << (offset * 8))
+            });
             let mut encoded = vec![0xFD];
             encoded.extend_from_slice(&bytes);
             (encoded, Some(value))
@@ -125,6 +157,7 @@ fn encode_lenenc(selector: u8, source: &[u8]) -> (Vec<u8>, Option<u64>) {
 }
 
 fn fill_prefix<const N: usize>(dst: &mut [u8; N], src: &[u8]) {
-    let copy_len = dst.len().min(src.len());
-    dst[..copy_len].copy_from_slice(&src[..copy_len]);
+    for (dst_byte, src_byte) in dst.iter_mut().zip(src.iter().copied()) {
+        *dst_byte = src_byte;
+    }
 }
