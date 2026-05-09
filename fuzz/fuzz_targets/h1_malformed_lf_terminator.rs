@@ -871,6 +871,12 @@ impl MockLfTerminatorParser {
     }
 }
 
+impl Default for MockLfTerminatorParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn fallback_token(value: &str, default: &str) -> String {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -1050,17 +1056,17 @@ fn test_lone_lf_detection(parser: &MockLfTerminatorParser, test_case: &Malformed
     let mut lone_lf_case = test_case.clone();
     lone_lf_case.termination = TerminationConfig::LoneLf;
 
-    if let Ok(parsed) = parser.parse_message(&lone_lf_case) {
-        if parser.strict_crlf {
-            let has_lone_lf = parsed
-                .termination_violations
-                .iter()
-                .any(|v| matches!(v.violation_type, ViolationType::LoneLf));
-            assert!(
-                has_lone_lf,
-                "Should detect lone LF violations in strict mode"
-            );
-        }
+    if let Ok(parsed) = parser.parse_message(&lone_lf_case)
+        && parser.strict_crlf
+    {
+        let has_lone_lf = parsed
+            .termination_violations
+            .iter()
+            .any(|v| matches!(v.violation_type, ViolationType::LoneLf));
+        assert!(
+            has_lone_lf,
+            "Should detect lone LF violations in strict mode"
+        );
     }
 }
 
@@ -1069,17 +1075,17 @@ fn test_bare_cr_detection(parser: &MockLfTerminatorParser, test_case: &Malformed
     let mut bare_cr_case = test_case.clone();
     bare_cr_case.termination = TerminationConfig::BareCr;
 
-    if let Ok(parsed) = parser.parse_message(&bare_cr_case) {
-        if parser.strict_crlf {
-            let has_bare_cr = parsed
-                .termination_violations
-                .iter()
-                .any(|v| matches!(v.violation_type, ViolationType::BareCr));
-            assert!(
-                has_bare_cr,
-                "Should detect bare CR violations in strict mode"
-            );
-        }
+    if let Ok(parsed) = parser.parse_message(&bare_cr_case)
+        && parser.strict_crlf
+    {
+        let has_bare_cr = parsed
+            .termination_violations
+            .iter()
+            .any(|v| matches!(v.violation_type, ViolationType::BareCr));
+        assert!(
+            has_bare_cr,
+            "Should detect bare CR violations in strict mode"
+        );
     }
 }
 
