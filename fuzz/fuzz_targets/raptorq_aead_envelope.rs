@@ -298,6 +298,32 @@ enum AeadEnvelopeError {
     NonceReuse,
 }
 
+fn assert_visible_envelope_error(error: &AeadEnvelopeError, label: &str) {
+    let diagnostic = format!("{error:?}");
+    assert!(
+        !diagnostic.is_empty(),
+        "{label} envelope parse errors should stay visible",
+    );
+}
+
+fn observe_aead_envelope_parse(data: &[u8], label: &str) {
+    match AeadEnvelope::from_bytes(data) {
+        Ok(envelope) => {
+            assert_eq!(envelope.magic, AEAD_ENVELOPE_MAGIC);
+            assert_eq!(envelope.version, AEAD_ENVELOPE_VERSION);
+
+            let serialized = envelope.to_bytes();
+            assert!(serialized.len() >= MIN_ENVELOPE_SIZE);
+            assert!(serialized.len() <= MAX_ENVELOPE_SIZE);
+            assert!(
+                AeadEnvelope::from_bytes(&serialized).is_ok(),
+                "{label} serialized envelope should parse again",
+            );
+        }
+        Err(error) => assert_visible_envelope_error(&error, label),
+    }
+}
+
 /// Test harness for AEAD envelope fuzzing.
 #[derive(Debug)]
 struct AeadTestHarness {
@@ -385,25 +411,27 @@ fn execute_aead_operation(
             esi,
             kind,
         } => {
-            if symbol_data.len() <= MAX_SYMBOL_SIZE {
-                if let Some(key) = harness.get_key(key_index).cloned() {
-                    let nonce = derive_nonce(nonce_base, esi);
+            if symbol_data.len() <= MAX_SYMBOL_SIZE
+                && let Some(key) = harness.get_key(key_index).cloned()
+            {
+                let nonce = derive_nonce(nonce_base, esi);
 
-                    // Check for nonce reuse if enabled
-                    if config.enable_nonce_reuse_detection && harness.check_nonce_reuse(nonce) {
-                        return; // Reject nonce reuse
+                // Check for nonce reuse if enabled
+                if config.enable_nonce_reuse_detection && harness.check_nonce_reuse(nonce) {
+                    let error = AeadEnvelopeError::NonceReuse;
+                    assert_visible_envelope_error(&error, "nonce reuse");
+                    return; // Reject nonce reuse
+                }
+
+                let symbol_id = create_symbol_id(object_id, sbn, esi);
+                let symbol = Symbol::new(symbol_id, symbol_data, kind.into());
+
+                match encrypt_symbol_to_envelope(&key, nonce, &symbol) {
+                    Ok(envelope) => {
+                        harness.store_envelope(key_index, envelope);
                     }
-
-                    let symbol_id = create_symbol_id(object_id, sbn, esi);
-                    let symbol = Symbol::new(symbol_id, symbol_data, kind.into());
-
-                    match encrypt_symbol_to_envelope(&key, nonce, &symbol) {
-                        Ok(envelope) => {
-                            harness.store_envelope(key_index, envelope);
-                        }
-                        Err(_) => {
-                            // Encryption failure is acceptable in fuzzing
-                        }
+                    Err(_) => {
+                        // Encryption failure is acceptable in fuzzing
                     }
                 }
             }
@@ -425,10 +453,10 @@ fn execute_aead_operation(
             envelope_index,
             tag_modification,
         } => {
-            if config.test_tag_boundaries {
-                if let Some(envelope) = harness.get_envelope(envelope_index) {
-                    test_tag_boundary_conditions(envelope, tag_modification);
-                }
+            if config.test_tag_boundaries
+                && let Some(envelope) = harness.get_envelope(envelope_index)
+            {
+                test_tag_boundary_conditions(envelope, tag_modification);
             }
         }
 
@@ -437,10 +465,10 @@ fn execute_aead_operation(
             overflow_offset,
             key_index,
         } => {
-            if config.test_nonce_overflow {
-                if let Some(key) = harness.get_key(key_index) {
-                    test_nonce_overflow(key, base_nonce, overflow_offset);
-                }
+            if config.test_nonce_overflow
+                && let Some(key) = harness.get_key(key_index)
+            {
+                test_nonce_overflow(key, base_nonce, overflow_offset);
             }
         }
 
@@ -448,10 +476,18 @@ fn execute_aead_operation(
             framing_error,
             key_index,
         } => {
-            if config.test_malformed_framing {
-                if let Some(key) = harness.get_key(key_index) {
-                    test_malformed_framing(framing_error, key);
-                }
+            let is_truncation_attack = matches!(
+                &framing_error,
+                FramingError::TruncatedNonce(_)
+                    | FramingError::MissingTag
+                    | FramingError::TruncatedEnvelope(_)
+            );
+
+            if config.test_malformed_framing
+                && (config.enable_truncation_attacks || !is_truncation_attack)
+                && let Some(key) = harness.get_key(key_index)
+            {
+                test_malformed_framing(framing_error, key);
             }
         }
 
@@ -460,13 +496,13 @@ fn execute_aead_operation(
             reorder_pattern,
             key_index,
         } => {
-            if config.test_byte_reordering {
-                if let (Some(envelope), Some(key)) = (
+            if config.test_byte_reordering
+                && let (Some(envelope), Some(key)) = (
                     harness.get_envelope(envelope_index),
                     harness.get_key(key_index),
-                ) {
-                    test_byte_reordering(envelope, reorder_pattern, key);
-                }
+                )
+            {
+                test_byte_reordering(envelope, reorder_pattern, key);
             }
         }
 
@@ -476,10 +512,10 @@ fn execute_aead_operation(
             payload1,
             payload2,
         } => {
-            if config.enable_nonce_reuse_detection {
-                if let Some(key) = harness.get_key(key_index) {
-                    test_nonce_reuse_detection(key, nonce, payload1, payload2);
-                }
+            if config.enable_nonce_reuse_detection
+                && let Some(key) = harness.get_key(key_index)
+            {
+                test_nonce_reuse_detection(key, nonce, payload1, payload2);
             }
         }
     }
@@ -847,7 +883,7 @@ fn test_byte_reordering(envelope: &AeadEnvelope, pattern: ReorderPattern, key: &
                 swapped.swap(0, last_idx);
 
                 // Try to parse the swapped data
-                let _ = AeadEnvelope::from_bytes(&swapped);
+                observe_aead_envelope_parse(&swapped, "byte-reordered AEAD envelope");
             }
         }
 
