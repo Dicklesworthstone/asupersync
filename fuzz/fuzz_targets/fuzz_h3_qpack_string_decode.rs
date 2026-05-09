@@ -28,10 +28,13 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::http::h3_native::{H3QpackMode, qpack_decode_field_section};
+use asupersync::http::h3_native::{
+    H3NativeError, H3QpackMode, QpackFieldPlan, qpack_decode_field_section,
+};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_INPUT_BYTES: usize = 64 * 1024;
+const FIELD_SECTION_PREFIX: [u8; 2] = [0x00, 0x00];
 
 #[derive(Arbitrary, Debug)]
 enum Scenario {
@@ -75,25 +78,37 @@ enum Scenario {
 }
 
 fuzz_target!(|s: Scenario| match s {
-    Scenario::Arbitrary(bytes) => fuzz_arbitrary(&bytes),
+    Scenario::Arbitrary(bytes) => {
+        fuzz_arbitrary(&bytes);
+        test_fixed_string_canaries();
+    }
     Scenario::LiteralNameWithPayload {
         repr_high,
         huffman,
         declared_len,
         payload,
-    } => fuzz_literal_name(repr_high, huffman, declared_len, &payload),
-    Scenario::MultiSection { sections } => fuzz_multi_section(&sections),
+    } => {
+        fuzz_literal_name(repr_high, huffman, declared_len, &payload);
+        test_fixed_string_canaries();
+    }
+    Scenario::MultiSection { sections } => {
+        fuzz_multi_section(&sections);
+        test_fixed_string_canaries();
+    }
     Scenario::OverlongDeclaredLength {
         repr_high,
         continuation_count,
-    } => fuzz_overlong_length(repr_high, continuation_count),
+    } => {
+        fuzz_overlong_length(repr_high, continuation_count);
+        test_fixed_string_canaries();
+    }
 });
 
 fn fuzz_arbitrary(bytes: &[u8]) {
     if bytes.len() > MAX_INPUT_BYTES {
         return;
     }
-    let _ = qpack_decode_field_section(bytes, H3QpackMode::StaticOnly);
+    observe_decode_result(qpack_decode_field_section(bytes, H3QpackMode::StaticOnly));
 }
 
 fn fuzz_literal_name(repr_high: u8, huffman: bool, declared_len: u8, payload: &[u8]) {
@@ -106,7 +121,8 @@ fn fuzz_literal_name(repr_high: u8, huffman: bool, declared_len: u8, payload: &[
 
     let take = payload.len().min(MAX_INPUT_BYTES - 2);
 
-    let mut buf = Vec::with_capacity(2 + take);
+    let mut buf = Vec::with_capacity(FIELD_SECTION_PREFIX.len() + 2 + take);
+    buf.extend_from_slice(&FIELD_SECTION_PREFIX);
     buf.push(first);
     // Length continuation: declared_len drives the multi-byte int. We
     // only emit one continuation byte to keep the length small enough
@@ -114,7 +130,7 @@ fn fuzz_literal_name(repr_high: u8, huffman: bool, declared_len: u8, payload: &[
     buf.push(declared_len);
     buf.extend_from_slice(&payload[..take]);
 
-    let _ = qpack_decode_field_section(&buf, H3QpackMode::StaticOnly);
+    observe_decode_result(qpack_decode_field_section(&buf, H3QpackMode::StaticOnly));
 }
 
 fn fuzz_multi_section(sections: &[Vec<u8>]) {
@@ -125,22 +141,123 @@ fn fuzz_multi_section(sections: &[Vec<u8>]) {
         }
         buf.extend_from_slice(section);
     }
-    let _ = qpack_decode_field_section(&buf, H3QpackMode::StaticOnly);
+    observe_decode_result(qpack_decode_field_section(&buf, H3QpackMode::StaticOnly));
 }
 
 fn fuzz_overlong_length(repr_high: u8, continuation_count: u8) {
     let count = continuation_count.min(16) as usize;
-    let mut buf = Vec::with_capacity(2 + count);
+    let mut buf = Vec::with_capacity(FIELD_SECTION_PREFIX.len() + 2 + count);
+    buf.extend_from_slice(&FIELD_SECTION_PREFIX);
 
     // Representation byte with saturated 7-bit length prefix (prefix_len = 7
     // so the integer continues into following bytes).
     buf.push((repr_high & 0x80) | 0x7F);
     // All-0x80 continuations push the integer toward overflow.
-    for _ in 0..count {
-        buf.push(0x80);
-    }
+    buf.extend(std::iter::repeat_n(0x80, count));
     // Final non-continuation byte to terminate cleanly.
     buf.push(0x00);
 
-    let _ = qpack_decode_field_section(&buf, H3QpackMode::StaticOnly);
+    observe_decode_result(qpack_decode_field_section(&buf, H3QpackMode::StaticOnly));
+}
+
+fn test_fixed_string_canaries() {
+    let empty = FIELD_SECTION_PREFIX.to_vec();
+    let decoded = expect_decode_ok(&empty);
+    assert!(
+        decoded.is_empty(),
+        "empty field section should decode empty"
+    );
+
+    let valid_literal = literal_name_value_section(b"a", b"b");
+    let decoded = expect_decode_ok(&valid_literal);
+    assert_eq!(
+        decoded,
+        vec![QpackFieldPlan::Literal {
+            name: "a".to_string(),
+            value: "b".to_string(),
+        }]
+    );
+
+    let invalid_name_utf8 = literal_name_value_section(&[0xff], b"b");
+    expect_invalid_frame_contains(&invalid_name_utf8, "utf-8");
+
+    let truncated_name = vec![FIELD_SECTION_PREFIX[0], FIELD_SECTION_PREFIX[1], 0x23, b'a'];
+    expect_unexpected_eof(&truncated_name);
+
+    let dynamic_post_base = vec![FIELD_SECTION_PREFIX[0], FIELD_SECTION_PREFIX[1], 0x00];
+    expect_qpack_policy_contains(&dynamic_post_base, "post-base");
+}
+
+fn literal_name_value_section(name: &[u8], value: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(FIELD_SECTION_PREFIX.len() + 2 + name.len() + value.len());
+    buf.extend_from_slice(&FIELD_SECTION_PREFIX);
+    push_short_string_literal(&mut buf, 0x20, name);
+    push_short_string_literal(&mut buf, 0x00, value);
+    buf
+}
+
+fn push_short_string_literal(buf: &mut Vec<u8>, representation_bits: u8, bytes: &[u8]) {
+    assert!(
+        bytes.len() <= 7,
+        "short literal helper only supports 3-bit inline lengths"
+    );
+    buf.push(representation_bits | bytes.len() as u8);
+    buf.extend_from_slice(bytes);
+}
+
+fn observe_decode_result(result: Result<Vec<QpackFieldPlan>, H3NativeError>) {
+    match result {
+        Ok(plans) => {
+            let debug = format!("{plans:?}");
+            assert!(!debug.is_empty(), "decoded plan debug should not be empty");
+        }
+        Err(error) => {
+            let display = format!("{error}");
+            assert!(
+                !display.is_empty(),
+                "decode error display should not be empty"
+            );
+        }
+    }
+}
+
+fn expect_decode_ok(input: &[u8]) -> Vec<QpackFieldPlan> {
+    match qpack_decode_field_section(input, H3QpackMode::StaticOnly) {
+        Ok(decoded) => decoded,
+        Err(error) => panic!("expected valid qpack field section, got {error:?}"),
+    }
+}
+
+fn expect_invalid_frame_contains(input: &[u8], expected: &str) {
+    match qpack_decode_field_section(input, H3QpackMode::StaticOnly) {
+        Err(H3NativeError::InvalidFrame(message)) => {
+            assert!(
+                message.contains(expected),
+                "InvalidFrame message {message:?} should contain {expected:?}"
+            );
+        }
+        Ok(decoded) => panic!("expected InvalidFrame({expected}), got {decoded:?}"),
+        Err(error) => panic!("expected InvalidFrame({expected}), got {error:?}"),
+    }
+}
+
+fn expect_unexpected_eof(input: &[u8]) {
+    match qpack_decode_field_section(input, H3QpackMode::StaticOnly) {
+        Err(H3NativeError::UnexpectedEof) => {}
+        Ok(decoded) => panic!("expected UnexpectedEof, got {decoded:?}"),
+        Err(error) => panic!("expected UnexpectedEof, got {error:?}"),
+    }
+}
+
+fn expect_qpack_policy_contains(input: &[u8], expected: &str) {
+    match qpack_decode_field_section(input, H3QpackMode::StaticOnly) {
+        Err(H3NativeError::QpackPolicy(message)) => {
+            assert!(
+                message.contains(expected),
+                "QpackPolicy message {message:?} should contain {expected:?}"
+            );
+        }
+        Ok(decoded) => panic!("expected QpackPolicy({expected}), got {decoded:?}"),
+        Err(error) => panic!("expected QpackPolicy({expected}), got {error:?}"),
+    }
 }
