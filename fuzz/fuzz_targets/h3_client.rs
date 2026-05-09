@@ -163,12 +163,12 @@ enum StreamErrorType {
 /// Error trigger points
 #[derive(Arbitrary, Debug, Clone)]
 enum ErrorTriggerPoint {
-    OnConnect,
-    OnSendRequest,
-    OnSendHeaders,
-    OnSendBody,
-    OnReceiveResponse,
-    OnReceiveBody,
+    Connect,
+    SendRequest,
+    SendHeaders,
+    SendBody,
+    ReceiveResponse,
+    ReceiveBody,
 }
 
 /// Cancellation timing scenarios
@@ -235,7 +235,7 @@ impl H3ClientShadowModel {
         }
     }
 
-    fn record_operation_start(&self, request_id: u64, method: &str, path: &str) {
+    fn record_operation_start(&self, request_id: u64, method: &str, path: &str, has_body: bool) {
         self.total_operations.fetch_add(1, Ordering::SeqCst);
         let mut requests = self.active_requests.lock().unwrap();
         requests.insert(
@@ -244,7 +244,7 @@ impl H3ClientShadowModel {
                 method: method.to_string(),
                 path: path.to_string(),
                 headers_sent: false,
-                body_sent: false,
+                body_sent: has_body,
                 response_received: false,
                 completed: false,
             },
@@ -255,6 +255,8 @@ impl H3ClientShadowModel {
         self.successful_operations.fetch_add(1, Ordering::SeqCst);
         let mut requests = self.active_requests.lock().unwrap();
         if let Some(request) = requests.get_mut(&request_id) {
+            request.headers_sent = true;
+            request.response_received = true;
             request.completed = true;
         }
     }
@@ -288,6 +290,28 @@ impl H3ClientShadowModel {
             return Err(format!("Protocol violations: {:?}", *violations));
         }
 
+        let requests = self.active_requests.lock().unwrap();
+        for (request_id, request) in requests.iter() {
+            if request.method.is_empty() {
+                return Err(format!("Request {} has empty method", request_id));
+            }
+            if request.path.is_empty() {
+                return Err(format!("Request {} has empty path", request_id));
+            }
+            if request.body_sent && !request.headers_sent && request.completed {
+                return Err(format!(
+                    "Request {} completed body send before headers",
+                    request_id
+                ));
+            }
+            if request.completed && !request.response_received {
+                return Err(format!(
+                    "Request {} completed without a response",
+                    request_id
+                ));
+            }
+        }
+
         Ok(())
     }
 }
@@ -312,6 +336,10 @@ fn method_to_string(method: &HttpMethodInput) -> String {
 fn normalize_fuzz_input(input: &mut H3ClientFuzzInput) {
     // Limit operations to prevent timeouts
     input.operations.truncate(20);
+    if !input.operations.is_empty() {
+        let rotate_by = (input.seed as usize) % input.operations.len();
+        input.operations.rotate_left(rotate_by);
+    }
 
     // Bound configuration values
     input.config.max_operations = input.config.max_operations.min(100);
@@ -416,7 +444,7 @@ fn test_simple_request(op: &H3ClientOperation, shadow: &H3ClientShadowModel) -> 
         let request_id = shadow.total_operations.load(Ordering::SeqCst);
         let method_str = method_to_string(method);
 
-        shadow.record_operation_start(request_id, &method_str, path);
+        shadow.record_operation_start(request_id, &method_str, path, false);
 
         // Simulate request processing
         let result = simulate_h3_request(&method_str, path, headers, None, expected_status_class);
@@ -450,7 +478,7 @@ fn test_request_with_body(
         let request_id = shadow.total_operations.load(Ordering::SeqCst);
         let method_str = method_to_string(method);
 
-        shadow.record_operation_start(request_id, &method_str, path);
+        shadow.record_operation_start(request_id, &method_str, path, !body.is_empty());
 
         // Simulate request with body processing
         let result = simulate_h3_request(
@@ -573,7 +601,7 @@ fn test_cancellation(op: &H3ClientOperation, shadow: &H3ClientShadowModel) -> Re
         let request_id = shadow.total_operations.load(Ordering::SeqCst);
 
         if *request_in_progress {
-            shadow.record_operation_start(request_id, "GET", "/test");
+            shadow.record_operation_start(request_id, "GET", "/test", false);
         }
 
         let result = simulate_cancellation(cancel_timing, *request_in_progress);
@@ -658,11 +686,11 @@ fn simulate_h3_request(
     }
 
     // Body validation
-    if let Some(body) = body {
-        if body.len() > 64 * 1024 * 1024 {
-            // 64MB limit
-            return Err("Body too large".to_string());
-        }
+    if let Some(body) = body
+        && body.len() > 64 * 1024 * 1024
+    {
+        // 64MB limit
+        return Err("Body too large".to_string());
     }
 
     // Simulate potential parsing errors based on input patterns
@@ -716,7 +744,7 @@ fn simulate_frame_injection(
         }
         MalformedFrame::CorruptedHeaders { headers_data } => {
             // Corrupted headers should be properly handled
-            if headers_data.iter().any(|&b| b == 0) {
+            if headers_data.contains(&0) {
                 Err("Corrupted headers detected".to_string())
             } else {
                 Ok(())
@@ -724,15 +752,23 @@ fn simulate_frame_injection(
         }
         MalformedFrame::InvalidQpackEncoding { encoded_data } => {
             // Invalid QPACK should be rejected gracefully
-            if encoded_data.len() > 8192 || (encoded_data.len() > 0 && encoded_data[0] > 0xF0) {
+            if encoded_data.len() > 8192 || (!encoded_data.is_empty() && encoded_data[0] > 0xF0) {
                 Err("Invalid QPACK encoding".to_string())
             } else {
                 Ok(())
             }
         }
-        MalformedFrame::DuplicateFrameType { .. } => {
+        MalformedFrame::DuplicateFrameType {
+            frame_type,
+            payload1,
+            payload2,
+        } => {
             // Duplicate frames should be handled
-            Err("Duplicate frame detected".to_string())
+            let total_payload = payload1.len().saturating_add(payload2.len());
+            Err(format!(
+                "Duplicate frame detected: type={} payload_bytes={}",
+                frame_type, total_payload
+            ))
         }
         MalformedFrame::OutOfOrderFrames { .. } => {
             // Out-of-order frames should be handled
@@ -788,40 +824,20 @@ fn simulate_settings_handling(
 ) -> Result<(), String> {
     // Check for invalid settings
     match setting_id {
-        0x01 => {
-            // QPACK_MAX_TABLE_CAPACITY
-            if value > 1024 * 1024 * 1024 {
-                // 1GB limit
-                return Err("QPACK table too large".to_string());
-            }
-        }
-        0x07 => {
-            // MAX_FIELD_SECTION_SIZE
-            if value > 64 * 1024 * 1024 {
-                // 64MB limit
-                return Err("Field section too large".to_string());
-            }
-        }
-        0x08 => {
-            // H3_DATAGRAM
-            if value > 1 {
-                return Err("Invalid H3_DATAGRAM value".to_string());
-            }
-        }
-        0x09 => {
-            // ENABLE_CONNECT_PROTOCOL
-            if value > 1 {
-                return Err("Invalid ENABLE_CONNECT_PROTOCOL value".to_string());
-            }
-        }
+        // QPACK_MAX_TABLE_CAPACITY
+        0x01 if value > 1024 * 1024 * 1024 => Err("QPACK table too large".to_string()),
+        // MAX_FIELD_SECTION_SIZE
+        0x07 if value > 64 * 1024 * 1024 => Err("Field section too large".to_string()),
+        // H3_DATAGRAM
+        0x08 if value > 1 => Err("Invalid H3_DATAGRAM value".to_string()),
+        // ENABLE_CONNECT_PROTOCOL
+        0x09 if value > 1 => Err("Invalid ENABLE_CONNECT_PROTOCOL value".to_string()),
         id if id > 0x1000 => {
             // Unknown settings should be ignored
-            return Ok(());
+            Ok(())
         }
-        _ => {}
+        _ => Ok(()),
     }
-
-    Ok(())
 }
 
 /// Execute all H3 client operations and verify invariants
@@ -842,10 +858,26 @@ fn execute_h3_client_operations(input: &H3ClientFuzzInput) -> Result<(), String>
             H3ClientOperation::SimpleRequest { .. } => test_simple_request(operation, &shadow),
             H3ClientOperation::RequestWithBody { .. } => test_request_with_body(operation, &shadow),
             H3ClientOperation::InjectMalformedFrames { .. } => {
-                test_malformed_frames(operation, &shadow)
+                if input.config.enable_frame_corruption {
+                    test_malformed_frames(operation, &shadow)
+                } else {
+                    Ok(())
+                }
             }
-            H3ClientOperation::ConnectionError { .. } => test_connection_errors(operation, &shadow),
-            H3ClientOperation::StreamError { .. } => test_stream_errors(operation, &shadow),
+            H3ClientOperation::ConnectionError { .. } => {
+                if input.config.enable_error_injection {
+                    test_connection_errors(operation, &shadow)
+                } else {
+                    Ok(())
+                }
+            }
+            H3ClientOperation::StreamError { .. } => {
+                if input.config.enable_error_injection {
+                    test_stream_errors(operation, &shadow)
+                } else {
+                    Ok(())
+                }
+            }
             H3ClientOperation::CancellationTest { .. } => test_cancellation(operation, &shadow),
             H3ClientOperation::SettingsTest { .. } => test_settings(operation, &shadow),
         };
@@ -894,8 +926,19 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
 
-    // Run H3 client fuzzing - catch any panics
-    let _ = std::panic::catch_unwind(|| {
-        let _ = fuzz_h3_client(input);
-    });
+    // Run H3 client fuzzing and observe all outcomes.
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fuzz_h3_client(input))) {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            assert!(
+                !error.trim().is_empty(),
+                "H3 client rejection should expose a diagnostic"
+            );
+            assert!(
+                error.len() <= 4096,
+                "H3 client diagnostic grew unexpectedly: {error}"
+            );
+        }
+        Err(_) => panic!("H3 client fuzzing panicked"),
+    }
 });
