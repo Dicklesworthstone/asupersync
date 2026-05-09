@@ -6,7 +6,7 @@ use libfuzzer_sys::fuzz_target;
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::codec::{Decoder, Encoder};
 use asupersync::net::websocket::{
-    ClientHandshake, Frame, FrameCodec, Opcode, Role, ServerHandshake,
+    ClientHandshake, Frame, FrameCodec, Opcode, Role, ServerHandshake, WsError,
 };
 use asupersync::util::OsEntropy;
 use std::collections::BTreeMap;
@@ -171,6 +171,14 @@ fn test_window_size_negotiation(config: &WebSocketDeflateConfig) -> Result<(), S
         ));
     }
 
+    if window_config.server_no_context_takeover {
+        extension.push_str("; server_no_context_takeover");
+    }
+
+    if window_config.client_no_context_takeover {
+        extension.push_str("; client_no_context_takeover");
+    }
+
     // Test server handshake with window parameters
     let _server = ServerHandshake::new().extension("permessage-deflate");
 
@@ -213,7 +221,21 @@ fn test_context_takeover(config: &WebSocketDeflateConfig) -> Result<(), String> 
         .map_err(|_| "Failed to create handshake")?
         .extension(extension);
 
-    // Verify handshake parameters are well-formed
+    if context_config.reset_frequency > 0 {
+        let reset_frequency = usize::from(context_config.reset_frequency);
+        let reset_points = config
+            .frame_sequence
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| (idx + 1) % reset_frequency == 0)
+            .count();
+        assert!(
+            reset_points <= config.frame_sequence.len(),
+            "context reset schedule exceeded frame sequence length"
+        );
+    }
+
+    // Verify handshake parameters and reset schedule are well-formed
     Ok(())
 }
 
@@ -246,14 +268,20 @@ fn test_deflate_stream_continuation(config: &WebSocketDeflateConfig) -> Result<(
 
         // Test frame encoding
         let mut buf = BytesMut::new();
-        if let Err(_) = codec.encode(frame.clone(), &mut buf) {
-            // Encoding failure is acceptable for malformed frames
+        let context = format!("deflate continuation frame {i}");
+        if !observe_frame_encode(
+            codec.encode(frame.clone(), &mut buf),
+            &frame,
+            0,
+            &buf,
+            &context,
+        ) {
             continue;
         }
 
         // Test frame decoding
         let mut decode_codec = FrameCodec::new(Role::Client);
-        match decode_codec.decode(&mut buf) {
+        match observe_frame_decode(decode_codec.decode(&mut buf), &frame, &context) {
             Ok(Some(decoded_frame)) => {
                 // Verify RSV1 bit preservation
                 if decoded_frame.rsv1 != frame.rsv1 {
@@ -298,13 +326,23 @@ fn test_rsv1_bit_validation(config: &WebSocketDeflateConfig) -> Result<(), Strin
 
         // Encode frame
         let mut encode_buf = BytesMut::new();
-        if codec.encode(frame.clone(), &mut encode_buf).is_err() {
+        if !observe_frame_encode(
+            codec.encode(frame.clone(), &mut encode_buf),
+            &frame,
+            0,
+            &encode_buf,
+            "RSV1 validation encode",
+        ) {
             continue;
         }
 
         // Test decoding with reserved bit validation
         let mut decode_codec = FrameCodec::new(Role::Client);
-        let result = decode_codec.decode(&mut encode_buf);
+        let result = observe_frame_decode(
+            decode_codec.decode(&mut encode_buf),
+            &frame,
+            "RSV1 validation decode",
+        );
 
         // If RSV bits are set inappropriately, decoder should reject
         if (frame.rsv1 || frame.rsv2 || frame.rsv3) && !frame.opcode.is_data() {
@@ -350,9 +388,7 @@ fn test_zip_bomb_protection(config: &WebSocketDeflateConfig) -> Result<(), Strin
         }
 
         // Test that reasonable frames are accepted
-        if fuzz_frame.rsv1 && fuzz_frame.opcode == FuzzOpcode::Text
-            || fuzz_frame.opcode == FuzzOpcode::Binary
-        {
+        if fuzz_frame.rsv1 && matches!(fuzz_frame.opcode, FuzzOpcode::Text | FuzzOpcode::Binary) {
             // This would be a compressed data frame in a real implementation
             // For now, just validate the frame structure
             let frame = Frame {
@@ -369,7 +405,13 @@ fn test_zip_bomb_protection(config: &WebSocketDeflateConfig) -> Result<(), Strin
             // Verify frame can be processed without errors
             let mut codec = FrameCodec::new(Role::Server);
             let mut buf = BytesMut::new();
-            let _ = codec.encode(frame, &mut buf);
+            observe_frame_encode(
+                codec.encode(frame.clone(), &mut buf),
+                &frame,
+                0,
+                &buf,
+                "zip-bomb accepted-frame encode",
+            );
         }
     }
 
@@ -452,5 +494,159 @@ fuzz_target!(|data: &[u8]| {
     };
 
     // Run WebSocket permessage-deflate fuzzing
-    let _ = fuzz_websocket_deflate(config);
+    observe_fuzz_result(fuzz_websocket_deflate(config));
 });
+
+fn observe_frame_encode(
+    result: Result<(), WsError>,
+    frame: &Frame,
+    original_len: usize,
+    buf: &BytesMut,
+    context: &str,
+) -> bool {
+    match result {
+        Ok(()) => {
+            assert!(
+                buf.len() >= original_len + 2,
+                "{context}: encoded frame should include at least the header"
+            );
+
+            let encoded = &buf[original_len..];
+            let first = encoded[0];
+            assert_eq!(
+                first & 0x0F,
+                frame.opcode as u8,
+                "{context}: opcode changed during encode"
+            );
+            assert_eq!(
+                (first & 0x80) != 0,
+                frame.fin,
+                "{context}: FIN bit changed during encode"
+            );
+            assert_eq!(
+                (first & 0x40) != 0,
+                frame.rsv1,
+                "{context}: RSV1 bit changed during encode"
+            );
+            assert_eq!(
+                (first & 0x20) != 0,
+                frame.rsv2,
+                "{context}: RSV2 bit changed during encode"
+            );
+            assert_eq!(
+                (first & 0x10) != 0,
+                frame.rsv3,
+                "{context}: RSV3 bit changed during encode"
+            );
+
+            let Some((payload_len, header_len, masked)) = encoded_payload_shape(encoded) else {
+                panic!("{context}: encoded frame header is incomplete");
+            };
+            assert!(
+                !masked,
+                "{context}: server-role encoder produced a masked frame"
+            );
+            assert_eq!(
+                payload_len,
+                frame.payload.len(),
+                "{context}: declared payload length changed during encode"
+            );
+            assert_eq!(
+                encoded.len(),
+                header_len + payload_len,
+                "{context}: encoded frame length does not match header declaration"
+            );
+            true
+        }
+        Err(error) => {
+            assert_eq!(
+                buf.len(),
+                original_len,
+                "{context}: failed encode appended partial frame bytes"
+            );
+            assert!(
+                !error.to_string().is_empty(),
+                "{context}: encode error diagnostics should remain observable"
+            );
+            let _close_code = error.as_close_code();
+            false
+        }
+    }
+}
+
+fn observe_frame_decode(
+    result: Result<Option<Frame>, WsError>,
+    expected: &Frame,
+    context: &str,
+) -> Result<Option<Frame>, WsError> {
+    match &result {
+        Ok(Some(decoded)) => {
+            assert_eq!(decoded.fin, expected.fin, "{context}: FIN bit changed");
+            assert_eq!(decoded.rsv1, expected.rsv1, "{context}: RSV1 bit changed");
+            assert_eq!(decoded.rsv2, expected.rsv2, "{context}: RSV2 bit changed");
+            assert_eq!(decoded.rsv3, expected.rsv3, "{context}: RSV3 bit changed");
+            assert_eq!(decoded.opcode, expected.opcode, "{context}: opcode changed");
+            assert_eq!(
+                decoded.payload.len(),
+                expected.payload.len(),
+                "{context}: payload length changed"
+            );
+        }
+        Ok(None) => {
+            panic!("{context}: complete encoded frame decoded as incomplete");
+        }
+        Err(error) => {
+            assert!(
+                !error.to_string().is_empty(),
+                "{context}: decode error diagnostics should remain observable"
+            );
+            let _close_code = error.as_close_code();
+        }
+    }
+    result
+}
+
+fn observe_fuzz_result(result: Result<(), String>) {
+    if let Err(error) = result {
+        assert!(
+            !error.is_empty(),
+            "top-level deflate fuzz failure should carry diagnostics"
+        );
+    }
+}
+
+fn encoded_payload_shape(encoded: &[u8]) -> Option<(usize, usize, bool)> {
+    if encoded.len() < 2 {
+        return None;
+    }
+
+    let masked = (encoded[1] & 0x80) != 0;
+    let len7 = encoded[1] & 0x7F;
+    match len7 {
+        0..=125 => {
+            let header_len = 2 + if masked { 4 } else { 0 };
+            (encoded.len() >= header_len).then_some((len7 as usize, header_len, masked))
+        }
+        126 => {
+            let header_len = 4 + if masked { 4 } else { 0 };
+            if encoded.len() < header_len {
+                return None;
+            }
+            let len = u16::from_be_bytes([encoded[2], encoded[3]]) as usize;
+            Some((len, header_len, masked))
+        }
+        _ => {
+            let header_len = 10 + if masked { 4 } else { 0 };
+            if encoded.len() < header_len {
+                return None;
+            }
+            let len = u64::from_be_bytes([
+                encoded[2], encoded[3], encoded[4], encoded[5], encoded[6], encoded[7], encoded[8],
+                encoded[9],
+            ]);
+            usize::try_from(len)
+                .ok()
+                .map(|len| (len, header_len, masked))
+        }
+    }
+}
