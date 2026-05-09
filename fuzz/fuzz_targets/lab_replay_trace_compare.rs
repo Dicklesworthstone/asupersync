@@ -40,7 +40,8 @@
 //! sub-second.
 
 use asupersync::lab::replay::{
-    compare_normalized, find_divergence, normalize_for_replay, traces_equivalent,
+    NormalizationResult, TraceDivergence, compare_normalized, find_divergence,
+    normalize_for_replay, traces_equivalent,
 };
 use asupersync::trace::TraceEvent;
 use libfuzzer_sys::fuzz_target;
@@ -55,6 +56,92 @@ struct TracePair {
     a: Vec<TraceEvent>,
     #[serde(default)]
     b: Vec<TraceEvent>,
+}
+
+fn observe_trace_divergence(
+    label: &str,
+    divergence: &TraceDivergence,
+    left_len: usize,
+    right_len: usize,
+) {
+    let max_len = left_len.max(right_len);
+    assert!(
+        divergence.position <= max_len,
+        "{label}: divergence position {} exceeded max input length {max_len}",
+        divergence.position,
+    );
+
+    let diagnostic = divergence.to_string();
+    assert!(
+        diagnostic.contains("Divergence at position"),
+        "{label}: divergence diagnostic should identify the divergent position",
+    );
+    assert!(
+        diagnostic.contains(&divergence.position.to_string()),
+        "{label}: divergence diagnostic should include the numeric position",
+    );
+}
+
+fn observe_find_divergence(
+    label: &str,
+    left: &[TraceEvent],
+    right: &[TraceEvent],
+) -> Option<TraceDivergence> {
+    let divergence = find_divergence(left, right);
+    if let Some(divergence) = &divergence {
+        observe_trace_divergence(label, divergence, left.len(), right.len());
+    }
+    divergence
+}
+
+fn observe_normalized_comparison(
+    label: &str,
+    left: &[TraceEvent],
+    right: &[TraceEvent],
+) -> Option<TraceDivergence> {
+    let divergence = compare_normalized(left, right);
+    if let Some(divergence) = &divergence {
+        observe_trace_divergence(label, divergence, left.len(), right.len());
+    }
+    divergence
+}
+
+fn observe_trace_equivalence(
+    left: &[TraceEvent],
+    right: &[TraceEvent],
+    normalized_divergence: &Option<TraceDivergence>,
+) {
+    let equivalent = traces_equivalent(left, right);
+    assert_eq!(
+        equivalent,
+        normalized_divergence.is_none(),
+        "traces_equivalent must mirror compare_normalized",
+    );
+}
+
+fn observe_normalization(label: &str, events: &[TraceEvent]) {
+    let result = normalize_for_replay(events);
+    assert_normalization_shape(label, events.len(), &result);
+}
+
+fn assert_normalization_shape(label: &str, original_len: usize, result: &NormalizationResult) {
+    assert_eq!(
+        result.normalized.len(),
+        original_len,
+        "{label}: normalization must preserve event count",
+    );
+    assert!(
+        result.original_switches <= original_len.saturating_sub(1),
+        "{label}: original switch count cannot exceed adjacent event pairs",
+    );
+    assert!(
+        result.normalized_switches <= original_len.saturating_sub(1),
+        "{label}: normalized switch count cannot exceed adjacent event pairs",
+    );
+    assert!(
+        !result.algorithm.trim().is_empty(),
+        "{label}: normalization algorithm label must be visible",
+    );
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -79,11 +166,11 @@ fuzz_target!(|data: &[u8]| {
     };
 
     // Contract 1: panic floor across the quartet.
-    let _ = find_divergence(a, b);
-    let _ = compare_normalized(a, b);
-    let _ = traces_equivalent(a, b);
-    let _ = normalize_for_replay(a);
-    let _ = normalize_for_replay(b);
+    let raw_divergence = observe_find_divergence("raw trace comparison", a, b);
+    let normalized_divergence = observe_normalized_comparison("normalized trace comparison", a, b);
+    observe_trace_equivalence(a, b, &normalized_divergence);
+    observe_normalization("side A", a);
+    observe_normalization("side B", b);
 
     // Contract 2: reflexivity. Both directions to also catch any
     // accidental asymmetry in the comparator's prefix-cursor logic.
@@ -109,10 +196,16 @@ fuzz_target!(|data: &[u8]| {
     // match, no assertion on Some/None — they may still differ on
     // payload, which is what the comparator is for.
     if a.len() != b.len() {
-        let div = find_divergence(a, b);
         assert!(
-            div.is_some(),
+            raw_divergence.is_some(),
             "find_divergence must report a divergence when slice lengths differ",
+        );
+        assert_eq!(
+            raw_divergence
+                .as_ref()
+                .map(|divergence| divergence.position),
+            Some(a.len().min(b.len())),
+            "length mismatch divergence must point at the first missing event",
         );
     }
 });
