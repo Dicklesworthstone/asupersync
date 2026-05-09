@@ -381,6 +381,50 @@ fn observe_response_parse(response_data: &[u8]) {
     }
 }
 
+fn observe_client_response_validation(
+    client: &ClientHandshake,
+    response: &HttpResponse,
+    result: Result<(), HandshakeError>,
+) {
+    match result {
+        Ok(()) => {
+            assert_eq!(
+                response.status, 101,
+                "validated WebSocket response must be HTTP 101"
+            );
+            assert!(
+                response
+                    .header("upgrade")
+                    .is_some_and(|value| value.eq_ignore_ascii_case("websocket")),
+                "validated WebSocket response must expose Upgrade: websocket"
+            );
+            assert!(
+                response
+                    .header("connection")
+                    .is_some_and(|value| value.to_ascii_lowercase().contains("upgrade")),
+                "validated WebSocket response must expose Connection: Upgrade"
+            );
+            assert!(
+                response.header("sec-websocket-accept").is_some(),
+                "validated WebSocket response must expose Sec-WebSocket-Accept"
+            );
+        }
+        Err(error) => {
+            let diagnostic = format!("{error:?}");
+            assert!(
+                !diagnostic.is_empty(),
+                "client response validation failures must expose diagnostics"
+            );
+            assert!(
+                response.status != 101
+                    || response.header("sec-websocket-accept").is_none()
+                    || client.validate_response(response).is_err(),
+                "validation failure must be reproducible for the same response"
+            );
+        }
+    }
+}
+
 fn expect_url_parse(url: &str) -> WsUrl {
     let parsed = WsUrl::parse(url)
         .unwrap_or_else(|error| panic!("expected WebSocket URL to parse: {error:?}"));
@@ -729,7 +773,11 @@ fn fuzz_full_handshake_flow(
 
                 // Parse response on client and validate
                 if let Ok(response) = HttpResponse::parse(&response_bytes) {
-                    let _ = client.validate_response(&response);
+                    observe_client_response_validation(
+                        &client,
+                        &response,
+                        client.validate_response(&response),
+                    );
                 }
             }
         }
