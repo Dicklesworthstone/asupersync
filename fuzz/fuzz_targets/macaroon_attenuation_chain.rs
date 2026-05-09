@@ -261,7 +261,9 @@ fn test_serialization_round_trip(token: &MacaroonToken) {
     );
 
     // Deserialization should succeed for valid tokens
-    if let Some(deserialized) = observe_macaroon_binary_decode(&serialized) {
+    if let Some(deserialized) =
+        observe_macaroon_decode_outcome(&serialized, "serialization round-trip")
+    {
         // Round-trip should preserve all fields
         assert_eq!(deserialized.identifier(), token.identifier());
         assert_eq!(deserialized.location(), token.location());
@@ -275,7 +277,7 @@ fn test_serialization_round_trip(token: &MacaroonToken) {
 
 fn test_safe_deserialization(data: &[u8]) {
     // Deserialization should never panic, even with malformed data
-    let _ = observe_macaroon_binary_decode(data);
+    observe_macaroon_decode_outcome(data, "safe deserialization");
 }
 
 fn observe_macaroon_binary_decode(data: &[u8]) -> Option<MacaroonToken> {
@@ -283,15 +285,7 @@ fn observe_macaroon_binary_decode(data: &[u8]) -> Option<MacaroonToken> {
 
     match &result {
         Some(token) => {
-            // Identifier and location should be valid UTF-8 and accessible.
-            let _ = token.identifier();
-            let _ = token.location();
-
-            // Caveat count should be reasonable.
-            assert!(token.caveat_count() <= MAX_CAVEAT_COUNT);
-
-            // Signature should be exactly 32 bytes.
-            assert_eq!(token.signature().as_bytes().len(), 32);
+            observe_token_accessors(token, "binary decode");
         }
         None => {
             assert!(
@@ -312,7 +306,7 @@ fn test_malformed_deserialization(data: &[u8]) {
     };
 
     // Should handle malformed data gracefully
-    let _ = observe_macaroon_binary_decode(limited_data);
+    observe_macaroon_decode_outcome(limited_data, "malformed deserialization");
 }
 
 fn test_predicate_round_trip(operations: &[MacaroonOperation]) {
@@ -490,22 +484,100 @@ fn test_discharge_binding(token: &MacaroonToken, _discharge_ops: &[MacaroonOpera
 
 fn test_comprehensive_properties(token: &MacaroonToken, context: &VerificationContext) {
     // Test all accessor methods don't panic
-    let _ = token.identifier();
-    let _ = token.location();
-    let _ = token.caveat_count();
-    let _ = token.signature().as_bytes();
+    observe_token_accessors(token, "comprehensive properties");
 
     // Test with various keys
     for seed in [0u64, 1, u64::MAX, u64::MAX / 2] {
         let key = AuthKey::from_seed(seed);
-        let _ = token.verify_signature(&key);
-        let _ = token.verify(&key, context);
+        observe_signature_verification(
+            token.verify_signature(&key),
+            token,
+            "comprehensive signature verification",
+        );
+        observe_verification_result(token.verify(&key, context), "comprehensive verification");
     }
 
     // Test serialization
     let serialized = token.to_binary();
     assert!(!serialized.is_empty());
     assert!(serialized.len() < 1_000_000); // Reasonable upper bound
+}
+
+fn observe_macaroon_decode_outcome(data: &[u8], context: &str) -> Option<MacaroonToken> {
+    let decoded = observe_macaroon_binary_decode(data);
+    match &decoded {
+        Some(token) => observe_token_accessors(token, context),
+        None => assert!(
+            data.len() <= MAX_MALFORMED_DATA_LEN,
+            "{context} decode rejection must remain bounded to the fuzz input cap"
+        ),
+    }
+    decoded
+}
+
+fn observe_token_accessors(token: &MacaroonToken, context: &str) {
+    assert!(
+        !context.trim().is_empty(),
+        "macaroon observer context must not be empty"
+    );
+
+    assert!(
+        token.identifier().len() <= MAX_MALFORMED_DATA_LEN,
+        "{context} identifier must stay bounded"
+    );
+    assert!(
+        token.location().len() <= MAX_MALFORMED_DATA_LEN,
+        "{context} location must stay bounded"
+    );
+    assert!(
+        token.caveat_count() <= MAX_CAVEAT_COUNT,
+        "{context} caveat count must stay bounded"
+    );
+    assert_eq!(
+        token.signature().as_bytes().len(),
+        32,
+        "{context} signature length must remain canonical"
+    );
+}
+
+fn observe_signature_verification(result: bool, token: &MacaroonToken, context: &str) {
+    assert!(
+        !context.trim().is_empty(),
+        "signature observer context must not be empty"
+    );
+
+    if result {
+        assert_eq!(
+            token.signature().as_bytes().len(),
+            32,
+            "{context} successful signature checks require a canonical signature"
+        );
+    } else {
+        assert!(
+            token.caveat_count() <= MAX_CAVEAT_COUNT,
+            "{context} failed signature checks must still leave a bounded token"
+        );
+    }
+}
+
+fn observe_verification_result<E: std::fmt::Debug>(result: Result<(), E>, context: &str) {
+    match result {
+        Ok(()) => assert!(
+            !context.trim().is_empty(),
+            "verification observer context must not be empty"
+        ),
+        Err(error) => {
+            let diagnostics = format!("{error:?}");
+            assert!(
+                !diagnostics.trim().is_empty(),
+                "{context} errors must expose diagnostics"
+            );
+            assert!(
+                diagnostics.len() < 10_000,
+                "{context} diagnostics must stay bounded"
+            );
+        }
+    }
 }
 
 fn convert_predicate_fuzz(predicate_fuzz: &CaveatPredicateFuzz) -> CaveatPredicate {
