@@ -167,7 +167,12 @@ fn setup_dynamic_table(decoder: &mut Decoder, operations: &[DynamicTableOp]) {
 
     // Apply operations if any were generated
     if !header_block.is_empty() {
-        let _ = observe_decode(decoder, header_block);
+        let header_block_len = header_block.len();
+        assert_decode_observation(
+            "dynamic table setup",
+            header_block_len,
+            observe_decode(decoder, header_block),
+        );
         assert!(
             decoder.dynamic_table_size() <= decoder.dynamic_table_max_size(),
             "dynamic table size exceeded max after setup"
@@ -199,13 +204,21 @@ fn test_no_panic_on_indexed_bytes(decoder: &mut Decoder, data: &[u8]) {
         for chunk in data.chunks(2).take(128) {
             if chunk.len() == 2 {
                 let indexed_seq = vec![chunk[0] | 0x80, chunk[1]];
-                let _ = observe_decode(decoder, indexed_seq);
+                assert_decode_observation(
+                    "multi-byte indexed sequence",
+                    indexed_seq.len(),
+                    observe_decode(decoder, indexed_seq),
+                );
             }
         }
     }
 
     // Test raw data as indexed header block
-    let _ = observe_decode(decoder, data.to_vec());
+    assert_decode_observation(
+        "raw indexed header block",
+        data.len(),
+        observe_decode(decoder, data.to_vec()),
+    );
 }
 
 /// Test Property 2: Static table indices 1-61 resolve to correct (name,value) pairs
@@ -403,6 +416,25 @@ fn observe_decode(decoder: &mut Decoder, data: Vec<u8>) -> Result<Vec<Header>, u
             Ok(headers)
         }
         Err(_) => Err(remaining_len),
+    }
+}
+
+fn assert_decode_observation(context: &str, input_len: usize, result: Result<Vec<Header>, usize>) {
+    match result {
+        Ok(headers) => {
+            assert!(
+                headers.len() <= input_len.max(1),
+                "{context} decoded more headers than input bytes: {} > {}",
+                headers.len(),
+                input_len.max(1)
+            );
+        }
+        Err(remaining_len) => {
+            assert!(
+                remaining_len <= input_len,
+                "{context} rejected decode reported impossible remaining bytes: {remaining_len} > {input_len}"
+            );
+        }
     }
 }
 
