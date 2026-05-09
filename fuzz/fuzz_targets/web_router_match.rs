@@ -229,8 +229,12 @@ fn assert_well_typed(resp: &Response) {
         (100..=599).contains(&code),
         "status code {code} outside legal HTTP range"
     );
-    // Debug-format must succeed (no formatter panic).
-    let _ = format!("{:?}", resp.status);
+    // Debug-format must succeed and produce observable diagnostics.
+    let diagnostic = format!("{:?}", resp.status);
+    assert!(
+        !diagnostic.trim().is_empty(),
+        "status debug formatting must produce a non-empty diagnostic"
+    );
 }
 
 fuzz_target!(|data: &[u8]| {
