@@ -53,6 +53,7 @@ enum LengthPrefix {
 fuzz_target!(|case: AttributeCase| {
     let limits = case.limits.normalized();
 
+    assert_attribute_canaries();
     assert_empty_attribute_map(&limits);
     parse_without_harness_panic(&deep_attribute_wire(24, b"seed"), &limits);
     parse_adjacent_values_without_harness_panic(
@@ -71,6 +72,65 @@ fuzz_target!(|case: AttributeCase| {
 
     fuzz_attribute_parse(case.scenario, &limits);
 });
+
+fn assert_attribute_canaries() {
+    let limits = canary_limits();
+
+    assert_exact_decode(
+        b"|1\r\n+ttl\r\n:7\r\n",
+        RespValue::Attribute(vec![(
+            RespValue::SimpleString("ttl".into()),
+            RespValue::Integer(7),
+        )]),
+        &limits,
+    );
+
+    assert_exact_decode(
+        &deep_attribute_wire(3, b"seed"),
+        RespValue::Attribute(vec![(
+            RespValue::BulkString(Some(b"a0".to_vec())),
+            RespValue::Attribute(vec![(
+                RespValue::BulkString(Some(b"a1".to_vec())),
+                RespValue::Attribute(vec![(
+                    RespValue::BulkString(Some(b"a2".to_vec())),
+                    RespValue::BulkString(Some(b"seed".to_vec())),
+                )]),
+            )]),
+        )]),
+        &limits,
+    );
+
+    let adjacent = attribute_before_nested_aggregate(AggregateShape::EmptyArray);
+    let (decoded, used) = decode_one(&adjacent, &limits);
+    assert_eq!(
+        decoded,
+        RespValue::Attribute(vec![(
+            RespValue::SimpleString("meta".into()),
+            RespValue::Integer(1),
+        )])
+    );
+    assert!(used < adjacent.len(), "attribute must leave adjacent value");
+    assert_exact_decode(&adjacent[used..], RespValue::Array(Some(vec![])), &limits);
+
+    assert_exact_decode(
+        &nested_aggregate_contains_attribute(AggregateShape::ArrayWithBulk {
+            payload: b"payload".to_vec(),
+        }),
+        RespValue::Array(Some(vec![
+            RespValue::Attribute(vec![(
+                RespValue::SimpleString("meta".into()),
+                RespValue::SimpleString("value".into()),
+            )]),
+            RespValue::Array(Some(vec![RespValue::BulkString(Some(b"payload".to_vec()))])),
+        ])),
+        &limits,
+    );
+
+    assert_no_complete_decode(
+        &malformed_attribute_prefix(LengthPrefix::TruncatedPair, b"key".to_vec()),
+        &limits,
+    );
+}
 
 fn fuzz_attribute_parse(scenario: AttributeScenario, limits: &RedisProtocolLimits) {
     let wire = match scenario {
@@ -108,6 +168,27 @@ fn assert_empty_attribute_map(limits: &RedisProtocolLimits) {
     assert_eq!(used, b"|0\r\n".len());
 }
 
+fn assert_exact_decode(wire: &[u8], expected: RespValue, limits: &RedisProtocolLimits) {
+    let (decoded, used) = decode_one(wire, limits);
+    assert_eq!(decoded, expected);
+    assert_eq!(used, wire.len(), "canary must consume full RESP3 frame");
+}
+
+fn decode_one(wire: &[u8], limits: &RedisProtocolLimits) -> (RespValue, usize) {
+    RespValue::try_decode_with_limits(wire, limits)
+        .expect("RESP3 canary should not produce a protocol error")
+        .expect("RESP3 canary should decode a complete value")
+}
+
+fn assert_no_complete_decode(wire: &[u8], limits: &RedisProtocolLimits) {
+    match RespValue::try_decode_with_limits(wire, limits) {
+        Ok(None) | Err(_) => {}
+        Ok(Some((decoded, used))) => {
+            panic!("malformed RESP3 attribute decoded as {decoded:?} using {used} bytes");
+        }
+    }
+}
+
 fn parse_adjacent_values_without_harness_panic(wire: &[u8], limits: &RedisProtocolLimits) {
     let wire = bounded_wire_ref(wire);
     let Ok(Some((_, used))) = RespValue::try_decode_with_limits(wire, limits) else {
@@ -134,6 +215,14 @@ impl FuzzLimits {
             .max_nesting_depth(max_nesting_depth)
             .max_bulk_string_len(max_bulk_string_len)
     }
+}
+
+fn canary_limits() -> RedisProtocolLimits {
+    RedisProtocolLimits::new()
+        .max_frame_size(MAX_WIRE_LEN)
+        .max_array_len(MAX_PAIRS)
+        .max_nesting_depth(MAX_DEPTH)
+        .max_bulk_string_len(MAX_PAYLOAD_LEN)
 }
 
 fn deep_attribute_wire(depth: usize, leaf: &[u8]) -> Vec<u8> {
