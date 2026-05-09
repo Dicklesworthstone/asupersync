@@ -12,7 +12,7 @@
 
 #![no_main]
 
-use asupersync::bytes::{BufMut, Bytes, BytesMut};
+use asupersync::bytes::{BufMut, BytesMut};
 use asupersync::codec::Decoder;
 use asupersync::http::h1::{Http1Codec, HttpError};
 use libfuzzer_sys::fuzz_target;
@@ -25,6 +25,8 @@ fuzz_target!(|data: &[u8]| {
     if data.is_empty() || data.len() > MAX_INPUT_SIZE {
         return;
     }
+
+    assert_known_trailer_outcomes();
 
     // Create a chunked body with trailer headers for parsing
     let mut input = BytesMut::new();
@@ -165,3 +167,55 @@ fuzz_target!(|data: &[u8]| {
         // Should reject forbidden headers appropriately
     }
 });
+
+fn assert_known_trailer_outcomes() {
+    let parsed = decode_request_with_trailers(b"X-Checksum: abc123\r\n\r\n")
+        .expect("safe trailer should decode")
+        .expect("safe trailer request should be complete");
+    assert_eq!(parsed.body, b"Hello");
+    assert_eq!(
+        parsed.trailers,
+        vec![("X-Checksum".to_string(), "abc123".to_string())]
+    );
+
+    for forbidden in [
+        b"Content-Length: 5\r\n\r\n".as_ref(),
+        b"Transfer-Encoding: chunked\r\n\r\n".as_ref(),
+        b"Host: example.com\r\n\r\n".as_ref(),
+        b"Authorization: bearer token\r\n\r\n".as_ref(),
+    ] {
+        assert!(
+            matches!(
+                decode_request_with_trailers(forbidden),
+                Err(HttpError::BadHeader)
+            ),
+            "forbidden trailer should reject: {forbidden:?}",
+        );
+    }
+
+    assert!(
+        matches!(
+            decode_request_with_trailers(b"X-Test: ok\0bad\r\n\r\n"),
+            Err(HttpError::InvalidHeaderValue)
+        ),
+        "NUL in trailer value should reject",
+    );
+    assert!(
+        matches!(
+            decode_request_with_trailers(b": value\r\n\r\n"),
+            Err(HttpError::InvalidHeaderName)
+        ),
+        "empty trailer name should reject",
+    );
+}
+
+fn decode_request_with_trailers(
+    trailer_block: &[u8],
+) -> Result<Option<asupersync::http::h1::Request>, HttpError> {
+    let mut codec = Http1Codec::new();
+    let mut request = BytesMut::new();
+    request.put(&b"POST /test HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"[..]);
+    request.put(&b"5\r\nHello\r\n0\r\n"[..]);
+    request.put(trailer_block);
+    codec.decode(&mut request)
+}

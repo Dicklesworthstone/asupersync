@@ -48,18 +48,18 @@ fn extract_json_string(json: &str, key: &str) -> Option<String> {
                     'n' => out.push('\n'),
                     'r' => out.push('\r'),
                     't' => out.push('\t'),
-                    '"' | '\\' | '/' => out.push(next),
                     'u' => {
                         let mut hex = String::with_capacity(4);
                         for _ in 0..4 {
                             hex.push(chars.next()?);
                         }
-                        let cp = u32::from_str_radix(&hex, 16).ok()?;
-                        if let Some(c) = char::from_u32(cp) {
-                            out.push(c);
+                        if let Ok(cp) = u32::from_str_radix(&hex, 16) {
+                            if let Some(c) = char::from_u32(cp) {
+                                out.push(c);
+                            }
                         }
                     }
-                    _ => return None,
+                    other => out.push(other),
                 }
             }
             c => out.push(c),
@@ -70,11 +70,11 @@ fn extract_json_string(json: &str, key: &str) -> Option<String> {
 fn extract_json_i64(json: &str, key: &str) -> Option<i64> {
     let pattern = format!("\"{key}\":");
     let start = json.find(&pattern)? + pattern.len();
-    let slice = &json[start..];
+    let slice = json[start..].trim_start();
     let end = slice
-        .find(|c: char| c == ',' || c == '}' || c == ']' || c.is_whitespace())
+        .find(|c: char| !c.is_ascii_digit() && c != '-')
         .unwrap_or(slice.len());
-    slice[..end].trim().parse::<i64>().ok()
+    slice[..end].parse::<i64>().ok()
 }
 
 fn extract_json_bool(json: &str, key: &str) -> Option<bool> {
@@ -128,7 +128,54 @@ fn parse_hmsg_headers(block: &[u8]) -> Option<Vec<(String, String)>> {
     Some(out)
 }
 
+fn assert_fixed_oracles() {
+    assert_eq!(
+        extract_json_string(
+            r#"{"server_id":"line\nquote\"slash\/unknown\zunicode\u0041bad\uZZZZsurrogate\uD800end"}"#,
+            "server_id"
+        )
+        .as_deref(),
+        Some("line\nquote\"slash/unknownzunicodeAbadsurrogateend")
+    );
+    assert_eq!(
+        extract_json_string(r#"{"server_id":"truncated\u12"}"#, "server_id"),
+        None
+    );
+    assert_eq!(extract_json_i64(r#"{"proto": -12x}"#, "proto"), Some(-12));
+    assert_eq!(
+        extract_json_i64(r#"{"max_payload": 42,"#, "max_payload"),
+        Some(42)
+    );
+    assert_eq!(extract_json_i64(r#"{"proto": +1}"#, "proto"), None);
+    assert_eq!(
+        extract_json_bool(r#"{"headers": trueish}"#, "headers"),
+        Some(true)
+    );
+    assert_eq!(
+        extract_json_bool(r#"{"tls_required": falsehood}"#, "tls_required"),
+        Some(false)
+    );
+    assert_eq!(
+        parse_hmsg_headers(b"NATS/1.0\r\nStatus: 503\r\nDescription: No Responders\r\n\r\n"),
+        Some(vec![
+            ("Status".to_string(), "503".to_string()),
+            ("Description".to_string(), "No Responders".to_string()),
+        ])
+    );
+    assert_eq!(
+        parse_hmsg_headers(b"NATS/1.0 408 Request Timeout\r\n\r\n"),
+        Some(Vec::new())
+    );
+    assert_eq!(parse_hmsg_headers(b"HTTP/1.1\r\nFoo: bar\r\n\r\n"), None);
+    assert_eq!(
+        parse_hmsg_headers(b"NATS/1.0\r\nBad: va\0lue\r\n\r\n"),
+        None
+    );
+}
+
 fuzz_target!(|data: &[u8]| {
+    assert_fixed_oracles();
+
     if data.len() > MAX_INPUT || data.len() < 2 {
         return;
     }
