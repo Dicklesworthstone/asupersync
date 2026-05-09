@@ -53,10 +53,10 @@ fn extract_json_string(json: &str, key: &str) -> Option<String> {
                         for _ in 0..4 {
                             hex.push(chars.next()?);
                         }
-                        if let Ok(cp) = u32::from_str_radix(&hex, 16) {
-                            if let Some(c) = char::from_u32(cp) {
-                                out.push(c);
-                            }
+                        if let Ok(cp) = u32::from_str_radix(&hex, 16)
+                            && let Some(c) = char::from_u32(cp)
+                        {
+                            out.push(c);
                         }
                     }
                     other => out.push(other),
