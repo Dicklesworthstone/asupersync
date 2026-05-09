@@ -257,6 +257,7 @@ fn test_jetstream_info_decoding_scenarios(input: &JetStreamInfoFuzz) {
             for response in stream_responses.iter().take(MAX_RESPONSES) {
                 if is_valid_stream_response(response) {
                     let json = generate_stream_info_json(response, &input.field_strategy);
+                    observe_stream_info_json_fields(&json);
                     observe_stream_info_parse(json.as_bytes());
                 }
             }
@@ -266,8 +267,7 @@ fn test_jetstream_info_decoding_scenarios(input: &JetStreamInfoFuzz) {
             for response in consumer_responses.iter().take(MAX_RESPONSES) {
                 if is_valid_consumer_response(response) {
                     let json = generate_consumer_info_json(response, &input.field_strategy);
-                    // ConsumerInfo parsing would go through similar JSON extraction
-                    test_json_extraction(&json);
+                    observe_consumer_info_json_fields(&json);
                 }
             }
         }
@@ -285,13 +285,14 @@ fn test_jetstream_info_decoding_scenarios(input: &JetStreamInfoFuzz) {
                     ResponseVariant::Stream(stream) => {
                         if is_valid_stream_response(stream) {
                             let json = generate_stream_info_json(stream, &input.field_strategy);
+                            observe_stream_info_json_fields(&json);
                             observe_stream_info_parse(json.as_bytes());
                         }
                     }
                     ResponseVariant::Consumer(consumer) => {
                         if is_valid_consumer_response(consumer) {
                             let json = generate_consumer_info_json(consumer, &input.field_strategy);
-                            test_json_extraction(&json);
+                            observe_consumer_info_json_fields(&json);
                         }
                     }
                     ResponseVariant::Error(error) => {
@@ -606,13 +607,67 @@ fn test_json_edge_case(edge_case: &JsonEdgeCase) {
     }
 }
 
-/// Test JSON field extraction utilities directly
-fn test_json_extraction(json: &str) {
-    // These functions are internal to the module but the fuzzing exercises them
-    // through the public parse functions
-    let _ = json.find("\"name\":");
-    let _ = json.find("\"messages\":");
-    let _ = json.find("\"bytes\":");
+#[derive(Debug)]
+struct JsonFieldPresence {
+    name: bool,
+    config: bool,
+    state: bool,
+    messages: bool,
+    bytes: bool,
+    stream_name: bool,
+    deliver_policy: bool,
+    ack_policy: bool,
+}
+
+fn observe_json_field_presence(json: &str) -> JsonFieldPresence {
+    let fields = JsonFieldPresence {
+        name: json.find("\"name\":").is_some(),
+        config: json.find("\"config\":").is_some(),
+        state: json.find("\"state\":").is_some(),
+        messages: json.find("\"messages\":").is_some(),
+        bytes: json.find("\"bytes\":").is_some(),
+        stream_name: json.find("\"stream_name\":").is_some(),
+        deliver_policy: json.find("\"deliver_policy\":").is_some(),
+        ack_policy: json.find("\"ack_policy\":").is_some(),
+    };
+
+    assert!(
+        fields.name
+            || fields.config
+            || fields.state
+            || fields.messages
+            || fields.bytes
+            || fields.stream_name
+            || fields.deliver_policy
+            || fields.ack_policy,
+        "generated JetStream JSON should expose at least one known info field: {fields:?}"
+    );
+
+    fields
+}
+
+fn observe_stream_info_json_fields(json: &str) {
+    let fields = observe_json_field_presence(json);
+    assert!(
+        fields.config && fields.name,
+        "generated StreamInfo JSON should expose config.name: {fields:?}"
+    );
+    assert!(
+        fields.state && fields.messages && fields.bytes,
+        "generated StreamInfo JSON should expose state counters: {fields:?}"
+    );
+}
+
+fn observe_consumer_info_json_fields(json: &str) {
+    let fields = observe_json_field_presence(json);
+    assert!(
+        fields.name && fields.stream_name && fields.config,
+        "generated ConsumerInfo JSON should expose name, stream_name, and config: {fields:?}"
+    );
+    assert!(
+        fields.deliver_policy && fields.ack_policy,
+        "generated ConsumerInfo JSON should expose delivery and ack policies: {fields:?}"
+    );
 }
 
 /// Check if stream response is valid for testing
