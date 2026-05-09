@@ -26,7 +26,7 @@ use arbitrary::Arbitrary;
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::codec::{BytesCodec, Decoder, Encoder};
 use libfuzzer_sys::fuzz_target;
-use std::collections::VecDeque;
+use std::io;
 
 /// Maximum total data size to prevent OOM in fuzzer
 const MAX_TOTAL_DATA: usize = 1024 * 1024; // 1MB
@@ -36,6 +36,46 @@ const MAX_CHUNK_SIZE: usize = 64 * 1024; // 64KB
 
 /// Maximum number of operations to prevent timeout
 const MAX_OPERATIONS: usize = 100;
+
+fn observe_passthrough_decode(
+    codec: &mut BytesCodec,
+    buffer: &mut BytesMut,
+) -> io::Result<Option<BytesMut>> {
+    let expected = buffer.clone();
+    let before_len = buffer.len();
+    let result = codec.decode(buffer);
+    assert!(
+        buffer.len() <= before_len,
+        "BytesCodec decode must not grow the source buffer"
+    );
+
+    match &result {
+        Ok(Some(decoded)) => {
+            assert!(before_len > 0, "empty buffers should decode as None");
+            assert!(
+                buffer.is_empty(),
+                "BytesCodec must consume all visible bytes"
+            );
+            assert_eq!(
+                decoded.as_ref(),
+                expected.as_ref(),
+                "BytesCodec must preserve visible bytes exactly"
+            );
+        }
+        Ok(None) => {
+            assert_eq!(before_len, 0, "non-empty buffers should decode bytes");
+            assert!(buffer.is_empty(), "empty decode must leave buffer empty");
+        }
+        Err(err) => {
+            assert!(
+                !err.to_string().is_empty(),
+                "BytesCodec decode errors must be observable"
+            );
+        }
+    }
+
+    result
+}
 
 #[derive(Arbitrary, Debug)]
 struct BytesCodecFuzzInput {
@@ -125,6 +165,8 @@ fuzz_target!(|input: BytesCodecFuzzInput| {
         return;
     }
 
+    let largest_payload_size = payloads.iter().map(|p| p.data.len()).max().unwrap_or(0);
+
     match input.scenario {
         TestScenario::RoundTrip => test_roundtrip_identity(&payloads),
         TestScenario::PartialAccumulation => {
@@ -136,7 +178,9 @@ fuzz_target!(|input: BytesCodecFuzzInput| {
             test_roundtrip_identity(&payloads);
             test_partial_accumulation(&payloads, &input.partial_config);
             test_buffer_manipulation(&payloads, &input.buffer_ops);
+            test_max_frame_length_respected(largest_payload_size);
             test_empty_frames_tolerance();
+            test_comprehensive_edge_cases();
         }
     }
 });
@@ -234,6 +278,22 @@ fn test_partial_accumulation(payloads: &[DataPayload], partial_config: &PartialR
     let mut reference_buffer = complete_buffer.clone();
     let reference_result = codec.decode(&mut reference_buffer).unwrap();
 
+    if partial_config.intermix_full {
+        let mut full_probe = complete_buffer.clone();
+        let full_probe_result = codec.decode(&mut full_probe).unwrap();
+        match (reference_result.as_ref(), full_probe_result.as_ref()) {
+            (Some(reference), Some(probe)) => {
+                assert_eq!(
+                    probe.as_ref(),
+                    reference.as_ref(),
+                    "Intermixed full-buffer probe diverged from reference decode"
+                );
+            }
+            (None, None) => {}
+            _ => panic!("Intermixed full-buffer probe changed decode presence"),
+        }
+    }
+
     // Test 2: Decode in chunks and verify accumulation
     let chunk_sizes: Vec<usize> = partial_config
         .chunk_sizes
@@ -294,7 +354,7 @@ fn test_partial_accumulation(payloads: &[DataPayload], partial_config: &PartialR
                 accumulated_results[0].as_ref()
             );
         }
-        (Some(_), n) if n > 1 => {
+        (Some(_), 2..) => {
             // This could happen if decode was called multiple times - verify total correctness
             let total_accumulated: Vec<u8> = accumulated_results
                 .iter()
@@ -353,8 +413,6 @@ fn test_buffer_manipulation(payloads: &[DataPayload], buffer_ops: &[BufferOperat
         codec.encode(payload.data.clone(), &mut buffer).unwrap();
     }
 
-    let original_buffer_content = buffer.clone();
-
     // Apply buffer operations (simulating various cancellation/manipulation scenarios)
     for buffer_op in buffer_ops.iter().take(10) {
         // Limit operations
@@ -380,20 +438,20 @@ fn test_buffer_manipulation(payloads: &[DataPayload], buffer_ops: &[BufferOperat
                     let split_pos = (*pos as usize) % buffer.len();
                     let _split_off = buffer.split_off(split_pos);
                     // Remaining buffer should still be decodable
-                    let _ = codec.decode(&mut buffer);
+                    let _ = observe_passthrough_decode(&mut codec, &mut buffer);
                 }
             }
             BufferOperation::Truncate(len) => {
                 let new_len = (*len as usize) % (buffer.len() + 1);
                 buffer.truncate(new_len);
                 // Truncated buffer should still be decodable
-                let _ = codec.decode(&mut buffer);
+                let _ = observe_passthrough_decode(&mut codec, &mut buffer);
             }
             BufferOperation::Extend(data) => {
                 if buffer.len() + data.len() <= MAX_CHUNK_SIZE {
                     buffer.extend_from_slice(data);
                     // Extended buffer should still be decodable
-                    let _ = codec.decode(&mut buffer);
+                    let _ = observe_passthrough_decode(&mut codec, &mut buffer);
                 }
             }
         }
