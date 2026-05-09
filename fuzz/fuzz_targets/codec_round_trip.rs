@@ -23,8 +23,53 @@
 
 use arbitrary::Arbitrary;
 use asupersync::bytes::{Bytes, BytesMut};
-use asupersync::codec::{BytesCodec, Decoder, Encoder, LinesCodec};
+use asupersync::codec::{BytesCodec, Decoder, Encoder, LinesCodec, LinesCodecError};
 use libfuzzer_sys::fuzz_target;
+
+fn observe_lines_decode_eof(
+    codec: &mut LinesCodec,
+    src: &mut BytesMut,
+) -> Result<Option<String>, LinesCodecError> {
+    let before_len = src.len();
+    let max_length = codec.max_length();
+    let result = codec.decode_eof(src);
+
+    assert!(
+        src.len() <= before_len,
+        "LinesCodec::decode_eof grew the source buffer"
+    );
+
+    match &result {
+        Ok(Some(line)) => {
+            assert!(
+                src.len() < before_len,
+                "successful EOF line decode must consume input"
+            );
+            if max_length != usize::MAX {
+                assert!(
+                    line.len() <= max_length,
+                    "EOF line length {} exceeds max_length {}",
+                    line.len(),
+                    max_length
+                );
+            }
+            assert!(!line.contains('\n'), "EOF line retained newline delimiter");
+            assert!(
+                !line.ends_with('\r'),
+                "EOF line retained trailing carriage return"
+            );
+        }
+        Ok(None) => {}
+        Err(error) => {
+            assert!(
+                !error.to_string().is_empty(),
+                "LinesCodec EOF error must have a non-empty description: {error:?}"
+            );
+        }
+    }
+
+    result
+}
 
 /// Fuzzable codec types for round-trip testing
 #[derive(Arbitrary, Debug, Clone)]
@@ -242,7 +287,7 @@ fn fuzz_round_trip(codec_type: CodecType, test_data: TestData) {
             // Only test valid UTF-8 strings for line codec
             if let TestData::ValidText(text) = test_data {
                 // Don't include newlines in the input for round-trip test
-                let clean_text = text.replace('\n', "").replace('\r', "");
+                let clean_text = text.replace(['\n', '\r'], "");
                 if clean_text.is_empty() {
                     return;
                 }
@@ -334,7 +379,7 @@ fn fuzz_partial_frames(codec_type: CodecType, test_data: TestData, chunk_sizes: 
 
             // Final decode attempt
             if !src.is_empty() {
-                let _ = codec.decode_eof(&mut src);
+                let _ = observe_lines_decode_eof(&mut codec, &mut src);
             }
 
             // Partial frame oracle: decoded lines should be prefix of expected
@@ -486,11 +531,13 @@ fn fuzz_state_persistence(codec_type: CodecType, operations: Vec<TestData>) {
 
             // Encode multiple operations
             for test_data in operations {
-                if let TestData::ValidText(text) = test_data {
-                    if !text.is_empty() && !text.contains('\n') && !text.contains('\r') {
-                        let _ = codec.encode(text.clone(), &mut all_encoded);
-                        expected_lines.push(text);
-                    }
+                if let TestData::ValidText(text) = test_data
+                    && !text.is_empty()
+                    && !text.contains('\n')
+                    && !text.contains('\r')
+                {
+                    let _ = codec.encode(text.clone(), &mut all_encoded);
+                    expected_lines.push(text);
                 }
             }
 
