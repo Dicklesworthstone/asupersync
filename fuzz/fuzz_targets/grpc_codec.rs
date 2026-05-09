@@ -71,8 +71,9 @@ fuzz_target!(|input: FuzzInput| {
                 Ok(Some(msg)) => {
                     // Valid message
                     assert!(prev_len > buf.len()); // MUST consume bytes
+                    let payload_len = msg.data.len();
                     let mut out = BytesMut::new();
-                    let _ = codec.encode(msg, &mut out);
+                    observe_grpc_encode_result(codec.encode(msg, &mut out), &out, payload_len);
                 }
                 Ok(None) => {
                     assert_eq!(prev_len, buf.len()); // MUST NOT consume bytes if incomplete
@@ -95,3 +96,38 @@ fuzz_target!(|input: FuzzInput| {
         }
     }
 });
+
+fn observe_grpc_encode_result(
+    result: Result<(), GrpcError>,
+    out: &BytesMut,
+    payload_len: usize,
+) {
+    match result {
+        Ok(()) => {
+            assert_eq!(
+                out.len(),
+                MESSAGE_HEADER_SIZE + payload_len,
+                "encoded gRPC frame length must match header plus payload"
+            );
+            assert!(
+                matches!(out[0], 0 | 1),
+                "encoded gRPC compression flag must be valid"
+            );
+            let encoded_len = u32::from_be_bytes([out[1], out[2], out[3], out[4]]) as usize;
+            assert_eq!(
+                encoded_len, payload_len,
+                "encoded gRPC length prefix must match payload"
+            );
+        }
+        Err(error) => {
+            assert!(
+                !format!("{error:?}").is_empty(),
+                "gRPC encode errors must remain observable"
+            );
+            assert!(
+                out.is_empty(),
+                "failed gRPC encode should not mutate destination buffer"
+            );
+        }
+    }
+}
