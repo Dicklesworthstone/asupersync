@@ -59,7 +59,7 @@ use asupersync::bytes::Bytes;
 use asupersync::grpc::Status;
 use asupersync::grpc::server::{DEFAULT_MAX_METADATA_SIZE, enforce_metadata_size_limit};
 use asupersync::grpc::status::Code;
-use asupersync::grpc::streaming::{Metadata, Request};
+use asupersync::grpc::streaming::{Metadata, MetadataValue, Request};
 use libfuzzer_sys::fuzz_target;
 
 /// Per-iteration cap on number of metadata entries — bounded so each
@@ -105,6 +105,133 @@ fn truncate_kv(s: &str) -> String {
     s[..end].to_string()
 }
 
+fn metadata_entry_count(metadata: &Metadata) -> usize {
+    metadata.iter().count()
+}
+
+fn expected_metadata_key(key: &str, binary: bool) -> Option<String> {
+    let mut normalized = key.to_ascii_lowercase();
+    if binary && !normalized.ends_with("-bin") {
+        normalized.push_str("-bin");
+    }
+    if normalized.is_empty() {
+        return None;
+    }
+
+    normalized
+        .chars()
+        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '-' | '_' | '.'))
+        .then_some(normalized)
+}
+
+fn expected_ascii_value(value: &str) -> String {
+    value
+        .bytes()
+        .filter(|byte| (0x20..=0x7E).contains(byte))
+        .map(char::from)
+        .collect()
+}
+
+fn assert_ascii_insert_observation(
+    metadata: &Metadata,
+    before_len: usize,
+    key: &str,
+    value: &str,
+    inserted: bool,
+) {
+    let after_len = metadata_entry_count(metadata);
+    if !inserted {
+        assert_eq!(
+            after_len,
+            before_len,
+            "Metadata::insert rejected an ASCII entry but mutated metadata: \
+             raw_key_len={}, before_len={before_len}, after_len={after_len}",
+            key.len(),
+        );
+        assert!(
+            expected_metadata_key(key, false).is_none(),
+            "Metadata::insert rejected a locally valid ASCII metadata key: raw_key={key:?}",
+        );
+        return;
+    }
+
+    assert_eq!(
+        after_len,
+        before_len + 1,
+        "Metadata::insert accepted an ASCII entry without appending exactly one entry: \
+         raw_key_len={}, before_len={before_len}, after_len={after_len}",
+        key.len(),
+    );
+    let expected_key =
+        expected_metadata_key(key, false).expect("accepted ASCII metadata key must normalize");
+    let expected_value = expected_ascii_value(value);
+    let (stored_key, stored_value) = metadata
+        .iter()
+        .last()
+        .expect("accepted ASCII metadata entry must be observable");
+    assert_eq!(
+        stored_key, expected_key,
+        "accepted ASCII key normalization drifted"
+    );
+    match stored_value {
+        MetadataValue::Ascii(stored) => assert_eq!(
+            stored, &expected_value,
+            "accepted ASCII metadata value was not sanitized as documented",
+        ),
+        MetadataValue::Binary(_) => panic!("Metadata::insert stored an ASCII value as binary"),
+    }
+}
+
+fn assert_binary_insert_observation(
+    metadata: &Metadata,
+    before_len: usize,
+    key: &str,
+    value: &[u8],
+    inserted: bool,
+) {
+    let after_len = metadata_entry_count(metadata);
+    if !inserted {
+        assert_eq!(
+            after_len,
+            before_len,
+            "Metadata::insert_bin rejected a binary entry but mutated metadata: \
+             raw_key_len={}, before_len={before_len}, after_len={after_len}",
+            key.len(),
+        );
+        assert!(
+            expected_metadata_key(key, true).is_none(),
+            "Metadata::insert_bin rejected a locally valid binary metadata key: raw_key={key:?}",
+        );
+        return;
+    }
+
+    assert_eq!(
+        after_len,
+        before_len + 1,
+        "Metadata::insert_bin accepted a binary entry without appending exactly one entry: \
+         raw_key_len={}, before_len={before_len}, after_len={after_len}",
+        key.len(),
+    );
+    let expected_key =
+        expected_metadata_key(key, true).expect("accepted binary metadata key must normalize");
+    let (stored_key, stored_value) = metadata
+        .iter()
+        .last()
+        .expect("accepted binary metadata entry must be observable");
+    assert_eq!(
+        stored_key, expected_key,
+        "accepted binary key normalization drifted",
+    );
+    match stored_value {
+        MetadataValue::Binary(stored) => assert_eq!(
+            stored.as_ref(),
+            value,
+            "accepted binary metadata value changed during insertion",
+        ),
+        MetadataValue::Ascii(_) => panic!("Metadata::insert_bin stored a binary value as ASCII"),
+    }
+}
+
 fn build_metadata(entries: &[MetadataEntry]) -> Metadata {
     let mut metadata = Metadata::new();
     for entry in entries.iter().take(MAX_ENTRIES) {
@@ -112,11 +239,21 @@ fn build_metadata(entries: &[MetadataEntry]) -> Metadata {
         match &entry.kind {
             ValueKind::Ascii(value) => {
                 let value = truncate_kv(value);
-                let _ = metadata.insert(key, value);
+                let before_len = metadata_entry_count(&metadata);
+                let inserted = metadata.insert(key.clone(), value.clone());
+                assert_ascii_insert_observation(&metadata, before_len, &key, &value, inserted);
             }
             ValueKind::Binary(bytes) => {
                 let bytes_capped: Vec<u8> = bytes.iter().take(MAX_KV_LEN).copied().collect();
-                let _ = metadata.insert_bin(key, Bytes::from(bytes_capped));
+                let before_len = metadata_entry_count(&metadata);
+                let inserted = metadata.insert_bin(key.clone(), Bytes::from(bytes_capped.clone()));
+                assert_binary_insert_observation(
+                    &metadata,
+                    before_len,
+                    &key,
+                    &bytes_capped,
+                    inserted,
+                );
             }
         }
     }
