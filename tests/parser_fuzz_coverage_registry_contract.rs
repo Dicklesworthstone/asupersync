@@ -204,6 +204,40 @@ fn partial_and_stale_targets_match_full_output_golden() {
 }
 
 #[test]
+fn schema_and_stale_targets_fail_closed_even_when_surface_is_covered() {
+    let receipt = registry_json("schema_and_stale_target.json");
+
+    assert_eq!(receipt["summary"]["passes"].as_bool(), Some(false));
+    assert_eq!(receipt["summary"]["covered"].as_u64(), Some(1));
+    assert_eq!(receipt["summary"]["missing"].as_u64(), Some(0));
+    assert_eq!(receipt["summary"]["partial"].as_u64(), Some(0));
+    assert_eq!(
+        receipt["summary"]["stale_covering_targets"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        receipt["requirements"]["input_schema_recognized"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        receipt["requirements"]["coverage_uses_active_fuzz_target"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        coverage_record(&receipt, "dns_message_parse")["status"].as_str(),
+        Some("covered")
+    );
+}
+
+#[test]
+fn schema_and_stale_targets_match_full_output_golden() {
+    assert_registry_output_matches_golden(
+        "schema_and_stale_target.json",
+        "schema_and_stale_target_expected.json",
+    );
+}
+
+#[test]
 fn duplicate_target_ids_are_coalesced_deterministically() {
     let receipt = registry_json("duplicate_targets.json");
     let covering = coverage_record(&receipt, "nats_header_parse")["evidence"]["covering_targets"]

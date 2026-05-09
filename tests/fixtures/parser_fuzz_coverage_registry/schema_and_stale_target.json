@@ -1,0 +1,31 @@
+{
+  "schema_version": "parser-fuzz-coverage-input-v0",
+  "parser_surfaces": [
+    {
+      "id": "dns_message_parse",
+      "path": "src/net/dns/message.rs",
+      "symbol": "decode_message",
+      "visibility": "pub",
+      "input_kind": "&[u8]",
+      "risk": "critical",
+      "category": "dns"
+    }
+  ],
+  "fuzz_targets": [
+    {
+      "id": "fuzz_dns_message_decoder",
+      "path": "fuzz/fuzz_targets/dns_message_decoder.rs",
+      "exists": true,
+      "covers": ["dns_message_parse"],
+      "references": ["decode_message"]
+    },
+    {
+      "id": "fuzz_dns_message_old",
+      "path": "fuzz/fuzz_targets/dns_message_old.rs",
+      "exists": false,
+      "covers": ["dns_message_parse"],
+      "references": ["decode_message"]
+    }
+  ],
+  "exemptions": []
+}

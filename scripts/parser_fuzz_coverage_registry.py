@@ -242,7 +242,18 @@ def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
             if record["evidence"]["exemption_status"] in {"missing-reason", "invalid-expiry", "expired"}
         ),
     }
-    passes = counts["missing"] == 0 and counts["partial"] == 0 and counts["invalid_exemptions"] == 0
+    input_schema_recognized = data.get("schema_version") == INPUT_SCHEMA_VERSION
+    every_public_surface_accounted_for = counts["missing"] == 0
+    partial_references_absent = counts["partial"] == 0
+    exemptions_valid = counts["invalid_exemptions"] == 0
+    active_target_coverage_only = counts["stale_covering_targets"] == 0
+    passes = (
+        input_schema_recognized
+        and every_public_surface_accounted_for
+        and partial_references_absent
+        and exemptions_valid
+        and active_target_coverage_only
+    )
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -257,11 +268,11 @@ def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
         },
         "summary": counts | {"passes": passes},
         "requirements": {
-            "input_schema_recognized": data.get("schema_version") == INPUT_SCHEMA_VERSION,
-            "every_public_byte_or_string_parser_has_coverage_or_exemption": counts["missing"] == 0,
-            "partial_references_are_not_counted_as_coverage": counts["partial"] == 0,
-            "exemptions_have_reason_and_future_expiry": counts["invalid_exemptions"] == 0,
-            "coverage_uses_active_fuzz_target": counts["stale_covering_targets"] == 0,
+            "input_schema_recognized": input_schema_recognized,
+            "every_public_byte_or_string_parser_has_coverage_or_exemption": every_public_surface_accounted_for,
+            "partial_references_are_not_counted_as_coverage": partial_references_absent,
+            "exemptions_have_reason_and_future_expiry": exemptions_valid,
+            "coverage_uses_active_fuzz_target": active_target_coverage_only,
         },
         "coverage": records,
         "missing_coverage": [record["surface"]["id"] for record in records if record["status"] == "missing"],
