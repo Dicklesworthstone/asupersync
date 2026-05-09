@@ -13,11 +13,12 @@
 //! - Protocol violations and security edge cases
 
 #![no_main]
+#![allow(clippy::enum_variant_names)]
 
 use arbitrary::Arbitrary;
 use asupersync::bytes::BytesMut;
 use asupersync::codec::Decoder;
-use asupersync::http::h1::Http1Codec;
+use asupersync::http::h1::{Http1Codec, HttpError, types::Request};
 use libfuzzer_sys::fuzz_target;
 
 /// Comprehensive HTTP/1.1 request parsing fuzz structure.
@@ -299,6 +300,68 @@ enum FuzzVersion {
 const MAX_OPERATIONS: usize = 50;
 const MAX_PAYLOAD_SIZE: usize = 100_000;
 
+fn assert_visible_http_error(context: &str, error: &HttpError) {
+    let rendered = error.to_string();
+    assert!(
+        !rendered.is_empty(),
+        "{context} decode error must have a visible display message: {error:?}"
+    );
+
+    let debug = format!("{error:?}");
+    assert!(
+        !debug.is_empty(),
+        "{context} decode error must have visible debug diagnostics"
+    );
+}
+
+fn assert_visible_request(context: &str, request: &Request) {
+    assert!(
+        !request.method.as_str().is_empty(),
+        "{context} decoded request method must be visible"
+    );
+    assert!(
+        !request.uri.is_empty(),
+        "{context} decoded request URI must be visible"
+    );
+    assert!(
+        request.headers.len() <= 128,
+        "{context} decoded request exceeded header bound"
+    );
+    assert!(
+        request.body.len() <= MAX_PAYLOAD_SIZE,
+        "{context} decoded request body exceeded fuzz payload bound"
+    );
+
+    let summary = format!(
+        "{context}:{}:{}:{}:{}",
+        request.method,
+        request.uri.len(),
+        request.headers.len(),
+        request.body.len()
+    );
+    assert!(
+        !summary.is_empty(),
+        "{context} decoded request summary must stay visible"
+    );
+}
+
+fn observe_decode(
+    codec: &mut Http1Codec,
+    buf: &mut BytesMut,
+    context: &str,
+) -> Result<Option<Request>, HttpError> {
+    let result = codec.decode(buf);
+    match &result {
+        Ok(Some(request)) => assert_visible_request(context, request),
+        Ok(None) => assert!(
+            buf.len() <= MAX_PAYLOAD_SIZE,
+            "{context} incomplete decode left an unbounded buffer"
+        ),
+        Err(error) => assert_visible_http_error(context, error),
+    }
+    result
+}
+
 fuzz_target!(|input: Http1RequestFuzz| {
     // Limit operations to prevent timeout
     let total_ops = input.request_operations.len()
@@ -344,7 +407,7 @@ fn test_request_operation(operation: RequestOperation) {
                 if request_bytes.len() <= MAX_PAYLOAD_SIZE {
                     let mut codec = Http1Codec::new();
                     let mut buf = BytesMut::from(request_bytes.as_slice());
-                    let _ = codec.decode(&mut buf);
+                    let _ = observe_decode(&mut codec, &mut buf, "RequestOperation::ParseValid");
                 }
             }
         }
@@ -359,7 +422,11 @@ fn test_request_operation(operation: RequestOperation) {
                 if request_bytes.len() <= MAX_PAYLOAD_SIZE {
                     let mut codec = Http1Codec::new();
                     let mut buf = BytesMut::from(request_bytes.as_slice());
-                    let _ = codec.decode(&mut buf);
+                    let _ = observe_decode(
+                        &mut codec,
+                        &mut buf,
+                        "RequestOperation::ParseMalformedRequestLine",
+                    );
                 }
             }
         }
@@ -381,7 +448,7 @@ fn test_request_operation(operation: RequestOperation) {
 
                 // Try to parse multiple requests
                 while !buf.is_empty() {
-                    match codec.decode(&mut buf) {
+                    match observe_decode(&mut codec, &mut buf, "RequestOperation::ParsePipelined") {
                         Ok(Some(_)) => continue, // Got a request, try next
                         Ok(None) => break,       // Incomplete, need more data
                         Err(_) => break,         // Parse error
@@ -401,7 +468,8 @@ fn test_request_operation(operation: RequestOperation) {
                 if truncated.len() <= MAX_PAYLOAD_SIZE {
                     let mut codec = Http1Codec::new();
                     let mut buf = BytesMut::from(truncated);
-                    let _ = codec.decode(&mut buf);
+                    let _ =
+                        observe_decode(&mut codec, &mut buf, "RequestOperation::ParseIncomplete");
                 }
             }
         }
@@ -418,7 +486,7 @@ fn test_header_operation(operation: HeaderOperation) {
                 if request_bytes.len() <= MAX_PAYLOAD_SIZE {
                     let mut codec = Http1Codec::new();
                     let mut buf = BytesMut::from(request_bytes.as_slice());
-                    let _ = codec.decode(&mut buf);
+                    let _ = observe_decode(&mut codec, &mut buf, "HeaderOperation::HeaderFolding");
                 }
             }
         }
@@ -449,7 +517,8 @@ fn test_header_operation(operation: HeaderOperation) {
                 if request_bytes.len() <= MAX_PAYLOAD_SIZE {
                     let mut codec = Http1Codec::new();
                     let mut buf = BytesMut::from(request_bytes.as_slice());
-                    let _ = codec.decode(&mut buf);
+                    let _ =
+                        observe_decode(&mut codec, &mut buf, "HeaderOperation::DuplicateHeaders");
                 }
             }
         }
@@ -476,7 +545,7 @@ fn test_header_operation(operation: HeaderOperation) {
                 if request_bytes.len() <= MAX_PAYLOAD_SIZE {
                     let mut codec = Http1Codec::new();
                     let mut buf = BytesMut::from(request_bytes.as_slice());
-                    let _ = codec.decode(&mut buf);
+                    let _ = observe_decode(&mut codec, &mut buf, "HeaderOperation::LongHeaders");
                 }
             }
         }
@@ -489,7 +558,8 @@ fn test_header_operation(operation: HeaderOperation) {
                 if request_bytes.len() <= MAX_PAYLOAD_SIZE {
                     let mut codec = Http1Codec::new();
                     let mut buf = BytesMut::from(request_bytes.as_slice());
-                    let _ = codec.decode(&mut buf);
+                    let _ =
+                        observe_decode(&mut codec, &mut buf, "HeaderOperation::InvalidHeaderChars");
                 }
             }
         }
@@ -520,7 +590,7 @@ fn test_body_operation(operation: BodyOperation) {
                 if request_bytes.len() <= MAX_PAYLOAD_SIZE {
                     let mut codec = Http1Codec::new();
                     let mut buf = BytesMut::from(request_bytes.as_slice());
-                    let _ = codec.decode(&mut buf);
+                    let _ = observe_decode(&mut codec, &mut buf, "BodyOperation::ContentLength");
                 }
             }
         }
@@ -545,14 +615,25 @@ fn test_body_operation(operation: BodyOperation) {
                         .copied()
                         .collect::<Vec<_>>();
 
-                    // Chunk size line
-                    if chunk.use_hex_uppercase {
-                        request_bytes
-                            .extend_from_slice(format!("{:X}\r\n", chunk_data.len()).as_bytes());
+                    // Chunk size line with bounded extension coverage.
+                    let mut chunk_line = if chunk.use_hex_uppercase {
+                        format!("{:X}", chunk_data.len())
                     } else {
-                        request_bytes
-                            .extend_from_slice(format!("{:x}\r\n", chunk_data.len()).as_bytes());
+                        format!("{:x}", chunk_data.len())
+                    };
+                    for extension in chunk.extensions.iter().take(3) {
+                        let extension = extension
+                            .chars()
+                            .filter(|ch| ch.is_ascii_graphic() && *ch != ';')
+                            .take(32)
+                            .collect::<String>();
+                        if !extension.is_empty() {
+                            chunk_line.push(';');
+                            chunk_line.push_str(&extension);
+                        }
                     }
+                    chunk_line.push_str("\r\n");
+                    request_bytes.extend_from_slice(chunk_line.as_bytes());
 
                     // Chunk data + CRLF
                     request_bytes.extend_from_slice(&chunk_data);
@@ -579,7 +660,7 @@ fn test_body_operation(operation: BodyOperation) {
                 if request_bytes.len() <= MAX_PAYLOAD_SIZE {
                     let mut codec = Http1Codec::new();
                     let mut buf = BytesMut::from(request_bytes.as_slice());
-                    let _ = codec.decode(&mut buf);
+                    let _ = observe_decode(&mut codec, &mut buf, "BodyOperation::ChunkedEncoding");
                 }
             }
         }
@@ -601,7 +682,7 @@ fn test_body_operation(operation: BodyOperation) {
                 if request_bytes.len() <= MAX_PAYLOAD_SIZE {
                     let mut codec = Http1Codec::new();
                     let mut buf = BytesMut::from(request_bytes.as_slice());
-                    let _ = codec.decode(&mut buf);
+                    let _ = observe_decode(&mut codec, &mut buf, "BodyOperation::AmbiguousLength");
                 }
             }
         }
@@ -620,7 +701,8 @@ fn test_body_operation(operation: BodyOperation) {
                 if request_bytes.len() <= MAX_PAYLOAD_SIZE {
                     let mut codec = Http1Codec::new();
                     let mut buf = BytesMut::from(request_bytes.as_slice());
-                    let _ = codec.decode(&mut buf);
+                    let _ =
+                        observe_decode(&mut codec, &mut buf, "BodyOperation::EmptyBodyWithHeaders");
                 }
             }
         }
@@ -640,7 +722,8 @@ fn test_security_operation(operation: SecurityOperation) {
                 if request_bytes.len() <= MAX_PAYLOAD_SIZE {
                     let mut codec = Http1Codec::new();
                     let mut buf = BytesMut::from(request_bytes.as_slice());
-                    let _ = codec.decode(&mut buf);
+                    let _ =
+                        observe_decode(&mut codec, &mut buf, "SecurityOperation::CrlfInjection");
                 }
             }
         }
@@ -653,7 +736,8 @@ fn test_security_operation(operation: SecurityOperation) {
                 if request_bytes.len() <= MAX_PAYLOAD_SIZE {
                     let mut codec = Http1Codec::new();
                     let mut buf = BytesMut::from(request_bytes.as_slice());
-                    let _ = codec.decode(&mut buf);
+                    let _ =
+                        observe_decode(&mut codec, &mut buf, "SecurityOperation::RequestSmuggling");
                 }
             }
         }
@@ -667,7 +751,8 @@ fn test_security_operation(operation: SecurityOperation) {
                 if request_bytes.len() <= MAX_PAYLOAD_SIZE {
                     let mut codec = Http1Codec::new();
                     let mut buf = BytesMut::from(request_bytes.as_slice());
-                    let _ = codec.decode(&mut buf);
+                    let _ =
+                        observe_decode(&mut codec, &mut buf, "SecurityOperation::HeaderInjection");
                 }
             }
         }
@@ -680,7 +765,11 @@ fn test_security_operation(operation: SecurityOperation) {
                 if request_bytes.len() <= MAX_PAYLOAD_SIZE {
                     let mut codec = Http1Codec::new();
                     let mut buf = BytesMut::from(request_bytes.as_slice());
-                    let _ = codec.decode(&mut buf);
+                    let _ = observe_decode(
+                        &mut codec,
+                        &mut buf,
+                        "SecurityOperation::NullByteInjection",
+                    );
                 }
             }
         }
@@ -697,7 +786,8 @@ fn test_violation_operation(operation: ViolationOperation) {
                 if request_bytes.len() <= MAX_PAYLOAD_SIZE {
                     let mut codec = Http1Codec::new();
                     let mut buf = BytesMut::from(request_bytes.as_slice());
-                    let _ = codec.decode(&mut buf);
+                    let _ =
+                        observe_decode(&mut codec, &mut buf, "ViolationOperation::InvalidVersion");
                 }
             }
         }
@@ -710,7 +800,8 @@ fn test_violation_operation(operation: ViolationOperation) {
                 if request_bytes.len() <= MAX_PAYLOAD_SIZE {
                     let mut codec = Http1Codec::new();
                     let mut buf = BytesMut::from(request_bytes.as_slice());
-                    let _ = codec.decode(&mut buf);
+                    let _ =
+                        observe_decode(&mut codec, &mut buf, "ViolationOperation::InvalidMethod");
                 }
             }
         }
@@ -726,7 +817,11 @@ fn test_violation_operation(operation: ViolationOperation) {
             if request_line.len() <= MAX_PAYLOAD_SIZE {
                 let mut codec = Http1Codec::new();
                 let mut buf = BytesMut::from(request_line.as_bytes());
-                let _ = codec.decode(&mut buf);
+                let _ = observe_decode(
+                    &mut codec,
+                    &mut buf,
+                    "ViolationOperation::RequestLineTooLong",
+                );
             }
         }
 
@@ -745,7 +840,8 @@ fn test_violation_operation(operation: ViolationOperation) {
                 if request_bytes.len() <= MAX_PAYLOAD_SIZE {
                     let mut codec = Http1Codec::new();
                     let mut buf = BytesMut::from(request_bytes.as_slice());
-                    let _ = codec.decode(&mut buf);
+                    let _ =
+                        observe_decode(&mut codec, &mut buf, "ViolationOperation::TooManyHeaders");
                 }
             }
         }
