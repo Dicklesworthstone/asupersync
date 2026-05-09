@@ -3904,6 +3904,7 @@ impl RuntimeState {
                                     Duration::from_nanos(now.duration_since(region.created_at()));
                                 self.metrics.region_closed(region_id, lifetime);
                             }
+                            self.resource_monitor.clear_region_priority(region_id);
 
                             if let Some(parent_id) = parent {
                                 // Remove from parent
@@ -11527,6 +11528,45 @@ mod tests {
             );
         }
         crate::test_complete!("region_closed_metric_fires_on_close");
+    }
+
+    #[test]
+    #[allow(clippy::significant_drop_tightening)]
+    fn region_close_clears_resource_monitor_priority() {
+        init_test("region_close_clears_resource_monitor_priority");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let task = insert_task(&mut state, root);
+
+        assert!(state.set_region_priority(root, RegionPriority::Low));
+        state
+            .resource_monitor()
+            .pressure()
+            .update_degradation_level(
+                crate::runtime::resource_monitor::ResourceType::Memory,
+                DegradationLevel::Emergency,
+            );
+        assert!(matches!(
+            state.resource_monitor().engine().should_shed_region(root),
+            crate::runtime::resource_monitor::SheddingDecision::Cancel
+        ));
+
+        {
+            let region = state.regions.get(root.arena_index()).expect("root");
+            region.begin_close(None);
+        }
+        state
+            .task_mut(task)
+            .expect("task")
+            .complete(Outcome::Ok(()));
+        let _ = state.task_completed(task);
+
+        assert!(state.regions.get(root.arena_index()).is_none());
+        assert!(matches!(
+            state.resource_monitor().engine().should_shed_region(root),
+            crate::runtime::resource_monitor::SheddingDecision::Pause
+        ));
+        crate::test_complete!("region_close_clears_resource_monitor_priority");
     }
 
     #[test]

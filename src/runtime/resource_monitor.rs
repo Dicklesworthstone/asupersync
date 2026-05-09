@@ -866,6 +866,12 @@ impl DegradationEngine {
         priorities.insert(region_id, priority);
     }
 
+    /// Clear the priority override for a region that left the runtime.
+    pub fn clear_region_priority(&self, region_id: RegionId) -> Option<RegionPriority> {
+        let mut priorities = self.region_priorities.write();
+        priorities.remove(&region_id)
+    }
+
     /// Add a degradation policy for a resource type.
     pub fn add_policy(&self, policy: DegradationPolicy) {
         let mut policies = self.active_policies.write();
@@ -3296,6 +3302,11 @@ impl ResourceMonitor {
     /// Get access to the degradation engine.
     pub fn engine(&self) -> Arc<DegradationEngine> {
         Arc::clone(&self.engine)
+    }
+
+    /// Clear the degradation priority override for a region that closed.
+    pub fn clear_region_priority(&self, region_id: RegionId) -> Option<RegionPriority> {
+        self.engine.clear_region_priority(region_id)
     }
 
     /// Update monitoring configuration.
