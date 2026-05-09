@@ -490,7 +490,8 @@ impl SwarmPressureGovernor {
     }
 
     /// Register a resource envelope for an active region.
-    pub fn register_region_envelope(&self, region_id: RegionId, envelope: ResourceEnvelope) {
+    pub fn register_region_envelope(&self, region_id: RegionId, mut envelope: ResourceEnvelope) {
+        envelope.region_id = region_id;
         let mut envelopes = self.active_regions.lock().unwrap();
         envelopes.insert(region_id, envelope);
     }
@@ -877,6 +878,27 @@ mod tests {
             envelope.reserve_memory(1),
             Err(SwarmPressureError::EnvelopeBudgetExceeded { resource, .. }) if resource == "memory"
         ));
+    }
+
+    #[test]
+    fn test_register_region_envelope_binds_envelope_to_region_key() {
+        let governor = create_test_swarm_governor();
+        let actual_region_id = RegionId::new_for_test(9, 1);
+        let placeholder_region_id = RegionId::new_for_test(1, 99);
+        let envelope = ResourceEnvelope::new(placeholder_region_id, 2048, 100, 10);
+
+        governor.register_region_envelope(actual_region_id, envelope);
+
+        let registered = governor
+            .get_region_envelope(actual_region_id)
+            .expect("registered region envelope should be retrievable by actual region id");
+        assert_eq!(registered.region_id, actual_region_id);
+        assert!(
+            governor
+                .get_region_envelope(placeholder_region_id)
+                .is_none(),
+            "placeholder admission id must not become a separately registered region"
+        );
     }
 
     #[test]
