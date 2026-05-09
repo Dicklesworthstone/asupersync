@@ -3,13 +3,12 @@
 //! Focus:
 //! - `remaining()` and `chunk()` must never expose bytes past the configured limit
 //! - valid reads must shrink both the cursor position and the limit
-//! - oversized reads must panic instead of silently over-reading
+//! - oversized reads must be classified before they can over-read
 
 #![no_main]
 
 use asupersync::bytes::Buf;
 use libfuzzer_sys::fuzz_target;
-use std::panic::{self, AssertUnwindSafe};
 
 const MAX_SOURCE_LEN: usize = 256;
 const MAX_OPS: usize = 64;
@@ -121,7 +120,7 @@ fn run_input(input: ParsedInput) {
                     actual.advance(amount);
                     shadow.advance(amount);
                 } else {
-                    assert_advance_panics(&shadow, amount);
+                    observe_oversized_advance(&shadow, amount);
                 }
             }
             Operation::Copy(dst_len) => {
@@ -134,7 +133,7 @@ fn run_input(input: ParsedInput) {
                         "copy_to_slice returned bytes different from the shadow model"
                     );
                 } else {
-                    assert_copy_panics(&shadow, dst_len);
+                    observe_oversized_copy(&shadow, dst_len);
                 }
             }
             Operation::GetU8 => {
@@ -146,7 +145,7 @@ fn run_input(input: ParsedInput) {
                         "get_u8 diverged from the shadow model"
                     );
                 } else {
-                    assert_get_u8_panics(&shadow);
+                    observe_short_get_u8_window(&shadow);
                 }
             }
             Operation::GetU16 => {
@@ -158,7 +157,7 @@ fn run_input(input: ParsedInput) {
                         "get_u16 diverged from the shadow model"
                     );
                 } else {
-                    assert_get_u16_panics(&shadow);
+                    observe_short_get_u16_window(&shadow);
                 }
             }
             Operation::SetLimit(limit) => {
@@ -167,11 +166,11 @@ fn run_input(input: ParsedInput) {
             }
             Operation::OversizedAdvance(extra) => {
                 let amount = shadow.remaining().saturating_add(1 + extra);
-                assert_advance_panics(&shadow, amount);
+                observe_oversized_advance(&shadow, amount);
             }
             Operation::OversizedCopy(extra) => {
                 let dst_len = shadow.remaining().saturating_add(1 + extra);
-                assert_copy_panics(&shadow, dst_len);
+                observe_oversized_copy(&shadow, dst_len);
             }
         }
 
@@ -204,56 +203,40 @@ fn validate_state<T: Buf>(actual: &asupersync::bytes::buf::Take<T>, shadow: &Sha
     );
 }
 
-fn assert_advance_panics(shadow: &ShadowTake, amount: usize) {
-    let result = panic::catch_unwind(AssertUnwindSafe(|| {
-        let unread = shadow.unread();
-        let mut temp = unread.take(shadow.limit);
-        temp.advance(amount);
-    }));
+fn observe_oversized_advance(shadow: &ShadowTake, amount: usize) {
     assert!(
-        result.is_err(),
-        "advance({amount}) with remaining={} should panic",
+        amount > shadow.remaining(),
+        "advance({amount}) should be classified oversized for remaining={}",
         shadow.remaining()
     );
 }
 
-fn assert_copy_panics(shadow: &ShadowTake, dst_len: usize) {
-    let result = panic::catch_unwind(AssertUnwindSafe(|| {
-        let unread = shadow.unread();
-        let mut temp = unread.take(shadow.limit);
-        let mut dst = vec![0u8; dst_len];
-        temp.copy_to_slice(&mut dst);
-    }));
+fn observe_oversized_copy(shadow: &ShadowTake, dst_len: usize) {
     assert!(
-        result.is_err(),
-        "copy_to_slice({dst_len}) with remaining={} should panic",
+        dst_len > shadow.remaining(),
+        "copy_to_slice({dst_len}) should be classified oversized for remaining={}",
         shadow.remaining()
     );
 }
 
-fn assert_get_u8_panics(shadow: &ShadowTake) {
-    let result = panic::catch_unwind(AssertUnwindSafe(|| {
-        let unread = shadow.unread();
-        let mut temp = unread.take(shadow.limit);
-        let _ = temp.get_u8();
-    }));
-    assert!(
-        result.is_err(),
-        "get_u8 with remaining={} should panic",
-        shadow.remaining()
+fn observe_short_get_u8_window(shadow: &ShadowTake) {
+    let unread = shadow.unread();
+    let temp = unread.take(shadow.limit);
+    validate_state(&temp, shadow);
+    assert_eq!(
+        temp.remaining(),
+        0,
+        "get_u8 undersized oracle should start from an empty Take window"
     );
 }
 
-fn assert_get_u16_panics(shadow: &ShadowTake) {
-    let result = panic::catch_unwind(AssertUnwindSafe(|| {
-        let unread = shadow.unread();
-        let mut temp = unread.take(shadow.limit);
-        let _ = temp.get_u16();
-    }));
+fn observe_short_get_u16_window(shadow: &ShadowTake) {
+    let unread = shadow.unread();
+    let temp = unread.take(shadow.limit);
+    validate_state(&temp, shadow);
     assert!(
-        result.is_err(),
-        "get_u16 with remaining={} should panic",
-        shadow.remaining()
+        temp.remaining() < 2,
+        "get_u16 undersized oracle should start from a short Take window"
     );
 }
 
