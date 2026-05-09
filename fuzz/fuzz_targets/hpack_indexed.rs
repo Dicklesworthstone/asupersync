@@ -12,7 +12,10 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use asupersync::{bytes::Bytes, http::h2::hpack::Decoder};
+use asupersync::{
+    bytes::Bytes,
+    http::h2::hpack::{Decoder, Header},
+};
 
 /// Fuzzing input structure for HPACK indexed header testing
 #[derive(Arbitrary, Debug)]
@@ -119,13 +122,16 @@ fuzz_target!(|input: HpackIndexedInput| {
     test_static_table_correctness();
 
     // Test Property 3: Dynamic table index past size → error (not panic)
-    test_dynamic_table_bounds(&mut decoder);
+    test_dynamic_table_bounds();
 
     // Test Property 4: Index 0 rejected as invalid per RFC
     test_index_zero_rejection();
 
     // Test Property 5: Huffman + literal round-trip preservation
     test_huffman_round_trip(&input.header_data);
+
+    // Fixed parser-contract canaries for indexed and dynamic-table behavior.
+    test_indexed_decode_canaries();
 });
 
 /// Setup dynamic table with bounded operations to avoid excessive state
@@ -141,12 +147,8 @@ fn setup_dynamic_table(decoder: &mut Decoder, operations: &[DynamicTableOp]) {
         match op {
             DynamicTableOp::InsertHeader { name, value } => {
                 // Bound header sizes
-                let bounded_name = if name.len() > 256 { &name[..256] } else { name };
-                let bounded_value = if value.len() > 512 {
-                    &value[..512]
-                } else {
-                    value
-                };
+                let bounded_name = bounded_utf8_prefix(name, 256);
+                let bounded_value = bounded_utf8_prefix(value, 512);
 
                 // Encode literal with incremental indexing (pattern: 01xxxxxx)
                 // Use index 0 for new name + encode name string + encode value string
@@ -165,8 +167,15 @@ fn setup_dynamic_table(decoder: &mut Decoder, operations: &[DynamicTableOp]) {
 
     // Apply operations if any were generated
     if !header_block.is_empty() {
-        let mut bytes = Bytes::from(header_block);
-        let _ = decoder.decode(&mut bytes); // Ignore result - setup only
+        let _ = observe_decode(decoder, header_block);
+        assert!(
+            decoder.dynamic_table_size() <= decoder.dynamic_table_max_size(),
+            "dynamic table size exceeded max after setup"
+        );
+        assert!(
+            decoder.dynamic_table_max_size() <= decoder.allowed_table_size(),
+            "dynamic table max exceeded allowed size after setup"
+        );
     }
 }
 
@@ -176,8 +185,13 @@ fn test_no_panic_on_indexed_bytes(decoder: &mut Decoder, data: &[u8]) {
     for byte in data.iter().take(256) {
         // Limit iterations
         let indexed_byte = *byte | 0x80; // Force indexed pattern
-        let mut bytes = Bytes::from(vec![indexed_byte]);
-        let _ = decoder.decode(&mut bytes); // Should not panic
+        if let Ok(headers) = observe_decode(decoder, vec![indexed_byte]) {
+            assert_eq!(
+                headers.len(),
+                1,
+                "single indexed header representation decoded to unexpected header count"
+            );
+        }
     }
 
     // Test multi-byte indexed patterns
@@ -185,15 +199,13 @@ fn test_no_panic_on_indexed_bytes(decoder: &mut Decoder, data: &[u8]) {
         for chunk in data.chunks(2).take(128) {
             if chunk.len() == 2 {
                 let indexed_seq = vec![chunk[0] | 0x80, chunk[1]];
-                let mut bytes = Bytes::from(indexed_seq);
-                let _ = decoder.decode(&mut bytes); // Should not panic
+                let _ = observe_decode(decoder, indexed_seq);
             }
         }
     }
 
     // Test raw data as indexed header block
-    let mut bytes = Bytes::from(data.to_vec());
-    let _ = decoder.decode(&mut bytes); // Should not panic on malformed data
+    let _ = observe_decode(decoder, data.to_vec());
 }
 
 /// Test Property 2: Static table indices 1-61 resolve to correct (name,value) pairs
@@ -206,41 +218,41 @@ fn test_static_table_correctness() {
         let index = expected_index + 1; // Static table is 1-indexed
 
         // Encode indexed header field for this static table entry
-        let mut header_block = Vec::new();
-        header_block.push(0x80); // 10000000 - indexed header field pattern
-        encode_integer(&mut header_block, index, 7);
+        let header_block = encode_indexed_header(index);
 
-        let mut bytes = Bytes::from(header_block);
-        if let Ok(headers) = decoder.decode(&mut bytes)
-            && let Some(header) = headers.first()
-        {
-            // Verify name and value match static table entry exactly
-            assert_eq!(
-                header.name, expected_name,
-                "Static table index {} name mismatch: expected '{}', got '{}'",
-                index, expected_name, header.name
-            );
-            assert_eq!(
-                header.value, expected_value,
-                "Static table index {} value mismatch: expected '{}', got '{}'",
-                index, expected_value, header.value
-            );
-        }
+        let headers = observe_decode(&mut decoder, header_block).unwrap_or_else(|remaining| {
+            panic!("static table index {index} rejected with {remaining} bytes remaining")
+        });
+        assert_eq!(
+            headers.len(),
+            1,
+            "Static table index {index} decoded to wrong header count"
+        );
+        let header = &headers[0];
+
+        // Verify name and value match static table entry exactly
+        assert_eq!(
+            header.name, expected_name,
+            "Static table index {} name mismatch: expected '{}', got '{}'",
+            index, expected_name, header.name
+        );
+        assert_eq!(
+            header.value, expected_value,
+            "Static table index {} value mismatch: expected '{}', got '{}'",
+            index, expected_value, header.value
+        );
     }
 }
 
 /// Test Property 3: Dynamic table index past current size → decoding error (not panic)
-fn test_dynamic_table_bounds(decoder: &mut Decoder) {
+fn test_dynamic_table_bounds() {
     // Test indices beyond static table range (> 61) on empty dynamic table
     let out_of_bounds_indices = [62, 63, 100, 255, 1000, 65535];
 
     for &index in &out_of_bounds_indices {
-        let mut header_block = Vec::new();
-        header_block.push(0x80); // 10000000 - indexed header field pattern
-        encode_integer(&mut header_block, index, 7);
-
-        let mut bytes = Bytes::from(header_block);
-        let result = decoder.decode(&mut bytes);
+        let mut decoder = Decoder::new();
+        let header_block = encode_indexed_header(index);
+        let result = observe_decode(&mut decoder, header_block);
 
         // Should return error, not panic
         assert!(
@@ -256,10 +268,7 @@ fn test_index_zero_rejection() {
     let mut decoder = Decoder::new();
 
     // Encode indexed header field with index 0 (invalid per RFC)
-    let header_block = vec![0x80]; // 10000000 - indexed pattern, index 0
-
-    let mut bytes = Bytes::from(header_block);
-    let result = decoder.decode(&mut bytes);
+    let result = observe_decode(&mut decoder, encode_indexed_header(0));
 
     // RFC 7541 requires rejecting index 0
     assert!(
@@ -304,8 +313,7 @@ fn test_huffman_round_trip(data: &[u8]) {
         encode_string(&mut header_block, &name_str, true); // Huffman=true
         encode_string(&mut header_block, "test-value", false); // Plain value
 
-        let mut bytes = Bytes::from(header_block);
-        if let Ok(headers) = decoder.decode(&mut bytes)
+        if let Ok(headers) = observe_decode(&mut decoder, header_block)
             && let Some(header) = headers.first()
         {
             // The decoded name should equal the original input (round-trip preservation)
@@ -318,6 +326,109 @@ fn test_huffman_round_trip(data: &[u8]) {
             );
         }
     }
+}
+
+/// Fixed canaries for HPACK indexed-header parser contracts.
+fn test_indexed_decode_canaries() {
+    let mut decoder = Decoder::new();
+    let headers = observe_decode(&mut decoder, encode_indexed_header(2))
+        .expect("static table index 2 should decode");
+    assert_eq!(headers.len(), 1);
+    assert_eq!(headers[0].name, ":method");
+    assert_eq!(headers[0].value, "GET");
+
+    let mut decoder = Decoder::new();
+    assert!(
+        observe_decode(&mut decoder, encode_indexed_header(0)).is_err(),
+        "index 0 must be rejected"
+    );
+
+    let mut decoder = Decoder::new();
+    assert!(
+        observe_decode(&mut decoder, vec![0xff]).is_err(),
+        "truncated indexed integer continuation must be rejected"
+    );
+
+    let mut decoder = Decoder::new();
+    assert!(
+        observe_decode(&mut decoder, encode_indexed_header(127)).is_err(),
+        "empty dynamic table must reject index past static table"
+    );
+
+    let mut decoder = Decoder::new();
+    let setup_block = encode_literal_with_incremental_indexing("x-test", "v");
+    let setup_headers = observe_decode(&mut decoder, setup_block)
+        .expect("valid literal with incremental indexing should decode");
+    assert_eq!(setup_headers.len(), 1);
+    assert_eq!(setup_headers[0].name, "x-test");
+    assert_eq!(setup_headers[0].value, "v");
+
+    let dynamic_index = STATIC_TABLE_ENTRIES.len() + 1;
+    let dynamic_headers = observe_decode(&mut decoder, encode_indexed_header(dynamic_index))
+        .expect("first dynamic table entry should be addressable");
+    assert_eq!(dynamic_headers.len(), 1);
+    assert_eq!(dynamic_headers[0].name, "x-test");
+    assert_eq!(dynamic_headers[0].value, "v");
+}
+
+fn observe_decode(decoder: &mut Decoder, data: Vec<u8>) -> Result<Vec<Header>, usize> {
+    let original_len = data.len();
+    let mut bytes = Bytes::from(data);
+    let result = decoder.decode(&mut bytes);
+    let remaining_len = bytes.len();
+    assert!(
+        remaining_len <= original_len,
+        "HPACK decoder reported impossible remaining byte count"
+    );
+
+    match result {
+        Ok(headers) => {
+            assert!(
+                bytes.is_empty(),
+                "successful HPACK decode left {remaining_len} trailing bytes"
+            );
+            for header in &headers {
+                assert!(
+                    !header.name.is_empty(),
+                    "successful HPACK decode produced an empty header name"
+                );
+                assert!(
+                    !header
+                        .value
+                        .chars()
+                        .any(|ch| matches!(ch, '\0' | '\r' | '\n')),
+                    "successful HPACK decode produced an invalid header value"
+                );
+            }
+            Ok(headers)
+        }
+        Err(_) => Err(remaining_len),
+    }
+}
+
+fn encode_indexed_header(index: usize) -> Vec<u8> {
+    let mut header_block = vec![0x80]; // 10000000 - indexed header field pattern
+    encode_integer(&mut header_block, index, 7);
+    header_block
+}
+
+fn encode_literal_with_incremental_indexing(name: &str, value: &str) -> Vec<u8> {
+    let mut header_block = vec![0x40]; // 01000000 - literal with incremental indexing, index 0
+    encode_string(&mut header_block, name, false);
+    encode_string(&mut header_block, value, false);
+    header_block
+}
+
+fn bounded_utf8_prefix(value: &str, max_len: usize) -> &str {
+    if value.len() <= max_len {
+        return value;
+    }
+
+    let mut end = max_len;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
 }
 
 /// Encode string with optional Huffman encoding (simplified for fuzzing)
