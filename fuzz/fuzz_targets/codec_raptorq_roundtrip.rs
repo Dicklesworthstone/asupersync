@@ -36,6 +36,31 @@ use libfuzzer_sys::fuzz_target;
 const MAX_INPUT: usize = 8 * 1024;
 const MAX_SYMBOL_SIZE: u16 = 1024;
 const MAX_SYMBOLS_PER_BLOCK: u16 = 32;
+const MAX_DECODE_DIAGNOSTIC_SIZE: usize = 512;
+
+fn assert_visible_decode_error(context: &str, error: &str) {
+    let diagnostic = format!("{context}: {error}");
+    assert!(
+        !diagnostic.is_empty(),
+        "{context} decode failures should expose diagnostics"
+    );
+    assert!(
+        diagnostic.len() <= MAX_DECODE_DIAGNOSTIC_SIZE,
+        "{context} decode diagnostic size {} exceeds maximum {}",
+        diagnostic.len(),
+        MAX_DECODE_DIAGNOSTIC_SIZE
+    );
+}
+
+fn observe_decode_attempt(result: Result<Vec<u8>, String>, context: &str, expected_payload: &[u8]) {
+    match result {
+        Ok(decoded) => assert_eq!(
+            decoded, expected_payload,
+            "{context} recovered bytes must match the original payload"
+        ),
+        Err(error) => assert_visible_decode_error(context, &error),
+    }
+}
 
 fuzz_target!(|data: &[u8]| {
     if data.len() < 4 {
@@ -105,7 +130,7 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // ROUND-TRIP A: full symbol set ⇒ decoder MUST recover original bytes.
-    if let Some(decoded) = decode_attempt(
+    match decode_attempt(
         symbol_size,
         max_block_size,
         source_symbols,
@@ -113,15 +138,16 @@ fuzz_target!(|data: &[u8]| {
         payload_len,
         &symbols,
     ) {
-        assert_eq!(
+        Ok(decoded) => assert_eq!(
             decoded, payload,
             "RaptorQ codec round-trip MUST preserve bytes when full symbol set is received"
-        );
-    } else {
-        // Some configurations (e.g. zero-symbol blocks) legitimately
-        // refuse to encode/decode; surface as a no-op rather than
-        // asserting false.
-        return;
+        ),
+        Err(error) => {
+            // Some configurations legitimately refuse to decode; make that
+            // rejection visible instead of collapsing it into a silent no-op.
+            assert_visible_decode_error("full symbol set", &error);
+            return;
+        }
     }
 
     // ROUND-TRIP B: decoder fail-safe on truncated symbol set. Drop the
@@ -130,16 +156,17 @@ fuzz_target!(|data: &[u8]| {
     // must return a typed error (NOT panic).
     if symbols.len() > 1 {
         let truncated: Vec<Symbol> = symbols.iter().skip(1).cloned().collect();
-        // We don't assert success — only fail-safety. The call path
-        // inside decode_attempt already requires non-panicking behavior;
-        // a None return here is acceptable (Err propagated as typed).
-        let _ = decode_attempt(
-            symbol_size,
-            max_block_size,
-            source_symbols,
-            object_id,
-            payload_len,
-            &truncated,
+        observe_decode_attempt(
+            decode_attempt(
+                symbol_size,
+                max_block_size,
+                source_symbols,
+                object_id,
+                payload_len,
+                &truncated,
+            ),
+            "single-symbol truncation",
+            payload,
         );
     }
 
@@ -149,19 +176,23 @@ fuzz_target!(|data: &[u8]| {
     if symbols.len() >= 4 {
         let half = symbols.len() / 2;
         let truncated: Vec<Symbol> = symbols.iter().take(half).cloned().collect();
-        let _ = decode_attempt(
-            symbol_size,
-            max_block_size,
-            source_symbols,
-            object_id,
-            payload_len,
-            &truncated,
+        observe_decode_attempt(
+            decode_attempt(
+                symbol_size,
+                max_block_size,
+                source_symbols,
+                object_id,
+                payload_len,
+                &truncated,
+            ),
+            "half-symbol truncation",
+            payload,
         );
     }
 });
 
-/// Run the decode pipeline against the provided symbol set. Returns
-/// `Some(bytes)` on full recovery, `None` on any typed decoder error.
+/// Run the decode pipeline against the provided symbol set. Returns recovered
+/// bytes on full recovery, or a typed diagnostic on decoder error.
 /// MUST NOT panic regardless of input.
 fn decode_attempt(
     symbol_size: u16,
@@ -170,7 +201,7 @@ fn decode_attempt(
     object_id: ObjectId,
     data_len: usize,
     symbols: &[Symbol],
-) -> Option<Vec<u8>> {
+) -> Result<Vec<u8>, String> {
     let dec_config = DecodingConfig {
         symbol_size,
         max_block_size,
@@ -190,12 +221,16 @@ fn decode_attempt(
             1,
             source_symbols,
         ))
-        .ok()?;
+        .map_err(|error| format!("set object params failed: {error:?}"))?;
 
-    for symbol in symbols {
+    for (index, symbol) in symbols.iter().enumerate() {
         let auth = AuthenticatedSymbol::from_parts(symbol.clone(), AuthenticationTag::zero());
-        decoder.feed(auth).ok()?;
+        decoder
+            .feed(auth)
+            .map_err(|error| format!("feed symbol {index} failed: {error:?}"))?;
     }
 
-    decoder.into_data().ok()
+    decoder
+        .into_data()
+        .map_err(|error| format!("finish decode failed: {error:?}"))
 }
