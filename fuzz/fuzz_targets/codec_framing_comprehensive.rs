@@ -461,7 +461,7 @@ fn test_length_delimited_codec(input: &FuzzInput) {
 
     // Test overflow boundary values
     let mut overflow_codec = codec_builder.clone().new_codec();
-    test_overflow_scenarios(&config, &mut overflow_codec);
+    test_overflow_scenarios(config, &mut overflow_codec);
 }
 
 /// Test integer overflow scenarios
@@ -519,6 +519,10 @@ fn test_framed_transport(input: &FuzzInput) {
         transport =
             transport.with_read_error(IoError::new(ErrorKind::UnexpectedEof, "Triggered error"));
     }
+    assert!(
+        transport.written_data().is_empty(),
+        "fresh mock transport should not have written bytes"
+    );
 
     // Create codec
     let codec_builder = LengthDelimitedCodec::builder()
@@ -544,7 +548,9 @@ fn test_framed_transport(input: &FuzzInput) {
                 // Test codec directly (framed would need async runtime)
                 let mut test_buf = BytesMut::from(&transport_data[..100.min(transport_data.len())]);
                 let mut test_codec = codec_builder.clone().new_codec();
-                let _ = test_codec.decode(&mut test_buf);
+                let before_len = test_buf.len();
+                let result = test_codec.decode(&mut test_buf);
+                observe_decode_result("framed decode", before_len, &test_buf, result);
             }
             FramedOperation::SendData { data } => {
                 if data.len() <= 100_000 {
@@ -552,11 +558,21 @@ fn test_framed_transport(input: &FuzzInput) {
                     // Test encoding data that would be sent
                     let mut encoder = TestEncoder;
                     let mut dst = BytesMut::new();
-                    let _ = encoder.encode(data.clone(), &mut dst);
+                    let before_len = dst.len();
+                    let result = encoder.encode(data.clone(), &mut dst);
+                    observe_encode_result(
+                        "framed send encode",
+                        before_len,
+                        data.len(),
+                        &dst,
+                        result,
+                    );
 
                     // Test decoding the encoded data
                     let mut test_codec = codec_builder.clone().new_codec();
-                    let _ = test_codec.decode(&mut dst);
+                    let before_len = dst.len();
+                    let result = test_codec.decode(&mut dst);
+                    observe_decode_result("framed send decode", before_len, &dst, result);
                 }
             }
             FramedOperation::Flush => {
@@ -565,7 +581,9 @@ fn test_framed_transport(input: &FuzzInput) {
                 test_buf.extend_from_slice(&transport_data[..64.min(transport_data.len())]);
 
                 let mut test_codec = codec_builder.clone().new_codec();
-                let _ = test_codec.decode(&mut test_buf);
+                let before_len = test_buf.len();
+                let result = test_codec.decode(&mut test_buf);
+                observe_decode_result("framed flush decode", before_len, &test_buf, result);
             }
             FramedOperation::PollMultiple { count } => {
                 // Test repeated decode operations
@@ -576,7 +594,14 @@ fn test_framed_transport(input: &FuzzInput) {
                     if offset < end {
                         let mut test_buf = BytesMut::from(&transport_data[offset..end]);
                         let mut test_codec = codec_builder.clone().new_codec();
-                        let _ = test_codec.decode(&mut test_buf);
+                        let before_len = test_buf.len();
+                        let result = test_codec.decode(&mut test_buf);
+                        observe_decode_result(
+                            "framed repeated decode",
+                            before_len,
+                            &test_buf,
+                            result,
+                        );
                     }
                 }
             }
@@ -617,11 +642,13 @@ fn test_codec_boundary_cases(_input: &FuzzInput) {
     for byte in [0x00, 0x01, 0xFF, 0x80, 0x7F] {
         let mut single_codec = LengthDelimitedCodec::new();
         let mut single_buf = BytesMut::from(&[byte][..]);
-        let _ = single_codec.decode(&mut single_buf);
+        let before_len = single_buf.len();
+        let result = single_codec.decode(&mut single_buf);
+        observe_decode_result("single byte decode", before_len, &single_buf, result);
     }
 
     // Test max frame size enforcement
-    let oversized_length = vec![0x7F, 0xFF, 0xFF, 0xFF]; // Large length
+    let oversized_length = [0x7F, 0xFF, 0xFF, 0xFF]; // Large length
     let mut codec = LengthDelimitedCodec::builder()
         .max_frame_length(1024)
         .new_codec();
@@ -645,9 +672,79 @@ fn test_codec_boundary_cases(_input: &FuzzInput) {
     let mut be_buf = BytesMut::from(&test_data[..]);
     let mut le_buf = BytesMut::from(&test_data[..]);
 
-    let _be_result = be_codec.decode(&mut be_buf);
-    let _le_result = le_codec.decode(&mut le_buf);
+    let be_before_len = be_buf.len();
+    let be_result = be_codec.decode(&mut be_buf);
+    observe_decode_result(
+        "big-endian boundary decode",
+        be_before_len,
+        &be_buf,
+        be_result,
+    );
+
+    let le_before_len = le_buf.len();
+    let le_result = le_codec.decode(&mut le_buf);
+    observe_decode_result(
+        "little-endian boundary decode",
+        le_before_len,
+        &le_buf,
+        le_result,
+    );
 
     // Both should handle the data (possibly differently)
     // This tests that endianness selection doesn't cause panics
+}
+
+fn observe_decode_result(
+    context: &str,
+    before_len: usize,
+    remaining: &BytesMut,
+    result: IoResult<Option<BytesMut>>,
+) {
+    assert!(
+        remaining.len() <= before_len,
+        "{context}: decode grew the source buffer"
+    );
+    match result {
+        Ok(Some(frame)) => {
+            assert!(
+                frame.len() <= 1_000_000,
+                "{context}: decoded frame exceeded fuzz cap: {}",
+                frame.len()
+            );
+        }
+        Ok(None) => {}
+        Err(err) => observe_io_error(context, &err),
+    }
+}
+
+fn observe_encode_result(
+    context: &str,
+    before_len: usize,
+    item_len: usize,
+    dst: &BytesMut,
+    result: IoResult<()>,
+) {
+    match result {
+        Ok(()) => {
+            assert_eq!(
+                dst.len(),
+                before_len + item_len,
+                "{context}: test encoder should append exactly the input bytes"
+            );
+        }
+        Err(err) => observe_io_error(context, &err),
+    }
+}
+
+fn observe_io_error(context: &str, err: &IoError) {
+    let display = err.to_string();
+    assert!(
+        !display.trim().is_empty(),
+        "{context}: IO error display should not be empty"
+    );
+    let debug = format!("{err:?}");
+    assert!(
+        !debug.trim().is_empty(),
+        "{context}: IO error debug should not be empty"
+    );
 }
