@@ -2,7 +2,6 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use std::fmt::Write as _;
 use std::time::Duration;
 
 /// Structure-aware fuzz input for JetStream PullSubscribeOpts wire format testing
@@ -221,7 +220,7 @@ fn test_pull_subscribe_opts_scenarios(input: &PullSubscribeOptsFuzz) {
 }
 
 /// Test JSON parsing edge cases
-fn test_json_parsing_edge_cases(input: &PullSubscribeOptsFuzz) {
+fn test_json_parsing_edge_cases(_input: &PullSubscribeOptsFuzz) {
     let malformed_cases = [
         "",                                 // Empty
         "{}",                               // Empty object
@@ -241,8 +240,8 @@ fn test_json_parsing_edge_cases(input: &PullSubscribeOptsFuzz) {
         "123",                              // Number instead of object
     ];
 
-    for &malformed in malformed_cases {
-        test_pull_request_parsing(malformed);
+    for malformed in malformed_cases {
+        observe_pull_request_json(malformed);
     }
 }
 
@@ -255,7 +254,7 @@ fn test_format_manipulation_strategies(input: &PullSubscribeOptsFuzz) {
     };
 
     let manipulated = apply_format_strategy(&base_request, &input.format_strategy);
-    test_pull_request_parsing(&manipulated);
+    observe_valid_pull_request_json(&manipulated);
 }
 
 /// Test timeout computation edge cases
@@ -317,8 +316,7 @@ fn test_pull_request_encoding(request: &PullRequestVariant, strategy: &FormatStr
         }
     };
 
-    // Test that the generated JSON can be parsed
-    test_pull_request_parsing(&json);
+    observe_valid_pull_request_json(&json);
 }
 
 /// Test boundary value cases
@@ -413,7 +411,7 @@ fn test_mixed_request_case(case: &MixedRequestCase, strategy: &FormatStrategy) {
         _ => json,
     };
 
-    test_pull_request_parsing(&final_json);
+    observe_pull_request_json(&final_json);
 }
 
 /// Apply format strategy to generate JSON variations
@@ -485,29 +483,103 @@ fn test_timeout_computation(timeout: Duration) {
 
     // Test JSON encoding with computed expires
     let json = format!(r#"{{"batch":10,"expires":{}}}"#, expires);
-    test_pull_request_parsing(&json);
+    observe_valid_pull_request_json(&json);
 }
 
-/// Test pull request JSON parsing (simulate server-side parsing)
-fn test_pull_request_parsing(json: &str) {
+#[derive(Debug)]
+struct PullRequestJsonObservation {
+    has_batch_key: bool,
+    has_expires_key: bool,
+    balanced_braces: bool,
+    parsed: PullRequestJsonParse,
+}
+
+#[derive(Debug)]
+enum PullRequestJsonParse {
+    Object { has_batch: bool, has_expires: bool },
+    NonObject,
+    Invalid,
+}
+
+/// Observe pull request JSON parsing without rejecting malformed fuzz cases.
+fn observe_pull_request_json(json: &str) -> Option<PullRequestJsonObservation> {
     if json.len() > MAX_STRING_LEN {
-        return;
+        return None;
     }
 
-    // Simulate basic JSON parsing that a server might do
-    // In a real implementation, this would call actual parsing functions
-
-    // Test that we can at least attempt to parse the JSON structure
-    let _ = json.find(r#""batch":"#);
-    let _ = json.find(r#""expires":"#);
-
-    // Test for basic JSON validity markers
     let open_braces = json.matches('{').count();
     let close_braces = json.matches('}').count();
-    let _ = open_braces == close_braces; // Basic brace matching
+    let has_batch_key = has_json_key_lexeme(json, "batch");
+    let has_expires_key = has_json_key_lexeme(json, "expires");
 
-    // Test that parsing doesn't cause panics on malformed input
-    let _ = json.parse::<serde_json::Value>();
+    let parsed = match json.parse::<serde_json::Value>() {
+        Ok(serde_json::Value::Object(map)) => {
+            let has_batch = map.contains_key("batch");
+            let has_expires = map.contains_key("expires");
+            PullRequestJsonParse::Object {
+                has_batch,
+                has_expires,
+            }
+        }
+        Ok(_) => PullRequestJsonParse::NonObject,
+        Err(_) => PullRequestJsonParse::Invalid,
+    };
+
+    let observation = PullRequestJsonObservation {
+        has_batch_key,
+        has_expires_key,
+        balanced_braces: open_braces == close_braces,
+        parsed,
+    };
+
+    if matches!(observation.parsed, PullRequestJsonParse::Object { .. }) {
+        assert!(
+            observation.balanced_braces,
+            "parsed pull request JSON object should have balanced braces: {observation:?}"
+        );
+    }
+
+    Some(observation)
+}
+
+fn has_json_key_lexeme(json: &str, key: &str) -> bool {
+    let needle = format!(r#""{key}""#);
+    let mut remaining = json;
+
+    while let Some(position) = remaining.find(&needle) {
+        let after_key = &remaining[position + needle.len()..];
+        if after_key.trim_start().starts_with(':') {
+            return true;
+        }
+        remaining = after_key;
+    }
+
+    false
+}
+
+fn observe_valid_pull_request_json(json: &str) {
+    let observation = observe_pull_request_json(json)
+        .expect("generated pull request JSON should stay within the fuzz size guard");
+
+    assert!(
+        observation.has_batch_key && observation.has_expires_key && observation.balanced_braces,
+        "generated pull request JSON should expose balanced batch/expires fields: {observation:?}"
+    );
+
+    match &observation.parsed {
+        PullRequestJsonParse::Object {
+            has_batch,
+            has_expires,
+        } => {
+            assert!(
+                *has_batch && *has_expires,
+                "generated pull request JSON object should contain batch and expires: {observation:?}"
+            );
+        }
+        PullRequestJsonParse::NonObject | PullRequestJsonParse::Invalid => {
+            panic!("generated pull request JSON should parse as an object: {observation:?}");
+        }
+    }
 }
 
 /// Check if pull request is valid for testing
@@ -543,7 +615,7 @@ mod tests {
 
     #[test]
     fn test_malformed_json_parsing() {
-        test_pull_request_parsing(r#"{"batch":5,"expires":"#); // Truncated
-        test_pull_request_parsing(r#"{"batch":null}"#); // Null batch
+        observe_pull_request_json(r#"{"batch":5,"expires":"#); // Truncated
+        observe_pull_request_json(r#"{"batch":null}"#); // Null batch
     }
 }
