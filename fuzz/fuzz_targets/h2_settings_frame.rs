@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use asupersync::bytes::{Bytes, BytesMut};
-use asupersync::http::h2::connection::Connection;
+use asupersync::http::h2::connection::{Connection, ReceivedFrame};
 use asupersync::http::h2::error::H2Error;
 use asupersync::http::h2::frame::{
     Frame, FrameHeader, FrameType, Setting, SettingsFrame, settings_flags,
@@ -49,6 +49,78 @@ fn observe_settings_parse(header: &FrameHeader, payload: Bytes) -> Result<Frame,
     }
 
     result
+}
+
+fn observe_settings_parse_only(context: &str, header: &FrameHeader, payload: Bytes) {
+    match observe_settings_parse(header, payload) {
+        Ok(_) | Err(_) => {}
+    }
+    assert!(
+        !context.is_empty(),
+        "SETTINGS parser observer context must be named"
+    );
+}
+
+fn observe_settings_process(
+    connection: &mut Connection,
+    frame: Frame,
+    context: &str,
+) -> Result<Option<ReceivedFrame>, H2Error> {
+    let before_local_settings = connection.local_settings().clone();
+    let before_remote_settings = connection.remote_settings().clone();
+    let result = connection.process_frame(frame);
+
+    assert_eq!(
+        connection.local_settings(),
+        &before_local_settings,
+        "{context}: incoming SETTINGS must not mutate local settings"
+    );
+
+    match &result {
+        Ok(received) => {
+            assert!(
+                received.is_none(),
+                "{context}: SETTINGS processing must not surface application frames"
+            );
+            let remote = connection.remote_settings();
+            assert!(
+                remote.initial_window_size <= 0x7fff_ffff,
+                "{context}: remote SETTINGS_INITIAL_WINDOW_SIZE escaped RFC bounds"
+            );
+            assert!(
+                (16_384..=16_777_215).contains(&remote.max_frame_size),
+                "{context}: remote SETTINGS_MAX_FRAME_SIZE escaped RFC bounds"
+            );
+        }
+        Err(err) => {
+            assert!(
+                !format!("{err:?}").is_empty(),
+                "{context}: SETTINGS processing errors must remain observable"
+            );
+            assert_eq!(
+                connection.remote_settings(),
+                &before_remote_settings,
+                "{context}: failed SETTINGS processing must not partially apply remote settings"
+            );
+        }
+    }
+
+    result
+}
+
+fn observe_settings_process_only(connection: &mut Connection, frame: Frame, context: &str) {
+    match observe_settings_process(connection, frame, context) {
+        Ok(_) | Err(_) => {}
+    }
+}
+
+fn observe_fuzz_result(result: Result<(), String>) {
+    if let Err(err) = result {
+        assert!(
+            !err.is_empty(),
+            "H2 SETTINGS fuzz orchestration errors must be observable"
+        );
+    }
 }
 
 /// Comprehensive fuzz input for HTTP/2 SETTINGS frame parsing and handling
@@ -387,7 +459,8 @@ fn execute_settings_operations(
                     let frame = Frame::Settings(settings_frame);
 
                     // Process the frame
-                    match connection.process_frame(frame) {
+                    match observe_settings_process(&mut connection, frame, "settings ack operation")
+                    {
                         Ok(_) => {
                             shadow.ack_settings();
                         }
@@ -421,7 +494,7 @@ fn execute_settings_operations(
                     let expected_result = shadow.expect_settings(&actual_settings);
 
                     // Process the frame
-                    match connection.process_frame(frame) {
+                    match observe_settings_process(&mut connection, frame, "settings operation") {
                         Ok(_) => {
                             if expected_result.is_err() {
                                 return Err(format!(
@@ -454,7 +527,11 @@ fn execute_settings_operations(
 
                     // Parse the 9-byte frame header
                     if let Ok(header) = FrameHeader::parse(&mut header_buf) {
-                        let _ = observe_settings_parse(&header, payload_bytes);
+                        observe_settings_parse_only(
+                            "raw settings operation",
+                            &header,
+                            payload_bytes,
+                        );
                     }
                 }
             }
@@ -478,7 +555,11 @@ fn execute_settings_operations(
                     if let Ok(header) = FrameHeader::parse(&mut header_buf)
                         && let Ok(frame) = observe_settings_parse(&header, payload_bytes)
                     {
-                        let _ = connection.process_frame(frame);
+                        observe_settings_process_only(
+                            &mut connection,
+                            frame,
+                            "unknown settings operation",
+                        );
                     }
                 }
             }
@@ -487,7 +568,7 @@ fn execute_settings_operations(
                 let settings_frame = SettingsFrame::ack();
                 let frame = Frame::Settings(settings_frame);
 
-                match connection.process_frame(frame) {
+                match observe_settings_process(&mut connection, frame, "ack operation") {
                     Ok(_) => {
                         shadow.ack_settings();
                     }
@@ -509,7 +590,7 @@ fn execute_settings_operations(
                 // Boundary settings may or may not be valid
                 let expected_result = shadow.expect_settings(&boundary_settings);
 
-                match connection.process_frame(frame) {
+                match observe_settings_process(&mut connection, frame, "boundary operation") {
                     Ok(_) => {
                         // If shadow model expected failure but we succeeded, that's suspicious
                         if expected_result.is_err() {
@@ -536,7 +617,7 @@ fn execute_settings_operations(
                     let frame = Frame::Settings(settings_frame);
 
                     // Process the frame - implementation should handle flooding gracefully
-                    match connection.process_frame(frame) {
+                    match observe_settings_process(&mut connection, frame, "flood operation") {
                         Ok(_) => {
                             // Flood should be rate limited after a certain point
                         }
@@ -580,7 +661,11 @@ fn execute_settings_operations(
 
                 let settings_frame = SettingsFrame::new(filtered_settings);
                 let frame = Frame::Settings(settings_frame);
-                let _ = connection.process_frame(frame);
+                observe_settings_process_only(
+                    &mut connection,
+                    frame,
+                    "all-valid settings scenario",
+                );
             }
 
             SettingsFrameScenario::MalformedFrame {
@@ -607,7 +692,11 @@ fn execute_settings_operations(
 
                     // Malformed frames should be handled gracefully
                     if let Ok(header) = FrameHeader::parse(&mut header_buf) {
-                        let _ = observe_settings_parse(&header, payload_bytes);
+                        observe_settings_parse_only(
+                            "malformed settings scenario",
+                            &header,
+                            payload_bytes,
+                        );
                     }
                 }
             }
@@ -618,7 +707,11 @@ fn execute_settings_operations(
                     let settings_frame = SettingsFrame::new(vec![Setting::HeaderTableSize(4096)]);
                     let frame = Frame::Settings(settings_frame);
 
-                    match connection.process_frame(frame) {
+                    match observe_settings_process(
+                        &mut connection,
+                        frame,
+                        "settings flood scenario",
+                    ) {
                         Ok(_) => {}
                         Err(_) => {
                             // Flood protection may kick in - that's good
@@ -678,7 +771,11 @@ fn execute_settings_operations(
 
                     // Mixed frames should be handled gracefully
                     if let Ok(header) = FrameHeader::parse(&mut header_buf) {
-                        let _ = observe_settings_parse(&header, payload_bytes);
+                        observe_settings_parse_only(
+                            "mixed valid invalid settings scenario",
+                            &header,
+                            payload_bytes,
+                        );
                     }
                 }
             }
@@ -722,5 +819,5 @@ fuzz_target!(|data: &[u8]| {
     };
 
     // Run HTTP/2 SETTINGS fuzzing
-    let _ = fuzz_h2_settings(input);
+    observe_fuzz_result(fuzz_h2_settings(input));
 });
