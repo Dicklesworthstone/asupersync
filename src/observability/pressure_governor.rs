@@ -1549,6 +1549,41 @@ mod tests {
     }
 
     #[test]
+    fn pressure_governor_channel_backlog_sample_drives_admission() {
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .global_queue_limit(4)
+                .build()
+                .expect("Failed to create channel-backlog admission runtime"),
+        );
+        let config = PressureGovernorConfig {
+            enabled: true,
+            admission_control: true,
+            sample_interval: Duration::ZERO,
+            ..Default::default()
+        };
+        let metrics = Metrics::new();
+        let governor = PressureGovernor::new(config, std::sync::Arc::clone(&runtime), metrics)
+            .expect("pressure governor should initialize");
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+
+        governor.record_channel_backlog_sample(3, 4);
+        let decision = governor
+            .check_admission(&cx)
+            .expect("channel backlog admission should not fail");
+
+        assert_eq!(decision, AdmissionDecision::AdmitWithBackpressure);
+        assert_eq!(governor.backpressure_total.get(), 1);
+        assert_eq!(governor.partial_fallback_total.get(), 1);
+        assert_eq!(governor.no_win_fallback_total.get(), 0);
+        assert_eq!(
+            governor.fallback_verdict_metric(),
+            PressureFallbackVerdict::PartialSignalsUnavailable.as_metric_value()
+        );
+    }
+
+    #[test]
     fn test_pressure_thresholds_defaults() {
         let thresholds = PressureThresholds::default();
 
