@@ -191,11 +191,32 @@ fn parse_no_panic(url: &str) -> Result<ParseOutcome, PanicPayload> {
 }
 
 fn exercise_raw(url: &str) {
-    let result = parse_no_panic(url);
-    assert!(
-        result.is_ok(),
-        "NatsConfig::from_url panicked on raw input {url:?}"
-    );
+    match parse_no_panic(url) {
+        Ok(result) => observe_raw_parse_outcome(url, result),
+        Err(_) => panic!("NatsConfig::from_url panicked on raw input {url:?}"),
+    }
+}
+
+fn observe_raw_parse_outcome(url: &str, result: ParseOutcome) {
+    match result {
+        Ok(config) => {
+            assert!(
+                !config.host.is_empty(),
+                "raw NATS URL parsed with an empty host: {url:?}"
+            );
+            assert!(
+                config.host.len() <= MAX_RAW_URL_BYTES,
+                "raw NATS URL parsed into an unexpectedly large host: {} bytes",
+                config.host.len()
+            );
+        }
+        Err(message) => {
+            assert!(
+                !message.trim().is_empty(),
+                "raw NATS URL rejection should expose a diagnostic for {url:?}"
+            );
+        }
+    }
 }
 
 fn exercise_structured(url: &str, expectation: UrlExpectation) {
