@@ -17,7 +17,92 @@
 //! - Events (variable): Length-prefixed MessagePack-encoded ReplayEvent structs
 
 use libfuzzer_sys::fuzz_target;
-use std::io::Cursor;
+use std::fmt::Debug;
+use std::io::Write;
+
+const MAX_INPUT_LEN: usize = 16 * 1024 * 1024;
+const MAX_DIRECT_DECOMPRESSED_LEN: usize = 16 * 1024 * 1024;
+
+fn assert_visible_debug<T: Debug + ?Sized>(context: &str, value: &T) {
+    let rendered = format!("{value:?}");
+    assert!(
+        !rendered.is_empty(),
+        "{context} produced an empty debug representation"
+    );
+}
+
+fn observe_result<T, E>(context: &str, result: Result<T, E>)
+where
+    T: Debug,
+    E: Debug,
+{
+    match result {
+        Ok(value) => assert_visible_debug(context, &value),
+        Err(err) => assert_visible_debug(context, &err),
+    }
+}
+
+fn observe_trace_reader_result(
+    context: &str,
+    result: asupersync::trace::file::TraceFileResult<asupersync::trace::file::TraceReader>,
+) -> Option<asupersync::trace::file::TraceReader> {
+    match result {
+        Ok(reader) => {
+            assert_visible_debug(context, &reader.event_count());
+            Some(reader)
+        }
+        Err(err) => {
+            assert_visible_debug(context, &err);
+            None
+        }
+    }
+}
+
+fn observe_trace_reader_from_bytes(
+    context: &str,
+    data: &[u8],
+) -> Option<(
+    tempfile::NamedTempFile,
+    asupersync::trace::file::TraceReader,
+)> {
+    let mut trace_file = match tempfile::NamedTempFile::new() {
+        Ok(trace_file) => trace_file,
+        Err(err) => {
+            assert_visible_debug("trace temp file creation", &err);
+            return None;
+        }
+    };
+
+    if let Err(err) = trace_file.write_all(data) {
+        assert_visible_debug("trace temp file write", &err);
+        return None;
+    }
+
+    if let Err(err) = trace_file.flush() {
+        assert_visible_debug("trace temp file flush", &err);
+        return None;
+    }
+
+    observe_trace_reader_result(
+        context,
+        asupersync::trace::file::TraceReader::open(trace_file.path()),
+    )
+    .map(|reader| (trace_file, reader))
+}
+
+fn observe_direct_lz4(data: &[u8]) {
+    if data.len() < 4 {
+        return;
+    }
+
+    let decompressed_len = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    if decompressed_len <= MAX_DIRECT_DECOMPRESSED_LEN {
+        observe_result(
+            "LZ4 size-prepended decompression",
+            lz4_flex::decompress_size_prepended(data),
+        );
+    }
+}
 
 fuzz_target!(|data: &[u8]| {
     // Skip tiny inputs that can't contain a valid header
@@ -26,12 +111,9 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Limit input size to prevent timeout issues (16MB max)
-    if data.len() > 16 * 1024 * 1024 {
+    if data.len() > MAX_INPUT_LEN {
         return;
     }
-
-    // Test TraceReader parsing from memory buffer
-    let cursor = Cursor::new(data);
 
     // This is the main parsing entry point - exercises:
     // 1. Binary header parsing (magic, version, flags, compression mode)
@@ -41,21 +123,24 @@ fuzz_target!(|data: &[u8]| {
     // 5. LZ4 decompression if FLAG_COMPRESSED is set
     // 6. Truncation detection and bounds checking
     // 7. DoS mitigation (MAX_META_LEN, MAX_EVENT_LEN, MAX_COMPRESSED_CHUNK_LEN)
-    match asupersync::trace::file::TraceReader::from_reader(cursor) {
-        Ok(mut reader) => {
+    match observe_trace_reader_from_bytes("trace reader from full input", data) {
+        Some((_trace_file, mut reader)) => {
             // If parsing succeeded, try to read some events to exercise
             // the streaming event parser and MessagePack deserialization
             for _ in 0..10 {
                 match reader.read_event() {
                     Ok(Some(_event)) => {
                         // Successfully parsed an event - continue
+                        assert_visible_debug("trace event", &_event);
                     }
                     Ok(None) => {
                         // End of events - break
+                        assert_visible_debug("trace event end", &None::<()>);
                         break;
                     }
-                    Err(_) => {
+                    Err(err) => {
                         // Parse error in event stream - break
+                        assert_visible_debug("trace event parse error", &err);
                         break;
                     }
                 }
@@ -63,15 +148,14 @@ fuzz_target!(|data: &[u8]| {
 
             // Test the load_all convenience method if we have a small number of events
             // This exercises pre-allocation logic and batch parsing
-            if let Ok(mut reader2) =
-                asupersync::trace::file::TraceReader::from_reader(Cursor::new(data))
+            if let Some((_trace_file, reader2)) =
+                observe_trace_reader_from_bytes("trace reader for load_all", data)
+                && reader2.event_count() <= 1000
             {
-                if reader2.event_count() <= 1000 {
-                    let _ = reader2.load_all();
-                }
+                observe_result("trace reader load_all", reader2.load_all());
             }
         }
-        Err(_) => {
+        None => {
             // Parse error is expected for malformed input - that's what we're testing
         }
     }
@@ -80,16 +164,22 @@ fuzz_target!(|data: &[u8]| {
     // This exercises the serde deserialization logic independently
     if data.len() >= 4 {
         // Try to deserialize as ReplayEvent
-        let _ = rmp_serde::from_slice::<asupersync::trace::replay::ReplayEvent>(data);
+        observe_result(
+            "MessagePack ReplayEvent parse",
+            rmp_serde::from_slice::<asupersync::trace::replay::ReplayEvent>(data),
+        );
 
         // Try to deserialize as TraceMetadata
-        let _ = rmp_serde::from_slice::<asupersync::trace::replay::TraceMetadata>(data);
+        observe_result(
+            "MessagePack TraceMetadata parse",
+            rmp_serde::from_slice::<asupersync::trace::replay::TraceMetadata>(data),
+        );
     }
 
     // Test LZ4 decompression directly to catch decompression bombs and invalid streams
     if data.len() >= 8 {
         // lz4_flex::decompress_size_prepended expects first 4 bytes to be decompressed size
-        let _ = lz4_flex::decompress_size_prepended(data);
+        observe_direct_lz4(data);
     }
 
     // Test partial parsing scenarios by truncating at various points
@@ -97,7 +187,10 @@ fuzz_target!(|data: &[u8]| {
         for truncate_at in [20, 30, 40, data.len() / 2] {
             if truncate_at < data.len() {
                 let truncated = &data[..truncate_at];
-                let _ = asupersync::trace::file::TraceReader::from_reader(Cursor::new(truncated));
+                drop(observe_trace_reader_from_bytes(
+                    "trace reader from truncated input",
+                    truncated,
+                ));
             }
         }
     }
