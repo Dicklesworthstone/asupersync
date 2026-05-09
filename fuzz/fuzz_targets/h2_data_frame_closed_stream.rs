@@ -51,6 +51,23 @@ enum ErrorCode {
     Http11Required = 0xd,
 }
 
+const ALL_ERROR_CODES: [ErrorCode; 14] = [
+    ErrorCode::NoError,
+    ErrorCode::ProtocolError,
+    ErrorCode::InternalError,
+    ErrorCode::FlowControlError,
+    ErrorCode::SettingsTimeout,
+    ErrorCode::StreamClosed,
+    ErrorCode::FrameSizeError,
+    ErrorCode::RefusedStream,
+    ErrorCode::Cancel,
+    ErrorCode::CompressionError,
+    ErrorCode::ConnectError,
+    ErrorCode::EnhanceYourCalm,
+    ErrorCode::InadequateSecurity,
+    ErrorCode::Http11Required,
+];
+
 /// DATA frame per RFC 9113 §6.1
 #[derive(Debug, Clone, Arbitrary)]
 struct DataFrame {
@@ -205,6 +222,22 @@ impl MockH2Connection {
                 }
             }
         };
+        debug_assert_eq!(stream_info.stream_id, stream_id);
+
+        if let Some(padding_len) = frame.padded
+            && padding_len as usize > frame.data.len()
+        {
+            self.stream_errors.push((
+                stream_id,
+                ErrorCode::FrameSizeError,
+                format!(
+                    "DATA padding length {} exceeds payload length {}",
+                    padding_len,
+                    frame.data.len()
+                ),
+            ));
+            return Err(ErrorCode::FrameSizeError);
+        }
 
         // Check if stream is closed - this is the main test case
         if stream_info.is_closed() {
@@ -365,7 +398,13 @@ fn test_data_on_closed_streams(scenario: ClosedStreamDataScenario) -> Result<(),
             StreamCloseReason::EndStream => {
                 // Simulate END_STREAM by creating DATA frame with end_stream flag
                 let end_stream_frame = DataFrame::new(stream_id, vec![]).with_end_stream();
-                let _ = connection.receive_data_frame(end_stream_frame);
+                let end_stream_result = connection.receive_data_frame(end_stream_frame);
+                observe_data_frame_result(
+                    &connection,
+                    stream_id,
+                    &end_stream_result,
+                    "close stream via END_STREAM DATA",
+                );
 
                 // Send our own END_STREAM to fully close
                 if let Some(stream) = connection.streams.get_mut(&stream_id) {
@@ -376,27 +415,57 @@ fn test_data_on_closed_streams(scenario: ClosedStreamDataScenario) -> Result<(),
                 }
             }
             StreamCloseReason::ResetLocal => {
-                let _ = connection.send_rst_stream(stream_id, ErrorCode::Cancel);
+                let close_result = connection.send_rst_stream(stream_id, ErrorCode::Cancel);
+                observe_close_result(
+                    &connection,
+                    stream_id,
+                    StreamCloseReason::ResetLocal,
+                    &close_result,
+                    "close stream via local RST_STREAM",
+                );
             }
             StreamCloseReason::ResetRemote => {
-                let _ = connection.receive_rst_stream(stream_id, ErrorCode::Cancel);
+                let close_result = connection.receive_rst_stream(stream_id, ErrorCode::Cancel);
+                observe_close_result(
+                    &connection,
+                    stream_id,
+                    StreamCloseReason::ResetRemote,
+                    &close_result,
+                    "close stream via remote RST_STREAM",
+                );
             }
             StreamCloseReason::ProtocolError => {
-                let _ = connection.close_stream(stream_id, StreamCloseReason::ProtocolError);
+                let close_result =
+                    connection.close_stream(stream_id, StreamCloseReason::ProtocolError);
+                observe_close_result(
+                    &connection,
+                    stream_id,
+                    StreamCloseReason::ProtocolError,
+                    &close_result,
+                    "close stream via protocol error",
+                );
             }
             StreamCloseReason::ConnectionClose => {
-                let _ = connection.close_stream(stream_id, StreamCloseReason::ConnectionClose);
+                let close_result =
+                    connection.close_stream(stream_id, StreamCloseReason::ConnectionClose);
+                observe_close_result(
+                    &connection,
+                    stream_id,
+                    StreamCloseReason::ConnectionClose,
+                    &close_result,
+                    "close stream via connection close",
+                );
             }
         }
 
         // Verify stream is closed
-        if let Some(state) = connection.get_stream_state(stream_id) {
-            if state != StreamState::Closed {
-                return Err(format!(
-                    "Stream {} not closed after {:?}",
-                    stream_id, close_reason
-                ));
-            }
+        if let Some(state) = connection.get_stream_state(stream_id)
+            && state != StreamState::Closed
+        {
+            return Err(format!(
+                "Stream {} not closed after {:?}",
+                stream_id, close_reason
+            ));
         }
     }
 
@@ -564,7 +633,13 @@ fn test_closure_method_variations() -> Result<(), String> {
         match close_reason {
             StreamCloseReason::EndStream => {
                 let end_frame = DataFrame::new(stream_id, vec![]).with_end_stream();
-                let _ = connection.receive_data_frame(end_frame);
+                let end_stream_result = connection.receive_data_frame(end_frame);
+                observe_data_frame_result(
+                    &connection,
+                    stream_id,
+                    &end_stream_result,
+                    "closure variation END_STREAM DATA",
+                );
                 if let Some(stream) = connection.streams.get_mut(&stream_id) {
                     stream.end_stream_sent = true;
                     stream.close_with_reason(StreamCloseReason::EndStream);
@@ -615,7 +690,7 @@ fn test_large_data_on_closed_stream() -> Result<(), String> {
 
     // Large DATA frame
     let large_data = vec![0x42; 16384]; // 16KB
-    let data_frame = DataFrame::new(stream_id, large_data);
+    let data_frame = DataFrame::new(stream_id, large_data).with_padding(0);
 
     match connection.receive_data_frame(data_frame) {
         Err(ErrorCode::StreamClosed) => {
@@ -638,19 +713,122 @@ fuzz_target!(|data: &[u8]| {
 
         // Try to generate scenario from fuzz input
         if let Ok(scenario) = ClosedStreamDataScenario::arbitrary(&mut unstructured) {
-            let _ = test_data_on_closed_streams(scenario);
+            observe_test_result(
+                test_data_on_closed_streams(scenario),
+                "arbitrary closed-stream DATA scenario",
+            );
         }
 
         // Run deterministic test cases
         if data.len() > 20 {
-            let _ = test_basic_data_on_closed_stream();
-            let _ = test_data_on_stream_zero();
-            let _ = test_closure_method_variations();
-            let _ = test_large_data_on_closed_stream();
+            observe_test_result(
+                test_basic_data_on_closed_stream(),
+                "basic DATA on closed stream",
+            );
+            observe_test_result(test_data_on_stream_zero(), "DATA on stream zero");
+            observe_test_result(
+                test_closure_method_variations(),
+                "closure method variations",
+            );
+            observe_test_result(
+                test_large_data_on_closed_stream(),
+                "large DATA on closed stream",
+            );
         }
     });
 
-    if result.is_err() {
-        eprintln!("Panic in DATA frame on closed stream fuzzing");
-    }
+    assert!(
+        result.is_ok(),
+        "panic in DATA frame on closed stream fuzzing"
+    );
 });
+
+fn observe_data_frame_result(
+    connection: &MockH2Connection,
+    stream_id: u32,
+    result: &Result<(), ErrorCode>,
+    context: &str,
+) {
+    match result {
+        Ok(()) => {
+            if stream_id != 0 {
+                assert!(
+                    connection.streams.contains_key(&stream_id),
+                    "{context}: accepted DATA for an unknown nonzero stream"
+                );
+            }
+        }
+        Err(error) => {
+            assert_error_code_observable(*error, context);
+            match error {
+                ErrorCode::ProtocolError => {
+                    assert!(
+                        !connection.is_connection_active()
+                            || connection.get_connection_errors().contains(error)
+                            || stream_id != 0,
+                        "{context}: protocol error on stream 0 should close or be recorded"
+                    );
+                }
+                ErrorCode::StreamClosed => {
+                    assert!(
+                        connection
+                            .get_stream_errors()
+                            .iter()
+                            .any(|(id, code, message)| {
+                                *id == stream_id
+                                    && *code == ErrorCode::StreamClosed
+                                    && !message.is_empty()
+                            }),
+                        "{context}: STREAM_CLOSED should be recorded with diagnostics"
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn observe_close_result(
+    connection: &MockH2Connection,
+    stream_id: u32,
+    expected_reason: StreamCloseReason,
+    result: &Result<(), String>,
+    context: &str,
+) {
+    match result {
+        Ok(()) => {
+            assert_eq!(
+                connection.get_stream_state(stream_id),
+                Some(StreamState::Closed),
+                "{context}: successful close should leave stream closed"
+            );
+            assert_eq!(
+                connection.get_stream_close_reason(stream_id),
+                Some(expected_reason),
+                "{context}: close reason changed"
+            );
+        }
+        Err(error) => {
+            assert!(
+                !error.is_empty(),
+                "{context}: close error diagnostics should remain observable"
+            );
+        }
+    }
+}
+
+fn observe_test_result(result: Result<(), String>, context: &str) {
+    if let Err(error) = result {
+        assert!(
+            !error.is_empty(),
+            "{context}: test failure diagnostics should remain observable"
+        );
+    }
+}
+
+fn assert_error_code_observable(error: ErrorCode, context: &str) {
+    assert!(
+        ALL_ERROR_CODES.contains(&error),
+        "{context}: error code outside registered HTTP/2 range"
+    );
+}
