@@ -1,11 +1,11 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use bytes::{BufMut, BytesMut};
 use libfuzzer_sys::fuzz_target;
 
+use asupersync::bytes::{BufMut, BytesMut};
+use asupersync::codec::Decoder;
 use asupersync::grpc::codec::{GrpcCodec, GrpcMessage};
-use tokio_util::codec::Decoder;
 
 /// Structure-aware fuzz input for gRPC message length-prefix + compression-flag testing
 #[derive(Arbitrary, Debug)]
@@ -120,10 +120,10 @@ const MAX_CHUNKS: usize = 50;
 
 fuzz_target!(|input: GrpcLengthPrefixFuzz| {
     // Input size guards to prevent OOM
-    if let FramingScenario::ValidFrames { ref messages } = input.scenario {
-        if messages.len() > MAX_MESSAGES {
-            return;
-        }
+    if let FramingScenario::ValidFrames { ref messages } = input.scenario
+        && messages.len() > MAX_MESSAGES
+    {
+        return;
     }
 
     // Test the main framing scenarios
@@ -154,21 +154,10 @@ fn test_grpc_framing_scenarios(input: &GrpcLengthPrefixFuzz) {
 
                 let mut buf = encode_message(msg.compressed, &msg.payload);
 
-                // Valid messages should decode successfully
-                let result = codec.decode(&mut buf);
-                match result {
-                    Ok(Some(decoded)) => {
-                        // Verify the decoded message matches input
-                        assert_eq!(decoded.compressed, msg.compressed);
-                        assert_eq!(&decoded.data[..], &msg.payload[..]);
-                    }
-                    Ok(None) => {
-                        // Partial message - acceptable for framing
-                    }
-                    Err(_) => {
-                        // Decode failure on valid input - should not happen
-                        // but don't panic as this might reveal edge cases
-                    }
+                if let Some(decoded) = observe_decode(&mut codec, &mut buf) {
+                    // Verify the decoded message matches input
+                    assert_eq!(decoded.compressed, msg.compressed);
+                    assert_eq!(&decoded.data[..], &msg.payload[..]);
                 }
             }
         }
@@ -193,10 +182,7 @@ fn test_grpc_framing_scenarios(input: &GrpcLengthPrefixFuzz) {
 
                 let mut buf = encode_message_raw(*flag, *length, payload);
 
-                // Invalid compression flags should be rejected
-                let result = codec.decode(&mut buf);
-                // Should return an error for invalid compression flags
-                // but we don't assert to avoid panicking on edge cases
+                observe_decode(&mut codec, &mut buf);
             }
         }
 
@@ -253,28 +239,27 @@ fn test_message_sequence_processing(input: &GrpcLengthPrefixFuzz) {
     // Decode the sequence
     let mut decoded_count = 0;
     while !combined_buf.is_empty() && decoded_count < MAX_MESSAGES {
-        match codec.decode(&mut combined_buf) {
-            Ok(Some(_)) => decoded_count += 1,
-            Ok(None) => break, // Need more data
-            Err(_) => break,   // Decode error
+        if observe_decode(&mut codec, &mut combined_buf).is_some() {
+            decoded_count += 1;
+        } else {
+            break;
         }
     }
 }
 
 /// Test different buffer chunking strategies
 fn test_buffer_chunking_strategies(input: &GrpcLengthPrefixFuzz) {
-    if let FramingScenario::ValidFrames { messages } = &input.scenario {
-        if let Some(msg) = messages.first() {
-            if msg.payload.len() <= MAX_PAYLOAD_SIZE {
-                let frame = encode_message(msg.compressed, &msg.payload);
-                test_chunked_decode(&frame, &input.buffer_strategy);
-            }
-        }
+    if let FramingScenario::ValidFrames { messages } = &input.scenario
+        && let Some(msg) = messages.first()
+        && msg.payload.len() <= MAX_PAYLOAD_SIZE
+    {
+        let frame = encode_message(msg.compressed, &msg.payload);
+        test_chunked_decode(&frame, &input.buffer_strategy);
     }
 }
 
 /// Test edge cases in length-prefix parsing
-fn test_length_prefix_edge_cases(input: &GrpcLengthPrefixFuzz) {
+fn test_length_prefix_edge_cases(_input: &GrpcLengthPrefixFuzz) {
     let mut codec = GrpcCodec::new();
 
     // Test specific edge cases
@@ -287,7 +272,7 @@ fn test_length_prefix_edge_cases(input: &GrpcLengthPrefixFuzz) {
 
     for (compressed, length, payload) in edge_cases {
         let mut buf = encode_message_raw(if compressed { 1 } else { 0 }, length, &payload);
-        let _ = codec.decode(&mut buf);
+        observe_decode(&mut codec, &mut buf);
     }
 }
 
@@ -309,6 +294,36 @@ fn encode_message_raw(flag: u8, length: u32, payload: &[u8]) -> BytesMut {
     buf
 }
 
+fn observe_decode(codec: &mut GrpcCodec, buf: &mut BytesMut) -> Option<GrpcMessage> {
+    let before_len = buf.len();
+    let result = codec.decode(buf);
+    assert!(
+        buf.len() <= before_len,
+        "GrpcCodec::decode grew source buffer from {before_len} to {} bytes",
+        buf.len()
+    );
+
+    match result {
+        Ok(Some(decoded)) => {
+            assert!(
+                decoded.data.len() <= MAX_DECLARED_LENGTH as usize,
+                "decoded payload length {} exceeded fuzz declared-length guard {}",
+                decoded.data.len(),
+                MAX_DECLARED_LENGTH
+            );
+            Some(decoded)
+        }
+        Ok(None) => None,
+        Err(err) => {
+            assert!(
+                !err.to_string().is_empty(),
+                "gRPC length-prefix decode error should be observable"
+            );
+            None
+        }
+    }
+}
+
 /// Test a specific length boundary case
 fn test_length_boundary_case(codec: &mut GrpcCodec, case: &LengthBoundaryCase) {
     let flag = if case.compressed { 1 } else { 0 };
@@ -316,24 +331,24 @@ fn test_length_boundary_case(codec: &mut GrpcCodec, case: &LengthBoundaryCase) {
     match case.boundary_type {
         BoundaryType::ExactMatch => {
             let mut buf = encode_message_raw(flag, case.payload.len() as u32, &case.payload);
-            let _ = codec.decode(&mut buf);
+            observe_decode(codec, &mut buf);
         }
         BoundaryType::LengthTooLarge => {
             let declared = case.declared_length.min(MAX_DECLARED_LENGTH);
             if declared > case.payload.len() as u32 {
                 let mut buf = encode_message_raw(flag, declared, &case.payload);
-                let _ = codec.decode(&mut buf);
+                observe_decode(codec, &mut buf);
             }
         }
         BoundaryType::LengthTooSmall => {
             if case.declared_length < case.payload.len() as u32 {
                 let mut buf = encode_message_raw(flag, case.declared_length, &case.payload);
-                let _ = codec.decode(&mut buf);
+                observe_decode(codec, &mut buf);
             }
         }
         BoundaryType::ZeroLength => {
             let mut buf = encode_message_raw(flag, 0, &[]);
-            let _ = codec.decode(&mut buf);
+            observe_decode(codec, &mut buf);
         }
         BoundaryType::MaxLength => {
             // Don't actually create max-length payload - just test header parsing
@@ -341,13 +356,13 @@ fn test_length_boundary_case(codec: &mut GrpcCodec, case: &LengthBoundaryCase) {
             buf.put_u8(flag);
             buf.put_u32(u32::MAX);
             // Don't add payload - test header parsing only
-            let _ = codec.decode(&mut buf);
+            observe_decode(codec, &mut buf);
         }
         BoundaryType::NearSizeLimit | BoundaryType::OverSizeLimit => {
             // Test declared lengths near or over limits
             let declared = case.declared_length.min(MAX_DECLARED_LENGTH);
             let mut buf = encode_message_raw(flag, declared, &case.payload);
-            let _ = codec.decode(&mut buf);
+            observe_decode(codec, &mut buf);
         }
     }
 }
@@ -358,7 +373,7 @@ fn test_malformed_header(codec: &mut GrpcCodec, partial: &PartialHeader) {
     buf.extend_from_slice(&partial.header_bytes);
     buf.extend_from_slice(&partial.trailing_data);
 
-    let _ = codec.decode(&mut buf);
+    observe_decode(codec, &mut buf);
 }
 
 /// Test individual frame variant
@@ -367,7 +382,7 @@ fn test_frame_variant(codec: &mut GrpcCodec, frame: &FrameVariant) {
         FrameVariant::Valid(msg) => {
             if msg.payload.len() <= MAX_PAYLOAD_SIZE {
                 let mut buf = encode_message(msg.compressed, &msg.payload);
-                let _ = codec.decode(&mut buf);
+                observe_decode(codec, &mut buf);
             }
         }
         FrameVariant::InvalidFlag {
@@ -377,7 +392,7 @@ fn test_frame_variant(codec: &mut GrpcCodec, frame: &FrameVariant) {
         } => {
             if payload.len() <= MAX_PAYLOAD_SIZE && *length <= MAX_DECLARED_LENGTH {
                 let mut buf = encode_message_raw(*flag, *length, payload);
-                let _ = codec.decode(&mut buf);
+                observe_decode(codec, &mut buf);
             }
         }
         FrameVariant::LengthMismatch {
@@ -388,7 +403,7 @@ fn test_frame_variant(codec: &mut GrpcCodec, frame: &FrameVariant) {
             if payload.len() <= MAX_PAYLOAD_SIZE && *declared <= MAX_DECLARED_LENGTH {
                 let flag = if *compressed { 1 } else { 0 };
                 let mut buf = encode_message_raw(flag, *declared, payload);
-                let _ = codec.decode(&mut buf);
+                observe_decode(codec, &mut buf);
             }
         }
         FrameVariant::PartialFrame(partial) => {
@@ -404,13 +419,13 @@ fn test_chunked_decode(frame: &[u8], strategy: &BufferStrategy) {
     match strategy {
         BufferStrategy::SingleChunk => {
             let mut buf = BytesMut::from(frame);
-            let _ = codec.decode(&mut buf);
+            observe_decode(&mut codec, &mut buf);
         }
         BufferStrategy::ByteByByte => {
             let mut buf = BytesMut::new();
             for &byte in frame {
                 buf.put_u8(byte);
-                let _ = codec.decode(&mut buf);
+                observe_decode(&mut codec, &mut buf);
             }
         }
         BufferStrategy::RandomChunks { chunk_sizes } => {
@@ -423,23 +438,23 @@ fn test_chunked_decode(frame: &[u8], strategy: &BufferStrategy) {
                 let end = (pos + chunk_size).min(frame.len());
                 buf.extend_from_slice(&frame[pos..end]);
                 pos = end;
-                let _ = codec.decode(&mut buf);
+                observe_decode(&mut codec, &mut buf);
             }
             // Add any remaining bytes
             if pos < frame.len() {
                 buf.extend_from_slice(&frame[pos..]);
-                let _ = codec.decode(&mut buf);
+                observe_decode(&mut codec, &mut buf);
             }
         }
         BufferStrategy::HeaderThenPayload => {
             if frame.len() >= 5 {
                 // Feed header first
                 let mut buf = BytesMut::from(&frame[..5]);
-                let _ = codec.decode(&mut buf);
+                observe_decode(&mut codec, &mut buf);
 
                 // Then payload
                 buf.extend_from_slice(&frame[5..]);
-                let _ = codec.decode(&mut buf);
+                observe_decode(&mut codec, &mut buf);
             }
         }
     }
