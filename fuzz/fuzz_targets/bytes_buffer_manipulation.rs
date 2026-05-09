@@ -186,7 +186,7 @@ fuzz_target!(|input: &[u8]| {
 
             BufferOperation::ConcatMultiple { count } => {
                 // Test concatenation of N Bytes segments for reference-counting correctness
-                let segment_count = (count as usize).min(8).max(1); // Limit to 1-8 segments
+                let segment_count = (count as usize).clamp(1, 8); // Limit to 1-8 segments
                 let mut segments = Vec::new();
 
                 // Create multiple segments from existing variants or new data
@@ -230,7 +230,7 @@ fuzz_target!(|input: &[u8]| {
 
             BufferOperation::FreezeWithReaders { reader_count } => {
                 // Test BytesMut::freeze atomicity with simulated concurrent readers
-                let readers = (reader_count as usize).min(4).max(1); // Limit to 1-4 readers
+                let readers = (reader_count as usize).clamp(1, 4); // Limit to 1-4 readers
 
                 if !bytes_mut.is_empty() {
                     // Create multiple "readers" that capture state before freeze
@@ -299,7 +299,7 @@ fuzz_target!(|input: &[u8]| {
 
             BufferOperation::MaxLengthOps => {
                 // Test operations near maximum length boundaries
-                if bytes_mut.len() > 0 {
+                if !bytes_mut.is_empty() {
                     let len = bytes_mut.len();
 
                     // Test split_to at maximum position
@@ -315,7 +315,7 @@ fuzz_target!(|input: &[u8]| {
                         let split_off = bytes_mut.split_off(0);
                         assert_eq!(bytes_mut.len(), 0);
                         assert_eq!(split_off.len(), len);
-                        bytes_mut = asupersync::bytes::BytesMut::from(split_off);
+                        bytes_mut = split_off;
                     }
 
                     // Test reserve with large values (but capped to prevent OOM)
@@ -340,8 +340,12 @@ fuzz_target!(|input: &[u8]| {
 
     // Final invariant checks
     for bytes in &bytes_variants {
-        // Test Debug formatting doesn't panic
-        let _ = format!("{:?}", bytes);
+        // Test Debug formatting doesn't panic and produces diagnostics
+        let diagnostic = format!("{:?}", bytes);
+        assert!(
+            !diagnostic.trim().is_empty(),
+            "bytes debug formatting must produce a non-empty diagnostic"
+        );
 
         // Test comparison operations
         let cloned = bytes.clone();
