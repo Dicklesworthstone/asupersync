@@ -11,9 +11,8 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::tls::{TlsError, TlsStream};
+use asupersync::tls::TlsError;
 use libfuzzer_sys::fuzz_target;
-use std::io::Cursor;
 
 /// TLS 1.3 Content Types as per RFC 8446 Section 5.1
 #[derive(Arbitrary, Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,7 +130,7 @@ struct TlsRecordFuzz {
 
 /// RFC 8446 constants
 const MAX_RECORD_LENGTH: u16 = (1 << 14) + 256; // 2^14 + 256 = 16640 octets
-const IV_EXHAUSTION_THRESHOLD: u64 = (1u64 << 24); // 2^24 records trigger renegotiation
+const IV_EXHAUSTION_THRESHOLD: u64 = 1u64 << 24; // 2^24 records trigger renegotiation
 
 /// Serialize TLS record to wire format
 fn serialize_record(record: &TlsRecord) -> Vec<u8> {
@@ -160,7 +159,7 @@ fn serialize_record(record: &TlsRecord) -> Vec<u8> {
 /// Parse TLS record from wire format
 fn parse_record(data: &[u8]) -> Result<(ContentType, ProtocolVersion, u16, Vec<u8>), TlsError> {
     if data.len() < 5 {
-        return Err(TlsError::Protocol(
+        return Err(TlsError::Handshake(
             "TLS record too short for header".to_string(),
         ));
     }
@@ -175,7 +174,7 @@ fn parse_record(data: &[u8]) -> Result<(ContentType, ProtocolVersion, u16, Vec<u
     // Assertion 1: ContentType enum validated
     let content_type = ContentType::from_u8(content_type_raw);
     if !content_type.is_valid() {
-        return Err(TlsError::Protocol(format!(
+        return Err(TlsError::Handshake(format!(
             "Invalid TLS ContentType: {}",
             content_type_raw
         )));
@@ -183,7 +182,7 @@ fn parse_record(data: &[u8]) -> Result<(ContentType, ProtocolVersion, u16, Vec<u
 
     // Assertion 2: TLSPlaintext.legacy_record_version echoed
     if !legacy_version.is_valid_legacy() {
-        return Err(TlsError::Protocol(format!(
+        return Err(TlsError::Handshake(format!(
             "Invalid legacy_record_version: {}.{}",
             legacy_version.major, legacy_version.minor
         )));
@@ -191,7 +190,7 @@ fn parse_record(data: &[u8]) -> Result<(ContentType, ProtocolVersion, u16, Vec<u
 
     // Assertion 3: record length bound (2^14 + 256 octets)
     if length > MAX_RECORD_LENGTH {
-        return Err(TlsError::Protocol(format!(
+        return Err(TlsError::Handshake(format!(
             "TLS record length {} exceeds maximum {}",
             length, MAX_RECORD_LENGTH
         )));
@@ -199,14 +198,16 @@ fn parse_record(data: &[u8]) -> Result<(ContentType, ProtocolVersion, u16, Vec<u
 
     // Assertion 4: empty records rejected
     if length == 0 {
-        return Err(TlsError::Protocol(
+        return Err(TlsError::Handshake(
             "Empty TLS records are not allowed".to_string(),
         ));
     }
 
     // Check if we have enough data
     if data.len() < 5 + length as usize {
-        return Err(TlsError::Protocol("Incomplete TLS record data".to_string()));
+        return Err(TlsError::Handshake(
+            "Incomplete TLS record data".to_string(),
+        ));
     }
 
     let fragment = data[5..5 + length as usize].to_vec();
@@ -220,7 +221,7 @@ fn check_iv_exhaustion(iv_counter: u64, record_count: u16) -> Result<(), TlsErro
     let projected_iv_counter = iv_counter + record_count as u64;
 
     if projected_iv_counter >= IV_EXHAUSTION_THRESHOLD {
-        return Err(TlsError::Protocol(
+        return Err(TlsError::Handshake(
             "IV exhaustion threshold reached, renegotiation required".to_string(),
         ));
     }
@@ -238,7 +239,8 @@ fn test_record_parsing(record: &TlsRecord, iv_counter: &mut u64) -> Result<(), T
     // Verify parsing results match input (when valid)
     assert_eq!(content_type, ContentType::from_u8(record.content_type));
     assert_eq!(version, record.legacy_record_version);
-    assert_eq!(length, record.length.min(record.fragment.len() as u16));
+    assert_eq!(length, record.length);
+    assert_eq!(fragment.len(), usize::from(length));
 
     // Test IV exhaustion if requested
     if record.test_iv_exhaustion {
@@ -251,7 +253,74 @@ fn test_record_parsing(record: &TlsRecord, iv_counter: &mut u64) -> Result<(), T
     Ok(())
 }
 
-/// Main fuzz target
+fn observe_sequence_record_result(
+    result: &Result<(), TlsError>,
+    record: &TlsRecord,
+    iv_counter_before: u64,
+    iv_counter_after: u64,
+) {
+    match result {
+        Ok(()) => {
+            assert_record_acceptance(record);
+            let expected_iv_delta = if record.test_iv_exhaustion {
+                u64::from(record.iv_exhaustion_count)
+            } else {
+                1
+            };
+            assert_eq!(
+                iv_counter_after,
+                iv_counter_before + expected_iv_delta,
+                "accepted sequence record must advance the IV counter by its modeled delta"
+            );
+        }
+        Err(err) => {
+            assert_eq!(
+                iv_counter_after, iv_counter_before,
+                "rejected sequence record must not advance the IV counter"
+            );
+            observe_record_rejection(err, record);
+        }
+    }
+}
+
+fn assert_record_acceptance(record: &TlsRecord) {
+    assert!(
+        ContentType::from_u8(record.content_type).is_valid(),
+        "Invalid ContentType should be rejected"
+    );
+    assert!(
+        record.legacy_record_version.is_valid_legacy(),
+        "Invalid legacy version should be rejected"
+    );
+    assert!(
+        record.length <= MAX_RECORD_LENGTH,
+        "Oversized record should be rejected"
+    );
+    assert!(record.length > 0, "Empty record should be rejected");
+}
+
+fn observe_record_rejection(err: &TlsError, record: &TlsRecord) {
+    assert!(
+        !err.to_string().is_empty(),
+        "rejected TLS record must expose a diagnostic"
+    );
+    if let TlsError::Handshake(msg) = err {
+        assert!(!msg.is_empty(), "TLS handshake diagnostic must be visible");
+        if msg.contains("Invalid TLS ContentType") {
+            assert!(!ContentType::from_u8(record.content_type).is_valid());
+        } else if msg.contains("Invalid legacy_record_version") {
+            assert!(!record.legacy_record_version.is_valid_legacy());
+        } else if msg.contains("exceeds maximum") {
+            assert!(record.length > MAX_RECORD_LENGTH);
+        } else if msg.contains("Empty TLS records") {
+            assert_eq!(record.length, 0);
+        } else if msg.contains("IV exhaustion") {
+            assert!(record.test_iv_exhaustion);
+        }
+    }
+}
+
+// Main fuzz target
 fuzz_target!(|data: TlsRecordFuzz| {
     let mut global_iv_counter = data.global_iv_counter;
 
@@ -283,7 +352,7 @@ fuzz_target!(|data: TlsRecordFuzz| {
                     Err(e) => {
                         // Parsing failed - verify it's for the right reasons
                         match e {
-                            TlsError::Protocol(msg) => {
+                            TlsError::Handshake(msg) => {
                                 // Expected for malformed data
                                 if msg.contains("Invalid TLS ContentType") {
                                     assert!(!ContentType::from_u8(record.content_type).is_valid());
@@ -306,7 +375,14 @@ fuzz_target!(|data: TlsRecordFuzz| {
             TlsRecordOperation::ParseRecordSequence { records } => {
                 // Test sequence of records for cumulative effects
                 for record in records {
-                    let _ = test_record_parsing(&record, &mut global_iv_counter);
+                    let iv_counter_before = global_iv_counter;
+                    let result = test_record_parsing(&record, &mut global_iv_counter);
+                    observe_sequence_record_result(
+                        &result,
+                        &record,
+                        iv_counter_before,
+                        global_iv_counter,
+                    );
 
                     // Check if IV exhaustion threshold is approaching
                     if global_iv_counter >= IV_EXHAUSTION_THRESHOLD {
@@ -344,7 +420,7 @@ fuzz_target!(|data: TlsRecordFuzz| {
                     // Size is valid - should succeed or fail for other reasons
                     match result {
                         Ok(()) => { /* Valid record processed */ }
-                        Err(TlsError::Protocol(msg)) if msg.contains("exceeds maximum") => {
+                        Err(TlsError::Handshake(msg)) if msg.contains("exceeds maximum") => {
                             panic!("Valid-sized record should not be rejected for size");
                         }
                         Err(_) => { /* Other errors OK */ }
@@ -370,7 +446,7 @@ fuzz_target!(|data: TlsRecordFuzz| {
 
                 // Empty records should always be rejected
                 assert!(result.is_err(), "Empty records should be rejected");
-                if let Err(TlsError::Protocol(msg)) = result {
+                if let Err(TlsError::Handshake(msg)) = result {
                     assert!(
                         msg.contains("Empty TLS records"),
                         "Should specifically reject empty records"
@@ -399,7 +475,7 @@ fuzz_target!(|data: TlsRecordFuzz| {
                 if !content_type.is_valid() {
                     // Should be rejected for invalid content type
                     assert!(result.is_err(), "Invalid ContentType should be rejected");
-                    if let Err(TlsError::Protocol(msg)) = result {
+                    if let Err(TlsError::Handshake(msg)) = result {
                         assert!(
                             msg.contains("Invalid TLS ContentType"),
                             "Should specifically reject invalid ContentType"
@@ -409,7 +485,9 @@ fuzz_target!(|data: TlsRecordFuzz| {
                     // Valid content type - should succeed or fail for other reasons
                     match result {
                         Ok(()) => { /* Valid record processed */ }
-                        Err(TlsError::Protocol(msg)) if msg.contains("Invalid TLS ContentType") => {
+                        Err(TlsError::Handshake(msg))
+                            if msg.contains("Invalid TLS ContentType") =>
+                        {
                             panic!("Valid ContentType should not be rejected");
                         }
                         Err(_) => { /* Other errors OK */ }
