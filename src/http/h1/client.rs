@@ -6,8 +6,9 @@ use crate::bytes::{Buf, BytesCursor, BytesMut};
 use crate::codec::Encoder;
 use crate::http::body::{Body, Frame, HeaderMap, HeaderName, HeaderValue, SizeHint};
 use crate::http::h1::codec::{
-    ChunkedBodyDecoder, HttpError, append_chunk_size_line, append_decimal, parse_header_line,
-    require_transfer_encoding_chunked, unique_header_value, validate_header_field,
+    ChunkedBodyDecoder, HttpError, append_chunk_size_line, append_decimal, parse_chunk_size_line,
+    parse_header_line, require_transfer_encoding_chunked, unique_header_value,
+    validate_header_field,
 };
 use crate::http::h1::types::{Method, Request, Response, Version};
 use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
@@ -988,31 +989,7 @@ impl<T> ClientIncomingBody<T> {
                     };
 
                     let line = &self.buffer.as_ref()[..line_end];
-                    let line_str =
-                        std::str::from_utf8(line).map_err(|_| HttpError::BadChunkedEncoding)?;
-                    // Split on ';' to separate chunk-size from chunk-ext.
-                    // Do NOT trim — chunk-size = 1*HEXDIG with no leading/trailing
-                    // whitespace. Trimming would mask differences from stricter
-                    // proxies (request smuggling vector). Must match codec.rs
-                    // parse_chunk_size_line() behavior.
-                    let size_part = line_str.split(';').next().unwrap_or("");
-                    if size_part.is_empty() {
-                        return Err(HttpError::BadChunkedEncoding);
-                    }
-                    if size_part
-                        .as_bytes()
-                        .first()
-                        .is_some_and(u8::is_ascii_whitespace)
-                        || size_part
-                            .as_bytes()
-                            .last()
-                            .is_some_and(u8::is_ascii_whitespace)
-                    {
-                        return Err(HttpError::BadChunkedEncoding);
-                    }
-
-                    let chunk_size = usize::from_str_radix(size_part, 16)
-                        .map_err(|_| HttpError::BadChunkedEncoding)?;
+                    let chunk_size = parse_chunk_size_line(line)?;
 
                     let _ = self.buffer.split_to(line_end + 2);
 
@@ -1826,6 +1803,16 @@ mod tests {
         assert_eq!(resp.status, 200);
         assert_eq!(resp.body, b"hello world");
         assert!(resp.trailers.is_empty());
+    }
+
+    #[test]
+    fn decode_chunked_response_rejects_signed_chunk_size() {
+        let mut codec = Http1ClientCodec::new();
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
+                    +1\r\nx\r\n0\r\n\r\n";
+        let mut buf = BytesMut::from(&raw[..]);
+        let result = codec.decode(&mut buf);
+        assert!(matches!(result, Err(HttpError::BadChunkedEncoding)));
     }
 
     #[test]

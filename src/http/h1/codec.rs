@@ -882,7 +882,7 @@ fn split_line_crlf(src: &mut BytesMut, max_len: usize) -> Result<Option<BytesMut
     Ok(Some(line))
 }
 
-fn parse_chunk_size_line(line: &[u8]) -> Result<usize, HttpError> {
+pub(super) fn parse_chunk_size_line(line: &[u8]) -> Result<usize, HttpError> {
     let line = std::str::from_utf8(line).map_err(|_| HttpError::BadChunkedEncoding)?;
     // Split on ';' to separate chunk-size from optional chunk-ext (RFC 7230 §4.1).
     // Do NOT trim — chunk-size = 1*HEXDIG with no leading/trailing whitespace.
