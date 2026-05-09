@@ -3493,13 +3493,13 @@ mod tests {
             msg.contains("invalid hostname")
         );
 
-        let not_impl = DnsError::NotImplemented("SRV");
-        let msg = format!("{not_impl}");
+        let server_error = DnsError::ServerError("SERVFAIL".to_string());
+        let msg = format!("{server_error}");
         crate::assert_with_log!(
-            msg.contains("not implemented"),
-            "not impl msg",
+            msg.contains("DNS server error"),
+            "server error msg",
             true,
-            msg.contains("not implemented")
+            msg.contains("DNS server error")
         );
 
         crate::test_complete!("error_display_formats");

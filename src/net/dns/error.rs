@@ -24,8 +24,6 @@ pub enum DnsError {
     InvalidHost(String),
     /// DNS server returned an error.
     ServerError(String),
-    /// Feature not implemented.
-    NotImplemented(&'static str),
 }
 
 impl fmt::Display for DnsError {
@@ -39,7 +37,6 @@ impl fmt::Display for DnsError {
             Self::Cancelled => write!(f, "DNS operation cancelled"),
             Self::InvalidHost(host) => write!(f, "invalid hostname: {host}"),
             Self::ServerError(msg) => write!(f, "DNS server error: {msg}"),
-            Self::NotImplemented(feature) => write!(f, "not implemented: {feature}"),
         }
     }
 }
@@ -80,7 +77,6 @@ mod tests {
             DnsError::InvalidHost("???".into()),
             DnsError::ServerError("SERVFAIL".into()),
             DnsError::Protocol("truncated packet".into()),
-            DnsError::NotImplemented("AAAA"),
         ];
 
         let expected_display = [
@@ -93,7 +89,6 @@ mod tests {
             "invalid hostname: ???",
             "DNS server error: SERVFAIL",
             "DNS protocol error: truncated packet",
-            "not implemented: AAAA",
         ];
 
         for (err, expected) in errors.iter().zip(expected_display.iter()) {
