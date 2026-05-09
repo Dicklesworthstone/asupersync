@@ -70,7 +70,7 @@ fn normalize_config(config: &mut FuzzConfig) {
     // Normalize permutation indices
     if !config.permutation_indices.is_empty() {
         for idx in &mut config.permutation_indices {
-            *idx = *idx % config.k;
+            *idx %= config.k;
         }
         config.permutation_indices.truncate(config.k as usize);
     }
@@ -409,7 +409,7 @@ fn assert_solution_satisfies_rhs(
         return Err("intermediate symbols had inconsistent widths".to_string());
     }
 
-    for row in 0..matrix.rows {
+    for (row, expected_rhs) in rhs.iter().enumerate().take(matrix.rows) {
         let mut reconstructed = vec![0u8; symbol_size];
         for (col, symbol) in intermediate.iter().enumerate().take(matrix.cols) {
             let coefficient = matrix.get(row, col);
@@ -419,7 +419,7 @@ fn assert_solution_satisfies_rhs(
             gf256_addmul_slice(&mut reconstructed, symbol, coefficient);
         }
 
-        if reconstructed != rhs[row] {
+        if reconstructed != *expected_rhs {
             return Err(format!("A·C = D invariant failed at row {row}"));
         }
     }
@@ -740,11 +740,9 @@ fn test_proof_consistency(
     }
 
     // Test proof replay (if successful decode)
-    if is_success {
-        if let Err(_replay_error) = proof.replay_and_verify(&all_symbols) {
-            // Note: replay failures are expected in fuzzing due to simplified ReceivedSymbol creation
-            // We just ensure it doesn't panic
-        }
+    if is_success && let Err(_replay_error) = proof.replay_and_verify(&all_symbols) {
+        // Note: replay failures are expected in fuzzing due to simplified ReceivedSymbol creation.
+        // We just ensure it doesn't panic.
     }
 
     Ok(())
@@ -793,10 +791,8 @@ fn test_permutation_invariance(
         let mut permuted_matches = 0;
         for i in 0..k {
             let orig_idx = permutation[i] as usize;
-            if orig_idx < sys1.len() && i < sys2.len() {
-                if sys1[orig_idx].data == sys2[i].data {
-                    permuted_matches += 1;
-                }
+            if orig_idx < sys1.len() && i < sys2.len() && sys1[orig_idx].data == sys2[i].data {
+                permuted_matches += 1;
             }
         }
 
@@ -1804,6 +1800,19 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
 
-    // Run systematic encoder/decoder fuzzing
-    let _ = fuzz_systematic(config);
+    // Run systematic encoder/decoder fuzzing and observe rejections.
+    match fuzz_systematic(config) {
+        Ok(()) => {}
+        Err(error) => {
+            assert!(
+                !error.trim().is_empty(),
+                "RaptorQ systematic rejection should expose a diagnostic"
+            );
+            assert!(
+                error.len() <= 1024,
+                "RaptorQ systematic rejection diagnostic should stay bounded: {} bytes",
+                error.len()
+            );
+        }
+    }
 });
