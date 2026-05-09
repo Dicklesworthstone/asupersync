@@ -6,39 +6,27 @@
 //! Feeds raw random byte streams into the decoder and asserts three
 //! invariants:
 //!
-//!   1. **No panic on bad lengths.** The decoder MUST handle every byte
-//!      sequence — including zero-length input, length-prefix overflow
-//!      (length > usize::MAX after num_skip / length_adjustment), short
-//!      headers, and impossibly large declared frame lengths — without
-//!      ever panicking. Any panic is a crash bug.
-//!
-//!   2. **Typed error or success.** Every byte consumed by `decode` /
-//!      `decode_eof` must produce one of three observable outcomes:
-//!        * `Ok(Some(frame))` — the decoder pulled a frame off,
-//!        * `Ok(None)`        — needs more bytes (Incomplete),
-//!        * `Err(io::Error)`  — a typed error with an `ErrorKind`.
-//!      Anything else (panic, infinite loop, silent corruption) is a bug.
-//!
-//!   3. **Bounded allocation under length-overflow.** A length prefix of
-//!      `u64::MAX` MUST NOT cause the decoder to pre-allocate ~16 EiB of
-//!      `BytesMut`. The decoder's `max_frame_length` ceiling (set to a
-//!      modest `MAX_FRAME_LEN` here) MUST short-circuit such inputs into
-//!      `Err(InvalidData)` before any allocation. The fuzzer asserts the
-//!      capacity of `src` and any returned frame stays below
-//!      `MAX_FRAME_LEN * SAFETY_FACTOR` — a hard ceiling that is orders
-//!      of magnitude smaller than what a naive decoder would request.
+//! 1. No panic on bad lengths. The decoder must handle every byte sequence,
+//!    including zero-length input, length-prefix overflow, short headers, and
+//!    impossibly large declared frame lengths.
+//! 2. Typed error or success. Every `decode` / `decode_eof` call must produce
+//!    `Ok(Some(frame))`, `Ok(None)`, or a typed `io::Error` with an
+//!    `ErrorKind`; silent corruption and infinite loops are bugs.
+//! 3. Bounded allocation under length overflow. A length prefix of `u64::MAX`
+//!    must not cause the decoder to pre-allocate ~16 EiB of `BytesMut`; frame
+//!    and buffer capacities stay under `MAX_FRAME_LEN * SAFETY_FACTOR`.
 //!
 //! Coverage biases:
-//!   * Random length-field width (1/2/4/8 bytes), big- and little-endian.
-//!   * Random `length_field_offset`, `length_adjustment`, `num_skip` —
-//!     including extreme values that trigger checked-arithmetic edge
-//!     cases inside `adjusted_frame_len` / `total_frame_len`.
-//!   * Repeated `decode` calls so frame-spanning state (Head ↔ Data) is
-//!     exercised across multiple iterations from the same input.
+//! - Random length-field width (1/2/4/8 bytes), big- and little-endian.
+//! - Random `length_field_offset`, `length_adjustment`, `num_skip`, including
+//!   values that trigger checked-arithmetic edge cases.
+//! - Repeated `decode` calls so frame-spanning state is exercised across
+//!   multiple iterations from the same input.
 
 use asupersync::bytes::BytesMut;
 use asupersync::codec::{Decoder, LengthDelimitedCodec};
 use libfuzzer_sys::fuzz_target;
+use std::io::ErrorKind;
 
 /// Cap the configured `max_frame_length`. Smaller than the prod default
 /// (8 MiB) so that the over-allocation invariant is easier to assert and
@@ -53,6 +41,8 @@ const MAX_INPUT_LEN: usize = 16 * 1024;
 const SAFETY_FACTOR: usize = 4;
 
 fuzz_target!(|data: &[u8]| {
+    assert_known_eof_outcomes();
+
     if data.is_empty() || data.len() > MAX_INPUT_LEN {
         return;
     }
@@ -121,8 +111,7 @@ fuzz_target!(|data: &[u8]| {
 
         // Final EOF flush — `decode_eof` MUST also handle the residual
         // buffer without panic.
-        let _ = codec.decode_eof(&mut buf);
-        high_water = high_water.max(buf.capacity());
+        high_water = observe_decode_eof(&mut codec, &mut buf, high_water);
 
         assert!(
             high_water <= MAX_FRAME_LEN * SAFETY_FACTOR,
@@ -134,6 +123,104 @@ fuzz_target!(|data: &[u8]| {
         );
     }
 });
+
+fn assert_known_eof_outcomes() {
+    let mut full = default_frame(b"abc");
+    let mut full_codec = LengthDelimitedCodec::new();
+    let full_capacity = full.capacity();
+    let high_water = observe_decode_eof(&mut full_codec, &mut full, full_capacity);
+    assert!(full.is_empty(), "complete EOF frame must fully drain");
+    assert!(
+        high_water <= MAX_FRAME_LEN * SAFETY_FACTOR,
+        "complete EOF canary exceeded allocation ceiling"
+    );
+
+    let mut incomplete = BytesMut::from(&[0, 0, 0, 3, b'a', b'b'][..]);
+    let mut incomplete_codec = LengthDelimitedCodec::new();
+    let incomplete_result = incomplete_codec.decode_eof(&mut incomplete);
+    assert!(
+        matches!(&incomplete_result, Err(e) if e.kind() == ErrorKind::UnexpectedEof),
+        "incomplete EOF must surface UnexpectedEof; got {incomplete_result:?}"
+    );
+    assert_eq!(
+        incomplete.as_ref(),
+        b"ab",
+        "incomplete EOF keeps residual body bytes buffered"
+    );
+
+    let mut over_cap = default_frame(b"abc");
+    let mut over_cap_codec = LengthDelimitedCodec::builder()
+        .max_frame_length(2)
+        .new_codec();
+    let over_cap_result = over_cap_codec.decode_eof(&mut over_cap);
+    assert!(
+        matches!(&over_cap_result, Err(e) if e.kind() == ErrorKind::InvalidData),
+        "over-cap EOF must surface InvalidData; got {over_cap_result:?}"
+    );
+    assert_eq!(
+        over_cap.as_ref(),
+        b"abc",
+        "over-cap EOF consumes the header and leaves body bytes for skip draining"
+    );
+    let drained = match over_cap_codec.decode_eof(&mut over_cap) {
+        Ok(drained) => drained,
+        Err(error) => panic!("skip drain must not re-emit the size error: {error}"),
+    };
+    assert!(
+        drained.is_none(),
+        "skip-drained over-cap EOF should finish without a frame"
+    );
+    assert!(
+        over_cap.is_empty(),
+        "skip drain must consume the body bytes"
+    );
+}
+
+fn default_frame(payload: &[u8]) -> BytesMut {
+    let mut buf = BytesMut::with_capacity(4 + payload.len());
+    let len = u32::try_from(payload.len()).unwrap_or(u32::MAX);
+    buf.extend_from_slice(&len.to_be_bytes());
+    buf.extend_from_slice(payload);
+    buf
+}
+
+fn observe_decode_eof(
+    codec: &mut LengthDelimitedCodec,
+    buf: &mut BytesMut,
+    mut high_water: usize,
+) -> usize {
+    match codec.decode_eof(buf) {
+        Ok(Some(frame)) => {
+            assert!(
+                frame.capacity() <= MAX_FRAME_LEN * SAFETY_FACTOR,
+                "EOF frame capacity {} exceeds {}*{} ceiling",
+                frame.capacity(),
+                MAX_FRAME_LEN,
+                SAFETY_FACTOR
+            );
+            high_water = high_water.max(frame.capacity()).max(buf.capacity());
+        }
+        Ok(None) => {
+            assert!(
+                buf.is_empty(),
+                "decode_eof Ok(None) is only valid after all buffered bytes drain"
+            );
+            high_water = high_water.max(buf.capacity());
+        }
+        Err(error) => {
+            assert!(
+                matches!(
+                    error.kind(),
+                    ErrorKind::InvalidData | ErrorKind::UnexpectedEof
+                ),
+                "decode_eof must surface a framing error kind, got {:?}: {error}",
+                error.kind()
+            );
+            high_water = high_water.max(buf.capacity());
+        }
+    }
+    high_water
+}
 
 /// Build a randomised `LengthDelimitedCodec` from the fuzz input bytes.
 /// Every field is constrained to a sane range — the *codec configuration*
