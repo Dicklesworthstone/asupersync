@@ -410,6 +410,16 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
 
-    // Run virtual time fuzzing
-    let _ = fuzz_lab_runtime_virtual_time(input);
+    // Run virtual time fuzzing and require rejected scenarios to expose
+    // bounded diagnostics instead of becoming no-panic-only probes.
+    match fuzz_lab_runtime_virtual_time(input) {
+        Ok(()) => {}
+        Err(err) => {
+            assert!(!err.is_empty(), "Lab virtual-time error must be diagnostic");
+            assert!(
+                err.len() <= 4096,
+                "Lab virtual-time diagnostic grew unexpectedly: {err}"
+            );
+        }
+    }
 });
