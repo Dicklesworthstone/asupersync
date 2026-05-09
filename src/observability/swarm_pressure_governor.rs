@@ -566,6 +566,21 @@ impl SwarmPressureGovernor {
     /// Returns current swarm governance metrics.
     pub fn metrics(&self) -> SwarmPressureMetrics {
         let envelopes = self.active_regions.lock().unwrap();
+        let max_memory_utilization_scaled = envelopes
+            .values()
+            .map(|envelope| scale_pressure_for_metrics(envelope.memory_utilization()))
+            .max()
+            .unwrap_or(0);
+        let max_cpu_utilization_scaled = envelopes
+            .values()
+            .map(|envelope| scale_pressure_for_metrics(envelope.cpu_utilization()))
+            .max()
+            .unwrap_or(0);
+        let max_io_utilization_scaled = envelopes
+            .values()
+            .map(|envelope| scale_pressure_for_metrics(envelope.io_utilization()))
+            .max()
+            .unwrap_or(0);
         let peer_pressure = self.peer_pressure_summary(Instant::now());
         SwarmPressureMetrics {
             total_admission_checks: self.total_admission_checks.load(Ordering::Relaxed),
@@ -573,6 +588,9 @@ impl SwarmPressureGovernor {
             regions_rejected: self.regions_rejected.load(Ordering::Relaxed),
             envelope_budget_violations: self.envelope_budget_violations.load(Ordering::Relaxed),
             active_region_count: envelopes.len() as u64,
+            max_memory_utilization_scaled,
+            max_cpu_utilization_scaled,
+            max_io_utilization_scaled,
             live_peer_pressure_reports: peer_pressure.live_report_count,
             max_peer_pressure_scaled: scale_pressure_for_metrics(
                 peer_pressure.max_overall_pressure,
@@ -785,6 +803,12 @@ pub struct SwarmPressureMetrics {
     pub envelope_budget_violations: u64,
     /// Number of active regions with envelopes.
     pub active_region_count: u64,
+    /// Maximum active memory-envelope utilization scaled by 10_000.
+    pub max_memory_utilization_scaled: i64,
+    /// Maximum active CPU-envelope utilization scaled by 10_000.
+    pub max_cpu_utilization_scaled: i64,
+    /// Maximum active IO-envelope utilization scaled by 10_000.
+    pub max_io_utilization_scaled: i64,
     /// Number of live peer pressure reports considered by admission.
     pub live_peer_pressure_reports: u64,
     /// Maximum live peer pressure ratio scaled by 10_000.
@@ -960,6 +984,43 @@ mod tests {
         assert!(governor.get_region_envelope(region_id).is_none());
         assert_eq!(governor.metrics().active_region_count, 0);
         assert!(governor.unregister_region_envelope(region_id).is_none());
+    }
+
+    #[test]
+    fn test_metrics_report_active_envelope_utilization() {
+        let governor = create_test_swarm_governor();
+        let low_region_id = RegionId::new_for_test(11, 1);
+        let high_region_id = RegionId::new_for_test(12, 1);
+        let low_envelope = ResourceEnvelope::new(low_region_id, 1024, 100, 10);
+        low_envelope
+            .reserve_memory(512)
+            .expect("memory reservation should fit");
+        low_envelope
+            .reserve_cpu(25)
+            .expect("cpu reservation should fit");
+        low_envelope
+            .reserve_io(3)
+            .expect("io reservation should fit");
+
+        let high_envelope = ResourceEnvelope::new(high_region_id, 1000, 100, 20);
+        high_envelope
+            .reserve_memory(900)
+            .expect("memory reservation should fit");
+        high_envelope
+            .reserve_cpu(80)
+            .expect("cpu reservation should fit");
+        high_envelope
+            .reserve_io(4)
+            .expect("io reservation should fit");
+
+        governor.register_region_envelope(low_region_id, low_envelope);
+        governor.register_region_envelope(high_region_id, high_envelope);
+
+        let metrics = governor.metrics();
+        assert_eq!(metrics.active_region_count, 2);
+        assert_eq!(metrics.max_memory_utilization_scaled, 9000);
+        assert_eq!(metrics.max_cpu_utilization_scaled, 8000);
+        assert_eq!(metrics.max_io_utilization_scaled, 3000);
     }
 
     #[test]
