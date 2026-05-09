@@ -986,11 +986,13 @@ impl<'a, T> RwLockWriteGuard<'a, T> {
             state.writer_active = false;
             state.readers = 1; // This downgraded reader
 
-            // Wake up any waiting readers since we're no longer exclusive
-            let mut wakers = Vec::new();
-            while let Some(waiter) = state.reader_waiters.pop_front() {
-                wakers.push(waiter.waker);
-                state.readers += 1;
+            // Wake only readers that are not queued behind the first writer.
+            // Downgrade relaxes exclusivity for the current writer, but it must
+            // preserve the same writer-preference boundary as release_writer().
+            let wakers = RwLock::<T>::take_eligible_reader_waiters(&mut state);
+            state.readers += wakers.len();
+            if !wakers.is_empty() {
+                state.consecutive_writers_served = 0;
             }
 
             wakers
@@ -1169,11 +1171,13 @@ impl<T> OwnedRwLockWriteGuard<T> {
             state.writer_active = false;
             state.readers = 1; // This downgraded reader
 
-            // Wake up any waiting readers since we're no longer exclusive
-            let mut wakers = Vec::new();
-            while let Some(waiter) = state.reader_waiters.pop_front() {
-                wakers.push(waiter.waker);
-                state.readers += 1;
+            // Wake only readers that are not queued behind the first writer.
+            // Downgrade relaxes exclusivity for the current writer, but it must
+            // preserve the same writer-preference boundary as release_writer().
+            let wakers = RwLock::<T>::take_eligible_reader_waiters(&mut state);
+            state.readers += wakers.len();
+            if !wakers.is_empty() {
+                state.consecutive_writers_served = 0;
             }
 
             wakers
@@ -2156,6 +2160,175 @@ mod tests {
             younger_reader_acquired
         );
         crate::test_complete!("release_writer_does_not_wake_readers_younger_than_first_writer");
+    }
+
+    #[test]
+    fn downgrade_preserves_writer_preference_for_younger_readers() {
+        init_test("downgrade_preserves_writer_preference_for_younger_readers");
+        let cx = test_cx();
+        let lock = RwLock::new(0_u32);
+
+        let active_writer = write_blocking(&lock, &cx);
+
+        let mut writer_fut = lock.write(&cx);
+        let writer_pending = poll_once(&mut writer_fut).is_none();
+        crate::assert_with_log!(
+            writer_pending,
+            "writer queued behind active writer",
+            true,
+            writer_pending
+        );
+
+        let mut younger_reader_fut = lock.read(&cx);
+        let reader_pending = poll_once(&mut younger_reader_fut).is_none();
+        crate::assert_with_log!(
+            reader_pending,
+            "younger reader queued behind writer",
+            true,
+            reader_pending
+        );
+
+        let downgraded_reader = active_writer.downgrade();
+
+        let state = lock.debug_state();
+        crate::assert_with_log!(
+            state.readers == 1
+                && state.writer_waiters == 1
+                && state.writer_queue.len() == 1
+                && state.reader_waiters.len() == 1,
+            "downgrade keeps younger reader queued behind writer",
+            true,
+            state.readers == 1
+                && state.writer_waiters == 1
+                && state.writer_queue.len() == 1
+                && state.reader_waiters.len() == 1
+        );
+
+        let younger_reader_still_pending = poll_once(&mut younger_reader_fut).is_none();
+        crate::assert_with_log!(
+            younger_reader_still_pending,
+            "younger reader stays pending after downgrade",
+            true,
+            younger_reader_still_pending
+        );
+
+        let writer_still_pending = poll_once(&mut writer_fut).is_none();
+        crate::assert_with_log!(
+            writer_still_pending,
+            "writer waits while downgraded reader is held",
+            true,
+            writer_still_pending
+        );
+
+        drop(downgraded_reader);
+
+        let writer_guard = match poll_once(&mut writer_fut) {
+            Some(Ok(guard)) => guard,
+            other => panic!("writer should acquire before younger reader: {other:?}"),
+        };
+        let younger_reader_still_pending = poll_once(&mut younger_reader_fut).is_none();
+        crate::assert_with_log!(
+            younger_reader_still_pending,
+            "younger reader remains queued while writer holds lock",
+            true,
+            younger_reader_still_pending
+        );
+
+        drop(writer_guard);
+
+        let younger_reader_guard = match poll_once(&mut younger_reader_fut) {
+            Some(Ok(guard)) => guard,
+            other => panic!("younger reader should acquire after writer releases: {other:?}"),
+        };
+        drop(younger_reader_guard);
+
+        crate::test_complete!("downgrade_preserves_writer_preference_for_younger_readers");
+    }
+
+    #[test]
+    fn owned_downgrade_preserves_writer_preference_for_younger_readers() {
+        init_test("owned_downgrade_preserves_writer_preference_for_younger_readers");
+        let cx = test_cx();
+        let lock = StdArc::new(RwLock::new(0_u32));
+
+        let active_writer = OwnedRwLockWriteGuard::try_write(StdArc::clone(&lock))
+            .expect("owned writer should acquire");
+
+        let mut writer_fut = OwnedRwLockWriteGuard::write(StdArc::clone(&lock), &cx);
+        let writer_pending = poll_once(&mut writer_fut).is_none();
+        crate::assert_with_log!(
+            writer_pending,
+            "owned writer queued behind active writer",
+            true,
+            writer_pending
+        );
+
+        let mut younger_reader_fut = OwnedRwLockReadGuard::read(StdArc::clone(&lock), &cx);
+        let reader_pending = poll_once(&mut younger_reader_fut).is_none();
+        crate::assert_with_log!(
+            reader_pending,
+            "owned younger reader queued behind writer",
+            true,
+            reader_pending
+        );
+
+        let downgraded_reader = active_writer.downgrade();
+
+        let state = lock.debug_state();
+        crate::assert_with_log!(
+            state.readers == 1
+                && state.writer_waiters == 1
+                && state.writer_queue.len() == 1
+                && state.reader_waiters.len() == 1,
+            "owned downgrade keeps younger reader queued behind writer",
+            true,
+            state.readers == 1
+                && state.writer_waiters == 1
+                && state.writer_queue.len() == 1
+                && state.reader_waiters.len() == 1
+        );
+
+        let younger_reader_still_pending = poll_once(&mut younger_reader_fut).is_none();
+        crate::assert_with_log!(
+            younger_reader_still_pending,
+            "owned younger reader stays pending after downgrade",
+            true,
+            younger_reader_still_pending
+        );
+
+        let writer_still_pending = poll_once(&mut writer_fut).is_none();
+        crate::assert_with_log!(
+            writer_still_pending,
+            "owned writer waits while downgraded reader is held",
+            true,
+            writer_still_pending
+        );
+
+        drop(downgraded_reader);
+
+        let writer_guard = match poll_once(&mut writer_fut) {
+            Some(Ok(guard)) => guard,
+            other => panic!("owned writer should acquire before younger reader: {other:?}"),
+        };
+        let younger_reader_still_pending = poll_once(&mut younger_reader_fut).is_none();
+        crate::assert_with_log!(
+            younger_reader_still_pending,
+            "owned younger reader remains queued while writer holds lock",
+            true,
+            younger_reader_still_pending
+        );
+
+        drop(writer_guard);
+
+        let younger_reader_guard = match poll_once(&mut younger_reader_fut) {
+            Some(Ok(guard)) => guard,
+            other => {
+                panic!("owned younger reader should acquire after writer releases: {other:?}")
+            }
+        };
+        drop(younger_reader_guard);
+
+        crate::test_complete!("owned_downgrade_preserves_writer_preference_for_younger_readers");
     }
 
     #[test]
