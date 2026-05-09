@@ -41,7 +41,7 @@ fn observe_parse_frame(header: &FrameHeader, payload: Bytes) -> Result<Frame, H2
     let result = parse_frame(header, payload);
 
     match &result {
-        Ok(_) => {
+        Ok(frame) => {
             assert!(
                 payload_len <= MAX_FRAME_SIZE as usize,
                 "successful H2 frame parse exceeded max payload size"
@@ -50,16 +50,146 @@ fn observe_parse_frame(header: &FrameHeader, payload: Bytes) -> Result<Frame, H2
                 header.length as usize <= MAX_FRAME_SIZE as usize,
                 "successful H2 frame parse accepted oversized header length"
             );
+            observe_parsed_frame_shape(header, payload_len, frame);
         }
         Err(err) => {
             assert!(
-                !format!("{err:?}").is_empty(),
+                !err.message.is_empty(),
                 "H2 frame parse errors must remain observable"
             );
+            assert_ne!(
+                err.code,
+                ErrorCode::NoError,
+                "failed H2 frame parse should not report NO_ERROR"
+            );
+            if let Some(stream_id) = err.stream_id {
+                assert!(
+                    stream_id <= 0x7fff_ffff,
+                    "H2 frame parse error carried a stream ID with the reserved bit set"
+                );
+            }
         }
     }
 
     result
+}
+
+fn observe_parsed_frame_shape(header: &FrameHeader, payload_len: usize, frame: &Frame) {
+    assert_eq!(
+        frame.stream_id(),
+        header.stream_id,
+        "parsed frame stream ID should match the parsed header"
+    );
+
+    match frame {
+        Frame::Data(frame) => {
+            assert_eq!(header.frame_type, 0x0);
+            assert_ne!(frame.stream_id, 0, "DATA frames must be stream-scoped");
+            assert!(frame.data.len() <= payload_len);
+            assert_eq!(frame.end_stream, header.has_flag(data_flags::END_STREAM));
+        }
+        Frame::Headers(frame) => {
+            assert_eq!(header.frame_type, 0x1);
+            assert_ne!(frame.stream_id, 0, "HEADERS frames must be stream-scoped");
+            assert!(frame.header_block.len() <= payload_len);
+            assert_eq!(frame.end_stream, header.has_flag(headers_flags::END_STREAM));
+            assert_eq!(
+                frame.end_headers,
+                header.has_flag(headers_flags::END_HEADERS)
+            );
+            assert_eq!(
+                frame.priority.is_some(),
+                header.has_flag(headers_flags::PRIORITY)
+            );
+        }
+        Frame::Priority(frame) => {
+            assert_eq!(header.frame_type, 0x2);
+            assert_ne!(frame.stream_id, 0, "PRIORITY frames must be stream-scoped");
+        }
+        Frame::RstStream(frame) => {
+            assert_eq!(header.frame_type, 0x3);
+            assert_ne!(
+                frame.stream_id, 0,
+                "RST_STREAM frames must be stream-scoped"
+            );
+        }
+        Frame::Settings(frame) => {
+            assert_eq!(header.frame_type, 0x4);
+            assert_eq!(
+                header.stream_id, 0,
+                "SETTINGS frames must be connection-scoped"
+            );
+            assert_eq!(frame.ack, header.has_flag(settings_flags::ACK));
+            if frame.ack {
+                assert!(
+                    frame.settings.is_empty(),
+                    "SETTINGS ACK must not carry settings entries"
+                );
+            }
+        }
+        Frame::PushPromise(frame) => {
+            assert_eq!(header.frame_type, 0x5);
+            assert_ne!(
+                frame.stream_id, 0,
+                "PUSH_PROMISE frames must be stream-scoped"
+            );
+            assert_ne!(
+                frame.promised_stream_id, 0,
+                "PUSH_PROMISE accepted a zero promised stream ID"
+            );
+            assert!(frame.header_block.len() <= payload_len);
+            assert_eq!(
+                frame.end_headers,
+                header.has_flag(headers_flags::END_HEADERS)
+            );
+        }
+        Frame::Ping(frame) => {
+            assert_eq!(header.frame_type, 0x6);
+            assert_eq!(header.stream_id, 0, "PING frames must be connection-scoped");
+            assert_eq!(frame.ack, header.has_flag(ping_flags::ACK));
+        }
+        Frame::GoAway(frame) => {
+            assert_eq!(header.frame_type, 0x7);
+            assert_eq!(
+                header.stream_id, 0,
+                "GOAWAY frames must be connection-scoped"
+            );
+            assert!(frame.last_stream_id <= 0x7fff_ffff);
+            assert!(frame.debug_data.len() <= payload_len);
+        }
+        Frame::WindowUpdate(frame) => {
+            assert_eq!(header.frame_type, 0x8);
+            assert!(
+                (1..=0x7fff_ffff).contains(&frame.increment),
+                "WINDOW_UPDATE accepted an invalid increment"
+            );
+        }
+        Frame::Continuation(frame) => {
+            assert_eq!(header.frame_type, 0x9);
+            assert_ne!(
+                frame.stream_id, 0,
+                "CONTINUATION frames must be stream-scoped"
+            );
+            assert!(frame.header_block.len() <= payload_len);
+            assert_eq!(
+                frame.end_headers,
+                header.has_flag(continuation_flags::END_HEADERS)
+            );
+        }
+        Frame::Unknown {
+            frame_type,
+            stream_id,
+            payload,
+        } => {
+            assert_eq!(*frame_type, header.frame_type);
+            assert_eq!(*stream_id, header.stream_id);
+            assert_eq!(payload.len(), payload_len);
+            assert!(
+                !matches!(header.frame_type, 0x0..=0x9),
+                "known HTTP/2 frame type parsed as unknown"
+            );
+        }
+    }
 }
 
 /// Fuzzing input for individual frame parsing
@@ -283,7 +413,18 @@ fn fuzz_header_parsing(
 
             // Try to parse the complete frame
             let remaining_payload = header_buf.freeze();
-            let _ = observe_parse_frame(&parsed_header, remaining_payload);
+            match observe_parse_frame(&parsed_header, remaining_payload) {
+                Ok(frame) => assert_eq!(
+                    frame.stream_id(),
+                    parsed_header.stream_id,
+                    "header-parsing scenario returned a frame for the wrong stream"
+                ),
+                Err(err) => assert_ne!(
+                    err.code,
+                    ErrorCode::NoError,
+                    "header-parsing scenario failed with NO_ERROR"
+                ),
+            }
             // Note: parse_frame may fail for invalid frame content, which is expected
         }
         Err(_) => {
@@ -335,7 +476,7 @@ fn fuzz_padding_validation(
         let payload = header_buf.freeze();
 
         // Try to parse the frame
-        match parse_frame(&parsed_header, payload) {
+        match observe_parse_frame(&parsed_header, payload) {
             Ok(_) => {
                 // Assertion 5: Padding length <= payload length when PADDED flag set
                 // If the frame parsed successfully with PADDED flag, the implementation
@@ -382,7 +523,18 @@ fn fuzz_raw_byte_sequence(bytes: Vec<u8>) {
             }
 
             // Try full frame parsing
-            let _ = observe_parse_frame(&header, remaining);
+            match observe_parse_frame(&header, remaining) {
+                Ok(frame) => assert_eq!(
+                    frame.stream_id(),
+                    header.stream_id,
+                    "raw-byte scenario returned a frame for the wrong stream"
+                ),
+                Err(err) => assert_ne!(
+                    err.code,
+                    ErrorCode::NoError,
+                    "raw-byte scenario failed with NO_ERROR"
+                ),
+            }
         }
         Err(_) => {
             // Header parsing failed - acceptable for malformed input
@@ -407,7 +559,7 @@ fn fuzz_flag_validation(frame_type: u8, flags: u8, stream_id: u32, payload: Vec<
 
         // Assertion 4: Flags mask respects frame-type reserved bits
         // Parse the frame and verify that invalid flag combinations are rejected
-        let parse_result = parse_frame(&parsed_header, frame_payload);
+        let parse_result = observe_parse_frame(&parsed_header, frame_payload);
 
         // Verify flags are handled according to frame type
         match frame_type {
