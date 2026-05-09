@@ -27,12 +27,12 @@
 
 #![no_main]
 
-use arbitrary::{Arbitrary, Result, Unstructured};
+use arbitrary::{Arbitrary, Unstructured};
+use base64::Engine as _;
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
-use asupersync::tls::error::TlsError;
-use asupersync::tls::types::Certificate;
+use asupersync::tls::{Certificate, TlsError};
 
 /// Maximum input size to prevent memory exhaustion during fuzzing
 const MAX_INPUT_SIZE: usize = 256 * 1024; // 256KB
@@ -103,13 +103,13 @@ enum NestingCorruption {
 #[derive(Arbitrary, Debug, Clone)]
 enum LengthField {
     /// Certificate total length
-    CertificateLength,
+    Certificate,
     /// TBSCertificate length
-    TbsCertLength,
+    TbsCert,
     /// Extensions length
-    ExtensionsLength,
+    Extensions,
     /// Individual extension length
-    ExtensionLength,
+    Extension,
 }
 
 /// RDN (Relative Distinguished Name) corruption strategies
@@ -281,7 +281,7 @@ impl X509FuzzConfig {
         ]);
 
         // Issuer (will be corrupted by RDN corruption)
-        let issuer_start = cert.len();
+        let _issuer_start = cert.len();
         cert.extend_from_slice(&[
             0x30, 0x1E, // SEQUENCE
             0x31, 0x1C, // SET
@@ -320,21 +320,21 @@ impl X509FuzzConfig {
         ]);
         // Minimal RSA public key (placeholder)
         cert.extend_from_slice(&[0x30, 0x4B, 0x02, 0x44]); // SEQUENCE, INTEGER
-        cert.extend_from_slice(&vec![0x01; 0x44]); // Dummy modulus
+        cert.extend_from_slice(&[0x01; 0x44]); // Dummy modulus
         cert.extend_from_slice(&[0x02, 0x03, 0x01, 0x00, 0x01]); // Exponent 65537
 
         // Extensions [3] EXPLICIT Extensions OPTIONAL
-        let extensions_start = cert.len();
+        let _extensions_start = cert.len();
         cert.extend_from_slice(&[0xA3]); // [3] EXPLICIT
-        let ext_length_placeholder = cert.len();
+        let _ext_length_placeholder = cert.len();
         cert.extend_from_slice(&[0x00]); // Length placeholder
 
         cert.extend_from_slice(&[0x30]); // Extensions SEQUENCE
-        let ext_seq_length_placeholder = cert.len();
+        let _ext_seq_length_placeholder = cert.len();
         cert.extend_from_slice(&[0x00]); // Extensions SEQUENCE length placeholder
 
         // This will be populated by extension corruption
-        let extensions_end = cert.len();
+        let _extensions_end = cert.len();
 
         // Calculate and fix lengths
         let tbs_length = cert.len() - tbs_length_placeholder - 2;
@@ -350,7 +350,7 @@ impl X509FuzzConfig {
 
         // signatureValue (dummy signature)
         cert.extend_from_slice(&[0x03, 0x81, 0x81, 0x00]); // BIT STRING
-        cert.extend_from_slice(&vec![0xAA; 0x80]); // Dummy signature
+        cert.extend_from_slice(&[0xAA; 0x80]); // Dummy signature
 
         // Fix total certificate length
         let total_length = cert.len() - length_placeholder - 2;
@@ -441,7 +441,7 @@ impl X509FuzzConfig {
     ) -> Vec<u8> {
         // Find length field and multiply it (this will create invalid certificates)
         match field_type {
-            LengthField::CertificateLength => {
+            LengthField::Certificate => {
                 if cert_data.len() > 4 {
                     let original = ((cert_data[2] as u16) << 8) | (cert_data[3] as u16);
                     let new_length = original.saturating_mul(multiplier);
@@ -452,15 +452,15 @@ impl X509FuzzConfig {
             _ => {
                 // For other fields, find them in the structure and modify
                 // This is a simplified approach for fuzzing
-                for i in 0..cert_data.len().saturating_sub(2) {
-                    if cert_data[i] == 0x30 && cert_data[i + 1] == 0x82 {
-                        // Found a length field, modify it
-                        let original = ((cert_data[i + 2] as u16) << 8) | (cert_data[i + 3] as u16);
-                        let new_length = original.saturating_mul(multiplier);
-                        cert_data[i + 2] = ((new_length >> 8) & 0xFF) as u8;
-                        cert_data[i + 3] = (new_length & 0xFF) as u8;
-                        break;
-                    }
+                if let Some(i) = cert_data
+                    .windows(4)
+                    .position(|window| window[0] == 0x30 && window[1] == 0x82)
+                {
+                    // Found a length field, modify it
+                    let original = ((cert_data[i + 2] as u16) << 8) | (cert_data[i + 3] as u16);
+                    let new_length = original.saturating_mul(multiplier);
+                    cert_data[i + 2] = ((new_length >> 8) & 0xFF) as u8;
+                    cert_data[i + 3] = (new_length & 0xFF) as u8;
                 }
             }
         }
@@ -468,7 +468,7 @@ impl X509FuzzConfig {
     }
 
     /// Apply RDN corruption to test Distinguished Name parsing
-    fn apply_rdn_corruption(&self, mut cert_data: Vec<u8>) -> Vec<u8> {
+    fn apply_rdn_corruption(&self, cert_data: Vec<u8>) -> Vec<u8> {
         match &self.rdn_corruption {
             RdnCorruption::Valid => cert_data,
             RdnCorruption::InvalidOrdering => {
@@ -496,13 +496,10 @@ impl X509FuzzConfig {
 
     fn inject_invalid_utf8(&self, mut cert_data: Vec<u8>) -> Vec<u8> {
         // Find UTF8String (0x0C) fields and corrupt them
-        for i in 0..cert_data.len() {
-            if cert_data[i] == 0x0C && i + 3 < cert_data.len() {
-                // Inject invalid UTF-8 sequence
-                cert_data[i + 2] = 0xFF; // Invalid UTF-8 byte
-                cert_data[i + 3] = 0xFE;
-                break;
-            }
+        if let Some(i) = cert_data.windows(4).position(|window| window[0] == 0x0C) {
+            // Inject invalid UTF-8 sequence
+            cert_data[i + 2] = 0xFF; // Invalid UTF-8 byte
+            cert_data[i + 3] = 0xFE;
         }
         cert_data
     }
@@ -520,11 +517,8 @@ impl X509FuzzConfig {
 
     fn corrupt_rdn_set_structure(&self, mut cert_data: Vec<u8>) -> Vec<u8> {
         // Find SET (0x31) structures and corrupt them to SEQUENCE (0x30)
-        for i in 0..cert_data.len() {
-            if cert_data[i] == 0x31 {
-                cert_data[i] = 0x30; // Change SET to SEQUENCE (invalid for RDN)
-                break;
-            }
+        if let Some(tag) = cert_data.iter_mut().find(|tag| **tag == 0x31) {
+            *tag = 0x30; // Change SET to SEQUENCE (invalid for RDN)
         }
         cert_data
     }
@@ -538,12 +532,36 @@ impl X509FuzzConfig {
     /// Apply extension corruption to test critical extension handling
     fn apply_extension_corruption(&self, mut cert_data: Vec<u8>) -> Vec<u8> {
         for extension in &self.extensions.extensions {
-            cert_data = self.inject_extension(cert_data, extension);
+            let unknown_extension = Self::is_unknown_extension_type(&extension.extension_type);
+            let force_critical = self.extensions.mark_unknown_critical && unknown_extension;
+            cert_data = self.inject_extension(cert_data, extension, force_critical);
+            if self.extensions.duplicate_standard && !unknown_extension {
+                cert_data = self.inject_extension(cert_data, extension, force_critical);
+            }
         }
         cert_data
     }
 
-    fn inject_extension(&self, mut cert_data: Vec<u8>, extension: &ExtensionEntry) -> Vec<u8> {
+    fn is_unknown_extension_type(extension_type: &ExtensionType) -> bool {
+        matches!(extension_type, ExtensionType::Unknown(_))
+    }
+
+    fn extension_oid(extension: &ExtensionEntry) -> &[u8] {
+        if extension.oid.is_empty()
+            && let ExtensionType::Unknown(custom_oid) = &extension.extension_type
+            && !custom_oid.is_empty()
+        {
+            return custom_oid;
+        }
+        &extension.oid
+    }
+
+    fn inject_extension(
+        &self,
+        mut cert_data: Vec<u8>,
+        extension: &ExtensionEntry,
+        force_critical: bool,
+    ) -> Vec<u8> {
         // Build extension DER structure
         let mut ext_der = Vec::new();
 
@@ -553,19 +571,22 @@ impl X509FuzzConfig {
         ext_der.push(0x00); // Length placeholder
 
         // extnID OBJECT IDENTIFIER
+        let oid = Self::extension_oid(extension);
+        let oid_len = oid.len().min(u8::MAX as usize);
         ext_der.extend_from_slice(&[0x06]); // OID tag
-        ext_der.push(extension.oid.len() as u8);
-        ext_der.extend_from_slice(&extension.oid);
+        ext_der.push(oid_len as u8);
+        ext_der.extend_from_slice(&oid[..oid_len]);
 
         // critical BOOLEAN DEFAULT FALSE
-        if extension.critical {
+        if extension.critical || force_critical {
             ext_der.extend_from_slice(&[0x01, 0x01, 0xFF]); // BOOLEAN TRUE
         }
 
         // extnValue OCTET STRING
+        let value_len = extension.value.len().min(u8::MAX as usize);
         ext_der.extend_from_slice(&[0x04]); // OCTET STRING
-        ext_der.push(extension.value.len() as u8);
-        ext_der.extend_from_slice(&extension.value);
+        ext_der.push(value_len as u8);
+        ext_der.extend_from_slice(&extension.value[..value_len]);
 
         // Fix extension length
         let ext_length = ext_der.len() - length_placeholder - 1;
@@ -657,9 +678,8 @@ impl X509FuzzConfig {
                 let arc_count = (*count as usize).min(255);
                 oid_data.push(arc_count as u8); // Length
                 // Add many small arcs
-                for _ in 0..arc_count {
-                    oid_data.push(0x01); // Arc value 1
-                }
+                let oid_len = oid_data.len() + arc_count;
+                oid_data.resize(oid_len, 0x01); // Arc value 1
                 oid_data
             }
             OidCorruption::InvalidFirstArc { first_arc } => {
@@ -773,6 +793,11 @@ impl MockX509Parser {
     fn validate_critical_extensions(&self, _der_data: &[u8]) -> Result<(), String> {
         // Critical extension validation
         // Unknown critical extensions should cause rejection
+        for (oid, critical) in &self.critical_extensions {
+            if *critical && !oid.is_empty() {
+                return Err("Unknown critical extension".to_string());
+            }
+        }
         Ok(())
     }
 
@@ -825,7 +850,7 @@ impl MockX509Parser {
         // Validate subsequent arcs
         let mut i = 1;
         while i < oid_data.len() {
-            let mut arc_value = 0u64;
+            let mut _arc_value = 0u64;
             let mut shift = 0;
 
             loop {
@@ -835,7 +860,7 @@ impl MockX509Parser {
                 }
 
                 let byte = oid_data[i];
-                arc_value |= ((byte & 0x7F) as u64) << shift;
+                _arc_value |= ((byte & 0x7F) as u64) << shift;
                 shift += 7;
                 i += 1;
 
@@ -858,26 +883,64 @@ fn test_certificate_parsing_assertions(cert_data: &[u8]) {
     let parser = MockX509Parser::new();
 
     // Test with our mock parser for assertion validation
-    if let Err(e) = parser.parse_and_validate(cert_data) {
+    if parser.parse_and_validate(cert_data).is_err() {
         // This is expected for malformed certificates
         return;
     }
 
-    // Test with actual asupersync Certificate parser
-    match Certificate::from_der(cert_data.to_vec()) {
-        Ok(_cert) => {
-            // Certificate was successfully parsed
-            // Additional validation could be performed here
+    // Test with actual asupersync Certificate DER wrapper.
+    let cert = Certificate::from_der(cert_data.to_vec());
+    assert_eq!(
+        cert.as_der(),
+        cert_data,
+        "DER wrapper must preserve certificate bytes"
+    );
+}
+
+fn observe_pem_parse(
+    result: std::result::Result<Vec<Certificate>, TlsError>,
+    pem_len: usize,
+    source_der_len: usize,
+) {
+    match result {
+        Ok(certs) => {
+            assert!(!certs.is_empty(), "successful PEM parse must return certs");
+            assert!(
+                certs.len() <= MAX_CHAIN_LENGTH,
+                "single PEM wrapper yielded an implausible chain length"
+            );
+
+            let mut total_der_len = 0usize;
+            for cert in &certs {
+                let der = cert.as_der();
+                assert!(!der.is_empty(), "PEM parser returned an empty cert");
+                assert!(
+                    der.len() <= source_der_len,
+                    "decoded cert exceeded source DER input"
+                );
+                total_der_len += der.len();
+            }
+
+            assert!(
+                total_der_len <= source_der_len,
+                "decoded PEM payload exceeded source DER input"
+            );
+            assert!(
+                total_der_len < pem_len,
+                "decoded DER should be smaller than its PEM wrapper"
+            );
         }
-        Err(TlsError::Certificate(_)) => {
-            // Expected for malformed certificates
-        }
-        Err(TlsError::Configuration(_)) => {
-            // Expected when TLS feature is disabled
-        }
-        Err(e) => {
-            // Other errors should be investigated
-            eprintln!("Unexpected TLS error: {:?}", e);
+        Err(err) => {
+            let rendered = err.to_string();
+            assert!(
+                !rendered.is_empty(),
+                "PEM parse errors must render visible diagnostics"
+            );
+            let debug = format!("{err:?}");
+            assert!(
+                !debug.is_empty(),
+                "PEM parse errors must expose debug diagnostics"
+            );
         }
     }
 }
@@ -918,8 +981,14 @@ fuzz_target!(|data: &[u8]| {
             {
                 // Corrupt this specific chain member
                 if !chain_cert.is_empty() {
-                    chain_cert[chain_cert.len() / 2] ^= 0xFF;
+                    let corrupt_offset = chain_cert.len() / 2;
+                    chain_cert[corrupt_offset] ^= 0xFF;
                 }
+            }
+
+            if config.chain_tests.test_signatures && !chain_cert.is_empty() {
+                let signature_offset = chain_cert.len() - 1;
+                chain_cert[signature_offset] ^= (i as u8).wrapping_add(1);
             }
 
             // Test each certificate in the chain
@@ -933,13 +1002,17 @@ fuzz_target!(|data: &[u8]| {
         let mut pem_data = Vec::new();
         pem_data.extend_from_slice(b"-----BEGIN CERTIFICATE-----\n");
         pem_data.extend_from_slice(
-            &base64::engine::general_purpose::STANDARD
+            base64::engine::general_purpose::STANDARD
                 .encode(&cert_data)
                 .as_bytes(),
         );
         pem_data.extend_from_slice(b"\n-----END CERTIFICATE-----\n");
 
         // Test PEM parsing (this may fail, which is expected for malformed data)
-        let _ = Certificate::from_pem(&pem_data);
+        observe_pem_parse(
+            Certificate::from_pem(&pem_data),
+            pem_data.len(),
+            cert_data.len(),
+        );
     }
 });
