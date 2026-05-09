@@ -77,6 +77,43 @@ fn observe_passthrough_decode(
     result
 }
 
+fn assert_passthrough_decode_observation(
+    context: &str,
+    result: io::Result<Option<BytesMut>>,
+    before_len: usize,
+    remaining_len: usize,
+) {
+    assert!(
+        remaining_len <= before_len,
+        "{context}: BytesCodec left more bytes than it started with"
+    );
+
+    match result {
+        Ok(Some(decoded)) => {
+            assert!(before_len > 0, "{context}: empty buffer decoded as bytes");
+            assert_eq!(
+                decoded.len(),
+                before_len,
+                "{context}: decoded length did not match visible input"
+            );
+            assert_eq!(
+                remaining_len, 0,
+                "{context}: successful decode should consume the full buffer"
+            );
+        }
+        Ok(None) => {
+            assert_eq!(before_len, 0, "{context}: non-empty buffer decoded as None");
+            assert_eq!(remaining_len, 0, "{context}: empty decode retained bytes");
+        }
+        Err(err) => {
+            assert!(
+                !err.to_string().trim().is_empty(),
+                "{context}: BytesCodec error should expose diagnostics"
+            );
+        }
+    }
+}
+
 #[derive(Arbitrary, Debug)]
 struct BytesCodecFuzzInput {
     /// Test scenario to execute
@@ -438,20 +475,41 @@ fn test_buffer_manipulation(payloads: &[DataPayload], buffer_ops: &[BufferOperat
                     let split_pos = (*pos as usize) % buffer.len();
                     let _split_off = buffer.split_off(split_pos);
                     // Remaining buffer should still be decodable
-                    let _ = observe_passthrough_decode(&mut codec, &mut buffer);
+                    let before_len = buffer.len();
+                    let result = observe_passthrough_decode(&mut codec, &mut buffer);
+                    assert_passthrough_decode_observation(
+                        "split buffer decode",
+                        result,
+                        before_len,
+                        buffer.len(),
+                    );
                 }
             }
             BufferOperation::Truncate(len) => {
                 let new_len = (*len as usize) % (buffer.len() + 1);
                 buffer.truncate(new_len);
                 // Truncated buffer should still be decodable
-                let _ = observe_passthrough_decode(&mut codec, &mut buffer);
+                let before_len = buffer.len();
+                let result = observe_passthrough_decode(&mut codec, &mut buffer);
+                assert_passthrough_decode_observation(
+                    "truncated buffer decode",
+                    result,
+                    before_len,
+                    buffer.len(),
+                );
             }
             BufferOperation::Extend(data) => {
                 if buffer.len() + data.len() <= MAX_CHUNK_SIZE {
                     buffer.extend_from_slice(data);
                     // Extended buffer should still be decodable
-                    let _ = observe_passthrough_decode(&mut codec, &mut buffer);
+                    let before_len = buffer.len();
+                    let result = observe_passthrough_decode(&mut codec, &mut buffer);
+                    assert_passthrough_decode_observation(
+                        "extended buffer decode",
+                        result,
+                        before_len,
+                        buffer.len(),
+                    );
                 }
             }
         }
