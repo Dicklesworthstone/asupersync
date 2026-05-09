@@ -10,13 +10,68 @@
 
 #![no_main]
 
+use std::panic::{AssertUnwindSafe, catch_unwind};
+
 use arbitrary::Arbitrary;
 use asupersync::bytes::Bytes;
-use asupersync::http::h2::hpack::Decoder;
+use asupersync::http::h2::error::H2Error;
+use asupersync::http::h2::hpack::{Decoder, Header};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_INPUT_SIZE: usize = 8192; // Smaller focused inputs
 const MAX_HEADERS: usize = 32;
+
+fn observe_hpack_decode(context: &str, decoder: &mut Decoder, bytes: &mut Bytes) {
+    let input_len = bytes.len();
+    let outcome = catch_unwind(AssertUnwindSafe(|| decoder.decode(bytes)));
+
+    match outcome {
+        Ok(Ok(headers)) => observe_successful_hpack_decode(context, input_len, bytes, &headers),
+        Ok(Err(err)) => observe_hpack_decode_error(context, input_len, bytes, &err),
+        Err(_) => panic!("{context}: HPACK decoder panicked"),
+    }
+}
+
+fn observe_successful_hpack_decode(
+    context: &str,
+    input_len: usize,
+    bytes: &Bytes,
+    headers: &[Header],
+) {
+    assert!(
+        bytes.len() <= input_len,
+        "{context}: decoder must not grow its input buffer"
+    );
+    assert!(
+        headers.len() <= MAX_HEADERS,
+        "{context}: decoded too many headers from bounded fuzz input"
+    );
+
+    let decoded_size: usize = headers.iter().map(Header::size).sum();
+    assert!(
+        decoded_size <= MAX_INPUT_SIZE + MAX_HEADERS * 32,
+        "{context}: decoded header list should remain bounded"
+    );
+
+    let observation = format!("{context}:ok:{}:{decoded_size}", headers.len());
+    assert!(
+        !observation.trim().is_empty(),
+        "{context}: successful decode should stay observable"
+    );
+}
+
+fn observe_hpack_decode_error(context: &str, input_len: usize, bytes: &Bytes, err: &H2Error) {
+    assert!(
+        bytes.len() <= input_len,
+        "{context}: rejected decode must not grow its input buffer"
+    );
+
+    let diagnostic = format!("{:?}:{}", err.code, err.message);
+    assert!(
+        !diagnostic.trim().is_empty(),
+        "{context}: rejected decode should expose a visible diagnostic"
+    );
+}
 
 #[derive(Arbitrary, Debug, Clone)]
 enum RFC7541EdgeCase {
@@ -169,7 +224,7 @@ fn fuzz_huffman_prefix_edge(
 
     // Test the decoder with potentially malformed Huffman sequences
     let mut bytes = Bytes::from(buffer);
-    let _result = decoder.decode(&mut bytes);
+    observe_hpack_decode("RFC7541 huffman prefix edge", &mut decoder, &mut bytes);
 }
 
 /// Test dynamic table size update after header field (RFC 7541 §4.2)
@@ -200,7 +255,7 @@ fn fuzz_mid_block_size_update(
 
     let mut bytes = Bytes::from(buffer);
     // According to RFC 7541 §4.2, this should fail with compression error
-    let _result = decoder.decode(&mut bytes);
+    observe_hpack_decode("RFC7541 mid-block size update", &mut decoder, &mut bytes);
 }
 
 /// Test never-indexed literal combinations (RFC 7541 §6.2.3)
@@ -243,7 +298,7 @@ fn fuzz_never_indexed_literal(literals: Vec<NeverIndexedPattern>, table_updates:
     }
 
     let mut bytes = Bytes::from(buffer);
-    let _result = decoder.decode(&mut bytes);
+    observe_hpack_decode("RFC7541 never-indexed literal", &mut decoder, &mut bytes);
 }
 
 /// Test table size shrink causing eviction (RFC 7541 §4.3)
@@ -277,7 +332,11 @@ fn fuzz_table_shrink_eviction(
 
     // Decode first to populate table
     let mut bytes1 = Bytes::from(buffer.clone());
-    let _result1 = decoder.decode(&mut bytes1);
+    observe_hpack_decode(
+        "RFC7541 table populate before shrink",
+        &mut decoder,
+        &mut bytes1,
+    );
 
     // Now shrink the table, causing evictions
     buffer.clear();
@@ -295,7 +354,7 @@ fn fuzz_table_shrink_eviction(
     }
 
     let mut bytes2 = Bytes::from(buffer);
-    let _result2 = decoder.decode(&mut bytes2);
+    observe_hpack_decode("RFC7541 table shrink eviction", &mut decoder, &mut bytes2);
 }
 
 /// Test malformed varint edge cases (RFC 7541 §5.1)
@@ -333,7 +392,7 @@ fn fuzz_malformed_varint(varint_patterns: Vec<VarintPattern>, context: VarintCon
 
         if buffer.len() <= MAX_INPUT_SIZE {
             let mut bytes = Bytes::from(buffer);
-            let _result = decoder.decode(&mut bytes);
+            observe_hpack_decode("RFC7541 malformed varint", &mut decoder, &mut bytes);
         }
     }
 }
