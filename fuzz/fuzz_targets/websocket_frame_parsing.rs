@@ -3,8 +3,9 @@
 use arbitrary::Arbitrary;
 use asupersync::bytes::BytesMut;
 use asupersync::codec::Decoder;
-use asupersync::net::websocket::{Frame, FrameCodec, Opcode, Role, WsError, apply_mask};
+use asupersync::net::websocket::{CloseCode, Frame, FrameCodec, Opcode, Role, WsError, apply_mask};
 use libfuzzer_sys::fuzz_target;
+use std::sync::OnceLock;
 
 /// Comprehensive WebSocket frame parsing fuzz target (RFC 6455).
 ///
@@ -228,8 +229,11 @@ enum EdgeMaskType {
 
 const MAX_OPERATIONS: usize = 50;
 const MAX_PAYLOAD_SIZE: usize = 100_000;
+static FIXED_DECODE_CANARIES: OnceLock<()> = OnceLock::new();
 
 fuzz_target!(|input: WsFrameFuzz| {
+    FIXED_DECODE_CANARIES.get_or_init(run_fixed_decode_canaries);
+
     // Limit operations to prevent timeout
     let total_ops = input.frame_operations.len()
         + input.utf8_operations.len()
@@ -281,7 +285,7 @@ fn test_frame_operation(operation: FrameOperation) {
                 && frame_bytes.len() <= MAX_PAYLOAD_SIZE
             {
                 let mut buf = BytesMut::from(frame_bytes.as_slice());
-                let result = codec.decode(&mut buf);
+                let result = decode_with_observation(&mut codec, &mut buf, role);
 
                 verify_frame_result(&result, &frame_spec, role);
             }
@@ -296,7 +300,7 @@ fn test_frame_operation(operation: FrameOperation) {
                     && fragment_bytes.len() <= MAX_PAYLOAD_SIZE / 10
                 {
                     let mut buf = BytesMut::from(fragment_bytes.as_slice());
-                    let _ = codec.decode(&mut buf);
+                    observe_decode(&mut codec, &mut buf, role);
                 }
             }
         }
@@ -314,7 +318,7 @@ fn test_frame_operation(operation: FrameOperation) {
                     }
 
                     let mut buf = BytesMut::from(frame_bytes.as_slice());
-                    let _ = codec.decode(&mut buf);
+                    observe_decode(&mut codec, &mut buf, role);
                 }
             }
         }
@@ -332,7 +336,7 @@ fn test_frame_operation(operation: FrameOperation) {
                 && violation_bytes.len() <= MAX_PAYLOAD_SIZE
             {
                 let mut buf = BytesMut::from(violation_bytes.as_slice());
-                let result = codec.decode(&mut buf);
+                let result = decode_with_observation(&mut codec, &mut buf, role);
 
                 // Violations should result in errors, not panics
                 match result {
@@ -360,7 +364,7 @@ fn test_utf8_operation(operation: Utf8Operation) {
                 let mut codec = FrameCodec::new(role);
                 let mut buf = BytesMut::from(encoded.as_slice());
 
-                let result = codec.decode(&mut buf);
+                let result = decode_with_observation(&mut codec, &mut buf, role);
                 match result {
                     Ok(Some(decoded_frame)) => {
                         assert_eq!(decoded_frame.opcode, Opcode::Text);
@@ -389,7 +393,7 @@ fn test_utf8_operation(operation: Utf8Operation) {
                 let mut codec = FrameCodec::new(role);
                 let mut buf = BytesMut::from(frame_bytes.as_slice());
 
-                let result = codec.decode(&mut buf);
+                let result = decode_with_observation(&mut codec, &mut buf, role);
                 // Invalid UTF-8 should either be rejected or handled gracefully
                 match result {
                     Ok(Some(_)) => {
@@ -430,7 +434,7 @@ fn test_utf8_operation(operation: Utf8Operation) {
                             && fragment_bytes.len() <= MAX_PAYLOAD_SIZE / 5
                         {
                             let mut buf = BytesMut::from(fragment_bytes.as_slice());
-                            let _ = codec.decode(&mut buf);
+                            observe_decode(&mut codec, &mut buf, role);
                             pos = end_pos;
                         }
                     }
@@ -458,7 +462,7 @@ fn test_close_operation(operation: CloseOperation) {
                 let mut codec = FrameCodec::new(role);
                 let mut buf = BytesMut::from(encoded.as_slice());
 
-                let result = codec.decode(&mut buf);
+                let result = decode_with_observation(&mut codec, &mut buf, role);
                 match result {
                     Ok(Some(decoded_frame)) => {
                         assert_eq!(decoded_frame.opcode, Opcode::Close);
@@ -484,7 +488,7 @@ fn test_close_operation(operation: CloseOperation) {
                 let mut codec = FrameCodec::new(role);
                 let mut buf = BytesMut::from(frame_bytes.as_slice());
 
-                let result = codec.decode(&mut buf);
+                let result = decode_with_observation(&mut codec, &mut buf, role);
                 // Invalid close payload should either be rejected or handled gracefully
                 match result {
                     Ok(Some(_)) => {
@@ -511,7 +515,7 @@ fn test_raw_operation(operation: RawOperation) {
                 let mut buf = BytesMut::from(data.as_slice());
 
                 // Should never panic, only return Ok/Err
-                let _ = codec.decode(&mut buf);
+                observe_decode(&mut codec, &mut buf, role);
             }
         }
 
@@ -530,7 +534,7 @@ fn test_raw_operation(operation: RawOperation) {
                     let mut codec = FrameCodec::new(role);
                     let mut buf = BytesMut::from(truncated);
 
-                    let result = codec.decode(&mut buf);
+                    let result = decode_with_observation(&mut codec, &mut buf, role);
                     match result {
                         Ok(None) => {
                             // Incomplete frame - expected for truncated input
@@ -586,6 +590,133 @@ fn test_mask_operation(operation: MaskOperation) {
 }
 
 // Helper functions for frame construction and verification
+
+fn run_fixed_decode_canaries() {
+    let mut client_codec = FrameCodec::new(Role::Client);
+    let mut unmasked_text = BytesMut::from(&b"\x81\x02ok"[..]);
+    let frame = decode_with_observation(&mut client_codec, &mut unmasked_text, Role::Client)
+        .expect("valid unmasked server text frame should decode")
+        .expect("complete text frame should be returned");
+    assert_eq!(frame.opcode, Opcode::Text);
+    assert_eq!(frame.payload.as_ref(), b"ok");
+    assert!(unmasked_text.is_empty());
+
+    let mut server_codec = FrameCodec::new(Role::Server);
+    let mut masked_ping = BytesMut::from(&b"\x89\x80\x12\x34\x56\x78"[..]);
+    let frame = decode_with_observation(&mut server_codec, &mut masked_ping, Role::Server)
+        .expect("valid masked client ping frame should decode")
+        .expect("complete ping frame should be returned");
+    assert_eq!(frame.opcode, Opcode::Ping);
+    assert!(frame.payload.is_empty());
+    assert!(masked_ping.is_empty());
+
+    let mut server_codec = FrameCodec::new(Role::Server);
+    let mut unmasked_client_text = BytesMut::from(&b"\x81\x00"[..]);
+    assert!(matches!(
+        decode_with_observation(&mut server_codec, &mut unmasked_client_text, Role::Server),
+        Err(WsError::UnmaskedClientFrame)
+    ));
+
+    let mut client_codec = FrameCodec::new(Role::Client);
+    let mut masked_server_text = BytesMut::from(&b"\x81\x80\x12\x34\x56\x78"[..]);
+    assert!(matches!(
+        decode_with_observation(&mut client_codec, &mut masked_server_text, Role::Client),
+        Err(WsError::MaskedServerFrame)
+    ));
+
+    let mut client_codec = FrameCodec::new(Role::Client);
+    let mut non_minimal_len = BytesMut::from(&b"\x82\x7e\x00\x01x"[..]);
+    assert!(matches!(
+        decode_with_observation(&mut client_codec, &mut non_minimal_len, Role::Client),
+        Err(WsError::ProtocolViolation(_))
+    ));
+
+    let mut client_codec = FrameCodec::new(Role::Client);
+    let mut invalid_close = BytesMut::from(&b"\x88\x01\x00"[..]);
+    assert!(matches!(
+        decode_with_observation(&mut client_codec, &mut invalid_close, Role::Client),
+        Err(WsError::InvalidClosePayload)
+    ));
+
+    let mut client_codec = FrameCodec::new(Role::Client);
+    let mut truncated_extended_len = BytesMut::from(&b"\x82\x7e\x00"[..]);
+    assert!(
+        decode_with_observation(&mut client_codec, &mut truncated_extended_len, Role::Client)
+            .expect("truncated extended-length frame should wait for more bytes")
+            .is_none()
+    );
+}
+
+fn observe_decode(codec: &mut FrameCodec, buf: &mut BytesMut, role: Role) {
+    let _result = decode_with_observation(codec, buf, role);
+}
+
+fn decode_with_observation(
+    codec: &mut FrameCodec,
+    buf: &mut BytesMut,
+    role: Role,
+) -> Result<Option<Frame>, WsError> {
+    let before_len = buf.len();
+    let result = codec.decode(buf);
+    let after_len = buf.len();
+
+    assert!(
+        after_len <= before_len,
+        "websocket decoder must never grow the source buffer: before={before_len}, after={after_len}"
+    );
+
+    match &result {
+        Ok(Some(frame)) => {
+            assert!(
+                before_len > after_len,
+                "successful websocket decode must consume at least one frame byte"
+            );
+            assert!(!frame.rsv1 && !frame.rsv2 && !frame.rsv3);
+            assert_eq!(frame.masked, role == Role::Server);
+            assert_eq!(frame.mask_key.is_some(), frame.masked);
+            assert!(frame.payload.len() <= before_len);
+
+            if frame.opcode.is_control() {
+                assert!(frame.fin, "control frames must not be fragmented");
+                assert!(
+                    frame.payload.len() <= 125,
+                    "control frame payload must fit RFC 6455's 125-byte limit"
+                );
+            }
+            if frame.opcode == Opcode::Close {
+                observe_close_payload(&frame.payload);
+            }
+        }
+        Ok(None) => {}
+        Err(err) => {
+            let debug = format!("{err:?}");
+            assert!(
+                !debug.is_empty(),
+                "websocket decode errors must remain observable"
+            );
+        }
+    }
+
+    result
+}
+
+fn observe_close_payload(payload: &[u8]) {
+    match payload.len() {
+        0 => {}
+        1 => panic!("accepted close frame with one-byte payload"),
+        _ => {
+            let code = u16::from_be_bytes([payload[0], payload[1]]);
+            assert!(
+                CloseCode::is_valid_code(code),
+                "accepted invalid close status code {code}"
+            );
+            if payload.len() > 2 {
+                std::str::from_utf8(&payload[2..])
+                    .expect("accepted close reason must be valid UTF-8");
+            }
+        }
+    }
+}
 
 fn convert_role(role: FuzzRole) -> Role {
     match role {
