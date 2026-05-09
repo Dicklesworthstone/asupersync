@@ -120,9 +120,33 @@ fn exercise_raw_stream(bytes: Vec<u8>, max_event_size: usize) {
             assert_eq!(parsed, reparsed);
         }
         Err(ParseError::EventTooLarge) => {
-            let _ = parse_sse_stream(&bytes, MAX_EVENT_SIZE);
+            observe_sse_reparse(&bytes, MAX_EVENT_SIZE, "oversized SSE reparse");
         }
         Err(ParseError::InvalidUtf8 | ParseError::InvalidRetry | ParseError::InvalidId) => {}
+    }
+}
+
+fn assert_visible_parse_error(error: &ParseError, label: &str) {
+    let diagnostic = format!("{error:?}");
+    assert!(
+        !diagnostic.is_empty(),
+        "{label} parser errors should stay visible",
+    );
+}
+
+fn observe_sse_reparse(bytes: &[u8], max_event_size: usize, label: &str) {
+    match parse_sse_stream(bytes, max_event_size) {
+        Ok(parsed) => {
+            let rendered = render_parsed_stream(&parsed);
+            assert!(
+                !rendered.contains('\r'),
+                "{label} canonical rendering must be LF-only",
+            );
+            let reparsed = parse_sse_stream(rendered.as_bytes(), MAX_EVENT_SIZE)
+                .expect("canonical SSE render must reparse");
+            assert_eq!(parsed, reparsed);
+        }
+        Err(error) => assert_visible_parse_error(&error, label),
     }
 }
 
