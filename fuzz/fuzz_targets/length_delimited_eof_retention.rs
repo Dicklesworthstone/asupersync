@@ -5,6 +5,58 @@ use asupersync::codec::{Decoder, LengthDelimitedCodec};
 use libfuzzer_sys::fuzz_target;
 use std::io;
 
+fn observe_decode_result(
+    label: &str,
+    before_len: usize,
+    buf: &BytesMut,
+    result: io::Result<Option<BytesMut>>,
+) -> io::Result<Option<BytesMut>> {
+    assert!(
+        buf.len() <= before_len,
+        "{label} must not grow the source buffer"
+    );
+
+    match &result {
+        Ok(Some(frame)) => {
+            assert!(
+                buf.len() < before_len,
+                "{label} returning a frame must consume input"
+            );
+            assert!(
+                frame.len() <= before_len,
+                "{label} returned more frame bytes than were available"
+            );
+        }
+        Ok(None) => {}
+        Err(err) => {
+            assert!(
+                !err.to_string().is_empty(),
+                "{label} errors must carry an observable description"
+            );
+        }
+    }
+
+    result
+}
+
+fn observe_decode(
+    codec: &mut LengthDelimitedCodec,
+    buf: &mut BytesMut,
+) -> io::Result<Option<BytesMut>> {
+    let before_len = buf.len();
+    let result = codec.decode(buf);
+    observe_decode_result("decode", before_len, buf, result)
+}
+
+fn observe_decode_eof(
+    codec: &mut LengthDelimitedCodec,
+    buf: &mut BytesMut,
+) -> io::Result<Option<BytesMut>> {
+    let before_len = buf.len();
+    let result = codec.decode_eof(buf);
+    observe_decode_result("decode_eof", before_len, buf, result)
+}
+
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
     // 2-byte BE length field, 4 bytes payload expected, EOF before the last 2 payload bytes
@@ -35,7 +87,7 @@ fuzz_target!(|data: &[u8]| {
         .length_adjustment(0)
         .num_skip(2)
         .max_frame_length(1024)
-        .big_endian(true)
+        .big_endian()
         .new_codec();
 
     // Case 1: Truncated frame EOF
@@ -46,19 +98,23 @@ fuzz_target!(|data: &[u8]| {
     buf.put_slice(b"ab");
 
     // 1 & 2. `decode_eof()` on a truncated final frame returns `UnexpectedEof`, no partial frame.
-    let res = codec.decode_eof(&mut buf);
+    let res = observe_decode_eof(&mut codec, &mut buf);
     match res {
         Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {}
         _ => panic!("decode_eof on truncated frame should return UnexpectedEof"),
     }
 
-    // 3. Prefix/header bytes remain unconsumed until a full frame exists.
-    assert_eq!(buf.len(), 4, "buffer should not be consumed");
-    assert_eq!(&buf[..], &[0, 4, b'a', b'b']);
+    // 3. The complete header is consumed, but visible partial payload bytes are retained.
+    assert_eq!(
+        buf.len(),
+        2,
+        "partial payload should remain buffered after EOF rejection"
+    );
+    assert_eq!(&buf[..], b"ab");
 
-    // 4. Completing the retained prefix later yields exactly the skipped frame bytes.
+    // 4. Completing the retained payload later yields exactly the skipped frame bytes.
     buf.put_slice(b"cd"); // complete the frame
-    let frame = codec.decode(&mut buf).unwrap().unwrap();
+    let frame = observe_decode(&mut codec, &mut buf).unwrap().unwrap();
     assert_eq!(frame.as_ref(), b"abcd");
     assert!(buf.is_empty());
 
@@ -69,13 +125,13 @@ fuzz_target!(|data: &[u8]| {
         .length_adjustment(0)
         .num_skip(2)
         .max_frame_length(1024)
-        .big_endian(true)
+        .big_endian()
         .new_codec();
 
     let mut buf2 = BytesMut::new();
     buf2.put_u8(0); // Half of length field
 
-    let res2 = codec2.decode_eof(&mut buf2);
+    let res2 = observe_decode_eof(&mut codec2, &mut buf2);
     match res2 {
         Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {}
         _ => panic!("decode_eof on truncated header should return UnexpectedEof"),
@@ -89,7 +145,7 @@ fuzz_target!(|data: &[u8]| {
     buf2.put_u8(4); // Second half of length field
     buf2.put_slice(b"efgh");
 
-    let frame2 = codec2.decode(&mut buf2).unwrap().unwrap();
+    let frame2 = observe_decode(&mut codec2, &mut buf2).unwrap().unwrap();
     assert_eq!(frame2.as_ref(), b"efgh");
     assert!(buf2.is_empty());
 
@@ -101,7 +157,7 @@ fuzz_target!(|data: &[u8]| {
             2 => 4,
             _ => 8,
         };
-        let mut fuzzed_codec = LengthDelimitedCodec::builder()
+        let fuzzed_builder = LengthDelimitedCodec::builder()
             .length_field_offset(0)
             .length_field_length(length_field_length)
             .length_adjustment(input.length_adjustment as isize)
@@ -110,16 +166,19 @@ fuzz_target!(|data: &[u8]| {
                 1024
             } else {
                 input.max_frame_length
-            })
-            .big_endian(input.big_endian)
-            .new_codec();
+            });
+        let mut fuzzed_codec = if input.big_endian {
+            fuzzed_builder.big_endian().new_codec()
+        } else {
+            fuzzed_builder.little_endian().new_codec()
+        };
 
         let mut fuzzed_buf = BytesMut::new();
         fuzzed_buf.extend_from_slice(&input.chunk1);
-        let _ = fuzzed_codec.decode(&mut fuzzed_buf);
+        let _ = observe_decode(&mut fuzzed_codec, &mut fuzzed_buf);
         fuzzed_buf.extend_from_slice(&input.chunk2);
-        let _ = fuzzed_codec.decode(&mut fuzzed_buf);
+        let _ = observe_decode(&mut fuzzed_codec, &mut fuzzed_buf);
         fuzzed_buf.extend_from_slice(&input.chunk3);
-        let _ = fuzzed_codec.decode_eof(&mut fuzzed_buf);
+        let _ = observe_decode_eof(&mut fuzzed_codec, &mut fuzzed_buf);
     }
 });
