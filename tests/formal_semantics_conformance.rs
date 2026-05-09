@@ -17,14 +17,16 @@
 #[macro_use]
 mod common;
 
-use asupersync::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig, conformance_test};
 use asupersync::cx::Cx;
 use asupersync::runtime::yield_now;
 use asupersync::types::{Budget, CancelKind, CancelReason, Outcome};
+use asupersync::{
+    conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig},
+    conformance_test,
+};
 use common::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
 
 fn init_test(test_name: &str) {
     init_test_logging();
@@ -181,7 +183,7 @@ conformance_test!(test_cancel_idempotence, |config: &TestConfig| {
         // Multiple cancellation requests with different reasons
         LabRuntimeTarget::cancel(&cx, &region, CancelReason::user("first cancel"));
         LabRuntimeTarget::cancel(&cx, &region, CancelReason::user("second cancel"));
-        LabRuntimeTarget::cancel(&cx, &region, CancelReason::deadline("timeout"));
+        LabRuntimeTarget::cancel(&cx, &region, CancelReason::deadline());
 
         // Task should be cancelled with the strongest (most recent/severe) reason
         let result = task.await;
@@ -229,8 +231,8 @@ conformance_test!(test_cancel_strengthen_severity, |config: &TestConfig| {
 
         // Apply cancels in order of increasing severity
         LabRuntimeTarget::cancel(&cx, &region, CancelReason::user("low severity"));
-        LabRuntimeTarget::cancel(&cx, &region, CancelReason::deadline("medium severity"));
-        LabRuntimeTarget::cancel(&cx, &region, CancelReason::shutdown("high severity"));
+        LabRuntimeTarget::cancel(&cx, &region, CancelReason::deadline());
+        LabRuntimeTarget::cancel(&cx, &region, CancelReason::shutdown());
 
         let result = task.await;
         match result {
@@ -428,7 +430,7 @@ conformance_test!(test_all_properties_compose, |config: &TestConfig| {
 
         // Test cancel idempotence on inner region
         LabRuntimeTarget::cancel(&cx, &inner_region, CancelReason::user("first"));
-        LabRuntimeTarget::cancel(&cx, &inner_region, CancelReason::deadline("second"));
+        LabRuntimeTarget::cancel(&cx, &inner_region, CancelReason::deadline());
 
         // Race loser should be drained (property c)
         let loser_result = race_loser.await;
