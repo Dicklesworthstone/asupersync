@@ -20,20 +20,9 @@ enum StreamState {
 /// HTTP/2 error codes per RFC 9113 §7
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ErrorCode {
-    NoError = 0x0,
     ProtocolError = 0x1,
-    InternalError = 0x2,
-    FlowControlError = 0x3,
-    SettingsTimeout = 0x4,
-    StreamClosed = 0x5,
     FrameSizeError = 0x6,
-    RefusedStream = 0x7,
     Cancel = 0x8,
-    CompressionError = 0x9,
-    ConnectError = 0xa,
-    EnhanceYourCalm = 0xb,
-    InadequateSecurity = 0xc,
-    Http11Required = 0xd,
 }
 
 /// RST_STREAM frame with arbitrary payload size (should be exactly 4 bytes)
@@ -80,7 +69,6 @@ impl RstStreamFrame {
 /// Stream information for tracking state
 #[derive(Debug, Clone)]
 struct StreamInfo {
-    stream_id: u32,
     state: StreamState,
     /// Whether this stream has been reset
     reset: bool,
@@ -89,9 +77,8 @@ struct StreamInfo {
 }
 
 impl StreamInfo {
-    fn new(stream_id: u32, initial_state: StreamState) -> Self {
+    fn new(initial_state: StreamState) -> Self {
         Self {
-            stream_id,
             state: initial_state,
             reset: false,
             reset_error: None,
@@ -116,12 +103,8 @@ struct MockH2Connection {
     streams: HashMap<u32, StreamInfo>,
     /// Connection-level errors that occurred
     connection_errors: Vec<(ErrorCode, String)>,
-    /// Stream-level errors that occurred
-    stream_errors: Vec<(u32, ErrorCode, String)>,
     /// Whether connection is active
     is_active: bool,
-    /// Count of FRAME_SIZE_ERROR occurrences
-    frame_size_errors: usize,
 }
 
 impl MockH2Connection {
@@ -129,9 +112,7 @@ impl MockH2Connection {
         Self {
             streams: HashMap::new(),
             connection_errors: Vec::new(),
-            stream_errors: Vec::new(),
             is_active: true,
-            frame_size_errors: 0,
         }
     }
 
@@ -140,8 +121,7 @@ impl MockH2Connection {
         if stream_id == 0 {
             return; // Stream 0 is reserved
         }
-        self.streams
-            .insert(stream_id, StreamInfo::new(stream_id, state));
+        self.streams.insert(stream_id, StreamInfo::new(state));
     }
 
     /// Process RST_STREAM frame per RFC 9113 §6.4
@@ -162,7 +142,6 @@ impl MockH2Connection {
             // FRAME_SIZE_ERROR is a connection-level error
             self.connection_errors
                 .push((ErrorCode::FrameSizeError, error_msg));
-            self.frame_size_errors += 1;
             self.is_active = false; // Connection closes on frame size error
 
             return Err(ErrorCode::FrameSizeError);
@@ -185,7 +164,7 @@ impl MockH2Connection {
             // RST_STREAM on non-existent stream is allowed (RFC 9113 §6.4)
             // Just ignore it or create the stream as closed
             self.streams.insert(stream_id, {
-                let mut stream = StreamInfo::new(stream_id, StreamState::Closed);
+                let mut stream = StreamInfo::new(StreamState::Closed);
                 stream.reset_with_error(frame.error_code);
                 stream
             });
@@ -205,21 +184,6 @@ impl MockH2Connection {
             .get(&stream_id)
             .map(|s| s.is_reset())
             .unwrap_or(false)
-    }
-
-    /// Get connection errors
-    fn get_connection_errors(&self) -> &[(ErrorCode, String)] {
-        &self.connection_errors
-    }
-
-    /// Get stream errors
-    fn get_stream_errors(&self) -> &[(u32, ErrorCode, String)] {
-        &self.stream_errors
-    }
-
-    /// Get frame size error count
-    fn get_frame_size_error_count(&self) -> usize {
-        self.frame_size_errors
     }
 
     /// Check if connection is active
@@ -254,7 +218,7 @@ fn test_rst_frame_size_consistency(scenario: RstStreamSizeErrorScenario) -> Resu
     let mut connection = MockH2Connection::new();
 
     // Phase 1: Create streams in various states
-    for (stream_id, state) in scenario.stream_states {
+    for &(stream_id, state) in &scenario.stream_states {
         if stream_id != 0 && stream_id < 1000 {
             // Limit range for practical testing
             connection.add_stream(stream_id, state);
@@ -263,16 +227,17 @@ fn test_rst_frame_size_consistency(scenario: RstStreamSizeErrorScenario) -> Resu
 
     // Phase 2: Test RST_STREAM frames with various sizes
     let mut frame_size_errors_by_state: HashMap<StreamState, usize> = HashMap::new();
-    let initial_error_count = connection.get_frame_size_error_count();
 
     for rst_frame in scenario.rst_frames {
-        if rst_frame.stream_id == 0 || rst_frame.stream_id >= 1000 {
+        let stream_id = rst_frame.stream_id;
+
+        if stream_id == 0 || stream_id >= 1000 {
             continue; // Skip invalid stream IDs
         }
 
         // Record the stream state before sending RST_STREAM
         let stream_state = connection
-            .get_stream_state(rst_frame.stream_id)
+            .get_stream_state(stream_id)
             .unwrap_or(StreamState::Idle);
 
         let was_invalid_size = !rst_frame.is_valid_size();
@@ -283,7 +248,7 @@ fn test_rst_frame_size_consistency(scenario: RstStreamSizeErrorScenario) -> Resu
                 if !was_invalid_size {
                     return Err(format!(
                         "Got FRAME_SIZE_ERROR for valid-sized RST_STREAM on stream {} in state {:?}",
-                        rst_frame.stream_id, stream_state
+                        stream_id, stream_state
                     ));
                 }
 
@@ -305,10 +270,10 @@ fn test_rst_frame_size_consistency(scenario: RstStreamSizeErrorScenario) -> Resu
             }
             Err(ErrorCode::ProtocolError) => {
                 // May occur for stream 0, but not expected for frame size issues
-                if was_invalid_size && rst_frame.stream_id != 0 {
+                if was_invalid_size && stream_id != 0 {
                     return Err(format!(
                         "Expected FRAME_SIZE_ERROR but got PROTOCOL_ERROR for stream {} in state {:?}",
-                        rst_frame.stream_id, stream_state
+                        stream_id, stream_state
                     ));
                 }
             }
@@ -323,15 +288,15 @@ fn test_rst_frame_size_consistency(scenario: RstStreamSizeErrorScenario) -> Resu
                 if was_invalid_size {
                     return Err(format!(
                         "Invalid-sized RST_STREAM was accepted on stream {} in state {:?}",
-                        rst_frame.stream_id, stream_state
+                        stream_id, stream_state
                     ));
                 }
 
                 // Verify stream was reset
-                if !connection.is_stream_reset(rst_frame.stream_id) {
+                if !connection.is_stream_reset(stream_id) {
                     return Err(format!(
                         "Stream {} not marked as reset after valid RST_STREAM",
-                        rst_frame.stream_id
+                        stream_id
                     ));
                 }
             }
@@ -398,7 +363,6 @@ fn test_rst_frame_size_consistency(scenario: RstStreamSizeErrorScenario) -> Resu
                 test_connection
                     .connection_errors
                     .push((ErrorCode::FrameSizeError, error_msg));
-                test_connection.frame_size_errors += 1;
                 test_connection.is_active = false;
 
                 // Verify consistent error handling regardless of stream state
@@ -417,13 +381,12 @@ fn test_rst_frame_size_consistency(scenario: RstStreamSizeErrorScenario) -> Resu
     error_counts.sort();
 
     // If we had frame size errors, they should be consistent across states
-    if let (Some(&min_errors), Some(&max_errors)) = (error_counts.first(), error_counts.last()) {
-        if max_errors > 0 && min_errors == 0 {
-            // Some states had errors, others didn't - this suggests inconsistent handling
-            return Err(
-                "FRAME_SIZE_ERROR handling is inconsistent across stream states".to_string(),
-            );
-        }
+    if let (Some(&min_errors), Some(&max_errors)) = (error_counts.first(), error_counts.last())
+        && max_errors > 0
+        && min_errors == 0
+    {
+        // Some states had errors, others didn't - this suggests inconsistent handling
+        return Err("FRAME_SIZE_ERROR handling is inconsistent across stream states".to_string());
     }
 
     Ok(())
@@ -623,20 +586,42 @@ fuzz_target!(|data: &[u8]| {
 
         // Try to generate scenario from fuzz input
         if let Ok(scenario) = RstStreamSizeErrorScenario::arbitrary(&mut unstructured) {
-            let _ = test_rst_frame_size_consistency(scenario);
+            observe_rst_stream_oracle(
+                test_rst_frame_size_consistency(scenario),
+                "generated RST_STREAM frame-size scenario",
+            );
         }
 
         // Run deterministic test cases
         if data.len() > 25 {
-            let _ = test_basic_frame_size_error();
-            let _ = test_frame_size_error_consistency();
-            let _ = test_valid_rst_frames();
-            let _ = test_extremely_large_frame();
-            let _ = test_rst_stream_zero();
+            observe_rst_stream_oracle(
+                test_basic_frame_size_error(),
+                "basic RST_STREAM frame-size error",
+            );
+            observe_rst_stream_oracle(
+                test_frame_size_error_consistency(),
+                "RST_STREAM frame-size consistency",
+            );
+            observe_rst_stream_oracle(test_valid_rst_frames(), "valid RST_STREAM frames");
+            observe_rst_stream_oracle(
+                test_extremely_large_frame(),
+                "extremely large RST_STREAM frame",
+            );
+            observe_rst_stream_oracle(test_rst_stream_zero(), "RST_STREAM stream-zero precedence");
         }
     });
 
-    if result.is_err() {
-        eprintln!("Panic in RST_STREAM frame size error fuzzing");
+    if let Err(payload) = result {
+        panic::resume_unwind(payload);
     }
 });
+
+fn observe_rst_stream_oracle(result: Result<(), String>, context: &str) {
+    if let Err(error) = result {
+        assert!(
+            !error.trim().is_empty(),
+            "{context} failed without diagnostic details"
+        );
+        panic!("{context}: {error}");
+    }
+}
