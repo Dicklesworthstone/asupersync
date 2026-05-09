@@ -1,11 +1,13 @@
 #![no_main]
 
+use std::panic::{AssertUnwindSafe, catch_unwind};
+
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use asupersync::bytes::{BufMut, Bytes, BytesMut};
 use asupersync::http::h2::error::{ErrorCode, H2Error};
-use asupersync::http::h2::frame::{FrameHeader, FrameType};
+use asupersync::http::h2::frame::{FrameHeader, FrameType, WindowUpdateFrame};
 
 /// Fuzz input for HTTP/2 WINDOW_UPDATE frame testing (RFC 7540 §6.9)
 #[derive(Arbitrary, Debug)]
@@ -160,6 +162,42 @@ const WINDOW_UPDATE_PAYLOAD_SIZE: usize = 4;
 const MAX_OPERATIONS: usize = 50;
 const MAX_FRAMES: usize = 10;
 
+fn observe_window_update_parse(
+    context: &str,
+    header: &FrameHeader,
+    payload: &Bytes,
+) -> Result<WindowUpdateFrame, H2Error> {
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        WindowUpdateFrame::parse(header, payload)
+    }));
+
+    match outcome {
+        Ok(Ok(frame)) => {
+            verify_window_update_consistency(frame.stream_id, frame.increment);
+            let observation = format!("{context}:ok:{}:{}", frame.stream_id, frame.increment);
+            assert!(
+                !observation.trim().is_empty(),
+                "{context} parse success should stay observable"
+            );
+            Ok(frame)
+        }
+        Ok(Err(err)) => {
+            verify_window_update_error_consistency(&err, header, payload);
+            assert_h2_error_visible(context, &err);
+            Err(err)
+        }
+        Err(_) => panic!("{context}: WINDOW_UPDATE parser panicked"),
+    }
+}
+
+fn assert_h2_error_visible(context: &str, err: &H2Error) {
+    let diagnostic = format!("{:?}:{}", err.code, err.message);
+    assert!(
+        !diagnostic.trim().is_empty(),
+        "{context} parse rejection should expose a visible diagnostic"
+    );
+}
+
 fuzz_target!(|input: WindowUpdateFuzz| {
     // Limit operations to prevent timeout
     let total_operations = input.window_update_operations.len()
@@ -215,9 +253,8 @@ fn test_window_update_operation(operation: WindowUpdateOperation) {
 
                     // Test WINDOW_UPDATE parsing
                     if header.frame_type == FrameType::WindowUpdate as u8 {
-                        let result = asupersync::http::h2::frame::WindowUpdateFrame::parse(
-                            &header, &payload,
-                        );
+                        let result =
+                            observe_window_update_parse("raw WINDOW_UPDATE frame", &header, &payload);
                         match result {
                             Ok(frame) => {
                                 verify_window_update_consistency(frame.stream_id, frame.increment);
@@ -249,7 +286,11 @@ fn test_window_update_operation(operation: WindowUpdateOperation) {
                 if let Ok(header) = FrameHeader::parse(&mut buf) {
                     let payload = buf.split_to(header.length as usize).freeze();
 
-                    match asupersync::http::h2::frame::WindowUpdateFrame::parse(&header, &payload) {
+                    match observe_window_update_parse(
+                        "structured WINDOW_UPDATE frame",
+                        &header,
+                        &payload,
+                    ) {
                         Ok(parsed) => {
                             assert_eq!(parsed.stream_id, clamped_stream_id, "Stream ID mismatch");
                             assert_eq!(parsed.increment, clamped_increment, "Increment mismatch");
@@ -293,11 +334,11 @@ fn test_window_update_operation(operation: WindowUpdateOperation) {
                             if header.length as usize <= buf.len() {
                                 let payload = buf.split_to(header.length as usize).freeze();
 
-                                if let Ok(frame) =
-                                    asupersync::http::h2::frame::WindowUpdateFrame::parse(
-                                        &header, &payload,
-                                    )
-                                {
+                                if let Ok(frame) = observe_window_update_parse(
+                                    "multi-frame WINDOW_UPDATE parse",
+                                    &header,
+                                    &payload,
+                                ) {
                                     verify_window_update_consistency(
                                         frame.stream_id,
                                         frame.increment,
@@ -337,8 +378,11 @@ fn test_window_update_operation(operation: WindowUpdateOperation) {
                 if let Ok(header) = FrameHeader::parse(&mut buf) {
                     let payload = buf.freeze();
 
-                    let result =
-                        asupersync::http::h2::frame::WindowUpdateFrame::parse(&header, &payload);
+                    let result = observe_window_update_parse(
+                        "truncated WINDOW_UPDATE frame",
+                        &header,
+                        &payload,
+                    );
                     match result {
                         Ok(frame) => {
                             // If parsing succeeded, frame must be valid within truncated data
@@ -367,7 +411,7 @@ fn test_window_update_edge_case(edge_case: WindowUpdateEdgeCase) {
                 let payload = buf.split_to(header.length as usize).freeze();
 
                 let result =
-                    asupersync::http::h2::frame::WindowUpdateFrame::parse(&header, &payload);
+                    observe_window_update_parse("zero-increment WINDOW_UPDATE", &header, &payload);
                 match result {
                     Err(ref err) if clamped_stream_id == 0 => {
                         // Connection-level zero increment should be protocol error
@@ -407,8 +451,7 @@ fn test_window_update_edge_case(edge_case: WindowUpdateEdgeCase) {
                         panic!("Zero increment should be rejected per RFC 7540 §6.9.1");
                     }
                     Err(ref other) => {
-                        // Other errors might be acceptable depending on implementation
-                        eprintln!("Unexpected error for zero increment: {:?}", other);
+                        assert_h2_error_visible("zero-increment WINDOW_UPDATE", other);
                     }
                 }
             }
@@ -424,7 +467,11 @@ fn test_window_update_edge_case(edge_case: WindowUpdateEdgeCase) {
             if let Ok(header) = FrameHeader::parse(&mut buf) {
                 let payload = buf.split_to(header.length as usize).freeze();
 
-                match asupersync::http::h2::frame::WindowUpdateFrame::parse(&header, &payload) {
+                match observe_window_update_parse(
+                    "max-increment WINDOW_UPDATE",
+                    &header,
+                    &payload,
+                ) {
                     Ok(frame) => {
                         assert_eq!(frame.stream_id, clamped_stream_id);
                         assert_eq!(frame.increment, max_increment);
@@ -449,7 +496,11 @@ fn test_window_update_edge_case(edge_case: WindowUpdateEdgeCase) {
             if let Ok(header) = FrameHeader::parse(&mut buf) {
                 let payload = buf.split_to(header.length as usize).freeze();
 
-                match asupersync::http::h2::frame::WindowUpdateFrame::parse(&header, &payload) {
+                match observe_window_update_parse(
+                    "connection-vs-stream WINDOW_UPDATE",
+                    &header,
+                    &payload,
+                ) {
                     Ok(frame) => {
                         assert_eq!(frame.stream_id, stream_id);
                         assert_eq!(frame.increment, clamped_increment);
@@ -490,8 +541,11 @@ fn test_window_update_edge_case(edge_case: WindowUpdateEdgeCase) {
             if let Ok(parsed_header) = FrameHeader::parse(&mut buf) {
                 let payload = buf.split_to(parsed_header.length as usize).freeze();
 
-                let result =
-                    asupersync::http::h2::frame::WindowUpdateFrame::parse(&parsed_header, &payload);
+                let result = observe_window_update_parse(
+                    "invalid-length WINDOW_UPDATE frame",
+                    &parsed_header,
+                    &payload,
+                );
                 if length != WINDOW_UPDATE_PAYLOAD_SIZE {
                     // Should fail for invalid payload length
                     match result {
@@ -505,8 +559,7 @@ fn test_window_update_edge_case(edge_case: WindowUpdateEdgeCase) {
                             panic!("Invalid payload length should be rejected");
                         }
                         Err(ref other) => {
-                            // Other errors might be acceptable
-                            eprintln!("Unexpected error for invalid payload length: {:?}", other);
+                            assert_h2_error_visible("invalid-length WINDOW_UPDATE frame", other);
                         }
                     }
                 }
@@ -543,8 +596,11 @@ fn test_window_update_edge_case(edge_case: WindowUpdateEdgeCase) {
             if let Ok(header) = FrameHeader::parse(&mut buf) {
                 let payload = buf.split_to(header.length as usize).freeze();
 
-                let result =
-                    asupersync::http::h2::frame::WindowUpdateFrame::parse(&header, &payload);
+                let result = observe_window_update_parse(
+                    "stream-id-boundary WINDOW_UPDATE frame",
+                    &header,
+                    &payload,
+                );
                 match result {
                     Ok(frame) => {
                         // Verify stream ID is properly handled (reserved bit should be cleared)
