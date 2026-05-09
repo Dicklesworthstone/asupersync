@@ -174,37 +174,37 @@ impl ObligationLedgerShadowModel {
     }
 
     fn record_commit(&mut self, id: ObligationId) -> bool {
-        if let Some(state) = self.tracked_obligations.get_mut(&id) {
-            if *state == ObligationState::Reserved {
-                *state = ObligationState::Committed;
-                self.expected_committed += 1;
-                self.expected_pending = self.expected_pending.saturating_sub(1);
-                return true;
-            }
+        if let Some(state) = self.tracked_obligations.get_mut(&id)
+            && *state == ObligationState::Reserved
+        {
+            *state = ObligationState::Committed;
+            self.expected_committed += 1;
+            self.expected_pending = self.expected_pending.saturating_sub(1);
+            return true;
         }
         false
     }
 
     fn record_abort(&mut self, id: ObligationId) -> bool {
-        if let Some(state) = self.tracked_obligations.get_mut(&id) {
-            if *state == ObligationState::Reserved {
-                *state = ObligationState::Aborted;
-                self.expected_aborted += 1;
-                self.expected_pending = self.expected_pending.saturating_sub(1);
-                return true;
-            }
+        if let Some(state) = self.tracked_obligations.get_mut(&id)
+            && *state == ObligationState::Reserved
+        {
+            *state = ObligationState::Aborted;
+            self.expected_aborted += 1;
+            self.expected_pending = self.expected_pending.saturating_sub(1);
+            return true;
         }
         false
     }
 
     fn record_leaked(&mut self, id: ObligationId) -> bool {
-        if let Some(state) = self.tracked_obligations.get_mut(&id) {
-            if *state == ObligationState::Reserved {
-                *state = ObligationState::Leaked;
-                self.expected_leaked += 1;
-                self.expected_pending = self.expected_pending.saturating_sub(1);
-                return true;
-            }
+        if let Some(state) = self.tracked_obligations.get_mut(&id)
+            && *state == ObligationState::Reserved
+        {
+            *state = ObligationState::Leaked;
+            self.expected_leaked += 1;
+            self.expected_pending = self.expected_pending.saturating_sub(1);
+            return true;
         }
         false
     }
@@ -281,8 +281,8 @@ fn normalize_fuzz_input(input: &mut ObligationLedgerFuzzInput) {
                 time_offset,
                 ..
             } => {
-                *holder_idx = (*holder_idx) % input.config.holder_count.max(1);
-                *region_idx = (*region_idx) % input.config.region_count.max(1);
+                *holder_idx %= input.config.holder_count.max(1);
+                *region_idx %= input.config.region_count.max(1);
                 *time_offset = (*time_offset).clamp(0, 1_000_000_000); // Max 1 second offset
             }
             ObligationOperation::Commit { time_offset, .. }
@@ -292,7 +292,7 @@ fn normalize_fuzz_input(input: &mut ObligationLedgerFuzzInput) {
                 *time_offset = (*time_offset).clamp(0, 1_000_000_000);
             }
             ObligationOperation::CheckRegionClean { region_idx } => {
-                *region_idx = (*region_idx) % input.config.region_count.max(1);
+                *region_idx %= input.config.region_count.max(1);
             }
             _ => {}
         }
@@ -316,6 +316,7 @@ fn execute_obligation_operations(input: &ObligationLedgerFuzzInput) -> Result<()
         .collect();
 
     let base_time = Time::from_nanos(input.config.base_time_nanos);
+    let verification_stride = 1 + (input.seed as usize % 16);
 
     // Execute operation sequence
     for (op_index, operation) in input.operations.iter().enumerate() {
@@ -478,8 +479,8 @@ fn execute_obligation_operations(input: &ObligationLedgerFuzzInput) -> Result<()
             }
         }
 
-        // Verify shadow model matches ledger state every 10 operations
-        if op_index % 10 == 0 {
+        // Verify shadow model matches ledger state at a seed-driven cadence.
+        if op_index % verification_stride == 0 {
             shadow.verify_stats(&ledger)?;
         }
     }
@@ -543,5 +544,18 @@ fuzz_target!(|data: &[u8]| {
     };
 
     // Run obligation ledger fuzzing
-    let _ = fuzz_obligation_ledger(input);
+    match fuzz_obligation_ledger(input) {
+        Ok(()) => {}
+        Err(error) => {
+            assert!(
+                !error.trim().is_empty(),
+                "obligation ledger rejection should expose a diagnostic"
+            );
+            assert!(
+                error.len() <= 512,
+                "obligation ledger rejection diagnostic should stay bounded: {} bytes",
+                error.len()
+            );
+        }
+    }
 });
