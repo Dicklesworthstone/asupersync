@@ -12,7 +12,7 @@
 
 #![no_main]
 
-use asupersync::bytes::{BufMut, BytesMut};
+use asupersync::bytes::BytesMut;
 use asupersync::codec::Decoder;
 use asupersync::http::h1::{Http1Codec, HttpError};
 use libfuzzer_sys::fuzz_target;
@@ -32,15 +32,15 @@ fuzz_target!(|data: &[u8]| {
     let mut input = BytesMut::new();
 
     // Write minimal chunked body ending in trailers state
-    input.put(&b"5\r\nHello\r\n0\r\n"[..]); // Chunk + final chunk
+    input.extend_from_slice(b"5\r\nHello\r\n0\r\n"); // Chunk + final chunk
 
     // Add fuzzed trailer data
-    input.put(data);
+    input.extend_from_slice(data);
 
     // Ensure we end with double CRLF (proper trailer termination)
     // This tests the parser's ability to handle malformed content before the terminator
     if !data.ends_with(b"\r\n\r\n") {
-        input.put(&b"\r\n\r\n"[..]);
+        input.extend_from_slice(b"\r\n\r\n");
     }
 
     let input_bytes = input.freeze();
@@ -52,12 +52,12 @@ fuzz_target!(|data: &[u8]| {
         let mut complete_request = BytesMut::new();
 
         // Add HTTP request headers with chunked encoding
-        complete_request.put(&b"POST /test HTTP/1.1\r\n"[..]);
-        complete_request.put(&b"Transfer-Encoding: chunked\r\n"[..]);
-        complete_request.put(&b"\r\n"[..]);
+        complete_request.extend_from_slice(b"POST /test HTTP/1.1\r\n");
+        complete_request.extend_from_slice(b"Transfer-Encoding: chunked\r\n");
+        complete_request.extend_from_slice(b"\r\n");
 
         // Add the chunked body with trailers
-        complete_request.put(&input_bytes[..]);
+        complete_request.extend_from_slice(&input_bytes);
 
         // Try to parse the complete request
         let _result = codec.decode(&mut complete_request);
@@ -72,8 +72,9 @@ fuzz_target!(|data: &[u8]| {
         let mut complete_request = BytesMut::new();
 
         // First request with chunked body and potentially malformed trailers
-        complete_request.put(&b"POST /test HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"[..]);
-        complete_request.put(&input_bytes[..]);
+        complete_request
+            .extend_from_slice(b"POST /test HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n");
+        complete_request.extend_from_slice(&input_bytes);
 
         // Try to parse first request
         let _result = codec.decode(&mut complete_request);
@@ -81,7 +82,7 @@ fuzz_target!(|data: &[u8]| {
         // Create a fresh codec for next request to ensure no state pollution
         let mut fresh_codec = Http1Codec::new();
         let mut next_request = BytesMut::new();
-        next_request.put(&b"GET /simple HTTP/1.1\r\nContent-Length: 3\r\n\r\nfoo"[..]);
+        next_request.extend_from_slice(b"GET /simple HTTP/1.1\r\nContent-Length: 3\r\n\r\nfoo");
 
         // This should succeed regardless of previous malformed trailer parsing
         let _fresh_result = fresh_codec.decode(&mut next_request);
@@ -95,10 +96,10 @@ fuzz_target!(|data: &[u8]| {
         let mut request = BytesMut::new();
 
         // Create minimal chunked request
-        request.put(&b"POST /test HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"[..]);
-        request.put(&b"0\r\n"[..]); // Just final chunk marker
-        request.put(data); // Fuzzed trailer data
-        request.put(&b"\r\n"[..]); // Ensure termination
+        request.extend_from_slice(b"POST /test HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n");
+        request.extend_from_slice(b"0\r\n"); // Just final chunk marker
+        request.extend_from_slice(data); // Fuzzed trailer data
+        request.extend_from_slice(b"\r\n"); // Ensure termination
 
         let _result = codec.decode(&mut request);
     }
@@ -108,10 +109,10 @@ fuzz_target!(|data: &[u8]| {
         let mut codec = Http1Codec::new();
         let mut request = BytesMut::new();
 
-        request.put(&b"POST /test HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"[..]);
-        request.put(&b"0\r\n"[..]);
-        request.put(data);
-        request.put(&b"\r\n\r\n"[..]);
+        request.extend_from_slice(b"POST /test HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n");
+        request.extend_from_slice(b"0\r\n");
+        request.extend_from_slice(data);
+        request.extend_from_slice(b"\r\n\r\n");
 
         let _result = codec.decode(&mut request);
 
@@ -124,11 +125,11 @@ fuzz_target!(|data: &[u8]| {
         let mut codec = Http1Codec::new();
         let mut request = BytesMut::new();
 
-        request.put(&b"POST /test HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"[..]);
-        request.put(&b"0\r\n"[..]);
+        request.extend_from_slice(b"POST /test HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n");
+        request.extend_from_slice(b"0\r\n");
 
         // Add potentially malformed trailer data without guaranteed CRLF
-        request.put(data);
+        request.extend_from_slice(data);
         // Deliberately not adding final \r\n\r\n to test incomplete parsing
 
         let _result = codec.decode(&mut request);
@@ -138,7 +139,7 @@ fuzz_target!(|data: &[u8]| {
 
     // Test 6: Forbidden trailer headers (RFC 9110 §6.5.1)
     // Test common forbidden headers mixed with fuzzed data
-    let forbidden_patterns = [
+    let forbidden_patterns: &[&[u8]] = &[
         b"authorization:",
         b"cache-control:",
         b"content-encoding:",
@@ -151,16 +152,16 @@ fuzz_target!(|data: &[u8]| {
         b"transfer-encoding:",
     ];
 
-    for pattern in &forbidden_patterns {
+    for pattern in forbidden_patterns {
         let mut codec = Http1Codec::new();
         let mut request = BytesMut::new();
 
-        request.put(&b"POST /test HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"[..]);
-        request.put(&b"0\r\n"[..]);
-        request.put(*pattern);
-        request.put(&b" value\r\n"[..]);
-        request.put(data); // Add fuzzed data after forbidden header
-        request.put(&b"\r\n"[..]);
+        request.extend_from_slice(b"POST /test HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n");
+        request.extend_from_slice(b"0\r\n");
+        request.extend_from_slice(pattern);
+        request.extend_from_slice(b" value\r\n");
+        request.extend_from_slice(data); // Add fuzzed data after forbidden header
+        request.extend_from_slice(b"\r\n");
 
         let _result = codec.decode(&mut request);
 
@@ -214,8 +215,8 @@ fn decode_request_with_trailers(
 ) -> Result<Option<asupersync::http::h1::Request>, HttpError> {
     let mut codec = Http1Codec::new();
     let mut request = BytesMut::new();
-    request.put(&b"POST /test HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"[..]);
-    request.put(&b"5\r\nHello\r\n0\r\n"[..]);
-    request.put(trailer_block);
+    request.extend_from_slice(b"POST /test HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n");
+    request.extend_from_slice(b"5\r\nHello\r\n0\r\n");
+    request.extend_from_slice(trailer_block);
     codec.decode(&mut request)
 }
