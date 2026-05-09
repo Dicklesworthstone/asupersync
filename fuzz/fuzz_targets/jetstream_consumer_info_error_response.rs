@@ -1,5 +1,7 @@
 #![no_main]
 
+use std::fmt::Write as _;
+
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
@@ -134,6 +136,15 @@ const AUTH_REQUIRED: u32 = 10040;
 const AUTH_TIMEOUT: u32 = 10041;
 const AUTH_REVOKED: u32 = 10042;
 
+fn observe_api_error_parse(json: &str) -> JsError {
+    let err = fuzz_parse_api_error(json);
+    assert!(
+        !err.to_string().is_empty(),
+        "JetStream API error parser output should be observable"
+    );
+    err
+}
+
 fuzz_target!(|input: ConsumerInfoErrorFuzz| {
     // Limit array sizes to prevent excessive resource usage
     const MAX_NAMES: usize = 100;
@@ -247,7 +258,7 @@ fn test_consumer_info_error_scenarios(input: &ConsumerInfoErrorFuzz) {
 
 fn test_error_parsing_invariants(json: &str) {
     // The parser should never panic on any error JSON
-    let result = fuzz_parse_api_error(json);
+    let result = observe_api_error_parse(json);
 
     // All valid error JSONs should produce some kind of error
     match result {
@@ -278,9 +289,59 @@ fn test_error_parsing_invariants(json: &str) {
     }
 }
 
-fn test_api_error_parsing_robustness(json: &str) {
+fn test_error_parsing_robustness(json: &str) {
     // Parser should handle malformed JSON gracefully without panicking
-    let _ = fuzz_parse_api_error(json);
+    observe_api_error_parse(json);
+}
+
+fn test_api_error_parsing_robustness(input: &ConsumerInfoErrorFuzz) {
+    let baseline = build_bad_request_error("consumer info probe");
+    test_error_parsing_robustness(&baseline);
+
+    let auth_timeout = format!(
+        r#"{{"error":{{"code":401,"err_code":{},"description":"authentication timeout"}}}}"#,
+        AUTH_TIMEOUT
+    );
+    test_error_parsing_robustness(&auth_timeout);
+
+    let auth_revoked = format!(
+        r#"{{"error":{{"code":403,"err_code":{},"description":"authentication revoked"}}}}"#,
+        AUTH_REVOKED
+    );
+    test_error_parsing_robustness(&auth_revoked);
+
+    for variation in input.error_field_variations.iter().take(20) {
+        let json = build_field_variation_error(variation);
+        test_error_parsing_robustness(&json);
+    }
+
+    let structural_probe = match &input.structure_strategy {
+        StructureStrategy::Standard => {
+            r#"{"error":{"code":400,"err_code":10003,"description":"standard"}}"#.to_string()
+        }
+        StructureStrategy::Nested { depth } => {
+            let depth = (*depth).min(8);
+            let mut json = r#"{"error":{"code":400,"description":"nested""#.to_string();
+            for level in 0..depth {
+                let _ = write!(&mut json, r#","level{}":{{"#, level);
+            }
+            for _ in 0..depth {
+                json.push('}');
+            }
+            json.push_str("}}");
+            json
+        }
+        StructureStrategy::ErrorArray => {
+            r#"{"errors":[{"code":404,"err_code":10014,"description":"consumer not found"}]}"#
+                .to_string()
+        }
+        StructureStrategy::ExtendedMetadata => {
+            r#"{"error":{"code":400,"err_code":10003,"description":"bad request"},"metadata":{"operation":"consumer_info"}}"#
+                .to_string()
+        }
+        StructureStrategy::LegacyFormats => r#"{"code":404,"message":"legacy not found"}"#.to_string(),
+    };
+    test_error_parsing_robustness(&structural_probe);
 }
 
 fn test_error_classification_consistency(input: &ConsumerInfoErrorFuzz) {
@@ -289,24 +350,23 @@ fn test_error_classification_consistency(input: &ConsumerInfoErrorFuzz) {
         consumer_names,
         stream_names,
     } = &input.scenario
+        && let (Some(consumer), Some(stream)) = (consumer_names.first(), stream_names.first())
     {
-        if let (Some(consumer), Some(stream)) = (consumer_names.first(), stream_names.first()) {
-            let json = build_consumer_not_found_error(consumer, stream);
+        let json = build_consumer_not_found_error(consumer, stream);
 
-            let result1 = fuzz_parse_api_error(&json);
-            let result2 = fuzz_parse_api_error(&json);
+        let result1 = observe_api_error_parse(&json);
+        let result2 = observe_api_error_parse(&json);
 
-            // Results should be consistent (same error type)
-            assert_eq!(
-                std::mem::discriminant(&result1),
-                std::mem::discriminant(&result2),
-                "Same JSON should produce same error type"
-            );
-        }
+        // Results should be consistent (same error type)
+        assert_eq!(
+            std::mem::discriminant(&result1),
+            std::mem::discriminant(&result2),
+            "Same JSON should produce same error type"
+        );
     }
 }
 
-fn test_malformed_error_handling(input: &ConsumerInfoErrorFuzz) {
+fn test_malformed_error_handling(_input: &ConsumerInfoErrorFuzz) {
     // Test with various malformed JSON structures
     let malformed_jsons = vec![
         r#"{"error":{"#,                                             // Truncated
@@ -319,7 +379,7 @@ fn test_malformed_error_handling(input: &ConsumerInfoErrorFuzz) {
     ];
 
     for malformed in malformed_jsons {
-        let _ = fuzz_parse_api_error(malformed);
+        observe_api_error_parse(malformed);
     }
 }
 
@@ -368,15 +428,52 @@ fn build_auth_error(msg: &str) -> String {
 }
 
 fn build_custom_error(error: &SpecificError) -> String {
+    let context = error
+        .context
+        .as_ref()
+        .map(|context| format!(r#","context":"{}""#, context))
+        .unwrap_or_default();
+
     match error.err_code {
         Some(err_code) => format!(
-            r#"{{"error":{{"code":{},"err_code":{},"description":"{}"}}}}"#,
-            error.http_code, err_code, error.description
+            r#"{{"error":{{"code":{},"err_code":{},"description":"{}"{}}}}}"#,
+            error.http_code, err_code, error.description, context
         ),
         None => format!(
-            r#"{{"error":{{"code":{},"description":"{}"}}}}"#,
-            error.http_code, error.description
+            r#"{{"error":{{"code":{},"description":"{}"{}}}}}"#,
+            error.http_code, error.description, context
         ),
+    }
+}
+
+fn build_field_variation_error(variation: &ErrorFieldVariation) -> String {
+    format!(
+        r#"{{"error":{{"code":400,"description":"field variation","{}":{}}}}}"#,
+        variation.field_name,
+        render_field_value(&variation.field_value)
+    )
+}
+
+fn render_field_value(value: &FieldValue) -> String {
+    match value {
+        FieldValue::String(value) => format!(r#""{}""#, value),
+        FieldValue::Number(value) => value.to_string(),
+        FieldValue::Boolean(value) => value.to_string(),
+        FieldValue::Null => "null".to_string(),
+        FieldValue::Object(value) => value.to_string(),
+        FieldValue::Array(values) => {
+            let mut rendered = String::from("[");
+            for (index, value) in values.iter().take(8).enumerate() {
+                if index > 0 {
+                    rendered.push(',');
+                }
+                rendered.push('"');
+                rendered.push_str(value);
+                rendered.push('"');
+            }
+            rendered.push(']');
+            rendered
+        }
     }
 }
 
@@ -434,7 +531,7 @@ fn build_malformed_error(variant: &MalformedErrorVariant, _strategy: &StructureS
             } else if *use_zero_codes {
                 0
             } else if *use_max_values {
-                u32::MAX as i64
+                i64::from(u32::MAX)
             } else {
                 404
             };
@@ -451,7 +548,10 @@ fn build_malformed_error(variant: &MalformedErrorVariant, _strategy: &StructureS
             JsonCorruption::Truncated { at_position } => {
                 let full = r#"{"error":{"code":404,"description":"test"}}"#;
                 let pos = (*at_position).min(full.len());
-                full[..pos].to_string()
+                match full.get(..pos) {
+                    Some(prefix) => prefix.to_string(),
+                    None => String::new(),
+                }
             }
             JsonCorruption::InvalidEscapes => {
                 r#"{"error":{"code":404,"description":"test\invalid"}}"#.to_string()
