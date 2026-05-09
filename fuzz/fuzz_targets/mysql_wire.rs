@@ -177,7 +177,7 @@ fn test_command_dispatch(command: u8, payload: Vec<u8>) {
     if known_commands.contains(&command) {
         exercise_payload_parsers(&command_payload);
     } else {
-        let _ = fuzz_parse_error_packet(&command_payload);
+        observe_error_packet(&command_payload);
     }
 }
 
@@ -188,7 +188,7 @@ fn test_column_count_parsing(encoded_count: Vec<u8>) {
     }
 
     let packet = ok_packet_with_affected_rows(&encoded_count);
-    let _ = fuzz_parse_ok_packet_fields(&packet);
+    observe_ok_packet_fields(&packet);
 }
 
 /// Test EOF vs OK packet discrimination (Assertion 5: discrimination by length).
@@ -203,10 +203,10 @@ fn test_eof_ok_discrimination(packet_data: Vec<u8>) {
         assert!(matches!(terminator_result, Ok(None)));
     }
     if packet_data[0] == 0x00 {
-        let _ = fuzz_parse_ok_packet_fields(&packet_data);
+        observe_ok_packet_fields(&packet_data);
     }
     if packet_data[0] == 0xFF {
-        let _ = fuzz_parse_error_packet(&packet_data);
+        observe_error_packet(&packet_data);
     }
 }
 
@@ -267,20 +267,131 @@ fn ok_packet_with_affected_rows(encoded_affected_rows: &[u8]) -> Vec<u8> {
 fn exercise_payload_parsers(payload: &[u8]) {
     match payload.first() {
         Some(0x00) => {
-            let _ = fuzz_parse_ok_packet_fields(payload);
-            let _ = fuzz_parse_data_row_or_terminator(payload, &[], true);
+            observe_ok_packet_fields(payload);
+            observe_data_row_or_terminator(payload, true);
         }
         Some(0xFE) => {
-            let _ = fuzz_parse_data_row_or_terminator(payload, &[], true);
+            observe_data_row_or_terminator(payload, true);
         }
         Some(0xFF) => {
-            let _ = fuzz_parse_error_packet(payload);
+            observe_error_packet(payload);
         }
         Some(_) => {
-            let _ = fuzz_parse_data_row_or_terminator(payload, &[], false);
+            observe_data_row_or_terminator(payload, false);
         }
         None => {}
     }
+}
+
+fn observe_ok_packet_fields(packet: &[u8]) {
+    match fuzz_parse_ok_packet_fields(packet) {
+        Ok((affected_rows, status_flags)) => {
+            assert_eq!(packet.first(), Some(&0x00));
+
+            let mut pos = 1;
+            let expected_affected_rows =
+                scan_lenenc_int(packet, &mut pos).expect("successful OK packet exposes rows");
+            let _last_insert_id =
+                scan_lenenc_int(packet, &mut pos).expect("successful OK packet exposes insert id");
+            assert!(
+                pos + 4 <= packet.len(),
+                "successful OK packet must contain status and warning fields"
+            );
+            let expected_status = u16::from_le_bytes([packet[pos], packet[pos + 1]]);
+
+            assert_eq!(affected_rows, expected_affected_rows);
+            assert_eq!(status_flags, expected_status);
+        }
+        Err(error) => assert_observable_mysql_error(&error),
+    }
+}
+
+fn observe_error_packet(packet: &[u8]) {
+    let error = fuzz_parse_error_packet(packet);
+    match &error {
+        MySqlError::Server {
+            code, sql_state, ..
+        } => {
+            assert_eq!(packet.first(), Some(&0xFF));
+            assert!(packet.len() >= 3);
+            assert_eq!(*code, u16::from_le_bytes([packet[1], packet[2]]));
+            assert_eq!(sql_state.len(), 5);
+        }
+        MySqlError::Protocol(message) => {
+            assert!(!message.is_empty());
+            assert!(
+                packet.first() != Some(&0xFF) || packet.len() < 3,
+                "0xFF packets with an error code should classify as server errors"
+            );
+        }
+        other => assert_observable_mysql_error(other),
+    }
+}
+
+fn observe_data_row_or_terminator(payload: &[u8], deprecate_eof: bool) {
+    match fuzz_parse_data_row_or_terminator(payload, &[], deprecate_eof) {
+        Ok(None) => {
+            assert!(
+                is_short_eof_packet(payload) || (deprecate_eof && is_ok_like_terminator(payload)),
+                "terminator classification must be backed by EOF or OK-like packet shape"
+            );
+        }
+        Ok(Some(values)) => {
+            assert!(values.is_empty());
+            assert!(
+                payload.is_empty(),
+                "zero-column text rows should only consume an empty payload"
+            );
+        }
+        Err(error) => assert_observable_mysql_error(&error),
+    }
+}
+
+fn scan_lenenc_int(data: &[u8], pos: &mut usize) -> Option<u64> {
+    let first = *data.get(*pos)?;
+    *pos += 1;
+    match first {
+        0..=250 => Some(u64::from(first)),
+        0xFC => {
+            let bytes = [*data.get(*pos)?, *data.get(*pos + 1)?];
+            *pos += 2;
+            Some(u64::from(u16::from_le_bytes(bytes)))
+        }
+        0xFD => {
+            let b0 = u64::from(*data.get(*pos)?);
+            let b1 = u64::from(*data.get(*pos + 1)?);
+            let b2 = u64::from(*data.get(*pos + 2)?);
+            *pos += 3;
+            Some(b0 | (b1 << 8) | (b2 << 16))
+        }
+        0xFE => {
+            let bytes: [u8; 8] = data.get(*pos..*pos + 8)?.try_into().ok()?;
+            *pos += 8;
+            Some(u64::from_le_bytes(bytes))
+        }
+        0xFB => None,
+        _ => None,
+    }
+}
+
+fn is_short_eof_packet(payload: &[u8]) -> bool {
+    payload.first() == Some(&0xFE) && payload.len() < 9
+}
+
+fn is_ok_like_terminator(payload: &[u8]) -> bool {
+    if !matches!(payload.first(), Some(0x00 | 0xFE)) {
+        return false;
+    }
+
+    let mut pos = 1;
+    scan_lenenc_int(payload, &mut pos).is_some()
+        && scan_lenenc_int(payload, &mut pos).is_some()
+        && pos + 4 <= payload.len()
+}
+
+fn assert_observable_mysql_error(error: &MySqlError) {
+    let rendered = error.to_string();
+    assert!(!rendered.is_empty());
 }
 
 fn expect_protocol_err<T>(result: Result<T, MySqlError>, expected: &str) {
