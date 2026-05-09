@@ -12,7 +12,7 @@
 
 #![no_main]
 
-use asupersync::http::h1::codec::fuzz_parse_header_line_bounds;
+use asupersync::http::h1::codec::{HttpError, fuzz_parse_header_line_bounds};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_INPUT_LEN: usize = 8192;
@@ -21,6 +21,23 @@ fuzz_target!(|data: &[u8]| {
     if data.len() > MAX_INPUT_LEN {
         return;
     }
+
+    assert_bounds(b"Host: example.com", 4, 6, b"Host: example.com".len());
+    assert_bounds(b"X-Test:\t value \t", 6, 9, 14);
+    assert_bounds(b"Accept:*/*", 6, 7, b"Accept:*/*".len());
+    assert_bounds(b"Obs: \xFF", 3, 5, b"Obs: \xFF".len());
+
+    assert_bad_header(b"MissingColon");
+    assert_invalid_header_name(b": value");
+    assert_invalid_header_name(b"Bad Name: value");
+    assert_invalid_header_name(b"Bad(Name): value");
+    assert_invalid_header_name(b"Bad\rName: value");
+
+    assert_invalid_header_value(b"X: \r");
+    assert_invalid_header_value(b"X: \n");
+    assert_invalid_header_value(b"X: \0");
+    assert_invalid_header_value(b"X: \x1F");
+    assert_invalid_header_value(b"X: \x7F");
 
     assert_consistent_bounds(data);
 
@@ -34,6 +51,58 @@ fuzz_target!(|data: &[u8]| {
         assert_consistent_bounds(&combined);
     }
 });
+
+fn assert_bounds(
+    line: &[u8],
+    expected_name_end: usize,
+    expected_value_start: usize,
+    expected_value_end: usize,
+) {
+    let (name_end, value_start, value_end) =
+        fuzz_parse_header_line_bounds(line).expect("valid header-line candidate");
+    assert_eq!(
+        name_end, expected_name_end,
+        "name_end mismatch for {line:?}"
+    );
+    assert_eq!(
+        value_start, expected_value_start,
+        "value_start mismatch for {line:?}"
+    );
+    assert_eq!(
+        value_end, expected_value_end,
+        "value_end mismatch for {line:?}"
+    );
+}
+
+fn assert_bad_header(line: &[u8]) {
+    assert!(
+        matches!(
+            fuzz_parse_header_line_bounds(line),
+            Err(HttpError::BadHeader)
+        ),
+        "expected BadHeader for {line:?}",
+    );
+}
+
+fn assert_invalid_header_name(line: &[u8]) {
+    assert!(
+        matches!(
+            fuzz_parse_header_line_bounds(line),
+            Err(HttpError::InvalidHeaderName)
+        ),
+        "expected InvalidHeaderName for {line:?}",
+    );
+}
+
+fn assert_invalid_header_value(line: &[u8]) {
+    assert!(
+        matches!(
+            fuzz_parse_header_line_bounds(line),
+            Err(HttpError::InvalidHeaderValue)
+        ),
+        "expected InvalidHeaderValue for {line:?}",
+    );
+}
 
 fn assert_consistent_bounds(line: &[u8]) {
     if let Ok((name_end, value_start, value_end)) = fuzz_parse_header_line_bounds(line) {
