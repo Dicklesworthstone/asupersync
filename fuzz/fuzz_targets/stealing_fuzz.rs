@@ -123,10 +123,10 @@ impl StealingShadowModel {
 
         if successful {
             self.successful_steals.fetch_add(1, Ordering::SeqCst);
-            if let Some(queue_idx) = source_queue {
-                if let Ok(mut counts) = self.per_queue_steals.lock() {
-                    *counts.entry(queue_idx).or_insert(0) += 1;
-                }
+            if let Some(queue_idx) = source_queue
+                && let Ok(mut counts) = self.per_queue_steals.lock()
+            {
+                *counts.entry(queue_idx).or_insert(0) += 1;
             }
         } else {
             self.failed_steals.fetch_add(1, Ordering::SeqCst);
@@ -580,10 +580,13 @@ fn execute_stealing_operations(input: &StealingFuzzInput) -> Result<(), String> 
             StealingOperation::AddTasks {
                 queue_index,
                 task_count,
-                mark_local: _,
+                mark_local,
             } => {
                 let idx = (*queue_index as usize) % queues.len();
                 let count = (*task_count).clamp(1, 10);
+                if *mark_local {
+                    continue;
+                }
 
                 for i in 0..count {
                     let task_id = task((op_index * 1000 + i as usize) as u32);
@@ -658,6 +661,18 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
 
-    // Run work stealing fuzzing
-    let _ = fuzz_work_stealing(input);
+    // Run work stealing fuzzing and observe all outcomes.
+    match fuzz_work_stealing(input) {
+        Ok(()) => {}
+        Err(error) => {
+            assert!(
+                !error.trim().is_empty(),
+                "work-stealing rejection should expose a diagnostic"
+            );
+            assert!(
+                error.len() <= 4096,
+                "work-stealing diagnostic grew unexpectedly: {error}"
+            );
+        }
+    }
 });
