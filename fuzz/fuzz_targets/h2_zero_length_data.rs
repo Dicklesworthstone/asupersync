@@ -11,6 +11,7 @@ use asupersync::http::h2::frame::{
     DataFrame, FRAME_HEADER_SIZE, Frame, HeadersFrame, PingFrame, RstStreamFrame, SettingsFrame,
     WindowUpdateFrame,
 };
+use std::ops::Range;
 
 /// HTTP/2 zero-length DATA frame test sequence
 #[derive(Debug, Clone, Arbitrary)]
@@ -106,6 +107,81 @@ fuzz_target!(|data: &[u8]| {
     test_interleaved_zero_length_data(&test_seq);
 });
 
+fn observe_encode(
+    codec: &mut FrameCodec,
+    frame: Frame,
+    buffer: &mut BytesMut,
+    context: &str,
+) -> Result<Range<usize>, String> {
+    let before_len = buffer.len();
+    match codec.encode(frame, buffer) {
+        Ok(()) => {
+            assert!(
+                buffer.len() >= before_len + FRAME_HEADER_SIZE,
+                "{context} encode succeeded without a complete HTTP/2 frame header"
+            );
+            Ok(before_len..buffer.len())
+        }
+        Err(err) => {
+            assert!(
+                buffer.len() >= before_len,
+                "{context} encode shrank the output buffer on error"
+            );
+            let diagnostic = err.to_string();
+            assert!(
+                !diagnostic.trim().is_empty(),
+                "{context} encode error should expose a diagnostic"
+            );
+            Err(diagnostic)
+        }
+    }
+}
+
+fn encoded_payload_len(encoded: &[u8]) -> usize {
+    assert!(
+        encoded.len() >= FRAME_HEADER_SIZE,
+        "encoded frame slice shorter than HTTP/2 frame header"
+    );
+    ((encoded[0] as usize) << 16) | ((encoded[1] as usize) << 8) | encoded[2] as usize
+}
+
+fn encoded_stream_id(encoded: &[u8]) -> u32 {
+    u32::from_be_bytes([encoded[5] & 0x7f, encoded[6], encoded[7], encoded[8]])
+}
+
+fn assert_zero_length_data_encoding(encoded: &[u8], data_frame: &ZeroLengthDataFrame) {
+    let payload_length = encoded_payload_len(encoded);
+    assert_eq!(
+        encoded.len(),
+        FRAME_HEADER_SIZE + payload_length,
+        "encoded DATA frame length must match its header length"
+    );
+    assert_eq!(encoded[3], 0x0, "zero-length test must encode a DATA frame");
+    assert_eq!(
+        encoded_stream_id(encoded),
+        normalize_stream_id(data_frame.stream_id),
+        "encoded DATA stream id should match normalized fuzz input"
+    );
+    assert_eq!(
+        encoded[4] & 0x1 != 0,
+        data_frame.end_stream,
+        "encoded DATA END_STREAM flag should match fuzz input"
+    );
+
+    if data_frame.padded {
+        assert_eq!(
+            payload_length,
+            usize::from(data_frame.padding_length) + 1,
+            "synthetic padded zero-length DATA payload should contain pad length plus padding"
+        );
+    } else {
+        assert_eq!(
+            payload_length, 0,
+            "non-padded zero-length DATA frame should have payload length 0"
+        );
+    }
+}
+
 /// Core test: zero-length DATA frames should be processed correctly without infinite loops
 fn test_zero_length_data_processing(test_seq: &ZeroLengthDataSequence) {
     let mut codec = FrameCodec::new();
@@ -115,7 +191,7 @@ fn test_zero_length_data_processing(test_seq: &ZeroLengthDataSequence) {
     // Send setup frames first
     for setup_frame in &test_seq.setup_frames {
         if let Ok(frame) = create_setup_frame(setup_frame) {
-            let _ = codec.encode(frame, &mut buffer);
+            let _encode_result = observe_encode(&mut codec, frame, &mut buffer, "setup frame");
         }
 
         if state.check_infinite_loop() {
@@ -130,36 +206,12 @@ fn test_zero_length_data_processing(test_seq: &ZeroLengthDataSequence) {
     for data_frame in &test_seq.data_frames {
         let frame = create_zero_length_data_frame(data_frame);
 
-        match codec.encode(frame, &mut buffer) {
-            Ok(_) => {
+        match observe_encode(&mut codec, frame, &mut buffer, "zero-length DATA frame") {
+            Ok(encoded_range) => {
                 // Frame should be processed correctly
-                assert!(
-                    buffer.len() >= FRAME_HEADER_SIZE,
-                    "Zero-length DATA frame should produce at least frame header"
-                );
-
-                // For zero-length frames, check the payload length in the frame header
-                if buffer.len() >= FRAME_HEADER_SIZE {
-                    let payload_length =
-                        u32::from_be_bytes([0, buffer[0], buffer[1], buffer[2]]) >> 8;
-
-                    if !data_frame.padded {
-                        assert_eq!(
-                            payload_length, 0,
-                            "Non-padded zero-length DATA frame should have payload length 0, got {}",
-                            payload_length
-                        );
-                    } else {
-                        // Padded frame has at least 1 byte (padding length field)
-                        assert!(
-                            payload_length >= 1,
-                            "Padded zero-length DATA frame should have payload length >= 1, got {}",
-                            payload_length
-                        );
-                    }
-                }
+                assert_zero_length_data_encoding(&buffer[encoded_range], data_frame);
             }
-            Err(_) => {
+            Err(_diagnostic) => {
                 // Some zero-length DATA frames may be rejected (e.g., on closed streams)
                 // This is acceptable behavior
             }
@@ -186,6 +238,7 @@ fn test_interleaved_zero_length_data(test_seq: &ZeroLengthDataSequence) {
     let mut codec = FrameCodec::new();
     let mut buffer = BytesMut::new();
     let mut state = ProcessingState::new();
+    let mut encoded_frames = 0usize;
 
     // Interleave DATA frames with other frames
     let max_frames = test_seq
@@ -195,16 +248,24 @@ fn test_interleaved_zero_length_data(test_seq: &ZeroLengthDataSequence) {
 
     for i in 0..max_frames {
         // Send an interleaved frame if available
-        if i < test_seq.interleaved_frames.len() {
-            if let Ok(frame) = create_interleaved_frame(&test_seq.interleaved_frames[i]) {
-                let _ = codec.encode(frame, &mut buffer);
-            }
+        let interleaved_frame = test_seq
+            .interleaved_frames
+            .get(i)
+            .and_then(|frame| create_interleaved_frame(frame).ok());
+        if let Some(frame) = interleaved_frame {
+            encoded_frames +=
+                usize::from(observe_encode(&mut codec, frame, &mut buffer, "interleaved frame").is_ok());
         }
 
         // Send a zero-length DATA frame if available
         if i < test_seq.data_frames.len() {
             let data_frame = create_zero_length_data_frame(&test_seq.data_frames[i]);
-            let _ = codec.encode(data_frame, &mut buffer);
+            if let Ok(encoded_range) =
+                observe_encode(&mut codec, data_frame, &mut buffer, "interleaved DATA frame")
+            {
+                encoded_frames += 1;
+                assert_zero_length_data_encoding(&buffer[encoded_range], &test_seq.data_frames[i]);
+            }
         }
 
         if state.check_infinite_loop() {
@@ -217,8 +278,8 @@ fn test_interleaved_zero_length_data(test_seq: &ZeroLengthDataSequence) {
 
     // Verify final buffer state
     assert!(
-        buffer.len() % FRAME_HEADER_SIZE == 0 || buffer.len() == 0,
-        "Buffer should contain complete frames or be empty"
+        buffer.len() >= encoded_frames * FRAME_HEADER_SIZE,
+        "Buffer should contain at least one complete header per successfully encoded frame"
     );
 }
 
@@ -260,7 +321,7 @@ fn create_zero_length_data_frame(data_config: &ZeroLengthDataFrame) -> Frame {
 
     if data_config.padded {
         // Padded DATA frame with zero-length payload but padding
-        let padding_length = data_config.padding_length.min(255);
+        let padding_length = data_config.padding_length;
         let mut padded_payload = vec![padding_length]; // Padding length field
         padded_payload.extend(vec![0u8; padding_length as usize]); // Padding bytes
 
@@ -338,7 +399,7 @@ fn normalize_stream_id(stream_id: u32) -> u32 {
     let normalized = stream_id & 0x7FFFFFFF; // Clear reserved bit
     if normalized == 0 {
         1 // Default to stream 1
-    } else if normalized % 2 == 0 {
+    } else if normalized.is_multiple_of(2) {
         normalized + 1 // Make odd (client-initiated)
     } else {
         normalized
