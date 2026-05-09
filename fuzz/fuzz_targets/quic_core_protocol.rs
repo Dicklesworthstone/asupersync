@@ -30,13 +30,13 @@ struct QuicCoreFuzzInput {
 #[derive(Arbitrary, Debug)]
 enum VarIntOperation {
     /// Decode varint from raw bytes
-    DecodeVarint { data: Vec<u8> },
+    Decode { data: Vec<u8> },
     /// Roundtrip test: encode then decode
-    RoundtripVarint { value: u64 },
+    Roundtrip { value: u64 },
     /// Test varint boundary values
-    BoundaryVarint { boundary_type: VarIntBoundary },
+    Boundary { boundary_type: VarIntBoundary },
     /// Test malformed varint encoding
-    MalformedVarint { malformed_data: Vec<u8> },
+    Malformed { malformed_data: Vec<u8> },
 }
 
 /// Varint boundary test cases
@@ -66,25 +66,25 @@ enum VarIntBoundary {
 #[derive(Arbitrary, Debug)]
 enum ConnectionIdOperation {
     /// Create ConnectionId from bytes
-    CreateFromBytes { bytes: Vec<u8> },
+    FromBytes { bytes: Vec<u8> },
     /// Create empty ConnectionId
-    CreateEmpty,
+    Empty,
     /// Create maximum length ConnectionId
-    CreateMaxLength,
+    MaxLength,
     /// Create oversized ConnectionId (should fail)
-    CreateOversized { extra_bytes: u8 },
+    Oversized { extra_bytes: u8 },
 }
 
 /// Packet header operation variants
 #[derive(Arbitrary, Debug)]
 enum PacketOperation {
     /// Parse packet header with various DCID lengths
-    ParseHeader {
+    Header {
         packet_data: Vec<u8>,
         short_dcid_len: u8,
     },
     /// Parse specifically crafted long header
-    ParseLongHeader {
+    LongHeader {
         version: u32,
         dst_cid: Vec<u8>,
         src_cid: Vec<u8>,
@@ -94,7 +94,7 @@ enum PacketOperation {
         packet_number: u32,
     },
     /// Parse specifically crafted short header
-    ParseShortHeader {
+    ShortHeader {
         spin: bool,
         key_phase: bool,
         dst_cid: Vec<u8>,
@@ -102,7 +102,7 @@ enum PacketOperation {
         packet_number_len: u8,
     },
     /// Test truncated packet headers
-    ParseTruncatedHeader {
+    TruncatedHeader {
         complete_header: Vec<u8>,
         truncate_at: u16,
     },
@@ -121,15 +121,15 @@ enum LongPacketTypeFuzz {
 #[derive(Arbitrary, Debug)]
 enum TransportParamOperation {
     /// Parse transport parameters from bytes
-    ParseTransportParams { tlv_data: Vec<u8> },
+    FromBytes { tlv_data: Vec<u8> },
     /// Parse known transport parameters
-    ParseKnownParams { params: Vec<KnownTransportParam> },
+    Known { params: Vec<KnownTransportParam> },
     /// Parse with duplicate parameters (should fail)
-    ParseDuplicateParams { param_id: u64, values: Vec<u64> },
+    Duplicate { param_id: u64, values: Vec<u64> },
     /// Parse malformed transport parameters
-    ParseMalformedParams { malformed_data: Vec<u8> },
+    Malformed { malformed_data: Vec<u8> },
     /// Roundtrip test: encode then decode
-    RoundtripParams { params: Vec<KnownTransportParam> },
+    Roundtrip { params: Vec<KnownTransportParam> },
 }
 
 /// Known transport parameter for testing
@@ -216,7 +216,7 @@ fuzz_target!(|input: QuicCoreFuzzInput| {
 
 fn test_varint_operation(operation: VarIntOperation) {
     match operation {
-        VarIntOperation::DecodeVarint { mut data } => {
+        VarIntOperation::Decode { mut data } => {
             if data.len() > MAX_INPUT_SIZE {
                 data.truncate(MAX_INPUT_SIZE);
             }
@@ -228,7 +228,7 @@ fn test_varint_operation(operation: VarIntOperation) {
                     // Verify consumed bytes are reasonable
                     assert!(consumed <= data.len(), "Consumed more bytes than available");
                     assert!(
-                        consumed >= 1 && consumed <= 8,
+                        (1..=8).contains(&consumed),
                         "Invalid varint length: {}",
                         consumed
                     );
@@ -248,11 +248,11 @@ fn test_varint_operation(operation: VarIntOperation) {
             }
         }
 
-        VarIntOperation::RoundtripVarint { value } => {
+        VarIntOperation::Roundtrip { value } => {
             test_varint_roundtrip(value);
         }
 
-        VarIntOperation::BoundaryVarint { boundary_type } => {
+        VarIntOperation::Boundary { boundary_type } => {
             let test_value = match boundary_type {
                 VarIntBoundary::Zero => 0,
                 VarIntBoundary::Max1Byte => 63,
@@ -313,20 +313,20 @@ fn test_varint_operation(operation: VarIntOperation) {
             }
         }
 
-        VarIntOperation::MalformedVarint { mut malformed_data } => {
+        VarIntOperation::Malformed { mut malformed_data } => {
             if malformed_data.len() > MAX_INPUT_SIZE {
                 malformed_data.truncate(MAX_INPUT_SIZE);
             }
 
             // Should handle malformed data gracefully
-            let _ = decode_varint(&malformed_data);
+            observe_varint_decode("malformed varint", &malformed_data);
         }
     }
 }
 
 fn test_connection_id_operation(operation: ConnectionIdOperation) {
     match operation {
-        ConnectionIdOperation::CreateFromBytes { mut bytes } => {
+        ConnectionIdOperation::FromBytes { mut bytes } => {
             if bytes.len() > MAX_CONNECTION_ID_TEST_SIZE {
                 bytes.truncate(MAX_CONNECTION_ID_TEST_SIZE);
             }
@@ -364,7 +364,7 @@ fn test_connection_id_operation(operation: ConnectionIdOperation) {
             }
         }
 
-        ConnectionIdOperation::CreateEmpty => {
+        ConnectionIdOperation::Empty => {
             let result = ConnectionId::new(&[]);
             assert!(result.is_ok(), "Empty ConnectionId should be valid");
 
@@ -379,7 +379,7 @@ fn test_connection_id_operation(operation: ConnectionIdOperation) {
             }
         }
 
-        ConnectionIdOperation::CreateMaxLength => {
+        ConnectionIdOperation::MaxLength => {
             let bytes = vec![0x42; ConnectionId::MAX_LEN];
             let result = ConnectionId::new(&bytes);
             assert!(result.is_ok(), "Max length ConnectionId should be valid");
@@ -402,7 +402,7 @@ fn test_connection_id_operation(operation: ConnectionIdOperation) {
             }
         }
 
-        ConnectionIdOperation::CreateOversized { extra_bytes } => {
+        ConnectionIdOperation::Oversized { extra_bytes } => {
             let oversized_len = ConnectionId::MAX_LEN + 1 + (extra_bytes as usize % 100);
             let bytes = vec![0x42; oversized_len];
             let result = ConnectionId::new(&bytes);
@@ -413,7 +413,7 @@ fn test_connection_id_operation(operation: ConnectionIdOperation) {
 
 fn test_packet_operation(operation: PacketOperation) {
     match operation {
-        PacketOperation::ParseHeader {
+        PacketOperation::Header {
             mut packet_data,
             short_dcid_len,
         } => {
@@ -443,7 +443,7 @@ fn test_packet_operation(operation: PacketOperation) {
             }
         }
 
-        PacketOperation::ParseLongHeader {
+        PacketOperation::LongHeader {
             version,
             mut dst_cid,
             mut src_cid,
@@ -474,10 +474,10 @@ fn test_packet_operation(operation: PacketOperation) {
                 packet_number,
             );
 
-            let _ = PacketHeader::decode(&packet_bytes, dst_cid.len());
+            observe_packet_header_decode("constructed long header", &packet_bytes, dst_cid.len());
         }
 
-        PacketOperation::ParseShortHeader {
+        PacketOperation::ShortHeader {
             spin,
             key_phase,
             mut dst_cid,
@@ -497,10 +497,10 @@ fn test_packet_operation(operation: PacketOperation) {
                 packet_number_len,
             );
 
-            let _ = PacketHeader::decode(&packet_bytes, dst_cid.len());
+            observe_packet_header_decode("constructed short header", &packet_bytes, dst_cid.len());
         }
 
-        PacketOperation::ParseTruncatedHeader {
+        PacketOperation::TruncatedHeader {
             mut complete_header,
             truncate_at,
         } => {
@@ -530,7 +530,7 @@ fn test_packet_operation(operation: PacketOperation) {
 
 fn test_transport_param_operation(operation: TransportParamOperation) {
     match operation {
-        TransportParamOperation::ParseTransportParams { mut tlv_data } => {
+        TransportParamOperation::FromBytes { mut tlv_data } => {
             if tlv_data.len() > MAX_INPUT_SIZE {
                 tlv_data.truncate(MAX_INPUT_SIZE);
             }
@@ -552,13 +552,13 @@ fn test_transport_param_operation(operation: TransportParamOperation) {
             }
         }
 
-        TransportParamOperation::ParseKnownParams { params } => {
+        TransportParamOperation::Known { params } => {
             // Construct transport parameters TLV
             let tlv_bytes = construct_transport_params_tlv(&params);
-            let _ = TransportParameters::decode(&tlv_bytes);
+            observe_transport_params_decode("known transport parameters", &tlv_bytes);
         }
 
-        TransportParamOperation::ParseDuplicateParams { param_id, values } => {
+        TransportParamOperation::Duplicate { param_id, values } => {
             // Test duplicate parameter detection
             let mut tlv_data = Vec::new();
             for value in values.into_iter().take(10) {
@@ -579,16 +579,16 @@ fn test_transport_param_operation(operation: TransportParamOperation) {
             }
         }
 
-        TransportParamOperation::ParseMalformedParams { mut malformed_data } => {
+        TransportParamOperation::Malformed { mut malformed_data } => {
             if malformed_data.len() > MAX_INPUT_SIZE {
                 malformed_data.truncate(MAX_INPUT_SIZE);
             }
 
             // Should handle malformed data gracefully
-            let _ = TransportParameters::decode(&malformed_data);
+            observe_transport_params_decode("malformed transport parameters", &malformed_data);
         }
 
-        TransportParamOperation::RoundtripParams { params } => {
+        TransportParamOperation::Roundtrip { params } => {
             // Test that encoding then decoding preserves the parameters
             let tlv_bytes = construct_transport_params_tlv(&params);
             let result = TransportParameters::decode(&tlv_bytes);
@@ -605,11 +605,9 @@ fn test_edge_case_operation(operation: EdgeCaseOperation) {
     match operation {
         EdgeCaseOperation::EmptyInput => {
             // Test parsing empty input
-            let result_varint = decode_varint(&[]);
-            matches!(result_varint, Err(QuicCoreError::UnexpectedEof));
+            observe_varint_decode("empty varint input", &[]);
 
-            let result_header = PacketHeader::decode(&[], 8);
-            matches!(result_header, Err(QuicCoreError::UnexpectedEof));
+            observe_packet_header_decode("empty packet header input", &[], 8);
 
             let result_params = TransportParameters::decode(&[]);
             assert!(
@@ -623,9 +621,9 @@ fn test_edge_case_operation(operation: EdgeCaseOperation) {
 
         EdgeCaseOperation::SingleByte { byte } => {
             // Test single byte input
-            let _ = decode_varint(&[byte]);
-            let _ = PacketHeader::decode(&[byte], 8);
-            let _ = TransportParameters::decode(&[byte]);
+            observe_varint_decode("single-byte varint input", &[byte]);
+            observe_packet_header_decode("single-byte packet header input", &[byte], 8);
+            observe_transport_params_decode("single-byte transport parameters", &[byte]);
             let _ = ConnectionId::new(&[byte]);
         }
 
@@ -634,9 +632,9 @@ fn test_edge_case_operation(operation: EdgeCaseOperation) {
             let data = vec![fill_pattern; size];
 
             // Test that large inputs don't cause excessive memory usage or timeouts
-            let _ = decode_varint(&data);
-            let _ = PacketHeader::decode(&data, 8);
-            let _ = TransportParameters::decode(&data);
+            observe_varint_decode("large varint input", &data);
+            observe_packet_header_decode("large packet header input", &data, 8);
+            observe_transport_params_decode("large transport parameters", &data);
             if size <= ConnectionId::MAX_LEN {
                 let _ = ConnectionId::new(&data);
             }
@@ -648,9 +646,9 @@ fn test_edge_case_operation(operation: EdgeCaseOperation) {
             }
 
             // Test that random garbage is handled gracefully
-            let _ = decode_varint(&garbage);
-            let _ = PacketHeader::decode(&garbage, 8);
-            let _ = TransportParameters::decode(&garbage);
+            observe_varint_decode("garbage varint input", &garbage);
+            observe_packet_header_decode("garbage packet header input", &garbage, 8);
+            observe_transport_params_decode("garbage transport parameters", &garbage);
             if garbage.len() <= ConnectionId::MAX_LEN {
                 let _ = ConnectionId::new(&garbage);
             }
@@ -662,10 +660,13 @@ fn test_edge_case_operation(operation: EdgeCaseOperation) {
             }
 
             // Test high-entropy input for potential parser state confusion
-            let _ = decode_varint(&entropy_data);
-            let _ =
-                PacketHeader::decode(&entropy_data, entropy_data.len().min(ConnectionId::MAX_LEN));
-            let _ = TransportParameters::decode(&entropy_data);
+            observe_varint_decode("high-entropy varint input", &entropy_data);
+            observe_packet_header_decode(
+                "high-entropy packet header input",
+                &entropy_data,
+                entropy_data.len().min(ConnectionId::MAX_LEN),
+            );
+            observe_transport_params_decode("high-entropy transport parameters", &entropy_data);
             if entropy_data.len() <= ConnectionId::MAX_LEN {
                 let _ = ConnectionId::new(&entropy_data);
             }
@@ -712,10 +713,90 @@ fn test_varint_roundtrip(value: u64) {
     }
 }
 
+fn observe_varint_decode(context: &str, data: &[u8]) {
+    match decode_varint(data) {
+        Ok((value, consumed)) => {
+            assert!(
+                consumed <= data.len(),
+                "{context}: consumed more bytes than available"
+            );
+            assert!(
+                (1..=8).contains(&consumed),
+                "{context}: invalid varint length: {consumed}"
+            );
+            assert!(
+                value <= QUIC_VARINT_MAX,
+                "{context}: decoded value exceeds QUIC varint max: {value}"
+            );
+            assert_eq!(
+                consumed,
+                required_varint_len(data).expect("successful decode requires a prefix byte"),
+                "{context}: consumed width must match the prefix-selected width"
+            );
+        }
+        Err(err) => {
+            verify_varint_error(&err, data);
+            observe_quic_core_error(context, &err);
+        }
+    }
+}
+
+fn observe_packet_header_decode(context: &str, data: &[u8], short_dcid_len: usize) {
+    match PacketHeader::decode(data, short_dcid_len) {
+        Ok((header, consumed)) => {
+            assert!(
+                consumed <= data.len(),
+                "{context}: consumed more bytes than available"
+            );
+            assert!(consumed > 0, "{context}: packet header consumed zero bytes");
+            verify_packet_header_consistency(&header);
+        }
+        Err(err) => {
+            verify_packet_error(&err, data);
+            observe_quic_core_error(context, &err);
+        }
+    }
+}
+
+fn observe_transport_params_decode(context: &str, data: &[u8]) {
+    match TransportParameters::decode(data) {
+        Ok(params) => {
+            verify_transport_params_consistency(&params);
+            test_transport_params_roundtrip(&params);
+        }
+        Err(err) => {
+            verify_transport_params_error(&err, data);
+            observe_quic_core_error(context, &err);
+        }
+    }
+}
+
+fn required_varint_len(data: &[u8]) -> Option<usize> {
+    data.first().map(|first| 1usize << (first >> 6))
+}
+
+fn observe_quic_core_error(context: &str, err: &QuicCoreError) {
+    let display = err.to_string();
+    assert!(
+        !display.trim().is_empty(),
+        "{context}: error display diagnostics should be visible"
+    );
+
+    let debug = format!("{err:?}");
+    assert!(
+        !debug.trim().is_empty(),
+        "{context}: error debug diagnostics should be visible"
+    );
+}
+
 fn verify_varint_error(err: &QuicCoreError, data: &[u8]) {
     match err {
         QuicCoreError::UnexpectedEof => {
             // Should occur when input is too short for declared varint length
+            assert!(
+                data.len() < required_varint_len(data).unwrap_or(1),
+                "UnexpectedEof should mean input is too short for the declared varint width"
+            );
         }
         QuicCoreError::VarIntOutOfRange(value) => {
             // Should specify the invalid value
@@ -993,7 +1074,7 @@ fn verify_params_roundtrip(original: &[KnownTransportParam], decoded: &Transport
                 assert_eq!(decoded.initial_max_data, Some(param.value));
             }
             TransportParamType::DisableActiveMigration => {
-                assert_eq!(decoded.disable_active_migration, true);
+                assert!(decoded.disable_active_migration);
             }
             _ => {
                 // Other parameters are optional to check
