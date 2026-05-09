@@ -18,8 +18,11 @@
 
 use arbitrary::Arbitrary;
 use asupersync::bytes::BytesMut;
-use asupersync::codec::{Decoder, LinesCodec};
+use asupersync::codec::{Decoder, LinesCodec, LinesCodecError};
 use libfuzzer_sys::fuzz_target;
+use std::sync::OnceLock;
+
+static FIXED_CANARIES: OnceLock<()> = OnceLock::new();
 
 #[derive(Arbitrary, Debug)]
 struct FuzzConfig {
@@ -35,7 +38,131 @@ struct FuzzInput {
     split_points: Vec<u8>, // For splitting operations
 }
 
+fn assert_decoded_line_shape(line: &str, max_length: usize) {
+    if max_length != usize::MAX {
+        assert!(
+            line.len() <= max_length,
+            "decoded line length {} exceeds max_length {}",
+            line.len(),
+            max_length
+        );
+    }
+    assert!(
+        !line.contains('\n'),
+        "decoded line contains newline delimiter"
+    );
+    assert!(
+        !line.ends_with('\r'),
+        "decoded line retained trailing carriage return"
+    );
+}
+
+fn observe_decode(
+    codec: &mut LinesCodec,
+    buf: &mut BytesMut,
+    eof: bool,
+) -> Result<Option<String>, LinesCodecError> {
+    let before_len = buf.len();
+    let max_length = codec.max_length();
+    let result = if eof {
+        codec.decode_eof(buf)
+    } else {
+        codec.decode(buf)
+    };
+
+    assert!(
+        buf.len() <= before_len,
+        "LinesCodec decode grew the input buffer"
+    );
+
+    match &result {
+        Ok(Some(line)) => {
+            assert!(
+                buf.len() < before_len,
+                "successful line decode must consume input"
+            );
+            assert_decoded_line_shape(line, max_length);
+        }
+        Ok(None) => {}
+        Err(error) => {
+            assert!(
+                !error.to_string().is_empty(),
+                "LinesCodec error must have a non-empty description: {error:?}"
+            );
+        }
+    }
+
+    result
+}
+
+fn expect_line(result: Result<Option<String>, LinesCodecError>, expected: &str) {
+    match result {
+        Ok(Some(line)) => assert_eq!(line, expected),
+        other => panic!("expected decoded line {expected:?}, got {other:?}"),
+    }
+}
+
+fn expect_none(result: Result<Option<String>, LinesCodecError>) {
+    match result {
+        Ok(None) => {}
+        other => panic!("expected no decoded line, got {other:?}"),
+    }
+}
+
+fn expect_error(
+    result: Result<Option<String>, LinesCodecError>,
+    matches_expected: impl FnOnce(&LinesCodecError) -> bool,
+    label: &str,
+) {
+    match result {
+        Err(error) if matches_expected(&error) => {}
+        other => panic!("expected {label} error, got {other:?}"),
+    }
+}
+
+fn assert_fixed_decode_canaries() {
+    let mut codec = LinesCodec::new();
+    let mut buf = BytesMut::from("alpha\nbeta\r\ntail");
+    expect_line(observe_decode(&mut codec, &mut buf, false), "alpha");
+    expect_line(observe_decode(&mut codec, &mut buf, false), "beta");
+    expect_none(observe_decode(&mut codec, &mut buf, false));
+    expect_line(observe_decode(&mut codec, &mut buf, true), "tail");
+    assert!(buf.is_empty(), "EOF canary should consume trailing line");
+
+    let mut limited = LinesCodec::new_with_max_length(3);
+    let mut too_long = BytesMut::from("abcd\nok\n");
+    expect_error(
+        observe_decode(&mut limited, &mut too_long, false),
+        |error| matches!(error, LinesCodecError::MaxLineLengthExceeded),
+        "max-line-length",
+    );
+    expect_line(observe_decode(&mut limited, &mut too_long, false), "ok");
+    assert!(
+        too_long.is_empty(),
+        "discard canary should drain the oversized line and decode the next line"
+    );
+
+    let mut invalid_utf8 = LinesCodec::new();
+    let mut invalid_buf = BytesMut::from(&b"\xff\n"[..]);
+    expect_error(
+        observe_decode(&mut invalid_utf8, &mut invalid_buf, false),
+        |error| matches!(error, LinesCodecError::InvalidUtf8),
+        "invalid-utf8",
+    );
+    assert!(
+        invalid_buf.is_empty(),
+        "invalid UTF-8 canary should consume the rejected line"
+    );
+
+    let mut empty = LinesCodec::new();
+    let mut empty_buf = BytesMut::new();
+    expect_none(observe_decode(&mut empty, &mut empty_buf, false));
+    expect_none(observe_decode(&mut empty, &mut empty_buf, true));
+}
+
 fuzz_target!(|input: FuzzInput| {
+    FIXED_CANARIES.get_or_init(assert_fixed_decode_canaries);
+
     // Guard against excessively large inputs
     if input.data.len() > 100_000 {
         return;
@@ -64,11 +191,8 @@ fuzz_target!(|input: FuzzInput| {
                 break; // Prevent infinite loops
             }
 
-            let result = if input.config.use_decode_eof && buf.is_empty() {
-                codec.decode_eof(&mut buf)
-            } else {
-                codec.decode(&mut buf)
-            };
+            let decode_at_eof = input.config.use_decode_eof && buf.is_empty();
+            let result = observe_decode(&mut codec, &mut buf, decode_at_eof);
 
             match result {
                 Ok(Some(line)) => {
@@ -96,8 +220,8 @@ fuzz_target!(|input: FuzzInput| {
                         "Decoded line contains newline character"
                     );
                     assert!(
-                        !line.contains('\r'),
-                        "Decoded line contains carriage return"
+                        !line.ends_with('\r'),
+                        "Decoded line contains trailing carriage return"
                     );
 
                     // If buffer is empty, break
@@ -142,14 +266,14 @@ fuzz_target!(|input: FuzzInput| {
                 data_consumed = end;
 
                 // Try to decode after each chunk
-                let _ = fresh_codec.decode(&mut buf);
+                let _ = observe_decode(&mut fresh_codec, &mut buf, false);
             }
         }
 
         // Process any remaining data
         if data_consumed < input.data.len() {
             buf.extend_from_slice(&input.data[data_consumed..]);
-            let _ = fresh_codec.decode_eof(&mut buf);
+            let _ = observe_decode(&mut fresh_codec, &mut buf, true);
         }
     }
 
@@ -159,13 +283,13 @@ fuzz_target!(|input: FuzzInput| {
 
         // Test with buffer that gets cleared/replaced between calls
         let mut buf = BytesMut::from(&input.data[..std::cmp::min(input.data.len(), 5)]);
-        let _ = edge_codec.decode(&mut buf);
+        let _ = observe_decode(&mut edge_codec, &mut buf, false);
 
         // Replace buffer entirely
         buf.clear();
         if input.data.len() > 5 {
             buf.extend_from_slice(&input.data[5..]);
-            let _ = edge_codec.decode(&mut buf);
+            let _ = observe_decode(&mut edge_codec, &mut buf, false);
         }
     }
 
@@ -178,7 +302,7 @@ fuzz_target!(|input: FuzzInput| {
         if !input.data.is_empty() {
             let mut cloned_codec = codec_copy;
             let mut buf = BytesMut::from(&input.data[..std::cmp::min(input.data.len(), 10)]);
-            let _ = cloned_codec.decode(&mut buf);
+            let _ = observe_decode(&mut cloned_codec, &mut buf, false);
         }
     }
 
@@ -214,7 +338,7 @@ fuzz_target!(|input: FuzzInput| {
 
         for test_case in &test_cases {
             let mut test_buf = BytesMut::from(*test_case);
-            let _ = newline_codec.decode(&mut test_buf);
+            let _ = observe_decode(&mut newline_codec, &mut test_buf, false);
         }
     }
 
@@ -325,7 +449,7 @@ fuzz_target!(|input: FuzzInput| {
 
         // Handle trailing data
         if !mixed_buf.is_empty() {
-            let _ = mixed_codec.decode_eof(&mut mixed_buf);
+            let _ = observe_decode(&mut mixed_codec, &mut mixed_buf, true);
         }
     }
 });
