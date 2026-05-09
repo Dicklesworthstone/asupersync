@@ -53,9 +53,16 @@ fuzz_target!(|data: &[u8]| {
             match result {
                 Ok(frame) => {
                     // Test that the frame parses correctly
-                    let _parsing_result = validate_headers_frame_priority(&frame);
+                    observe_headers_priority_frame(
+                        "basic priority",
+                        &frame,
+                        stream_id,
+                        dependency,
+                        weight,
+                        exclusive,
+                    );
                 }
-                Err(_) => {} // Expected for some invalid combinations
+                Err(err) => observe_h2_error("basic priority", &err), // Expected for some invalid combinations
             }
         }
     }
@@ -74,12 +81,15 @@ fuzz_target!(|data: &[u8]| {
             let result =
                 create_headers_frame_with_priority(stream_id, stream_id, weight, exclusive);
             match result {
-                Ok(_) => {} // Should not happen - self-dependency should be rejected
-                Err(H2Error {
-                    code: ErrorCode::ProtocolError,
-                    ..
-                }) => {} // Expected
-                Err(_) => {} // Other errors acceptable
+                Ok(_) => panic!("self-dependency parsed successfully"),
+                Err(err) => {
+                    observe_h2_error("self-dependency", &err);
+                    assert_eq!(
+                        err.code,
+                        ErrorCode::ProtocolError,
+                        "self-dependency must be rejected as a protocol error"
+                    );
+                }
             }
         }
     }
@@ -100,8 +110,14 @@ fuzz_target!(|data: &[u8]| {
                     * 2;
 
                 if stream_id != dependency {
-                    let _result =
-                        create_headers_frame_with_priority(stream_id, dependency, weight, false);
+                    observe_priority_creation_result(
+                        "weight boundary",
+                        stream_id,
+                        dependency,
+                        weight,
+                        false,
+                        create_headers_frame_with_priority(stream_id, dependency, weight, false),
+                    );
                 }
             }
         }
@@ -113,14 +129,20 @@ fuzz_target!(|data: &[u8]| {
         let mut prev_stream = 0u32; // Root dependency
 
         for i in 0..(chain_length as usize).min((data.len() - 1) / 4) {
-            let offset = 1 + (i as usize) * 4;
+            let offset = 1 + i * 4;
             if offset + 4 <= data.len() {
                 let stream_id = ((i as u32 + 1) * 2) + 1; // Odd stream IDs
                 let weight = data[offset];
                 let exclusive = data[offset + 1] & 0x80 != 0;
 
-                let _result =
-                    create_headers_frame_with_priority(stream_id, prev_stream, weight, exclusive);
+                observe_priority_creation_result(
+                    "dependency chain",
+                    stream_id,
+                    prev_stream,
+                    weight,
+                    exclusive,
+                    create_headers_frame_with_priority(stream_id, prev_stream, weight, exclusive),
+                );
                 prev_stream = stream_id;
             }
         }
@@ -138,9 +160,13 @@ fuzz_target!(|data: &[u8]| {
                     let _weight = priority.weight; // Should be 0-255
                     let _exclusive = priority.exclusive;
                 }
+                observe_priority_validation_result(
+                    "raw priority parse",
+                    validate_headers_frame_priority(&Frame::Headers(headers_frame)),
+                );
             }
-            Err(_) => {} // Parse errors acceptable for malformed input
-            _ => {}      // Other frame types
+            Err(err) => observe_h2_error("raw priority parse", &err), // Parse errors acceptable for malformed input
+            _ => {}                                                   // Other frame types
         }
     }
 
@@ -155,8 +181,22 @@ fuzz_target!(|data: &[u8]| {
 
         if stream_id != dependency {
             // Test both exclusive and non-exclusive
-            let _result1 = create_headers_frame_with_priority(stream_id, dependency, weight, true);
-            let _result2 = create_headers_frame_with_priority(stream_id, dependency, weight, false);
+            observe_priority_creation_result(
+                "exclusive priority",
+                stream_id,
+                dependency,
+                weight,
+                true,
+                create_headers_frame_with_priority(stream_id, dependency, weight, true),
+            );
+            observe_priority_creation_result(
+                "non-exclusive priority",
+                stream_id,
+                dependency,
+                weight,
+                false,
+                create_headers_frame_with_priority(stream_id, dependency, weight, false),
+            );
         }
     }
 
@@ -180,8 +220,14 @@ fuzz_target!(|data: &[u8]| {
                 let weight = if data.len() > 4 { data[4] } else { 16 };
 
                 if stream_id != dependency {
-                    let _result =
-                        create_headers_frame_with_priority(stream_id, dependency, weight, false);
+                    observe_priority_creation_result(
+                        "large dependency",
+                        stream_id,
+                        dependency,
+                        weight,
+                        false,
+                        create_headers_frame_with_priority(stream_id, dependency, weight, false),
+                    );
                 }
             }
         }
@@ -191,7 +237,7 @@ fuzz_target!(|data: &[u8]| {
     {
         if data.len() >= 8 {
             let conn_result = test_priority_in_connection_context(data);
-            let _ = conn_result; // May succeed or fail based on input
+            observe_connection_priority_result("connection priority", conn_result);
         }
     }
 
@@ -200,7 +246,7 @@ fuzz_target!(|data: &[u8]| {
         let frame_count = (data[0] % 4) + 1; // 1-4 frames
 
         for i in 0..(frame_count as usize).min((data.len() - 1) / 6) {
-            let offset = 1 + (i as usize) * 6;
+            let offset = 1 + i * 6;
             if offset + 6 <= data.len() {
                 let stream_id = ((i as u32 + 1) * 2) + 1;
                 let dependency = u32::from_be_bytes([
@@ -213,8 +259,15 @@ fuzz_target!(|data: &[u8]| {
                 let exclusive = data[offset + 5] & 0x80 != 0;
 
                 if stream_id != dependency {
-                    let _result = create_headers_frame_with_priority(
-                        stream_id, dependency, weight, exclusive,
+                    observe_priority_creation_result(
+                        "multiple priority frames",
+                        stream_id,
+                        dependency,
+                        weight,
+                        exclusive,
+                        create_headers_frame_with_priority(
+                            stream_id, dependency, weight, exclusive,
+                        ),
                     );
                 }
             }
@@ -228,12 +281,140 @@ fuzz_target!(|data: &[u8]| {
         for &size in &malformed_sizes {
             if data.len() >= size {
                 let truncated_data = &data[..size];
-                let _result = create_headers_frame_with_truncated_priority(1, truncated_data);
-                // Should fail gracefully with appropriate error
+                observe_truncated_priority_result(
+                    size,
+                    create_headers_frame_with_truncated_priority(1, truncated_data),
+                );
             }
         }
     }
 });
+
+fn observe_priority_creation_result(
+    context: &str,
+    stream_id: u32,
+    dependency: u32,
+    weight: u8,
+    exclusive: bool,
+    result: Result<Frame, H2Error>,
+) {
+    match result {
+        Ok(frame) => {
+            observe_headers_priority_frame(
+                context, &frame, stream_id, dependency, weight, exclusive,
+            );
+        }
+        Err(err) => {
+            observe_h2_error(context, &err);
+            if stream_id == (dependency & 0x7fff_ffff) {
+                assert_eq!(
+                    err.code,
+                    ErrorCode::ProtocolError,
+                    "{context}: self-dependency must be a protocol error"
+                );
+            }
+        }
+    }
+}
+
+fn observe_headers_priority_frame(
+    context: &str,
+    frame: &Frame,
+    expected_stream_id: u32,
+    expected_dependency: u32,
+    expected_weight: u8,
+    expected_exclusive: bool,
+) {
+    match frame {
+        Frame::Headers(headers_frame) => {
+            assert_eq!(
+                headers_frame.stream_id, expected_stream_id,
+                "{context}: parsed HEADERS stream id changed"
+            );
+            let priority = headers_frame
+                .priority
+                .as_ref()
+                .expect("priority flag should preserve priority fields");
+            assert_eq!(
+                priority.dependency,
+                expected_dependency & 0x7fff_ffff,
+                "{context}: parsed dependency changed"
+            );
+            assert_eq!(
+                priority.weight, expected_weight,
+                "{context}: parsed weight changed"
+            );
+            let expected_wire_exclusive =
+                expected_exclusive || (expected_dependency & 0x8000_0000 != 0);
+            assert_eq!(
+                priority.exclusive, expected_wire_exclusive,
+                "{context}: parsed exclusive bit changed"
+            );
+            assert_ne!(
+                priority.dependency, headers_frame.stream_id,
+                "{context}: parser accepted self-dependency"
+            );
+            observe_priority_validation_result(context, validate_headers_frame_priority(frame));
+        }
+        _ => panic!("{context}: expected HEADERS frame"),
+    }
+}
+
+fn observe_priority_validation_result(context: &str, result: Result<(), H2Error>) {
+    if let Err(err) = result {
+        observe_h2_error(context, &err);
+        assert_eq!(
+            err.code,
+            ErrorCode::ProtocolError,
+            "{context}: priority validation should report protocol errors"
+        );
+    }
+}
+
+fn observe_connection_priority_result(context: &str, result: Result<(), H2Error>) {
+    if let Err(err) = result {
+        observe_h2_error(context, &err);
+        assert_ne!(
+            err.code,
+            ErrorCode::NoError,
+            "{context}: failed connection processing cannot report NO_ERROR"
+        );
+    }
+}
+
+fn observe_truncated_priority_result(size: usize, result: Result<Frame, H2Error>) {
+    match result {
+        Ok(_) => panic!("truncated priority payload of {size} bytes parsed successfully"),
+        Err(err) => {
+            observe_h2_error("truncated priority", &err);
+            assert!(
+                matches!(
+                    err.code,
+                    ErrorCode::FrameSizeError | ErrorCode::ProtocolError
+                ),
+                "truncated priority should fail with frame-size/protocol error, got {:?}",
+                err.code
+            );
+        }
+    }
+}
+
+fn observe_h2_error(context: &str, err: &H2Error) {
+    assert!(
+        !err.message.trim().is_empty(),
+        "{context}: H2 error message should not be empty"
+    );
+    let display = err.to_string();
+    assert!(
+        !display.trim().is_empty(),
+        "{context}: H2 error display should not be empty"
+    );
+    let debug = format!("{err:?}");
+    assert!(
+        !debug.trim().is_empty(),
+        "{context}: H2 error debug should not be empty"
+    );
+}
 
 /// Create a HEADERS frame with specific priority values
 fn create_headers_frame_with_priority(
