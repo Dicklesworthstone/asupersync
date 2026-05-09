@@ -82,26 +82,38 @@ fuzz_target!(|input: Input| {
 
     // Eval at an arbitrary time point.
     let t = (input.eval_t as f64) / 1000.0;
-    let _ = a_curve.eval(t);
-    let _ = b_curve.eval(t);
+    observe_scalar(a_curve.eval(t), "a_curve.eval");
+    observe_scalar(b_curve.eval(t), "b_curve.eval");
 
     // Static-shape constructors must not panic on any positive params.
-    let _ = PiecewiseLinearCurve::affine(1.0, 0.0);
-    let _ = PiecewiseLinearCurve::rate_latency(1.0, 0.0);
-    let _ = PiecewiseLinearCurve::staircase(1.0, 1.0, 4);
+    observe_curve(PiecewiseLinearCurve::affine(1.0, 0.0), "affine");
+    observe_curve(PiecewiseLinearCurve::rate_latency(1.0, 0.0), "rate_latency");
+    observe_curve(PiecewiseLinearCurve::staircase(1.0, 1.0, 4), "staircase");
 
     // Inspectors.
-    let _ = a_curve.segment_count();
-    let _ = a_curve.asymptotic_rate();
-    let _ = a_curve.segments();
+    assert!(
+        a_curve.segment_count() > 0,
+        "curve inspector returned an empty segment count"
+    );
+    observe_scalar(a_curve.asymptotic_rate(), "a_curve.asymptotic_rate");
+    observe_segments(a_curve.segments(), "a_curve.segments");
 
     // Algebra: must not panic. Numerical results may overflow to
     // f64::INFINITY, which is acceptable (caller's responsibility to
     // check); the contract is "no panic, no UB".
-    let _ = min_plus_convolution(&a_curve, &b_curve);
-    let _ = min_plus_deconvolution(&a_curve, &b_curve);
-    let _ = horizontal_deviation(&a_curve, &b_curve);
-    let _ = vertical_deviation(&a_curve, &b_curve);
+    observe_curve(
+        min_plus_convolution(&a_curve, &b_curve),
+        "min_plus_convolution",
+    );
+    observe_curve(
+        min_plus_deconvolution(&a_curve, &b_curve),
+        "min_plus_deconvolution",
+    );
+    observe_bounded_deviation(
+        horizontal_deviation(&a_curve, &b_curve),
+        "horizontal_deviation",
+    );
+    observe_bounded_deviation(vertical_deviation(&a_curve, &b_curve), "vertical_deviation");
 
     // Self-deviation reflexivity: deviation between identical curves
     // should be finite and non-negative (or 0 in the degenerate case).
@@ -120,3 +132,52 @@ fuzz_target!(|input: Input| {
         );
     }
 });
+
+fn observe_curve(curve: PiecewiseLinearCurve, context: &str) {
+    assert!(
+        curve.segment_count() > 0,
+        "{context} produced an empty curve"
+    );
+    observe_scalar(curve.asymptotic_rate(), context);
+    observe_segments(curve.segments(), context);
+}
+
+fn observe_segments(segments: &[Segment], context: &str) {
+    assert!(!segments.is_empty(), "{context} exposed no segments");
+
+    let mut previous_start = None;
+    for segment in segments {
+        observe_scalar(segment.start, context);
+        observe_scalar(segment.rate, context);
+        observe_scalar(segment.burst, context);
+
+        if let Some(previous_start) = previous_start {
+            assert!(
+                segment.start > previous_start,
+                "{context} segment starts must increase strictly"
+            );
+        }
+        previous_start = Some(segment.start);
+    }
+}
+
+fn observe_scalar(value: f64, context: &str) {
+    assert!(value.is_finite(), "{context} produced a non-finite value");
+    assert!(
+        value >= -1e-9,
+        "{context} produced a negative value: {value}"
+    );
+}
+
+fn observe_bounded_deviation(value: f64, context: &str) {
+    assert!(
+        value.is_finite() || value.is_infinite() && value.is_sign_positive(),
+        "{context} produced invalid deviation: {value}"
+    );
+    if value.is_finite() {
+        assert!(
+            value >= -1e-9,
+            "{context} produced negative deviation: {value}"
+        );
+    }
+}
