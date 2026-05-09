@@ -39,10 +39,13 @@ use crate::observability::pressure_governor::{
 };
 use crate::runtime::resource_monitor::{DegradationLevel, RegionPriority, ResourceMonitor};
 use crate::types::{RegionId, id::next_bootstrap_region_id};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use thiserror::Error;
+
+const PEER_PRESSURE_BACKPRESSURE_THRESHOLD: f64 = 0.80;
 
 /// Errors specific to swarm pressure governance.
 #[derive(Debug, Error)]
@@ -254,6 +257,8 @@ pub struct SwarmPressureGovernorConfig {
     pub envelope_enforcement_enabled: bool,
     /// Swarm coordination timeout.
     pub swarm_coordination_timeout: Duration,
+    /// Maximum age for a peer pressure report to influence admission.
+    pub peer_pressure_max_age: Duration,
 }
 
 impl Default for SwarmPressureGovernorConfig {
@@ -267,7 +272,41 @@ impl Default for SwarmPressureGovernorConfig {
             default_io_budget_ops_per_sec: 1000,            // 1000 ops per second
             envelope_enforcement_enabled: true,
             swarm_coordination_timeout: Duration::from_millis(50),
+            peer_pressure_max_age: Duration::from_secs(5),
         }
+    }
+}
+
+/// Pressure report received from another runtime instance in the swarm.
+#[derive(Debug, Clone)]
+pub struct SwarmPeerPressureReport {
+    /// Stable runtime/swarm instance identifier.
+    pub instance_id: String,
+    /// Peer-reported overall pressure ratio.
+    pub overall_pressure: f64,
+    /// Peer-reported degradation band.
+    pub degradation_level: DegradationLevel,
+    /// Local timestamp when this report was accepted.
+    pub reported_at: Instant,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SwarmPeerPressureSummary {
+    live_report_count: u64,
+    max_overall_pressure: f64,
+    max_degradation_level: DegradationLevel,
+}
+
+impl SwarmPeerPressureSummary {
+    const EMPTY: Self = Self {
+        live_report_count: 0,
+        max_overall_pressure: 0.0,
+        max_degradation_level: DegradationLevel::None,
+    };
+
+    #[must_use]
+    fn has_live_pressure(self) -> bool {
+        self.live_report_count > 0
     }
 }
 
@@ -301,7 +340,8 @@ pub struct SwarmPressureGovernor {
     envelope_budget_violations: AtomicU64,
 
     // Resource envelope tracking
-    active_regions: std::sync::Mutex<std::collections::HashMap<RegionId, ResourceEnvelope>>,
+    active_regions: std::sync::Mutex<HashMap<RegionId, ResourceEnvelope>>,
+    peer_pressure_reports: std::sync::Mutex<HashMap<String, SwarmPeerPressureReport>>,
 }
 
 impl SwarmPressureGovernor {
@@ -319,7 +359,8 @@ impl SwarmPressureGovernor {
             regions_admitted: AtomicU64::new(0),
             regions_rejected: AtomicU64::new(0),
             envelope_budget_violations: AtomicU64::new(0),
-            active_regions: std::sync::Mutex::new(std::collections::HashMap::new()),
+            active_regions: std::sync::Mutex::new(HashMap::new()),
+            peer_pressure_reports: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -355,6 +396,7 @@ impl SwarmPressureGovernor {
         // Check runtime-internal pressure via pressure governor
         let pressure_snapshot = self.pressure_governor.sample_pressure(cx)?;
         let pressure_decision = self.pressure_governor.check_admission(cx)?;
+        let peer_pressure = self.peer_pressure_summary(decision_start);
 
         if let Some(requested_memory) = requested_memory
             && self.config.envelope_enforcement_enabled
@@ -382,6 +424,7 @@ impl SwarmPressureGovernor {
             &pressure_decision,
             degradation_level,
             requested_memory,
+            peer_pressure,
         )?;
 
         // Create resource envelope if admitted
@@ -436,15 +479,57 @@ impl SwarmPressureGovernor {
         envelopes.get(&region_id).cloned()
     }
 
+    /// Record the latest pressure report from a peer runtime instance.
+    pub fn record_peer_pressure(
+        &self,
+        instance_id: impl Into<String>,
+        overall_pressure: f64,
+        degradation_level: DegradationLevel,
+    ) -> Result<(), SwarmPressureError> {
+        let instance_id = instance_id.into();
+        if instance_id.trim().is_empty() {
+            return Err(SwarmPressureError::SwarmCoordinationFailed {
+                reason: "peer instance id must be non-empty".to_string(),
+            });
+        }
+        if !overall_pressure.is_finite() || overall_pressure < 0.0 {
+            return Err(SwarmPressureError::SwarmCoordinationFailed {
+                reason: "peer pressure must be finite and non-negative".to_string(),
+            });
+        }
+
+        let report = SwarmPeerPressureReport {
+            instance_id: instance_id.clone(),
+            overall_pressure,
+            degradation_level,
+            reported_at: Instant::now(),
+        };
+        let mut reports = self.peer_pressure_reports.lock().unwrap();
+        reports.insert(instance_id, report);
+        Ok(())
+    }
+
+    /// Remove a peer pressure report.
+    pub fn clear_peer_pressure(&self, instance_id: &str) -> Option<SwarmPeerPressureReport> {
+        let mut reports = self.peer_pressure_reports.lock().unwrap();
+        reports.remove(instance_id)
+    }
+
     /// Returns current swarm governance metrics.
     pub fn metrics(&self) -> SwarmPressureMetrics {
         let envelopes = self.active_regions.lock().unwrap();
+        let peer_pressure = self.peer_pressure_summary(Instant::now());
         SwarmPressureMetrics {
             total_admission_checks: self.total_admission_checks.load(Ordering::Relaxed),
             regions_admitted: self.regions_admitted.load(Ordering::Relaxed),
             regions_rejected: self.regions_rejected.load(Ordering::Relaxed),
             envelope_budget_violations: self.envelope_budget_violations.load(Ordering::Relaxed),
             active_region_count: envelopes.len() as u64,
+            live_peer_pressure_reports: peer_pressure.live_report_count,
+            max_peer_pressure_scaled: scale_pressure_for_metrics(
+                peer_pressure.max_overall_pressure,
+            ),
+            max_peer_degradation_level: peer_pressure.max_degradation_level as u8,
         }
     }
 
@@ -456,6 +541,7 @@ impl SwarmPressureGovernor {
         pressure_decision: &AdmissionDecision,
         degradation_level: DegradationLevel,
         _requested_memory: Option<u64>,
+        peer_pressure: SwarmPeerPressureSummary,
     ) -> Result<SwarmAdmissionDecisionInternal, SwarmPressureError> {
         // Check region count limits
         let active_count = {
@@ -473,10 +559,23 @@ impl SwarmPressureGovernor {
             });
         }
 
+        let effective_degradation = degradation_level.max(peer_pressure.max_degradation_level);
+        let peer_pressure_high =
+            peer_pressure.max_overall_pressure >= PEER_PRESSURE_BACKPRESSURE_THRESHOLD;
+
         // Combine pressure governor decision with system degradation
-        let decision = match (pressure_decision, degradation_level, priority) {
+        let decision = match (pressure_decision, effective_degradation, priority) {
             // Always admit critical regions regardless of pressure
             (_, _, RegionPriority::Critical) => AdmissionDecision::Admit,
+
+            // Peer pressure is a swarm-wide signal: keep background work out of
+            // the system and slow normal work before all runtimes stampede.
+            (_, _, RegionPriority::Low | RegionPriority::BestEffort) if peer_pressure_high => {
+                AdmissionDecision::Reject
+            }
+            (_, _, RegionPriority::Normal) if peer_pressure_high => {
+                AdmissionDecision::AdmitWithBackpressure
+            }
 
             // Reject if pressure governor rejected and system is under stress
             (
@@ -502,18 +601,67 @@ impl SwarmPressureGovernor {
         };
 
         let reason = match decision {
-            AdmissionDecision::Admit => "Admission approved".to_string(),
-            AdmissionDecision::Reject => format!(
-                "Rejected due to pressure: {:?} degradation, {:?} priority",
-                degradation_level, priority
+            AdmissionDecision::Admit => Self::format_swarm_admission_reason(
+                "Admission approved",
+                degradation_level,
+                priority,
+                peer_pressure,
             ),
-            AdmissionDecision::AdmitWithBackpressure => format!(
-                "Admitted with backpressure: {:?} degradation",
-                degradation_level
+            AdmissionDecision::Reject => Self::format_swarm_admission_reason(
+                "Rejected due to pressure",
+                effective_degradation,
+                priority,
+                peer_pressure,
+            ),
+            AdmissionDecision::AdmitWithBackpressure => Self::format_swarm_admission_reason(
+                "Admitted with backpressure",
+                effective_degradation,
+                priority,
+                peer_pressure,
             ),
         };
 
         Ok(SwarmAdmissionDecisionInternal { decision, reason })
+    }
+
+    fn peer_pressure_summary(&self, now: Instant) -> SwarmPeerPressureSummary {
+        let reports = self.peer_pressure_reports.lock().unwrap();
+        let mut summary = SwarmPeerPressureSummary::EMPTY;
+
+        for report in reports.values() {
+            if now.saturating_duration_since(report.reported_at) > self.config.peer_pressure_max_age
+            {
+                continue;
+            }
+
+            summary.live_report_count += 1;
+            summary.max_overall_pressure =
+                summary.max_overall_pressure.max(report.overall_pressure);
+            summary.max_degradation_level =
+                summary.max_degradation_level.max(report.degradation_level);
+        }
+
+        summary
+    }
+
+    fn format_swarm_admission_reason(
+        base: &str,
+        degradation_level: DegradationLevel,
+        priority: RegionPriority,
+        peer_pressure: SwarmPeerPressureSummary,
+    ) -> String {
+        if peer_pressure.has_live_pressure() {
+            format!(
+                "{base}: {degradation_level:?} degradation, {priority:?} priority, {} live peer pressure reports, max peer pressure {:.3}, max peer degradation {:?}",
+                peer_pressure.live_report_count,
+                peer_pressure.max_overall_pressure,
+                peer_pressure.max_degradation_level
+            )
+        } else if base == "Admission approved" {
+            base.to_string()
+        } else {
+            format!("{base}: {degradation_level:?} degradation, {priority:?} priority")
+        }
     }
 
     fn create_envelope_for_region(
@@ -579,6 +727,23 @@ pub struct SwarmPressureMetrics {
     pub envelope_budget_violations: u64,
     /// Number of active regions with envelopes.
     pub active_region_count: u64,
+    /// Number of live peer pressure reports considered by admission.
+    pub live_peer_pressure_reports: u64,
+    /// Maximum live peer pressure ratio scaled by 10_000.
+    pub max_peer_pressure_scaled: i64,
+    /// Maximum live peer degradation level.
+    pub max_peer_degradation_level: u8,
+}
+
+fn scale_pressure_for_metrics(pressure: f64) -> i64 {
+    const PRESSURE_SCALE: f64 = 10000.0;
+    if !pressure.is_finite() || pressure <= 0.0 {
+        0
+    } else if pressure >= i64::MAX as f64 / PRESSURE_SCALE {
+        i64::MAX
+    } else {
+        (pressure * PRESSURE_SCALE) as i64
+    }
 }
 
 #[cfg(test)]
@@ -769,6 +934,89 @@ mod tests {
         let metrics = governor.metrics();
         assert_eq!(metrics.regions_rejected, 1);
         assert_eq!(metrics.envelope_budget_violations, 1);
+    }
+
+    #[test]
+    fn test_peer_pressure_backpressures_normal_admission() {
+        let governor = create_test_swarm_governor();
+        governor
+            .record_peer_pressure("peer-a", 0.85, DegradationLevel::Moderate)
+            .expect("peer pressure report should be accepted");
+
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create test runtime"),
+        );
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+
+        let decision = governor
+            .check_region_admission(&cx, RegionPriority::Normal, None)
+            .expect("Peer pressure admission should produce a decision");
+
+        assert!(matches!(
+            decision.decision,
+            AdmissionDecision::AdmitWithBackpressure
+        ));
+        assert!(decision.envelope.is_some());
+        assert!(decision.reason.contains("live peer pressure reports"));
+
+        let metrics = governor.metrics();
+        assert_eq!(metrics.live_peer_pressure_reports, 1);
+        assert!(
+            (metrics.max_peer_pressure_scaled - 8500).abs() <= 1,
+            "scaled peer pressure should round near 8500, got {}",
+            metrics.max_peer_pressure_scaled
+        );
+        assert_eq!(
+            metrics.max_peer_degradation_level,
+            DegradationLevel::Moderate as u8
+        );
+    }
+
+    #[test]
+    fn test_peer_pressure_rejects_low_priority_admission() {
+        let governor = create_test_swarm_governor();
+        governor
+            .record_peer_pressure("peer-b", 0.81, DegradationLevel::Light)
+            .expect("peer pressure report should be accepted");
+
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create test runtime"),
+        );
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+
+        let decision = governor
+            .check_region_admission(&cx, RegionPriority::Low, None)
+            .expect("Peer pressure admission should produce a decision");
+
+        assert!(matches!(decision.decision, AdmissionDecision::Reject));
+        assert!(decision.envelope.is_none());
+        assert!(decision.reason.contains("peer pressure"));
+        assert_eq!(governor.metrics().regions_rejected, 1);
+    }
+
+    #[test]
+    fn test_peer_pressure_rejects_invalid_reports() {
+        let governor = create_test_swarm_governor();
+
+        assert!(matches!(
+            governor.record_peer_pressure("", 0.5, DegradationLevel::Light),
+            Err(SwarmPressureError::SwarmCoordinationFailed { .. })
+        ));
+        assert!(matches!(
+            governor.record_peer_pressure("peer-a", f64::NAN, DegradationLevel::Light),
+            Err(SwarmPressureError::SwarmCoordinationFailed { .. })
+        ));
+        assert!(matches!(
+            governor.record_peer_pressure("peer-a", -0.01, DegradationLevel::Light),
+            Err(SwarmPressureError::SwarmCoordinationFailed { .. })
+        ));
+        assert_eq!(governor.metrics().live_peer_pressure_reports, 0);
     }
 
     #[test]
