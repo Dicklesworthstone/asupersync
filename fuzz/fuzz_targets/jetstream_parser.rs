@@ -4,8 +4,8 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::messaging::jetstream::{
-    FuzzJsAckControl, JsError, fuzz_parse_ack_control, fuzz_parse_api_error, fuzz_parse_js_message,
-    fuzz_parse_pub_ack, fuzz_parse_stream_info,
+    FuzzJsAckControl, FuzzJsAckMetadata, JsError, fuzz_parse_ack_control, fuzz_parse_api_error,
+    fuzz_parse_js_message, fuzz_parse_pub_ack, fuzz_parse_stream_info,
 };
 use asupersync::messaging::nats::Message;
 use libfuzzer_sys::fuzz_target;
@@ -15,6 +15,7 @@ const MAX_PAYLOAD_BYTES: usize = 512;
 const MAX_TEXT_CHARS: usize = 64;
 const MAX_SEGMENTS: usize = 4;
 const HUGE_DIGITS_LEN: usize = 96;
+const MAX_OBSERVED_DEBUG_BYTES: usize = 32 * 1024;
 
 #[derive(Arbitrary, Debug)]
 enum Scenario {
@@ -143,18 +144,74 @@ fuzz_target!(|data: &[u8]| {
 
 fn fuzz_raw_inputs(data: &[u8]) {
     let bounded = &data[..data.len().min(MAX_JSON_BYTES)];
-    let _ = fuzz_parse_stream_info(bounded);
-    let _ = fuzz_parse_pub_ack(bounded);
-    let _ = fuzz_parse_ack_control(bounded);
+    observe_js_result("raw stream info", fuzz_parse_stream_info(bounded));
+    observe_js_result("raw pub ack", fuzz_parse_pub_ack(bounded));
+    observe_ack_control("raw ack control", fuzz_parse_ack_control(bounded));
 
     let reply = String::from_utf8_lossy(bounded).into_owned();
-    let _ = fuzz_parse_api_error(&reply);
-    let _ = fuzz_parse_js_message(Message {
+    let api_error = fuzz_parse_api_error(&reply);
+    observe_js_error("raw API error", &api_error);
+    let parsed = fuzz_parse_js_message(Message {
         subject: "fuzz.jetstream".to_string(),
         sid: 1,
         reply_to: Some(reply),
+        headers: None,
         payload: bounded[..bounded.len().min(MAX_PAYLOAD_BYTES)].to_vec(),
     });
+    observe_js_message_metadata("raw JS message", parsed);
+}
+
+fn observe_js_result<T: std::fmt::Debug>(context: &str, result: Result<T, JsError>) {
+    match result {
+        Ok(value) => {
+            let rendered = format!("{value:?}");
+            assert!(
+                !rendered.trim().is_empty(),
+                "{context}: successful parse should be visible"
+            );
+            assert!(
+                rendered.len() <= MAX_OBSERVED_DEBUG_BYTES,
+                "{context}: successful parse debug output is too large: {} bytes",
+                rendered.len()
+            );
+        }
+        Err(err) => observe_js_error(context, &err),
+    }
+}
+
+fn observe_js_error(context: &str, err: &JsError) {
+    let diagnostic = format!("{err:?}");
+    assert!(
+        !diagnostic.trim().is_empty(),
+        "{context}: parser failure should expose diagnostics"
+    );
+    assert!(
+        diagnostic.len() <= MAX_OBSERVED_DEBUG_BYTES,
+        "{context}: parser failure diagnostic is too large: {} bytes",
+        diagnostic.len()
+    );
+}
+
+fn observe_ack_control(context: &str, outcome: FuzzJsAckControl) {
+    let rendered = format!("{outcome:?}");
+    assert!(
+        !rendered.trim().is_empty(),
+        "{context}: ack-control outcome should be visible"
+    );
+}
+
+fn observe_js_message_metadata(context: &str, parsed: Option<FuzzJsAckMetadata>) {
+    if let Some(meta) = parsed {
+        assert!(
+            !meta.subject.is_empty(),
+            "{context}: parsed metadata should retain a subject"
+        );
+        assert!(
+            meta.payload_len <= MAX_PAYLOAD_BYTES,
+            "{context}: parsed metadata payload length {} exceeds bounded input",
+            meta.payload_len
+        );
+    }
 }
 
 fn fuzz_stream_info(spec: StreamInfoSpec) {
@@ -383,6 +440,7 @@ fn fuzz_ack_reply(spec: AckReplySpec) {
         subject: subject.clone(),
         sid: 1,
         reply_to: Some(reply),
+        headers: None,
         payload: payload.clone(),
     });
 
