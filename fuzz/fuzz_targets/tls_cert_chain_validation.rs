@@ -230,12 +230,329 @@ fuzz_target!(|input: CertChainValidationInput| {
     // Normalize input to prevent resource exhaustion
     let mut normalized_input = input;
     normalize_input(&mut normalized_input);
+    observe_validation_context(&normalized_input.validation_context);
 
     // Test each certificate chain scenario
-    for scenario in &normalized_input.scenarios {
-        let _ = test_certificate_chain_scenario(scenario, &normalized_input.validation_context);
+    for (scenario_index, scenario) in normalized_input.scenarios.iter().enumerate() {
+        observe_certificate_chain_scenario_result(
+            test_certificate_chain_scenario(scenario, &normalized_input.validation_context),
+            scenario,
+            scenario_index,
+        );
     }
 });
+
+fn observe_certificate_chain_scenario_result(
+    result: Result<(), Box<dyn std::error::Error>>,
+    scenario: &CertChainScenario,
+    scenario_index: usize,
+) {
+    assert!(
+        scenario_index < MAX_SCENARIOS,
+        "scenario index must remain bounded by normalized fuzz cap"
+    );
+    observe_expected_outcome(&scenario.expected_outcome);
+    observe_chain_configuration(&scenario.chain);
+
+    if let Err(error) = result {
+        let display = error.to_string();
+        let debug = format!("{error:?}");
+        assert!(
+            !display.trim().is_empty() || !debug.trim().is_empty(),
+            "certificate-chain scenario errors must expose diagnostics"
+        );
+        assert!(
+            display.len().saturating_add(debug.len()) < 4096,
+            "certificate-chain scenario diagnostics must remain bounded"
+        );
+    }
+}
+
+fn observe_chain_configuration(chain: &ChainConfiguration) {
+    match chain {
+        ChainConfiguration::Valid {
+            chain_length,
+            include_root,
+        } => {
+            assert!(
+                (*chain_length as usize) <= MAX_CHAIN_LENGTH,
+                "valid chain length must remain normalized"
+            );
+            std::hint::black_box(*include_root);
+        }
+        ChainConfiguration::Expired {
+            expired_positions,
+            days_expired,
+        } => {
+            assert!(
+                expired_positions.len() <= MAX_CHAIN_LENGTH,
+                "expired position list must remain bounded"
+            );
+            assert!(*days_expired <= 3650, "expired day offset is normalized");
+        }
+        ChainConfiguration::NotYetValid {
+            future_positions,
+            days_future,
+        } => {
+            assert!(
+                future_positions.len() <= MAX_CHAIN_LENGTH,
+                "future position list must remain bounded"
+            );
+            assert!(*days_future <= 3650, "future day offset is normalized");
+        }
+        ChainConfiguration::SignatureMismatch {
+            mismatch_positions,
+            algorithms,
+        } => {
+            assert!(
+                mismatch_positions.len() <= MAX_CHAIN_LENGTH,
+                "signature mismatch position list must remain bounded"
+            );
+            assert!(
+                algorithms.len() <= MAX_CHAIN_LENGTH,
+                "signature algorithm list must remain bounded"
+            );
+            for algorithm in algorithms {
+                observe_signature_algorithm(algorithm);
+            }
+        }
+        ChainConfiguration::MissingIntermediate { missing_positions } => {
+            assert!(
+                missing_positions.len() <= MAX_CHAIN_LENGTH,
+                "missing-intermediate position list must remain bounded"
+            );
+        }
+        ChainConfiguration::IncorrectOrdering { shuffle_pattern } => {
+            assert!(
+                shuffle_pattern.len() <= MAX_CHAIN_LENGTH,
+                "shuffle pattern must remain bounded"
+            );
+        }
+        ChainConfiguration::SelfSignedIssues {
+            self_signed_positions,
+        } => {
+            assert!(
+                self_signed_positions.len() <= MAX_CHAIN_LENGTH,
+                "self-signed position list must remain bounded"
+            );
+        }
+        ChainConfiguration::MalformedDer {
+            corruption_positions,
+        } => {
+            assert!(
+                corruption_positions.len() <= MAX_CHAIN_LENGTH,
+                "DER corruption list must remain bounded"
+            );
+        }
+        ChainConfiguration::DuplicateCerts {
+            duplicate_positions,
+        } => {
+            assert!(
+                duplicate_positions.len() <= MAX_CHAIN_LENGTH / 2,
+                "duplicate-certificate list must remain bounded"
+            );
+        }
+        ChainConfiguration::MixedFormats { format_corruptions } => {
+            assert!(
+                format_corruptions.len() <= MAX_CHAIN_LENGTH,
+                "format corruption list must remain bounded"
+            );
+            for corruption in format_corruptions {
+                observe_format_corruption(corruption);
+            }
+        }
+    }
+}
+
+fn observe_validation_context(context: &ValidationContext) {
+    assert!(
+        context.custom_roots.len() <= 10,
+        "custom root list must remain bounded"
+    );
+    assert!(
+        (-365..=365).contains(&context.time_offset_days),
+        "validation time offset must remain normalized"
+    );
+
+    if let Some(max_chain_length) = context.max_chain_length {
+        assert!(
+            (1..=MAX_CHAIN_LENGTH as u8).contains(&max_chain_length),
+            "max chain length must remain normalized"
+        );
+    }
+
+    std::hint::black_box((
+        context.use_system_roots,
+        context.use_webpki_roots,
+        context.allow_self_signed,
+    ));
+
+    for source in &context.custom_roots {
+        observe_certificate_source(source);
+    }
+}
+
+fn observe_signature_algorithm(algorithm: &SignatureAlgorithm) {
+    let label = match algorithm {
+        SignatureAlgorithm::RsaSha256 => "rsa-sha256",
+        SignatureAlgorithm::RsaSha384 => "rsa-sha384",
+        SignatureAlgorithm::RsaSha512 => "rsa-sha512",
+        SignatureAlgorithm::EcdsaP256 => "ecdsa-p256",
+        SignatureAlgorithm::EcdsaP384 => "ecdsa-p384",
+        SignatureAlgorithm::EcdsaP521 => "ecdsa-p521",
+        SignatureAlgorithm::Ed25519 => "ed25519",
+        SignatureAlgorithm::Unknown(value) => {
+            std::hint::black_box(*value);
+            "unknown"
+        }
+    };
+    assert!(
+        !label.is_empty(),
+        "signature algorithm must have a diagnostic label"
+    );
+}
+
+fn observe_format_corruption(corruption: &FormatCorruption) {
+    std::hint::black_box(corruption.position);
+    observe_format_corruption_type(&corruption.corruption_type);
+}
+
+fn observe_format_corruption_type(corruption_type: &FormatCorruptionType) {
+    let label = match corruption_type {
+        FormatCorruptionType::PemHeaderInDer => "pem-header-in-der",
+        FormatCorruptionType::Base64Corruption(byte) => {
+            std::hint::black_box(*byte);
+            "base64-corruption"
+        }
+        FormatCorruptionType::MixedLineEndings => "mixed-line-endings",
+    };
+    assert!(
+        !label.is_empty(),
+        "format corruption must have a diagnostic label"
+    );
+}
+
+fn observe_certificate_source(source: &CertificateSource) {
+    match source {
+        CertificateSource::SelfSigned {
+            key_type,
+            validity_days,
+        } => {
+            observe_key_type(key_type);
+            assert!(*validity_days <= 3650, "validity days are normalized");
+        }
+        CertificateSource::WithProperties {
+            key_type,
+            issuer_name,
+            subject_name,
+            validity_start_offset_days,
+            validity_duration_days,
+            extensions,
+        } => {
+            observe_key_type(key_type);
+            observe_certificate_name(issuer_name);
+            observe_certificate_name(subject_name);
+            std::hint::black_box(extensions.len());
+            assert!(
+                (-365..=365).contains(validity_start_offset_days),
+                "validity start offset is normalized"
+            );
+            assert!(
+                *validity_duration_days <= 3650,
+                "validity duration is normalized"
+            );
+            for extension in extensions {
+                observe_certificate_extension(extension);
+            }
+        }
+        CertificateSource::RawDer(bytes) | CertificateSource::RawPem(bytes) => {
+            assert!(bytes.len() <= MAX_CERT_SIZE, "raw certificate is bounded");
+        }
+    }
+}
+
+fn observe_key_type(key_type: &KeyType) {
+    let label = match key_type {
+        KeyType::Rsa2048 => "rsa2048",
+        KeyType::Rsa4096 => "rsa4096",
+        KeyType::EcdsaP256 => "ecdsa-p256",
+        KeyType::EcdsaP384 => "ecdsa-p384",
+        KeyType::Ed25519 => "ed25519",
+    };
+    assert!(!label.is_empty(), "key type must have a diagnostic label");
+}
+
+fn observe_certificate_name(name: &CertificateName) {
+    std::hint::black_box(name.common_name.len());
+    if let Some(organization) = &name.organization {
+        std::hint::black_box(organization.len());
+    }
+    if let Some(country) = &name.country {
+        std::hint::black_box(country.len());
+    }
+}
+
+fn observe_certificate_extension(extension: &CertificateExtension) {
+    match extension {
+        CertificateExtension::BasicConstraints { is_ca, path_len } => {
+            std::hint::black_box(*is_ca);
+            if let Some(path_len) = path_len {
+                std::hint::black_box(*path_len);
+            }
+        }
+        CertificateExtension::KeyUsage(flags) => {
+            std::hint::black_box(flags.len());
+            for flag in flags {
+                observe_key_usage_flag(flag);
+            }
+        }
+        CertificateExtension::SubjectAltName(names) => {
+            for name in names {
+                std::hint::black_box(name.len());
+            }
+        }
+        CertificateExtension::AuthorityKeyIdentifier(bytes)
+        | CertificateExtension::SubjectKeyIdentifier(bytes) => {
+            std::hint::black_box(bytes.len());
+        }
+    }
+}
+
+fn observe_key_usage_flag(flag: &KeyUsageFlag) {
+    let label = match flag {
+        KeyUsageFlag::DigitalSignature => "digital-signature",
+        KeyUsageFlag::KeyEncipherment => "key-encipherment",
+        KeyUsageFlag::KeyAgreement => "key-agreement",
+        KeyUsageFlag::KeyCertSign => "key-cert-sign",
+        KeyUsageFlag::CrlSign => "crl-sign",
+    };
+    assert!(
+        !label.is_empty(),
+        "key usage flag must have a diagnostic label"
+    );
+}
+
+fn observe_expected_outcome(outcome: &ExpectedOutcome) {
+    match outcome {
+        ExpectedOutcome::Valid => {}
+        ExpectedOutcome::Either => {}
+        ExpectedOutcome::Invalid(invalidation) => {
+            let label = match invalidation {
+                InvalidationType::Expired => "expired",
+                InvalidationType::NotYetValid => "not-yet-valid",
+                InvalidationType::SignatureFailure => "signature-failure",
+                InvalidationType::UnknownIssuer => "unknown-issuer",
+                InvalidationType::MalformedCertificate => "malformed-certificate",
+                InvalidationType::ChainTooLong => "chain-too-long",
+                InvalidationType::SelfSignedNotAllowed => "self-signed-not-allowed",
+            };
+            assert!(
+                !label.is_empty(),
+                "invalid expected outcome must have a diagnostic label"
+            );
+        }
+    }
+}
 
 fn normalize_input(input: &mut CertChainValidationInput) {
     // Limit number of scenarios
