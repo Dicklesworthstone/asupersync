@@ -448,7 +448,14 @@ fuzz_target!(|input: LengthDelimitedBypassFuzz| {
 
     // General robustness: codec must never panic or cause memory safety violations
     let mut buf = BytesMut::from(&raw_data[..]);
-    let _ = observe_decode(&mut codec, &mut buf, max_len);
+    let observation = observe_decode_observation(&mut codec, &mut buf, max_len);
+    assert_general_decode_observation(
+        "general bypass decode",
+        &observation,
+        buf.len(),
+        raw_data.len(),
+        max_len,
+    );
 
     // Additional round-trip test if decoding succeeded
     let mut buf2 = BytesMut::from(&raw_data[..]);
@@ -504,11 +511,29 @@ fn configured_codec(
     builder.new_codec()
 }
 
+#[derive(Debug)]
+enum DecodeObservation {
+    Frame(BytesMut),
+    Incomplete,
+    Rejected(io::ErrorKind),
+}
+
 fn observe_decode(
     codec: &mut LengthDelimitedCodec,
     buf: &mut BytesMut,
     max_len: usize,
 ) -> Option<BytesMut> {
+    match observe_decode_observation(codec, buf, max_len) {
+        DecodeObservation::Frame(frame) => Some(frame),
+        DecodeObservation::Incomplete | DecodeObservation::Rejected(_) => None,
+    }
+}
+
+fn observe_decode_observation(
+    codec: &mut LengthDelimitedCodec,
+    buf: &mut BytesMut,
+    max_len: usize,
+) -> DecodeObservation {
     let before_len = buf.len();
     let result = codec.decode(buf);
     assert!(
@@ -524,18 +549,64 @@ fn observe_decode(
                 frame.len(),
                 max_len
             );
-            Some(frame)
+            DecodeObservation::Frame(frame)
         }
-        Ok(None) => None,
+        Ok(None) => DecodeObservation::Incomplete,
         Err(err) => {
+            let kind = err.kind();
             assert!(
                 matches!(
-                    err.kind(),
+                    kind,
                     io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof
                 ),
                 "unexpected length-delimited decode error kind: {err:?}"
             );
-            None
+            assert!(
+                !err.to_string().trim().is_empty(),
+                "length-delimited decode errors should expose diagnostics"
+            );
+            DecodeObservation::Rejected(kind)
+        }
+    }
+}
+
+fn assert_general_decode_observation(
+    context: &str,
+    observation: &DecodeObservation,
+    remaining_len: usize,
+    original_len: usize,
+    max_len: usize,
+) {
+    assert!(
+        remaining_len <= original_len,
+        "{context}: decoder left more bytes than it started with"
+    );
+
+    match observation {
+        DecodeObservation::Frame(frame) => {
+            assert!(
+                frame.len() <= max_len,
+                "{context}: decoded frame exceeded configured max length"
+            );
+            assert!(
+                frame.len() <= original_len,
+                "{context}: decoded frame exceeded original input length"
+            );
+        }
+        DecodeObservation::Incomplete => {
+            assert!(
+                remaining_len <= original_len,
+                "{context}: incomplete decode should retain only original bytes"
+            );
+        }
+        DecodeObservation::Rejected(kind) => {
+            assert!(
+                matches!(
+                    kind,
+                    io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof
+                ),
+                "{context}: rejected decode had unexpected error kind {kind:?}"
+            );
         }
     }
 }
