@@ -14,6 +14,8 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::thread;
 use std::time::Duration;
 
+const MAX_OPT_RDATA_BYTES: usize = 64;
+
 #[derive(Debug, Clone, Arbitrary)]
 struct FuzzInput {
     scenario: Scenario,
@@ -304,14 +306,17 @@ fn append_opt_record(
     opt_rdata: &[u8],
     oversized_opt: bool,
 ) {
+    let emitted_len = opt_rdata.len().min(MAX_OPT_RDATA_BYTES);
+    let emitted_rdata = &opt_rdata[..emitted_len];
+
     response.push(0);
     response.extend_from_slice(&41u16.to_be_bytes());
     response.extend_from_slice(&udp_payload_size.max(512).to_be_bytes());
     response.extend_from_slice(&0u32.to_be_bytes());
     let advertised_len =
-        u16::try_from(opt_rdata.len() + usize::from(oversized_opt)).unwrap_or(u16::MAX);
+        u16::try_from(emitted_len + usize::from(oversized_opt)).unwrap_or(u16::MAX);
     response.extend_from_slice(&advertised_len.to_be_bytes());
-    response.extend_from_slice(&opt_rdata[..opt_rdata.len().min(64)]);
+    response.extend_from_slice(emitted_rdata);
 }
 
 fn parse_question_end(request: &[u8]) -> Option<usize> {
