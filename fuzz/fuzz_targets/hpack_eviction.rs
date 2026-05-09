@@ -3,7 +3,7 @@
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 
-use asupersync::bytes::{BufMut, BytesMut};
+use asupersync::bytes::BytesMut;
 use asupersync::http::h2::hpack::{Decoder, Encoder, Header};
 
 /// Fuzzing parameters for HPACK dynamic table eviction scenarios.
@@ -341,5 +341,18 @@ fuzz_target!(|data: &[u8]| {
     };
 
     // Run HPACK eviction fuzzing
-    let _ = fuzz_hpack_eviction(config);
+    match fuzz_hpack_eviction(config) {
+        Ok(()) => {}
+        Err(error) => {
+            assert!(
+                !error.trim().is_empty(),
+                "HPACK eviction rejection should expose a diagnostic"
+            );
+            assert!(
+                error.len() <= 512,
+                "HPACK eviction rejection diagnostic should stay bounded: {} bytes",
+                error.len()
+            );
+        }
+    }
 });
