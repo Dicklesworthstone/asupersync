@@ -6,6 +6,7 @@
 //! - Correlation IDs parsed as valid UUID variants
 //! - Compressed snapshots decoded correctly
 //! - Oversized snapshot rejection for security
+//!
 //! Tests malformed diagnostic snapshots to verify robust error handling and security boundaries.
 
 #![no_main]
@@ -13,13 +14,10 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use serde_json::Value;
-use std::collections::BTreeMap;
 
 use asupersync::observability::task_inspector::{
-    TASK_CONSOLE_WIRE_SCHEMA_V1, TaskConsoleWireSnapshot, TaskDetailsWire, TaskRegionCountWire,
-    TaskStateInfo, TaskSummaryWire,
+    TASK_CONSOLE_WIRE_SCHEMA_V1, TaskConsoleWireSnapshot,
 };
-use asupersync::types::{ObligationId, RegionId, TaskId, Time};
 
 /// Maximum reasonable snapshot size for security testing (1MB)
 const MAX_SNAPSHOT_SIZE: usize = 1_048_576;
@@ -324,22 +322,16 @@ impl DiagnosticAttackPattern {
                     }
                     AmplificationPattern::DeepNesting { depth } => {
                         let mut json = serde_json::Value::Object(serde_json::Map::new());
-                        let mut current = &mut json;
                         for _ in 0..(*depth as usize).min(multiplier.min(1000)) {
-                            let mut nested = serde_json::Map::new();
-                            nested.insert(
-                                "nested".to_string(),
-                                serde_json::Value::Object(serde_json::Map::new()),
+                            let mut child = serde_json::Map::new();
+                            child.insert("nested".to_string(), json);
+
+                            let mut parent = serde_json::Map::new();
+                            parent.insert(
+                                "child".to_string(),
+                                serde_json::Value::Object(child),
                             );
-                            if let serde_json::Value::Object(obj) = current {
-                                obj.insert("child".to_string(), serde_json::Value::Object(nested));
-                                if let Some(serde_json::Value::Object(child)) = obj.get_mut("child")
-                                {
-                                    if let Some(nested_obj) = child.get_mut("nested") {
-                                        current = nested_obj;
-                                    }
-                                }
-                            }
+                            json = serde_json::Value::Object(parent);
                         }
                         serde_json::to_vec(&json).unwrap_or_default()
                     }
@@ -479,6 +471,40 @@ struct JsonManipulation {
     numeric_overflow: bool,
 }
 
+fn observe_task_console_snapshot_parse(
+    payload: &str,
+    context: &str,
+) -> Result<TaskConsoleWireSnapshot, serde_json::Error> {
+    match TaskConsoleWireSnapshot::from_json(payload) {
+        Ok(snapshot) => {
+            assert!(
+                snapshot.schema_version.len() <= 256,
+                "{context}: schema version is unexpectedly large: {} bytes",
+                snapshot.schema_version.len()
+            );
+            assert!(
+                snapshot.tasks.len() <= 50_000,
+                "{context}: task vector is unexpectedly large: {} tasks",
+                snapshot.tasks.len()
+            );
+            assert!(
+                snapshot.summary.by_region.len() <= 50_000,
+                "{context}: region count vector is unexpectedly large: {} regions",
+                snapshot.summary.by_region.len()
+            );
+            Ok(snapshot)
+        }
+        Err(err) => {
+            let diagnostic = err.to_string();
+            assert!(
+                !diagnostic.trim().is_empty(),
+                "{context}: parse failure should expose diagnostics"
+            );
+            Err(err)
+        }
+    }
+}
+
 fuzz_target!(|input: DiagnosticSnapshotFuzzInput| {
     // Limit input processing to reasonable bounds
     let mut raw_data = input.pattern.to_json_bytes();
@@ -539,7 +565,6 @@ fuzz_target!(|input: DiagnosticSnapshotFuzzInput| {
         match parse_result {
             Ok(snapshot) => {
                 // If parsing succeeds, timestamp ordering should be reasonable
-                let mut prev_timestamp = snapshot.generated_at;
                 let mut violations = 0;
 
                 for task in &snapshot.tasks {
@@ -547,7 +572,6 @@ fuzz_target!(|input: DiagnosticSnapshotFuzzInput| {
                     if task.created_at > snapshot.generated_at {
                         violations += 1;
                     }
-                    prev_timestamp = task.created_at;
                 }
 
                 // Allow some timestamp violations but not excessive ones (indicates corruption)
@@ -638,66 +662,62 @@ fuzz_target!(|input: DiagnosticSnapshotFuzzInput| {
     if matches!(
         input.pattern,
         DiagnosticAttackPattern::OversizedSnapshot { .. }
-    ) {
-        if raw_data.len() > MAX_SNAPSHOT_SIZE / 2 {
-            // Large but not maximum
-            let json_str = String::from_utf8_lossy(&raw_data);
-            let parse_result = TaskConsoleWireSnapshot::from_json(&json_str);
+    ) && raw_data.len() > MAX_SNAPSHOT_SIZE / 2
+    {
+        // Large but not maximum
+        let json_str = String::from_utf8_lossy(&raw_data);
+        let parse_result = TaskConsoleWireSnapshot::from_json(&json_str);
 
-            match parse_result {
-                Ok(snapshot) => {
-                    // If oversized parsing succeeds, should have reasonable limits
-                    assert!(
-                        snapshot.tasks.len() <= 50000,
-                        "Oversized snapshot security: too many tasks {} allowed",
-                        snapshot.tasks.len()
-                    );
+        match parse_result {
+            Ok(snapshot) => {
+                // If oversized parsing succeeds, should have reasonable limits
+                assert!(
+                    snapshot.tasks.len() <= 50000,
+                    "Oversized snapshot security: too many tasks {} allowed",
+                    snapshot.tasks.len()
+                );
 
-                    // Memory usage should be reasonable
-                    let estimated_memory = snapshot.tasks.len() * 1000; // Rough estimate
-                    assert!(
-                        estimated_memory <= 50_000_000, // 50MB limit
-                        "Oversized snapshot security: estimated memory {} bytes too high",
-                        estimated_memory
-                    );
-                }
-                Err(_) => {
-                    // Rejection is good security behavior for oversized inputs
-                }
+                // Memory usage should be reasonable
+                let estimated_memory = snapshot.tasks.len() * 1000; // Rough estimate
+                assert!(
+                    estimated_memory <= 50_000_000, // 50MB limit
+                    "Oversized snapshot security: estimated memory {} bytes too high",
+                    estimated_memory
+                );
+            }
+            Err(_) => {
+                // Rejection is good security behavior for oversized inputs
             }
         }
     }
 
     // General robustness: parser must never panic on any input
     let json_str = String::from_utf8_lossy(&raw_data);
-    let _ = TaskConsoleWireSnapshot::from_json(&json_str);
+    let _ = observe_task_console_snapshot_parse(&json_str, "raw diagnostic snapshot");
 
     // Test round-trip consistency for valid cases
-    if input.test_valid_path && raw_data.len() <= 65536 {
-        // Try to parse as valid JSON first
-        if let Ok(json_value) = serde_json::from_slice::<Value>(&raw_data) {
-            if let Ok(json_str) = serde_json::to_string(&json_value) {
-                if let Ok(snapshot) = TaskConsoleWireSnapshot::from_json(&json_str) {
-                    // Round-trip test
-                    if let Ok(reencoded) = snapshot.to_json() {
-                        if let Ok(reparsed) = TaskConsoleWireSnapshot::from_json(&reencoded) {
-                            assert_eq!(
-                                snapshot.schema_version, reparsed.schema_version,
-                                "Round-trip consistency: schema version mismatch"
-                            );
-                            assert_eq!(
-                                snapshot.generated_at, reparsed.generated_at,
-                                "Round-trip consistency: timestamp mismatch"
-                            );
-                            assert_eq!(
-                                snapshot.summary.total_tasks, reparsed.summary.total_tasks,
-                                "Round-trip consistency: task count mismatch"
-                            );
-                        }
-                    }
-                }
-            }
-        }
+    if input.test_valid_path
+        && raw_data.len() <= 65536
+        && let Ok(json_value) = serde_json::from_slice::<Value>(&raw_data)
+        && let Ok(json_str) = serde_json::to_string(&json_value)
+        && let Ok(snapshot) =
+            observe_task_console_snapshot_parse(&json_str, "round-trip diagnostic snapshot")
+        && let Ok(reencoded) = snapshot.to_json()
+        && let Ok(reparsed) =
+            observe_task_console_snapshot_parse(&reencoded, "reencoded diagnostic snapshot")
+    {
+        assert_eq!(
+            snapshot.schema_version, reparsed.schema_version,
+            "Round-trip consistency: schema version mismatch"
+        );
+        assert_eq!(
+            snapshot.generated_at, reparsed.generated_at,
+            "Round-trip consistency: timestamp mismatch"
+        );
+        assert_eq!(
+            snapshot.summary.total_tasks, reparsed.summary.total_tasks,
+            "Round-trip consistency: task count mismatch"
+        );
     }
 
     // Numeric overflow test
@@ -748,7 +768,7 @@ fuzz_target!(|input: DiagnosticSnapshotFuzzInput| {
     ];
 
     for &minimal in &minimal_cases {
-        let _ = TaskConsoleWireSnapshot::from_json(minimal);
+        let _ = observe_task_console_snapshot_parse(minimal, "minimal diagnostic snapshot");
         // Should not panic on minimal/malformed inputs
     }
 });
