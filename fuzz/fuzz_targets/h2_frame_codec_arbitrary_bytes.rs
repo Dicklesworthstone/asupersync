@@ -31,9 +31,11 @@
 
 use asupersync::bytes::BytesMut;
 use asupersync::codec::Decoder;
+use asupersync::http::h2::H2Error;
 use asupersync::http::h2::connection::FrameCodec;
-use asupersync::http::h2::frame::Frame;
+use asupersync::http::h2::frame::{Frame, FrameHeader};
 use libfuzzer_sys::fuzz_target;
+use std::sync::OnceLock;
 
 /// Maximum input size to prevent OOM fuzzing artifacts (64KB)
 const MAX_FUZZ_INPUT_SIZE: usize = 65536;
@@ -41,7 +43,11 @@ const MAX_FUZZ_INPUT_SIZE: usize = 65536;
 /// Maximum number of decode iterations to prevent infinite loops
 const MAX_DECODE_ITERATIONS: usize = 1000;
 
+static FIXED_CANARIES: OnceLock<()> = OnceLock::new();
+
 fuzz_target!(|data: &[u8]| {
+    FIXED_CANARIES.get_or_init(assert_fixed_decode_canaries);
+
     // Limit input size to prevent timeouts and OOM
     if data.is_empty() || data.len() > MAX_FUZZ_INPUT_SIZE {
         return;
@@ -79,7 +85,7 @@ fn fuzz_frame_codec_decode(data: &[u8]) {
         let buffer_len_before = buffer.len();
 
         // **CORE TEST**: FrameCodec::decode should never panic
-        let decode_result = codec.decode(&mut buffer);
+        let decode_result = observe_decode(&mut codec, &mut buffer);
 
         let buffer_len_after = buffer.len();
         let bytes_consumed = buffer_len_before - buffer_len_after;
@@ -101,7 +107,7 @@ fn fuzz_frame_codec_decode(data: &[u8]) {
                 if let Frame::Unknown {
                     frame_type,
                     stream_id,
-                    payload,
+                    payload: _,
                 } = &frame
                 {
                     assert!(
@@ -122,13 +128,9 @@ fn fuzz_frame_codec_decode(data: &[u8]) {
                 }
             }
             Ok(None) => {
-                // **ASSERTION 3**: Partial frame should not consume bytes
-                assert_eq!(
-                    bytes_consumed, 0,
-                    "Partial frame decode should not consume bytes: consumed={}",
-                    bytes_consumed
-                );
-
+                // Partial payloads consume their header into codec state, and complete
+                // extension frames are ignored by the codec. Both are legal `Ok(None)`
+                // outcomes as long as the buffer only shrinks.
                 // No complete frame available - exit loop
                 break;
             }
@@ -159,7 +161,203 @@ fn fuzz_frame_codec_decode(data: &[u8]) {
     // After any sequence of operations, the decoder should remain in a valid state
     // We test this by attempting one more decode operation
     let mut dummy_buffer = BytesMut::new();
-    let _ = codec.decode(&mut dummy_buffer); // Should not panic even on empty buffer
+    assert!(matches!(
+        observe_decode(&mut codec, &mut dummy_buffer),
+        Ok(None)
+    ));
+    assert!(dummy_buffer.is_empty());
+}
+
+fn observe_decode(codec: &mut FrameCodec, buffer: &mut BytesMut) -> Result<Option<Frame>, H2Error> {
+    let before_len = buffer.len();
+    let result = codec.decode(buffer);
+    assert!(
+        buffer.len() <= before_len,
+        "FrameCodec::decode grew the input buffer"
+    );
+
+    match &result {
+        Ok(Some(frame)) => {
+            assert!(
+                buffer.len() < before_len,
+                "successful H2 frame decode must consume bytes: frame={:?}",
+                frame_summary(frame)
+            );
+            assert_frame_contract(frame);
+        }
+        Ok(None) => {}
+        Err(error) => {
+            assert!(
+                !error.to_string().is_empty(),
+                "H2 decode error must have a non-empty description: {error:?}"
+            );
+        }
+    }
+
+    result
+}
+
+fn assert_frame_contract(frame: &Frame) {
+    match frame {
+        Frame::Data(frame) => {
+            assert_ne!(frame.stream_id, 0, "DATA frame decoded with stream ID 0");
+        }
+        Frame::Headers(frame) => {
+            assert_ne!(frame.stream_id, 0, "HEADERS frame decoded with stream ID 0");
+        }
+        Frame::Priority(frame) => {
+            assert_ne!(
+                frame.stream_id, 0,
+                "PRIORITY frame decoded with stream ID 0"
+            );
+        }
+        Frame::RstStream(frame) => {
+            assert_ne!(
+                frame.stream_id, 0,
+                "RST_STREAM frame decoded with stream ID 0"
+            );
+        }
+        Frame::Settings(frame) => {
+            assert!(
+                !frame.ack || frame.settings.is_empty(),
+                "SETTINGS ACK decoded with non-empty settings"
+            );
+        }
+        Frame::PushPromise(frame) => {
+            assert_ne!(
+                frame.stream_id, 0,
+                "PUSH_PROMISE frame decoded with stream ID 0"
+            );
+            assert_ne!(
+                frame.promised_stream_id, 0,
+                "PUSH_PROMISE decoded with promised stream ID 0"
+            );
+        }
+        Frame::Ping(frame) => {
+            assert_eq!(
+                frame.opaque_data.len(),
+                8,
+                "PING frame opaque data must stay exactly 8 bytes"
+            );
+        }
+        Frame::GoAway(frame) => {
+            assert_eq!(
+                frame.last_stream_id & 0x8000_0000,
+                0,
+                "GOAWAY last stream ID reserved bit should be cleared"
+            );
+        }
+        Frame::WindowUpdate(frame) => {
+            assert_ne!(
+                frame.increment, 0,
+                "WINDOW_UPDATE frame decoded with zero increment"
+            );
+        }
+        Frame::Continuation(frame) => {
+            assert_ne!(
+                frame.stream_id, 0,
+                "CONTINUATION frame decoded with stream ID 0"
+            );
+        }
+        Frame::Unknown {
+            frame_type,
+            stream_id,
+            ..
+        } => {
+            assert!(
+                *frame_type > 9,
+                "unknown H2 frame type should be an extension type: {frame_type}"
+            );
+            assert_eq!(
+                stream_id & 0x8000_0000,
+                0,
+                "unknown frame stream ID reserved bit should be cleared"
+            );
+        }
+    }
+}
+
+fn assert_fixed_decode_canaries() {
+    let mut empty = BytesMut::new();
+    let mut codec = FrameCodec::new();
+    assert!(matches!(observe_decode(&mut codec, &mut empty), Ok(None)));
+    assert!(empty.is_empty());
+
+    let mut incomplete_header = BytesMut::from(&b"\0\0"[..]);
+    let mut codec = FrameCodec::new();
+    assert!(matches!(
+        observe_decode(&mut codec, &mut incomplete_header),
+        Ok(None)
+    ));
+    assert_eq!(incomplete_header.as_ref(), b"\0\0");
+
+    let mut data_frame = frame_bytes(5, 0, 0x1, 1, b"hello");
+    let mut codec = FrameCodec::new();
+    let frame = observe_decode(&mut codec, &mut data_frame)
+        .expect("DATA frame canary should decode")
+        .expect("DATA frame canary should produce a frame");
+    match &frame {
+        Frame::Data(frame) => {
+            assert_eq!(frame.stream_id, 1);
+            assert!(frame.end_stream);
+            assert_eq!(frame.data.as_ref(), b"hello");
+        }
+        other => panic!("expected DATA frame, got {}", frame_summary(other)),
+    }
+    assert!(data_frame.is_empty());
+
+    let mut partial_payload = frame_bytes(5, 0, 0, 1, b"he");
+    let mut codec = FrameCodec::new();
+    assert!(matches!(
+        observe_decode(&mut codec, &mut partial_payload),
+        Ok(None)
+    ));
+    assert_eq!(partial_payload.as_ref(), b"he");
+    partial_payload.extend_from_slice(b"llo");
+    let frame = observe_decode(&mut codec, &mut partial_payload)
+        .expect("completed partial DATA frame should decode")
+        .expect("completed partial DATA frame should produce a frame");
+    match &frame {
+        Frame::Data(frame) => {
+            assert_eq!(frame.stream_id, 1);
+            assert_eq!(frame.data.as_ref(), b"hello");
+        }
+        other => panic!(
+            "expected completed DATA frame, got {}",
+            frame_summary(other)
+        ),
+    }
+    assert!(partial_payload.is_empty());
+
+    let mut unknown = frame_bytes(3, 0x0a, 0xff, 42, b"abc");
+    let mut codec = FrameCodec::new();
+    assert!(matches!(observe_decode(&mut codec, &mut unknown), Ok(None)));
+    assert!(
+        unknown.is_empty(),
+        "complete extension frames should be consumed and ignored"
+    );
+
+    let mut oversized = frame_bytes(17, 0, 0, 1, &[]);
+    let mut codec = FrameCodec::new();
+    codec.set_max_frame_size(16);
+    assert!(observe_decode(&mut codec, &mut oversized).is_err());
+    assert!(
+        oversized.is_empty(),
+        "oversized-frame rejection should consume the parsed header"
+    );
+}
+
+fn frame_bytes(length: u32, frame_type: u8, flags: u8, stream_id: u32, payload: &[u8]) -> BytesMut {
+    let header = FrameHeader {
+        length,
+        frame_type,
+        flags,
+        stream_id,
+    };
+    let mut bytes = BytesMut::new();
+    header.write(&mut bytes);
+    bytes.extend_from_slice(payload);
+    bytes
 }
 
 /// Create a brief frame summary for debugging without exposing large payloads
