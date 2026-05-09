@@ -15,7 +15,7 @@
 
 use arbitrary::Arbitrary;
 use asupersync::http::h3_native::{H3ConnectionConfig, H3Frame, H3NativeError};
-use asupersync::net::quic_core::encode_varint;
+use asupersync::net::quic_core::{QuicCoreError, encode_varint};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
@@ -124,7 +124,7 @@ impl FuzzH3Frame {
         match self {
             FuzzH3Frame::Headers { qpack_data } => H3Frame::Headers(qpack_data.clone()),
             FuzzH3Frame::Data { payload } => H3Frame::Data(payload.clone()),
-            FuzzH3Frame::Settings { settings } => {
+            FuzzH3Frame::Settings { settings: _ } => {
                 // Convert to H3Settings - simplified for fuzzing
                 H3Frame::Settings(Default::default())
             }
@@ -245,7 +245,6 @@ impl FrameOrderingValidator {
 /// Convert frame sequence to wire format bytes
 fn encode_frame_sequence(sequence: &H3FrameSequence) -> Vec<u8> {
     let mut encoded = Vec::new();
-    let config = H3ConnectionConfig::default();
 
     for frame in &sequence.frames {
         let h3_frame = frame.to_h3_frame();
@@ -260,30 +259,84 @@ fn encode_frame_sequence(sequence: &H3FrameSequence) -> Vec<u8> {
             _ => continue, // Skip unsupported frame types
         };
 
-        let payload = match &h3_frame {
-            H3Frame::Data(data) => data.clone(),
-            H3Frame::Headers(headers) => headers.clone(),
-            H3Frame::Settings(_) => vec![0x01, 0x40, 0x00], // Minimal SETTINGS
-            H3Frame::Goaway(stream_id) => {
+        let payload = match (&h3_frame, frame) {
+            (H3Frame::Data(data), _) => data.clone(),
+            (H3Frame::Headers(headers), _) => headers.clone(),
+            (H3Frame::Settings(_), FuzzH3Frame::Settings { settings }) => {
+                encode_settings_payload(settings)
+            }
+            (H3Frame::Goaway(stream_id), _) => {
                 let mut goaway_payload = Vec::new();
-                encode_varint(*stream_id, &mut goaway_payload).ok();
+                if !observe_varint_encoding(
+                    encode_varint(*stream_id, &mut goaway_payload),
+                    "GOAWAY stream id",
+                ) {
+                    continue;
+                }
                 goaway_payload
             }
-            H3Frame::CancelPush(push_id) => {
+            (H3Frame::CancelPush(push_id), _) => {
                 let mut cancel_payload = Vec::new();
-                encode_varint(*push_id, &mut cancel_payload).ok();
+                if !observe_varint_encoding(
+                    encode_varint(*push_id, &mut cancel_payload),
+                    "CANCEL_PUSH push id",
+                ) {
+                    continue;
+                }
                 cancel_payload
             }
             _ => continue,
         };
 
         // Encode frame header
-        encode_varint(frame_type, &mut encoded).ok();
-        encode_varint(payload.len() as u64, &mut encoded).ok();
+        assert!(
+            observe_varint_encoding(encode_varint(frame_type, &mut encoded), "frame type"),
+            "bounded HTTP/3 frame type must encode as QUIC varint"
+        );
+        assert!(
+            observe_varint_encoding(
+                encode_varint(payload.len() as u64, &mut encoded),
+                "frame payload length",
+            ),
+            "bounded HTTP/3 payload length must encode as QUIC varint"
+        );
         encoded.extend_from_slice(&payload);
     }
 
     encoded
+}
+
+fn encode_settings_payload(settings: &[(u64, u64)]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    for (id, value) in settings {
+        assert!(
+            observe_varint_encoding(encode_varint(*id, &mut payload), "SETTINGS id"),
+            "bounded HTTP/3 SETTINGS id must encode as QUIC varint"
+        );
+        assert!(
+            observe_varint_encoding(encode_varint(*value, &mut payload), "SETTINGS value"),
+            "bounded HTTP/3 SETTINGS value must encode as QUIC varint"
+        );
+    }
+    payload
+}
+
+fn observe_varint_encoding(result: Result<(), QuicCoreError>, context: &str) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(error) => {
+            let diagnostic = format!("{context}: {error:?}");
+            assert!(
+                !diagnostic.trim().is_empty(),
+                "varint encoding failures must expose diagnostics"
+            );
+            assert!(
+                diagnostic.len() < 512,
+                "varint encoding diagnostics must stay bounded"
+            );
+            false
+        }
+    }
 }
 
 fuzz_target!(|sequence: H3FrameSequence| {
@@ -355,31 +408,19 @@ fuzz_target!(|sequence: H3FrameSequence| {
     for frame in &parsed_frames {
         let validation_result = final_validator.validate_frame(frame, sequence.stream_id);
 
-        // Invariant: Frame ordering violations must be consistent
-        match &sequence.scenario {
-            FrameOrderingScenario::MalformedDataFirst => {
-                // DATA-first scenarios should trigger ordering errors
-                if matches!(frame, H3Frame::Data(_))
-                    && !final_validator
-                        .stream_states
-                        .contains_key(&sequence.stream_id)
-                {
-                    assert!(validation_result.is_err(), "DATA-first should be rejected");
-                }
-            }
-            FrameOrderingScenario::NormalRequest => {
-                // Normal scenarios should not trigger errors for well-formed sequences
-                // (Allowing errors for fuzz-generated malformed data is acceptable)
-            }
-            _ => {
-                // Other scenarios have their own constraints
-                // Fuzzing explores the edge cases
-            }
+        if matches!(
+            (&sequence.scenario, frame),
+            (FrameOrderingScenario::MalformedDataFirst, H3Frame::Data(_))
+        ) && !final_validator
+            .stream_states
+            .contains_key(&sequence.stream_id)
+        {
+            assert!(validation_result.is_err(), "DATA-first should be rejected");
         }
     }
 
     // Test 4: State machine consistency
-    for (stream_id, state) in &final_validator.stream_states {
+    for state in final_validator.stream_states.values() {
         // Invariant: Error states should not transition to non-error states
         if matches!(state, StreamState::Error(_)) {
             // Ensure error state is terminal
