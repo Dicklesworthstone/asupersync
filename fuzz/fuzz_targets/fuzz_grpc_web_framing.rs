@@ -10,7 +10,7 @@ use libfuzzer_sys::fuzz_target;
 
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::grpc::status::{Code, GrpcError, Status};
-use asupersync::grpc::streaming::Metadata;
+use asupersync::grpc::streaming::{Metadata, MetadataValue};
 use asupersync::grpc::web::{
     ContentType, TrailerFrame, WebFrame, WebFrameCodec, base64_decode, base64_encode,
     decode_trailers, is_grpc_web_request, is_text_mode,
@@ -97,16 +97,15 @@ fn fuzz_grpc_web_framing(input: FuzzInput) {
         } => exercise_binary_stream(usize::from(max_frame_size), bytes),
         FuzzInput::TextMode { content_type, text } => {
             let header = header_value(&content_type);
-            let _ = observe_content_type_parse(&header);
-            let _ = is_grpc_web_request(&header);
-            let header_is_text = is_text_mode(&header);
+            let content_type = observe_content_type_parse(&header);
+            let request_detected = observe_grpc_web_request_detection(&header, content_type);
+            let header_is_text = observe_text_mode_detection(&header, content_type);
+            let text = truncate_text(&text, MAX_TEXT_CHARS);
+            let decoded = observe_base64_decode(&text);
+            observe_text_payload_decode(request_detected, header_is_text, &text, &decoded);
 
-            if header_is_text {
-                if let Ok(decoded) = observe_base64_decode(&truncate_text(&text, MAX_TEXT_CHARS)) {
-                    exercise_binary_stream(DEFAULT_TEXT_MAX_FRAME_SIZE, decoded);
-                }
-            } else {
-                let _ = observe_base64_decode(&truncate_text(&text, MAX_TEXT_CHARS));
+            if header_is_text && let Ok(decoded) = decoded {
+                exercise_binary_stream(DEFAULT_TEXT_MAX_FRAME_SIZE, decoded);
             }
         }
         FuzzInput::Structured(stream) => exercise_structured_stream(stream),
@@ -148,6 +147,26 @@ fn observe_content_type_parse(header: &str) -> Option<ContentType> {
     result
 }
 
+fn observe_grpc_web_request_detection(header: &str, content_type: Option<ContentType>) -> bool {
+    let detected = is_grpc_web_request(header);
+    assert_eq!(
+        detected,
+        content_type.is_some(),
+        "request detection should match content-type parsing"
+    );
+    detected
+}
+
+fn observe_text_mode_detection(header: &str, content_type: Option<ContentType>) -> bool {
+    let text_mode = is_text_mode(header);
+    assert_eq!(
+        text_mode,
+        content_type.is_some_and(ContentType::is_text_mode),
+        "text-mode detection should match parsed content type"
+    );
+    text_mode
+}
+
 fn observe_base64_decode(text: &str) -> Result<Vec<u8>, GrpcError> {
     let result = base64_decode(text);
 
@@ -162,6 +181,26 @@ fn observe_base64_decode(text: &str) -> Result<Vec<u8>, GrpcError> {
     }
 
     result
+}
+
+fn observe_text_payload_decode(
+    request_detected: bool,
+    header_is_text: bool,
+    text: &str,
+    result: &Result<Vec<u8>, GrpcError>,
+) {
+    if header_is_text {
+        assert!(
+            request_detected,
+            "text-mode gRPC-Web content type should be detected as a gRPC-Web request"
+        );
+    }
+    if let Ok(decoded) = result {
+        assert!(
+            decoded.len() <= text.len(),
+            "observed text decode should remain bounded by input text"
+        );
+    }
 }
 
 fn observe_decode_trailers(payload: &[u8]) -> Result<TrailerFrame, GrpcError> {
@@ -181,6 +220,28 @@ fn observe_decode_trailers(payload: &[u8]) -> Result<TrailerFrame, GrpcError> {
     }
 
     result
+}
+
+fn observe_raw_trailer_payload_decode(
+    compressed_flag: bool,
+    payload: &[u8],
+    result: &Result<TrailerFrame, GrpcError>,
+) {
+    match result {
+        Ok(trailers) => {
+            assert!(
+                !format!("{:?}", trailers.status.code()).is_empty(),
+                "decoded trailer status code should remain observable"
+            );
+            if compressed_flag {
+                assert!(
+                    !payload.is_empty() || trailers.metadata.iter().next().is_none(),
+                    "direct trailer payload decode should not synthesize metadata"
+                );
+            }
+        }
+        Err(error) => assert_grpc_error_observable(error, "raw trailer payload decode"),
+    }
 }
 
 fn exercise_structured_stream(stream: StructuredStream) {
@@ -232,13 +293,15 @@ fn build_structured_stream(stream: &StructuredStream) -> Vec<u8> {
                 let mut metadata = Metadata::new();
 
                 for item in ascii_metadata.iter().take(MAX_METADATA_ITEMS) {
-                    let _ = metadata.insert(
+                    observe_ascii_metadata_insert(
+                        &mut metadata,
                         truncate_text(&item.key, 64),
                         truncate_text(&item.value, 128),
                     );
                 }
                 for item in binary_metadata.iter().take(MAX_METADATA_ITEMS) {
-                    let _ = metadata.insert_bin(
+                    observe_binary_metadata_insert(
+                        &mut metadata,
                         truncate_text(&item.key, 64),
                         Bytes::from(truncate_bytes(item.value.clone(), 128)),
                     );
@@ -261,7 +324,8 @@ fn build_structured_stream(stream: &StructuredStream) -> Vec<u8> {
                     payload.len() as u16,
                     &payload,
                 ));
-                let _ = observe_decode_trailers(&payload);
+                let result = observe_decode_trailers(&payload);
+                observe_raw_trailer_payload_decode(*compressed_flag, &payload, &result);
             }
             StructuredFrame::RawFrame {
                 flag,
@@ -275,6 +339,38 @@ fn build_structured_stream(stream: &StructuredStream) -> Vec<u8> {
     }
 
     out.to_vec()
+}
+
+fn observe_ascii_metadata_insert(metadata: &mut Metadata, key: String, value: String) {
+    let before_len = metadata.iter().count();
+    let inserted = metadata.insert(key, value);
+    observe_metadata_insert_result(inserted, before_len, metadata.iter().count(), "ASCII");
+}
+
+fn observe_binary_metadata_insert(metadata: &mut Metadata, key: String, value: Bytes) {
+    let before_len = metadata.iter().count();
+    let inserted = metadata.insert_bin(key, value);
+    observe_metadata_insert_result(inserted, before_len, metadata.iter().count(), "binary");
+}
+
+fn observe_metadata_insert_result(
+    inserted: bool,
+    before_len: usize,
+    after_len: usize,
+    context: &str,
+) {
+    if inserted {
+        assert_eq!(
+            after_len,
+            before_len + 1,
+            "{context} metadata insert should append exactly one entry"
+        );
+    } else {
+        assert_eq!(
+            after_len, before_len,
+            "{context} metadata insert rejection should leave metadata unchanged"
+        );
+    }
 }
 
 fn observe_frame_encode_result(
@@ -309,16 +405,35 @@ fn observe_frame_encode_result(
 }
 
 fn exercise_binary_stream(max_frame_size: usize, bytes: Vec<u8>) {
-    let codec = WebFrameCodec::with_max_size(max_frame_size.max(1));
+    let max_frame_size = max_frame_size.max(1);
+    let codec = WebFrameCodec::with_max_size(max_frame_size);
     let mut src = BytesMut::from(bytes.as_slice());
     let mut iterations = 0usize;
 
     while !src.is_empty() && iterations < MAX_FRAMES {
         let before = src.len();
         match codec.decode(&mut src) {
-            Ok(Some(frame)) => inspect_frame(frame),
-            Ok(None) => break,
-            Err(_) => {
+            Ok(Some(frame)) => {
+                assert!(
+                    src.len() < before,
+                    "successful frame decode should consume at least the frame header"
+                );
+                inspect_frame(frame, max_frame_size);
+            }
+            Ok(None) => {
+                assert_eq!(
+                    src.len(),
+                    before,
+                    "incomplete gRPC-Web frame should remain buffered"
+                );
+                break;
+            }
+            Err(error) => {
+                assert_grpc_error_observable(&error, "gRPC-Web frame decode");
+                assert!(
+                    codec.is_poisoned(),
+                    "gRPC-Web decode errors should poison the codec"
+                );
                 if src.len() == before {
                     break;
                 }
@@ -328,18 +443,58 @@ fn exercise_binary_stream(max_frame_size: usize, bytes: Vec<u8>) {
     }
 }
 
-fn inspect_frame(frame: WebFrame) {
+fn inspect_frame(frame: WebFrame, max_frame_size: usize) {
     match frame {
         WebFrame::Data { compressed, data } => {
-            let _ = compressed;
-            let _ = data.len();
+            observe_data_frame(compressed, &data, max_frame_size);
         }
         WebFrame::Trailers(trailers) => {
-            let _ = trailers.status.code().as_i32();
-            let _ = trailers.status.message();
-            for (key, value) in trailers.metadata.iter() {
-                let _ = key;
-                let _ = value;
+            observe_trailer_frame(&trailers);
+        }
+    }
+}
+
+fn observe_data_frame(compressed: bool, data: &Bytes, max_frame_size: usize) {
+    assert!(
+        data.len() <= max_frame_size,
+        "decoded data frame exceeded codec max frame size"
+    );
+    if compressed {
+        assert!(
+            !format!("{data:?}").is_empty(),
+            "compressed data frame payload should remain observable"
+        );
+    }
+}
+
+fn observe_trailer_frame(trailers: &TrailerFrame) {
+    assert!(
+        !format!("{:?}", trailers.status.code()).is_empty(),
+        "trailer status code should remain observable"
+    );
+    assert!(
+        !format!("{:?}", trailers.status.message()).is_empty(),
+        "trailer status message should remain observable"
+    );
+    for (key, value) in trailers.metadata.iter() {
+        assert!(!key.is_empty(), "trailer metadata key is empty");
+        match value {
+            MetadataValue::Ascii(value) => assert!(
+                value
+                    .as_bytes()
+                    .iter()
+                    .all(|byte| (0x20..=0x7E).contains(byte)),
+                "ASCII trailer metadata value should stay visible ASCII"
+            ),
+            MetadataValue::Binary(value) => {
+                assert!(
+                    key.ends_with("-bin"),
+                    "binary trailer metadata key should end with -bin"
+                );
+                assert!(
+                    !format!("{value:?}").is_empty(),
+                    "binary trailer metadata value should remain observable"
+                );
             }
         }
     }
