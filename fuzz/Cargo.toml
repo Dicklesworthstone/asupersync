@@ -1105,6 +1105,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h2_settings_frame_parser"
+path = "fuzz_targets/h2_settings_frame_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "h2_rst_stream"
 path = "fuzz_targets/h2_rst_stream.rs"
 test = false

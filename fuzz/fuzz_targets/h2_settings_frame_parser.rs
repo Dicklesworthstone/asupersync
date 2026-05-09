@@ -2,18 +2,43 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashMap;
+use std::fmt::Debug;
 
 use asupersync::bytes::Bytes;
 use asupersync::http::h2::frame::{
-    FrameHeader, FrameType, Setting, SettingsFrame, FRAME_HEADER_SIZE,
-    MIN_MAX_FRAME_SIZE, MAX_FRAME_SIZE,
+    FRAME_HEADER_SIZE, FrameHeader, FrameType, MAX_FRAME_SIZE, MIN_MAX_FRAME_SIZE, Setting,
+    SettingsFrame,
 };
 
 /// Maximum input size to prevent OOM during fuzzing
 const MAX_INPUT_SIZE: usize = 64 * 1024;
 /// Maximum reasonable number of settings parameters
 const MAX_SETTINGS_COUNT: usize = 1024;
+
+fn assert_visible_debug<T: Debug + ?Sized>(context: &str, value: &T) {
+    let rendered = format!("{value:?}");
+    assert!(
+        !rendered.is_empty(),
+        "{context} produced an empty debug representation"
+    );
+}
+
+fn observe_result<T, E>(context: &str, result: Result<T, E>) -> Option<T>
+where
+    T: Debug,
+    E: Debug,
+{
+    match result {
+        Ok(value) => {
+            assert_visible_debug(context, &value);
+            Some(value)
+        }
+        Err(err) => {
+            assert_visible_debug(context, &err);
+            None
+        }
+    }
+}
 
 /// Structure-aware fuzzer for HTTP/2 SETTINGS frame parameter pairs and ACK handshake.
 ///
@@ -121,7 +146,7 @@ enum ViolatingValue {
     /// ENABLE_PUSH > 1 (should be 0 or 1)
     EnablePushOutOfRange(u32), // Values > 1
     /// INITIAL_WINDOW_SIZE > 2^31-1
-    WindowSizeOverflow(u32),   // Values > 0x7fff_ffff
+    WindowSizeOverflow(u32), // Values > 0x7fff_ffff
     /// MAX_FRAME_SIZE outside valid bounds
     FrameSizeOutOfBounds(u32), // Values < MIN_MAX_FRAME_SIZE or > MAX_FRAME_SIZE
     /// Other parameters with extreme values
@@ -132,7 +157,10 @@ impl SettingsParameter {
     /// Encode this parameter as 6-byte wire format (2-byte ID + 4-byte value)
     fn encode(&self) -> Vec<u8> {
         match self {
-            Self::Known { setting_type, value } => {
+            Self::Known {
+                setting_type,
+                value,
+            } => {
                 let mut bytes = Vec::with_capacity(6);
                 bytes.extend_from_slice(&setting_type.id().to_be_bytes());
                 bytes.extend_from_slice(&value.to_be_bytes());
@@ -144,7 +172,10 @@ impl SettingsParameter {
                 bytes.extend_from_slice(&value.to_be_bytes());
                 bytes
             }
-            Self::BoundaryViolation { setting_type, violating_value } => {
+            Self::BoundaryViolation {
+                setting_type,
+                violating_value,
+            } => {
                 let mut bytes = Vec::with_capacity(6);
                 bytes.extend_from_slice(&setting_type.id().to_be_bytes());
 
@@ -157,7 +188,10 @@ impl SettingsParameter {
                 bytes.extend_from_slice(&value.to_be_bytes());
                 bytes
             }
-            Self::RawBytes { id_bytes, value_bytes } => {
+            Self::RawBytes {
+                id_bytes,
+                value_bytes,
+            } => {
                 let mut bytes = Vec::with_capacity(6);
                 bytes.extend_from_slice(id_bytes);
                 bytes.extend_from_slice(value_bytes);
@@ -194,7 +228,7 @@ fn generate_settings_frame_bytes(scenario: SettingsFrameScenario) -> Vec<u8> {
     };
 
     // Encode frame header (9 bytes)
-    frame_bytes.extend_from_slice(&(declared_length as u32).to_be_bytes()[1..]); // 24-bit length
+    frame_bytes.extend_from_slice(&declared_length.to_be_bytes()[1..]); // 24-bit length
     frame_bytes.push(FrameType::Settings as u8); // Frame type
 
     // Calculate flags
@@ -214,7 +248,9 @@ fn generate_settings_frame_bytes(scenario: SettingsFrameScenario) -> Vec<u8> {
 }
 
 /// Execute the SETTINGS frame boundary testing scenario
-fn execute_settings_scenario(scenario: SettingsFrameScenario) -> Result<(), Box<dyn std::error::Error>> {
+fn execute_settings_scenario(
+    scenario: SettingsFrameScenario,
+) -> Result<(), Box<dyn std::error::Error>> {
     if scenario.parameters.len() > MAX_SETTINGS_COUNT {
         return Ok(()); // Skip oversized scenarios
     }
@@ -228,39 +264,39 @@ fn execute_settings_scenario(scenario: SettingsFrameScenario) -> Result<(), Box<
     if frame_bytes.len() >= FRAME_HEADER_SIZE {
         let header_result = std::panic::catch_unwind(|| {
             let header_bytes = &frame_bytes[..FRAME_HEADER_SIZE];
-            let mut bytes = asupersync::bytes::BytesMut::from(&header_bytes[..]);
+            let mut bytes = asupersync::bytes::BytesMut::from(header_bytes);
             FrameHeader::parse(&mut bytes)
         });
 
         match header_result {
-            Ok(Ok(header)) => {
+            Ok(header_result) => {
                 // Valid header parsed - now test SETTINGS frame parsing
-                if frame_bytes.len() > FRAME_HEADER_SIZE {
+                if let Some(header) =
+                    observe_result("generated SETTINGS frame header parse", header_result)
+                    && frame_bytes.len() > FRAME_HEADER_SIZE
+                {
                     let payload = Bytes::from(frame_bytes[FRAME_HEADER_SIZE..].to_vec());
 
-                    let parse_result = std::panic::catch_unwind(|| {
-                        SettingsFrame::parse(&header, &payload)
-                    });
+                    let parse_result =
+                        std::panic::catch_unwind(|| SettingsFrame::parse(&header, &payload));
 
                     match parse_result {
-                        Ok(Ok(settings_frame)) => {
+                        Ok(settings_result) => {
                             // Successfully parsed - verify invariants
-                            verify_settings_invariants(&settings_frame, &header)?;
+                            if let Some(settings_frame) =
+                                observe_result("generated SETTINGS frame parse", settings_result)
+                            {
+                                verify_settings_invariants(&settings_frame, &header)?;
 
-                            // Test round-trip encoding if valid
-                            test_settings_roundtrip(settings_frame)?;
-                        }
-                        Ok(Err(_)) => {
-                            // Expected protocol error for malformed frames
+                                // Test round-trip encoding if valid
+                                test_settings_roundtrip(settings_frame)?;
+                            }
                         }
                         Err(_) => {
                             return Err("SETTINGS frame parsing panicked".into());
                         }
                     }
                 }
-            }
-            Ok(Err(_)) => {
-                // Expected header parsing error
             }
             Err(_) => {
                 return Err("Frame header parsing panicked".into());
@@ -274,13 +310,11 @@ fn execute_settings_scenario(scenario: SettingsFrameScenario) -> Result<(), Box<
 /// Verify SETTINGS frame invariants after successful parsing
 fn verify_settings_invariants(
     frame: &SettingsFrame,
-    header: &FrameHeader
+    header: &FrameHeader,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Verify ACK semantics
-    if frame.ack {
-        if !frame.settings.is_empty() {
-            return Err("ACK frame contains parameters".into());
-        }
+    if frame.ack && !frame.settings.is_empty() {
+        return Err("ACK frame contains parameters".into());
     }
 
     // Verify stream ID constraint
@@ -321,32 +355,29 @@ fn test_settings_roundtrip(frame: SettingsFrame) -> Result<(), Box<dyn std::erro
     let mut encoded = asupersync::bytes::BytesMut::new();
 
     // Test encoding
-    let encode_result = std::panic::catch_unwind(|| {
-        frame.encode(&mut encoded)
-    });
-
-    match encode_result {
-        Ok(Ok(())) => {
+    match frame.encode(&mut encoded) {
+        Ok(()) => {
             // Encoding succeeded - test re-parsing
             if encoded.len() >= FRAME_HEADER_SIZE {
                 let payload = Bytes::from(encoded[FRAME_HEADER_SIZE..].to_vec());
-                let mut header_bytes = encoded[..FRAME_HEADER_SIZE].to_vec();
+                let header_bytes = encoded[..FRAME_HEADER_SIZE].to_vec();
                 let mut header_buf = asupersync::bytes::BytesMut::from(header_bytes.as_slice());
 
-                if let Ok(header) = FrameHeader::parse(&mut header_buf) {
-                    if let Ok(reparsed) = SettingsFrame::parse(&header, &payload) {
-                        // Verify round-trip consistency
-                        assert_eq!(frame.ack, reparsed.ack);
-                        assert_eq!(frame.settings.len(), reparsed.settings.len());
-                    }
+                if let Some(header) = observe_result(
+                    "round-trip SETTINGS frame header parse",
+                    FrameHeader::parse(&mut header_buf),
+                ) && let Some(reparsed) = observe_result(
+                    "round-trip SETTINGS frame parse",
+                    SettingsFrame::parse(&header, &payload),
+                ) {
+                    // Verify round-trip consistency
+                    assert_eq!(frame.ack, reparsed.ack);
+                    assert_eq!(frame.settings.len(), reparsed.settings.len());
                 }
             }
         }
-        Ok(Err(_)) => {
-            // Expected encoding error
-        }
-        Err(_) => {
-            return Err("SETTINGS frame encoding panicked".into());
+        Err(err) => {
+            assert_visible_debug("SETTINGS frame encode error", &err);
         }
     }
 
@@ -362,12 +393,11 @@ fuzz_target!(|data: &[u8]| {
 
     // Generate structured scenario from input data
     if let Ok(scenario) = SettingsFrameScenario::arbitrary(&mut u) {
-        let _ = std::panic::catch_unwind(|| {
-            if let Err(e) = execute_settings_scenario(scenario) {
-                // Log error but don't panic - errors are expected for boundary cases
-                eprintln!("Settings scenario error: {}", e);
-            }
-        });
+        match std::panic::catch_unwind(|| execute_settings_scenario(scenario)) {
+            Ok(Ok(())) => assert_visible_debug("SETTINGS scenario outcome", &"ok"),
+            Ok(Err(err)) => assert_visible_debug("SETTINGS scenario error", &err),
+            Err(_) => panic!("SETTINGS scenario execution panicked"),
+        }
     }
 
     // Also test raw bytes directly as SETTINGS frame payload
@@ -375,8 +405,8 @@ fuzz_target!(|data: &[u8]| {
         // Create a minimal SETTINGS frame header + payload from raw bytes
         let mut frame_bytes = vec![
             0x00, 0x00, 0x06, // Length: 6 bytes (1 parameter)
-            0x04,             // Type: SETTINGS
-            0x00,             // Flags: none
+            0x04, // Type: SETTINGS
+            0x00, // Flags: none
             0x00, 0x00, 0x00, 0x00, // Stream ID: 0
         ];
 
@@ -384,13 +414,23 @@ fuzz_target!(|data: &[u8]| {
         frame_bytes.extend_from_slice(&data[..6.min(data.len())]);
 
         if frame_bytes.len() >= FRAME_HEADER_SIZE + 6 {
-            let _ = std::panic::catch_unwind(|| {
-                let mut header_buf = asupersync::bytes::BytesMut::from(&frame_bytes[..FRAME_HEADER_SIZE]);
-                if let Ok(header) = FrameHeader::parse(&mut header_buf) {
+            match std::panic::catch_unwind(|| {
+                let mut header_buf =
+                    asupersync::bytes::BytesMut::from(&frame_bytes[..FRAME_HEADER_SIZE]);
+                if let Some(header) = observe_result(
+                    "raw SETTINGS frame header parse",
+                    FrameHeader::parse(&mut header_buf),
+                ) {
                     let payload = Bytes::from(frame_bytes[FRAME_HEADER_SIZE..].to_vec());
-                    let _ = SettingsFrame::parse(&header, &payload);
+                    drop(observe_result(
+                        "raw SETTINGS frame parse",
+                        SettingsFrame::parse(&header, &payload),
+                    ));
                 }
-            });
+            }) {
+                Ok(()) => {}
+                Err(_) => panic!("raw SETTINGS frame parsing panicked"),
+            }
         }
     }
 });
