@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use asupersync::tls::{
     Certificate, CertificateChain, CertificatePin, CertificatePinSet, TlsConnector,
-    TlsConnectorBuilder,
+    TlsConnectorBuilder, TlsError,
 };
 
 const MAX_CERT_SOURCES: usize = 8;
@@ -137,14 +137,11 @@ fn add_raw_pin(pin_set: &mut CertificatePinSet, raw: &RawPinInput) {
 
     if raw.treat_as_base64 {
         if let Ok(base64ish) = std::str::from_utf8(&bytes) {
-            match raw.kind {
-                PinKind::Spki => {
-                    let _ = pin_set.add_spki_sha256_base64(base64ish);
-                }
-                PinKind::Cert => {
-                    let _ = pin_set.add_cert_sha256_base64(base64ish);
-                }
-            }
+            let result = match raw.kind {
+                PinKind::Spki => pin_set.add_spki_sha256_base64(base64ish),
+                PinKind::Cert => pin_set.add_cert_sha256_base64(base64ish),
+            };
+            observe_pin_add_result("raw base64 pin", result, pin_set);
         }
         return;
     }
@@ -205,10 +202,22 @@ fn exercise_validation(pin_set: &CertificatePinSet, certs: &[Certificate]) {
     inverted_mode.set_enforce(!pin_set.is_enforcing());
 
     for cert in certs {
-        let _ = CertificatePin::compute_spki_sha256(cert);
-        let _ = CertificatePin::compute_cert_sha256(cert);
-        let _ = pin_set.validate(cert);
-        let _ = inverted_mode.validate(cert);
+        observe_pin_compute(
+            "SPKI certificate pin",
+            CertificatePin::compute_spki_sha256(cert),
+            PinKind::Spki,
+        );
+        observe_pin_compute(
+            "full certificate pin",
+            CertificatePin::compute_cert_sha256(cert),
+            PinKind::Cert,
+        );
+        observe_pin_validation("configured pin set", pin_set, pin_set.validate(cert));
+        observe_pin_validation(
+            "inverted pin set",
+            &inverted_mode,
+            inverted_mode.validate(cert),
+        );
     }
 }
 
@@ -226,7 +235,7 @@ fn exercise_builder_path(
 
     if use_insecure_roots {
         for cert in certs.iter().take(MAX_CHAIN_CERTS) {
-            builder = builder.insecure_add_root_certificate(cert);
+            builder = builder.add_root_certificate(cert);
         }
     } else {
         let mut chain = CertificateChain::new();
@@ -236,7 +245,7 @@ fn exercise_builder_path(
         builder = builder.add_root_certificates(chain);
     }
 
-    let _ = builder.build();
+    observe_builder_result(builder.build(), timeout_from_millis(attach_timeout_ms));
 }
 
 fn exercise_raw_connector_path(pin_set: &CertificatePinSet, attach_timeout_ms: Option<u16>) {
@@ -255,11 +264,124 @@ fn exercise_raw_connector_path(pin_set: &CertificatePinSet, attach_timeout_ms: O
         connector = connector.with_handshake_timeout(Duration::from_millis(u64::from(timeout_ms)));
     }
 
-    let _ = connector.handshake_timeout();
-    let _ = connector.config();
+    let expected_timeout = timeout_from_millis(attach_timeout_ms);
+    assert_eq!(
+        connector.handshake_timeout(),
+        expected_timeout,
+        "raw connector should retain configured handshake timeout"
+    );
+    assert!(
+        Arc::strong_count(connector.config()) >= 1,
+        "raw connector config should remain owned"
+    );
 }
 
 fn clamp_bytes(bytes: &[u8], max_len: usize) -> Vec<u8> {
     let end = bytes.len().min(max_len);
     bytes[..end].to_vec()
+}
+
+fn observe_pin_add_result(
+    context: &str,
+    result: Result<(), TlsError>,
+    pin_set: &CertificatePinSet,
+) {
+    assert!(
+        pin_set.len() <= MAX_PIN_INPUTS,
+        "{context} should keep pin set bounded"
+    );
+    match result {
+        Ok(()) => {
+            assert!(
+                pin_set.iter().all(|pin| pin.hash_bytes().len() == 32),
+                "{context} should only admit SHA-256-length pins"
+            );
+        }
+        Err(error) => assert_tls_error_visible(context, &error),
+    }
+}
+
+fn observe_pin_compute(context: &str, result: Result<CertificatePin, TlsError>, kind: PinKind) {
+    match result {
+        Ok(pin) => {
+            let expected_kind = matches!(
+                (&pin, kind),
+                (CertificatePin::SpkiSha256(_), PinKind::Spki)
+                    | (CertificatePin::CertSha256(_), PinKind::Cert)
+            );
+            assert!(
+                expected_kind,
+                "{context} should return the requested pin kind"
+            );
+            assert_eq!(
+                pin.hash_bytes().len(),
+                32,
+                "{context} should compute a SHA-256-length hash"
+            );
+            assert!(
+                !pin.to_base64().is_empty(),
+                "{context} should expose a base64 representation"
+            );
+        }
+        Err(error) => assert_tls_error_visible(context, &error),
+    }
+}
+
+fn observe_pin_validation(
+    context: &str,
+    pin_set: &CertificatePinSet,
+    result: Result<bool, TlsError>,
+) {
+    match result {
+        Ok(matched) => {
+            if pin_set.is_empty() {
+                assert!(matched, "{context} should accept empty pin sets");
+            }
+            if !pin_set.is_enforcing() && !matched {
+                assert!(
+                    !pin_set.is_empty(),
+                    "{context} should only report mismatch when pins exist"
+                );
+            }
+        }
+        Err(error) => {
+            assert!(
+                pin_set.is_enforcing() && !pin_set.is_empty(),
+                "{context} should fail closed only for enforcing non-empty pin sets"
+            );
+            assert_tls_error_visible(context, &error);
+        }
+    }
+}
+
+fn observe_builder_result(
+    result: Result<TlsConnector, TlsError>,
+    expected_timeout: Option<Duration>,
+) {
+    match result {
+        Ok(connector) => {
+            assert_eq!(
+                connector.handshake_timeout(),
+                expected_timeout,
+                "builder connector should retain configured handshake timeout"
+            );
+            assert!(
+                Arc::strong_count(connector.config()) >= 1,
+                "builder connector config should remain owned"
+            );
+        }
+        Err(error) => assert_tls_error_visible("builder result", &error),
+    }
+}
+
+fn timeout_from_millis(timeout_ms: Option<u16>) -> Option<Duration> {
+    timeout_ms.map(|millis| Duration::from_millis(u64::from(millis)))
+}
+
+fn assert_tls_error_visible(context: &str, error: &TlsError) {
+    let diagnostic = format!("{error:?}");
+    assert!(
+        !diagnostic.is_empty(),
+        "{context} failure should expose diagnostics"
+    );
 }
