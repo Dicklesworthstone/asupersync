@@ -784,31 +784,26 @@ impl ScenarioRunner {
             .keys()
             .cloned()
             .collect::<Vec<_>>();
-        let first_stall_index = fault_log
-            .iter()
-            .enumerate()
-            .find_map(|(index, entry)| {
-                if entry.action != "process_stall" {
-                    return None;
-                }
-                let host_is_still_stalled = entry.args_summary.split(',').any(|arg| {
-                    arg.strip_prefix("host=").is_some_and(|host| {
-                        fault_effect_summary
-                            .stalled_participants_until_ms
-                            .contains_key(host)
-                    })
-                });
-                host_is_still_stalled.then_some(index)
-            })?;
+        let first_stall_index = fault_log.iter().enumerate().find_map(|(index, entry)| {
+            if entry.action != "process_stall" {
+                return None;
+            }
+            let host_is_still_stalled = entry.args_summary.split(',').any(|arg| {
+                arg.strip_prefix("host=").is_some_and(|host| {
+                    fault_effect_summary
+                        .stalled_participants_until_ms
+                        .contains_key(host)
+                })
+            });
+            host_is_still_stalled.then_some(index)
+        })?;
         let max_counterexample_events = scenario
             .minimization
             .max_counterexample_events
             .or(scenario.resource_caps.max_counterexample_events)
             .unwrap_or(fault_log.len())
             .max(1);
-        let required_prefix_len = first_stall_index
-            .saturating_add(1)
-            .min(fault_log.len());
+        let required_prefix_len = first_stall_index.saturating_add(1).min(fault_log.len());
         let retained_len = required_prefix_len.min(max_counterexample_events);
         let retained_start = required_prefix_len.saturating_sub(retained_len);
         let fault_log_prefix = fault_log
@@ -1335,6 +1330,7 @@ mod tests {
         }];
         scenario.minimization = MinimizationSection {
             enabled: true,
+            max_evaluations: Some(4),
             max_counterexample_events: Some(1),
             ..MinimizationSection::default()
         };
@@ -1382,7 +1378,10 @@ mod tests {
         let retained = &counterexample.fault_log_prefix[0];
         assert_eq!(retained.action, "process_stall");
         assert!(
-            retained.args_summary.split(',').any(|arg| arg == "host=alice"),
+            retained
+                .args_summary
+                .split(',')
+                .any(|arg| arg == "host=alice"),
             "counterexample must retain the causal stalled host"
         );
         crate::test_complete!("process_stall_counterexample_keeps_causal_event_under_small_cap");
