@@ -8,7 +8,10 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
-use asupersync::cancel::{CancelBroadcaster, CancelMessage, CancelSink, PeerId, SymbolCancelToken};
+use asupersync::cancel::{
+    CancelBroadcastMetrics, CancelBroadcaster, CancelMessage, CancelSink, PeerId,
+    SymbolCancelToken,
+};
 use asupersync::types::symbol::ObjectId;
 use asupersync::types::{CancelKind, CancelReason, Time};
 use asupersync::util::DetRng;
@@ -168,12 +171,92 @@ fn delivered_counter(expected: bool) -> usize {
     if expected { 1 } else { 0 }
 }
 
+fn assert_metrics_monotonic(before: &CancelBroadcastMetrics, after: &CancelBroadcastMetrics) {
+    assert!(
+        after.received >= before.received,
+        "receive_message must not decrease received count"
+    );
+    assert!(
+        after.forwarded >= before.forwarded,
+        "receive_message must not decrease forwarded count"
+    );
+    assert!(
+        after.duplicates >= before.duplicates,
+        "receive_message must not decrease duplicate count"
+    );
+    assert!(
+        after.max_hops_reached >= before.max_hops_reached,
+        "receive_message must not decrease max-hop count"
+    );
+}
+
+fn observe_receive_message(peer: &PeerState, message: &CancelMessage, now: Time) {
+    let before = peer.broadcaster.metrics();
+    let forwarded = peer.broadcaster.receive_message(message, now);
+    let after = peer.broadcaster.metrics();
+
+    assert_metrics_monotonic(&before, &after);
+
+    if forwarded.is_some() {
+        assert_eq!(
+            after.received,
+            before.received + 1,
+            "forwarded receive must increment received exactly once"
+        );
+        assert_eq!(
+            after.forwarded,
+            before.forwarded + 1,
+            "forwarded receive must increment forwarded exactly once"
+        );
+        assert_eq!(
+            after.duplicates, before.duplicates,
+            "forwarded receive must not count as a duplicate"
+        );
+        assert_eq!(
+            after.max_hops_reached, before.max_hops_reached,
+            "forwarded receive must not count as max-hop exhaustion"
+        );
+    } else if after.duplicates == before.duplicates + 1 {
+        assert_eq!(
+            after.received, before.received,
+            "duplicate receive must not increment received"
+        );
+        assert_eq!(
+            after.forwarded, before.forwarded,
+            "duplicate receive must not forward"
+        );
+        assert_eq!(
+            after.max_hops_reached, before.max_hops_reached,
+            "duplicate receive must not count as max-hop exhaustion"
+        );
+    } else {
+        assert_eq!(
+            after.received,
+            before.received + 1,
+            "max-hop receive must increment received exactly once"
+        );
+        assert_eq!(
+            after.forwarded, before.forwarded,
+            "max-hop receive must not forward"
+        );
+        assert_eq!(
+            after.duplicates, before.duplicates,
+            "max-hop receive must not count as a duplicate"
+        );
+        assert_eq!(
+            after.max_hops_reached,
+            before.max_hops_reached + 1,
+            "max-hop receive must increment max-hop count exactly once"
+        );
+    }
+}
+
 fn receive_once(peer: &PeerState, message: &CancelMessage, now: Time) {
-    let _ = peer.broadcaster.receive_message(message, now);
+    observe_receive_message(peer, message, now);
 }
 
 fn receive_duplicate(peer: &PeerState, message: &CancelMessage, now: Time) {
-    let _ = peer.broadcaster.receive_message(message, now);
+    observe_receive_message(peer, message, now);
     let after_first = peer.broadcaster.metrics();
     let second = peer.broadcaster.receive_message(message, now);
     let after_second = peer.broadcaster.metrics();
