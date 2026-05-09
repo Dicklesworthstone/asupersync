@@ -16,7 +16,7 @@
 
 use arbitrary::Arbitrary;
 use asupersync::raptorq::{
-    decoder::{InactivationDecoder, ReceivedSymbol},
+    decoder::{DecodeError, DecodeResult, InactivationDecoder, ReceivedSymbol},
     gf256::Gf256,
 };
 use libfuzzer_sys::fuzz_target;
@@ -131,7 +131,7 @@ fn arbitrary_k(u: &mut arbitrary::Unstructured) -> arbitrary::Result<usize> {
 /// Generate bounded symbol sizes
 fn arbitrary_symbol_size(u: &mut arbitrary::Unstructured) -> arbitrary::Result<usize> {
     let sizes = [1, 2, 4, 8, 16, 32, 64];
-    let idx = u.int_in_range(0..sizes.len())?;
+    let idx = u.int_in_range(0..=sizes.len() - 1)?;
     Ok(sizes[idx])
 }
 
@@ -187,7 +187,7 @@ fn create_repair_symbol(
         SparsityPattern::BlockSchurTrigger { split_ratio } => {
             // Create structure that benefits from Block-Schur decomposition
             let split = k * (*split_ratio as usize) / 100;
-            let connect_left = (esi % 2) == 0;
+            let connect_left = esi.is_multiple_of(2);
             let range = if connect_left { 0..split } else { split..k };
             for col in range.take(max_columns) {
                 columns.push(col);
@@ -306,7 +306,19 @@ fn build_symbols(input: &ScheduleEdgeCaseInput) -> Vec<ReceivedSymbol> {
     }
 
     // Add repair symbols based on strategy
-    let num_repairs = input.symbol_config.num_repairs as usize;
+    let requested_repairs = (input.symbol_config.num_repairs as usize).min(MAX_EXTRA_SYMBOLS);
+    let num_repairs = match &input.dense_config.force_ratio {
+        Some(DenseRatio::Overdetermined) => requested_repairs
+            .max(k.saturating_add(1).saturating_sub(num_sources))
+            .min(MAX_EXTRA_SYMBOLS),
+        Some(DenseRatio::Square) => requested_repairs
+            .max(k.saturating_sub(num_sources))
+            .min(MAX_EXTRA_SYMBOLS),
+        Some(DenseRatio::Underdetermined) => requested_repairs
+            .min(k.saturating_sub(num_sources).saturating_sub(1))
+            .min(MAX_EXTRA_SYMBOLS),
+        None => requested_repairs,
+    };
     let mut rng_state = input.seed;
 
     match &input.symbol_config.repair_strategy {
@@ -372,7 +384,7 @@ fn build_symbols(input: &ScheduleEdgeCaseInput) -> Vec<ReceivedSymbol> {
                 symbols.push(create_repair_symbol(
                     esi,
                     k,
-                    (target_nnz as usize + 1).min(MAX_REPAIR_DEGREE),
+                    (*target_nnz as usize + 1).min(MAX_REPAIR_DEGREE),
                     &input.dense_config.sparsity_pattern,
                     symbol_size,
                     &mut rng_state,
@@ -412,41 +424,48 @@ fuzz_target!(|input: ScheduleEdgeCaseInput| {
 
     // If configured for cache testing, run multiple iterations
     let iterations = if input.dense_config.cache_config.test_cache_reuse {
-        (input.dense_config.cache_config.iterations as usize)
-            .min(5)
-            .max(1)
+        (input.dense_config.cache_config.iterations as usize).clamp(1, 5)
     } else {
         1
     };
 
     for iteration in 0..iterations {
         // For cache collision testing, modify seed slightly
-        let test_decoder = if iteration > 0 && input.dense_config.cache_config.create_collision {
+        let decode_result = if iteration > 0 && input.dense_config.cache_config.create_collision {
             match InactivationDecoder::try_new(
                 input.k,
                 input.symbol_size,
                 input.seed + iteration as u64,
             ) {
-                Ok(decoder) => decoder,
+                Ok(test_decoder) => test_decoder.decode(&symbols),
                 Err(_) => continue,
             }
+        } else if iteration > 0 {
+            // Reuse same decoder to test cache hits.
+            continue;
         } else {
-            // Reuse same decoder to test cache hits
-            continue; // Skip additional iterations with same decoder for now
+            decoder.decode(&symbols)
         };
 
-        // Attempt decode - we expect this might fail (that's part of the test)
-        let _ = if iteration == 0 {
-            decoder.decode(&symbols)
-        } else {
-            test_decoder.decode(&symbols)
-        };
+        observe_decode_result(
+            decode_result,
+            input.k,
+            input.symbol_size,
+            false,
+            "schedule decode",
+        );
     }
 
     // Test wavefront decoder as well (different code path)
     if !symbols.is_empty() {
         let batch_size = (input.seed % 8) + 1; // Small batch sizes for edge case testing
-        let _ = decoder.decode_wavefront(&symbols, batch_size as usize);
+        observe_decode_result(
+            decoder.decode_wavefront(&symbols, batch_size as usize),
+            input.k,
+            input.symbol_size,
+            true,
+            "wavefront decode",
+        );
     }
 
     // ORACLE: The fuzz target succeeds if no panics occur.
@@ -460,3 +479,57 @@ fuzz_target!(|input: ScheduleEdgeCaseInput| {
     // 3. Proper error classification (recoverable vs unrecoverable)
     // 4. Cache coherency (same matrix signatures → cache hits)
 });
+
+fn observe_decode_result(
+    result: Result<DecodeResult, DecodeError>,
+    expected_k: usize,
+    symbol_size: usize,
+    expect_wavefront: bool,
+    context: &str,
+) {
+    match result {
+        Ok(result) => {
+            assert_eq!(
+                result.source.len(),
+                expected_k,
+                "{context}: decoded source count changed"
+            );
+            assert!(
+                result.intermediate.len() >= result.source.len(),
+                "{context}: intermediate symbols should cover source symbols"
+            );
+            assert!(
+                result
+                    .source
+                    .iter()
+                    .all(|symbol| symbol.len() == symbol_size),
+                "{context}: decoded source symbol size mismatch"
+            );
+            assert_eq!(
+                result.stats.wavefront_active, expect_wavefront,
+                "{context}: wavefront stats flag mismatch"
+            );
+            if expect_wavefront {
+                assert!(
+                    result.stats.wavefront_batches > 0,
+                    "{context}: successful wavefront decode should record batches"
+                );
+                assert!(
+                    result.stats.wavefront_batch_size > 0,
+                    "{context}: successful wavefront decode should record batch size"
+                );
+            }
+        }
+        Err(error) => {
+            assert_ne!(
+                error.is_recoverable(),
+                error.is_unrecoverable(),
+                "{context}: decode error classification should be exclusive"
+            );
+            assert!(
+                !format!("{error:?}").is_empty(),
+                "{context}: decode error diagnostics should remain observable"
+            );
+        }
+    }
+}
