@@ -258,6 +258,61 @@ fn observe_transport_parameters_encode(
     result
 }
 
+fn assert_expected_encode_result(context: &str, result: Result<(), QuicCoreError>) {
+    if let Err(err) = result {
+        assert!(
+            matches!(err, QuicCoreError::VarIntOutOfRange(_)),
+            "{context}: unexpected transport parameter encode error: {err:?}"
+        );
+        assert!(
+            !err.to_string().trim().is_empty(),
+            "{context}: encode error should expose diagnostics"
+        );
+    }
+}
+
+fn assert_expected_decode_result(
+    context: &str,
+    result: Result<TransportParameters, QuicCoreError>,
+) -> Option<TransportParameters> {
+    match result {
+        Ok(params) => {
+            assert_valid_decoded_params(&params);
+            Some(params)
+        }
+        Err(
+            err @ (QuicCoreError::DuplicateTransportParameter(_)
+            | QuicCoreError::InvalidTransportParameter(_)
+            | QuicCoreError::UnexpectedEof
+            | QuicCoreError::VarIntOutOfRange(_)),
+        ) => {
+            assert!(
+                !err.to_string().trim().is_empty(),
+                "{context}: decode error should expose diagnostics"
+            );
+            None
+        }
+        Err(err) => {
+            panic!("{context}: unexpected transport parameter decode error: {err:?}");
+        }
+    }
+}
+
+fn assert_round_trip_decode_result(
+    context: &str,
+    original: &TransportParameters,
+    result: Result<TransportParameters, QuicCoreError>,
+) {
+    if let Some(decoded) = assert_expected_decode_result(context, result)
+        && can_assert_exact_round_trip(original)
+    {
+        assert_eq!(
+            decoded, *original,
+            "{context}: valid transport parameters should round-trip exactly"
+        );
+    }
+}
+
 fn encode_parameter(out: &mut Vec<u8>, id: u64, value: &[u8]) {
     encode_varint(id, out).expect("fuzz transport parameter id should fit QUIC varint");
     encode_varint(value.len() as u64, out)
@@ -601,17 +656,22 @@ fn process_tlv_operation(operation: &TlvOperation) {
         TlvOperation::Encode { params } => {
             let tp: TransportParameters = params.clone().into();
             let mut encoded = Vec::new();
-            let _ = observe_transport_parameters_encode(&tp, &mut encoded);
+            let result = observe_transport_parameters_encode(&tp, &mut encoded);
+            assert_expected_encode_result("operation encode", result);
         }
         TlvOperation::Decode { bytes } => {
-            let _ = observe_transport_parameters_decode(bytes);
+            let result = observe_transport_parameters_decode(bytes);
+            let _decoded = assert_expected_decode_result("operation decode", result);
         }
         TlvOperation::RoundTrip { params } => {
             let tp: TransportParameters = params.clone().into();
             let mut encoded = Vec::new();
-            if tp.encode(&mut encoded).is_ok() {
-                let _ = observe_transport_parameters_decode(&encoded);
+            let encode_result = observe_transport_parameters_encode(&tp, &mut encoded);
+            if encode_result.is_ok() {
+                let decode_result = observe_transport_parameters_decode(&encoded);
+                assert_round_trip_decode_result("operation round-trip", &tp, decode_result);
             }
+            assert_expected_encode_result("operation round-trip encode", encode_result);
         }
     }
 }
@@ -629,9 +689,12 @@ fn process_attack_scenario(scenario: &AttackScenario) {
                 ..TransportParameters::default()
             };
             let mut encoded = Vec::new();
-            if params.encode(&mut encoded).is_ok() {
-                let _ = observe_transport_parameters_decode(&encoded);
+            let encode_result = observe_transport_parameters_encode(&params, &mut encoded);
+            if encode_result.is_ok() {
+                let decode_result = observe_transport_parameters_decode(&encoded);
+                assert_round_trip_decode_result("normal attack scenario", &params, decode_result);
             }
+            assert_expected_encode_result("normal attack scenario encode", encode_result);
         }
         AttackScenario::TruncatedData { truncate_bytes } => {
             // Create valid TLV then truncate it
@@ -641,11 +704,23 @@ fn process_attack_scenario(scenario: &AttackScenario) {
                 ..TransportParameters::default()
             };
             let mut encoded = Vec::new();
-            if params.encode(&mut encoded).is_ok() {
-                let truncate_amount = (*truncate_bytes as usize).min(encoded.len());
+            let encode_result = observe_transport_parameters_encode(&params, &mut encoded);
+            if encode_result.is_ok() {
+                let truncate_amount = usize::from(*truncate_bytes).min(encoded.len());
                 encoded.truncate(encoded.len().saturating_sub(truncate_amount));
-                let _ = observe_transport_parameters_decode(&encoded);
+                let decode_result = observe_transport_parameters_decode(&encoded);
+                if truncate_amount == 0 {
+                    assert_round_trip_decode_result(
+                        "untruncated attack scenario",
+                        &params,
+                        decode_result,
+                    );
+                } else {
+                    let _decoded =
+                        assert_expected_decode_result("truncated attack scenario", decode_result);
+                }
             }
+            assert_expected_encode_result("truncated attack scenario encode", encode_result);
         }
         _ => {
             // Other scenarios handled in their respective test functions
