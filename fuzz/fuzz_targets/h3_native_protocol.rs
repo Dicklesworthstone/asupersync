@@ -5,10 +5,10 @@ use libfuzzer_sys::fuzz_target;
 
 use asupersync::http::h3_native::{
     H3_SETTING_ENABLE_CONNECT_PROTOCOL, H3_SETTING_H3_DATAGRAM, H3_SETTING_MAX_FIELD_SECTION_SIZE,
-    H3_SETTING_QPACK_BLOCKED_STREAMS, H3_SETTING_QPACK_MAX_TABLE_CAPACITY, H3Frame, H3NativeError,
-    H3QpackMode, H3RequestHead, H3ResponseHead, H3Settings, QpackFieldPlan,
+    H3_SETTING_QPACK_BLOCKED_STREAMS, H3_SETTING_QPACK_MAX_TABLE_CAPACITY, H3ConnectionConfig,
+    H3Frame, H3NativeError, H3QpackMode, H3RequestHead, H3ResponseHead, H3Settings, QpackFieldPlan,
     qpack_decode_field_section, qpack_decode_request_field_section,
-    qpack_decode_response_field_section,
+    qpack_decode_response_field_section, qpack_encode_field_section,
 };
 
 /// Fuzz input for HTTP/3 native protocol parsing
@@ -30,16 +30,16 @@ struct H3ProtocolFuzz {
 #[derive(Arbitrary, Debug)]
 enum FrameOperation {
     /// Parse single frame from raw bytes
-    ParseFrame { data: Vec<u8> },
+    RawFrame { data: Vec<u8> },
     /// Parse multiple consecutive frames
-    ParseMultipleFrames { frame_data: Vec<Vec<u8>> },
+    MultipleFrames { frame_data: Vec<Vec<u8>> },
     /// Parse frame with specific type
-    ParseTypedFrame {
+    TypedFrame {
         frame_type: FrameType,
         payload: Vec<u8>,
     },
     /// Parse truncated frame
-    ParseTruncatedFrame {
+    TruncatedFrame {
         complete_data: Vec<u8>,
         truncate_at: u16,
     },
@@ -62,13 +62,13 @@ enum FrameType {
 #[derive(Arbitrary, Debug)]
 enum SettingsOperation {
     /// Parse settings payload
-    ParseSettings { payload: Vec<u8> },
+    SettingsPayload { payload: Vec<u8> },
     /// Parse settings with known identifiers
-    ParseKnownSettings { settings: Vec<SettingPair> },
+    KnownSettings { settings: Vec<SettingPair> },
     /// Parse settings with duplicates
-    ParseDuplicateSettings { setting_id: u64, values: Vec<u64> },
+    DuplicateSettings { setting_id: u64, values: Vec<u64> },
     /// Parse malformed settings
-    ParseMalformedSettings { malformed_data: Vec<u8> },
+    MalformedSettings { malformed_data: Vec<u8> },
 }
 
 /// Setting key-value pair
@@ -102,18 +102,18 @@ enum StreamOperation {
 #[derive(Arbitrary, Debug)]
 enum QpackOperation {
     /// Parse generic field section
-    ParseFieldSection { payload: Vec<u8>, mode: QpackMode },
+    FieldSection { payload: Vec<u8>, mode: QpackMode },
     /// Parse request field section
-    ParseRequestFieldSection { payload: Vec<u8>, mode: QpackMode },
+    RequestFieldSection { payload: Vec<u8>, mode: QpackMode },
     /// Parse response field section
-    ParseResponseFieldSection { payload: Vec<u8>, mode: QpackMode },
+    ResponseFieldSection { payload: Vec<u8>, mode: QpackMode },
     /// Parse field section with specific patterns
-    ParseStructuredFieldSection {
+    StructuredFieldSection {
         field_patterns: Vec<FieldPattern>,
         mode: QpackMode,
     },
     /// Parse malformed QPACK data
-    ParseMalformedQpack {
+    MalformedQpack {
         malformed_data: Vec<u8>,
         mode: QpackMode,
     },
@@ -204,18 +204,21 @@ fuzz_target!(|input: H3ProtocolFuzz| {
     for operation in input.edge_cases {
         test_edge_case_operation(operation);
     }
+
+    test_h3_qpack_static_canaries();
 });
 
 fn test_frame_operation(operation: FrameOperation) {
     match operation {
-        FrameOperation::ParseFrame { mut data } => {
+        FrameOperation::RawFrame { mut data } => {
             // Limit size to prevent memory exhaustion
             if data.len() > MAX_FRAME_SIZE {
                 data.truncate(MAX_FRAME_SIZE);
             }
 
             // Test frame parsing - should not panic
-            let result = H3Frame::decode(&data);
+            let config = h3_decode_config();
+            let result = H3Frame::decode(&data, &config);
 
             match result {
                 Ok((frame, consumed)) => {
@@ -235,18 +238,19 @@ fn test_frame_operation(operation: FrameOperation) {
             }
         }
 
-        FrameOperation::ParseMultipleFrames { frame_data } => {
+        FrameOperation::MultipleFrames { frame_data } => {
             for mut data in frame_data {
                 if data.len() > MAX_FRAME_SIZE {
                     data.truncate(MAX_FRAME_SIZE);
                 }
 
                 // Parse and verify each frame independently
-                let _ = H3Frame::decode(&data);
+                let config = h3_decode_config();
+                let _ = H3Frame::decode(&data, &config);
             }
         }
 
-        FrameOperation::ParseTypedFrame {
+        FrameOperation::TypedFrame {
             frame_type,
             mut payload,
         } => {
@@ -256,10 +260,11 @@ fn test_frame_operation(operation: FrameOperation) {
 
             // Construct frame with specific type
             let frame_bytes = construct_frame_bytes(frame_type, &payload);
-            let _ = H3Frame::decode(&frame_bytes);
+            let config = h3_decode_config();
+            let _ = H3Frame::decode(&frame_bytes, &config);
         }
 
-        FrameOperation::ParseTruncatedFrame {
+        FrameOperation::TruncatedFrame {
             mut complete_data,
             truncate_at,
         } => {
@@ -271,7 +276,8 @@ fn test_frame_operation(operation: FrameOperation) {
             let truncated = &complete_data[..truncate_pos];
 
             // Should handle truncated input gracefully
-            let result = H3Frame::decode(truncated);
+            let config = h3_decode_config();
+            let result = H3Frame::decode(truncated, &config);
             match result {
                 Ok(_) => {
                     // If parsing succeeded, frame must be complete
@@ -289,7 +295,7 @@ fn test_frame_operation(operation: FrameOperation) {
 
 fn test_settings_operation(operation: SettingsOperation) {
     match operation {
-        SettingsOperation::ParseSettings { mut payload } => {
+        SettingsOperation::SettingsPayload { mut payload } => {
             if payload.len() > MAX_PAYLOAD_SIZE {
                 payload.truncate(MAX_PAYLOAD_SIZE);
             }
@@ -312,13 +318,13 @@ fn test_settings_operation(operation: SettingsOperation) {
             }
         }
 
-        SettingsOperation::ParseKnownSettings { settings } => {
+        SettingsOperation::KnownSettings { settings } => {
             // Construct settings payload with known setting IDs
             let payload = construct_settings_payload(&settings);
             let _ = H3Settings::decode_payload(&payload);
         }
 
-        SettingsOperation::ParseDuplicateSettings { setting_id, values } => {
+        SettingsOperation::DuplicateSettings { setting_id, values } => {
             // Test duplicate setting detection
             let mut payload = Vec::new();
             for value in values.into_iter().take(10) {
@@ -338,7 +344,7 @@ fn test_settings_operation(operation: SettingsOperation) {
             }
         }
 
-        SettingsOperation::ParseMalformedSettings { mut malformed_data } => {
+        SettingsOperation::MalformedSettings { mut malformed_data } => {
             if malformed_data.len() > MAX_PAYLOAD_SIZE {
                 malformed_data.truncate(MAX_PAYLOAD_SIZE);
             }
@@ -383,7 +389,7 @@ fn test_stream_operation(operation: StreamOperation) {
 
 fn test_qpack_operation(operation: QpackOperation) {
     match operation {
-        QpackOperation::ParseFieldSection { mut payload, mode } => {
+        QpackOperation::FieldSection { mut payload, mode } => {
             if payload.len() > MAX_PAYLOAD_SIZE {
                 payload.truncate(MAX_PAYLOAD_SIZE);
             }
@@ -405,7 +411,7 @@ fn test_qpack_operation(operation: QpackOperation) {
             }
         }
 
-        QpackOperation::ParseRequestFieldSection { mut payload, mode } => {
+        QpackOperation::RequestFieldSection { mut payload, mode } => {
             if payload.len() > MAX_PAYLOAD_SIZE {
                 payload.truncate(MAX_PAYLOAD_SIZE);
             }
@@ -413,7 +419,7 @@ fn test_qpack_operation(operation: QpackOperation) {
             let h3_mode = convert_qpack_mode(mode);
 
             // Test request field section parsing
-            let result = qpack_decode_request_field_section(&payload, h3_mode);
+            let result = qpack_decode_request_field_section(&payload, h3_mode, None);
 
             match result {
                 Ok(request_head) => {
@@ -426,7 +432,7 @@ fn test_qpack_operation(operation: QpackOperation) {
             }
         }
 
-        QpackOperation::ParseResponseFieldSection { mut payload, mode } => {
+        QpackOperation::ResponseFieldSection { mut payload, mode } => {
             if payload.len() > MAX_PAYLOAD_SIZE {
                 payload.truncate(MAX_PAYLOAD_SIZE);
             }
@@ -434,7 +440,7 @@ fn test_qpack_operation(operation: QpackOperation) {
             let h3_mode = convert_qpack_mode(mode);
 
             // Test response field section parsing
-            let result = qpack_decode_response_field_section(&payload, h3_mode);
+            let result = qpack_decode_response_field_section(&payload, h3_mode, None);
 
             match result {
                 Ok(response_head) => {
@@ -447,7 +453,7 @@ fn test_qpack_operation(operation: QpackOperation) {
             }
         }
 
-        QpackOperation::ParseStructuredFieldSection {
+        QpackOperation::StructuredFieldSection {
             field_patterns,
             mode,
         } => {
@@ -460,7 +466,7 @@ fn test_qpack_operation(operation: QpackOperation) {
             }
         }
 
-        QpackOperation::ParseMalformedQpack {
+        QpackOperation::MalformedQpack {
             mut malformed_data,
             mode,
         } => {
@@ -472,17 +478,72 @@ fn test_qpack_operation(operation: QpackOperation) {
 
             // Should handle malformed QPACK data gracefully
             let _ = qpack_decode_field_section(&malformed_data, h3_mode);
-            let _ = qpack_decode_request_field_section(&malformed_data, h3_mode);
-            let _ = qpack_decode_response_field_section(&malformed_data, h3_mode);
+            let _ = qpack_decode_request_field_section(&malformed_data, h3_mode, None);
+            let _ = qpack_decode_response_field_section(&malformed_data, h3_mode, None);
         }
     }
+}
+
+fn test_h3_qpack_static_canaries() {
+    let empty_section = vec![0x00, 0x00]; // RIC=0, Delta Base=0
+    let decoded_empty =
+        qpack_decode_field_section(&empty_section, H3QpackMode::StaticOnly).expect("empty decode");
+    assert_eq!(decoded_empty, Vec::<QpackFieldPlan>::new());
+
+    let request_plan = vec![
+        QpackFieldPlan::StaticIndex(17), // :method GET
+        QpackFieldPlan::StaticIndex(23), // :scheme https
+        QpackFieldPlan::StaticIndex(1),  // :path /
+        QpackFieldPlan::Literal {
+            name: "accept".to_string(),
+            value: "*/*".to_string(),
+        },
+    ];
+    let request_wire = qpack_encode_field_section(&request_plan).expect("request encode");
+    assert_eq!(
+        qpack_decode_field_section(&request_wire, H3QpackMode::StaticOnly)
+            .expect("request plan decode"),
+        request_plan
+    );
+    let request = qpack_decode_request_field_section(&request_wire, H3QpackMode::StaticOnly, None)
+        .expect("request head decode");
+    assert_eq!(request.pseudo.method.as_deref(), Some("GET"));
+    assert_eq!(request.pseudo.scheme.as_deref(), Some("https"));
+    assert_eq!(request.pseudo.path.as_deref(), Some("/"));
+    assert_eq!(
+        request.headers,
+        vec![("accept".to_string(), "*/*".to_string())]
+    );
+
+    let response_plan = vec![
+        QpackFieldPlan::StaticIndex(25), // :status 200
+        QpackFieldPlan::Literal {
+            name: "server".to_string(),
+            value: "asupersync".to_string(),
+        },
+    ];
+    let response_wire = qpack_encode_field_section(&response_plan).expect("response encode");
+    assert_eq!(
+        qpack_decode_field_section(&response_wire, H3QpackMode::StaticOnly)
+            .expect("response plan decode"),
+        response_plan
+    );
+    let response =
+        qpack_decode_response_field_section(&response_wire, H3QpackMode::StaticOnly, None)
+            .expect("response head decode");
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        response.headers,
+        vec![("server".to_string(), "asupersync".to_string())]
+    );
 }
 
 fn test_edge_case_operation(operation: EdgeCaseOperation) {
     match operation {
         EdgeCaseOperation::EmptyInput => {
             // Test parsing empty input
-            let result = H3Frame::decode(&[]);
+            let config = h3_decode_config();
+            let result = H3Frame::decode(&[], &config);
             match result {
                 Err(H3NativeError::UnexpectedEof) => {
                     // Expected behavior
@@ -495,7 +556,8 @@ fn test_edge_case_operation(operation: EdgeCaseOperation) {
 
         EdgeCaseOperation::SingleByte { byte } => {
             // Test single byte input
-            let _ = H3Frame::decode(&[byte]);
+            let config = h3_decode_config();
+            let _ = H3Frame::decode(&[byte], &config);
         }
 
         EdgeCaseOperation::LargeVarint { value } => {
@@ -515,7 +577,8 @@ fn test_edge_case_operation(operation: EdgeCaseOperation) {
             if overlap > 0 {
                 let mut combined = frame1;
                 combined.extend_from_slice(&frame2[overlap..]);
-                let _ = H3Frame::decode(&combined);
+                let config = h3_decode_config();
+                let _ = H3Frame::decode(&combined, &config);
             }
         }
 
@@ -526,7 +589,8 @@ fn test_edge_case_operation(operation: EdgeCaseOperation) {
 
             // Create a frame with potentially invalid UTF-8 payload
             let frame_bytes = construct_frame_bytes(FrameType::Data, &payload);
-            let _ = H3Frame::decode(&frame_bytes);
+            let config = h3_decode_config();
+            let _ = H3Frame::decode(&frame_bytes, &config);
         }
 
         EdgeCaseOperation::MaxSizeFrame {
@@ -536,8 +600,16 @@ fn test_edge_case_operation(operation: EdgeCaseOperation) {
             // Test maximum size frames
             let payload = vec![fill_byte; MAX_PAYLOAD_SIZE];
             let frame_bytes = construct_frame_bytes(frame_type, &payload);
-            let _ = H3Frame::decode(&frame_bytes);
+            let config = h3_decode_config();
+            let _ = H3Frame::decode(&frame_bytes, &config);
         }
+    }
+}
+
+fn h3_decode_config() -> H3ConnectionConfig {
+    H3ConnectionConfig {
+        max_frame_payload_size: MAX_FRAME_SIZE,
+        ..H3ConnectionConfig::default()
     }
 }
 
@@ -569,6 +641,17 @@ fn verify_frame_consistency(frame: &H3Frame) {
         H3Frame::MaxPushId(id) => {
             assert!(*id < (1u64 << 62), "Push ID too large: {}", id);
         }
+        H3Frame::Datagram {
+            quarter_stream_id,
+            payload: _,
+        } => {
+            assert!(
+                *quarter_stream_id < (1u64 << 62),
+                "Quarter stream ID too large: {}",
+                quarter_stream_id
+            );
+            // DATAGRAM payload can contain any bytes.
+        }
         H3Frame::Unknown {
             frame_type: _,
             payload: _,
@@ -586,6 +669,15 @@ fn verify_error_consistency(err: &H3NativeError, _data: &[u8]) {
         H3NativeError::InvalidFrame(msg) => {
             // Should describe what's invalid
             assert!(!msg.is_empty(), "Error message should not be empty");
+        }
+        H3NativeError::FrameTooLarge {
+            payload_size,
+            max_size,
+        } => {
+            assert!(
+                payload_size > max_size,
+                "FrameTooLarge must report payload_size > max_size"
+            );
         }
         H3NativeError::DuplicateSetting(_id) => {
             // Should specify which setting is duplicated
@@ -615,6 +707,12 @@ fn verify_error_consistency(err: &H3NativeError, _data: &[u8]) {
             assert!(
                 !msg.is_empty(),
                 "Invalid response pseudo header error should have message"
+            );
+        }
+        H3NativeError::ConcurrentStreamLimitExceeded { active, limit } => {
+            assert!(
+                active >= limit,
+                "concurrent stream limit error must report active >= limit"
             );
         }
     }
