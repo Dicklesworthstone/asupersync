@@ -11,6 +11,57 @@
 
 use libfuzzer_sys::fuzz_target;
 
+fn assert_visible_error(error: &impl core::fmt::Debug, label: &str) {
+    let diagnostic = format!("{error:?}");
+    assert!(
+        !diagnostic.is_empty(),
+        "{label} parser errors should keep visible diagnostics",
+    );
+}
+
+fn assert_nonempty_debug(value: &impl core::fmt::Debug, label: &str) {
+    let debug_repr = format!("{value:?}");
+    assert!(
+        !debug_repr.is_empty(),
+        "{label} debug output should stay visible",
+    );
+}
+
+fn assert_msgpack_round_trip<T>(value: &T, label: &str)
+where
+    T: serde::Serialize + serde::de::DeserializeOwned + core::fmt::Debug,
+{
+    let serialized = match rmp_serde::to_vec(value) {
+        Ok(serialized) => serialized,
+        Err(error) => panic!("{label} serialization failed after successful decode: {error:?}"),
+    };
+
+    match rmp_serde::from_slice::<T>(&serialized) {
+        Ok(round_tripped) => assert_nonempty_debug(&round_tripped, label),
+        Err(error) => panic!("{label} serialization output failed to decode: {error:?}"),
+    }
+}
+
+fn observe_msgpack_round_trip<T>(data: &[u8], label: &str)
+where
+    T: serde::Serialize + serde::de::DeserializeOwned + core::fmt::Debug,
+{
+    match rmp_serde::from_slice::<T>(data) {
+        Ok(value) => {
+            assert_nonempty_debug(&value, label);
+            assert_msgpack_round_trip(&value, label);
+        }
+        Err(error) => assert_visible_error(&error, label),
+    }
+}
+
+fn observe_raw_msgpack_decode(data: &[u8]) {
+    match rmp_serde::from_slice::<rmp_serde::Raw>(data) {
+        Ok(raw) => assert_nonempty_debug(&raw, "raw MessagePack string"),
+        Err(error) => assert_visible_error(&error, "raw MessagePack string"),
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
     // Skip empty input
     if data.is_empty() {
@@ -28,52 +79,16 @@ fuzz_target!(|data: &[u8]| {
     // TimerFired, IoReady, IoResult, IoError, RngSeed, RngValue, ChaosInjection,
     // RegionCreated, RegionClosed, RegionCancelled, WakerWake, WakerBatchWake,
     // Checkpoint, and many others
-    match rmp_serde::from_slice::<asupersync::trace::replay::ReplayEvent>(data) {
-        Ok(event) => {
-            // Successfully deserialized - test round-trip serialization
-            // to ensure the event is well-formed and can be re-serialized
-            match rmp_serde::to_vec(&event) {
-                Ok(serialized) => {
-                    // Verify round-trip consistency by deserializing again
-                    let _ = rmp_serde::from_slice::<asupersync::trace::replay::ReplayEvent>(
-                        &serialized,
-                    );
-                }
-                Err(_) => {
-                    // Serialization error - could indicate malformed internal state
-                }
-            }
-
-            // Test the Debug implementation to catch any panics in formatting
-            let _ = format!("{:?}", event);
-        }
-        Err(_) => {
-            // Deserialization error is expected for malformed input
-        }
-    }
+    observe_msgpack_round_trip::<asupersync::trace::replay::ReplayEvent>(data, "ReplayEvent");
 
     // Test TraceMetadata deserialization as well
-    match rmp_serde::from_slice::<asupersync::trace::replay::TraceMetadata>(data) {
-        Ok(metadata) => {
-            // Test round-trip serialization for metadata
-            if let Ok(serialized) = rmp_serde::to_vec(&metadata) {
-                let _ =
-                    rmp_serde::from_slice::<asupersync::trace::replay::TraceMetadata>(&serialized);
-            }
-
-            // Test Debug formatting
-            let _ = format!("{:?}", metadata);
-        }
-        Err(_) => {
-            // Expected for malformed input
-        }
-    }
+    observe_msgpack_round_trip::<asupersync::trace::replay::TraceMetadata>(data, "TraceMetadata");
 
     // Test with different MessagePack format variations
     // MessagePack has multiple valid representations for the same data
     if data.len() > 4 {
         // Try parsing with msgpack as well to test cross-implementation compatibility
-        let _ = rmp_serde::from_slice::<rmp_serde::Raw>(data);
+        observe_raw_msgpack_decode(data);
     }
 
     // Test partial deserialization scenarios
@@ -81,7 +96,10 @@ fuzz_target!(|data: &[u8]| {
         for truncate_at in [1, 2, 4, 8, data.len() / 2] {
             if truncate_at < data.len() {
                 let truncated = &data[..truncate_at];
-                let _ = rmp_serde::from_slice::<asupersync::trace::replay::ReplayEvent>(truncated);
+                observe_msgpack_round_trip::<asupersync::trace::replay::ReplayEvent>(
+                    truncated,
+                    "truncated ReplayEvent",
+                );
             }
         }
     }
