@@ -898,5 +898,18 @@ fuzz_target!(|data: &[u8]| {
     };
 
     // Run trace event serialization fuzzing
-    let _ = fuzz_trace_event_serialization(config);
+    match fuzz_trace_event_serialization(config) {
+        Ok(()) => {}
+        Err(error) => {
+            assert!(
+                !error.trim().is_empty(),
+                "trace event serialization rejection should expose a diagnostic"
+            );
+            assert!(
+                error.len() <= 512,
+                "trace event serialization diagnostic should stay bounded: {} bytes",
+                error.len()
+            );
+        }
+    }
 });
