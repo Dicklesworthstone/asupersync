@@ -47,6 +47,13 @@ enum DecoderType {
     ResponseSpecific,
 }
 
+#[derive(Debug)]
+enum QpackDecodeObservation {
+    FieldSection { fields: usize },
+    Request { headers: usize },
+    Response { headers: usize, status: u16 },
+}
+
 #[derive(Arbitrary, Debug, Clone)]
 enum AttackScenario {
     /// Valid field section (baseline)
@@ -119,23 +126,73 @@ fn test_no_panic(input: &QpackFuzzInput) {
     let mode = input.qpack_mode.clone().into();
 
     // Test should never panic, only return errors
-    let result = std::panic::catch_unwind(|| -> Result<(), H3NativeError> {
+    let result = std::panic::catch_unwind(|| -> Result<QpackDecodeObservation, H3NativeError> {
         match &input.decoder_type {
-            DecoderType::FieldSection => {
-                qpack_decode_field_section(&input.field_section, mode).map(|_| ())
-            }
+            DecoderType::FieldSection => qpack_decode_field_section(&input.field_section, mode)
+                .map(|plan| QpackDecodeObservation::FieldSection { fields: plan.len() }),
             DecoderType::RequestSpecific => {
-                qpack_decode_request_field_section(&input.field_section, mode, None).map(|_| ())
+                qpack_decode_request_field_section(&input.field_section, mode, None).map(
+                    |request| QpackDecodeObservation::Request {
+                        headers: request.headers.len(),
+                    },
+                )
             }
             DecoderType::ResponseSpecific => {
-                qpack_decode_response_field_section(&input.field_section, mode, None).map(|_| ())
+                qpack_decode_response_field_section(&input.field_section, mode, None).map(
+                    |response| QpackDecodeObservation::Response {
+                        headers: response.headers.len(),
+                        status: response.status,
+                    },
+                )
             }
         }
     });
 
+    match result {
+        Ok(Ok(observation)) => observe_qpack_decode_success(input, observation),
+        Ok(Err(err)) => observe_qpack_decode_rejection(input, &err),
+        Err(_) => {
+            panic!(
+                "QPACK {:?} decoder panicked for {} bytes",
+                input.decoder_type,
+                input.field_section.len()
+            );
+        }
+    }
+}
+
+fn observe_qpack_decode_success(input: &QpackFuzzInput, observation: QpackDecodeObservation) {
+    let max_observed_fields = input.field_section.len().saturating_add(1);
+
+    match observation {
+        QpackDecodeObservation::FieldSection { fields }
+        | QpackDecodeObservation::Request { headers: fields } => {
+            assert!(
+                fields <= max_observed_fields,
+                "QPACK {:?} produced {fields} fields from {} input bytes",
+                input.decoder_type,
+                input.field_section.len()
+            );
+        }
+        QpackDecodeObservation::Response { headers, status } => {
+            assert!(
+                headers <= max_observed_fields,
+                "QPACK response decoder produced {headers} fields from {} input bytes",
+                input.field_section.len()
+            );
+            assert!(
+                (100..=999).contains(&status),
+                "invalid HTTP status {status}"
+            );
+        }
+    }
+}
+
+fn observe_qpack_decode_rejection(input: &QpackFuzzInput, err: &H3NativeError) {
+    let diagnostic = format!("{err:?}");
     assert!(
-        result.is_ok(),
-        "QPACK {:?} decoder panicked for {} bytes",
+        !diagnostic.is_empty(),
+        "QPACK {:?} decoder rejected {} bytes without a diagnostic",
         input.decoder_type,
         input.field_section.len()
     );
