@@ -14,7 +14,7 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use std::{convert::TryInto, str};
+use std::{fmt::Debug, str};
 
 // HTTP/3 error codes per RFC 9114 Section 8
 const H3_NO_ERROR: u64 = 0x100;
@@ -53,6 +53,31 @@ const QUIC_CRYPTO_BUFFER_EXCEEDED: u64 = 0xD;
 const QUIC_KEY_UPDATE_ERROR: u64 = 0xE;
 const QUIC_AEAD_LIMIT_REACHED: u64 = 0xF;
 
+fn assert_visible_debug<T: Debug + ?Sized>(context: &str, value: &T) {
+    let rendered = format!("{value:?}");
+    assert!(
+        !rendered.is_empty(),
+        "{context} produced an empty debug representation"
+    );
+}
+
+fn observe_option<T: Debug>(context: &str, option: Option<T>) -> Option<T> {
+    assert_visible_debug(context, &option);
+    option
+}
+
+fn observe_result<T, E>(context: &str, result: Result<T, E>) -> Result<T, E>
+where
+    T: Debug,
+    E: Debug,
+{
+    match &result {
+        Ok(value) => assert_visible_debug(context, value),
+        Err(err) => assert_visible_debug(context, err),
+    }
+    result
+}
+
 /// Fuzz input for HTTP/3 error code testing
 #[derive(Debug, Clone, Arbitrary)]
 struct H3ErrorFuzzInput {
@@ -85,19 +110,19 @@ enum ErrorFrameEncoding {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum H3ErrorClass {
     /// Valid HTTP/3 error code in range 0x100-0x110
-    ValidH3Error,
+    ValidH3,
     /// QUIC transport error code (0x0-0xF)
-    QuicTransportError,
+    QuicTransport,
     /// Unknown/invalid error code
-    UnknownError,
+    Unknown,
 }
 
 /// Classify an error code according to RFC 9114
 fn classify_error_code(code: u64) -> H3ErrorClass {
     match code {
-        H3_NO_ERROR..=H3_VERSION_FALLBACK => H3ErrorClass::ValidH3Error,
-        QUIC_NO_ERROR..=QUIC_AEAD_LIMIT_REACHED => H3ErrorClass::QuicTransportError,
-        _ => H3ErrorClass::UnknownError,
+        H3_NO_ERROR..=H3_VERSION_FALLBACK => H3ErrorClass::ValidH3,
+        QUIC_NO_ERROR..=QUIC_AEAD_LIMIT_REACHED => H3ErrorClass::QuicTransport,
+        _ => H3ErrorClass::Unknown,
     }
 }
 
@@ -224,12 +249,10 @@ fn parse_error_code(frame_data: &[u8]) -> Option<u64> {
     }
 
     // Simple varint parsing for error code
-    let mut cursor = 0;
     let mut result = 0u64;
-    let mut shift = 0;
+    let mut shift: u32 = 0;
 
     for &byte in frame_data.iter().take(8) {
-        cursor += 1;
         if shift == 0 {
             // First byte determines encoding
             match byte >> 6 {
@@ -280,7 +303,7 @@ fuzz_target!(|input: H3ErrorFuzzInput| {
     // === Assertion 1: H3_NO_ERROR (0x100) through H3_VERSION_FALLBACK (0x110) correctly parsed ===
     let error_classification = classify_error_code(input.error_code);
     match error_classification {
-        H3ErrorClass::ValidH3Error => {
+        H3ErrorClass::ValidH3 => {
             // All HTTP/3 error codes should be recognized
             assert!(
                 h3_error_name(input.error_code).is_some(),
@@ -295,7 +318,7 @@ fuzz_target!(|input: H3ErrorFuzzInput| {
                 input.error_code
             );
         }
-        H3ErrorClass::QuicTransportError => {
+        H3ErrorClass::QuicTransport => {
             // QUIC codes should be in transport range
             assert!(
                 input.error_code <= QUIC_AEAD_LIMIT_REACHED,
@@ -303,7 +326,7 @@ fuzz_target!(|input: H3ErrorFuzzInput| {
                 input.error_code
             );
         }
-        H3ErrorClass::UnknownError => {
+        H3ErrorClass::Unknown => {
             // Unknown codes should not have names in either namespace
             assert!(
                 h3_error_name(input.error_code).is_none(),
@@ -319,16 +342,25 @@ fuzz_target!(|input: H3ErrorFuzzInput| {
     }
 
     // === Assertion 2: Unknown error codes handled as generic HTTP/3 error ===
-    if matches!(error_classification, H3ErrorClass::UnknownError) {
+    if matches!(error_classification, H3ErrorClass::Unknown) {
         // Unknown codes above HTTP/3 range should be treated as generic HTTP/3 errors
         if input.error_code > H3_VERSION_FALLBACK {
             // Should not cause panic or undefined behavior when parsed
-            let _ = parse_error_code(&frame_data);
+            if let Some(code) = observe_option(
+                "unknown HTTP/3 error code parse",
+                parse_error_code(&frame_data),
+            ) {
+                assert!(
+                    code < (1u64 << 62),
+                    "Parsed unknown error code 0x{:x} exceeds varint maximum",
+                    code
+                );
+            }
         }
     }
 
     // === Assertion 3: QUIC error codes distinct from HTTP/3 codes ===
-    if matches!(error_classification, H3ErrorClass::QuicTransportError) {
+    if matches!(error_classification, H3ErrorClass::QuicTransport) {
         // QUIC transport error codes should not be confused with HTTP/3 codes
         assert!(
             h3_error_name(input.error_code).is_none(),
@@ -349,7 +381,10 @@ fuzz_target!(|input: H3ErrorFuzzInput| {
     // === Assertion 4: Error-code frame length bound ===
     if !frame_data.is_empty() {
         // Parsing should not cause buffer overruns
-        let parsed_code = parse_error_code(&frame_data);
+        let parsed_code = observe_option(
+            "bounded HTTP/3 error code parse",
+            parse_error_code(&frame_data),
+        );
 
         // Should either parse successfully or fail gracefully
         if let Some(code) = parsed_code {
@@ -369,7 +404,7 @@ fuzz_target!(|input: H3ErrorFuzzInput| {
                     _ => {
                         // Other encodings may have additional data, but code should be reasonable
                         assert!(
-                            code <= (1u64 << 62) - 1,
+                            code < (1u64 << 62),
                             "Parsed error code 0x{:x} exceeds varint maximum",
                             code
                         );
@@ -391,7 +426,10 @@ fuzz_target!(|input: H3ErrorFuzzInput| {
     match input.encoding_variant {
         ErrorFrameEncoding::QuicConnectionClose | ErrorFrameEncoding::QuicApplicationClose => {
             // Reason phrase should be validated for UTF-8
-            let utf8_result = validate_reason_phrase(&input.reason_phrase);
+            let utf8_result = observe_result(
+                "HTTP/3 reason phrase UTF-8 validation",
+                validate_reason_phrase(&input.reason_phrase),
+            );
 
             match utf8_result {
                 Ok(valid_reason) => {
@@ -414,6 +452,7 @@ fuzz_target!(|input: H3ErrorFuzzInput| {
                     // Check that the error is legitimate (not due to fuzzer edge cases)
                     if !input.reason_phrase.is_empty() {
                         let _sanitized = String::from_utf8_lossy(&input.reason_phrase);
+                        assert_visible_debug("HTTP/3 sanitized reason phrase", &_sanitized);
                         // Should not panic during sanitization
                     }
                 }
@@ -422,8 +461,16 @@ fuzz_target!(|input: H3ErrorFuzzInput| {
         _ => {
             // For other frame types, UTF-8 validation may not apply
             // But if reason phrase is present, it should still be handled safely
-            if !input.reason_phrase.is_empty() {
-                let _ = validate_reason_phrase(&input.reason_phrase);
+            if !input.reason_phrase.is_empty()
+                && let Ok(reason) = observe_result(
+                    "HTTP/3 non-close reason phrase UTF-8 validation",
+                    validate_reason_phrase(&input.reason_phrase),
+                )
+            {
+                assert!(
+                    reason.len() <= input.reason_phrase.len(),
+                    "Validated reason phrase should not exceed byte length"
+                );
             }
         }
     }
@@ -444,19 +491,19 @@ fuzz_target!(|input: H3ErrorFuzzInput| {
     match input.error_code {
         0 => {
             // Zero error code (QUIC NO_ERROR)
-            assert_eq!(classify_error_code(0), H3ErrorClass::QuicTransportError);
+            assert_eq!(classify_error_code(0), H3ErrorClass::QuicTransport);
         }
         u64::MAX => {
             // Maximum error code
-            assert_eq!(classify_error_code(u64::MAX), H3ErrorClass::UnknownError);
+            assert_eq!(classify_error_code(u64::MAX), H3ErrorClass::Unknown);
         }
         0xFF => {
             // Boundary case between QUIC and HTTP/3 ranges
-            assert_eq!(classify_error_code(0xFF), H3ErrorClass::UnknownError);
+            assert_eq!(classify_error_code(0xFF), H3ErrorClass::Unknown);
         }
         0x111 => {
             // Just above HTTP/3 range
-            assert_eq!(classify_error_code(0x111), H3ErrorClass::UnknownError);
+            assert_eq!(classify_error_code(0x111), H3ErrorClass::Unknown);
         }
         _ => {}
     }
