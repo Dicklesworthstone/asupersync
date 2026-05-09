@@ -217,7 +217,7 @@ fuzz_target!(|input: BroadcastLagFuzz| {
                             );
                         }
                         Err(broadcast::SendError::Cancelled) => {
-                            assert!(false, "broadcast send unexpectedly cancelled under test Cx");
+                            panic!("broadcast send unexpectedly cancelled under test Cx");
                         }
                     }
                 }
@@ -286,8 +286,7 @@ fuzz_target!(|input: BroadcastLagFuzz| {
 
                     _ => {
                         // Mismatch - this is a bug
-                        assert!(
-                            false,
+                        panic!(
                             "Receive result mismatch: actual={:?}, shadow={:?}",
                             actual_result, shadow_result
                         );
@@ -327,8 +326,28 @@ fuzz_target!(|input: BroadcastLagFuzz| {
 
                 for i in 0..burst_size {
                     let msg = start_value.wrapping_add(i as u8);
-                    let _ = senders[0].send(&cx, msg);
-                    shadow.send_message(msg);
+                    let active_receiver_count = receivers.iter().filter(|r| r.is_some()).count();
+
+                    match senders[0].send(&cx, msg) {
+                        Ok(live_count) => {
+                            shadow.send_message(msg);
+                            assert_eq!(
+                                live_count, active_receiver_count,
+                                "Burst send live receiver count mismatch: got {}, expected {}",
+                                live_count, active_receiver_count
+                            );
+                        }
+                        Err(broadcast::SendError::Closed(_)) => {
+                            assert_eq!(
+                                active_receiver_count, 0,
+                                "Burst send closed with {} active receivers",
+                                active_receiver_count
+                            );
+                        }
+                        Err(broadcast::SendError::Cancelled) => {
+                            panic!("broadcast burst send unexpectedly cancelled under test Cx");
+                        }
+                    }
                 }
             }
 
