@@ -1,9 +1,12 @@
-//! Mock code finder clean sweep audit test for observability module.
+//! Mock-code finder audit guard for the observability module.
 //!
 //! **Audit Scope**: Comprehensive sweep of src/observability/ for implementation
 //! gaps, stubs, mocks, placeholders, and incomplete functionality.
 //!
-//! **Finding**: NO IMPLEMENTATION GAPS DETECTED as of 2026-05-07
+//! **Finding**: no macro-level stubs were detected as of 2026-05-07. This is
+//! not a blanket claim that every observability integration surface is complete;
+//! known runtime metric boundaries must stay documented in source and covered by
+//! targeted tests.
 //!
 //! **Methodology**: Multi-method detection sweep including:
 //! - Keyword search: unimplemented!, todo!, panic!("not implemented"), unreachable!
@@ -17,19 +20,21 @@
 //! 2. **No unreachable!() calls** found
 //! 3. **Panic calls are legitimate** (test assertions, conformance failures)
 //! 4. **Empty functions are intentional** (NoOpMetrics no-op implementations)
-//! 5. **No hardcoded stub returns** detected
-//! 6. **Mock/fake references are test infrastructure** (not implementation gaps)
+//! 5. **Known integration boundaries are explicit** (for example, pressure
+//!    governor channel-backlog sampling is externally fed until a runtime
+//!    channel registry exists)
 //!
-//! **Quality Assessment**: The observability module demonstrates mature,
-//! production-ready implementation with comprehensive test coverage and
-//! proper abstraction patterns (no-op implementations where appropriate).
-//!
-//! This audit test pins the current clean state and serves as a baseline
-//! for future mock-code-finder sweeps.
+//! This audit test pins the current stub-search baseline without overpromising
+//! broader feature completeness.
 
 #[cfg(test)]
 mod mock_code_finder_audit {
     use std::process::Command;
+
+    const KNOWN_IMPLEMENTATION_BOUNDARIES: &[(&str, &str)] = &[(
+        "src/observability/pressure_governor.rs",
+        "Channel-backlog pressure is an explicit aggregate sample today",
+    )];
 
     /// **AUDIT ASSERTION**: Verify no unimplemented!() macros in observability.
     #[test]
@@ -186,6 +191,19 @@ mod mock_code_finder_audit {
         );
     }
 
+    /// **AUDIT ASSERTION**: Known integration boundaries remain explicit.
+    #[test]
+    fn audit_known_implementation_boundaries_stay_truthful() {
+        for (path, marker) in KNOWN_IMPLEMENTATION_BOUNDARIES {
+            let source = std::fs::read_to_string(path)
+                .unwrap_or_else(|error| panic!("failed to read {path}: {error}"));
+            assert!(
+                source.contains(marker),
+                "known observability boundary lost its truthful source marker: {path} missing {marker:?}"
+            );
+        }
+    }
+
     /// **AUDIT ASSERTION**: Document the comprehensive sweep methodology.
     #[test]
     fn audit_methodology_documentation() {
@@ -202,15 +220,17 @@ mod mock_code_finder_audit {
         println!("  5. Cross-reference tracing: caller impact analysis");
         println!("  6. API stub detection: 501 responses");
         println!("");
-        println!("RESULT: NO IMPLEMENTATION GAPS FOUND");
+        println!("RESULT: NO MACRO-LEVEL STUBS FOUND");
         println!("- All empty functions are intentional (NoOpMetrics)");
         println!("- All panic calls are legitimate (tests, assertions)");
         println!("- No unimplemented!/todo!/unreachable! macros");
-        println!("- No hardcoded stub returns");
-        println!("- Mock/fake references are test infrastructure");
+        println!(
+            "- Known integration boundaries remain source-documented: {}",
+            KNOWN_IMPLEMENTATION_BOUNDARIES.len()
+        );
         println!("");
-        println!("ASSESSMENT: Observability module is production-ready");
-        println!("with mature implementation and comprehensive testing.");
+        println!("ASSESSMENT: Stub-search baseline is clean; broader feature");
+        println!("completeness still requires targeted integration evidence.");
     }
 
     /// **AUDIT VERIFICATION**: Test the sweep detection capability itself.
