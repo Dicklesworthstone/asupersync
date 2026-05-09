@@ -13,7 +13,9 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use asupersync::raptorq::decoder::{DecodeError, InactivationDecoder, ReceivedSymbol};
+use asupersync::raptorq::decoder::{
+    DecodeError, DecodeResult, InactivationDecoder, ReceivedSymbol,
+};
 use asupersync::raptorq::gf256::Gf256;
 
 /// Maximum symbols to generate for fuzzer performance
@@ -62,7 +64,7 @@ impl SourceBlockSize {
         match self {
             SourceBlockSize::Tiny(k) => ((k as usize) % 10).max(1),
             SourceBlockSize::Small(k) => ((k as usize) % 40) + 11,
-            SourceBlockSize::Medium(k) => ((k as usize) % 50) + 51,
+            SourceBlockSize::Medium(k) => ((k as usize) % (MAX_K - 50)) + 51,
         }
     }
 }
@@ -197,6 +199,17 @@ enum ArrivalJitter {
     Burst,
 }
 
+impl ArrivalJitter {
+    fn extra_repair_symbols(self) -> usize {
+        match self {
+            ArrivalJitter::None => 0,
+            ArrivalJitter::Low => 2,
+            ArrivalJitter::High => 5,
+            ArrivalJitter::Burst => 8,
+        }
+    }
+}
+
 /// Cancellation storm patterns
 #[derive(Arbitrary, Debug, Clone)]
 enum CancelPattern {
@@ -248,12 +261,12 @@ enum CancelProbability {
 }
 
 impl CancelProbability {
-    fn as_f32(self) -> f32 {
+    fn scaled_symbols(self, symbol_count: usize) -> usize {
         match self {
-            CancelProbability::Low => 0.1,
-            CancelProbability::Medium => 0.3,
-            CancelProbability::High => 0.6,
-            CancelProbability::VeryHigh => 0.9,
+            CancelProbability::Low => symbol_count / 10,
+            CancelProbability::Medium => symbol_count.saturating_mul(3) / 10,
+            CancelProbability::High => symbol_count.saturating_mul(6) / 10,
+            CancelProbability::VeryHigh => symbol_count.saturating_mul(9) / 10,
         }
     }
 }
@@ -319,6 +332,13 @@ enum ProgressiveOperation {
     MemoryPressure,
     /// Validate decoder state consistency
     ValidateState,
+}
+
+#[derive(Debug)]
+struct ProgressiveDecodeAttempt {
+    result: Result<DecodeResult, DecodeError>,
+    attempted_symbols: usize,
+    wavefront: bool,
 }
 
 /// Symbol data generation patterns
@@ -424,8 +444,12 @@ fn test_progressive_cancel_scenario(scenario: &ProgressiveCancelScenario) {
             ProgressiveOperation::ValidateState => test_state_validation(&decoder, &symbols),
         };
 
-        // Don't fail on expected errors - we're testing error handling under cancellation
-        let _ = result;
+        observe_progressive_decode_attempt(
+            progressive_operation_context(operation),
+            result,
+            k,
+            symbol_size,
+        );
     }
 }
 
@@ -443,16 +467,156 @@ fn test_cancel_invariants(scenario: &ProgressiveCancelScenario) {
     let symbols = generate_test_symbols(k, symbol_size, &scenario.arrival_strategy);
 
     // Test that partial decode attempts don't corrupt subsequent attempts
-    let partial_result = decoder.decode(&symbols[..symbols.len().min(k / 2)]);
-
-    // Should fail due to insufficient symbols, but not crash
-    if let Err(DecodeError::InsufficientSymbols { .. }) = partial_result {
-        // Expected - continue with full decode
-    }
+    let partial_attempt = direct_decode_attempt(&decoder, &symbols, symbols.len().min(k / 2));
+    observe_progressive_decode_attempt(
+        "cancel invariant partial decode",
+        partial_attempt,
+        k,
+        symbol_size,
+    );
 
     // Full decode should still work
     if symbols.len() >= k {
-        let _full_result = decoder.decode(&symbols);
+        let full_attempt = direct_decode_attempt(&decoder, &symbols, symbols.len());
+        observe_progressive_decode_attempt(
+            "cancel invariant full decode",
+            full_attempt,
+            k,
+            symbol_size,
+        );
+    }
+}
+
+fn progressive_operation_context(operation: &ProgressiveOperation) -> &'static str {
+    match operation {
+        ProgressiveOperation::DecodeBatched { .. } => "batched progressive decode",
+        ProgressiveOperation::DecodeWavefront { .. } => "wavefront progressive decode",
+        ProgressiveOperation::TryIntermediateDecode { .. } => "intermediate progressive decode",
+        ProgressiveOperation::MemoryPressure => "memory pressure progressive decode",
+        ProgressiveOperation::ValidateState => "state validation progressive decode",
+    }
+}
+
+fn observe_progressive_decode_attempt(
+    context: &str,
+    attempt: ProgressiveDecodeAttempt,
+    expected_k: usize,
+    symbol_size: usize,
+) {
+    assert!(
+        attempt.attempted_symbols <= MAX_SYMBOLS,
+        "{context}: attempted symbols escaped the fuzz cap"
+    );
+
+    match attempt.result {
+        Ok(result) => {
+            assert!(
+                attempt.attempted_symbols >= expected_k,
+                "{context}: decoded with fewer symbols than K"
+            );
+            assert_eq!(
+                result.source.len(),
+                expected_k,
+                "{context}: decoded source count changed"
+            );
+            assert!(
+                result.intermediate.len() >= result.source.len(),
+                "{context}: intermediate symbols should cover source symbols"
+            );
+            assert!(
+                result
+                    .source
+                    .iter()
+                    .all(|symbol| symbol.len() == symbol_size),
+                "{context}: decoded source symbol size mismatch"
+            );
+            assert_eq!(
+                result.stats.wavefront_active, attempt.wavefront,
+                "{context}: wavefront stats flag mismatch"
+            );
+            if attempt.wavefront {
+                assert!(
+                    result.stats.wavefront_batch_size > 0,
+                    "{context}: successful wavefront decode should record a batch size"
+                );
+            }
+        }
+        Err(error) => {
+            observe_progressive_decode_error(context, &error, attempt.attempted_symbols, expected_k)
+        }
+    }
+}
+
+fn observe_progressive_decode_error(
+    context: &str,
+    error: &DecodeError,
+    attempted_symbols: usize,
+    expected_k: usize,
+) {
+    assert_ne!(
+        error.is_recoverable(),
+        error.is_unrecoverable(),
+        "{context}: decode error classification should be exclusive"
+    );
+    assert!(
+        !format!("{error:?}").is_empty(),
+        "{context}: decode error diagnostics should remain observable"
+    );
+
+    match error {
+        DecodeError::InsufficientSymbols { received, required } => {
+            assert_eq!(
+                *received, attempted_symbols,
+                "{context}: insufficient-symbol count should match attempted input"
+            );
+            assert!(
+                *required >= expected_k,
+                "{context}: required-symbol threshold should cover K"
+            );
+            assert!(
+                *received < *required,
+                "{context}: insufficient-symbol error must require more symbols"
+            );
+        }
+        DecodeError::SymbolSizeMismatch { expected, actual } => {
+            assert_ne!(
+                *expected, *actual,
+                "{context}: symbol-size mismatch should report different sizes"
+            );
+        }
+        DecodeError::SymbolEquationArityMismatch {
+            columns,
+            coefficients,
+            ..
+        } => {
+            assert_ne!(
+                *columns, *coefficients,
+                "{context}: equation arity mismatch should report different lengths"
+            );
+        }
+        DecodeError::ColumnIndexOutOfRange {
+            column, max_valid, ..
+        } => {
+            assert!(
+                *column >= *max_valid,
+                "{context}: out-of-range column should be outside the decode domain"
+            );
+        }
+        DecodeError::SourceEsiOutOfRange { esi, max_valid } => {
+            assert!(
+                *esi >= *max_valid as u32,
+                "{context}: out-of-range source ESI should exceed the source domain"
+            );
+        }
+        DecodeError::CorruptDecodedOutput {
+            expected, actual, ..
+        } => {
+            assert_ne!(
+                *expected, *actual,
+                "{context}: corrupt output should report a byte mismatch"
+            );
+        }
+        DecodeError::SingularMatrix { .. } | DecodeError::InvalidSourceSymbolEquation { .. } => {}
     }
 }
 
@@ -494,9 +658,11 @@ fn test_wavefront_cancel_robustness(scenario: &ProgressiveCancelScenario) {
                 }
                 (Err(e1), Err(e2)) => {
                     // Both failed - error types should match for deterministic failures
-                    if std::mem::discriminant(e1) != std::mem::discriminant(e2) {
-                        // Different error types could indicate non-determinism
-                    }
+                    assert_eq!(
+                        std::mem::discriminant(e1),
+                        std::mem::discriminant(e2),
+                        "sequential and wavefront decode returned different error classes: sequential={e1:?} wavefront={e2:?}"
+                    );
                 }
                 _ => {
                     // One succeeded, one failed - potential non-determinism
@@ -519,16 +685,28 @@ fn generate_test_symbols(
             esi: esi as u32,
             is_source: true,
             columns: vec![esi],
-            coefficients: vec![Gf256::from(1)],
+            coefficients: vec![Gf256::ONE],
             data: SymbolData::Incremental(esi as u8).generate(symbol_size),
         });
     }
 
     // Generate some repair symbols
     let repair_count = match strategy {
-        ArrivalStrategy::SmallBatches { total_batches, .. } => (*total_batches as usize).min(20),
-        ArrivalStrategy::MediumBatches { .. } => 10,
-        ArrivalStrategy::LargeBatch { .. } => 5,
+        ArrivalStrategy::SmallBatches {
+            batch_size,
+            total_batches,
+        } => batch_size
+            .as_usize()
+            .saturating_mul(*total_batches as usize)
+            .min(20),
+        ArrivalStrategy::MediumBatches {
+            batch_size,
+            arrival_jitter,
+        } => batch_size
+            .as_usize()
+            .saturating_add(arrival_jitter.extra_repair_symbols())
+            .min(20),
+        ArrivalStrategy::LargeBatch { batch_size } => batch_size.as_usize().min(20),
         ArrivalStrategy::VariableBatches { batch_pattern } => batch_pattern.len().min(15),
     };
 
@@ -539,7 +717,7 @@ fn generate_test_symbols(
             esi,
             is_source: false,
             columns: vec![0, 1],
-            coefficients: vec![Gf256::from(1), Gf256::from(1)],
+            coefficients: vec![Gf256::ONE, Gf256::ONE],
             data: SymbolData::Random(esi).generate(symbol_size),
         });
     }
@@ -553,32 +731,51 @@ fn test_batched_decode_with_cancel(
     symbols: &[ReceivedSymbol],
     batch_size: usize,
     cancel_pattern: &CancelPattern,
-) -> Result<(), DecodeError> {
+) -> ProgressiveDecodeAttempt {
     // Simulate batched processing with potential cancellation
 
     match cancel_pattern {
         CancelPattern::None => {
             // No cancellation - test normal batched decode
-            decoder.decode(symbols).map(|_| ())
+            direct_decode_attempt(decoder, symbols, symbols.len())
         }
         CancelPattern::AtProgress { cancel_points } => {
             // Test cancellation at specific progress points
-            for _point in cancel_points {
+            let partial_len = batch_size
+                .max(1)
+                .saturating_mul(cancel_points.len().max(1))
+                .min(symbols.len());
+            let mut attempt = direct_decode_attempt(decoder, symbols, partial_len);
+            for _point in cancel_points.iter().skip(1) {
                 // In a real implementation, this would check for cancellation
                 // For fuzzing, we just exercise the decode path
-                let partial_len = symbols.len() / 2;
-                let result = decoder.decode(&symbols[..partial_len]);
-                if result.is_ok() {
+                if attempt.result.is_ok() {
                     break; // Unexpected success with partial symbols
                 }
+                attempt = direct_decode_attempt(decoder, symbols, partial_len);
             }
-            Ok(())
+            attempt
         }
-        CancelPattern::Random { .. } | CancelPattern::Storm { .. } => {
+        CancelPattern::Random {
+            attempts,
+            probability,
+        } => {
             // Test various interruption patterns
-            let partial_len = symbols.len() / 3;
-            let _result = decoder.decode(&symbols[..partial_len]);
-            Ok(())
+            let attempted_cancels = (*attempts as usize).max(1);
+            let partial_len = probability
+                .scaled_symbols(symbols.len())
+                .saturating_add(attempted_cancels)
+                .min(symbols.len());
+            direct_decode_attempt(decoder, symbols, partial_len)
+        }
+        CancelPattern::Storm {
+            frequency,
+            duration,
+        } => {
+            // Test various interruption patterns
+            let storm_span = duration.as_usize().min(symbols.len());
+            let partial_len = storm_span.saturating_sub(storm_span % frequency.as_usize().max(1));
+            direct_decode_attempt(decoder, symbols, partial_len)
         }
     }
 }
@@ -588,17 +785,17 @@ fn test_wavefront_decode_with_cancel(
     symbols: &[ReceivedSymbol],
     batch_size: usize,
     cancel_pattern: &CancelPattern,
-) -> Result<(), DecodeError> {
+) -> ProgressiveDecodeAttempt {
     // Test wavefront decoding under cancellation pressure
 
     match cancel_pattern {
-        CancelPattern::None => decoder.decode_wavefront(symbols, batch_size).map(|_| ()),
+        CancelPattern::None => {
+            wavefront_decode_attempt(decoder, symbols, symbols.len(), batch_size)
+        }
         _ => {
             // Test partial wavefront decode
             let partial_len = symbols.len() / 2;
-            decoder
-                .decode_wavefront(&symbols[..partial_len], batch_size)
-                .map(|_| ())
+            wavefront_decode_attempt(decoder, symbols, partial_len, batch_size)
         }
     }
 }
@@ -607,23 +804,49 @@ fn test_intermediate_decode(
     decoder: &InactivationDecoder,
     symbols: &[ReceivedSymbol],
     after_symbols: usize,
-) -> Result<(), DecodeError> {
-    let attempt_len = after_symbols.min(symbols.len());
-    decoder.decode(&symbols[..attempt_len]).map(|_| ())
+) -> ProgressiveDecodeAttempt {
+    direct_decode_attempt(decoder, symbols, after_symbols)
 }
 
 fn test_memory_pressure_decode(
     decoder: &InactivationDecoder,
     symbols: &[ReceivedSymbol],
-) -> Result<(), DecodeError> {
+) -> ProgressiveDecodeAttempt {
     // Simulate decode under memory pressure (simplified)
-    decoder.decode(symbols).map(|_| ())
+    direct_decode_attempt(decoder, symbols, symbols.len())
 }
 
 fn test_state_validation(
     decoder: &InactivationDecoder,
     symbols: &[ReceivedSymbol],
-) -> Result<(), DecodeError> {
+) -> ProgressiveDecodeAttempt {
     // Test that decoder state validation works correctly
-    decoder.decode(symbols).map(|_| ())
+    direct_decode_attempt(decoder, symbols, symbols.len())
+}
+
+fn direct_decode_attempt(
+    decoder: &InactivationDecoder,
+    symbols: &[ReceivedSymbol],
+    attempted_symbols: usize,
+) -> ProgressiveDecodeAttempt {
+    let attempted_symbols = attempted_symbols.min(symbols.len());
+    ProgressiveDecodeAttempt {
+        result: decoder.decode(&symbols[..attempted_symbols]),
+        attempted_symbols,
+        wavefront: false,
+    }
+}
+
+fn wavefront_decode_attempt(
+    decoder: &InactivationDecoder,
+    symbols: &[ReceivedSymbol],
+    attempted_symbols: usize,
+    batch_size: usize,
+) -> ProgressiveDecodeAttempt {
+    let attempted_symbols = attempted_symbols.min(symbols.len());
+    ProgressiveDecodeAttempt {
+        result: decoder.decode_wavefront(&symbols[..attempted_symbols], batch_size),
+        attempted_symbols,
+        wavefront: true,
+    }
 }
