@@ -42,7 +42,7 @@
       "lane_id": "default-production-tokio-tree",
       "kind": "dependency_graph",
       "package": "asupersync",
-      "command": "rch exec -- cargo tree -e normal -p asupersync -i tokio",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_default_tokio_tree cargo tree -e normal -p asupersync -i tokio",
       "guarantee_ids": [
         "default-production-tokio-free"
       ],
@@ -59,7 +59,7 @@
       "lane_id": "metrics-production-tokio-tree",
       "kind": "dependency_graph",
       "package": "asupersync",
-      "command": "rch exec -- cargo tree -e normal -p asupersync --features metrics -i tokio",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_metrics_tokio_tree cargo tree -e normal -p asupersync --features metrics -i tokio",
       "guarantee_ids": [
         "metrics-production-tokio-free"
       ],
@@ -78,7 +78,7 @@
       "lane_id": "fuzz-tokio-quarantine-tree",
       "kind": "dependency_graph",
       "package": "asupersync",
-      "command": "rch exec -- cargo tree -e normal -p asupersync --features fuzz -i tokio",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_fuzz_tokio_tree cargo tree -e normal -p asupersync --features fuzz -i tokio",
       "guarantee_ids": [
         "fuzz-tokio-quarantine"
       ],
@@ -96,7 +96,7 @@
       "lane_id": "workspace-normal-tokio-audit",
       "kind": "dependency_graph",
       "package": "workspace",
-      "command": "rch exec -- cargo tree -e normal --workspace -i tokio",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_workspace_tokio_tree cargo tree -e normal --workspace -i tokio",
       "guarantee_ids": [
         "workspace-tokio-audit"
       ],
@@ -200,7 +200,7 @@
       "lane_id": "rustfmt-check",
       "kind": "format_frontier",
       "package": "workspace",
-      "command": "rch exec -- cargo fmt --check",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_rustfmt cargo fmt --check",
       "guarantee_ids": [
         "rustfmt-frontier"
       ],

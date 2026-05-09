@@ -222,6 +222,18 @@ fn every_claim_maps_to_manifest_lanes_guarantees_and_commands() {
             expected_commands, snapshot_commands,
             "{claim_id}: proof commands must match the manifest lane commands"
         );
+        for command in &snapshot_commands {
+            if command.contains(" cargo ") {
+                assert!(
+                    command.contains("CARGO_TARGET_DIR="),
+                    "{claim_id}: cargo proof command must isolate target output: {command}"
+                );
+                assert!(
+                    !command.contains("rch exec -- cargo"),
+                    "{claim_id}: cargo proof command must not use bare rch cargo routing: {command}"
+                );
+            }
+        }
     }
 }
 

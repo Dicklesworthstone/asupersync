@@ -65,8 +65,8 @@
         "metrics-production-tokio-tree"
       ],
       "proof_commands": [
-        "rch exec -- cargo tree -e normal -p asupersync -i tokio",
-        "rch exec -- cargo tree -e normal -p asupersync --features metrics -i tokio"
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_default_tokio_tree cargo tree -e normal -p asupersync -i tokio",
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_metrics_tokio_tree cargo tree -e normal -p asupersync --features metrics -i tokio"
       ],
       "blocked_frontier": null,
       "notes": "Green here is a mapped proof lane, not a fresh execution result."
@@ -179,7 +179,7 @@
       ],
       "proof_commands": [
         "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fuzz_manifest_smoke CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check --manifest-path fuzz/Cargo.toml",
-        "rch exec -- cargo tree -e normal -p asupersync --features fuzz -i tokio"
+        "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_fuzz_tokio_tree cargo tree -e normal -p asupersync --features fuzz -i tokio"
       ],
       "blocked_frontier": null,
       "notes": "The tokio edge is expected only in the fuzz quarantine lane and must not weaken production no-Tokio claims."

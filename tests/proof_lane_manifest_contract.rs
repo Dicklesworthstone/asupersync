@@ -329,6 +329,16 @@ fn every_lane_has_rch_command_scope_limits_and_live_paths() {
             command.starts_with(required_prefix),
             "{lane_id}: command must start with {required_prefix:?}: {command}"
         );
+        if command.contains(" cargo ") {
+            assert!(
+                command.contains("CARGO_TARGET_DIR="),
+                "{lane_id}: cargo command must isolate target output: {command}"
+            );
+            assert!(
+                !command.contains("rch exec -- cargo"),
+                "{lane_id}: cargo command must not use bare rch cargo routing: {command}"
+            );
+        }
         assert!(
             !string_set(lane, "guarantee_ids").is_empty(),
             "{lane_id}: guarantee_ids must be nonempty"

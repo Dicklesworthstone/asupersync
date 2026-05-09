@@ -10,6 +10,8 @@ const FRONTIER_PATH: &str = "artifacts/validation_frontier_ledger_schema_v1.json
 const MANIFEST_PATH: &str = "artifacts/proof_lane_manifest_v1.json";
 const SNAPSHOT_PATH: &str = "artifacts/proof_status_snapshot_v1.json";
 const SCRIPT_PATH: &str = "scripts/proof_runner.py";
+const NO_TOKIO_TREE_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_console_report_docs cargo tree -e normal -p asupersync -i tokio";
+const LIB_TEST_COMMAND: &str = "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_console_report_docs cargo test -p asupersync --lib";
 
 fn repo_path(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
@@ -87,6 +89,18 @@ fn report_contains_raw_coordination_data(report: &Value) -> bool {
     .any(|marker| serialized.contains(marker))
 }
 
+fn validate_rch_cargo_command_shape(label: &str, command: &str, failures: &mut Vec<String>) {
+    if command.contains("rch exec -- cargo") {
+        failures.push(format!("bare-rch-cargo:{label}:{command}"));
+    }
+    if command.contains("rch exec --")
+        && command.contains(" cargo ")
+        && !command.contains("CARGO_TARGET_DIR=")
+    {
+        failures.push(format!("missing-cargo-target-dir:{label}:{command}"));
+    }
+}
+
 fn valid_report() -> Value {
     json!({
         "schema_version": "proof-console-report-v1",
@@ -117,7 +131,7 @@ fn valid_report() -> Value {
                 "status": "green",
                 "manifest_lane_ids": ["default-production-tokio-tree"],
                 "manifest_guarantee_ids": ["default-production-tokio-free"],
-                "proof_commands": ["rch exec -- cargo tree -e normal -p asupersync -i tokio"],
+                "proof_commands": [NO_TOKIO_TREE_COMMAND],
                 "blocked_frontier": null,
                 "doc_claim_markers": {
                     "README.md": ["default production graph has no normal-edge dependency on tokio"],
@@ -130,7 +144,7 @@ fn valid_report() -> Value {
             {
                 "lane_id": "default-production-tokio-tree",
                 "kind": "dependency_graph",
-                "command": "rch exec -- cargo tree -e normal -p asupersync -i tokio",
+                "command": NO_TOKIO_TREE_COMMAND,
                 "guarantee_ids": ["default-production-tokio-free"],
                 "expected_signal": "warning: nothing to print.",
                 "status": "pass",
@@ -139,7 +153,7 @@ fn valid_report() -> Value {
         ],
         "rch_outcomes": [
             {
-                "command": "rch exec -- cargo tree -e normal -p asupersync -i tokio",
+                "command": NO_TOKIO_TREE_COMMAND,
                 "outcome_class": "pass",
                 "remote_exit_status": 0,
                 "first_blocker": null
@@ -221,6 +235,16 @@ fn validate_report(contract: &Value, report: &Value) -> Vec<String> {
             failures.push(format!("unsupported-broad-claim:{claim_id}"));
         }
 
+        if let Some(commands) = row.get("proof_commands").and_then(Value::as_array) {
+            for command in commands.iter().filter_map(Value::as_str) {
+                validate_rch_cargo_command_shape(
+                    &format!("claim:{claim_id}:proof_commands"),
+                    command,
+                    &mut failures,
+                );
+            }
+        }
+
         if status == "red_blocked_external" {
             let blocked = &row["blocked_frontier"];
             let generated_at = blocked
@@ -238,6 +262,13 @@ fn validate_report(contract: &Value, report: &Value) -> Vec<String> {
                 || line.unwrap_or(0) == 0
             {
                 failures.push(format!("stale-blocker-row:{claim_id}"));
+            }
+            if let Some(command) = blocked.get("command").and_then(Value::as_str) {
+                validate_rch_cargo_command_shape(
+                    &format!("claim:{claim_id}:blocked_frontier"),
+                    command,
+                    &mut failures,
+                );
             }
         }
     }
@@ -257,6 +288,11 @@ fn validate_report(contract: &Value, report: &Value) -> Vec<String> {
         if !allowed_lane_statuses.contains(status) {
             failures.push(format!("unknown-lane-status:{lane_id}:{status}"));
         }
+        validate_rch_cargo_command_shape(
+            &format!("lane:{lane_id}:command"),
+            string(row, "command"),
+            &mut failures,
+        );
     }
 
     for outcome in array(report, "rch_outcomes") {
@@ -268,6 +304,7 @@ fn validate_report(contract: &Value, report: &Value) -> Vec<String> {
         if !allowed_outcomes.contains(outcome_class) {
             failures.push(format!("unclassified-rch-outcome:{command}"));
         }
+        validate_rch_cargo_command_shape("rch_outcome:command", command, &mut failures);
     }
 
     if report_contains_raw_coordination_data(report) {
@@ -431,7 +468,7 @@ fn stale_blocker_rows_are_rejected() {
     report["claim_rows"][0]["status"] = json!("red_blocked_external");
     report["claim_rows"][0]["blocked_frontier"] = json!({
         "generated_at": "2026-05-01T00:00:00Z",
-        "command": "rch exec -- cargo test -p asupersync --lib",
+        "command": LIB_TEST_COMMAND,
         "first_failure": {
             "file": "src/runtime/scheduler/three_lane.rs",
             "line": 44
@@ -458,7 +495,7 @@ fn blocker_rows_need_positive_line_evidence() {
     report["claim_rows"][0]["status"] = json!("red_blocked_external");
     report["claim_rows"][0]["blocked_frontier"] = json!({
         "generated_at": "2026-05-08T12:00:00Z",
-        "command": "rch exec -- cargo test -p asupersync --lib",
+        "command": LIB_TEST_COMMAND,
         "first_failure": {
             "file": "src/runtime/scheduler/three_lane.rs",
             "line": 0
@@ -528,6 +565,23 @@ fn unclassified_rch_outcomes_are_rejected() {
 }
 
 #[test]
+fn bare_rch_cargo_commands_are_rejected() {
+    let contract = contract();
+    let mut report = valid_report();
+    report["lane_rows"][0]["command"] =
+        json!("rch exec -- cargo tree -e normal -p asupersync -i tokio");
+    report["verdict"] = json!("fail_closed");
+
+    let failures = validate_report(&contract, &report);
+    assert!(
+        failures
+            .iter()
+            .any(|failure| failure.starts_with("bare-rch-cargo:")),
+        "bare rch cargo routing must fail closed: {failures:?}"
+    );
+}
+
+#[test]
 fn raw_coordination_data_is_rejected() {
     let contract = contract();
     let mut report = valid_report();
@@ -589,6 +643,16 @@ fn proof_commands_are_rch_routed_and_include_existing_manifest_snapshot_gates() 
             command.starts_with("rch exec -- "),
             "proof command must be rch-routed: {command}"
         );
+        if command.contains(" cargo ") {
+            assert!(
+                command.contains("CARGO_TARGET_DIR="),
+                "cargo proof command must isolate target output: {command}"
+            );
+            assert!(
+                !command.contains("rch exec -- cargo"),
+                "cargo proof command must not use bare rch cargo routing: {command}"
+            );
+        }
     }
     assert!(
         commands

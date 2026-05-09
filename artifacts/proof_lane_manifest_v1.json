@@ -35,7 +35,7 @@
     {
       "lane_id": "default-production-tokio-tree",
       "kind": "dependency_graph",
-      "command": "rch exec -- cargo tree -e normal -p asupersync -i tokio",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_default_tokio_tree cargo tree -e normal -p asupersync -i tokio",
       "package": "asupersync",
       "feature_flags": [],
       "guarantee_ids": [
@@ -58,7 +58,7 @@
     {
       "lane_id": "metrics-production-tokio-tree",
       "kind": "dependency_graph",
-      "command": "rch exec -- cargo tree -e normal -p asupersync --features metrics -i tokio",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_metrics_tokio_tree cargo tree -e normal -p asupersync --features metrics -i tokio",
       "package": "asupersync",
       "feature_flags": [
         "metrics"
@@ -84,7 +84,7 @@
     {
       "lane_id": "fuzz-tokio-quarantine-tree",
       "kind": "dependency_graph",
-      "command": "rch exec -- cargo tree -e normal -p asupersync --features fuzz -i tokio",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_fuzz_tokio_tree cargo tree -e normal -p asupersync --features fuzz -i tokio",
       "package": "asupersync",
       "feature_flags": [
         "fuzz"
@@ -108,7 +108,7 @@
     {
       "lane_id": "workspace-normal-tokio-audit",
       "kind": "dependency_graph",
-      "command": "rch exec -- cargo tree -e normal --workspace -i tokio",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_workspace_tokio_tree cargo tree -e normal --workspace -i tokio",
       "package": "workspace",
       "feature_flags": [],
       "guarantee_ids": [
@@ -255,7 +255,7 @@
     {
       "lane_id": "rustfmt-check",
       "kind": "format_frontier",
-      "command": "rch exec -- cargo fmt --check",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_rustfmt cargo fmt --check",
       "package": "workspace",
       "feature_flags": [],
       "guarantee_ids": [
