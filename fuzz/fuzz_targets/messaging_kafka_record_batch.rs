@@ -185,6 +185,47 @@ fn decode_record_batch(buf: &[u8]) -> Result<usize, &'static str> {
     Ok(pos)
 }
 
+fn observe_varint_zigzag(buf: &[u8]) {
+    match read_varint_zigzag(buf) {
+        Ok((_value, consumed)) => {
+            assert!(consumed > 0, "varint decode must consume input");
+            assert!(
+                consumed <= buf.len(),
+                "varint decode consumed past input: consumed={consumed}, len={}",
+                buf.len()
+            );
+            assert!(
+                consumed <= MAX_VARINT_BYTES,
+                "varint decode exceeded Kafka varint byte bound"
+            );
+        }
+        Err(err) => {
+            assert!(
+                !err.is_empty(),
+                "varint decode errors must remain observable"
+            );
+        }
+    }
+}
+
+fn observe_record_batch_decode(buf: &[u8]) {
+    match decode_record_batch(buf) {
+        Ok(consumed) => {
+            assert!(
+                consumed <= buf.len(),
+                "record-batch decode consumed past input: consumed={consumed}, len={}",
+                buf.len()
+            );
+        }
+        Err(err) => {
+            assert!(
+                !err.is_empty(),
+                "record-batch decode errors must remain observable"
+            );
+        }
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
     if data.len() > MAX_INPUT {
         return;
@@ -193,8 +234,8 @@ fuzz_target!(|data: &[u8]| {
     // Always exercise the varint reader first — this catches
     // continuation-overrun shapes that the batch decoder hides
     // behind the `Result` shape.
-    let _ = read_varint_zigzag(data);
+    observe_varint_zigzag(data);
 
     // Then attempt full record-batch decode. Any panic is a bug.
-    let _ = decode_record_batch(data);
+    observe_record_batch_decode(data);
 });
