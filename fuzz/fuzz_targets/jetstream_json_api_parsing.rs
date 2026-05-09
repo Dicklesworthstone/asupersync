@@ -20,6 +20,30 @@ fn parse_reply_subject(reply_subject: &str, payload: &[u8]) -> Option<FuzzJsAckM
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AckSubjectObservation {
+    Accepted,
+    Rejected,
+}
+
+fn observe_reply_subject_parse(reply_subject: &str, payload: &[u8]) -> AckSubjectObservation {
+    match parse_reply_subject(reply_subject, payload) {
+        Some(metadata) => {
+            assert_eq!(
+                metadata.subject, "fuzz.jetstream.payload",
+                "ACK metadata should preserve the source message subject",
+            );
+            assert_eq!(
+                metadata.payload_len,
+                payload.len(),
+                "ACK metadata should preserve the source payload length",
+            );
+            AckSubjectObservation::Accepted
+        }
+        None => AckSubjectObservation::Rejected,
+    }
+}
+
 fn assert_visible_js_error(err: &JsError) {
     assert!(
         !err.to_string().is_empty(),
@@ -134,9 +158,25 @@ fn observe_ack_subject_variants(subject_data: &str, payload: &[u8]) {
         subject_data.to_string(),
     ];
 
-    for reply_subject in reply_subjects {
-        let _ = parse_reply_subject(&reply_subject, payload);
+    let mut accepted = 0usize;
+    let mut rejected = 0usize;
+
+    for reply_subject in &reply_subjects {
+        match observe_reply_subject_parse(reply_subject, payload) {
+            AckSubjectObservation::Accepted => accepted += 1,
+            AckSubjectObservation::Rejected => rejected += 1,
+        }
     }
+
+    assert_eq!(
+        accepted + rejected,
+        reply_subjects.len(),
+        "every generated ACK subject variant should be classified",
+    );
+    assert!(
+        accepted > 0,
+        "fixed ACK subject variants should keep at least one successful parse",
+    );
 }
 
 /// Generate malformed JSON based on input data.
