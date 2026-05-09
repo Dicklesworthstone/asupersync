@@ -2,18 +2,284 @@
 
 use arbitrary::Arbitrary;
 use asupersync::error::{Error, ErrorKind};
-use asupersync::http::h3::error::H3Error;
+use asupersync::http::h3_native::{
+    H3ConnectionConfig, H3Frame, H3NativeError, H3QpackMode, H3Settings, qpack_decode_field_section,
+};
 use asupersync::types::CancelReason;
-use h3::error::{Code, ConnectionError, StreamError};
 use libfuzzer_sys::fuzz_target;
+use std::error::Error as StdError;
+use std::fmt;
 use std::io;
+
+#[derive(Debug)]
+enum H3Error {
+    Connection(ConnectionError),
+    Stream(StreamError),
+    Io(io::Error),
+    Cancelled,
+    Asupersync(Error),
+    Native(H3NativeError),
+}
+
+impl H3Error {
+    fn is_cancelled(&self) -> bool {
+        match self {
+            Self::Cancelled => true,
+            Self::Asupersync(error) => error.is_cancelled(),
+            _ => false,
+        }
+    }
+}
+
+impl fmt::Display for H3Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Connection(error) => write!(f, "connection error: {error}"),
+            Self::Stream(error) => write!(f, "stream error: {error}"),
+            Self::Io(error) => write!(f, "io error: {error}"),
+            Self::Cancelled => f.write_str("cancelled"),
+            Self::Asupersync(error) => write!(f, "asupersync error: {error}"),
+            Self::Native(error) => write!(f, "native h3 error: {error}"),
+        }
+    }
+}
+
+impl StdError for H3Error {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        match self {
+            Self::Connection(error) => Some(error),
+            Self::Stream(error) => Some(error),
+            Self::Io(error) => error.source(),
+            Self::Asupersync(error) => error.source(),
+            Self::Native(error) => Some(error),
+            Self::Cancelled => None,
+        }
+    }
+}
+
+impl From<ConnectionError> for H3Error {
+    fn from(error: ConnectionError) -> Self {
+        Self::Connection(error)
+    }
+}
+
+impl From<StreamError> for H3Error {
+    fn from(error: StreamError) -> Self {
+        Self::Stream(error)
+    }
+}
+
+impl From<io::Error> for H3Error {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl From<Error> for H3Error {
+    fn from(error: Error) -> Self {
+        if error.is_cancelled() {
+            Self::Cancelled
+        } else {
+            Self::Asupersync(error)
+        }
+    }
+}
+
+impl From<H3NativeError> for H3Error {
+    fn from(error: H3NativeError) -> Self {
+        Self::Native(error)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConnectionError {
+    code: Code,
+    native: H3NativeError,
+}
+
+impl ConnectionError {
+    fn timeout() -> Self {
+        Self {
+            code: Code::H3_INTERNAL_ERROR,
+            native: H3NativeError::ControlProtocol("timeout"),
+        }
+    }
+
+    fn is_h3_no_error(&self) -> bool {
+        matches!(self.code.kind, H3CodeKind::NoError)
+    }
+}
+
+impl fmt::Display for ConnectionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "0x{:x}: {}", self.code.raw, self.native)
+    }
+}
+
+impl StdError for ConnectionError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        Some(&self.native)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StreamError {
+    code: Code,
+    native: H3NativeError,
+}
+
+impl StreamError {
+    fn id() -> Self {
+        Self {
+            code: Code::H3_ID_ERROR,
+            native: H3NativeError::StreamProtocol("stream id error"),
+        }
+    }
+}
+
+impl fmt::Display for StreamError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "0x{:x}: {}", self.code.raw, self.native)
+    }
+}
+
+impl StdError for StreamError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        Some(&self.native)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Code {
+    raw: u64,
+    kind: H3CodeKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum H3CodeKind {
+    NoError,
+    GeneralProtocolError,
+    InternalError,
+    StreamCreationError,
+    ClosedCriticalStream,
+    FrameUnexpected,
+    FrameError,
+    ExcessiveLoad,
+    IdError,
+    SettingsError,
+    MissingSettings,
+    RequestRejected,
+    RequestCancelled,
+    RequestIncomplete,
+    MessageError,
+    ConnectError,
+    VersionFallback,
+    Unknown,
+}
+
+impl Code {
+    const H3_NO_ERROR: Self = Self {
+        raw: 0x100,
+        kind: H3CodeKind::NoError,
+    };
+    const H3_GENERAL_PROTOCOL_ERROR: Self = Self {
+        raw: 0x101,
+        kind: H3CodeKind::GeneralProtocolError,
+    };
+    const H3_INTERNAL_ERROR: Self = Self {
+        raw: 0x102,
+        kind: H3CodeKind::InternalError,
+    };
+    const H3_STREAM_CREATION_ERROR: Self = Self {
+        raw: 0x103,
+        kind: H3CodeKind::StreamCreationError,
+    };
+    const H3_CLOSED_CRITICAL_STREAM: Self = Self {
+        raw: 0x104,
+        kind: H3CodeKind::ClosedCriticalStream,
+    };
+    const H3_FRAME_UNEXPECTED: Self = Self {
+        raw: 0x105,
+        kind: H3CodeKind::FrameUnexpected,
+    };
+    const H3_FRAME_ERROR: Self = Self {
+        raw: 0x106,
+        kind: H3CodeKind::FrameError,
+    };
+    const H3_EXCESSIVE_LOAD: Self = Self {
+        raw: 0x107,
+        kind: H3CodeKind::ExcessiveLoad,
+    };
+    const H3_ID_ERROR: Self = Self {
+        raw: 0x108,
+        kind: H3CodeKind::IdError,
+    };
+    const H3_SETTINGS_ERROR: Self = Self {
+        raw: 0x109,
+        kind: H3CodeKind::SettingsError,
+    };
+    const H3_MISSING_SETTINGS: Self = Self {
+        raw: 0x10a,
+        kind: H3CodeKind::MissingSettings,
+    };
+    const H3_REQUEST_REJECTED: Self = Self {
+        raw: 0x10b,
+        kind: H3CodeKind::RequestRejected,
+    };
+    const H3_REQUEST_CANCELLED: Self = Self {
+        raw: 0x10c,
+        kind: H3CodeKind::RequestCancelled,
+    };
+    const H3_REQUEST_INCOMPLETE: Self = Self {
+        raw: 0x10d,
+        kind: H3CodeKind::RequestIncomplete,
+    };
+    const H3_MESSAGE_ERROR: Self = Self {
+        raw: 0x10e,
+        kind: H3CodeKind::MessageError,
+    };
+    const H3_CONNECT_ERROR: Self = Self {
+        raw: 0x10f,
+        kind: H3CodeKind::ConnectError,
+    };
+    const H3_VERSION_FALLBACK: Self = Self {
+        raw: 0x110,
+        kind: H3CodeKind::VersionFallback,
+    };
+
+    fn from_u64(raw: u64) -> Self {
+        match raw {
+            0x100 => Self::H3_NO_ERROR,
+            0x101 => Self::H3_GENERAL_PROTOCOL_ERROR,
+            0x102 => Self::H3_INTERNAL_ERROR,
+            0x103 => Self::H3_STREAM_CREATION_ERROR,
+            0x104 => Self::H3_CLOSED_CRITICAL_STREAM,
+            0x105 => Self::H3_FRAME_UNEXPECTED,
+            0x106 => Self::H3_FRAME_ERROR,
+            0x107 => Self::H3_EXCESSIVE_LOAD,
+            0x108 => Self::H3_ID_ERROR,
+            0x109 => Self::H3_SETTINGS_ERROR,
+            0x10a => Self::H3_MISSING_SETTINGS,
+            0x10b => Self::H3_REQUEST_REJECTED,
+            0x10c => Self::H3_REQUEST_CANCELLED,
+            0x10d => Self::H3_REQUEST_INCOMPLETE,
+            0x10e => Self::H3_MESSAGE_ERROR,
+            0x10f => Self::H3_CONNECT_ERROR,
+            0x110 => Self::H3_VERSION_FALLBACK,
+            _ => Self {
+                raw,
+                kind: H3CodeKind::Unknown,
+            },
+        }
+    }
+}
 
 /// Comprehensive fuzz target for HTTP/3 error code parsing and handling
 ///
 /// Tests the H3 error system for:
-/// - Error conversion robustness (h3 errors → H3Error → asupersync Error)
+/// - Error conversion robustness (native H3 errors -> H3Error -> asupersync Error)
 /// - Error classification and properties under edge cases
-/// - Error code parsing from h3 crate with malformed values
+/// - Error code parsing from native HTTP/3 parser surfaces with malformed values
 /// - Cancellation detection and propagation correctness
 /// - Error display and serialization consistency
 /// - Integration with asupersync error system
@@ -290,7 +556,7 @@ fn test_io_error_conversion(error_kind: &IoErrorKind, message: &str) {
 
     // Create I/O error
     let io_kind = convert_io_error_kind(error_kind);
-    let io_error = io::Error::new(io_kind, safe_message);
+    let io_error = io_error_with_message(io_kind, &safe_message);
 
     // Convert to H3Error
     let h3_error = H3Error::from(io_error);
@@ -314,7 +580,8 @@ fn test_cancellation_error(cancel_reason_type: &CancelReasonType, message: &str)
     let safe_message = limit_string(message, MAX_MESSAGE_LEN);
 
     // Create cancel reason
-    let cancel_reason = create_cancel_reason(cancel_reason_type, &safe_message);
+    let cancel_reason =
+        create_cancel_reason(cancel_reason_type, static_error_message(&safe_message));
 
     // Create cancelled asupersync error
     let asupersync_error = Error::cancelled(&cancel_reason);
@@ -340,8 +607,8 @@ fn test_asupersync_error_conversion(
     let safe_message = limit_string(message, MAX_MESSAGE_LEN);
 
     // Create asupersync error
-    let asupersync_error = if *is_cancelled {
-        let cancel_reason = CancelReason::user(&safe_message);
+    let asupersync_error = if is_cancelled {
+        let cancel_reason = CancelReason::user(static_error_message(&safe_message));
         Error::cancelled(&cancel_reason)
     } else {
         let kind = convert_asupersync_error_kind(error_kind);
@@ -354,7 +621,7 @@ fn test_asupersync_error_conversion(
     // Test cancellation detection consistency
     assert_eq!(
         h3_error.is_cancelled(),
-        *is_cancelled,
+        is_cancelled,
         "Cancellation detection should match input"
     );
 
@@ -365,7 +632,8 @@ fn test_asupersync_error_conversion(
 fn test_error_chaining(primary: &ErrorOperation, source: &ErrorOperation) {
     // Test error chaining behavior - this is implementation-dependent
     // but should not panic
-    let _ = format!("Primary: {:?}, Source: {:?}", primary, source);
+    let chain_description = format!("Primary: {:?}, Source: {:?}", primary, source);
+    assert_nonempty_text("chained error debug", &chain_description);
 }
 
 fn test_error_serialization(error_op: &ErrorOperation) {
@@ -419,6 +687,17 @@ fn test_raw_error_data(data: &[u8]) {
     if let Ok(message) = std::str::from_utf8(limited_data) {
         test_raw_message_parsing(message);
     }
+
+    let config = H3ConnectionConfig {
+        max_frame_payload_size: MAX_ERROR_DATA_LEN,
+        ..H3ConnectionConfig::default()
+    };
+    observe_native_parse("frame decode", H3Frame::decode(limited_data, &config));
+    observe_native_parse("settings decode", H3Settings::decode_payload(limited_data));
+    observe_native_parse(
+        "qpack static decode",
+        qpack_decode_field_section(limited_data, H3QpackMode::StaticOnly),
+    );
 }
 
 fn test_comprehensive_error_scenarios() {
@@ -446,7 +725,7 @@ fn test_edge_case_scenarios() {
 
     // Test with special characters in message
     let special_message = "\0\n\r\t🦀";
-    let io_error = io::Error::new(io::ErrorKind::Other, special_message);
+    let io_error = io::Error::other(special_message);
     let h3_error = H3Error::from(io_error);
     test_h3_error_properties(&h3_error);
 }
@@ -455,7 +734,7 @@ fn test_conversion_round_trips() {
     // Test H3Error → display → parsing patterns
     let errors = [
         H3Error::Cancelled,
-        H3Error::Io(io::Error::new(io::ErrorKind::TimedOut, "timeout")),
+        H3Error::Io(io_error_with_message(io::ErrorKind::TimedOut, "timeout")),
         H3Error::Connection(ConnectionError::timeout()),
         H3Error::Stream(StreamError::id()),
     ];
@@ -480,8 +759,13 @@ fn test_error_equality() {
     // These should be equal (if PartialEq is implemented)
     // Note: H3Error may not implement PartialEq, so we just test that
     // the comparison doesn't panic
-    let _ = format!("{:?}", error1);
-    let _ = format!("{:?}", error2);
+    let debug1 = format!("{:?}", error1);
+    let debug2 = format!("{:?}", error2);
+    assert_eq!(
+        debug1, debug2,
+        "same cancelled error variant should have stable debug output"
+    );
+    assert_nonempty_text("cancelled debug", &debug1);
 }
 
 // Helper functions
@@ -489,10 +773,10 @@ fn test_error_equality() {
 fn test_h3_error_properties(error: &H3Error) {
     // Test basic error properties
     let display = format!("{}", error);
-    assert!(!display.is_empty() || display.is_empty()); // Should not panic
+    assert_nonempty_text("H3Error Display", &display);
 
     let debug = format!("{:?}", error);
-    assert!(!debug.is_empty() || debug.is_empty()); // Should not panic
+    assert_nonempty_text("H3Error Debug", &debug);
 
     // Test cancellation detection
     let is_cancelled = error.is_cancelled();
@@ -512,7 +796,8 @@ fn test_h3_error_properties(error: &H3Error) {
 fn test_connection_error_properties(error: &ConnectionError) {
     // Test connection error properties
     let display = format!("{}", error);
-    assert!(!display.is_empty() || display.is_empty());
+    assert_nonempty_text("ConnectionError Display", &display);
+    test_native_error_properties(&error.native);
 
     // Test specific ConnectionError methods if available
     let is_no_error = error.is_h3_no_error();
@@ -523,20 +808,22 @@ fn test_connection_error_properties(error: &ConnectionError) {
 fn test_stream_error_properties(error: &StreamError) {
     // Test stream error properties
     let display = format!("{}", error);
-    assert!(!display.is_empty() || display.is_empty());
+    assert_nonempty_text("StreamError Display", &display);
+    test_native_error_properties(&error.native);
 
     // Test any stream-specific properties
     let debug = format!("{:?}", error);
-    assert!(!debug.is_empty() || debug.is_empty());
+    assert_nonempty_text("StreamError Debug", &debug);
 }
 
 fn test_io_error_properties(error: &io::Error) {
     // Test I/O error properties
     let display = format!("{}", error);
-    assert!(!display.is_empty() || display.is_empty());
+    assert_nonempty_text("I/O error Display", &display);
 
     let kind = error.kind();
-    let _ = format!("{:?}", kind); // Should not panic
+    let kind_debug = format!("{:?}", kind);
+    assert_nonempty_text("I/O error kind Debug", &kind_debug);
 
     // Test error source if present
     let _ = error.source();
@@ -544,19 +831,21 @@ fn test_io_error_properties(error: &io::Error) {
 
 fn test_error_source_chain(error: &H3Error) {
     // Test error source chain traversal
-    let mut current: &dyn std::error::Error = error;
+    let mut current: &dyn StdError = error;
     let mut depth = 0;
     const MAX_SOURCE_DEPTH: usize = 10;
 
     while let Some(source) = current.source() {
         depth += 1;
-        if depth > MAX_SOURCE_DEPTH {
-            break; // Prevent infinite loops
-        }
+        assert!(
+            depth <= MAX_SOURCE_DEPTH,
+            "error source chain exceeded max depth"
+        );
         current = source;
 
         // Test that source is accessible
-        let _ = format!("{}", current);
+        let source_display = format!("{}", current);
+        assert_nonempty_text("error source Display", &source_display);
     }
 }
 
@@ -568,19 +857,23 @@ fn test_error_display(error: &H3Error) {
     let debug_alternate = format!("{:#?}", error);
 
     // All should be valid strings
-    assert!(!display.is_empty() || display.is_empty());
-    assert!(!debug.is_empty() || debug.is_empty());
-    assert!(!alternate.is_empty() || alternate.is_empty());
-    assert!(!debug_alternate.is_empty() || debug_alternate.is_empty());
+    assert_nonempty_text("H3Error Display", &display);
+    assert_nonempty_text("H3Error Debug", &debug);
+    assert_nonempty_text("H3Error alternate Display", &alternate);
+    assert_nonempty_text("H3Error alternate Debug", &debug_alternate);
 }
 
 fn test_raw_code_parsing(code: u64) {
     // Test parsing raw error codes
     let h3_code = Code::from_u64(code.min(u64::from(u32::MAX))); // Limit to reasonable range
+    assert!(
+        h3_code.raw <= u64::from(u32::MAX),
+        "raw code must stay inside the clamped u32 range"
+    );
 
     // Test creating errors with this code
-    let conn_error = ConnectionError::general_protocol_error();
-    let stream_error = StreamError::general_protocol_error();
+    let conn_error = create_connection_error(h3_code, "raw code");
+    let stream_error = create_stream_error(h3_code, "raw code");
 
     // Convert to H3Error
     let h3_conn_error = H3Error::from(conn_error);
@@ -595,15 +888,79 @@ fn test_raw_message_parsing(message: &str) {
     let safe_message = limit_string(message, MAX_MESSAGE_LEN);
 
     // Test creating errors with raw message
-    let io_error = io::Error::new(io::ErrorKind::Other, safe_message);
+    let io_error = io::Error::other(if safe_message.is_empty() {
+        "empty raw message".to_string()
+    } else {
+        safe_message
+    });
     let h3_error = H3Error::from(io_error);
 
     test_h3_error_properties(&h3_error);
 }
 
+fn observe_native_parse<T: fmt::Debug>(label: &str, result: Result<T, H3NativeError>) {
+    match result {
+        Ok(value) => {
+            let debug = format!("{:?}", value);
+            assert_nonempty_text(label, &debug);
+        }
+        Err(error) => {
+            test_native_error_properties(&error);
+            let h3_error = H3Error::from(error);
+            test_h3_error_properties(&h3_error);
+        }
+    }
+}
+
+fn test_native_error_properties(error: &H3NativeError) {
+    let display = format!("{}", error);
+    assert_nonempty_text("H3NativeError Display", &display);
+
+    let debug = format!("{:?}", error);
+    assert_nonempty_text("H3NativeError Debug", &debug);
+
+    match error {
+        H3NativeError::InvalidFrame(message)
+        | H3NativeError::ControlProtocol(message)
+        | H3NativeError::StreamProtocol(message)
+        | H3NativeError::QpackPolicy(message)
+        | H3NativeError::InvalidRequestPseudoHeader(message)
+        | H3NativeError::InvalidResponsePseudoHeader(message) => {
+            assert_nonempty_text("H3 native error message", message);
+        }
+        H3NativeError::FrameTooLarge {
+            payload_size,
+            max_size,
+        } => {
+            assert!(
+                payload_size > max_size,
+                "FrameTooLarge must report payload_size > max_size"
+            );
+        }
+        H3NativeError::ConcurrentStreamLimitExceeded { active, limit } => {
+            assert!(
+                active >= limit,
+                "stream limit error must report active >= limit"
+            );
+        }
+        H3NativeError::UnexpectedEof
+        | H3NativeError::DuplicateSetting(_)
+        | H3NativeError::InvalidSettingValue(_) => {}
+    }
+}
+
+fn assert_nonempty_text(label: &str, text: &str) {
+    assert!(!text.is_empty(), "{label} should not be empty");
+}
+
 // Conversion helper functions
 
 fn convert_connection_error_type(error_type: &ConnectionErrorType, code: u64) -> Code {
+    let parsed = Code::from_u64(code.min(u64::from(u32::MAX)));
+    if !matches!(parsed.kind, H3CodeKind::Unknown) {
+        return parsed;
+    }
+
     match error_type {
         ConnectionErrorType::NoError => Code::H3_NO_ERROR,
         ConnectionErrorType::GeneralProtocolError => Code::H3_GENERAL_PROTOCOL_ERROR,
@@ -625,7 +982,12 @@ fn convert_connection_error_type(error_type: &ConnectionErrorType, code: u64) ->
     }
 }
 
-fn convert_stream_error_type(error_type: &StreamErrorType, _code: u64) -> Code {
+fn convert_stream_error_type(error_type: &StreamErrorType, code: u64) -> Code {
+    let parsed = Code::from_u64(code.min(u64::from(u32::MAX)));
+    if !matches!(parsed.kind, H3CodeKind::Unknown) {
+        return parsed;
+    }
+
     match error_type {
         StreamErrorType::NoError => Code::H3_NO_ERROR,
         StreamErrorType::GeneralProtocolError => Code::H3_GENERAL_PROTOCOL_ERROR,
@@ -664,48 +1026,105 @@ fn convert_io_error_kind(error_kind: &IoErrorKind) -> io::ErrorKind {
     }
 }
 
-fn create_cancel_reason(reason_type: &CancelReasonType, message: &str) -> CancelReason {
+fn create_cancel_reason(reason_type: &CancelReasonType, message: &'static str) -> CancelReason {
     match reason_type {
         CancelReasonType::User => CancelReason::user(message),
-        CancelReasonType::Timeout => CancelReason::timeout(message),
-        CancelReasonType::Shutdown => CancelReason::shutdown(message),
-        CancelReasonType::Resource => CancelReason::resource(message),
+        CancelReasonType::Timeout => CancelReason::timeout(),
+        CancelReasonType::Shutdown => CancelReason::shutdown(),
+        CancelReasonType::Resource => CancelReason::resource_unavailable(),
     }
 }
 
 fn convert_asupersync_error_kind(error_kind: &AsupersyncErrorKind) -> ErrorKind {
     match error_kind {
         AsupersyncErrorKind::Cancelled => ErrorKind::Cancelled,
-        AsupersyncErrorKind::Timeout => ErrorKind::Timeout,
-        AsupersyncErrorKind::InvalidParams => ErrorKind::InvalidParams,
-        AsupersyncErrorKind::ResourceExhausted => ErrorKind::ResourceExhausted,
-        AsupersyncErrorKind::NetworkError => ErrorKind::NetworkError,
+        AsupersyncErrorKind::Timeout => ErrorKind::DeadlineExceeded,
+        AsupersyncErrorKind::InvalidParams => ErrorKind::InvalidEncodingParams,
+        AsupersyncErrorKind::ResourceExhausted => ErrorKind::AdmissionDenied,
+        AsupersyncErrorKind::NetworkError => ErrorKind::ConnectionLost,
         AsupersyncErrorKind::DecodingFailed => ErrorKind::DecodingFailed,
         AsupersyncErrorKind::EncodingFailed => ErrorKind::EncodingFailed,
     }
 }
 
 fn create_connection_error(code: Code, message: &str) -> ConnectionError {
-    // Create connection error based on the message content
-    // Since ConnectionError constructors are limited, we use available ones
-    if message.contains("timeout") {
-        ConnectionError::timeout()
-    } else if message.contains("protocol") {
-        ConnectionError::general_protocol_error()
-    } else {
-        ConnectionError::general_protocol_error()
-    }
+    let detail = static_error_message(message);
+    let native = match code.kind {
+        H3CodeKind::NoError => H3NativeError::ControlProtocol("h3 no error"),
+        H3CodeKind::GeneralProtocolError
+        | H3CodeKind::FrameUnexpected
+        | H3CodeKind::FrameError
+        | H3CodeKind::Unknown => H3NativeError::InvalidFrame(detail),
+        H3CodeKind::InternalError
+        | H3CodeKind::ClosedCriticalStream
+        | H3CodeKind::ExcessiveLoad
+        | H3CodeKind::RequestRejected
+        | H3CodeKind::RequestCancelled
+        | H3CodeKind::RequestIncomplete
+        | H3CodeKind::MessageError
+        | H3CodeKind::ConnectError
+        | H3CodeKind::VersionFallback => H3NativeError::ControlProtocol(detail),
+        H3CodeKind::StreamCreationError | H3CodeKind::IdError => {
+            H3NativeError::StreamProtocol(detail)
+        }
+        H3CodeKind::SettingsError => H3NativeError::InvalidSettingValue(code.raw),
+        H3CodeKind::MissingSettings => H3NativeError::ControlProtocol("missing settings"),
+    };
+    ConnectionError { code, native }
 }
 
 fn create_stream_error(code: Code, message: &str) -> StreamError {
-    // Create stream error based on the message content
-    // Since StreamError constructors are limited, we use available ones
-    if message.contains("id") {
-        StreamError::id()
+    let detail = static_error_message(message);
+    let native = match code.kind {
+        H3CodeKind::NoError => H3NativeError::StreamProtocol("h3 no error"),
+        H3CodeKind::FrameUnexpected | H3CodeKind::FrameError | H3CodeKind::Unknown => {
+            H3NativeError::InvalidFrame(detail)
+        }
+        H3CodeKind::SettingsError => H3NativeError::InvalidSettingValue(code.raw),
+        H3CodeKind::GeneralProtocolError
+        | H3CodeKind::InternalError
+        | H3CodeKind::StreamCreationError
+        | H3CodeKind::ClosedCriticalStream
+        | H3CodeKind::ExcessiveLoad
+        | H3CodeKind::IdError
+        | H3CodeKind::MissingSettings
+        | H3CodeKind::RequestRejected
+        | H3CodeKind::RequestCancelled
+        | H3CodeKind::RequestIncomplete
+        | H3CodeKind::MessageError
+        | H3CodeKind::ConnectError
+        | H3CodeKind::VersionFallback => H3NativeError::StreamProtocol(detail),
+    };
+    StreamError { code, native }
+}
+
+fn static_error_message(message: &str) -> &'static str {
+    if message.is_empty() {
+        "empty fuzz message"
+    } else if message.contains("timeout") {
+        "timeout"
     } else if message.contains("protocol") {
-        StreamError::general_protocol_error()
+        "protocol"
+    } else if message.contains("setting") {
+        "setting"
+    } else if message.contains("header") {
+        "header"
     } else {
-        StreamError::general_protocol_error()
+        "fuzz h3 error"
+    }
+}
+
+fn io_error_with_message(kind: io::ErrorKind, message: &str) -> io::Error {
+    let message = if message.is_empty() {
+        "fuzz io error"
+    } else {
+        message
+    };
+
+    if kind == io::ErrorKind::Other {
+        io::Error::other(message.to_string())
+    } else {
+        io::Error::new(kind, message.to_string())
     }
 }
 
