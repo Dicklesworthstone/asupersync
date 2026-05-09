@@ -406,11 +406,11 @@ fn construct_2byte_huffman_edge(seq: u16, data: &[u8], offset: usize) -> Vec<u8>
 
     // Some critical 2-byte boundary codes from the Huffman table
     let critical_codes = [
-        0x1ff8,                  // 13-bit code for space (common)
-        0x3ffc,                  // 14-bit code for '/'
-        0x7ffc,                  // 15-bit code for '='
-        0xffff,                  // Invalid 16-bit sequence
-        0x1ff0 | (offset & 0xf), // Mutated boundary codes
+        0x1ff8,                           // 13-bit code for space (common)
+        0x3ffc,                           // 14-bit code for '/'
+        0x7ffc,                           // 15-bit code for '='
+        0xffff,                           // Invalid 16-bit sequence
+        0x1ff0 | ((offset & 0xf) as u16), // Mutated boundary codes
     ];
 
     let code = if (seq as usize) < critical_codes.len() {
@@ -470,11 +470,13 @@ fn encode_malformed_varint(buffer: &mut Vec<u8>, pattern: &VarintPattern) {
         *last |= prefix_max;
     }
 
+    buffer.push(pattern.initial_byte);
+
     // Add potentially malformed continuation bytes
     for &byte in &pattern.continuation_bytes {
         buffer.push(byte);
         // Stop if we've added enough malformed bytes
-        if buffer.len() % 8 == 0 {
+        if buffer.len().is_multiple_of(8) {
             break;
         }
     }
