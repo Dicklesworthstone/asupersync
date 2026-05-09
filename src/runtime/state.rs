@@ -16,6 +16,9 @@ use crate::cx::scope::{CatchUnwind, payload_to_string};
 use crate::epoch::EpochId;
 use crate::error::{Error, ErrorKind};
 use crate::observability::metrics::{MetricsProvider, NoOpMetrics, OutcomeKind};
+use crate::observability::swarm_pressure_governor::{
+    SwarmPressureGovernor, SwarmPressureGovernorConfig,
+};
 use crate::observability::{LogCollector, ObservabilityConfig};
 use crate::record::{
     AdmissionError, ObligationAbortReason, ObligationKind, ObligationRecord, ObligationState,
@@ -45,6 +48,7 @@ use crate::types::task_context::{CxInner, MAX_MASK_DEPTH};
 use crate::types::{
     Budget, CancelAttributionConfig, CancelKind, CancelReason, CapabilityBudget,
     CapabilityBudgetRequirements, ObligationId, Outcome, Policy, RegionId, TaskId, Time,
+    id::{next_bootstrap_region_id, next_bootstrap_task_id},
 };
 use crate::util::{Arena, ArenaIndex, EntropySource, OsEntropy};
 use serde::{Deserialize, Serialize};
@@ -723,6 +727,11 @@ pub struct RuntimeState {
     /// Tracks memory, file descriptors, CPU load, and network connections,
     /// and triggers degradation policies when thresholds are exceeded.
     resource_monitor: Arc<ResourceMonitor>,
+    /// Swarm pressure governor for admission control and resource envelope management.
+    ///
+    /// Provides comprehensive admission decisions, resource envelope tracking,
+    /// and swarm coordination for distributed pressure management.
+    swarm_pressure_governor: SwarmPressureGovernor,
 }
 
 impl std::fmt::Debug for RuntimeState {
@@ -790,6 +799,17 @@ impl RuntimeState {
         trace_capacity: usize,
         metrics: Arc<dyn MetricsProvider>,
     ) -> Self {
+        // Create shared instances for pressure monitoring
+        let resource_monitor = Arc::new(ResourceMonitor::new(MonitorConfig::default()));
+
+        // Note: PressureGovernor requires Runtime which creates a circular dependency
+        // For now, create a SwarmPressureGovernor without an underlying PressureGovernor
+        // This will be enhanced later when we can safely create the PressureGovernor
+        let swarm_pressure_governor = SwarmPressureGovernor::new_without_pressure_governor(
+            SwarmPressureGovernorConfig::default(),
+            Arc::clone(&resource_monitor),
+        );
+
         Self {
             instance_id: NEXT_RUNTIME_INSTANCE_ID.fetch_add(1, Ordering::Relaxed),
             regions: RegionTable::with_capacity(capacity_hints.region_capacity),
@@ -836,7 +856,8 @@ impl RuntimeState {
                 CancelProtocolValidator::new(CancelValidationLevel::Basic),
             )),
             debt_monitor: Arc::new(crate::observability::CancellationDebtMonitor::default()),
-            resource_monitor: Arc::new(ResourceMonitor::new(MonitorConfig::default())),
+            resource_monitor,
+            swarm_pressure_governor,
         }
     }
 
@@ -1700,6 +1721,14 @@ impl RuntimeState {
 
         self.record_trace_event(|seq| TraceEvent::region_created(seq, now, id, Some(parent)));
         self.metrics.region_created(id, Some(parent));
+
+        // Register resource envelope with swarm pressure governor
+        if let Ok(envelope) =
+            self.create_resource_envelope_for_region(id, &budget, &capability_budget)
+        {
+            self.swarm_pressure_governor
+                .register_region_envelope(id, envelope);
+        }
 
         // Notify epoch tracker of region creation
         self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::RegionTable);
@@ -4094,37 +4123,101 @@ impl RuntimeState {
         &self,
         priority: RegionPriority,
     ) -> Result<(), RegionCreateError> {
+        // First, check using the existing basic resource monitor for critical path compatibility
         let composite_level = self
             .resource_monitor
             .pressure()
             .composite_degradation_level();
 
-        // Apply shedding based on degradation level and region priority
-        let should_shed = match (composite_level, priority) {
-            // Critical/High regions are never shed
-            (_, RegionPriority::Critical | RegionPriority::High) => false,
-            // Normal regions are shed under Heavy or Emergency pressure
-            (DegradationLevel::Heavy | DegradationLevel::Emergency, RegionPriority::Normal) => true,
-            // Low/BestEffort regions are shed under Moderate+ pressure
-            (
-                DegradationLevel::Moderate | DegradationLevel::Heavy | DegradationLevel::Emergency,
-                RegionPriority::Low | RegionPriority::BestEffort,
-            ) => true,
-            // Allow in all other cases
-            _ => false,
-        };
-
-        if should_shed {
-            Err(RegionCreateError::ResourcePressure {
-                requested_priority: priority,
-                reason: format!(
-                    "Resource pressure level {:?} prevents region creation at priority {:?}",
-                    composite_level, priority
-                ),
-            })
-        } else {
-            Ok(())
+        // For critical and high priority regions, always allow through basic check first
+        if matches!(priority, RegionPriority::Critical | RegionPriority::High) {
+            return Ok(());
         }
+
+        // For lower priority regions, use the enhanced swarm pressure governor
+        // We create a minimal context for the admission check since we're in the region creation path
+        let minimal_cx = self.create_minimal_cx_for_admission_check();
+
+        match self.swarm_pressure_governor.check_region_admission(&minimal_cx, priority, None) {
+            Ok(admission_decision) => {
+                match admission_decision.decision {
+                    crate::observability::pressure_governor::AdmissionDecision::Admit |
+                    crate::observability::pressure_governor::AdmissionDecision::AdmitWithBackpressure => {
+                        Ok(())
+                    }
+                    crate::observability::pressure_governor::AdmissionDecision::Reject => {
+                        Err(RegionCreateError::ResourcePressure {
+                            requested_priority: priority,
+                            reason: admission_decision.reason,
+                        })
+                    }
+                }
+            }
+            Err(err) => {
+                // Fall back to basic degradation check if swarm governor fails
+                let should_shed = match (composite_level, priority) {
+                    (DegradationLevel::Heavy | DegradationLevel::Emergency, RegionPriority::Normal) => true,
+                    (
+                        DegradationLevel::Moderate | DegradationLevel::Heavy | DegradationLevel::Emergency,
+                        RegionPriority::Low | RegionPriority::BestEffort,
+                    ) => true,
+                    _ => false,
+                };
+
+                if should_shed {
+                    Err(RegionCreateError::ResourcePressure {
+                        requested_priority: priority,
+                        reason: format!(
+                            "Resource pressure level {:?} prevents region creation at priority {:?} (swarm governor error: {})",
+                            composite_level, priority, err
+                        ),
+                    })
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    /// Creates a minimal Cx for internal admission checks during region creation.
+    ///
+    /// This creates a lightweight context that can be used for pressure governor
+    /// admission decisions without requiring a full region hierarchy.
+    fn create_minimal_cx_for_admission_check(&self) -> crate::cx::Cx {
+        crate::cx::Cx::new(
+            self.root_region.unwrap_or_else(next_bootstrap_region_id),
+            next_bootstrap_task_id(),
+            Budget::INFINITE,
+        )
+    }
+
+    /// Creates a resource envelope for a region based on its budgets.
+    fn create_resource_envelope_for_region(
+        &self,
+        region_id: RegionId,
+        budget: &Budget,
+        capability_budget: &CapabilityBudget,
+    ) -> Result<crate::observability::swarm_pressure_governor::ResourceEnvelope, Error> {
+        use crate::observability::swarm_pressure_governor::ResourceEnvelope;
+
+        // Extract resource limits from budget and capability budget
+        let config = SwarmPressureGovernorConfig::default();
+        let memory_budget = capability_budget
+            .memory_bytes
+            .or(budget.cost_quota)
+            .unwrap_or(config.default_memory_budget_bytes);
+        let cpu_budget_ns_per_sec = budget
+            .deadline
+            .map(Time::as_nanos)
+            .unwrap_or(config.default_cpu_budget_ns_per_sec);
+        let io_budget_ops_per_sec = config.default_io_budget_ops_per_sec;
+
+        Ok(ResourceEnvelope::new(
+            region_id,
+            memory_budget,
+            cpu_budget_ns_per_sec,
+            io_budget_ops_per_sec,
+        ))
     }
 }
 

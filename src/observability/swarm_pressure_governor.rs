@@ -361,7 +361,7 @@ pub struct SwarmAdmissionDecision {
 /// Swarm-aware pressure governor with resource envelope management.
 pub struct SwarmPressureGovernor {
     config: SwarmPressureGovernorConfig,
-    pressure_governor: PressureGovernor,
+    pressure_governor: Option<PressureGovernor>,
     resource_monitor: Arc<ResourceMonitor>,
 
     // Metrics
@@ -369,6 +369,7 @@ pub struct SwarmPressureGovernor {
     regions_admitted: AtomicU64,
     regions_rejected: AtomicU64,
     envelope_budget_violations: AtomicU64,
+    max_decision_latency_ns: AtomicU64,
 
     // Resource envelope tracking
     active_regions: std::sync::Mutex<HashMap<RegionId, ResourceEnvelope>>,
@@ -384,15 +385,45 @@ impl SwarmPressureGovernor {
     ) -> Self {
         Self {
             config,
-            pressure_governor,
+            pressure_governor: Some(pressure_governor),
             resource_monitor,
             total_admission_checks: AtomicU64::new(0),
             regions_admitted: AtomicU64::new(0),
             regions_rejected: AtomicU64::new(0),
             envelope_budget_violations: AtomicU64::new(0),
+            max_decision_latency_ns: AtomicU64::new(0),
             active_regions: std::sync::Mutex::new(HashMap::new()),
             peer_pressure_reports: std::sync::Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Creates a new swarm pressure governor without an underlying pressure governor.
+    ///
+    /// This is used during runtime initialization when the PressureGovernor
+    /// would create a circular dependency. The SwarmPressureGovernor will use
+    /// only resource monitor data and swarm coordination for admission decisions.
+    pub fn new_without_pressure_governor(
+        config: SwarmPressureGovernorConfig,
+        resource_monitor: Arc<ResourceMonitor>,
+    ) -> Self {
+        Self {
+            config,
+            pressure_governor: None,
+            resource_monitor,
+            total_admission_checks: AtomicU64::new(0),
+            regions_admitted: AtomicU64::new(0),
+            regions_rejected: AtomicU64::new(0),
+            envelope_budget_violations: AtomicU64::new(0),
+            max_decision_latency_ns: AtomicU64::new(0),
+            active_regions: std::sync::Mutex::new(HashMap::new()),
+            peer_pressure_reports: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Returns the active swarm pressure governor configuration.
+    #[must_use]
+    pub fn config(&self) -> &SwarmPressureGovernorConfig {
+        &self.config
     }
 
     /// Make a comprehensive admission decision for a new region.
@@ -418,7 +449,7 @@ impl SwarmPressureGovernor {
                 envelope: Some(envelope),
                 pressure_snapshot: self.get_default_pressure_snapshot(),
                 degradation_level: DegradationLevel::None,
-                decision_latency_ns: decision_start.elapsed().as_nanos() as u64,
+                decision_latency_ns: self.record_decision_latency(decision_start),
                 reason: "Swarm governance disabled".to_string(),
             });
         }
@@ -430,8 +461,17 @@ impl SwarmPressureGovernor {
             .composite_degradation_level();
 
         // Check runtime-internal pressure via pressure governor
-        let pressure_snapshot = self.pressure_governor.sample_pressure(cx)?;
-        let pressure_decision = self.pressure_governor.check_admission(cx)?;
+        let (pressure_snapshot, pressure_decision) =
+            if let Some(pressure_governor) = &self.pressure_governor {
+                let snapshot = pressure_governor.sample_pressure(cx)?;
+                let decision = pressure_governor.check_admission(cx)?;
+                (snapshot, decision)
+            } else {
+                // No pressure governor available, use defaults based on resource monitor
+                let default_snapshot = self.get_default_pressure_snapshot();
+                let default_decision = self.get_default_admission_decision(degradation_level);
+                (default_snapshot, default_decision)
+            };
         let peer_pressure = self.peer_pressure_summary(decision_start);
 
         if let Some(requested_memory) = requested_memory
@@ -446,7 +486,7 @@ impl SwarmPressureGovernor {
                 envelope: None,
                 pressure_snapshot,
                 degradation_level,
-                decision_latency_ns: decision_start.elapsed().as_nanos() as u64,
+                decision_latency_ns: self.record_decision_latency(decision_start),
                 reason: format!(
                     "Requested memory {requested_memory} exceeds region envelope budget {}",
                     self.config.default_memory_budget_bytes
@@ -492,7 +532,7 @@ impl SwarmPressureGovernor {
             envelope,
             pressure_snapshot,
             degradation_level,
-            decision_latency_ns: decision_start.elapsed().as_nanos() as u64,
+            decision_latency_ns: self.record_decision_latency(decision_start),
             reason: swarm_decision.reason,
         })
     }
@@ -591,6 +631,7 @@ impl SwarmPressureGovernor {
             regions_admitted: self.regions_admitted.load(Ordering::Relaxed),
             regions_rejected: self.regions_rejected.load(Ordering::Relaxed),
             envelope_budget_violations: self.envelope_budget_violations.load(Ordering::Relaxed),
+            max_decision_latency_ns: self.max_decision_latency_ns.load(Ordering::Relaxed),
             active_region_count: envelopes.len() as u64,
             max_memory_utilization_scaled,
             max_cpu_utilization_scaled,
@@ -689,6 +730,16 @@ impl SwarmPressureGovernor {
         };
 
         Ok(SwarmAdmissionDecisionInternal { decision, reason })
+    }
+
+    fn record_decision_latency(&self, decision_start: Instant) -> u64 {
+        let latency_ns = duration_as_u64_ns(decision_start.elapsed());
+        let _ = self.max_decision_latency_ns.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |current| (latency_ns > current).then_some(latency_ns),
+        );
+        latency_ns
     }
 
     fn peer_pressure_summary(&self, now: Instant) -> SwarmPeerPressureSummary {
@@ -801,6 +852,18 @@ impl SwarmPressureGovernor {
                 crate::observability::pressure_governor::PressureFallbackVerdict::Complete,
         }
     }
+
+    fn get_default_admission_decision(
+        &self,
+        degradation_level: DegradationLevel,
+    ) -> AdmissionDecision {
+        // Make admission decisions based on system resource degradation when
+        // no runtime-local pressure governor is available.
+        match degradation_level {
+            DegradationLevel::Emergency => AdmissionDecision::Reject,
+            _ => AdmissionDecision::Admit,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -820,6 +883,8 @@ pub struct SwarmPressureMetrics {
     pub regions_rejected: u64,
     /// Total envelope budget violations.
     pub envelope_budget_violations: u64,
+    /// Maximum observed swarm admission decision latency in nanoseconds.
+    pub max_decision_latency_ns: u64,
     /// Number of active regions with envelopes.
     pub active_region_count: u64,
     /// Maximum active memory-envelope utilization scaled by 10_000.
@@ -845,6 +910,10 @@ fn scale_pressure_for_metrics(pressure: f64) -> i64 {
     } else {
         (pressure * PRESSURE_SCALE) as i64
     }
+}
+
+fn duration_as_u64_ns(duration: Duration) -> u64 {
+    duration.as_nanos().min(u64::MAX as u128) as u64
 }
 
 fn prune_stale_peer_pressure_reports_locked(
@@ -1132,6 +1201,31 @@ mod tests {
         assert_eq!(metrics.total_admission_checks, 1);
         assert_eq!(metrics.regions_admitted, 1);
         assert_eq!(metrics.regions_rejected, 0);
+    }
+
+    #[test]
+    fn test_metrics_report_max_decision_latency() {
+        let governor = create_test_swarm_governor();
+        assert_eq!(governor.metrics().max_decision_latency_ns, 0);
+
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create test runtime"),
+        );
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+
+        let decision = governor
+            .check_region_admission(&cx, RegionPriority::Normal, None)
+            .expect("admission should produce a latency-bearing decision");
+
+        let metrics = governor.metrics();
+        assert_eq!(metrics.total_admission_checks, 1);
+        assert_eq!(
+            metrics.max_decision_latency_ns, decision.decision_latency_ns,
+            "single admission should publish its latency as the max latency metric"
+        );
     }
 
     #[test]

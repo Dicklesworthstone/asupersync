@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 const CHANNEL_BACKLOG_SAMPLE_UNAVAILABLE: u64 = u64::MAX;
+static NEXT_PRESSURE_GOVERNOR_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Configuration for the pressure governor.
 #[derive(Debug, Clone)]
@@ -197,6 +198,95 @@ pub enum AdmissionDecision {
     AdmitWithBackpressure,
 }
 
+/// Resource envelope for tracking region-level resource allocations.
+#[derive(Debug, Clone)]
+pub struct ResourceEnvelope {
+    /// Memory budget allocated to this envelope.
+    pub memory_budget: u64,
+    /// CPU allocation weight (relative to other envelopes).
+    pub cpu_weight: f64,
+    /// Maximum concurrent I/O operations.
+    pub io_budget: u64,
+    /// Maximum number of tasks allowed in this envelope.
+    pub task_limit: usize,
+    /// Current resource usage within this envelope.
+    pub usage: ResourceUsage,
+}
+
+/// Current resource usage for an envelope.
+#[derive(Debug, Clone, Default)]
+pub struct ResourceUsage {
+    /// Memory currently allocated.
+    pub memory_used: u64,
+    /// CPU utilization (0.0-1.0).
+    pub cpu_utilization: f64,
+    /// Active I/O operations.
+    pub io_active: u64,
+    /// Current task count.
+    pub task_count: usize,
+}
+
+/// Swarm coordination state for distributed pressure management.
+#[derive(Debug, Clone)]
+pub struct SwarmCoordinationState {
+    /// This runtime's instance ID for swarm coordination.
+    pub instance_id: u64,
+    /// Peer runtime pressure states.
+    pub peer_states: std::collections::HashMap<u64, PeerPressureState>,
+    /// Last coordination timestamp.
+    pub last_coordination: std::time::Instant,
+    /// Coordination interval.
+    pub coordination_interval: std::time::Duration,
+}
+
+/// Pressure state from a peer runtime in the swarm.
+#[derive(Debug, Clone)]
+pub struct PeerPressureState {
+    /// Peer's overall pressure level.
+    pub overall_pressure: f64,
+    /// Peer's admission rate.
+    pub admission_rate: f64,
+    /// Last update timestamp.
+    pub last_update: std::time::Instant,
+    /// Whether peer is available for coordination.
+    pub available: bool,
+}
+
+/// Enhanced admission decision with resource envelope context.
+#[derive(Debug, Clone)]
+pub struct EnhancedAdmissionDecision {
+    /// Basic admission decision.
+    pub decision: AdmissionDecision,
+    /// Suggested resource envelope for admitted operations.
+    pub suggested_envelope: Option<ResourceEnvelope>,
+    /// Backpressure propagation signals.
+    pub backpressure_signals: BackpressureSignals,
+    /// Coordination hints for swarm management.
+    pub swarm_hints: SwarmCoordinationHints,
+}
+
+/// Backpressure signals to propagate across components.
+#[derive(Debug, Clone, Default)]
+pub struct BackpressureSignals {
+    /// Suggested delay before retry (for rejected operations).
+    pub retry_delay: Option<std::time::Duration>,
+    /// Component-specific pressure levels (0.0-1.0).
+    pub component_pressures: std::collections::HashMap<String, f64>,
+    /// Whether to shed load in upstream components.
+    pub shed_load: bool,
+}
+
+/// Coordination hints for swarm pressure management.
+#[derive(Debug, Clone, Default)]
+pub struct SwarmCoordinationHints {
+    /// Whether to redistribute load to peer runtimes.
+    pub redistribute_load: bool,
+    /// Preferred peer instances for load redistribution.
+    pub preferred_peers: Vec<u64>,
+    /// Expected pressure relief duration.
+    pub relief_duration: Option<std::time::Duration>,
+}
+
 /// Live swarm pressure governor.
 pub struct PressureGovernor {
     config: PressureGovernorConfig,
@@ -230,6 +320,33 @@ pub struct PressureGovernor {
     decision_latency_p95_gauge: Arc<Gauge>,
     decision_latency_p999_gauge: Arc<Gauge>,
     fallback_verdict_gauge: Arc<Gauge>,
+
+    // Resource envelope tracking
+    active_envelopes: std::sync::RwLock<std::collections::HashMap<u64, ResourceEnvelope>>,
+    envelope_metrics: EnvelopeMetrics,
+
+    // Swarm coordination
+    swarm_state: std::sync::RwLock<SwarmCoordinationState>,
+    swarm_metrics: SwarmMetrics,
+}
+
+/// Metrics for resource envelope tracking.
+#[derive(Debug)]
+struct EnvelopeMetrics {
+    envelopes_active: Arc<Gauge>,
+    envelope_memory_used: Arc<Gauge>,
+    envelope_cpu_utilization: Arc<Gauge>,
+    envelope_io_active: Arc<Gauge>,
+    envelope_violations: Arc<Counter>,
+}
+
+/// Metrics for swarm coordination.
+#[derive(Debug)]
+struct SwarmMetrics {
+    peers_active: Arc<Gauge>,
+    coordination_rounds: Arc<Counter>,
+    peer_pressure_max: Arc<Gauge>,
+    coordination_latency: Arc<Summary>,
 }
 
 impl PressureGovernor {
@@ -267,12 +384,26 @@ impl PressureGovernor {
         let decision_latency_p999_gauge =
             metrics.gauge("pressure_governor_decision_latency_p999_ns");
         let fallback_verdict_gauge = metrics.gauge("pressure_governor_fallback_verdict");
+        let envelope_metrics = EnvelopeMetrics {
+            envelopes_active: metrics.gauge("envelope_envelopes_active"),
+            envelope_memory_used: metrics.gauge("envelope_memory_used_bytes"),
+            envelope_cpu_utilization: metrics.gauge("envelope_cpu_utilization_scaled"),
+            envelope_io_active: metrics.gauge("envelope_io_active_operations"),
+            envelope_violations: metrics.counter("envelope_violations_total"),
+        };
+        let swarm_metrics = SwarmMetrics {
+            peers_active: metrics.gauge("swarm_peers_active"),
+            coordination_rounds: metrics.counter("swarm_coordination_rounds_total"),
+            peer_pressure_max: metrics.gauge("swarm_peer_pressure_max_scaled"),
+            coordination_latency: metrics.summary("swarm_coordination_latency_seconds"),
+        };
         let started_at = Instant::now();
+        let metrics = Arc::new(metrics);
 
         Ok(Self {
             config,
             runtime,
-            metrics: Arc::new(metrics),
+            metrics,
             runnable_queue_gauge,
             blocking_pool_gauge,
             channel_backlog_gauge,
@@ -293,6 +424,19 @@ impl PressureGovernor {
             decision_latency_p95_gauge,
             decision_latency_p999_gauge,
             fallback_verdict_gauge,
+
+            // Initialize resource envelope tracking
+            active_envelopes: std::sync::RwLock::new(std::collections::HashMap::new()),
+            envelope_metrics,
+
+            // Initialize swarm coordination
+            swarm_state: std::sync::RwLock::new(SwarmCoordinationState {
+                instance_id: NEXT_PRESSURE_GOVERNOR_INSTANCE_ID.fetch_add(1, Ordering::Relaxed),
+                peer_states: std::collections::HashMap::new(),
+                last_coordination: Instant::now(),
+                coordination_interval: Duration::from_secs(1), // 1s coordination interval
+            }),
+            swarm_metrics,
         })
     }
 
@@ -452,6 +596,156 @@ impl PressureGovernor {
     #[must_use]
     pub fn decision_latency_p999_metric_ns(&self) -> i64 {
         self.decision_latency_p999_gauge.get()
+    }
+
+    /// Make an enhanced admission decision with resource envelope and swarm coordination.
+    pub fn check_enhanced_admission(
+        &self,
+        cx: &Cx,
+        requested_envelope: Option<ResourceEnvelope>,
+    ) -> Result<EnhancedAdmissionDecision, Error> {
+        let decision_started_at = Instant::now();
+
+        // Basic admission check first
+        let basic_decision = self.check_admission(cx)?;
+
+        // Update swarm coordination state
+        self.update_swarm_coordination()?;
+
+        // Build enhanced decision with resource envelope and backpressure signals
+        let enhanced_decision = match basic_decision {
+            AdmissionDecision::Admit => {
+                let envelope = self.allocate_resource_envelope(requested_envelope)?;
+                EnhancedAdmissionDecision {
+                    decision: AdmissionDecision::Admit,
+                    suggested_envelope: Some(envelope),
+                    backpressure_signals: self.generate_backpressure_signals(false)?,
+                    swarm_hints: self.generate_swarm_hints()?,
+                }
+            }
+            AdmissionDecision::AdmitWithBackpressure => {
+                let envelope = self.allocate_constrained_envelope(requested_envelope)?;
+                EnhancedAdmissionDecision {
+                    decision: AdmissionDecision::AdmitWithBackpressure,
+                    suggested_envelope: envelope,
+                    backpressure_signals: self.generate_backpressure_signals(true)?,
+                    swarm_hints: self.generate_swarm_hints()?,
+                }
+            }
+            AdmissionDecision::Reject => {
+                let backpressure = self.generate_backpressure_signals(true)?;
+                let swarm_hints = self.generate_swarm_hints()?;
+                EnhancedAdmissionDecision {
+                    decision: AdmissionDecision::Reject,
+                    suggested_envelope: None,
+                    backpressure_signals: backpressure,
+                    swarm_hints,
+                }
+            }
+        };
+
+        self.record_decision_latency(decision_started_at);
+        Ok(enhanced_decision)
+    }
+
+    /// Register a new resource envelope for tracking.
+    pub fn register_envelope(
+        &self,
+        envelope_id: u64,
+        envelope: ResourceEnvelope,
+    ) -> Result<(), Error> {
+        let mut envelopes = self
+            .active_envelopes
+            .write()
+            .map_err(|_| Error::internal("Failed to acquire envelope lock".to_string()))?;
+
+        envelopes.insert(envelope_id, envelope);
+        self.envelope_metrics
+            .envelopes_active
+            .set(envelopes.len() as i64);
+        self.update_envelope_metrics(&*envelopes)?;
+        Ok(())
+    }
+
+    /// Update resource usage for an existing envelope.
+    pub fn update_envelope_usage(
+        &self,
+        envelope_id: u64,
+        usage: ResourceUsage,
+    ) -> Result<(), Error> {
+        let mut envelopes = self
+            .active_envelopes
+            .write()
+            .map_err(|_| Error::internal("Failed to acquire envelope lock".to_string()))?;
+
+        if let Some(envelope) = envelopes.get_mut(&envelope_id) {
+            envelope.usage = usage;
+
+            // Check for violations
+            if self.check_envelope_violations(envelope) {
+                self.envelope_metrics.envelope_violations.increment();
+            }
+
+            self.update_envelope_metrics(&*envelopes)?;
+        }
+
+        Ok(())
+    }
+
+    /// Remove a resource envelope when no longer needed.
+    pub fn unregister_envelope(&self, envelope_id: u64) -> Result<(), Error> {
+        let mut envelopes = self
+            .active_envelopes
+            .write()
+            .map_err(|_| Error::internal("Failed to acquire envelope lock".to_string()))?;
+
+        envelopes.remove(&envelope_id);
+        self.envelope_metrics
+            .envelopes_active
+            .set(envelopes.len() as i64);
+        self.update_envelope_metrics(&*envelopes)?;
+        Ok(())
+    }
+
+    /// Update peer pressure state for swarm coordination.
+    pub fn update_peer_pressure(
+        &self,
+        peer_id: u64,
+        pressure_state: PeerPressureState,
+    ) -> Result<(), Error> {
+        let mut swarm_state = self
+            .swarm_state
+            .write()
+            .map_err(|_| Error::internal("Failed to acquire swarm lock".to_string()))?;
+
+        swarm_state.peer_states.insert(peer_id, pressure_state);
+        self.swarm_metrics
+            .peers_active
+            .set(swarm_state.peer_states.len() as i64);
+
+        // Update max peer pressure metric
+        if let Some(max_pressure) = swarm_state
+            .peer_states
+            .values()
+            .map(|p| p.overall_pressure)
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        {
+            const PRESSURE_SCALE: f64 = 10000.0;
+            self.swarm_metrics
+                .peer_pressure_max
+                .set((max_pressure * PRESSURE_SCALE) as i64);
+        }
+
+        Ok(())
+    }
+
+    /// Get current swarm coordination state for external coordination.
+    pub fn get_swarm_state(&self) -> Result<SwarmCoordinationState, Error> {
+        let swarm_state = self
+            .swarm_state
+            .read()
+            .map_err(|_| Error::internal("Failed to acquire swarm lock".to_string()))?;
+        Ok(swarm_state.clone())
     }
 
     // Private helper methods
@@ -660,6 +954,214 @@ impl PressureGovernor {
             self.decision_latency_p999_gauge
                 .set(u64_to_i64_saturating(p999));
         }
+    }
+
+    // Resource envelope management helpers
+
+    fn allocate_resource_envelope(
+        &self,
+        requested: Option<ResourceEnvelope>,
+    ) -> Result<ResourceEnvelope, Error> {
+        // Use requested envelope or create a default one
+        let envelope = requested.unwrap_or_else(|| ResourceEnvelope {
+            memory_budget: 64 * 1024 * 1024, // 64MB default
+            cpu_weight: 1.0,
+            io_budget: 10,
+            task_limit: 100,
+            usage: ResourceUsage::default(),
+        });
+
+        // Validate that we have resources available
+        self.validate_resource_availability(&envelope)?;
+        Ok(envelope)
+    }
+
+    fn allocate_constrained_envelope(
+        &self,
+        requested: Option<ResourceEnvelope>,
+    ) -> Result<Option<ResourceEnvelope>, Error> {
+        if let Some(mut envelope) = requested {
+            // Reduce allocations by 50% under backpressure
+            envelope.memory_budget /= 2;
+            envelope.cpu_weight /= 2.0;
+            envelope.io_budget /= 2;
+            envelope.task_limit /= 2;
+
+            if self.validate_resource_availability(&envelope).is_ok() {
+                Ok(Some(envelope))
+            } else {
+                Ok(None) // Can't even allocate constrained envelope
+            }
+        } else {
+            // Create a minimal constrained envelope
+            let envelope = ResourceEnvelope {
+                memory_budget: 16 * 1024 * 1024, // 16MB constrained
+                cpu_weight: 0.5,
+                io_budget: 2,
+                task_limit: 10,
+                usage: ResourceUsage::default(),
+            };
+
+            if self.validate_resource_availability(&envelope).is_ok() {
+                Ok(Some(envelope))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+
+    fn validate_resource_availability(&self, envelope: &ResourceEnvelope) -> Result<(), Error> {
+        let envelopes = self
+            .active_envelopes
+            .read()
+            .map_err(|_| Error::internal("Failed to acquire envelope lock".to_string()))?;
+
+        // Calculate current resource usage across all envelopes
+        let total_memory: u64 = envelopes.values().map(|e| e.usage.memory_used).sum();
+        let total_io: u64 = envelopes.values().map(|e| e.usage.io_active).sum();
+        let total_tasks: usize = envelopes.values().map(|e| e.usage.task_count).sum();
+
+        // Simple resource limits (in production, these would come from system discovery)
+        const MAX_MEMORY: u64 = 4 * 1024 * 1024 * 1024; // 4GB
+        const MAX_IO: u64 = 1000;
+        const MAX_TASKS: usize = 10000;
+
+        if total_memory + envelope.memory_budget > MAX_MEMORY {
+            return Err(Error::internal("Insufficient memory budget".to_string()));
+        }
+        if total_io + envelope.io_budget > MAX_IO {
+            return Err(Error::internal("Insufficient I/O budget".to_string()));
+        }
+        if total_tasks + envelope.task_limit > MAX_TASKS {
+            return Err(Error::internal("Insufficient task limit".to_string()));
+        }
+
+        Ok(())
+    }
+
+    fn check_envelope_violations(&self, envelope: &ResourceEnvelope) -> bool {
+        envelope.usage.memory_used > envelope.memory_budget
+            || envelope.usage.io_active > envelope.io_budget
+            || envelope.usage.task_count > envelope.task_limit
+            || envelope.usage.cpu_utilization > 1.0
+    }
+
+    fn update_envelope_metrics(
+        &self,
+        envelopes: &std::collections::HashMap<u64, ResourceEnvelope>,
+    ) -> Result<(), Error> {
+        let total_memory: u64 = envelopes.values().map(|e| e.usage.memory_used).sum();
+        let avg_cpu: f64 = if envelopes.is_empty() {
+            0.0
+        } else {
+            envelopes
+                .values()
+                .map(|e| e.usage.cpu_utilization)
+                .sum::<f64>()
+                / envelopes.len() as f64
+        };
+        let total_io: u64 = envelopes.values().map(|e| e.usage.io_active).sum();
+
+        self.envelope_metrics
+            .envelope_memory_used
+            .set(total_memory as i64);
+        self.envelope_metrics
+            .envelope_cpu_utilization
+            .set((avg_cpu * 10000.0) as i64); // scaled
+        self.envelope_metrics
+            .envelope_io_active
+            .set(total_io as i64);
+
+        Ok(())
+    }
+
+    // Backpressure signal generation
+
+    fn generate_backpressure_signals(
+        &self,
+        under_pressure: bool,
+    ) -> Result<BackpressureSignals, Error> {
+        let mut signals = BackpressureSignals::default();
+
+        if under_pressure {
+            signals.retry_delay = Some(Duration::from_millis(100)); // 100ms retry delay
+            signals.shed_load = true;
+
+            // Add component-specific pressure levels
+            signals
+                .component_pressures
+                .insert("scheduler".to_string(), 0.8);
+            signals
+                .component_pressures
+                .insert("blocking_pool".to_string(), 0.7);
+            signals
+                .component_pressures
+                .insert("memory".to_string(), 0.9);
+        }
+
+        Ok(signals)
+    }
+
+    // Swarm coordination helpers
+
+    fn generate_swarm_hints(&self) -> Result<SwarmCoordinationHints, Error> {
+        let swarm_state = self
+            .swarm_state
+            .read()
+            .map_err(|_| Error::internal("Failed to acquire swarm lock".to_string()))?;
+
+        let mut hints = SwarmCoordinationHints::default();
+
+        // Find peers with lower pressure for load redistribution
+        let available_peers: Vec<u64> = swarm_state
+            .peer_states
+            .iter()
+            .filter(|(_, state)| state.available && state.overall_pressure < 0.7)
+            .map(|(&id, _)| id)
+            .collect();
+
+        if !available_peers.is_empty() {
+            hints.redistribute_load = true;
+            hints.preferred_peers = available_peers;
+            hints.relief_duration = Some(Duration::from_secs(30)); // Expected relief in 30s
+        }
+
+        Ok(hints)
+    }
+
+    fn update_swarm_coordination(&self) -> Result<(), Error> {
+        let coordination_start = Instant::now();
+
+        {
+            let mut swarm_state = self
+                .swarm_state
+                .write()
+                .map_err(|_| Error::internal("Failed to acquire swarm lock".to_string()))?;
+
+            // Check if it's time for coordination
+            if coordination_start.duration_since(swarm_state.last_coordination)
+                < swarm_state.coordination_interval
+            {
+                return Ok(());
+            }
+
+            // Remove stale peer states
+            let stale_threshold = Duration::from_secs(30);
+            swarm_state.peer_states.retain(|_, state| {
+                coordination_start.duration_since(state.last_update) < stale_threshold
+            });
+
+            swarm_state.last_coordination = coordination_start;
+        }
+
+        self.swarm_metrics.coordination_rounds.increment();
+
+        let coordination_duration = Instant::now().duration_since(coordination_start);
+        self.swarm_metrics
+            .coordination_latency
+            .observe(coordination_duration.as_secs_f64());
+
+        Ok(())
     }
 }
 
@@ -1845,5 +2347,172 @@ mod tests {
             runtime.is_quiescent(),
             "runtime should be quiescent after pressure scenario drains"
         );
+    }
+
+    #[test]
+    fn enhanced_admission_control_with_resource_envelope() {
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create enhanced admission runtime"),
+        );
+        let config = PressureGovernorConfig {
+            enabled: true,
+            admission_control: true,
+            sample_interval: Duration::ZERO,
+            ..Default::default()
+        };
+        let metrics = Metrics::new();
+        let governor = PressureGovernor::new(config, std::sync::Arc::clone(&runtime), metrics)
+            .expect("pressure governor should initialize");
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+
+        // Test basic enhanced admission
+        let decision = governor
+            .check_enhanced_admission(&cx, None)
+            .expect("enhanced admission should not fail");
+
+        assert_eq!(decision.decision, AdmissionDecision::Admit);
+        assert!(decision.suggested_envelope.is_some());
+        assert!(!decision.backpressure_signals.shed_load);
+
+        let envelope = decision.suggested_envelope.unwrap();
+        assert_eq!(envelope.memory_budget, 64 * 1024 * 1024); // 64MB default
+        assert_eq!(envelope.cpu_weight, 1.0);
+        assert_eq!(envelope.io_budget, 10);
+        assert_eq!(envelope.task_limit, 100);
+    }
+
+    #[test]
+    fn resource_envelope_tracking() {
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create envelope tracking runtime"),
+        );
+        let config = PressureGovernorConfig::default();
+        let metrics = Metrics::new();
+        let governor = PressureGovernor::new(config, std::sync::Arc::clone(&runtime), metrics)
+            .expect("pressure governor should initialize");
+
+        // Register a resource envelope
+        let envelope = ResourceEnvelope {
+            memory_budget: 128 * 1024 * 1024, // 128MB
+            cpu_weight: 2.0,
+            io_budget: 20,
+            task_limit: 200,
+            usage: ResourceUsage::default(),
+        };
+
+        governor
+            .register_envelope(1, envelope.clone())
+            .expect("envelope registration should succeed");
+
+        assert_eq!(governor.envelope_metrics.envelopes_active.get(), 1);
+
+        // Update envelope usage
+        let usage = ResourceUsage {
+            memory_used: 64 * 1024 * 1024, // 64MB used
+            cpu_utilization: 0.5,
+            io_active: 10,
+            task_count: 50,
+        };
+
+        governor
+            .update_envelope_usage(1, usage)
+            .expect("envelope usage update should succeed");
+
+        assert_eq!(
+            governor.envelope_metrics.envelope_memory_used.get(),
+            64 * 1024 * 1024
+        );
+
+        // Unregister envelope
+        governor
+            .unregister_envelope(1)
+            .expect("envelope unregistration should succeed");
+
+        assert_eq!(governor.envelope_metrics.envelopes_active.get(), 0);
+        assert_eq!(governor.envelope_metrics.envelope_memory_used.get(), 0);
+    }
+
+    #[test]
+    fn swarm_coordination_peer_management() {
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create swarm coordination runtime"),
+        );
+        let config = PressureGovernorConfig::default();
+        let metrics = Metrics::new();
+        let governor = PressureGovernor::new(config, std::sync::Arc::clone(&runtime), metrics)
+            .expect("pressure governor should initialize");
+
+        // Add a peer with low pressure
+        let peer_state = PeerPressureState {
+            overall_pressure: 0.3,
+            admission_rate: 0.9,
+            last_update: std::time::Instant::now(),
+            available: true,
+        };
+
+        governor
+            .update_peer_pressure(100, peer_state)
+            .expect("peer pressure update should succeed");
+
+        assert_eq!(governor.swarm_metrics.peers_active.get(), 1);
+
+        // Check swarm coordination hints
+        let hints = governor
+            .generate_swarm_hints()
+            .expect("swarm hints generation should succeed");
+
+        assert!(hints.redistribute_load);
+        assert_eq!(hints.preferred_peers, vec![100]);
+
+        // Test swarm state retrieval
+        let swarm_state = governor
+            .get_swarm_state()
+            .expect("swarm state retrieval should succeed");
+
+        assert_eq!(swarm_state.peer_states.len(), 1);
+        assert!(swarm_state.peer_states.contains_key(&100));
+    }
+
+    #[test]
+    fn backpressure_signal_generation() {
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create backpressure runtime"),
+        );
+        let config = PressureGovernorConfig::default();
+        let metrics = Metrics::new();
+        let governor = PressureGovernor::new(config, std::sync::Arc::clone(&runtime), metrics)
+            .expect("pressure governor should initialize");
+
+        // Test backpressure signals under pressure
+        let signals = governor
+            .generate_backpressure_signals(true)
+            .expect("backpressure signal generation should succeed");
+
+        assert!(signals.shed_load);
+        assert!(signals.retry_delay.is_some());
+        assert_eq!(signals.retry_delay.unwrap(), Duration::from_millis(100));
+        assert!(!signals.component_pressures.is_empty());
+        assert_eq!(signals.component_pressures.get("scheduler"), Some(&0.8));
+
+        // Test normal signals without pressure
+        let normal_signals = governor
+            .generate_backpressure_signals(false)
+            .expect("normal signal generation should succeed");
+
+        assert!(!normal_signals.shed_load);
+        assert!(normal_signals.retry_delay.is_none());
+        assert!(normal_signals.component_pressures.is_empty());
     }
 }
