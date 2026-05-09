@@ -15,7 +15,7 @@
 #![no_main]
 
 use asupersync::bytes::{Bytes, BytesMut};
-use asupersync::http::h2::connection::Connection;
+use asupersync::http::h2::connection::{Connection, ConnectionState, ReceivedFrame};
 use asupersync::http::h2::error::ErrorCode;
 use asupersync::http::h2::frame::{DataFrame, PushPromiseFrame, SettingsFrame};
 use asupersync::http::h2::settings::Settings;
@@ -36,13 +36,8 @@ fuzz_target!(|data: &[u8]| {
         // Create a minimal frame with fuzzed payload
         let frame = create_push_promise_frame(data, 1, 2);
 
-        // Try to parse the frame - should handle gracefully
-        if let Frame::PushPromise(push_frame) = frame {
-            // Should not panic regardless of payload content
-            let _stream_id = push_frame.stream_id;
-            let _promised_id = push_frame.promised_stream_id;
-            let _headers = &push_frame.header_block;
-        }
+        let mut connection = create_push_disabled_test_connection();
+        observe_push_disabled_rejection(&mut connection, frame, "push-disabled-basic");
     }
 
     // Test 2: PUSH_PROMISE with malformed promised stream ID
@@ -71,7 +66,7 @@ fuzz_target!(|data: &[u8]| {
         };
 
         let frame = create_push_promise_frame(data, stream_id, 2);
-        let _result = connection.process_frame(frame);
+        observe_process_frame(&mut connection, frame, "invalid-or-closed-stream");
 
         // Should handle invalid stream states gracefully
     }
@@ -82,7 +77,7 @@ fuzz_target!(|data: &[u8]| {
 
         // Create oversized PUSH_PROMISE frame
         let large_frame = create_large_push_promise_frame(data);
-        let _result = connection.process_frame(large_frame);
+        observe_process_frame(&mut connection, large_frame, "large-push-promise");
 
         // Should handle large frames without crashing
     }
@@ -119,7 +114,7 @@ fuzz_target!(|data: &[u8]| {
             let end = std::cmp::min(start + chunk_size, data.len());
             if start < end {
                 let frame = create_push_promise_frame(&data[start..end], 1, 2 + i as u32);
-                let _result = connection.process_frame(frame);
+                observe_process_frame(&mut connection, frame, "rapid-push-promise");
             }
         }
 
@@ -134,7 +129,7 @@ fuzz_target!(|data: &[u8]| {
         let flags = if !data.is_empty() { data[0] } else { 0 };
         let frame = create_push_promise_frame_with_flags(data, 1, 2, flags);
 
-        let _result = connection.process_frame(frame);
+        observe_process_frame(&mut connection, frame, "invalid-flags");
         // Should handle invalid flags appropriately
     }
 
@@ -147,7 +142,7 @@ fuzz_target!(|data: &[u8]| {
 
         // Try to send PUSH_PROMISE after GOAWAY
         let frame = create_push_promise_frame(data, 1, 2);
-        let _result = connection.process_frame(frame);
+        observe_process_frame(&mut connection, frame, "after-goaway");
 
         // Should reject PUSH_PROMISE after GOAWAY
     }
@@ -158,7 +153,7 @@ fuzz_target!(|data: &[u8]| {
 
         // Create PUSH_PROMISE with padding
         let frame = create_padded_push_promise_frame(data);
-        let _result = connection.process_frame(frame);
+        observe_process_frame(&mut connection, frame, "padded-push-promise");
 
         // Should handle padded frames correctly
     }
@@ -172,22 +167,176 @@ fuzz_target!(|data: &[u8]| {
 
         // Send PUSH_PROMISE
         let push_frame = create_push_promise_frame(&data[..mid], 1, 2);
-        let _result1 = connection.process_frame(push_frame);
+        observe_process_frame(&mut connection, push_frame, "interleaved-push-promise");
 
         // Send DATA frame (or other frame type based on fuzzed data)
         let other_frame = create_data_frame(&data[mid..], 1);
-        let _result2 = connection.process_frame(other_frame);
+        observe_process_frame(&mut connection, other_frame, "interleaved-data");
 
         // Should handle frame interleaving properly
     }
 });
+
+fn observe_process_result(
+    connection: &mut Connection,
+    frame: Frame,
+    scenario: &str,
+) -> Result<Option<ReceivedFrame>, H2Error> {
+    let before_state = connection.state();
+    let result = connection.process_frame(frame);
+    let after_state = connection.state();
+
+    if matches!(before_state, ConnectionState::Open | ConnectionState::Closing) {
+        assert!(
+            !matches!(after_state, ConnectionState::Handshaking),
+            "{scenario}: connection regressed to handshaking"
+        );
+    }
+    if matches!(before_state, ConnectionState::Closed) {
+        assert!(
+            matches!(after_state, ConnectionState::Closed),
+            "{scenario}: closed connection became active again"
+        );
+    }
+
+    match &result {
+        Ok(Some(received)) => observe_received_frame(received, scenario),
+        Ok(None) => {}
+        Err(error) => {
+            assert_ne!(
+                error.code,
+                ErrorCode::NoError,
+                "{scenario}: error used NO_ERROR"
+            );
+            assert!(
+                !error.message.trim().is_empty(),
+                "{scenario}: error message was empty"
+            );
+        }
+    }
+
+    result
+}
+
+fn observe_process_frame(connection: &mut Connection, frame: Frame, scenario: &str) {
+    let _observed = observe_process_result(connection, frame, scenario);
+}
+
+fn observe_push_disabled_rejection(connection: &mut Connection, frame: Frame, scenario: &str) {
+    match observe_process_result(connection, frame, scenario) {
+        Err(error) => {
+            assert_eq!(
+                error.code,
+                ErrorCode::ProtocolError,
+                "{scenario}: disabled push used wrong error code"
+            );
+            assert!(
+                error.is_connection_error(),
+                "{scenario}: disabled push must be a connection error"
+            );
+        }
+        Ok(result) => panic!("{scenario}: disabled push was accepted: {result:?}"),
+    }
+}
+
+fn observe_received_frame(received: &ReceivedFrame, scenario: &str) {
+    match received {
+        ReceivedFrame::PushPromise {
+            stream_id,
+            promised_stream_id,
+            headers,
+        } => {
+            assert!(
+                stream_id % 2 == 1,
+                "{scenario}: accepted PUSH_PROMISE on non-client stream {stream_id}"
+            );
+            assert!(
+                *promised_stream_id != 0 && promised_stream_id.is_multiple_of(2),
+                "{scenario}: accepted invalid promised stream {promised_stream_id}"
+            );
+            assert!(
+                !headers.is_empty(),
+                "{scenario}: accepted PUSH_PROMISE without headers"
+            );
+            for header in headers {
+                assert!(
+                    valid_observed_header_name(&header.name),
+                    "{scenario}: decoded invalid pushed header name {:?}",
+                    header.name
+                );
+                assert!(
+                    valid_observed_header_value(&header.value),
+                    "{scenario}: decoded invalid pushed header value {:?}",
+                    header.value
+                );
+            }
+        }
+        ReceivedFrame::Headers { headers, .. } => {
+            for header in headers {
+                assert!(
+                    valid_observed_header_name(&header.name),
+                    "{scenario}: decoded invalid header name {:?}",
+                    header.name
+                );
+                assert!(
+                    valid_observed_header_value(&header.value),
+                    "{scenario}: decoded invalid header value {:?}",
+                    header.value
+                );
+            }
+        }
+        ReceivedFrame::Data { .. } | ReceivedFrame::Reset { .. } | ReceivedFrame::GoAway { .. } => {
+        }
+    }
+}
+
+fn valid_observed_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().enumerate().all(|(i, byte)| {
+            matches!(
+                byte,
+                b'a'..=b'z'
+                    | b'0'..=b'9'
+                    | b'!'
+                    | b'#'
+                    | b'$'
+                    | b'%'
+                    | b'&'
+                    | b'\''
+                    | b'*'
+                    | b'+'
+                    | b'-'
+                    | b'.'
+                    | b'^'
+                    | b'_'
+                    | b'`'
+                    | b'|'
+                    | b'~'
+            ) || (byte == b':' && i == 0)
+        })
+}
+
+fn valid_observed_header_value(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| !matches!(byte, b'\0' | b'\r' | b'\n'))
+}
+
+fn create_push_disabled_test_connection() -> Connection {
+    let mut settings = Settings::client();
+    settings.enable_push = false;
+    let mut connection = Connection::client(settings);
+    let settings_frame = Frame::Settings(SettingsFrame::new(Vec::new()));
+    observe_process_frame(&mut connection, settings_frame, "initial-settings-disabled");
+    connection
+}
 
 fn create_push_enabled_test_connection() -> Connection {
     let mut settings = Settings::client();
     settings.enable_push = true;
     let mut connection = Connection::client(settings);
     let settings_frame = Frame::Settings(SettingsFrame::new(Vec::new()));
-    let _ = connection.process_frame(settings_frame);
+    observe_process_frame(&mut connection, settings_frame, "initial-settings-enabled");
     connection
 }
 
