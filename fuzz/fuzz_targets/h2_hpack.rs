@@ -217,6 +217,10 @@ impl HpackDecoderShadowModel {
 fn normalize_fuzz_input(input: &mut HpackDecoderFuzzInput) {
     // Limit operations to prevent timeouts
     input.operations.truncate(50);
+    if !input.operations.is_empty() {
+        let rotation = (input.seed as usize) % input.operations.len();
+        input.operations.rotate_left(rotation);
+    }
 
     // Bound configuration values
     input.config.max_operations = input.config.max_operations.min(100);
@@ -395,9 +399,9 @@ fn test_indexed_header_fields(
                 Ok(_headers) => {
                     // Valid index
                     if *test_invalid_indices && index == 0 {
-                        shadow.record_violation(format!(
-                            "Index 0 should be rejected per RFC 7541 but was accepted"
-                        ));
+                        shadow.record_violation(
+                            "Index 0 should be rejected per RFC 7541 but was accepted".to_string(),
+                        );
                         return Err("Index 0 was incorrectly accepted".to_string());
                     }
                 }
@@ -472,9 +476,9 @@ fn test_huffman_strings(
                 match decode_result {
                     Ok(_headers) => {
                         if *expect_decode_failure {
-                            shadow.record_violation(format!(
-                                "Expected Huffman decode failure but succeeded"
-                            ));
+                            shadow.record_violation(
+                                "Expected Huffman decode failure but succeeded".to_string(),
+                            );
                         } else {
                             shadow.record_operation_success();
                         }
@@ -487,7 +491,7 @@ fn test_huffman_strings(
             }
             Err(_panic) => {
                 // Panic on malformed Huffman is a violation
-                shadow.record_violation(format!("Huffman decoder panicked on malformed input"));
+                shadow.record_violation("Huffman decoder panicked on malformed input".to_string());
                 return Err("Huffman decoder panicked".to_string());
             }
         }
@@ -520,9 +524,9 @@ fn test_integer_overflow(
                 match decode_result {
                     Ok(_headers) => {
                         if *expect_overflow {
-                            shadow.record_violation(format!(
-                                "Expected integer overflow error but decode succeeded"
-                            ));
+                            shadow.record_violation(
+                                "Expected integer overflow error but decode succeeded".to_string(),
+                            );
                         } else {
                             shadow.record_operation_success();
                         }
@@ -535,7 +539,7 @@ fn test_integer_overflow(
             }
             Err(_panic) => {
                 // Panic on integer overflow is a violation
-                shadow.record_violation(format!("Integer decoder panicked on overflow input"));
+                shadow.record_violation("Integer decoder panicked on overflow input".to_string());
                 return Err("Integer decoder panicked".to_string());
             }
         }
@@ -575,7 +579,7 @@ fn test_complex_header_blocks(
                 }
             },
             Err(_panic) => {
-                shadow.record_violation(format!("Complex header block caused panic"));
+                shadow.record_violation("Complex header block caused panic".to_string());
                 return Err("Complex header block panicked".to_string());
             }
         }
@@ -768,8 +772,14 @@ fn execute_hpack_operations(input: &HpackDecoderFuzzInput) -> Result<(), String>
             HpackOperation::LiteralHeaderField { .. } => {
                 test_literal_header_fields(operation, &shadow)
             }
-            HpackOperation::HuffmanStringTest { .. } => test_huffman_strings(operation, &shadow),
-            HpackOperation::IntegerOverflowTest { .. } => test_integer_overflow(operation, &shadow),
+            HpackOperation::HuffmanStringTest { .. } if input.config.test_huffman_corruption => {
+                test_huffman_strings(operation, &shadow)
+            }
+            HpackOperation::HuffmanStringTest { .. } => continue,
+            HpackOperation::IntegerOverflowTest { .. } if input.config.test_integer_overflow => {
+                test_integer_overflow(operation, &shadow)
+            }
+            HpackOperation::IntegerOverflowTest { .. } => continue,
             HpackOperation::ComplexHeaderBlock { .. } => {
                 test_complex_header_blocks(operation, &shadow)
             }
@@ -819,8 +829,20 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
 
-    // Run HPACK decoder fuzzing - catch any panics
-    let _ = std::panic::catch_unwind(|| {
-        let _ = fuzz_hpack_decoder(input);
-    });
+    // Run HPACK decoder fuzzing while preserving panic visibility.
+    match std::panic::catch_unwind(|| fuzz_hpack_decoder(input)) {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            assert!(
+                !error.trim().is_empty(),
+                "HPACK decoder rejection should expose a diagnostic"
+            );
+            assert!(
+                error.len() <= 512,
+                "HPACK decoder rejection diagnostic should stay bounded: {} bytes",
+                error.len()
+            );
+        }
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
 });
