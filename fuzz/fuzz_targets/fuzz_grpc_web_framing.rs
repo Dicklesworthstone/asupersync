@@ -9,11 +9,11 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use asupersync::bytes::{Bytes, BytesMut};
-use asupersync::grpc::status::{Code, Status};
+use asupersync::grpc::status::{Code, GrpcError, Status};
 use asupersync::grpc::streaming::Metadata;
 use asupersync::grpc::web::{
-    ContentType, WebFrame, WebFrameCodec, base64_decode, base64_encode, decode_trailers,
-    is_grpc_web_request, is_text_mode,
+    ContentType, TrailerFrame, WebFrame, WebFrameCodec, base64_decode, base64_encode,
+    decode_trailers, is_grpc_web_request, is_text_mode,
 };
 
 const MAX_STRUCTURED_PAYLOAD: usize = 4096;
@@ -97,16 +97,16 @@ fn fuzz_grpc_web_framing(input: FuzzInput) {
         } => exercise_binary_stream(usize::from(max_frame_size), bytes),
         FuzzInput::TextMode { content_type, text } => {
             let header = header_value(&content_type);
-            let _ = ContentType::from_header_value(&header);
+            let _ = observe_content_type_parse(&header);
             let _ = is_grpc_web_request(&header);
             let header_is_text = is_text_mode(&header);
 
             if header_is_text {
-                if let Ok(decoded) = base64_decode(&truncate_text(&text, MAX_TEXT_CHARS)) {
+                if let Ok(decoded) = observe_base64_decode(&truncate_text(&text, MAX_TEXT_CHARS)) {
                     exercise_binary_stream(DEFAULT_TEXT_MAX_FRAME_SIZE, decoded);
                 }
             } else {
-                let _ = base64_decode(&truncate_text(&text, MAX_TEXT_CHARS));
+                let _ = observe_base64_decode(&truncate_text(&text, MAX_TEXT_CHARS));
             }
         }
         FuzzInput::Structured(stream) => exercise_structured_stream(stream),
@@ -114,6 +114,74 @@ fn fuzz_grpc_web_framing(input: FuzzInput) {
 }
 
 const DEFAULT_TEXT_MAX_FRAME_SIZE: usize = 4096;
+
+fn assert_grpc_error_observable(error: &GrpcError, context: &str) {
+    assert!(
+        !format!("{error:?}").is_empty(),
+        "{context} errors must remain observable"
+    );
+}
+
+fn observe_content_type_parse(header: &str) -> Option<ContentType> {
+    let result = ContentType::from_header_value(header);
+
+    match result {
+        Some(content_type) => {
+            assert!(
+                is_grpc_web_request(header),
+                "parsed gRPC-Web content type must satisfy request detection"
+            );
+            assert_eq!(
+                content_type.is_text_mode(),
+                is_text_mode(header),
+                "content type text-mode parser must agree with helper"
+            );
+        }
+        None => {
+            assert!(
+                !is_grpc_web_request(header),
+                "unparsed gRPC-Web content type must not satisfy request detection"
+            );
+        }
+    }
+
+    result
+}
+
+fn observe_base64_decode(text: &str) -> Result<Vec<u8>, GrpcError> {
+    let result = base64_decode(text);
+
+    match &result {
+        Ok(decoded) => {
+            assert!(
+                decoded.len() <= text.len(),
+                "base64 decode output should not exceed encoded input length"
+            );
+        }
+        Err(error) => assert_grpc_error_observable(error, "base64 decode"),
+    }
+
+    result
+}
+
+fn observe_decode_trailers(payload: &[u8]) -> Result<TrailerFrame, GrpcError> {
+    let result = decode_trailers(payload);
+
+    match &result {
+        Ok(trailers) => {
+            assert!(
+                trailers.status.message().len() <= payload.len(),
+                "decoded trailer status message should stay input-bounded"
+            );
+            for (key, _) in trailers.metadata.iter() {
+                assert!(!key.is_empty(), "decoded trailer metadata key is empty");
+            }
+        }
+        Err(error) => assert_grpc_error_observable(error, "trailer decode"),
+    }
+
+    result
+}
 
 fn exercise_structured_stream(stream: StructuredStream) {
     let mut bytes = build_structured_stream(&stream);
@@ -184,7 +252,7 @@ fn build_structured_stream(stream: &StructuredStream) -> Vec<u8> {
                     payload.len() as u16,
                     &payload,
                 ));
-                let _ = decode_trailers(&payload);
+                let _ = observe_decode_trailers(&payload);
             }
             StructuredFrame::RawFrame {
                 flag,
