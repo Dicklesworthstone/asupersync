@@ -110,7 +110,9 @@ fuzz_target!(|data: &[u8]| {
 
 fn exercise_partial_decode(input: &FuzzInput) {
     let mut frame = BytesMut::new();
-    Frame::Ping(asupersync::http::h2::frame::PingFrame::new(input.ping_seed)).encode(&mut frame);
+    Frame::Ping(asupersync::http::h2::frame::PingFrame::new(input.ping_seed))
+        .encode(&mut frame)
+        .expect("valid partial-decode PING frame should encode");
 
     let split = usize::min(usize::from(input.split_at), frame.len().saturating_sub(1));
     let mut partial = BytesMut::from(&frame[..split]);
@@ -152,7 +154,9 @@ fn exercise_unknown_passthrough(input: &FuzzInput) {
         truncate_bytes(&input.unknown_payload),
         &mut stream,
     );
-    Frame::Ping(asupersync::http::h2::frame::PingFrame::new(input.ping_seed)).encode(&mut stream);
+    Frame::Ping(asupersync::http::h2::frame::PingFrame::new(input.ping_seed))
+        .encode(&mut stream)
+        .expect("valid passthrough PING frame should encode");
 
     let mut codec = FrameCodec::new();
     codec.set_max_frame_size(normalize_max_frame_size(input.max_frame_size));
@@ -206,13 +210,36 @@ fn exercise_sequence(input: &FuzzInput) {
 
 fn setup_connection() -> Connection {
     let mut connection = Connection::server(Settings::default());
-    let _ = connection.process_frame(Frame::Settings(SettingsFrame::new(vec![])));
-    let _ = connection.process_frame(Frame::Headers(HeadersFrame::new(
+    let settings_result = connection
+        .process_frame(Frame::Settings(SettingsFrame::new(vec![])))
+        .expect("setup SETTINGS preface should be accepted");
+    assert!(
+        settings_result.is_none(),
+        "setup SETTINGS preface must not surface inbound data"
+    );
+
+    let headers_result = connection.process_frame(Frame::Headers(HeadersFrame::new(
         1,
         Bytes::new(),
         false,
         true,
     )));
+    match headers_result {
+        Ok(received) => {
+            assert!(
+                received.is_none(),
+                "setup HEADERS without DATA must not surface inbound data"
+            );
+            assert!(
+                connection.stream(1).is_some(),
+                "accepted setup HEADERS must leave the active test stream open"
+            );
+        }
+        Err(err) => {
+            assert_eq!(err.code, ErrorCode::ProtocolError);
+            assert_eq!(err.stream_id, Some(1));
+        }
+    }
     drain_frames(&mut connection);
     connection
 }
@@ -306,8 +333,16 @@ fn encode_frame_spec(spec: &FrameSpec, dst: &mut BytesMut) {
 
 fn encode_settings_frame(mode: SettingsMode, value: u32, dst: &mut BytesMut) {
     match mode {
-        SettingsMode::Empty => Frame::Settings(SettingsFrame::new(vec![])).encode(dst),
-        SettingsMode::Ack => Frame::Settings(SettingsFrame::ack()).encode(dst),
+        SettingsMode::Empty => {
+            Frame::Settings(SettingsFrame::new(vec![]))
+                .encode(dst)
+                .expect("empty SETTINGS frame should encode");
+        }
+        SettingsMode::Ack => {
+            Frame::Settings(SettingsFrame::ack())
+                .encode(dst)
+                .expect("SETTINGS ACK frame should encode");
+        }
         SettingsMode::AckWithPayload => {
             let payload = setting_payload(Setting::MaxConcurrentStreams(value.max(1)));
             write_raw_frame(
