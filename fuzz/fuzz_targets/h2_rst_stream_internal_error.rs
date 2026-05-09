@@ -14,7 +14,6 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::bytes::BytesMut;
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
@@ -153,21 +152,21 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    // Test core RST_STREAM cleanup
-    test_rst_stream_cleanup(&test_case);
+    observe_error_code_catalog();
+    exercise_rst_stream_test_case(&test_case);
 
-    // Test resource cleanup specifically
-    test_resource_cleanup(&test_case);
-
-    // Test concurrent stream interactions
-    test_concurrent_stream_cleanup(&test_case);
-
-    // Test stream state transitions
-    test_stream_state_transitions(&test_case);
-
-    // Test edge cases
-    test_cleanup_edge_cases(&test_case);
+    for scenario in generate_cleanup_scenarios() {
+        exercise_rst_stream_test_case(&scenario);
+    }
 });
+
+fn exercise_rst_stream_test_case(test_case: &RstStreamTest) {
+    test_rst_stream_cleanup(test_case);
+    test_resource_cleanup(test_case);
+    test_concurrent_stream_cleanup(test_case);
+    test_stream_state_transitions(test_case);
+    test_cleanup_edge_cases(test_case);
+}
 
 /// Test RST_STREAM cleanup with INTERNAL_ERROR
 fn test_rst_stream_cleanup(test_case: &RstStreamTest) {
@@ -293,8 +292,9 @@ fn test_resource_cleanup(test_case: &RstStreamTest) {
     // Track initial resource counts
     let initial_resources = mock_connection.get_resource_counts();
 
-    // Send RST_STREAM
-    let _ = mock_connection.send_rst_stream(stream_id, ErrorCode::InternalError);
+    // Send RST_STREAM and observe the cleanup outcome instead of discarding it.
+    let cleanup_result = mock_connection.send_rst_stream(stream_id, ErrorCode::InternalError);
+    assert_internal_error_cleanup_success(&cleanup_result, stream_id, "resource cleanup");
 
     // Check final resource counts
     let final_resources = mock_connection.get_resource_counts();
@@ -313,6 +313,22 @@ fn test_resource_cleanup(test_case: &RstStreamTest) {
     assert!(
         final_resources.pending_operations <= initial_resources.pending_operations,
         "Pending operations should not increase after RST_STREAM"
+    );
+    assert!(
+        final_resources.dependency_count <= initial_resources.dependency_count,
+        "Dependency count should not increase after RST_STREAM"
+    );
+    assert!(
+        final_resources.pending_operation_shape <= initial_resources.pending_operation_shape,
+        "Pending operation payload/priority shape should not increase after RST_STREAM"
+    );
+    assert!(
+        final_resources.resource_shape <= initial_resources.resource_shape,
+        "Stream resource shape should not increase after RST_STREAM"
+    );
+    assert_eq!(
+        final_resources.settings_shape, initial_resources.settings_shape,
+        "Connection settings should not change during RST_STREAM cleanup"
     );
 
     // For INTERNAL_ERROR, we expect aggressive cleanup
@@ -358,6 +374,7 @@ fn test_concurrent_stream_cleanup(test_case: &RstStreamTest) {
 
     // Send RST_STREAM to target
     let cleanup_result = mock_connection.send_rst_stream(target_stream, ErrorCode::InternalError);
+    assert_internal_error_cleanup_success(&cleanup_result, target_stream, "concurrent cleanup");
 
     // Verify dependent streams are handled correctly
     for dependent_id in dependent_streams {
@@ -410,8 +427,9 @@ fn test_stream_state_transitions(test_case: &RstStreamTest) {
     // Record initial state
     let initial_state = mock_connection.get_stream_state(stream_id);
 
-    // Send RST_STREAM
-    let _ = mock_connection.send_rst_stream(stream_id, ErrorCode::InternalError);
+    // Send RST_STREAM and observe the cleanup outcome instead of discarding it.
+    let cleanup_result = mock_connection.send_rst_stream(stream_id, ErrorCode::InternalError);
+    assert_internal_error_cleanup_success(&cleanup_result, stream_id, "state transition cleanup");
 
     // Check final state
     let final_state = mock_connection.get_stream_state(stream_id);
@@ -449,6 +467,9 @@ fn test_cleanup_edge_cases(test_case: &RstStreamTest) {
         result.is_ok(),
         "RST_STREAM on non-existent stream should not panic"
     );
+    if let Ok(cleanup_result) = result {
+        assert_cleanup_error(&cleanup_result, nonexistent_stream, "non-existent stream");
+    }
 
     // Test RST_STREAM on stream ID 0 (connection-level)
     let connection_rst = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -458,6 +479,9 @@ fn test_cleanup_edge_cases(test_case: &RstStreamTest) {
         connection_rst.is_ok(),
         "RST_STREAM on stream 0 should not panic"
     );
+    if let Ok(cleanup_result) = connection_rst {
+        assert_cleanup_error(&cleanup_result, 0, "connection stream");
+    }
 
     // Test RST_STREAM with invalid stream ID (even number for client)
     let invalid_stream = test_case.stream_id.max(2) & !1; // Ensure even
@@ -468,6 +492,9 @@ fn test_cleanup_edge_cases(test_case: &RstStreamTest) {
         invalid_result.is_ok(),
         "RST_STREAM with invalid stream ID should not panic"
     );
+    if let Ok(cleanup_result) = invalid_result {
+        assert_cleanup_error(&cleanup_result, invalid_stream, "invalid stream");
+    }
 
     // Test double RST_STREAM
     let stream_id = test_case.stream_id.max(1) | 1;
@@ -478,11 +505,15 @@ fn test_cleanup_edge_cases(test_case: &RstStreamTest) {
     );
 
     let first_rst = mock_connection.send_rst_stream(stream_id, ErrorCode::InternalError);
+    assert_internal_error_cleanup_success(&first_rst, stream_id, "first reset");
     let second_rst = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         mock_connection.send_rst_stream(stream_id, ErrorCode::InternalError)
     }));
 
     assert!(second_rst.is_ok(), "Double RST_STREAM should not panic");
+    if let Ok(cleanup_result) = second_rst {
+        assert_cleanup_error(&cleanup_result, stream_id, "double reset");
+    }
 }
 
 /// HTTP/2 error codes
@@ -503,6 +534,25 @@ enum ErrorCode {
     EnhanceYourCalm = 0xb,
     InadequateSecurity = 0xc,
     Http11Required = 0xd,
+}
+
+impl ErrorCode {
+    const ALL: [Self; 14] = [
+        Self::NoError,
+        Self::ProtocolError,
+        Self::InternalError,
+        Self::FlowControlError,
+        Self::SettingsTimeout,
+        Self::StreamClosed,
+        Self::FrameSizeError,
+        Self::RefusedStream,
+        Self::Cancel,
+        Self::CompressionError,
+        Self::ConnectError,
+        Self::EnhanceYourCalm,
+        Self::InadequateSecurity,
+        Self::Http11Required,
+    ];
 }
 
 /// Result of cleanup operation
@@ -538,6 +588,9 @@ struct ResourceCounts {
     buffer_bytes: usize,
     pending_operations: usize,
     dependency_count: usize,
+    pending_operation_shape: usize,
+    resource_shape: usize,
+    settings_shape: usize,
 }
 
 /// Mock HTTP/2 connection for testing
@@ -571,6 +624,54 @@ impl Default for StreamResources {
     }
 }
 
+impl OperationType {
+    fn shape_weight(&self) -> usize {
+        match self {
+            Self::SendData => 1,
+            Self::SendHeaders => 2,
+            Self::WindowUpdate => 3,
+            Self::FlowControl => 4,
+            Self::Read => 5,
+            Self::Write => 6,
+            Self::Close => 7,
+        }
+    }
+}
+
+impl PendingOperation {
+    fn shape_weight(&self) -> usize {
+        self.operation_type
+            .shape_weight()
+            .saturating_add(self.data.len())
+            .saturating_add(usize::from(self.priority))
+    }
+}
+
+impl StreamResources {
+    fn shape_weight(&self) -> usize {
+        let flag_count = usize::from(self.headers_received)
+            + usize::from(self.headers_sent)
+            + usize::from(self.end_stream_sent)
+            + usize::from(self.end_stream_received);
+
+        (self.send_window.unsigned_abs() as usize)
+            .saturating_add(self.recv_window.unsigned_abs() as usize)
+            .saturating_add(self.buffered_data.len())
+            .saturating_add(usize::from(self.priority_weight))
+            .saturating_add(self.dependencies.len())
+            .saturating_add(flag_count)
+    }
+}
+
+impl ConnectionSettings {
+    fn shape_weight(&self) -> usize {
+        (self.max_concurrent_streams as usize)
+            .saturating_add(self.initial_window_size as usize)
+            .saturating_add(self.max_frame_size as usize)
+            .saturating_add(self.header_table_size as usize)
+    }
+}
+
 impl MockConnection {
     fn new(settings: ConnectionSettings) -> Self {
         Self {
@@ -598,7 +699,7 @@ impl MockConnection {
     fn add_stream_dependency(&mut self, stream_id: u32, depends_on: u32) {
         self.dependencies
             .entry(depends_on)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(stream_id);
     }
 
@@ -624,7 +725,10 @@ impl MockConnection {
         if error_code == ErrorCode::InternalError {
             let operations_cancelled = stream.pending_operations.len();
             let buffers_freed = !stream.resources.buffered_data.is_empty();
-            let window_credits = stream.resources.send_window + stream.resources.recv_window;
+            let window_credits = stream
+                .resources
+                .send_window
+                .saturating_add(stream.resources.recv_window);
 
             // Remove stream
             self.streams.remove(&stream_id);
@@ -643,7 +747,7 @@ impl MockConnection {
             }
 
             // Remove this stream from other dependencies
-            for (_, deps) in self.dependencies.iter_mut() {
+            for deps in self.dependencies.values_mut() {
                 deps.retain(|&id| id != stream_id);
             }
 
@@ -691,20 +795,109 @@ impl MockConnection {
             .values()
             .map(|s| s.pending_operations.len())
             .sum();
-        let dependency_count = self.dependencies.values().map(|deps| deps.len()).sum();
+        let dependency_count = self
+            .dependencies
+            .values()
+            .map(|deps| deps.len())
+            .sum::<usize>()
+            .saturating_add(
+                self.streams
+                    .values()
+                    .map(|s| s.resources.dependencies.len())
+                    .sum::<usize>(),
+            );
+        let pending_operation_shape = self
+            .streams
+            .values()
+            .flat_map(|s| s.pending_operations.iter())
+            .map(PendingOperation::shape_weight)
+            .sum();
+        let resource_shape = self
+            .streams
+            .values()
+            .map(|s| s.resources.shape_weight())
+            .sum();
+        let settings_shape = self.settings.shape_weight();
 
         ResourceCounts {
             stream_count,
             buffer_bytes,
             pending_operations,
             dependency_count,
+            pending_operation_shape,
+            resource_shape,
+            settings_shape,
         }
     }
 }
 
 /// Check if stream ID is valid for client-initiated streams
 fn is_valid_stream_id(stream_id: u32) -> bool {
-    stream_id > 0 && stream_id & 1 == 1 // Odd numbers for client streams
+    stream_id > 0 && !stream_id.is_multiple_of(2) // Odd numbers for client streams
+}
+
+fn observe_error_code_catalog() {
+    let ordinal_sum: u32 = ErrorCode::ALL.iter().map(|code| *code as u32).sum();
+    assert_eq!(
+        ordinal_sum, 91,
+        "HTTP/2 error-code catalog should cover RFC 7540 codes 0x0 through 0xd"
+    );
+}
+
+fn assert_internal_error_cleanup_success<'a>(
+    result: &'a CleanupResult,
+    stream_id: u32,
+    context: &str,
+) -> &'a ResourcesFreed {
+    match result {
+        CleanupResult::Success { resources_freed } => {
+            assert!(
+                resources_freed.stream_removed,
+                "{} should remove stream {}",
+                context, stream_id
+            );
+            let credit_sign = resources_freed.window_credits_returned.signum();
+            assert!(
+                (-1..=1).contains(&credit_sign),
+                "{} returned invalid window-credit sign {} for stream {}",
+                context,
+                credit_sign,
+                stream_id
+            );
+            if resources_freed.dependencies_cleared {
+                assert!(
+                    resources_freed.stream_removed,
+                    "{} cleared dependencies without removing stream {}",
+                    context, stream_id
+                );
+            }
+            resources_freed
+        }
+        CleanupResult::PartialCleanup {
+            remaining_resources,
+        } => {
+            panic!(
+                "{} for stream {} left resources after INTERNAL_ERROR: {:?}",
+                context, stream_id, remaining_resources
+            );
+        }
+        CleanupResult::Error { reason } => {
+            panic!(
+                "{} for existing stream {} failed: {}",
+                context, stream_id, reason
+            );
+        }
+    }
+}
+
+fn assert_cleanup_error(result: &CleanupResult, stream_id: u32, context: &str) {
+    assert!(
+        matches!(result, CleanupResult::Error { .. }),
+        "{} for stream {} should return an explicit cleanup error, got {:?}",
+        context,
+        stream_id,
+        result
+    );
 }
 
 /// Generate various stream cleanup scenarios
