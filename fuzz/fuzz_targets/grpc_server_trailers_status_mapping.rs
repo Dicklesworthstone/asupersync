@@ -97,7 +97,21 @@ fuzz_target!(|input: FuzzInput| {
     for entry in input.extra.into_iter().take(MAX_EXTRA_ENTRIES) {
         let key = truncate_kv(&entry.key, MAX_KV_LEN);
         let value = truncate_kv(&entry.value, MAX_KV_LEN);
-        let _ = metadata.insert(key, value);
+        let before_len = metadata.len();
+        let inserted = metadata.insert(key, value);
+        if inserted {
+            assert_eq!(
+                metadata.len(),
+                before_len + 1,
+                "accepted metadata insert must append exactly one entry"
+            );
+        } else {
+            assert_eq!(
+                metadata.len(),
+                before_len,
+                "rejected metadata insert must not mutate entries"
+            );
+        }
     }
 
     // Property 1: no panic on any (status, metadata) combination.
