@@ -519,8 +519,8 @@ impl SwarmPressureGovernor {
         overall_pressure: f64,
         degradation_level: DegradationLevel,
     ) -> Result<(), SwarmPressureError> {
-        let instance_id = instance_id.into();
-        if instance_id.trim().is_empty() {
+        let instance_id = instance_id.into().trim().to_string();
+        if instance_id.is_empty() {
             return Err(SwarmPressureError::SwarmCoordinationFailed {
                 reason: "peer instance id must be non-empty".to_string(),
             });
@@ -550,7 +550,7 @@ impl SwarmPressureGovernor {
     /// Remove a peer pressure report.
     pub fn clear_peer_pressure(&self, instance_id: &str) -> Option<SwarmPeerPressureReport> {
         let mut reports = self.peer_pressure_reports.lock().unwrap();
-        reports.remove(instance_id)
+        reports.remove(instance_id.trim())
     }
 
     /// Remove stale peer pressure reports and return the number pruned.
@@ -1346,6 +1346,35 @@ mod tests {
             governor.record_peer_pressure("peer-a", -0.01, DegradationLevel::Light),
             Err(SwarmPressureError::SwarmCoordinationFailed { .. })
         ));
+        assert_eq!(governor.metrics().live_peer_pressure_reports, 0);
+    }
+
+    #[test]
+    fn test_peer_pressure_normalizes_instance_ids() {
+        let governor = create_test_swarm_governor();
+
+        governor
+            .record_peer_pressure(" peer-a ", 0.40, DegradationLevel::Light)
+            .expect("peer pressure report should be accepted");
+        governor
+            .record_peer_pressure("peer-a", 0.85, DegradationLevel::Moderate)
+            .expect("same peer report should update by normalized id");
+
+        let metrics = governor.metrics();
+        assert_eq!(
+            metrics.live_peer_pressure_reports, 1,
+            "whitespace variants must not inflate live peer counts"
+        );
+        assert!(
+            (metrics.max_peer_pressure_scaled - 8500).abs() <= 1,
+            "normalized update should replace the old peer pressure, got {}",
+            metrics.max_peer_pressure_scaled
+        );
+
+        let cleared = governor
+            .clear_peer_pressure(" peer-a ")
+            .expect("normalized peer report should be clearable by whitespace variant");
+        assert_eq!(cleared.instance_id, "peer-a");
         assert_eq!(governor.metrics().live_peer_pressure_reports, 0);
     }
 
