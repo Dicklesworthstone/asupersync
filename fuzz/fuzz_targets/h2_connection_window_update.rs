@@ -1,9 +1,10 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::bytes::Bytes;
+use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::http::h2::connection::ReceivedFrame;
 use asupersync::http::h2::frame::{HeadersFrame, SettingsFrame, WindowUpdateFrame};
+use asupersync::http::h2::hpack::{Encoder as HpackEncoder, Header};
 use asupersync::http::h2::{Connection, ConnectionState, ErrorCode, Frame, H2Error, Settings};
 use libfuzzer_sys::fuzz_target;
 
@@ -61,7 +62,7 @@ fn setup_connection() -> Connection {
 
     let headers = Frame::Headers(HeadersFrame::new(
         ACTIVE_STREAM_ID,
-        Bytes::new(),
+        valid_request_header_block(),
         false,
         true,
     ));
@@ -80,6 +81,19 @@ fn setup_connection() -> Connection {
     );
 
     connection
+}
+
+fn valid_request_header_block() -> Bytes {
+    let headers = [
+        Header::new(":method", "GET"),
+        Header::new(":path", "/"),
+        Header::new(":scheme", "https"),
+        Header::new(":authority", "example.test"),
+    ];
+    let mut encoder = HpackEncoder::new();
+    let mut block = BytesMut::new();
+    encoder.encode(&headers, &mut block);
+    block.freeze()
 }
 
 fn assert_initial_settings_observed(
