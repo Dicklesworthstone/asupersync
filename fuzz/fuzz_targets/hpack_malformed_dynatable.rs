@@ -11,11 +11,12 @@
 
 use arbitrary::Arbitrary;
 use asupersync::bytes::Bytes;
-use asupersync::http::h2::{error::H2Error, hpack::Decoder};
+use asupersync::http::h2::{error::ErrorCode, hpack::Decoder};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_BLOCK_SIZE: usize = 64 * 1024; // 64KB limit
 const MAX_OPERATIONS: usize = 100;
+const MAX_DECODED_HEADERS: usize = MAX_OPERATIONS * 2 + 2;
 
 #[derive(Arbitrary, Debug)]
 struct MalformedDynamicTableFuzz {
@@ -103,34 +104,79 @@ fuzz_target!(|input: MalformedDynamicTableFuzz| {
     }
 
     // Create decoder with configurable table size
-    let table_size = input.initial_max_table_size.min(65536) as usize;
+    let table_size = usize::from(input.initial_max_table_size);
     let mut decoder = Decoder::with_max_size(table_size);
 
     // Apply mutations
-    let mut mutated_data = apply_mutations(block_data, &input.byte_mutations);
+    let mutated_data = apply_mutations(block_data, &input.byte_mutations);
 
     // The core test: decode should never panic
     // Malformed input should result in H2Error::Compression, not panic
     let mut bytes = Bytes::from(mutated_data);
-
-    match decoder.decode(&mut bytes) {
-        Ok(_headers) => {
-            // Valid decode - this is fine
-        }
-        Err(H2Error::Compression { .. }) => {
-            // Expected error for malformed input - this is what we want
-        }
-        Err(other_error) => {
-            // Other errors are also acceptable (e.g., protocol errors)
-            // As long as we don't panic
-        }
-    }
+    observe_decode("primary malformed block", &mut decoder, &mut bytes);
 
     // Test decoder state consistency after error
     // A second decode attempt should not panic either
     let mut bytes2 = Bytes::from(vec![0x20, 0x00]); // Simple table size update
-    let _ = decoder.decode(&mut bytes2);
+    observe_decode("post-error table-size update", &mut decoder, &mut bytes2);
 });
+
+fn observe_decode(context: &str, decoder: &mut Decoder, bytes: &mut Bytes) -> bool {
+    let input_len = bytes.len();
+    match decoder.decode(bytes) {
+        Ok(headers) => {
+            assert!(
+                bytes.is_empty(),
+                "{context} successful decode left {} trailing bytes from {input_len}",
+                bytes.len()
+            );
+            assert!(
+                headers.len() <= MAX_DECODED_HEADERS,
+                "{context} decoded too many headers: {} > {MAX_DECODED_HEADERS}",
+                headers.len()
+            );
+            for header in &headers {
+                assert!(
+                    header
+                        .name
+                        .chars()
+                        .all(|c| c != '\0' && c != '\r' && c != '\n'),
+                    "{context} decoded invalid header name bytes"
+                );
+                assert!(
+                    header
+                        .value
+                        .chars()
+                        .all(|c| c != '\0' && c != '\r' && c != '\n'),
+                    "{context} decoded invalid header value bytes"
+                );
+            }
+            true
+        }
+        Err(error) if error.code == ErrorCode::CompressionError => {
+            assert!(
+                bytes.len() <= input_len,
+                "{context} compression error grew input buffer"
+            );
+            assert!(
+                !error.message.is_empty(),
+                "{context} compression error lacked diagnostics"
+            );
+            false
+        }
+        Err(error) => {
+            assert!(
+                bytes.len() <= input_len,
+                "{context} non-compression error grew input buffer"
+            );
+            assert!(
+                !error.message.is_empty(),
+                "{context} error lacked diagnostics"
+            );
+            false
+        }
+    }
+}
 
 fn build_malformed_block(input: &MalformedDynamicTableFuzz) -> Vec<u8> {
     let mut block = Vec::new();
@@ -253,9 +299,7 @@ fn encode_malformed_size_update(size: u32) -> Vec<u8> {
         1 => {
             // Overly long encoding
             bytes.push(0x1F);
-            for _ in 0..10 {
-                bytes.push(0x80); // Keep continuation bit set
-            }
+            bytes.extend([0x80; 10]); // Keep continuation bit set
             bytes.push((size & 0x7F) as u8);
         }
         2 => {
@@ -294,9 +338,7 @@ fn encode_malformed_indexed(index: u32) -> Vec<u8> {
         _ => {
             // Extremely large index
             bytes.push(0xFF);
-            for _ in 0..5 {
-                bytes.push(0xFF);
-            }
+            bytes.extend([0xFF; 5]);
             bytes.push(0x01);
         }
     }
