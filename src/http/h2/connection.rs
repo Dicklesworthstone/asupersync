@@ -1939,19 +1939,20 @@ mod tests {
 
     fn set_test_time_offset(duration: Duration) {
         let millis = u64::try_from(duration.as_millis()).expect("duration fits u64 millis");
-        TEST_NOW_OFFSET_MS.store(millis, Ordering::SeqCst);
+        // The offset is standalone test state; it does not publish side data.
+        TEST_NOW_OFFSET_MS.store(millis, Ordering::Relaxed);
     }
 
     fn advance_test_time(duration: Duration) {
         let millis = u64::try_from(duration.as_millis()).expect("duration fits u64 millis");
-        TEST_NOW_OFFSET_MS.fetch_add(millis, Ordering::SeqCst);
+        TEST_NOW_OFFSET_MS.fetch_add(millis, Ordering::Relaxed);
     }
 
     fn test_now() -> Instant {
         TEST_NOW_BASE
             .get_or_init(Instant::now)
             .checked_add(Duration::from_millis(
-                TEST_NOW_OFFSET_MS.load(Ordering::SeqCst),
+                TEST_NOW_OFFSET_MS.load(Ordering::Relaxed),
             ))
             .expect("test instant overflow")
     }
