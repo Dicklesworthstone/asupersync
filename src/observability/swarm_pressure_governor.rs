@@ -925,6 +925,28 @@ mod tests {
     }
 
     #[test]
+    fn test_unregister_region_envelope_updates_active_region_metrics() {
+        let governor = create_test_swarm_governor();
+        let region_id = RegionId::new_for_test(10, 1);
+        let envelope = ResourceEnvelope::new(region_id, 4096, 100, 10);
+        envelope
+            .reserve_memory(512)
+            .expect("test reservation should fit inside the envelope budget");
+
+        governor.register_region_envelope(region_id, envelope);
+        assert_eq!(governor.metrics().active_region_count, 1);
+
+        let removed = governor
+            .unregister_region_envelope(region_id)
+            .expect("registered envelope should be returned exactly once");
+        assert_eq!(removed.region_id, region_id);
+        assert_eq!(removed.memory_used.load(Ordering::Relaxed), 512);
+        assert!(governor.get_region_envelope(region_id).is_none());
+        assert_eq!(governor.metrics().active_region_count, 0);
+        assert!(governor.unregister_region_envelope(region_id).is_none());
+    }
+
+    #[test]
     fn test_swarm_governor_region_limits() {
         let mut config = SwarmPressureGovernorConfig::default();
         config.max_regions_per_instance = 2;
