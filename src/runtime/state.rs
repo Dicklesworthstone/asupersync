@@ -1634,11 +1634,26 @@ impl RuntimeState {
         parent: RegionId,
         budget: Budget,
     ) -> Result<RegionId, RegionCreateError> {
-        self.create_child_region_with_capability_budget(
+        self.create_child_region_with_priority(parent, budget, RegionPriority::Normal)
+    }
+
+    /// Creates a child region with an explicit resource-pressure priority.
+    ///
+    /// This preserves the default [`Self::create_child_region`] behavior for
+    /// normal work while allowing callers to classify background or critical
+    /// child regions before the resource-pressure admission check runs.
+    pub fn create_child_region_with_priority(
+        &mut self,
+        parent: RegionId,
+        budget: Budget,
+        priority: RegionPriority,
+    ) -> Result<RegionId, RegionCreateError> {
+        self.create_child_region_with_capability_budget_and_priority(
             parent,
             budget,
             CapabilityBudget::UNSPECIFIED,
             CapabilityBudgetRequirements::NONE,
+            priority,
         )
     }
 
@@ -1650,9 +1665,25 @@ impl RuntimeState {
         capability_budget: CapabilityBudget,
         requirements: CapabilityBudgetRequirements,
     ) -> Result<RegionId, RegionCreateError> {
-        // Check resource pressure before creating the region
-        // Use Normal priority as the default for backward compatibility
-        self.check_resource_pressure_for_region(RegionPriority::Normal)?;
+        self.create_child_region_with_capability_budget_and_priority(
+            parent,
+            budget,
+            capability_budget,
+            requirements,
+            RegionPriority::Normal,
+        )
+    }
+
+    /// Creates a child region with explicit capability-budget and pressure priority.
+    pub fn create_child_region_with_capability_budget_and_priority(
+        &mut self,
+        parent: RegionId,
+        budget: Budget,
+        capability_budget: CapabilityBudget,
+        requirements: CapabilityBudgetRequirements,
+        priority: RegionPriority,
+    ) -> Result<RegionId, RegionCreateError> {
+        self.check_resource_pressure_for_region(priority)?;
 
         let now = self.current_runtime_time();
         let id = self.regions.create_child_with_capability_budget(
@@ -1662,6 +1693,9 @@ impl RuntimeState {
             requirements,
             now,
         )?;
+        self.resource_monitor
+            .engine()
+            .set_region_priority(id, priority);
         self.track_new_region_in_cancel_protocol_validator(id, Some(parent), now);
 
         self.record_trace_event(|seq| TraceEvent::region_created(seq, now, id, Some(parent)));
@@ -11567,6 +11601,73 @@ mod tests {
             crate::runtime::resource_monitor::SheddingDecision::Pause
         ));
         crate::test_complete!("region_close_clears_resource_monitor_priority");
+    }
+
+    #[test]
+    fn priority_aware_child_region_admission_uses_requested_priority() {
+        init_test("priority_aware_child_region_admission_uses_requested_priority");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+
+        state
+            .resource_monitor()
+            .pressure()
+            .update_degradation_level(
+                crate::runtime::resource_monitor::ResourceType::Memory,
+                DegradationLevel::Moderate,
+            );
+
+        state
+            .create_child_region(root, Budget::INFINITE)
+            .expect("default normal child region should be admitted at moderate pressure");
+
+        let rejected =
+            state.create_child_region_with_priority(root, Budget::INFINITE, RegionPriority::Low);
+        assert!(matches!(
+            rejected,
+            Err(RegionCreateError::ResourcePressure {
+                requested_priority: RegionPriority::Low,
+                ..
+            })
+        ));
+        crate::test_complete!("priority_aware_child_region_admission_uses_requested_priority");
+    }
+
+    #[test]
+    fn priority_aware_child_region_registers_shedding_priority() {
+        init_test("priority_aware_child_region_registers_shedding_priority");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let default_child = state
+            .create_child_region(root, Budget::INFINITE)
+            .expect("default child region should be admitted");
+        let low_child = state
+            .create_child_region_with_priority(root, Budget::INFINITE, RegionPriority::Low)
+            .expect("low-priority child should be admitted before pressure rises");
+
+        state
+            .resource_monitor()
+            .pressure()
+            .update_degradation_level(
+                crate::runtime::resource_monitor::ResourceType::Memory,
+                DegradationLevel::Heavy,
+            );
+
+        assert!(matches!(
+            state
+                .resource_monitor()
+                .engine()
+                .should_shed_region(default_child),
+            crate::runtime::resource_monitor::SheddingDecision::Keep
+        ));
+        assert!(matches!(
+            state
+                .resource_monitor()
+                .engine()
+                .should_shed_region(low_child),
+            crate::runtime::resource_monitor::SheddingDecision::Pause
+        ));
+        crate::test_complete!("priority_aware_child_region_registers_shedding_priority");
     }
 
     #[test]
