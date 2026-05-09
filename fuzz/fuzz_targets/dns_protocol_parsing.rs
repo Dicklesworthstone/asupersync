@@ -132,6 +132,8 @@ enum CompressionAttack {
 struct DnsFuzzData {
     /// Base DNS message
     message: DnsMessage,
+    /// Typed RDATA cases to append as additional records
+    typed_rdata: Vec<RDataType>,
     /// Compression attack to apply
     compression_attack: CompressionAttack,
     /// Raw packet modifications
@@ -178,7 +180,14 @@ fn build_dns_packet(fuzz_data: &DnsFuzzData) -> Vec<u8> {
     packet.extend_from_slice(&(fuzz_data.message.questions.len() as u16).to_be_bytes());
     packet.extend_from_slice(&(fuzz_data.message.answers.len() as u16).to_be_bytes());
     packet.extend_from_slice(&(fuzz_data.message.authority.len() as u16).to_be_bytes());
-    packet.extend_from_slice(&(fuzz_data.message.additional.len() as u16).to_be_bytes());
+    let typed_rdata_count = fuzz_data.typed_rdata.len().min(8);
+    let additional_count = fuzz_data
+        .message
+        .additional
+        .len()
+        .saturating_add(typed_rdata_count)
+        .min(u16::MAX as usize) as u16;
+    packet.extend_from_slice(&additional_count.to_be_bytes());
 
     // Questions section
     for question in &fuzz_data.message.questions {
@@ -217,6 +226,19 @@ fn build_dns_packet(fuzz_data: &DnsFuzzData) -> Vec<u8> {
         packet.extend_from_slice(&additional.rdata);
     }
 
+    for rdata in fuzz_data.typed_rdata.iter().take(typed_rdata_count) {
+        let (rr_type, encoded_rdata) = encode_typed_rdata(rdata);
+        encode_dns_name(
+            &DnsName::Normal(vec!["typed".to_string(), "test".to_string()]),
+            &mut packet,
+        );
+        packet.extend_from_slice(&rr_type.to_be_bytes());
+        packet.extend_from_slice(&1u16.to_be_bytes());
+        packet.extend_from_slice(&60u32.to_be_bytes());
+        packet.extend_from_slice(&(encoded_rdata.len() as u16).to_be_bytes());
+        packet.extend_from_slice(&encoded_rdata);
+    }
+
     // Apply compression attacks
     apply_compression_attack(&mut packet, &fuzz_data.compression_attack);
 
@@ -231,6 +253,55 @@ fn build_dns_packet(fuzz_data: &DnsFuzzData) -> Vec<u8> {
     }
 
     packet
+}
+
+fn encode_typed_rdata(rdata: &RDataType) -> (u16, Vec<u8>) {
+    match rdata {
+        RDataType::A(addr) => (1, addr.octets().to_vec()),
+        RDataType::Aaaa(addr) => (28, addr.octets().to_vec()),
+        RDataType::Cname(name) => {
+            let mut encoded = Vec::new();
+            encode_dns_name(name, &mut encoded);
+            (5, encoded)
+        }
+        RDataType::Mx {
+            preference,
+            exchange,
+        } => {
+            let mut encoded = Vec::new();
+            encoded.extend_from_slice(&preference.to_be_bytes());
+            encode_dns_name(exchange, &mut encoded);
+            (15, encoded)
+        }
+        RDataType::Txt(parts) => {
+            let mut encoded = Vec::new();
+            for part in parts.iter().take(8) {
+                let bytes = part.as_bytes();
+                let len = bytes.len().min(255);
+                encoded.push(len as u8);
+                encoded.extend_from_slice(&bytes[..len]);
+            }
+            (16, encoded)
+        }
+        RDataType::Srv {
+            priority,
+            weight,
+            port,
+            target,
+        } => {
+            let mut encoded = Vec::new();
+            encoded.extend_from_slice(&priority.to_be_bytes());
+            encoded.extend_from_slice(&weight.to_be_bytes());
+            encoded.extend_from_slice(&port.to_be_bytes());
+            encode_dns_name(target, &mut encoded);
+            (33, encoded)
+        }
+        RDataType::Raw(data) => {
+            let mut encoded = data.clone();
+            encoded.truncate(512);
+            (65280, encoded)
+        }
+    }
 }
 
 /// Build DNS flags word from individual flags
@@ -332,7 +403,7 @@ fn encode_dns_name(name: &DnsName, packet: &mut Vec<u8>) {
 }
 
 /// Apply compression pointer attacks to test cycle detection
-fn apply_compression_attack(packet: &mut Vec<u8>, attack: &CompressionAttack) {
+fn apply_compression_attack(packet: &mut [u8], attack: &CompressionAttack) {
     if packet.len() < 20 {
         return;
     }
@@ -424,18 +495,22 @@ fn apply_raw_mutation(packet: &mut Vec<u8>, mutation: &RawMutation) {
             }
         }
         RawMutation::CorruptRDataLen {
-            record_index: _,
+            record_index,
             new_length,
         } => {
             // Find RDATA length field and corrupt it
             if packet.len() > 12 {
                 // Simple heuristic: look for RDATA length fields
+                let mut seen = 0usize;
                 for i in 12..packet.len().saturating_sub(2) {
                     if i + 1 < packet.len() {
-                        // Assume this might be an RDATA length field
-                        packet[i] = (*new_length >> 8) as u8;
-                        packet[i + 1] = (*new_length & 0xFF) as u8;
-                        break;
+                        if seen == *record_index % 16 {
+                            // Assume this might be an RDATA length field
+                            packet[i] = (*new_length >> 8) as u8;
+                            packet[i + 1] = (*new_length & 0xFF) as u8;
+                            break;
+                        }
+                        seen += 1;
                     }
                 }
             }
@@ -463,8 +538,18 @@ fn test_dns_with_fake_server(fuzz_packet: &[u8]) {
     };
 
     // Set short timeout to avoid hanging fuzzer
-    let _ = socket.set_read_timeout(Some(Duration::from_millis(50)));
-    let _ = socket.set_write_timeout(Some(Duration::from_millis(50)));
+    if socket
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .is_err()
+    {
+        return;
+    }
+    if socket
+        .set_write_timeout(Some(Duration::from_millis(50)))
+        .is_err()
+    {
+        return;
+    }
 
     // Start fake DNS server in background
     let fuzz_response = fuzz_packet.to_vec();
@@ -474,7 +559,9 @@ fn test_dns_with_fake_server(fuzz_packet: &[u8]) {
         let mut buf = [0u8; 512];
         // Read one query and respond with fuzzed data
         if let Ok((_, src)) = server_socket.recv_from(&mut buf) {
-            let _ = server_socket.send_to(&fuzz_response, src);
+            match server_socket.send_to(&fuzz_response, src) {
+                Ok(_) | Err(_) => {}
+            }
         }
     });
 
@@ -490,7 +577,10 @@ fn test_dns_with_fake_server(fuzz_packet: &[u8]) {
         ..Default::default()
     };
 
-    // Configuration complete - resolver will use fake server
+    assert_eq!(config.nameservers.as_slice(), &[local_addr]);
+    assert_eq!(config.timeout, Duration::from_millis(100));
+    assert_eq!(config.retries, 0);
+    assert!(!config.cache_enabled);
 }
 
 /// Test specific RFC 1035 compliance edge cases
@@ -543,10 +633,11 @@ fn test_packet_parsing(packet: &[u8]) {
         return;
     }
 
-    // Create minimal fake server to serve this packet
-    let _ = std::panic::catch_unwind(|| {
-        test_dns_with_fake_server(packet);
-    });
+    // Create minimal fake server to serve this packet and observe parser panics.
+    match std::panic::catch_unwind(|| test_dns_with_fake_server(packet)) {
+        Ok(()) => {}
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
 }
 
 /// Test DNS name encoding edge cases specifically
