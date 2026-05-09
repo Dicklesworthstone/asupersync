@@ -81,6 +81,8 @@ fuzz_target!(|data: &[u8]| {
         Err(_) => return, // Invalid input for generating test case
     };
 
+    observe_underflow_scenario_flags(&test_case.underflow_scenarios);
+
     // Test scenario 1: Basic window update underflow detection
     test_basic_window_underflow(&test_case);
 
@@ -279,7 +281,48 @@ fn test_stream_window_underflow(test_case: &WindowUpdateTestCase) {
             consume_connection_window: false, // Only stream window
         };
 
-        let _ = flow_control.consume_window(&consumption);
+        let before_stream_window = flow_control
+            .stream_windows
+            .get(&stream_id)
+            .copied()
+            .unwrap_or(INITIAL_WINDOW_SIZE);
+        let consumption_result = flow_control.consume_window(&consumption);
+        match consumption_result {
+            Ok(window_state) => {
+                let consumed = i64::from(consumption.bytes_consumed);
+                let after_stream_window = window_state
+                    .stream_windows
+                    .get(&stream_id)
+                    .copied()
+                    .unwrap_or(INITIAL_WINDOW_SIZE);
+                assert_eq!(
+                    after_stream_window,
+                    before_stream_window - consumed,
+                    "stream {} consumption applied the wrong window delta",
+                    stream_id
+                );
+                assert!(
+                    after_stream_window >= 0,
+                    "stream {} consumption underflowed to {}",
+                    stream_id,
+                    after_stream_window
+                );
+            }
+            Err(error_msg) => {
+                assert!(
+                    before_stream_window < i64::from(consumption.bytes_consumed),
+                    "stream {} consumption was rejected despite sufficient window {} for {} bytes",
+                    stream_id,
+                    before_stream_window,
+                    consumption.bytes_consumed
+                );
+                assert!(
+                    error_msg.contains("FLOW_CONTROL_ERROR"),
+                    "stream consumption rejection should report FLOW_CONTROL_ERROR: {}",
+                    error_msg
+                );
+            }
+        }
 
         // Try window updates on this stream
         for update in test_case
@@ -443,7 +486,7 @@ fn test_zero_increment_updates(test_case: &WindowUpdateTestCase) {
     let zero_connection_update = WindowUpdateFrame {
         stream_id: 0,
         window_size_increment: 0,
-        timing: UpdateTiming::Immediate,
+        timing: UpdateTiming::BeforeDataConsumption,
         malformed_patterns: WindowUpdateMalformed {
             zero_increment: true,
             max_u32_increment: false,
@@ -473,7 +516,7 @@ fn test_zero_increment_updates(test_case: &WindowUpdateTestCase) {
         let zero_stream_update = WindowUpdateFrame {
             stream_id: stream.stream_id,
             window_size_increment: 0,
-            timing: UpdateTiming::Immediate,
+            timing: UpdateTiming::BeforeDataConsumption,
             malformed_patterns: WindowUpdateMalformed {
                 zero_increment: true,
                 max_u32_increment: false,
@@ -512,7 +555,7 @@ fn test_overflow_underflow_sequence(test_case: &WindowUpdateTestCase) {
     let overflow_update = WindowUpdateFrame {
         stream_id: 0,
         window_size_increment: (MAX_WINDOW_SIZE as u32).saturating_sub(INITIAL_WINDOW_SIZE as u32),
-        timing: UpdateTiming::Immediate,
+        timing: UpdateTiming::BeforeDataConsumption,
         malformed_patterns: WindowUpdateMalformed {
             zero_increment: false,
             max_u32_increment: true,
@@ -598,7 +641,7 @@ fn test_rapid_window_updates(test_case: &WindowUpdateTestCase) {
                     window_state.stream_windows.get(&update.stream_id)
                 {
                     assert!(
-                        stream_window >= 0 && stream_window <= MAX_WINDOW_SIZE,
+                        (0..=MAX_WINDOW_SIZE).contains(&stream_window),
                         "Stream {} window out of bounds after update {}: {}",
                         update.stream_id,
                         i,
@@ -641,7 +684,7 @@ fn test_invalid_stream_window_updates(test_case: &WindowUpdateTestCase) {
     let invalid_stream_update = WindowUpdateFrame {
         stream_id: 99999, // Non-existent stream
         window_size_increment: 1000,
-        timing: UpdateTiming::Immediate,
+        timing: UpdateTiming::BeforeDataConsumption,
         malformed_patterns: WindowUpdateMalformed {
             zero_increment: false,
             max_u32_increment: false,
@@ -681,17 +724,20 @@ fn test_window_state_consistency(test_case: &WindowUpdateTestCase) {
     // Apply data consumption and window updates interleaved
     for (i, data_frame) in test_case.data_frames.iter().enumerate().take(5) {
         // Consume window
-        let consumption_result = flow_control.consume_window(data_frame);
-
-        if let Ok(state_after_consumption) = consumption_result {
-            // Verify consumption decreased windows appropriately
-            if data_frame.consume_connection_window {
-                assert!(
-                    state_after_consumption.connection_window <= initial_state.connection_window,
-                    "Connection window should decrease after consumption"
-                );
+        let connection_window_after_consumption = match flow_control.consume_window(data_frame) {
+            Ok(state_after_consumption) => {
+                // Verify consumption decreased windows appropriately
+                if data_frame.consume_connection_window {
+                    assert!(
+                        state_after_consumption.connection_window
+                            <= initial_state.connection_window,
+                        "Connection window should decrease after consumption"
+                    );
+                }
+                Some(state_after_consumption.connection_window)
             }
-        }
+            Err(_) => None,
+        };
 
         // Apply window update if available
         if let Some(update) = test_case.window_updates.get(i) {
@@ -701,8 +747,7 @@ fn test_window_state_consistency(test_case: &WindowUpdateTestCase) {
                 // Verify window update increased windows appropriately
                 if update.stream_id == 0 && update.window_size_increment > 0 {
                     // Connection window should have increased (unless at max)
-                    let expected_min = state_after_consumption
-                        .map(|s| s.connection_window)
+                    let expected_min = connection_window_after_consumption
                         .unwrap_or(initial_state.connection_window);
 
                     assert!(
@@ -757,20 +802,57 @@ fn create_flow_control_context(
             // Skip connection-level
             stream_windows.insert(
                 stream.stream_id,
-                stream.initial_window.min(MAX_WINDOW_SIZE).max(0),
+                stream.initial_window.clamp(0, MAX_WINDOW_SIZE),
             );
         }
     }
 
     FlowControlContext {
-        connection_window: initial_connection_window.min(MAX_WINDOW_SIZE).max(0),
+        connection_window: initial_connection_window.clamp(0, MAX_WINDOW_SIZE),
         stream_windows,
         max_window_size: MAX_WINDOW_SIZE,
     }
 }
 
+fn observe_underflow_scenario_flags(scenarios: &UnderflowScenarios) {
+    let enabled_count = [
+        scenarios.negative_sum_window,
+        scenarios.multiple_decrements,
+        scenarios.large_increment_then_consumption,
+        scenarios.connection_window_underflow,
+        scenarios.stream_window_underflow,
+        scenarios.zero_window_updates,
+        scenarios.overflow_then_underflow,
+    ]
+    .into_iter()
+    .filter(|enabled| *enabled)
+    .count();
+    std::hint::black_box(enabled_count);
+}
+
+fn observe_window_update_metadata(update: &WindowUpdateFrame) {
+    let timing_marker = match update.timing {
+        UpdateTiming::BeforeDataConsumption => 0usize,
+        UpdateTiming::AfterDataConsumption => 1,
+        UpdateTiming::InterleaveWithData => 2,
+        UpdateTiming::Rapid(count) => usize::from(count),
+    };
+    let malformed_count = [
+        update.malformed_patterns.zero_increment,
+        update.malformed_patterns.max_u32_increment,
+        update.malformed_patterns.reserved_bit_set,
+        update.malformed_patterns.invalid_stream_id,
+    ]
+    .into_iter()
+    .filter(|enabled| *enabled)
+    .count();
+    std::hint::black_box((WINDOW_UPDATE_FRAME_TYPE, timing_marker, malformed_count));
+}
+
 impl FlowControlContext {
     fn process_window_update(&mut self, update: &WindowUpdateFrame) -> Result<WindowState, String> {
+        observe_window_update_metadata(update);
+
         // Validate increment
         if update.window_size_increment == 0 {
             return Err("PROTOCOL_ERROR: Window update increment must be non-zero".to_string());
