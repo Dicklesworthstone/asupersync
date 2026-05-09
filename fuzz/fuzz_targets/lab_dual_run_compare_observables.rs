@@ -39,12 +39,14 @@
 //! drops the iteration immediately.
 
 use asupersync::lab::dual_run::{
-    NormalizedObservable, SeedLineageRecord, check_core_invariants, compare_observables,
+    NormalizedObservable, SeedLineageRecord, SemanticMismatch, check_core_invariants,
+    compare_observables,
 };
 use libfuzzer_sys::fuzz_target;
 use serde::Deserialize;
 
 const MAX_INPUT: usize = 256 * 1024;
+const CHECK_CORE_INVARIANT_OBSERVER_MAX_VIOLATIONS: usize = 5;
 
 #[derive(Deserialize)]
 struct ObservableTriple {
@@ -64,9 +66,11 @@ fuzz_target!(|data: &[u8]| {
     };
 
     // Contract 1: panic floor on the per-observable invariant
-    // checker.
-    let _ = check_core_invariants(&triple.a);
-    let _ = check_core_invariants(&triple.b);
+    // checker, with violations made visible to the fuzz oracle.
+    let side_a_violations = check_core_invariants(&triple.a);
+    observe_core_invariant_violations("side A", &side_a_violations);
+    let side_b_violations = check_core_invariants(&triple.b);
+    observe_core_invariant_violations("side B", &side_b_violations);
 
     // Contract 1: panic floor on the differential comparator. The
     // signature is (lab, live, seed_lineage) -> ComparisonVerdict.
@@ -75,12 +79,7 @@ fuzz_target!(|data: &[u8]| {
     // Contract 3: format-string safety — exercise Display + Debug
     // on every reported mismatch.
     for m in &verdict.mismatches {
-        let _ = format!("{m:?}");
-        let _ = format!("{m}");
-        let _ = format!(
-            "field={} desc={} lab={} live={}",
-            m.field, m.description, m.lab_value, m.live_value,
-        );
+        observe_mismatch_formatting(m);
     }
 
     // Contract 2: reflexivity. compare_observables(o, o, _) must
@@ -98,3 +97,49 @@ fuzz_target!(|data: &[u8]| {
         self_b.mismatches.len(),
     );
 });
+
+fn observe_core_invariant_violations(side: &str, violations: &[String]) {
+    assert!(
+        violations.len() <= CHECK_CORE_INVARIANT_OBSERVER_MAX_VIOLATIONS,
+        "{side} emitted {} core-invariant violations; update the fuzz oracle if check_core_invariants grows",
+        violations.len(),
+    );
+
+    for violation in violations {
+        assert!(
+            !violation.trim().is_empty(),
+            "{side} emitted an empty core-invariant violation"
+        );
+
+        let diagnostic = format!("{side}: {violation}");
+        assert!(
+            diagnostic.len() >= side.len() + violation.len() + 2,
+            "{side} invariant diagnostic lost context"
+        );
+    }
+}
+
+fn observe_mismatch_formatting(mismatch: &SemanticMismatch) {
+    let debug = format!("{mismatch:?}");
+    let display = format!("{mismatch}");
+    let fields = format!(
+        "field={} desc={} lab={} live={}",
+        mismatch.field, mismatch.description, mismatch.lab_value, mismatch.live_value,
+    );
+
+    for rendered in [&debug, &display, &fields] {
+        assert!(
+            !rendered.is_empty(),
+            "semantic mismatch formatting must not render an empty diagnostic"
+        );
+    }
+
+    assert!(
+        display.contains(&mismatch.field),
+        "semantic mismatch Display must include the field name"
+    );
+    assert!(
+        fields.contains(&mismatch.description),
+        "semantic mismatch field formatting must include the description"
+    );
+}
