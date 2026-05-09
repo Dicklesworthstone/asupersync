@@ -25,16 +25,42 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::bytes::{BufMut, BytesMut};
+use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::http::h2::error::{ErrorCode, H2Error};
 use asupersync::http::h2::frame::{
-    FRAME_HEADER_SIZE, FrameHeader, MAX_FRAME_SIZE, continuation_flags, data_flags, headers_flags,
-    parse_frame, ping_flags, settings_flags,
+    FRAME_HEADER_SIZE, Frame, FrameHeader, MAX_FRAME_SIZE, continuation_flags, data_flags,
+    headers_flags, parse_frame, ping_flags, settings_flags,
 };
 use libfuzzer_sys::fuzz_target;
 
 /// Maximum fuzz input size to prevent timeouts (16KB)
 const MAX_FUZZ_INPUT_SIZE: usize = 16_384;
+
+fn observe_parse_frame(header: &FrameHeader, payload: Bytes) -> Result<Frame, H2Error> {
+    let payload_len = payload.len();
+    let result = parse_frame(header, payload);
+
+    match &result {
+        Ok(_) => {
+            assert!(
+                payload_len <= MAX_FRAME_SIZE as usize,
+                "successful H2 frame parse exceeded max payload size"
+            );
+            assert!(
+                header.length as usize <= MAX_FRAME_SIZE as usize,
+                "successful H2 frame parse accepted oversized header length"
+            );
+        }
+        Err(err) => {
+            assert!(
+                !format!("{err:?}").is_empty(),
+                "H2 frame parse errors must remain observable"
+            );
+        }
+    }
+
+    result
+}
 
 /// Fuzzing input for individual frame parsing
 #[derive(Arbitrary, Debug, Clone)]
@@ -257,7 +283,7 @@ fn fuzz_header_parsing(
 
             // Try to parse the complete frame
             let remaining_payload = header_buf.freeze();
-            let _ = parse_frame(&parsed_header, remaining_payload);
+            let _ = observe_parse_frame(&parsed_header, remaining_payload);
             // Note: parse_frame may fail for invalid frame content, which is expected
         }
         Err(_) => {
@@ -356,7 +382,7 @@ fn fuzz_raw_byte_sequence(bytes: Vec<u8>) {
             }
 
             // Try full frame parsing
-            let _ = parse_frame(&header, remaining);
+            let _ = observe_parse_frame(&header, remaining);
         }
         Err(_) => {
             // Header parsing failed - acceptable for malformed input
