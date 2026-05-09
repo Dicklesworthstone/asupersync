@@ -32,13 +32,80 @@ use libfuzzer_sys::fuzz_target;
 /// - Very long compression streams testing memory usage
 use asupersync::http::compress::{
     BrotliDecompressor, ContentEncoding, Decompressor, DeflateDecompressor, GzipDecompressor,
-    IdentityDecompressor, negotiate_encoding, parse_accept_encoding,
+    IdentityDecompressor, negotiate_encoding,
 };
 use std::io;
 
 // Constants for decompression bomb protection
 const MAX_DECOMPRESSED_SIZE: usize = 1024 * 1024; // 1MB safety limit for fuzzing
 const SMALL_DECOMPRESSED_SIZE: usize = 1024; // 1KB for testing exact limits
+
+fn assert_output_within_limit(context: &str, output_len: usize, max_size: Option<usize>) {
+    if let Some(limit) = max_size {
+        assert!(
+            output_len <= limit,
+            "{context} exceeded decompression size limit: {output_len} > {limit}"
+        );
+    }
+}
+
+fn observe_decompression_result(
+    context: &str,
+    result: io::Result<()>,
+    output_len: usize,
+    max_size: Option<usize>,
+) -> bool {
+    assert_output_within_limit(context, output_len, max_size);
+
+    match result {
+        Ok(()) => true,
+        Err(error) => {
+            let kind = error.kind();
+            assert!(
+                kind != io::ErrorKind::Interrupted && kind != io::ErrorKind::WouldBlock,
+                "{context} returned transient error kind: {kind:?}"
+            );
+            assert!(
+                !error.to_string().is_empty(),
+                "{context} error did not include diagnostics"
+            );
+            false
+        }
+    }
+}
+
+fn observe_decompress<D: Decompressor>(
+    context: &str,
+    decompressor: &mut D,
+    input: &[u8],
+    output: &mut Vec<u8>,
+    max_size: Option<usize>,
+) -> bool {
+    let before_len = output.len();
+    let result = decompressor.decompress(input, output);
+    let ok = observe_decompression_result(context, result, output.len(), max_size);
+    assert!(
+        output.len() >= before_len,
+        "{context} shrank the output buffer"
+    );
+    ok
+}
+
+fn observe_finish<D: Decompressor>(
+    context: &str,
+    decompressor: &mut D,
+    output: &mut Vec<u8>,
+    max_size: Option<usize>,
+) -> bool {
+    let before_len = output.len();
+    let result = decompressor.finish(output);
+    let ok = observe_decompression_result(context, result, output.len(), max_size);
+    assert!(
+        output.len() >= before_len,
+        "{context} shrank the output buffer"
+    );
+    ok
+}
 
 /// Test identity decompression with size limits and edge cases.
 fn test_identity_decompression(data: &[u8]) {
@@ -52,12 +119,9 @@ fn test_identity_decompression(data: &[u8]) {
     ];
 
     for &max_size in &size_limits {
-        let mut decompressor = IdentityDecompressor::new(max_size);
-        let mut output = Vec::new();
-
         // Test chunk-by-chunk decompression
         for chunk_size in [1, 4, 16, 64, data.len()] {
-            if chunk_size > data.len() {
+            if chunk_size == 0 || chunk_size > data.len() {
                 continue;
             }
 
@@ -89,8 +153,12 @@ fn test_identity_decompression(data: &[u8]) {
                 }
             }
 
-            // Test finish()
-            let _ = local_decompressor.finish(&mut local_output);
+            observe_finish(
+                "identity finish",
+                &mut local_decompressor,
+                &mut local_output,
+                max_size,
+            );
         }
     }
 }
@@ -121,13 +189,22 @@ fn test_gzip_decompression(data: &[u8]) {
                     );
                 }
 
-                // Test finish after successful decompress
-                let _ = decompressor.finish(&mut output);
+                observe_finish(
+                    "gzip finish after success",
+                    &mut decompressor,
+                    &mut output,
+                    max_size,
+                );
             }
             Err(_) => {
-                // Errors are expected for malformed gzip data
-                // Still test finish() to ensure no panics
-                let _ = decompressor.finish(&mut output);
+                // Errors are expected for malformed gzip data. Still observe
+                // finish() so poisoned and truncated states expose diagnostics.
+                observe_finish(
+                    "gzip finish after error",
+                    &mut decompressor,
+                    &mut output,
+                    max_size,
+                );
             }
         }
 
@@ -156,7 +233,12 @@ fn test_gzip_decompression(data: &[u8]) {
                 }
             }
 
-            let _ = stream_decompressor.finish(&mut stream_output);
+            observe_finish(
+                "streaming gzip finish",
+                &mut stream_decompressor,
+                &mut stream_output,
+                max_size,
+            );
         }
     }
 }
@@ -190,7 +272,7 @@ fn test_deflate_decompression(data: &[u8]) {
             }
         }
 
-        let _ = decompressor.finish(&mut output);
+        observe_finish("deflate finish", &mut decompressor, &mut output, max_size);
 
         // Test incremental decompression
         let mut incremental_decompressor = DeflateDecompressor::new(max_size);
@@ -201,21 +283,26 @@ fn test_deflate_decompression(data: &[u8]) {
             // Limit to avoid timeout
             match incremental_decompressor.decompress(&[byte], &mut incremental_output) {
                 Ok(_) => {
-                    if let Some(limit) = max_size {
-                        if incremental_output.len() > limit {
-                            panic!(
-                                "Incremental deflate exceeded size limit: {} > {}",
-                                incremental_output.len(),
-                                limit
-                            );
-                        }
+                    if let Some(limit) = max_size
+                        && incremental_output.len() > limit
+                    {
+                        panic!(
+                            "Incremental deflate exceeded size limit: {} > {}",
+                            incremental_output.len(),
+                            limit
+                        );
                     }
                 }
                 Err(_) => break,
             }
         }
 
-        let _ = incremental_decompressor.finish(&mut incremental_output);
+        observe_finish(
+            "incremental deflate finish",
+            &mut incremental_decompressor,
+            &mut incremental_output,
+            max_size,
+        );
     }
 }
 
@@ -247,7 +334,7 @@ fn test_brotli_decompression(data: &[u8]) {
             }
         }
 
-        let _ = decompressor.finish(&mut output);
+        observe_finish("brotli finish", &mut decompressor, &mut output, max_size);
 
         // Test with different chunk boundaries
         let mut chunk_decompressor = BrotliDecompressor::new(max_size);
@@ -262,21 +349,26 @@ fn test_brotli_decompression(data: &[u8]) {
             for chunk in data.chunks(chunk_size) {
                 match chunk_decompressor.decompress(chunk, &mut chunk_output) {
                     Ok(_) => {
-                        if let Some(limit) = max_size {
-                            if chunk_output.len() > limit {
-                                panic!(
-                                    "Chunked brotli exceeded size limit: {} > {}",
-                                    chunk_output.len(),
-                                    limit
-                                );
-                            }
+                        if let Some(limit) = max_size
+                            && chunk_output.len() > limit
+                        {
+                            panic!(
+                                "Chunked brotli exceeded size limit: {} > {}",
+                                chunk_output.len(),
+                                limit
+                            );
                         }
                     }
                     Err(_) => break,
                 }
             }
 
-            let _ = chunk_decompressor.finish(&mut chunk_output);
+            observe_finish(
+                "chunked brotli finish",
+                &mut chunk_decompressor,
+                &mut chunk_output,
+                max_size,
+            );
             break; // Only test one chunk size per data input
         }
     }
@@ -351,7 +443,7 @@ fn test_compression_edge_cases(base_data: &[u8]) {
             with_nulls
         },
         // Repeated byte patterns (common in compression bombs)
-        vec![base_data.get(0).copied().unwrap_or(0); std::cmp::min(base_data.len() * 10, 1000)],
+        vec![base_data.first().copied().unwrap_or(0); std::cmp::min(base_data.len() * 10, 1000)],
     ];
 
     for malformed_data in &malformed_patterns {
@@ -388,7 +480,7 @@ fn test_known_edge_cases() {
         b"*;q=0.".to_vec(),                         // Incomplete quality
         b"gzip;q=".to_vec(),                        // Missing quality value
         b"identity\x00gzip".to_vec(),               // Embedded null
-        b"gzip,".repeat(10000).into_bytes(),        // Excessive repetition
+        b"gzip,".repeat(10000),                     // Excessive repetition
     ];
 
     for edge_case in &edge_cases {
@@ -531,54 +623,54 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Test 7: Encoding negotiation with fuzzer-generated headers
-    if let Ok(header_str) = std::str::from_utf8(data) {
-        if header_str.len() < 1000 {
-            // Prevent excessively long headers
-            // Test realistic encoding combinations
-            let encoding_combinations = [
-                &[ContentEncoding::Identity][..],
-                &[ContentEncoding::Gzip],
-                &[ContentEncoding::Deflate],
-                &[ContentEncoding::Brotli],
-                &[ContentEncoding::Gzip, ContentEncoding::Deflate],
-                &[ContentEncoding::Gzip, ContentEncoding::Brotli],
-                &[
-                    ContentEncoding::Gzip,
-                    ContentEncoding::Deflate,
-                    ContentEncoding::Brotli,
-                ],
-                &[
-                    ContentEncoding::Identity,
-                    ContentEncoding::Gzip,
-                    ContentEncoding::Deflate,
-                    ContentEncoding::Brotli,
-                ],
-            ];
+    if let Ok(header_str) = std::str::from_utf8(data)
+        && header_str.len() < 1000
+    {
+        // Prevent excessively long headers
+        // Test realistic encoding combinations
+        let encoding_combinations = [
+            &[ContentEncoding::Identity][..],
+            &[ContentEncoding::Gzip],
+            &[ContentEncoding::Deflate],
+            &[ContentEncoding::Brotli],
+            &[ContentEncoding::Gzip, ContentEncoding::Deflate],
+            &[ContentEncoding::Gzip, ContentEncoding::Brotli],
+            &[
+                ContentEncoding::Gzip,
+                ContentEncoding::Deflate,
+                ContentEncoding::Brotli,
+            ],
+            &[
+                ContentEncoding::Identity,
+                ContentEncoding::Gzip,
+                ContentEncoding::Deflate,
+                ContentEncoding::Brotli,
+            ],
+        ];
 
-            for supported in &encoding_combinations {
-                let _result = negotiate_encoding(Some(header_str), supported);
-                let _result = negotiate_encoding(None, supported);
-            }
+        for supported in &encoding_combinations {
+            let _result = negotiate_encoding(Some(header_str), supported);
+            let _result = negotiate_encoding(None, supported);
+        }
 
-            // Test malformed header variants
-            let header_variants = [
-                header_str.to_string(),
-                header_str.to_uppercase(),
-                header_str.to_lowercase(),
-                format!("{}; q=0.5", header_str),
-                format!("{}, gzip", header_str),
-                format!("gzip, {}", header_str),
-                format!("  {}  ", header_str),
-                header_str.replace(";", " ; "),
-                header_str.replace(",", " , "),
-                header_str.repeat(3),
-            ];
+        // Test malformed header variants
+        let header_variants = [
+            header_str.to_string(),
+            header_str.to_uppercase(),
+            header_str.to_lowercase(),
+            format!("{}; q=0.5", header_str),
+            format!("{}, gzip", header_str),
+            format!("gzip, {}", header_str),
+            format!("  {}  ", header_str),
+            header_str.replace(";", " ; "),
+            header_str.replace(",", " , "),
+            header_str.repeat(3),
+        ];
 
-            for variant in &header_variants {
-                if variant.len() < 2000 {
-                    // Prevent excessive lengths
-                    let _result = negotiate_encoding(Some(variant), &[ContentEncoding::Gzip]);
-                }
+        for variant in &header_variants {
+            if variant.len() < 2000 {
+                // Prevent excessive lengths
+                let _result = negotiate_encoding(Some(variant), &[ContentEncoding::Gzip]);
             }
         }
     }
@@ -587,7 +679,7 @@ fuzz_target!(|data: &[u8]| {
     // Ensure that no decompression operation allocates excessive memory
     // This is implicitly tested by the size limits, but we can also check
     // that intermediate allocations don't spike
-    if data.len() > 0 && data.len() < 100 {
+    if !data.is_empty() && data.len() < 100 {
         // For small inputs, test rapid create/destroy cycles to check for memory leaks
         for _ in 0..10 {
             let mut gzip = GzipDecompressor::new(Some(1024));
@@ -596,16 +688,39 @@ fuzz_target!(|data: &[u8]| {
             let mut identity = IdentityDecompressor::new(Some(1024));
 
             let mut output = Vec::new();
-            let _ = gzip.decompress(data, &mut output);
-            let _ = deflate.decompress(data, &mut output);
-            let _ = brotli.decompress(data, &mut output);
-            let _ = identity.decompress(data, &mut output);
+            observe_decompress(
+                "rapid gzip decompress",
+                &mut gzip,
+                data,
+                &mut output,
+                Some(1024),
+            );
+            observe_decompress(
+                "rapid deflate decompress",
+                &mut deflate,
+                data,
+                &mut output,
+                Some(1024),
+            );
+            observe_decompress(
+                "rapid brotli decompress",
+                &mut brotli,
+                data,
+                &mut output,
+                Some(1024),
+            );
+            observe_decompress(
+                "rapid identity decompress",
+                &mut identity,
+                data,
+                &mut output,
+                Some(1024),
+            );
 
             // Explicit drop to ensure cleanup
             drop(gzip);
             drop(deflate);
             drop(brotli);
-            drop(identity);
             output.clear();
         }
     }
