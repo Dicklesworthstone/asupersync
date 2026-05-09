@@ -23,9 +23,8 @@ use libfuzzer_sys::fuzz_target;
 /// - Malformed Object Transmission Information
 /// - Resource exhaustion via oversized frames
 /// - Cross-block contamination attacks
-use asupersync::codec::raptorq::{
-    EncodedSymbol, EncodingConfig, EncodingError, EncodingPipeline, EncodingStats,
-};
+use asupersync::codec::raptorq::{EncodingConfig, EncodingError, EncodingPipeline};
+use asupersync::types::resource::{PoolConfig, SymbolPool};
 use asupersync::types::{ObjectId, Symbol, SymbolId, SymbolKind};
 
 /// Maximum frame size for testing (1MB)
@@ -33,9 +32,6 @@ const MAX_FRAME_SIZE: usize = 1024 * 1024;
 
 /// Maximum reasonable symbol size per RFC 6330
 const MAX_SYMBOL_SIZE: usize = 65535;
-
-/// Maximum source blocks per object
-const MAX_SOURCE_BLOCKS: u8 = 255;
 
 /// Structure-aware RaptorQ frame patterns for corpus seeding
 #[derive(Arbitrary, Debug, Clone)]
@@ -178,7 +174,7 @@ fn test_block_index_bounds(data: &[u8]) {
         let symbol = Symbol::new(symbol_id, symbol_data, SymbolKind::Source);
 
         // Verify SBN is properly bounded
-        assert!(symbol.id().sbn() <= MAX_SOURCE_BLOCKS);
+        assert_eq!(symbol.id().sbn(), valid_sbn);
 
         // Test encoding pipeline with the symbol
         test_encoding_pipeline_with_symbol(&symbol);
@@ -321,10 +317,10 @@ fn test_oversized_frame_rejection(data: &[u8]) {
 
     // Test various oversized scenarios
     let size_test_cases = [
-        (MAX_FRAME_SIZE + 1, vec![0; 100]),  // Just over limit
-        (declared_size, data[4..].to_vec()), // From fuzz input
-        (u32::MAX, vec![0; 1000]),           // Maximum declaration
-        (0, vec![0; MAX_FRAME_SIZE + 1]),    // Size/data mismatch
+        ((MAX_FRAME_SIZE as u32).saturating_add(1), vec![0; 100]), // Just over limit
+        (declared_size, data[4..].to_vec()),                       // From fuzz input
+        (u32::MAX, vec![0; 1000]),                                 // Maximum declaration
+        (0, vec![0; MAX_FRAME_SIZE + 1]),                          // Size/data mismatch
     ];
 
     for (decl_size, frame_data) in size_test_cases {
@@ -347,11 +343,11 @@ fn test_encoding_pipeline_with_symbol(symbol: &Symbol) {
 
     // Create pipeline - should not panic
     let result = std::panic::catch_unwind(|| {
-        let mut pipeline = EncodingPipeline::new(config);
+        let mut pipeline = encoding_pipeline(config);
 
         // Test encoding the symbol data
         let object_id = symbol.id().object_id();
-        let _result = pipeline.encode_object(object_id, symbol.data());
+        observe_encoding_result(pipeline.encode(object_id, symbol.data()).collect());
     });
 
     assert!(
@@ -362,7 +358,7 @@ fn test_encoding_pipeline_with_symbol(symbol: &Symbol) {
 }
 
 /// Helper: Test oversized symbol rejection
-fn test_oversized_symbol_rejection(symbol: &Symbol, expected_size: usize) {
+fn test_oversized_symbol_rejection(symbol: &Symbol, _expected_size: usize) {
     if symbol.data().len() > MAX_SYMBOL_SIZE {
         // Oversized symbols should be handled gracefully
         // This is implementation-specific behavior
@@ -479,6 +475,44 @@ fn test_frame_acceptance(declared_size: u32, frame_data: &[u8]) {
     }
 }
 
+fn encoding_pipeline(config: EncodingConfig) -> EncodingPipeline {
+    let pool = SymbolPool::new(PoolConfig::new(config.symbol_size, 0, 0, false, 0));
+    EncodingPipeline::new(config, pool)
+}
+
+fn observe_encoding_result(
+    result: Result<Vec<asupersync::codec::raptorq::EncodedSymbol>, EncodingError>,
+) {
+    match result {
+        Ok(encoded) => {
+            for symbol in encoded {
+                assert!(
+                    !symbol.symbol().data().is_empty(),
+                    "encoded symbols must carry data"
+                );
+            }
+        }
+        Err(EncodingError::DataTooLarge { size, limit }) => {
+            assert!(size > limit, "DataTooLarge must report size > limit");
+        }
+        Err(EncodingError::InvalidConfig { reason }) => {
+            assert!(
+                !reason.trim().is_empty(),
+                "InvalidConfig must include a diagnostic reason"
+            );
+        }
+        Err(EncodingError::PoolExhausted) => {
+            panic!("disabled symbol pool should not report PoolExhausted");
+        }
+        Err(EncodingError::ComputationFailed { details }) => {
+            assert!(
+                !details.trim().is_empty(),
+                "ComputationFailed must include diagnostic details"
+            );
+        }
+    }
+}
+
 /// Test codec round-trip operations
 fn test_codec_round_trip(data: &[u8]) {
     if data.len() < 8 {
@@ -486,7 +520,7 @@ fn test_codec_round_trip(data: &[u8]) {
     }
 
     let config = EncodingConfig::default();
-    let mut pipeline = EncodingPipeline::new(config);
+    let mut pipeline = encoding_pipeline(config);
 
     // Test encoding
     let object_id = ObjectId::new(
@@ -496,29 +530,10 @@ fn test_codec_round_trip(data: &[u8]) {
         0xBBBBBBBBBBBBBBBB,
     );
 
-    let result = pipeline.encode_object(object_id, data);
+    let result = pipeline.encode(object_id, data).collect();
 
-    // Should not panic regardless of input
-    match result {
-        Ok(encoded) => {
-            // Test that encoded symbols are valid
-            // This would be implementation specific
-        }
-        Err(err) => {
-            // Should be a graceful error, not a panic
-            match err {
-                EncodingError::DataTooLarge { .. } => {
-                    // Expected for oversized data
-                }
-                EncodingError::InvalidConfig { .. } => {
-                    // Expected for invalid configurations
-                }
-                _ => {
-                    // Other errors should also be handled gracefully
-                }
-            }
-        }
-    }
+    // Should produce valid symbols or a typed diagnostic regardless of input.
+    observe_encoding_result(result);
 }
 
 /// Test malformed frame parsing with arbitrary data
@@ -526,11 +541,23 @@ fn test_malformed_frame_parsing(frame: &RaptorQFrame) {
     let serialized = frame.serialize();
 
     // Test frame parsing - should not panic
-    let result = std::panic::catch_unwind(|| {
-        parse_raptorq_frame(&serialized);
-    });
+    let result = std::panic::catch_unwind(|| parse_raptorq_frame(&serialized));
 
-    assert!(result.is_ok(), "Frame parsing panicked with: {:?}", frame);
+    match result {
+        Ok(Ok((_object_id, _sbn, _esi, symbol_data))) => {
+            assert!(
+                symbol_data.len() <= MAX_SYMBOL_SIZE,
+                "parsed symbol data must stay within the fuzz target maximum"
+            );
+        }
+        Ok(Err(reason)) => {
+            assert!(
+                !reason.trim().is_empty(),
+                "frame parser errors must include a diagnostic reason"
+            );
+        }
+        Err(_) => panic!("Frame parsing panicked with: {:?}", frame),
+    }
 }
 
 /// Mock frame parser for testing (implementation would be in codec)
@@ -546,7 +573,7 @@ fn parse_raptorq_frame(data: &[u8]) -> Result<(ObjectId, u8, u32, Vec<u8>), &'st
     let sbn = data[8];
     let esi = u32::from_le_bytes([data[9], data[10], data[11], data[12]]);
     let symbol_size = u16::from_le_bytes([data[13], data[14]]);
-    let is_source = data[15] != 0;
+    let _is_source = data[15] != 0;
 
     // Validate bounds
     if symbol_size as usize > MAX_SYMBOL_SIZE {
@@ -594,12 +621,13 @@ fuzz_target!(|frame: RaptorQFrame| {
 
     // Stress test with rapid symbol creation
     if serialized.len() >= 16 {
-        for i in 0..10 {
+        for i in 0_u64..10 {
             let object_id = ObjectId::new(i, i * 2);
             let symbol_id = SymbolId::new(object_id, (i % 256) as u8, i as u32);
+            let offset = (i as usize) % serialized.len();
             let symbol = Symbol::new(
                 symbol_id,
-                serialized[i % serialized.len()..].to_vec(),
+                serialized[offset..].to_vec(),
                 if i % 2 == 0 {
                     SymbolKind::Source
                 } else {
