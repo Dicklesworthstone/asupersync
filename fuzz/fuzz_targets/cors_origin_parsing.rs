@@ -108,7 +108,7 @@ fn request_with_origin_scenario(input: &CorsOriginFuzzInput) -> Request {
 
     match &input.origin_scenario {
         OriginHeaderScenario::MultipleOrigins { origins } => {
-            req = req.with_header("Origin", &coalesced_multi_origin_value(origins));
+            req = req.with_header("Origin", coalesced_multi_origin_value(origins));
         }
         OriginHeaderScenario::SingleOrigin { origin } => {
             req = req.with_header("Origin", origin);
@@ -169,8 +169,22 @@ fn test_multi_origin_rfc6454_compliance(input: &CorsOriginFuzzInput) {
 
     // Call middleware - should never panic
     let response = middleware.call(req);
+    observe_cors_response("multi-origin compliance", &response, &input.origin_scenario);
+}
 
-    // Basic invariants that should always hold
+fn test_origin_parsing_robustness(input: &CorsOriginFuzzInput) {
+    // Test that origin parsing doesn't panic on any input
+    let cors_policy = build_cors_policy(&input.cors_policy_type);
+    let middleware = CorsMiddleware::new(TestHandler, cors_policy);
+    let response = middleware.call(request_with_origin_scenario(input));
+    observe_cors_response(
+        "origin parsing robustness",
+        &response,
+        &input.origin_scenario,
+    );
+}
+
+fn observe_cors_response(context: &str, response: &Response, scenario: &OriginHeaderScenario) {
     assert!(
         matches!(
             response.status,
@@ -178,22 +192,37 @@ fn test_multi_origin_rfc6454_compliance(input: &CorsOriginFuzzInput) {
                 | asupersync::web::StatusCode::NO_CONTENT
                 | asupersync::web::StatusCode::FORBIDDEN
         ),
-        "Response status should be valid HTTP status"
+        "{context}: response status should be a valid CORS outcome"
     );
-
-    if let OriginHeaderScenario::MultipleOrigins { .. } = &input.origin_scenario {
+    assert!(
+        response.headers.len() <= 16,
+        "{context}: CORS middleware should keep response headers bounded"
+    );
+    for (name, value) in &response.headers {
         assert!(
-            !response.headers.contains_key("access-control-allow-origin"),
-            "malformed multi-origin header must fail closed"
+            !name.trim().is_empty(),
+            "{context}: response header name should not be empty"
+        );
+        assert!(
+            !name.contains('\r') && !name.contains('\n'),
+            "{context}: response header name should not contain line breaks"
+        );
+        assert!(
+            !value.contains('\r') && !value.contains('\n'),
+            "{context}: response header value should not contain line breaks"
         );
     }
-}
+    assert!(
+        response.set_cookies.is_empty(),
+        "{context}: CORS middleware test handler should not emit cookies"
+    );
 
-fn test_origin_parsing_robustness(input: &CorsOriginFuzzInput) {
-    // Test that origin parsing doesn't panic on any input
-    let cors_policy = build_cors_policy(&input.cors_policy_type);
-    let middleware = CorsMiddleware::new(TestHandler, cors_policy);
-    let _response = middleware.call(request_with_origin_scenario(input));
+    if let OriginHeaderScenario::MultipleOrigins { .. } = scenario {
+        assert!(
+            !response.headers.contains_key("access-control-allow-origin"),
+            "{context}: malformed multi-origin header must fail closed"
+        );
+    }
 }
 
 fn test_cors_policy_consistency(input: &CorsOriginFuzzInput) {
