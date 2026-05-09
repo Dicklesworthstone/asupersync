@@ -133,16 +133,12 @@ impl ResourceEnvelope {
 
     /// Reserves memory from the envelope budget.
     pub fn reserve_memory(&self, amount: u64) -> Result<(), SwarmPressureError> {
-        self.check_memory_budget(amount)?;
-        self.memory_used.fetch_add(amount, Ordering::Relaxed);
-        Ok(())
+        reserve_envelope_budget("memory", &self.memory_used, amount, self.memory_budget)
     }
 
     /// Releases memory back to the envelope budget.
     pub fn release_memory(&self, amount: u64) {
-        let current = self.memory_used.load(Ordering::Relaxed);
-        let new_value = current.saturating_sub(amount);
-        self.memory_used.store(new_value, Ordering::Relaxed);
+        release_envelope_budget(&self.memory_used, amount);
     }
 
     /// Returns current memory utilization as a ratio (0.0 to 1.0+).
@@ -166,16 +162,17 @@ impl ResourceEnvelope {
 
     /// Reserves CPU nanoseconds from this envelope's per-second budget.
     pub fn reserve_cpu(&self, amount_ns: u64) -> Result<(), SwarmPressureError> {
-        self.check_cpu_budget(amount_ns)?;
-        self.cpu_used_ns.fetch_add(amount_ns, Ordering::Relaxed);
-        Ok(())
+        reserve_envelope_budget(
+            "cpu",
+            &self.cpu_used_ns,
+            amount_ns,
+            self.cpu_budget_ns_per_sec,
+        )
     }
 
     /// Releases CPU nanoseconds back to the envelope budget.
     pub fn release_cpu(&self, amount_ns: u64) {
-        let current = self.cpu_used_ns.load(Ordering::Relaxed);
-        self.cpu_used_ns
-            .store(current.saturating_sub(amount_ns), Ordering::Relaxed);
+        release_envelope_budget(&self.cpu_used_ns, amount_ns);
     }
 
     /// Returns current CPU utilization as a ratio (0.0 to 1.0+).
@@ -199,16 +196,17 @@ impl ResourceEnvelope {
 
     /// Reserves IO operations from this envelope's per-second budget.
     pub fn reserve_io(&self, amount_ops: u64) -> Result<(), SwarmPressureError> {
-        self.check_io_budget(amount_ops)?;
-        self.io_ops_used.fetch_add(amount_ops, Ordering::Relaxed);
-        Ok(())
+        reserve_envelope_budget(
+            "io",
+            &self.io_ops_used,
+            amount_ops,
+            self.io_budget_ops_per_sec,
+        )
     }
 
     /// Releases IO operations back to the envelope budget.
     pub fn release_io(&self, amount_ops: u64) {
-        let current = self.io_ops_used.load(Ordering::Relaxed);
-        self.io_ops_used
-            .store(current.saturating_sub(amount_ops), Ordering::Relaxed);
+        release_envelope_budget(&self.io_ops_used, amount_ops);
     }
 
     /// Returns current IO utilization as a ratio (0.0 to 1.0+).
@@ -236,6 +234,36 @@ fn check_envelope_budget(
         });
     }
     Ok(())
+}
+
+fn reserve_envelope_budget(
+    resource: &str,
+    used: &AtomicU64,
+    requested: u64,
+    limit: u64,
+) -> Result<(), SwarmPressureError> {
+    let mut current = used.load(Ordering::Relaxed);
+    loop {
+        let next = current.saturating_add(requested);
+        if next > limit {
+            return Err(SwarmPressureError::EnvelopeBudgetExceeded {
+                resource: resource.to_string(),
+                current: next,
+                limit,
+            });
+        }
+
+        match used.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return Ok(()),
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+fn release_envelope_budget(used: &AtomicU64, amount: u64) {
+    let _ = used.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_sub(amount))
+    });
 }
 
 /// Configuration for swarm pressure governance.
@@ -813,6 +841,42 @@ mod tests {
         envelope.release_io(3);
         assert!(envelope.reserve_io(2).is_ok());
         assert_eq!(envelope.io_utilization(), 0.6);
+    }
+
+    #[test]
+    fn test_resource_envelope_concurrent_reservations_do_not_overshoot_budget() {
+        let envelope = std::sync::Arc::new(ResourceEnvelope::new(
+            RegionId::new_for_test(1, 3),
+            64,
+            100,
+            100,
+        ));
+        let mut handles = Vec::new();
+
+        for _ in 0..8 {
+            let envelope = std::sync::Arc::clone(&envelope);
+            handles.push(std::thread::spawn(move || {
+                let mut successful_reservations = 0_u64;
+                for _ in 0..32 {
+                    if envelope.reserve_memory(1).is_ok() {
+                        successful_reservations += 1;
+                    }
+                }
+                successful_reservations
+            }));
+        }
+
+        let successful_reservations: u64 = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("reservation thread should finish"))
+            .sum();
+
+        assert_eq!(successful_reservations, 64);
+        assert_eq!(envelope.memory_used.load(Ordering::Relaxed), 64);
+        assert!(matches!(
+            envelope.reserve_memory(1),
+            Err(SwarmPressureError::EnvelopeBudgetExceeded { resource, .. }) if resource == "memory"
+        ));
     }
 
     #[test]
