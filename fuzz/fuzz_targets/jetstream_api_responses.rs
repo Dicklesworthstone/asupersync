@@ -271,20 +271,17 @@ enum JsonCorruption {
 
 fuzz_target!(|response: ApiResponseType| {
     // Limit complexity to maintain fuzzer performance
-    match &response {
-        ApiResponseType::Malformed { corruption } => {
-            if let JsonCorruption::DeepNesting { depth } = corruption {
-                if *depth > 50 {
-                    return;
-                }
-            }
-            if let JsonCorruption::NonJson { content } = corruption {
-                if content.len() > 1024 {
-                    return;
-                }
-            }
+    if let ApiResponseType::Malformed { corruption } = &response {
+        if let JsonCorruption::DeepNesting { depth } = corruption
+            && *depth > 50
+        {
+            return;
         }
-        _ => {}
+        if let JsonCorruption::NonJson { content } = corruption
+            && content.len() > 1024
+        {
+            return;
+        }
     }
 
     let json = build_api_response(&response);
@@ -1037,21 +1034,58 @@ fn json_escape(s: &str) -> String {
     result
 }
 
+fn assert_visible_js_error(err: &JsError) {
+    assert!(
+        !err.to_string().is_empty(),
+        "JetStream parser errors should be observable"
+    );
+}
+
+fn observe_stream_info_parse(bytes: &[u8]) {
+    match fuzz_parse_stream_info(bytes) {
+        Ok(info) => {
+            assert!(
+                info.config.name.len() <= bytes.len(),
+                "parsed StreamInfo name should be sourced from the input"
+            );
+        }
+        Err(err) => assert_visible_js_error(&err),
+    }
+}
+
+fn observe_pub_ack_parse(bytes: &[u8]) {
+    match fuzz_parse_pub_ack(bytes) {
+        Ok(ack) => {
+            assert!(
+                ack.stream.len() <= bytes.len(),
+                "parsed PubAck stream should be sourced from the input"
+            );
+        }
+        Err(err) => assert_visible_js_error(&err),
+    }
+}
+
+fn observe_api_error_parse(json: &str) -> JsError {
+    let err = fuzz_parse_api_error(json);
+    assert_visible_js_error(&err);
+    err
+}
+
 fn test_jetstream_parsing(response: &ApiResponseType, json: &str) {
     let bytes = json.as_bytes();
 
     match response {
         ApiResponseType::StreamInfo { .. } => {
             // Test existing StreamInfo parser
-            let _ = fuzz_parse_stream_info(bytes);
+            observe_stream_info_parse(bytes);
         }
         ApiResponseType::PubAck { .. } => {
             // Test existing PubAck parser
-            let _ = fuzz_parse_pub_ack(bytes);
+            observe_pub_ack_parse(bytes);
         }
         ApiResponseType::ApiError { .. } => {
             // Test existing API error parser
-            let _ = fuzz_parse_api_error(json);
+            observe_api_error_parse(json);
         }
         _ => {
             // For ServerInfo/AccountInfo, test general error detection
@@ -1101,7 +1135,7 @@ fn test_error_classification(json: &str) {
 
     if is_error_response {
         // Should be classified as error
-        let parsed_error = fuzz_parse_api_error(json);
+        let parsed_error = observe_api_error_parse(json);
         match parsed_error {
             JsError::Api { .. } | JsError::StreamNotFound(_) => {
                 // Expected error classification
