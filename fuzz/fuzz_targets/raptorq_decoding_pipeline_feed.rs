@@ -19,7 +19,9 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use asupersync::config::EncodingConfig;
-use asupersync::decoding::{DecodingConfig, DecodingPipeline, RejectReason, SymbolAcceptResult};
+use asupersync::decoding::{
+    DecodingConfig, DecodingError, DecodingPipeline, RejectReason, SymbolAcceptResult,
+};
 use asupersync::encoding::{EncodingError, EncodingPipeline};
 use asupersync::security::{
     AuthMode, AuthenticatedSymbol, SecurityContext, tag::AuthenticationTag,
@@ -282,8 +284,21 @@ fn execute(input: FeedFuzzInput) {
             assert_eq!(decoded, payload, "decoded payload drifted from original");
         }
     } else {
-        let _ = pipeline.into_data().err();
+        observe_incomplete_pipeline_data(pipeline.into_data());
     }
+}
+
+fn observe_incomplete_pipeline_data(result: Result<Vec<u8>, DecodingError>) {
+    let error = result.expect_err("incomplete pipeline should expose why data is unavailable");
+    let diagnostic = format!("{error:?}");
+    assert!(
+        !diagnostic.trim().is_empty(),
+        "incomplete pipeline errors must expose diagnostics"
+    );
+    assert!(
+        diagnostic.len() < 4096,
+        "incomplete pipeline diagnostics must stay bounded"
+    );
 }
 
 fn build_payload(object_size: usize, seed: u64, payload_bytes: &[u8]) -> Vec<u8> {
