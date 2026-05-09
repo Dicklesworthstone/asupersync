@@ -76,11 +76,7 @@ fn test_round_trip_consistency(input: &AeadFuzzInput) {
     };
 
     // Create symbol from fuzz input
-    let symbol_id = SymbolId::new_for_test(
-        input.object_id.wrapping_add(1), // Ensure non-zero object_id
-        input.sbn,
-        input.esi,
-    );
+    let symbol_id = SymbolId::new_for_test(input.object_value(), input.sbn, input.esi);
 
     let symbol_kind = if input.is_source {
         SymbolKind::Source
@@ -98,8 +94,8 @@ fn test_round_trip_consistency(input: &AeadFuzzInput) {
     );
 
     // Test AuthenticatedSymbol wrapper consistency
-    let auth_symbol = AuthenticatedSymbol::new_verified(symbol.clone(), tag);
-    assert!(auth_symbol.is_verified());
+    let auth_symbol = AuthenticatedSymbol::from_parts(symbol.clone(), tag);
+    assert!(!auth_symbol.is_verified());
     assert_eq!(auth_symbol.symbol(), &symbol);
     assert_eq!(auth_symbol.tag(), &tag);
 }
@@ -117,7 +113,7 @@ fn test_tag_mismatch_security(input: &AeadFuzzInput) {
         Err(_) => return,
     };
 
-    let symbol_id = SymbolId::new_for_test(input.object_id.wrapping_add(1), input.sbn, input.esi);
+    let symbol_id = SymbolId::new_for_test(input.object_value(), input.sbn, input.esi);
     let symbol_kind = if input.is_source {
         SymbolKind::Source
     } else {
@@ -170,23 +166,21 @@ fn test_tag_mismatch_security(input: &AeadFuzzInput) {
         TagModificationScenario::PayloadTamper {
             byte_index,
             new_value,
-        } => {
-            if !input.payload.is_empty() {
-                let mut tampered_payload = input.payload.clone();
-                let idx = *byte_index % tampered_payload.len();
-                let old_value = tampered_payload[idx];
-                tampered_payload[idx] = *new_value;
+        } if !input.payload.is_empty() => {
+            let mut tampered_payload = input.payload.clone();
+            let idx = *byte_index % tampered_payload.len();
+            let old_value = tampered_payload[idx];
+            tampered_payload[idx] = *new_value;
 
-                // Only test if we actually changed something
-                if tampered_payload[idx] != old_value {
-                    let tampered_symbol = Symbol::new(symbol_id, tampered_payload, symbol_kind);
+            // Only test if we actually changed something
+            if tampered_payload[idx] != old_value {
+                let tampered_symbol = Symbol::new(symbol_id, tampered_payload, symbol_kind);
 
-                    // Original tag should NOT verify against tampered symbol
-                    assert!(
-                        !valid_tag.verify(&key, &tampered_symbol),
-                        "Tag verified against tampered payload - SECURITY ISSUE"
-                    );
-                }
+                // Original tag should NOT verify against tampered symbol
+                assert!(
+                    !valid_tag.verify(&key, &tampered_symbol),
+                    "Tag verified against tampered payload - SECURITY ISSUE"
+                );
             }
         }
 
@@ -216,8 +210,7 @@ fn test_key_isolation(input: &AeadFuzzInput) {
 
         // Only test if keys are actually different
         if key1 != key2 {
-            let symbol_id =
-                SymbolId::new_for_test(input.object_id.wrapping_add(1), input.sbn, input.esi);
+            let symbol_id = SymbolId::new_for_test(input.object_value(), input.sbn, input.esi);
             let symbol_kind = if input.is_source {
                 SymbolKind::Source
             } else {
@@ -267,8 +260,7 @@ fn test_aad_tamper_detection(input: &AeadFuzzInput) {
             Err(_) => return,
         };
 
-        let original_id =
-            SymbolId::new_for_test(input.object_id.wrapping_add(1), input.sbn, input.esi);
+        let original_id = SymbolId::new_for_test(input.object_value(), input.sbn, input.esi);
         let symbol_kind = if input.is_source {
             SymbolKind::Source
         } else {
@@ -279,19 +271,19 @@ fn test_aad_tamper_detection(input: &AeadFuzzInput) {
         let original_tag = AuthenticationTag::compute(&key, &original_symbol);
 
         // Tamper with metadata
+        let aad_delta = input.aad_delta();
         let tampered_sbn = if *tamper_sbn {
-            input.sbn.wrapping_add(1)
+            input.sbn.wrapping_add(aad_delta)
         } else {
             input.sbn
         };
         let tampered_esi = if *tamper_esi {
-            input.esi.wrapping_add(1)
+            input.esi.wrapping_add(u32::from(aad_delta))
         } else {
             input.esi
         };
 
-        let tampered_id =
-            SymbolId::new_for_test(input.object_id.wrapping_add(1), tampered_sbn, tampered_esi);
+        let tampered_id = SymbolId::new_for_test(input.object_value(), tampered_sbn, tampered_esi);
 
         // Only test if we actually changed something
         if tampered_id != original_id {
@@ -319,23 +311,53 @@ fn test_constant_time_verification(input: &AeadFuzzInput) {
         Err(_) => return,
     };
 
-    let symbol_id = SymbolId::new_for_test(input.object_id.wrapping_add(1), input.sbn, input.esi);
+    let symbol_id = SymbolId::new_for_test(input.object_value(), input.sbn, input.esi);
     let symbol_kind = if input.is_source {
         SymbolKind::Source
     } else {
         SymbolKind::Repair
     };
     let symbol = Symbol::new(symbol_id, input.payload.clone(), symbol_kind);
+    let valid_tag = AuthenticationTag::compute(&key, &symbol);
 
     // Test with zero tag (should be rejected)
     let zero_tag = AuthenticationTag::zero();
-    let _ = zero_tag.verify(&key, &symbol); // Should not panic
+    assert_tag_verify_observation("zero tag", &zero_tag, &key, &symbol, &valid_tag);
 
     // Test with valid tag
-    let valid_tag = AuthenticationTag::compute(&key, &symbol);
-    let _ = valid_tag.verify(&key, &symbol); // Should not panic
+    assert_tag_verify_observation("valid tag", &valid_tag, &key, &symbol, &valid_tag);
 
     // Test with random tag bytes
     let random_tag = AuthenticationTag::from_bytes(input.key_bytes); // Reuse key bytes as random tag
-    let _ = random_tag.verify(&key, &symbol); // Should not panic
+    assert_tag_verify_observation("random tag", &random_tag, &key, &symbol, &valid_tag);
+}
+
+fn assert_tag_verify_observation(
+    context: &str,
+    tag: &AuthenticationTag,
+    key: &AuthKey,
+    symbol: &Symbol,
+    valid_tag: &AuthenticationTag,
+) {
+    let verified = tag.verify(key, symbol);
+    assert_eq!(
+        verified,
+        tag == valid_tag,
+        "{context} verification result must match canonical tag equality"
+    );
+}
+
+impl AeadFuzzInput {
+    fn object_value(&self) -> u64 {
+        let value = (self.object_id as u64).wrapping_add(1);
+        if value == 0 { 1 } else { value }
+    }
+
+    fn aad_delta(&self) -> u8 {
+        let delta = self
+            .aad_bytes
+            .iter()
+            .fold(1u8, |acc, byte| acc.wrapping_add(*byte));
+        if delta == 0 { 1 } else { delta }
+    }
 }
