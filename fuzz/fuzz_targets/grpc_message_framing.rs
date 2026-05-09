@@ -38,7 +38,9 @@ use libfuzzer_sys::fuzz_target;
 // Import required traits and types
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::codec::{Decoder, Encoder};
-use asupersync::grpc::codec::{Codec as GrpcCodec_, GrpcCodec, GrpcMessage, MESSAGE_HEADER_SIZE};
+use asupersync::grpc::codec::{
+    Codec as GrpcCodec_, DEFAULT_MAX_MESSAGE_SIZE, GrpcCodec, GrpcMessage, MESSAGE_HEADER_SIZE,
+};
 use asupersync::grpc::{Code, GrpcError, ProstCodec};
 use std::sync::OnceLock;
 
@@ -260,8 +262,102 @@ fn fuzz_grpc_framing(compression_flag: u8, declared_length: u32, actual_payload:
     if declared_length != actual_len {
         // This tests length validation in the decoder
         let mut buf = BytesMut::from(&frame_data[..]);
+        let before_len = buf.len();
         let mut codec = GrpcCodec::new();
-        let _ = observe_grpc_decode(&mut codec, &mut buf);
+        let result = observe_grpc_decode(&mut codec, &mut buf);
+        observe_length_mismatch_decode(
+            compression_flag,
+            declared_length,
+            actual_payload.len(),
+            before_len,
+            buf.len(),
+            result,
+        );
+    }
+}
+
+fn observe_length_mismatch_decode(
+    compression_flag: u8,
+    declared_length: u32,
+    actual_payload_len: usize,
+    before_len: usize,
+    remaining_len: usize,
+    result: Result<Option<GrpcMessage>, GrpcError>,
+) {
+    let declared_len =
+        usize::try_from(declared_length).expect("u32 gRPC frame length should fit usize");
+
+    match result {
+        Ok(Some(message)) => {
+            assert!(
+                compression_flag <= 1,
+                "accepted gRPC frame with invalid compression flag {compression_flag}"
+            );
+            assert_eq!(
+                message.compressed,
+                compression_flag == 1,
+                "decoded compression bit did not match the wire flag"
+            );
+            assert_eq!(
+                message.data.len(),
+                declared_len,
+                "decoded message length should match declared frame length"
+            );
+            assert!(
+                declared_len <= actual_payload_len,
+                "decoder accepted a frame before the declared payload was buffered"
+            );
+            assert_eq!(
+                remaining_len,
+                actual_payload_len - declared_len,
+                "decoder should leave only bytes after the declared gRPC frame"
+            );
+        }
+        Ok(None) => {
+            assert!(
+                declared_len > actual_payload_len,
+                "complete mismatched gRPC frame should not remain pending"
+            );
+            assert_eq!(
+                remaining_len, before_len,
+                "incomplete gRPC frame should remain fully buffered"
+            );
+        }
+        Err(GrpcError::MessageTooLarge) => {
+            assert!(
+                declared_len > DEFAULT_MAX_MESSAGE_SIZE,
+                "default codec reported MessageTooLarge below its decode limit"
+            );
+            assert_eq!(
+                remaining_len, before_len,
+                "oversized declared gRPC frame should remain buffered"
+            );
+        }
+        Err(GrpcError::Protocol(message)) => {
+            assert!(
+                compression_flag > 1,
+                "length mismatch without invalid compression should not be a protocol error: {message}"
+            );
+            assert!(
+                declared_len <= actual_payload_len,
+                "invalid compression flag should only be consumed after the full declared frame is buffered"
+            );
+            assert!(
+                message.contains("compression flag"),
+                "protocol error should identify the invalid compression flag: {message}"
+            );
+            assert_eq!(
+                remaining_len,
+                actual_payload_len - declared_len,
+                "invalid compression frame should consume exactly the declared frame"
+            );
+        }
+        Err(error) => {
+            assert!(
+                !error.to_string().is_empty(),
+                "unexpected gRPC decode error should remain diagnosable: {error:?}"
+            );
+        }
     }
 }
 
