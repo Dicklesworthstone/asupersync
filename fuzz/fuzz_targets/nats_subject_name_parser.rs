@@ -69,8 +69,25 @@ fn insert_str_at_char(subject: &mut String, insertion: usize, value: &str) {
     subject.insert_str(byte_index, value);
 }
 
-fn has_forbidden_controls(subject: &str) -> bool {
-    subject.chars().any(|ch| matches!(ch, '\0' | '\r' | '\n'))
+fn has_forbidden_control_or_whitespace(subject: &str) -> bool {
+    subject
+        .chars()
+        .any(|ch| ch.is_ascii_control() || ch.is_whitespace())
+}
+
+fn is_valid_publish_token(token: &str) -> bool {
+    !token.is_empty()
+        && !token.contains('*')
+        && !token.contains('>')
+        && !has_forbidden_control_or_whitespace(token)
+}
+
+fn model_accepts_publish_subject(subject: &str, max_subject_bytes: usize) -> bool {
+    if subject.is_empty() || subject.len() > max_subject_bytes {
+        return false;
+    }
+
+    subject.split('.').all(is_valid_publish_token)
 }
 
 fuzz_target!(|input: SubjectNameInput| {
@@ -87,6 +104,13 @@ fuzz_target!(|input: SubjectNameInput| {
     );
 
     let validation = parse_result.expect("panic checked above");
+    let modeled_valid = model_accepts_publish_subject(&subject, max_subject_bytes);
+    assert_eq!(
+        validation.is_ok(),
+        modeled_valid,
+        "validator/model mismatch for subject {:?}",
+        subject
+    );
 
     if subject.len() > max_subject_bytes {
         assert!(
@@ -97,16 +121,18 @@ fuzz_target!(|input: SubjectNameInput| {
         );
     }
 
-    if has_forbidden_controls(&subject) {
+    if has_forbidden_control_or_whitespace(&subject) {
         assert!(
             validation.is_err(),
-            "subject with NUL/CR/LF should be rejected: {:?}",
+            "subject with whitespace/control characters should be rejected: {:?}",
             subject
         );
     }
 
     if let Ok(()) = validation {
         assert!(subject.len() <= max_subject_bytes);
-        assert!(!has_forbidden_controls(&subject));
+        assert!(!has_forbidden_control_or_whitespace(&subject));
+        assert!(!subject.is_empty());
+        assert!(subject.split('.').all(is_valid_publish_token));
     }
 });
