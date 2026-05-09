@@ -57,6 +57,15 @@ fn observe_decode_eof(
     observe_decode_result("decode_eof", before_len, buf, result)
 }
 
+fn observe_fuzzed_outcome(label: &str, result: io::Result<Option<BytesMut>>) {
+    if let Err(err) = result {
+        assert!(
+            !err.to_string().is_empty(),
+            "{label} errors must remain observable after fuzzed chunking"
+        );
+    }
+}
+
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
     // 2-byte BE length field, 4 bytes payload expected, EOF before the last 2 payload bytes
@@ -175,10 +184,19 @@ fuzz_target!(|data: &[u8]| {
 
         let mut fuzzed_buf = BytesMut::new();
         fuzzed_buf.extend_from_slice(&input.chunk1);
-        let _ = observe_decode(&mut fuzzed_codec, &mut fuzzed_buf);
+        observe_fuzzed_outcome(
+            "first fuzzed decode",
+            observe_decode(&mut fuzzed_codec, &mut fuzzed_buf),
+        );
         fuzzed_buf.extend_from_slice(&input.chunk2);
-        let _ = observe_decode(&mut fuzzed_codec, &mut fuzzed_buf);
+        observe_fuzzed_outcome(
+            "second fuzzed decode",
+            observe_decode(&mut fuzzed_codec, &mut fuzzed_buf),
+        );
         fuzzed_buf.extend_from_slice(&input.chunk3);
-        let _ = observe_decode_eof(&mut fuzzed_codec, &mut fuzzed_buf);
+        observe_fuzzed_outcome(
+            "fuzzed decode_eof",
+            observe_decode_eof(&mut fuzzed_codec, &mut fuzzed_buf),
+        );
     }
 });
