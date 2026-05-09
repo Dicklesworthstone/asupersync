@@ -78,13 +78,24 @@ fuzz_target!(|input: SubjectNameInput| {
     let name = input.materialize(max_name_bytes);
     let parse_result = catch_unwind(AssertUnwindSafe(|| fuzz_validate_stream_name(&name)));
 
-    assert!(
-        parse_result.is_ok(),
-        "validate_stream_name panicked on input {:?}",
-        name
-    );
+    let validation = match parse_result {
+        Ok(validation) => validation,
+        Err(_) => {
+            panic!("validate_stream_name panicked on input {:?}", name);
+        }
+    };
 
-    let validation = parse_result.expect("panic checked above");
+    if let Err(error) = &validation {
+        assert!(
+            !error.trim().is_empty(),
+            "stream-name rejection should expose a diagnostic"
+        );
+        assert!(
+            error.len() <= 512,
+            "stream-name rejection diagnostic should stay bounded: {} bytes",
+            error.len()
+        );
+    }
 
     if name.is_empty() {
         assert!(validation.is_err(), "empty stream name should be rejected");
