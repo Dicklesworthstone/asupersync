@@ -42,6 +42,49 @@ fn assert_header(headers: &[(String, String)], name: &str, value: &str) {
     );
 }
 
+fn assert_no_header_line_breaks(headers: &[(String, String)]) {
+    for (name, value) in headers {
+        assert!(!name.is_empty(), "decoded header name must be non-empty");
+        assert!(
+            !name
+                .bytes()
+                .any(|byte| matches!(byte, b'\r' | b'\n' | b':')),
+            "decoded header name must not contain delimiters: {name:?}"
+        );
+        assert!(
+            !value.bytes().any(|byte| matches!(byte, b'\r' | b'\n')),
+            "decoded header value must not contain raw line breaks: {value:?}"
+        );
+    }
+}
+
+fn assert_decoded_request_shape(request: &Request) {
+    assert!(
+        !request.uri.is_empty(),
+        "decoded request must have a request target"
+    );
+    assert!(
+        !request
+            .uri
+            .bytes()
+            .any(|byte| matches!(byte, b'\r' | b'\n')),
+        "decoded request target must not contain line breaks: {:?}",
+        request.uri
+    );
+    assert!(
+        request.body.len() <= MAX_DATA_SIZE,
+        "decoded request body exceeded fuzz input guard"
+    );
+    assert_no_header_line_breaks(&request.headers);
+    assert_no_header_line_breaks(&request.trailers);
+}
+
+fn observe_decode_result(result: Result<Option<Request>, HttpError>) {
+    if let Ok(Some(request)) = result {
+        assert_decoded_request_shape(&request);
+    }
+}
+
 fn run_fixed_canaries() {
     let get = expect_complete_request(
         b"GET /health?ready=1 HTTP/1.1\r\nHost: example.com\r\nUser-Agent: fuzz\r\n\r\n",
@@ -70,6 +113,26 @@ fn run_fixed_canaries() {
     assert_eq!(chunked.uri, "/chunked");
     assert_eq!(chunked.body, b"hello world");
     assert_header(&chunked.trailers, "X-Trailer", "done");
+
+    let mut pipelined_codec = Http1Codec::new();
+    let mut pipelined = BytesMut::from(
+        &b"GET /one HTTP/1.1\r\nHost: example.com\r\n\r\nGET /two HTTP/1.1\r\nHost: example.com\r\n\r\n"
+            [..],
+    );
+    let first = pipelined_codec
+        .decode(&mut pipelined)
+        .expect("first pipelined request must not error")
+        .expect("first pipelined request must decode completely");
+    let second = pipelined_codec
+        .decode(&mut pipelined)
+        .expect("second pipelined request must not error")
+        .expect("second pipelined request must decode completely");
+    assert_eq!(first.uri, "/one");
+    assert_eq!(second.uri, "/two");
+    assert!(
+        pipelined.is_empty(),
+        "pipelined canary should consume both requests"
+    );
 
     let incomplete = decode_once(b"GET /partial HTTP/1.1\r\nHost: example.com\r\n")
         .expect("partial head must not be a protocol error");
@@ -133,22 +196,22 @@ fuzz_target!(|data: &[u8]| {
     let mut buf = BytesMut::from(data);
 
     // Test request parsing - must not panic
-    let _ = codec.decode(&mut buf);
+    observe_decode_result(codec.decode(&mut buf));
 
     // Test multiple decode calls on the same buffer (simulates pipelined requests)
-    let _ = codec.decode(&mut buf);
+    observe_decode_result(codec.decode(&mut buf));
 
     // Test with different buffer sizes to trigger boundary conditions
     if data.len() > 1 {
         let mut small_buf = BytesMut::from(&data[..1]);
-        let _ = codec.decode(&mut small_buf);
+        observe_decode_result(codec.decode(&mut small_buf));
     }
 
     // Test with mid-sized buffer
     if data.len() > 100 {
         let mid = data.len() / 2;
         let mut mid_buf = BytesMut::from(&data[..mid]);
-        let _ = codec.decode(&mut mid_buf);
+        observe_decode_result(codec.decode(&mut mid_buf));
     }
 
     // Test codec with different size limits
@@ -158,6 +221,6 @@ fuzz_target!(|data: &[u8]| {
     let mut buf_copy1 = BytesMut::from(data);
     let mut buf_copy2 = BytesMut::from(data);
 
-    let _ = small_headers_codec.decode(&mut buf_copy1);
-    let _ = small_body_codec.decode(&mut buf_copy2);
+    observe_decode_result(small_headers_codec.decode(&mut buf_copy1));
+    observe_decode_result(small_body_codec.decode(&mut buf_copy2));
 });
