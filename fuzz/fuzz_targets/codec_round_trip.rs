@@ -26,6 +26,92 @@ use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::codec::{BytesCodec, Decoder, Encoder, LinesCodec, LinesCodecError};
 use libfuzzer_sys::fuzz_target;
 
+fn assert_visible_codec_error<E>(context: &str, error: &E)
+where
+    E: std::fmt::Debug + std::fmt::Display,
+{
+    let rendered = error.to_string();
+    assert!(
+        !rendered.is_empty(),
+        "{context} error must have a non-empty description: {error:?}"
+    );
+    let debug = format!("{error:?}");
+    assert!(
+        !debug.is_empty(),
+        "{context} error must expose debug diagnostics"
+    );
+}
+
+fn observe_bytes_encode(
+    result: std::io::Result<()>,
+    before_len: usize,
+    after_len: usize,
+    item_len: usize,
+) -> std::io::Result<()> {
+    match &result {
+        Ok(()) => {
+            assert_eq!(
+                after_len,
+                before_len + item_len,
+                "BytesCodec::encode must append exactly the input length"
+            );
+        }
+        Err(error) => assert_visible_codec_error("BytesCodec::encode", error),
+    }
+    result
+}
+
+fn observe_lines_encode(
+    result: std::io::Result<()>,
+    before_len: usize,
+    after_len: usize,
+    line_len: usize,
+) -> std::io::Result<()> {
+    match &result {
+        Ok(()) => {
+            assert_eq!(
+                after_len,
+                before_len + line_len + 1,
+                "LinesCodec::encode must append the line plus newline"
+            );
+        }
+        Err(error) => assert_visible_codec_error("LinesCodec::encode", error),
+    }
+    result
+}
+
+fn observe_bytes_decode(
+    result: std::io::Result<Option<BytesMut>>,
+    before_len: usize,
+    after_len: usize,
+) -> std::io::Result<Option<BytesMut>> {
+    match &result {
+        Ok(Some(decoded)) => {
+            assert!(!decoded.is_empty(), "BytesCodec decoded an empty frame");
+            assert!(
+                decoded.len() <= before_len,
+                "BytesCodec decoded more bytes than were available"
+            );
+            assert!(
+                after_len < before_len,
+                "successful BytesCodec decode must consume source bytes"
+            );
+        }
+        Ok(None) => {
+            assert_eq!(
+                before_len, 0,
+                "BytesCodec returned None despite available input"
+            );
+            assert_eq!(
+                after_len, 0,
+                "BytesCodec returned None with bytes left in the source buffer"
+            );
+        }
+        Err(error) => assert_visible_codec_error("BytesCodec::decode", error),
+    }
+    result
+}
+
 fn observe_lines_decode_eof(
     codec: &mut LinesCodec,
     src: &mut BytesMut,
@@ -64,6 +150,11 @@ fn observe_lines_decode_eof(
             assert!(
                 !error.to_string().is_empty(),
                 "LinesCodec EOF error must have a non-empty description: {error:?}"
+            );
+            let debug = format!("{error:?}");
+            assert!(
+                !debug.is_empty(),
+                "LinesCodec EOF error must expose debug diagnostics"
             );
         }
     }
@@ -248,14 +339,26 @@ fn fuzz_round_trip(codec_type: CodecType, test_data: TestData) {
             let mut encode_buf = BytesMut::new();
 
             // Encode phase
+            let encode_len_before = encode_buf.len();
             let encode_result = codec.encode(bytes_input.clone(), &mut encode_buf);
+            let encode_len_after = encode_buf.len();
+            let encode_result = observe_bytes_encode(
+                encode_result,
+                encode_len_before,
+                encode_len_after,
+                bytes_input.len(),
+            );
             if encode_result.is_err() {
                 return; // Expected failure, not a bug
             }
 
             // Decode phase
             let mut decode_src = encode_buf;
+            let decode_len_before = decode_src.len();
             let decode_result = codec.decode(&mut decode_src);
+            let decode_len_after = decode_src.len();
+            let decode_result =
+                observe_bytes_decode(decode_result, decode_len_before, decode_len_after);
 
             // Round-trip oracle: decoded must match original
             match decode_result {
@@ -295,7 +398,15 @@ fn fuzz_round_trip(codec_type: CodecType, test_data: TestData) {
                 let mut encode_buf = BytesMut::new();
 
                 // Encode phase
+                let encode_len_before = encode_buf.len();
                 let encode_result = codec.encode(clean_text.clone(), &mut encode_buf);
+                let encode_len_after = encode_buf.len();
+                let encode_result = observe_lines_encode(
+                    encode_result,
+                    encode_len_before,
+                    encode_len_after,
+                    clean_text.len(),
+                );
                 if encode_result.is_err() {
                     return; // Expected failure (e.g., too long)
                 }
@@ -378,8 +489,8 @@ fn fuzz_partial_frames(codec_type: CodecType, test_data: TestData, chunk_sizes: 
             }
 
             // Final decode attempt
-            if !src.is_empty() {
-                let _ = observe_lines_decode_eof(&mut codec, &mut src);
+            if !src.is_empty() && observe_lines_decode_eof(&mut codec, &mut src).is_err() {
+                return;
             }
 
             // Partial frame oracle: decoded lines should be prefix of expected
@@ -481,10 +592,14 @@ fn fuzz_capacity_growth(
                 let len_before = encode_buf.len();
 
                 // Encode - this may trigger capacity growth
-                let _ = codec.encode(bytes_input, &mut encode_buf);
+                let item_len = bytes_input.len();
+                let encode_result = codec.encode(bytes_input, &mut encode_buf);
+                let len_after = encode_buf.len();
+                if observe_bytes_encode(encode_result, len_before, len_after, item_len).is_err() {
+                    continue;
+                }
 
                 let capacity_after = encode_buf.capacity();
-                let len_after = encode_buf.len();
 
                 // Capacity growth oracle: capacity should never decrease
                 assert!(
@@ -536,7 +651,14 @@ fn fuzz_state_persistence(codec_type: CodecType, operations: Vec<TestData>) {
                     && !text.contains('\n')
                     && !text.contains('\r')
                 {
-                    let _ = codec.encode(text.clone(), &mut all_encoded);
+                    let len_before = all_encoded.len();
+                    let encode_result = codec.encode(text.clone(), &mut all_encoded);
+                    let len_after = all_encoded.len();
+                    if observe_lines_encode(encode_result, len_before, len_after, text.len())
+                        .is_err()
+                    {
+                        continue;
+                    }
                     expected_lines.push(text);
                 }
             }
