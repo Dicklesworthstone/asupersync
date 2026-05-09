@@ -33,7 +33,7 @@
 //!     covers the boundary cases (0.001, 0.05, 0.1, 0.5, 0.95, 0.99,
 //!     and the open boundaries) without tripping the
 //!     ConformalConfig::new assertion.
-//!   - `min_calibration_samples: u8` — capped at 64.
+//!   - `min_calibration_samples: u8` — clamped to 1..=64.
 //!   - `ops: Vec<Op>` — bounded sequence of {Calibrate, Predict}
 //!     where each Op carries a synthesised OracleReport with
 //!     adversarial counts (passed/failed/total) and adversarial
@@ -43,9 +43,10 @@
 //! 1024.
 
 use arbitrary::{Arbitrary, Unstructured};
-use asupersync::lab::conformal::{ConformalCalibrator, ConformalConfig};
+use asupersync::lab::conformal::{CalibrationReport, ConformalCalibrator, ConformalConfig};
 use asupersync::lab::oracle::{OracleEntryReport, OracleReport};
 use libfuzzer_sys::fuzz_target;
+use std::hint::black_box;
 
 const MAX_INPUT: usize = 64 * 1024;
 const MAX_OPS: usize = 1024;
@@ -164,7 +165,7 @@ fuzz_target!(|data: &[u8]| {
     };
 
     let alpha = quantised_alpha(seed.alpha_choice);
-    let min_samples = (seed.min_calibration_samples as usize).min(64);
+    let min_samples = (seed.min_calibration_samples as usize).clamp(1, 64);
 
     let config = ConformalConfig {
         alpha,
@@ -181,11 +182,69 @@ fuzz_target!(|data: &[u8]| {
         } else {
             // Contract 1: predict must not panic and may return None
             // when the calibration history is too short.
-            let _ = cal.predict(&report);
+            let samples_before = cal.calibration_samples();
+            let prediction = cal.predict(&report);
+            observe_prediction(prediction, samples_before, min_samples, alpha);
         }
     }
 
     // Contract 3: is_calibrated must be total — no panic, no
     // matter what the call sequence was.
-    let _ = cal.is_calibrated();
+    observe_calibration_state(cal.is_calibrated(), cal.calibration_samples(), min_samples);
 });
+
+fn observe_prediction(
+    prediction: Option<CalibrationReport>,
+    samples_before: usize,
+    min_samples: usize,
+    alpha: f64,
+) {
+    if samples_before < min_samples {
+        assert!(
+            prediction.is_none(),
+            "predict returned a report before the calibrator reached min_calibration_samples",
+        );
+        return;
+    }
+
+    let report = prediction.expect("calibrated conformal predictor returned no report");
+    assert!(
+        (report.alpha - alpha).abs() <= f64::EPSILON,
+        "prediction report alpha diverged from calibrator config",
+    );
+    assert_eq!(
+        report.calibration_samples,
+        samples_before.saturating_add(1),
+        "prediction should append the observed report to calibration history",
+    );
+    assert!(
+        report.overall_coverage.covered <= report.overall_coverage.total,
+        "overall coverage cannot cover more predictions than it observed",
+    );
+
+    for set in &report.prediction_sets {
+        assert!(
+            set.score.is_finite() && set.threshold.is_finite() && set.coverage_target.is_finite(),
+            "prediction set produced non-finite conformal diagnostics",
+        );
+        assert!(
+            (0.0..=1.0).contains(&set.coverage_target),
+            "prediction set coverage target should remain a probability",
+        );
+        assert!(
+            set.calibration_n <= samples_before,
+            "prediction set cannot use future calibration samples",
+        );
+    }
+
+    black_box(report.is_well_calibrated());
+}
+
+fn observe_calibration_state(calibrated: bool, samples: usize, min_samples: usize) {
+    assert_eq!(
+        calibrated,
+        samples >= min_samples,
+        "is_calibrated disagreed with calibration sample threshold",
+    );
+    black_box(calibrated);
+}
