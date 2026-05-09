@@ -25,12 +25,15 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::http::h3_native::{H3QpackMode, qpack_decode_field_section};
+use asupersync::http::h3_native::{
+    H3NativeError, H3QpackMode, QpackFieldPlan, qpack_decode_field_section,
+};
 use libfuzzer_sys::fuzz_target;
 
 /// Cap input size so libFuzzer doesn't waste cycles on multi-MB blobs that
 /// the decoder would reject up-front.
 const MAX_INPUT_BYTES: usize = 64 * 1024;
+const FIELD_SECTION_PREFIX: [u8; 2] = [0x00, 0x00];
 
 #[derive(Arbitrary, Debug)]
 enum Scenario {
@@ -69,52 +72,164 @@ enum Scenario {
 }
 
 fuzz_target!(|s: Scenario| match s {
-    Scenario::Arbitrary(bytes) => fuzz_arbitrary(&bytes),
+    Scenario::Arbitrary(bytes) => {
+        fuzz_arbitrary(&bytes);
+        test_fixed_integer_canaries();
+    }
     Scenario::SaturatedPrefixWithContinuation {
         prefix_high_bits,
         continuation,
         trailing,
-    } => fuzz_saturated_prefix(prefix_high_bits, &continuation, &trailing),
-    Scenario::AllContinuation { prefix_byte, count } => fuzz_all_continuation(prefix_byte, count),
+    } => {
+        fuzz_saturated_prefix(prefix_high_bits, &continuation, &trailing);
+        test_fixed_integer_canaries();
+    }
+    Scenario::AllContinuation { prefix_byte, count } => {
+        fuzz_all_continuation(prefix_byte, count);
+        test_fixed_integer_canaries();
+    }
 });
 
 fn fuzz_arbitrary(bytes: &[u8]) {
     if bytes.len() > MAX_INPUT_BYTES {
         return;
     }
-    let _ = qpack_decode_field_section(bytes, H3QpackMode::StaticOnly);
+    observe_decode_result(qpack_decode_field_section(bytes, H3QpackMode::StaticOnly));
 }
 
 fn fuzz_saturated_prefix(prefix_high_bits: u8, continuation: &[u8], trailing: &[u8]) {
-    // 5-bit prefix saturated to 0x1F; high 3 bits drawn from the fuzzer.
-    let prefix = (prefix_high_bits & 0xE0) | 0x1F;
+    // Field-line representation with a saturated 6-bit prefix. The high two
+    // bits still let libFuzzer choose indexed-static, indexed-dynamic, or
+    // literal-name-reference families after a valid QPACK field-section prefix.
+    let prefix = (prefix_high_bits & 0xC0) | 0x3F;
 
     let cont_take = continuation.len().min(64);
-    let trail_take = trailing.len().min(MAX_INPUT_BYTES - 1 - cont_take);
+    let trail_take = trailing
+        .len()
+        .min(MAX_INPUT_BYTES - FIELD_SECTION_PREFIX.len() - 1 - cont_take);
 
-    let mut buf = Vec::with_capacity(1 + cont_take + trail_take);
+    let mut buf = Vec::with_capacity(FIELD_SECTION_PREFIX.len() + 1 + cont_take + trail_take);
+    buf.extend_from_slice(&FIELD_SECTION_PREFIX);
     buf.push(prefix);
     buf.extend_from_slice(&continuation[..cont_take]);
     buf.extend_from_slice(&trailing[..trail_take]);
 
-    let _ = qpack_decode_field_section(&buf, H3QpackMode::StaticOnly);
+    observe_decode_result(qpack_decode_field_section(&buf, H3QpackMode::StaticOnly));
 }
 
 fn fuzz_all_continuation(prefix_byte: u8, count: u8) {
-    // Saturate the 5-bit prefix so the continuation loop runs.
-    let prefix = (prefix_byte & 0xE0) | 0x1F;
+    // Saturate the field-line 6-bit prefix so the continuation loop runs.
+    let prefix = (prefix_byte & 0xC0) | 0x3F;
     let count = count.min(128) as usize;
 
-    let mut buf = Vec::with_capacity(1 + count + 1);
+    let mut buf = Vec::with_capacity(FIELD_SECTION_PREFIX.len() + 1 + count + 1);
+    buf.extend_from_slice(&FIELD_SECTION_PREFIX);
     buf.push(prefix);
     // Long run of `0x80`-flagged bytes (continuation continues forever
     // — the decoder must terminate via its `shift > 56` guard).
-    for _ in 0..count {
-        buf.push(0x80);
-    }
+    buf.extend(std::iter::repeat_n(0x80, count));
     // Final byte without the continuation bit — gives the decoder a chance
     // to terminate cleanly if it didn't already error out via the shift cap.
     buf.push(0x00);
 
-    let _ = qpack_decode_field_section(&buf, H3QpackMode::StaticOnly);
+    observe_decode_result(qpack_decode_field_section(&buf, H3QpackMode::StaticOnly));
+}
+
+fn test_fixed_integer_canaries() {
+    let empty = FIELD_SECTION_PREFIX.to_vec();
+    assert_eq!(expect_decode_ok(&empty), Vec::<QpackFieldPlan>::new());
+
+    let inline_static = vec![FIELD_SECTION_PREFIX[0], FIELD_SECTION_PREFIX[1], 0xC0 | 25];
+    assert_eq!(
+        expect_decode_ok(&inline_static),
+        vec![QpackFieldPlan::StaticIndex(25)]
+    );
+
+    let continuation_static = vec![FIELD_SECTION_PREFIX[0], FIELD_SECTION_PREFIX[1], 0xFF, 0x01];
+    assert_eq!(
+        expect_decode_ok(&continuation_static),
+        vec![QpackFieldPlan::StaticIndex(64)]
+    );
+
+    let unknown_static_after_continuation = vec![
+        FIELD_SECTION_PREFIX[0],
+        FIELD_SECTION_PREFIX[1],
+        0xFF,
+        0x80,
+        0x01,
+    ];
+    expect_invalid_frame_contains(
+        &unknown_static_after_continuation,
+        "unknown static qpack index",
+    );
+
+    let truncated_static = vec![FIELD_SECTION_PREFIX[0], FIELD_SECTION_PREFIX[1], 0xFF];
+    expect_unexpected_eof(&truncated_static);
+
+    let mut overflowing_static = vec![FIELD_SECTION_PREFIX[0], FIELD_SECTION_PREFIX[1], 0xFF];
+    overflowing_static.extend(std::iter::repeat_n(0x80, 9));
+    expect_invalid_frame_contains(&overflowing_static, "qpack integer overflow");
+
+    let non_zero_required_insert_count = vec![0xFF, 0x00, 0x00];
+    expect_qpack_policy_contains(
+        &non_zero_required_insert_count,
+        "required insert count must be zero",
+    );
+}
+
+fn observe_decode_result(result: Result<Vec<QpackFieldPlan>, H3NativeError>) {
+    match result {
+        Ok(plans) => {
+            let debug = format!("{plans:?}");
+            assert!(!debug.is_empty(), "decoded plan debug should not be empty");
+        }
+        Err(error) => {
+            let display = format!("{error}");
+            assert!(
+                !display.is_empty(),
+                "decode error display should not be empty"
+            );
+        }
+    }
+}
+
+fn expect_decode_ok(input: &[u8]) -> Vec<QpackFieldPlan> {
+    match qpack_decode_field_section(input, H3QpackMode::StaticOnly) {
+        Ok(decoded) => decoded,
+        Err(error) => panic!("expected valid qpack field section, got {error:?}"),
+    }
+}
+
+fn expect_unexpected_eof(input: &[u8]) {
+    match qpack_decode_field_section(input, H3QpackMode::StaticOnly) {
+        Err(H3NativeError::UnexpectedEof) => {}
+        Ok(decoded) => panic!("expected UnexpectedEof, got {decoded:?}"),
+        Err(error) => panic!("expected UnexpectedEof, got {error:?}"),
+    }
+}
+
+fn expect_invalid_frame_contains(input: &[u8], expected: &str) {
+    match qpack_decode_field_section(input, H3QpackMode::StaticOnly) {
+        Err(H3NativeError::InvalidFrame(message)) => {
+            assert!(
+                message.contains(expected),
+                "InvalidFrame message {message:?} should contain {expected:?}"
+            );
+        }
+        Ok(decoded) => panic!("expected InvalidFrame({expected}), got {decoded:?}"),
+        Err(error) => panic!("expected InvalidFrame({expected}), got {error:?}"),
+    }
+}
+
+fn expect_qpack_policy_contains(input: &[u8], expected: &str) {
+    match qpack_decode_field_section(input, H3QpackMode::StaticOnly) {
+        Err(H3NativeError::QpackPolicy(message)) => {
+            assert!(
+                message.contains(expected),
+                "QpackPolicy message {message:?} should contain {expected:?}"
+            );
+        }
+        Ok(decoded) => panic!("expected QpackPolicy({expected}), got {decoded:?}"),
+        Err(error) => panic!("expected QpackPolicy({expected}), got {error:?}"),
+    }
 }
