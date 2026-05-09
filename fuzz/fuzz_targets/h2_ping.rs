@@ -4,8 +4,8 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use asupersync::bytes::{Bytes, BytesMut};
-use asupersync::http::h2::error::{ErrorCode, H2Error};
-use asupersync::http::h2::frame::{Frame, FrameHeader, FrameType, PingFrame, ping_flags};
+use asupersync::http::h2::error::ErrorCode;
+use asupersync::http::h2::frame::{FrameHeader, FrameType, PingFrame, ping_flags};
 
 /// Comprehensive fuzz input for HTTP/2 PING frame parsing and handling
 #[derive(Arbitrary, Debug, Clone)]
@@ -22,22 +22,22 @@ struct H2PingFuzz {
 #[derive(Arbitrary, Debug, Clone)]
 enum PingOperation {
     /// Send a PING frame with specific opaque data
-    SendPing { opaque_data: [u8; 8], ack: bool },
+    Ping { opaque_data: [u8; 8], ack: bool },
     /// Send raw PING frame bytes for parsing edge cases
-    SendRawPingFrame {
+    RawPingFrame {
         raw_payload: Vec<u8>,
         stream_id: u32,
         ack: bool,
     },
     /// Test PING ACK handling without prior PING
-    SendUnmatchedAck { opaque_data: [u8; 8] },
+    UnmatchedAck { opaque_data: [u8; 8] },
     /// Test PING storm (potential DoS)
-    SendPingStorm {
+    PingStorm {
         frame_count: u32,
         opaque_data: [u8; 8],
     },
     /// Test boundary conditions
-    SendBoundaryPing { boundary_type: PingBoundaryType },
+    BoundaryPing { boundary_type: PingBoundaryType },
 }
 
 /// Different boundary conditions for PING frames
@@ -79,11 +79,11 @@ enum PingFrameScenario {
 #[derive(Arbitrary, Debug, Clone)]
 struct PingConnectionConfig {
     /// Whether to track PING round-trip times
-    pub track_rtt: bool,
+    pub _track_rtt: bool,
     /// Maximum pending PINGs before rate limiting
     pub max_pending_pings: u8,
     /// Whether to test role-specific behavior
-    pub test_role_violations: bool,
+    pub _test_role_violations: bool,
 }
 
 /// Shadow model to track expected PING state
@@ -139,10 +139,6 @@ impl PingShadowModel {
             Ok(())
         }
     }
-
-    fn is_rate_limited(&self) -> bool {
-        self.ping_rate_limit_exceeded
-    }
 }
 
 /// Normalize fuzz input to prevent timeouts and ensure valid ranges
@@ -157,16 +153,16 @@ fn normalize_fuzz_input(input: &mut H2PingFuzz) {
 
     for op in &mut input.operations {
         match op {
-            PingOperation::SendRawPingFrame {
+            PingOperation::RawPingFrame {
                 raw_payload,
                 stream_id,
                 ..
             } => {
                 raw_payload.truncate(1024); // Limit raw frame size
                 // Stream ID should be 0 for PING frames (test invalid ones too)
-                *stream_id = *stream_id % 16; // Allow some invalid stream IDs for testing
+                *stream_id %= 16; // Allow some invalid stream IDs for testing
             }
-            PingOperation::SendPingStorm { frame_count, .. } => {
+            PingOperation::PingStorm { frame_count, .. } => {
                 *frame_count = (*frame_count).clamp(1, 100); // Reasonable storm test
             }
             _ => {}
@@ -201,14 +197,119 @@ fn create_boundary_ping(boundary_type: PingBoundaryType) -> [u8; 8] {
     }
 }
 
+fn assert_ping_parse_contract(
+    header: &FrameHeader,
+    payload: &Bytes,
+) -> Result<Option<PingFrame>, String> {
+    match PingFrame::parse(header, payload) {
+        Ok(frame) => {
+            if header.stream_id != 0 {
+                return Err(format!(
+                    "PING frame with stream ID {} parsed successfully",
+                    header.stream_id
+                ));
+            }
+
+            if payload.len() != 8 {
+                return Err(format!(
+                    "PING frame with {} bytes payload parsed successfully",
+                    payload.len()
+                ));
+            }
+
+            let mut expected_opaque_data = [0u8; 8];
+            expected_opaque_data.copy_from_slice(&payload[..8]);
+            if frame.opaque_data != expected_opaque_data {
+                return Err(format!(
+                    "PING opaque data mismatch: parsed {:?}, expected {:?}",
+                    frame.opaque_data, expected_opaque_data
+                ));
+            }
+
+            let expected_ack = header.has_flag(ping_flags::ACK);
+            if frame.ack != expected_ack {
+                return Err(format!(
+                    "PING ACK flag mismatch: parsed {}, expected {}",
+                    frame.ack, expected_ack
+                ));
+            }
+
+            Ok(Some(frame))
+        }
+        Err(error) => {
+            let expected_code = if header.stream_id != 0 {
+                Some(ErrorCode::ProtocolError)
+            } else if payload.len() != 8 {
+                Some(ErrorCode::FrameSizeError)
+            } else {
+                None
+            };
+
+            match expected_code {
+                Some(code) if error.code == code => Ok(None),
+                Some(code) => Err(format!(
+                    "PING parse rejected with {:?}, expected {:?}",
+                    error.code, code
+                )),
+                None => Err(format!(
+                    "valid PING frame rejected with {:?}: {}",
+                    error.code, error.message
+                )),
+            }
+        }
+    }
+}
+
+fn assert_ping_parse_canaries() -> Result<(), String> {
+    let valid_payload = Bytes::copy_from_slice(b"pingpong");
+    let valid_header = FrameHeader {
+        length: 8,
+        frame_type: FrameType::Ping as u8,
+        flags: 0,
+        stream_id: 0,
+    };
+    let parsed = assert_ping_parse_contract(&valid_header, &valid_payload)?
+        .ok_or_else(|| "valid PING frame was rejected".to_string())?;
+    if parsed.opaque_data != *b"pingpong" || parsed.ack {
+        return Err("valid PING frame did not preserve opaque data and ACK flag".to_string());
+    }
+
+    let ack_header = FrameHeader {
+        flags: ping_flags::ACK,
+        ..valid_header
+    };
+    let parsed_ack = assert_ping_parse_contract(&ack_header, &valid_payload)?
+        .ok_or_else(|| "valid PING ACK frame was rejected".to_string())?;
+    if parsed_ack.opaque_data != *b"pingpong" || !parsed_ack.ack {
+        return Err("valid PING ACK frame did not preserve opaque data and ACK flag".to_string());
+    }
+
+    let non_zero_stream_header = FrameHeader {
+        stream_id: 1,
+        ..valid_header
+    };
+    if assert_ping_parse_contract(&non_zero_stream_header, &valid_payload)?.is_some() {
+        return Err("PING frame with non-zero stream ID was accepted".to_string());
+    }
+
+    let short_payload = Bytes::copy_from_slice(b"short");
+    if assert_ping_parse_contract(&valid_header, &short_payload)?.is_some() {
+        return Err("PING frame with short payload was accepted".to_string());
+    }
+
+    Ok(())
+}
+
 /// Test PING frame parsing with the 5 required assertions
 fn test_ping_frame_parsing(input: &H2PingFuzz) -> Result<(), String> {
+    assert_ping_parse_canaries()?;
+
     let mut shadow = PingShadowModel::new(input.connection_config.max_pending_pings as u32);
 
     // Execute operation sequence
-    for (op_index, operation) in input.operations.iter().enumerate() {
+    for operation in &input.operations {
         match operation {
-            PingOperation::SendPing { opaque_data, ack } => {
+            PingOperation::Ping { opaque_data, ack } => {
                 // Create PING frame
                 let ping_frame = if *ack {
                     PingFrame::ack(*opaque_data)
@@ -218,7 +319,9 @@ fn test_ping_frame_parsing(input: &H2PingFuzz) -> Result<(), String> {
 
                 // Assertion 1: PING frame payload is exactly 8 bytes (enforced by struct)
                 let mut buf = BytesMut::new();
-                ping_frame.encode(&mut buf);
+                ping_frame
+                    .encode(&mut buf)
+                    .map_err(|error| format!("PING frame encode failed: {}", error.message))?;
 
                 // Check frame structure: 9-byte header + 8-byte payload = 17 bytes total
                 if buf.len() != 17 {
@@ -230,16 +333,11 @@ fn test_ping_frame_parsing(input: &H2PingFuzz) -> Result<(), String> {
 
                 if *ack {
                     // PING ACK
-                    match shadow.expect_ping_ack(*opaque_data) {
-                        Ok(_) => {
-                            // Assertion 3: ACK flag responds with echo of opaque_data
-                            // (Validated by matching opaque_data in shadow model)
-                        }
-                        Err(e) => {
-                            // Assertion 4: ACK without matching PING ignored (not an error)
-                            // Shadow model handles this case
-                        }
-                    }
+                    shadow
+                        .expect_ping_ack(*opaque_data)
+                        .map_err(|error| format!("PING ACK shadow model rejected: {error}"))?;
+                    // Assertion 3: ACK flag responds with echo of opaque_data
+                    // (Validated by matching opaque_data in shadow model)
                 } else {
                     // Regular PING
                     match shadow.expect_ping(*opaque_data) {
@@ -254,7 +352,7 @@ fn test_ping_frame_parsing(input: &H2PingFuzz) -> Result<(), String> {
                 }
             }
 
-            PingOperation::SendRawPingFrame {
+            PingOperation::RawPingFrame {
                 raw_payload,
                 stream_id,
                 ack,
@@ -267,86 +365,30 @@ fn test_ping_frame_parsing(input: &H2PingFuzz) -> Result<(), String> {
                     let payload_bytes = Bytes::copy_from_slice(&frame_data[9..]);
 
                     // Parse frame header
-                    if let Ok(header) = FrameHeader::parse(&mut header_buf) {
-                        // Assertion 2: PING on Stream ID != 0 triggers PROTOCOL_ERROR
-                        if header.stream_id != 0 {
-                            // This should result in a PROTOCOL_ERROR
-                            match PingFrame::parse(&header, &payload_bytes) {
-                                Ok(_) => {
-                                    return Err(format!(
-                                        "PING frame with stream ID {} should trigger PROTOCOL_ERROR",
-                                        header.stream_id
-                                    ));
-                                }
-                                Err(e) => {
-                                    // Verify it's a PROTOCOL_ERROR
-                                    if e.code != ErrorCode::ProtocolError {
-                                        return Err(format!(
-                                            "PING frame with non-zero stream ID produced {:?}, expected ProtocolError",
-                                            e.code
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-
-                        // Assertion 1: PING frame length exactly 8 bytes
-                        if raw_payload.len() != 8 && header.stream_id == 0 {
-                            match PingFrame::parse(&header, &payload_bytes) {
-                                Ok(_) => {
-                                    return Err(format!(
-                                        "PING frame with {} bytes payload should trigger FRAME_SIZE_ERROR",
-                                        raw_payload.len()
-                                    ));
-                                }
-                                Err(e) => {
-                                    // Should be FRAME_SIZE_ERROR
-                                    if e.code != ErrorCode::FrameSizeError {
-                                        return Err(format!(
-                                            "Invalid PING frame size produced {:?}, expected FrameSizeError",
-                                            e.code
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-
-                        // Valid PING frame (8 bytes, stream ID 0)
-                        if raw_payload.len() == 8 && header.stream_id == 0 {
-                            if let Ok(_) = PingFrame::parse(&header, &payload_bytes) {
-                                // Process valid PING
-                                if header.has_flag(ping_flags::ACK) {
-                                    if raw_payload.len() >= 8 {
-                                        let mut opaque_data = [0u8; 8];
-                                        opaque_data.copy_from_slice(&raw_payload[..8]);
-                                        let _ = shadow.expect_ping_ack(opaque_data);
-                                    }
-                                } else {
-                                    if raw_payload.len() >= 8 {
-                                        let mut opaque_data = [0u8; 8];
-                                        opaque_data.copy_from_slice(&raw_payload[..8]);
-                                        let _ = shadow.expect_ping(opaque_data);
-                                    }
-                                }
-                            }
+                    if let Ok(header) = FrameHeader::parse(&mut header_buf)
+                        && let Some(parsed) = assert_ping_parse_contract(&header, &payload_bytes)?
+                    {
+                        if parsed.ack {
+                            let _ = shadow.expect_ping_ack(parsed.opaque_data);
+                        } else {
+                            let _ = shadow.expect_ping(parsed.opaque_data);
                         }
                     }
                 }
             }
 
-            PingOperation::SendUnmatchedAck { opaque_data } => {
+            PingOperation::UnmatchedAck { opaque_data } => {
                 // Assertion 4: ACK without matching PING ignored
-                let result = shadow.expect_ping_ack(*opaque_data);
+                let _ = shadow.expect_ping_ack(*opaque_data);
                 // This should not cause an error - just be ignored
                 // The shadow model tracks this correctly
             }
 
-            PingOperation::SendPingStorm {
+            PingOperation::PingStorm {
                 frame_count,
                 opaque_data,
             } => {
                 // Assertion 5: PING storm rate-limited by connection
-                let mut accepted_count = 0;
                 let mut rate_limited_count = 0;
 
                 for i in 0..*frame_count {
@@ -355,9 +397,7 @@ fn test_ping_frame_parsing(input: &H2PingFuzz) -> Result<(), String> {
                     storm_data[7] = (storm_data[7] as u32 + i) as u8;
 
                     match shadow.expect_ping(storm_data) {
-                        Ok(_) => {
-                            accepted_count += 1;
-                        }
+                        Ok(_) => {}
                         Err(_) => {
                             rate_limited_count += 1;
                             // Once rate limited, remaining PINGs should also be rate limited
@@ -375,7 +415,7 @@ fn test_ping_frame_parsing(input: &H2PingFuzz) -> Result<(), String> {
                 }
             }
 
-            PingOperation::SendBoundaryPing { boundary_type } => {
+            PingOperation::BoundaryPing { boundary_type } => {
                 let boundary_data = create_boundary_ping(boundary_type.clone());
                 let _ = shadow.expect_ping(boundary_data);
             }
@@ -412,16 +452,16 @@ fn test_ping_frame_parsing(input: &H2PingFuzz) -> Result<(), String> {
 
                     if let Ok(header) = FrameHeader::parse(&mut header_buf) {
                         // Malformed frames should be rejected with appropriate errors
-                        let result = PingFrame::parse(&header, &payload_bytes);
+                        let result = assert_ping_parse_contract(&header, &payload_bytes)?;
 
-                        if *invalid_stream_id && result.is_ok() {
+                        if *invalid_stream_id && result.is_some() {
                             return Err(
                                 "Malformed PING frame with invalid stream ID should be rejected"
                                     .to_string(),
                             );
                         }
 
-                        if *invalid_payload_length && result.is_ok() {
+                        if *invalid_payload_length && result.is_some() {
                             return Err("Malformed PING frame with invalid payload length should be rejected".to_string());
                         }
                     }
@@ -436,7 +476,7 @@ fn test_ping_frame_parsing(input: &H2PingFuzz) -> Result<(), String> {
                 let mut accepted = 0;
                 for i in 0..*frame_count {
                     let mut flood_data = *opaque_data;
-                    flood_data[7] = (flood_data[7] as u8).wrapping_add(i);
+                    flood_data[7] = flood_data[7].wrapping_add(i);
 
                     if shadow.expect_ping(flood_data).is_ok() {
                         accepted += 1;
@@ -474,7 +514,7 @@ fn test_ping_frame_parsing(input: &H2PingFuzz) -> Result<(), String> {
                             let payload_bytes = Bytes::copy_from_slice(&frame_data[9..]);
 
                             if let Ok(header) = FrameHeader::parse(&mut header_buf) {
-                                let _ = PingFrame::parse(&header, &payload_bytes);
+                                let _ = assert_ping_parse_contract(&header, &payload_bytes)?;
                             }
                         }
                     }
