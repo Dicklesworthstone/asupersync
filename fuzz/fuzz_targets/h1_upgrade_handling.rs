@@ -15,6 +15,54 @@ fn decode_once(raw: &[u8]) -> Result<Option<Request>, HttpError> {
     codec.decode(&mut buf)
 }
 
+fn observe_decode(
+    codec: &mut Http1Codec,
+    buf: &mut BytesMut,
+) -> Result<Option<Request>, HttpError> {
+    let before_len = buf.len();
+    let result = codec.decode(buf);
+    assert!(
+        buf.len() <= before_len,
+        "HTTP/1 decoder must not grow the source buffer"
+    );
+
+    match &result {
+        Ok(Some(request)) => {
+            let consumed = before_len - buf.len();
+            assert!(consumed > 0, "decoded request must consume input");
+            assert!(
+                request.body.len() <= consumed,
+                "decoded body cannot exceed consumed bytes"
+            );
+            assert!(
+                !request.uri.is_empty(),
+                "decoded request URI must be non-empty"
+            );
+            assert!(
+                request.headers.len() <= 128,
+                "decoded request must respect the header-count limit"
+            );
+            assert!(
+                request.headers.iter().all(|(name, _)| !name.is_empty()),
+                "decoded request headers must have non-empty names"
+            );
+        }
+        Ok(None) => {
+            if before_len == 0 {
+                assert!(buf.is_empty(), "empty input must remain empty");
+            }
+        }
+        Err(err) => {
+            assert!(
+                !err.to_string().is_empty(),
+                "HTTP/1 decode errors must remain observable"
+            );
+        }
+    }
+
+    result
+}
+
 fn expect_complete_request(raw: &[u8]) -> Request {
     decode_once(raw)
         .expect("valid upgrade request must not return a parser error")
@@ -120,14 +168,14 @@ fuzz_target!(|data: &[u8]| {
     // Test with different codec configurations for upgrade scenarios
     let mut small_headers_codec = Http1Codec::new().max_headers_size(256);
     let mut buf_copy = BytesMut::from(data);
-    let _ = small_headers_codec.decode(&mut buf_copy);
+    let _ = observe_decode(&mut small_headers_codec, &mut buf_copy);
 
     // Test multiple decode calls to simulate pipelined upgrade requests
     if data.len() > 10 {
         let mut multi_codec = Http1Codec::new();
         let mut multi_buf = BytesMut::from(data);
-        let _ = multi_codec.decode(&mut multi_buf);
-        let _ = multi_codec.decode(&mut multi_buf);
+        let _ = observe_decode(&mut multi_codec, &mut multi_buf);
+        let _ = observe_decode(&mut multi_codec, &mut multi_buf);
     }
 
     // Test specific upgrade-related edge cases
@@ -289,7 +337,7 @@ fn test_upgrade_edge_cases(data: &[u8]) {
             // Found upgrade-related pattern - test codec robustness
             let mut test_codec = Http1Codec::new();
             let mut test_buf = BytesMut::from(data);
-            let _ = test_codec.decode(&mut test_buf);
+            let _ = observe_decode(&mut test_codec, &mut test_buf);
         }
     }
 
@@ -299,11 +347,11 @@ fn test_upgrade_edge_cases(data: &[u8]) {
         if point < data.len() {
             let mut boundary_codec = Http1Codec::new();
             let mut boundary_buf = BytesMut::from(&data[..point]);
-            let _ = boundary_codec.decode(&mut boundary_buf);
+            let _ = observe_decode(&mut boundary_codec, &mut boundary_buf);
 
             // Add remaining data
             boundary_buf.extend_from_slice(&data[point..]);
-            let _ = boundary_codec.decode(&mut boundary_buf);
+            let _ = observe_decode(&mut boundary_codec, &mut boundary_buf);
         }
     }
 }
