@@ -247,12 +247,25 @@ fn escape_json(input: &str) -> String {
     escaped
 }
 
-fn exercise_parser(payload: &[u8]) {
+fn observe_pub_ack_parse(payload: &[u8]) {
     if payload.len() > MAX_PAYLOAD_SIZE {
         return;
     }
 
-    let _ = fuzz_parse_pub_ack(payload);
+    match fuzz_parse_pub_ack(payload) {
+        Ok(ack) => {
+            assert!(
+                ack.stream.len() <= payload.len(),
+                "parsed PubAck stream should be sourced from the input"
+            );
+        }
+        Err(err) => {
+            assert!(
+                !err.to_string().is_empty(),
+                "JetStream PubAck parser errors should be observable"
+            );
+        }
+    }
 }
 
 fn exercise_structured_case(case: &PubAckFuzzCase) {
@@ -286,7 +299,7 @@ fn exercise_curated_cases() {
 
 fuzz_target!(|data: &[u8]| {
     exercise_curated_cases();
-    exercise_parser(data);
+    observe_pub_ack_parse(data);
 
     let mut u = Unstructured::new(data);
     if let Ok(fuzz_case) = PubAckFuzzCase::arbitrary(&mut u) {
