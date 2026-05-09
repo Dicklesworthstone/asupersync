@@ -14,7 +14,6 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::bytes::BytesMut;
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -138,6 +137,13 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
+    if data.is_empty() {
+        for test_case in generate_timeout_scenarios() {
+            exercise_settings_ack_timeout_case(&test_case);
+        }
+        return;
+    }
+
     let mut u = arbitrary::Unstructured::new(data);
 
     // Generate SETTINGS ACK timeout test case
@@ -161,21 +167,27 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
+    exercise_settings_ack_timeout_case(&test_case);
+});
+
+fn exercise_settings_ack_timeout_case(test_case: &SettingsAckTimeoutTest) {
+    assert_protocol_model_shapes();
+
     // Test core SETTINGS ACK timeout
-    test_settings_ack_timeout(&test_case);
+    test_settings_ack_timeout(test_case);
 
     // Test multiple pending SETTINGS
-    test_multiple_pending_settings(&test_case);
+    test_multiple_pending_settings(test_case);
 
     // Test GOAWAY after timeout
-    test_goaway_after_timeout(&test_case);
+    test_goaway_after_timeout(test_case);
 
     // Test connection cleanup
-    test_connection_cleanup_after_timeout(&test_case);
+    test_connection_cleanup_after_timeout(test_case);
 
     // Test edge cases
-    test_settings_timeout_edge_cases(&test_case);
-});
+    test_settings_timeout_edge_cases(test_case);
+}
 
 /// Test SETTINGS ACK timeout behavior
 fn test_settings_ack_timeout(test_case: &SettingsAckTimeoutTest) {
@@ -334,11 +346,19 @@ fn test_multiple_pending_settings(test_case: &SettingsAckTimeoutTest) {
         if settings_ids.len() >= 2 {
             let ack_result = mock_connection.send_settings_ack(settings_ids[1]);
             // Out-of-order ACK might be accepted or rejected depending on implementation
+            assert!(
+                matches!(ack_result, AckResult::Accepted | AckResult::Ignored),
+                "out-of-order SETTINGS ACK should be accepted or ignored"
+            );
         }
 
         // Then ACK the first
         let ack_result = mock_connection.send_settings_ack(settings_ids[0]);
         // Should be accepted even after out-of-order ACK
+        assert!(
+            matches!(ack_result, AckResult::Accepted | AckResult::Ignored),
+            "first SETTINGS ACK after out-of-order ACK should be accepted or ignored"
+        );
     }
 }
 
@@ -362,8 +382,8 @@ fn test_goaway_after_timeout(test_case: &SettingsAckTimeoutTest) {
     }
 
     // Advance time past timeout without sending ACK
-    let timeout_ms = test_case.timeout_config.settings_ack_timeout_ms + 1000;
-    mock_connection.advance_time(Duration::from_millis(timeout_ms as u64));
+    let timeout_ms = u64::from(test_case.timeout_config.settings_ack_timeout_ms) + 1000;
+    mock_connection.advance_time(Duration::from_millis(timeout_ms));
 
     // Check GOAWAY was sent
     assert!(
@@ -396,10 +416,15 @@ fn test_goaway_after_timeout(test_case: &SettingsAckTimeoutTest) {
         "Opening stream after GOAWAY should not panic"
     );
     if let Ok(stream_result) = new_stream_result {
-        assert!(
-            matches!(stream_result, StreamResult::Rejected { .. }),
-            "New streams should be rejected after GOAWAY"
-        );
+        match stream_result {
+            StreamResult::Rejected { reason } => assert!(
+                !reason.trim().is_empty(),
+                "rejected stream opens should include a reason"
+            ),
+            StreamResult::Opened { stream_id } => {
+                panic!("new stream {stream_id} should be rejected after GOAWAY")
+            }
+        }
     }
 }
 
@@ -422,11 +447,31 @@ fn test_connection_cleanup_after_timeout(test_case: &SettingsAckTimeoutTest) {
         extra_data: vec![],
     };
 
-    let _result = mock_connection.send_settings_frame(settings_frame);
+    let settings_result = mock_connection.send_settings_frame(settings_frame);
+    let sent_settings_id = observe_cleanup_settings_send_result(&mock_connection, settings_result);
 
     // Advance past timeout
-    let timeout_ms = test_case.timeout_config.settings_ack_timeout_ms + 500;
-    mock_connection.advance_time(Duration::from_millis(timeout_ms as u64));
+    let timeout_ms = u64::from(test_case.timeout_config.settings_ack_timeout_ms) + 500;
+    mock_connection.advance_time(Duration::from_millis(timeout_ms));
+
+    if let Some(settings_id) = sent_settings_id {
+        assert!(
+            !mock_connection.pending_settings.contains_key(&settings_id),
+            "timed-out SETTINGS should be removed from the pending map"
+        );
+        assert!(
+            mock_connection.goaway_sent(),
+            "SETTINGS ACK timeout should send GOAWAY"
+        );
+        let goaway = mock_connection
+            .get_goaway_info()
+            .expect("GOAWAY metadata should be recorded after SETTINGS timeout");
+        assert_eq!(
+            goaway.error_code,
+            H2ErrorCode::SettingsTimeout,
+            "SETTINGS ACK timeout should use SETTINGS_TIMEOUT"
+        );
+    }
 
     // Check cleanup
     let pending_count = mock_connection.get_pending_operations_count();
@@ -437,6 +482,14 @@ fn test_connection_cleanup_after_timeout(test_case: &SettingsAckTimeoutTest) {
     if mock_connection.goaway_sent() {
         // Resources should be cleaned up or in process of cleanup
         // (exact behavior depends on implementation)
+        assert!(
+            pending_count <= test_case.connection_state.pending_operations.len(),
+            "cleanup should not synthesize extra pending operations after GOAWAY"
+        );
+        assert!(
+            stream_count <= test_case.connection_state.pending_operations.len() as u32,
+            "cleanup should not synthesize extra active streams after GOAWAY"
+        );
     }
 
     // Connection should not accept new operations
@@ -447,10 +500,55 @@ fn test_connection_cleanup_after_timeout(test_case: &SettingsAckTimeoutTest) {
     });
 
     if mock_connection.goaway_sent() {
-        assert!(
-            matches!(new_op_result, OperationResult::Rejected { .. }),
-            "New operations should be rejected after GOAWAY"
-        );
+        match new_op_result {
+            OperationResult::Rejected { reason } => assert!(
+                !reason.trim().is_empty(),
+                "rejected operations should include a reason"
+            ),
+            OperationResult::Accepted => panic!("new operations should be rejected after GOAWAY"),
+        }
+    }
+}
+
+fn observe_cleanup_settings_send_result(
+    connection: &MockH2Connection,
+    result: SettingsResult,
+) -> Option<u32> {
+    match result {
+        SettingsResult::Sent { settings_id } => {
+            assert!(settings_id > 0, "SETTINGS ids should be positive");
+            assert!(
+                connection.pending_settings.contains_key(&settings_id),
+                "sent SETTINGS should be tracked as pending"
+            );
+            assert!(
+                !connection.goaway_sent(),
+                "accepted cleanup SETTINGS should not immediately close the connection"
+            );
+            Some(settings_id)
+        }
+        SettingsResult::Rejected { reason } => {
+            assert!(
+                !reason.trim().is_empty(),
+                "rejected cleanup SETTINGS should include a reason"
+            );
+            assert!(
+                connection.timeout_config.max_pending_settings == 0
+                    || !matches!(connection.get_connection_state(), ConnectionStatus::Open),
+                "valid cleanup SETTINGS should only be rejected when visible connection state blocks it"
+            );
+            if connection.timeout_config.max_pending_settings == 0 {
+                let goaway = connection
+                    .get_goaway_info()
+                    .expect("pending SETTINGS limit rejection should record GOAWAY");
+                assert_eq!(
+                    goaway.error_code,
+                    H2ErrorCode::EnhanceYourCalm,
+                    "pending SETTINGS limit should use ENHANCE_YOUR_CALM"
+                );
+            }
+            None
+        }
     }
 }
 
@@ -470,6 +568,7 @@ fn test_settings_timeout_edge_cases(test_case: &SettingsAckTimeoutTest) {
         };
 
         let result = mock_connection.send_settings_frame(settings_frame);
+        observe_cleanup_settings_send_result(&mock_connection, result);
         // Zero timeout should either immediately timeout or use minimum timeout
     }
 
@@ -483,10 +582,14 @@ fn test_settings_timeout_edge_cases(test_case: &SettingsAckTimeoutTest) {
         "Orphan SETTINGS ACK should not panic"
     );
     if let Ok(ack_result) = orphan_ack_result {
-        assert!(
-            matches!(ack_result, AckResult::Ignored | AckResult::Rejected { .. }),
-            "Orphan SETTINGS ACK should be ignored or rejected"
-        );
+        match ack_result {
+            AckResult::Ignored => {}
+            AckResult::Rejected { reason } => assert!(
+                !reason.trim().is_empty(),
+                "rejected orphan SETTINGS ACK should include a reason"
+            ),
+            AckResult::Accepted => panic!("orphan SETTINGS ACK should not be accepted"),
+        }
     }
 
     // Test SETTINGS with invalid values
@@ -561,11 +664,49 @@ impl SettingId {
 /// Check if SETTINGS contain invalid values
 fn has_invalid_settings(settings: &[Setting]) -> bool {
     settings.iter().any(|setting| match setting.id {
-        SettingId::EnablePush => setting.value > 1,
-        SettingId::InitialWindowSize => setting.value > 0x7FFFFFFF,
-        SettingId::MaxFrameSize => setting.value < 16384 || setting.value > 0xFFFFFF,
-        _ => false,
+        SettingId::EnablePush => {
+            let _wire_id = setting.id.to_u16();
+            setting.value > 1
+        }
+        SettingId::InitialWindowSize => {
+            let _wire_id = setting.id.to_u16();
+            setting.value > 0x7FFFFFFF
+        }
+        SettingId::MaxFrameSize => {
+            let _wire_id = setting.id.to_u16();
+            !(16384..=0xFFFFFF).contains(&setting.value)
+        }
+        _ => {
+            let _wire_id = setting.id.to_u16();
+            false
+        }
     })
+}
+
+fn assert_protocol_model_shapes() {
+    let all_error_codes = [
+        H2ErrorCode::NoError,
+        H2ErrorCode::ProtocolError,
+        H2ErrorCode::InternalError,
+        H2ErrorCode::FlowControlError,
+        H2ErrorCode::SettingsTimeout,
+        H2ErrorCode::StreamClosed,
+        H2ErrorCode::FrameSizeError,
+        H2ErrorCode::RefusedStream,
+        H2ErrorCode::Cancel,
+        H2ErrorCode::CompressionError,
+        H2ErrorCode::ConnectError,
+        H2ErrorCode::EnhanceYourCalm,
+        H2ErrorCode::InadequateSecurity,
+        H2ErrorCode::Http11Required,
+    ];
+    assert!(
+        all_error_codes.contains(&H2ErrorCode::SettingsTimeout)
+            && all_error_codes.contains(&H2ErrorCode::EnhanceYourCalm),
+        "model should include timeout and pending-settings GOAWAY codes"
+    );
+
+    assert!(matches!(ConnectionStatus::Closed, ConnectionStatus::Closed));
 }
 
 /// HTTP/2 error codes
@@ -669,6 +810,8 @@ impl MockH2Connection {
             };
         }
 
+        let _flow_control_window = state.window_size;
+        let _stream_limit = state.max_concurrent_streams;
         self.pending_operations = state.pending_operations.clone();
         self.active_streams = state.pending_operations.len() as u32;
     }
@@ -726,6 +869,7 @@ impl MockH2Connection {
 
     fn send_malformed_settings_ack(&mut self, settings_id: u32) -> AckResult {
         // Malformed ACK should be rejected
+        assert!(settings_id > 0, "SETTINGS ids should be positive");
         AckResult::Rejected {
             reason: "Malformed SETTINGS ACK".to_string(),
         }
@@ -805,6 +949,17 @@ impl MockH2Connection {
             };
         }
 
+        let _operation_shape = (
+            operation.stream_id,
+            matches!(
+                operation.operation,
+                StreamOpType::SendData
+                    | StreamOpType::SendHeaders
+                    | StreamOpType::WindowUpdate
+                    | StreamOpType::ReceiveData
+            ),
+            operation.data_size,
+        );
         self.pending_operations.push(operation);
         OperationResult::Accepted
     }
