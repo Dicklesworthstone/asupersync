@@ -15,12 +15,32 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use asupersync::messaging::kafka::{
-    KafkaError, RecordMetadata, fuzz_parse_delivery_result, fuzz_parse_kafka_error_response,
-    fuzz_parse_response_metadata, fuzz_validate_response_frame,
+    fuzz_parse_delivery_result, fuzz_parse_kafka_error_response, fuzz_parse_response_metadata,
+    fuzz_validate_response_frame,
 };
+use std::fmt::Debug;
 
 /// Maximum response size for fuzzer performance
-const MAX_RESPONSE_SIZE: usize = 1024 * 1024; // 1MB
+const MAX_RESPONSE_SIZE: i32 = 1024 * 1024; // 1MB
+
+fn assert_visible_debug<T: Debug + ?Sized>(context: &str, value: &T) {
+    let rendered = format!("{value:?}");
+    assert!(
+        !rendered.is_empty(),
+        "{context} produced an empty debug representation"
+    );
+}
+
+fn observe_result<T, E>(context: &str, result: Result<T, E>)
+where
+    T: Debug,
+    E: Debug,
+{
+    match result {
+        Ok(value) => assert_visible_debug(context, &value),
+        Err(err) => assert_visible_debug(context, &err),
+    }
+}
 
 /// Test scenario for Kafka ProduceResponse parsing
 #[derive(Arbitrary, Debug, Clone)]
@@ -56,11 +76,11 @@ enum CorrelationId {
 }
 
 impl CorrelationId {
-    fn as_i32(self) -> i32 {
+    fn as_i32(&self) -> i32 {
         match self {
-            CorrelationId::Valid(id) => id,
-            CorrelationId::Boundary(b) => b.as_i32(),
-            CorrelationId::Invalid(inv) => inv.as_i32(),
+            CorrelationId::Valid(id) => *id,
+            CorrelationId::Boundary(boundary) => boundary.as_i32(),
+            CorrelationId::Invalid(invalid) => invalid.as_i32(),
         }
     }
 }
@@ -115,11 +135,11 @@ enum ResponseLength {
 }
 
 impl ResponseLength {
-    fn as_i32(self, actual_payload_len: usize) -> i32 {
+    fn as_i32(&self, actual_payload_len: usize) -> i32 {
         match self {
-            ResponseLength::Valid(len) => (len as usize % actual_payload_len.max(1)) as i32,
-            ResponseLength::Boundary(b) => b.as_i32(),
-            ResponseLength::Invalid(inv) => inv.as_i32(),
+            ResponseLength::Valid(len) => (*len as usize % actual_payload_len.max(1)) as i32,
+            ResponseLength::Boundary(boundary) => boundary.as_i32(),
+            ResponseLength::Invalid(invalid) => invalid.as_i32(),
         }
     }
 }
@@ -137,8 +157,8 @@ impl LengthBoundary {
     fn as_i32(self) -> i32 {
         match self {
             LengthBoundary::Zero => 0,
-            LengthBoundary::MaxValid => 50 * 1024 * 1024, // 50MB (current limit)
-            LengthBoundary::JustOverLimit => 50 * 1024 * 1024 + 1,
+            LengthBoundary::MaxValid => MAX_RESPONSE_SIZE,
+            LengthBoundary::JustOverLimit => MAX_RESPONSE_SIZE + 1,
             LengthBoundary::I32Max => i32::MAX,
         }
     }
@@ -408,7 +428,7 @@ impl ErrorMessage {
         match self {
             ErrorMessage::Empty => vec![],
             ErrorMessage::Short(n) => format!("Error {}", n).into_bytes(),
-            ErrorMessage::Long => "This is a very long error message that describes exactly what went wrong in great detail with lots of context and information".into_bytes(),
+            ErrorMessage::Long => "This is a very long error message that describes exactly what went wrong in great detail with lots of context and information".as_bytes().to_vec(),
             ErrorMessage::Binary => vec![0x80, 0x81, 0x82, 0x83],
             ErrorMessage::Truncated => b"Truncated".to_vec(),
         }
@@ -463,9 +483,10 @@ fn test_produce_response_parsing(scenario: &ProduceResponseScenario) {
     for operation in &scenario.operations {
         match operation {
             ResponseOperation::ValidateFrame => {
-                let result = fuzz_validate_response_frame(&response_data);
-                // Don't fail on expected validation errors
-                let _ = result;
+                observe_result(
+                    "Kafka ProduceResponse frame validation",
+                    fuzz_validate_response_frame(&response_data),
+                );
             }
 
             ResponseOperation::ParseError => {
@@ -473,8 +494,10 @@ fn test_produce_response_parsing(scenario: &ProduceResponseScenario) {
                     // Extract just the error code for error parsing
                     if response_data.len() > 8 {
                         let error_byte = &response_data[8..9];
-                        let result = fuzz_parse_kafka_error_response(error_byte);
-                        let _ = result; // Expected to succeed or fail gracefully
+                        observe_result(
+                            "Kafka ProduceResponse error parser",
+                            fuzz_parse_kafka_error_response(error_byte),
+                        );
                     }
                 }
             }
@@ -484,23 +507,33 @@ fn test_produce_response_parsing(scenario: &ProduceResponseScenario) {
                     // Extract metadata portion for parsing
                     if response_data.len() > 9 {
                         let metadata_data = &response_data[9..];
-                        let result = fuzz_parse_response_metadata(metadata_data);
-                        let _ = result; // Expected to succeed or fail gracefully
+                        observe_result(
+                            "Kafka ProduceResponse metadata parser",
+                            fuzz_parse_response_metadata(metadata_data),
+                        );
                     }
                 }
             }
 
             ResponseOperation::ParseDeliveryResult => {
-                let result = fuzz_parse_delivery_result(&response_data);
-                let _ = result; // Expected to succeed or fail gracefully
+                observe_result(
+                    "Kafka ProduceResponse delivery parser",
+                    fuzz_parse_delivery_result(&response_data),
+                );
             }
 
             ResponseOperation::TestBoundaries => {
                 // Test with various truncated versions
                 for len in 0..response_data.len().min(50) {
                     let truncated = &response_data[..len];
-                    let _ = fuzz_validate_response_frame(truncated);
-                    let _ = fuzz_parse_delivery_result(truncated);
+                    observe_result(
+                        "truncated Kafka ProduceResponse frame validation",
+                        fuzz_validate_response_frame(truncated),
+                    );
+                    observe_result(
+                        "truncated Kafka ProduceResponse delivery parser",
+                        fuzz_parse_delivery_result(truncated),
+                    );
                 }
             }
         }
@@ -514,29 +547,31 @@ fn test_frame_validation(scenario: &ProduceResponseScenario) {
     match scenario.frame_config.consistency {
         FrameConsistency::Consistent => {
             // Should validate successfully if payload is well-formed
-            let result = fuzz_validate_response_frame(&response_data);
-            let _ = result;
+            observe_result(
+                "consistent Kafka ProduceResponse frame validation",
+                fuzz_validate_response_frame(&response_data),
+            );
         }
         FrameConsistency::TooSmall => {
             // Length field smaller than actual payload - should fail
-            let result = fuzz_validate_response_frame(&response_data);
-            if let Ok(()) = result {
-                // Unexpected success with inconsistent length
-            }
+            observe_result(
+                "undersized Kafka ProduceResponse frame validation",
+                fuzz_validate_response_frame(&response_data),
+            );
         }
         FrameConsistency::TooLarge => {
             // Length field larger than actual payload - should fail
-            let result = fuzz_validate_response_frame(&response_data);
-            if let Ok(()) = result {
-                // Unexpected success with inconsistent length
-            }
+            observe_result(
+                "oversized Kafka ProduceResponse frame validation",
+                fuzz_validate_response_frame(&response_data),
+            );
         }
         FrameConsistency::Truncated => {
             // Frame cut off mid-payload - should fail
-            let result = fuzz_validate_response_frame(&response_data);
-            if let Ok(()) = result {
-                // Unexpected success with truncated frame
-            }
+            observe_result(
+                "truncated Kafka ProduceResponse frame validation",
+                fuzz_validate_response_frame(&response_data),
+            );
         }
     }
 }
@@ -548,23 +583,17 @@ fn test_error_handling(scenario: &ProduceResponseScenario) {
     match &scenario.response_payload {
         ResponsePayload::Error { error } => {
             let error_code = error.error_code.as_u8();
-            let result = fuzz_parse_kafka_error_response(&[error_code]);
-
-            // Verify error is properly categorized
-            match result {
-                Ok(kafka_error) => {
-                    // Error was parsed successfully
-                    let _ = kafka_error;
-                }
-                Err(_) => {
-                    // Error parsing failed - should not happen for single byte
-                }
-            }
+            observe_result(
+                "single-byte Kafka error response",
+                fuzz_parse_kafka_error_response(&[error_code]),
+            );
         }
         _ => {
             // Test error parsing on non-error responses (should handle gracefully)
-            let result = fuzz_parse_delivery_result(&response_data);
-            let _ = result;
+            observe_result(
+                "non-error Kafka ProduceResponse delivery parser",
+                fuzz_parse_delivery_result(&response_data),
+            );
         }
     }
 }
