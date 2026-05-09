@@ -4,8 +4,9 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use asupersync::http::h3_native::{
-    H3NativeError, H3QpackMode, qpack_decode_field_section, qpack_decode_request_field_section,
-    qpack_decode_response_field_section,
+    H3NativeError, H3QpackMode, QpackFieldPlan, qpack_decode_field_section,
+    qpack_decode_request_field_section, qpack_decode_response_field_section,
+    qpack_encode_field_section,
 };
 
 /// Fuzz input for QPACK decoder testing
@@ -94,17 +95,23 @@ fuzz_target!(|input: QpackFuzzInput| {
     // Property 3: Dynamic table size change respected
     test_dynamic_table_size(&input);
 
-    // Property 4: Huffman-encoded strings decode without overflow
+    // Property 4: Delta base manipulation completes cleanly
+    test_delta_base(&input);
+
+    // Property 5: Huffman-encoded strings decode without overflow
     test_huffman_string_safety(&input);
 
-    // Property 5: Required insert count stall handled cleanly
+    // Property 6: Prefixed integer overflows are rejected gracefully
+    test_integer_overflow(&input);
+
+    // Property 7: Required insert count stall handled cleanly
     test_required_insert_count_stall(&input);
 
     // Additional: Test malformed patterns
     test_malformed_patterns(&input);
 
     // Additional: Test realistic scenarios
-    test_realistic_scenarios(&input);
+    test_realistic_scenarios();
 });
 
 /// Property 1: No panic on any input - decoder should handle all malformed inputs gracefully
@@ -112,20 +119,26 @@ fn test_no_panic(input: &QpackFuzzInput) {
     let mode = input.qpack_mode.clone().into();
 
     // Test should never panic, only return errors
-    let _result = match input.decoder_type {
-        DecoderType::FieldSection => {
-            std::panic::catch_unwind(|| qpack_decode_field_section(&input.field_section, mode))
+    let result = std::panic::catch_unwind(|| -> Result<(), H3NativeError> {
+        match &input.decoder_type {
+            DecoderType::FieldSection => {
+                qpack_decode_field_section(&input.field_section, mode).map(|_| ())
+            }
+            DecoderType::RequestSpecific => {
+                qpack_decode_request_field_section(&input.field_section, mode, None).map(|_| ())
+            }
+            DecoderType::ResponseSpecific => {
+                qpack_decode_response_field_section(&input.field_section, mode, None).map(|_| ())
+            }
         }
-        DecoderType::RequestSpecific => std::panic::catch_unwind(|| {
-            qpack_decode_request_field_section(&input.field_section, mode)
-        }),
-        DecoderType::ResponseSpecific => std::panic::catch_unwind(|| {
-            qpack_decode_response_field_section(&input.field_section, mode)
-        }),
-    };
+    });
 
-    // If we reach here without panic, the property holds
-    assert!(true, "Decoder handled input without panic");
+    assert!(
+        result.is_ok(),
+        "QPACK {:?} decoder panicked for {} bytes",
+        input.decoder_type,
+        input.field_section.len()
+    );
 }
 
 /// Property 2: Invalid static table index rejected gracefully
@@ -187,7 +200,31 @@ fn test_dynamic_table_size(input: &QpackFuzzInput) {
     }
 }
 
-/// Property 4: Huffman-encoded strings decode without overflow
+/// Property 4: Delta Base manipulation handled cleanly
+fn test_delta_base(input: &QpackFuzzInput) {
+    if let AttackScenario::DeltaBase { delta } = &input.attack_scenario {
+        let mode = input.qpack_mode.clone().into();
+        let delta_section = build_delta_base_section(*delta);
+        let result = qpack_decode_field_section(&delta_section, mode);
+
+        match result {
+            Err(H3NativeError::InvalidFrame(_)) | Err(H3NativeError::UnexpectedEof) => {
+                // Expected for nonsensical bases or truncated continuations.
+            }
+            Err(_) => {
+                // Other decoder errors are acceptable for adversarial input.
+            }
+            Ok(plan) => {
+                assert!(
+                    *delta == 0 || !plan.is_empty(),
+                    "non-zero Delta Base decoded as an empty field section"
+                );
+            }
+        }
+    }
+}
+
+/// Property 5: Huffman-encoded strings decode without overflow
 fn test_huffman_string_safety(input: &QpackFuzzInput) {
     if let AttackScenario::HuffmanOverflow {
         prefix_bits,
@@ -215,14 +252,41 @@ fn test_huffman_string_safety(input: &QpackFuzzInput) {
                 // Other errors are acceptable for malformed data
             }
             Ok(_) => {
-                // If it succeeds, ensure no overflow occurred (function returned normally)
-                assert!(true, "Huffman string decoded without overflow");
+                // Success is acceptable as long as the decoder returned normally.
             }
         }
     }
 }
 
-/// Property 5: Required insert count stall handled cleanly (not infinite loop)
+/// Property 6: Prefixed integer overflow is rejected or completes in bounded time
+fn test_integer_overflow(input: &QpackFuzzInput) {
+    if let AttackScenario::IntegerOverflow {
+        prefix_len,
+        overflow_bytes,
+    } = &input.attack_scenario
+    {
+        let mode = input.qpack_mode.clone().into();
+        let overflow_section = build_integer_overflow_section(*prefix_len, overflow_bytes);
+
+        let start_time = std::time::Instant::now();
+        let result = qpack_decode_field_section(&overflow_section, mode);
+        let elapsed = start_time.elapsed();
+
+        assert!(
+            elapsed.as_millis() < 100,
+            "Decoder took too long ({elapsed:?}) on prefixed integer overflow input"
+        );
+
+        if overflow_bytes.len() >= 10 {
+            assert!(
+                result.is_err(),
+                "oversized QPACK prefixed integer continuation was accepted"
+            );
+        }
+    }
+}
+
+/// Property 7: Required insert count stall handled cleanly (not infinite loop)
 fn test_required_insert_count_stall(input: &QpackFuzzInput) {
     if let AttackScenario::RequiredInsertCount { count } = &input.attack_scenario {
         let mode = input.qpack_mode.clone().into();
@@ -253,6 +317,22 @@ fn test_required_insert_count_stall(input: &QpackFuzzInput) {
             }
         }
     }
+}
+
+/// Build a QPACK field section with a specific Delta Base value
+fn build_delta_base_section(delta: u64) -> Vec<u8> {
+    let mut section = Vec::new();
+
+    section.push(0x00); // RIC = 0
+    if delta < 127 {
+        section.push(delta as u8);
+    } else {
+        section.push(127);
+        encode_varint_continuation(&mut section, delta - 127);
+    }
+    section.push(0b1100_0000 | 17); // :method GET
+
+    section
 }
 
 /// Build a QPACK field section with a specific static table index reference
@@ -303,13 +383,13 @@ fn build_huffman_string_section(prefix_bits: u8, string_data: &[u8]) -> Vec<u8> 
 
     // String literal with Huffman bit set: 1XXXXXXX
     let huffman_bit = 0b1000_0000;
-    let length_bits = prefix_bits & 0b0111_1111;
+    let claimed_inline_len = prefix_bits & 0b0111_1111;
 
-    if string_data.len() < 127 {
-        section.push(huffman_bit | (string_data.len() as u8));
+    if claimed_inline_len < 127 {
+        section.push(huffman_bit | claimed_inline_len);
     } else {
         section.push(huffman_bit | 127);
-        encode_varint_continuation(&mut section, string_data.len() as u64 - 127);
+        encode_varint_continuation(&mut section, string_data.len().saturating_sub(127) as u64);
     }
 
     section.extend_from_slice(string_data);
@@ -336,6 +416,22 @@ fn build_required_insert_count_section(count: u64) -> Vec<u8> {
     section
 }
 
+/// Build a QPACK field section with an oversized prefixed integer continuation
+fn build_integer_overflow_section(prefix_len: u8, overflow_bytes: &[u8]) -> Vec<u8> {
+    let mut section = vec![0x00, 0x00]; // RIC=0, Delta Base=0
+
+    // Static indexed field line with the 6-bit prefix saturated, forcing
+    // continuation bytes for the static index value.
+    section.push(0b1100_0000 | 63);
+    let max_extra = usize::from((prefix_len % 8).max(1)) + overflow_bytes.len().min(16);
+    for byte in overflow_bytes.iter().take(max_extra) {
+        section.push((byte & 0x7F) | 0x80);
+    }
+    section.push(0x7F);
+
+    section
+}
+
 /// Encode variable-length integer continuation bytes
 fn encode_varint_continuation(out: &mut Vec<u8>, mut value: u64) {
     while value >= 128 {
@@ -353,7 +449,7 @@ fn test_malformed_patterns(input: &QpackFuzzInput) {
         let malformed_section = match pattern_type {
             MalformedPattern::Truncated { at_byte } => {
                 let mut section = input.field_section.clone();
-                let truncate_at = (*at_byte as usize).min(section.len());
+                let truncate_at = (*at_byte).min(section.len());
                 section.truncate(truncate_at);
                 section
             }
@@ -431,27 +527,56 @@ fn build_invalid_utf8_string(invalid_bytes: &[u8]) -> Vec<u8> {
 }
 
 /// Integration test: real-world QPACK scenarios
-fn test_realistic_scenarios(input: &QpackFuzzInput) {
-    let mode = input.qpack_mode.clone().into();
-
-    // Test empty field section
+fn test_realistic_scenarios() {
     let empty_section = vec![0x00, 0x00]; // RIC=0, Delta Base=0
-    let _ = qpack_decode_field_section(&empty_section, mode);
+    let decoded_empty =
+        qpack_decode_field_section(&empty_section, H3QpackMode::StaticOnly).expect("empty decode");
+    assert_eq!(decoded_empty, Vec::<QpackFieldPlan>::new());
 
-    // Test valid static-only request
-    let valid_request = vec![
-        0x00,
-        0x00,            // RIC=0, Delta Base=0
-        0b1100_0001,     // Static index 1 (:method GET)
-        0b1100_0000 | 4, // Static index 4 (:path /)
+    let request_plan = vec![
+        QpackFieldPlan::StaticIndex(17), // :method GET
+        QpackFieldPlan::StaticIndex(23), // :scheme https
+        QpackFieldPlan::StaticIndex(1),  // :path /
+        QpackFieldPlan::Literal {
+            name: "user-agent".to_string(),
+            value: "asupersync-fuzz".to_string(),
+        },
     ];
-    let _ = qpack_decode_request_field_section(&valid_request, mode);
+    let request_wire = qpack_encode_field_section(&request_plan).expect("request encode");
+    assert_eq!(
+        qpack_decode_field_section(&request_wire, H3QpackMode::StaticOnly)
+            .expect("request plan decode"),
+        request_plan
+    );
+    let request = qpack_decode_request_field_section(&request_wire, H3QpackMode::StaticOnly, None)
+        .expect("request head decode");
+    assert_eq!(request.pseudo.method.as_deref(), Some("GET"));
+    assert_eq!(request.pseudo.scheme.as_deref(), Some("https"));
+    assert_eq!(request.pseudo.path.as_deref(), Some("/"));
+    assert_eq!(
+        request.headers,
+        vec![("user-agent".to_string(), "asupersync-fuzz".to_string())]
+    );
 
-    // Test valid static-only response
-    let valid_response = vec![
-        0x00,
-        0x00,             // RIC=0, Delta Base=0
-        0b1100_0000 | 25, // Static index 25 (:status 200)
+    let response_plan = vec![
+        QpackFieldPlan::StaticIndex(25), // :status 200
+        QpackFieldPlan::Literal {
+            name: "server".to_string(),
+            value: "asupersync".to_string(),
+        },
     ];
-    let _ = qpack_decode_response_field_section(&valid_response, mode);
+    let response_wire = qpack_encode_field_section(&response_plan).expect("response encode");
+    assert_eq!(
+        qpack_decode_field_section(&response_wire, H3QpackMode::StaticOnly)
+            .expect("response plan decode"),
+        response_plan
+    );
+    let response =
+        qpack_decode_response_field_section(&response_wire, H3QpackMode::StaticOnly, None)
+            .expect("response head decode");
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        response.headers,
+        vec![("server".to_string(), "asupersync".to_string())]
+    );
 }
