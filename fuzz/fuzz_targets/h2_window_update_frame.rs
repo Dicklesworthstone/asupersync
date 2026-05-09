@@ -639,7 +639,11 @@ fn test_window_update_roundtrip(roundtrip: WindowUpdateRoundTrip) {
                 Ok(header) => {
                     let payload = buf.split_to(header.length as usize).freeze();
 
-                    match asupersync::http::h2::frame::WindowUpdateFrame::parse(&header, &payload) {
+                    match observe_window_update_parse(
+                        "standard round-trip WINDOW_UPDATE frame",
+                        &header,
+                        &payload,
+                    ) {
                         Ok(parsed) => {
                             // Verify round-trip consistency
                             assert_eq!(
@@ -693,7 +697,11 @@ fn test_window_update_roundtrip(roundtrip: WindowUpdateRoundTrip) {
                 Ok(header) => {
                     let payload = buf.split_to(header.length as usize).freeze();
 
-                    match asupersync::http::h2::frame::WindowUpdateFrame::parse(&header, &payload) {
+                    match observe_window_update_parse(
+                        "boundary-increment WINDOW_UPDATE frame",
+                        &header,
+                        &payload,
+                    ) {
                         Ok(parsed) => {
                             assert_eq!(parsed.stream_id, stream_id);
                             assert_eq!(parsed.increment, increment);
@@ -747,9 +755,11 @@ fn test_window_update_roundtrip(roundtrip: WindowUpdateRoundTrip) {
                 if let Ok(header) = FrameHeader::parse(&mut buf) {
                     let payload = buf.split_to(header.length as usize).freeze();
 
-                    if let Ok(parsed) =
-                        asupersync::http::h2::frame::WindowUpdateFrame::parse(&header, &payload)
-                    {
+                    if let Ok(parsed) = observe_window_update_parse(
+                        "stream-id-pattern WINDOW_UPDATE frame",
+                        &header,
+                        &payload,
+                    ) {
                         assert_eq!(parsed.stream_id, stream_id);
                         assert_eq!(parsed.increment, increment);
                     }
@@ -782,7 +792,11 @@ fn test_window_update_overflow(overflow: WindowUpdateOverflow) {
                     let payload = buf.split_to(header.length as usize).freeze();
 
                     // Frame parsing should succeed even if increment causes overflow
-                    match asupersync::http::h2::frame::WindowUpdateFrame::parse(&header, &payload) {
+                    match observe_window_update_parse(
+                        "overflow-scenario WINDOW_UPDATE frame",
+                        &header,
+                        &payload,
+                    ) {
                         Ok(frame) => {
                             verify_window_update_consistency(frame.stream_id, frame.increment);
 
@@ -820,9 +834,11 @@ fn test_window_update_overflow(overflow: WindowUpdateOverflow) {
                 if let Ok(header) = FrameHeader::parse(&mut buf) {
                     let payload = buf.split_to(header.length as usize).freeze();
 
-                    if let Ok(frame) =
-                        asupersync::http::h2::frame::WindowUpdateFrame::parse(&header, &payload)
-                    {
+                    if let Ok(frame) = observe_window_update_parse(
+                        "cumulative-overflow WINDOW_UPDATE frame",
+                        &header,
+                        &payload,
+                    ) {
                         total_increment += frame.increment as u64;
 
                         // Each individual frame should be valid
@@ -850,7 +866,11 @@ fn test_window_update_overflow(overflow: WindowUpdateOverflow) {
             if let Ok(header) = FrameHeader::parse(&mut buf) {
                 let payload = buf.split_to(header.length as usize).freeze();
 
-                match asupersync::http::h2::frame::WindowUpdateFrame::parse(&header, &payload) {
+                match observe_window_update_parse(
+                    "large-increment WINDOW_UPDATE frame",
+                    &header,
+                    &payload,
+                ) {
                     Ok(frame) => {
                         assert_eq!(frame.stream_id, clamped_stream_id);
                         assert_eq!(frame.increment, large_increment);
@@ -882,7 +902,11 @@ fn test_reserved_bit_handling(reserved_bit: ReservedBitTest) {
             if let Ok(header) = FrameHeader::parse(&mut buf) {
                 let payload = buf.split_to(header.length as usize).freeze();
 
-                match asupersync::http::h2::frame::WindowUpdateFrame::parse(&header, &payload) {
+                match observe_window_update_parse(
+                    "increment-reserved-bit WINDOW_UPDATE frame",
+                    &header,
+                    &payload,
+                ) {
                     Ok(frame) => {
                         // Reserved bit should be cleared during parsing
                         let expected_increment = increment_with_reserved_bit & 0x7FFF_FFFF;
@@ -914,10 +938,7 @@ fn test_reserved_bit_handling(reserved_bit: ReservedBitTest) {
             let clamped_increment = (frame.increment & 0x7FFF_FFFF).max(1);
 
             // Create frame using library encoding
-            let h2_frame = asupersync::http::h2::frame::WindowUpdateFrame::new(
-                clamped_stream_id,
-                clamped_increment,
-            );
+            let h2_frame = WindowUpdateFrame::new(clamped_stream_id, clamped_increment);
 
             let mut encoded_buf = BytesMut::new();
             h2_frame.encode(&mut encoded_buf);
@@ -938,9 +959,11 @@ fn test_reserved_bit_handling(reserved_bit: ReservedBitTest) {
                     );
 
                     // Also verify through parsing
-                    if let Ok(parsed) =
-                        asupersync::http::h2::frame::WindowUpdateFrame::parse(&header, &payload)
-                    {
+                    if let Ok(parsed) = observe_window_update_parse(
+                        "encoded-reserved-bit WINDOW_UPDATE frame",
+                        &header,
+                        &payload,
+                    ) {
                         assert_eq!(
                             parsed.increment & 0x8000_0000,
                             0,
@@ -968,7 +991,11 @@ fn test_reserved_bit_handling(reserved_bit: ReservedBitTest) {
             if let Ok(header) = FrameHeader::parse(&mut buf) {
                 let payload = buf.split_to(header.length as usize).freeze();
 
-                match asupersync::http::h2::frame::WindowUpdateFrame::parse(&header, &payload) {
+                match observe_window_update_parse(
+                    "multi-reserved-bit WINDOW_UPDATE frame",
+                    &header,
+                    &payload,
+                ) {
                     Ok(frame) => {
                         // All reserved bits should be cleared
                         let expected_increment = modified_increment & 0x7FFF_FFFF;
@@ -997,7 +1024,7 @@ fn test_reserved_bit_handling(reserved_bit: ReservedBitTest) {
 }
 
 fn construct_window_update_frame(stream_id: u32, increment: u32) -> Vec<u8> {
-    let frame = asupersync::http::h2::frame::WindowUpdateFrame::new(stream_id, increment);
+    let frame = WindowUpdateFrame::new(stream_id, increment);
     let mut buf = BytesMut::new();
     frame.encode(&mut buf);
     buf.to_vec()
@@ -1077,7 +1104,7 @@ fn verify_window_update_error_consistency(err: &H2Error, header: &FrameHeader, p
 
 fn test_window_update_reencode(stream_id: u32, increment: u32) {
     // Test that we can re-encode a successfully parsed frame
-    let frame = asupersync::http::h2::frame::WindowUpdateFrame::new(stream_id, increment);
+    let frame = WindowUpdateFrame::new(stream_id, increment);
 
     let mut encoded_buf = BytesMut::new();
     frame.encode(&mut encoded_buf);
@@ -1088,7 +1115,11 @@ fn test_window_update_reencode(stream_id: u32, increment: u32) {
         Ok(header) => {
             let payload = buf.split_to(header.length as usize).freeze();
 
-            match asupersync::http::h2::frame::WindowUpdateFrame::parse(&header, &payload) {
+            match observe_window_update_parse(
+                "re-encoded WINDOW_UPDATE frame",
+                &header,
+                &payload,
+            ) {
                 Ok(re_parsed) => {
                     assert_eq!(
                         re_parsed.stream_id, stream_id,
