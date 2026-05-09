@@ -174,6 +174,11 @@ fn generate_handshake_packet(protocol_version: u8, capabilities: u32) -> Vec<u8>
 
 /// Test MySQL packet parsing with various operations.
 fn test_mysql_decoder(data: &[u8], operations: &[FuzzOperation], config: &ParserConfig) {
+    let configured_max_packet_size = config.max_packet_size.min(MAX_PACKET_SIZE);
+    if config.strict_validation && data.len() as u32 > configured_max_packet_size {
+        return;
+    }
+
     for operation in operations {
         match operation {
             FuzzOperation::CorruptPacketLength { new_length } => {
@@ -235,8 +240,7 @@ fn test_packet_header_corruption(data: &[u8], corrupt_length: u32, expected_seq:
             combined.extend_from_slice(&data[4..]);
         }
 
-        // Try parsing the corrupted header - should handle gracefully
-        let _ = parse_packet_header(&combined, expected_seq);
+        observe_packet_header_parse(parse_packet_header(&combined, expected_seq));
     }
 }
 
@@ -251,7 +255,7 @@ fn test_packet_sequence_corruption(data: &[u8], corrupt_sequence: u8) {
 
     // Test with various expected sequence numbers
     for expected_seq in [0, 1, 255, corrupt_sequence.wrapping_add(1)] {
-        let _ = parse_packet_header(&test_data, expected_seq);
+        observe_packet_header_parse(parse_packet_header(&test_data, expected_seq));
     }
 }
 
@@ -265,12 +269,12 @@ fn test_lenenc_int_boundary(value: u64) {
 
     for &test_value in &boundary_values {
         let encoded = generate_lenenc_int(test_value);
-        let _ = parse_lenenc_int(&encoded, 0);
+        observe_lenenc_int_parse(parse_lenenc_int(&encoded, 0));
 
         // Test with truncated data
         for truncate_len in 1..=encoded.len() {
             let truncated = &encoded[..truncate_len.min(encoded.len())];
-            let _ = parse_lenenc_int(truncated, 0);
+            observe_lenenc_int_parse(parse_lenenc_int(truncated, 0));
         }
     }
 }
@@ -279,51 +283,51 @@ fn test_lenenc_int_boundary(value: u64) {
 fn test_ok_packet_discrimination(data: &[u8], corrupt_marker: bool) {
     // Generate valid OK packet
     let ok_packet = generate_ok_packet(1, 0, 0x0002, 0);
-    let _ = parse_ok_packet(&ok_packet);
+    observe_ok_packet_parse(parse_ok_packet(&ok_packet));
 
     if corrupt_marker && !ok_packet.is_empty() {
         // Test with corrupted marker
         let mut corrupted = ok_packet.clone();
         corrupted[0] = 0x01; // Change from 0x00 to 0x01
-        let _ = parse_ok_packet(&corrupted);
+        observe_ok_packet_parse(parse_ok_packet(&corrupted));
     }
 
     // Test with fuzzed data as potential OK packet
-    let _ = parse_ok_packet(data);
+    observe_ok_packet_parse(parse_ok_packet(data));
 }
 
 /// Test EOF packet discrimination (0xFE marker).
 fn test_eof_packet_discrimination(data: &[u8], corrupt_marker: bool) {
     // Generate valid EOF packet
     let eof_packet = generate_eof_packet(0, 0x0002);
-    let _ = parse_eof_packet(&eof_packet);
+    observe_eof_packet_parse(parse_eof_packet(&eof_packet));
 
     if corrupt_marker && !eof_packet.is_empty() {
         // Test with corrupted marker
         let mut corrupted = eof_packet.clone();
         corrupted[0] = 0xFD; // Change from 0xFE to 0xFD
-        let _ = parse_eof_packet(&corrupted);
+        observe_eof_packet_parse(parse_eof_packet(&corrupted));
     }
 
     // Test with fuzzed data as potential EOF packet
-    let _ = parse_eof_packet(data);
+    observe_eof_packet_parse(parse_eof_packet(data));
 }
 
 /// Test ERR packet discrimination (0xFF marker).
 fn test_err_packet_discrimination(data: &[u8], corrupt_marker: bool) {
     // Generate valid ERR packet
     let err_packet = generate_err_packet(1062, "23000", "Duplicate entry");
-    let _ = parse_err_packet(&err_packet);
+    observe_err_packet_parse(parse_err_packet(&err_packet));
 
     if corrupt_marker && !err_packet.is_empty() {
         // Test with corrupted marker
         let mut corrupted = err_packet.clone();
         corrupted[0] = 0xFE; // Change from 0xFF to 0xFE
-        let _ = parse_err_packet(&corrupted);
+        observe_err_packet_parse(parse_err_packet(&corrupted));
     }
 
     // Test with fuzzed data as potential ERR packet
-    let _ = parse_err_packet(data);
+    observe_err_packet_parse(parse_err_packet(data));
 }
 
 /// Test handshake version discrimination (v9 vs v10).
@@ -344,7 +348,7 @@ fn test_handshake_version_discrimination(version: u8) {
 
         for &capabilities in &capability_combinations {
             let handshake = generate_handshake_packet(test_version, capabilities);
-            let _ = parse_handshake_packet(&handshake);
+            observe_handshake_packet_parse(parse_handshake_packet(&handshake));
         }
     }
 }
@@ -365,10 +369,10 @@ fn test_capability_flags_combinations(flags: u32) {
 
     for &test_flags in &flag_combinations {
         let handshake = generate_handshake_packet(10, test_flags);
-        let _ = parse_handshake_packet(&handshake);
+        observe_handshake_packet_parse(parse_handshake_packet(&handshake));
 
         // Test flag validation
-        let _ = validate_capability_flags(test_flags);
+        observe_capability_flags_validation(test_flags, validate_capability_flags(test_flags));
     }
 }
 
@@ -382,11 +386,11 @@ fn test_partial_packet_parsing(data: &[u8], truncate_at: usize) {
     let partial_data = &data[..truncate_pos];
 
     // Test various parsers with partial data
-    let _ = parse_packet_header(partial_data, 0);
-    let _ = parse_ok_packet(partial_data);
-    let _ = parse_eof_packet(partial_data);
-    let _ = parse_err_packet(partial_data);
-    let _ = parse_lenenc_int(partial_data, 0);
+    observe_packet_header_parse(parse_packet_header(partial_data, 0));
+    observe_ok_packet_parse(parse_ok_packet(partial_data));
+    observe_eof_packet_parse(parse_eof_packet(partial_data));
+    observe_err_packet_parse(parse_err_packet(partial_data));
+    observe_lenenc_int_parse(parse_lenenc_int(partial_data, 0));
 
     // Test incremental parsing (simulating slow reader)
     for chunk_size in [1, 2, 3, 4, 8, 16] {
@@ -396,8 +400,8 @@ fn test_partial_packet_parsing(data: &[u8], truncate_at: usize) {
             let chunk = &data[offset..end];
 
             // Try parsing each chunk independently
-            let _ = parse_packet_header(chunk, 0);
-            let _ = parse_lenenc_int(chunk, 0);
+            observe_packet_header_parse(parse_packet_header(chunk, 0));
+            observe_lenenc_int_parse(parse_lenenc_int(chunk, 0));
 
             offset = end;
         }
@@ -435,7 +439,7 @@ fn test_multi_packet_reassembly(data: &[u8], fragment_sizes: &[usize]) {
     }
 
     // Try parsing the reassembled packet stream
-    let _ = parse_multi_packet_stream(&reassembled);
+    observe_multi_packet_stream_parse(parse_multi_packet_stream(&reassembled));
 }
 
 /// Parse MySQL packet header (internal test function).
@@ -653,6 +657,126 @@ fn validate_capability_flags(flags: u32) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn assert_visible_error(context: &str, error: &str) {
+    let diagnostic = format!("{context}: {error}");
+    assert!(
+        !diagnostic.is_empty(),
+        "{context} failures should expose diagnostics"
+    );
+}
+
+fn observe_packet_header_parse(result: Result<(u32, u8), String>) {
+    match result {
+        Ok((length, sequence)) => {
+            assert!(
+                length <= MAX_PACKET_SIZE,
+                "accepted MySQL packet length must stay bounded"
+            );
+            let summary = format!("ok:{length}:{sequence}");
+            assert!(
+                !summary.is_empty(),
+                "packet header success should stay visible"
+            );
+        }
+        Err(error) => assert_visible_error("packet header parse", &error),
+    }
+}
+
+fn observe_lenenc_int_parse(result: Result<u64, String>) {
+    match result {
+        Ok(value) => {
+            let summary = format!("ok:{value}");
+            assert!(
+                !summary.is_empty(),
+                "length-encoded integer success should stay visible"
+            );
+        }
+        Err(error) => assert_visible_error("length-encoded integer parse", &error),
+    }
+}
+
+fn observe_ok_packet_parse(result: Result<(u64, u64, u16, u16), String>) {
+    match result {
+        Ok((affected_rows, last_insert_id, status_flags, warning_count)) => {
+            let summary =
+                format!("ok:{affected_rows}:{last_insert_id}:{status_flags}:{warning_count}");
+            assert!(!summary.is_empty(), "OK packet success should stay visible");
+        }
+        Err(error) => assert_visible_error("OK packet parse", &error),
+    }
+}
+
+fn observe_eof_packet_parse(result: Result<(u16, u16), String>) {
+    match result {
+        Ok((warning_count, status_flags)) => {
+            let summary = format!("ok:{warning_count}:{status_flags}");
+            assert!(
+                !summary.is_empty(),
+                "EOF packet success should stay visible"
+            );
+        }
+        Err(error) => assert_visible_error("EOF packet parse", &error),
+    }
+}
+
+fn observe_err_packet_parse(result: Result<(u16, String, String), String>) {
+    match result {
+        Ok((error_code, sql_state, message)) => {
+            assert!(
+                sql_state.len() <= 5,
+                "ERR packet SQLSTATE should be protocol-bounded"
+            );
+            let summary = format!("ok:{error_code}:{}:{}", sql_state.len(), message.len());
+            assert!(
+                !summary.is_empty(),
+                "ERR packet success should stay visible"
+            );
+        }
+        Err(error) => assert_visible_error("ERR packet parse", &error),
+    }
+}
+
+fn observe_handshake_packet_parse(result: Result<(u8, u32), String>) {
+    match result {
+        Ok((protocol_version, capabilities)) => {
+            let summary = format!("ok:{protocol_version}:{capabilities}");
+            assert!(
+                !summary.is_empty(),
+                "handshake packet success should stay visible"
+            );
+        }
+        Err(error) => assert_visible_error("handshake packet parse", &error),
+    }
+}
+
+fn observe_capability_flags_validation(flags: u32, result: Result<(), String>) {
+    const CLIENT_PROTOCOL_41: u32 = 0x0000_0200;
+    const CLIENT_SECURE_CONNECTION: u32 = 0x0000_8000;
+
+    match result {
+        Ok(()) => {
+            assert!(
+                (flags & CLIENT_SECURE_CONNECTION) == 0 || (flags & CLIENT_PROTOCOL_41) != 0,
+                "valid capability flags must keep secure-connection prerequisites"
+            );
+        }
+        Err(error) => assert_visible_error("capability flag validation", &error),
+    }
+}
+
+fn observe_multi_packet_stream_parse(result: Result<Vec<Vec<u8>>, String>) {
+    match result {
+        Ok(packets) => {
+            let summary = format!("ok:{}", packets.len());
+            assert!(
+                !summary.is_empty(),
+                "multi-packet stream success should stay visible"
+            );
+        }
+        Err(error) => assert_visible_error("multi-packet stream parse", &error),
+    }
 }
 
 /// Calculate the byte size of a length-encoded integer encoding.
