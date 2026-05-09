@@ -61,9 +61,9 @@ enum OffsetConfig {
 }
 
 impl OffsetConfig {
-    fn as_usize(self) -> usize {
+    fn as_usize(&self) -> usize {
         match self {
-            OffsetConfig::Small(n) => n as usize,
+            OffsetConfig::Small(n) => *n as usize,
             OffsetConfig::Boundary(b) => b.as_usize(),
             OffsetConfig::Large(l) => l.as_usize(),
         }
@@ -158,9 +158,9 @@ enum AdjustmentConfig {
 }
 
 impl AdjustmentConfig {
-    fn as_isize(self) -> isize {
+    fn as_isize(&self) -> isize {
         match self {
-            AdjustmentConfig::Small(n) => n as isize,
+            AdjustmentConfig::Small(n) => *n as isize,
             AdjustmentConfig::Boundary(b) => b.as_isize(),
             AdjustmentConfig::Large(l) => l.as_isize(),
         }
@@ -219,12 +219,12 @@ enum SkipConfig {
 }
 
 impl SkipConfig {
-    fn as_option_usize(self) -> Option<usize> {
+    fn as_option_usize(&self) -> Option<usize> {
         match self {
             SkipConfig::None => None,
-            SkipConfig::Small(n) => Some(n as usize),
+            SkipConfig::Small(n) => Some(*n as usize),
             SkipConfig::Boundary(b) => Some(b.as_usize()),
-            SkipConfig::Large(n) => Some((n % 1_000_000) as usize + 1000),
+            SkipConfig::Large(n) => Some((*n % 1_000_000) as usize + 1000),
         }
     }
 }
@@ -263,9 +263,9 @@ enum MaxFrameConfig {
 }
 
 impl MaxFrameConfig {
-    fn as_usize(self) -> usize {
+    fn as_usize(&self) -> usize {
         match self {
-            MaxFrameConfig::Small(n) => ((n % 64) * 1024 + 1024) as usize, // 1KB-64KB
+            MaxFrameConfig::Small(n) => ((*n % 64) * 1024 + 1024) as usize, // 1KB-64KB
             MaxFrameConfig::Standard(s) => s.as_usize(),
             MaxFrameConfig::Large(l) => l.as_usize(),
             MaxFrameConfig::Boundary(b) => b.as_usize(),
@@ -369,9 +369,9 @@ enum LengthInput {
 }
 
 impl LengthInput {
-    fn as_u64(self) -> u64 {
+    fn as_u64(&self) -> u64 {
         match self {
-            LengthInput::Normal(n) => n as u64,
+            LengthInput::Normal(n) => *n as u64,
             LengthInput::Boundary(b) => b.as_u64(),
             LengthInput::Crafted(c) => c.as_u64(),
         }
@@ -503,11 +503,11 @@ enum PayloadSize {
 }
 
 impl PayloadSize {
-    fn as_usize(self) -> usize {
+    fn as_usize(&self) -> usize {
         match self {
-            PayloadSize::Small(n) => n as usize,
-            PayloadSize::Medium(n) => (n as usize % (1024 * 1024)).max(1),
-            PayloadSize::Large(n) => (n as usize % MAX_BUFFER_SIZE).max(1),
+            PayloadSize::Small(n) => *n as usize,
+            PayloadSize::Medium(n) => (*n as usize % (1024 * 1024)).max(1),
+            PayloadSize::Large(n) => (*n as usize % MAX_BUFFER_SIZE).max(1),
             PayloadSize::Boundary(b) => b.as_usize(),
         }
     }
@@ -562,6 +562,8 @@ fn test_adjust_saturating_boundaries(scenario: &AdjustSaturatingScenario) {
 }
 
 fn test_single_boundary(config: &CodecConfig, test: &BoundaryTest) {
+    observe_expected_outcome(test.expected_outcome);
+
     let codec_result = build_codec_from_config(config);
 
     match codec_result {
@@ -683,7 +685,7 @@ fn test_adjustment_operation(codec: &mut LengthDelimitedCodec, operation: &Adjus
             // But we can test it indirectly through decode operations
             let frame = craft_frame_with_length(*raw_length);
             let mut buf = BytesMut::from(frame.as_slice());
-            let _result = codec.decode(&mut buf);
+            observe_decode_result(codec, &mut buf, "direct adjustment decode");
         }
     }
 }
@@ -692,42 +694,48 @@ fn test_i64_conversion_boundary(codec: &LengthDelimitedCodec, test: &BoundaryTes
     let length = test.input_length.as_u64();
     let frame = craft_frame_with_length(length);
     let mut buf = BytesMut::from(frame.as_slice());
-    let _result = codec.clone().decode(&mut buf);
+    let mut codec = codec.clone();
+    observe_decode_result(&mut codec, &mut buf, "i64 conversion boundary");
 }
 
 fn test_adjustment_overflow(codec: &LengthDelimitedCodec, test: &BoundaryTest) {
     let length = test.input_length.as_u64();
     let frame = craft_frame_with_length(length);
     let mut buf = BytesMut::from(frame.as_slice());
-    let _result = codec.clone().decode(&mut buf);
+    let mut codec = codec.clone();
+    observe_decode_result(&mut codec, &mut buf, "adjustment overflow");
 }
 
 fn test_adjustment_underflow(codec: &LengthDelimitedCodec, test: &BoundaryTest) {
     let length = test.input_length.as_u64();
     let frame = craft_frame_with_length(length);
     let mut buf = BytesMut::from(frame.as_slice());
-    let _result = codec.clone().decode(&mut buf);
+    let mut codec = codec.clone();
+    observe_decode_result(&mut codec, &mut buf, "adjustment underflow");
 }
 
 fn test_negative_length(codec: &LengthDelimitedCodec, test: &BoundaryTest) {
     let length = test.input_length.as_u64();
     let frame = craft_frame_with_length(length);
     let mut buf = BytesMut::from(frame.as_slice());
-    let _result = codec.clone().decode(&mut buf);
+    let mut codec = codec.clone();
+    observe_decode_result(&mut codec, &mut buf, "negative length");
 }
 
 fn test_usize_conversion(codec: &LengthDelimitedCodec, test: &BoundaryTest) {
     let length = test.input_length.as_u64();
     let frame = craft_frame_with_length(length);
     let mut buf = BytesMut::from(frame.as_slice());
-    let _result = codec.clone().decode(&mut buf);
+    let mut codec = codec.clone();
+    observe_decode_result(&mut codec, &mut buf, "usize conversion boundary");
 }
 
 fn test_max_frame_length(codec: &LengthDelimitedCodec, test: &BoundaryTest) {
     let length = test.input_length.as_u64();
     let frame = craft_frame_with_length(length);
     let mut buf = BytesMut::from(frame.as_slice());
-    let _result = codec.clone().decode(&mut buf);
+    let mut codec = codec.clone();
+    observe_decode_result(&mut codec, &mut buf, "max frame length boundary");
 }
 
 fn test_header_overflow(_codec: &LengthDelimitedCodec, _test: &BoundaryTest) {
@@ -737,14 +745,100 @@ fn test_header_overflow(_codec: &LengthDelimitedCodec, _test: &BoundaryTest) {
 fn test_decode_frame(codec: &mut LengthDelimitedCodec, frame_data: &FrameData) {
     let frame = generate_frame_data(frame_data);
     let mut buf = BytesMut::from(frame.as_slice());
-    let _result = codec.decode(&mut buf);
+    observe_decode_result(codec, &mut buf, "generated frame decode");
 }
 
 fn test_encode_frame(codec: &mut LengthDelimitedCodec, payload_size: &PayloadSize) {
     let size = payload_size.as_usize().min(MAX_BUFFER_SIZE);
     let payload = generate_payload(size);
     let mut buf = BytesMut::new();
-    let _result = codec.encode(BytesMut::from(payload.as_slice()), &mut buf);
+    observe_encode_result(
+        codec,
+        BytesMut::from(payload.as_slice()),
+        &mut buf,
+        "generated frame encode",
+    );
+}
+
+fn observe_decode_result(codec: &mut LengthDelimitedCodec, buf: &mut BytesMut, context: &str) {
+    let before_len = buf.len();
+    let result = codec.decode(buf);
+    assert!(
+        buf.len() <= before_len,
+        "{context}: decode should never increase the input buffer"
+    );
+
+    match result {
+        Ok(Some(frame)) => {
+            assert!(
+                frame.len() <= before_len,
+                "{context}: decoded frame must be bounded by original input"
+            );
+        }
+        Ok(None) => {}
+        Err(error) => {
+            assert!(
+                !error.to_string().is_empty(),
+                "{context}: rejected boundary frame should explain the rejection"
+            );
+        }
+    }
+}
+
+fn observe_encode_result(
+    codec: &mut LengthDelimitedCodec,
+    payload: BytesMut,
+    dst: &mut BytesMut,
+    context: &str,
+) {
+    let payload_len = payload.len();
+    let before_len = dst.len();
+    let result = codec.encode(payload, dst);
+
+    match result {
+        Ok(()) => {
+            assert!(
+                dst.len() >= before_len + payload_len,
+                "{context}: encoded frame must include the payload bytes"
+            );
+            assert!(
+                dst.len() <= before_len + payload_len + 8,
+                "{context}: encoded frame prefix should be bounded by the length field"
+            );
+        }
+        Err(error) => {
+            assert_eq!(
+                dst.len(),
+                before_len,
+                "{context}: rejected encode must not partially mutate the output buffer"
+            );
+            assert!(
+                !error.to_string().is_empty(),
+                "{context}: rejected encode should explain the rejection"
+            );
+        }
+    }
+}
+
+fn observe_expected_outcome(outcome: ExpectedOutcome) {
+    match outcome {
+        ExpectedOutcome::Success => {}
+        ExpectedOutcome::Error(error) | ExpectedOutcome::SuccessOrError(error) => {
+            assert!(!expected_error_label(error).is_empty());
+        }
+    }
+}
+
+fn expected_error_label(error: ExpectedError) -> &'static str {
+    match error {
+        ExpectedError::LengthExceedsI64 => "length-exceeds-i64",
+        ExpectedError::AdjustmentExceedsI64 => "adjustment-exceeds-i64",
+        ExpectedError::LengthOverflow => "length-overflow",
+        ExpectedError::NegativeFrameLength => "negative-frame-length",
+        ExpectedError::LengthExceedsUsize => "length-exceeds-usize",
+        ExpectedError::FrameLengthExceedsMax => "frame-length-exceeds-max",
+        ExpectedError::HeaderLengthOverflow => "header-length-overflow",
+    }
 }
 
 fn craft_frame_with_length(length: u64) -> Vec<u8> {
