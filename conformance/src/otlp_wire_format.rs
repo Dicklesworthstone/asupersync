@@ -30,6 +30,7 @@
     clippy::approx_constant,
     clippy::cast_abs_to_unsigned,
     clippy::collapsible_if,
+    clippy::collapsible_match,
     clippy::enum_variant_names,
     clippy::explicit_counter_loop,
     clippy::format_in_format_args,
