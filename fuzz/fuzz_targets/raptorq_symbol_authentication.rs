@@ -237,14 +237,21 @@ fn execute_auth_operation(
             esi,
             kind,
         } => {
-            if let Some(key) = harness.get_key(key_index) {
-                if symbol_data.len() <= MAX_SYMBOL_SIZE {
-                    let symbol_id = create_symbol_id(object_id, sbn, esi);
-                    let symbol = Symbol::new(symbol_id, symbol_data, kind.into());
-                    let tag = AuthenticationTag::compute(key, &symbol);
-                    let auth_symbol = AuthenticatedSymbol::new_verified(symbol, tag);
-                    harness.store_symbol(key_index, auth_symbol);
+            if let Some(key) = harness.get_key(key_index)
+                && symbol_data.len() <= MAX_SYMBOL_SIZE
+            {
+                let symbol_id = create_symbol_id(object_id, sbn, esi);
+                let symbol = Symbol::new(symbol_id, symbol_data, kind.into());
+                let tag = AuthenticationTag::compute(key, &symbol);
+                assert!(
+                    tag.verify(key, &symbol),
+                    "freshly computed authentication tag must verify"
+                );
+                if config.enable_collision_attempts {
+                    test_collision_attempt(key, &symbol, tag);
                 }
+                let auth_symbol = AuthenticatedSymbol::from_parts(symbol, tag);
+                harness.store_symbol(key_index, auth_symbol);
             }
         }
 
@@ -273,10 +280,10 @@ fn execute_auth_operation(
             symbol_index,
             tag_modification,
         } => {
-            if config.test_tag_boundary_conditions {
-                if let Some(auth_symbol) = harness.get_symbol(symbol_index) {
-                    test_tag_boundary_conditions(auth_symbol, tag_modification);
-                }
+            if config.test_tag_boundary_conditions
+                && let Some(auth_symbol) = harness.get_symbol(symbol_index)
+            {
+                test_tag_boundary_conditions(auth_symbol, tag_modification);
             }
         }
 
@@ -299,10 +306,10 @@ fn execute_auth_operation(
             symbol_index,
             reorder_pattern,
         } => {
-            if config.test_byte_reordering {
-                if let Some(auth_symbol) = harness.get_symbol(symbol_index) {
-                    test_byte_reordering(auth_symbol, reorder_pattern);
-                }
+            if config.test_byte_reordering
+                && let Some(auth_symbol) = harness.get_symbol(symbol_index)
+            {
+                test_byte_reordering(auth_symbol, reorder_pattern);
             }
         }
     }
@@ -334,6 +341,31 @@ fn test_symbol_verification(auth_symbol: &AuthenticatedSymbol, key: &AuthKey) {
     assert_eq!(
         is_valid, second_verification,
         "Authentication verification is non-deterministic"
+    );
+}
+
+/// Test that a neighboring symbol does not authenticate under the original tag.
+fn test_collision_attempt(key: &AuthKey, symbol: &Symbol, tag: AuthenticationTag) {
+    let alternate_symbol_id = SymbolId::new(
+        symbol.object_id(),
+        symbol.sbn(),
+        symbol.esi().wrapping_add(1),
+    );
+    let alternate_symbol = Symbol::new(alternate_symbol_id, symbol.data().to_vec(), symbol.kind());
+    let alternate_tag = AuthenticationTag::compute(key, &alternate_symbol);
+
+    assert!(
+        alternate_tag.verify(key, &alternate_symbol),
+        "alternate authentication tag failed verification"
+    );
+    assert_ne!(
+        tag.as_bytes(),
+        alternate_tag.as_bytes(),
+        "neighboring symbol produced identical authentication tag"
+    );
+    assert!(
+        !tag.verify(key, &alternate_symbol),
+        "original authentication tag unexpectedly verified neighboring symbol"
     );
 }
 
@@ -489,12 +521,15 @@ fn test_malformed_framing(framing_error: FramingError) {
             padded.resize(32, 0);
             let tag = AuthenticationTag::from_bytes(padded.try_into().unwrap());
 
-            // This tag will not verify correctly, but shouldn't cause crashes
+            // This tag must not verify correctly, but still should not panic.
             let test_key = AuthKey::from_seed(0xabcdef);
             let test_symbol_id = create_symbol_id(1, 1, 1);
             let test_symbol = Symbol::new(test_symbol_id, vec![1, 2, 3], SymbolKind::Source);
 
-            let _ = tag.verify(&test_key, &test_symbol);
+            assert!(
+                !tag.verify(&test_key, &test_symbol),
+                "Truncated authentication tag unexpectedly verified"
+            );
         }
 
         FramingError::ExtendedTag(extra_bytes) => {
@@ -705,7 +740,13 @@ fn test_constant_time_verification() {
     let valid_tag = AuthenticationTag::compute(&key, &symbol);
     let invalid_tag = AuthenticationTag::zero();
 
-    // Both verifications should complete without panic
-    let _ = valid_tag.verify(&key, &symbol);
-    let _ = invalid_tag.verify(&key, &symbol);
+    // Both verifications should complete without panic and expose their outcome.
+    assert!(
+        valid_tag.verify(&key, &symbol),
+        "Valid authentication tag failed verification"
+    );
+    assert!(
+        !invalid_tag.verify(&key, &symbol),
+        "Invalid authentication tag unexpectedly verified"
+    );
 }
