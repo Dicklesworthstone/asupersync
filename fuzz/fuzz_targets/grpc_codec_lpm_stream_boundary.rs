@@ -191,6 +191,15 @@ fn observe_decode(
     result
 }
 
+fn observe_decode_probe_outcome(result: Result<Option<GrpcMessage>, GrpcError>) {
+    if let Err(error) = result {
+        assert!(
+            !error.to_string().is_empty(),
+            "extra decode probe errors must remain observable"
+        );
+    }
+}
+
 fn assert_fixed_rejection_canaries() {
     let mut complete_invalid = BytesMut::from(&b"\x02\0\0\0\x02no"[..]);
     let mut codec = GrpcCodec::with_max_size(CODEC_MAX_FRAME);
@@ -251,7 +260,7 @@ fuzz_target!(|stream: Stream| {
     // returns Err — and consumes some bytes either way (or
     // returns Ok(None) cleanly).
     let pre_len = buf_single.len();
-    let _ = observe_decode(&mut codec_single, &mut buf_single); // must not loop
+    observe_decode_probe_outcome(observe_decode(&mut codec_single, &mut buf_single)); // must not loop
     assert!(
         buf_single.len() <= pre_len,
         "decoder must not increase buffer length",
@@ -317,7 +326,11 @@ fuzz_target!(|stream: Stream| {
         // The decode loop must terminate in finite work — drain()
         // would loop on an Ok(None) or Err result, neither of
         // which advances. The function returns when stuck.
-        let _ = drain(&mut codec_oversize, &mut buf_oversize);
+        let oversize_drain = drain(&mut codec_oversize, &mut buf_oversize);
+        assert!(
+            oversize_drain.len() <= MAX_FRAMES,
+            "oversize drain must terminate within the frame cap"
+        );
         // No panic = property 3 holds.
     }
 
