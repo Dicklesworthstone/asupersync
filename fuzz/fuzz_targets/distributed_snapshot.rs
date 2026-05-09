@@ -596,25 +596,45 @@ fn apply_operation(
 
 fn test_snapshot_deserializer(data: &[u8], _config: &ParserConfig) {
     // Test deserializer with multiple approaches
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _ = RegionSnapshot::from_bytes(data);
-    }));
+    observe_snapshot_parse(data, "mutated snapshot");
 
     // Test with truncated versions of the data
     for len in (0..data.len().min(100)).step_by(3) {
         let truncated = &data[..len];
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = RegionSnapshot::from_bytes(truncated);
-        }));
+        observe_snapshot_parse(truncated, "truncated snapshot");
     }
 
     // Test with trailing garbage
     if data.len() < MAX_INPUT_SIZE / 2 {
         let mut with_trailing = data.to_vec();
         with_trailing.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]);
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = RegionSnapshot::from_bytes(&with_trailing);
-        }));
+        observe_snapshot_parse(&with_trailing, "trailing-garbage snapshot");
+    }
+}
+
+fn observe_snapshot_parse(data: &[u8], context: &str) {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        RegionSnapshot::from_bytes(data)
+    })) {
+        Ok(Ok(snapshot)) => {
+            assert!(
+                snapshot.metadata.len() <= data.len(),
+                "{context} accepted metadata should remain input-bounded"
+            );
+            assert!(
+                snapshot.tasks.len() <= data.len() / TASK_ENTRY_LEN,
+                "{context} accepted task count should remain input-bounded"
+            );
+            assert!(
+                snapshot.children.len() <= data.len() / REGION_ID_LEN,
+                "{context} accepted child count should remain input-bounded"
+            );
+        }
+        Ok(Err(error)) => assert!(
+            !error.to_string().is_empty(),
+            "{context} parser errors should remain observable"
+        ),
+        Err(_) => panic!("RegionSnapshot parser panicked on {context} input"),
     }
 }
 
