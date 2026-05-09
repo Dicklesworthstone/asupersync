@@ -18,9 +18,11 @@
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::messaging::jetstream::{FuzzJsAckControl, fuzz_parse_ack_control};
 use libfuzzer_sys::fuzz_target;
+use std::sync::OnceLock;
 
 /// Maximum size for control token payload (reasonable upper bound)
 const MAX_TOKEN_SIZE: usize = 256;
+static FIXED_ACK_CONTROL_CANARIES: OnceLock<()> = OnceLock::new();
 
 /// Structure-aware generator for JetStream ack control tokens
 #[derive(Arbitrary, Debug, Clone)]
@@ -187,13 +189,15 @@ impl AckControlToken {
 }
 
 fuzz_target!(|data: &[u8]| {
+    FIXED_ACK_CONTROL_CANARIES.get_or_init(run_fixed_ack_control_canaries);
+
     // Limit input size to prevent excessive memory usage
     if data.len() > MAX_TOKEN_SIZE {
         return;
     }
 
     // Test 1: Direct raw bytes fuzzing (classic approach)
-    let raw_result = fuzz_parse_ack_control(data);
+    let raw_result = observe_ack_control(data, "raw");
 
     // Verify the result is one of the valid enum variants
     match raw_result {
@@ -216,7 +220,7 @@ fuzz_target!(|data: &[u8]| {
             return;
         }
 
-        let structured_result = fuzz_parse_ack_control(&generated_bytes);
+        let structured_result = observe_ack_control(&generated_bytes, "structured");
         let expected = token.expected_result();
 
         // For well-formed tokens, verify the parser behaves correctly
@@ -253,7 +257,7 @@ fuzz_target!(|data: &[u8]| {
 fn fuzz_boundary_conditions(data: &[u8]) {
     // Test very short inputs
     if data.len() <= 8 {
-        let _ = fuzz_parse_ack_control(data);
+        observe_ack_control(data, "short");
     }
 
     // Test exact valid token lengths
@@ -265,20 +269,60 @@ fn fuzz_boundary_conditions(data: &[u8]) {
             for (i, &byte) in data.iter().enumerate().take(token.len()) {
                 modified[i] ^= byte; // XOR corruption
             }
-            let _ = fuzz_parse_ack_control(&modified);
+            observe_ack_control(&modified, "corrupted-valid-token");
         }
     }
 
     // Test prefix-only inputs
     if !data.is_empty() {
         let prefix_only = vec![data[0]];
-        let _ = fuzz_parse_ack_control(&prefix_only);
+        observe_ack_control(&prefix_only, "prefix-only");
     }
 
     // Test null-terminated variants
     if data.len() > 4 {
         let mut null_term = data[..4].to_vec();
         null_term.push(0);
-        let _ = fuzz_parse_ack_control(&null_term);
+        observe_ack_control(&null_term, "null-terminated");
+    }
+}
+
+fn run_fixed_ack_control_canaries() {
+    for (bytes, expected) in [
+        (&b"+ACK"[..], FuzzJsAckControl::Ack),
+        (&b"-NAK"[..], FuzzJsAckControl::Nak),
+        (&b"+WPI"[..], FuzzJsAckControl::InProgress),
+        (&b"+TERM"[..], FuzzJsAckControl::Term),
+        (&b"+ack"[..], FuzzJsAckControl::Unknown),
+        (&b"+ACK\0"[..], FuzzJsAckControl::Unknown),
+        (&b" +ACK"[..], FuzzJsAckControl::Unknown),
+        (&b"+ACK+ACK"[..], FuzzJsAckControl::Unknown),
+        (&b"+"[..], FuzzJsAckControl::Unknown),
+        (&b""[..], FuzzJsAckControl::Unknown),
+    ] {
+        let actual = observe_ack_control(bytes, "fixed-canary");
+        assert_eq!(actual, expected);
+    }
+}
+
+fn observe_ack_control(payload: &[u8], context: &str) -> FuzzJsAckControl {
+    let result = fuzz_parse_ack_control(payload);
+    let expected = expected_ack_control(payload);
+    assert_eq!(
+        result,
+        expected,
+        "{context} JetStream ack control parse mismatch for {:?}",
+        String::from_utf8_lossy(payload)
+    );
+    result
+}
+
+fn expected_ack_control(payload: &[u8]) -> FuzzJsAckControl {
+    match payload {
+        b"+ACK" => FuzzJsAckControl::Ack,
+        b"-NAK" => FuzzJsAckControl::Nak,
+        b"+WPI" => FuzzJsAckControl::InProgress,
+        b"+TERM" => FuzzJsAckControl::Term,
+        _ => FuzzJsAckControl::Unknown,
     }
 }
