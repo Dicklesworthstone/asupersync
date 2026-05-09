@@ -18,18 +18,30 @@ use std::str;
 fn test_content_encoding_from_token(data: &[u8]) {
     if let Ok(token) = str::from_utf8(data) {
         // Should not crash on any input
-        let _encoding = ContentEncoding::from_token(token);
+        observe_content_encoding_token("raw token", token, ContentEncoding::from_token(token));
 
         // Test with leading/trailing whitespace
         let trimmed = token.trim();
-        let _encoding = ContentEncoding::from_token(trimmed);
+        observe_content_encoding_token(
+            "trimmed token",
+            trimmed,
+            ContentEncoding::from_token(trimmed),
+        );
 
         // Test case variations
         let lowercase = token.to_lowercase();
-        let _encoding = ContentEncoding::from_token(&lowercase);
+        observe_content_encoding_token(
+            "lowercase token",
+            &lowercase,
+            ContentEncoding::from_token(&lowercase),
+        );
 
         let uppercase = token.to_uppercase();
-        let _encoding = ContentEncoding::from_token(&uppercase);
+        observe_content_encoding_token(
+            "uppercase token",
+            &uppercase,
+            ContentEncoding::from_token(&uppercase),
+        );
     }
 }
 
@@ -59,17 +71,102 @@ fn test_encoding_negotiation(accept_encoding_header: &str) {
 
     for supported in &test_cases {
         // Test with Some(header)
-        let _result = negotiate_encoding(Some(accept_encoding_header), supported);
+        observe_negotiation_result(
+            "header negotiation",
+            Some(accept_encoding_header),
+            supported,
+            negotiate_encoding(Some(accept_encoding_header), supported),
+        );
 
         // Test with None (no header)
-        let _result = negotiate_encoding(None, supported);
+        observe_negotiation_result(
+            "absent header negotiation",
+            None,
+            supported,
+            negotiate_encoding(None, supported),
+        );
     }
 
     // Test with empty header
-    let _result = negotiate_encoding(Some(""), &[ContentEncoding::Gzip]);
+    observe_negotiation_result(
+        "empty header negotiation",
+        Some(""),
+        &[ContentEncoding::Gzip],
+        negotiate_encoding(Some(""), &[ContentEncoding::Gzip]),
+    );
 
     // Test with whitespace-only header
-    let _result = negotiate_encoding(Some("   \t\n  "), &[ContentEncoding::Gzip]);
+    observe_negotiation_result(
+        "whitespace header negotiation",
+        Some("   \t\n  "),
+        &[ContentEncoding::Gzip],
+        negotiate_encoding(Some("   \t\n  "), &[ContentEncoding::Gzip]),
+    );
+}
+
+fn observe_content_encoding_token(context: &str, token: &str, encoding: Option<ContentEncoding>) {
+    if let Some(encoding) = encoding {
+        let canonical = encoding.as_token();
+        assert!(
+            !canonical.is_empty(),
+            "{context}: accepted encoding should expose a canonical token"
+        );
+        assert_eq!(
+            ContentEncoding::from_token(canonical),
+            Some(encoding),
+            "{context}: accepted token {token:?} should round-trip through canonical token"
+        );
+    }
+}
+
+fn observe_negotiation_result(
+    context: &str,
+    accept_encoding: Option<&str>,
+    supported: &[ContentEncoding],
+    result: Option<ContentEncoding>,
+) {
+    if supported.is_empty() {
+        assert!(
+            result.is_none(),
+            "{context}: unsupported server set must not negotiate an encoding"
+        );
+        return;
+    }
+
+    if let Some(encoding) = result {
+        assert!(
+            supported.contains(&encoding),
+            "{context}: negotiated encoding {encoding:?} was not server-supported"
+        );
+        assert!(
+            !encoding.as_token().is_empty(),
+            "{context}: negotiated encoding should expose a response token"
+        );
+    }
+
+    match accept_encoding {
+        None => {
+            let expected = if supported.contains(&ContentEncoding::Identity) {
+                Some(ContentEncoding::Identity)
+            } else {
+                supported.first().copied()
+            };
+            assert_eq!(
+                result, expected,
+                "{context}: absent Accept-Encoding should preserve server fallback semantics"
+            );
+        }
+        Some(header) if header.trim().is_empty() => {
+            let expected = supported
+                .contains(&ContentEncoding::Identity)
+                .then_some(ContentEncoding::Identity);
+            assert_eq!(
+                result, expected,
+                "{context}: empty Accept-Encoding should only permit identity"
+            );
+        }
+        Some(_) => {}
+    }
 }
 
 /// Create various malformed Accept-Encoding headers for edge case testing.
@@ -142,7 +239,7 @@ fn test_malformed_headers(base_data: &[u8]) {
 
 /// Test edge cases with specific problematic patterns.
 fn test_edge_cases() {
-    let edge_case_headers = vec![
+    let mut edge_case_headers = [
         // Empty and whitespace
         "",
         " ",
@@ -179,19 +276,23 @@ fn test_edge_cases() {
         "gzip, deflate, br, zstd",
         "gzip, compress, deflate",
         "deflate, gzip;q=1.0, *;q=0.5",
-        // Malicious attempts
-        "x".repeat(10000),                         // very long
-        "gzip;q=".to_string() + &"9".repeat(1000), // huge quality value
-        "a,".repeat(10000),                        // many parts
-        ("\x00".repeat(100)) + "gzip",             // null bytes
-        "\u{FFFF}gzip\u{FFFE}",                    // unicode edge chars
-        "gzip\r\ngzip",                            // line breaks
+        "\u{FFFF}gzip\u{FFFE}", // unicode edge chars
+        "gzip\r\ngzip",         // line breaks
         // Float edge cases
         "gzip;q=1.7976931348623157e+308", // max f64
         "gzip;q=4.9406564584124654e-324", // min f64
         "gzip;q=1.0000000000000002",      // precision test
         "gzip;q=0.9999999999999999",      // precision test
-    ];
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect::<Vec<_>>();
+    edge_case_headers.extend([
+        "x".repeat(10000),                         // very long
+        "gzip;q=".to_string() + &"9".repeat(1000), // huge quality value
+        "a,".repeat(10000),                        // many parts
+        ("\x00".repeat(100)) + "gzip",             // null bytes
+    ]);
 
     for header in &edge_case_headers {
         test_encoding_negotiation(header);
@@ -233,20 +334,21 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Test 6: Concatenation tests (test long headers)
-    if let Ok(base_str) = str::from_utf8(data) {
-        if !base_str.is_empty() && base_str.len() < 1000 {
-            // Test repeated concatenation
-            let repeated = base_str.repeat(10);
-            test_encoding_negotiation(&repeated);
+    if let Ok(base_str) = str::from_utf8(data)
+        && !base_str.is_empty()
+        && base_str.len() < 1000
+    {
+        // Test repeated concatenation
+        let repeated = base_str.repeat(10);
+        test_encoding_negotiation(&repeated);
 
-            // Test comma-separated concatenation
-            let comma_separated = format!("{},{},{}", base_str, base_str, base_str);
-            test_encoding_negotiation(&comma_separated);
+        // Test comma-separated concatenation
+        let comma_separated = format!("{},{},{}", base_str, base_str, base_str);
+        test_encoding_negotiation(&comma_separated);
 
-            // Test with quality parameters
-            let with_quality = format!("{};q=0.5,{};q=0.8", base_str, base_str);
-            test_encoding_negotiation(&with_quality);
-        }
+        // Test with quality parameters
+        let with_quality = format!("{};q=0.5,{};q=0.8", base_str, base_str);
+        test_encoding_negotiation(&with_quality);
     }
 
     // Test 7: Binary data interpretation
