@@ -809,7 +809,9 @@ fn t812_17_triage_pointers_one_per_suite() {
             .unwrap();
         pointers.push((
             suite.suite_id,
-            format!("rch exec -- cargo test --test {stem} -- --nocapture"),
+            format!(
+                "rch exec -- env CARGO_TARGET_DIR=${{TMPDIR:-/tmp}}/rch_target_tokio_cross_track_e2e_{stem} cargo test --test {stem} -- --nocapture"
+            ),
         ));
     }
 
@@ -818,6 +820,14 @@ fn t812_17_triage_pointers_one_per_suite() {
         assert!(
             cmd.contains("cargo test") && cmd.contains("rch exec"),
             "suite {suite_id} pointer must use rch exec + cargo test"
+        );
+        assert!(
+            cmd.contains("CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_cross_track_e2e_"),
+            "suite {suite_id} pointer must use an explicit rch target dir"
+        );
+        assert!(
+            !cmd.contains("rch exec -- cargo "),
+            "suite {suite_id} pointer must not use stale bare rch cargo routing"
         );
     }
 
