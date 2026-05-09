@@ -660,7 +660,8 @@ fuzz_target!(|data: &[u8]| {
     );
 
     // Execute the test case
-    let _result = connection.execute_test_case(&test_case);
+    let result = connection.execute_test_case(&test_case);
+    observe_execute_test_case_result(&connection, &test_case, &result);
 
     // Test specific timeout edge cases
     test_continuation_timeout_edge_cases(&test_case);
@@ -717,6 +718,122 @@ fn observe_process_frame_outcome(
             );
             false
         }
+    }
+}
+
+fn observe_execute_test_case_result(
+    connection: &MockH2Connection,
+    test_case: &ContinuationTimeoutTestCase,
+    result: &ContinuationTimeoutTestResult,
+) {
+    assert_eq!(
+        result.timeout_violations, connection.timeout_violations,
+        "execute_test_case result should report the connection timeout violations"
+    );
+    assert_eq!(
+        result.frame_sequence_violations, connection.frame_sequence_violations,
+        "execute_test_case result should report the connection frame-sequence violations"
+    );
+    assert_eq!(
+        result.memory_peak_bytes, connection.memory_usage_bytes,
+        "execute_test_case result should report final simulated memory usage"
+    );
+    assert!(
+        result.protocol_compliance_score.is_finite()
+            && (0.0..=1.0).contains(&result.protocol_compliance_score),
+        "protocol compliance score should stay in [0, 1]"
+    );
+    assert!(
+        result.continuation_sequences_completed <= test_case.frame_sequence.len(),
+        "completed continuation count cannot exceed processed frame count"
+    );
+    assert!(
+        result.continuation_sequences_timed_out <= test_case.frame_sequence.len(),
+        "timed-out continuation count cannot exceed processed frame count"
+    );
+
+    if !test_case.timeout_config.enable_timeout_checking {
+        assert!(
+            result.timeout_violations.iter().all(|violation| {
+                violation.violation_type != TimeoutViolationType::ContinuationTimeout
+            }),
+            "disabled timeout checking should not emit continuation timeout violations"
+        );
+    }
+
+    if result.memory_peak_bytes > connection.max_memory_usage_bytes {
+        assert!(
+            result
+                .timeout_violations
+                .iter()
+                .any(|violation| { violation.violation_type == TimeoutViolationType::MemoryLeak }),
+            "memory above configured limit should be reported as a MemoryLeak violation"
+        );
+    }
+
+    for violation in &result.timeout_violations {
+        assert_timeout_violation_shape(violation);
+    }
+
+    for violation in &result.frame_sequence_violations {
+        assert!(
+            !violation.actual_frame_type.trim().is_empty(),
+            "frame sequence violations should identify the observed frame type"
+        );
+        assert!(
+            matches!(
+                violation.violation_type,
+                FrameSequenceViolationType::InterleavedFrame
+                    | FrameSequenceViolationType::WrongStreamContinuation
+                    | FrameSequenceViolationType::ConcurrentContinuations
+            ),
+            "frame sequence violation should use a known violation type"
+        );
+    }
+}
+
+fn assert_timeout_violation_shape(violation: &TimeoutViolation) {
+    assert!(
+        matches!(
+            violation.violation_type,
+            TimeoutViolationType::ContinuationTimeout
+                | TimeoutViolationType::TimeoutNotEnforced
+                | TimeoutViolationType::PrematureTimeout
+                | TimeoutViolationType::MemoryLeak
+                | TimeoutViolationType::InvalidTimeoutConfig
+        ),
+        "timeout violation should use a known violation type"
+    );
+
+    match violation.violation_type {
+        TimeoutViolationType::ContinuationTimeout => {
+            assert_eq!(
+                violation.severity,
+                ViolationSeverity::Critical,
+                "continuation timeouts should be critical"
+            );
+            assert!(
+                violation.actual_elapsed_ms >= u64::from(violation.timeout_ms),
+                "continuation timeout elapsed before the configured timeout"
+            );
+        }
+        TimeoutViolationType::MemoryLeak => {
+            assert_eq!(
+                violation.severity,
+                ViolationSeverity::Critical,
+                "memory leaks should be critical"
+            );
+        }
+        TimeoutViolationType::TimeoutNotEnforced => {
+            assert!(
+                matches!(
+                    violation.severity,
+                    ViolationSeverity::High | ViolationSeverity::Critical
+                ),
+                "unenforced timeouts should be high severity or worse"
+            );
+        }
+        TimeoutViolationType::PrematureTimeout | TimeoutViolationType::InvalidTimeoutConfig => {}
     }
 }
 
