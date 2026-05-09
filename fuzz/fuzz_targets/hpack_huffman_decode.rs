@@ -33,15 +33,17 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use asupersync::bytes::{Bytes, BytesMut};
-use asupersync::http::h2::H2Error;
-use asupersync::http::h2::hpack::{Header, HpackDecoder};
+use asupersync::bytes::Bytes;
+use asupersync::http::h2::HpackDecoder;
 
 /// Maximum input size to prevent memory exhaustion during fuzzing.
 const MAX_FUZZ_INPUT_SIZE: usize = 64_000;
 
 /// Maximum reasonable decoded output size (estimated worst case).
 const MAX_DECODED_OUTPUT_SIZE: usize = 512_000; // ~8x expansion worst case
+
+/// Maximum diagnostic size accepted from graceful decoder rejections.
+const MAX_HUFFMAN_DIAGNOSTIC_SIZE: usize = 2048;
 
 /// Huffman decoding test scenarios.
 #[derive(Arbitrary, Debug, Clone)]
@@ -174,6 +176,31 @@ fn test_huffman_decoder_invariants(huffman_data: &[u8]) -> Result<String, String
     }
 }
 
+fn observe_huffman_decoder_result(context: &str, result: Result<String, String>) {
+    match result {
+        Ok(decoded) => {
+            assert!(
+                decoded.len() <= MAX_DECODED_OUTPUT_SIZE,
+                "{context}: decoded output size {} exceeds maximum {}",
+                decoded.len(),
+                MAX_DECODED_OUTPUT_SIZE
+            );
+        }
+        Err(error_msg) => {
+            assert!(
+                !error_msg.trim().is_empty(),
+                "{context}: decoder rejection should include a diagnostic"
+            );
+            assert!(
+                error_msg.len() <= MAX_HUFFMAN_DIAGNOSTIC_SIZE,
+                "{context}: decoder diagnostic size {} exceeds maximum {}",
+                error_msg.len(),
+                MAX_HUFFMAN_DIAGNOSTIC_SIZE
+            );
+        }
+    }
+}
+
 /// Generate specific edge case inputs for targeted testing.
 fn generate_edge_case_input(edge_case: &HuffmanEdgeCase) -> Vec<u8> {
     match edge_case {
@@ -240,8 +267,8 @@ fn test_known_valid_sequences() {
         (vec![0xFF], "should handle all-ones padding"),
     ];
 
-    for (input, _description) in &test_cases {
-        let _ = test_huffman_decoder_invariants(input);
+    for (input, description) in &test_cases {
+        observe_huffman_decoder_result(description, test_huffman_decoder_invariants(input));
         // Note: We don't assert success here because some test patterns may
         // be invalid due to padding requirements, but we test that the
         // decoder handles them gracefully without crashing
@@ -261,13 +288,13 @@ fuzz_target!(|fuzz_input: HuffmanFuzzInput| {
     if test_data.is_empty() {
         let result = test_huffman_decoder_invariants(&test_data);
         // Empty input should either succeed (empty string) or fail gracefully
-        match result {
-            Ok(decoded) => assert!(
+        if let Ok(decoded) = &result {
+            assert!(
                 decoded.is_empty(),
                 "Empty input should decode to empty string"
-            ),
-            Err(_) => {} // Graceful failure is acceptable
+            );
         }
+        observe_huffman_decoder_result("empty input", result);
         return;
     }
 
@@ -287,7 +314,10 @@ fuzz_target!(|fuzz_input: HuffmanFuzzInput| {
     }
 
     // Test the main data
-    let _ = test_huffman_decoder_invariants(&test_data);
+    observe_huffman_decoder_result(
+        "mutated fuzz input",
+        test_huffman_decoder_invariants(&test_data),
+    );
 
     // Test specific edge cases if requested
     if fuzz_input.test_edge_cases {
@@ -310,13 +340,16 @@ fuzz_target!(|fuzz_input: HuffmanFuzzInput| {
         for edge_case in &edge_cases {
             let edge_input = generate_edge_case_input(edge_case);
             if edge_input.len() <= MAX_FUZZ_INPUT_SIZE {
-                let _ = test_huffman_decoder_invariants(&edge_input);
+                observe_huffman_decoder_result(
+                    "generated edge case",
+                    test_huffman_decoder_invariants(&edge_input),
+                );
             }
         }
     }
 
     // Test known valid sequences periodically
-    if fuzz_input.data.len() % 100 == 0 {
+    if fuzz_input.data.len().is_multiple_of(100) {
         test_known_valid_sequences();
     }
 });
