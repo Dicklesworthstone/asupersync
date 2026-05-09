@@ -22,8 +22,8 @@
 
 use arbitrary::Arbitrary;
 use asupersync::database::postgres::{
-    fuzz_parse_command_complete_tag, fuzz_parse_error_response, fuzz_parse_notice_response,
-    fuzz_parse_parameter_status,
+    PgError, fuzz_parse_command_complete_tag, fuzz_parse_error_response,
+    fuzz_parse_notice_response, fuzz_parse_parameter_status,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -329,13 +329,11 @@ fn build_error_message(fields: &[ErrorField], termination: &MalformedTermination
             // Don't add final null
         }
         MalformedTermination::ExtraTerminators(count) => {
-            for _ in 0..=*count {
-                message.push(0);
-            }
+            message.resize(message.len() + usize::from(*count) + 1, 0);
         }
         MalformedTermination::EmbeddedNulls => {
             // Insert nulls at random positions in existing data
-            if !message.is_empty() && fields.len() > 0 {
+            if !message.is_empty() && !fields.is_empty() {
                 let insert_pos = message.len() / 2;
                 message.insert(insert_pos, 0);
             }
@@ -388,6 +386,7 @@ fn assert_error_response_round_trip(fields: &[ErrorField], message: &[u8]) {
             message,
             detail,
             hint,
+            ..
         }) => {
             assert_eq!(code, expected.code);
             assert_eq!(message, expected.message);
@@ -396,6 +395,155 @@ fn assert_error_response_round_trip(fields: &[ErrorField], message: &[u8]) {
         }
         Ok(other) => panic!("expected PgError::Server, got {other:?}"),
         Err(err) => panic!("expected successful ErrorResponse parse, got {err:?}"),
+    }
+}
+
+fn assert_visible_pg_error(context: &str, err: &PgError) {
+    let rendered = format!("{err:?}");
+    assert!(!rendered.is_empty(), "{context} produced an empty error");
+    assert!(
+        rendered.len() <= MAX_MESSAGE_SIZE * 8 + 4096,
+        "{context} error diagnostic grew past bounded input size: {} bytes",
+        rendered.len()
+    );
+}
+
+fn assert_bounded_field(context: &str, field_name: &str, value: &str, input_len: usize) {
+    assert!(
+        value.len() <= input_len,
+        "{context} {field_name} length {} exceeded input length {input_len}",
+        value.len()
+    );
+}
+
+fn assert_bounded_optional_field(
+    context: &str,
+    field_name: &str,
+    value: &Option<String>,
+    input_len: usize,
+) {
+    if let Some(value) = value {
+        assert_bounded_field(context, field_name, value, input_len);
+    }
+}
+
+fn assert_bounded_pg_error(context: &str, err: &PgError, input_len: usize) {
+    match err {
+        PgError::Server {
+            code,
+            message,
+            detail,
+            hint,
+            diagnostic,
+        } => {
+            assert_bounded_field(context, "code", code, input_len);
+            assert_bounded_field(context, "message", message, input_len);
+            assert_bounded_optional_field(context, "detail", detail, input_len);
+            assert_bounded_optional_field(context, "hint", hint, input_len);
+            assert_bounded_optional_field(
+                context,
+                "diagnostic.constraint_name",
+                &diagnostic.constraint_name,
+                input_len,
+            );
+            assert_bounded_optional_field(
+                context,
+                "diagnostic.table_name",
+                &diagnostic.table_name,
+                input_len,
+            );
+            assert_bounded_optional_field(
+                context,
+                "diagnostic.schema_name",
+                &diagnostic.schema_name,
+                input_len,
+            );
+            assert_bounded_optional_field(
+                context,
+                "diagnostic.column_name",
+                &diagnostic.column_name,
+                input_len,
+            );
+            assert_bounded_optional_field(
+                context,
+                "diagnostic.severity",
+                &diagnostic.severity,
+                input_len,
+            );
+            assert_bounded_optional_field(
+                context,
+                "diagnostic.routine_name",
+                &diagnostic.routine_name,
+                input_len,
+            );
+            assert_bounded_optional_field(
+                context,
+                "diagnostic.position",
+                &diagnostic.position,
+                input_len,
+            );
+            assert_bounded_optional_field(
+                context,
+                "diagnostic.internal_position",
+                &diagnostic.internal_position,
+                input_len,
+            );
+            assert_bounded_optional_field(
+                context,
+                "diagnostic.internal_query",
+                &diagnostic.internal_query,
+                input_len,
+            );
+            assert_bounded_optional_field(
+                context,
+                "diagnostic.where_context",
+                &diagnostic.where_context,
+                input_len,
+            );
+            assert_bounded_optional_field(
+                context,
+                "diagnostic.file_name",
+                &diagnostic.file_name,
+                input_len,
+            );
+            assert_bounded_optional_field(
+                context,
+                "diagnostic.line_number",
+                &diagnostic.line_number,
+                input_len,
+            );
+        }
+        other => assert_visible_pg_error(context, other),
+    }
+}
+
+fn observe_pg_error_result(context: &str, data: &[u8], result: Result<PgError, PgError>) {
+    match result {
+        Ok(parsed) => assert_bounded_pg_error(context, &parsed, data.len()),
+        Err(err) => assert_visible_pg_error(context, &err),
+    }
+}
+
+fn assert_expected_pg_error_failure(context: &str, result: Result<PgError, PgError>) {
+    match result {
+        Ok(parsed) => panic!("{context} should have failed, got {parsed:?}"),
+        Err(err) => assert_visible_pg_error(context, &err),
+    }
+}
+
+fn observe_parameter_status_result(context: &str, data: &[u8], result: Result<(), PgError>) {
+    match result {
+        Ok(()) => {
+            let first_nul = data
+                .iter()
+                .position(|byte| *byte == 0)
+                .expect("successful ParameterStatus parse should contain name terminator");
+            assert!(
+                data[first_nul + 1..].contains(&0),
+                "successful ParameterStatus parse should contain value terminator"
+            );
+        }
+        Err(err) => assert_visible_pg_error(context, &err),
     }
 }
 
@@ -556,9 +704,7 @@ fn build_command_complete_message(tag: &CommandCompleteCase) -> Vec<u8> {
         }
     };
 
-    for _ in 0..tag.trailing_nulls {
-        message.push(0);
-    }
+    message.resize(message.len() + usize::from(tag.trailing_nulls), 0);
 
     message
 }
@@ -609,21 +755,32 @@ fuzz_target!(|scenario: PgMessageScenario| {
                 MalformedTermination::Proper => {
                     assert_error_response_round_trip(&error_fields, &message);
                 }
+                MalformedTermination::ExtraTerminators(0) => {
+                    assert_error_response_round_trip(&error_fields, &message);
+                }
                 MalformedTermination::MissingTerminator
-                | MalformedTermination::ExtraTerminators(_)
+                | MalformedTermination::ExtraTerminators(1..=u8::MAX)
                 | MalformedTermination::Truncated(_) => {
-                    assert!(
-                        fuzz_parse_error_response(&message).is_err(),
-                        "malformed ErrorResponse payload should return Err"
+                    assert_expected_pg_error_failure(
+                        "malformed ErrorResponse payload",
+                        fuzz_parse_error_response(&message),
                     );
                 }
                 MalformedTermination::EmbeddedNulls => {
-                    let _ = fuzz_parse_error_response(&message);
+                    observe_pg_error_result(
+                        "embedded-null ErrorResponse payload",
+                        &message,
+                        fuzz_parse_error_response(&message),
+                    );
                 }
             }
 
             // Test NoticeResponse parsing (same structure)
-            let _ = fuzz_parse_notice_response(&message);
+            observe_pg_error_result(
+                "ErrorResponse-shaped NoticeResponse payload",
+                &message,
+                fuzz_parse_notice_response(&message),
+            );
         }
 
         PgMessageScenario::NoticeMessage {
@@ -634,7 +791,11 @@ fuzz_target!(|scenario: PgMessageScenario| {
             apply_encoding_variant(&mut message, &encoding_issues);
 
             // NoticeResponse uses same format as ErrorResponse
-            let _ = fuzz_parse_notice_response(&message);
+            observe_pg_error_result(
+                "NoticeResponse payload",
+                &message,
+                fuzz_parse_notice_response(&message),
+            );
         }
 
         PgMessageScenario::ParameterStatus {
@@ -646,7 +807,11 @@ fuzz_target!(|scenario: PgMessageScenario| {
                 build_parameter_message(&parameter_name, &parameter_value, &boundary_conditions);
 
             // Test ParameterStatus parsing
-            let _ = fuzz_parse_parameter_status(&message);
+            observe_parameter_status_result(
+                "ParameterStatus payload",
+                &message,
+                fuzz_parse_parameter_status(&message),
+            );
         }
 
         PgMessageScenario::EdgeCaseMessage {
@@ -666,9 +831,21 @@ fuzz_target!(|scenario: PgMessageScenario| {
             let modified_message = apply_modifications(base_message, &payload_modifications);
 
             // Test all three parsers on edge cases
-            let _ = fuzz_parse_error_response(&modified_message);
-            let _ = fuzz_parse_notice_response(&modified_message);
-            let _ = fuzz_parse_parameter_status(&modified_message);
+            observe_pg_error_result(
+                "edge ErrorResponse payload",
+                &modified_message,
+                fuzz_parse_error_response(&modified_message),
+            );
+            observe_pg_error_result(
+                "edge NoticeResponse payload",
+                &modified_message,
+                fuzz_parse_notice_response(&modified_message),
+            );
+            observe_parameter_status_result(
+                "edge ParameterStatus payload",
+                &modified_message,
+                fuzz_parse_parameter_status(&modified_message),
+            );
         }
 
         PgMessageScenario::CommandComplete { tag } => {
