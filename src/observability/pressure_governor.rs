@@ -1412,6 +1412,51 @@ mod tests {
     }
 
     #[test]
+    fn pressure_governor_cached_snapshot_preserves_signal_availability() {
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .global_queue_limit(4)
+                .build()
+                .expect("Failed to create cached-snapshot runtime"),
+        );
+        runtime.resource_monitor().pressure().update_measurement(
+            ResourceType::Memory,
+            crate::runtime::resource_monitor::ResourceMeasurement::new(512, 800, 950, 1024),
+        );
+
+        let config = PressureGovernorConfig {
+            enabled: true,
+            admission_control: true,
+            sample_interval: Duration::from_secs(60),
+            ..Default::default()
+        };
+        let metrics = Metrics::new();
+        let governor = PressureGovernor::new(config, std::sync::Arc::clone(&runtime), metrics)
+            .expect("pressure governor should initialize");
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+
+        let fresh = governor
+            .sample_pressure(&cx)
+            .expect("fresh pressure snapshot should not fail");
+        let cached = governor
+            .sample_pressure(&cx)
+            .expect("cached pressure snapshot should not fail");
+
+        assert_eq!(governor.sample_count(), 1);
+        assert_eq!(cached.signal_availability, fresh.signal_availability);
+        assert!(cached.signal_availability.runnable_queue);
+        assert!(cached.signal_availability.cleanup_debt);
+        assert!(cached.signal_availability.memory_budget);
+        assert_eq!(
+            cached.fallback_verdict,
+            PressureFallbackVerdict::PartialSignalsUnavailable
+        );
+        assert_eq!(cached.memory_budget_pressure, 0.5);
+        assert_eq!(cached.overall_pressure, fresh.overall_pressure);
+    }
+
+    #[test]
     fn test_pressure_thresholds_defaults() {
         let thresholds = PressureThresholds::default();
 
