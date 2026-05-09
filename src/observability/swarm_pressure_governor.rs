@@ -45,7 +45,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
-const PEER_PRESSURE_BACKPRESSURE_THRESHOLD: f64 = 0.80;
+const DEFAULT_PEER_PRESSURE_BACKPRESSURE_THRESHOLD: f64 = 0.80;
 
 /// Errors specific to swarm pressure governance.
 #[derive(Debug, Error)]
@@ -287,6 +287,8 @@ pub struct SwarmPressureGovernorConfig {
     pub swarm_coordination_timeout: Duration,
     /// Maximum age for a peer pressure report to influence admission.
     pub peer_pressure_max_age: Duration,
+    /// Peer pressure ratio that triggers swarm-wide backpressure rules.
+    pub peer_pressure_backpressure_threshold: f64,
 }
 
 impl Default for SwarmPressureGovernorConfig {
@@ -301,6 +303,7 @@ impl Default for SwarmPressureGovernorConfig {
             envelope_enforcement_enabled: true,
             swarm_coordination_timeout: Duration::from_millis(50),
             peer_pressure_max_age: Duration::from_secs(5),
+            peer_pressure_backpressure_threshold: DEFAULT_PEER_PRESSURE_BACKPRESSURE_THRESHOLD,
         }
     }
 }
@@ -606,7 +609,7 @@ impl SwarmPressureGovernor {
 
         let effective_degradation = degradation_level.max(peer_pressure.max_degradation_level);
         let peer_pressure_high =
-            peer_pressure.max_overall_pressure >= PEER_PRESSURE_BACKPRESSURE_THRESHOLD;
+            peer_pressure.max_overall_pressure >= self.peer_pressure_backpressure_threshold();
 
         // Combine pressure governor decision with system degradation
         let decision = match (pressure_decision, effective_degradation, priority) {
@@ -684,6 +687,15 @@ impl SwarmPressureGovernor {
         }
 
         summary
+    }
+
+    fn peer_pressure_backpressure_threshold(&self) -> f64 {
+        let threshold = self.config.peer_pressure_backpressure_threshold;
+        if threshold.is_finite() && threshold >= 0.0 {
+            threshold
+        } else {
+            DEFAULT_PEER_PRESSURE_BACKPRESSURE_THRESHOLD
+        }
     }
 
     fn format_swarm_admission_reason(
@@ -1148,6 +1160,64 @@ mod tests {
             metrics.max_peer_degradation_level,
             DegradationLevel::Moderate as u8
         );
+    }
+
+    #[test]
+    fn test_configurable_peer_pressure_threshold_controls_backpressure() {
+        let mut tuned_config = SwarmPressureGovernorConfig::default();
+        tuned_config.peer_pressure_backpressure_threshold = 0.70;
+        let tuned_runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create test runtime"),
+        );
+        let tuned_pressure_governor = PressureGovernor::new(
+            tuned_config.pressure_config.clone(),
+            std::sync::Arc::clone(&tuned_runtime),
+            Metrics::new(),
+        )
+        .expect("Failed to create pressure governor");
+        let tuned_governor = SwarmPressureGovernor::new(
+            tuned_config,
+            tuned_runtime.resource_monitor(),
+            tuned_pressure_governor,
+        );
+        tuned_governor
+            .record_peer_pressure("peer-tuned", 0.75, DegradationLevel::Light)
+            .expect("peer pressure report should be accepted");
+        let tuned_cx = tuned_runtime.request_cx_with_budget(Budget::INFINITE);
+
+        let tuned_decision = tuned_governor
+            .check_region_admission(&tuned_cx, RegionPriority::Normal, None)
+            .expect("tuned peer pressure admission should produce a decision");
+
+        assert!(matches!(
+            tuned_decision.decision,
+            AdmissionDecision::AdmitWithBackpressure
+        ));
+        assert!(tuned_decision.reason.contains("max peer pressure 0.750"));
+
+        let default_governor = create_test_swarm_governor();
+        default_governor
+            .record_peer_pressure("peer-default", 0.75, DegradationLevel::Light)
+            .expect("peer pressure report should be accepted");
+        let default_runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create test runtime"),
+        );
+        let default_cx = default_runtime.request_cx_with_budget(Budget::INFINITE);
+
+        let default_decision = default_governor
+            .check_region_admission(&default_cx, RegionPriority::Normal, None)
+            .expect("default peer pressure admission should produce a decision");
+
+        assert!(matches!(
+            default_decision.decision,
+            AdmissionDecision::Admit
+        ));
     }
 
     #[test]
