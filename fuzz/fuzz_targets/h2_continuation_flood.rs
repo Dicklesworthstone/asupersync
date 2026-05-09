@@ -3,8 +3,10 @@
 use arbitrary::Arbitrary;
 use asupersync::bytes::Bytes;
 use asupersync::http::h2::connection::{Connection, ConnectionState};
+use asupersync::http::h2::error::H2Error;
 use asupersync::http::h2::frame::{
-    ContinuationFrame, Frame, HeadersFrame, SettingsFrame, continuation_flags, parse_frame,
+    ContinuationFrame, Frame, FrameHeader, FrameType, HeadersFrame, SettingsFrame,
+    continuation_flags, parse_frame,
 };
 use asupersync::http::h2::settings::Settings;
 use libfuzzer_sys::fuzz_target;
@@ -13,6 +15,48 @@ const MAX_INITIAL_BLOCK: usize = 4096;
 const MAX_FRAGMENT: usize = 4096;
 const MAX_CONTINUATIONS: usize = 256;
 const MAX_RAW_PAYLOAD: usize = 8192;
+
+fn observe_parse_frame(header: &FrameHeader, payload: Bytes) -> Result<Frame, H2Error> {
+    let payload_len = payload.len();
+    let result = parse_frame(header, payload);
+
+    match &result {
+        Ok(Frame::Continuation(frame)) => {
+            assert!(
+                payload_len <= MAX_RAW_PAYLOAD,
+                "successful continuation parse exceeded raw fuzz payload bound"
+            );
+            assert_eq!(
+                header.length as usize, payload_len,
+                "successful continuation parse accepted a mismatched header length"
+            );
+            assert_eq!(
+                header.frame_type,
+                FrameType::Continuation as u8,
+                "continuation parser probe used a non-continuation frame type"
+            );
+            assert_eq!(
+                frame.stream_id, header.stream_id,
+                "successful continuation parse changed the stream id"
+            );
+            assert!(
+                frame.header_block.len() <= MAX_RAW_PAYLOAD,
+                "successful continuation parse exceeded header block fuzz bound"
+            );
+        }
+        Ok(_) => {
+            panic!("continuation parser probe returned a non-continuation frame");
+        }
+        Err(err) => {
+            assert!(
+                !format!("{err:?}").is_empty(),
+                "H2 continuation parser errors must remain observable"
+            );
+        }
+    }
+
+    result
+}
 
 #[derive(Arbitrary, Debug)]
 struct ContinuationFloodInput {
@@ -79,15 +123,24 @@ fn fuzz_connection_sequence(input: &ContinuationFloodInput) {
 }
 
 fn fuzz_parser_only(input: &ContinuationFloodInput) {
+    let raw_payload = capped_bytes(&input.raw_payload, MAX_RAW_PAYLOAD);
+    let raw_header = FrameHeader {
+        length: raw_payload.len() as u32,
+        frame_type: FrameType::Continuation as u8,
+        flags: continuation_flags::END_HEADERS,
+        stream_id: normalize_client_stream_id(input.initial_stream_id),
+    };
+    let _ = observe_parse_frame(&raw_header, raw_payload);
+
     for fragment in input.fragments.iter().take(MAX_CONTINUATIONS) {
         let payload = capped_bytes(&fragment.payload, MAX_RAW_PAYLOAD);
-        let header = asupersync::http::h2::frame::FrameHeader {
+        let header = FrameHeader {
             length: payload.len() as u32,
-            frame_type: asupersync::http::h2::frame::FrameType::Continuation as u8,
+            frame_type: FrameType::Continuation as u8,
             flags: fragment.raw_flags | continuation_flags::END_HEADERS,
             stream_id: fragment.stream_id & 0x7fff_ffff,
         };
-        let _ = parse_frame(&header, payload);
+        let _ = observe_parse_frame(&header, payload);
     }
 }
 
