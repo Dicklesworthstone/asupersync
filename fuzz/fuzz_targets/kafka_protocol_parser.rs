@@ -13,15 +13,15 @@
 //! these protocol features by creating edge case configurations and operations
 //! that should trigger the specific parsing paths in the underlying library.
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
 
+use asupersync::cx::Cx;
 #[cfg(feature = "kafka")]
 use asupersync::messaging::kafka::*;
 #[cfg(feature = "kafka")]
 use asupersync::messaging::kafka_consumer::*;
-use asupersync::cx::Cx;
 
 /// Protocol edge case scenarios to fuzz
 #[derive(Arbitrary, Debug, Clone)]
@@ -89,13 +89,9 @@ enum VersionedOperation {
         timeout_ms: u16,
     },
     /// Metadata request with version override
-    MetadataRequest {
-        topics: Option<Vec<String>>,
-    },
+    MetadataRequest { topics: Option<Vec<String>> },
     /// Transaction operation with version override
-    TransactionOp {
-        operation: TransactionOpType,
-    },
+    TransactionOp { operation: TransactionOpType },
 }
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -166,9 +162,7 @@ enum ThrottledOperation {
         message_size: u16,
     },
     /// Rapid metadata requests
-    MetadataBurst {
-        request_count: u16,
-    },
+    MetadataBurst { request_count: u16 },
     /// Consumer poll under throttling
     ConsumerPoll {
         topics: Vec<String>,
@@ -217,7 +211,10 @@ enum PathologicalPattern {
     /// Compression bomb-like patterns
     Repetitive { pattern_size: u8, repeat_count: u16 },
     /// Alternating patterns that might break compression
-    Alternating { pattern1: Vec<u8>, pattern2: Vec<u8> },
+    Alternating {
+        pattern1: Vec<u8>,
+        pattern2: Vec<u8>,
+    },
 }
 
 /// Network conditions for testing partial response recovery
@@ -277,31 +274,49 @@ fn normalize_fuzz_input(input: &mut KafkaProtocolParserFuzz) {
 
     for scenario in &mut input.scenarios {
         match scenario {
-            ProtocolTestScenario::ApiVersionBoundaries { api_version_override, operations, .. } => {
+            ProtocolTestScenario::ApiVersionBoundaries {
+                api_version_override,
+                operations,
+                ..
+            } => {
                 // Bound API version to reasonable range
                 if let Some(ref mut version) = api_version_override {
                     *version = (*version).clamp(-1, 50); // Kafka API versions typically 0-20
                 }
                 operations.truncate(20);
             }
-            ProtocolTestScenario::CorrelationIdMatching { operations, concurrent_operations, .. } => {
+            ProtocolTestScenario::CorrelationIdMatching {
+                operations,
+                concurrent_operations,
+                ..
+            } => {
                 operations.truncate(50);
                 *concurrent_operations = (*concurrent_operations).min(10);
             }
-            ProtocolTestScenario::ThrottleTimeHandling { throttle_config, throttled_operations } => {
-                throttle_config.requests_per_second = throttle_config.requests_per_second.clamp(1, 1000);
+            ProtocolTestScenario::ThrottleTimeHandling {
+                throttle_config,
+                throttled_operations,
+            } => {
+                throttle_config.requests_per_second =
+                    throttle_config.requests_per_second.clamp(1, 1000);
                 throttle_config.batch_size = throttle_config.batch_size.clamp(1, 10000);
                 throttle_config.producer_count = throttle_config.producer_count.clamp(1, 10);
                 throttled_operations.truncate(20);
             }
-            ProtocolTestScenario::CompressionCodecDispatch { compression_tests, message_sizes } => {
+            ProtocolTestScenario::CompressionCodecDispatch {
+                compression_tests,
+                message_sizes,
+            } => {
                 compression_tests.truncate(10);
                 message_sizes.truncate(20);
                 for size in message_sizes.iter_mut() {
                     *size = (*size).clamp(1, 100_000); // Max 100KB per message
                 }
             }
-            ProtocolTestScenario::PartialResponseRecovery { network_conditions, recovery_operations } => {
+            ProtocolTestScenario::PartialResponseRecovery {
+                network_conditions,
+                recovery_operations,
+            } => {
                 network_conditions.delay_jitter_ms = network_conditions.delay_jitter_ms.min(30_000);
                 recovery_operations.truncate(15);
             }
@@ -322,14 +337,20 @@ async fn test_api_version_boundaries(
 
     for operation in operations.iter().take(10) {
         match operation {
-            VersionedOperation::ProducerSend { topic, payload_size, use_headers } => {
+            VersionedOperation::ProducerSend {
+                topic,
+                payload_size,
+                use_headers,
+            } => {
                 let config = ProducerConfig::new(vec!["localhost:9092".to_string()]);
                 if let Ok(producer) = KafkaProducer::new(config) {
                     let payload = vec![0u8; (*payload_size as usize).min(10000)];
 
                     if *use_headers {
                         let headers = vec![("test-header", b"value".as_slice())];
-                        let _ = producer.send_with_headers(cx, topic, None, &payload, &headers).await;
+                        let _ = producer
+                            .send_with_headers(cx, topic, None, &payload, &headers)
+                            .await;
                     } else {
                         let _ = producer.send(cx, topic, None, &payload, None).await;
                     }
@@ -341,7 +362,7 @@ async fn test_api_version_boundaries(
                 {
                     let config = ConsumerConfig::new(
                         vec!["localhost:9092".to_string()],
-                        "test-group".to_string()
+                        "test-group".to_string(),
                     );
                     if let Ok(consumer) = KafkaConsumer::new(config) {
                         let _ = consumer.subscribe(topics).await;
@@ -397,16 +418,26 @@ async fn test_correlation_id_matching(
     // Create multiple concurrent operations to potentially cause correlation ID conflicts
     let mut futures = Vec::new();
 
-    for (i, operation) in operations.iter().take(concurrent_operations as usize).enumerate() {
+    for (i, operation) in operations
+        .iter()
+        .take(concurrent_operations as usize)
+        .enumerate()
+    {
         let operation = operation.clone();
         let cx = cx.clone();
 
         let future = async move {
             // Add varying delays to create timing edge cases
             if let Some(delay_ms) = match &operation {
-                CorrelationOperation::ProducerSend { delay_before_ms, .. } => Some(*delay_before_ms),
-                CorrelationOperation::ConsumerOperation { delay_before_ms, .. } => Some(*delay_before_ms),
-                CorrelationOperation::AdminOperation { delay_before_ms, .. } => Some(*delay_before_ms),
+                CorrelationOperation::ProducerSend {
+                    delay_before_ms, ..
+                } => Some(*delay_before_ms),
+                CorrelationOperation::ConsumerOperation {
+                    delay_before_ms, ..
+                } => Some(*delay_before_ms),
+                CorrelationOperation::AdminOperation {
+                    delay_before_ms, ..
+                } => Some(*delay_before_ms),
             } {
                 asupersync::time::sleep(Duration::from_millis((delay_ms as u64).min(1000))).await;
             }
@@ -420,7 +451,9 @@ async fn test_correlation_id_matching(
                         } else {
                             &payload
                         };
-                        let _ = producer.send(&cx, &topic, None, bounded_payload, None).await;
+                        let _ = producer
+                            .send(&cx, &topic, None, bounded_payload, None)
+                            .await;
                         let _ = producer.close(&cx, Duration::from_millis(100)).await;
                     }
                 }
@@ -429,19 +462,24 @@ async fn test_correlation_id_matching(
                     {
                         let config = ConsumerConfig::new(
                             vec!["localhost:9092".to_string()],
-                            format!("test-group-{}", i)
+                            format!("test-group-{}", i),
                         );
                         if let Ok(consumer) = KafkaConsumer::new(config) {
                             match operation {
                                 ConsumerOpType::Poll(timeout_ms) => {
-                                    let timeout = Duration::from_millis((*timeout_ms as u64).min(2000));
+                                    let timeout =
+                                        Duration::from_millis((*timeout_ms as u64).min(2000));
                                     let _ = consumer.poll(&cx, timeout).await;
                                 }
                                 ConsumerOpType::Commit => {
                                     let _ = consumer.commit_offsets(&[]).await;
                                 }
                                 ConsumerOpType::Seek { partition, offset } => {
-                                    let tpo = TopicPartitionOffset::new("test-topic".to_string(), *partition, *offset);
+                                    let tpo = TopicPartitionOffset::new(
+                                        "test-topic".to_string(),
+                                        *partition,
+                                        *offset,
+                                    );
                                     let _ = consumer.seek(&[tpo]).await;
                                 }
                             }
@@ -484,7 +522,11 @@ async fn test_throttle_time_handling(
     if let Ok(producer) = KafkaProducer::new(producer_config) {
         for operation in operations.iter().take(10) {
             match operation {
-                ThrottledOperation::ProducerBurst { topic, burst_size, message_size } => {
+                ThrottledOperation::ProducerBurst {
+                    topic,
+                    burst_size,
+                    message_size,
+                } => {
                     let payload = vec![0u8; (*message_size as usize).min(10000)];
                     for _ in 0..(*burst_size).min(50) {
                         let _ = producer.send(cx, topic, None, &payload, None).await;
@@ -502,7 +544,7 @@ async fn test_throttle_time_handling(
                     {
                         let config = ConsumerConfig::new(
                             vec!["localhost:9092".to_string()],
-                            "throttle-test-group".to_string()
+                            "throttle-test-group".to_string(),
                         );
                         if let Ok(consumer) = KafkaConsumer::new(config) {
                             let _ = consumer.subscribe(topics).await;
@@ -526,7 +568,8 @@ async fn test_compression_codec_dispatch(
 ) {
     for test in tests.iter().take(5) {
         for &size in message_sizes.iter().take(5) {
-            let message = generate_message_for_pattern(&test.message_pattern, size.min(50000) as usize);
+            let message =
+                generate_message_for_pattern(&test.message_pattern, size.min(50000) as usize);
 
             // Test different compression types
             let compression_types = match &test.compression_type {
@@ -536,15 +579,17 @@ async fn test_compression_codec_dispatch(
                 CompressionTypeTest::Lz4 => vec![Compression::Lz4],
                 CompressionTypeTest::Zstd => vec![Compression::Zstd],
                 CompressionTypeTest::Invalid(_) => vec![Compression::None], // Fallback for invalid
-                CompressionTypeTest::Dynamic(types) => {
-                    types.iter().take(3).map(|t| match t {
+                CompressionTypeTest::Dynamic(types) => types
+                    .iter()
+                    .take(3)
+                    .map(|t| match t {
                         CompressionTypeTest::Gzip => Compression::Gzip,
                         CompressionTypeTest::Snappy => Compression::Snappy,
                         CompressionTypeTest::Lz4 => Compression::Lz4,
                         CompressionTypeTest::Zstd => Compression::Zstd,
                         _ => Compression::None,
-                    }).collect()
-                }
+                    })
+                    .collect(),
             };
 
             for compression in compression_types {
@@ -552,7 +597,9 @@ async fn test_compression_codec_dispatch(
                     .compression(compression);
 
                 if let Ok(producer) = KafkaProducer::new(config) {
-                    let _ = producer.send(cx, "compression-test", None, &message, None).await;
+                    let _ = producer
+                        .send(cx, "compression-test", None, &message, None)
+                        .await;
                     let _ = producer.close(cx, Duration::from_millis(100)).await;
                 }
             }
@@ -572,7 +619,10 @@ fn generate_message_for_pattern(pattern: &MessagePattern, size: usize) -> Vec<u8
             data
         }
         MessagePattern::Pathological(pathological) => match pathological {
-            PathologicalPattern::Repetitive { pattern_size, repeat_count } => {
+            PathologicalPattern::Repetitive {
+                pattern_size,
+                repeat_count,
+            } => {
                 let pattern: Vec<u8> = (0..*pattern_size).map(|i| i).collect();
                 pattern.repeat((*repeat_count as usize).min(size / pattern.len().max(1)))
             }
@@ -587,7 +637,7 @@ fn generate_message_for_pattern(pattern: &MessagePattern, size: usize) -> Vec<u8
                 data.truncate(size);
                 data
             }
-        }
+        },
     }
 }
 
@@ -603,7 +653,11 @@ async fn test_partial_response_recovery(
 
     for operation in operations.iter().take(8) {
         match operation {
-            RecoveryOperation::ProducerSendWithRetry { topic, payload_size, max_retries } => {
+            RecoveryOperation::ProducerSendWithRetry {
+                topic,
+                payload_size,
+                max_retries,
+            } => {
                 let config = ProducerConfig::new(vec!["localhost:9092".to_string()])
                     .retries(*max_retries as u32);
 
@@ -613,12 +667,14 @@ async fn test_partial_response_recovery(
                     let _ = producer.close(cx, Duration::from_millis(100)).await;
                 }
             }
-            RecoveryOperation::ConsumerPollWithRecovery { topics, timeout_ms, .. } => {
+            RecoveryOperation::ConsumerPollWithRecovery {
+                topics, timeout_ms, ..
+            } => {
                 #[cfg(feature = "kafka")]
                 {
                     let config = ConsumerConfig::new(
                         vec!["localhost:9092".to_string()],
-                        "recovery-test-group".to_string()
+                        "recovery-test-group".to_string(),
                     );
                     if let Ok(consumer) = KafkaConsumer::new(config) {
                         let _ = consumer.subscribe(topics).await;
@@ -631,7 +687,8 @@ async fn test_partial_response_recovery(
             RecoveryOperation::TransactionWithRecovery { operations, commit } => {
                 let producer_config = ProducerConfig::new(vec!["localhost:9092".to_string()])
                     .enable_idempotence(true);
-                let tx_config = TransactionalConfig::new(producer_config, "recovery-tx-id".to_string());
+                let tx_config =
+                    TransactionalConfig::new(producer_config, "recovery-tx-id".to_string());
 
                 if let Ok(producer) = TransactionalProducer::new(tx_config) {
                     if let Ok(tx) = producer.begin_transaction(cx).await {
@@ -654,7 +711,9 @@ async fn test_partial_response_recovery(
                     for topic in topics.iter().take(5) {
                         let _ = producer.send(cx, topic, None, b"test", None).await;
                     }
-                    let _ = producer.flush(cx, Duration::from_millis((*timeout_ms as u64).min(2000))).await;
+                    let _ = producer
+                        .flush(cx, Duration::from_millis((*timeout_ms as u64).min(2000)))
+                        .await;
                     let _ = producer.close(cx, Duration::from_millis(100)).await;
                 }
             }
@@ -669,31 +728,37 @@ async fn execute_kafka_protocol_fuzz(input: &KafkaProtocolParserFuzz, cx: &Cx) {
             ProtocolTestScenario::ApiVersionBoundaries {
                 api_version_override,
                 force_old_protocol,
-                operations
+                operations,
             } => {
-                test_api_version_boundaries(*api_version_override, *force_old_protocol, operations, cx).await;
+                test_api_version_boundaries(
+                    *api_version_override,
+                    *force_old_protocol,
+                    operations,
+                    cx,
+                )
+                .await;
             }
             ProtocolTestScenario::CorrelationIdMatching {
                 operations,
-                concurrent_operations
+                concurrent_operations,
             } => {
                 test_correlation_id_matching(operations, *concurrent_operations, cx).await;
             }
             ProtocolTestScenario::ThrottleTimeHandling {
                 throttle_config,
-                throttled_operations
+                throttled_operations,
             } => {
                 test_throttle_time_handling(throttle_config, throttled_operations, cx).await;
             }
             ProtocolTestScenario::CompressionCodecDispatch {
                 compression_tests,
-                message_sizes
+                message_sizes,
             } => {
                 test_compression_codec_dispatch(compression_tests, message_sizes, cx).await;
             }
             ProtocolTestScenario::PartialResponseRecovery {
                 network_conditions,
-                recovery_operations
+                recovery_operations,
             } => {
                 test_partial_response_recovery(network_conditions, recovery_operations, cx).await;
             }
@@ -738,6 +803,18 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
 
-    // Run protocol parser fuzzing
-    let _ = fuzz_kafka_protocol_parser(input);
+    // Run protocol parser fuzzing and observe all outcomes.
+    match fuzz_kafka_protocol_parser(input) {
+        Ok(()) => {}
+        Err(error) => {
+            assert!(
+                !error.trim().is_empty(),
+                "Kafka protocol rejection should expose a diagnostic"
+            );
+            assert!(
+                error.len() <= 4096,
+                "Kafka protocol diagnostic grew unexpectedly: {error}"
+            );
+        }
+    }
 });
