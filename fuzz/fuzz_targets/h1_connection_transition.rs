@@ -28,7 +28,6 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use std::collections::VecDeque;
 
 /// HTTP version for connection transitions
 #[derive(Debug, Clone, Copy, PartialEq, Arbitrary)]
@@ -94,23 +93,27 @@ impl ConnectionDirective {
 
     /// Determine if this directive requests connection close
     fn requests_close(self) -> bool {
-        match self {
+        matches!(
+            self,
             ConnectionDirective::Close
-            | ConnectionDirective::CloseKeepAlive
-            | ConnectionDirective::KeepAliveClose
-            | ConnectionDirective::TeClose => true,
-            _ => false,
-        }
+                | ConnectionDirective::CloseKeepAlive
+                | ConnectionDirective::KeepAliveClose
+                | ConnectionDirective::TeClose
+        )
     }
 
     /// Determine if this directive requests keep-alive
     fn requests_keep_alive(self) -> bool {
-        match self {
+        matches!(
+            self,
             ConnectionDirective::KeepAlive
-            | ConnectionDirective::CloseKeepAlive
-            | ConnectionDirective::KeepAliveClose => true,
-            _ => false,
-        }
+                | ConnectionDirective::CloseKeepAlive
+                | ConnectionDirective::KeepAliveClose
+        )
+    }
+
+    fn header_shape(self) -> usize {
+        self.to_header_value().map_or(0, |value| value.len())
     }
 }
 
@@ -123,6 +126,18 @@ struct TransitionRequest {
     has_body: bool,
     /// Request method (HEAD vs others affects body expectations)
     method: HttpMethod,
+}
+
+impl TransitionRequest {
+    fn semantic_shape(&self) -> usize {
+        self.version
+            .as_str()
+            .len()
+            .saturating_add(self.connection.header_shape())
+            .saturating_add(usize::from(self.has_body))
+            .saturating_add(self.method.as_str().len())
+            .saturating_add(usize::from(self.method.typically_has_body()))
+    }
 }
 
 /// HTTP method affecting connection behavior
@@ -159,6 +174,14 @@ struct TransitionResponse {
     connection: ConnectionDirective,
     /// Whether response has a body
     has_body: bool,
+}
+
+impl TransitionResponse {
+    fn semantic_shape(&self) -> usize {
+        usize::from(self.status)
+            .saturating_add(self.connection.header_shape())
+            .saturating_add(usize::from(self.has_body))
+    }
 }
 
 /// Connection state during transition testing
@@ -219,6 +242,7 @@ struct MockConnectionStateMachine {
     requests_processed: u8,
     config: ServerConfig,
     last_version: Option<HttpVersion>,
+    observed_shape: usize,
 }
 
 impl MockConnectionStateMachine {
@@ -228,33 +252,36 @@ impl MockConnectionStateMachine {
             requests_processed: 0,
             config,
             last_version: None,
+            observed_shape: 0,
         }
     }
 
     /// Process a request and determine connection fate
     fn process_request(&mut self, req: &TransitionRequest) -> Result<ConnectionState, String> {
+        self.observed_shape = self.observed_shape.saturating_add(req.semantic_shape());
+
         // Check if connection is already closed
         if matches!(self.state, ConnectionState::Closed | ConnectionState::Error) {
             return Err("Request on closed/error connection".to_string());
         }
 
         // Validate HTTP version consistency
-        if let Some(last_version) = self.last_version {
-            if last_version != req.version {
-                // Version changes are unusual but not forbidden
-                // Some servers might handle this differently
-            }
+        if let Some(last_version) = self.last_version
+            && last_version != req.version
+        {
+            // Version changes are unusual but not forbidden.
+            // Some servers might handle this differently.
         }
         self.last_version = Some(req.version);
 
         self.requests_processed += 1;
 
         // Check request limit
-        if let Some(max_requests) = self.config.max_requests {
-            if self.requests_processed >= max_requests {
-                self.state = ConnectionState::MarkedForClose;
-                return Ok(self.state);
-            }
+        if let Some(max_requests) = self.config.max_requests
+            && self.requests_processed >= max_requests
+        {
+            self.state = ConnectionState::MarkedForClose;
+            return Ok(self.state);
         }
 
         // Determine new state based on request Connection header
@@ -266,6 +293,8 @@ impl MockConnectionStateMachine {
 
     /// Process response and finalize connection state
     fn process_response(&mut self, resp: &TransitionResponse) -> Result<ConnectionState, String> {
+        self.observed_shape = self.observed_shape.saturating_add(resp.semantic_shape());
+
         // Response Connection header can override request decision
         if resp.connection.requests_close() {
             self.state = ConnectionState::MarkedForClose;
@@ -329,6 +358,10 @@ impl MockConnectionStateMachine {
 
     fn get_state(&self) -> ConnectionState {
         self.state
+    }
+
+    fn observed_shape(&self) -> usize {
+        self.observed_shape
     }
 }
 
@@ -446,9 +479,19 @@ fuzz_target!(|sequence: ConnectionTransitionSequence| {
         test_connection_transition_sequence(test_requests, &sequence.responses, &sequence.config);
     }
 
+    observe_terminal_error_state();
+
     // Test individual transition patterns
     test_specific_transition_patterns(&sequence);
 });
+
+fn observe_terminal_error_state() {
+    let state = ConnectionState::Error;
+    assert!(
+        matches!(state, ConnectionState::Error),
+        "ConnectionState::Error should stay a terminal state"
+    );
+}
 
 /// Test a complete sequence of connection transitions
 fn test_connection_transition_sequence(
@@ -649,7 +692,18 @@ fn test_version_transitions(config: &ServerConfig) {
         method: HttpMethod::Get,
     };
 
-    let _ = state_machine.process_request(&http10_request);
+    let initial_state = assert_request_processed(
+        state_machine.process_request(&http10_request),
+        "HTTP/1.0 keep-alive setup",
+    );
+    assert!(
+        matches!(
+            initial_state,
+            ConnectionState::KeepAlive | ConnectionState::MarkedForClose
+        ),
+        "HTTP/1.0 keep-alive setup should produce a live or closing state, got {:?}",
+        initial_state
+    );
 
     // Transition to HTTP/1.1
     let http11_request = TransitionRequest {
@@ -709,7 +763,18 @@ fn test_response_override_transitions(config: &ServerConfig) {
         method: HttpMethod::Get,
     };
 
-    let _ = state_machine.process_request(&request);
+    let request_state = assert_request_processed(
+        state_machine.process_request(&request),
+        "response override setup",
+    );
+    assert!(
+        matches!(
+            request_state,
+            ConnectionState::KeepAlive | ConnectionState::MarkedForClose
+        ),
+        "Request keep-alive setup should produce keep-alive or close, got {:?}",
+        request_state
+    );
 
     // Response requests close
     let response = TransitionResponse {
@@ -763,16 +828,33 @@ fn validate_final_connection_state(
     }
 
     // If request limit reached, should be marked for close
-    if let Some(max_requests) = config.max_requests {
-        if state_machine.requests_processed >= max_requests {
-            assert!(
-                matches!(
-                    final_state,
-                    ConnectionState::MarkedForClose | ConnectionState::Closed
-                ),
-                "Connection should be closed when request limit reached"
-            );
-        }
+    if let Some(max_requests) = config.max_requests
+        && state_machine.requests_processed >= max_requests
+    {
+        assert!(
+            matches!(
+                final_state,
+                ConnectionState::MarkedForClose | ConnectionState::Closed
+            ),
+            "Connection should be closed when request limit reached"
+        );
+    }
+
+    if !requests.is_empty() || !responses.is_empty() {
+        assert!(
+            state_machine.observed_shape() > 0,
+            "Processed connection inputs should contribute observable request/response shape"
+        );
+    }
+}
+
+fn assert_request_processed(
+    result: Result<ConnectionState, String>,
+    context: &str,
+) -> ConnectionState {
+    match result {
+        Ok(state) => state,
+        Err(error) => panic!("{} request processing failed: {}", context, error),
     }
 }
 
