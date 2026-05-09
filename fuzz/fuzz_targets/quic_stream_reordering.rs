@@ -3,7 +3,9 @@
 use libfuzzer_sys::fuzz_target;
 
 // Re-export the types we need from the main crate
-use asupersync::net::quic_native::streams::{StreamDirection, StreamId, StreamRole, StreamTable};
+use asupersync::net::quic_native::streams::{
+    StreamDirection, StreamId, StreamRole, StreamTable, StreamTableError,
+};
 
 #[derive(Debug)]
 struct StreamSegment {
@@ -77,7 +79,7 @@ fuzz_target!(|data: &[u8]| {
 
     // Accept a remote (client) bidirectional stream for receiving data
     let stream_id = StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 0);
-    let _ = table.accept_remote_stream(stream_id); // Ignore if already exists
+    assert_remote_stream_accepted(&mut table, stream_id);
 
     // Apply segments in the order provided by fuzzer
     // This tests out-of-order delivery, overlapping segments, etc.
@@ -87,14 +89,64 @@ fuzz_target!(|data: &[u8]| {
 
         // We expect some segments to fail due to flow control or protocol violations
         // but the stream should never panic or corrupt its internal state
-        let _ = result; // Explicitly ignore expected failures
+        observe_segment_result(result, &table, stream_id, &segment);
+    }
+});
 
-        // Verify stream invariants hold after each segment
-        if let Ok(stream) = table.stream(stream_id) {
+fn assert_remote_stream_accepted(table: &mut StreamTable, stream_id: StreamId) {
+    table
+        .accept_remote_stream(stream_id)
+        .unwrap_or_else(|err| panic!("remote stream must be accepted before fuzzing: {err}"));
+    let stream = table
+        .stream(stream_id)
+        .expect("accepted remote stream must be present");
+    assert_eq!(
+        stream.id, stream_id,
+        "accepted stream table entry must preserve stream id"
+    );
+    verify_stream_invariants(stream);
+}
+
+fn observe_segment_result(
+    result: Result<(), StreamTableError>,
+    table: &StreamTable,
+    stream_id: StreamId,
+    segment: &StreamSegment,
+) {
+    match result {
+        Ok(()) => {
+            let stream = table
+                .stream(stream_id)
+                .expect("accepted segment must leave stream present");
+            if segment.is_fin {
+                let final_size = segment
+                    .offset
+                    .checked_add(segment.length)
+                    .expect("bounded fuzz segment offset cannot overflow");
+                assert_eq!(
+                    stream.final_size,
+                    Some(final_size),
+                    "accepted FIN segment must record its final size"
+                );
+            }
+            verify_stream_invariants(stream);
+        }
+        Err(err) => {
+            assert!(
+                !matches!(err, StreamTableError::UnknownStream(id) if id == stream_id),
+                "segment processing must not lose the accepted stream"
+            );
+            assert!(
+                !err.to_string().is_empty(),
+                "rejected segment must expose a diagnostic"
+            );
+            let stream = table
+                .stream(stream_id)
+                .expect("rejected segment must leave stream present");
             verify_stream_invariants(stream);
         }
     }
-});
+}
 
 /// Verify that QuicStream maintains its invariants after each operation
 fn verify_stream_invariants(stream: &asupersync::net::quic_native::streams::QuicStream) {
@@ -111,6 +163,15 @@ fn verify_stream_invariants(stream: &asupersync::net::quic_native::streams::Quic
             final_size
         );
     }
+
+    assert!(
+        stream.recv_offset <= stream.recv_credit.used(),
+        "contiguous receive offset must not exceed receive credit used"
+    );
+    assert!(
+        stream.recv_credit.used() <= stream.recv_credit.limit(),
+        "receive credit used must not exceed receive window"
+    );
 
     // Invariant 2: recv_offset is monotonic (tested implicitly by checking it doesn't decrease)
     // This would be caught by the actual implementation design
