@@ -258,7 +258,18 @@ fn execute(input: FuzzInput) {
             .expect("complete pipeline should yield decoded object");
         assert_eq!(decoded, payload, "decoded payload drifted from original");
     } else {
-        let _ = pipeline.into_data().err();
+        let err = pipeline
+            .into_data()
+            .expect_err("incomplete pipeline should report missing symbols");
+        match err {
+            DecodingError::InsufficientSymbols { received, needed } => {
+                assert!(
+                    received < needed,
+                    "incomplete pipeline reported nonsensical symbol counts: received={received} needed={needed}"
+                );
+            }
+            other => panic!("incomplete pipeline reported unexpected decode error: {other:?}"),
+        }
     }
 }
 
