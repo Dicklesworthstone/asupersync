@@ -23,7 +23,7 @@ use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 
 use asupersync::bytes::Bytes;
-use asupersync::http::h2::error::H2Error;
+use asupersync::http::h2::error::{ErrorCode, H2Error};
 use asupersync::http::h2::hpack::{Decoder, Header};
 
 /// Size of the static table per RFC 7541 Appendix A.
@@ -79,7 +79,7 @@ impl HeaderTemplate {
             .chars()
             .filter(|c| c.is_ascii() && !c.is_control())
             .take(100) // Limit value length
-            .collect();
+            .collect::<String>();
 
         Header::new(if name.is_empty() { "x-test" } else { &name }, &value)
     }
@@ -96,8 +96,10 @@ fn test_hpack_index_lookup(input: &HpackIndexFuzzInput) {
 
             // Create a simple indexed header field to trigger dynamic table insertion
             // This simulates how headers get added to the dynamic table during decoding
-            let encoded = encode_literal_with_incremental_indexing(&header);
-            let _ = decoder.decode(&encoded); // Ignore decode result, just populate table
+            let mut encoded = encode_literal_with_incremental_indexing(&header);
+            decoder
+                .decode(&mut encoded)
+                .expect("normalized dynamic-table setup header must decode");
         }
         count
     } else {
@@ -109,13 +111,21 @@ fn test_hpack_index_lookup(input: &HpackIndexFuzzInput) {
         let new_size = (input.new_table_size as usize).min(8192); // Cap size
 
         // Create dynamic table size update frame
-        let size_update = encode_dynamic_table_size_update(new_size);
-        let _ = decoder.decode(&size_update);
+        let mut size_update = encode_dynamic_table_size_update(new_size);
+        let size_update_result = decoder.decode(&mut size_update);
+        if new_size <= decoder.allowed_table_size() {
+            size_update_result.expect("allowed dynamic table size update must decode");
+        } else {
+            assert_compression_error(
+                size_update_result.expect_err("oversized table size update must reject"),
+                "dynamic table size update exceeds allowed maximum",
+            );
+        }
     }
 
     // Test the actual index lookup
     let test_index = (input.index as usize).min(MAX_TEST_INDEX);
-    let lookup_result = test_index_lookup(&decoder, test_index);
+    let lookup_result = test_index_lookup(&mut decoder, test_index);
 
     // Validate results based on assertions
     match lookup_result {
@@ -161,7 +171,10 @@ fn test_hpack_index_lookup(input: &HpackIndexFuzzInput) {
         Err(error) => {
             // Assertion 3: Out-of-bounds indices trigger DECOMPRESSION_FAILED
             match error {
-                H2Error::Compression { .. } => {
+                H2Error {
+                    code: ErrorCode::CompressionError,
+                    ..
+                } => {
                     // Expected for invalid indices
                     if test_index == 0 {
                         // Index 0 should always fail
@@ -202,7 +215,10 @@ fn test_hpack_index_lookup(input: &HpackIndexFuzzInput) {
             Ok(_) => {
                 // If successful, the index should still be within bounds
             }
-            Err(H2Error::Compression { .. }) => {
+            Err(H2Error {
+                code: ErrorCode::CompressionError,
+                ..
+            }) => {
                 // If failed, it's likely due to eviction from size reduction
             }
             Err(e) => {
@@ -213,12 +229,12 @@ fn test_hpack_index_lookup(input: &HpackIndexFuzzInput) {
 }
 
 /// Test index lookup through a simple indexed header field decode.
-fn test_index_lookup(decoder: &Decoder, index: usize) -> Result<Header, H2Error> {
+fn test_index_lookup(decoder: &mut Decoder, index: usize) -> Result<Header, H2Error> {
     // Create an indexed header field with the given index
-    let encoded = encode_indexed_header_field(index);
+    let mut encoded = encode_indexed_header_field(index);
 
     // Decode and extract the first header
-    match decoder.decode(&encoded) {
+    match decoder.decode(&mut encoded) {
         Ok(headers) => {
             if let Some(header) = headers.first() {
                 Ok(header.clone())
@@ -228,6 +244,62 @@ fn test_index_lookup(decoder: &Decoder, index: usize) -> Result<Header, H2Error>
         }
         Err(e) => Err(e),
     }
+}
+
+fn assert_compression_error(error: H2Error, expected_message: &str) {
+    assert_eq!(
+        error.code,
+        ErrorCode::CompressionError,
+        "expected compression error, got {error}"
+    );
+    assert!(
+        error.message.contains(expected_message),
+        "expected error message containing {expected_message:?}, got {:?}",
+        error.message
+    );
+}
+
+fn expect_index(decoder: &mut Decoder, index: usize, name: &str, value: &str) {
+    let header = test_index_lookup(decoder, index).expect("index must resolve");
+    assert_eq!(header.name, name, "index {index} resolved wrong name");
+    assert_eq!(header.value, value, "index {index} resolved wrong value");
+}
+
+fn run_fixed_canaries() {
+    let mut decoder = Decoder::new();
+
+    expect_index(&mut decoder, 2, ":method", "GET");
+    expect_index(&mut decoder, 4, ":path", "/");
+    expect_index(&mut decoder, 8, ":status", "200");
+    expect_index(&mut decoder, STATIC_TABLE_SIZE, "www-authenticate", "");
+
+    let zero_error = test_index_lookup(&mut decoder, 0).expect_err("index zero must reject");
+    assert_compression_error(zero_error, "invalid index 0");
+
+    let oversized_error =
+        test_index_lookup(&mut decoder, MAX_TEST_INDEX).expect_err("oversized index must reject");
+    assert_compression_error(oversized_error, "invalid dynamic index");
+
+    let first = Header::new("x-first", "one");
+    let second = Header::new("x-second", "two");
+    let mut encoded_first = encode_literal_with_incremental_indexing(&first);
+    let mut encoded_second = encode_literal_with_incremental_indexing(&second);
+    decoder
+        .decode(&mut encoded_first)
+        .expect("first incremental header must decode");
+    decoder
+        .decode(&mut encoded_second)
+        .expect("second incremental header must decode");
+    expect_index(&mut decoder, STATIC_TABLE_SIZE + 1, "x-second", "two");
+    expect_index(&mut decoder, STATIC_TABLE_SIZE + 2, "x-first", "one");
+
+    let mut shrink_to_zero = encode_dynamic_table_size_update(0);
+    decoder
+        .decode(&mut shrink_to_zero)
+        .expect("zero table size update must decode");
+    let evicted = test_index_lookup(&mut decoder, STATIC_TABLE_SIZE + 1)
+        .expect_err("dynamic index must reject after table is shrunk to zero");
+    assert_compression_error(evicted, "invalid dynamic index");
 }
 
 /// Encode an indexed header field for testing.
@@ -303,6 +375,8 @@ fn encode_varint_continuation(buf: &mut Vec<u8>, mut value: usize) {
 }
 
 fuzz_target!(|data: &[u8]| {
+    run_fixed_canaries();
+
     if let Ok(input) = HpackIndexFuzzInput::arbitrary(&mut Unstructured::new(data)) {
         test_hpack_index_lookup(&input);
     }
