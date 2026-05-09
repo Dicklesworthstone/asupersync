@@ -87,6 +87,13 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
+    if data.is_empty() {
+        for test_case in generate_multiplicity_scenarios() {
+            exercise_settings_multiplicity_case(&test_case);
+        }
+        return;
+    }
+
     let mut u = arbitrary::Unstructured::new(data);
 
     // Generate SETTINGS multiplicity test case
@@ -109,23 +116,27 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
+    exercise_settings_multiplicity_case(&test_case);
+});
+
+fn exercise_settings_multiplicity_case(test_case: &SettingsMultiplicityTest) {
     // Test core SETTINGS multiplicity behavior
-    test_settings_multiplicity(&test_case);
+    test_settings_multiplicity(test_case);
 
     // Test latest value application
-    test_latest_value_application(&test_case);
+    test_latest_value_application(test_case);
 
     // Test intra-frame duplicates
     if test_case.test_intra_frame_duplicates {
-        test_intra_frame_duplicates(&test_case);
+        test_intra_frame_duplicates(test_case);
     }
 
     // Test parameter independence
-    test_parameter_independence(&test_case);
+    test_parameter_independence(test_case);
 
     // Test edge cases
-    test_multiplicity_edge_cases(&test_case);
-});
+    test_multiplicity_edge_cases(test_case);
+}
 
 /// Test SETTINGS frame multiplicity behavior
 fn test_settings_multiplicity(test_case: &SettingsMultiplicityTest) {
@@ -211,19 +222,18 @@ fn test_latest_value_application(test_case: &SettingsMultiplicityTest) {
             continue; // Skip ACK frames
         }
 
-        // Within each frame, find latest value for each parameter
-        let mut frame_latest: HashMap<SettingIdentifier, u32> = HashMap::new();
-        for param in &settings_frame.parameters {
-            frame_latest.insert(param.setting_id, param.value);
-        }
-
-        // Update global latest values
-        for (setting_id, value) in frame_latest {
-            latest_values.insert(setting_id, value);
-        }
-
         // Send the frame
-        let _result = mock_connection.send_settings_frame(settings_frame.clone());
+        let result = mock_connection.send_settings_frame(settings_frame.clone());
+        if let Some(applied_settings) = observe_settings_frame_result(
+            settings_frame,
+            test_case.connection_config.strict_validation,
+            result,
+        ) {
+            // Update global latest values only with values the connection accepted.
+            for (setting_id, value) in applied_settings {
+                latest_values.insert(setting_id, value);
+            }
+        }
     }
 
     // Verify that the connection has the latest values
@@ -276,26 +286,32 @@ fn test_intra_frame_duplicates(test_case: &SettingsMultiplicityTest) {
     let mut mock_connection = MockH2Connection::new(test_case.connection_config.clone());
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        mock_connection.send_settings_frame(duplicate_frame)
+        mock_connection.send_settings_frame(duplicate_frame.clone())
     }));
 
     assert!(result.is_ok(), "Intra-frame duplicates should not panic");
 
-    if let Ok(frame_result) = result {
-        if let SettingsFrameResult::Accepted { .. } = frame_result {
-            // The last occurrence should win
-            let window_size =
-                mock_connection.get_setting_value(SettingIdentifier::InitialWindowSize);
-            assert_eq!(
-                window_size,
-                Some(65535),
-                "Last occurrence should win for intra-frame duplicates"
-            );
+    if let Ok(frame_result) = result
+        && let Some(applied_settings) = observe_settings_frame_result(
+            &duplicate_frame,
+            test_case.connection_config.strict_validation,
+            frame_result,
+        )
+    {
+        let window_size = mock_connection.get_setting_value(SettingIdentifier::InitialWindowSize);
+        assert_eq!(
+            window_size,
+            applied_settings
+                .get(&SettingIdentifier::InitialWindowSize)
+                .copied(),
+            "Last occurrence should win for intra-frame duplicates"
+        );
 
+        if let Some(expected_frame_size) = applied_settings.get(&SettingIdentifier::MaxFrameSize) {
             let frame_size = mock_connection.get_setting_value(SettingIdentifier::MaxFrameSize);
             assert_eq!(
                 frame_size,
-                Some(16384),
+                Some(*expected_frame_size),
                 "Non-duplicated setting should be applied normally"
             );
         }
@@ -336,7 +352,18 @@ fn test_parameter_independence(test_case: &SettingsMultiplicityTest) {
 
     // Send each frame
     for frame in independent_frames {
-        let _result = mock_connection.send_settings_frame(frame);
+        let result = mock_connection.send_settings_frame(frame.clone());
+        let applied_settings = observe_settings_frame_result(
+            &frame,
+            test_case.connection_config.strict_validation,
+            result,
+        )
+        .expect("independent SETTINGS frame");
+        assert_eq!(
+            applied_settings.len(),
+            1,
+            "independent SETTINGS frame should apply one parameter"
+        );
     }
 
     // Verify independent updates
@@ -353,12 +380,78 @@ fn test_parameter_independence(test_case: &SettingsMultiplicityTest) {
         Some(100),
         "MaxConcurrentStreams should remain unchanged"
     );
+    assert!(
+        mock_connection.get_all_settings().len() >= 2,
+        "independent SETTINGS updates should be visible in the connection map"
+    );
 
     // Send additional test case frames if any
     for settings_frame in &test_case.settings_frames {
         if settings_frame.flags & SETTINGS_ACK_FLAG == 0 {
-            let _result = mock_connection.send_settings_frame(settings_frame.clone());
+            let result = mock_connection.send_settings_frame(settings_frame.clone());
+            observe_settings_frame_result(
+                settings_frame,
+                test_case.connection_config.strict_validation,
+                result,
+            );
         }
+    }
+}
+
+fn observe_settings_frame_result(
+    frame: &SettingsFrame,
+    strict_validation: bool,
+    result: SettingsFrameResult,
+) -> Option<HashMap<SettingIdentifier, u32>> {
+    match result {
+        SettingsFrameResult::Accepted { applied_settings } => {
+            assert!(
+                frame.flags & SETTINGS_ACK_FLAG == 0 || frame.parameters.is_empty(),
+                "accepted SETTINGS ACK frames must not carry parameters"
+            );
+
+            let expected = expected_applied_settings(frame, strict_validation);
+            assert_eq!(
+                applied_settings, expected,
+                "accepted SETTINGS frames should apply the latest valid value per setting"
+            );
+
+            Some(applied_settings)
+        }
+        SettingsFrameResult::Rejected { reason } => {
+            assert!(
+                !reason.trim().is_empty(),
+                "rejected SETTINGS frames should include a diagnostic reason"
+            );
+            assert!(
+                !is_valid_settings_frame(frame),
+                "only invalid SETTINGS frames should be rejected by the mock connection"
+            );
+            None
+        }
+    }
+}
+
+fn expected_applied_settings(
+    frame: &SettingsFrame,
+    strict_validation: bool,
+) -> HashMap<SettingIdentifier, u32> {
+    if frame.flags & SETTINGS_ACK_FLAG != 0 {
+        return HashMap::new();
+    }
+
+    let mut latest_values = HashMap::new();
+    for param in &frame.parameters {
+        latest_values.insert(param.setting_id, param.value);
+    }
+
+    if strict_validation {
+        latest_values
+            .into_iter()
+            .filter(|(setting_id, value)| is_valid_setting_value(*setting_id, *value))
+            .collect()
+    } else {
+        latest_values
     }
 }
 
@@ -417,16 +510,21 @@ fn test_multiplicity_edge_cases(test_case: &SettingsMultiplicityTest) {
     };
 
     let many_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        mock_connection.send_settings_frame(many_duplicates)
+        mock_connection.send_settings_frame(many_duplicates.clone())
     }));
 
     assert!(many_result.is_ok(), "Many duplicates should not panic");
 
-    if let Ok(SettingsFrameResult::Accepted { .. }) = many_result.unwrap() {
-        // Last value (49 % 2 = 1) should be applied
-        let enable_push = mock_connection.get_setting_value(SettingIdentifier::EnablePush);
-        assert_eq!(enable_push, Some(1), "Last duplicate value should win");
-    }
+    observe_settings_frame_result(
+        &many_duplicates,
+        mock_connection.config.strict_validation,
+        many_result.unwrap(),
+    )
+    .expect("many duplicate SETTINGS frame should be accepted");
+
+    // Last value (49 % 2 = 1) should be applied
+    let enable_push = mock_connection.get_setting_value(SettingIdentifier::EnablePush);
+    assert_eq!(enable_push, Some(1), "Last duplicate value should win");
 
     // Test maximum value boundaries
     let boundary_frame = SettingsFrame {
@@ -511,6 +609,10 @@ impl SettingIdentifier {
 
 /// Check if SETTINGS frame is valid
 fn is_valid_settings_frame(frame: &SettingsFrame) -> bool {
+    if !frame.padding.is_empty() {
+        return false;
+    }
+
     // ACK frames should have no parameters
     if frame.flags & SETTINGS_ACK_FLAG != 0 {
         return frame.parameters.is_empty();
@@ -518,6 +620,9 @@ fn is_valid_settings_frame(frame: &SettingsFrame) -> bool {
 
     // Check parameter validity
     for param in &frame.parameters {
+        if param.setting_id.is_known() {
+            debug_assert!((1..=6).contains(&param.setting_id.to_u16()));
+        }
         if !is_valid_setting_value(param.setting_id, param.value) {
             return false;
         }
@@ -531,7 +636,7 @@ fn is_valid_setting_value(setting_id: SettingIdentifier, value: u32) -> bool {
     match setting_id {
         SettingIdentifier::EnablePush => value <= 1,
         SettingIdentifier::InitialWindowSize => value <= 0x7FFFFFFF,
-        SettingIdentifier::MaxFrameSize => value >= 16384 && value <= 0xFFFFFF,
+        SettingIdentifier::MaxFrameSize => (16384..=0xFFFFFF).contains(&value),
         _ => true, // Other settings accept any u32 value
     }
 }
@@ -551,7 +656,6 @@ enum SettingsFrameResult {
 #[derive(Debug, Clone)]
 enum AckResult {
     Sent,
-    AlreadyAcked,
     NoSetting,
 }
 
