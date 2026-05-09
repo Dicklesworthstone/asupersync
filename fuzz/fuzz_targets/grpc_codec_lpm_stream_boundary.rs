@@ -323,22 +323,23 @@ fuzz_target!(|stream: Stream| {
 
     // Property: round-trip a small well-formed payload to verify
     // the encoder/decoder agree. Single small frame sanity-check.
-    if let Some(first_frame) = stream.frames.first() {
-        if first_frame.flag <= 1 && !first_frame.declare_oversize {
-            let body: Vec<u8> = first_frame
-                .body
-                .iter()
-                .copied()
-                .take(MAX_FRAME_BODY)
-                .collect();
-            let mut wire = BytesMut::new();
-            let mut enc = GrpcCodec::with_max_size(CODEC_MAX_FRAME);
-            let msg = GrpcMessage::new(body.clone().into());
-            if enc.encode(msg, &mut wire).is_ok() {
-                let mut dec = GrpcCodec::with_max_size(CODEC_MAX_FRAME);
-                if let Ok(Some(decoded)) = observe_decode(&mut dec, &mut wire) {
-                    assert_eq!(decoded.data.as_ref(), &body[..], "round-trip body mismatch",);
-                }
+    if let Some(first_frame) = stream.frames.first()
+        && first_frame.flag <= 1
+        && !first_frame.declare_oversize
+    {
+        let body: Vec<u8> = first_frame
+            .body
+            .iter()
+            .copied()
+            .take(MAX_FRAME_BODY)
+            .collect();
+        let mut wire = BytesMut::new();
+        let mut enc = GrpcCodec::with_max_size(CODEC_MAX_FRAME);
+        let msg = GrpcMessage::new(body.clone().into());
+        if enc.encode(msg, &mut wire).is_ok() {
+            let mut dec = GrpcCodec::with_max_size(CODEC_MAX_FRAME);
+            if let Ok(Some(decoded)) = observe_decode(&mut dec, &mut wire) {
+                assert_eq!(decoded.data.as_ref(), &body[..], "round-trip body mismatch",);
             }
         }
     }
