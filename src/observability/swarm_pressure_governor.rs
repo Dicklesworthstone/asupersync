@@ -1035,8 +1035,8 @@ mod tests {
     fn test_register_region_envelope_binds_envelope_to_region_key() {
         let governor = create_test_swarm_governor();
         let actual_region_id = RegionId::new_for_test(9, 1);
-        let placeholder_region_id = RegionId::new_for_test(1, 99);
-        let envelope = ResourceEnvelope::new(placeholder_region_id, 2048, 100, 10);
+        let stale_admission_region_id = RegionId::new_for_test(1, 99);
+        let envelope = ResourceEnvelope::new(stale_admission_region_id, 2048, 100, 10);
 
         governor.register_region_envelope(actual_region_id, envelope);
 
@@ -1046,9 +1046,9 @@ mod tests {
         assert_eq!(registered.region_id, actual_region_id);
         assert!(
             governor
-                .get_region_envelope(placeholder_region_id)
+                .get_region_envelope(stale_admission_region_id)
                 .is_none(),
-            "placeholder admission id must not become a separately registered region"
+            "stale admission id must not become a separately registered region"
         );
     }
 

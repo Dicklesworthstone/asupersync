@@ -757,7 +757,7 @@ pub enum MemoryTierCertificationStatus {
     ContractGuarded,
     /// Conservative fallback is the only supported runtime mode.
     FallbackOnly,
-    /// Design-only placeholder that must not render as passing.
+    /// Design-only declaration that must not render as passing.
     TemplateOnly,
 }
 

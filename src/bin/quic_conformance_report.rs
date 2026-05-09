@@ -75,7 +75,7 @@ fn json_report() -> String {
         "next_step": NEXT_STEP,
         "source": {
             "kind": "fail-closed",
-            "static_placeholder_metrics_removed": true
+            "static_sample_metrics_removed": true
         }
     });
 
@@ -117,7 +117,7 @@ RFC 9000 QUIC Stream Conformance Report
 Status: unavailable
 Reason: {UNAVAILABLE_REASON}
 
-No conformance score is reported. Static placeholder metrics were removed so this command cannot be mistaken for a live RFC 9000 proof.
+No conformance score is reported. Static sample metrics were removed so this command cannot be mistaken for a live RFC 9000 proof.
 
 Next step: {NEXT_STEP}."
         )
@@ -167,7 +167,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_format_errors_without_rendering_placeholder() {
+    fn unknown_format_errors_without_rendering_static_scores() {
         let error = render_report("xml", false).expect_err("unknown format should fail");
 
         assert_eq!(error, "Unknown format: xml");
