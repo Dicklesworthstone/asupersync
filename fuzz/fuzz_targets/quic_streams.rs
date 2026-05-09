@@ -15,13 +15,43 @@ const MAX_STREAM_SEQ: u64 = 100;
 /// Maximum data size for write/receive operations
 const MAX_DATA_SIZE: u64 = 64 * 1024; // 64KB
 
+#[derive(Debug, Clone, Copy, Arbitrary)]
+enum FuzzStreamRole {
+    Client,
+    Server,
+}
+
+impl From<FuzzStreamRole> for StreamRole {
+    fn from(role: FuzzStreamRole) -> Self {
+        match role {
+            FuzzStreamRole::Client => Self::Client,
+            FuzzStreamRole::Server => Self::Server,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Arbitrary)]
+enum FuzzStreamDirection {
+    Bidirectional,
+    Unidirectional,
+}
+
+impl From<FuzzStreamDirection> for StreamDirection {
+    fn from(direction: FuzzStreamDirection) -> Self {
+        match direction {
+            FuzzStreamDirection::Bidirectional => Self::Bidirectional,
+            FuzzStreamDirection::Unidirectional => Self::Unidirectional,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Arbitrary)]
 enum StreamOp {
     OpenLocalBidi,
     OpenLocalUni,
     AcceptRemote {
-        role: StreamRole,
-        direction: StreamDirection,
+        role: FuzzStreamRole,
+        direction: FuzzStreamDirection,
         seq: u64,
     },
     WriteStream {
@@ -62,7 +92,7 @@ enum StreamOp {
 
 #[derive(Debug, Clone, Arbitrary)]
 struct QuicStreamsFuzzInput {
-    role: StreamRole,
+    role: FuzzStreamRole,
     max_local_bidi: u8,
     max_local_uni: u8,
     send_window: u64,
@@ -89,11 +119,11 @@ impl ObservedStreamState {
         let stream = table.stream(stream_id)?;
 
         // Check if stream has been reset
-        if let Some(_) = stream.send_reset {
+        if stream.send_reset.is_some() {
             return Ok(ObservedStreamState::ResetSent);
         }
 
-        if let Some(_) = stream.stop_sending_error_code {
+        if stream.stop_sending_error_code.is_some() {
             return Ok(ObservedStreamState::ResetReceived);
         }
 
@@ -116,6 +146,64 @@ impl ObservedStreamState {
                 }
             }
         }
+    }
+}
+
+fn observe_error(label: &str, error: &impl std::fmt::Display) {
+    assert!(
+        !error.to_string().is_empty(),
+        "{label} errors should carry a deterministic diagnostic"
+    );
+}
+
+fn observe_state_update(
+    label: &str,
+    state_tracker: &mut StateTracker,
+    table: &StreamTable,
+    stream_id: StreamId,
+) {
+    assert!(
+        state_tracker.update_state(table, stream_id),
+        "{label} produced an invalid stream-state transition"
+    );
+}
+
+fn observe_limit_result(
+    label: &str,
+    before_remaining: u64,
+    after_remaining: u64,
+    result: Result<(), asupersync::net::quic_native::streams::FlowControlError>,
+) {
+    match result {
+        Ok(()) => assert!(
+            after_remaining >= before_remaining,
+            "{label} should not reduce remaining connection credit"
+        ),
+        Err(error) => observe_error(label, &error),
+    }
+}
+
+fn observe_next_writable(table: &mut StreamTable, role: StreamRole) {
+    if let Some(stream_id) = table.next_writable_stream() {
+        let stream = table
+            .stream(stream_id)
+            .expect("round-robin returned an unknown stream");
+        let writable_direction = match stream_id.direction() {
+            StreamDirection::Bidirectional => true,
+            StreamDirection::Unidirectional => stream_id.is_local_for(role),
+        };
+        assert!(
+            writable_direction,
+            "round-robin returned a non-writable remote unidirectional stream"
+        );
+        assert!(
+            stream.send_reset.is_none() && stream.stop_sending_error_code.is_none(),
+            "round-robin returned a stopped or reset stream"
+        );
+        assert!(
+            stream.send_credit.remaining() > 0,
+            "round-robin returned a stream without send credit"
+        );
     }
 }
 
@@ -205,9 +293,10 @@ fuzz_target!(|input: QuicStreamsFuzzInput| {
     let recv_window = input.recv_window.min(1024 * 1024); // 1MB
     let connection_send_limit = input.connection_send_limit.min(10 * 1024 * 1024); // 10MB
     let connection_recv_limit = input.connection_recv_limit.min(10 * 1024 * 1024); // 10MB
+    let endpoint_role = StreamRole::from(input.role);
 
     let mut table = StreamTable::new_with_connection_limits(
-        input.role,
+        endpoint_role,
         max_local_bidi,
         max_local_uni,
         send_window,
@@ -219,7 +308,7 @@ fuzz_target!(|input: QuicStreamsFuzzInput| {
     let mut state_tracker = StateTracker::new();
     let mut stream_list: Vec<StreamId> = Vec::new();
 
-    for op in &input.operations {
+    for op in input.operations {
         match op {
             StreamOp::OpenLocalBidi => {
                 match table.open_local_bidi() {
@@ -232,7 +321,7 @@ fuzz_target!(|input: QuicStreamsFuzzInput| {
                             .iter()
                             .filter(|id| {
                                 id.direction() == StreamDirection::Bidirectional
-                                    && id.is_local_for(input.role)
+                                    && id.is_local_for(endpoint_role)
                             })
                             .count();
                         assert!(
@@ -247,9 +336,7 @@ fuzz_target!(|input: QuicStreamsFuzzInput| {
                         assert_eq!(limit, max_local_bidi);
                         // This is expected when limit is reached
                     }
-                    Err(_) => {
-                        // Other errors are unexpected for this operation
-                    }
+                    Err(error) => observe_error("open local bidirectional stream", &error),
                 }
             }
 
@@ -264,7 +351,7 @@ fuzz_target!(|input: QuicStreamsFuzzInput| {
                             .iter()
                             .filter(|id| {
                                 id.direction() == StreamDirection::Unidirectional
-                                    && id.is_local_for(input.role)
+                                    && id.is_local_for(endpoint_role)
                             })
                             .count();
                         assert!(
@@ -279,9 +366,7 @@ fuzz_target!(|input: QuicStreamsFuzzInput| {
                         assert_eq!(limit, max_local_uni);
                         // This is expected when limit is reached
                     }
-                    Err(_) => {
-                        // Other errors are unexpected for this operation
-                    }
+                    Err(error) => observe_error("open local unidirectional stream", &error),
                 }
             }
 
@@ -291,13 +376,16 @@ fuzz_target!(|input: QuicStreamsFuzzInput| {
                 seq,
             } => {
                 let seq = seq.min(MAX_STREAM_SEQ);
-                let stream_id = StreamId::local(*role, *direction, seq);
+                let stream_id = StreamId::local(role.into(), direction.into(), seq);
 
                 // Only accept if it's actually remote for our role
-                if !stream_id.is_local_for(input.role) {
-                    if let Ok(()) = table.accept_remote_stream(stream_id) {
-                        stream_list.push(stream_id);
-                        state_tracker.record_stream_opened(stream_id);
+                if !stream_id.is_local_for(endpoint_role) {
+                    match table.accept_remote_stream(stream_id) {
+                        Ok(()) => {
+                            stream_list.push(stream_id);
+                            state_tracker.record_stream_opened(stream_id);
+                        }
+                        Err(error) => observe_error("accept remote stream", &error),
                     }
                 }
             }
@@ -305,7 +393,7 @@ fuzz_target!(|input: QuicStreamsFuzzInput| {
             StreamOp::WriteStream { stream_index, len } => {
                 let len = len.min(MAX_DATA_SIZE);
                 if let Some(&stream_id) =
-                    stream_list.get(*stream_index as usize % stream_list.len().max(1))
+                    stream_list.get(stream_index as usize % stream_list.len().max(1))
                 {
                     let old_state = state_tracker
                         .states
@@ -313,27 +401,48 @@ fuzz_target!(|input: QuicStreamsFuzzInput| {
                         .cloned()
                         .unwrap_or(ObservedStreamState::Idle);
 
-                    if let Ok(()) = table.write_stream(stream_id, len) {
-                        // Property 1: IDLE→OPEN on first frame
-                        if old_state == ObservedStreamState::Idle && len > 0 {
-                            state_tracker.record_first_frame(stream_id);
-                            let valid_transition = state_tracker.update_state(&table, stream_id);
+                    let before_send_remaining = table.connection_send_remaining();
+                    match table.write_stream(stream_id, len) {
+                        Ok(()) => {
                             assert!(
-                                valid_transition,
-                                "Invalid state transition after first write"
+                                table.connection_send_remaining() <= before_send_remaining,
+                                "write_stream should not increase remaining send credit"
                             );
-
-                            let new_state = state_tracker.states.get(&stream_id).unwrap();
+                            let stream = table
+                                .stream(stream_id)
+                                .expect("successful write should leave stream present");
                             assert_eq!(
-                                *new_state,
-                                ObservedStreamState::Open,
-                                "Stream should transition to OPEN on first frame"
+                                stream.send_offset,
+                                stream.send_credit.used(),
+                                "send offset should mirror consumed stream send credit"
                             );
-                        }
 
-                        // Update state after write
-                        let valid_transition = state_tracker.update_state(&table, stream_id);
-                        assert!(valid_transition, "Invalid state transition after write");
+                            // Property 1: IDLE→OPEN on first frame
+                            if old_state == ObservedStreamState::Idle && len > 0 {
+                                state_tracker.record_first_frame(stream_id);
+                                assert!(
+                                    state_tracker.has_received_first_frame(stream_id),
+                                    "first write should be recorded for the stream"
+                                );
+                                observe_state_update(
+                                    "first write",
+                                    &mut state_tracker,
+                                    &table,
+                                    stream_id,
+                                );
+
+                                let new_state = state_tracker.states.get(&stream_id).unwrap();
+                                assert_eq!(
+                                    *new_state,
+                                    ObservedStreamState::Open,
+                                    "Stream should transition to OPEN on first frame"
+                                );
+                            }
+
+                            // Update state after write
+                            observe_state_update("write", &mut state_tracker, &table, stream_id);
+                        }
+                        Err(error) => observe_error("write stream", &error),
                     }
                 }
             }
@@ -348,7 +457,7 @@ fuzz_target!(|input: QuicStreamsFuzzInput| {
                 let len = len.min(MAX_DATA_SIZE);
 
                 if let Some(&stream_id) =
-                    stream_list.get(*stream_index as usize % stream_list.len().max(1))
+                    stream_list.get(stream_index as usize % stream_list.len().max(1))
                 {
                     let old_state = state_tracker
                         .states
@@ -356,11 +465,15 @@ fuzz_target!(|input: QuicStreamsFuzzInput| {
                         .cloned()
                         .unwrap_or(ObservedStreamState::Idle);
 
-                    match table.receive_stream_segment(stream_id, offset, *len, *is_fin) {
+                    match table.receive_stream_segment(stream_id, offset, len, is_fin) {
                         Ok(()) => {
                             // Property 1: IDLE→OPEN on first frame
-                            if old_state == ObservedStreamState::Idle && (*len > 0 || *is_fin) {
+                            if old_state == ObservedStreamState::Idle && (len > 0 || is_fin) {
                                 state_tracker.record_first_frame(stream_id);
+                                assert!(
+                                    state_tracker.has_received_first_frame(stream_id),
+                                    "first receive should be recorded for the stream"
+                                );
                                 let valid_transition =
                                     state_tracker.update_state(&table, stream_id);
                                 assert!(
@@ -377,7 +490,7 @@ fuzz_target!(|input: QuicStreamsFuzzInput| {
                             }
 
                             // Property 2: OPEN→HALF_CLOSED on FIN
-                            if *is_fin && old_state == ObservedStreamState::Open {
+                            if is_fin && old_state == ObservedStreamState::Open {
                                 let valid_transition =
                                     state_tracker.update_state(&table, stream_id);
                                 assert!(valid_transition, "Invalid state transition on FIN");
@@ -393,15 +506,12 @@ fuzz_target!(|input: QuicStreamsFuzzInput| {
                             // Property 5: state observed only on poll_recv (receive operations)
                             // This property is inherently satisfied since we only observe state changes
                             // when explicitly checking via receive operations
-                            let valid_transition = state_tracker.update_state(&table, stream_id);
-                            assert!(valid_transition, "Invalid state transition after receive");
+                            observe_state_update("receive", &mut state_tracker, &table, stream_id);
                         }
                         Err(StreamTableError::StreamNotReadable(_)) => {
                             // Expected for local unidirectional streams
                         }
-                        Err(_) => {
-                            // Other errors might be valid depending on stream state
-                        }
+                        Err(error) => observe_error("receive stream segment", &error),
                     }
                 }
             }
@@ -414,43 +524,47 @@ fuzz_target!(|input: QuicStreamsFuzzInput| {
                 let final_size = final_size.min(MAX_DATA_SIZE);
 
                 if let Some(&stream_id) =
-                    stream_list.get(*stream_index as usize % stream_list.len().max(1))
+                    stream_list.get(stream_index as usize % stream_list.len().max(1))
                 {
-                    if let Ok(stream) = table.stream_mut(stream_id) {
-                        let old_state = state_tracker
-                            .states
-                            .get(&stream_id)
-                            .cloned()
-                            .unwrap_or(ObservedStreamState::Idle);
+                    match table.stream_mut(stream_id) {
+                        Ok(stream) => match stream.reset_send(error_code, final_size) {
+                            Ok(()) => {
+                                // Property 4: RESET_STREAM transitions immediate
+                                observe_state_update(
+                                    "reset_send",
+                                    &mut state_tracker,
+                                    &table,
+                                    stream_id,
+                                );
 
-                        if let Ok(()) = stream.reset_send(*error_code, final_size) {
-                            // Property 4: RESET_STREAM transitions immediate
-                            let valid_transition = state_tracker.update_state(&table, stream_id);
-                            assert!(
-                                valid_transition,
-                                "Invalid state transition after reset_send"
-                            );
+                                let new_state = state_tracker.states.get(&stream_id).unwrap();
+                                assert_eq!(
+                                    *new_state,
+                                    ObservedStreamState::ResetSent,
+                                    "Stream should immediately transition to RESET_SENT state"
+                                );
 
-                            let new_state = state_tracker.states.get(&stream_id).unwrap();
-                            assert_eq!(
-                                *new_state,
-                                ObservedStreamState::ResetSent,
-                                "Stream should immediately transition to RESET_SENT state"
-                            );
-
-                            // Verify that the stream cannot send more data after reset
-                            let write_result = table.write_stream(stream_id, 1);
-                            match write_result {
-                                Err(StreamTableError::Stream(QuicStreamError::SendStopped {
-                                    code,
-                                })) => {
-                                    assert_eq!(code, *error_code, "Error code should match reset");
-                                }
-                                _ => {
-                                    // Stream may not be writable for other reasons (e.g., unidirectional)
+                                // Verify that the stream cannot send more data after reset
+                                let write_result = table.write_stream(stream_id, 1);
+                                match write_result {
+                                    Err(StreamTableError::Stream(
+                                        QuicStreamError::SendStopped { code },
+                                    )) => {
+                                        assert_eq!(
+                                            code, error_code,
+                                            "Error code should match reset"
+                                        );
+                                    }
+                                    Err(StreamTableError::StreamNotWritable(_)) => {
+                                        // Remote unidirectional streams are already unwritable.
+                                    }
+                                    Err(error) => observe_error("write after reset_send", &error),
+                                    Ok(()) => panic!("write after reset_send should not succeed"),
                                 }
                             }
-                        }
+                            Err(error) => observe_error("reset send", &error),
+                        },
+                        Err(error) => observe_error("lookup stream for reset_send", &error),
                     }
                 }
             }
@@ -460,29 +574,44 @@ fuzz_target!(|input: QuicStreamsFuzzInput| {
                 error_code,
             } => {
                 if let Some(&stream_id) =
-                    stream_list.get(*stream_index as usize % stream_list.len().max(1))
+                    stream_list.get(stream_index as usize % stream_list.len().max(1))
                 {
-                    if let Ok(stream) = table.stream_mut(stream_id) {
-                        let old_state = state_tracker
-                            .states
-                            .get(&stream_id)
-                            .cloned()
-                            .unwrap_or(ObservedStreamState::Idle);
+                    match table.stream_mut(stream_id) {
+                        Ok(stream) => {
+                            stream.on_stop_sending(error_code);
+                            assert_eq!(
+                                stream.stop_sending_error_code,
+                                Some(error_code),
+                                "STOP_SENDING should record the first error code"
+                            );
 
-                        stream.on_stop_sending(*error_code);
+                            // Property 4: RESET_STREAM transitions immediate (similar for STOP_SENDING)
+                            observe_state_update(
+                                "stop_sending",
+                                &mut state_tracker,
+                                &table,
+                                stream_id,
+                            );
 
-                        // Property 4: RESET_STREAM transitions immediate (similar for STOP_SENDING)
-                        let valid_transition = state_tracker.update_state(&table, stream_id);
-                        assert!(
-                            valid_transition,
-                            "Invalid state transition after stop_sending"
-                        );
-
-                        // After STOP_SENDING, further writes should fail
-                        let write_result = table.write_stream(stream_id, 1);
-                        if write_result.is_err() {
-                            // This is expected - writes should fail after stop_sending
+                            // After STOP_SENDING, further writes should fail
+                            let write_result = table.write_stream(stream_id, 1);
+                            match write_result {
+                                Err(StreamTableError::Stream(QuicStreamError::SendStopped {
+                                    code,
+                                })) => {
+                                    assert_eq!(
+                                        code, error_code,
+                                        "Error code should match stop_sending"
+                                    );
+                                }
+                                Err(StreamTableError::StreamNotWritable(_)) => {
+                                    // Remote unidirectional streams are already unwritable.
+                                }
+                                Err(error) => observe_error("write after stop_sending", &error),
+                                Ok(()) => panic!("write after stop_sending should not succeed"),
+                            }
                         }
+                        Err(error) => observe_error("lookup stream for stop_sending", &error),
                     }
                 }
             }
@@ -492,32 +621,43 @@ fuzz_target!(|input: QuicStreamsFuzzInput| {
                 error_code,
             } => {
                 if let Some(&stream_id) =
-                    stream_list.get(*stream_index as usize % stream_list.len().max(1))
+                    stream_list.get(stream_index as usize % stream_list.len().max(1))
                 {
-                    if let Ok(stream) = table.stream_mut(stream_id) {
-                        stream.stop_receiving(*error_code);
+                    match table.stream_mut(stream_id) {
+                        Ok(stream) => {
+                            stream.stop_receiving(error_code);
+                            assert_eq!(
+                                stream.receive_stopped_error_code,
+                                Some(error_code),
+                                "stop_receiving should record the error code"
+                            );
 
-                        let valid_transition = state_tracker.update_state(&table, stream_id);
-                        assert!(
-                            valid_transition,
-                            "Invalid state transition after stop_receiving"
-                        );
+                            observe_state_update(
+                                "stop_receiving",
+                                &mut state_tracker,
+                                &table,
+                                stream_id,
+                            );
 
-                        // After stop_receiving, further receives should fail
-                        let recv_result = table.receive_stream_segment(stream_id, 0, 1, false);
-                        match recv_result {
-                            Err(StreamTableError::Stream(QuicStreamError::ReceiveStopped {
-                                code,
-                            })) => {
-                                assert_eq!(
-                                    code, *error_code,
-                                    "Error code should match stop_receiving"
-                                );
-                            }
-                            _ => {
-                                // Stream may not be readable for other reasons
+                            // After stop_receiving, further receives should fail
+                            let recv_result = table.receive_stream_segment(stream_id, 0, 1, false);
+                            match recv_result {
+                                Err(StreamTableError::Stream(
+                                    QuicStreamError::ReceiveStopped { code },
+                                )) => {
+                                    assert_eq!(
+                                        code, error_code,
+                                        "Error code should match stop_receiving"
+                                    );
+                                }
+                                Err(StreamTableError::StreamNotReadable(_)) => {
+                                    // Local unidirectional streams are already unreadable.
+                                }
+                                Err(error) => observe_error("receive after stop_receiving", &error),
+                                Ok(()) => panic!("receive after stop_receiving should not succeed"),
                             }
                         }
+                        Err(error) => observe_error("lookup stream for stop_receiving", &error),
                     }
                 }
             }
@@ -529,31 +669,51 @@ fuzz_target!(|input: QuicStreamsFuzzInput| {
                 let final_size = final_size.min(MAX_DATA_SIZE);
 
                 if let Some(&stream_id) =
-                    stream_list.get(*stream_index as usize % stream_list.len().max(1))
+                    stream_list.get(stream_index as usize % stream_list.len().max(1))
                 {
-                    if let Ok(()) = table.set_stream_final_size(stream_id, final_size) {
-                        // Property 2: Setting final size may transition to HALF_CLOSED
-                        let valid_transition = state_tracker.update_state(&table, stream_id);
-                        assert!(
-                            valid_transition,
-                            "Invalid state transition after set_final_size"
-                        );
+                    match table.set_stream_final_size(stream_id, final_size) {
+                        Ok(()) => {
+                            // Property 2: Setting final size may transition to HALF_CLOSED
+                            observe_state_update(
+                                "set final size",
+                                &mut state_tracker,
+                                &table,
+                                stream_id,
+                            );
+                        }
+                        Err(error) => observe_error("set stream final size", &error),
                     }
                 }
             }
 
             StreamOp::IncreaseConnectionSendLimit { new_limit } => {
                 let new_limit = new_limit.min(100 * 1024 * 1024); // 100MB max
-                let _ = table.increase_connection_send_limit(new_limit);
+                let before_remaining = table.connection_send_remaining();
+                let result = table.increase_connection_send_limit(new_limit);
+                let after_remaining = table.connection_send_remaining();
+                observe_limit_result(
+                    "increase connection send limit",
+                    before_remaining,
+                    after_remaining,
+                    result,
+                );
             }
 
             StreamOp::IncreaseConnectionRecvLimit { new_limit } => {
                 let new_limit = new_limit.min(100 * 1024 * 1024); // 100MB max
-                let _ = table.increase_connection_recv_limit(new_limit);
+                let before_remaining = table.connection_recv_remaining();
+                let result = table.increase_connection_recv_limit(new_limit);
+                let after_remaining = table.connection_recv_remaining();
+                observe_limit_result(
+                    "increase connection receive limit",
+                    before_remaining,
+                    after_remaining,
+                    result,
+                );
             }
 
             StreamOp::GetNextWritableStream => {
-                let _ = table.next_writable_stream();
+                observe_next_writable(&mut table, endpoint_role);
             }
         }
 
@@ -581,6 +741,11 @@ fuzz_target!(|input: QuicStreamsFuzzInput| {
 
     // Final validation: verify all recorded streams still have valid states
     for stream_id in &stream_list {
-        let _ = state_tracker.update_state(&table, *stream_id);
+        observe_state_update(
+            "final stream-state validation",
+            &mut state_tracker,
+            &table,
+            *stream_id,
+        );
     }
 });
