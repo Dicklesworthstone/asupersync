@@ -301,7 +301,6 @@ impl MockLfTerminatorParser {
         let raw_message = self.build_raw_message(test_case)?;
 
         let mut violations = Vec::new();
-        let _position = 0;
 
         // Scan for termination violations first
         self.scan_termination_violations(&raw_message, &mut violations);
@@ -323,6 +322,12 @@ impl MockLfTerminatorParser {
         } else {
             Vec::new()
         };
+        if self.allow_bare_cr_in_body && headers_end < raw_message.len() {
+            violations.retain(|violation| {
+                !(violation.position >= headers_end
+                    && matches!(violation.violation_type, ViolationType::BareCr))
+            });
+        }
 
         // Validate body terminators if chunked
         if self.is_chunked_encoding(&headers) {
@@ -343,6 +348,11 @@ impl MockLfTerminatorParser {
 
     fn build_raw_message(&self, test_case: &MalformedLfTestCase) -> Result<Vec<u8>, String> {
         let mut message = Vec::new();
+        let scenario_marker = format!("{:?}", test_case.scenario);
+        assert!(
+            !scenario_marker.is_empty(),
+            "malformation scenario should stay visible"
+        );
 
         // Build first line
         let first_line = self.build_first_line(test_case)?;
@@ -386,50 +396,56 @@ impl MockLfTerminatorParser {
     }
 
     fn build_first_line(&self, test_case: &MalformedLfTestCase) -> Result<String, String> {
+        let configured_parts = &test_case.structure.first_line.parts;
         match &test_case.message_type {
-            MessageType::Request(_) | MessageType::ChunkedRequest => Ok(format!(
-                "{} {} {}",
-                test_case
-                    .structure
-                    .first_line
-                    .parts
-                    .get(0)
-                    .unwrap_or(&"GET".to_string()),
-                test_case
-                    .structure
-                    .first_line
-                    .parts
-                    .get(1)
-                    .unwrap_or(&"/".to_string()),
-                test_case
-                    .structure
-                    .first_line
-                    .parts
-                    .get(2)
-                    .unwrap_or(&"HTTP/1.1".to_string())
-            )),
-            MessageType::Response(_) | MessageType::ChunkedResponse => Ok(format!(
-                "{} {} {}",
-                test_case
-                    .structure
-                    .first_line
-                    .parts
-                    .get(0)
-                    .unwrap_or(&"HTTP/1.1".to_string()),
-                test_case
-                    .structure
-                    .first_line
-                    .parts
-                    .get(1)
-                    .unwrap_or(&"200".to_string()),
-                test_case
-                    .structure
-                    .first_line
-                    .parts
-                    .get(2)
-                    .unwrap_or(&"OK".to_string())
-            )),
-            MessageType::PipelinedRequests => Ok(format!("GET / HTTP/1.1")),
+            MessageType::Request(request) => {
+                let defaults = [
+                    fallback_token(&request.method, "GET"),
+                    fallback_token(&request.uri, "/"),
+                    fallback_token(&request.version, "HTTP/1.1"),
+                ];
+                Ok(join_first_line_parts(
+                    configured_parts,
+                    &defaults,
+                    &test_case.structure.first_line.separators,
+                ))
+            }
+            MessageType::ChunkedRequest => {
+                let defaults = ["GET".to_string(), "/".to_string(), "HTTP/1.1".to_string()];
+                Ok(join_first_line_parts(
+                    configured_parts,
+                    &defaults,
+                    &test_case.structure.first_line.separators,
+                ))
+            }
+            MessageType::Response(response) => {
+                let defaults = [
+                    fallback_token(&response.version, "HTTP/1.1"),
+                    response.status.to_string(),
+                    fallback_token(&response.reason, "OK"),
+                ];
+                Ok(join_first_line_parts(
+                    configured_parts,
+                    &defaults,
+                    &test_case.structure.first_line.separators,
+                ))
+            }
+            MessageType::ChunkedResponse => {
+                let defaults = ["HTTP/1.1".to_string(), "200".to_string(), "OK".to_string()];
+                Ok(join_first_line_parts(
+                    configured_parts,
+                    &defaults,
+                    &test_case.structure.first_line.separators,
+                ))
+            }
+            MessageType::PipelinedRequests => {
+                let defaults = ["GET".to_string(), "/".to_string(), "HTTP/1.1".to_string()];
+                Ok(join_first_line_parts(
+                    configured_parts,
+                    &defaults,
+                    &test_case.structure.first_line.separators,
+                ))
+            }
         }
     }
 
@@ -445,6 +461,25 @@ impl MockLfTerminatorParser {
             MessageType::Request(_) | MessageType::ChunkedRequest | MessageType::PipelinedRequests
         ) {
             headers.push(("Host: example.com".to_string(), "host".to_string()));
+        }
+
+        if message_type_declares_body(&test_case.message_type)
+            && !message_type_declares_chunked_body(&test_case.message_type)
+            && !has_body_framing_header(&test_case.structure.headers)
+        {
+            headers.push((
+                "Content-Length: 0".to_string(),
+                "content-length".to_string(),
+            ));
+        }
+
+        if message_type_declares_chunked_body(&test_case.message_type)
+            && !has_transfer_encoding_header(&test_case.structure.headers)
+        {
+            headers.push((
+                "Transfer-Encoding: chunked".to_string(),
+                "transfer-encoding".to_string(),
+            ));
         }
 
         // Add configured headers
@@ -549,6 +584,16 @@ impl MockLfTerminatorParser {
         placement: &TerminatorPlacement,
         line_index: usize,
     ) {
+        if let TerminatorPlacement::Insert(points) = placement {
+            for point in points {
+                if point.position == line_index {
+                    self.add_terminator_type(message, &point.terminator);
+                }
+            }
+            message.extend_from_slice(b"\r\n");
+            return;
+        }
+
         // Check if this line should get a terminator based on placement
         let should_add = match placement {
             TerminatorPlacement::ReplaceAll => true,
@@ -700,10 +745,16 @@ impl MockLfTerminatorParser {
         violations: &mut Vec<TerminationViolation>,
     ) -> Result<(String, usize), String> {
         if let Some(line_end) = self.find_pattern(headers_section, b"\r\n") {
+            if line_end > self.max_line_length {
+                return Err("First line exceeds maximum length".to_string());
+            }
             let line = &headers_section[..line_end];
             let line_str = String::from_utf8_lossy(line).to_string();
             Ok((line_str, line_end + 2))
         } else if let Some(line_end) = self.find_pattern(headers_section, b"\n") {
+            if line_end > self.max_line_length {
+                return Err("First line exceeds maximum length".to_string());
+            }
             violations.push(TerminationViolation {
                 position: line_end,
                 violation_type: ViolationType::LoneLf,
@@ -744,6 +795,12 @@ impl MockLfTerminatorParser {
             let line = &headers_data[offset..line_end];
             if line.is_empty() {
                 break; // End of headers
+            }
+            if line.len() > self.max_line_length {
+                return Err("Header line exceeds maximum length".to_string());
+            }
+            if headers.len() >= self.max_headers {
+                return Err("Too many headers".to_string());
             }
 
             // Parse header
@@ -812,6 +869,89 @@ impl MockLfTerminatorParser {
 
         ParsingResult::MalformedMessage("Termination violations detected".to_string())
     }
+}
+
+fn fallback_token(value: &str, default: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        default.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn join_first_line_parts(
+    configured_parts: &[String],
+    defaults: &[String],
+    separators: &[SeparatorType],
+) -> String {
+    defaults
+        .iter()
+        .enumerate()
+        .map(|(index, default)| {
+            configured_parts
+                .get(index)
+                .map(|part| fallback_token(part, default))
+                .unwrap_or_else(|| default.clone())
+        })
+        .enumerate()
+        .fold(String::new(), |mut line, (index, part)| {
+            if index > 0 {
+                line.push_str(&separator_for_position(separators, index - 1));
+            }
+            line.push_str(&part);
+            line
+        })
+}
+
+fn separator_for_position(separators: &[SeparatorType], position: usize) -> String {
+    match separators.get(position).unwrap_or(&SeparatorType::Space) {
+        SeparatorType::Space => " ".to_string(),
+        SeparatorType::Tab => "\t".to_string(),
+        SeparatorType::Multiple(count) => " ".repeat((*count).clamp(1, 8)),
+        SeparatorType::Mixed => " \t".to_string(),
+        SeparatorType::None => String::new(),
+        SeparatorType::Control(byte) => char::from(*byte).to_string(),
+    }
+}
+
+fn message_type_declares_body(message_type: &MessageType) -> bool {
+    match message_type {
+        MessageType::Request(request) => request.has_body,
+        MessageType::Response(response) => response.has_body,
+        MessageType::ChunkedRequest | MessageType::ChunkedResponse => true,
+        MessageType::PipelinedRequests => false,
+    }
+}
+
+fn message_type_declares_chunked_body(message_type: &MessageType) -> bool {
+    matches!(
+        message_type,
+        MessageType::ChunkedRequest | MessageType::ChunkedResponse
+    )
+}
+
+fn has_body_framing_header(headers: &HeadersConfig) -> bool {
+    headers.special_headers.iter().any(|header| {
+        matches!(
+            header,
+            SpecialHeader::ContentLength(_) | SpecialHeader::TransferEncoding(_)
+        )
+    }) || headers.headers.iter().any(|header| {
+        header.name.eq_ignore_ascii_case("content-length")
+            || header.name.eq_ignore_ascii_case("transfer-encoding")
+    })
+}
+
+fn has_transfer_encoding_header(headers: &HeadersConfig) -> bool {
+    headers
+        .special_headers
+        .iter()
+        .any(|header| matches!(header, SpecialHeader::TransferEncoding(_)))
+        || headers
+            .headers
+            .iter()
+            .any(|header| header.name.eq_ignore_ascii_case("transfer-encoding"))
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -969,6 +1109,34 @@ fn test_mixed_terminators(parser: &MockLfTerminatorParser, test_case: &Malformed
     }
 }
 
+fn observe_boundary_parse_result(context: &str, result: Result<ParsedMessage, String>) {
+    match result {
+        Ok(parsed) => {
+            assert!(
+                parsed.headers.len() <= 128,
+                "{context} should keep parsed headers bounded"
+            );
+            let summary = format!(
+                "{context}:{}:{}:{}:{:?}",
+                parsed.first_line.len(),
+                parsed.headers.len(),
+                parsed.body.len(),
+                parsed.parsing_result
+            );
+            assert!(
+                !summary.is_empty(),
+                "{context} parse success should stay visible"
+            );
+        }
+        Err(error) => {
+            assert!(
+                !error.is_empty(),
+                "{context} parse failure should expose diagnostics"
+            );
+        }
+    }
+}
+
 fn test_boundary_conditions(parser: &MockLfTerminatorParser, test_case: &MalformedLfTestCase) {
     // Test empty message
     let mut empty_case = test_case.clone();
@@ -976,14 +1144,15 @@ fn test_boundary_conditions(parser: &MockLfTerminatorParser, test_case: &Malform
     empty_case.structure.headers.headers = vec![];
     empty_case.structure.body = None;
 
-    let _ = parser.parse_message(&empty_case);
-    // Should not crash on empty input
+    observe_boundary_parse_result("empty HTTP/1 message", parser.parse_message(&empty_case));
 
     // Test very long line
     let mut long_case = test_case.clone();
     long_case.structure.first_line.parts =
         vec!["GET".to_string(), "/".repeat(10000), "HTTP/1.1".to_string()];
 
-    let _ = parser.parse_message(&long_case);
-    // Should handle long lines gracefully
+    observe_boundary_parse_result(
+        "very long HTTP/1 first line",
+        parser.parse_message(&long_case),
+    );
 }
