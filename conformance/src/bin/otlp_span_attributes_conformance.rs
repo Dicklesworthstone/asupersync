@@ -155,7 +155,7 @@ fn main() {
 
         if !proto_values_equal(actual_proto_value, &test_case.expected_proto_value) {
             failed_tests.push((
-                test_case.name,
+                test_case.name.clone(),
                 format!(
                     "Expected {:?}, got {:?}",
                     test_case.expected_proto_value, actual_proto_value
