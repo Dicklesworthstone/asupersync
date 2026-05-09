@@ -19,8 +19,9 @@
 //!    pattern with all-0x80 bytes (overflow), truncated tail, or values past
 //!    the implementation's overflow guard.
 //!
-//! The harness must never panic. Decoder errors are expected and ignored;
-//! only crashes / aborts are findings.
+//! The harness must never panic. Decoder errors are expected, but every decode
+//! result is observed so successful paths keep HPACK header/table invariants
+//! and rejected paths still produce a structured error.
 //!
 //! ```bash
 //! cargo +nightly fuzz run fuzz_hpack_decode
@@ -128,6 +129,76 @@ fuzz_target!(|s: Scenario| match s {
     } => fuzz_malformed_varint(prefix_pattern, prefix_bits, &continuation),
 });
 
+fn observe_decode(decoder: &mut Decoder, bytes: &mut Bytes, scenario: &str) {
+    let before_len = bytes.len();
+    let result = decoder.decode(bytes);
+
+    assert!(
+        bytes.len() <= before_len,
+        "{scenario}: decoder grew the input buffer"
+    );
+    assert!(
+        decoder.dynamic_table_size() <= decoder.dynamic_table_max_size(),
+        "{scenario}: dynamic table size exceeded its limit"
+    );
+
+    match result {
+        Ok(headers) => {
+            for header in headers {
+                assert!(
+                    valid_observed_header_name(&header.name),
+                    "{scenario}: decoded invalid header name {:?}",
+                    header.name
+                );
+                assert!(
+                    valid_observed_header_value(&header.value),
+                    "{scenario}: decoded invalid header value {:?}",
+                    header.value
+                );
+            }
+        }
+        Err(error) => {
+            let message = error.to_string();
+            assert!(
+                !message.trim().is_empty(),
+                "{scenario}: decode error rendered an empty message"
+            );
+        }
+    }
+}
+
+fn valid_observed_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().enumerate().all(|(i, byte)| {
+            matches!(
+                byte,
+                b'a'..=b'z'
+                    | b'0'..=b'9'
+                    | b'!'
+                    | b'#'
+                    | b'$'
+                    | b'%'
+                    | b'&'
+                    | b'\''
+                    | b'*'
+                    | b'+'
+                    | b'-'
+                    | b'.'
+                    | b'^'
+                    | b'_'
+                    | b'`'
+                    | b'|'
+                    | b'~'
+            ) || (byte == b':' && i == 0)
+        })
+}
+
+fn valid_observed_header_value(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| !matches!(byte, b'\0' | b'\r' | b'\n'))
+}
+
 /// Vector 1: 7-bit prefix + continuation boundary on the string-length encoding.
 fn fuzz_huffman_prefix_edge(
     name_len_bump: u16,
@@ -152,7 +223,7 @@ fn fuzz_huffman_prefix_edge(
     }
     let mut decoder = Decoder::new();
     let mut bytes = Bytes::from(buf);
-    let _ = decoder.decode(&mut bytes);
+    observe_decode(&mut decoder, &mut bytes, "huffman-prefix-edge");
 }
 
 /// Vector 2: dynamic table size update appearing after a header field.
@@ -192,7 +263,7 @@ fn fuzz_size_update_mid_block(
 
     let mut decoder = Decoder::new();
     let mut bytes = Bytes::from(buf);
-    let _ = decoder.decode(&mut bytes);
+    observe_decode(&mut decoder, &mut bytes, "size-update-mid-block");
 }
 
 /// Vector 3: `0000xxxx` (no indexing) and `0001xxxx` (never indexed).
@@ -225,7 +296,7 @@ fn fuzz_literal_no_indexing(
     }
     let mut decoder = Decoder::new();
     let mut bytes = Bytes::from(buf);
-    let _ = decoder.decode(&mut bytes);
+    observe_decode(&mut decoder, &mut bytes, "literal-no-indexing");
 }
 
 /// Vector 4: insert headers, then shrink the table to force eviction.
@@ -236,7 +307,7 @@ fn fuzz_table_shrink_eviction(
     post_insert_size: u16,
     followup_index_lookups: &[u8],
 ) {
-    let allowed = (allowed_size as usize).min(MAX_TABLE_SIZE).max(64);
+    let allowed = (allowed_size as usize).clamp(64, MAX_TABLE_SIZE);
     let mut decoder = Decoder::with_max_size(allowed);
     decoder.set_allowed_table_size(allowed);
 
@@ -262,7 +333,7 @@ fn fuzz_table_shrink_eviction(
         }
     }
     let mut bytes1 = Bytes::from(block1);
-    let _ = decoder.decode(&mut bytes1);
+    observe_decode(&mut decoder, &mut bytes1, "table-shrink-eviction-block1");
 
     let _grew_to = decoder.dynamic_table_size();
 
@@ -279,7 +350,7 @@ fn fuzz_table_shrink_eviction(
         encode_integer_into(&mut block2, idx as usize, 7);
     }
     let mut bytes2 = Bytes::from(block2);
-    let _ = decoder.decode(&mut bytes2);
+    observe_decode(&mut decoder, &mut bytes2, "table-shrink-eviction-block2");
 
     // Bookkeeping must remain consistent.
     let _shrunk_to = decoder.dynamic_table_size();
@@ -313,7 +384,7 @@ fn fuzz_malformed_varint(prefix_pattern: u8, prefix_bits: u8, continuation: &[u8
 
     let mut decoder = Decoder::new();
     let mut bytes = Bytes::from(buf);
-    let _ = decoder.decode(&mut bytes);
+    observe_decode(&mut decoder, &mut bytes, "malformed-varint");
 }
 
 // =========================================================================
