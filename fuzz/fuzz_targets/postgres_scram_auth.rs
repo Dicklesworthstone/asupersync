@@ -273,6 +273,133 @@ fn parse_client_final(data: &[u8]) -> Result<(String, String, Vec<u8>), String> 
     Ok((channel_binding.to_string(), nonce, proof))
 }
 
+fn assert_visible_error(context: &str, error: &str) {
+    let diagnostic = format!("{context}: {error}");
+    assert!(
+        !diagnostic.is_empty(),
+        "{context} failures should expose diagnostics"
+    );
+}
+
+fn observe_sasl_mechanisms_parse(result: Result<Vec<String>, String>, context: &str) {
+    match result {
+        Ok(mechanisms) => {
+            let summary = format!("ok:{}", mechanisms.len());
+            assert!(!summary.is_empty(), "{context} success should stay visible");
+            for mechanism in mechanisms {
+                assert!(
+                    mechanism.len() <= 64,
+                    "{context} accepted an oversized mechanism name"
+                );
+            }
+        }
+        Err(error) => assert_visible_error(context, &error),
+    }
+}
+
+fn observe_server_first_parse(result: Result<(String, Vec<u8>, u32), String>, context: &str) {
+    match result {
+        Ok((server_nonce, salt, iterations)) => {
+            assert!(
+                !server_nonce.is_empty(),
+                "{context} accepted an empty server nonce"
+            );
+            assert!(!salt.is_empty(), "{context} accepted an empty salt");
+            assert!(
+                iterations > 0 && iterations <= MAX_SAFE_ITERATIONS,
+                "{context} accepted an out-of-range iteration count"
+            );
+        }
+        Err(error) => assert_visible_error(context, &error),
+    }
+}
+
+fn observe_server_final_parse(result: Result<Vec<u8>, String>, context: &str) {
+    match result {
+        Ok(signature) => {
+            assert_eq!(
+                signature.len(),
+                32,
+                "{context} accepted a non-SHA-256 signature length"
+            );
+        }
+        Err(error) => assert_visible_error(context, &error),
+    }
+}
+
+fn observe_client_final_parse(result: Result<(String, String, Vec<u8>), String>, context: &str) {
+    match result {
+        Ok((channel_binding, nonce, proof)) => {
+            let summary = format!(
+                "ok:{}:{}:{}",
+                channel_binding.len(),
+                nonce.len(),
+                proof.len()
+            );
+            assert!(!summary.is_empty(), "{context} success should stay visible");
+            assert_eq!(
+                proof.len(),
+                32,
+                "{context} accepted a non-SHA-256 client proof length"
+            );
+        }
+        Err(error) => assert_visible_error(context, &error),
+    }
+}
+
+fn observe_base64_decode(result: Result<Vec<u8>, base64::DecodeError>, context: &str) {
+    match result {
+        Ok(decoded) => {
+            let summary = format!("ok:{}", decoded.len());
+            assert!(!summary.is_empty(), "{context} success should stay visible");
+        }
+        Err(error) => {
+            let diagnostic = format!("{context}: {error:?}");
+            assert!(
+                !diagnostic.is_empty(),
+                "{context} failures should expose diagnostics"
+            );
+        }
+    }
+}
+
+fn observe_parser_read_until(result: Result<&[u8], String>, delimiter: u8) {
+    match result {
+        Ok(segment) => {
+            let summary = format!("ok:{delimiter}:{}", segment.len());
+            assert!(
+                !summary.is_empty(),
+                "SCRAM parser read_until success should stay visible"
+            );
+        }
+        Err(error) => assert_visible_error("SCRAM parser read_until", &error),
+    }
+}
+
+fn observe_parser_read_to_end(segment: &[u8]) {
+    let summary = format!("ok:{}", segment.len());
+    assert!(
+        !summary.is_empty(),
+        "SCRAM parser read_to_end success should stay visible"
+    );
+}
+
+fn observe_utf8(result: Result<&str, std::str::Utf8Error>, context: &str) {
+    match result {
+        Ok(text) => {
+            let summary = format!("ok:{}", text.len());
+            assert!(!summary.is_empty(), "{context} success should stay visible");
+        }
+        Err(error) => {
+            let diagnostic = format!("{context}: {error:?}");
+            assert!(
+                !diagnostic.is_empty(),
+                "{context} failures should expose diagnostics"
+            );
+        }
+    }
+}
+
 fn expected_channel_binding(case: &ClientFinalProofCase) -> Vec<u8> {
     match case.channel_binding {
         ClientFinalChannelBinding::None => b"n,,".to_vec(),
@@ -535,7 +662,7 @@ fn test_nonce_scenarios(data: &[u8]) {
     let _ = test_nonce_concatenation(b"long", b"short");
 
     // Test with repeated client nonce pattern
-    if client_part.len() > 0 {
+    if !client_part.is_empty() {
         let mut server_with_client = client_part.to_vec();
         server_with_client.extend_from_slice(server_part);
         let _ = test_nonce_concatenation(client_part, &server_with_client);
@@ -550,7 +677,7 @@ fn test_channel_binding_scenarios(data: &[u8]) {
     let _ = test_channel_binding(b"tls-unique-data");
 
     // Test channel binding with fuzzer data
-    if data.len() > 0 {
+    if !data.is_empty() {
         let chunks = [
             &data[..data.len().min(16)],
             &data[..data.len().min(64)],
@@ -620,50 +747,55 @@ fn test_full_scram_flow(data: &[u8]) {
     let salt_bytes = &data[pos..pos + salt_len];
 
     // Convert to strings for username
-    if let Ok(username) = std::str::from_utf8(username_bytes) {
-        if let Ok(password) = std::str::from_utf8(password_bytes) {
-            // Simulate client-first generation
-            let client_nonce = "fuzzed_nonce";
-            let _ = generate_client_first(username, client_nonce);
+    if let Ok(username) = std::str::from_utf8(username_bytes)
+        && let Ok(password) = std::str::from_utf8(password_bytes)
+    {
+        // Simulate client-first generation
+        let client_nonce = "fuzzed_nonce";
+        let _ = generate_client_first(username, client_nonce);
 
-            // Simulate server-first parsing with generated salt
-            use base64::Engine;
-            let salt_b64 = base64::engine::general_purpose::STANDARD.encode(salt_bytes);
-            let iterations = 4096u32;
-            let server_nonce = format!("{client_nonce}server_part");
+        // Simulate server-first parsing with generated salt
+        use base64::Engine;
+        let salt_b64 = base64::engine::general_purpose::STANDARD.encode(salt_bytes);
+        let iterations = 4096u32;
+        let server_nonce = format!("{client_nonce}server_part");
 
-            let server_first = format!("r={server_nonce},s={salt_b64},i={iterations}");
-            let _ = parse_server_first(server_first.as_bytes());
+        let server_first = format!("r={server_nonce},s={salt_b64},i={iterations}");
+        observe_server_first_parse(
+            parse_server_first(server_first.as_bytes()),
+            "generated server-first",
+        );
 
-            // Test PBKDF2 with these parameters
-            let _ = pbkdf2_sha256_test(password.as_bytes(), salt_bytes, iterations);
+        // Test PBKDF2 with these parameters
+        let _ = pbkdf2_sha256_test(password.as_bytes(), salt_bytes, iterations);
 
-            // Simulate signature computation and verification
-            let salted_password = pbkdf2_sha256_test(password.as_bytes(), salt_bytes, iterations);
-            let client_key = hmac_sha256_test(&salted_password, b"Client Key");
-            let server_key = hmac_sha256_test(&salted_password, b"Server Key");
-            let stored_key = sha256_test(&client_key);
+        // Simulate signature computation and verification
+        let salted_password = pbkdf2_sha256_test(password.as_bytes(), salt_bytes, iterations);
+        let client_key = hmac_sha256_test(&salted_password, b"Client Key");
+        let server_key = hmac_sha256_test(&salted_password, b"Server Key");
+        let stored_key = sha256_test(&client_key);
 
-            // Test auth message construction
-            let client_first_bare = format!("n={username},r={client_nonce}");
-            let channel_binding = base64::engine::general_purpose::STANDARD.encode(b"n,,");
-            let client_final_without_proof = format!("c={channel_binding},r={server_nonce}");
-            let auth_message =
-                format!("{client_first_bare},{server_first},{client_final_without_proof}");
+        // Test auth message construction
+        let client_first_bare = format!("n={username},r={client_nonce}");
+        let channel_binding = base64::engine::general_purpose::STANDARD.encode(b"n,,");
+        let client_final_without_proof = format!("c={channel_binding},r={server_nonce}");
+        let auth_message =
+            format!("{client_first_bare},{server_first},{client_final_without_proof}");
 
-            // Test signature computations
-            let _client_signature = hmac_sha256_test(&stored_key, auth_message.as_bytes());
-            let server_signature = hmac_sha256_test(&server_key, auth_message.as_bytes());
+        // Test signature computations
+        let _client_signature = hmac_sha256_test(&stored_key, auth_message.as_bytes());
+        let server_signature = hmac_sha256_test(&server_key, auth_message.as_bytes());
 
-            // Test constant-time verification
-            let _ = constant_time_compare_test(&server_signature, &server_signature);
+        // Test constant-time verification
+        let _ = constant_time_compare_test(&server_signature, &server_signature);
 
-            // Test server-final message
-            let server_sig_b64 =
-                base64::engine::general_purpose::STANDARD.encode(&server_signature);
-            let server_final = format!("v={server_sig_b64}");
-            let _ = parse_server_final(server_final.as_bytes());
-        }
+        // Test server-final message
+        let server_sig_b64 = base64::engine::general_purpose::STANDARD.encode(&server_signature);
+        let server_final = format!("v={server_sig_b64}");
+        observe_server_final_parse(
+            parse_server_final(server_final.as_bytes()),
+            "generated server-final",
+        );
     }
 }
 
@@ -680,16 +812,16 @@ fuzz_target!(|data: &[u8]| {
     // ===== CORE SCRAM-SHA-256 COVERAGE =====
 
     // Test 1: Parse as SASL mechanism list
-    let _ = parse_sasl_mechanisms(data);
+    observe_sasl_mechanisms_parse(parse_sasl_mechanisms(data), "raw SASL mechanisms");
 
     // Test 2: Parse as SCRAM server-first message (client-first/server-first message parsing)
-    let _ = parse_server_first(data);
+    observe_server_first_parse(parse_server_first(data), "raw server-first");
 
     // Test 3: Parse as SCRAM server-final message
-    let _ = parse_server_final(data);
+    observe_server_final_parse(parse_server_final(data), "raw server-final");
 
     // Test 4: Parse as client-final message
-    let _ = parse_client_final(data);
+    observe_client_final_parse(parse_client_final(data), "raw client-final");
 
     // ===== ENHANCED SCRAM BOUNDARY TESTING =====
 
@@ -713,22 +845,34 @@ fuzz_target!(|data: &[u8]| {
     // Test 7: Base64 decoding edge cases with various formats
     if let Ok(s) = std::str::from_utf8(data) {
         use base64::Engine;
-        let _ = base64::engine::general_purpose::STANDARD.decode(s);
-        let _ = base64::engine::general_purpose::URL_SAFE.decode(s);
-        let _ = base64::engine::general_purpose::STANDARD_NO_PAD.decode(s);
-        let _ = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(s);
+        observe_base64_decode(
+            base64::engine::general_purpose::STANDARD.decode(s),
+            "standard base64",
+        );
+        observe_base64_decode(
+            base64::engine::general_purpose::URL_SAFE.decode(s),
+            "URL-safe base64",
+        );
+        observe_base64_decode(
+            base64::engine::general_purpose::STANDARD_NO_PAD.decode(s),
+            "standard no-pad base64",
+        );
+        observe_base64_decode(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(s),
+            "URL-safe no-pad base64",
+        );
     }
 
     // Test 8: Parser state machine with truncated and malformed inputs
     let mut parser = ScramParser::new(data);
     while parser.remaining() > 0 {
-        let _ = parser.read_until(b',');
-        let _ = parser.read_until(b'=');
-        let _ = parser.read_until(b'\0');
-        let _ = parser.read_until(b'\n');
-        let _ = parser.read_until(b'\r');
+        observe_parser_read_until(parser.read_until(b','), b',');
+        observe_parser_read_until(parser.read_until(b'='), b'=');
+        observe_parser_read_until(parser.read_until(b'\0'), b'\0');
+        observe_parser_read_until(parser.read_until(b'\n'), b'\n');
+        observe_parser_read_until(parser.read_until(b'\r'), b'\r');
     }
-    let _ = parser.read_to_end();
+    observe_parser_read_to_end(parser.read_to_end());
 
     // Test 9: Large input boundary conditions
     if data.len() >= 1024 {
@@ -736,8 +880,8 @@ fuzz_target!(|data: &[u8]| {
         for chunk_size in [256, 512, 1024, 2048, 4096] {
             if data.len() >= chunk_size {
                 let chunk = &data[..chunk_size];
-                let _ = parse_server_first(chunk);
-                let _ = parse_server_final(chunk);
+                observe_server_first_parse(parse_server_first(chunk), "chunked server-first");
+                observe_server_final_parse(parse_server_final(chunk), "chunked server-final");
                 test_scram_comprehensive(chunk);
             }
         }
@@ -754,7 +898,7 @@ fuzz_target!(|data: &[u8]| {
         }
         Err(_) => {
             // Test error handling for invalid UTF-8
-            let _ = std::str::from_utf8(data);
+            observe_utf8(std::str::from_utf8(data), "raw UTF-8");
         }
     }
 });
