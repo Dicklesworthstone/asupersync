@@ -142,13 +142,14 @@ impl MockH1HeaderParser {
         let raw_request = self.build_raw_request(input);
 
         // Check for line-folding patterns
-        if let Some(violation) = self.detect_line_folding(&raw_request) {
-            if self.policy.strict_rfc9112 && !self.policy.allow_line_folding {
-                return HeaderParseResult::BadRequest(format!(
-                    "RFC 9112 §5.2 violation: {}",
-                    violation
-                ));
-            }
+        if let Some(violation) = self.detect_line_folding(&raw_request)
+            && self.policy.strict_rfc9112
+            && !self.policy.allow_line_folding
+        {
+            return HeaderParseResult::BadRequest(format!(
+                "RFC 9112 §5.2 violation: {}",
+                violation
+            ));
         }
 
         // Parse headers line by line
@@ -188,11 +189,15 @@ impl MockH1HeaderParser {
 
         for i in 0..pattern.continuation_count.min(5) {
             // Limit for performance
-            let whitespace = match pattern.whitespace_type {
-                WhitespaceType::Space => " ".to_string(),
-                WhitespaceType::Tab => "\t".to_string(),
-                WhitespaceType::Multiple => "  ".to_string(),
-                WhitespaceType::Mixed => if i % 2 == 0 { " " } else { "\t" }.to_string(),
+            let whitespace = if pattern.mixed_whitespace {
+                if i % 2 == 0 { " " } else { "\t" }.to_string()
+            } else {
+                match pattern.whitespace_type {
+                    WhitespaceType::Space => " ".to_string(),
+                    WhitespaceType::Tab => "\t".to_string(),
+                    WhitespaceType::Multiple => "  ".to_string(),
+                    WhitespaceType::Mixed => if i % 2 == 0 { " " } else { "\t" }.to_string(),
+                }
             };
 
             let continuation_value = match pattern.continuation_position {
@@ -390,13 +395,13 @@ impl MockH1HeaderParser {
                     );
                 }
 
-                if name_lower == "transfer-encoding" && value.to_lowercase().contains("chunked") {
-                    if !value.trim().to_lowercase().ends_with("chunked") {
-                        return HeaderParseResult::SecurityViolation(
-                            "Transfer-Encoding chunked not at end (potential smuggling)"
-                                .to_string(),
-                        );
-                    }
+                if name_lower == "transfer-encoding"
+                    && value.to_lowercase().contains("chunked")
+                    && !value.trim().to_lowercase().ends_with("chunked")
+                {
+                    return HeaderParseResult::SecurityViolation(
+                        "Transfer-Encoding chunked not at end (potential smuggling)".to_string(),
+                    );
                 }
             }
         }
