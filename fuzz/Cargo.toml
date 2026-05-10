@@ -5496,6 +5496,7 @@ name = "h2_data_payload_at_max"
 path = "fuzz_targets/h2_data_payload_at_max.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_priority_huge_dependency"
