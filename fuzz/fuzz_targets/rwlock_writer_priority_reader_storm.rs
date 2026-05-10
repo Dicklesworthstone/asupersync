@@ -14,7 +14,7 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::cx::Cx;
-use asupersync::sync::rwlock::RwLock;
+use asupersync::sync::RwLock;
 use asupersync::types::{Budget, RegionId, TaskId};
 use asupersync::util::ArenaIndex;
 use futures::task::{Context, noop_waker};
@@ -74,7 +74,6 @@ struct TestStats {
     writer_acquisitions: AtomicUsize,
     reader_blocks_due_to_writer: AtomicUsize,
     writer_wait_times_ms: Arc<parking_lot::Mutex<Vec<u64>>>,
-    test_start_time: Instant,
     test_complete: AtomicBool,
 }
 
@@ -85,13 +84,11 @@ impl TestStats {
             writer_acquisitions: AtomicUsize::new(0),
             reader_blocks_due_to_writer: AtomicUsize::new(0),
             writer_wait_times_ms: Arc::new(parking_lot::Mutex::new(Vec::new())),
-            test_start_time: Instant::now(),
             test_complete: AtomicBool::new(false),
         }
     }
 
     fn check_writer_starvation_invariants(&self) -> Result<(), String> {
-        let reader_acqs = self.reader_acquisitions.load(Ordering::SeqCst);
         let writer_acqs = self.writer_acquisitions.load(Ordering::SeqCst);
         let reader_blocks = self.reader_blocks_due_to_writer.load(Ordering::SeqCst);
 
@@ -104,11 +101,11 @@ impl TestStats {
 
         // Check writer wait times for excessive delays
         let wait_times = self.writer_wait_times_ms.lock();
-        if let Some(&max_wait) = wait_times.iter().max() {
-            if max_wait > 2000 {
-                // 2 second maximum wait time
-                return Err(format!("Excessive writer wait time: {} ms", max_wait));
-            }
+        if let Some(&max_wait) = wait_times.iter().max()
+            && max_wait > 2000
+        {
+            // 2 second maximum wait time
+            return Err(format!("Excessive writer wait time: {} ms", max_wait));
         }
 
         // If readers were blocked due to writers, it should show writer priority working
@@ -361,15 +358,5 @@ fuzz_target!(|data: &[u8]| {
         final_value, total_writer_acqs as u32,
         "Final value {} should equal writer acquisitions {}",
         final_value, total_writer_acqs
-    );
-
-    // Log statistics for analysis
-    let elapsed = stats.test_start_time.elapsed().as_millis();
-    println!(
-        "Test completed in {}ms: {} readers, {} writers, {} reader blocks",
-        elapsed,
-        total_reader_acqs,
-        total_writer_acqs,
-        stats.reader_blocks_due_to_writer.load(Ordering::SeqCst)
     );
 });
