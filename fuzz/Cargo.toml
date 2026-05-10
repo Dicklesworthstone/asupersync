@@ -12,7 +12,7 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
-asupersync = { path = "..", features = ["compression", "tls", "metrics", "tracing-integration", "test-internals", "trace-compression", "io-uring", "simd-intrinsics", "fuzz", "mysql", "postgres", "messaging-fabric"] }
+asupersync = { path = "..", features = ["compression", "tls", "metrics", "tracing-integration", "test-internals", "trace-compression", "io-uring", "simd-intrinsics", "fuzz", "sqlite", "mysql", "postgres", "messaging-fabric"] }
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 libc = "0.2"
@@ -1594,6 +1594,13 @@ bench = false
 [[bin]]
 name = "sqlite_sql"
 path = "fuzz_targets/sqlite_sql.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sqlite_pragma_ddl_parser"
+path = "fuzz_targets/sqlite_pragma_ddl_parser.rs"
 test = false
 doc = false
 bench = false

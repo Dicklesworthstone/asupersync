@@ -1,12 +1,13 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
+use asupersync::{
+    cx::Cx,
+    database::sqlite::{SqliteConnection, SqliteError},
+    types::Outcome,
+};
+use futures::executor::block_on;
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashMap;
-
-use asupersync::cx::Cx;
-use asupersync::database::{SqliteConnection, SqliteError};
-use asupersync::runtime::blocking_pool::BlockingPool;
 
 /// Maximum input size to prevent OOM during fuzzing
 const MAX_INPUT_SIZE: usize = 32 * 1024;
@@ -79,9 +80,7 @@ enum SqlStatement {
         if_exists: bool,
     },
     /// Raw SQL for direct testing
-    RawSql {
-        sql: String,
-    },
+    RawSql { sql: String },
     /// Comment-based edge cases
     CommentTest {
         comment_type: CommentType,
@@ -250,7 +249,10 @@ enum ColumnConstraint {
     Unique,
     Check(String),
     Default(PragmaValue),
-    References { table: String, column: Option<String> },
+    References {
+        table: String,
+        column: Option<String>,
+    },
 }
 
 /// Table constraints
@@ -277,17 +279,21 @@ enum SqlIdentifier {
 /// Comment types for edge case testing
 #[derive(Debug, Arbitrary)]
 enum CommentType {
-    LineComment,      // --
-    BlockComment,     // /* */
-    NestedBlock,      // /* /* */ */
-    MalformedBlock,   // /* without */
+    LineComment,    // --
+    BlockComment,   // /* */
+    NestedBlock,    // /* /* */ */
+    MalformedBlock, // /* without */
 }
 
 impl SqlStatement {
     /// Generate the SQL string for this statement
     fn to_sql(&self) -> String {
         match self {
-            Self::Pragma { pragma_type, value, schema_name } => {
+            Self::Pragma {
+                pragma_type,
+                value,
+                schema_name,
+            } => {
                 let mut sql = String::from("PRAGMA ");
                 if let Some(schema) = schema_name {
                     sql.push_str(schema);
@@ -296,32 +302,39 @@ impl SqlStatement {
                 sql.push_str(&pragma_type.name());
 
                 match value {
-                    PragmaValue::None => {},
+                    PragmaValue::None => {}
                     PragmaValue::Boolean(b) => {
                         sql.push_str(" = ");
                         sql.push_str(if *b { "ON" } else { "OFF" });
-                    },
+                    }
                     PragmaValue::Integer(i) => {
                         sql.push_str(&format!(" = {}", i));
-                    },
+                    }
                     PragmaValue::String(s) => {
                         sql.push_str(&format!(" = '{}'", s.replace("'", "''")));
-                    },
+                    }
                     PragmaValue::Identifier(s) => {
                         sql.push_str(&format!(" = {}", s));
-                    },
+                    }
                     PragmaValue::BoundaryInteger { value } => {
                         sql.push_str(&format!(" = {}", value));
-                    },
-                    PragmaValue::MalformedString { content, quote_type } => {
+                    }
+                    PragmaValue::MalformedString {
+                        content,
+                        quote_type,
+                    } => {
                         sql.push_str(" = ");
                         sql.push_str(&quote_string(content, quote_type));
-                    },
+                    }
                 }
                 sql
-            },
+            }
 
-            Self::CreateStatement { object_type, name, definition } => {
+            Self::CreateStatement {
+                object_type,
+                name,
+                definition,
+            } => {
                 let mut sql = String::from("CREATE ");
 
                 match object_type {
@@ -329,10 +342,16 @@ impl SqlStatement {
                         sql.push_str("TABLE ");
                         sql.push_str(&name.to_sql());
 
-                        if let CreateDefinition::Table { columns, constraints } = definition {
+                        if let CreateDefinition::Table {
+                            columns,
+                            constraints,
+                        } = definition
+                        {
                             sql.push_str(" (");
                             for (i, col) in columns.iter().enumerate() {
-                                if i > 0 { sql.push_str(", "); }
+                                if i > 0 {
+                                    sql.push_str(", ");
+                                }
                                 sql.push_str(&col.to_sql());
                             }
                             for constraint in constraints {
@@ -343,10 +362,17 @@ impl SqlStatement {
                         } else {
                             sql.push_str(" (id INTEGER)"); // Fallback
                         }
-                    },
+                    }
                     CreateObjectType::Index => {
-                        if let CreateDefinition::Index { table_name, columns, unique } = definition {
-                            if *unique { sql.push_str("UNIQUE "); }
+                        if let CreateDefinition::Index {
+                            table_name,
+                            columns,
+                            unique,
+                        } = definition
+                        {
+                            if *unique {
+                                sql.push_str("UNIQUE ");
+                            }
                             sql.push_str("INDEX ");
                             sql.push_str(&name.to_sql());
                             sql.push_str(" ON ");
@@ -355,7 +381,7 @@ impl SqlStatement {
                             sql.push_str(&columns.join(", "));
                             sql.push(')');
                         }
-                    },
+                    }
                     CreateObjectType::View => {
                         sql.push_str("VIEW ");
                         sql.push_str(&name.to_sql());
@@ -365,7 +391,7 @@ impl SqlStatement {
                         } else {
                             sql.push_str("SELECT 1");
                         }
-                    },
+                    }
                     _ => {
                         // For other types, use raw definition
                         if let CreateDefinition::Raw(raw) = definition {
@@ -374,9 +400,13 @@ impl SqlStatement {
                     }
                 }
                 sql
-            },
+            }
 
-            Self::AlterStatement { object_type, name, action } => {
+            Self::AlterStatement {
+                object_type,
+                name,
+                action,
+            } => {
                 let mut sql = String::from("ALTER ");
                 match object_type {
                     AlterObjectType::Table => {
@@ -387,9 +417,13 @@ impl SqlStatement {
                     }
                 }
                 sql
-            },
+            }
 
-            Self::DropStatement { object_type, name, if_exists } => {
+            Self::DropStatement {
+                object_type,
+                name,
+                if_exists,
+            } => {
                 let mut sql = String::from("DROP ");
                 match object_type {
                     DropObjectType::Table => sql.push_str("TABLE"),
@@ -403,40 +437,44 @@ impl SqlStatement {
                 sql.push(' ');
                 sql.push_str(&name.to_sql());
                 sql
-            },
+            }
 
             Self::RawSql { sql } => sql.clone(),
 
-            Self::CommentTest { comment_type, content, trailing_sql } => {
+            Self::CommentTest {
+                comment_type,
+                content,
+                trailing_sql,
+            } => {
                 let mut sql = String::new();
                 match comment_type {
                     CommentType::LineComment => {
                         sql.push_str("-- ");
                         sql.push_str(content);
                         sql.push('\n');
-                    },
+                    }
                     CommentType::BlockComment => {
                         sql.push_str("/* ");
                         sql.push_str(content);
                         sql.push_str(" */");
-                    },
+                    }
                     CommentType::NestedBlock => {
                         sql.push_str("/* outer /* ");
                         sql.push_str(content);
                         sql.push_str(" */ inner */");
-                    },
+                    }
                     CommentType::MalformedBlock => {
                         sql.push_str("/* ");
                         sql.push_str(content);
                         // Missing closing */
-                    },
+                    }
                 }
                 if let Some(trailing) = trailing_sql {
                     sql.push(' ');
                     sql.push_str(trailing);
                 }
                 sql
-            },
+            }
         }
     }
 }
@@ -492,7 +530,7 @@ impl ColumnConstraint {
                 } else {
                     format!("REFERENCES {}", table)
                 }
-            },
+            }
         }
     }
 }
@@ -502,10 +540,18 @@ impl TableConstraint {
         match self {
             Self::PrimaryKey(columns) => format!("PRIMARY KEY ({})", columns.join(", ")),
             Self::Unique(columns) => format!("UNIQUE ({})", columns.join(", ")),
-            Self::ForeignKey { columns, ref_table, ref_columns } => {
-                format!("FOREIGN KEY ({}) REFERENCES {}({})",
-                    columns.join(", "), ref_table, ref_columns.join(", "))
-            },
+            Self::ForeignKey {
+                columns,
+                ref_table,
+                ref_columns,
+            } => {
+                format!(
+                    "FOREIGN KEY ({}) REFERENCES {}({})",
+                    columns.join(", "),
+                    ref_table,
+                    ref_columns.join(", ")
+                )
+            }
             Self::Check(expr) => format!("CHECK ({})", expr),
         }
     }
@@ -531,7 +577,10 @@ impl PragmaValue {
             Self::String(s) => format!("'{}'", s.replace("'", "''")),
             Self::Identifier(s) => s.clone(),
             Self::BoundaryInteger { value } => value.to_string(),
-            Self::MalformedString { content, quote_type } => quote_string(content, quote_type),
+            Self::MalformedString {
+                content,
+                quote_type,
+            } => quote_string(content, quote_type),
             Self::None => "NULL".to_string(),
         }
     }
@@ -547,79 +596,138 @@ fn quote_string(content: &str, quote_type: &QuoteType) -> String {
     }
 }
 
-/// Execute the SQL statement boundary testing scenario
-fn execute_sql_scenario(scenario: SqlStatementScenario) -> Result<(), Box<dyn std::error::Error>> {
-    // Generate SQL statements
-    let sql_statements: Vec<String> = scenario.statements.iter()
-        .map(|stmt| stmt.to_sql())
-        .filter(|sql| sql.len() <= MAX_SQL_LENGTH)
-        .take(10) // Limit number of statements
-        .collect();
-
-    if sql_statements.is_empty() {
-        return Ok(());
-    }
-
-    // Test SQL parsing without actually executing on database
-    for sql in &sql_statements {
-        // Basic SQL validation - check for null bytes and extreme lengths
-        if sql.contains('\0') || sql.len() > MAX_SQL_LENGTH {
-            continue;
-        }
-
-        // Test that the SQL generation doesn't panic
-        let _ = std::panic::catch_unwind(|| {
-            // Simulate what the SQLite module does - validate SQL string format
-            validate_sql_format(sql)
-        });
-    }
-
-    // Test batch execution format
-    if scenario.use_batch_execution && !sql_statements.is_empty() {
-        let batch_sql = sql_statements.join(";\n");
-        if batch_sql.len() <= MAX_SQL_LENGTH {
-            let _ = std::panic::catch_unwind(|| {
-                validate_sql_format(&batch_sql)
-            });
-        }
-    }
-
-    Ok(())
+struct SqlitePragmaDdlHarness {
+    conn: SqliteConnection,
+    cx: Cx,
 }
 
-/// Validate SQL format without executing (simulates input validation)
-fn validate_sql_format(sql: &str) -> Result<(), &'static str> {
-    // Basic format validation that mirrors what SQLite wrapper might do
-    if sql.is_empty() {
-        return Err("Empty SQL");
+impl SqlitePragmaDdlHarness {
+    async fn new() -> Result<Self, SqliteError> {
+        let cx = Cx::for_testing();
+        let conn = match SqliteConnection::open_in_memory(&cx).await {
+            Outcome::Ok(conn) => conn,
+            Outcome::Err(error) => return Err(error),
+            Outcome::Cancelled(reason) => return Err(SqliteError::Cancelled(reason)),
+            Outcome::Panicked(_) => panic!("sqlite open_in_memory panicked"),
+        };
+
+        match conn
+            .execute_batch(
+                &cx,
+                "CREATE TABLE fuzz_probe (id INTEGER PRIMARY KEY, name TEXT, value BLOB);",
+            )
+            .await
+        {
+            Outcome::Ok(()) => Ok(Self { conn, cx }),
+            Outcome::Err(error) => Err(error),
+            Outcome::Cancelled(reason) => Err(SqliteError::Cancelled(reason)),
+            Outcome::Panicked(_) => panic!("sqlite setup execute_batch panicked"),
+        }
     }
 
-    if sql.len() > MAX_SQL_LENGTH {
-        return Err("SQL too long");
+    async fn execute_sql_scenario(&self, scenario: SqlStatementScenario) {
+        let mut sql_statements: Vec<String> = scenario
+            .statements
+            .iter()
+            .map(SqlStatement::to_sql)
+            .filter(|sql| sql.len() <= MAX_SQL_LENGTH)
+            .take(10)
+            .collect();
+
+        if scenario.include_invalid_chars {
+            for (index, sql) in sql_statements.iter_mut().enumerate() {
+                if index % 2 == 0 && sql.len() < MAX_SQL_LENGTH {
+                    sql.push('\0');
+                }
+            }
+        }
+
+        for sql in &sql_statements {
+            self.execute_statement(sql).await;
+        }
+
+        if scenario.use_batch_execution && !sql_statements.is_empty() {
+            let batch_sql = sql_statements.join(";\n");
+            if batch_sql.len() <= MAX_SQL_LENGTH {
+                self.execute_batch_surfaces(&batch_sql).await;
+            }
+        }
     }
 
-    if sql.contains('\0') {
-        return Err("SQL contains null bytes");
+    async fn execute_statement(&self, sql: &str) {
+        if sql.len() > MAX_SQL_LENGTH {
+            return;
+        }
+
+        self.expect_clean_execute(sql).await;
+
+        if is_unchecked_surface_probe(sql) {
+            self.expect_clean_unchecked_execute(sql).await;
+        }
     }
 
-    // Check for basic statement patterns
-    let sql_upper = sql.to_uppercase();
-    let starts_with_valid = sql_upper.trim_start().starts_with("PRAGMA") ||
-                           sql_upper.trim_start().starts_with("CREATE") ||
-                           sql_upper.trim_start().starts_with("ALTER") ||
-                           sql_upper.trim_start().starts_with("DROP") ||
-                           sql_upper.trim_start().starts_with("SELECT") ||
-                           sql_upper.trim_start().starts_with("INSERT") ||
-                           sql_upper.trim_start().starts_with("UPDATE") ||
-                           sql_upper.trim_start().starts_with("DELETE") ||
-                           sql_upper.trim_start().starts_with("--") ||
-                           sql_upper.trim_start().starts_with("/*");
-
-    if !starts_with_valid {
-        return Err("Unrecognized SQL statement type");
+    async fn expect_clean_execute(&self, sql: &str) {
+        match self.conn.execute(&self.cx, sql, &[]).await {
+            Outcome::Ok(_) | Outcome::Err(_) | Outcome::Cancelled(_) => {}
+            Outcome::Panicked(_) => {
+                panic!("sqlite checked execute panicked for {}", sql_context(sql));
+            }
+        }
     }
 
-    Ok(())
+    async fn expect_clean_unchecked_execute(&self, sql: &str) {
+        match self.conn.execute_unchecked(&self.cx, sql, &[]).await {
+            Outcome::Ok(_) | Outcome::Err(_) | Outcome::Cancelled(_) => {}
+            Outcome::Panicked(_) => {
+                panic!("sqlite unchecked execute panicked for {}", sql_context(sql));
+            }
+        }
+    }
+
+    async fn execute_batch_surfaces(&self, sql: &str) {
+        match self.conn.execute_batch(&self.cx, sql).await {
+            Outcome::Ok(()) | Outcome::Err(_) | Outcome::Cancelled(_) => {}
+            Outcome::Panicked(_) => {
+                panic!(
+                    "sqlite checked execute_batch panicked for {}",
+                    sql_context(sql)
+                );
+            }
+        }
+
+        match self.conn.execute_batch_unchecked(&self.cx, sql).await {
+            Outcome::Ok(()) | Outcome::Err(_) | Outcome::Cancelled(_) => {}
+            Outcome::Panicked(_) => {
+                panic!(
+                    "sqlite unchecked execute_batch panicked for {}",
+                    sql_context(sql)
+                );
+            }
+        }
+    }
+}
+
+fn is_unchecked_surface_probe(sql: &str) -> bool {
+    let keyword = sql
+        .trim_start()
+        .split(|c: char| !c.is_ascii_alphabetic())
+        .next()
+        .unwrap_or_default();
+
+    keyword.eq_ignore_ascii_case("PRAGMA")
+        || keyword.eq_ignore_ascii_case("BEGIN")
+        || keyword.eq_ignore_ascii_case("COMMIT")
+        || keyword.eq_ignore_ascii_case("ROLLBACK")
+        || keyword.eq_ignore_ascii_case("SAVEPOINT")
+        || keyword.eq_ignore_ascii_case("RELEASE")
+}
+
+fn sql_context(sql: &str) -> String {
+    const MAX_CONTEXT_CHARS: usize = 96;
+    sql.chars()
+        .take(MAX_CONTEXT_CHARS)
+        .flat_map(char::escape_debug)
+        .collect()
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -628,23 +736,27 @@ fuzz_target!(|data: &[u8]| {
     }
 
     let mut u = Unstructured::new(data);
+    let scenario = SqlStatementScenario::arbitrary(&mut u).ok();
+    let raw_sql = std::str::from_utf8(data)
+        .ok()
+        .filter(|sql| sql.len() <= MAX_SQL_LENGTH);
 
-    // Generate structured scenario from input data
-    if let Ok(scenario) = SqlStatementScenario::arbitrary(&mut u) {
-        let _ = std::panic::catch_unwind(|| {
-            if let Err(e) = execute_sql_scenario(scenario) {
-                // Log error but don't panic - errors are expected for boundary cases
-                eprintln!("SQL scenario error: {}", e);
-            }
-        });
+    if scenario.is_none() && raw_sql.is_none() {
+        return;
     }
 
-    // Also test raw data as SQL directly
-    if let Ok(sql_string) = std::str::from_utf8(data) {
-        if sql_string.len() <= MAX_SQL_LENGTH {
-            let _ = std::panic::catch_unwind(|| {
-                let _ = validate_sql_format(sql_string);
-            });
+    block_on(async {
+        let harness = match SqlitePragmaDdlHarness::new().await {
+            Ok(harness) => harness,
+            Err(error) => panic!("sqlite harness setup failed: {error}"),
+        };
+
+        if let Some(scenario) = scenario {
+            harness.execute_sql_scenario(scenario).await;
         }
-    }
+
+        if let Some(sql) = raw_sql {
+            harness.execute_statement(sql).await;
+        }
+    });
 });
