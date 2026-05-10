@@ -37,6 +37,23 @@ pub struct ExpectContinueTestCase {
     timing: TimingScenario,
 }
 
+impl ExpectContinueTestCase {
+    fn header_section_len(&self) -> usize {
+        self.method
+            .wire_len()
+            .saturating_add(1)
+            .saturating_add(self.uri.wire_len())
+            .saturating_add(10)
+            .saturating_add(
+                self.expect_header
+                    .as_ref()
+                    .map_or(0, ExpectHeaderType::wire_len),
+            )
+            .saturating_add(self.body_headers.wire_len())
+            .saturating_add(2)
+    }
+}
+
 #[derive(Arbitrary, Debug, Clone)]
 pub enum RequestMethod {
     Get,
@@ -49,6 +66,23 @@ pub enum RequestMethod {
     Connect,
     Trace,
     Custom(CustomMethod),
+}
+
+impl RequestMethod {
+    fn wire_len(&self) -> usize {
+        match self {
+            RequestMethod::Get => 3,
+            RequestMethod::Post => 4,
+            RequestMethod::Put => 3,
+            RequestMethod::Patch => 5,
+            RequestMethod::Delete => 6,
+            RequestMethod::Head => 4,
+            RequestMethod::Options => 7,
+            RequestMethod::Connect => 7,
+            RequestMethod::Trace => 5,
+            RequestMethod::Custom(custom) => custom.name.wire_len(),
+        }
+    }
 }
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -66,6 +100,18 @@ pub enum MethodName {
     VeryLong(String),
 }
 
+impl MethodName {
+    fn wire_len(&self) -> usize {
+        match self {
+            MethodName::Normal(name)
+            | MethodName::WithWhitespace(name)
+            | MethodName::WithControl(name)
+            | MethodName::VeryLong(name) => name.len(),
+            MethodName::Empty => 0,
+        }
+    }
+}
+
 #[derive(Arbitrary, Debug, Clone)]
 pub enum UriPath {
     Root,
@@ -76,6 +122,25 @@ pub enum UriPath {
     Authority(String, u16),
     Absolute(String),
     Malformed(String),
+}
+
+impl UriPath {
+    fn wire_len(&self) -> usize {
+        match self {
+            UriPath::Root => 1,
+            UriPath::Simple(path) | UriPath::Absolute(path) | UriPath::Malformed(path) => {
+                path.len()
+            }
+            UriPath::WithQuery(path, query) => {
+                path.len().saturating_add(1).saturating_add(query.len())
+            }
+            UriPath::WithFragment(path, fragment) => {
+                path.len().saturating_add(1).saturating_add(fragment.len())
+            }
+            UriPath::Asterisk => 1,
+            UriPath::Authority(host, _) => host.len().saturating_add(6),
+        }
+    }
 }
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -105,6 +170,39 @@ pub enum ExpectHeaderType {
     Duplicate(String, String),
 }
 
+impl ExpectHeaderType {
+    fn wire_len(&self) -> usize {
+        let value_len = match self {
+            ExpectHeaderType::Continue
+            | ExpectHeaderType::ContinueUppercase
+            | ExpectHeaderType::ContinueMixedCase
+            | ExpectHeaderType::HttpVersionMismatch => "100-continue".len(),
+            ExpectHeaderType::ContinueWithSpaces | ExpectHeaderType::ContinueWithTabs => {
+                "100-continue".len().saturating_add(2)
+            }
+            ExpectHeaderType::ContinueWithExtra(extra) => "100-continue"
+                .len()
+                .saturating_add(1)
+                .saturating_add(extra.len()),
+            ExpectHeaderType::MultipleContinue => {
+                "100-continue".len().saturating_mul(2).saturating_add(1)
+            }
+            ExpectHeaderType::UnsupportedSingle(value)
+            | ExpectHeaderType::MalformedTokens(value)
+            | ExpectHeaderType::WithControlChars(value) => value.len(),
+            ExpectHeaderType::UnsupportedMultiple(values) => comma_separated_len(values),
+            ExpectHeaderType::EmptyValue => 0,
+            ExpectHeaderType::OnlyWhitespace => 4,
+            ExpectHeaderType::Duplicate(first, second) => {
+                return header_line_len("Expect", first.len())
+                    .saturating_add(header_line_len("Expect", second.len()));
+            }
+        };
+
+        header_line_len("Expect", value_len)
+    }
+}
+
 #[derive(Arbitrary, Debug, Clone)]
 pub enum BodyHeaderType {
     None,
@@ -112,6 +210,26 @@ pub enum BodyHeaderType {
     TransferEncoding(TransferEncodingType),
     Both(ContentLengthType, TransferEncodingType), // Ambiguous - RFC violation
     Malformed(String, String),
+}
+
+impl BodyHeaderType {
+    fn wire_len(&self) -> usize {
+        match self {
+            BodyHeaderType::None => 0,
+            BodyHeaderType::ContentLength(content_length) => {
+                header_line_len("Content-Length", content_length.wire_len())
+            }
+            BodyHeaderType::TransferEncoding(transfer_encoding) => {
+                header_line_len("Transfer-Encoding", transfer_encoding.wire_len())
+            }
+            BodyHeaderType::Both(content_length, transfer_encoding) => {
+                header_line_len("Content-Length", content_length.wire_len()).saturating_add(
+                    header_line_len("Transfer-Encoding", transfer_encoding.wire_len()),
+                )
+            }
+            BodyHeaderType::Malformed(name, value) => header_line_len(name, value.len()),
+        }
+    }
 }
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -125,6 +243,20 @@ pub enum ContentLengthType {
     Multiple(Vec<String>),
 }
 
+impl ContentLengthType {
+    fn wire_len(&self) -> usize {
+        match self {
+            ContentLengthType::Zero => 1,
+            ContentLengthType::Small(value) | ContentLengthType::Large(value) => {
+                decimal_len_u64(u64::from(*value))
+            }
+            ContentLengthType::VeryLarge(value) => decimal_len_u64(*value),
+            ContentLengthType::Invalid(value) | ContentLengthType::Negative(value) => value.len(),
+            ContentLengthType::Multiple(values) => comma_separated_len(values),
+        }
+    }
+}
+
 #[derive(Arbitrary, Debug, Clone)]
 pub enum TransferEncodingType {
     Chunked,
@@ -133,6 +265,20 @@ pub enum TransferEncodingType {
     Multiple(Vec<String>),
     Unsupported(String),
     Malformed(String),
+}
+
+impl TransferEncodingType {
+    fn wire_len(&self) -> usize {
+        match self {
+            TransferEncodingType::Chunked => "chunked".len(),
+            TransferEncodingType::Gzip => "gzip".len(),
+            TransferEncodingType::Deflate => "deflate".len(),
+            TransferEncodingType::Multiple(values) => comma_separated_len(values),
+            TransferEncodingType::Unsupported(value) | TransferEncodingType::Malformed(value) => {
+                value.len()
+            }
+        }
+    }
 }
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -166,6 +312,19 @@ pub enum ConnectionState {
     Closing,
 }
 
+impl ConnectionState {
+    fn completed_requests(&self) -> u32 {
+        match self {
+            ConnectionState::Fresh | ConnectionState::Closing => 0,
+            ConnectionState::KeepAlive(count) | ConnectionState::PipelinePending(count) => *count,
+        }
+    }
+
+    fn accepts_new_expect_request(&self) -> bool {
+        !matches!(self, ConnectionState::Closing)
+    }
+}
+
 #[derive(Arbitrary, Debug, Clone)]
 pub enum TimingScenario {
     /// Body arrives after expect processing
@@ -178,6 +337,35 @@ pub enum TimingScenario {
     PartialTimeout,
     /// Concurrent pipeline requests
     Pipelined,
+}
+
+fn header_line_len(name: impl AsRef<str>, value_len: usize) -> usize {
+    name.as_ref()
+        .len()
+        .saturating_add(2)
+        .saturating_add(value_len)
+        .saturating_add(2)
+}
+
+fn comma_separated_len(values: &[String]) -> usize {
+    values
+        .iter()
+        .fold(0usize, |len, value| len.saturating_add(value.len()))
+        .saturating_add(values.len().saturating_sub(1))
+}
+
+fn decimal_len_u64(value: u64) -> usize {
+    if value == 0 {
+        return 1;
+    }
+
+    let mut remaining = value;
+    let mut digits = 0usize;
+    while remaining > 0 {
+        remaining /= 10;
+        digits += 1;
+    }
+    digits
 }
 
 /// Mock HTTP/1.1 Expect: 100-continue handler for fuzzing
@@ -224,6 +412,12 @@ pub struct ExpectationResult {
     error: Option<String>,
 }
 
+impl Default for MockExpectHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MockExpectHandler {
     pub fn new() -> Self {
         Self {
@@ -246,33 +440,50 @@ impl MockExpectHandler {
         } else {
             HttpVersion::Http10
         };
+        self.requests_processed = test_case.connection_state.completed_requests();
 
-        // Parse request line
-        self.validate_request_line(&test_case.method, &test_case.uri)?;
+        let result = (|| {
+            if !test_case.connection_state.accepts_new_expect_request() {
+                return Err("Connection closing".to_string());
+            }
 
-        // Process Expect header
-        let expectation_action = self.classify_expectation(&test_case.expect_header)?;
+            if test_case.header_section_len() > self.max_header_size {
+                return Err("Request headers exceed limit".to_string());
+            }
 
-        // Validate body headers
-        self.validate_body_headers(&test_case.body_headers)?;
+            // Parse request line
+            self.validate_request_line(&test_case.method, &test_case.uri)?;
 
-        // Check protocol compatibility
-        self.check_protocol_compatibility(&expectation_action)?;
+            // Process Expect header
+            let expectation_action = self.classify_expectation(&test_case.expect_header)?;
 
-        // Determine if body is expected
-        let expects_body =
-            self.request_expects_body(&test_case.body_headers, &test_case.body_config);
+            // Validate body headers
+            self.validate_body_headers(&test_case.body_headers)?;
 
-        // Generate expectation response
-        let result =
-            self.handle_expectation(expectation_action, expects_body, &test_case.timing)?;
+            // Check protocol compatibility
+            self.check_protocol_compatibility(&expectation_action)?;
 
-        // Process body if needed
-        if result.action == ExpectationAction::Continue {
-            self.process_body(&test_case.body_config, &test_case.timing)?;
+            // Determine if body is expected
+            let expects_body =
+                self.request_expects_body(&test_case.body_headers, &test_case.body_config);
+
+            // Generate expectation response
+            let result =
+                self.handle_expectation(expectation_action, expects_body, &test_case.timing)?;
+
+            // Process body if needed
+            if result.action == ExpectationAction::Continue {
+                self.process_body(&test_case.body_config, &test_case.timing)?;
+            }
+
+            Ok(result)
+        })();
+
+        if let Err(error) = &result {
+            self.state = ExpectState::Error(error.clone());
         }
 
-        Ok(result)
+        result
     }
 
     fn validate_request_line(
@@ -281,8 +492,8 @@ impl MockExpectHandler {
         uri: &UriPath,
     ) -> Result<(), String> {
         // Validate method
-        match method {
-            RequestMethod::Custom(custom) => match &custom.name {
+        if let RequestMethod::Custom(custom) = method {
+            match &custom.name {
                 MethodName::Normal(name) => {
                     if name.is_empty() {
                         return Err("Empty method name".to_string());
@@ -306,8 +517,7 @@ impl MockExpectHandler {
                         return Err("Method too long".to_string());
                     }
                 }
-            },
-            _ => {} // Standard methods are always valid
+            }
         }
 
         // Validate URI
@@ -342,7 +552,7 @@ impl MockExpectHandler {
     ) -> Result<ExpectationAction, String> {
         self.state = ExpectState::ProcessingExpectation;
 
-        let Some(ref expect) = expect_header else {
+        let Some(expect) = expect_header else {
             return Ok(ExpectationAction::None);
         };
 
@@ -368,7 +578,7 @@ impl MockExpectHandler {
             }
 
             ExpectHeaderType::MalformedTokens(_) | ExpectHeaderType::WithControlChars(_) => {
-                return Err("Malformed Expect header".to_string());
+                Err("Malformed Expect header".to_string())
             }
 
             ExpectHeaderType::EmptyValue | ExpectHeaderType::OnlyWhitespace => {
@@ -382,7 +592,7 @@ impl MockExpectHandler {
             }
 
             ExpectHeaderType::Duplicate(_, _) => {
-                return Err("Duplicate Expect header forbidden".to_string());
+                Err("Duplicate Expect header forbidden".to_string())
             }
         }
     }
@@ -402,10 +612,8 @@ impl MockExpectHandler {
                 ContentLengthType::Multiple(_) => {
                     return Err("Multiple Content-Length headers".to_string());
                 }
-                ContentLengthType::VeryLarge(size) => {
-                    if *size > self.max_body_size as u64 {
-                        return Err("Content-Length exceeds limit".to_string());
-                    }
+                ContentLengthType::VeryLarge(size) if *size > self.max_body_size as u64 => {
+                    return Err("Content-Length exceeds limit".to_string());
                 }
                 _ => {}
             },
@@ -595,7 +803,7 @@ impl MockExpectHandler {
             }
         }
 
-        self.requests_processed += 1;
+        self.requests_processed = self.requests_processed.saturating_add(1);
         Ok(())
     }
 
@@ -604,10 +812,10 @@ impl MockExpectHandler {
             if chunk.size as usize != chunk.data.len() {
                 return Err("Chunk size mismatch".to_string());
             }
-            if let Some(ref extensions) = chunk.extensions {
-                if extensions.contains('\r') || extensions.contains('\n') {
-                    return Err("Invalid chunk extensions".to_string());
-                }
+            if let Some(ref extensions) = chunk.extensions
+                && (extensions.contains('\r') || extensions.contains('\n'))
+            {
+                return Err("Invalid chunk extensions".to_string());
             }
         }
         Ok(())
@@ -725,10 +933,27 @@ fuzz_target!(|data: &[u8]| {
                 }
 
                 // Validate HTTP/1.0 compatibility
-                if handler.version == HttpVersion::Http10 {
-                    if expectation_result.response_code == 100 {
-                        panic!("100-continue sent for HTTP/1.0 request");
-                    }
+                if handler.version == HttpVersion::Http10 && expectation_result.response_code == 100
+                {
+                    panic!("100-continue sent for HTTP/1.0 request");
+                }
+
+                if expectation_result.response_code == 417 {
+                    assert!(
+                        expectation_result
+                            .response_headers
+                            .iter()
+                            .any(|(name, value)| {
+                                name.eq_ignore_ascii_case("connection")
+                                    && value.eq_ignore_ascii_case("close")
+                            }),
+                        "417 response missing Connection: close"
+                    );
+                } else {
+                    assert!(
+                        expectation_result.response_headers.is_empty(),
+                        "non-rejection response emitted unexpected headers"
+                    );
                 }
             }
 

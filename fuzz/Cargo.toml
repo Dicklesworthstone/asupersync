@@ -5011,6 +5011,7 @@ name = "h1_expect_100_continue"
 path = "fuzz_targets/h1_expect_100_continue.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h1_response_status_line"
