@@ -3,7 +3,6 @@
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 use std::future::Future;
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
@@ -75,6 +74,7 @@ impl NotifyCancelTracker {
             let mut notify_deliveries = std::collections::HashMap::new();
 
             for event in events.iter() {
+                let _observed_at = event.timestamp;
                 if event.event_type == DeliveryType::NotifyReceived {
                     let count = notify_deliveries.entry(event.operation_id).or_insert(0);
                     *count += 1;
@@ -83,8 +83,8 @@ impl NotifyCancelTracker {
                         self.record_violation(InvariantViolation {
                             violation_type: "double_delivery".to_string(),
                             description: format!(
-                                "Operation {} delivered to {} waiters (double delivery)",
-                                event.operation_id, count
+                                "Operation {} delivered to waiter {} as delivery {}",
+                                event.operation_id, event.waiter_id, count
                             ),
                             operation_id: event.operation_id,
                         });
@@ -133,19 +133,19 @@ impl NotifyCancelTracker {
         }
 
         // Check for any violations and panic if found
-        if let Ok(violations) = self.invariant_violations.lock() {
-            if !violations.is_empty() {
-                for violation in violations.iter() {
-                    self.record_operation(&format!(
-                        "VIOLATION: {} - {}",
-                        violation.violation_type, violation.description
-                    ));
-                }
-                panic!(
-                    "Notify cancel race invariant violations detected: {} violations",
-                    violations.len()
-                );
+        if let Ok(violations) = self.invariant_violations.lock()
+            && !violations.is_empty()
+        {
+            for violation in violations.iter() {
+                self.record_operation(&format!(
+                    "VIOLATION op {}: {} - {}",
+                    violation.operation_id, violation.violation_type, violation.description
+                ));
             }
+            panic!(
+                "Notify cancel race invariant violations detected: {} violations",
+                violations.len()
+            );
         }
     }
 }
@@ -164,14 +164,6 @@ impl TrackedWaker {
             operation_id,
             tracker,
             waked: Arc::new(Mutex::new(false)),
-        }
-    }
-
-    fn was_waked(&self) -> bool {
-        if let Ok(waked) = self.waked.lock() {
-            *waked
-        } else {
-            false
         }
     }
 
@@ -202,7 +194,7 @@ static TRACKED_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
 );
 
 unsafe fn tracked_waker_clone(data: *const ()) -> RawWaker {
-    let arc = Arc::from_raw(data as *const TrackedWaker);
+    let arc = unsafe { Arc::from_raw(data as *const TrackedWaker) };
     let cloned = arc.clone();
     std::mem::forget(arc);
     let new_data = Arc::into_raw(cloned) as *const ();
@@ -210,7 +202,7 @@ unsafe fn tracked_waker_clone(data: *const ()) -> RawWaker {
 }
 
 unsafe fn tracked_waker_wake(data: *const ()) {
-    let arc = Arc::from_raw(data as *const TrackedWaker);
+    let arc = unsafe { Arc::from_raw(data as *const TrackedWaker) };
     if let Ok(mut waked) = arc.waked.lock() {
         *waked = true;
     }
@@ -223,7 +215,7 @@ unsafe fn tracked_waker_wake(data: *const ()) {
 }
 
 unsafe fn tracked_waker_wake_by_ref(data: *const ()) {
-    let arc = Arc::from_raw(data as *const TrackedWaker);
+    let arc = unsafe { Arc::from_raw(data as *const TrackedWaker) };
     if let Ok(mut waked) = arc.waked.lock() {
         *waked = true;
     }
@@ -237,7 +229,14 @@ unsafe fn tracked_waker_wake_by_ref(data: *const ()) {
 }
 
 unsafe fn tracked_waker_drop(data: *const ()) {
-    let _arc = Arc::from_raw(data as *const TrackedWaker);
+    let _arc = unsafe { Arc::from_raw(data as *const TrackedWaker) };
+}
+
+fn expect_initial_registration_pending(poll: Poll<()>, waiter_id: usize, operation_id: usize) {
+    assert!(
+        matches!(poll, Poll::Pending),
+        "waiter {waiter_id} unexpectedly completed during operation {operation_id} registration"
+    );
 }
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -330,7 +329,11 @@ fn test_simple_notify_one_cancel(tracker: &NotifyCancelTracker, notify: &Notify,
         let waker = tracked_waker.create_waker();
         let mut context = Context::from_waker(&waker);
 
-        let _ = Pin::new(&mut waiter).poll(&mut context);
+        expect_initial_registration_pending(
+            Pin::new(&mut waiter).poll(&mut context),
+            i as usize,
+            1,
+        );
         waiters.push(waiter);
         wakers.push(tracked_waker);
     }
@@ -382,7 +385,11 @@ fn test_notify_one_with_baton_pass(
         let waker = tracked_waker.create_waker();
         let mut context = Context::from_waker(&waker);
 
-        let _ = Pin::new(&mut waiter).poll(&mut context);
+        expect_initial_registration_pending(
+            Pin::new(&mut waiter).poll(&mut context),
+            i as usize,
+            2,
+        );
         waiters.push(waiter);
         wakers.push(tracked_waker);
     }
@@ -443,7 +450,11 @@ fn test_broadcast_then_cancel(
         let waker = tracked_waker.create_waker();
         let mut context = Context::from_waker(&waker);
 
-        let _ = Pin::new(&mut waiter).poll(&mut context);
+        expect_initial_registration_pending(
+            Pin::new(&mut waiter).poll(&mut context),
+            i as usize,
+            3,
+        );
         waiters.push(waiter);
         wakers.push(tracked_waker);
     }
@@ -512,7 +523,11 @@ fn test_concurrent_notify_cancel(
         let waker = tracked_waker.create_waker();
         let mut context = Context::from_waker(&waker);
 
-        let _ = Pin::new(&mut waiter).poll(&mut context);
+        expect_initial_registration_pending(
+            Pin::new(&mut waiter).poll(&mut context),
+            i as usize,
+            operation_counter,
+        );
         waiters.push(waiter);
         wakers.push(tracked_waker);
     }
@@ -566,17 +581,18 @@ fn test_concurrent_notify_cancel(
                     let waker = tracked_waker.create_waker();
                     let mut context = Context::from_waker(&waker);
 
-                    let _ = Pin::new(&mut waiter).poll(&mut context);
+                    expect_initial_registration_pending(
+                        Pin::new(&mut waiter).poll(&mut context),
+                        waiter_idx,
+                        operation_counter,
+                    );
                     waiters.push(waiter);
                     wakers.push(tracked_waker);
                 }
             }
 
             Operation::CheckStoredCount => {
-                let stored = notify
-                    .stored_notifications
-                    .load(std::sync::atomic::Ordering::Acquire);
-                tracker.record_operation(&format!("stored_count_{}", stored));
+                tracker.record_operation("stored_count_unavailable_private_notify_state");
             }
         }
     }
@@ -615,7 +631,11 @@ fn test_baton_pass_chain(
         let waker = tracked_waker.create_waker();
         let mut context = Context::from_waker(&waker);
 
-        let _ = Pin::new(&mut waiter).poll(&mut context);
+        expect_initial_registration_pending(
+            Pin::new(&mut waiter).poll(&mut context),
+            i as usize,
+            5,
+        );
         waiters.push(waiter);
         wakers.push(tracked_waker);
     }
@@ -640,19 +660,19 @@ fn test_baton_pass_chain(
     }
 
     // Check if final waiter got the baton
-    if let Some(waiter) = waiters.first_mut() {
-        if let Some(tracked_waker) = wakers.first() {
-            let waker = tracked_waker.create_waker();
-            let mut context = Context::from_waker(&waker);
+    if let Some(waiter) = waiters.first_mut()
+        && let Some(tracked_waker) = wakers.first()
+    {
+        let waker = tracked_waker.create_waker();
+        let mut context = Context::from_waker(&waker);
 
-            if let Poll::Ready(()) = Pin::new(waiter).poll(&mut context) {
-                tracker.record_delivery_event(DeliveryEvent {
-                    waiter_id: tracked_waker.waiter_id,
-                    event_type: DeliveryType::BatonPassed,
-                    operation_id: 5,
-                    timestamp: std::time::Instant::now(),
-                });
-            }
+        if let Poll::Ready(()) = Pin::new(waiter).poll(&mut context) {
+            tracker.record_delivery_event(DeliveryEvent {
+                waiter_id: tracked_waker.waiter_id,
+                event_type: DeliveryType::BatonPassed,
+                operation_id: 5,
+                timestamp: std::time::Instant::now(),
+            });
         }
     }
 }
@@ -707,7 +727,7 @@ fn test_stored_notification_cancel(
         let waker = tracked_waker.create_waker();
         let mut context = Context::from_waker(&waker);
 
-        let _ = Pin::new(&mut waiter).poll(&mut context);
+        expect_initial_registration_pending(Pin::new(&mut waiter).poll(&mut context), 0, 7);
 
         tracker.record_operation("notify_one_7");
         notify.notify_one();
