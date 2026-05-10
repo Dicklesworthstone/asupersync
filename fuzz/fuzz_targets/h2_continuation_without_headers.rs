@@ -1,16 +1,12 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 
 use asupersync::bytes::BytesMut;
 use asupersync::codec::Encoder;
-use asupersync::http::h2::connection::{FrameCodec, ConnectionState};
-use asupersync::http::h2::frame::{
-    Frame, FrameType, ContinuationFrame, DataFrame, SettingsFrame,
-    FRAME_HEADER_SIZE
-};
 use asupersync::http::h2::error::{ErrorCode, H2Error};
+use asupersync::http::h2::frame::{ContinuationFrame, DataFrame, Frame, SettingsFrame};
 
 /// HTTP/2 frame sequence for testing CONTINUATION-without-HEADERS scenarios
 #[derive(Debug, Clone, Arbitrary)]
@@ -29,7 +25,7 @@ struct FuzzFrame {
     frame_type: FrameTypeChoice,
     flags: u8,
     stream_id: u32,
-    payload_size: u16,  // Bounded payload size
+    payload_size: u16, // Bounded payload size
 }
 
 /// Frame types to fuzz with (excluding CONTINUATION to avoid accidental valid sequences)
@@ -82,7 +78,10 @@ fn test_orphaned_continuation_protocol_error(test_seq: &ContinuationTestSequence
     // Send prefix frames (none of which are HEADERS)
     for prefix_frame in &test_seq.prefix_frames {
         if let Ok(frame) = create_frame_from_fuzz(prefix_frame) {
-            let _ = codec.encode(frame, &mut buffer);
+            observe_prefix_encode(
+                codec.encode(frame, &mut buffer),
+                "orphaned-continuation prefix",
+            );
         }
     }
 
@@ -95,23 +94,30 @@ fn test_orphaned_continuation_protocol_error(test_seq: &ContinuationTestSequence
             // Verify it's the correct error type
             match error.downcast_ref::<H2Error>() {
                 Some(h2_err) => {
-                    assert_eq!(h2_err.code(), ErrorCode::ProtocolError,
-                        "CONTINUATION without HEADERS should return PROTOCOL_ERROR, got: {:?}", h2_err.code());
+                    assert_eq!(
+                        h2_err.code(),
+                        ErrorCode::ProtocolError,
+                        "CONTINUATION without HEADERS should return PROTOCOL_ERROR, got: {:?}",
+                        h2_err.code()
+                    );
                 }
                 None => {
                     // Other errors are acceptable if they indicate protocol violation
                     let error_str = format!("{:?}", error);
                     assert!(
-                        error_str.contains("protocol") ||
-                        error_str.contains("CONTINUATION") ||
-                        error_str.contains("invalid"),
-                        "Expected protocol error for orphaned CONTINUATION, got: {}", error_str
+                        error_str.contains("protocol")
+                            || error_str.contains("CONTINUATION")
+                            || error_str.contains("invalid"),
+                        "Expected protocol error for orphaned CONTINUATION, got: {}",
+                        error_str
                     );
                 }
             }
         }
         Ok(_) => {
-            panic!("Orphaned CONTINUATION frame should not be accepted - this is a protocol violation!");
+            panic!(
+                "Orphaned CONTINUATION frame should not be accepted - this is a protocol violation!"
+            );
         }
     }
 }
@@ -134,7 +140,10 @@ fn test_continuation_in_various_positions(test_seq: &ContinuationTestSequence) {
                 break;
             }
             if let Ok(frame) = create_frame_from_fuzz(prefix_frame) {
-                let _ = codec.encode(frame, &mut buffer);
+                observe_prefix_encode(
+                    codec.encode(frame, &mut buffer),
+                    "positioned-continuation prefix",
+                );
             }
         }
 
@@ -150,8 +159,32 @@ fn test_continuation_in_various_positions(test_seq: &ContinuationTestSequence) {
             }
             Ok(_) => {
                 // This would be a protocol violation
-                assert!(false, "CONTINUATION frame accepted at position {} without preceding HEADERS", pos);
+                panic!(
+                    "CONTINUATION frame accepted at position {} without preceding HEADERS",
+                    pos
+                );
             }
+        }
+    }
+}
+
+fn observe_prefix_encode(result: Result<(), H2Error>, context: &str) {
+    match result {
+        Ok(()) => {
+            std::hint::black_box(context);
+        }
+        Err(error) => {
+            let message = error.to_string();
+            assert!(
+                !message.trim().is_empty(),
+                "{context} rejection should expose a diagnostic"
+            );
+            assert!(
+                message.len() <= 2048,
+                "{context} rejection diagnostic should stay bounded: {} bytes",
+                message.len()
+            );
+            std::hint::black_box((context, message));
         }
     }
 }
@@ -173,7 +206,7 @@ fn create_frame_from_fuzz(fuzz_frame: &FuzzFrame) -> Result<Frame, Box<dyn std::
         }
         FrameTypeChoice::Settings => {
             Ok(Frame::Settings(SettingsFrame::new(
-                Vec::new(), // Empty settings for simplicity
+                Vec::new(),                   // Empty settings for simplicity
                 fuzz_frame.flags & 0x01 != 0, // ACK flag
             )?))
         }
@@ -185,27 +218,29 @@ fn create_frame_from_fuzz(fuzz_frame: &FuzzFrame) -> Result<Frame, Box<dyn std::
             )?))
         }
         FrameTypeChoice::GoAway => {
-            Ok(Frame::GoAway(asupersync::http::h2::frame::GoAwayFrame::new(
-                0, // Last stream ID
-                ErrorCode::NoError,
-                payload.into(),
-            )?))
+            Ok(Frame::GoAway(
+                asupersync::http::h2::frame::GoAwayFrame::new(
+                    0, // Last stream ID
+                    ErrorCode::NoError,
+                    payload.into(),
+                )?,
+            ))
         }
         FrameTypeChoice::WindowUpdate => {
-            Ok(Frame::WindowUpdate(asupersync::http::h2::frame::WindowUpdateFrame::new(
-                stream_id,
-                1, // Window size increment (must be > 0)
-            )?))
+            Ok(Frame::WindowUpdate(
+                asupersync::http::h2::frame::WindowUpdateFrame::new(
+                    stream_id, 1, // Window size increment (must be > 0)
+                )?,
+            ))
         }
         FrameTypeChoice::RstStream => {
             if stream_id == 0 {
                 // RST_STREAM cannot be on stream 0
                 return Err("RST_STREAM on stream 0".into());
             }
-            Ok(Frame::RstStream(asupersync::http::h2::frame::RstStreamFrame::new(
-                stream_id,
-                ErrorCode::Cancel,
-            )?))
+            Ok(Frame::RstStream(
+                asupersync::http::h2::frame::RstStreamFrame::new(stream_id, ErrorCode::Cancel)?,
+            ))
         }
     }
 }
@@ -222,11 +257,10 @@ fn create_continuation_frame(cont_data: &ContinuationFrameData) -> Frame {
         cont_data.payload.clone()
     };
 
-    Frame::Continuation(ContinuationFrame::new(
-        stream_id,
-        payload.into(),
-        end_headers,
-    ).expect("Failed to create CONTINUATION frame"))
+    Frame::Continuation(
+        ContinuationFrame::new(stream_id, payload.into(), end_headers)
+            .expect("Failed to create CONTINUATION frame"),
+    )
 }
 
 /// Normalize stream ID to valid range (1-2^31-1, odd for client)
