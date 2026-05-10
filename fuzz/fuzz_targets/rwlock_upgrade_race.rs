@@ -17,7 +17,7 @@ use arbitrary::{Arbitrary, Unstructured};
 use asupersync::cx::Cx;
 use asupersync::sync::RwLock;
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -156,8 +156,10 @@ impl UpgradeTracker {
 }
 
 /// Tracks a reader that may attempt to upgrade
+type ReaderFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
+
 struct TrackedReader {
-    read_guard: Option<Pin<Box<dyn Future<Output = Result<(), String>> + Send>>>,
+    read_guard: Option<ReaderFuture>,
     attempting_upgrade: bool,
     completed: Arc<AtomicBool>,
     upgrade_success: Arc<AtomicBool>,
@@ -280,10 +282,24 @@ fn noop_waker() -> Waker {
     unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &NOOP_WAKER_VTABLE)) }
 }
 
+fn observe_reader_poll(
+    context: &str,
+    reader_id: u8,
+    poll: Poll<Result<(), String>>,
+) -> Result<(), String> {
+    match poll {
+        Poll::Ready(Ok(())) | Poll::Pending => Ok(()),
+        Poll::Ready(Err(msg)) => Err(format!(
+            "{} reader {} poll failed: {}",
+            context, reader_id, msg
+        )),
+    }
+}
+
 /// Test RwLock upgrade race scenarios
 fn test_upgrade_race_scenario(
     config: &RwLockUpgradeConfig,
-    tracker: &UpgradeTracker,
+    tracker: Arc<UpgradeTracker>,
 ) -> Result<(), String> {
     let rwlock = Arc::new(RwLock::new(42i32));
     let mut readers: HashMap<u8, TrackedReader> = HashMap::new();
@@ -295,7 +311,7 @@ fn test_upgrade_race_scenario(
 
     // Create initial readers
     for i in 0..max_readers {
-        let reader = TrackedReader::new(rwlock.clone(), i, Arc::new(UpgradeTracker::new()));
+        let reader = TrackedReader::new(rwlock.clone(), i, Arc::clone(&tracker));
         readers.insert(i, reader);
     }
 
@@ -310,18 +326,17 @@ fn test_upgrade_race_scenario(
                 if !readers.contains_key(&id)
                     && readers.len() < RwLockUpgradeConfig::max_readers() as usize
                 {
-                    let reader =
-                        TrackedReader::new(rwlock.clone(), id, Arc::new(UpgradeTracker::new()));
+                    let reader = TrackedReader::new(rwlock.clone(), id, Arc::clone(&tracker));
                     readers.insert(id, reader);
                 }
             }
 
             UpgradeOperation::AttemptUpgrade { reader_id } => {
                 let id = *reader_id % 20;
-                if let Some(reader) = readers.get_mut(&id) {
-                    if current_writer.is_none() {
-                        reader.attempt_upgrade(rwlock.clone(), id, Arc::new(UpgradeTracker::new()));
-                    }
+                if let Some(reader) = readers.get_mut(&id)
+                    && current_writer.is_none()
+                {
+                    reader.attempt_upgrade(rwlock.clone(), id, Arc::clone(&tracker));
                 }
             }
 
@@ -340,16 +355,12 @@ fn test_upgrade_race_scenario(
 
                 if current_writer.is_none() {
                     let mut upgrade_attempts = 0;
-                    let mut successful_upgrades = 0;
+                    let mut successful_upgrade_ids = HashSet::new();
 
                     for &reader_id in reader_ids.iter().take(concurrent_count) {
                         let id = reader_id % 20;
                         if let Some(reader) = readers.get_mut(&id) {
-                            reader.attempt_upgrade(
-                                rwlock.clone(),
-                                id,
-                                Arc::new(UpgradeTracker::new()),
-                            );
+                            reader.attempt_upgrade(rwlock.clone(), id, Arc::clone(&tracker));
                             upgrade_attempts += 1;
                         }
                     }
@@ -357,13 +368,15 @@ fn test_upgrade_race_scenario(
                     // Poll all readers to see results
                     for _ in 0..10 {
                         // Give some iterations for completion
-                        for reader in readers.values_mut() {
-                            let _ = reader.poll();
+                        for (&id, reader) in readers.iter_mut() {
+                            observe_reader_poll("concurrent-upgrade", id, reader.poll())?;
                             if reader.upgrade_succeeded() {
-                                successful_upgrades += 1;
+                                successful_upgrade_ids.insert(id);
                             }
                         }
                     }
+
+                    let successful_upgrades = successful_upgrade_ids.len();
 
                     // Critical invariant: only one upgrade should succeed
                     if successful_upgrades > 1 {
@@ -419,7 +432,7 @@ fn test_upgrade_race_scenario(
         // Always poll all readers to make progress
         let mut to_remove = Vec::new();
         for (&id, reader) in readers.iter_mut() {
-            let _ = reader.poll();
+            observe_reader_poll("progress", id, reader.poll())?;
             if reader.is_completed() && !reader.attempting_upgrade {
                 to_remove.push(id);
             }
@@ -449,10 +462,10 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    let tracker = UpgradeTracker::new();
+    let tracker = Arc::new(UpgradeTracker::new());
 
     // Test the upgrade race scenario
-    if let Err(msg) = test_upgrade_race_scenario(&config, &tracker) {
+    if let Err(msg) = test_upgrade_race_scenario(&config, Arc::clone(&tracker)) {
         panic!("RwLock upgrade race test failed: {}", msg);
     }
 
@@ -460,10 +473,11 @@ fuzz_target!(|data: &[u8]| {
     if config.test_concurrency {
         use std::thread;
 
-        let tracker2 = UpgradeTracker::new();
+        let tracker2 = Arc::new(UpgradeTracker::new());
         let config2 = config.clone();
+        let tracker2_thread = Arc::clone(&tracker2);
 
-        let handle = thread::spawn(move || test_upgrade_race_scenario(&config2, &tracker2));
+        let handle = thread::spawn(move || test_upgrade_race_scenario(&config2, tracker2_thread));
 
         match handle.join() {
             Ok(Ok(())) => {
