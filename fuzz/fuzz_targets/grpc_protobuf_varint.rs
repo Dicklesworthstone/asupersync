@@ -172,6 +172,32 @@ fuzz_target!(|input: FuzzMessage| {
     test_wire_type_validation(&wire_bytes, &input);
 });
 
+fn observe_decode_result<T, E: std::fmt::Display>(stage: &str, result: Result<T, E>) {
+    match result {
+        Ok(_) => {
+            std::hint::black_box((stage, "accepted"));
+        }
+        Err(error) => {
+            let error_msg = error.to_string();
+            assert!(
+                !error_msg.is_empty(),
+                "{stage} returned an empty decode error"
+            );
+            std::hint::black_box((stage, "rejected", error_msg));
+        }
+    }
+}
+
+fn observe_caught_decode<T, E: std::fmt::Display>(
+    stage: &str,
+    result: std::thread::Result<Result<T, E>>,
+) {
+    match result {
+        Ok(decode_result) => observe_decode_result(stage, decode_result),
+        Err(_) => panic!("{stage} panicked"),
+    }
+}
+
 /// Property 1: No panic on any protobuf input
 fn test_no_panic_varint_decoding(wire_bytes: &[u8]) {
     let bytes = Bytes::from(wire_bytes.to_vec());
@@ -180,29 +206,23 @@ fn test_no_panic_varint_decoding(wire_bytes: &[u8]) {
     let simple_result = catch_unwind(AssertUnwindSafe(|| {
         let mut codec: ProstCodec<SimpleTestMessage, SimpleTestMessage> =
             ProstCodec::with_max_size(MAX_MESSAGE_SIZE);
-        let _ = codec.decode(&bytes);
+        codec.decode(&bytes)
     }));
-    assert!(
-        simple_result.is_ok(),
-        "Simple protobuf varint decode panicked"
-    );
+    observe_caught_decode("Simple protobuf varint decode", simple_result);
 
     let nested_result = catch_unwind(AssertUnwindSafe(|| {
         let mut codec: ProstCodec<NestedTestMessage, NestedTestMessage> =
             ProstCodec::with_max_size(MAX_MESSAGE_SIZE);
-        let _ = codec.decode(&bytes);
+        codec.decode(&bytes)
     }));
-    assert!(
-        nested_result.is_ok(),
-        "Nested protobuf varint decode panicked"
-    );
+    observe_caught_decode("Nested protobuf varint decode", nested_result);
 
     let varint_result = catch_unwind(AssertUnwindSafe(|| {
         let mut codec: ProstCodec<VarintTestMessage, VarintTestMessage> =
             ProstCodec::with_max_size(MAX_MESSAGE_SIZE);
-        let _ = codec.decode(&bytes);
+        codec.decode(&bytes)
     }));
-    assert!(varint_result.is_ok(), "Varint protobuf decode panicked");
+    observe_caught_decode("Varint protobuf decode", varint_result);
 }
 
 /// Property 2: Valid messages should round-trip correctly
