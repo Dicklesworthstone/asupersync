@@ -3,10 +3,10 @@
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::panic;
 
 /// HTTP/2 error codes per RFC 9113 §7
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 enum ErrorCode {
     NoError = 0x0,
     ProtocolError = 0x1,
@@ -60,8 +60,6 @@ impl PriorityFrame {
 /// Stream priority information
 #[derive(Debug, Clone)]
 struct StreamPriority {
-    /// Stream ID
-    stream_id: u32,
     /// Parent stream (0 = root)
     parent: u32,
     /// Weight (1-256)
@@ -73,9 +71,8 @@ struct StreamPriority {
 }
 
 impl StreamPriority {
-    fn new(stream_id: u32) -> Self {
+    fn new(_stream_id: u32) -> Self {
         Self {
-            stream_id,
             parent: 0,  // Default to root
             weight: 16, // Default weight
             exclusive: false,
@@ -116,10 +113,9 @@ impl PriorityTree {
             return; // Stream 0 is reserved
         }
 
-        if !self.streams.contains_key(&stream_id) {
-            self.streams
-                .insert(stream_id, StreamPriority::new(stream_id));
-        }
+        self.streams
+            .entry(stream_id)
+            .or_insert_with(|| StreamPriority::new(stream_id));
     }
 
     /// Process PRIORITY frame per RFC 9113 §6.3
@@ -217,34 +213,35 @@ impl PriorityTree {
     ) {
         // Remove stream from its current parent's children
         let current_parent = self.streams.get(&stream_id).map(|s| s.parent).unwrap_or(0);
-        if current_parent != 0 {
-            if let Some(parent_stream) = self.streams.get_mut(&current_parent) {
-                parent_stream.children.retain(|&child| child != stream_id);
-            }
+        if current_parent != 0
+            && let Some(parent_stream) = self.streams.get_mut(&current_parent)
+        {
+            parent_stream.children.retain(|&child| child != stream_id);
         }
 
         // If exclusive, make all current children of new_parent become children of stream_id
-        if exclusive && new_parent != 0 {
-            if let Some(parent_stream) = self.streams.get(&new_parent) {
-                let siblings = parent_stream.children.clone();
+        if exclusive
+            && new_parent != 0
+            && let Some(parent_stream) = self.streams.get(&new_parent)
+        {
+            let siblings = parent_stream.children.clone();
 
-                // Move siblings to be children of stream_id
-                for sibling in siblings {
-                    if let Some(sibling_stream) = self.streams.get_mut(&sibling) {
-                        sibling_stream.parent = stream_id;
-                    }
-
-                    if let Some(stream) = self.streams.get_mut(&stream_id) {
-                        if !stream.children.contains(&sibling) {
-                            stream.children.push(sibling);
-                        }
-                    }
+            // Move siblings to be children of stream_id
+            for sibling in siblings {
+                if let Some(sibling_stream) = self.streams.get_mut(&sibling) {
+                    sibling_stream.parent = stream_id;
                 }
 
-                // Clear parent's children
-                if let Some(parent_stream) = self.streams.get_mut(&new_parent) {
-                    parent_stream.children.clear();
+                if let Some(stream) = self.streams.get_mut(&stream_id)
+                    && !stream.children.contains(&sibling)
+                {
+                    stream.children.push(sibling);
                 }
+            }
+
+            // Clear parent's children
+            if let Some(parent_stream) = self.streams.get_mut(&new_parent) {
+                parent_stream.children.clear();
             }
         }
 
@@ -254,26 +251,17 @@ impl PriorityTree {
         }
 
         // Add stream as child of new parent
-        if new_parent != 0 {
-            if let Some(parent_stream) = self.streams.get_mut(&new_parent) {
-                if !parent_stream.children.contains(&stream_id) {
-                    parent_stream.children.push(stream_id);
-                }
-            }
+        if new_parent != 0
+            && let Some(parent_stream) = self.streams.get_mut(&new_parent)
+            && !parent_stream.children.contains(&stream_id)
+        {
+            parent_stream.children.push(stream_id);
         }
     }
 
     /// Get stream dependency
     fn get_stream_parent(&self, stream_id: u32) -> Option<u32> {
         self.streams.get(&stream_id).map(|s| s.parent)
-    }
-
-    /// Get stream children
-    fn get_stream_children(&self, stream_id: u32) -> Vec<u32> {
-        self.streams
-            .get(&stream_id)
-            .map(|s| s.children.clone())
-            .unwrap_or_default()
     }
 
     /// Check if tree is acyclic (should always be true after valid operations)
@@ -447,7 +435,7 @@ fn test_circular_dependency_detection(scenario: CircularDependencyScenario) -> R
         }
 
         // Tree should remain acyclic
-        if tree.is_acyclic() == false {
+        if !tree.is_acyclic() {
             return Err("Tree became cyclic after processing frame".to_string());
         }
     }
@@ -664,25 +652,27 @@ fn test_dependency_on_nonexistent() -> Result<(), String> {
 }
 
 fuzz_target!(|data: &[u8]| {
-    let result = panic::catch_unwind(|| {
-        let mut unstructured = Unstructured::new(data);
+    let mut unstructured = Unstructured::new(data);
 
-        // Try to generate scenario from fuzz input
-        if let Ok(scenario) = CircularDependencyScenario::arbitrary(&mut unstructured) {
-            let _ = test_circular_dependency_detection(scenario);
-        }
+    // Try to generate scenario from fuzz input
+    if let Ok(scenario) = CircularDependencyScenario::arbitrary(&mut unstructured) {
+        test_circular_dependency_detection(scenario).unwrap_or_else(|message| {
+            panic!("PRIORITY circular dependency scenario failed: {message}")
+        });
+    }
 
-        // Run deterministic test cases
-        if data.len() > 30 {
-            let _ = test_basic_self_cycle();
-            let _ = test_indirect_cycle();
-            let _ = test_exclusive_circular();
-            let _ = test_complex_dependency_chain();
-            let _ = test_dependency_on_nonexistent();
-        }
-    });
-
-    if result.is_err() {
-        eprintln!("Panic in PRIORITY frame circular dependency fuzzing");
+    // Run deterministic test cases
+    if data.len() > 30 {
+        test_basic_self_cycle()
+            .unwrap_or_else(|message| panic!("PRIORITY self-cycle case failed: {message}"));
+        test_indirect_cycle()
+            .unwrap_or_else(|message| panic!("PRIORITY indirect-cycle case failed: {message}"));
+        test_exclusive_circular()
+            .unwrap_or_else(|message| panic!("PRIORITY exclusive-cycle case failed: {message}"));
+        test_complex_dependency_chain()
+            .unwrap_or_else(|message| panic!("PRIORITY complex-chain case failed: {message}"));
+        test_dependency_on_nonexistent().unwrap_or_else(|message| {
+            panic!("PRIORITY nonexistent-dependency case failed: {message}")
+        });
     }
 });
