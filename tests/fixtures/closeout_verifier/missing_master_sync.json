@@ -1,0 +1,35 @@
+{
+  "agent_mail": {
+    "messages": [
+      {
+        "body_md": "Closed and pushed `asupersync-master-drift` at `fedcba987`. Validation: cargo test passed. Released reservations.",
+        "from": "GentleCitadel",
+        "id": 1003,
+        "subject": "Closed asupersync-master-drift",
+        "thread_id": "asupersync-master-drift"
+      }
+    ],
+    "reservations": []
+  },
+  "beads": {
+    "issues": [
+      {
+        "id": "asupersync-master-drift",
+        "status": "closed"
+      }
+    ]
+  },
+  "closeout": {
+    "agent": "GentleCitadel",
+    "bead_id": "asupersync-master-drift",
+    "commit": "fedcba987",
+    "mode": "bead-backed",
+    "slice_id": "asupersync-master-drift",
+    "thread_id": "asupersync-master-drift"
+  },
+  "git": {
+    "main_head": "fedcba987",
+    "origin_main": "fedcba987",
+    "origin_master": "old000111"
+  }
+}

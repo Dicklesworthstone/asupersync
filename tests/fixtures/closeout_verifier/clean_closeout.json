@@ -1,0 +1,42 @@
+{
+  "agent_mail": {
+    "messages": [
+      {
+        "body_md": "Closed and pushed `asupersync-clean` at `abc1234def`. Validation: cargo test passed. Released reservations.",
+        "from": "GentleCitadel",
+        "id": 1001,
+        "subject": "Closed asupersync-clean",
+        "thread_id": "asupersync-clean"
+      }
+    ],
+    "reservations": [
+      {
+        "agent": "GentleCitadel",
+        "id": 41,
+        "path": "src/example.rs",
+        "released_ts": "2026-05-10T08:00:00Z"
+      }
+    ]
+  },
+  "beads": {
+    "issues": [
+      {
+        "id": "asupersync-clean",
+        "status": "closed"
+      }
+    ]
+  },
+  "closeout": {
+    "agent": "GentleCitadel",
+    "bead_id": "asupersync-clean",
+    "commit": "abc1234def",
+    "mode": "bead-backed",
+    "slice_id": "asupersync-clean",
+    "thread_id": "asupersync-clean"
+  },
+  "git": {
+    "main_head": "abc1234def",
+    "origin_main": "abc1234def",
+    "origin_master": "abc1234def"
+  }
+}
