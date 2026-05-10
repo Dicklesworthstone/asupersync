@@ -103,6 +103,74 @@ fn counting_waker(counter: Arc<AtomicUsize>) -> Waker {
     Waker::from(Arc::new(CountingWaker { counter }))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ObservedRecvPoll {
+    Value(u32),
+    Closed,
+    Cancelled,
+    PolledAfterCompletion,
+    Pending,
+}
+
+fn observe_recv_poll(poll: Poll<Result<u32, RecvError>>) -> ObservedRecvPoll {
+    match poll {
+        Poll::Ready(Ok(value)) => ObservedRecvPoll::Value(value),
+        Poll::Ready(Err(RecvError::Closed)) => ObservedRecvPoll::Closed,
+        Poll::Ready(Err(RecvError::Cancelled)) => ObservedRecvPoll::Cancelled,
+        Poll::Ready(Err(RecvError::PolledAfterCompletion)) => {
+            ObservedRecvPoll::PolledAfterCompletion
+        }
+        Poll::Pending => ObservedRecvPoll::Pending,
+    }
+}
+
+fn expect_recv_pending(poll: Poll<Result<u32, RecvError>>, phase: &str) {
+    let outcome = observe_recv_poll(poll);
+    assert_eq!(
+        outcome,
+        ObservedRecvPoll::Pending,
+        "receiver poll completed unexpectedly during {phase}"
+    );
+}
+
+fn expect_recv_value(poll: Poll<Result<u32, RecvError>>, expected: u32, phase: &str) {
+    let outcome = observe_recv_poll(poll);
+    assert_eq!(
+        outcome,
+        ObservedRecvPoll::Value(expected),
+        "receiver poll did not return expected value during {phase}"
+    );
+}
+
+fn apply_send_result(
+    tracker: &mut ComponentTracker,
+    value: u32,
+    result: Result<(), SendError<u32>>,
+) {
+    match result {
+        Ok(()) => tracker.value_sent = Some(value),
+        Err(SendError::Disconnected(_)) | Err(SendError::Cancelled(_)) => {
+            tracker.channel_closed = true;
+        }
+    }
+}
+
+fn expect_send_ok(result: Result<(), SendError<u32>>, phase: &str) {
+    if let Err(error) = result {
+        panic!("send failed unexpectedly during {phase}: {error}");
+    }
+}
+
+fn observe_permit_send_result(result: Result<(), SendError<u32>>, phase: &str) {
+    if let Err(SendError::Cancelled(_)) = result {
+        panic!("permit send was cancelled unexpectedly during {phase}");
+    }
+}
+
+fn expect_thread_join(result: thread::Result<()>, phase: &str) {
+    assert!(result.is_ok(), "helper thread panicked during {phase}");
+}
+
 fn test_cx(enable_cancellation: bool) -> Cx {
     let cx = Cx::new(
         RegionId::from_arena(ArenaIndex::new(0, 0)),
@@ -121,14 +189,15 @@ fn execute_oneshot_race_scenario(scenario: &OneShotFuzzScenario) {
     }
 
     let cx = test_cx(scenario.enable_cancellation);
-    let (mut tx, mut rx) = oneshot::channel::<u32>();
+    let (tx, rx) = oneshot::channel::<u32>();
     let mut tracker = ComponentTracker::new();
+    let mut sender_opt = Some(tx);
+    let mut receiver_opt = Some(rx);
     let mut permit_opt = None;
-    let mut recv_future_opt = None;
 
     // Shared state for concurrent operations
     let channel_dropped = Arc::new(AtomicBool::new(false));
-    let operation_barrier = Arc::new(std::sync::Barrier::new(
+    let _operation_barrier = Arc::new(std::sync::Barrier::new(
         scenario.thread_pool_size.max(1) as usize
     ));
 
@@ -140,41 +209,39 @@ fn execute_oneshot_race_scenario(scenario: &OneShotFuzzScenario) {
 
         match operation {
             OneShotOperation::SenderReserve => {
-                if tracker.sender_exists && permit_opt.is_none() {
-                    // Move sender into permit
-                    let sender = std::mem::replace(&mut tx, unsafe { std::mem::zeroed() });
-                    std::mem::forget(tx); // Prevent double-drop
-
-                    permit_opt = Some(sender.reserve(&cx));
+                if permit_opt.is_none()
+                    && let Some(sender) = sender_opt.take()
+                {
                     tracker.sender_exists = false;
-                    tracker.permit_exists = true;
-                }
-            }
-
-            OneShotOperation::SenderSend { value } => {
-                if tracker.sender_exists {
-                    let sender = std::mem::replace(&mut tx, unsafe { std::mem::zeroed() });
-                    std::mem::forget(tx);
-
-                    let result = sender.send(&cx, *value);
-                    tracker.sender_exists = false;
-
-                    match result {
-                        Ok(()) => tracker.value_sent = Some(*value),
-                        Err(SendError::Disconnected(_)) => tracker.channel_closed = true,
+                    match sender.reserve(&cx) {
+                        Ok(permit) => {
+                            permit_opt = Some(permit);
+                            tracker.permit_exists = true;
+                        }
+                        Err(SendError::Disconnected(())) | Err(SendError::Cancelled(())) => {
+                            tracker.channel_closed = true;
+                        }
                     }
                 }
             }
 
+            OneShotOperation::SenderSend { value } => {
+                if let Some(sender) = sender_opt.take() {
+                    let result = sender.send(&cx, *value);
+                    tracker.sender_exists = false;
+
+                    apply_send_result(&mut tracker, *value, result);
+                }
+            }
+
             OneShotOperation::SenderIsClosedCheck => {
-                if tracker.sender_exists {
-                    let _is_closed = tx.is_closed();
+                if let Some(sender) = sender_opt.as_ref() {
+                    let _is_closed = sender.is_closed();
                 }
             }
 
             OneShotOperation::SenderDrop => {
-                if tracker.sender_exists {
-                    drop(std::mem::replace(&mut tx, unsafe { std::mem::zeroed() }));
+                if sender_opt.take().is_some() {
                     tracker.sender_exists = false;
                     tracker.channel_closed = !tracker.permit_exists && tracker.value_sent.is_none();
                 }
@@ -185,10 +252,7 @@ fn execute_oneshot_race_scenario(scenario: &OneShotFuzzScenario) {
                     let result = permit.send(*value);
                     tracker.permit_exists = false;
 
-                    match result {
-                        Ok(()) => tracker.value_sent = Some(*value),
-                        Err(SendError::Disconnected(_)) => tracker.channel_closed = true,
-                    }
+                    apply_send_result(&mut tracker, *value, result);
                 }
             }
 
@@ -214,36 +278,35 @@ fn execute_oneshot_race_scenario(scenario: &OneShotFuzzScenario) {
             }
 
             OneShotOperation::ReceiverRecvStart => {
-                if tracker.receiver_exists && recv_future_opt.is_none() {
-                    recv_future_opt = Some(Box::pin(rx.recv(&cx)));
+                if receiver_opt.is_some() && !tracker.recv_future_exists {
                     tracker.recv_future_exists = true;
                 }
             }
 
             OneShotOperation::ReceiverRecvPoll => {
-                if let Some(ref mut recv_future) = recv_future_opt {
+                if tracker.recv_future_exists
+                    && let Some(receiver) = receiver_opt.as_mut()
+                {
                     let waker = counting_waker(tracker.wake_count.clone());
                     let mut task_cx = Context::from_waker(&waker);
+                    let mut recv_future = Box::pin(receiver.recv(&cx));
 
-                    match recv_future.as_mut().poll(&mut task_cx) {
-                        Poll::Ready(Ok(value)) => {
-                            recv_future_opt = None;
+                    match observe_recv_poll(recv_future.as_mut().poll(&mut task_cx)) {
+                        ObservedRecvPoll::Value(value) => {
                             tracker.recv_future_exists = false;
                             tracker.value_sent = Some(value);
                         }
-                        Poll::Ready(Err(RecvError::Closed)) => {
-                            recv_future_opt = None;
+                        ObservedRecvPoll::Closed => {
                             tracker.recv_future_exists = false;
                             tracker.channel_closed = true;
                         }
-                        Poll::Ready(Err(RecvError::Cancelled)) => {
-                            recv_future_opt = None;
+                        ObservedRecvPoll::Cancelled => {
                             tracker.recv_future_exists = false;
                         }
-                        Poll::Ready(Err(RecvError::PolledAfterCompletion)) => {
-                            // This should only happen on subsequent polls
+                        ObservedRecvPoll::PolledAfterCompletion => {
+                            panic!("fresh recv future was polled after completion");
                         }
-                        Poll::Pending => {
+                        ObservedRecvPoll::Pending => {
                             // Future is waiting for value or close
                         }
                     }
@@ -251,14 +314,12 @@ fn execute_oneshot_race_scenario(scenario: &OneShotFuzzScenario) {
             }
 
             OneShotOperation::ReceiverRecvDrop => {
-                if recv_future_opt.take().is_some() {
-                    tracker.recv_future_exists = false;
-                }
+                tracker.recv_future_exists = false;
             }
 
             OneShotOperation::ReceiverTryRecv => {
-                if tracker.receiver_exists {
-                    match rx.try_recv() {
+                if let Some(receiver) = receiver_opt.as_mut() {
+                    match receiver.try_recv() {
                         Ok(value) => tracker.value_sent = Some(value),
                         Err(TryRecvError::Empty) => {}
                         Err(TryRecvError::Closed) => tracker.channel_closed = true,
@@ -267,21 +328,21 @@ fn execute_oneshot_race_scenario(scenario: &OneShotFuzzScenario) {
             }
 
             OneShotOperation::ReceiverIsReadyCheck => {
-                if tracker.receiver_exists {
-                    let _is_ready = rx.is_ready();
+                if let Some(receiver) = receiver_opt.as_ref() {
+                    let _is_ready = receiver.is_ready();
                 }
             }
 
             OneShotOperation::ReceiverIsClosedCheck => {
-                if tracker.receiver_exists {
-                    let _is_closed = rx.is_closed();
+                if let Some(receiver) = receiver_opt.as_ref() {
+                    let _is_closed = receiver.is_closed();
                 }
             }
 
             OneShotOperation::ReceiverDrop => {
-                if tracker.receiver_exists {
-                    drop(std::mem::replace(&mut rx, unsafe { std::mem::zeroed() }));
+                if receiver_opt.take().is_some() {
                     tracker.receiver_exists = false;
+                    tracker.recv_future_exists = false;
                 }
             }
 
@@ -295,33 +356,28 @@ fn execute_oneshot_race_scenario(scenario: &OneShotFuzzScenario) {
             }
 
             OneShotOperation::SpawnConcurrentSenderDrop => {
-                if tracker.sender_exists {
-                    let sender_copy = unsafe { std::ptr::read(&tx) };
+                if let Some(sender) = sender_opt.take() {
                     let channel_dropped = channel_dropped.clone();
 
                     thread::spawn(move || {
                         thread::sleep(Duration::from_micros(100));
-                        drop(sender_copy);
+                        drop(sender);
                         channel_dropped.store(true, Ordering::SeqCst);
                     });
 
-                    // Mark as dropped to prevent double-drop
-                    std::mem::forget(std::mem::replace(&mut tx, unsafe { std::mem::zeroed() }));
                     tracker.sender_exists = false;
                 }
             }
 
             OneShotOperation::SpawnConcurrentReceiverDrop => {
-                if tracker.receiver_exists {
-                    let receiver_copy = unsafe { std::ptr::read(&rx) };
-
+                if let Some(receiver) = receiver_opt.take() {
                     thread::spawn(move || {
                         thread::sleep(Duration::from_micros(100));
-                        drop(receiver_copy);
+                        drop(receiver);
                     });
 
-                    std::mem::forget(std::mem::replace(&mut rx, unsafe { std::mem::zeroed() }));
                     tracker.receiver_exists = false;
+                    tracker.recv_future_exists = false;
                 }
             }
 
@@ -336,10 +392,9 @@ fn execute_oneshot_race_scenario(scenario: &OneShotFuzzScenario) {
             }
 
             OneShotOperation::SpawnConcurrentRecvFutureDrop => {
-                if let Some(recv_future) = recv_future_opt.take() {
+                if tracker.recv_future_exists {
                     thread::spawn(move || {
                         thread::sleep(Duration::from_micros(100));
-                        drop(recv_future);
                     });
                     tracker.recv_future_exists = false;
                 }
@@ -394,6 +449,9 @@ fuzz_target!(|data: &[u8]| {
         Err(_) => return, // Skip malformed input
     };
 
+    // Test the generated operation sequence before the fixed regression helpers.
+    execute_oneshot_race_scenario(&scenario);
+
     // Test basic oneshot properties under race conditions
     test_oneshot_basic_properties(&scenario);
 
@@ -410,27 +468,25 @@ fuzz_target!(|data: &[u8]| {
     test_waker_cleanup_races(&scenario);
 });
 
-fn test_oneshot_basic_properties(scenario: &OneShotFuzzScenario) {
+fn test_oneshot_basic_properties(_scenario: &OneShotFuzzScenario) {
     // Test that basic oneshot semantics are preserved under fuzzing
     let cx = test_cx(false);
     let (tx, mut rx) = oneshot::channel::<u32>();
 
     // Value should round-trip correctly
-    if let Err(_) = tx.send(&cx, 42) {
-        // Receiver may have been dropped, that's fine
-        return;
-    }
+    expect_send_ok(tx.send(&cx, 42), "basic_roundtrip_send");
 
     // Channel should work normally after creation
     assert!(!rx.is_closed());
 
     match rx.try_recv() {
         Ok(value) => assert_eq!(value, 42),
-        Err(_) => {} // May be empty if sender dropped without sending
+        Err(TryRecvError::Empty) => panic!("basic roundtrip value was not ready"),
+        Err(TryRecvError::Closed) => panic!("basic roundtrip receiver was closed"),
     }
 }
 
-fn test_oneshot_drop_races(scenario: &OneShotFuzzScenario) {
+fn test_oneshot_drop_races(_scenario: &OneShotFuzzScenario) {
     // Test concurrent sender and receiver drops
     let cx = test_cx(false);
     let (tx, mut rx) = oneshot::channel::<u32>();
@@ -441,7 +497,11 @@ fn test_oneshot_drop_races(scenario: &OneShotFuzzScenario) {
 
     // Start recv to register waker
     let mut recv_fut = Box::pin(rx.recv(&cx));
-    let _ = recv_fut.as_mut().poll(&mut task_cx);
+    expect_recv_pending(
+        recv_fut.as_mut().poll(&mut task_cx),
+        "sender_receiver_drop_initial_poll",
+    );
+    drop(recv_fut);
 
     // Concurrently drop sender and receiver
     let tx_thread = thread::spawn(move || {
@@ -455,23 +515,25 @@ fn test_oneshot_drop_races(scenario: &OneShotFuzzScenario) {
     });
 
     // Wait for drops
-    let _ = tx_thread.join();
-    let _ = rx_thread.join();
+    expect_thread_join(tx_thread.join(), "sender_drop");
+    expect_thread_join(rx_thread.join(), "receiver_drop");
 
     // Should not panic or deadlock
 }
 
-fn test_permit_lifecycle_races(scenario: &OneShotFuzzScenario) {
+fn test_permit_lifecycle_races(_scenario: &OneShotFuzzScenario) {
     // Test races between permit operations and receiver drops
     let cx = test_cx(false);
     let (tx, rx) = oneshot::channel::<u32>();
 
-    let permit = tx.reserve(&cx);
+    let permit = tx
+        .reserve(&cx)
+        .expect("reserve should succeed before receiver drop race");
 
     // Race permit.send() with receiver.drop()
     let permit_thread = thread::spawn(move || {
         thread::sleep(Duration::from_micros(50));
-        let _ = permit.send(99); // May fail if receiver dropped
+        observe_permit_send_result(permit.send(99), "permit_send_receiver_drop_race");
     });
 
     let rx_thread = thread::spawn(move || {
@@ -479,13 +541,13 @@ fn test_permit_lifecycle_races(scenario: &OneShotFuzzScenario) {
         drop(rx);
     });
 
-    let _ = permit_thread.join();
-    let _ = rx_thread.join();
+    expect_thread_join(permit_thread.join(), "permit_send");
+    expect_thread_join(rx_thread.join(), "permit_receiver_drop");
 
     // Should not panic or deadlock
 }
 
-fn test_recv_future_drop_races(scenario: &OneShotFuzzScenario) {
+fn test_recv_future_drop_races(_scenario: &OneShotFuzzScenario) {
     // Test recv future drops racing with sender operations
     let cx = test_cx(false);
     let (tx, mut rx) = oneshot::channel::<u32>();
@@ -494,27 +556,27 @@ fn test_recv_future_drop_races(scenario: &OneShotFuzzScenario) {
     let waker = counting_waker(wake_counter.clone());
     let mut task_cx = Context::from_waker(&waker);
 
+    let send_cx = cx.clone();
     let mut recv_fut = Box::pin(rx.recv(&cx));
-    let _ = recv_fut.as_mut().poll(&mut task_cx);
+    expect_recv_pending(
+        recv_fut.as_mut().poll(&mut task_cx),
+        "recv_future_drop_initial_poll",
+    );
 
-    // Race future drop with sender.send()
-    let fut_thread = thread::spawn(move || {
-        thread::sleep(Duration::from_micros(100));
-        drop(recv_fut); // Should clean up waker
-    });
-
+    // Race future drop with sender.send().
     let send_thread = thread::spawn(move || {
         thread::sleep(Duration::from_micros(50));
-        let _ = tx.send(&cx, 123);
+        expect_send_ok(tx.send(&send_cx, 123), "recv_future_drop_send");
     });
 
-    let _ = fut_thread.join();
-    let _ = send_thread.join();
+    thread::sleep(Duration::from_micros(100));
+    drop(recv_fut); // Should clean up waker
+    expect_thread_join(send_thread.join(), "recv_future_drop_send");
 
     // Future drop should properly clean up internal state
 }
 
-fn test_waker_cleanup_races(scenario: &OneShotFuzzScenario) {
+fn test_waker_cleanup_races(_scenario: &OneShotFuzzScenario) {
     // Test that wakers are properly cleaned up in race scenarios
     let cx = test_cx(false);
     let (tx, mut rx) = oneshot::channel::<u32>();
@@ -529,7 +591,10 @@ fn test_waker_cleanup_races(scenario: &OneShotFuzzScenario) {
     {
         let mut task_cx = Context::from_waker(&waker1);
         let mut recv_fut1 = Box::pin(rx.recv(&cx));
-        let _ = recv_fut1.as_mut().poll(&mut task_cx);
+        expect_recv_pending(
+            recv_fut1.as_mut().poll(&mut task_cx),
+            "waker_cleanup_first_poll",
+        );
         // Drop future to test cleanup
     }
 
@@ -537,12 +602,19 @@ fn test_waker_cleanup_races(scenario: &OneShotFuzzScenario) {
     {
         let mut task_cx = Context::from_waker(&waker2);
         let mut recv_fut2 = Box::pin(rx.recv(&cx));
-        let _ = recv_fut2.as_mut().poll(&mut task_cx);
+        expect_recv_pending(
+            recv_fut2.as_mut().poll(&mut task_cx),
+            "waker_cleanup_second_poll",
+        );
 
         // Send value - should wake only the active waker (waker2)
-        let _ = tx.send(&cx, 456);
+        expect_send_ok(tx.send(&cx, 456), "waker_cleanup_send");
 
-        let _ = recv_fut2.as_mut().poll(&mut task_cx);
+        expect_recv_value(
+            recv_fut2.as_mut().poll(&mut task_cx),
+            456,
+            "waker_cleanup_final_poll",
+        );
     }
 
     // First waker should not have been notified (cleaned up)
