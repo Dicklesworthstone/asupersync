@@ -19,22 +19,13 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 /// HTTP/2 frame type identifiers
+#[cfg(test)]
 const PRIORITY_TYPE: u8 = 0x2;
-const HEADERS_TYPE: u8 = 0x1;
-const DATA_TYPE: u8 = 0x0;
-const RST_STREAM_TYPE: u8 = 0x3;
-
-/// HTTP/2 frame flags
-const END_STREAM_FLAG: u8 = 0x1;
-const END_HEADERS_FLAG: u8 = 0x4;
 
 /// HTTP/2 stream states per RFC 7540 §5.1
 #[derive(Debug, Clone, PartialEq)]
 enum StreamState {
-    Idle,
     Open,
-    HalfClosedRemote,
-    HalfClosedLocal,
     Closed,
 }
 
@@ -62,7 +53,6 @@ struct PriorityInfo {
 struct MockH2PriorityParser {
     streams: Vec<StreamEntry>,
     current_time: u64,
-    next_stream_id: u32,
 }
 
 /// Result types for parsing
@@ -124,7 +114,6 @@ impl MockH2PriorityParser {
         Self {
             streams: Vec::new(),
             current_time: 0,
-            next_stream_id: 1,
         }
     }
 
@@ -173,9 +162,6 @@ impl MockH2PriorityParser {
             ));
         }
 
-        // Get or create the stream (PRIORITY can create streams)
-        let stream = self.get_or_create_stream(stream_id);
-
         // Convert wire weight (0-255) to actual weight (1-256)
         let actual_weight = priority.weight.wrapping_add(1);
 
@@ -192,17 +178,19 @@ impl MockH2PriorityParser {
             None
         };
 
-        // Update stream priority
-        stream.depends_on = dependency_target;
-        stream.weight = actual_weight;
-        stream.exclusive = priority.exclusive;
+        {
+            // Get or create the stream (PRIORITY can create streams), then update
+            // priority after dependency lookup has finished reading parser state.
+            let stream = self.get_or_create_stream(stream_id);
+            stream.depends_on = dependency_target;
+            stream.weight = actual_weight;
+            stream.exclusive = priority.exclusive;
+        }
 
         // Handle exclusive dependency restructuring
-        if priority.exclusive && dependency_target.is_some() {
+        if let (true, Some(target_stream)) = (priority.exclusive, dependency_target) {
             // In exclusive mode, this stream becomes the sole dependent of the target,
             // and all other dependents become dependents of this stream
-            let target_stream = dependency_target.unwrap();
-
             // Find all streams that currently depend on the target
             let mut affected_streams = Vec::new();
             for other_stream in &mut self.streams {
@@ -236,15 +224,16 @@ impl MockH2PriorityParser {
 
     /// Close a stream
     fn close_stream(&mut self, stream_id: u32) -> ParseResult {
+        let current_time = self.current_time;
         if let Some(stream) = self.get_stream(stream_id) {
             stream.state = StreamState::Closed;
-            stream.closed_at = Some(self.current_time);
+            stream.closed_at = Some(current_time);
 
             // Remove this stream from dependency graph but keep the record
             // for testing "long ago" scenarios
             ParseResult::StreamClosed {
                 stream_id,
-                time: self.current_time,
+                time: current_time,
             }
         } else {
             // Closing non-existent stream is allowed (idempotent)
@@ -278,6 +267,7 @@ impl MockH2PriorityParser {
     }
 
     /// Get streams that have been closed for a long time
+    #[cfg(test)]
     fn get_long_closed_streams(&self, threshold: u64) -> Vec<u32> {
         self.streams
             .iter()
@@ -292,6 +282,7 @@ impl MockH2PriorityParser {
 }
 
 /// Encode PRIORITY frame
+#[cfg(test)]
 fn encode_priority_frame(stream_id: u32, priority: PriorityInfo) -> Vec<u8> {
     let mut frame = Vec::new();
     let payload_len = 5; // PRIORITY frames are always 5 bytes
@@ -369,6 +360,64 @@ fn process_input(input: &H2PriorityDependencyInput) -> Vec<ParseResult> {
     results
 }
 
+fn assert_priority_results(results: &[ParseResult], context: &str) {
+    // Track closed streams and verify PRIORITY never keeps a closed dependency
+    // in the active dependency graph.
+    let mut closed_streams = std::collections::HashSet::new();
+
+    for result in results {
+        match result {
+            ParseResult::StreamClosed { stream_id, .. } => {
+                closed_streams.insert(*stream_id);
+            }
+            ParseResult::PriorityProcessed {
+                stream_id,
+                depends_on: Some(dep_stream),
+                ..
+            } => {
+                assert!(
+                    !closed_streams.contains(dep_stream),
+                    "{context}: PRIORITY processing included closed stream {dep_stream} as dependency for stream {stream_id}"
+                );
+            }
+            ParseResult::PriorityProcessed { .. } => {}
+            ParseResult::ProtocolError(msg) => {
+                assert!(
+                    is_expected_priority_protocol_error(msg),
+                    "{context}: unexpected PRIORITY protocol error: {msg}"
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+fn is_expected_priority_protocol_error(msg: &str) -> bool {
+    msg.contains("self-dependency") || msg.contains("stream_id=0")
+}
+
+fn assert_predefined_priority_processed(
+    parser: &MockH2PriorityParser,
+    stream_id: u32,
+    result: ParseResult,
+    context: &str,
+) {
+    match result {
+        ParseResult::PriorityProcessed { .. } => {}
+        ParseResult::ProtocolError(msg) => {
+            panic!("{context}: unexpected protocol error for stream {stream_id}: {msg}");
+        }
+        other => {
+            panic!("{context}: expected PRIORITY processing for stream {stream_id}, got {other:?}");
+        }
+    }
+
+    assert!(
+        !parser.check_circular_dependency(stream_id),
+        "{context}: circular dependency created for stream {stream_id}"
+    );
+}
+
 fuzz_target!(|input: H2PriorityDependencyInput| {
     // Skip empty inputs
     if input.operations.is_empty() {
@@ -376,44 +425,7 @@ fuzz_target!(|input: H2PriorityDependencyInput| {
     }
 
     let results = process_input(&input);
-
-    // Track closed streams and verify no crashes occur
-    let mut closed_streams = std::collections::HashSet::new();
-
-    for result in &results {
-        match result {
-            ParseResult::StreamClosed { stream_id, .. } => {
-                closed_streams.insert(*stream_id);
-            }
-            ParseResult::PriorityProcessed {
-                stream_id,
-                depends_on,
-                ..
-            } => {
-                // Priority processing should never crash, even with closed dependencies
-
-                // If depends_on is a closed stream, it should be None (treated as root dependency)
-                if let Some(dep_stream) = depends_on {
-                    if closed_streams.contains(dep_stream) {
-                        // This should not happen - closed streams should not be in dependency graph
-                        panic!(
-                            "PRIORITY processing included closed stream {} as dependency for stream {}",
-                            dep_stream, stream_id
-                        );
-                    }
-                }
-            }
-            ParseResult::ProtocolError(msg) => {
-                // Only self-dependency should cause protocol errors
-                if !msg.contains("self-dependency") && !msg.contains("stream_id=0") {
-                    // Other protocol errors might indicate improper handling
-                }
-            }
-            _ => {
-                // Other results are fine
-            }
-        }
-    }
+    assert_priority_results(&results, "arbitrary input");
 
     // Test specific closed stream dependency scenarios
     let closed_dependency_tests = [
@@ -480,8 +492,8 @@ fuzz_target!(|input: H2PriorityDependencyInput| {
             time_advance_step: 100,
         };
 
-        // This should not panic or crash
-        let _test_results = process_input(&test_input);
+        let test_results = process_input(&test_input);
+        assert_priority_results(&test_results, "predefined closed-dependency case");
 
         // Verify no parser state corruption
         let mut test_parser = MockH2PriorityParser::new();
@@ -498,14 +510,9 @@ fuzz_target!(|input: H2PriorityDependencyInput| {
                         stream_dependency: *depends_on,
                         weight: *weight,
                     };
-                    let _result = test_parser.process_priority_frame(*stream_id, priority);
-
-                    // Verify no circular dependencies were created
-                    assert!(
-                        !test_parser.check_circular_dependency(*stream_id),
-                        "Circular dependency created for stream {}",
-                        stream_id
-                    );
+                    let result = test_parser.process_priority_frame(*stream_id, priority);
+                    let context = "predefined closed-dependency SetPriority";
+                    assert_predefined_priority_processed(&test_parser, *stream_id, result, context);
                 }
                 PriorityOperation::CreateStream(stream_id) => {
                     test_parser.create_stream(*stream_id);
@@ -523,7 +530,14 @@ fuzz_target!(|input: H2PriorityDependencyInput| {
                             stream_dependency: depends_on,
                             weight,
                         };
-                        let _result = test_parser.process_priority_frame(stream_id, priority);
+                        let result = test_parser.process_priority_frame(stream_id, priority);
+                        let context = "predefined closed-dependency PriorityBatch";
+                        assert_predefined_priority_processed(
+                            &test_parser,
+                            stream_id,
+                            result,
+                            context,
+                        );
                     }
                 }
             }
