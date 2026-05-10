@@ -2,6 +2,7 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
+use std::panic::AssertUnwindSafe;
 
 use asupersync::lab::oracle::priority_inversion::{
     Priority, PriorityInversionConfig, PriorityInversionOracle, ResourceId,
@@ -146,14 +147,15 @@ fn test_no_panic(input: &PriorityInversionFuzzInput) {
     let oracle = PriorityInversionOracle::new(config);
 
     // Process all events - should never panic
-    for event in &input.event_sequence {
-        let _result = std::panic::catch_unwind(|| {
+    for (index, event) in input.event_sequence.iter().enumerate() {
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
             process_event(&oracle, event);
-        });
+        }));
+        assert!(
+            result.is_ok(),
+            "PriorityInversionOracle panicked while processing event {index}: {event:?}"
+        );
     }
-
-    // If we reach here without panic, the property holds
-    assert!(true, "Oracle handled event sequence without panic");
 }
 
 /// Property 2: Priority inversions are detected correctly
@@ -171,47 +173,42 @@ fn test_priority_inversion_detection(input: &PriorityInversionFuzzInput) {
         // Create a classic priority inversion scenario:
         // 1. Low priority task acquires resource
         // 2. High priority task waits for resource (blocked by low priority)
-        oracle.on_task_spawn(TaskId(*low_task), Priority::Cooperative);
-        oracle.on_task_spawn(TaskId(*high_task), Priority::High);
-        oracle.on_task_start(TaskId(*low_task));
-        oracle.on_resource_acquire(TaskId(*low_task), ResourceId(*resource as u64));
-        oracle.on_resource_wait(TaskId(*high_task), ResourceId(*resource as u64));
-
-        // This should trigger priority inversion detection
-        // We can't directly inspect internal state but can verify no panic occurred
-        assert!(true, "Priority inversion scenario processed successfully");
+        oracle.on_task_spawn(fuzz_task_id(*low_task), Priority::Cooperative);
+        oracle.on_task_spawn(fuzz_task_id(*medium_task), Priority::Normal);
+        oracle.on_task_spawn(fuzz_task_id(*high_task), Priority::High);
+        oracle.on_task_start(fuzz_task_id(*low_task));
+        oracle.on_task_start(fuzz_task_id(*medium_task));
+        oracle.on_resource_acquire(fuzz_task_id(*low_task), ResourceId(*resource as u64));
+        oracle.on_resource_wait(fuzz_task_id(*high_task), ResourceId(*resource as u64));
     }
 }
 
 /// Property 3: Transitive inversion detection works
 fn test_transitive_inversion_detection(input: &PriorityInversionFuzzInput) {
-    if let AttackScenario::TransitiveBlocking { tasks, resources } = &input.attack_scenario {
-        if tasks.len() >= 3 && resources.len() >= 2 {
-            let config = PriorityInversionConfig {
-                detect_transitive_blocking: true,
-                ..input.config.clone().into()
-            };
-            let oracle = PriorityInversionOracle::new(config);
+    if let AttackScenario::TransitiveBlocking { tasks, resources } = &input.attack_scenario
+        && tasks.len() >= 3
+        && resources.len() >= 2
+    {
+        let config = PriorityInversionConfig {
+            detect_transitive_blocking: true,
+            ..input.config.clone().into()
+        };
+        let oracle = PriorityInversionOracle::new(config);
 
-            // Create transitive blocking scenario:
-            // TaskA (high) waits for Resource1 held by TaskB (medium)
-            // TaskB waits for Resource2 held by TaskC (low)
-            let priorities = [Priority::High, Priority::Normal, Priority::Cooperative];
-            for (i, &task_id) in tasks.iter().take(3).enumerate() {
-                oracle.on_task_spawn(TaskId(task_id), priorities[i]);
-                oracle.on_task_start(TaskId(task_id));
-            }
-
-            // Create the blocking chain
-            if resources.len() >= 2 {
-                oracle.on_resource_acquire(TaskId(tasks[2]), ResourceId(resources[1] as u64));
-                oracle.on_resource_wait(TaskId(tasks[1]), ResourceId(resources[1] as u64));
-                oracle.on_resource_acquire(TaskId(tasks[1]), ResourceId(resources[0] as u64));
-                oracle.on_resource_wait(TaskId(tasks[0]), ResourceId(resources[0] as u64));
-            }
-
-            assert!(true, "Transitive blocking scenario processed successfully");
+        // Create transitive blocking scenario:
+        // TaskA (high) waits for Resource1 held by TaskB (medium)
+        // TaskB waits for Resource2 held by TaskC (low)
+        let priorities = [Priority::High, Priority::Normal, Priority::Cooperative];
+        for (i, &task_id) in tasks.iter().take(3).enumerate() {
+            oracle.on_task_spawn(fuzz_task_id(task_id), priorities[i]);
+            oracle.on_task_start(fuzz_task_id(task_id));
         }
+
+        // Create the blocking chain
+        oracle.on_resource_acquire(fuzz_task_id(tasks[2]), ResourceId(resources[1] as u64));
+        oracle.on_resource_wait(fuzz_task_id(tasks[1]), ResourceId(resources[1] as u64));
+        oracle.on_resource_acquire(fuzz_task_id(tasks[1]), ResourceId(resources[0] as u64));
+        oracle.on_resource_wait(fuzz_task_id(tasks[0]), ResourceId(resources[0] as u64));
     }
 }
 
@@ -226,31 +223,28 @@ fn test_resource_lifecycle(input: &PriorityInversionFuzzInput) {
             task_id,
             resource_id,
         } => {
-            oracle.on_task_spawn(TaskId(*task_id), Priority::Normal);
-            oracle.on_task_start(TaskId(*task_id));
-            oracle.on_resource_acquire(TaskId(*task_id), ResourceId(*resource_id as u64));
+            oracle.on_task_spawn(fuzz_task_id(*task_id), Priority::Normal);
+            oracle.on_task_start(fuzz_task_id(*task_id));
+            oracle.on_resource_acquire(fuzz_task_id(*task_id), ResourceId(*resource_id as u64));
             // Don't release - test leak handling
-            oracle.on_task_complete(TaskId(*task_id));
-            assert!(true, "Resource leak handled without panic");
+            oracle.on_task_complete(fuzz_task_id(*task_id));
         }
         AttackScenario::DoubleAcquire {
             task_id,
             resource_id,
         } => {
-            oracle.on_task_spawn(TaskId(*task_id), Priority::Normal);
-            oracle.on_task_start(TaskId(*task_id));
-            oracle.on_resource_acquire(TaskId(*task_id), ResourceId(*resource_id as u64));
-            oracle.on_resource_acquire(TaskId(*task_id), ResourceId(*resource_id as u64));
-            assert!(true, "Double acquire handled without panic");
+            oracle.on_task_spawn(fuzz_task_id(*task_id), Priority::Normal);
+            oracle.on_task_start(fuzz_task_id(*task_id));
+            oracle.on_resource_acquire(fuzz_task_id(*task_id), ResourceId(*resource_id as u64));
+            oracle.on_resource_acquire(fuzz_task_id(*task_id), ResourceId(*resource_id as u64));
         }
         AttackScenario::ReleaseWithoutAcquire {
             task_id,
             resource_id,
         } => {
-            oracle.on_task_spawn(TaskId(*task_id), Priority::Normal);
-            oracle.on_task_start(TaskId(*task_id));
-            oracle.on_resource_release(TaskId(*task_id), ResourceId(*resource_id as u64));
-            assert!(true, "Release without acquire handled without panic");
+            oracle.on_task_spawn(fuzz_task_id(*task_id), Priority::Normal);
+            oracle.on_task_start(fuzz_task_id(*task_id));
+            oracle.on_resource_release(fuzz_task_id(*task_id), ResourceId(*resource_id as u64));
         }
         _ => {}
     }
@@ -273,8 +267,6 @@ fn test_statistics_consistency(input: &PriorityInversionFuzzInput) {
             panic!("Event processing took too long: {:?}", elapsed);
         }
     }
-
-    assert!(true, "Statistics remained consistent throughout processing");
 }
 
 /// Property 6: Attack scenarios are handled robustly
@@ -284,14 +276,13 @@ fn test_attack_scenarios(input: &PriorityInversionFuzzInput) {
 
     match &input.attack_scenario {
         AttackScenario::OperationsAfterComplete { task_id } => {
-            oracle.on_task_spawn(TaskId(*task_id), Priority::Normal);
-            oracle.on_task_start(TaskId(*task_id));
-            oracle.on_task_complete(TaskId(*task_id));
+            oracle.on_task_spawn(fuzz_task_id(*task_id), Priority::Normal);
+            oracle.on_task_start(fuzz_task_id(*task_id));
+            oracle.on_task_complete(fuzz_task_id(*task_id));
 
             // Try operations on completed task
-            oracle.on_resource_acquire(TaskId(*task_id), ResourceId(1));
-            oracle.on_resource_wait(TaskId(*task_id), ResourceId(2));
-            assert!(true, "Operations after complete handled without panic");
+            oracle.on_resource_acquire(fuzz_task_id(*task_id), ResourceId(1));
+            oracle.on_resource_wait(fuzz_task_id(*task_id), ResourceId(2));
         }
         AttackScenario::CircularDependency {
             task1,
@@ -299,17 +290,16 @@ fn test_attack_scenarios(input: &PriorityInversionFuzzInput) {
             resource1,
             resource2,
         } => {
-            oracle.on_task_spawn(TaskId(*task1), Priority::Normal);
-            oracle.on_task_spawn(TaskId(*task2), Priority::Normal);
-            oracle.on_task_start(TaskId(*task1));
-            oracle.on_task_start(TaskId(*task2));
+            oracle.on_task_spawn(fuzz_task_id(*task1), Priority::Normal);
+            oracle.on_task_spawn(fuzz_task_id(*task2), Priority::Normal);
+            oracle.on_task_start(fuzz_task_id(*task1));
+            oracle.on_task_start(fuzz_task_id(*task2));
 
             // Create circular dependency
-            oracle.on_resource_acquire(TaskId(*task1), ResourceId(*resource1 as u64));
-            oracle.on_resource_acquire(TaskId(*task2), ResourceId(*resource2 as u64));
-            oracle.on_resource_wait(TaskId(*task1), ResourceId(*resource2 as u64));
-            oracle.on_resource_wait(TaskId(*task2), ResourceId(*resource1 as u64));
-            assert!(true, "Circular dependency handled without panic");
+            oracle.on_resource_acquire(fuzz_task_id(*task1), ResourceId(*resource1 as u64));
+            oracle.on_resource_acquire(fuzz_task_id(*task2), ResourceId(*resource2 as u64));
+            oracle.on_resource_wait(fuzz_task_id(*task1), ResourceId(*resource2 as u64));
+            oracle.on_resource_wait(fuzz_task_id(*task2), ResourceId(*resource1 as u64));
         }
         _ => {}
     }
@@ -333,46 +323,48 @@ fn test_configuration_bounds(input: &PriorityInversionFuzzInput) {
                 _ => Priority::High,
             };
 
-            oracle.on_task_spawn(TaskId(task_id), priority);
-            oracle.on_task_start(TaskId(task_id));
-            oracle.on_resource_acquire(TaskId(task_id), ResourceId(resource_id as u64));
-            oracle.on_resource_release(TaskId(task_id), ResourceId(resource_id as u64));
-            oracle.on_task_complete(TaskId(task_id));
+            oracle.on_task_spawn(fuzz_task_id(task_id), priority);
+            oracle.on_task_start(fuzz_task_id(task_id));
+            oracle.on_resource_acquire(fuzz_task_id(task_id), ResourceId(resource_id as u64));
+            oracle.on_resource_release(fuzz_task_id(task_id), ResourceId(resource_id as u64));
+            oracle.on_task_complete(fuzz_task_id(task_id));
         }
-
-        assert!(true, "Stress test completed without panic");
     }
+}
+
+fn fuzz_task_id(value: u32) -> TaskId {
+    TaskId::new_for_test(value, 0)
 }
 
 /// Helper function to process a lifecycle event
 fn process_event(oracle: &PriorityInversionOracle, event: &LifecycleEvent) {
     match event {
         LifecycleEvent::TaskSpawn { task_id, priority } => {
-            oracle.on_task_spawn(TaskId(*task_id), (*priority).into());
+            oracle.on_task_spawn(fuzz_task_id(*task_id), (*priority).into());
         }
         LifecycleEvent::TaskStart { task_id } => {
-            oracle.on_task_start(TaskId(*task_id));
+            oracle.on_task_start(fuzz_task_id(*task_id));
         }
         LifecycleEvent::TaskComplete { task_id } => {
-            oracle.on_task_complete(TaskId(*task_id));
+            oracle.on_task_complete(fuzz_task_id(*task_id));
         }
         LifecycleEvent::ResourceAcquire {
             task_id,
             resource_id,
         } => {
-            oracle.on_resource_acquire(TaskId(*task_id), ResourceId(*resource_id as u64));
+            oracle.on_resource_acquire(fuzz_task_id(*task_id), ResourceId(*resource_id as u64));
         }
         LifecycleEvent::ResourceWait {
             task_id,
             resource_id,
         } => {
-            oracle.on_resource_wait(TaskId(*task_id), ResourceId(*resource_id as u64));
+            oracle.on_resource_wait(fuzz_task_id(*task_id), ResourceId(*resource_id as u64));
         }
         LifecycleEvent::ResourceRelease {
             task_id,
             resource_id,
         } => {
-            oracle.on_resource_release(TaskId(*task_id), ResourceId(*resource_id as u64));
+            oracle.on_resource_release(fuzz_task_id(*task_id), ResourceId(*resource_id as u64));
         }
     }
 }
