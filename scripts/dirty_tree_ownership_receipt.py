@@ -19,7 +19,7 @@ from typing import Any
 
 
 SCHEMA_VERSION = "dirty-tree-ownership-receipt-v1"
-TRACKER_PATHS = {".beads/issues.jsonl", ".beads/beads.db"}
+TRACKER_PATHS = {".beads/issues.jsonl", ".beads/beads.db", ".beads/beads.db-wal"}
 FORBIDDEN_COMMAND_TOKENS = [
     "git branch",
     "git checkout -b",
@@ -89,6 +89,13 @@ def run_json(repo_path: Path, command: list[str], timeout: float) -> tuple[str, 
         return "malformed-json", None
 
 
+def parse_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def path_matches(pattern: str, path: str) -> bool:
     return pattern == path or fnmatch.fnmatchcase(path, pattern) or fnmatch.fnmatchcase(pattern, path)
 
@@ -152,11 +159,36 @@ def parse_status_lines(raw: str) -> list[dict[str, str]]:
 def live_probe(repo_path: Path, timeout: float) -> dict[str, Any]:
     status, raw_status = run_text(repo_path, ["git", "status", "--porcelain=v1"], timeout)
     branch_status, branch = run_text(repo_path, ["git", "branch", "--show-current"], timeout)
+    upstream_status, upstream_counts = run_text(
+        repo_path,
+        ["git", "rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
+        timeout,
+    )
+    upstream_ref_status, upstream_ref = run_text(
+        repo_path,
+        ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+        timeout,
+    )
     beads_status, beads = run_json(repo_path, ["br", "list", "--json"], timeout)
+    ahead = 0
+    behind = 0
+    if upstream_status == "ok":
+        parts = upstream_counts.split()
+        if len(parts) == 2:
+            ahead = parse_int(parts[0])
+            behind = parse_int(parts[1])
+        else:
+            upstream_status = "malformed-counts"
     return {
         "git": {
             "status": status,
             "branch": branch if branch_status == "ok" else "",
+            "upstream": {
+                "status": upstream_status,
+                "branch": upstream_ref if upstream_ref_status == "ok" else "",
+                "ahead": ahead,
+                "behind": behind,
+            },
             "entries": parse_status_lines(raw_status if status == "ok" else ""),
         },
         "agent_mail": {
@@ -412,6 +444,72 @@ def commit_boundary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def normalized_upstream(source: dict[str, Any]) -> dict[str, Any] | None:
+    git = source.get("git", {})
+    if not isinstance(git, dict):
+        return None
+    upstream = git.get("upstream")
+    if not isinstance(upstream, dict):
+        return None
+    status = str(upstream.get("status", "unknown"))
+    ahead = parse_int(upstream.get("ahead"))
+    behind = parse_int(upstream.get("behind"))
+    return {
+        "status": status,
+        "branch": str(upstream.get("branch", "")),
+        "ahead": ahead,
+        "behind": behind,
+        "requires_refresh": status == "ok" and behind > 0,
+    }
+
+
+def shared_main_boundary(
+    rows: list[dict[str, Any]],
+    upstream: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if upstream is None:
+        return None
+
+    safe_to_stage = [
+        str(row["path"])
+        for row in rows
+        if row["staging_guidance"]["decision"] == "safe-to-stage-with-pathspec"
+    ]
+    unsafe_to_stage = [
+        str(row["path"])
+        for row in rows
+        if row["staging_guidance"]["decision"] != "safe-to-stage-with-pathspec"
+    ]
+    staged_without_ownership = [
+        str(row["path"])
+        for row in rows
+        if row["classification"] != "self-owned" and is_index_staged(row)
+    ]
+
+    if upstream["requires_refresh"]:
+        decision = "refresh-before-commit"
+        reason = "local main is behind upstream; refresh before relying on this staging set"
+    elif staged_without_ownership:
+        decision = "pathspec-only"
+        reason = "the index contains staged paths without current-agent ownership evidence"
+    elif safe_to_stage:
+        decision = "safe-pathspecs-available"
+        reason = "current-agent owned paths can be staged explicitly with pathspecs"
+    else:
+        decision = "blocked-no-owned-paths"
+        reason = "no dirty paths have current-agent ownership evidence"
+
+    return {
+        "decision": decision,
+        "reason": reason,
+        "upstream_drift": upstream,
+        "safe_to_stage_paths": safe_to_stage,
+        "unsafe_to_stage_paths": unsafe_to_stage,
+        "staged_without_ownership_paths": staged_without_ownership,
+        "recommended_git_add_command": f"git add -- {pathspec(safe_to_stage)}" if safe_to_stage else "",
+    }
+
+
 def build_receipt(
     source: dict[str, Any],
     repo_path: str,
@@ -424,7 +522,7 @@ def build_receipt(
     ]
     hits = forbidden_hits(rows)
     boundary = commit_boundary(rows)
-    return {
+    receipt = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated_at,
         "current_date": current_date(generated_at),
@@ -463,6 +561,10 @@ def build_receipt(
             "forbidden_command_tokens": hits,
         },
     }
+    shared_boundary = shared_main_boundary(rows, normalized_upstream(source))
+    if shared_boundary is not None:
+        receipt["shared_main_boundary"] = shared_boundary
+    return receipt
 
 
 def parse_args() -> argparse.Namespace:

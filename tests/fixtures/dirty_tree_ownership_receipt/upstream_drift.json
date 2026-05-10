@@ -1,0 +1,39 @@
+{
+  "agent_mail": {
+    "available": true,
+    "messages": [],
+    "reservations": [
+      {
+        "agent_name": "TopazGoose",
+        "exclusive": true,
+        "expires_ts": "2026-05-08T06:08:00Z",
+        "path_pattern": "scripts/dirty_tree_ownership_receipt.py",
+        "reason": "asupersync-mwaf0z"
+      }
+    ],
+    "status": "ok"
+  },
+  "beads": {
+    "issues": [],
+    "status": "ok"
+  },
+  "git": {
+    "entries": [
+      {
+        "path": "scripts/dirty_tree_ownership_receipt.py",
+        "status": " M"
+      },
+      {
+        "path": "tests/proof_status_snapshot_contract.rs",
+        "status": "M "
+      }
+    ],
+    "status": "ok",
+    "upstream": {
+      "ahead": 0,
+      "behind": 2,
+      "branch": "origin/main",
+      "status": "ok"
+    }
+  }
+}

@@ -208,6 +208,35 @@ fn mixed_staged_index_matches_full_output_golden() {
 }
 
 #[test]
+fn upstream_drift_requires_refresh_before_commit() {
+    let receipt = receipt_json("upstream_drift.json");
+    let boundary = &receipt["shared_main_boundary"];
+
+    assert_eq!(boundary["decision"].as_str(), Some("refresh-before-commit"));
+    assert_eq!(boundary["upstream_drift"]["behind"].as_u64(), Some(2));
+    assert_eq!(
+        boundary["upstream_drift"]["requires_refresh"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        boundary["safe_to_stage_paths"][0].as_str(),
+        Some("scripts/dirty_tree_ownership_receipt.py")
+    );
+    assert_eq!(
+        boundary["unsafe_to_stage_paths"][0].as_str(),
+        Some("tests/proof_status_snapshot_contract.rs")
+    );
+    assert_eq!(
+        boundary["staged_without_ownership_paths"][0].as_str(),
+        Some("tests/proof_status_snapshot_contract.rs")
+    );
+    assert_eq!(
+        boundary["recommended_git_add_command"].as_str(),
+        Some("git add -- scripts/dirty_tree_ownership_receipt.py")
+    );
+}
+
+#[test]
 fn tracker_dirty_state_is_never_mixed() {
     let receipt = receipt_json("tracker_dirty.json");
     let row = row(&receipt, ".beads/issues.jsonl");
