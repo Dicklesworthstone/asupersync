@@ -106,7 +106,12 @@ fuzz_target!(|case: Case| {
         let Some(key) = canonicalize_key(&entry.key, true) else {
             continue;
         };
-        let truncated = entry.value.iter().copied().take(MAX_VALUE).collect::<Vec<u8>>();
+        let truncated = entry
+            .value
+            .iter()
+            .copied()
+            .take(MAX_VALUE)
+            .collect::<Vec<u8>>();
         let _ = metadata.insert_bin(key, Bytes::from(truncated));
     }
 
@@ -115,7 +120,10 @@ fuzz_target!(|case: Case| {
     encode_trailers(&status, &metadata, &mut wire);
 
     // Strip the 5-byte framing header: [flag][u32 length].
-    assert!(wire.len() >= 5, "encoded trailer is shorter than 5-byte header");
+    assert!(
+        wire.len() >= 5,
+        "encoded trailer is shorter than 5-byte header"
+    );
     let flag = wire[0];
     assert_eq!(flag & 0x80, 0x80, "trailer frame must have MSB set");
     let declared_len = u32::from_be_bytes([wire[1], wire[2], wire[3], wire[4]]) as usize;
@@ -158,9 +166,10 @@ fuzz_target!(|case: Case| {
     // post-insert snapshot rather than the user's raw lists so the
     // assertion corresponds to what was actually encoded.
     for (key, value) in metadata.iter() {
-        let got = decoded.metadata.get(key).unwrap_or_else(|| {
-            panic!("metadata key {key:?} missing after round-trip")
-        });
+        let got = decoded
+            .metadata
+            .get(key)
+            .unwrap_or_else(|| panic!("metadata key {key:?} missing after round-trip"));
         match (value, got) {
             (MetadataValue::Ascii(original), MetadataValue::Ascii(round)) => {
                 assert_eq!(
@@ -175,9 +184,9 @@ fuzz_target!(|case: Case| {
                     "Binary metadata value for {key:?} diverged after round-trip",
                 );
             }
-            (orig, got) => panic!(
-                "metadata variant flipped for {key:?}: encoded {orig:?}, decoded {got:?}",
-            ),
+            (orig, got) => {
+                panic!("metadata variant flipped for {key:?}: encoded {orig:?}, decoded {got:?}",)
+            }
         }
     }
 });

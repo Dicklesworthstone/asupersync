@@ -2163,6 +2163,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "grpc_web_trailer_roundtrip"
+path = "fuzz_targets/grpc_web_trailer_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "grpc_web_compressed_message"
 path = "fuzz_targets/grpc_web_compressed_message.rs"
 test = false
