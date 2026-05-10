@@ -35,7 +35,7 @@ struct SettingEntry {
 }
 
 /// Known HTTP/2 settings from RFC 7540
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 enum KnownSetting {
     HeaderTableSize = 1,
     EnablePush = 2,
@@ -64,7 +64,7 @@ impl KnownSetting {
             Self::EnablePush => value <= 1,                    // Only 0 or 1
             Self::MaxConcurrentStreams => true,                // Any value allowed
             Self::InitialWindowSize => value <= 2_147_483_647, // 2^31 - 1
-            Self::MaxFrameSize => value >= 16384 && value <= 16777215, // 2^14 to 2^24-1
+            Self::MaxFrameSize => (16384..=16777215).contains(&value), // 2^14 to 2^24-1
             Self::MaxHeaderListSize => true,                   // Any value allowed
         }
     }
@@ -132,18 +132,40 @@ impl MockH2SettingsParser {
 
     /// Verify that ordering doesn't affect final result
     fn verify_ordering_independence(&self, input: &FuzzInput) -> bool {
-        // Create a shuffled version of the settings
-        let mut shuffled_settings = input.settings.clone();
-        shuffled_settings.reverse(); // Simple reordering
+        // Unknown settings are ignored, so their position and order should not
+        // affect the applied known settings. Known settings keep their relative
+        // order because duplicate known settings intentionally use last-value-wins.
+        let mut known_settings = Vec::new();
+        let mut unknown_settings = Vec::new();
+        for setting in &input.settings {
+            if KnownSetting::from_id(setting.id).is_some() {
+                known_settings.push(setting.clone());
+            } else {
+                unknown_settings.push(setting.clone());
+            }
+        }
+
+        unknown_settings.reverse();
+        let split_at = unknown_settings.len() / 2;
+        let mut reordered_settings = Vec::with_capacity(input.settings.len());
+        reordered_settings.extend_from_slice(&unknown_settings[..split_at]);
+        reordered_settings.extend(known_settings);
+        reordered_settings.extend_from_slice(&unknown_settings[split_at..]);
 
         let shuffled_input = FuzzInput {
-            settings: shuffled_settings,
+            settings: reordered_settings,
             flags: input.flags,
             stream_id: input.stream_id,
         };
 
         let mut other_parser = MockH2SettingsParser::new();
-        let _ = other_parser.parse_settings_frame(&shuffled_input);
+        if let Err(err) = other_parser.parse_settings_frame(&shuffled_input) {
+            assert!(
+                !err.is_empty(),
+                "reordered SETTINGS parse failure should expose a diagnostic"
+            );
+            return false;
+        }
 
         // Applied settings should be identical regardless of order
         self.applied_settings == other_parser.applied_settings
@@ -219,27 +241,26 @@ fuzz_target!(|data: &[u8]| {
             .iter()
             .find(|s| KnownSetting::from_id(s.id).is_some());
 
-        if let Some(first_setting) = first_known_setting {
-            if let Some(known) = KnownSetting::from_id(first_setting.id) {
-                // Find last occurrence of this setting
-                let last_value = input
-                    .settings
-                    .iter()
-                    .rev()
-                    .find(|s| s.id == first_setting.id)
-                    .map(|s| s.value);
+        if let Some(first_setting) = first_known_setting
+            && let Some(known) = KnownSetting::from_id(first_setting.id)
+        {
+            // Find last occurrence of this setting
+            let last_value = input
+                .settings
+                .iter()
+                .rev()
+                .find(|s| s.id == first_setting.id)
+                .map(|s| s.value);
 
-                if let Some(last_val) = last_value {
-                    if known.validate_value(last_val) {
-                        if let Some(&applied_value) = parser.applied_settings.get(&known) {
-                            assert_eq!(
-                                applied_value, last_val,
-                                "Duplicate setting should use last value: expected {}, got {}",
-                                last_val, applied_value
-                            );
-                        }
-                    }
-                }
+            if let Some(last_val) = last_value
+                && known.validate_value(last_val)
+                && let Some(&applied_value) = parser.applied_settings.get(&known)
+            {
+                assert_eq!(
+                    applied_value, last_val,
+                    "Duplicate setting should use last value: expected {}, got {}",
+                    last_val, applied_value
+                );
             }
         }
     }
@@ -410,6 +431,33 @@ mod tests {
         // Results should be identical
         assert_eq!(parser1.applied_settings, parser2.applied_settings);
         assert_eq!(parser1.unknown_count, parser2.unknown_count);
+    }
+
+    #[test]
+    fn test_ordering_independence_preserves_duplicate_known_order() {
+        let input = FuzzInput {
+            settings: vec![
+                SettingEntry { id: 4, value: 1000 }, // INITIAL_WINDOW_SIZE
+                SettingEntry { id: 99, value: 42 },  // Unknown
+                SettingEntry { id: 4, value: 2000 }, // Duplicate known setting
+                SettingEntry {
+                    id: 255,
+                    value: 123,
+                }, // Unknown
+            ],
+            flags: 0,
+            stream_id: 0,
+        };
+
+        let mut parser = MockH2SettingsParser::new();
+        assert!(parser.parse_settings_frame(&input).is_ok());
+        assert!(parser.verify_ordering_independence(&input));
+        assert_eq!(
+            parser
+                .applied_settings
+                .get(&KnownSetting::InitialWindowSize),
+            Some(&2000)
+        );
     }
 
     #[test]
