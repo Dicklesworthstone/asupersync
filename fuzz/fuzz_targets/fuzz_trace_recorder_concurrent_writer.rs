@@ -284,11 +284,11 @@ fn test_concurrent_writers_single_reader(config: &TraceRecorderConcurrentConfig)
                     // Test take operation (resets recorder) - drop guard first to avoid move
                     if iterations % 3 == 0 {
                         drop(recorder); // Release lock before take
-                        if let Ok(mut recorder) = recorder_clone.try_lock() {
-                            if let Some(trace) = recorder.take() {
-                                // Validate trace structure
-                                assert!(trace.events.len() <= 10000, "Trace too large");
-                            }
+                        if let Ok(mut recorder) = recorder_clone.try_lock()
+                            && let Some(trace) = recorder.take()
+                        {
+                            // Validate trace structure
+                            assert!(trace.events.len() <= 10000, "Trace too large");
                         }
                     }
                 } else {
@@ -454,10 +454,10 @@ fn test_reader_lag_semantics(_config: &TraceRecorderConcurrentConfig) {
     let reader_handle = thread::spawn(move || {
         let mut snapshots = Vec::new();
         while snapshots.len() < 10 && !stop_flag_reader.load(Ordering::Relaxed) {
-            if let Ok(r) = recorder_reader.try_lock() {
-                if let Some(snapshot) = r.snapshot() {
-                    snapshots.push(snapshot.events.len());
-                }
+            if let Ok(r) = recorder_reader.try_lock()
+                && let Some(snapshot) = r.snapshot()
+            {
+                snapshots.push(snapshot.events.len());
             }
             // Intentional delay to simulate slow reader
             thread::sleep(Duration::from_micros(100));
@@ -469,8 +469,12 @@ fn test_reader_lag_semantics(_config: &TraceRecorderConcurrentConfig) {
     thread::sleep(Duration::from_millis(5));
     stop_flag.store(true, Ordering::Relaxed);
 
-    let write_count = writer_handle.join().unwrap_or(0);
-    let read_snapshots = reader_handle.join().unwrap_or(Vec::new());
+    let write_count = writer_handle
+        .join()
+        .expect("reader-lag writer thread must not panic");
+    let read_snapshots = reader_handle
+        .join()
+        .expect("reader-lag reader thread must not panic");
 
     // Reader should have captured some snapshots, but likely missed events
     if !read_snapshots.is_empty() && write_count > 0 {
