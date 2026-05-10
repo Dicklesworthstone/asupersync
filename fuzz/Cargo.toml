@@ -1690,6 +1690,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h1_space_delimiter_rejection"
+path = "fuzz_targets/h1_space_delimiter_rejection.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "h2_alpn_negotiation"
 path = "fuzz_targets/h2_alpn_negotiation.rs"
 test = false

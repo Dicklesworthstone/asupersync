@@ -122,7 +122,7 @@ impl SpacePattern {
         match self {
             Self::Single => vec![b' '],
             Self::Multiple(count) => {
-                let count = (*count).max(2).min(10); // 2-10 spaces
+                let count = (*count).clamp(2, 10); // 2-10 spaces
                 vec![b' '; count as usize]
             }
             Self::Tab => vec![b'\t'],
@@ -139,12 +139,12 @@ impl SpacePattern {
 
     fn should_be_rejected(&self) -> bool {
         match self {
-            Self::Single => false, // Single space is valid
-            Self::Multiple(_) => true, // Multiple spaces should be rejected
-            Self::Tab => true, // Tab should be rejected
+            Self::Single => false,      // Single space is valid
+            Self::Multiple(_) => true,  // Multiple spaces should be rejected
+            Self::Tab => true,          // Tab should be rejected
             Self::Mixed { .. } => true, // Mixed whitespace should be rejected
-            Self::None => true, // Missing delimiter should be rejected
-            Self::TabOnly => true, // Tab only should be rejected
+            Self::None => true,         // Missing delimiter should be rejected
+            Self::TabOnly => true,      // Tab only should be rejected
         }
     }
 }
@@ -173,7 +173,10 @@ impl SpaceDelimiterFuzz {
         line.extend_from_slice(self.version.as_str().as_bytes());
 
         // Add trailing spaces (should cause rejection if > 0)
-        line.extend(vec![b' '; self.space_config.trailing_spaces.min(5) as usize]);
+        line.extend(vec![
+            b' ';
+            self.space_config.trailing_spaces.min(5) as usize
+        ]);
 
         // Add CRLF termination
         line.extend_from_slice(b"\r\n");
@@ -210,9 +213,7 @@ fuzz_target!(|fuzz_spec: SpaceDelimiterFuzz| {
     let mut codec = Http1Codec::new();
     let mut buf = BytesMut::from(request_data.as_slice());
 
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        codec.decode(&mut buf)
-    }));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| codec.decode(&mut buf)));
 
     match result {
         Ok(parse_result) => {
@@ -254,7 +255,11 @@ fuzz_target!(|fuzz_spec: SpaceDelimiterFuzz| {
             let debug_str = String::from_utf8_lossy(&request_data);
             panic!(
                 "HTTP/1.1 codec panicked on space delimiter test: '{}'",
-                debug_str.lines().next().unwrap_or("(non-UTF8)").escape_debug()
+                debug_str
+                    .lines()
+                    .next()
+                    .unwrap_or("(non-UTF8)")
+                    .escape_debug()
             );
         }
     }
