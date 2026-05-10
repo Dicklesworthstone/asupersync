@@ -69,17 +69,18 @@ const MAX_OPERATIONS: usize = 200;
 const MAX_THREADS: usize = 8;
 const MAX_HOLD_MS: u64 = 50;
 const MAX_DELAY_MS: u64 = 20;
-const OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_OPERATION_TIMEOUT_SECS: u64 = 10;
 
 // Constants from RwLock implementation for starvation testing
 const MAX_CONSECUTIVE_WRITERS_BEFORE_READER_BATCH: usize = 16;
 
 fuzz_target!(|input: RwLockQueueFuzz| {
     // Apply resource limits
-    let max_ops = (input.config.max_operations as usize)
-        .min(MAX_OPERATIONS)
-        .max(1);
-    let max_threads = (input.config.max_threads as usize).min(MAX_THREADS).max(1);
+    let max_ops = (input.config.max_operations as usize).clamp(1, MAX_OPERATIONS);
+    let max_threads = (input.config.max_threads as usize).clamp(1, MAX_THREADS);
+    let operation_timeout = Duration::from_secs(
+        u64::from(input.config.timeout_seconds).clamp(1, MAX_OPERATION_TIMEOUT_SECS),
+    );
     let operations: Vec<_> = input.operations.into_iter().take(max_ops).collect();
 
     if operations.is_empty() {
@@ -94,14 +95,17 @@ fuzz_target!(|input: RwLockQueueFuzz| {
     let mut operations_by_thread: HashMap<usize, Vec<LockOperation>> = HashMap::new();
     for op in operations {
         let thread_id = (op.thread_id() as usize) % max_threads;
-        operations_by_thread
-            .entry(thread_id)
-            .or_insert_with(Vec::new)
-            .push(op);
+        operations_by_thread.entry(thread_id).or_default().push(op);
     }
 
     // Execute operations and verify no starvation
-    execute_and_verify_fairness(rwlock, tracker, operations_by_thread, max_threads);
+    execute_and_verify_fairness(
+        rwlock,
+        tracker,
+        operations_by_thread,
+        max_threads,
+        operation_timeout,
+    );
 });
 
 /// Tracks starvation and fairness properties
@@ -236,9 +240,60 @@ impl StarvationTracker {
 
     /// Verify no starvation has occurred
     fn verify_no_starvation(&self) {
+        self.verify_event_metadata();
+        self.verify_waiting_queue_accounting();
         self.verify_writer_starvation_bounds();
         self.verify_reader_starvation_bounds();
         self.verify_fairness_ordering();
+    }
+
+    /// Verify event metadata remains internally coherent.
+    fn verify_event_metadata(&self) {
+        for event in &self.acquire_events {
+            assert!(
+                event.thread_id < MAX_THREADS,
+                "acquire event recorded impossible thread id {}",
+                event.thread_id
+            );
+            assert!(
+                event.hold_duration <= Duration::from_millis(MAX_HOLD_MS),
+                "acquire event hold duration {:?} exceeds cap {:?}",
+                event.hold_duration,
+                Duration::from_millis(MAX_HOLD_MS)
+            );
+        }
+
+        for pair in self.acquire_events.windows(2) {
+            assert!(
+                pair[0].timestamp <= pair[1].timestamp,
+                "acquire event timestamps regressed between sequence {} and {}",
+                pair[0].sequence,
+                pair[1].sequence
+            );
+        }
+    }
+
+    /// Verify every recorded wait has been resolved before final fairness checks.
+    fn verify_waiting_queue_accounting(&self) {
+        for pair in self
+            .waiting_operations
+            .iter()
+            .zip(self.waiting_operations.iter().skip(1))
+        {
+            assert!(
+                pair.0.sequence < pair.1.sequence,
+                "waiting queue sequence order regressed"
+            );
+            assert!(
+                pair.0.start_time <= pair.1.start_time,
+                "waiting queue timestamp order regressed"
+            );
+        }
+
+        assert!(
+            self.waiting_operations.is_empty(),
+            "unresolved waiters remained after all worker threads joined"
+        );
     }
 
     /// Verify that consecutive writers don't exceed the starvation bound
@@ -302,13 +357,13 @@ impl StarvationTracker {
 }
 
 fn matches_operation_type(a: AcquireType, b: AcquireType) -> bool {
-    match (a, b) {
+    matches!(
+        (a, b),
         (AcquireType::Read, AcquireType::Read)
-        | (AcquireType::Write, AcquireType::Write)
-        | (AcquireType::TryRead, AcquireType::TryRead)
-        | (AcquireType::TryWrite, AcquireType::TryWrite) => true,
-        _ => false,
-    }
+            | (AcquireType::Write, AcquireType::Write)
+            | (AcquireType::TryRead, AcquireType::TryRead)
+            | (AcquireType::TryWrite, AcquireType::TryWrite)
+    )
 }
 
 /// Verify that a sequence is generally increasing (allowing some reordering)
@@ -354,6 +409,7 @@ fn execute_and_verify_fairness(
     tracker: Arc<parking_lot::Mutex<StarvationTracker>>,
     operations_by_thread: HashMap<usize, Vec<LockOperation>>,
     max_threads: usize,
+    operation_timeout: Duration,
 ) {
     let mut handles = Vec::new();
 
@@ -379,15 +435,18 @@ fn execute_and_verify_fairness(
     // Wait for all threads with timeout
     let start = Instant::now();
     for (i, handle) in handles.into_iter().enumerate() {
-        let remaining_time = OPERATION_TIMEOUT.saturating_sub(start.elapsed());
+        let remaining_time = operation_timeout.saturating_sub(start.elapsed());
 
         // Simple timeout mechanism using thread::sleep polling
-        let join_result = thread_join_with_timeout(handle, remaining_time);
-        assert!(
-            join_result.is_ok(),
-            "Thread {} timed out - possible deadlock or starvation",
-            i
-        );
+        match thread_join_with_timeout(handle, remaining_time) {
+            Ok(()) => {}
+            Err(WorkerJoinFailure::Timeout) => {
+                panic!("Thread {i} timed out - possible deadlock or starvation")
+            }
+            Err(WorkerJoinFailure::Panicked) => {
+                panic!("Thread {i} panicked while executing RwLock queue operations")
+            }
+        }
     }
 
     // Verify no starvation occurred
@@ -395,20 +454,26 @@ fn execute_and_verify_fairness(
     tracker_guard.verify_no_starvation();
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkerJoinFailure {
+    Timeout,
+    Panicked,
+}
+
 /// Simple timeout wrapper for thread join
 fn thread_join_with_timeout(
     handle: thread::JoinHandle<()>,
     timeout: Duration,
-) -> Result<(), &'static str> {
+) -> Result<(), WorkerJoinFailure> {
     let start = Instant::now();
 
     loop {
         if start.elapsed() > timeout {
-            return Err("timeout");
+            return Err(WorkerJoinFailure::Timeout);
         }
 
         if handle.is_finished() {
-            return handle.join().map_err(|_| "thread panicked");
+            return handle.join().map_err(|_| WorkerJoinFailure::Panicked);
         }
 
         thread::sleep(Duration::from_millis(1));
