@@ -33,10 +33,7 @@ enum Operation {
         time_ns: u64,
     },
     /// Commit an obligation by token index
-    Commit {
-        token_index: u8,
-        time_ns: u64,
-    },
+    Commit { token_index: u8, time_ns: u64 },
     /// Abort an obligation by token index
     Abort {
         token_index: u8,
@@ -50,15 +47,11 @@ enum Operation {
         reason: AbortReasonFuzz,
     },
     /// Mark a region as finalized
-    MarkRegionFinalized {
-        region_index: u8,
-    },
+    MarkRegionFinalized { region_index: u8 },
     /// Reset the ledger (requires clean state)
     Reset,
     /// Force wraparound scenario for testing ID collision
-    ForceWraparound {
-        target_index: u32,
-    },
+    ForceWraparound { target_index: u32 },
 }
 
 #[derive(Debug, Clone, Copy, Arbitrary)]
@@ -112,7 +105,6 @@ struct SharedFuzzState {
 /// Snapshot of an obligation token (since tokens aren't Clone)
 #[derive(Debug, Clone)]
 struct ObligationTokenSnapshot {
-    id: ObligationId,
     kind: ObligationKind,
     holder: TaskId,
     region: RegionId,
@@ -175,10 +167,14 @@ fuzz_target!(|data: FuzzInput| {
 
 /// Test single-threaded execution to establish baseline correctness
 fn test_single_threaded(shared_state: &SharedFuzzState, operations: &[Operation]) {
-    for op in operations {
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    for (op_idx, op) in operations.iter().enumerate() {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             execute_operation(shared_state, op);
         }));
+        assert!(
+            result.is_ok(),
+            "obligation single-threaded operation {op_idx} panicked: {op:?}"
+        );
     }
 
     // Verify final state invariants
@@ -186,7 +182,11 @@ fn test_single_threaded(shared_state: &SharedFuzzState, operations: &[Operation]
 }
 
 /// Test multi-threaded execution for race conditions
-fn test_multi_threaded(shared_state: Arc<SharedFuzzState>, operations: &[Operation], thread_count: usize) {
+fn test_multi_threaded(
+    shared_state: Arc<SharedFuzzState>,
+    operations: &[Operation],
+    thread_count: usize,
+) {
     let ops_per_thread = operations.len().max(1) / thread_count;
     let mut handles = Vec::new();
 
@@ -201,17 +201,23 @@ fn test_multi_threaded(shared_state: Arc<SharedFuzzState>, operations: &[Operati
         let thread_ops = operations[start..end].to_vec();
 
         handles.push(thread::spawn(move || {
-            for op in thread_ops {
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    execute_operation(&state, &op);
+            for (op_idx, op) in thread_ops.iter().enumerate() {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    execute_operation(&state, op);
                 }));
+                assert!(
+                    result.is_ok(),
+                    "obligation worker thread {thread_idx} operation {op_idx} panicked: {op:?}"
+                );
             }
         }));
     }
 
     // Wait for all threads to complete
-    for handle in handles {
-        handle.join().unwrap_or_default();
+    for (thread_idx, handle) in handles.into_iter().enumerate() {
+        if handle.join().is_err() {
+            panic!("obligation worker thread {thread_idx} panicked");
+        }
     }
 
     // Verify final state invariants after concurrent execution
@@ -232,104 +238,123 @@ fn test_metamorphic_equivalence(operations: &[Operation], thread_count: usize) {
 
     // Metamorphic relations:
     // MR1: Total acquired should be the same regardless of threading
-    assert_eq!(single_stats.total_acquired, multi_stats.total_acquired,
-        "MR1: total_acquired must be invariant to thread interleaving");
+    assert_eq!(
+        single_stats.total_acquired, multi_stats.total_acquired,
+        "MR1: total_acquired must be invariant to thread interleaving"
+    );
 
     // MR2: Sum of outcomes should be the same (acquired = committed + aborted + leaked)
-    let single_total = single_stats.total_committed + single_stats.total_aborted + single_stats.total_leaked;
-    let multi_total = multi_stats.total_committed + multi_stats.total_aborted + multi_stats.total_leaked;
-    assert_eq!(single_total, multi_total,
-        "MR2: sum of all outcomes must be invariant to thread interleaving");
+    let single_total =
+        single_stats.total_committed + single_stats.total_aborted + single_stats.total_leaked;
+    let multi_total =
+        multi_stats.total_committed + multi_stats.total_aborted + multi_stats.total_leaked;
+    assert_eq!(
+        single_total, multi_total,
+        "MR2: sum of all outcomes must be invariant to thread interleaving"
+    );
 }
 
 /// Execute a single operation on the shared state
 fn execute_operation(shared_state: &SharedFuzzState, operation: &Operation) {
     match operation {
-        Operation::Acquire { kind, task_index, region_index, time_ns } => {
+        Operation::Acquire {
+            kind,
+            task_index,
+            region_index,
+            time_ns,
+        } => {
             let task = shared_state.get_task(*task_index);
             let region = shared_state.get_region(*region_index);
             let time = Time::from_nanos(*time_ns);
             let kind = (*kind).into();
 
-            if let Ok(mut ledger) = shared_state.ledger.try_lock() {
-                if let Ok(token) = ledger.try_acquire(kind, task, region, time) {
-                    let token_snapshot = ObligationTokenSnapshot {
-                        id: token.id(),
-                        kind: token.kind(),
-                        holder: token.holder(),
-                        region: token.region(),
-                    };
+            if let Ok(mut ledger) = shared_state.ledger.try_lock()
+                && let Ok(token) = ledger.try_acquire(kind, task, region, time)
+            {
+                let token_snapshot = ObligationTokenSnapshot {
+                    kind: token.kind(),
+                    holder: token.holder(),
+                    region: token.region(),
+                };
 
-                    // Store token for later operations
-                    if let Ok(mut tokens) = shared_state.active_tokens.try_lock() {
-                        tokens.insert(*task_index, token_snapshot.clone());
-                    }
-
-                    // Store ID for abort_by_id operations
-                    if let Ok(mut ids) = shared_state.known_ids.try_lock() {
-                        ids.insert(*task_index, token.id());
-                    }
-
-                    // Consume the token immediately or store for commit/abort
-                    std::mem::drop(token);
+                // Store token for later operations
+                if let Ok(mut tokens) = shared_state.active_tokens.try_lock() {
+                    tokens.insert(*task_index, token_snapshot.clone());
                 }
+
+                // Store ID for abort_by_id operations
+                if let Ok(mut ids) = shared_state.known_ids.try_lock() {
+                    ids.insert(*task_index, token.id());
+                }
+
+                // Consume the token immediately or store for commit/abort
+                std::mem::drop(token);
             }
         }
 
-        Operation::Commit { token_index, time_ns } => {
+        Operation::Commit {
+            token_index,
+            time_ns,
+        } => {
             let time = Time::from_nanos(*time_ns);
             if let (Ok(mut ledger), Ok(tokens)) = (
                 shared_state.ledger.try_lock(),
                 shared_state.active_tokens.try_lock(),
-            ) {
-                if let Some(token_snapshot) = tokens.get(token_index) {
-                    // Try to commit using try_commit (fallible)
-                    if let Ok(token) = ledger.try_acquire(
-                        token_snapshot.kind,
-                        token_snapshot.holder,
-                        token_snapshot.region,
-                        time,
-                    ) {
-                        let _ = ledger.try_commit(token, time);
-                    }
+            ) && let Some(token_snapshot) = tokens.get(token_index)
+            {
+                // Try to commit using try_commit (fallible)
+                if let Ok(token) = ledger.try_acquire(
+                    token_snapshot.kind,
+                    token_snapshot.holder,
+                    token_snapshot.region,
+                    time,
+                ) {
+                    let _ = ledger.try_commit(token, time);
                 }
             }
         }
 
-        Operation::Abort { token_index, time_ns, reason } => {
+        Operation::Abort {
+            token_index,
+            time_ns,
+            reason,
+        } => {
             let time = Time::from_nanos(*time_ns);
             let reason = (*reason).into();
             if let (Ok(mut ledger), Ok(tokens)) = (
                 shared_state.ledger.try_lock(),
                 shared_state.active_tokens.try_lock(),
-            ) {
-                if let Some(token_snapshot) = tokens.get(token_index) {
-                    // Try to abort using try_abort (fallible)
-                    if let Ok(token) = ledger.try_acquire(
-                        token_snapshot.kind,
-                        token_snapshot.holder,
-                        token_snapshot.region,
-                        time,
-                    ) {
-                        let _ = ledger.try_abort(token, time, reason);
-                    }
+            ) && let Some(token_snapshot) = tokens.get(token_index)
+            {
+                // Try to abort using try_abort (fallible)
+                if let Ok(token) = ledger.try_acquire(
+                    token_snapshot.kind,
+                    token_snapshot.holder,
+                    token_snapshot.region,
+                    time,
+                ) {
+                    let _ = ledger.try_abort(token, time, reason);
                 }
             }
         }
 
-        Operation::AbortById { obligation_index, time_ns, reason } => {
+        Operation::AbortById {
+            obligation_index,
+            time_ns,
+            reason,
+        } => {
             let time = Time::from_nanos(*time_ns);
             let reason = (*reason).into();
             if let (Ok(mut ledger), Ok(ids)) = (
                 shared_state.ledger.try_lock(),
                 shared_state.known_ids.try_lock(),
-            ) {
-                if let Some(&id) = ids.get(obligation_index) {
-                    // This is the key race: abort_by_id concurrent with reset
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        ledger.abort_by_id(id, time, reason);
-                    }));
-                }
+            ) && let Some(&id) = ids.get(obligation_index)
+            {
+                // This is the key race: abort_by_id concurrent with reset.
+                // Use the race-tolerant surface so malformed input that
+                // repeats an already-resolved ID does not become a trivial
+                // fuzzer crash; an internal panic still escapes.
+                let _ = ledger.try_abort_by_id(id, time, reason);
             }
         }
 
@@ -342,17 +367,18 @@ fn execute_operation(shared_state: &SharedFuzzState, operation: &Operation) {
 
         Operation::Reset => {
             if let Ok(mut ledger) = shared_state.ledger.try_lock() {
-                // Reset requires clean state - this should race with other operations
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // Reset requires clean state. Dirty reset attempts are invalid
+                // input, so only call reset when its documented precondition holds.
+                if ledger.stats().is_clean() {
                     ledger.reset();
-                }));
 
-                // Clear our tracking state after reset
-                if let Ok(mut tokens) = shared_state.active_tokens.try_lock() {
-                    tokens.clear();
-                }
-                if let Ok(mut ids) = shared_state.known_ids.try_lock() {
-                    ids.clear();
+                    // Clear our tracking state after a successful reset.
+                    if let Ok(mut tokens) = shared_state.active_tokens.try_lock() {
+                        tokens.clear();
+                    }
+                    if let Ok(mut ids) = shared_state.known_ids.try_lock() {
+                        ids.clear();
+                    }
                 }
             }
         }
@@ -362,9 +388,7 @@ fn execute_operation(shared_state: &SharedFuzzState, operation: &Operation) {
             if let Ok(mut ledger) = shared_state.ledger.try_lock() {
                 // This is a test-only scenario to force wraparound conditions
                 // We'll create a fresh ledger with high index to test overflow
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    setup_wraparound_test(&mut ledger, *target_index);
-                }));
+                setup_wraparound_test(&mut ledger, *target_index);
             }
         }
     }
@@ -374,9 +398,7 @@ fn execute_operation(shared_state: &SharedFuzzState, operation: &Operation) {
 fn setup_wraparound_scenario(shared_state: &SharedFuzzState) {
     if let Ok(mut ledger) = shared_state.ledger.try_lock() {
         // This is test-only code to simulate near-wraparound conditions
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            setup_wraparound_test(&mut ledger, u32::MAX - 10);
-        }));
+        setup_wraparound_test(&mut ledger, u32::MAX - 10);
     }
 }
 
@@ -419,13 +441,19 @@ fn verify_ledger_invariants(shared_state: &SharedFuzzState) {
         assert!(stats.total_acquired >= stats.pending);
 
         // Invariant 3: Ledger consistency
-        assert_eq!(ledger.pending_count(), stats.pending,
-            "Ledger pending count must match stats");
+        assert_eq!(
+            ledger.pending_count(),
+            stats.pending,
+            "Ledger pending count must match stats"
+        );
 
         // Invariant 4: If clean, no pending or leaked
         if stats.is_clean() {
             assert_eq!(stats.pending, 0, "Clean ledger has no pending obligations");
-            assert_eq!(stats.total_leaked, 0, "Clean ledger has no leaked obligations");
+            assert_eq!(
+                stats.total_leaked, 0,
+                "Clean ledger has no leaked obligations"
+            );
         }
     }
 }
