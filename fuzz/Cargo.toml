@@ -5056,6 +5056,7 @@ name = "h1_keep_alive_http10_default"
 path = "fuzz_targets/h1_keep_alive_http10_default.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h1_request_method_case_sensitivity"

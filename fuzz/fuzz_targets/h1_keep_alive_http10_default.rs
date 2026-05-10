@@ -256,8 +256,8 @@ impl MockConnectionManager {
         let version_default = self.get_version_default_behavior(&test_case.http_version);
 
         // Check server config overrides
-        let server_override = self
-            .check_server_config_overrides(&test_case.server_config, &test_case.connection_state);
+        let server_override =
+            self.check_server_config_overrides(&self.config, &test_case.connection_state);
 
         // Determine effective behavior
         let (should_close, effective_behavior, decision_reason) = self
@@ -292,13 +292,13 @@ impl MockConnectionManager {
             let name = self.format_header_name(&header.name, &header.case_variant);
             let value = self.format_connection_value(&header.value);
 
-            if headers.contains_key(&name) {
-                // Multiple Connection headers (typically invalid)
-                let existing = headers.get(&name).unwrap().clone();
-                headers.insert(name, format!("{}, {}", existing, value));
-            } else {
-                headers.insert(name, value);
-            }
+            headers
+                .entry(name)
+                .and_modify(|existing| {
+                    existing.push_str(", ");
+                    existing.push_str(&value);
+                })
+                .or_insert(value);
         }
 
         headers
@@ -313,8 +313,11 @@ impl MockConnectionManager {
         let mut directives = Vec::new();
 
         for (name, value) in headers {
-            if name.eq_ignore_ascii_case("connection")
-                || name.eq_ignore_ascii_case("proxy-connection")
+            let is_connection = name.eq_ignore_ascii_case("connection");
+            let is_proxy_connection = name.eq_ignore_ascii_case("proxy-connection");
+
+            if is_connection
+                || (is_proxy_connection && self.precedence_config.allow_proxy_connection_fallback)
             {
                 // Parse comma-separated tokens
                 let tokens: Vec<String> = value
@@ -379,10 +382,21 @@ impl MockConnectionManager {
         }
 
         // If request limit reached, close
-        if let Some(max) = config.max_requests_per_connection {
-            if state.requests_served + 1 >= max {
-                return Some(true);
-            }
+        if let Some(max) = config.max_requests_per_connection
+            && state.requests_served.saturating_add(1) >= max
+        {
+            return Some(true);
+        }
+
+        if matches!(state.connection_phase, ConnectionPhase::Error) {
+            return Some(true);
+        }
+
+        if let Some(timeout_ms) = config.idle_timeout_ms
+            && matches!(state.connection_phase, ConnectionPhase::Idle)
+            && state.idle_time_ms >= timeout_ms
+        {
+            return Some(true);
         }
 
         // Force close on error
@@ -413,12 +427,19 @@ impl MockConnectionManager {
         }
 
         // Check explicit Connection headers
+        let matches_directive = |directive: &str, expected: &str| {
+            if self.precedence_config.case_sensitive_header_values {
+                directive == expected
+            } else {
+                directive.eq_ignore_ascii_case(expected)
+            }
+        };
         let has_close = connection_directives
             .iter()
-            .any(|d| d.eq_ignore_ascii_case("close"));
+            .any(|d| matches_directive(d, "close"));
         let has_keep_alive = connection_directives
             .iter()
-            .any(|d| d.eq_ignore_ascii_case("keep-alive"));
+            .any(|d| matches_directive(d, "keep-alive"));
 
         if has_close && has_keep_alive {
             // Conflicting directives - ambiguous
@@ -747,7 +768,16 @@ fuzz_target!(|data: &[u8]| {
     );
 
     // Analyze connection persistence behavior
-    let _analysis = manager.analyze_connection_persistence(&test_case);
+    let analysis = manager.analyze_connection_persistence(&test_case);
+    assert!(
+        (0.0..=1.0).contains(&analysis.rfc_compliance_score),
+        "RFC compliance score must stay normalized"
+    );
+    match analysis.effective_behavior {
+        EffectiveBehavior::Close => assert!(analysis.should_close),
+        EffectiveBehavior::KeepAlive => assert!(!analysis.should_close),
+        EffectiveBehavior::Ambiguous | EffectiveBehavior::Invalid => assert!(analysis.should_close),
+    }
 
     // Test specific edge cases
     test_http_version_defaults(&test_case);
@@ -788,15 +818,13 @@ fn test_connection_header_precedence(test_case: &KeepAliveDefaultTestCase) {
     // If there's an explicit Connection header and no server override,
     // it should take precedence over version default
     if let DecisionReason::ExplicitConnectionHeader = analysis.decision_reason {
-        // Connection header was respected
-        match analysis.effective_behavior {
-            EffectiveBehavior::Close | EffectiveBehavior::KeepAlive => {
-                // Valid explicit behavior
-            }
-            EffectiveBehavior::Ambiguous | EffectiveBehavior::Invalid => {
-                // Invalid or conflicting headers
-            }
-        }
+        assert!(
+            matches!(
+                analysis.effective_behavior,
+                EffectiveBehavior::Close | EffectiveBehavior::KeepAlive
+            ),
+            "explicit Connection header resolved to invalid persistence behavior"
+        );
     }
 }
 
@@ -812,15 +840,17 @@ fn test_server_config_overrides(test_case: &KeepAliveDefaultTestCase) {
         MockConnectionManager::new(disabled_config, test_case.precedence_config.clone());
     let analysis = manager.analyze_connection_persistence(test_case);
 
-    if matches!(
-        analysis.decision_reason,
-        DecisionReason::ServerConfigOverride
-    ) {
-        assert!(
-            analysis.should_close,
-            "Server config disable should force close"
-        );
-    }
+    assert!(
+        matches!(
+            analysis.decision_reason,
+            DecisionReason::ServerConfigOverride
+        ),
+        "disabled keep-alive config should drive the persistence decision"
+    );
+    assert!(
+        analysis.should_close,
+        "server config disable should force close"
+    );
 }
 
 /// Test case sensitivity in Connection header handling
@@ -833,11 +863,16 @@ fn test_case_sensitivity_handling(test_case: &KeepAliveDefaultTestCase) {
         };
 
         // Connection header values should be case-insensitive per RFC
-        let case_variants = vec!["close", "CLOSE", "Close", "cLoSe"];
+        let case_variants: &[&str] = match value_str {
+            "close" => &["close", "CLOSE", "Close", "cLoSe"],
+            "keep-alive" => &["keep-alive", "KEEP-ALIVE", "Keep-Alive", "kEeP-aLiVe"],
+            _ => unreachable!("only close and keep-alive variants reach this check"),
+        };
         for variant in case_variants {
-            if value_str.eq_ignore_ascii_case(variant) {
-                // Should be treated as equivalent
-            }
+            assert!(
+                value_str.eq_ignore_ascii_case(variant),
+                "Connection header values should be case-insensitive"
+            );
         }
     }
 }
