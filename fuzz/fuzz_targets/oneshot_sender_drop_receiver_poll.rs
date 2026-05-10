@@ -59,37 +59,48 @@ enum SenderAction {
 #[derive(Debug, Arbitrary, Clone)]
 enum ReceiverPattern {
     /// Single try_recv attempt
-    SingleTryRecv,
+    SingleTry,
     /// Multiple rapid try_recv attempts
-    RapidTryRecv { attempts: u8 },
+    RapidTry { attempts: u8 },
     /// try_recv with delays between attempts
-    DelayedTryRecv { attempts: u8, delay: u16 },
+    DelayedTry { attempts: u8, delay: u16 },
     /// Block on recv() with timeout simulation
-    BlockingRecv,
+    Blocking,
     /// Mixed: try_recv then blocking recv
-    MixedRecv,
+    Mixed,
 }
 
 impl SenderDropReceiverPollConfig {
     fn normalize(&mut self) {
         // Limit delays to reasonable values
-        self.sender_delay = self.sender_delay % 1000; // Max 1ms
-        self.receiver_delay = self.receiver_delay % 1000;
+        self.sender_delay %= 1000; // Max 1ms
+        self.receiver_delay %= 1000;
 
         // Normalize pattern parameters
         match &mut self.receiver_pattern {
-            ReceiverPattern::RapidTryRecv { attempts }
-            | ReceiverPattern::DelayedTryRecv { attempts, .. } => {
+            ReceiverPattern::RapidTry { attempts }
+            | ReceiverPattern::DelayedTry { attempts, .. } => {
                 *attempts = (*attempts % 20).max(1);
             }
             _ => {}
         }
 
-        match &mut self.sender_action {
-            SenderAction::DelayedSendThenDrop { send_delay } => {
-                *send_delay = *send_delay % 500; // Max 0.5ms send delay
-            }
-            _ => {}
+        if let SenderAction::DelayedSendThenDrop { send_delay } = &mut self.sender_action {
+            *send_delay %= 500; // Max 0.5ms send delay
+        }
+
+        if matches!(self.sender_action, SenderAction::KeepAlive)
+            && matches!(
+                self.receiver_pattern,
+                ReceiverPattern::Blocking | ReceiverPattern::Mixed
+            )
+        {
+            // Blocking receive requires a terminal sender event. KeepAlive is
+            // intentionally non-terminal, so keep this fuzz case bounded.
+            self.receiver_pattern = ReceiverPattern::DelayedTry {
+                attempts: 3,
+                delay: self.receiver_delay,
+            };
         }
     }
 }
@@ -266,7 +277,7 @@ fuzz_target!(|data: &[u8]| {
             }
 
             match pattern {
-                ReceiverPattern::SingleTryRecv => {
+                ReceiverPattern::SingleTry => {
                     let receiver_opt = receiver.lock().take();
                     if let Some(mut recv) = receiver_opt {
                         results.try_recv_attempts.fetch_add(1, Ordering::SeqCst);
@@ -288,7 +299,7 @@ fuzz_target!(|data: &[u8]| {
                     }
                 }
 
-                ReceiverPattern::RapidTryRecv { attempts } => {
+                ReceiverPattern::RapidTry { attempts } => {
                     for _ in 0..attempts {
                         let receiver_opt = receiver.lock().take();
                         if let Some(mut recv) = receiver_opt {
@@ -316,7 +327,7 @@ fuzz_target!(|data: &[u8]| {
                     }
                 }
 
-                ReceiverPattern::DelayedTryRecv { attempts, delay } => {
+                ReceiverPattern::DelayedTry { attempts, delay } => {
                     for _ in 0..attempts {
                         let receiver_opt = receiver.lock().take();
                         if let Some(mut recv) = receiver_opt {
@@ -348,7 +359,7 @@ fuzz_target!(|data: &[u8]| {
                     }
                 }
 
-                ReceiverPattern::BlockingRecv => {
+                ReceiverPattern::Blocking => {
                     let receiver_opt = receiver.lock().take();
                     if let Some(mut receiver) = receiver_opt {
                         results
@@ -368,7 +379,7 @@ fuzz_target!(|data: &[u8]| {
                     }
                 }
 
-                ReceiverPattern::MixedRecv => {
+                ReceiverPattern::Mixed => {
                     // First try_recv
                     let mut got_value = false;
                     let receiver_opt = receiver.lock().take();
@@ -421,8 +432,11 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Wait for all threads to complete
-    for handle in handles {
-        let _ = handle.join();
+    for (thread_idx, handle) in handles.into_iter().enumerate() {
+        assert!(
+            handle.join().is_ok(),
+            "oneshot sender-drop receiver-poll worker thread {thread_idx} panicked"
+        );
     }
 
     // Verify results
