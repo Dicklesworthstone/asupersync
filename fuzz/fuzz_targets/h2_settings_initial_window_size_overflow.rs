@@ -17,13 +17,9 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::bytes::Bytes;
-use asupersync::http::h2::connection::{Connection, ConnectionState};
 use asupersync::http::h2::error::ErrorCode;
-use asupersync::http::h2::frame::{
-    DataFrame, Frame, HeadersFrame, Setting, SettingsFrame, WindowUpdateFrame,
-};
-use asupersync::http::h2::settings::{MAX_INITIAL_WINDOW_SIZE, Settings};
+use asupersync::http::h2::frame::{Setting, SettingsFrame, WindowUpdateFrame};
+use asupersync::http::h2::settings::Settings;
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
@@ -78,8 +74,6 @@ pub enum OverflowTestMode {
 
 /// Mock connection for testing window size overflow scenarios
 pub struct MockWindowSizeConnection {
-    /// Current connection state
-    state: ConnectionState,
     /// Flow control windows per stream
     stream_windows: HashMap<u32, StreamFlowControl>,
     /// Connection-level flow control window
@@ -119,12 +113,17 @@ pub enum WindowViolation {
     },
     /// Invalid window update (zero or too large)
     InvalidWindowUpdate { stream_id: u32, increment: u32 },
+    /// DATA send attempted to consume more window than was available
+    SendDataExceedsWindow {
+        stream_id: u32,
+        current_window: u32,
+        attempted: u32,
+    },
 }
 
 impl MockWindowSizeConnection {
     pub fn new() -> Self {
         Self {
-            state: ConnectionState::Open,
             stream_windows: HashMap::new(),
             connection_window: 65535, // Default initial window size
             settings: Settings::default(),
@@ -132,7 +131,15 @@ impl MockWindowSizeConnection {
             max_stream_id: 0,
         }
     }
+}
 
+impl Default for MockWindowSizeConnection {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MockWindowSizeConnection {
     /// Process SETTINGS frame with new INITIAL_WINDOW_SIZE
     pub fn handle_settings_frame(&mut self, frame: &SettingsFrame) -> Result<(), ErrorCode> {
         if frame.ack {
@@ -143,15 +150,12 @@ impl MockWindowSizeConnection {
 
         // Parse settings
         for setting in &frame.settings {
-            match setting {
-                Setting::InitialWindowSize(new_size) => {
-                    // RFC 7540 §6.5.2: Values above 2^31-1 MUST be treated as connection error
-                    if *new_size > MAX_WINDOW_SIZE {
-                        return Err(ErrorCode::FlowControlError);
-                    }
-                    new_initial_window_size = *new_size;
+            if let Setting::InitialWindowSize(new_size) = setting {
+                // RFC 7540 §6.5.2: Values above 2^31-1 MUST be treated as connection error
+                if *new_size > MAX_WINDOW_SIZE {
+                    return Err(ErrorCode::FlowControlError);
                 }
-                _ => {} // Ignore other settings for this test
+                new_initial_window_size = *new_size;
             }
         }
 
@@ -191,24 +195,22 @@ impl MockWindowSizeConnection {
     /// Handle WINDOW_UPDATE frame
     pub fn handle_window_update(&mut self, frame: &WindowUpdateFrame) -> Result<(), ErrorCode> {
         // RFC 7540 §6.9.1: Window update increment must not be zero
-        if frame.window_size_increment == 0 {
+        if frame.increment == 0 {
             self.violations.push(WindowViolation::InvalidWindowUpdate {
                 stream_id: frame.stream_id,
-                increment: frame.window_size_increment,
+                increment: frame.increment,
             });
             return Err(ErrorCode::ProtocolError);
         }
 
         if frame.stream_id == 0 {
             // Connection-level window update
-            let new_window = self
-                .connection_window
-                .saturating_add(frame.window_size_increment);
+            let new_window = self.connection_window.saturating_add(frame.increment);
             if new_window > MAX_WINDOW_SIZE {
                 self.violations.push(WindowViolation::WindowOverflow {
                     stream_id: 0,
                     current_window: self.connection_window,
-                    increment: frame.window_size_increment,
+                    increment: frame.increment,
                     would_be: new_window as u64,
                 });
                 return Err(ErrorCode::FlowControlError);
@@ -218,13 +220,13 @@ impl MockWindowSizeConnection {
             // Stream-level window update
             if let Some(flow_control) = self.stream_windows.get_mut(&frame.stream_id) {
                 let current_window = flow_control.send_window;
-                let new_window = current_window.saturating_add(frame.window_size_increment);
+                let new_window = current_window.saturating_add(frame.increment);
 
                 if new_window > MAX_WINDOW_SIZE {
                     self.violations.push(WindowViolation::WindowOverflow {
                         stream_id: frame.stream_id,
                         current_window,
-                        increment: frame.window_size_increment,
+                        increment: frame.increment,
                         would_be: new_window as u64,
                     });
                     return Err(ErrorCode::FlowControlError);
@@ -257,6 +259,12 @@ impl MockWindowSizeConnection {
     pub fn send_data(&mut self, stream_id: u32, size: u32) -> Result<(), ErrorCode> {
         if let Some(flow_control) = self.stream_windows.get_mut(&stream_id) {
             if flow_control.send_window < size {
+                self.violations
+                    .push(WindowViolation::SendDataExceedsWindow {
+                        stream_id,
+                        current_window: flow_control.send_window,
+                        attempted: size,
+                    });
                 return Err(ErrorCode::FlowControlError);
             }
             flow_control.send_window -= size;
@@ -275,9 +283,29 @@ impl MockWindowSizeConnection {
         self.violations.iter().any(|v| {
             matches!(
                 v,
-                WindowViolation::WindowOverflow { .. } | WindowViolation::SettingsOverflow { .. }
+                WindowViolation::WindowOverflow { .. }
+                    | WindowViolation::SettingsOverflow { .. }
+                    | WindowViolation::SendDataExceedsWindow { .. }
             )
         })
+    }
+}
+
+fn observe_send_data_result(
+    result: Result<(), ErrorCode>,
+    conn: &MockWindowSizeConnection,
+    phase: &str,
+) {
+    if let Err(err) = result {
+        assert_eq!(
+            err,
+            ErrorCode::FlowControlError,
+            "{phase} send_data should only reject with FLOW_CONTROL_ERROR"
+        );
+        assert!(
+            conn.has_flow_control_violation(),
+            "{phase} send_data rejection must be reflected in the violation ledger"
+        );
     }
 }
 
@@ -287,7 +315,7 @@ fn normalize_stream_id(raw: u32) -> u32 {
     if id == 0 {
         id = 1;
     }
-    if id % 2 == 0 {
+    if id.is_multiple_of(2) {
         id = id.saturating_add(1);
     } // Make odd (client-initiated)
     id
@@ -310,7 +338,8 @@ fuzz_target!(|input: WindowSizeOverflowInput| {
             // Simulate some data being sent to consume window
             let consumed = cap_window_size(stream_setup.window_consumed);
             if consumed > 0 {
-                let _ = conn.send_data(stream_id, consumed);
+                let send_result = conn.send_data(stream_id, consumed);
+                observe_send_data_result(send_result, &conn, "setup");
             }
         }
     }
@@ -357,7 +386,8 @@ fuzz_target!(|input: WindowSizeOverflowInput| {
                 FlowControlOperation::SendData { stream_id, size } => {
                     let stream_id = normalize_stream_id(*stream_id);
                     let size = cap_window_size(*size);
-                    let _ = conn.send_data(stream_id, size);
+                    let send_result = conn.send_data(stream_id, size);
+                    observe_send_data_result(send_result, &conn, "operation");
                 }
                 FlowControlOperation::WindowUpdate {
                     stream_id,
@@ -368,7 +398,7 @@ fuzz_target!(|input: WindowSizeOverflowInput| {
                     if increment > 0 {
                         let window_update = WindowUpdateFrame {
                             stream_id,
-                            window_size_increment: increment,
+                            increment,
                         };
                         let _ = conn.handle_window_update(&window_update);
                     }
