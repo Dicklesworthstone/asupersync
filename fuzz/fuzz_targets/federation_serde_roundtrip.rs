@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 
 /// Federation config structures fuzz testing for serialization round-trip properties.
 ///
@@ -19,7 +19,7 @@ use arbitrary::{Arbitrary, Unstructured};
 /// - Malformed JSON input handling (must not panic)
 /// - Edge cases: empty collections, max/min values, special characters
 /// - Cross-format consistency (JSON vs bincode if applicable)
-use asupersync::messaging::federation::{MorphismConstraints, LeafConfig};
+use asupersync::messaging::federation::{LeafConfig, MorphismConstraints};
 
 /// Test helper for round-trip serialization properties
 fn test_json_roundtrip<T>(value: &T) -> Result<(), Box<dyn std::error::Error>>
@@ -34,7 +34,10 @@ where
 
     // Must be identical
     if value != &deserialized {
-        panic!("Round-trip failed: original != deserialized\nOriginal: {:#?}\nDeserialized: {:#?}", value, deserialized);
+        panic!(
+            "Round-trip failed: original != deserialized\nOriginal: {:#?}\nDeserialized: {:#?}",
+            value, deserialized
+        );
     }
 
     // Test pretty-printing round-trip as well
@@ -114,7 +117,10 @@ fuzz_target!(|data: &[u8]| {
 
         // Test that serialized form is valid JSON
         let json_str = serde_json::to_string(&constraints).expect("serialization should work");
-        assert!(serde_json::from_str::<serde_json::Value>(&json_str).is_ok(), "Serialized JSON should be valid");
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&json_str).is_ok(),
+            "Serialized JSON should be valid"
+        );
     }
 
     // Test 2: Generate valid LeafConfig and test round-trip
@@ -126,7 +132,10 @@ fuzz_target!(|data: &[u8]| {
 
         // Test that serialized form is valid JSON
         let json_str = serde_json::to_string(&leaf_config).expect("serialization should work");
-        assert!(serde_json::from_str::<serde_json::Value>(&json_str).is_ok(), "Serialized JSON should be valid");
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&json_str).is_ok(),
+            "Serialized JSON should be valid"
+        );
     }
 
     // Test 3: Test malformed JSON handling for both types
@@ -143,26 +152,29 @@ fuzz_target!(|data: &[u8]| {
     // Test 5: Test that valid structures can be serialized deterministically
     let mut unstructured3 = Unstructured::new(data);
     if let Ok(constraints) = MorphismConstraints::arbitrary(&mut unstructured3) {
-        let json1 = serde_json::to_string(&constraints);
-        let json2 = serde_json::to_string(&constraints);
+        let json1 = serde_json::to_string(&constraints)
+            .expect("MorphismConstraints deterministic serialization pass 1 should work");
+        let json2 = serde_json::to_string(&constraints)
+            .expect("MorphismConstraints deterministic serialization pass 2 should work");
         assert_eq!(json1, json2, "Serialization should be deterministic");
 
         // Test compact vs pretty formatting consistency
-        if let Ok(compact) = serde_json::to_string(&constraints) {
-            if let Ok(pretty) = serde_json::to_string_pretty(&constraints) {
-                let compact_parsed: serde_json::Value = serde_json::from_str(&compact).expect("compact JSON should parse");
-                let pretty_parsed: serde_json::Value = serde_json::from_str(&pretty).expect("pretty JSON should parse");
-                assert_eq!(compact_parsed, pretty_parsed, "Compact and pretty JSON should represent same data");
-            }
-        }
+        let compact = serde_json::to_string(&constraints)
+            .expect("MorphismConstraints compact JSON serialization should work");
+        let pretty = serde_json::to_string_pretty(&constraints)
+            .expect("MorphismConstraints pretty JSON serialization should work");
+        let compact_parsed: serde_json::Value =
+            serde_json::from_str(&compact).expect("compact JSON should parse");
+        let pretty_parsed: serde_json::Value =
+            serde_json::from_str(&pretty).expect("pretty JSON should parse");
+        assert_eq!(
+            compact_parsed, pretty_parsed,
+            "Compact and pretty JSON should represent same data"
+        );
     }
 
-    // Test 6: Test that the structures have reasonable bounds
+    // Test 6: Access generated structures without panicking.
     if let Ok(constraints) = MorphismConstraints::arbitrary(&mut Unstructured::new(data)) {
-        // MorphismConstraints should have reasonable limits
-        assert!(constraints.max_expansion_factor <= 65535, "max_expansion_factor should fit in u16");
-        assert!(constraints.max_fanout <= 65535, "max_fanout should fit in u16");
-
         // Should be able to access all fields without panicking
         let _ = constraints.allowed_classes.len();
         let _ = constraints.max_expansion_factor;

@@ -2878,6 +2878,16 @@ test = false
 doc = false
 bench = false
 
+# br-asupersync-kepz61 — federation config serde round-trip fuzz
+# for MorphismConstraints and LeafConfig. Covers compact/pretty JSON
+# identity, malformed JSON rejection, and deterministic serialization.
+[[bin]]
+name = "federation_serde_roundtrip"
+path = "fuzz_targets/federation_serde_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
 # br-asupersync-9d9b89 — Kafka record-batch v2 decode hot path.
 # Mirrors the KIP-98 wire format (header + record-count + varint-
 # encoded records) and feeds arbitrary bytes. Targets crash classes
