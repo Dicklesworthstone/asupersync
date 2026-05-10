@@ -15,11 +15,11 @@ use libfuzzer_sys::fuzz_target;
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::codec::Encoder;
 use asupersync::http::h2::connection::FrameCodec;
-use asupersync::http::h2::error::ErrorCode;
 use asupersync::http::h2::frame::{
     FRAME_HEADER_SIZE, Frame, HeadersFrame, PingFrame, PriorityFrame, PrioritySpec, Setting,
     SettingsFrame, WindowUpdateFrame,
 };
+use core::fmt::Debug;
 
 /// HTTP/2 SETTINGS_MAX_HEADER_LIST_SIZE test sequence
 #[derive(Debug, Clone, Arbitrary)]
@@ -178,6 +178,7 @@ fn test_max_header_list_size_enforcement(test_seq: &MaxHeaderListSizeSequence) {
         }
 
         // Create HEADERS frame with potentially oversized header block
+        let _padding_hint = attempt.padding.unwrap_or(0);
         let headers_frame = create_headers_frame_with_block(
             stream_id,
             &attempt.header_block,
@@ -208,7 +209,6 @@ fn test_max_header_list_size_enforcement(test_seq: &MaxHeaderListSizeSequence) {
             }
             Err(_) => {
                 // Panic occurred during encoding - this should not happen
-                state.panic_occurred = true;
                 panic!(
                     "Panic occurred during HEADERS frame encoding with header list size {}",
                     max_header_size
@@ -382,9 +382,26 @@ fn test_interleaved_frame(
         }
     };
 
-    // Interleaved frame results don't affect main test logic
-    let _ = frame_result;
+    observe_interleaved_frame_result(frame_result, state);
     state.record_frame_processed();
+}
+
+fn observe_interleaved_frame_result<E: Debug>(
+    frame_result: Result<(), E>,
+    state: &mut HeaderListSizeState,
+) {
+    if let Err(error) = frame_result {
+        state.record_enforcement_triggered();
+        let diagnostic = format!("interleaved frame encode: {error:?}");
+        assert!(
+            !diagnostic.trim().is_empty(),
+            "interleaved frame encode failures must expose diagnostics"
+        );
+        assert!(
+            diagnostic.len() < 1024,
+            "interleaved frame encode diagnostics must stay bounded"
+        );
+    }
 }
 
 /// Create SETTINGS frame with MAX_HEADER_LIST_SIZE and additional settings
@@ -456,7 +473,7 @@ fn normalize_stream_id(stream_id: u32) -> u32 {
     let normalized = stream_id & 0x7FFFFFFF; // Clear reserved bit
     if normalized == 0 {
         1 // Default to stream 1
-    } else if normalized % 2 == 0 {
+    } else if normalized.is_multiple_of(2) {
         normalized + 1 // Make odd (client-initiated)
     } else {
         normalized
