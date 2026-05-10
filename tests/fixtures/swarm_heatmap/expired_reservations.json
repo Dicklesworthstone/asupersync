@@ -1,0 +1,31 @@
+{
+  "agent_mail": {
+    "status": "fixture",
+    "reservations": [
+      {
+        "id": 201,
+        "agent_name": "OldHarbor",
+        "path_pattern": "src/sync/**",
+        "exclusive": true,
+        "expires_ts": "2026-05-10T07:00:00Z"
+      },
+      {
+        "id": 202,
+        "agent_name": "QuietField",
+        "path_pattern": "tests/sync_contract.rs",
+        "exclusive": true,
+        "released_ts": "2026-05-10T08:00:00Z",
+        "expires_ts": "2026-05-10T09:00:00Z"
+      }
+    ],
+    "messages": []
+  },
+  "candidate_surfaces": [
+    "src/sync",
+    "tests"
+  ],
+  "dirty_tree": {
+    "status": "ok",
+    "entries": []
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "agent_mail": {
+    "status": "fixture",
+    "agents": [],
+    "messages": [],
+    "reservations": []
+  },
+  "candidate_surfaces": [
+    "fuzz/fuzz_targets",
+    "src/runtime"
+  ],
+  "dirty_tree": {
+    "status": "ok",
+    "entries": []
+  }
+}

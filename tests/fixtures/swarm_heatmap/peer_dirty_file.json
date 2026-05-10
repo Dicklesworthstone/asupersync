@@ -1,0 +1,38 @@
+{
+  "agent_mail": {
+    "status": "fixture",
+    "agents": [
+      {
+        "name": "GentleCitadel",
+        "last_active_ts": "2026-05-10T08:36:17Z"
+      }
+    ],
+    "messages": [
+      {
+        "from": "GentleCitadel",
+        "created_ts": "2026-05-10T08:36:17Z",
+        "thread_id": "asupersync-rji7n7",
+        "subject": "Starting asupersync-rji7n7 closeout verifier",
+        "body_md": "Reserved scripts/closeout_verifier.py and tests/closeout_verifier_contract.rs. Validation will use CARGO_TARGET_DIR=/tmp/rch_target_gentlecitadel_closeout_verifier."
+      }
+    ],
+    "reservations": [
+      {
+        "id": 301,
+        "agent_name": "GentleCitadel",
+        "path_pattern": "scripts/closeout_verifier.py",
+        "exclusive": true,
+        "expires_ts": "2026-05-10T09:36:17Z"
+      }
+    ]
+  },
+  "dirty_tree": {
+    "status": "ok",
+    "entries": [
+      {
+        "status": "??",
+        "path": "scripts/closeout_verifier.py"
+      }
+    ]
+  }
+}
