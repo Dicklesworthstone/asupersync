@@ -157,6 +157,21 @@ impl NotifyDropTracker {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WaiterPollObservation {
+    Pending,
+    Ready,
+}
+
+impl WaiterPollObservation {
+    fn from_poll(result: Poll<()>) -> Self {
+        match result {
+            Poll::Pending => Self::Pending,
+            Poll::Ready(()) => Self::Ready,
+        }
+    }
+}
+
 /// Tracks a Notified future with drop detection
 struct TrackedNotifiedFuture {
     future: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
@@ -249,10 +264,33 @@ fn noop_waker() -> Waker {
     unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &NOOP_WAKER_VTABLE)) }
 }
 
+fn observe_waiter_poll(waiter: &mut TrackedNotifiedFuture) -> bool {
+    let observation = WaiterPollObservation::from_poll(waiter.poll());
+
+    match observation {
+        WaiterPollObservation::Pending => {
+            assert!(
+                !waiter.is_dropped(),
+                "waiter {} reported pending after its future was dropped",
+                waiter.waiter_id
+            );
+        }
+        WaiterPollObservation::Ready => {
+            assert!(
+                waiter.is_completed() || waiter.is_dropped(),
+                "waiter {} reported ready without completion or future removal",
+                waiter.waiter_id
+            );
+        }
+    }
+
+    waiter.is_completed() || waiter.is_dropped()
+}
+
 /// Test notify_one + drop race scenarios
 fn test_notify_drop_scenario(
     config: &NotifyDropConfig,
-    tracker: &NotifyDropTracker,
+    tracker: Arc<NotifyDropTracker>,
 ) -> Result<(), String> {
     let notify = Arc::new(Notify::new());
     let mut waiters: HashMap<u8, TrackedNotifiedFuture> = HashMap::new();
@@ -261,8 +299,7 @@ fn test_notify_drop_scenario(
 
     // Create initial waiters
     for i in 0..max_waiters {
-        let waiter =
-            TrackedNotifiedFuture::new(notify.clone(), i, Arc::new(NotifyDropTracker::new()));
+        let waiter = TrackedNotifiedFuture::new(notify.clone(), i, tracker.clone());
         waiters.insert(i, waiter);
     }
 
@@ -274,14 +311,9 @@ fn test_notify_drop_scenario(
         match operation {
             NotifyDropOperation::AddWaiter { waiter_id } => {
                 let id = *waiter_id % 20; // Limit total waiters
-                if !waiters.contains_key(&id) {
-                    let waiter = TrackedNotifiedFuture::new(
-                        notify.clone(),
-                        id,
-                        Arc::new(NotifyDropTracker::new()),
-                    );
-                    waiters.insert(id, waiter);
-                }
+                waiters.entry(id).or_insert_with(|| {
+                    TrackedNotifiedFuture::new(notify.clone(), id, tracker.clone())
+                });
             }
 
             NotifyDropOperation::DropWaiter { waiter_id } => {
@@ -292,8 +324,12 @@ fn test_notify_drop_scenario(
             }
 
             NotifyDropOperation::NotifyOne => {
+                let had_waiters = !waiters.is_empty();
                 notify.notify_one();
                 tracker.record_notification();
+                if !had_waiters {
+                    tracker.record_stored_notification();
+                }
             }
 
             NotifyDropOperation::NotifyWaiters => {
@@ -307,19 +343,19 @@ fn test_notify_drop_scenario(
 
             NotifyDropOperation::PollWaiter { waiter_id } => {
                 let id = *waiter_id % 20;
-                if let Some(waiter) = waiters.get_mut(&id) {
-                    let _ = waiter.poll();
-                    if waiter.is_completed() || waiter.is_dropped() {
-                        waiters.remove(&id);
-                    }
+                let should_remove = match waiters.get_mut(&id) {
+                    Some(waiter) => observe_waiter_poll(waiter),
+                    None => false,
+                };
+                if should_remove {
+                    waiters.remove(&id);
                 }
             }
 
             NotifyDropOperation::PollAllWaiters => {
                 let mut to_remove = Vec::new();
                 for (id, waiter) in waiters.iter_mut() {
-                    let _ = waiter.poll();
-                    if waiter.is_completed() || waiter.is_dropped() {
+                    if observe_waiter_poll(waiter) {
                         to_remove.push(*id);
                     }
                 }
@@ -345,11 +381,8 @@ fn test_notify_drop_scenario(
                 for i in 0..cycle_count {
                     // Add a waiter
                     let waiter_id = (100 + i) as u8; // Use high IDs to avoid conflicts
-                    let waiter = TrackedNotifiedFuture::new(
-                        notify.clone(),
-                        waiter_id,
-                        Arc::new(NotifyDropTracker::new()),
-                    );
+                    let waiter =
+                        TrackedNotifiedFuture::new(notify.clone(), waiter_id, tracker.clone());
                     waiters.insert(waiter_id, waiter);
 
                     // Notify
@@ -386,8 +419,7 @@ fn test_notify_drop_scenario(
         // Always poll all waiters to make progress and clean up completed ones
         let mut to_remove = Vec::new();
         for (id, waiter) in waiters.iter_mut() {
-            let _ = waiter.poll();
-            if waiter.is_completed() || waiter.is_dropped() {
+            if observe_waiter_poll(waiter) {
                 to_remove.push(*id);
             }
         }
@@ -416,10 +448,10 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    let tracker = NotifyDropTracker::new();
+    let tracker = Arc::new(NotifyDropTracker::new());
 
     // Test the notify+drop scenario
-    if let Err(msg) = test_notify_drop_scenario(&config, &tracker) {
+    if let Err(msg) = test_notify_drop_scenario(&config, tracker.clone()) {
         panic!("Notify drop race scenario test failed: {}", msg);
     }
 
@@ -427,10 +459,10 @@ fuzz_target!(|data: &[u8]| {
     if config.test_concurrency {
         use std::thread;
 
-        let tracker2 = NotifyDropTracker::new();
+        let tracker2 = Arc::new(NotifyDropTracker::new());
         let config2 = config.clone();
 
-        let handle = thread::spawn(move || test_notify_drop_scenario(&config2, &tracker2));
+        let handle = thread::spawn(move || test_notify_drop_scenario(&config2, tracker2));
 
         match handle.join() {
             Ok(Ok(())) => {
