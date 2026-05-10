@@ -5,7 +5,6 @@ use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::thread;
@@ -34,6 +33,11 @@ impl TrackedWaker {
     }
 
     fn create_waker(&self) -> Waker {
+        self.tracker.record_operation(&format!(
+            "waker_created_context_{}_operation_{}",
+            self.context_id, self.operation_id
+        ));
+
         unsafe fn wake(_ptr: *const ()) {
             // Wake implementation for testing - just record that wake was called
         }
@@ -79,6 +83,7 @@ struct LockAttemptResult {
 enum LockOutcome {
     Success,
     Cancelled,
+    TimedOut,
     Poisoned,
     PolledAfterCompletion,
     Panicked,
@@ -88,7 +93,6 @@ enum LockOutcome {
 enum CancelTiming {
     BeforePoll,
     DuringPoll,
-    AfterPoll,
     NeverCancelled,
 }
 
@@ -129,18 +133,34 @@ impl LockArcCancelTracker {
     fn validate_lock_cancel_invariants(&self) {
         if let Ok(attempts) = self.lock_attempts.lock() {
             for attempt in attempts.iter() {
+                let cancel_phase = match attempt.cancel_timing {
+                    CancelTiming::BeforePoll => "before_poll",
+                    CancelTiming::DuringPoll => "during_poll",
+                    CancelTiming::NeverCancelled => "never_cancelled",
+                };
+
+                if attempt.locked_before != attempt.locked_after {
+                    self.record_operation(&format!(
+                        "lock_state_transition_{}_{}_{}_{}",
+                        attempt.operation_id,
+                        cancel_phase,
+                        attempt.locked_before,
+                        attempt.locked_after
+                    ));
+                }
+
                 // Invariant: waiter count should not increase after cancellation
-                if attempt.result == LockOutcome::Cancelled {
-                    if attempt.waiters_after > attempt.waiters_before {
-                        self.record_violation(InvariantViolation {
-                            violation_type: "waiter_leak_on_cancel".to_string(),
-                            description: format!(
-                                "Operation {}: waiters increased from {} to {} after cancellation",
-                                attempt.operation_id, attempt.waiters_before, attempt.waiters_after
-                            ),
-                            operation_id: attempt.operation_id,
-                        });
-                    }
+                if attempt.result == LockOutcome::Cancelled
+                    && attempt.waiters_after > attempt.waiters_before
+                {
+                    self.record_violation(InvariantViolation {
+                        violation_type: "waiter_leak_on_cancel".to_string(),
+                        description: format!(
+                            "Operation {}: waiters increased from {} to {} after cancellation",
+                            attempt.operation_id, attempt.waiters_before, attempt.waiters_after
+                        ),
+                        operation_id: attempt.operation_id,
+                    });
                 }
 
                 // Invariant: no panics should occur during lock_arc operations
@@ -173,20 +193,37 @@ impl LockArcCancelTracker {
         }
 
         // Check for any violations and panic if found
-        if let Ok(violations) = self.invariant_violations.lock() {
-            if !violations.is_empty() {
-                for violation in violations.iter() {
-                    self.record_operation(&format!(
-                        "VIOLATION: {} - {}",
-                        violation.violation_type, violation.description
-                    ));
-                }
-                panic!(
-                    "Mutex lock_arc cancel invariant violations detected: {} violations",
-                    violations.len()
-                );
-            }
+        let Ok(violations) = self.invariant_violations.lock() else {
+            return;
+        };
+
+        if violations.is_empty() {
+            return;
         }
+
+        for violation in violations.iter() {
+            self.record_operation(&format!(
+                "VIOLATION {}: {} - {}",
+                violation.operation_id, violation.violation_type, violation.description
+            ));
+        }
+
+        panic!(
+            "Mutex lock_arc cancel invariant violations detected: {} violations",
+            violations.len()
+        );
+    }
+}
+
+fn observe_thread_join(
+    tracker: &LockArcCancelTracker,
+    context: &str,
+    handle_index: usize,
+    handle: thread::JoinHandle<()>,
+) {
+    if handle.join().is_err() {
+        tracker.record_operation(&format!("{context}_{handle_index}_thread_panicked"));
+        panic!("mutex_lock_arc_cancel {context} worker thread {handle_index} panicked");
     }
 }
 
@@ -325,6 +362,7 @@ fn test_simple_lock_cancel(tracker: &LockArcCancelTracker) {
     let outcome = match result {
         Ok(Ok(_guard)) => LockOutcome::Success,
         Ok(Err(LockError::Cancelled)) => LockOutcome::Cancelled,
+        Ok(Err(LockError::TimedOut(_))) => LockOutcome::TimedOut,
         Ok(Err(LockError::Poisoned)) => LockOutcome::Poisoned,
         Ok(Err(LockError::PolledAfterCompletion)) => LockOutcome::PolledAfterCompletion,
         Err(_) => LockOutcome::Panicked,
@@ -394,6 +432,7 @@ fn test_concurrent_lock_cancel(
             let outcome = match result {
                 Ok(Ok(_guard)) => LockOutcome::Success,
                 Ok(Err(LockError::Cancelled)) => LockOutcome::Cancelled,
+                Ok(Err(LockError::TimedOut(_))) => LockOutcome::TimedOut,
                 Ok(Err(LockError::Poisoned)) => LockOutcome::Poisoned,
                 Ok(Err(LockError::PolledAfterCompletion)) => LockOutcome::PolledAfterCompletion,
                 Err(_) => LockOutcome::Panicked,
@@ -420,8 +459,8 @@ fn test_concurrent_lock_cancel(
     }
 
     // Wait for all threads
-    for handle in handles {
-        let _ = handle.join();
+    for (handle_index, handle) in handles.into_iter().enumerate() {
+        observe_thread_join(tracker, "concurrent_lock_cancel", handle_index, handle);
     }
 }
 
@@ -461,6 +500,7 @@ fn test_sequential_lock_cancel(tracker: &LockArcCancelTracker, attempts: u8) {
         let outcome = match result {
             Ok(Ok(_guard)) => LockOutcome::Success,
             Ok(Err(LockError::Cancelled)) => LockOutcome::Cancelled,
+            Ok(Err(LockError::TimedOut(_))) => LockOutcome::TimedOut,
             Ok(Err(LockError::Poisoned)) => LockOutcome::Poisoned,
             Ok(Err(LockError::PolledAfterCompletion)) => LockOutcome::PolledAfterCompletion,
             Err(_) => LockOutcome::Panicked,
@@ -489,16 +529,14 @@ fn test_interleaved_lock_cancel(tracker: &LockArcCancelTracker, operations: Vec<
 
     let mutex = Arc::new(Mutex::new(42u32));
     let mut contexts: HashMap<u8, Cx<cap::All>> = HashMap::new();
-    let mut operation_id = 0;
-
-    for operation in operations.iter().take(20) {
-        operation_id += 1;
+    for (operation_index, operation) in operations.iter().take(20).enumerate() {
+        let operation_id = operation_index + 1;
 
         match operation {
             Operation::StartLock { context_id } => {
                 let cx = contexts
                     .entry(*context_id)
-                    .or_insert_with(|| Cx::<cap::All>::new());
+                    .or_insert_with(Cx::<cap::All>::for_testing);
 
                 let waiters_before = mutex.waiters();
                 let locked_before = mutex.is_locked();
@@ -525,6 +563,7 @@ fn test_interleaved_lock_cancel(tracker: &LockArcCancelTracker, operations: Vec<
                 let outcome = match result {
                     Ok(Ok(_guard)) => LockOutcome::Success,
                     Ok(Err(LockError::Cancelled)) => LockOutcome::Cancelled,
+                    Ok(Err(LockError::TimedOut(_))) => LockOutcome::TimedOut,
                     Ok(Err(LockError::Poisoned)) => LockOutcome::Poisoned,
                     Ok(Err(LockError::PolledAfterCompletion)) => LockOutcome::PolledAfterCompletion,
                     Err(_) => LockOutcome::Panicked,
@@ -595,16 +634,14 @@ fn test_rapid_cancel_sequence(tracker: &LockArcCancelTracker, sequence: Vec<Rapi
 
     let mutex = Arc::new(Mutex::new(42u32));
     let mut contexts: HashMap<u8, Cx<cap::All>> = HashMap::new();
-    let mut operation_id = 0;
-
-    for op in sequence.iter().take(15) {
-        operation_id += 1;
+    for (operation_index, op) in sequence.iter().take(15).enumerate() {
+        let operation_id = operation_index + 1;
 
         match op {
             RapidOp::Lock { context_id } => {
                 let cx = contexts
                     .entry(*context_id)
-                    .or_insert_with(|| Cx::<cap::All>::new());
+                    .or_insert_with(Cx::<cap::All>::for_testing);
 
                 let waiters_before = mutex.waiters();
                 let locked_before = mutex.is_locked();
@@ -631,6 +668,7 @@ fn test_rapid_cancel_sequence(tracker: &LockArcCancelTracker, sequence: Vec<Rapi
                 let outcome = match result {
                     Ok(Ok(_guard)) => LockOutcome::Success,
                     Ok(Err(LockError::Cancelled)) => LockOutcome::Cancelled,
+                    Ok(Err(LockError::TimedOut(_))) => LockOutcome::TimedOut,
                     Ok(Err(LockError::Poisoned)) => LockOutcome::Poisoned,
                     Ok(Err(LockError::PolledAfterCompletion)) => LockOutcome::PolledAfterCompletion,
                     Err(_) => LockOutcome::Panicked,
@@ -677,7 +715,7 @@ fn test_hold_and_cancel(
     let mutex = Arc::new(Mutex::new(42u32));
 
     // First, acquire the lock and hold it
-    let holder_cx = Cx::<cap::All>::new();
+    let holder_cx = Cx::<cap::All>::for_testing();
     let guard = {
         let mutex_clone = Arc::clone(&mutex);
         let mut lock_future = Box::pin(OwnedMutexGuard::lock(mutex_clone, &holder_cx));
@@ -696,7 +734,7 @@ fn test_hold_and_cancel(
         tracker.record_operation("holder_acquired_lock");
 
         // Start a waiter that will be cancelled
-        let waiter_cx = Cx::<cap::All>::new();
+        let waiter_cx = Cx::<cap::All>::for_testing();
         let tracker_clone = tracker.clone();
         let mutex_clone = Arc::clone(&mutex);
 
@@ -708,10 +746,11 @@ fn test_hold_and_cancel(
             if cancel_delay_us > 0 {
                 thread::sleep(Duration::from_micros(cancel_delay_us.min(1000) as u64));
             }
-            waiter_cx.cancel();
+            waiter_cx.cancel_fast(CancelKind::User);
 
             let result = catch_unwind(AssertUnwindSafe(|| {
-                let mut lock_future = Box::pin(OwnedMutexGuard::lock(mutex_clone, &waiter_cx));
+                let mutex_for_lock = Arc::clone(&mutex_clone);
+                let mut lock_future = Box::pin(OwnedMutexGuard::lock(mutex_for_lock, &waiter_cx));
                 let tracked_waker = TrackedWaker::new(1, 1, tracker_clone.clone());
                 let waker = tracked_waker.create_waker();
                 let mut context = Context::from_waker(&waker);
@@ -729,6 +768,7 @@ fn test_hold_and_cancel(
             let outcome = match result {
                 Ok(Ok(_guard)) => LockOutcome::Success,
                 Ok(Err(LockError::Cancelled)) => LockOutcome::Cancelled,
+                Ok(Err(LockError::TimedOut(_))) => LockOutcome::TimedOut,
                 Ok(Err(LockError::Poisoned)) => LockOutcome::Poisoned,
                 Ok(Err(LockError::PolledAfterCompletion)) => LockOutcome::PolledAfterCompletion,
                 Err(_) => LockOutcome::Panicked,
@@ -755,7 +795,7 @@ fn test_hold_and_cancel(
         tracker.record_operation("holder_released_lock");
 
         // Wait for waiter thread
-        let _ = waiter_handle.join();
+        observe_thread_join(tracker, "hold_and_cancel_waiter", 0, waiter_handle);
     }
 }
 
@@ -785,7 +825,8 @@ fn test_multi_context_cancel(
             let locked_before = mutex_clone.is_locked();
 
             let result = catch_unwind(AssertUnwindSafe(|| {
-                let mut lock_future = Box::pin(OwnedMutexGuard::lock(mutex_clone, &cx));
+                let mutex_for_lock = Arc::clone(&mutex_clone);
+                let mut lock_future = Box::pin(OwnedMutexGuard::lock(mutex_for_lock, &cx));
                 let tracked_waker =
                     TrackedWaker::new(i as usize, i as usize + 1, tracker_clone.clone());
                 let waker = tracked_waker.create_waker();
@@ -804,6 +845,7 @@ fn test_multi_context_cancel(
             let outcome = match result {
                 Ok(Ok(_guard)) => LockOutcome::Success,
                 Ok(Err(LockError::Cancelled)) => LockOutcome::Cancelled,
+                Ok(Err(LockError::TimedOut(_))) => LockOutcome::TimedOut,
                 Ok(Err(LockError::Poisoned)) => LockOutcome::Poisoned,
                 Ok(Err(LockError::PolledAfterCompletion)) => LockOutcome::PolledAfterCompletion,
                 Err(_) => LockOutcome::Panicked,
@@ -830,7 +872,7 @@ fn test_multi_context_cancel(
     }
 
     // Wait for all threads
-    for handle in handles {
-        let _ = handle.join();
+    for (handle_index, handle) in handles.into_iter().enumerate() {
+        observe_thread_join(tracker, "multi_context_cancel", handle_index, handle);
     }
 }
