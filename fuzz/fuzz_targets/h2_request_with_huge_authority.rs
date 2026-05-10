@@ -635,15 +635,8 @@ fn test_authority_performance_invariants(
         }
     }
 
-    // Invariant: Performance should scale reasonably with input size
-    let size_factor = (authority_value.len() / 1000).max(1);
-    let reasonable_time_bound = (size_factor * 100) as u32; // 100μs per KB
-    if performance.parse_time_us > reasonable_time_bound * 10 {
-        eprintln!(
-            "WARNING: Parse time {}μs seems excessive for {} char authority (expected <{}μs)",
-            performance.parse_time_us, authority_value.len(), reasonable_time_bound
-        );
-    }
+    // Wall-clock parse time is intentionally not asserted here: fuzz execution
+    // speed depends on scheduler and host load, not just parser behavior.
 }
 
 #[cfg(test)]
@@ -965,8 +958,10 @@ fn exercise_raw_header_block(raw: Bytes, max_header_list_size: usize) {
 }
 
 fn open_connection(max_header_list_size: usize) -> Connection {
-    let mut settings = Settings::default();
-    settings.max_header_list_size = max_header_list_size as u32;
+    let settings = Settings {
+        max_header_list_size: max_header_list_size as u32,
+        ..Settings::default()
+    };
     let mut connection = Connection::server(settings);
     connection
         .process_frame(Frame::Settings(SettingsFrame::new(Vec::new())))
