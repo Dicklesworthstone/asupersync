@@ -249,7 +249,6 @@ impl TrackedWaiter {
             }
         }
     }
-
 }
 
 /// Test spurious wake scenarios
