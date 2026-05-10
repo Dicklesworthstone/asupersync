@@ -8,9 +8,9 @@ use std::thread;
 use std::time::Duration;
 
 use asupersync::channel::oneshot;
-use asupersync::channel::oneshot::{RecvError, SendError};
+use asupersync::channel::oneshot::SendError;
 use asupersync::cx::Cx;
-use asupersync::types::cap;
+use asupersync::cx::cap;
 
 #[derive(Debug, Clone)]
 struct DetachedSendTracker {
@@ -79,6 +79,8 @@ impl DetachedSendTracker {
     fn validate_detached_send_invariants(&self) {
         if let Ok(results) = self.send_results.lock() {
             for result in results.iter() {
+                let sender_type = sender_type_label(&result.sender_type);
+
                 // Core invariant: sending to detached receiver returns Disconnected error
                 if result.receiver_detached_before {
                     match &result.result {
@@ -86,8 +88,8 @@ impl DetachedSendTracker {
                             self.record_violation(InvariantViolation {
                                 violation_type: "send_success_to_detached".to_string(),
                                 description: format!(
-                                    "Operation {} succeeded when sending to detached receiver",
-                                    result.operation_id
+                                    "Operation {} ({}) succeeded when sending to detached receiver",
+                                    result.operation_id, sender_type
                                 ),
                                 operation_id: result.operation_id,
                             });
@@ -102,8 +104,8 @@ impl DetachedSendTracker {
                             self.record_violation(InvariantViolation {
                                 violation_type: "panic_on_detached_send".to_string(),
                                 description: format!(
-                                    "Operation {} panicked when sending to detached receiver",
-                                    result.operation_id
+                                    "Operation {} ({}) panicked when sending to detached receiver",
+                                    result.operation_id, sender_type
                                 ),
                                 operation_id: result.operation_id,
                             });
@@ -112,50 +114,79 @@ impl DetachedSendTracker {
                 }
 
                 // Invariant: Disconnected error should return the original value
-                if let SendOutcome::Disconnected(returned_value) = &result.result {
-                    if *returned_value != result.value_attempted {
-                        self.record_violation(InvariantViolation {
-                            violation_type: "incorrect_disconnected_value".to_string(),
-                            description: format!(
-                                "Operation {} returned {} but attempted {}",
-                                result.operation_id, returned_value, result.value_attempted
-                            ),
-                            operation_id: result.operation_id,
-                        });
-                    }
+                if let SendOutcome::Disconnected(returned_value) = &result.result
+                    && *returned_value != result.value_attempted
+                {
+                    self.record_violation(InvariantViolation {
+                        violation_type: "incorrect_disconnected_value".to_string(),
+                        description: format!(
+                            "Operation {} ({}) returned {} but attempted {}",
+                            result.operation_id,
+                            sender_type,
+                            returned_value,
+                            result.value_attempted
+                        ),
+                        operation_id: result.operation_id,
+                    });
                 }
 
                 // Invariant: Cancelled error should return the original value
-                if let SendOutcome::Cancelled(returned_value) = &result.result {
-                    if *returned_value != result.value_attempted {
-                        self.record_violation(InvariantViolation {
-                            violation_type: "incorrect_cancelled_value".to_string(),
-                            description: format!(
-                                "Operation {} cancelled returned {} but attempted {}",
-                                result.operation_id, returned_value, result.value_attempted
-                            ),
-                            operation_id: result.operation_id,
-                        });
-                    }
+                if let SendOutcome::Cancelled(returned_value) = &result.result
+                    && *returned_value != result.value_attempted
+                {
+                    self.record_violation(InvariantViolation {
+                        violation_type: "incorrect_cancelled_value".to_string(),
+                        description: format!(
+                            "Operation {} ({}) cancelled returned {} but attempted {}",
+                            result.operation_id,
+                            sender_type,
+                            returned_value,
+                            result.value_attempted
+                        ),
+                        operation_id: result.operation_id,
+                    });
                 }
             }
         }
 
         // Check for any violations and panic if found
-        if let Ok(violations) = self.invariant_violations.lock() {
-            if !violations.is_empty() {
-                for violation in violations.iter() {
-                    self.record_operation(&format!(
-                        "VIOLATION: {} - {}",
-                        violation.violation_type, violation.description
-                    ));
-                }
-                panic!(
-                    "Oneshot detached send invariant violations detected: {} violations",
-                    violations.len()
-                );
+        if let Ok(violations) = self.invariant_violations.lock()
+            && !violations.is_empty()
+        {
+            for violation in violations.iter() {
+                self.record_operation(&format!(
+                    "VIOLATION op {}: {} - {}",
+                    violation.operation_id, violation.violation_type, violation.description
+                ));
             }
+            panic!(
+                "Oneshot detached send invariant violations detected: {} violations",
+                violations.len()
+            );
         }
+    }
+}
+
+fn sender_type_label(sender_type: &SenderType) -> &'static str {
+    match sender_type {
+        SenderType::Direct => "direct",
+        SenderType::ReserveCommit => "reserve_commit",
+    }
+}
+
+fn observe_detach_join(
+    tracker: &DetachedSendTracker,
+    join_result: thread::Result<()>,
+    operation_id: usize,
+    context: &str,
+) {
+    match join_result {
+        Ok(()) => tracker.record_operation(&format!("{context}_joined")),
+        Err(_) => tracker.record_violation(InvariantViolation {
+            violation_type: "detach_thread_panic".to_string(),
+            description: format!("{context} detach thread panicked before join completed"),
+            operation_id,
+        }),
     }
 }
 
@@ -195,9 +226,9 @@ enum Operation {
 
 #[derive(Debug, Clone, Arbitrary)]
 enum DetachTiming {
-    BeforeReserve,
-    AfterReserve,
-    DuringReserve, // Concurrent
+    Before,
+    After,
+    During, // Concurrent
 }
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -259,7 +290,7 @@ fuzz_target!(|data: &[u8]| {
 fn test_simple_detach_then_send(tracker: &DetachedSendTracker, value_range: u8) {
     tracker.record_operation("test_simple_detach_then_send");
 
-    let cx = Cx::<cap::All>::new();
+    let cx = Cx::<cap::All>::for_testing();
     let (sender, receiver) = oneshot::channel::<u32>();
 
     // Detach receiver by dropping it
@@ -291,7 +322,7 @@ fn test_simple_detach_then_send(tracker: &DetachedSendTracker, value_range: u8) 
 fn test_send_then_detach(tracker: &DetachedSendTracker, value_range: u8) {
     tracker.record_operation("test_send_then_detach");
 
-    let cx = Cx::<cap::All>::new();
+    let cx = Cx::<cap::All>::for_testing();
     let (sender, receiver) = oneshot::channel::<u32>();
 
     // Send first - should succeed
@@ -323,7 +354,7 @@ fn test_send_then_detach(tracker: &DetachedSendTracker, value_range: u8) {
 fn test_concurrent_detach_send(tracker: &DetachedSendTracker, value_range: u8, delay_us: u16) {
     tracker.record_operation("test_concurrent_detach_send");
 
-    let cx = Cx::<cap::All>::new();
+    let cx = Cx::<cap::All>::for_testing();
     let (sender, receiver) = oneshot::channel::<u32>();
 
     let tracker_clone = tracker.clone();
@@ -351,7 +382,7 @@ fn test_concurrent_detach_send(tracker: &DetachedSendTracker, value_range: u8, d
     };
 
     // Wait for detach thread
-    let _ = detach_handle.join();
+    observe_detach_join(tracker, detach_handle.join(), 1, "concurrent_detach");
 
     tracker.record_send_result(SendResult {
         operation_id: 1,
@@ -373,7 +404,7 @@ fn test_multiple_detach_send(
         return;
     }
 
-    let cx = Cx::<cap::All>::new();
+    let cx = Cx::<cap::All>::for_testing();
     let (sender, receiver) = oneshot::channel::<u32>();
 
     // Detach receiver first
@@ -400,6 +431,9 @@ fn test_multiple_detach_send(
                     Ok(Ok(())) => SendOutcome::Success,
                     Ok(Err(SendError::Disconnected(returned_value))) => {
                         SendOutcome::Disconnected(returned_value)
+                    }
+                    Ok(Err(SendError::Cancelled(returned_value))) => {
+                        SendOutcome::Cancelled(returned_value)
                     }
                     Err(_) => SendOutcome::Panicked,
                 };
@@ -446,15 +480,13 @@ fn test_interleaved_operations(
 ) {
     tracker.record_operation("test_interleaved_operations");
 
-    let cx = Cx::<cap::All>::new();
+    let cx = Cx::<cap::All>::for_testing();
     let mut sender = None;
     let mut receiver = None;
     let mut receiver_detached = false;
-    let mut operation_id = 0;
-
-    for operation in operations.iter().take(20) {
+    for (operation_index, operation) in operations.iter().take(20).enumerate() {
         // Limit operations
-        operation_id += 1;
+        let operation_id = operation_index + 1;
 
         match operation {
             Operation::CreateChannel => {
@@ -556,12 +588,12 @@ fn test_reserve_detach_send(
 ) {
     tracker.record_operation("test_reserve_detach_send");
 
-    let cx = Cx::<cap::All>::new();
+    let cx = Cx::<cap::All>::for_testing();
     let (sender, receiver) = oneshot::channel::<u32>();
     let value = (value_range / 2) as u32;
 
     match detach_timing {
-        DetachTiming::BeforeReserve => {
+        DetachTiming::Before => {
             // Detach before reserve
             drop(receiver);
             tracker.record_operation("receiver_detached_before_reserve");
@@ -592,7 +624,7 @@ fn test_reserve_detach_send(
             });
         }
 
-        DetachTiming::AfterReserve => {
+        DetachTiming::After => {
             // Reserve first
             let permit_result = catch_unwind(AssertUnwindSafe(|| sender.reserve(&cx)));
 
@@ -608,6 +640,9 @@ fn test_reserve_detach_send(
                         Ok(Ok(())) => SendOutcome::Success,
                         Ok(Err(SendError::Disconnected(returned_value))) => {
                             SendOutcome::Disconnected(returned_value)
+                        }
+                        Ok(Err(SendError::Cancelled(returned_value))) => {
+                            SendOutcome::Cancelled(returned_value)
                         }
                         Err(_) => SendOutcome::Panicked,
                     };
@@ -648,7 +683,7 @@ fn test_reserve_detach_send(
             }
         }
 
-        DetachTiming::DuringReserve => {
+        DetachTiming::During => {
             // Concurrent detach during reserve
             let tracker_clone = tracker.clone();
             let detach_handle = thread::spawn(move || {
@@ -663,7 +698,7 @@ fn test_reserve_detach_send(
                 Err(oneshot::SendError::Disconnected(())) => Err(SendError::Disconnected(value)),
             }));
 
-            let _ = detach_handle.join();
+            observe_detach_join(tracker, detach_handle.join(), 1, "reserve_during_detach");
 
             let outcome = match result {
                 Ok(Ok(())) => SendOutcome::Success,
@@ -690,12 +725,10 @@ fn test_reserve_detach_send(
 fn test_rapid_sequence(tracker: &DetachedSendTracker, sequence: Vec<RapidOp>, value_range: u8) {
     tracker.record_operation("test_rapid_sequence");
 
-    let cx = Cx::<cap::All>::new();
+    let cx = Cx::<cap::All>::for_testing();
     let mut current_channel: Option<(oneshot::Sender<u32>, Option<oneshot::Receiver<u32>>)> = None;
-    let mut operation_id = 0;
-
-    for op in sequence.iter().take(15) {
-        operation_id += 1;
+    for (operation_index, op) in sequence.iter().take(15).enumerate() {
+        let operation_id = operation_index + 1;
 
         match op {
             RapidOp::Send { value } => {
@@ -730,11 +763,11 @@ fn test_rapid_sequence(tracker: &DetachedSendTracker, sequence: Vec<RapidOp>, va
             }
 
             RapidOp::Detach => {
-                if let Some((sender, receiver)) = current_channel.as_mut() {
-                    if let Some(rx) = receiver.take() {
-                        drop(rx);
-                        tracker.record_operation("rapid_detach");
-                    }
+                if let Some((_, receiver)) = current_channel.as_mut()
+                    && let Some(rx) = receiver.take()
+                {
+                    drop(rx);
+                    tracker.record_operation("rapid_detach");
                 }
             }
 
