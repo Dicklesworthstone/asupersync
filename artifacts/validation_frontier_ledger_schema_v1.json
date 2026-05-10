@@ -96,6 +96,11 @@
       "description": "Best current bead hint when known."
     },
     {
+      "name": "external_to_narrow_fuzz_target_work",
+      "type": "boolean",
+      "description": "Whether the blocker is outside the owned narrow fuzz-target or artifact slice and should be cited as external frontier debt."
+    },
+    {
       "name": "supplemental_proof_command",
       "type": "string",
       "description": "The narrower proof that still covered the local change."
@@ -114,6 +119,7 @@
       "first_failure.line",
       "error_class",
       "summary",
+      "external_to_narrow_fuzz_target_work",
       "supplemental_proof_command"
     ],
     "example": "blocked-external: intended `rch exec -- cargo test --test combinator_select_fairness_determinism_audit -- --nocapture`; stopped at `src/sync/semaphore.rs:37` (`rustc_compile_error`, unused imports) while touching `tests/combinator_select_fairness_determinism_audit.rs`; supplemental proof `rch exec -- rustfmt --edition 2024 --check tests/combinator_select_fairness_determinism_audit.rs`."
@@ -146,6 +152,7 @@
         },
         "likely_owner": "local_change",
         "likely_bead": "asupersync-cu6cfw",
+        "external_to_narrow_fuzz_target_work": false,
         "summary": "non-exhaustive patterns: `DeliverPolicy::ByStartTime(_)` not covered"
       }
     },
@@ -170,6 +177,7 @@
         },
         "likely_owner": "shared-main external blocker",
         "likely_bead": null,
+        "external_to_narrow_fuzz_target_work": true,
         "summary": "this function has too many arguments (8/7)"
       }
     },
@@ -195,6 +203,7 @@
         },
         "likely_owner": "SunnyHollow",
         "likely_bead": "asupersync-aj7lx3.1",
+        "external_to_narrow_fuzz_target_work": true,
         "summary": "exclusive reservation held by SunnyHollow until 2026-05-07T09:36:30.647793Z"
       }
     },
@@ -219,7 +228,58 @@
         },
         "likely_owner": "shared-main peer dirt",
         "likely_bead": null,
+        "external_to_narrow_fuzz_target_work": true,
         "summary": "unrelated staged paths present before commit"
+      }
+    },
+    {
+      "fixture_id": "VF-ALL-TARGETS-SCHEDULER-BUDGET-TEST-WALL",
+      "source_kind": "rustc_broad_frontier_output",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --all-targets",
+      "timestamp": "2026-05-10T07:13:20Z",
+      "touched_files": [
+        "fuzz/fuzz_targets/h2_data_frame_after_end_stream.rs"
+      ],
+      "supplemental_proof_command": "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_copperspring_h2_data_after_end_stream cargo check --manifest-path fuzz/Cargo.toml --bin h2_data_frame_after_end_stream",
+      "snippet": "error[E0599]: no function or associated item named `test_with_budget` found for struct `Cx` in the current scope\n   --> tests/scheduler_cooperative_budget_yield_audit.rs:461:22\n    |\n461 |         let cx = Cx::test_with_budget(Budget::INFINITE.with_poll_quota(0));\n    |                      ^^^^^^^^^^^^^^^^ function or associated item not found in `Cx`\n\nerror: could not compile `asupersync` (test \"scheduler_cooperative_budget_yield_audit\") due to 5 previous errors\n",
+      "expected_record": {
+        "decision": "blocked-external",
+        "error_class": "rustc_compile_error",
+        "first_failure": {
+          "crate_or_surface": "asupersync",
+          "target": "test \"scheduler_cooperative_budget_yield_audit\"",
+          "file": "tests/scheduler_cooperative_budget_yield_audit.rs",
+          "line": 461
+        },
+        "likely_owner": "shared-main external blocker",
+        "likely_bead": null,
+        "external_to_narrow_fuzz_target_work": true,
+        "summary": "no function or associated item named `test_with_budget` found for struct `Cx` in the current scope"
+      }
+    },
+    {
+      "fixture_id": "VF-ALL-TARGETS-RUNTIME-YIELD-UNSAFE-WALL",
+      "source_kind": "rustc_broad_frontier_output",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --all-targets",
+      "timestamp": "2026-05-10T07:27:22Z",
+      "touched_files": [
+        "fuzz/fuzz_targets/h2_max_concurrent_streams.rs"
+      ],
+      "supplemental_proof_command": "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_copperspring_h2_max_concurrent_streams cargo check --manifest-path fuzz/Cargo.toml --bin h2_max_concurrent_streams",
+      "snippet": "error: usage of an `unsafe` block\n   --> tests/runtime_yield_now_cooperative_fairness_audit.rs:451:26\n    |\n451 |             let pinned = unsafe { Pin::new_unchecked(&mut yfut) };\n    |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\nerror: could not compile `asupersync` (test \"runtime_yield_now_cooperative_fairness_audit\") due to 5 previous errors; 1 warning emitted\n",
+      "expected_record": {
+        "decision": "blocked-external",
+        "error_class": "rustc_compile_error",
+        "first_failure": {
+          "crate_or_surface": "asupersync",
+          "target": "test \"runtime_yield_now_cooperative_fairness_audit\"",
+          "file": "tests/runtime_yield_now_cooperative_fairness_audit.rs",
+          "line": 451
+        },
+        "likely_owner": "shared-main external blocker",
+        "likely_bead": null,
+        "external_to_narrow_fuzz_target_work": true,
+        "summary": "usage of an `unsafe` block"
       }
     }
   ],

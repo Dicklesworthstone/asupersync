@@ -26,6 +26,7 @@ struct ValidationFrontierRecord {
     first_failure: FailureSite,
     likely_owner: String,
     likely_bead: Option<String>,
+    external_to_narrow_fuzz_target_work: bool,
     supplemental_proof_command: String,
     summary: String,
 }
@@ -70,6 +71,12 @@ fn string_vec_field(value: &Value, key: &str) -> Vec<String> {
         .collect()
 }
 
+fn bool_field(value: &Value, key: &str) -> bool {
+    value[key]
+        .as_bool()
+        .unwrap_or_else(|| panic!("{key} must be a boolean"))
+}
+
 fn parse_compile_target(line: &str) -> (String, String) {
     let crate_start = line
         .find('`')
@@ -96,6 +103,7 @@ fn parse_code_snippet(
     decision: &str,
     likely_owner: &str,
     likely_bead: Option<String>,
+    external_to_narrow_fuzz_target_work: bool,
 ) -> ValidationFrontierRecord {
     let snippet = string_field(fixture, "snippet");
     let error_line = snippet
@@ -144,6 +152,7 @@ fn parse_code_snippet(
         },
         likely_owner: likely_owner.to_string(),
         likely_bead,
+        external_to_narrow_fuzz_target_work,
         supplemental_proof_command: string_field(fixture, "supplemental_proof_command"),
         summary,
     }
@@ -185,6 +194,7 @@ fn parse_reservation_conflict(fixture: &Value) -> ValidationFrontierRecord {
         },
         likely_owner: agent.clone(),
         likely_bead: fixture["likely_bead_hint"].as_str().map(str::to_string),
+        external_to_narrow_fuzz_target_work: true,
         supplemental_proof_command: string_field(fixture, "supplemental_proof_command"),
         summary: format!("exclusive reservation held by {agent} until {expires}"),
     }
@@ -211,6 +221,7 @@ fn parse_peer_dirty_index(fixture: &Value) -> ValidationFrontierRecord {
         },
         likely_owner: "shared-main peer dirt".to_string(),
         likely_bead: None,
+        external_to_narrow_fuzz_target_work: true,
         supplemental_proof_command: string_field(fixture, "supplemental_proof_command"),
         summary: "unrelated staged paths present before commit".to_string(),
     }
@@ -229,6 +240,7 @@ fn parse_fixture(fixture: &Value) -> ValidationFrontierRecord {
             fixture["expected_record"]["likely_bead"]
                 .as_str()
                 .map(str::to_string),
+            false,
         ),
         "clippy_output" => parse_code_snippet(
             fixture,
@@ -236,6 +248,15 @@ fn parse_fixture(fixture: &Value) -> ValidationFrontierRecord {
             "blocked-external",
             "shared-main external blocker",
             None,
+            true,
+        ),
+        "rustc_broad_frontier_output" => parse_code_snippet(
+            fixture,
+            "rustc_compile_error",
+            "blocked-external",
+            "shared-main external blocker",
+            None,
+            true,
         ),
         "file_reservation_conflict" => parse_reservation_conflict(fixture),
         "peer_dirty_index" => parse_peer_dirty_index(fixture),
@@ -262,6 +283,10 @@ fn expected_record(fixture: &Value) -> ValidationFrontierRecord {
         },
         likely_owner: string_field(expected, "likely_owner"),
         likely_bead: expected["likely_bead"].as_str().map(str::to_string),
+        external_to_narrow_fuzz_target_work: bool_field(
+            expected,
+            "external_to_narrow_fuzz_target_work",
+        ),
         supplemental_proof_command: string_field(fixture, "supplemental_proof_command"),
         summary: string_field(expected, "summary"),
     }
@@ -342,6 +367,7 @@ fn record_schema_lists_required_closeout_fields() {
         "first_failure.line",
         "likely_owner",
         "likely_bead",
+        "external_to_narrow_fuzz_target_work",
         "supplemental_proof_command",
         "summary",
     ] {
@@ -358,6 +384,60 @@ fn fixture_parser_matches_expected_records() {
             expected_record(fixture),
             "fixture {} should parse to expected record",
             string_field(fixture, "fixture_id")
+        );
+    }
+}
+
+#[test]
+fn recurring_all_target_blockers_are_current_and_external() {
+    let artifact = artifact();
+    let fixtures = fixtures(&artifact);
+    let required = [
+        (
+            "VF-ALL-TARGETS-SCHEDULER-BUDGET-TEST-WALL",
+            "tests/scheduler_cooperative_budget_yield_audit.rs",
+            461,
+            "no function or associated item named `test_with_budget`",
+        ),
+        (
+            "VF-ALL-TARGETS-RUNTIME-YIELD-UNSAFE-WALL",
+            "tests/runtime_yield_now_cooperative_fairness_audit.rs",
+            451,
+            "usage of an `unsafe` block",
+        ),
+    ];
+
+    for (fixture_id, file, line, summary_marker) in required {
+        let fixture = fixtures
+            .iter()
+            .find(|entry| string_field(entry, "fixture_id") == fixture_id)
+            .unwrap_or_else(|| panic!("missing recurring blocker fixture {fixture_id}"));
+        assert_eq!(
+            fixture["source_kind"].as_str(),
+            Some("rustc_broad_frontier_output")
+        );
+        assert_eq!(
+            string_field(fixture, "command"),
+            "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --all-targets"
+        );
+
+        let expected = expected_record(fixture);
+        assert_eq!(expected.decision, "blocked-external");
+        assert_eq!(expected.error_class, "rustc_compile_error");
+        assert_eq!(expected.first_failure.file, file);
+        assert_eq!(expected.first_failure.line, line);
+        assert_eq!(expected.likely_owner, "shared-main external blocker");
+        assert!(
+            expected.external_to_narrow_fuzz_target_work,
+            "{fixture_id} must be explicitly external to narrow fuzz-target work"
+        );
+        assert!(
+            expected.summary.contains(summary_marker),
+            "{fixture_id} summary should preserve observed symptom"
+        );
+        assert!(
+            string_field(fixture, "supplemental_proof_command").contains("fuzz/Cargo.toml"),
+            "{fixture_id} should preserve the narrow fuzz-target proof lane"
         );
     }
 }
