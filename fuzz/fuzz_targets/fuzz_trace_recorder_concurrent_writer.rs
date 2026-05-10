@@ -161,6 +161,109 @@ struct OverflowConfig {
     pub event_limit: u8,
 }
 
+#[derive(Debug)]
+enum WriterJoinObservation {
+    Completed { writer_id: usize },
+    InjectedPanic { writer_id: usize },
+}
+
+#[derive(Debug)]
+struct ReaderJoinObservation {
+    snapshot_count: usize,
+}
+
+fn injected_writer_panic_is_allowed(
+    config: &PanicInjectionConfig,
+    writer_id: usize,
+    events_per_writer: usize,
+) -> bool {
+    config.enabled
+        && writer_id == usize::from(config.panic_writer_index)
+        && usize::from(config.panic_after_events) < events_per_writer
+        && (usize::from(config.panic_after_events) % 100) < usize::from(config.panic_probability)
+}
+
+fn observe_writer_join(
+    writer_id: usize,
+    result: thread::Result<()>,
+    panic_config: &PanicInjectionConfig,
+    events_per_writer: usize,
+) -> WriterJoinObservation {
+    match result {
+        Ok(()) => WriterJoinObservation::Completed { writer_id },
+        Err(_) => {
+            assert!(
+                injected_writer_panic_is_allowed(panic_config, writer_id, events_per_writer),
+                "unexpected trace-recorder writer panic for writer {writer_id}",
+            );
+            WriterJoinObservation::InjectedPanic { writer_id }
+        }
+    }
+}
+
+fn observe_reader_join(result: thread::Result<usize>) -> ReaderJoinObservation {
+    match result {
+        Ok(snapshot_count) => {
+            assert!(
+                snapshot_count <= 10,
+                "reader captured more snapshots than its iteration cap"
+            );
+            ReaderJoinObservation { snapshot_count }
+        }
+        Err(_) => panic!("trace-recorder reader thread panicked"),
+    }
+}
+
+fn assert_join_observations(
+    observations: &[WriterJoinObservation],
+    expected_writers: usize,
+    reader_observation: Option<&ReaderJoinObservation>,
+    panic_config: &PanicInjectionConfig,
+) {
+    assert_eq!(
+        observations.len(),
+        expected_writers,
+        "every writer thread join must be observed"
+    );
+
+    let mut completed = 0usize;
+    let mut injected_panics = 0usize;
+    for observation in observations {
+        match observation {
+            WriterJoinObservation::Completed { writer_id } => {
+                assert!(
+                    *writer_id < expected_writers,
+                    "completed writer id out of range"
+                );
+                completed += 1;
+            }
+            WriterJoinObservation::InjectedPanic { writer_id } => {
+                assert!(
+                    *writer_id < expected_writers,
+                    "panicking writer id out of range"
+                );
+                assert!(
+                    panic_config.enabled,
+                    "writer panic observed without panic injection enabled"
+                );
+                injected_panics += 1;
+            }
+        }
+    }
+    assert_eq!(
+        completed + injected_panics,
+        expected_writers,
+        "writer join observations must account for all writers"
+    );
+
+    if let Some(reader) = reader_observation {
+        assert!(
+            reader.snapshot_count <= 10,
+            "reader observation must stay within iteration cap"
+        );
+    }
+}
+
 /// Generate deterministic task/region IDs based on index
 fn make_task_id(index: u8) -> TaskId {
     TaskId::new_for_test(index.into(), 0)
@@ -261,7 +364,7 @@ fn test_concurrent_writers_single_reader(config: &TraceRecorderConcurrentConfig)
             }
         });
 
-        handles.push(handle);
+        handles.push((writer_id, handle));
     }
 
     // Start reader if enabled
@@ -312,14 +415,25 @@ fn test_concurrent_writers_single_reader(config: &TraceRecorderConcurrentConfig)
     stop_flag.store(true, Ordering::Relaxed);
 
     // Wait for all writers (with panic handling)
-    for handle in handles {
-        let _ = handle.join(); // Ignore panics from injected panics
+    let mut writer_join_observations = Vec::with_capacity(writer_count);
+    for (writer_id, handle) in handles {
+        writer_join_observations.push(observe_writer_join(
+            writer_id,
+            handle.join(),
+            &config.panic_injection,
+            events_per_writer,
+        ));
     }
 
     // Wait for reader
-    if let Some(reader_handle) = reader_handle {
-        let _ = reader_handle.join();
-    }
+    let reader_join_observation =
+        reader_handle.map(|reader_handle| observe_reader_join(reader_handle.join()));
+    assert_join_observations(
+        &writer_join_observations,
+        writer_count,
+        reader_join_observation.as_ref(),
+        &config.panic_injection,
+    );
 
     // Test final state - avoid moving out of MutexGuard
     if let Ok(recorder) = recorder.try_lock() {
