@@ -184,10 +184,15 @@ fn test_settings_multiplicity(test_case: &SettingsMultiplicityTest) {
                     }
                 }
                 SettingsFrameResult::Rejected { reason } => {
-                    // Some frames might be rejected for valid reasons
-                    if is_valid_settings_frame(settings_frame) {
-                        eprintln!("Warning: valid SETTINGS frame rejected: {}", reason);
-                    }
+                    assert!(
+                        !reason.trim().is_empty(),
+                        "rejected SETTINGS frames should expose diagnostics"
+                    );
+                    assert!(
+                        !is_valid_settings_frame(settings_frame),
+                        "valid SETTINGS frame rejected: {}",
+                        reason
+                    );
                 }
             }
         }
