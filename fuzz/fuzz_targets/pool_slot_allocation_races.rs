@@ -372,7 +372,13 @@ impl FuzzState {
             let mut close_future = pool.close();
             let waker = noop_waker();
             let mut context = Context::from_waker(&waker);
-            let _ = Pin::new(&mut close_future).poll(&mut context);
+            assert!(
+                matches!(
+                    Pin::new(&mut close_future).poll(&mut context),
+                    Poll::Ready(())
+                ),
+                "pool close future unexpectedly pending"
+            );
         }
     }
 
