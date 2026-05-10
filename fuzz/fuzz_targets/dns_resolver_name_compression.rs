@@ -11,6 +11,7 @@ use arbitrary::{Arbitrary, Unstructured};
 use asupersync::net::dns::{Resolver, ResolverConfig};
 use futures::executor::block_on;
 use libfuzzer_sys::fuzz_target;
+use std::fmt;
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::thread;
 use std::time::Duration;
@@ -49,6 +50,91 @@ enum LookupResult {
     Txt(Vec<String>),
 }
 
+const MAX_FAKE_NAMESERVER_REQUESTS: usize = 4;
+
+#[derive(Debug, Default)]
+struct NameserverObservation {
+    request_count: usize,
+    sends: Vec<SendObservation>,
+}
+
+impl NameserverObservation {
+    fn sent_response(&self) -> bool {
+        self.sends
+            .iter()
+            .any(|send| matches!(send, SendObservation::Sent { .. }))
+    }
+
+    fn assert_consistent(&self) {
+        if self.request_count == 0 {
+            assert!(
+                self.sends.is_empty(),
+                "fake nameserver recorded sends without requests"
+            );
+        } else {
+            assert_eq!(
+                self.sends.len(),
+                self.request_count,
+                "fake nameserver must record one send outcome per request"
+            );
+        }
+
+        for send in &self.sends {
+            match send {
+                SendObservation::Sent {
+                    bytes,
+                    response_len,
+                } => {
+                    assert_eq!(
+                        *bytes, *response_len,
+                        "fake nameserver sent a partial DNS response"
+                    );
+                }
+                SendObservation::Failed(diagnostic) => {
+                    assert!(
+                        !diagnostic.is_empty(),
+                        "fake nameserver send failure should be observable"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+enum SendObservation {
+    Sent { bytes: usize, response_len: usize },
+    Failed(String),
+}
+
+#[derive(Debug)]
+struct MalformedResultObservation {
+    diagnostic: String,
+}
+
+impl MalformedResultObservation {
+    fn assert_consistent(&self) {
+        assert!(
+            !self.diagnostic.is_empty(),
+            "malformed DNS rejection should carry a diagnostic"
+        );
+    }
+}
+
+#[derive(Debug)]
+struct UnservedLookupObservation {
+    diagnostic: String,
+}
+
+impl UnservedLookupObservation {
+    fn assert_consistent(&self) {
+        assert!(
+            !self.diagnostic.is_empty(),
+            "undelivered fake nameserver lookup failure should carry a diagnostic"
+        );
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
     if data.len() > 16 * 1024 {
         return;
@@ -67,16 +153,18 @@ fn run_case(input: FuzzInput) {
         Ok(socket) => socket,
         Err(_) => return,
     };
-    if socket
-        .set_read_timeout(Some(Duration::from_millis(100)))
-        .is_err()
-    {
+    if let Err(error) = socket.set_read_timeout(Some(Duration::from_millis(100))) {
+        assert!(
+            !format!("{error:?}").is_empty(),
+            "read-timeout setup failure should be observable"
+        );
         return;
     }
-    if socket
-        .set_write_timeout(Some(Duration::from_millis(100)))
-        .is_err()
-    {
+    if let Err(error) = socket.set_write_timeout(Some(Duration::from_millis(100))) {
+        assert!(
+            !format!("{error:?}").is_empty(),
+            "write-timeout setup failure should be observable"
+        );
         return;
     }
 
@@ -87,11 +175,25 @@ fn run_case(input: FuzzInput) {
 
     let server_input = input.clone();
     let handle = thread::spawn(move || {
+        let mut observation = NameserverObservation::default();
         let mut buf = [0u8; 512];
-        if let Ok((n, peer)) = socket.recv_from(&mut buf) {
+        for _ in 0..MAX_FAKE_NAMESERVER_REQUESTS {
+            let Ok((n, peer)) = socket.recv_from(&mut buf) else {
+                break;
+            };
+            observation.request_count += 1;
             let response = build_response(&buf[..n], &server_input);
-            let _ = socket.send_to(&response, peer);
+            observation
+                .sends
+                .push(match socket.send_to(&response, peer) {
+                    Ok(bytes) => SendObservation::Sent {
+                        bytes,
+                        response_len: response.len(),
+                    },
+                    Err(error) => SendObservation::Failed(format!("{error:?}")),
+                });
         }
+        observation
     });
 
     let resolver = Resolver::with_config(ResolverConfig {
@@ -142,7 +244,14 @@ fn run_case(input: FuzzInput) {
         }
     };
 
-    let _ = handle.join();
+    let server_observation = handle
+        .join()
+        .unwrap_or_else(|_| panic!("fake DNS nameserver thread panicked"));
+    server_observation.assert_consistent();
+    if !server_observation.sent_response() {
+        observe_unserved_lookup(result).assert_consistent();
+        return;
+    }
 
     match input.scenario {
         Scenario::ValidA => match result {
@@ -190,8 +299,30 @@ fn run_case(input: FuzzInput) {
         | Scenario::CnameRdlenOverrun
         | Scenario::SrvRdlenOverrun
         | Scenario::TxtRdlenOverrun => {
-            assert!(result.is_err(), "malformed DNS packet should not resolve");
+            observe_malformed_result(result).assert_consistent();
         }
+    }
+}
+
+fn observe_malformed_result<E: fmt::Debug>(
+    result: Result<LookupResult, E>,
+) -> MalformedResultObservation {
+    match result {
+        Err(error) => MalformedResultObservation {
+            diagnostic: format!("{error:?}"),
+        },
+        Ok(lookup) => panic!("malformed DNS packet unexpectedly resolved: {lookup:?}"),
+    }
+}
+
+fn observe_unserved_lookup<E: fmt::Debug>(
+    result: Result<LookupResult, E>,
+) -> UnservedLookupObservation {
+    match result {
+        Err(error) => UnservedLookupObservation {
+            diagnostic: format!("{error:?}"),
+        },
+        Ok(lookup) => panic!("resolver succeeded without a delivered fake response: {lookup:?}"),
     }
 }
 
