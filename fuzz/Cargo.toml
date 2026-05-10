@@ -5292,6 +5292,7 @@ name = "h2_data_padding_overflow"
 path = "fuzz_targets/h2_data_padding_overflow.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_request_authority_invalid"
