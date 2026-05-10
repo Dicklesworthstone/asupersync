@@ -26,15 +26,19 @@ fuzz_target!(|data: &[u8]| {
     match lz4_flex::decompress_size_prepended(data) {
         Ok(decompressed) => {
             // Successfully decompressed - test recompression to verify integrity
-            match lz4_flex::compress_prepend_size(&decompressed) {
-                Ok(recompressed) => {
-                    // Test round-trip by decompressing again
-                    let _ = lz4_flex::decompress_size_prepended(&recompressed);
-                }
-                Err(_) => {
-                    // Compression error
-                }
-            }
+            let recompressed = lz4_flex::compress_prepend_size(&decompressed);
+            let round_trip =
+                lz4_flex::decompress_size_prepended(&recompressed).unwrap_or_else(|err| {
+                    panic!(
+                        "LZ4 prepended-size round trip failed after successful decompression: \
+                         decompressed_len={}, err={err:?}",
+                        decompressed.len()
+                    )
+                });
+            assert_eq!(
+                round_trip, decompressed,
+                "LZ4 prepended-size recompression changed decompressed bytes"
+            );
 
             // Test that decompressed size is reasonable (guard against decompression bombs)
             // The trace file parser has MAX_COMPRESSED_CHUNK_LEN = 64MB limit
@@ -70,23 +74,34 @@ fuzz_target!(|data: &[u8]| {
     // Test compression of the input data to exercise the compression path
     if data.len() <= 1024 * 1024 {
         // Reasonable size for compression testing
-        match lz4_flex::compress(data) {
-            Ok(compressed) => {
-                // Test decompression of freshly compressed data
-                let _ = lz4_flex::decompress(&compressed, data.len());
-                let _ = lz4_flex::decompress_size_prepended(
-                    &lz4_flex::compress_prepend_size(data).unwrap_or_default(),
-                );
-            }
-            Err(_) => {
-                // Compression error
-            }
-        }
+        let compressed = lz4_flex::compress(data);
+        let decompressed = lz4_flex::decompress(&compressed, data.len()).unwrap_or_else(|err| {
+            panic!(
+                "LZ4 block decompression failed after successful compression: \
+                 input_len={}, compressed_len={}, err={err:?}",
+                data.len(),
+                compressed.len()
+            )
+        });
+        assert_eq!(
+            decompressed, data,
+            "LZ4 block compression round trip changed input bytes"
+        );
 
-        // Test with prepended size
-        if let Ok(compressed_with_size) = lz4_flex::compress_prepend_size(data) {
-            let _ = lz4_flex::decompress_size_prepended(&compressed_with_size);
-        }
+        let compressed_with_size = lz4_flex::compress_prepend_size(data);
+        let decompressed_with_size = lz4_flex::decompress_size_prepended(&compressed_with_size)
+            .unwrap_or_else(|err| {
+                panic!(
+                    "LZ4 prepended-size decompression failed after successful compression: \
+                     input_len={}, compressed_len={}, err={err:?}",
+                    data.len(),
+                    compressed_with_size.len()
+                )
+            });
+        assert_eq!(
+            decompressed_with_size, data,
+            "LZ4 prepended-size compression round trip changed input bytes"
+        );
     }
 
     // Test various size prefix manipulations to catch integer overflow/underflow
