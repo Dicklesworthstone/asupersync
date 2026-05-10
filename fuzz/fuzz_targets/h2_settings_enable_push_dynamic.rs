@@ -19,25 +19,6 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
-/// HTTP/2 error codes
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ErrorCode {
-    NoError = 0x0,
-    ProtocolError = 0x1,
-    InternalError = 0x2,
-    FlowControlError = 0x3,
-    SettingsTimeout = 0x4,
-    StreamClosed = 0x5,
-    FrameSizeError = 0x6,
-    RefusedStream = 0x7,
-    Cancel = 0x8,
-    CompressionError = 0x9,
-    ConnectError = 0xa,
-    EnhanceYourCalm = 0xb,
-    InadequateSecurity = 0xc,
-    Http11Required = 0xd,
-}
-
 /// HTTP/2 connection state
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Arbitrary)]
 enum ConnectionState {
@@ -90,28 +71,6 @@ enum Setting {
 }
 
 impl Setting {
-    fn id(&self) -> u16 {
-        match self {
-            Setting::HeaderTableSize(_) => 0x1,
-            Setting::EnablePush(_) => 0x2,
-            Setting::MaxConcurrentStreams(_) => 0x3,
-            Setting::InitialWindowSize(_) => 0x4,
-            Setting::MaxFrameSize(_) => 0x5,
-            Setting::MaxHeaderListSize(_) => 0x6,
-        }
-    }
-
-    fn value(&self) -> u32 {
-        match self {
-            Setting::HeaderTableSize(v) => *v,
-            Setting::EnablePush(v) => *v,
-            Setting::MaxConcurrentStreams(v) => *v,
-            Setting::InitialWindowSize(v) => *v,
-            Setting::MaxFrameSize(v) => *v,
-            Setting::MaxHeaderListSize(v) => *v,
-        }
-    }
-
     fn is_valid(&self) -> bool {
         match self {
             Setting::EnablePush(v) => *v <= 1, // MUST be 0 or 1
@@ -135,13 +94,6 @@ struct PushPromiseFrame {
     stream_id: u32,
     promised_stream_id: u32,
     end_headers: bool,
-}
-
-/// Frame types for testing
-#[derive(Debug, Clone, Arbitrary)]
-enum Frame {
-    Settings(SettingsFrame),
-    PushPromise(PushPromiseFrame),
 }
 
 /// Test action to perform
@@ -177,8 +129,6 @@ struct MockH2Connection {
     local_settings: Settings,
     remote_settings: Settings,
     open_streams: HashMap<u32, StreamInfo>,
-    next_promised_stream_id: u32,
-    errors: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -189,11 +139,7 @@ struct StreamInfo {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StreamState {
-    Idle,
     Open,
-    HalfClosedLocal,
-    HalfClosedRemote,
-    Closed,
 }
 
 impl MockH2Connection {
@@ -210,8 +156,6 @@ impl MockH2Connection {
             local_settings: local,
             remote_settings: initial_settings,
             open_streams: HashMap::new(),
-            next_promised_stream_id: 2, // Server-initiated streams are even
-            errors: Vec::new(),
         }
     }
 
@@ -286,24 +230,27 @@ impl MockH2Connection {
         }
 
         // Additional validation
-        if frame.stream_id % 2 == 0 {
+        if frame.stream_id.is_multiple_of(2) {
             return Err("PUSH_PROMISE on server-initiated stream".into());
         }
 
-        if frame.promised_stream_id % 2 == 1 {
+        if !frame.promised_stream_id.is_multiple_of(2) {
             return Err("promised stream ID must be server-initiated".into());
         }
 
         // Check if the associated stream exists and is in valid state
         if let Some(stream_info) = self.open_streams.get(&frame.stream_id) {
             match stream_info.state {
-                StreamState::Open | StreamState::HalfClosedLocal => {
+                StreamState::Open => {
                     // Valid states for PUSH_PROMISE
                 }
-                _ => return Err("PUSH_PROMISE on stream in invalid state".into()),
             }
         } else {
             return Err("PUSH_PROMISE on unknown stream".into());
+        }
+
+        if !frame.end_headers {
+            return Err("fragmented PUSH_PROMISE headers unsupported in harness".into());
         }
 
         // Check for duplicate promised stream ID
@@ -336,7 +283,7 @@ impl MockH2Connection {
 
     /// Open a client stream (for testing PUSH_PROMISE association)
     fn open_client_stream(&mut self, stream_id: u32) -> Result<(), String> {
-        if stream_id % 2 == 0 {
+        if stream_id.is_multiple_of(2) {
             return Err("Client stream ID must be odd".into());
         }
 
@@ -354,10 +301,28 @@ impl MockH2Connection {
 
         Ok(())
     }
+}
 
-    /// Update local settings (simulates sending SETTINGS)
-    fn update_local_settings(&mut self, enable_push: bool) {
-        self.local_settings.enable_push = enable_push;
+fn open_required_client_stream(conn: &mut MockH2Connection, stream_id: u32) {
+    match conn.open_client_stream(stream_id) {
+        Ok(()) => {
+            let stream = conn
+                .open_streams
+                .get(&stream_id)
+                .unwrap_or_else(|| panic!("opened client stream {stream_id} must be tracked"));
+            assert_eq!(
+                stream.state,
+                StreamState::Open,
+                "opened client stream {stream_id} must start open"
+            );
+            assert!(
+                stream.is_client_initiated,
+                "opened client stream {stream_id} must be client-initiated"
+            );
+        }
+        Err(error) => {
+            panic!("failed to open required client stream {stream_id}: {error}");
+        }
     }
 }
 
@@ -375,7 +340,7 @@ fuzz_target!(|scenario: EnablePushScenario| {
 
     // Open a client stream for PUSH_PROMISE testing (if this is a client)
     if scenario.is_client {
-        let _ = conn.open_client_stream(1);
+        open_required_client_stream(&mut conn, 1);
     }
 
     // Process each action in the scenario
@@ -405,7 +370,7 @@ fuzz_target!(|scenario: EnablePushScenario| {
                         settings: vec![Setting::EnablePush(2)], // Invalid value
                         ack: false,
                     };
-                    if let Err(_) = conn.process_settings(&invalid_frame) {
+                    if conn.process_settings(&invalid_frame).is_err() {
                         invalid_setting_errors += 1;
                     }
                 }
@@ -413,12 +378,12 @@ fuzz_target!(|scenario: EnablePushScenario| {
                 // Process the actual settings frame
                 let result = conn.process_settings(settings_frame);
 
-                if let Err(e) = result {
-                    if e.contains("Invalid setting") {
-                        invalid_setting_errors += 1;
-                    }
-                    // Continue processing other actions
+                if let Err(e) = result
+                    && e.contains("Invalid setting")
+                {
+                    invalid_setting_errors += 1;
                 }
+                // Continue processing other actions
             }
 
             TestAction::TryPushPromise(push_frame) => {
@@ -450,6 +415,15 @@ fuzz_target!(|scenario: EnablePushScenario| {
 
     // If we had any PUSH_PROMISE attempts, validate the push enabled/disabled behavior
     if push_promise_attempts > 0 {
+        assert!(
+            push_promise_successes <= push_promise_attempts,
+            "PUSH_PROMISE successes {push_promise_successes} exceed attempts {push_promise_attempts}"
+        );
+        assert!(
+            push_promise_push_disabled_errors <= push_promise_attempts,
+            "push-disabled errors {push_promise_push_disabled_errors} exceed attempts {push_promise_attempts}"
+        );
+
         // If push is currently disabled, all recent attempts should have failed with "push not enabled"
         if !conn.is_push_enabled() {
             // We can't easily determine which attempts were made while push was disabled
