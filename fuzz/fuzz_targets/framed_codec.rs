@@ -666,9 +666,13 @@ fn test_framed_operations_lines<T>(
         match operation {
             FramedOperation::PollNext => {
                 // Test stream polling with proper error handling
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let poll_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let _ = Pin::new(&mut *framed).poll_next(&mut cx);
                 }));
+                assert!(
+                    poll_result.is_ok(),
+                    "Framed<LinesCodec> poll_next panicked for operation {operation:?}"
+                );
             }
 
             FramedOperation::Send { data } => {
@@ -719,9 +723,13 @@ fn test_framed_operations_bytes<T, U>(
         match operation {
             FramedOperation::PollNext => {
                 // Test stream polling with proper error handling
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let poll_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let _ = Pin::new(&mut *framed).poll_next(&mut cx);
                 }));
+                assert!(
+                    poll_result.is_ok(),
+                    "Framed<bytes codec> poll_next panicked for operation {operation:?}"
+                );
             }
 
             FramedOperation::Send { data } => {
