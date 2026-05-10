@@ -14,12 +14,23 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
-use asupersync::sync::{OneShotError, oneshot};
+use asupersync::{Cx, channel::oneshot};
+use futures::executor::block_on;
+use futures::task::noop_waker;
 use libfuzzer_sys::fuzz_target;
+use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+use std::task::{Context, Poll};
 use std::thread;
 use std::time::Duration;
+
+const MAX_AWAIT_ATTEMPTS: usize = 20;
+const MAX_EXTRA_POST_COMPLETION_POLLS: usize = 5;
+const MAX_RAPID_POLLS: usize = 10;
 
 #[derive(Debug, Clone, Arbitrary)]
 struct AwaitConfig {
@@ -53,350 +64,227 @@ struct AwaitSequence {
     max_awaits: u8,
 }
 
-impl AwaitSequence {
-    fn max_awaits() -> u8 {
-        20 // Keep test duration reasonable
-    }
-}
-
 /// Test execution context tracking await behavior
 #[derive(Debug)]
 struct AwaitTracker {
-    successful_awaits: AtomicUsize,
-    error_awaits: AtomicUsize,
-    panic_awaits: AtomicUsize,
-    timeout_awaits: AtomicUsize,
-    first_await_completed: AtomicUsize, // 0 = no, 1 = yes
+    fresh_successes: AtomicUsize,
+    post_completion_rejections: AtomicUsize,
+    post_completion_panics: AtomicUsize,
+    post_completion_pending: AtomicUsize,
+    join_failures: AtomicUsize,
 }
 
 impl AwaitTracker {
     fn new() -> Self {
         Self {
-            successful_awaits: AtomicUsize::new(0),
-            error_awaits: AtomicUsize::new(0),
-            panic_awaits: AtomicUsize::new(0),
-            timeout_awaits: AtomicUsize::new(0),
-            first_await_completed: AtomicUsize::new(0),
+            fresh_successes: AtomicUsize::new(0),
+            post_completion_rejections: AtomicUsize::new(0),
+            post_completion_panics: AtomicUsize::new(0),
+            post_completion_pending: AtomicUsize::new(0),
+            join_failures: AtomicUsize::new(0),
         }
     }
 
-    fn record_successful_await(&self) {
-        self.successful_awaits.fetch_add(1, Ordering::SeqCst);
-        self.first_await_completed.store(1, Ordering::SeqCst);
+    fn record_fresh_success(&self) {
+        self.fresh_successes.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn record_error_await(&self) {
-        self.error_awaits.fetch_add(1, Ordering::SeqCst);
+    fn record_post_completion_rejection(&self) {
+        self.post_completion_rejections
+            .fetch_add(1, Ordering::Relaxed);
     }
 
-    fn record_panic_await(&self) {
-        self.panic_awaits.fetch_add(1, Ordering::SeqCst);
+    fn record_post_completion_panic(&self) {
+        self.post_completion_panics.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn record_timeout_await(&self) {
-        self.timeout_awaits.fetch_add(1, Ordering::SeqCst);
+    fn record_post_completion_pending(&self) {
+        self.post_completion_pending.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn is_first_await_completed(&self) -> bool {
-        self.first_await_completed.load(Ordering::SeqCst) == 1
+    fn record_join_failure(&self) {
+        self.join_failures.fetch_add(1, Ordering::Relaxed);
     }
 
     fn check_future_contract(&self) -> Result<(), String> {
-        let successful = self.successful_awaits.load(Ordering::SeqCst);
-        let errors = self.error_awaits.load(Ordering::SeqCst);
-        let panics = self.panic_awaits.load(Ordering::SeqCst);
-        let timeouts = self.timeout_awaits.load(Ordering::SeqCst);
-
-        // Future contract: at most one successful await for a oneshot
-        if successful > 1 {
-            return Err(format!(
-                "Future contract violation: {} successful awaits on oneshot (should be ≤ 1)",
-                successful
-            ));
+        let fresh_successes = self.fresh_successes.load(Ordering::Relaxed);
+        if fresh_successes == 0 {
+            return Err("no successful baseline oneshot await was observed".to_string());
         }
 
-        // All post-completion awaits should either error, panic, or timeout (not succeed)
-        if successful == 1 {
-            let total_attempts = successful + errors + panics + timeouts;
-            let post_completion_attempts = total_attempts - 1; // Subtract the first successful one
-
-            if post_completion_attempts > 0
-                && (errors + panics + timeouts) < post_completion_attempts
-            {
-                return Err(format!(
-                    "Post-completion await behavior inconsistent: {} total attempts, \
-                     1 successful, but only {} errors + {} panics + {} timeouts = {} proper post-completion responses",
-                    total_attempts,
-                    errors,
-                    panics,
-                    timeouts,
-                    errors + panics + timeouts
-                ));
-            }
+        let join_failures = self.join_failures.load(Ordering::Relaxed);
+        if join_failures > 0 {
+            return Err(format!(
+                "concurrent post-completion probes had {join_failures} join failures"
+            ));
         }
 
         Ok(())
     }
 }
 
-/// Test poll-after-await behavior within tokio runtime
-async fn test_poll_after_await_async(sequence: &PollSequence) -> Result<(), String> {
+fn await_fresh_channel_once(
+    value: u32,
+    tracker: &AwaitTracker,
+    label: &str,
+) -> Result<u32, String> {
+    let cx = Cx::for_testing();
     let (sender, mut receiver) = oneshot::channel::<u32>();
-    let tracker = Arc::new(PollTracker::new());
-
-    // Send the value
     sender
-        .send(sequence.config.sent_value)
-        .map_err(|_| "Failed to send value")?;
+        .send_blocking(value)
+        .map_err(|err| format!("{label}: send_blocking failed: {err:?}"))?;
 
-    // Await the future to completion (this should return Ready once)
-    let received_value = match receiver.await {
-        Ok(value) => {
-            if value == sequence.config.sent_value {
-                tracker.record_ready();
-                value
-            } else {
-                return Err(format!(
-                    "Received wrong value: expected {}, got {}",
-                    sequence.config.sent_value, value
-                ));
-            }
+    match block_on(receiver.recv(&cx)) {
+        Ok(received) if received == value => {
+            tracker.record_fresh_success();
+            Ok(received)
         }
-        Err(_) => return Err("Channel error during await".to_string()),
-    };
+        Ok(received) => Err(format!("{label}: expected {value}, received {received}")),
+        Err(err) => Err(format!("{label}: recv failed before completion: {err:?}")),
+    }
+}
 
-    // Now test post-completion polling patterns using manual polling
-    for (i, pattern) in sequence.config.poll_patterns.iter().enumerate() {
-        match pattern {
-            PollPattern::Immediate => {
-                // Poll immediately after await completion
-                tracker.record_post_completion_poll();
+fn poll_completed_recv_future_once(
+    value: u32,
+    tracker: &AwaitTracker,
+    label: &str,
+) -> Result<(), String> {
+    let cx = Cx::for_testing();
+    let (sender, mut receiver) = oneshot::channel::<u32>();
+    sender
+        .send_blocking(value)
+        .map_err(|err| format!("{label}: send_blocking failed: {err:?}"))?;
 
-                // Create new receiver to poll (since original is consumed)
-                let (sender2, mut receiver2) = oneshot::channel::<u32>();
-                sender2
-                    .send(received_value)
-                    .map_err(|_| "Failed to send for retest")?;
+    let mut recv_future = Box::pin(receiver.recv(&cx));
+    let waker = noop_waker();
+    let mut task_cx = Context::from_waker(&waker);
 
-                // Consume it first
-                let _ = receiver2.await.map_err(|_| "Failed to await retest")?;
-
-                // Now try polling it again - this should return Pending or panic
-                // Test post-completion behavior using timeout approach
-                let timeout_result = tokio::time::timeout(Duration::from_millis(10), async {
-                    // Try to re-use the completed receiver - should not return Ready again
-                    std::future::pending::<()>().await;
-                    0u32
-                })
-                .await;
-
-                match result {
-                    Ok(Poll::Ready(_)) => {
-                        return Err(
-                            "Future contract violation: poll after await returned Ready again"
-                                .to_string(),
-                        );
-                    }
-                    Ok(Poll::Pending) => {
-                        tracker.record_pending();
-                    }
-                    Err(_) => {
-                        tracker.record_panic();
-                    }
-                }
-            }
-
-            PollPattern::DelayedPoll { delay_millis } => {
-                tokio::time::sleep(Duration::from_millis(*delay_millis as u64)).await;
-                tracker.record_post_completion_poll();
-
-                // Similar test with delay
-                let (sender2, mut receiver2) = oneshot::channel::<u32>();
-                sender2
-                    .send(received_value)
-                    .map_err(|_| "Failed to send for delayed test")?;
-                let _ = receiver2
-                    .await
-                    .map_err(|_| "Failed to await for delayed test")?;
-
-                // Test post-completion behavior using timeout approach
-                let timeout_result = tokio::time::timeout(Duration::from_millis(10), async {
-                    // Try to re-use the completed receiver - should not return Ready again
-                    std::future::pending::<()>().await;
-                    0u32
-                })
-                .await;
-
-                match result {
-                    Ok(Poll::Ready(_)) => {
-                        return Err("Future contract violation: delayed poll after await returned Ready again".to_string());
-                    }
-                    Ok(Poll::Pending) => {
-                        tracker.record_pending();
-                    }
-                    Err(_) => {
-                        tracker.record_panic();
-                    }
-                }
-            }
-
-            PollPattern::RapidSequence { count } => {
-                // Multiple rapid polls
-                let (sender2, mut receiver2) = oneshot::channel::<u32>();
-                sender2
-                    .send(received_value)
-                    .map_err(|_| "Failed to send for rapid test")?;
-                let _ = receiver2
-                    .await
-                    .map_err(|_| "Failed to await for rapid test")?;
-
-                for poll_idx in 0..*count.min(10) {
-                    tracker.record_post_completion_poll();
-
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        let waker = futures_task::noop_waker();
-                        let mut cx = Context::from_waker(&waker);
-                        Pin::new(&mut receiver2).poll(&mut cx)
-                    }));
-
-                    match result {
-                        Ok(Poll::Ready(_)) => {
-                            return Err(format!(
-                                "Future contract violation: rapid poll #{} after await returned Ready again",
-                                poll_idx
-                            ));
-                        }
-                        Ok(Poll::Pending) => {
-                            tracker.record_pending();
-                        }
-                        Err(_) => {
-                            tracker.record_panic();
-                            break;
-                        }
-                    }
-                }
-            }
-
-            PollPattern::AfterSenderDrop => {
-                tracker.record_post_completion_poll();
-                // Similar to immediate, since sender is already consumed
-            }
+    match recv_future.as_mut().poll(&mut task_cx) {
+        Poll::Ready(Ok(received)) if received == value => tracker.record_fresh_success(),
+        Poll::Ready(Ok(received)) => {
+            return Err(format!(
+                "{label}: first poll expected {value}, received {received}"
+            ));
+        }
+        Poll::Ready(Err(err)) => {
+            return Err(format!("{label}: first poll failed: {err:?}"));
+        }
+        Poll::Pending => {
+            return Err(format!(
+                "{label}: first poll was pending despite a pre-sent value"
+            ));
         }
     }
 
-    // Check final contract
-    tracker.check_future_contract()?;
-    Ok(())
-}
-
-/// Test double-await behavior
-async fn test_double_await_behavior(sequence: &AwaitSequence) -> Result<(), String> {
-    let (sender, receiver) = oneshot::channel::<u32>();
-    let tracker = Arc::new(AwaitTracker::new());
-
-    // Send the value
-    sender
-        .send(sequence.config.sent_value)
-        .map_err(|_| "Failed to send value")?;
-
-    // First await - this should succeed
-    let received_value = match receiver.await {
-        Ok(value) => {
-            if value == sequence.config.sent_value {
-                tracker.record_successful_await();
-                value
-            } else {
-                return Err(format!(
-                    "Received wrong value: expected {}, got {}",
-                    sequence.config.sent_value, value
-                ));
-            }
+    let second_poll = catch_unwind(AssertUnwindSafe(|| recv_future.as_mut().poll(&mut task_cx)));
+    match second_poll {
+        Ok(Poll::Ready(Ok(second_value))) => Err(format!(
+            "{label}: Future contract violation: second poll returned Ok({second_value})"
+        )),
+        Ok(Poll::Ready(Err(oneshot::RecvError::PolledAfterCompletion))) => {
+            tracker.record_post_completion_rejection();
+            Ok(())
+        }
+        Ok(Poll::Ready(Err(_))) => {
+            tracker.record_post_completion_rejection();
+            Ok(())
+        }
+        Ok(Poll::Pending) => {
+            tracker.record_post_completion_pending();
+            Ok(())
         }
         Err(_) => {
-            tracker.record_error_await();
-            return Err("Channel error during first await".to_string());
+            tracker.record_post_completion_panic();
+            Ok(())
         }
-    };
+    }
+}
 
-    // Now test what happens when we try to use the receiver again
-    // Note: In most implementations, the receiver is consumed by await,
-    // so we can't actually await it again. But let's test different patterns
-    // that represent post-completion behavior.
+/// Test double-await and post-completion poll behavior.
+fn test_double_await_behavior(sequence: &AwaitSequence) -> Result<(), String> {
+    let tracker = Arc::new(AwaitTracker::new());
 
-    for pattern in &sequence.config.await_patterns {
+    // First await on a fresh channel should succeed and preserve the value.
+    let received_value =
+        await_fresh_channel_once(sequence.config.sent_value, &tracker, "baseline")?;
+
+    let extra_polls =
+        usize::from(sequence.config.post_completion_awaits).min(MAX_EXTRA_POST_COMPLETION_POLLS);
+    for idx in 0..extra_polls {
+        let value = received_value.wrapping_add(idx as u32);
+        poll_completed_recv_future_once(value, &tracker, "extra post-completion poll")?;
+    }
+
+    let max_patterns = usize::from(sequence.max_awaits).clamp(1, MAX_AWAIT_ATTEMPTS);
+    for (pattern_idx, pattern) in sequence
+        .config
+        .await_patterns
+        .iter()
+        .take(max_patterns)
+        .enumerate()
+    {
         match pattern {
             AwaitPattern::Immediate => {
-                // Test creating a new channel and immediately trying double await
-                let (sender2, receiver2) = oneshot::channel::<u32>();
-                sender2
-                    .send(received_value)
-                    .map_err(|_| "Failed to send for immediate test")?;
-
-                // First await
-                let _val1 = receiver2
-                    .await
-                    .map_err(|_| "Failed first await in immediate test")?;
-                tracker.record_successful_await();
-
-                // Second await should not be possible since receiver is consumed
-                // This tests the ownership model rather than polling after Ready
+                poll_completed_recv_future_once(
+                    received_value.wrapping_add(pattern_idx as u32),
+                    &tracker,
+                    "immediate post-completion poll",
+                )?;
             }
 
             AwaitPattern::DelayedAwait { delay_millis } => {
-                tokio::time::sleep(Duration::from_millis(*delay_millis as u64)).await;
-
-                // Test with delay between operations
-                let (sender2, receiver2) = oneshot::channel::<u32>();
-                sender2
-                    .send(received_value)
-                    .map_err(|_| "Failed to send for delayed test")?;
-
-                let _val1 = receiver2.await.map_err(|_| "Failed delayed await")?;
-                tracker.record_successful_await();
+                thread::sleep(Duration::from_millis(u64::from(*delay_millis).min(2)));
+                poll_completed_recv_future_once(
+                    received_value.wrapping_add(pattern_idx as u32),
+                    &tracker,
+                    "delayed post-completion poll",
+                )?;
             }
 
             AwaitPattern::RapidSequence { count } => {
-                // Test rapid channel creation and consumption
-                for _i in 0..*count.min(5) {
-                    let (sender2, receiver2) = oneshot::channel::<u32>();
-                    sender2
-                        .send(received_value)
-                        .map_err(|_| "Failed to send for rapid test")?;
-
-                    let _val = receiver2.await.map_err(|_| "Failed rapid await")?;
-                    tracker.record_successful_await();
+                for rapid_idx in 0..usize::from((*count).min(MAX_RAPID_POLLS as u8)) {
+                    let value = received_value
+                        .wrapping_add(pattern_idx as u32)
+                        .wrapping_add(rapid_idx as u32);
+                    poll_completed_recv_future_once(value, &tracker, "rapid post-completion poll")?;
                 }
             }
 
             AwaitPattern::ConcurrentAwait => {
-                // Test concurrent await on separate channels
-                let handles = (0..3)
+                if !sequence.config.test_concurrency {
+                    poll_completed_recv_future_once(
+                        received_value.wrapping_add(pattern_idx as u32),
+                        &tracker,
+                        "concurrency-disabled post-completion poll",
+                    )?;
+                    continue;
+                }
+
+                let handles = (0u32..3)
                     .map(|_| {
-                        let value = received_value;
                         let tracker = Arc::clone(&tracker);
-
-                        tokio::spawn(async move {
-                            let (sender, receiver) = oneshot::channel::<u32>();
-                            sender
-                                .send(value)
-                                .map_err(|_| "Failed to send in concurrent test")?;
-
-                            let result = receiver.await;
-                            match result {
-                                Ok(_) => tracker.record_successful_await(),
-                                Err(_) => tracker.record_error_await(),
-                            }
-
-                            Ok::<(), String>(())
+                        let value = received_value.wrapping_add(pattern_idx as u32);
+                        thread::spawn(move || {
+                            poll_completed_recv_future_once(
+                                value,
+                                &tracker,
+                                "concurrent post-completion poll",
+                            )
                         })
                     })
                     .collect::<Vec<_>>();
 
                 for handle in handles {
-                    handle
-                        .await
-                        .map_err(|_| "Task join error")?
-                        .map_err(|e| format!("Concurrent await failed: {}", e))?;
+                    match handle.join() {
+                        Ok(Ok(())) => {}
+                        Ok(Err(err)) => return Err(err),
+                        Err(_) => {
+                            tracker.record_join_failure();
+                            return Err(
+                                "concurrent post-completion poll thread panicked".to_string()
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -419,15 +307,9 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    // Run the test in tokio runtime
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-
-    let result = rt.block_on(test_double_await_behavior(&sequence));
+    let result = test_double_await_behavior(&sequence);
 
     if let Err(msg) = result {
-        panic!("Future contract test failed: {}", msg);
+        panic!("Future contract test failed: {msg}");
     }
 });
