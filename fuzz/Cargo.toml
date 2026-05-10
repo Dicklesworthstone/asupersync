@@ -5241,6 +5241,7 @@ name = "h2_continuation_overflow"
 path = "fuzz_targets/h2_continuation_overflow.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_headers_frame_size_cap_concurrent"

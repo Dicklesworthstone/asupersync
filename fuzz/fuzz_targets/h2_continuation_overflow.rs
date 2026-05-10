@@ -60,7 +60,6 @@ enum HeaderOverflowError {
     HeaderBlockTooLarge,
     TooManyFrames,
     InvalidFrameSequence,
-    IncompleteHeaderBlock,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -324,15 +323,15 @@ impl MockHeaderProcessor {
         state.stats.overflow_checks += 1;
 
         // Check SETTINGS_MAX_HEADER_LIST_SIZE (RFC 7540 §6.5.2)
-        if self.policy.enforce_max_header_list_size {
-            if state.current_size > self.settings.max_header_list_size as usize {
-                return Ok(Some(HeaderProcessResult::OverflowError(
-                    HeaderOverflowError::ExceedsMaxHeaderListSize {
-                        actual: state.current_size,
-                        limit: self.settings.max_header_list_size,
-                    },
-                )));
-            }
+        if self.policy.enforce_max_header_list_size
+            && state.current_size > self.settings.max_header_list_size as usize
+        {
+            return Ok(Some(HeaderProcessResult::OverflowError(
+                HeaderOverflowError::ExceedsMaxHeaderListSize {
+                    actual: state.current_size,
+                    limit: self.settings.max_header_list_size,
+                },
+            )));
         }
 
         // Check maximum header block size (implementation limit)
@@ -358,7 +357,7 @@ impl MockHeaderProcessor {
 
         // Check if any active streams would now exceed the new limit
         let new_limit = new_settings.max_header_list_size as usize;
-        for (stream_id, state) in &self.active_streams {
+        for state in self.active_streams.values() {
             if state.current_size > new_limit {
                 // Could either close the stream or reject the setting
                 // For this test, we'll allow the setting but mark streams for closure
@@ -561,7 +560,7 @@ fuzz_target!(|data: &[u8]| {
     for (i, frame) in frames.iter().enumerate() {
         let result = processor.process_header_frame(stream_id, frame);
 
-        match result {
+        match &result {
             Ok(HeaderProcessResult::Success(state)) => {
                 // Successful completion
                 assert!(state.complete, "Success result should have complete=true");
@@ -610,11 +609,11 @@ fuzz_target!(|data: &[u8]| {
                 match error {
                     HeaderOverflowError::ExceedsMaxHeaderListSize { actual, limit } => {
                         assert!(
-                            actual > limit as usize,
+                            *actual > *limit as usize,
                             "Overflow error should have actual > limit"
                         );
                         assert_eq!(
-                            limit, max_header_list_size,
+                            *limit, max_header_list_size,
                             "Limit should match configured setting"
                         );
                     }
@@ -650,7 +649,7 @@ fuzz_target!(|data: &[u8]| {
                     }
                 }
 
-                last_result = Some(Err(error));
+                last_result = Some(result);
                 break;
             }
         }
@@ -708,6 +707,62 @@ fuzz_target!(|data: &[u8]| {
 
     let _update_result = processor.update_settings(new_settings);
     // Should handle settings changes gracefully
+    assert_eq!(
+        processor.get_settings().max_frame_size,
+        32768,
+        "Settings update should preserve the new max frame size"
+    );
+
+    let mut reset_processor = MockHeaderProcessor::new();
+    let pending_header = HeaderFrame {
+        frame_type: FrameType::Headers,
+        header_block_fragment: vec![0x44],
+        end_headers: false,
+    };
+    let reset_result = reset_processor.process_header_frame(3, &pending_header);
+    assert!(
+        matches!(reset_result, Ok(HeaderProcessResult::Pending(_))),
+        "Open header block should remain pending before reset"
+    );
+    assert!(
+        reset_processor.get_stream_state(3).is_some(),
+        "Pending header block should be tracked before reset"
+    );
+    reset_processor.reset_stream(3);
+    assert!(
+        reset_processor.get_stream_state(3).is_none(),
+        "Reset stream should clear pending header block state"
+    );
+
+    let strict_policy = HeaderProcessingPolicy {
+        allow_empty_fragments: false,
+        ..HeaderProcessingPolicy::default()
+    };
+    let mut strict_processor = MockHeaderProcessor::with_policy(strict_policy);
+    let strict_headers = HeaderFrame {
+        frame_type: FrameType::Headers,
+        header_block_fragment: vec![0x45],
+        end_headers: false,
+    };
+    let empty_continuation = HeaderFrame {
+        frame_type: FrameType::Continuation,
+        header_block_fragment: Vec::new(),
+        end_headers: true,
+    };
+    assert!(
+        matches!(
+            strict_processor.process_header_frame(5, &strict_headers),
+            Ok(HeaderProcessResult::Pending(_))
+        ),
+        "Strict policy setup should start a pending header block"
+    );
+    assert!(
+        matches!(
+            strict_processor.process_header_frame(5, &empty_continuation),
+            Ok(HeaderProcessResult::ProtocolError(_))
+        ),
+        "Strict policy should reject empty continuation fragments"
+    );
 
     // Run predefined test cases for verification
     for (test_name, limit, test_frames, expected) in generate_test_cases() {
