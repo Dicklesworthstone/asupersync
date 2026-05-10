@@ -220,10 +220,15 @@ fn test_settings_ack_timeout(test_case: &SettingsAckTimeoutTest) {
                     pending_settings.push((settings_id, Instant::now()));
                 }
                 SettingsResult::Rejected { reason } => {
-                    // Some SETTINGS might be rejected for valid reasons
-                    if !has_invalid_settings(&settings_frame.settings) {
-                        eprintln!("Warning: valid SETTINGS rejected: {}", reason);
-                    }
+                    assert!(
+                        !reason.trim().is_empty(),
+                        "rejected SETTINGS should expose diagnostics"
+                    );
+                    assert!(
+                        has_invalid_settings(&settings_frame.settings),
+                        "valid SETTINGS rejected: {}",
+                        reason
+                    );
                 }
             }
         }
