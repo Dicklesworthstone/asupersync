@@ -104,10 +104,16 @@ fn test_no_panic_splitter(input: &FrameSplitterInput) {
 
     let data = generate_splitter_data(&input.splitter_scenario, &input.config);
 
-    // Test should never panic
-    let _decode_result = std::panic::catch_unwind(|| decode_with_iteration_limit(&mut codec, data));
-
-    assert!(true, "Frame splitter handled input without panic");
+    // Test should never panic.
+    let decode_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        decode_with_iteration_limit(&mut codec, data)
+    }));
+    assert!(
+        decode_result.is_ok(),
+        "LengthDelimitedCodec decode panicked for config {:?} and scenario {:?}",
+        input.config,
+        input.splitter_scenario
+    );
 }
 
 /// Property 2: Frame boundary detection is consistent
