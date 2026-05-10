@@ -366,7 +366,6 @@ impl MockTransferEncodingAnalyzer {
         }
 
         Some(TransferEncodingAnalysisResult {
-            encoding_type: te_value.clone(),
             is_chunked: te_value.eq_ignore_ascii_case("chunked") || te_value.contains("chunked"),
         })
     }
@@ -409,10 +408,7 @@ impl MockTransferEncodingAnalyzer {
             .map_err(|_| "Invalid Content-Length")
             .ok()?;
 
-        Some(ContentLengthAnalysisResult {
-            length,
-            raw_value: cl_value.clone(),
-        })
+        Some(ContentLengthAnalysisResult { length })
     }
 
     /// Determine effective body type based on precedence rules
@@ -591,10 +587,51 @@ impl MockTransferEncodingAnalyzer {
     }
 }
 
+fn observe_precedence_analysis(result: Result<PrecedenceAnalysis, String>, context: &str) {
+    match result {
+        Ok(analysis) => {
+            assert!(
+                (0.0..=1.0).contains(&analysis.rfc_compliance_score),
+                "{context} produced out-of-range RFC compliance score: {}",
+                analysis.rfc_compliance_score
+            );
+        }
+        Err(message) => {
+            assert!(
+                !message.trim().is_empty(),
+                "{context} rejected the case without an error reason"
+            );
+        }
+    }
+}
+
+fn assert_precedence_analysis_accepted(
+    result: Result<PrecedenceAnalysis, String>,
+    context: &str,
+) -> PrecedenceAnalysis {
+    match result {
+        Ok(analysis) => analysis,
+        Err(message) => panic!("{context} unexpectedly rejected case: {message}"),
+    }
+}
+
+fn assert_precedence_analysis_rejected(
+    result: Result<PrecedenceAnalysis, String>,
+    expected_message: &str,
+    context: &str,
+) {
+    match result {
+        Ok(analysis) => panic!("{context} unexpectedly accepted case: {analysis:?}"),
+        Err(message) => assert!(
+            message.contains(expected_message),
+            "{context} rejected with unexpected reason: {message}"
+        ),
+    }
+}
+
 /// Transfer-Encoding analysis result
 #[derive(Debug)]
 struct TransferEncodingAnalysisResult {
-    encoding_type: String,
     is_chunked: bool,
 }
 
@@ -602,7 +639,6 @@ struct TransferEncodingAnalysisResult {
 #[derive(Debug)]
 struct ContentLengthAnalysisResult {
     length: u64,
-    raw_value: String,
 }
 
 /// Generate comprehensive Transfer-Encoding precedence test cases
@@ -681,8 +717,8 @@ fuzz_target!(|data: &[u8]| {
     let strict_mode = unstructured.arbitrary().unwrap_or(true);
     let analyzer = MockTransferEncodingAnalyzer::new(strict_mode);
 
-    // Run precedence analysis
-    let _ = analyzer.analyze_precedence(&test_case);
+    // Run precedence analysis and observe both accepted and rejected cases.
+    observe_precedence_analysis(analyzer.analyze_precedence(&test_case), "fuzz input");
 
     // Test specific precedence edge cases
     test_transfer_encoding_precedence_edge_cases(&test_case);
@@ -720,24 +756,24 @@ fn test_transfer_encoding_precedence_edge_cases(test_case: &TransferEncodingPrec
         },
     };
 
-    if let Ok(analysis) = analyzer.analyze_precedence(&both_headers_case) {
-        // Should detect both headers
-        assert!(analysis.transfer_encoding_detected);
-        assert!(analysis.content_length_detected);
+    let analysis = assert_precedence_analysis_accepted(
+        analyzer.analyze_precedence(&both_headers_case),
+        "TE plus Content-Length precedence edge case",
+    );
 
-        // Effective body type should be chunked (Transfer-Encoding precedence)
-        match analysis.effective_body_type {
-            EffectiveBodyType::Chunked => {
-                // Correct precedence behavior
-            }
-            EffectiveBodyType::Ambiguous => {
-                // Implementation doesn't follow RFC precedence rules
-            }
-            _ => {
-                // Unexpected behavior
-            }
-        }
-    }
+    // Should detect both headers
+    assert!(analysis.transfer_encoding_detected);
+    assert!(analysis.content_length_detected);
+
+    // Effective body type should be chunked (Transfer-Encoding precedence)
+    assert_eq!(analysis.effective_body_type, EffectiveBodyType::Chunked);
+    assert!(
+        analysis
+            .header_conflicts
+            .iter()
+            .any(|conflict| conflict.conflict_type == ConflictType::Precedence),
+        "TE plus Content-Length should record a precedence conflict"
+    );
 }
 
 /// Test duplicate header detection
@@ -764,8 +800,11 @@ fn test_duplicate_header_detection(test_case: &TransferEncodingPrecedenceTestCas
         precedence_config: test_case.precedence_config.clone(),
     };
 
-    let _ = analyzer.analyze_precedence(&duplicate_te_case);
-    // Should detect duplicate Transfer-Encoding violation
+    assert_precedence_analysis_rejected(
+        analyzer.analyze_precedence(&duplicate_te_case),
+        "Duplicate Transfer-Encoding",
+        "duplicate Transfer-Encoding edge case",
+    );
 }
 
 /// Test case sensitivity in precedence determination
@@ -792,8 +831,23 @@ fn test_case_sensitivity_precedence(test_case: &TransferEncodingPrecedenceTestCa
         precedence_config: test_case.precedence_config.clone(),
     };
 
-    let _ = analyzer.analyze_precedence(&mixed_case);
+    let analysis = assert_precedence_analysis_accepted(
+        analyzer.analyze_precedence(&mixed_case),
+        "mixed-case header precedence edge case",
+    );
+
     // Should handle case-insensitive header name matching correctly
+    assert!(analysis.transfer_encoding_detected);
+    assert!(analysis.content_length_detected);
+    let expected_body_type = if mixed_case
+        .precedence_config
+        .ignore_content_length_when_chunked
+    {
+        EffectiveBodyType::Chunked
+    } else {
+        EffectiveBodyType::Ambiguous
+    };
+    assert_eq!(analysis.effective_body_type, expected_body_type);
 }
 
 /// Test RFC compliance scoring
