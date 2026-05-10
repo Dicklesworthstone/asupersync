@@ -25,7 +25,6 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashMap;
 
 /// HTTP/1.1 chunked encoding split-buffer scenario
 #[derive(Debug, Clone, Arbitrary)]
@@ -41,11 +40,14 @@ struct ChunkedSplitScenario {
 }
 
 /// Mock chunked body decoder for testing split-buffer scenarios
+type TrailerHeaders = Vec<(String, String)>;
+type ChunkedParseOutcome = Result<Option<(Vec<u8>, TrailerHeaders)>, String>;
+
 #[derive(Debug, Clone)]
 struct MockChunkedDecoder {
     phase: ChunkPhase,
     body: Vec<u8>,
-    trailers: Vec<(String, String)>,
+    trailers: TrailerHeaders,
     max_body_size: usize,
     max_headers_size: usize,
 }
@@ -75,11 +77,8 @@ impl MockChunkedDecoder {
     /// - Ok(Some((body, trailers))) when complete
     /// - Ok(None) when more data needed
     /// - Err(error) when malformed
-    fn process_fragment(
-        &mut self,
-        fragment: &[u8],
-    ) -> Result<Option<(Vec<u8>, Vec<(String, String)>)>, String> {
-        let mut buffer = fragment.to_vec();
+    fn process_fragment(&mut self, fragment: &[u8]) -> ChunkedParseOutcome {
+        let buffer = fragment.to_vec();
         let mut pos = 0;
 
         loop {
@@ -157,6 +156,17 @@ impl MockChunkedDecoder {
                         if trailer_line.is_empty() {
                             // End of trailers, chunked body complete
                             return Ok(Some((self.body.clone(), self.trailers.clone())));
+                        }
+
+                        let used_trailer_bytes = self
+                            .trailers
+                            .iter()
+                            .map(|(name, value)| name.len().saturating_add(value.len() + 2))
+                            .sum::<usize>();
+                        if used_trailer_bytes.saturating_add(trailer_line.len())
+                            > self.max_headers_size
+                        {
+                            return Err("trailer headers too large".to_string());
                         }
 
                         if let Some(colon_pos) = trailer_line.iter().position(|&b| b == b':') {
@@ -428,7 +438,7 @@ fn test_deterministic_behavior(data: &[u8]) {
                 "Split-buffer parsing changed trailers"
             );
         }
-        (Err(e1), Err(e2)) => {
+        (Err(_), Err(_)) => {
             // Both errors - this is okay as long as they're for the same fundamental reason
             // We don't require identical error messages, just consistent failure
         }
@@ -483,6 +493,7 @@ fn validate_parse_error(error: &str, _fragment: &[u8]) {
         "invalid chunk size",
         "forbidden trailer header",
         "invalid trailer header format",
+        "trailer headers too large",
     ];
 
     let is_valid_error = valid_errors.iter().any(|&valid| error.contains(valid));
