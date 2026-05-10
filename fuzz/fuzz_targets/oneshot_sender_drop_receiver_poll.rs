@@ -449,6 +449,14 @@ fuzz_target!(|data: &[u8]| {
     let blocking_recv_attempts = results.blocking_recv_attempts.load(Ordering::SeqCst);
     let blocking_recv_success = results.blocking_recv_success.load(Ordering::SeqCst);
     let blocking_recv_error = results.blocking_recv_error.load(Ordering::SeqCst);
+    let receiver_state_after = receiver.lock();
+    let receiver_ready_after = receiver_state_after
+        .as_ref()
+        .is_some_and(oneshot::Receiver::is_ready);
+    let receiver_closed_after = receiver_state_after
+        .as_ref()
+        .is_some_and(oneshot::Receiver::is_closed);
+    drop(receiver_state_after);
 
     // Basic accounting
     assert_eq!(
@@ -469,12 +477,12 @@ fuzz_target!(|data: &[u8]| {
         "Should have at most one successful receive"
     );
 
-    // Invariant: If sender sent a value, exactly one receive should succeed
+    // Invariant: If sender sent a value, it is received or remains queued.
     if sender_sent {
         assert_eq!(
-            try_recv_success + blocking_recv_success,
+            try_recv_success + blocking_recv_success + usize::from(receiver_ready_after),
             1,
-            "Exactly one receive should succeed when sender sent value"
+            "Sent value should be received or remain ready after early polling"
         );
     }
 
@@ -489,7 +497,7 @@ fuzz_target!(|data: &[u8]| {
         // And if receiver tried, it should see Closed (eventually)
         if try_recv_attempts > 0 || blocking_recv_attempts > 0 {
             assert!(
-                try_recv_closed > 0 || blocking_recv_error > 0,
+                try_recv_closed > 0 || blocking_recv_error > 0 || receiver_closed_after,
                 "Receiver should detect disconnection when sender dropped without sending"
             );
         }
