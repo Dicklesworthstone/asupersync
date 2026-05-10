@@ -32,6 +32,11 @@ impl TrackedWaker {
     }
 
     fn create_waker(&self) -> Waker {
+        self.tracker.record_operation(&format!(
+            "create_waker_waiter_{}_storm_{}",
+            self.waiter_id, self.storm_id
+        ));
+
         unsafe fn wake(_ptr: *const ()) {
             // Wake implementation for testing - just record that wake was called
         }
@@ -122,6 +127,16 @@ impl ContentionStormTracker {
     }
 
     fn record_wakeup_event(&self, event: WakeupEvent) {
+        self.record_operation(&format!(
+            "wakeup_{:?}_waiter_{}_storm_{}_active_{}_to_{}_{:?}",
+            event.event_type,
+            event.waiter_id,
+            event.storm_id,
+            event.active_waiters_before,
+            event.active_waiters_after,
+            event.timestamp
+        ));
+
         if let Ok(mut events) = self.wakeup_events.lock() {
             events.push(event);
         }
@@ -142,6 +157,7 @@ impl ContentionStormTracker {
             if stats.total_notify_one_calls > 0 {
                 let total_activity = stats.total_waiters_awoken
                     + stats.total_notifications_stored
+                    + stats.total_notifications_consumed
                     + stats.total_waiters_cancelled;
                 if total_activity == 0 {
                     self.record_violation(InvariantViolation {
@@ -170,20 +186,51 @@ impl ContentionStormTracker {
         }
 
         // Check for any violations and panic if found
-        if let Ok(violations) = self.invariant_violations.lock() {
-            if !violations.is_empty() {
-                for violation in violations.iter() {
-                    self.record_operation(&format!(
-                        "VIOLATION: {} - {}",
-                        violation.violation_type, violation.description
-                    ));
-                }
-                panic!(
-                    "notify_one contention storm invariant violations detected: {} violations",
-                    violations.len()
-                );
+        if let Ok(violations) = self.invariant_violations.lock()
+            && !violations.is_empty()
+        {
+            for violation in violations.iter() {
+                self.record_operation(&format!(
+                    "VIOLATION storm {}: {} - {}",
+                    violation.storm_id, violation.violation_type, violation.description
+                ));
             }
+            panic!(
+                "notify_one contention storm invariant violations detected: {} violations",
+                violations.len()
+            );
         }
+    }
+}
+
+fn observe_waiter_poll(
+    tracker: &ContentionStormTracker,
+    context: &str,
+    waiter_id: usize,
+    storm_id: usize,
+    poll: Poll<()>,
+) {
+    let state = match poll {
+        Poll::Ready(()) => "ready",
+        Poll::Pending => "pending",
+    };
+    tracker.record_operation(&format!(
+        "waiter_poll_{context}_waiter_{waiter_id}_storm_{storm_id}_{state}"
+    ));
+}
+
+fn observe_thread_join(
+    tracker: &ContentionStormTracker,
+    context: &str,
+    handle_index: usize,
+    handle: thread::JoinHandle<()>,
+) {
+    if handle.join().is_err() {
+        tracker.record_violation(InvariantViolation {
+            violation_type: "worker_thread_panicked".to_string(),
+            description: format!("{context} worker thread {handle_index} panicked"),
+            storm_id: handle_index,
+        });
     }
 }
 
@@ -406,6 +453,14 @@ fn test_high_frequency_notify_storm(
                     } else {
                         // Notification was probably stored (no waiters decreased)
                         stats.total_notifications_stored += 1;
+                        tracker_clone.record_wakeup_event(WakeupEvent {
+                            waiter_id: notifier_id as usize,
+                            storm_id: notify_count,
+                            event_type: WakeupType::NotificationStored,
+                            timestamp: std::time::Instant::now(),
+                            active_waiters_before: active_before,
+                            active_waiters_after: active_after,
+                        });
                     }
                 }
 
@@ -429,8 +484,8 @@ fn test_high_frequency_notify_storm(
     running.store(0, Ordering::Release);
 
     // Wait for all threads
-    for handle in handles {
-        let _ = handle.join();
+    for (handle_index, handle) in handles.into_iter().enumerate() {
+        observe_thread_join(tracker, "high_frequency_notify", handle_index, handle);
     }
 
     tracker.record_operation("high_frequency_notify_storm_complete");
@@ -463,7 +518,13 @@ fn test_bursty_notify_storm(
             }
 
             // Poll once to register waiter
-            let _ = Pin::new(&mut waiter).poll(&mut context);
+            observe_waiter_poll(
+                &tracker_clone,
+                "bursty_register",
+                i as usize,
+                1,
+                Pin::new(&mut waiter).poll(&mut context),
+            );
 
             // Wait for notification or timeout
             thread::sleep(Duration::from_millis(burst_interval_ms.min(100) as u64 * 2));
@@ -475,10 +536,6 @@ fn test_bursty_notify_storm(
                     storm_id: 1,
                     event_type: WakeupType::WaiterAwoken,
                     timestamp: std::time::Instant::now(),
-                    stored_notifications_before: 0,
-                    stored_notifications_after: notify_clone
-                        .stored_notifications
-                        .load(Ordering::Acquire),
                     active_waiters_before: 0,
                     active_waiters_after: notify_clone.waiter_count(),
                 });
@@ -511,8 +568,8 @@ fn test_bursty_notify_storm(
     }
 
     // Wait for all threads
-    for handle in handles {
-        let _ = handle.join();
+    for (handle_index, handle) in handles.into_iter().enumerate() {
+        observe_thread_join(tracker, "bursty_notify", handle_index, handle);
     }
 
     tracker.record_operation("bursty_notify_storm_complete");
@@ -562,16 +619,22 @@ fn test_mixed_waiters_notifiers_storm(
                 }
 
                 // Poll to register
-                let _ = Pin::new(&mut waiter).poll(&mut context);
+                observe_waiter_poll(
+                    &tracker_clone,
+                    "mixed_register",
+                    i as usize,
+                    1,
+                    Pin::new(&mut waiter).poll(&mut context),
+                );
 
                 // Wait for notification
                 thread::sleep(Duration::from_millis(duration_ms.min(100) as u64));
 
                 // Check final state
-                if let Poll::Ready(()) = Pin::new(&mut waiter).poll(&mut context) {
-                    if let Ok(mut stats) = tracker_clone.delivery_stats.lock() {
-                        stats.total_waiters_awoken += 1;
-                    }
+                if let Poll::Ready(()) = Pin::new(&mut waiter).poll(&mut context)
+                    && let Ok(mut stats) = tracker_clone.delivery_stats.lock()
+                {
+                    stats.total_waiters_awoken += 1;
                 }
             }
         });
@@ -580,8 +643,8 @@ fn test_mixed_waiters_notifiers_storm(
     }
 
     // Wait for all threads
-    for handle in handles {
-        let _ = handle.join();
+    for (handle_index, handle) in handles.into_iter().enumerate() {
+        observe_thread_join(tracker, "mixed_waiters_notifiers", handle_index, handle);
     }
 
     tracker.record_operation("mixed_waiters_notifiers_storm_complete");
@@ -618,7 +681,13 @@ fn test_cancel_heavy_storm(
             }
 
             // Poll to register
-            let _ = Pin::new(&mut waiter).poll(&mut context);
+            observe_waiter_poll(
+                &tracker_clone,
+                "cancel_heavy_register",
+                i as usize,
+                1,
+                Pin::new(&mut waiter).poll(&mut context),
+            );
 
             if should_cancel && i % 2 == 0 {
                 // Cancel this waiter early
@@ -641,10 +710,10 @@ fn test_cancel_heavy_storm(
                 // Let this waiter potentially be notified
                 thread::sleep(Duration::from_millis(duration_ms.min(50) as u64));
 
-                if let Poll::Ready(()) = Pin::new(&mut waiter).poll(&mut context) {
-                    if let Ok(mut stats) = tracker_clone.delivery_stats.lock() {
-                        stats.total_waiters_awoken += 1;
-                    }
+                if let Poll::Ready(()) = Pin::new(&mut waiter).poll(&mut context)
+                    && let Ok(mut stats) = tracker_clone.delivery_stats.lock()
+                {
+                    stats.total_waiters_awoken += 1;
                 }
             }
         });
@@ -666,8 +735,8 @@ fn test_cancel_heavy_storm(
     }
 
     // Wait for all threads
-    for handle in handles {
-        let _ = handle.join();
+    for (handle_index, handle) in handles.into_iter().enumerate() {
+        observe_thread_join(tracker, "cancel_heavy", handle_index, handle);
     }
 
     tracker.record_operation("cancel_heavy_storm_complete");
@@ -731,8 +800,8 @@ fn test_storage_contention_storm(
     }
 
     // Wait for all threads
-    for handle in handles {
-        let _ = handle.join();
+    for (handle_index, handle) in handles.into_iter().enumerate() {
+        observe_thread_join(tracker, "storage_contention", handle_index, handle);
     }
 
     tracker.record_operation("storage_contention_storm_complete");
@@ -768,7 +837,13 @@ fn test_rapid_turnover_storm(
                 }
 
                 // Brief poll, then immediate destruction
-                let _ = Pin::new(&mut waiter).poll(&mut context);
+                observe_waiter_poll(
+                    &tracker_clone,
+                    "rapid_turnover_register",
+                    i as usize,
+                    cycle as usize,
+                    Pin::new(&mut waiter).poll(&mut context),
+                );
                 thread::sleep(Duration::from_micros(10));
                 drop(waiter);
 
@@ -788,8 +863,8 @@ fn test_rapid_turnover_storm(
         }
 
         // Wait for cycle to complete
-        for handle in handles {
-            let _ = handle.join();
+        for (handle_index, handle) in handles.into_iter().enumerate() {
+            observe_thread_join(tracker, "rapid_turnover", handle_index, handle);
         }
 
         tracker.record_operation(&format!("rapid_turnover_cycle_{}", cycle));
@@ -807,6 +882,7 @@ fn test_load_balance_storm(
 
     let notify = Arc::new(Notify::new());
     let mut handles = Vec::new();
+    let duration_ms = config.duration_ms.min(100);
 
     // Create balanced waiters
     for i in 0..config.waiter_threads.min(6) {
@@ -824,16 +900,22 @@ fn test_load_balance_storm(
             }
 
             // Poll to register
-            let _ = Pin::new(&mut waiter).poll(&mut context);
+            observe_waiter_poll(
+                &tracker_clone,
+                "load_balance_register",
+                i as usize,
+                1,
+                Pin::new(&mut waiter).poll(&mut context),
+            );
 
             // Wait for notification
-            thread::sleep(Duration::from_millis(config.duration_ms.min(100) as u64));
+            thread::sleep(Duration::from_millis(duration_ms as u64));
 
             // Check final state
-            if let Poll::Ready(()) = Pin::new(&mut waiter).poll(&mut context) {
-                if let Ok(mut stats) = tracker_clone.delivery_stats.lock() {
-                    stats.total_waiters_awoken += 1;
-                }
+            if let Poll::Ready(()) = Pin::new(&mut waiter).poll(&mut context)
+                && let Ok(mut stats) = tracker_clone.delivery_stats.lock()
+            {
+                stats.total_waiters_awoken += 1;
             }
         });
 
@@ -857,8 +939,8 @@ fn test_load_balance_storm(
     }
 
     // Wait for all threads
-    for handle in handles {
-        let _ = handle.join();
+    for (handle_index, handle) in handles.into_iter().enumerate() {
+        observe_thread_join(tracker, "load_balance", handle_index, handle);
     }
 
     tracker.record_operation("load_balance_storm_complete");
