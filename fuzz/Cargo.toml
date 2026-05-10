@@ -5532,6 +5532,7 @@ name = "h1_chunked_size_overflow"
 path = "fuzz_targets/h1_chunked_size_overflow.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_settings_table_size_change"

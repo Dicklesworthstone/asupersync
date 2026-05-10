@@ -1,4 +1,5 @@
 #![no_main]
+#![allow(dead_code)]
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
@@ -29,11 +30,20 @@ enum ChunkSizeStrategy {
     /// Very large but valid values
     LargeValid { magnitude: LargeMagnitude },
     /// Overflow with different hex formats
-    OverflowVariants { format: HexFormat, overflow_type: OverflowType },
+    OverflowVariants {
+        format: HexFormat,
+        overflow_type: OverflowType,
+    },
     /// Multiple chunk sizes in sequence
-    Sequential { sizes: Vec<u64>, overflow_position: usize },
+    Sequential {
+        sizes: Vec<u64>,
+        overflow_position: usize,
+    },
     /// Chunk size with extensions (overflow in size part)
-    WithExtensions { size_hex: String, extensions: String },
+    WithExtensions {
+        size_hex: String,
+        extensions: String,
+    },
 }
 
 #[derive(Arbitrary, Debug)]
@@ -130,7 +140,7 @@ enum ConnectionState {
     SlowConsumer,
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Clone, Debug)]
 struct ValidationSettings {
     /// Maximum allowed chunk size
     max_chunk_size: u64,
@@ -142,7 +152,7 @@ struct ValidationSettings {
     overflow_detection: OverflowDetection,
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Clone, Debug)]
 struct MemoryLimits {
     /// Maximum chunk size for memory safety
     max_safe_chunk_size: u32,
@@ -152,7 +162,7 @@ struct MemoryLimits {
     memory_exhaustion_protection: bool,
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Clone, Debug)]
 enum OverflowDetection {
     /// Strict overflow checking
     Strict,
@@ -230,10 +240,14 @@ enum ChunkedParsingError {
 }
 
 // RFC 9112 and practical limits
-const MAX_CHUNK_SIZE_LINE_LENGTH: usize = 4096;    // Reasonable line length limit
-const MAX_SAFE_CHUNK_SIZE: u64 = 1_073_741_824;    // 1GB reasonable limit
-const MAX_TOTAL_TRANSFER: u64 = 10_737_418_240;    // 10GB reasonable limit
-const USIZE_MAX_HEX_DIGITS: usize = if cfg!(target_pointer_width = "64") { 16 } else { 8 };
+const MAX_CHUNK_SIZE_LINE_LENGTH: usize = 4096; // Reasonable line length limit
+const MAX_SAFE_CHUNK_SIZE: u64 = 1_073_741_824; // 1GB reasonable limit
+const MAX_TOTAL_TRANSFER: u64 = 10_737_418_240; // 10GB reasonable limit
+const USIZE_MAX_HEX_DIGITS: usize = if cfg!(target_pointer_width = "64") {
+    16
+} else {
+    8
+};
 
 impl MockH1ChunkedParser {
     fn new(validation_settings: ValidationSettings) -> Self {
@@ -250,7 +264,10 @@ impl MockH1ChunkedParser {
         }
     }
 
-    fn parse_chunk_size_line(&mut self, size_line: &str) -> Result<ParsedChunk, ChunkedParsingError> {
+    fn parse_chunk_size_line(
+        &mut self,
+        size_line: &str,
+    ) -> Result<ParsedChunk, ChunkedParsingError> {
         // RFC 9112: Check line length limits
         if size_line.len() > MAX_CHUNK_SIZE_LINE_LENGTH {
             return Err(ChunkedParsingError::SizeLineTooLong {
@@ -370,7 +387,10 @@ impl MockH1ChunkedParser {
         }
 
         // If we're in strict mode, be more conservative
-        if matches!(self.validation_settings.overflow_detection, OverflowDetection::Security) {
+        if matches!(
+            self.validation_settings.overflow_detection,
+            OverflowDetection::Security
+        ) {
             // Security mode: reject anything that looks suspicious
             return trimmed_hex.len() > USIZE_MAX_HEX_DIGITS - 2;
         }
@@ -378,7 +398,11 @@ impl MockH1ChunkedParser {
         false
     }
 
-    fn detect_size_overflow(&self, hex_str: &str, parsed_value: u64) -> Result<bool, ChunkedParsingError> {
+    fn detect_size_overflow(
+        &self,
+        hex_str: &str,
+        parsed_value: u64,
+    ) -> Result<bool, ChunkedParsingError> {
         // Primary overflow detection
         let would_overflow = self.would_overflow_usize(hex_str);
 
@@ -413,7 +437,11 @@ impl MockH1ChunkedParser {
         }
 
         // Check memory limits
-        if self.validation_settings.memory_limits.memory_exhaustion_protection {
+        if self
+            .validation_settings
+            .memory_limits
+            .memory_exhaustion_protection
+        {
             if chunk_size > self.validation_settings.memory_limits.max_safe_chunk_size as u64 {
                 return Err(ChunkedParsingError::MemoryLimitExceeded {
                     requested: chunk_size,
@@ -462,24 +490,46 @@ impl MockH1ChunkedParser {
                     }
                 }
             }
-            ChunkSizeStrategy::OverflowVariants { format, overflow_type } => {
+            ChunkSizeStrategy::OverflowVariants {
+                format,
+                overflow_type,
+            } => {
                 let base_overflow = "F".repeat(USIZE_MAX_HEX_DIGITS + 2);
-                match format {
+                let formatted_overflow = match format {
                     HexFormat::Uppercase => base_overflow.to_uppercase(),
                     HexFormat::Lowercase => base_overflow.to_lowercase(),
-                    HexFormat::Mixed => {
-                        base_overflow.chars()
-                            .enumerate()
-                            .map(|(i, c)| if i % 2 == 0 { c.to_lowercase().next().unwrap() } else { c })
-                            .collect()
-                    }
+                    HexFormat::Mixed => base_overflow
+                        .chars()
+                        .enumerate()
+                        .map(|(i, c)| {
+                            if i % 2 == 0 {
+                                c.to_lowercase().next().unwrap()
+                            } else {
+                                c
+                            }
+                        })
+                        .collect(),
                     HexFormat::LeadingZeros { zero_count } => {
                         format!("{}{}", "0".repeat(*zero_count as usize), base_overflow)
                     }
                     HexFormat::NoPrefixHex => base_overflow,
+                };
+
+                match overflow_type {
+                    OverflowType::SimpleHex => formatted_overflow,
+                    OverflowType::WithExtensions => {
+                        format!("{};overflow=true", formatted_overflow)
+                    }
+                    OverflowType::Multiple => {
+                        format!("{}{}", formatted_overflow, formatted_overflow)
+                    }
+                    OverflowType::Disguised => format!("0000{}", formatted_overflow),
                 }
             }
-            ChunkSizeStrategy::Sequential { sizes, overflow_position: _ } => {
+            ChunkSizeStrategy::Sequential {
+                sizes,
+                overflow_position: _,
+            } => {
                 // Return first size for this call (multi-chunk would need sequence handling)
                 if let Some(first_size) = sizes.first() {
                     format!("{:X}", first_size)
@@ -487,9 +537,10 @@ impl MockH1ChunkedParser {
                     "0".to_string()
                 }
             }
-            ChunkSizeStrategy::WithExtensions { size_hex, extensions: _ } => {
-                size_hex.clone()
-            }
+            ChunkSizeStrategy::WithExtensions {
+                size_hex,
+                extensions: _,
+            } => size_hex.clone(),
         }
     }
 
@@ -523,13 +574,15 @@ fuzz_target!(|input: H1ChunkedOverflowInput| {
 
     // Apply test assertions based on chunk size strategy
     match input.chunk_size_strategy {
-        ChunkSizeStrategy::MaxOverflow |
-        ChunkSizeStrategy::JustOverMax { .. } => {
+        ChunkSizeStrategy::MaxOverflow | ChunkSizeStrategy::JustOverMax { .. } => {
             // These should always be rejected due to overflow
-            match parse_result {
+            match &parse_result {
                 Ok(parsed) => {
                     if !parsed.overflow_detected {
-                        panic!("Overflow chunk size should be detected: {}", chunk_line.trim());
+                        panic!(
+                            "Overflow chunk size should be detected: {}",
+                            chunk_line.trim()
+                        );
                     }
                     // In lenient mode, might be parsed but flagged
                     assert_eq!(parsed.validation_result, ChunkValidation::SizeOverflow);
@@ -547,15 +600,15 @@ fuzz_target!(|input: H1ChunkedOverflowInput| {
         }
         ChunkSizeStrategy::ExactlyMax => {
             // Exactly usize::MAX might be accepted or rejected depending on implementation
-            match parse_result {
+            match &parse_result {
                 Ok(parsed) => {
                     // If accepted, should not be flagged as overflow
                     assert_ne!(parsed.validation_result, ChunkValidation::SizeOverflow);
                     assert_eq!(parsed.size, usize::MAX as u64);
                 }
-                Err(ChunkedParsingError::ChunkSizeOverflow { .. }) |
-                Err(ChunkedParsingError::ChunkSizeTooBig { .. }) |
-                Err(ChunkedParsingError::MemoryLimitExceeded { .. }) => {
+                Err(ChunkedParsingError::ChunkSizeOverflow { .. })
+                | Err(ChunkedParsingError::ChunkSizeTooBig { .. })
+                | Err(ChunkedParsingError::MemoryLimitExceeded { .. }) => {
                     // Also acceptable to reject usize::MAX for safety
                 }
                 Err(error) => {
@@ -563,20 +616,28 @@ fuzz_target!(|input: H1ChunkedOverflowInput| {
                 }
             }
         }
-        ChunkSizeStrategy::JustBelowMax { .. } |
-        ChunkSizeStrategy::LargeValid { .. } => {
+        ChunkSizeStrategy::JustBelowMax { .. } | ChunkSizeStrategy::LargeValid { .. } => {
             // These should be accepted unless they exceed configured limits
-            match parse_result {
+            match &parse_result {
                 Ok(parsed) => {
-                    assert!(!parsed.overflow_detected, "Valid large size should not be flagged as overflow");
-                    assert!(parsed.size < usize::MAX as u64, "Size should be below usize::MAX");
+                    assert!(
+                        !parsed.overflow_detected,
+                        "Valid large size should not be flagged as overflow"
+                    );
+                    assert!(
+                        parsed.size < usize::MAX as u64,
+                        "Size should be below usize::MAX"
+                    );
                 }
-                Err(ChunkedParsingError::ChunkSizeTooBig { .. }) |
-                Err(ChunkedParsingError::MemoryLimitExceeded { .. }) => {
+                Err(ChunkedParsingError::ChunkSizeTooBig { .. })
+                | Err(ChunkedParsingError::MemoryLimitExceeded { .. }) => {
                     // Acceptable if exceeds configured policy limits
                 }
                 Err(ChunkedParsingError::ChunkSizeOverflow { .. }) => {
-                    panic!("Valid large size should not be flagged as overflow: {}", chunk_line.trim());
+                    panic!(
+                        "Valid large size should not be flagged as overflow: {}",
+                        chunk_line.trim()
+                    );
                 }
                 Err(_) => {
                     // Other errors may occur due to malformed input
@@ -585,10 +646,13 @@ fuzz_target!(|input: H1ChunkedOverflowInput| {
         }
         _ => {
             // Other strategies: verify basic overflow detection behavior
-            match parse_result {
+            match &parse_result {
                 Ok(parsed) => {
                     // If parsed successfully, size should be reasonable
-                    assert!(parsed.size <= usize::MAX as u64, "Parsed size should not exceed usize::MAX");
+                    assert!(
+                        parsed.size <= usize::MAX as u64,
+                        "Parsed size should not exceed usize::MAX"
+                    );
                 }
                 Err(_) => {
                     // Rejection is acceptable for various reasons
@@ -612,11 +676,15 @@ fn test_chunked_overflow_invariants(
     if size_hex.len() > USIZE_MAX_HEX_DIGITS + 2 {
         match result {
             Ok(parsed) => {
-                assert!(parsed.overflow_detected || parsed.validation_result == ChunkValidation::SizeOverflow,
-                    "Very long hex should be flagged as overflow: {}", size_hex);
+                assert!(
+                    parsed.overflow_detected
+                        || parsed.validation_result == ChunkValidation::SizeOverflow,
+                    "Very long hex should be flagged as overflow: {}",
+                    size_hex
+                );
             }
-            Err(ChunkedParsingError::ChunkSizeOverflow { .. }) |
-            Err(ChunkedParsingError::SizeLineTooLong { .. }) => {
+            Err(ChunkedParsingError::ChunkSizeOverflow { .. })
+            | Err(ChunkedParsingError::SizeLineTooLong { .. }) => {
                 // Expected: overflow or line length rejection
             }
             Err(_) => {
@@ -646,7 +714,10 @@ fn test_chunked_overflow_invariants(
     }
 
     // Invariant: Security mode should be most restrictive
-    if matches!(input.validation_settings.overflow_detection, OverflowDetection::Security) {
+    if matches!(
+        input.validation_settings.overflow_detection,
+        OverflowDetection::Security
+    ) {
         let trimmed_hex = size_hex.trim_start_matches('0');
         if trimmed_hex.len() > USIZE_MAX_HEX_DIGITS - 2 {
             match result {
@@ -665,18 +736,24 @@ fn test_chunked_overflow_invariants(
         assert!(
             parsed.size <= usize::MAX as u64,
             "Parsed chunk size {} should not exceed usize::MAX {}",
-            parsed.size, usize::MAX
+            parsed.size,
+            usize::MAX
         );
     }
 
     // Invariant: Memory limits should be enforced
-    if input.validation_settings.memory_limits.memory_exhaustion_protection {
-        if let Ok(parsed) = result {
-            if parsed.size > input.validation_settings.memory_limits.max_safe_chunk_size as u64 {
-                assert_eq!(parsed.validation_result, ChunkValidation::MemoryLimit,
-                    "Large chunk should be flagged as memory limit violation");
-            }
-        }
+    if input
+        .validation_settings
+        .memory_limits
+        .memory_exhaustion_protection
+        && let Ok(parsed) = result
+        && parsed.size > input.validation_settings.memory_limits.max_safe_chunk_size as u64
+    {
+        assert_eq!(
+            parsed.validation_result,
+            ChunkValidation::MemoryLimit,
+            "Large chunk should be flagged as memory limit violation"
+        );
     }
 
     // Invariant: Line length limits should be enforced
@@ -698,9 +775,11 @@ fn test_chunked_overflow_invariants(
         if significant_length > USIZE_MAX_HEX_DIGITS {
             match result {
                 Ok(parsed) => {
-                    assert!(parsed.overflow_detected,
+                    assert!(
+                        parsed.overflow_detected,
                         "Leading zeros should not hide overflow: original={}, trimmed={}",
-                        size_hex, size_without_leading_zeros);
+                        size_hex, size_without_leading_zeros
+                    );
                 }
                 Err(ChunkedParsingError::ChunkSizeOverflow { .. }) => {
                     // Expected: overflow detection despite leading zeros
@@ -751,7 +830,10 @@ mod tests {
         let overflow_hex = format!("{}\r\n", "F".repeat(USIZE_MAX_HEX_DIGITS + 4));
         let result = parser.parse_chunk_size_line(&overflow_hex);
 
-        assert!(matches!(result, Err(ChunkedParsingError::ChunkSizeOverflow { .. })));
+        assert!(matches!(
+            result,
+            Err(ChunkedParsingError::ChunkSizeOverflow { .. })
+        ));
     }
 
     #[test]
@@ -767,8 +849,8 @@ mod tests {
                 assert_eq!(parsed.size, usize::MAX as u64);
                 assert!(!parsed.overflow_detected);
             }
-            Err(ChunkedParsingError::ChunkSizeTooBig { .. }) |
-            Err(ChunkedParsingError::MemoryLimitExceeded { .. }) => {
+            Err(ChunkedParsingError::ChunkSizeTooBig { .. })
+            | Err(ChunkedParsingError::MemoryLimitExceeded { .. }) => {
                 // Also acceptable to reject for safety
             }
             Err(e) => panic!("Unexpected error for usize::MAX: {:?}", e),
@@ -783,7 +865,10 @@ mod tests {
         let hex_with_zeros = format!("0000{}\r\n", "F".repeat(USIZE_MAX_HEX_DIGITS + 2));
         let result = parser.parse_chunk_size_line(&hex_with_zeros);
 
-        assert!(matches!(result, Err(ChunkedParsingError::ChunkSizeOverflow { .. })));
+        assert!(matches!(
+            result,
+            Err(ChunkedParsingError::ChunkSizeOverflow { .. })
+        ));
     }
 
     #[test]
@@ -791,7 +876,10 @@ mod tests {
         let mut parser = MockH1ChunkedParser::new(default_validation_settings());
 
         let result = parser.parse_chunk_size_line("1A3G\r\n"); // G is not valid hex
-        assert!(matches!(result, Err(ChunkedParsingError::InvalidHexFormat { .. })));
+        assert!(matches!(
+            result,
+            Err(ChunkedParsingError::InvalidHexFormat { .. })
+        ));
     }
 
     #[test]
@@ -826,7 +914,10 @@ mod tests {
         let long_line = format!("{}\r\n", "F".repeat(MAX_CHUNK_SIZE_LINE_LENGTH + 100));
         let result = parser.parse_chunk_size_line(&long_line);
 
-        assert!(matches!(result, Err(ChunkedParsingError::SizeLineTooLong { .. })));
+        assert!(matches!(
+            result,
+            Err(ChunkedParsingError::SizeLineTooLong { .. })
+        ));
     }
 
     #[test]
@@ -837,7 +928,10 @@ mod tests {
         let mut parser = MockH1ChunkedParser::new(settings);
 
         let result = parser.parse_chunk_size_line("7D0\r\n"); // 2000 in hex
-        assert!(matches!(result, Err(ChunkedParsingError::MemoryLimitExceeded { .. })));
+        assert!(matches!(
+            result,
+            Err(ChunkedParsingError::MemoryLimitExceeded { .. })
+        ));
     }
 
     #[test]
@@ -862,19 +956,18 @@ mod tests {
     #[test]
     fn test_chunk_size_generation_strategies() {
         // Test that generation strategies produce expected patterns
-        let max_overflow = MockH1ChunkedParser::generate_chunk_size_hex(
-            &ChunkSizeStrategy::MaxOverflow
-        );
+        let max_overflow =
+            MockH1ChunkedParser::generate_chunk_size_hex(&ChunkSizeStrategy::MaxOverflow);
         assert!(max_overflow.len() > USIZE_MAX_HEX_DIGITS);
 
-        let exactly_max = MockH1ChunkedParser::generate_chunk_size_hex(
-            &ChunkSizeStrategy::ExactlyMax
-        );
+        let exactly_max =
+            MockH1ChunkedParser::generate_chunk_size_hex(&ChunkSizeStrategy::ExactlyMax);
         assert_eq!(exactly_max, format!("{:X}", usize::MAX));
 
-        let just_below = MockH1ChunkedParser::generate_chunk_size_hex(
-            &ChunkSizeStrategy::JustBelowMax { reduction: 1 }
-        );
+        let just_below =
+            MockH1ChunkedParser::generate_chunk_size_hex(&ChunkSizeStrategy::JustBelowMax {
+                reduction: 1,
+            });
         let expected_below = format!("{:X}", usize::MAX - 1);
         assert_eq!(just_below, expected_below);
     }
