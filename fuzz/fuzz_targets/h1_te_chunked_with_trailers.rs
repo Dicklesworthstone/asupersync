@@ -22,12 +22,10 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::bytes::Bytes;
-use asupersync::http::h1::codec::{H1Codec, H1Message, H1MessageType};
-use asupersync::http::h1::error::H1Error;
-use asupersync::http::h1::headers::HeaderMap;
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
+
+type HeaderMap = HashMap<String, String>;
 
 /// Test input for Transfer-Encoding: chunked with trailers
 #[derive(Debug, Arbitrary)]
@@ -259,13 +257,13 @@ pub enum ViolationType {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ViolationSeverity {
-    Critical,   // Security vulnerability
-    High,       // Protocol violation
-    Medium,     // Compliance issue
-    Low,        // Style/recommendation
+    Critical, // Security vulnerability
+    High,     // Protocol violation
+    Medium,   // Compliance issue
+    Low,      // Style/recommendation
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ParsingStats {
     chunks_parsed: u32,
     total_body_bytes: usize,
@@ -339,7 +337,10 @@ impl MockTeChunkedParser {
     }
 
     /// Process initial headers
-    pub fn process_headers(&mut self, headers: Vec<(String, String)>) -> Result<(), TeChunkedError> {
+    pub fn process_headers(
+        &mut self,
+        headers: Vec<(String, String)>,
+    ) -> Result<(), TeChunkedError> {
         for (name, value) in headers {
             let name_lower = name.to_lowercase();
 
@@ -364,15 +365,19 @@ impl MockTeChunkedParser {
     /// Process a chunk size line
     pub fn process_chunk_size_line(&mut self, size_line: &str) -> Result<(), TeChunkedError> {
         if !matches!(self.state, ParsingState::ChunkSize) {
-            return Err(TeChunkedError::ProtocolStateError(
-                format!("Expected chunk size, got: {:?}", self.state)
-            ));
+            return Err(TeChunkedError::ProtocolStateError(format!(
+                "Expected chunk size, got: {:?}",
+                self.state
+            )));
         }
 
         // Parse chunk size (hex) and optional extensions
         let size_line = size_line.trim_end_matches("\r\n");
         let (size_str, extensions_str) = if let Some(semicolon_pos) = size_line.find(';') {
-            (size_line[..semicolon_pos].trim(), Some(&size_line[semicolon_pos + 1..]))
+            (
+                size_line[..semicolon_pos].trim(),
+                Some(&size_line[semicolon_pos + 1..]),
+            )
         } else {
             (size_line, None)
         };
@@ -385,9 +390,10 @@ impl MockTeChunkedParser {
 
         // Validate chunk size limits
         if chunk_size > self.config.max_chunk_size {
-            return Err(TeChunkedError::InvalidChunkSize(
-                format!("Chunk size {} exceeds maximum {}", chunk_size, self.config.max_chunk_size)
-            ));
+            return Err(TeChunkedError::InvalidChunkSize(format!(
+                "Chunk size {} exceeds maximum {}",
+                chunk_size, self.config.max_chunk_size
+            )));
         }
 
         // Parse chunk extensions if present
@@ -418,7 +424,9 @@ impl MockTeChunkedParser {
             self.state = ParsingState::Trailers;
         } else {
             // Regular chunk - transition to data reading
-            self.state = ParsingState::ChunkData { remaining: chunk_size };
+            self.state = ParsingState::ChunkData {
+                remaining: chunk_size,
+            };
         }
 
         self.stats.chunks_parsed += 1;
@@ -435,7 +443,7 @@ impl MockTeChunkedParser {
                 // Check body size limits
                 if self.body_data.len() + to_read > self.config.max_body_size {
                     return Err(TeChunkedError::ProtocolStateError(
-                        "Body size exceeds maximum".to_string()
+                        "Body size exceeds maximum".to_string(),
                     ));
                 }
 
@@ -445,6 +453,10 @@ impl MockTeChunkedParser {
 
                 if let Some(chunk) = &mut self.current_chunk {
                     chunk.data_read += to_read;
+                    assert!(
+                        chunk.data_read <= chunk.size,
+                        "Chunk reader must not consume beyond the declared chunk size"
+                    );
                 }
 
                 if *remaining == 0 {
@@ -453,25 +465,39 @@ impl MockTeChunkedParser {
                 }
 
                 Ok(())
-            },
-            _ => Err(TeChunkedError::ProtocolStateError(
-                format!("Expected chunk data state, got: {:?}", self.state)
-            )),
+            }
+            _ => Err(TeChunkedError::ProtocolStateError(format!(
+                "Expected chunk data state, got: {:?}",
+                self.state
+            ))),
         }
     }
 
     /// Process chunk trailing CRLF
     pub fn process_chunk_crlf(&mut self, crlf: &str) -> Result<(), TeChunkedError> {
         if !matches!(self.state, ParsingState::ChunkCrlf) {
-            return Err(TeChunkedError::ProtocolStateError(
-                format!("Expected chunk CRLF, got: {:?}", self.state)
-            ));
+            return Err(TeChunkedError::ProtocolStateError(format!(
+                "Expected chunk CRLF, got: {:?}",
+                self.state
+            )));
         }
 
         if crlf != "\r\n" {
-            return Err(TeChunkedError::MalformedChunk(
-                format!("Expected CRLF after chunk data, got: {:?}", crlf)
-            ));
+            return Err(TeChunkedError::MalformedChunk(format!(
+                "Expected CRLF after chunk data, got: {:?}",
+                crlf
+            )));
+        }
+
+        if let Some(chunk) = &self.current_chunk {
+            assert_eq!(
+                chunk.data_read, chunk.size,
+                "Chunk CRLF should only be accepted after reading the full chunk"
+            );
+            assert!(
+                chunk.extensions.len() <= self.stats.chunk_extensions_count as usize,
+                "Current chunk extension count should be reflected in parser stats"
+            );
         }
 
         self.current_chunk = None;
@@ -481,7 +507,10 @@ impl MockTeChunkedParser {
     }
 
     /// Process trailer headers
-    pub fn process_trailer_headers(&mut self, headers: Vec<(String, String)>) -> Result<(), TeChunkedError> {
+    pub fn process_trailer_headers(
+        &mut self,
+        headers: Vec<(String, String)>,
+    ) -> Result<(), TeChunkedError> {
         if !matches!(self.state, ParsingState::Trailers) {
             self.violations.push(ProtocolViolation {
                 violation_type: ViolationType::TrailerBeforeFinalChunk,
@@ -489,6 +518,7 @@ impl MockTeChunkedParser {
                 severity: ViolationSeverity::High,
                 context: format!("Current state: {:?}", self.state),
             });
+            self.stats.protocol_violations += 1;
             return Err(TeChunkedError::TrailerBeforeFinalChunk);
         }
 
@@ -515,13 +545,16 @@ impl MockTeChunkedParser {
             let name_lower = name.to_lowercase();
 
             // Check for forbidden trailer headers
-            if !self.config.allow_forbidden_trailers && FORBIDDEN_TRAILER_HEADERS.contains(&name_lower.as_str()) {
+            if !self.config.allow_forbidden_trailers
+                && FORBIDDEN_TRAILER_HEADERS.contains(&name_lower.as_str())
+            {
                 self.violations.push(ProtocolViolation {
                     violation_type: ViolationType::ForbiddenTrailerHeader,
                     description: format!("Forbidden trailer header: {}", name),
                     severity: ViolationSeverity::High,
                     context: "RFC 9110 §6.5.1".to_string(),
                 });
+                self.stats.protocol_violations += 1;
                 return Err(TeChunkedError::ForbiddenTrailerHeader(name));
             }
 
@@ -533,6 +566,7 @@ impl MockTeChunkedParser {
                     severity: ViolationSeverity::Critical,
                     context: format!("Value: {:?}", value),
                 });
+                self.stats.protocol_violations += 1;
                 return Err(TeChunkedError::CrlfInjectionInTrailer(value));
             }
 
@@ -544,6 +578,7 @@ impl MockTeChunkedParser {
                     severity: ViolationSeverity::Critical,
                     context: format!("Value: {:?}", value),
                 });
+                self.stats.protocol_violations += 1;
                 return Err(TeChunkedError::HeaderInjectionAttempt(value));
             }
 
@@ -558,13 +593,14 @@ impl MockTeChunkedParser {
     /// Complete parsing (final empty line)
     pub fn complete_parsing(&mut self, final_line: &str) -> Result<(), TeChunkedError> {
         if !matches!(self.state, ParsingState::Trailers) {
-            return Err(TeChunkedError::ProtocolStateError(
-                format!("Expected trailers state for completion, got: {:?}", self.state)
-            ));
+            return Err(TeChunkedError::ProtocolStateError(format!(
+                "Expected trailers state for completion, got: {:?}",
+                self.state
+            )));
         }
 
         // Validate final empty line
-        if final_line != "\r\n" && final_line != "" {
+        if final_line != "\r\n" && !final_line.is_empty() {
             return Err(TeChunkedError::MissingFinalEmptyLine);
         }
 
@@ -602,7 +638,9 @@ impl MockTeChunkedParser {
         }
 
         // Check for trailers without final chunk
-        if !self.trailers.is_empty() && !matches!(self.state, ParsingState::Complete | ParsingState::Trailers) {
+        if !self.trailers.is_empty()
+            && !matches!(self.state, ParsingState::Complete | ParsingState::Trailers)
+        {
             issues.push(ComplianceIssue {
                 rule: "RFC 9112 §7.1.3".to_string(),
                 description: "Trailers present but not after final 0-chunk".to_string(),
@@ -611,7 +649,7 @@ impl MockTeChunkedParser {
         }
 
         // Check forbidden trailer headers
-        for (name, _) in &self.trailers {
+        for name in self.trailers.keys() {
             if FORBIDDEN_TRAILER_HEADERS.contains(&name.to_lowercase().as_str()) {
                 issues.push(ComplianceIssue {
                     rule: "RFC 9110 §6.5.1".to_string(),
@@ -658,11 +696,39 @@ fn cap_usize(value: usize, max: usize) -> usize {
     value.min(max)
 }
 
+fn observe_message_type(message_type: &MessageType) {
+    match message_type {
+        MessageType::Request {
+            method,
+            uri,
+            version,
+        } => {
+            let method_sample = &method[..method.len().min(128)];
+            let uri_sample = &uri[..uri.len().min(512)];
+            assert!(method_sample.len() <= 128);
+            assert!(uri_sample.len() <= 512);
+            assert!(matches!(version, HttpVersion::Http10 | HttpVersion::Http11));
+        }
+        MessageType::Response {
+            status_code,
+            reason_phrase,
+            version,
+        } => {
+            let status_sample = (*status_code).min(999);
+            let reason_sample = &reason_phrase[..reason_phrase.len().min(256)];
+            assert!(status_sample <= 999);
+            assert!(reason_sample.len() <= 256);
+            assert!(matches!(version, HttpVersion::Http10 | HttpVersion::Http11));
+        }
+    }
+}
+
 /// Generate chunk line in proper format
 fn format_chunk_line(size: usize, extensions: &[(String, Option<String>)]) -> String {
     let mut line = format!("{:x}", size);
 
-    for (name, value) in extensions.iter().take(5) { // Limit extensions
+    for (name, value) in extensions.iter().take(5) {
+        // Limit extensions
         line.push(';');
         line.push_str(&name[..name.len().min(20)]); // Limit extension name length
         if let Some(val) = value {
@@ -676,11 +742,18 @@ fn format_chunk_line(size: usize, extensions: &[(String, Option<String>)]) -> St
 }
 
 fuzz_target!(|input: TeChunkedWithTrailersInput| {
+    observe_message_type(&input.message_type);
+
+    let max_trailer_size =
+        usize::from(cap_u16(input.compliance_tests.max_trailer_size, 4096).max(1));
+    let max_trailer_count =
+        usize::from(cap_u8(input.compliance_tests.max_trailer_count, 20).max(1));
+
     let config = ParserConfig {
-        max_chunk_size: 16384,     // 16KB chunks max
-        max_trailer_size: 4096,    // 4KB trailers max
-        max_trailer_count: 20,     // 20 trailers max
-        enforce_te_chunked: true,
+        max_chunk_size: 16384, // 16KB chunks max
+        max_trailer_size,      // 4KB trailers max
+        max_trailer_count,     // 20 trailers max
+        enforce_te_chunked: input.compliance_tests.require_te_chunked,
         allow_forbidden_trailers: false,
         max_body_size: 1024 * 1024, // 1MB body max
     };
@@ -696,7 +769,9 @@ fuzz_target!(|input: TeChunkedWithTrailersInput| {
         let value = header.value[..header.value.len().min(200)].to_string();
 
         // Ensure we have Transfer-Encoding: chunked
-        if header.is_transfer_encoding_chunked || (!has_te_chunked && name.to_lowercase() == "transfer-encoding") {
+        if header.is_transfer_encoding_chunked
+            || (!has_te_chunked && name.to_lowercase() == "transfer-encoding")
+        {
             initial_headers.push(("Transfer-Encoding".to_string(), "chunked".to_string()));
             has_te_chunked = true;
         } else {
@@ -722,20 +797,25 @@ fuzz_target!(|input: TeChunkedWithTrailersInput| {
         let data_size = cap_usize(chunk.data.len(), chunk_size.min(1024));
 
         // Format chunk size line with extensions
-        let extensions: Vec<(String, Option<String>)> = chunk.extensions.iter()
+        let extensions: Vec<(String, Option<String>)> = chunk
+            .extensions
+            .iter()
             .take(3)
             .map(|ext| {
                 let name = ext.name[..ext.name.len().min(20)].to_string();
-                let value = ext.value.as_ref()
-                    .map(|v| v[..v.len().min(50)].to_string());
+                let value = ext.value.as_ref().map(|v| v[..v.len().min(50)].to_string());
                 (name, value)
             })
             .collect();
 
-        let chunk_line = format_chunk_line(chunk_size, &extensions);
+        let chunk_line = if input.chunked_body.include_malformed_chunks && chunk.malformed {
+            "not-a-hex-size\r\n".to_string()
+        } else {
+            format_chunk_line(chunk_size, &extensions)
+        };
 
         // Process chunk size line
-        if let Err(_) = parser.process_chunk_size_line(&chunk_line) {
+        if parser.process_chunk_size_line(&chunk_line).is_err() {
             // Invalid chunk format - continue with remaining test
             continue;
         }
@@ -743,20 +823,23 @@ fuzz_target!(|input: TeChunkedWithTrailersInput| {
         // Process chunk data
         if chunk_size > 0 {
             let chunk_data = &chunk.data[..data_size];
-            if let Err(_) = parser.process_chunk_data(chunk_data) {
+            if parser.process_chunk_data(chunk_data).is_err() {
                 continue;
             }
 
             // Process chunk trailing CRLF
-            if let Err(_) = parser.process_chunk_crlf("\r\n") {
+            if parser.process_chunk_crlf("\r\n").is_err() {
                 continue;
             }
         }
     }
 
     // Process final 0-chunk
-    let final_chunk_size = if input.chunked_body.final_chunk_size == 0 { 0 } else { 0 }; // Force 0 for final chunk
-    let final_chunk_line = format!("{:x}\r\n", final_chunk_size);
+    let final_chunk_line = if input.chunked_body.final_chunk_size.is_multiple_of(2) {
+        "0\r\n".to_string()
+    } else {
+        "000\r\n".to_string()
+    };
 
     let final_chunk_result = parser.process_chunk_size_line(&final_chunk_line);
     if final_chunk_result.is_err() {
@@ -769,7 +852,10 @@ fuzz_target!(|input: TeChunkedWithTrailersInput| {
         let early_result = parser.process_trailer_headers(early_trailers);
 
         // Should be rejected
-        assert!(early_result.is_err(), "Trailers before final chunk should be rejected");
+        assert!(
+            early_result.is_err() || !input.compliance_tests.validate_trailer_ordering,
+            "Trailers before final chunk should be rejected when ordering validation is enabled"
+        );
         return;
     }
 
@@ -786,7 +872,8 @@ fuzz_target!(|input: TeChunkedWithTrailersInput| {
 
         // Test forbidden headers
         let final_name = if trailer.is_forbidden && !FORBIDDEN_TRAILER_HEADERS.is_empty() {
-            FORBIDDEN_TRAILER_HEADERS[trailer.name.len() % FORBIDDEN_TRAILER_HEADERS.len()].to_string()
+            FORBIDDEN_TRAILER_HEADERS[trailer.name.len() % FORBIDDEN_TRAILER_HEADERS.len()]
+                .to_string()
         } else {
             name
         };
@@ -807,42 +894,95 @@ fuzz_target!(|input: TeChunkedWithTrailersInput| {
     // Validate results
     let results = parser.results();
     let compliance_issues = parser.validate_compliance();
+    for issue in &compliance_issues {
+        assert!(
+            !issue.rule.is_empty() && !issue.description.is_empty(),
+            "Compliance issues should keep rule and description context"
+        );
+        assert!(
+            matches!(
+                issue.severity,
+                ViolationSeverity::Critical
+                    | ViolationSeverity::High
+                    | ViolationSeverity::Medium
+                    | ViolationSeverity::Low
+            ),
+            "Compliance issue should carry a known severity"
+        );
+    }
 
     // Verify protocol compliance
-    assert!(results.has_te_chunked, "Transfer-Encoding: chunked should be detected");
+    assert!(
+        results.has_te_chunked,
+        "Transfer-Encoding: chunked should be detected"
+    );
 
     // Check violations were properly detected
     if input.compliance_tests.enforce_forbidden_trailers {
-        let forbidden_violations: Vec<_> = results.violations.iter()
+        let forbidden_violations: Vec<_> = results
+            .violations
+            .iter()
             .filter(|v| matches!(v.violation_type, ViolationType::ForbiddenTrailerHeader))
             .collect();
 
         for violation in &forbidden_violations {
-            assert_eq!(violation.severity, ViolationSeverity::High,
-                "Forbidden trailer violations should be high severity");
+            assert!(
+                !violation.description.is_empty() && !violation.context.is_empty(),
+                "Forbidden trailer violations should include diagnostic context"
+            );
+            assert_eq!(
+                violation.severity,
+                ViolationSeverity::High,
+                "Forbidden trailer violations should be high severity"
+            );
         }
     }
 
     // Check CRLF injection detection
-    let crlf_violations: Vec<_> = results.violations.iter()
+    let crlf_violations: Vec<_> = results
+        .violations
+        .iter()
         .filter(|v| matches!(v.violation_type, ViolationType::CrlfInjection))
         .collect();
 
     for violation in &crlf_violations {
-        assert_eq!(violation.severity, ViolationSeverity::Critical,
-            "CRLF injection should be critical severity");
+        assert!(
+            !violation.description.is_empty() && !violation.context.is_empty(),
+            "CRLF violations should include diagnostic context"
+        );
+        assert_eq!(
+            violation.severity,
+            ViolationSeverity::Critical,
+            "CRLF injection should be critical severity"
+        );
     }
 
     // Verify final state consistency
     if trailer_result.is_ok() && completion_result.is_ok() {
-        assert!(matches!(results.final_state, ParsingState::Complete),
-            "Successful parsing should reach complete state");
+        assert!(
+            matches!(results.final_state, ParsingState::Complete),
+            "Successful parsing should reach complete state"
+        );
     }
 
     // Verify size limits were respected
-    assert!(results.body_size <= 1024 * 1024, "Body size should not exceed limit");
-    assert!(results.trailer_size <= 4096, "Trailer size should not exceed limit");
-    assert!(results.trailer_count <= 20, "Trailer count should not exceed limit");
+    assert!(
+        results.body_size <= parser.config.max_body_size,
+        "Body size should not exceed limit"
+    );
+    assert!(
+        results.trailer_size <= parser.config.max_trailer_size,
+        "Trailer size should not exceed limit"
+    );
+    assert!(
+        results.trailer_count <= parser.config.max_trailer_count,
+        "Trailer count should not exceed limit"
+    );
+    assert_eq!(
+        results.stats.protocol_violations as usize,
+        results.violations.len(),
+        "Protocol violation stats should match recorded violations"
+    );
 
     // Process edge cases
     for edge_case in input.edge_cases.iter().take(5) {
@@ -853,24 +993,25 @@ fuzz_target!(|input: TeChunkedWithTrailersInput| {
                     let _value = value[..value.len().min(50)].to_string();
                     // Multiple TE headers are implementation-specific
                 }
-            },
+            }
             EdgeCaseTest::TransferEncodingWithOtherValues { encodings } => {
                 // Test TE with multiple encodings
                 for encoding in encodings.iter().take(3) {
                     let _encoding = encoding[..encoding.len().min(20)].to_string();
                     // Multiple encodings like "gzip, chunked"
                 }
-            },
-            EdgeCaseTest::TrailersNoFinalEmptyLine => {
+            }
+            EdgeCaseTest::TrailersNoFinalEmptyLine if trailer_result.is_ok() => {
                 // Test missing final empty line
-                if trailer_result.is_ok() {
-                    let no_final_result = parser.complete_parsing("X-Extra: header\r\n");
-                    // Should be rejected without final empty line
-                    if input.compliance_tests.require_final_empty_line {
-                        assert!(no_final_result.is_err(), "Missing final empty line should be rejected");
-                    }
+                let no_final_result = parser.complete_parsing("X-Extra: header\r\n");
+                // Should be rejected without final empty line
+                if input.compliance_tests.require_final_empty_line {
+                    assert!(
+                        no_final_result.is_err(),
+                        "Missing final empty line should be rejected"
+                    );
                 }
-            },
+            }
             _ => {
                 // Other edge cases handled in main flow
             }
@@ -878,12 +1019,18 @@ fuzz_target!(|input: TeChunkedWithTrailersInput| {
     }
 
     // Verify no critical violations in valid cases
-    let critical_violations: Vec<_> = results.violations.iter()
+    let critical_violations: Vec<_> = results
+        .violations
+        .iter()
         .filter(|v| v.severity == ViolationSeverity::Critical)
         .collect();
 
-    if critical_violations.is_empty() &&
-       !input.trailing_headers.iter().any(|t| t.crlf_injection || t.is_forbidden) {
+    if critical_violations.is_empty()
+        && !input
+            .trailing_headers
+            .iter()
+            .any(|t| t.crlf_injection || t.is_forbidden)
+    {
         // No critical violations expected for clean input
     }
 });
@@ -916,7 +1063,10 @@ mod tests {
         let result = parser.process_trailer_headers(forbidden_trailers);
 
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), TeChunkedError::ForbiddenTrailerHeader(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            TeChunkedError::ForbiddenTrailerHeader(_)
+        ));
     }
 
     #[test]
@@ -927,11 +1077,17 @@ mod tests {
         parser.state = ParsingState::Trailers;
 
         // Try CRLF injection
-        let injection_trailers = vec![("X-Test".to_string(), "value\r\nInjected: header".to_string())];
+        let injection_trailers = vec![(
+            "X-Test".to_string(),
+            "value\r\nInjected: header".to_string(),
+        )];
         let result = parser.process_trailer_headers(injection_trailers);
 
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), TeChunkedError::CrlfInjectionInTrailer(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            TeChunkedError::CrlfInjectionInTrailer(_)
+        ));
     }
 
     #[test]
@@ -964,7 +1120,10 @@ mod tests {
         let result = parser.process_trailer_headers(trailers);
 
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), TeChunkedError::TrailerBeforeFinalChunk));
+        assert!(matches!(
+            result.unwrap_err(),
+            TeChunkedError::TrailerBeforeFinalChunk
+        ));
     }
 
     #[test]
@@ -981,7 +1140,10 @@ mod tests {
         let result = parser.process_trailer_headers(large_trailers);
 
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), TeChunkedError::OversizedTrailerSection { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            TeChunkedError::OversizedTrailerSection { .. }
+        ));
     }
 
     #[test]

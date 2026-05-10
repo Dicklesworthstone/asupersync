@@ -5591,6 +5591,7 @@ name = "h1_te_chunked_with_trailers"
 path = "fuzz_targets/h1_te_chunked_with_trailers.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_request_pseudo_path_query_only"
