@@ -78,8 +78,8 @@ enum ReceiverPattern {
 impl SenderCloseReceiverPollConfig {
     fn normalize(&mut self) {
         // Limit delays to reasonable values
-        self.sender_delay = self.sender_delay % 1000; // Max 1ms
-        self.receiver_delay = self.receiver_delay % 1000;
+        self.sender_delay %= 1000; // Max 1ms
+        self.receiver_delay %= 1000;
 
         // Normalize pattern parameters
         match &mut self.receiver_pattern {
@@ -93,14 +93,14 @@ impl SenderCloseReceiverPollConfig {
 
         match &mut self.sender_action {
             SenderAction::DelayedClose { close_delay } => {
-                *close_delay = *close_delay % 500; // Max 0.5ms close delay
+                *close_delay %= 500; // Max 0.5ms close delay
             }
             SenderAction::DelayedSendThenClose {
                 send_delay,
                 close_delay,
             } => {
-                *send_delay = *send_delay % 300;
-                *close_delay = *close_delay % 300;
+                *send_delay %= 300;
+                *close_delay %= 300;
             }
             _ => {}
         }
@@ -108,10 +108,10 @@ impl SenderCloseReceiverPollConfig {
         // Normalize receiver pattern delays
         match &mut self.receiver_pattern {
             ReceiverPattern::DelayedTryRecv { delay, .. } => {
-                *delay = *delay % 200; // Max 0.2ms between attempts
+                *delay %= 200; // Max 0.2ms between attempts
             }
             ReceiverPattern::PollDuringClose { poll_delay, .. } => {
-                *poll_delay = *poll_delay % 50; // Fast polling during close window
+                *poll_delay %= 50; // Fast polling during close window
             }
             _ => {}
         }
@@ -123,6 +123,7 @@ impl SenderCloseReceiverPollConfig {
 struct TestResults {
     sender_started: AtomicBool,
     sender_sent: AtomicBool,
+    sender_send_failed: AtomicUsize,
     sender_closed: AtomicBool,
     close_succeeded: AtomicBool,
     receiver_started: AtomicBool,
@@ -134,6 +135,23 @@ struct TestResults {
     blocking_recv_success: AtomicUsize,
     blocking_recv_closed: AtomicUsize,
     post_close_poll_attempts: AtomicUsize,
+}
+
+fn record_send_result<E>(send_result: Result<(), E>, results: &TestResults) {
+    match send_result {
+        Ok(()) => {
+            results.sender_sent.store(true, Ordering::SeqCst);
+        }
+        Err(_) => {
+            results.sender_send_failed.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+fn observe_worker_join(role: &str, handle: thread::JoinHandle<()>) {
+    if handle.join().is_err() {
+        panic!("{role} worker panicked during oneshot sender-close race");
+    }
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -195,14 +213,7 @@ fuzz_target!(|data: &[u8]| {
 
                 SenderAction::SendThenClose => {
                     if let Some(sender) = sender.lock().take() {
-                        match sender.send(&cx, send_value) {
-                            Ok(()) => {
-                                results.sender_sent.store(true, Ordering::SeqCst);
-                            }
-                            Err(_) => {
-                                // Send failed (receiver dropped?)
-                            }
-                        }
+                        record_send_result(sender.send(&cx, send_value), &results);
                         results.sender_closed.store(true, Ordering::SeqCst);
                         results.close_succeeded.store(true, Ordering::SeqCst);
                     }
@@ -229,14 +240,7 @@ fuzz_target!(|data: &[u8]| {
                     }
 
                     if let Some(sender) = sender.lock().take() {
-                        match sender.send(&cx, send_value) {
-                            Ok(()) => {
-                                results.sender_sent.store(true, Ordering::SeqCst);
-                            }
-                            Err(_) => {
-                                // Send failed
-                            }
-                        }
+                        record_send_result(sender.send(&cx, send_value), &results);
 
                         if close_delay > 0 {
                             thread::sleep(Duration::from_micros(close_delay as u64));
@@ -249,9 +253,7 @@ fuzz_target!(|data: &[u8]| {
 
                 SenderAction::TrySendThenClose => {
                     if let Some(sender) = sender.lock().take() {
-                        // Try to send, don't care about success
-                        let _ = sender.send(&cx, send_value);
-                        results.sender_sent.store(true, Ordering::SeqCst);
+                        record_send_result(sender.send(&cx, send_value), &results);
 
                         results.sender_closed.store(true, Ordering::SeqCst);
                         results.close_succeeded.store(true, Ordering::SeqCst);
@@ -277,7 +279,7 @@ fuzz_target!(|data: &[u8]| {
             }
         });
 
-        handles.push(handle);
+        handles.push(("sender", handle));
     }
 
     // Spawn receiver thread
@@ -501,16 +503,17 @@ fuzz_target!(|data: &[u8]| {
             }
         });
 
-        handles.push(handle);
+        handles.push(("receiver", handle));
     }
 
     // Wait for all threads to complete
-    for handle in handles {
-        let _ = handle.join();
+    for (role, handle) in handles {
+        observe_worker_join(role, handle);
     }
 
     // Verify results and race condition properties
     let sender_sent = results.sender_sent.load(Ordering::SeqCst);
+    let sender_send_failed = results.sender_send_failed.load(Ordering::SeqCst);
     let sender_closed = results.sender_closed.load(Ordering::SeqCst);
     let close_succeeded = results.close_succeeded.load(Ordering::SeqCst);
     let try_recv_attempts = results.try_recv_attempts.load(Ordering::SeqCst);
@@ -533,6 +536,11 @@ fuzz_target!(|data: &[u8]| {
         blocking_recv_attempts,
         blocking_recv_success + blocking_recv_closed,
         "blocking recv accounting should be consistent"
+    );
+
+    assert!(
+        usize::from(sender_sent) + sender_send_failed <= 1,
+        "at most one sender send attempt can finish in this single-sender scenario"
     );
 
     // Invariant: At most one successful receive across all attempts
