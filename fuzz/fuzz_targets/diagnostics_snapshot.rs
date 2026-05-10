@@ -22,6 +22,15 @@ use asupersync::observability::task_inspector::{
 /// Maximum reasonable snapshot size for security testing (1MB)
 const MAX_SNAPSHOT_SIZE: usize = 1_048_576;
 
+fn encode_json<T: serde::Serialize + ?Sized>(
+    value: &T,
+    context: impl std::fmt::Display,
+) -> Vec<u8> {
+    serde_json::to_vec(value).unwrap_or_else(|err| {
+        panic!("diagnostics snapshot JSON serialization failed for {context}: {err}")
+    })
+}
+
 /// Diagnostic snapshot parsing attack patterns
 #[derive(Arbitrary, Debug, Clone)]
 enum DiagnosticAttackPattern {
@@ -164,7 +173,7 @@ impl DiagnosticAttackPattern {
                         .insert(key.clone(), serde_json::Value::String(value.clone()));
                 }
 
-                serde_json::to_vec(&json_obj).unwrap_or_default()
+                encode_json(&json_obj, "unknown-fields injection")
             }
             DiagnosticAttackPattern::TimestampOrdering {
                 base_timestamp,
@@ -212,7 +221,13 @@ impl DiagnosticAttackPattern {
                     });
                 }
 
-                serde_json::to_vec(&snapshot.to_json_value()).unwrap_or_default()
+                encode_json(
+                    &snapshot.to_json_value(),
+                    format!(
+                        "timestamp ordering base={base_timestamp} tasks={} decreasing={inject_decreasing}",
+                        task_deltas.len()
+                    ),
+                )
             }
             DiagnosticAttackPattern::CorrelationIdMalform {
                 base_snapshot,
@@ -234,7 +249,15 @@ impl DiagnosticAttackPattern {
                     }
                 }
 
-                serde_json::to_vec(&snapshot.to_json_value()).unwrap_or_default()
+                encode_json(
+                    &snapshot.to_json_value(),
+                    format!(
+                        "correlation-id malform tasks={} malformed_tasks={} malformed_regions={}",
+                        snapshot.tasks.len(),
+                        malformed_task_ids.len(),
+                        malformed_region_ids.len()
+                    ),
+                )
             }
             DiagnosticAttackPattern::CompressedSnapshot {
                 json_data,
@@ -316,9 +339,9 @@ impl DiagnosticAttackPattern {
                                     "obligations": [],
                                     "waiters": []
                                 }
-                            ]
+                                ]
                         });
-                        serde_json::to_vec(&json).unwrap_or_default()
+                        encode_json(&json, format!("oversized large-strings size={string_size}"))
                     }
                     AmplificationPattern::DeepNesting { depth } => {
                         let mut json = serde_json::Value::Object(serde_json::Map::new());
@@ -327,13 +350,10 @@ impl DiagnosticAttackPattern {
                             child.insert("nested".to_string(), json);
 
                             let mut parent = serde_json::Map::new();
-                            parent.insert(
-                                "child".to_string(),
-                                serde_json::Value::Object(child),
-                            );
+                            parent.insert("child".to_string(), serde_json::Value::Object(child));
                             json = serde_json::Value::Object(parent);
                         }
-                        serde_json::to_vec(&json).unwrap_or_default()
+                        encode_json(&json, format!("oversized deep-nesting depth={depth}"))
                     }
                     AmplificationPattern::ArrayAmplification { array_size } => {
                         let mut tasks = Vec::new();
@@ -364,9 +384,12 @@ impl DiagnosticAttackPattern {
                                 "stuck_count": 0,
                                 "by_region": []
                             },
-                            "tasks": tasks
+                                "tasks": tasks
                         });
-                        serde_json::to_vec(&json).unwrap_or_default()
+                        encode_json(
+                            &json,
+                            format!("oversized array-amplification size={array_size}"),
+                        )
                     }
                 }
             }
