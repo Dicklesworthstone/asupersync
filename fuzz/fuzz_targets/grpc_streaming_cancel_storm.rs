@@ -39,8 +39,9 @@ use std::task::{Context, Poll, Waker};
 use std::thread;
 use std::time::Duration;
 
+use asupersync::grpc::ResponseStream;
 use asupersync::grpc::status::{Code, Status};
-use asupersync::grpc::streaming::{ResponseStream, Streaming, StreamingRequest};
+use asupersync::grpc::streaming::{Streaming, StreamingRequest};
 
 /// Maximum operations per scenario to bound fuzzing runtime.
 const MAX_OPERATIONS: usize = 100;
@@ -48,23 +49,11 @@ const MAX_OPERATIONS: usize = 100;
 /// Maximum concurrent cancel threads for storm simulation.
 const MAX_CANCEL_THREADS: usize = 8;
 
-/// Maximum items to buffer during stress testing.
-const MAX_BUFFER_ITEMS: usize = 512;
-
 /// Test message type for stream operations.
 #[derive(Debug, Clone, Arbitrary, PartialEq, Eq)]
 struct TestMessage {
     id: u32,
     payload: Vec<u8>,
-}
-
-impl TestMessage {
-    fn new(id: u32) -> Self {
-        Self {
-            id,
-            payload: vec![],
-        }
-    }
 }
 
 /// Describes a cancel storm scenario with structured operations.
@@ -88,7 +77,7 @@ struct CancelStormConfig {
     /// Types of cancellation to use in the storm
     cancel_types: Vec<CancelType>,
     /// Whether to inject operations during the cancel storm
-    concurrent_operations: bool,
+    _concurrent_operations: bool,
 }
 
 /// Types of stream cancellation to test.
@@ -238,10 +227,10 @@ impl StreamState {
     fn check_message_ordering_invariant(&self) -> bool {
         // Messages should be received in FIFO order relative to successful pushes
         for (i, received_msg) in self.received_items.iter().enumerate() {
-            if let Some(pushed_msg) = self.pushed_items.get(i) {
-                if received_msg.id != pushed_msg.id {
-                    return false;
-                }
+            if let Some(pushed_msg) = self.pushed_items.get(i)
+                && received_msg.id != pushed_msg.id
+            {
+                return false;
             }
         }
         true
@@ -279,13 +268,12 @@ impl<T> CancelStormTestHarness<T> {
 
 /// Execute a cancel storm against a StreamingRequest.
 fn test_streaming_request_cancel_storm(scenario: &CancelStormScenario) {
-    let mut request_stream = StreamingRequest::<TestMessage>::open();
+    let request_stream = StreamingRequest::<TestMessage>::open();
     let harness = CancelStormTestHarness::new(request_stream);
 
     // Create barrier for synchronized cancel storm
-    let cancel_count = (scenario.cancel_storm.cancel_thread_count as usize)
-        .min(MAX_CANCEL_THREADS)
-        .max(1);
+    let cancel_count =
+        (scenario.cancel_storm.cancel_thread_count as usize).clamp(1, MAX_CANCEL_THREADS);
     let barrier = Arc::new(Barrier::new(cancel_count + 1));
 
     // Spawn cancel storm threads
@@ -437,7 +425,7 @@ fn test_streaming_request_cancel_storm(scenario: &CancelStormScenario) {
                 drop(state);
 
                 let waker = Waker::noop();
-                let mut cx = Context::from_waker(&waker);
+                let mut cx = Context::from_waker(waker);
                 *harness.waker.lock().unwrap() = Some(waker.clone());
 
                 if let Ok(mut stream) = harness.stream.try_lock() {
@@ -514,7 +502,9 @@ fn test_streaming_request_cancel_storm(scenario: &CancelStormScenario) {
 
     // Wait for all cancel threads to complete
     for handle in cancel_handles {
-        handle.join().unwrap_or(());
+        handle
+            .join()
+            .expect("request-stream cancel thread must not panic");
     }
 
     // Final invariant check
@@ -543,9 +533,8 @@ fn test_response_stream_cancel_storm(scenario: &CancelStormScenario) {
     let harness = CancelStormTestHarness::new(response_stream);
 
     // Similar structure to StreamingRequest test but for ResponseStream
-    let cancel_count = (scenario.cancel_storm.cancel_thread_count as usize)
-        .min(MAX_CANCEL_THREADS)
-        .max(1);
+    let cancel_count =
+        (scenario.cancel_storm.cancel_thread_count as usize).clamp(1, MAX_CANCEL_THREADS);
     let barrier = Arc::new(Barrier::new(cancel_count + 1));
 
     let mut cancel_handles = Vec::new();
@@ -581,7 +570,7 @@ fn test_response_stream_cancel_storm(scenario: &CancelStormScenario) {
 
             match cancel_type {
                 CancelType::ErrorCancel { code, message } => {
-                    if let Ok(mut stream) = harness_clone.stream.try_lock() {
+                    if let Ok(stream) = harness_clone.stream.try_lock() {
                         let status = Status::new(
                             match code % 17 {
                                 1 => Code::Cancelled,
@@ -590,7 +579,7 @@ fn test_response_stream_cancel_storm(scenario: &CancelStormScenario) {
                             },
                             message,
                         );
-                        stream.cancel_with_error(status.clone());
+                        stream.cancel(status.clone());
                         let mut state = harness_clone.state.lock().unwrap();
                         state.is_cancelled = true;
                         if state.terminal_status.is_none() {
@@ -599,16 +588,16 @@ fn test_response_stream_cancel_storm(scenario: &CancelStormScenario) {
                     }
                 }
                 CancelType::GracefulClose => {
-                    if let Ok(mut stream) = harness_clone.stream.try_lock() {
+                    if let Ok(stream) = harness_clone.stream.try_lock() {
                         stream.close();
                         let mut state = harness_clone.state.lock().unwrap();
                         state.is_closed = true;
                     }
                 }
                 CancelType::TerminalCancel { status } => {
-                    if let Ok(mut stream) = harness_clone.stream.try_lock() {
+                    if let Ok(stream) = harness_clone.stream.try_lock() {
                         let status = status.into_status();
-                        stream.cancel_with_error(status.clone());
+                        stream.cancel(status.clone());
                         let mut state = harness_clone.state.lock().unwrap();
                         state.is_cancelled = true;
                         if state.terminal_status.is_none() {
@@ -663,7 +652,9 @@ fn test_response_stream_cancel_storm(scenario: &CancelStormScenario) {
     }
 
     for handle in cancel_handles {
-        handle.join().unwrap_or(());
+        handle
+            .join()
+            .expect("response-stream cancel thread must not panic");
     }
 
     // Final invariant verification
