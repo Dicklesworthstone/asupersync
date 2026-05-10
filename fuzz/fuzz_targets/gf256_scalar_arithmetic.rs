@@ -60,7 +60,7 @@ fn assert_scalar_contracts(a: u8, b: u8, c: u8, exp: u8) {
         assert_eq!(ga.pow(255).raw(), 1, "nonzero x^255 must equal one");
         assert_eq!(
             ga.pow(254).raw(),
-            reference_inv(a).unwrap_or_default(),
+            reference_inv_nonzero(a),
             "x^254 must match inverse"
         );
     }
@@ -68,7 +68,8 @@ fn assert_scalar_contracts(a: u8, b: u8, c: u8, exp: u8) {
     if a == 0 {
         let inverse = catch_unwind(AssertUnwindSafe(|| ga.inv()));
         assert!(inverse.is_err(), "inverting zero must panic");
-    } else if let Some(expected_inv) = reference_inv(a) {
+    } else {
+        let expected_inv = reference_inv_nonzero(a);
         let inverse = ga.inv();
         assert_eq!(inverse.raw(), expected_inv, "inverse mismatch");
         assert_eq!(
@@ -134,6 +135,10 @@ fn reference_inv(value: u8) -> Option<u8> {
     }
 
     (1..=u8::MAX).find(|&candidate| reference_mul(value, candidate) == 1)
+}
+
+fn reference_inv_nonzero(value: u8) -> u8 {
+    reference_inv(value).expect("nonzero GF256 element must have a multiplicative inverse")
 }
 
 fn reference_div(lhs: u8, rhs: u8) -> Option<u8> {
