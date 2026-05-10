@@ -183,6 +183,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "hpack_header_block_decoder"
+path = "fuzz_targets/hpack_header_block_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_http2_frame"
 path = "fuzz_targets/http2_frame.rs"
 test = false

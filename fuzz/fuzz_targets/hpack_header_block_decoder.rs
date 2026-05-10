@@ -34,7 +34,6 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashMap;
 
 use asupersync::bytes::Bytes;
 use asupersync::http::h2::hpack::{Decoder, Header};
@@ -52,13 +51,9 @@ const MAX_TABLE_OPERATIONS: usize = 32;
 #[derive(Debug, Arbitrary)]
 enum HpackOperation {
     /// Dynamic table size update (RFC 7541 §4.2)
-    DynamicTableSizeUpdate {
-        size: u32,
-    },
+    DynamicTableSizeUpdate { size: u32 },
     /// Indexed header field representation (RFC 7541 §6.1)
-    IndexedHeader {
-        index: u16,
-    },
+    IndexedHeader { index: u16 },
     /// Literal header field with incremental indexing (RFC 7541 §6.2.1)
     LiteralWithIncrementalIndexing {
         name_index: u16, // 0 = new name
@@ -179,14 +174,23 @@ fn execute_scenario(scenario: HpackFuzzScenario) -> Result<(), Box<dyn std::erro
                 }
             }
 
-            HpackOperation::LiteralWithIncrementalIndexing { name_index, name, value } => {
+            HpackOperation::LiteralWithIncrementalIndexing {
+                name_index,
+                name,
+                value,
+            } => {
                 header_fields_started = true;
                 if name_index > 256 || (name_index == 0 && name.is_none()) {
                     continue;
                 }
 
                 // Encode: pattern 01 + 6-bit integer + strings
-                encode_literal_with_incremental_indexing(&mut encoded_block, name_index, name.as_ref(), &value);
+                encode_literal_with_incremental_indexing(
+                    &mut encoded_block,
+                    name_index,
+                    name.as_ref(),
+                    &value,
+                );
 
                 // Track expected result
                 let header_name = if name_index == 0 {
@@ -198,7 +202,11 @@ fn execute_scenario(scenario: HpackFuzzScenario) -> Result<(), Box<dyn std::erro
                 expected_headers.push(Header::new(header_name, header_value));
             }
 
-            HpackOperation::LiteralNeverIndexed { name_index, name, value } => {
+            HpackOperation::LiteralNeverIndexed {
+                name_index,
+                name,
+                value,
+            } => {
                 header_fields_started = true;
                 if name_index > 256 || (name_index == 0 && name.is_none()) {
                     continue;
@@ -216,14 +224,23 @@ fn execute_scenario(scenario: HpackFuzzScenario) -> Result<(), Box<dyn std::erro
                 expected_headers.push(Header::new(header_name, header_value));
             }
 
-            HpackOperation::LiteralWithoutIndexing { name_index, name, value } => {
+            HpackOperation::LiteralWithoutIndexing {
+                name_index,
+                name,
+                value,
+            } => {
                 header_fields_started = true;
                 if name_index > 256 || (name_index == 0 && name.is_none()) {
                     continue;
                 }
 
                 // Encode: pattern 0000 + 4-bit integer + strings
-                encode_literal_without_indexing(&mut encoded_block, name_index, name.as_ref(), &value);
+                encode_literal_without_indexing(
+                    &mut encoded_block,
+                    name_index,
+                    name.as_ref(),
+                    &value,
+                );
 
                 let header_name = if name_index == 0 {
                     String::from_utf8_lossy(&name.as_ref().unwrap().data).to_string()
@@ -243,10 +260,10 @@ fn execute_scenario(scenario: HpackFuzzScenario) -> Result<(), Box<dyn std::erro
     }
 
     // Apply corruption for malformed input testing
-    if scenario.test_malformed {
-        if let Some(corruption) = scenario.corruption {
-            apply_corruption(&mut encoded_block, corruption);
-        }
+    if scenario.test_malformed
+        && let Some(corruption) = scenario.corruption
+    {
+        apply_corruption(&mut encoded_block, corruption);
     }
 
     // Test the decoder with the generated header block
@@ -260,15 +277,24 @@ fn execute_scenario(scenario: HpackFuzzScenario) -> Result<(), Box<dyn std::erro
             // Note: bytes should be fully consumed for valid blocks
 
             // Verify header count bounds
-            assert!(decoded_headers.len() <= MAX_HEADERS_PER_BLOCK,
-                "Decoder produced too many headers: {}", decoded_headers.len());
+            assert!(
+                decoded_headers.len() <= MAX_HEADERS_PER_BLOCK,
+                "Decoder produced too many headers: {}",
+                decoded_headers.len()
+            );
 
             // Verify header sizes (basic sanity check)
             for header in &decoded_headers {
-                assert!(header.name.len() <= MAX_STRING_LENGTH * 2,
-                    "Decoded header name too large: {}", header.name.len());
-                assert!(header.value.len() <= MAX_STRING_LENGTH * 2,
-                    "Decoded header value too large: {}", header.value.len());
+                assert!(
+                    header.name.len() <= MAX_STRING_LENGTH * 2,
+                    "Decoded header name too large: {}",
+                    header.name.len()
+                );
+                assert!(
+                    header.value.len() <= MAX_STRING_LENGTH * 2,
+                    "Decoded header value too large: {}",
+                    header.value.len()
+                );
             }
 
             // For well-formed scenarios, verify basic structure preservation
@@ -306,10 +332,10 @@ fn encode_literal_with_incremental_indexing(
 ) {
     encode_hpack_integer(buf, name_index as usize, 6, 0x40);
 
-    if name_index == 0 {
-        if let Some(name_str) = name {
-            encode_hpack_string(buf, &name_str.data, name_str.use_huffman);
-        }
+    if name_index == 0
+        && let Some(name_str) = name
+    {
+        encode_hpack_string(buf, &name_str.data, name_str.use_huffman);
     }
 
     encode_hpack_string(buf, &value.data, value.use_huffman);
@@ -324,10 +350,10 @@ fn encode_literal_never_indexed(
 ) {
     encode_hpack_integer(buf, name_index as usize, 4, 0x10);
 
-    if name_index == 0 {
-        if let Some(name_str) = name {
-            encode_hpack_string(buf, &name_str.data, name_str.use_huffman);
-        }
+    if name_index == 0
+        && let Some(name_str) = name
+    {
+        encode_hpack_string(buf, &name_str.data, name_str.use_huffman);
     }
 
     encode_hpack_string(buf, &value.data, value.use_huffman);
@@ -342,10 +368,10 @@ fn encode_literal_without_indexing(
 ) {
     encode_hpack_integer(buf, name_index as usize, 4, 0x00);
 
-    if name_index == 0 {
-        if let Some(name_str) = name {
-            encode_hpack_string(buf, &name_str.data, name_str.use_huffman);
-        }
+    if name_index == 0
+        && let Some(name_str) = name
+    {
+        encode_hpack_string(buf, &name_str.data, name_str.use_huffman);
     }
 
     encode_hpack_string(buf, &value.data, value.use_huffman);
@@ -460,12 +486,7 @@ fuzz_target!(|data: &[u8]| {
 
     // Generate structure-aware scenario from input data
     if let Ok(scenario) = HpackFuzzScenario::arbitrary(&mut u) {
-        // Execute with panic handler
-        let _ = std::panic::catch_unwind(|| {
-            if let Err(e) = execute_scenario(scenario) {
-                // Log error but don't panic - errors are expected for malformed input
-                eprintln!("HPACK scenario error: {}", e);
-            }
-        });
+        execute_scenario(scenario)
+            .unwrap_or_else(|error| panic!("HPACK header-block scenario failed: {error}"));
     }
 });
