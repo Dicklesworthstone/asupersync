@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 
 /// HTTP/1.1 Content-Length vs body-bytes mismatch fuzzing.
 ///
@@ -34,10 +34,29 @@ pub struct ContentLengthTestCase {
     scenario: TestScenario,
 }
 
+impl ContentLengthTestCase {
+    fn semantic_shape(&self) -> usize {
+        self.message_type
+            .semantic_shape()
+            .saturating_add(self.scenario.semantic_code())
+            .saturating_add(self.headers.extra_headers.len())
+            .saturating_add(self.headers.custom_headers.len())
+    }
+}
+
 #[derive(Arbitrary, Debug, Clone)]
 pub enum MessageType {
     Request(RequestConfig),
     Response(ResponseConfig),
+}
+
+impl MessageType {
+    fn semantic_shape(&self) -> usize {
+        match self {
+            MessageType::Request(request) => request.semantic_shape(),
+            MessageType::Response(response) => response.semantic_shape(),
+        }
+    }
 }
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -47,6 +66,15 @@ pub struct RequestConfig {
     version: HttpVersion,
 }
 
+impl RequestConfig {
+    fn semantic_shape(&self) -> usize {
+        self.method
+            .semantic_code()
+            .saturating_add(self.uri.len())
+            .saturating_add(self.version.semantic_code())
+    }
+}
+
 #[derive(Arbitrary, Debug, Clone)]
 pub struct ResponseConfig {
     status: u16,
@@ -54,6 +82,15 @@ pub struct ResponseConfig {
     version: HttpVersion,
     /// Special handling for HEAD responses (body allowed to be empty despite Content-Length)
     is_head_response: bool,
+}
+
+impl ResponseConfig {
+    fn semantic_shape(&self) -> usize {
+        usize::from(self.status)
+            .saturating_add(self.reason.len())
+            .saturating_add(self.version.semantic_code())
+            .saturating_add(usize::from(self.is_head_response))
+    }
 }
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -68,12 +105,38 @@ pub enum RequestMethod {
     Custom(String),
 }
 
+impl RequestMethod {
+    fn semantic_code(&self) -> usize {
+        match self {
+            RequestMethod::Get => 1,
+            RequestMethod::Head => 2,
+            RequestMethod::Post => 3,
+            RequestMethod::Put => 4,
+            RequestMethod::Patch => 5,
+            RequestMethod::Delete => 6,
+            RequestMethod::Options => 7,
+            RequestMethod::Custom(method) => 8usize.saturating_add(method.len()),
+        }
+    }
+}
+
 #[derive(Arbitrary, Debug, Clone)]
 pub enum HttpVersion {
     Http10,
     Http11,
     Http20, // Invalid for HTTP/1.1 codec
     Other(String),
+}
+
+impl HttpVersion {
+    fn semantic_code(&self) -> usize {
+        match self {
+            HttpVersion::Http10 => 10,
+            HttpVersion::Http11 => 11,
+            HttpVersion::Http20 => 20,
+            HttpVersion::Other(version) => 21usize.saturating_add(version.len()),
+        }
+    }
 }
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -227,6 +290,32 @@ pub enum TestScenario {
     RepeatedValidation,
 }
 
+impl TestScenario {
+    fn semantic_code(&self) -> usize {
+        match self {
+            TestScenario::ValidMatch => 1,
+            TestScenario::ValidMismatch => 2,
+            TestScenario::ZeroLength => 3,
+            TestScenario::MaxLength => 4,
+            TestScenario::OffByOne => 5,
+            TestScenario::InvalidHeader => 6,
+            TestScenario::DuplicateHeader => 7,
+            TestScenario::ConflictingHeaders => 8,
+            TestScenario::OversizeDeclaration => 9,
+            TestScenario::RequestSmuggling => 10,
+            TestScenario::BufferOverflow => 11,
+            TestScenario::IntegerOverflow => 12,
+            TestScenario::Http10Behavior => 13,
+            TestScenario::Http11Requirements => 14,
+            TestScenario::HeadResponseSpecial => 15,
+            TestScenario::ChunkedConflict => 16,
+            TestScenario::LargeBodySmallLength => 17,
+            TestScenario::SmallBodyLargeLength => 18,
+            TestScenario::RepeatedValidation => 19,
+        }
+    }
+}
+
 /// Mock HTTP/1.1 Content-Length validator for fuzzing
 #[derive(Debug)]
 pub struct MockContentLengthValidator {
@@ -235,12 +324,15 @@ pub struct MockContentLengthValidator {
     allow_head_mismatch: bool,
 }
 
+type HeaderList = Vec<(String, String)>;
+type BodyBytes = Vec<u8>;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ValidatedMessage {
     pub declared_length: Option<usize>,
     pub actual_length: usize,
-    pub headers: Vec<(String, String)>,
-    pub body: Vec<u8>,
+    pub headers: HeaderList,
+    pub body: BodyBytes,
     pub validation_result: ValidationResult,
 }
 
@@ -253,6 +345,12 @@ pub enum ValidationResult {
     ConflictingHeaders,
     BodyTooLarge,
     MalformedMessage(String),
+}
+
+impl Default for MockContentLengthValidator {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MockContentLengthValidator {
@@ -274,7 +372,10 @@ impl MockContentLengthValidator {
         self
     }
 
-    pub fn validate_message(&self, test_case: &ContentLengthTestCase) -> Result<ValidatedMessage, String> {
+    pub fn validate_message(
+        &self,
+        test_case: &ContentLengthTestCase,
+    ) -> Result<ValidatedMessage, String> {
         let (headers, body) = self.build_message(test_case)?;
 
         // Extract Content-Length from headers
@@ -295,20 +396,21 @@ impl MockContentLengthValidator {
         }
 
         // Check declared size limits
-        if let Some(declared) = declared_length {
-            if declared > self.max_body_size {
-                return Ok(ValidatedMessage {
-                    declared_length,
-                    actual_length: body.len(),
-                    headers,
-                    body,
-                    validation_result: ValidationResult::BodyTooLarge,
-                });
-            }
+        if let Some(declared) = declared_length
+            && declared > self.max_body_size
+        {
+            return Ok(ValidatedMessage {
+                declared_length,
+                actual_length: body.len(),
+                headers,
+                body,
+                validation_result: ValidationResult::BodyTooLarge,
+            });
         }
 
         // Validate Content-Length vs body length match
-        let validation_result = self.validate_length_match(test_case, declared_length, body.len())?;
+        let validation_result =
+            self.validate_length_match(test_case, declared_length, body.len())?;
 
         Ok(ValidatedMessage {
             declared_length,
@@ -319,13 +421,17 @@ impl MockContentLengthValidator {
         })
     }
 
-    fn build_message(&self, test_case: &ContentLengthTestCase) -> Result<(Vec<(String, String)>, Vec<u8>), String> {
+    fn build_message(
+        &self,
+        test_case: &ContentLengthTestCase,
+    ) -> Result<(HeaderList, BodyBytes), String> {
         let mut headers = Vec::new();
 
         // Add basic headers
         if let Some(host) = &test_case.headers.host {
             headers.push(("Host".to_string(), host.clone()));
-        } else if matches!(test_case.message_type, MessageType::Request(ref req) if req.version == HttpVersion::Http11) {
+        } else if matches!(test_case.message_type, MessageType::Request(ref req) if req.version == HttpVersion::Http11)
+        {
             headers.push(("Host".to_string(), "example.com".to_string()));
         }
 
@@ -339,11 +445,11 @@ impl MockContentLengthValidator {
 
         // Add Content-Length header(s)
         match &test_case.content_length {
-            ContentLengthConfig::Missing => {}, // No Content-Length header
+            ContentLengthConfig::Missing => {} // No Content-Length header
 
             ContentLengthConfig::Valid(len) => {
                 headers.push(("Content-Length".to_string(), len.to_string()));
-            },
+            }
 
             ContentLengthConfig::Invalid(invalid) => {
                 let value = match invalid {
@@ -359,26 +465,24 @@ impl MockContentLengthValidator {
                     InvalidContentLength::AlternateBase(s) => format!("0x{}", s),
                 };
                 headers.push(("Content-Length".to_string(), value));
-            },
+            }
 
             ContentLengthConfig::Multiple(values) => {
                 for value in values {
                     headers.push(("Content-Length".to_string(), value.clone()));
                 }
-            },
+            }
 
-            ContentLengthConfig::Conflicting(conflict) => {
-                match conflict {
-                    ConflictingHeaders::TransferEncoding(cl, te) => {
-                        headers.push(("Content-Length".to_string(), cl.clone()));
-                        headers.push(("Transfer-Encoding".to_string(), te.clone()));
-                    },
-                    ConflictingHeaders::MultipleEncoding(encodings) => {
-                        headers.push(("Content-Length".to_string(), "10".to_string()));
-                        for encoding in encodings {
-                            headers.push(("Transfer-Encoding".to_string(), encoding.clone()));
-                        }
-                    },
+            ContentLengthConfig::Conflicting(conflict) => match conflict {
+                ConflictingHeaders::TransferEncoding(cl, te) => {
+                    headers.push(("Content-Length".to_string(), cl.clone()));
+                    headers.push(("Transfer-Encoding".to_string(), te.clone()));
+                }
+                ConflictingHeaders::MultipleEncoding(encodings) => {
+                    headers.push(("Content-Length".to_string(), "10".to_string()));
+                    for encoding in encodings {
+                        headers.push(("Transfer-Encoding".to_string(), encoding.clone()));
+                    }
                 }
             },
         }
@@ -403,32 +507,42 @@ impl MockContentLengthValidator {
     fn format_custom_header(&self, custom: &CustomHeader) -> (String, String) {
         match custom.formatting {
             HeaderFormatting::Normal => (custom.name.clone(), custom.value.clone()),
-            HeaderFormatting::ExtraWhitespace => {
-                (format!("  {}  ", custom.name), format!("  {}  ", custom.value))
-            },
+            HeaderFormatting::ExtraWhitespace => (
+                format!("  {}  ", custom.name),
+                format!("  {}  ", custom.value),
+            ),
             HeaderFormatting::NoWhitespace => {
                 (custom.name.replace(" ", ""), custom.value.replace(" ", ""))
-            },
+            }
             HeaderFormatting::MultipleColons => {
                 (format!("{}:extra", custom.name), custom.value.clone())
-            },
+            }
             HeaderFormatting::EmptyName => (String::new(), custom.value.clone()),
             HeaderFormatting::EmptyValue => (custom.name.clone(), String::new()),
             HeaderFormatting::VeryLong => {
                 let long_name = custom.name.repeat(100);
                 let long_value = custom.value.repeat(100);
                 (long_name, long_value)
-            },
-            HeaderFormatting::WithControl => {
-                (format!("{}\x01{}", custom.name, custom.name),
-                 format!("{}\x02{}", custom.value, custom.value))
-            },
+            }
+            HeaderFormatting::WithControl => (
+                format!("{}\x01{}", custom.name, custom.name),
+                format!("{}\x02{}", custom.value, custom.value),
+            ),
             HeaderFormatting::CaseMixed => {
-                let mixed_name = custom.name.chars().enumerate()
-                    .map(|(i, c)| if i % 2 == 0 { c.to_ascii_uppercase() } else { c.to_ascii_lowercase() })
+                let mixed_name = custom
+                    .name
+                    .chars()
+                    .enumerate()
+                    .map(|(i, c)| {
+                        if i % 2 == 0 {
+                            c.to_ascii_uppercase()
+                        } else {
+                            c.to_ascii_lowercase()
+                        }
+                    })
                     .collect();
                 (mixed_name, custom.value.clone())
-            },
+            }
         }
     }
 
@@ -443,56 +557,55 @@ impl MockContentLengthValidator {
                 match pattern {
                     BodyPattern::AllZeros(size) => Ok(vec![0u8; *size % 1000]),
                     BodyPattern::AllOnes(size) => Ok(vec![0xFFu8; *size % 1000]),
-                    BodyPattern::Incrementing(size) => {
-                        Ok((0u8..(*size as u8 % 255)).collect())
-                    },
+                    BodyPattern::Incrementing(size) => Ok((0u8..(*size as u8 % 255)).collect()),
                     BodyPattern::Random(size) => {
                         // Deterministic "random" for fuzzing reproducibility
                         Ok((0..*size % 1000).map(|i| (i * 17 + 42) as u8).collect())
-                    },
+                    }
                     BodyPattern::Text(text) => Ok(text.as_bytes().to_vec()),
                     BodyPattern::Binary(data) => Ok(data.clone()),
-                    BodyPattern::HttpLike(content) => {
-                        Ok(format!("GET {} HTTP/1.1\r\nHost: example.com\r\n\r\n", content).into_bytes())
-                    },
+                    BodyPattern::HttpLike(content) => Ok(format!(
+                        "GET {} HTTP/1.1\r\nHost: example.com\r\n\r\n",
+                        content
+                    )
+                    .into_bytes()),
                     BodyPattern::JsonLike(content) => {
                         Ok(format!("{{\"data\":\"{}\",\"type\":\"test\"}}", content).into_bytes())
-                    },
+                    }
                     BodyPattern::XmlLike(content) => {
                         Ok(format!("<root><data>{}</data></root>", content).into_bytes())
-                    },
+                    }
                     BodyPattern::Base64Like(content) => {
                         // Simulate base64-like content
                         Ok(content.chars().map(|c| c as u8).collect())
-                    },
+                    }
                 }
-            },
+            }
 
             BodyConfig::Oversized(data) => Ok(data.clone()),
 
-            BodyConfig::Malformed(malformed) => {
-                match malformed {
-                    MalformedBody::WithNulls(data) => {
-                        let mut result = data.clone();
-                        result.extend_from_slice(&[0u8; 5]);
-                        Ok(result)
-                    },
-                    MalformedBody::WithControl(data) => {
-                        let mut result = data.clone();
-                        result.extend_from_slice(&[1u8, 2u8, 3u8]);
-                        Ok(result)
-                    },
-                    MalformedBody::HighBitSet(data) => {
-                        Ok(data.iter().map(|&b| b | 0x80).collect())
-                    },
-                    MalformedBody::InvalidUtf8(data) => Ok(data.clone()),
-                    MalformedBody::Truncated(data) => Ok(data.clone()),
+            BodyConfig::Malformed(malformed) => match malformed {
+                MalformedBody::WithNulls(data) => {
+                    let mut result = data.clone();
+                    result.extend_from_slice(&[0u8; 5]);
+                    Ok(result)
                 }
+                MalformedBody::WithControl(data) => {
+                    let mut result = data.clone();
+                    result.extend_from_slice(&[1u8, 2u8, 3u8]);
+                    Ok(result)
+                }
+                MalformedBody::HighBitSet(data) => Ok(data.iter().map(|&b| b | 0x80).collect()),
+                MalformedBody::InvalidUtf8(data) => Ok(data.clone()),
+                MalformedBody::Truncated(data) => Ok(data.clone()),
             },
         }
     }
 
-    fn extract_content_length(&self, headers: &[(String, String)]) -> Result<Option<usize>, String> {
+    fn extract_content_length(
+        &self,
+        headers: &[(String, String)],
+    ) -> Result<Option<usize>, String> {
         let mut content_lengths = Vec::new();
 
         for (name, value) in headers {
@@ -517,7 +630,7 @@ impl MockContentLengthValidator {
                     Ok(len) => Ok(Some(len)),
                     Err(_) => Err("Content-Length parse error".to_string()),
                 }
-            },
+            }
             _ => Err("Duplicate Content-Length headers".to_string()),
         }
     }
@@ -535,7 +648,10 @@ impl MockContentLengthValidator {
         }
 
         if has_content_length && has_transfer_encoding {
-            return Err("Ambiguous body length: both Content-Length and Transfer-Encoding present".to_string());
+            return Err(
+                "Ambiguous body length: both Content-Length and Transfer-Encoding present"
+                    .to_string(),
+            );
         }
 
         Ok(())
@@ -545,21 +661,26 @@ impl MockContentLengthValidator {
         &self,
         test_case: &ContentLengthTestCase,
         declared_length: Option<usize>,
-        actual_length: usize
+        actual_length: usize,
     ) -> Result<ValidationResult, String> {
         let Some(declared) = declared_length else {
             return Ok(ValidationResult::Valid); // No Content-Length to validate
         };
 
         // Special case: HEAD responses may have Content-Length without body
-        if let MessageType::Response(ref resp) = test_case.message_type {
-            if self.allow_head_mismatch && resp.is_head_response && actual_length == 0 {
-                return Ok(ValidationResult::Valid);
-            }
+        if let MessageType::Response(ref resp) = test_case.message_type
+            && self.allow_head_mismatch
+            && resp.is_head_response
+            && actual_length == 0
+        {
+            return Ok(ValidationResult::Valid);
         }
 
         if declared != actual_length {
-            Ok(ValidationResult::LengthMismatch { declared, actual: actual_length })
+            Ok(ValidationResult::LengthMismatch {
+                declared,
+                actual: actual_length,
+            })
         } else {
             Ok(ValidationResult::Valid)
         }
@@ -577,6 +698,7 @@ fuzz_target!(|data: &[u8]| {
 
     if let Ok(test_case) = ContentLengthTestCase::arbitrary(&mut u) {
         let validator = MockContentLengthValidator::new();
+        std::hint::black_box(test_case.semantic_shape());
 
         // Test main validation path
         let result = validator.validate_message(&test_case);
@@ -608,33 +730,37 @@ fuzz_target!(|data: &[u8]| {
                                 );
                             }
                         }
-                    },
+                    }
 
                     ValidationResult::LengthMismatch { declared, actual } => {
                         assert_eq!(actual, validated.actual_length);
                         assert_eq!(Some(declared), validated.declared_length);
                         assert_ne!(declared, actual, "Mismatch result but lengths match");
-                    },
+                    }
 
                     ValidationResult::BodyTooLarge => {
                         assert!(
-                            validated.actual_length > validator.max_body_size ||
-                            validated.declared_length.map_or(false, |d| d > validator.max_body_size),
+                            validated.actual_length > validator.max_body_size
+                                || validated
+                                    .declared_length
+                                    .is_some_and(|d| d > validator.max_body_size),
                             "Body too large result but sizes within limits"
                         );
-                    },
+                    }
 
-                    ValidationResult::InvalidHeader(_) |
-                    ValidationResult::DuplicateHeader |
-                    ValidationResult::ConflictingHeaders |
-                    ValidationResult::MalformedMessage(_) => {
+                    ValidationResult::InvalidHeader(_)
+                    | ValidationResult::DuplicateHeader
+                    | ValidationResult::ConflictingHeaders
+                    | ValidationResult::MalformedMessage(_) => {
                         // These are expected for malformed input
                     }
                 }
 
                 // Test Content-Length header extraction consistency
-                if let Some(declared) = validated.declared_length {
-                    let content_length_count = validated.headers.iter()
+                if validated.declared_length.is_some() {
+                    let content_length_count = validated
+                        .headers
+                        .iter()
                         .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
                         .count();
 
@@ -661,11 +787,14 @@ fuzz_target!(|data: &[u8]| {
         test_boundary_conditions(&validator, &test_case);
         test_header_conflicts(&validator, &test_case);
         test_size_limits(&validator, &test_case);
-        test_parsing_strictness(&validator, &test_case);
+        test_parsing_strictness(&test_case);
     }
 });
 
-fn test_boundary_conditions(validator: &MockContentLengthValidator, test_case: &ContentLengthTestCase) {
+fn test_boundary_conditions(
+    validator: &MockContentLengthValidator,
+    test_case: &ContentLengthTestCase,
+) {
     // Test zero-length scenarios
     let mut zero_case = test_case.clone();
     zero_case.content_length = ContentLengthConfig::Valid(0);
@@ -680,14 +809,20 @@ fn test_boundary_conditions(validator: &MockContentLengthValidator, test_case: &
 
     let result = validator.validate_message(&max_case);
     // Should either succeed or fail cleanly
-    assert!(result.is_ok() || result.is_err(), "Max size case should not panic");
+    assert!(
+        result.is_ok() || result.is_err(),
+        "Max size case should not panic"
+    );
 }
 
-fn test_header_conflicts(validator: &MockContentLengthValidator, test_case: &ContentLengthTestCase) {
+fn test_header_conflicts(
+    validator: &MockContentLengthValidator,
+    test_case: &ContentLengthTestCase,
+) {
     // Test Content-Length + Transfer-Encoding conflict
     let mut conflict_case = test_case.clone();
     conflict_case.content_length = ContentLengthConfig::Conflicting(
-        ConflictingHeaders::TransferEncoding("10".to_string(), "chunked".to_string())
+        ConflictingHeaders::TransferEncoding("10".to_string(), "chunked".to_string()),
     );
 
     let result = validator.validate_message(&conflict_case);
@@ -696,7 +831,10 @@ fn test_header_conflicts(validator: &MockContentLengthValidator, test_case: &Con
     match result {
         Ok(validated) => {
             assert!(
-                matches!(validated.validation_result, ValidationResult::ConflictingHeaders),
+                matches!(
+                    validated.validation_result,
+                    ValidationResult::ConflictingHeaders
+                ),
                 "Should detect header conflict"
             );
         }
@@ -721,7 +859,7 @@ fn test_size_limits(validator: &MockContentLengthValidator, test_case: &ContentL
     }
 }
 
-fn test_parsing_strictness(validator: &MockContentLengthValidator, test_case: &ContentLengthTestCase) {
+fn test_parsing_strictness(test_case: &ContentLengthTestCase) {
     // Test strict vs lenient parsing
     let strict_validator = MockContentLengthValidator::new().with_strict_parsing(true);
     let lenient_validator = MockContentLengthValidator::new().with_strict_parsing(false);
@@ -736,4 +874,4 @@ fn test_parsing_strictness(validator: &MockContentLengthValidator, test_case: &C
             "Lenient parser should not reject what strict parser accepts"
         );
     }
-};
+}
