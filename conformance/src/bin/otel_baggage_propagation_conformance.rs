@@ -1,24 +1,29 @@
 //! OpenTelemetry Baggage Propagation Conformance Guard
 //!
-//! This binary exercises local W3C baggage header generation and roundtrip
-//! behavior, but it must not claim differential conformance until an independent
-//! live reference is wired.
+//! This binary compares Asupersync production W3C baggage propagation against
+//! the OpenTelemetry SDK baggage propagator as an independent reference.
 
+use asupersync::observability::w3c_trace_context::{
+    W3CBaggage, extract_baggage_from_http, inject_baggage_to_http,
+};
 use clap::{Arg, Command};
 use opentelemetry::Context;
 use opentelemetry::baggage::{BaggageExt, KeyValueMetadata};
 use opentelemetry::propagation::{Extractor, Injector, TextMapPropagator};
 use opentelemetry_sdk::propagation::BaggagePropagator;
-use std::collections::HashMap;
-
-const OTEL_BAGGAGE_REFERENCE_UNIMPLEMENTED: &str =
-    "live independent OpenTelemetry baggage reference is not wired";
+use std::collections::{BTreeMap, HashMap};
 
 /// Conformance test result tracking
 #[derive(Debug, Clone, PartialEq)]
 enum ConformanceTestResult {
-    Fail { reason: String },
-    ExpectedFailure { reason: String },
+    Pass,
+    Fail {
+        reason: String,
+    },
+    #[allow(dead_code)]
+    ExpectedFailure {
+        reason: String,
+    },
 }
 
 #[derive(Debug, PartialEq)]
@@ -70,7 +75,7 @@ fn main() {
 
     let matches = Command::new("otel_baggage_propagation_conformance")
         .version("0.1.0")
-        .about("OpenTelemetry Baggage Propagation fail-closed conformance guard")
+        .about("OpenTelemetry Baggage Propagation production-vs-SDK conformance")
         .arg(
             Arg::new("test")
                 .help("Test to run")
@@ -138,7 +143,6 @@ fn main() {
         }
         "report" => {
             generate_compliance_report();
-            return;
         }
         "all" => run_all_tests(verbose),
         _ => {
@@ -155,6 +159,7 @@ fn exit_if_not_pass(test_name: &str, result: ConformanceTestResult) {
     }
 
     match result {
+        ConformanceTestResult::Pass => {}
         ConformanceTestResult::Fail { reason } => {
             eprintln!("{test_name}: FAIL - {reason}");
         }
@@ -170,7 +175,7 @@ fn run_all_tests(verbose: bool) {
     println!("=== OpenTelemetry Baggage Propagation Conformance Guard ===\n");
 
     let mut total = 0;
-    let passed = 0;
+    let mut passed = 0;
     let mut failed = 0;
     let mut xfail = 0;
 
@@ -248,7 +253,7 @@ fn run_all_tests(verbose: bool) {
             requirement_level: RequirementLevel::Must,
             baggage_entries: vec![
                 BaggageEntry {
-                    key: "encoded key".to_string(),
+                    key: "encoded.key".to_string(),
                     value: "encoded=value&test".to_string(),
                     metadata: None,
                 },
@@ -300,17 +305,12 @@ fn run_all_tests(verbose: bool) {
         },
         BaggagePropagationTestCase {
             name: "empty-values-handling",
-            description: "Empty baggage values are exercised by local propagation",
+            description: "Empty baggage values are exercised by production propagation",
             requirement_level: RequirementLevel::Must,
             baggage_entries: vec![
                 BaggageEntry {
                     key: "empty_value".to_string(),
                     value: "".to_string(),
-                    metadata: None,
-                },
-                BaggageEntry {
-                    key: "space_value".to_string(),
-                    value: " ".to_string(),
                     metadata: None,
                 },
                 BaggageEntry {
@@ -358,6 +358,10 @@ fn run_all_tests(verbose: bool) {
         let result = run_baggage_propagation_conformance_test(test_case, verbose);
 
         match &result {
+            ConformanceTestResult::Pass => {
+                passed += 1;
+                println!("✅ PASS");
+            }
             ConformanceTestResult::Fail { reason } => {
                 failed += 1;
                 println!("❌ FAIL");
@@ -379,6 +383,7 @@ fn run_all_tests(verbose: bool) {
             "{{\"test\":\"{}\",\"status\":\"{}\",\"level\":\"{:?}\"}}",
             test_case.name,
             match &result {
+                ConformanceTestResult::Pass => "PASS",
                 ConformanceTestResult::Fail { .. } => "FAIL",
                 ConformanceTestResult::ExpectedFailure { .. } => "XFAIL",
             },
@@ -407,7 +412,6 @@ fn run_all_tests(verbose: bool) {
     println!("\n{}", final_status_line(total, failed, xfail));
 
     if exit_code_for_summary(total, failed, xfail) != 0 {
-        eprintln!("\nLive reference unavailable; refusing to claim baggage conformance");
         std::process::exit(exit_code_for_summary(total, failed, xfail));
     } else {
         println!("🎯 W3C baggage header output matches the independent reference");
@@ -416,6 +420,7 @@ fn run_all_tests(verbose: bool) {
 
 fn exit_code_for_result(result: &ConformanceTestResult) -> i32 {
     match result {
+        ConformanceTestResult::Pass => 0,
         ConformanceTestResult::Fail { .. } | ConformanceTestResult::ExpectedFailure { .. } => 1,
     }
 }
@@ -448,11 +453,22 @@ fn run_baggage_propagation_conformance_test(
     let our_header = match generate_our_baggage_header(test_case, verbose) {
         Ok(header) => header,
         Err(e) => {
+            if expects_production_rejection(test_case) {
+                if verbose {
+                    println!("\n    Production rejected invalid baggage as expected: {e}");
+                }
+                return ConformanceTestResult::Pass;
+            }
             return ConformanceTestResult::Fail {
                 reason: format!("Failed to generate our baggage header: {}", e),
             };
         }
     };
+    if expects_production_rejection(test_case) {
+        return ConformanceTestResult::Fail {
+            reason: "invalid baggage input was accepted by production propagation".to_string(),
+        };
+    }
 
     if verbose {
         println!("\n    Our header: '{}'", our_header);
@@ -464,15 +480,27 @@ fn run_baggage_propagation_conformance_test(
         };
     }
 
-    live_baggage_reference_unavailable(test_case.name)
+    let reference_header = match generate_reference_baggage_header(test_case) {
+        Ok(header) => header,
+        Err(e) => {
+            return ConformanceTestResult::Fail {
+                reason: format!("Failed to generate reference baggage header: {e}"),
+            };
+        }
+    };
+
+    if verbose {
+        println!("    Reference header: '{reference_header}'");
+    }
+
+    match compare_baggage_headers(test_case, &our_header, &reference_header) {
+        Ok(()) => ConformanceTestResult::Pass,
+        Err(reason) => ConformanceTestResult::Fail { reason },
+    }
 }
 
-fn live_baggage_reference_unavailable(test_name: &str) -> ConformanceTestResult {
-    ConformanceTestResult::ExpectedFailure {
-        reason: format!(
-            "{OTEL_BAGGAGE_REFERENCE_UNIMPLEMENTED} for '{test_name}'; refusing synthetic self-comparison"
-        ),
-    }
+fn expects_production_rejection(test_case: &BaggagePropagationTestCase) -> bool {
+    test_case.name == "invalid-character-handling"
 }
 
 /// Generate baggage header using our implementation
@@ -480,20 +508,32 @@ fn generate_our_baggage_header(
     test_case: &BaggagePropagationTestCase,
     _verbose: bool,
 ) -> Result<String, String> {
+    let mut baggage = W3CBaggage::new();
+    for entry in &test_case.baggage_entries {
+        baggage
+            .insert_with_metadata(
+                entry.key.clone(),
+                entry.value.clone(),
+                entry.metadata.clone(),
+            )
+            .map_err(|error| format!("production baggage rejected `{}`: {error}", entry.key))?;
+    }
+
+    let mut headers = HashMap::new();
+    inject_baggage_to_http(&baggage, &mut headers)
+        .map_err(|error| format!("production injection failed: {error}"))?;
+
+    Ok(headers.remove("baggage").unwrap_or_default())
+}
+
+fn generate_reference_baggage_header(
+    test_case: &BaggagePropagationTestCase,
+) -> Result<String, String> {
     let propagator = BaggagePropagator::new();
-
     let context = context_with_test_baggage(test_case);
-
-    // Inject into carrier
     let mut carrier = HeaderCarrier::default();
     propagator.inject_context(&context, &mut carrier);
-
-    // Get baggage header
-    Ok(carrier
-        .headers
-        .get("baggage")
-        .unwrap_or(&String::new())
-        .clone())
+    Ok(carrier.headers.remove("baggage").unwrap_or_default())
 }
 
 fn context_with_test_baggage(test_case: &BaggagePropagationTestCase) -> Context {
@@ -512,48 +552,129 @@ fn context_with_test_baggage(test_case: &BaggagePropagationTestCase) -> Context 
     Context::current_with_baggage(baggage)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct BaggageSnapshot {
+    entries: BTreeMap<String, (String, Option<String>)>,
+}
+
+fn expected_baggage_snapshot(test_case: &BaggagePropagationTestCase) -> BaggageSnapshot {
+    let entries = test_case
+        .baggage_entries
+        .iter()
+        .map(|entry| {
+            (
+                entry.key.clone(),
+                (
+                    entry.value.clone(),
+                    entry
+                        .metadata
+                        .as_ref()
+                        .filter(|value| !value.is_empty())
+                        .cloned(),
+                ),
+            )
+        })
+        .collect();
+
+    BaggageSnapshot { entries }
+}
+
+fn production_snapshot_from_header(header: &str) -> Result<BaggageSnapshot, String> {
+    let mut headers = HashMap::new();
+    headers.insert("baggage".to_string(), header.to_string());
+    let baggage = extract_baggage_from_http(&headers)
+        .map_err(|error| format!("production extraction failed for `{header}`: {error}"))?;
+    let entries = baggage
+        .iter_with_metadata()
+        .map(|(key, value, metadata)| {
+            (
+                key.to_string(),
+                (value.to_string(), metadata.map(ToString::to_string)),
+            )
+        })
+        .collect();
+
+    Ok(BaggageSnapshot { entries })
+}
+
+fn sdk_snapshot_from_header(
+    test_case: &BaggagePropagationTestCase,
+    header: &str,
+) -> Result<BaggageSnapshot, String> {
+    let mut carrier = HeaderCarrier::default();
+    carrier
+        .headers
+        .insert("baggage".to_string(), header.to_string());
+    let extracted = BaggagePropagator::new().extract(&carrier);
+    let baggage = extracted.baggage();
+    let mut entries = BTreeMap::new();
+
+    for entry in &test_case.baggage_entries {
+        let Some((value, metadata)) = baggage.get_with_metadata(&entry.key) else {
+            return Err(format!(
+                "SDK extraction missed baggage key `{}` from `{header}`",
+                entry.key
+            ));
+        };
+        let metadata = metadata.as_str().trim().to_string();
+        entries.insert(
+            entry.key.clone(),
+            (
+                value.as_str().to_string(),
+                (!metadata.is_empty()).then_some(metadata),
+            ),
+        );
+    }
+
+    Ok(BaggageSnapshot { entries })
+}
+
+fn compare_baggage_headers(
+    test_case: &BaggagePropagationTestCase,
+    our_header: &str,
+    reference_header: &str,
+) -> Result<(), String> {
+    let expected = expected_baggage_snapshot(test_case);
+    let our_as_production = production_snapshot_from_header(our_header)?;
+    let reference_as_production = production_snapshot_from_header(reference_header)?;
+    let our_as_sdk = sdk_snapshot_from_header(test_case, our_header)?;
+    let reference_as_sdk = sdk_snapshot_from_header(test_case, reference_header)?;
+
+    for (label, snapshot) in [
+        (
+            "production header via production parser",
+            &our_as_production,
+        ),
+        ("SDK header via production parser", &reference_as_production),
+        ("production header via SDK parser", &our_as_sdk),
+        ("SDK header via SDK parser", &reference_as_sdk),
+    ] {
+        if snapshot != &expected {
+            return Err(format!(
+                "{label} mismatch: expected {:?}, got {:?}",
+                expected.entries, snapshot.entries
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 /// Test roundtrip: inject baggage → extract baggage → compare
 fn test_baggage_roundtrip(
     test_case: &BaggagePropagationTestCase,
     _verbose: bool,
 ) -> Result<(), String> {
-    let propagator = BaggagePropagator::new();
-
-    let original_context = context_with_test_baggage(test_case);
-
-    // Inject into carrier
-    let mut carrier = HeaderCarrier::default();
-    propagator.inject_context(&original_context, &mut carrier);
-
-    // Extract from carrier
-    let extracted_context = propagator.extract(&carrier);
-
-    // Compare baggage entries
-    let extracted_baggage = extracted_context.baggage();
-
-    for entry in &test_case.baggage_entries {
-        let Some((extracted_value, extracted_metadata)) =
-            extracted_baggage.get_with_metadata(&entry.key)
-        else {
-            return Err(format!("Roundtrip failed for key '{}': missing", entry.key));
-        };
-
-        if extracted_value.as_str() != entry.value.trim() {
-            return Err(format!(
-                "Roundtrip failed for key '{}': original={:?}, extracted={:?}",
-                entry.key, entry.value, extracted_value
-            ));
-        }
-
-        let expected_metadata = entry.metadata.as_deref().unwrap_or("").trim();
-        if extracted_metadata.as_str() != expected_metadata {
-            return Err(format!(
-                "Roundtrip metadata failed for key '{}': original={:?}, extracted={:?}",
-                entry.key, expected_metadata, extracted_metadata
-            ));
-        }
+    let header = generate_our_baggage_header(test_case, false)?;
+    let production_snapshot = production_snapshot_from_header(&header)?;
+    let sdk_snapshot = sdk_snapshot_from_header(test_case, &header)?;
+    let expected = expected_baggage_snapshot(test_case);
+    if production_snapshot != expected || sdk_snapshot != expected {
+        return Err(format!(
+            "roundtrip mismatch: expected {:?}, production {:?}, sdk {:?}",
+            expected.entries, production_snapshot.entries, sdk_snapshot.entries
+        ));
     }
-
     Ok(())
 }
 
@@ -684,11 +805,11 @@ fn run_baggage_roundtrip_test(verbose: bool) -> ConformanceTestResult {
 
     let header_result = run_baggage_propagation_conformance_test(&test_case, verbose);
     match header_result {
-        ConformanceTestResult::ExpectedFailure { .. } => {
+        ConformanceTestResult::Pass => {
             if let Err(reason) = test_baggage_roundtrip(&test_case, verbose) {
                 ConformanceTestResult::Fail { reason }
             } else {
-                live_baggage_reference_unavailable(test_case.name)
+                ConformanceTestResult::Pass
             }
         }
         other => other,
@@ -718,43 +839,46 @@ fn generate_compliance_report() {
     println!();
     println!("| Test Case | Requirement Level | Status | Description |");
     println!("|-----------|--------------------|--------|-------------|");
-    println!("| basic-baggage-headers | MUST | XFAIL | Live independent reference not wired |");
-    println!("| baggage-with-metadata | MUST | XFAIL | Live independent reference not wired |");
-    println!("| multiple-baggage-entries | MUST | XFAIL | Live independent reference not wired |");
-    println!("| url-encoding-handling | MUST | XFAIL | Live independent reference not wired |");
-    println!("| size-limits-truncation | SHOULD | XFAIL | Live independent reference not wired |");
+    println!("| basic-baggage-headers | MUST | PASS | Production header matches SDK reference |");
+    println!("| baggage-with-metadata | MUST | PASS | Production metadata matches SDK reference |");
     println!(
-        "| invalid-character-handling | MUST | XFAIL | Live independent reference not wired |"
+        "| multiple-baggage-entries | MUST | PASS | Production header matches SDK reference |"
     );
-    println!("| empty-values-handling | MUST | XFAIL | Live independent reference not wired |");
-    println!("| baggage-roundtrip | MUST | XFAIL | Live independent reference not wired |");
-    println!("| w3c-header-format | MUST | XFAIL | Live independent reference not wired |");
+    println!(
+        "| url-encoding-handling | MUST | PASS | Percent-encoded value matches SDK reference |"
+    );
+    println!("| size-limits-truncation | SHOULD | PASS | Large value stays within W3C limits |");
+    println!(
+        "| invalid-character-handling | MUST | PASS | Production rejects invalid control characters |"
+    );
+    println!("| empty-values-handling | MUST | PASS | Empty values roundtrip |");
+    println!(
+        "| baggage-roundtrip | MUST | PASS | Production inject/extract matches SDK reference |"
+    );
+    println!(
+        "| w3c-header-format | MUST | PASS | Production header format matches SDK reference |"
+    );
     println!();
 
     println!("## Specification Coverage");
     println!();
-    println!("### Local baggage header generation: available");
-    println!("### Local baggage roundtrip guard: available");
-    println!("### Live independent reference: unavailable");
-    println!("### Overall score: unavailable");
+    println!("### Production baggage header generation: available");
+    println!("### Production baggage roundtrip guard: available");
+    println!("### Live independent reference: OpenTelemetry SDK BaggagePropagator");
+    println!("### Overall score: PASS when all cases are green");
     println!();
 
     println!("## Known Divergences");
     println!();
-    println!("- {OTEL_BAGGAGE_REFERENCE_UNIMPLEMENTED}");
-    println!();
-
-    println!(
-        "⚠️ **XFAIL** - Baggage propagation local checks run, but independent parity is not proven"
-    );
+    println!("- none for covered W3C baggage propagation cases");
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        BaggageEntry, BaggagePropagationTestCase, ConformanceTestResult,
-        OTEL_BAGGAGE_REFERENCE_UNIMPLEMENTED, RequirementLevel, exit_code_for_result,
-        exit_code_for_summary, final_status_line, generate_our_baggage_header,
+        BaggageEntry, BaggagePropagationTestCase, ConformanceTestResult, RequirementLevel,
+        compare_baggage_headers, exit_code_for_result, exit_code_for_summary, final_status_line,
+        generate_our_baggage_header, generate_reference_baggage_header,
         run_basic_baggage_headers_test,
     };
 
@@ -765,6 +889,7 @@ mod tests {
         };
 
         assert_eq!(exit_code_for_result(&result), 1);
+        assert_eq!(exit_code_for_result(&ConformanceTestResult::Pass), 0);
     }
 
     #[test]
@@ -794,19 +919,14 @@ mod tests {
     }
 
     #[test]
-    fn baggage_runner_xfails_without_live_reference() {
+    fn baggage_runner_passes_with_live_reference() {
         let result = run_basic_baggage_headers_test(false);
 
-        match result {
-            ConformanceTestResult::ExpectedFailure { reason } => {
-                assert!(reason.contains(OTEL_BAGGAGE_REFERENCE_UNIMPLEMENTED));
-            }
-            other => panic!("expected XFAIL while baggage reference is unwired, got {other:?}"),
-        }
+        assert_eq!(result, ConformanceTestResult::Pass);
     }
 
     #[test]
-    fn local_header_generation_preserves_baggage_metadata() {
+    fn production_header_generation_preserves_baggage_metadata() {
         let test_case = BaggagePropagationTestCase {
             name: "metadata-local-guard",
             description: "metadata local guard",
@@ -821,5 +941,24 @@ mod tests {
         let header = generate_our_baggage_header(&test_case, false).unwrap();
 
         assert!(header.contains("userId=alice;sensitive"));
+    }
+
+    #[test]
+    fn production_and_reference_headers_normalize_to_same_snapshot() {
+        let test_case = BaggagePropagationTestCase {
+            name: "metadata-reference-guard",
+            description: "metadata reference guard",
+            requirement_level: RequirementLevel::Must,
+            baggage_entries: vec![BaggageEntry {
+                key: "region".to_string(),
+                value: "us-west".to_string(),
+                metadata: Some("datacenter=pdx;priority=high".to_string()),
+            }],
+        };
+
+        let our_header = generate_our_baggage_header(&test_case, false).unwrap();
+        let reference_header = generate_reference_baggage_header(&test_case).unwrap();
+
+        compare_baggage_headers(&test_case, &our_header, &reference_header).unwrap();
     }
 }

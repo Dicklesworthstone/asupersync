@@ -66,7 +66,13 @@ pub struct W3CPropagationContext {
 /// W3C Baggage entries.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct W3CBaggage {
-    entries: BTreeMap<String, String>,
+    entries: BTreeMap<String, W3CBaggageEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct W3CBaggageEntry {
+    value: String,
+    metadata: Option<String>,
 }
 
 /// 16-byte trace identifier.
@@ -172,14 +178,33 @@ impl W3CBaggage {
     /// Returns a baggage value by key.
     #[must_use]
     pub fn get(&self, key: &str) -> Option<&str> {
-        self.entries.get(key).map(String::as_str)
+        self.entries.get(key).map(|entry| entry.value.as_str())
+    }
+
+    /// Returns a baggage metadata property string by key.
+    #[must_use]
+    pub fn metadata(&self, key: &str) -> Option<&str> {
+        self.entries
+            .get(key)
+            .and_then(|entry| entry.metadata.as_deref())
     }
 
     /// Iterates entries in deterministic key order.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
         self.entries
             .iter()
-            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .map(|(key, entry)| (key.as_str(), entry.value.as_str()))
+    }
+
+    /// Iterates entries with optional metadata in deterministic key order.
+    pub fn iter_with_metadata(&self) -> impl Iterator<Item = (&str, &str, Option<&str>)> {
+        self.entries.iter().map(|(key, entry)| {
+            (
+                key.as_str(),
+                entry.value.as_str(),
+                entry.metadata.as_deref(),
+            )
+        })
     }
 
     /// Inserts or replaces a baggage entry.
@@ -188,16 +213,31 @@ impl W3CBaggage {
         key: impl Into<String>,
         value: impl Into<String>,
     ) -> Result<(), TraceContextError> {
+        self.insert_with_metadata(key, value, Option::<String>::None)
+    }
+
+    /// Inserts or replaces a baggage entry with metadata.
+    pub fn insert_with_metadata(
+        &mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+        metadata: Option<impl Into<String>>,
+    ) -> Result<(), TraceContextError> {
         let key = key.into();
         let value = value.into();
+        let metadata = metadata.map(Into::into).filter(|value| !value.is_empty());
         validate_baggage_key(&key)?;
         validate_baggage_value(&value)?;
+        if let Some(metadata) = metadata.as_deref() {
+            validate_baggage_metadata(metadata)?;
+        }
         if !self.entries.contains_key(&key) && self.entries.len() >= MAX_BAGGAGE_ITEMS {
             return Err(TraceContextError::TooManyBaggageItems(
                 self.entries.len() + 1,
             ));
         }
-        self.entries.insert(key, value);
+        self.entries
+            .insert(key, W3CBaggageEntry { value, metadata });
         Ok(())
     }
 
@@ -226,14 +266,23 @@ impl W3CBaggage {
             let key = key.trim();
             validate_baggage_key(key)?;
 
-            let raw_value = value_with_metadata
-                .split(';')
-                .next()
-                .unwrap_or_default()
-                .trim();
+            let (raw_value, metadata) = value_with_metadata
+                .split_once(';')
+                .map_or((value_with_metadata, None), |(value, metadata)| {
+                    (value, Some(metadata.trim()))
+                });
+            let raw_value = raw_value.trim();
             let value = percent_decode_baggage_value(raw_value)?;
             validate_baggage_value(&value)?;
-            baggage.entries.insert(key.to_string(), value);
+            let metadata = metadata
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string);
+            if let Some(metadata) = metadata.as_deref() {
+                validate_baggage_metadata(metadata)?;
+            }
+            baggage
+                .entries
+                .insert(key.to_string(), W3CBaggageEntry { value, metadata });
         }
 
         Ok(baggage)
@@ -244,7 +293,14 @@ impl W3CBaggage {
         let header = self
             .entries
             .iter()
-            .map(|(key, value)| format!("{key}={}", percent_encode_baggage_value(value)))
+            .map(|(key, entry)| {
+                let mut member = format!("{key}={}", percent_encode_baggage_value(&entry.value));
+                if let Some(metadata) = &entry.metadata {
+                    member.push(';');
+                    member.push_str(metadata);
+                }
+                member
+            })
             .collect::<Vec<_>>()
             .join(",");
         if header.len() > MAX_BAGGAGE_HEADER_LENGTH {
@@ -273,6 +329,23 @@ fn validate_baggage_value(value: &str) -> Result<(), TraceContextError> {
     if value.bytes().any(|byte| matches!(byte, 0x00..=0x1f | 0x7f)) {
         return Err(TraceContextError::InvalidBaggage(
             "member value contains control characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_baggage_metadata(metadata: &str) -> Result<(), TraceContextError> {
+    if metadata
+        .bytes()
+        .any(|byte| matches!(byte, 0x00..=0x1f | 0x7f))
+    {
+        return Err(TraceContextError::InvalidBaggage(
+            "metadata contains control characters".to_string(),
+        ));
+    }
+    if metadata.contains(',') {
+        return Err(TraceContextError::InvalidBaggage(
+            "metadata contains a list-member delimiter".to_string(),
         ));
     }
     Ok(())
@@ -775,11 +848,12 @@ mod tests {
                 .expect("baggage parse failed");
 
         assert_eq!(baggage.get("user"), Some("alice smith"));
+        assert_eq!(baggage.metadata("user"), Some("tenant=ignored"));
         assert_eq!(baggage.get("encoded"), Some("a,b;c"));
         assert_eq!(baggage.get("empty"), Some(""));
         assert_eq!(
             baggage.to_header().expect("baggage serialization failed"),
-            "empty=,encoded=a%2Cb%3Bc,user=alice%20smith"
+            "empty=,encoded=a%2Cb%3Bc,user=alice%20smith;tenant=ignored"
         );
     }
 
