@@ -25,12 +25,13 @@
 #![allow(clippy::too_many_lines)]
 
 use arbitrary::Arbitrary;
-use asupersync::io::{AsyncRead, AsyncWrite, copy, ReadBuf};
+use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf, copy};
+use futures::executor::block_on;
 use libfuzzer_sys::fuzz_target;
+use std::collections::HashMap;
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::collections::HashMap;
 
 const MAX_BUFFER_SIZE: usize = 65536; // 64KB max buffer for fuzzing
 const MAX_COPY_SIZE: usize = 1024 * 1024; // 1MB max copy operation
@@ -86,7 +87,7 @@ impl MaliciousReader {
 impl AsyncRead for MaliciousReader {
     fn poll_read(
         mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         if self.position >= self.data.len() {
@@ -109,7 +110,8 @@ impl AsyncRead for MaliciousReader {
                 available.min(buf_capacity)
             }
             ReaderBehavior::AlternatePending => {
-                if self.read_count % 3 == 0 {
+                if self.read_count.is_multiple_of(3) {
+                    cx.waker().wake_by_ref();
                     return Poll::Pending;
                 }
                 available.min(buf_capacity)
@@ -150,7 +152,7 @@ enum WriterBehavior {
 impl MaliciousWriter {
     fn new(behavior: WriterBehavior, max_size: usize) -> Self {
         Self {
-            buffer: Vec::with_capacity(max_size),
+            buffer: Vec::new(),
             behavior,
             write_count: 0,
             max_size,
@@ -165,7 +167,7 @@ impl MaliciousWriter {
 impl AsyncWrite for MaliciousWriter {
     fn poll_write(
         mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         if self.buffer.len() >= self.max_size {
@@ -182,13 +184,14 @@ impl AsyncWrite for MaliciousWriter {
                 short_write.min(self.max_size - self.buffer.len())
             }
             WriterBehavior::SlowWriter => {
-                if self.write_count % 4 == 0 {
+                if self.write_count.is_multiple_of(4) {
+                    cx.waker().wake_by_ref();
                     return Poll::Pending;
                 }
                 buf.len().min(self.max_size - self.buffer.len())
             }
             WriterBehavior::FailAfterWrites(fail_count) => {
-                if self.write_count > fail_count as usize {
+                if self.write_count > usize::from(fail_count) {
                     return Poll::Ready(Err(io::Error::new(
                         io::ErrorKind::BrokenPipe,
                         "Simulated write failure",
@@ -220,9 +223,9 @@ struct BufferOperation {
     scenario: BufferVulnScenario,
     reader_behavior: ReaderBehavior,
     writer_behavior: WriterBehavior,
-    buffer_size: u16,          // 0-65535
-    copy_size: u32,            // Size of data to copy
-    buffer_pattern: u8,        // Pattern for buffer contents
+    buffer_size: u16,           // 0-65535
+    copy_size: u32,             // Size of data to copy
+    buffer_pattern: u8,         // Pattern for buffer contents
     trigger_cancellation: bool, // Whether to trigger cancellation mid-copy
 }
 
@@ -230,6 +233,53 @@ struct BufferOperation {
 struct BufferVulnTestHarness {
     operation_counter: usize,
     buffer_tracking: HashMap<usize, Vec<u8>>, // Track buffer contents for contamination detection
+}
+
+#[derive(Debug)]
+struct CopyObservation {
+    vulnerabilities_detected: usize,
+    buffer_violations: Vec<String>,
+}
+
+fn observe_copy_result(
+    label: &str,
+    copy_result: io::Result<u64>,
+    bytes_processed: usize,
+    logical_limit: usize,
+) -> CopyObservation {
+    let mut buffer_violations = Vec::new();
+    let mut vulnerabilities_detected = 0;
+
+    match copy_result {
+        Ok(bytes_copied) => {
+            let reported_bytes = usize::try_from(bytes_copied).unwrap_or(usize::MAX);
+            if reported_bytes != bytes_processed {
+                buffer_violations.push(format!(
+                    "{label} reported {reported_bytes} bytes but writer stored {bytes_processed}"
+                ));
+            }
+        }
+        Err(err) => {
+            vulnerabilities_detected += 1;
+            if bytes_processed > logical_limit {
+                let error_kind = err.kind();
+                buffer_violations.push(format!(
+                    "{label} wrote {bytes_processed} bytes after {error_kind:?}, expected max {logical_limit}"
+                ));
+            }
+        }
+    }
+
+    if bytes_processed > logical_limit {
+        buffer_violations.push(format!(
+            "{label} wrote {bytes_processed} bytes, expected max {logical_limit}"
+        ));
+    }
+
+    CopyObservation {
+        vulnerabilities_detected,
+        buffer_violations,
+    }
 }
 
 impl BufferVulnTestHarness {
@@ -240,42 +290,69 @@ impl BufferVulnTestHarness {
         }
     }
 
-    async fn execute_buffer_vuln_test(&mut self, operation: &BufferOperation) -> Result<BufferTestResult, String> {
-        let buffer_size = (operation.buffer_size as usize).clamp(1, MAX_BUFFER_SIZE);
-        let copy_size = (operation.copy_size as usize).clamp(1, MAX_COPY_SIZE);
+    async fn execute_buffer_vuln_test(
+        &mut self,
+        operation: &BufferOperation,
+    ) -> Result<BufferTestResult, String> {
+        let buffer_size = usize::from(operation.buffer_size).clamp(1, MAX_BUFFER_SIZE);
+        let copy_size = usize::try_from(operation.copy_size)
+            .unwrap_or(MAX_COPY_SIZE)
+            .clamp(1, MAX_COPY_SIZE);
 
         match operation.scenario {
             BufferVulnScenario::BufferBoundsViolation => {
-                self.test_buffer_bounds_violation(operation, buffer_size, copy_size).await
+                self.test_buffer_bounds_violation(operation, buffer_size, copy_size)
+                    .await
             }
             BufferVulnScenario::CancellationDrainBypass => {
-                self.test_cancellation_drain_bypass(operation, buffer_size, copy_size).await
+                self.test_cancellation_drain_bypass(operation, buffer_size, copy_size)
+                    .await
             }
             BufferVulnScenario::ProgressCounterOverflow => {
-                self.test_progress_counter_overflow(operation, buffer_size, copy_size).await
+                self.test_progress_counter_overflow(operation, buffer_size, copy_size)
+                    .await
             }
             BufferVulnScenario::BidirectionalContamination => {
-                self.test_bidirectional_contamination(operation, buffer_size, copy_size).await
+                self.test_bidirectional_contamination(operation, buffer_size, copy_size)
+                    .await
             }
             BufferVulnScenario::Combined => {
                 // Test multiple vulnerability scenarios in sequence
-                let bounds_result = self.test_buffer_bounds_violation(operation, buffer_size, copy_size).await?;
-                let drain_result = self.test_cancellation_drain_bypass(operation, buffer_size, copy_size).await?;
+                let bounds_result = self
+                    .test_buffer_bounds_violation(operation, buffer_size, copy_size)
+                    .await?;
+                let drain_result = self
+                    .test_cancellation_drain_bypass(operation, buffer_size, copy_size)
+                    .await?;
 
                 Ok(BufferTestResult {
                     bytes_processed: bounds_result.bytes_processed + drain_result.bytes_processed,
-                    vulnerabilities_detected: bounds_result.vulnerabilities_detected + drain_result.vulnerabilities_detected,
-                    buffer_violations: [bounds_result.buffer_violations, drain_result.buffer_violations].concat(),
+                    vulnerabilities_detected: bounds_result.vulnerabilities_detected
+                        + drain_result.vulnerabilities_detected,
+                    buffer_violations: [
+                        bounds_result.buffer_violations,
+                        drain_result.buffer_violations,
+                    ]
+                    .concat(),
                 })
             }
         }
     }
 
-    async fn test_buffer_bounds_violation(&mut self, operation: &BufferOperation, buffer_size: usize, copy_size: usize) -> Result<BufferTestResult, String> {
+    async fn test_buffer_bounds_violation(
+        &mut self,
+        operation: &BufferOperation,
+        _buffer_size: usize,
+        copy_size: usize,
+    ) -> Result<BufferTestResult, String> {
         self.operation_counter += 1;
 
         // Create reader with known pattern
-        let mut reader = MaliciousReader::new(copy_size, operation.reader_behavior, operation.buffer_pattern);
+        let mut reader = MaliciousReader::new(
+            copy_size,
+            operation.reader_behavior,
+            operation.buffer_pattern,
+        );
 
         // Create writer with potential for short writes
         let mut writer = MaliciousWriter::new(operation.writer_behavior, copy_size * 2);
@@ -288,80 +365,122 @@ impl BufferVulnTestHarness {
 
         // Verify no buffer corruption occurred
         let expected_pattern = operation.buffer_pattern;
-        let corrupted_bytes = writer.written_data().iter()
+        let corrupted_bytes = writer
+            .written_data()
+            .iter()
             .filter(|&&byte| byte != expected_pattern)
             .count();
 
         if corrupted_bytes > 0 {
-            violations.push(format!("Buffer corruption: {} of {} bytes corrupted",
-                corrupted_bytes, writer.written_data().len()));
+            let written_len = writer.written_data().len();
+            violations.push(format!(
+                "Buffer corruption: {corrupted_bytes} of {written_len} bytes corrupted"
+            ));
         }
 
-        // Check for buffer length inconsistencies
-        if copy_result.is_ok() && bytes_processed > copy_size {
-            violations.push(format!("Buffer overflow: wrote {} bytes, expected max {}",
-                bytes_processed, copy_size));
-        }
+        let copy_observation = observe_copy_result(
+            "buffer bounds copy",
+            copy_result,
+            bytes_processed,
+            copy_size,
+        );
+        let vulnerabilities_detected = copy_observation.vulnerabilities_detected;
+        violations.extend(copy_observation.buffer_violations);
 
         // Store buffer state for cross-operation contamination detection
-        self.buffer_tracking.insert(self.operation_counter, writer.written_data().to_vec());
+        self.buffer_tracking
+            .insert(self.operation_counter, writer.written_data().to_vec());
 
         Ok(BufferTestResult {
             bytes_processed,
-            vulnerabilities_detected: if copy_result.is_err() { 1 } else { 0 },
+            vulnerabilities_detected,
             buffer_violations: violations,
         })
     }
 
-    async fn test_cancellation_drain_bypass(&mut self, operation: &BufferOperation, buffer_size: usize, copy_size: usize) -> Result<BufferTestResult, String> {
+    async fn test_cancellation_drain_bypass(
+        &mut self,
+        operation: &BufferOperation,
+        _buffer_size: usize,
+        copy_size: usize,
+    ) -> Result<BufferTestResult, String> {
         self.operation_counter += 1;
 
         // VULNERABILITY TEST: Test cancellation behavior with large buffers
-        let mut reader = MaliciousReader::new(copy_size, operation.reader_behavior, operation.buffer_pattern);
-        let mut writer = MaliciousWriter::new(WriterBehavior::SlowWriter, copy_size * 2);
+        let mut reader = MaliciousReader::new(
+            copy_size,
+            operation.reader_behavior,
+            operation.buffer_pattern,
+        );
+        let writer_behavior = if operation.trigger_cancellation {
+            WriterBehavior::SlowWriter
+        } else {
+            operation.writer_behavior
+        };
+        let mut writer = MaliciousWriter::new(writer_behavior, copy_size * 2);
 
         // This would test the MAX_DRAIN_ATTEMPTS_ON_CANCEL logic in real implementation
         // For now, test basic copy with slow writer to trigger partial operations
         let copy_result = copy(&mut reader, &mut writer).await;
 
-        let violations = Vec::new();
+        let bytes_processed = writer.written_data().len();
+        let copy_observation = observe_copy_result(
+            "cancellation drain copy",
+            copy_result,
+            bytes_processed,
+            copy_size,
+        );
 
         // In real implementation, would verify that drain attempts are properly bounded
         // and don't exceed MAX_DRAIN_ATTEMPTS_ON_CANCEL = 4
 
         Ok(BufferTestResult {
-            bytes_processed: writer.written_data().len(),
-            vulnerabilities_detected: 0,
-            buffer_violations: violations,
+            bytes_processed,
+            vulnerabilities_detected: copy_observation.vulnerabilities_detected,
+            buffer_violations: copy_observation.buffer_violations,
         })
     }
 
-    async fn test_progress_counter_overflow(&mut self, operation: &BufferOperation, buffer_size: usize, copy_size: usize) -> Result<BufferTestResult, String> {
+    async fn test_progress_counter_overflow(
+        &mut self,
+        operation: &BufferOperation,
+        _buffer_size: usize,
+        copy_size: usize,
+    ) -> Result<BufferTestResult, String> {
         self.operation_counter += 1;
 
         // VULNERABILITY TEST: Test progress counter overflow with large copy sizes
         let large_copy_size = copy_size.saturating_mul(1000); // Amplify to test overflow
-        let mut reader = MaliciousReader::new(large_copy_size, operation.reader_behavior, operation.buffer_pattern);
+        let mut reader = MaliciousReader::new(
+            large_copy_size,
+            operation.reader_behavior,
+            operation.buffer_pattern,
+        );
         let mut writer = MaliciousWriter::new(operation.writer_behavior, large_copy_size * 2);
 
         let copy_result = copy(&mut reader, &mut writer).await;
 
-        let mut violations = Vec::new();
         let bytes_processed = writer.written_data().len();
-
-        // Check for progress counter wraparound (would be detected in real CopyWithProgress)
-        if copy_result.is_ok() && bytes_processed > 0 {
-            // In real implementation, would check that progress callbacks received monotonic values
-        }
+        let copy_observation = observe_copy_result(
+            "progress counter copy",
+            copy_result,
+            bytes_processed,
+            large_copy_size,
+        );
 
         Ok(BufferTestResult {
             bytes_processed,
-            vulnerabilities_detected: 0,
-            buffer_violations: violations,
+            vulnerabilities_detected: copy_observation.vulnerabilities_detected,
+            buffer_violations: copy_observation.buffer_violations,
         })
     }
 
-    async fn test_bidirectional_contamination(&mut self, operation: &BufferOperation, buffer_size: usize, copy_size: usize) -> Result<BufferTestResult, String> {
+    async fn test_bidirectional_contamination(
+        &mut self,
+        operation: &BufferOperation,
+        _buffer_size: usize,
+        copy_size: usize,
+    ) -> Result<BufferTestResult, String> {
         self.operation_counter += 1;
 
         // VULNERABILITY TEST: Test for cross-contamination in bidirectional copy
@@ -379,24 +498,45 @@ impl BufferVulnTestHarness {
         let copy2_result = copy(&mut reader2, &mut writer2).await;
 
         let mut violations = Vec::new();
+        let mut vulnerabilities_detected = 0;
 
         // Check for cross-contamination between the two operations
         let writer1_data = writer1.written_data();
         let writer2_data = writer2.written_data();
 
-        let writer1_contaminated = writer1_data.iter().any(|&byte| byte == pattern2);
-        let writer2_contaminated = writer2_data.iter().any(|&byte| byte == pattern1);
+        let copy1_observation = observe_copy_result(
+            "bidirectional copy 1",
+            copy1_result,
+            writer1_data.len(),
+            copy_size,
+        );
+        let copy2_observation = observe_copy_result(
+            "bidirectional copy 2",
+            copy2_result,
+            writer2_data.len(),
+            copy_size,
+        );
+
+        vulnerabilities_detected +=
+            copy1_observation.vulnerabilities_detected + copy2_observation.vulnerabilities_detected;
+        violations.extend(copy1_observation.buffer_violations);
+        violations.extend(copy2_observation.buffer_violations);
+
+        let writer1_contaminated = writer1_data.contains(&pattern2);
+        let writer2_contaminated = writer2_data.contains(&pattern1);
 
         if writer1_contaminated {
+            vulnerabilities_detected += 1;
             violations.push("Writer1 contaminated with pattern2".to_string());
         }
         if writer2_contaminated {
+            vulnerabilities_detected += 1;
             violations.push("Writer2 contaminated with pattern1".to_string());
         }
 
         Ok(BufferTestResult {
             bytes_processed: writer1_data.len() + writer2_data.len(),
-            vulnerabilities_detected: violations.len(),
+            vulnerabilities_detected,
             buffer_violations: violations,
         })
     }
@@ -414,14 +554,9 @@ fuzz_target!(|operations: Vec<BufferOperation>| {
         return;
     }
 
-    // Use tokio runtime for async operation testing
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .expect("Failed to create runtime");
-
     let mut harness = BufferVulnTestHarness::new();
 
-    rt.block_on(async {
+    block_on(async {
         for (op_idx, operation) in operations.iter().enumerate() {
             let result = harness.execute_buffer_vuln_test(operation).await;
 
@@ -429,26 +564,22 @@ fuzz_target!(|operations: Vec<BufferOperation>| {
                 Ok(test_result) => {
                     // INVARIANT: No buffer violations allowed
                     if !test_result.buffer_violations.is_empty() {
-                        panic!(
-                            "BUFFER VIOLATION in operation {}: {:?}",
-                            op_idx,
-                            test_result.buffer_violations
-                        );
+                        let violations = &test_result.buffer_violations;
+                        panic!("BUFFER VIOLATION in operation {op_idx}: {violations:?}");
                     }
 
                     // INVARIANT: Bytes processed should never exceed logical limits
                     if test_result.bytes_processed > MAX_COPY_SIZE * 10 {
+                        let bytes_processed = test_result.bytes_processed;
                         panic!(
-                            "EXCESSIVE BYTES PROCESSED: {} bytes in operation {} exceeds reasonable limits",
-                            test_result.bytes_processed,
-                            op_idx
+                            "EXCESSIVE BYTES PROCESSED: {bytes_processed} bytes in operation {op_idx} exceeds reasonable limits"
                         );
                     }
                 }
                 Err(test_error) => {
                     // Test setup errors are acceptable, but buffer integrity violations are not
                     if test_error.contains("corruption") || test_error.contains("overflow") {
-                        panic!("BUFFER INTEGRITY FAILURE: {}", test_error);
+                        panic!("BUFFER INTEGRITY FAILURE: {test_error}");
                     }
                     // Other test errors are acceptable (e.g., I/O errors from malicious writers)
                 }
