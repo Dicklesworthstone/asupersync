@@ -5,6 +5,7 @@ use libfuzzer_sys::fuzz_target;
 
 use asupersync::bytes::BytesMut;
 use asupersync::http::h2::hpack::{Decoder, Encoder, Header};
+use std::fmt::Display;
 
 /// Fuzzing parameters for HPACK dynamic table eviction scenarios.
 #[derive(Debug, Clone, Arbitrary)]
@@ -194,7 +195,11 @@ fn test_huffman_padding_edge_cases(config: &HpackEvictionConfig) -> Result<(), S
         encode_string(&mut buf, "test-value", true);
 
         let mut src = buf.freeze();
-        let _ = decoder.decode(&mut src); // Allow both success and failure
+        observe_decode_outcome(
+            decoder.decode(&mut src),
+            config.max_header_list_size as usize,
+            "huffman padding edge case",
+        );
     }
 
     Ok(())
@@ -262,9 +267,43 @@ fn test_complex_eviction_scenarios(config: &HpackEvictionConfig) -> Result<(), S
     }
 
     let mut src = buf.freeze();
-    let _ = decoder.decode(&mut src); // Allow both success and failure
+    observe_decode_outcome(
+        decoder.decode(&mut src),
+        config.max_header_list_size as usize,
+        "complex eviction scenario",
+    );
 
     Ok(())
+}
+
+fn observe_decode_outcome<E: Display>(
+    result: Result<Vec<Header>, E>,
+    max_header_list_size: usize,
+    context: &str,
+) {
+    match result {
+        Ok(headers) => {
+            let total_size: usize = headers.iter().map(Header::size).sum();
+            assert!(
+                total_size <= max_header_list_size,
+                "{context} decoded header list exceeds configured max: {} > {}",
+                total_size,
+                max_header_list_size
+            );
+        }
+        Err(error) => {
+            let message = error.to_string();
+            assert!(
+                !message.trim().is_empty(),
+                "{context} HPACK rejection should expose a diagnostic"
+            );
+            assert!(
+                message.len() <= 2048,
+                "{context} HPACK rejection diagnostic should stay bounded: {} bytes",
+                message.len()
+            );
+        }
+    }
 }
 
 /// Main fuzzing function
