@@ -12,16 +12,10 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::bytes::{Bytes, BytesMut};
-use asupersync::codec::{Decoder, Encoder};
+use asupersync::bytes::Bytes;
 use asupersync::http::h2::{
-    connection::{ConnectionState, FrameCodec},
     error::{ErrorCode, H2Error},
-    frame::{
-        DataFrame, Frame, FrameHeader, FrameType, HeadersFrame, RstStreamFrame, WindowUpdateFrame,
-        data_flags, headers_flags,
-    },
-    hpack::Header,
+    frame::{DataFrame, Frame, HeadersFrame, RstStreamFrame, WindowUpdateFrame},
     stream::StreamState,
 };
 use libfuzzer_sys::fuzz_target;
@@ -89,9 +83,9 @@ struct ConcurrentStream {
 /// Simple stream operation for concurrent testing
 #[derive(Debug, Clone, Arbitrary)]
 enum StreamOperation {
-    SendHeaders,
-    SendData,
-    SendWindowUpdate,
+    Headers,
+    Data,
+    WindowUpdate,
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -135,7 +129,7 @@ fn test_data_after_end_stream(test_case: &FrameSequenceTest) {
 
     // Create mock connection and codec
     let connection_result =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| create_mock_h2_connection()));
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(create_mock_h2_connection));
 
     let mut connection = match connection_result {
         Ok(conn) => conn,
@@ -191,15 +185,15 @@ fn test_data_after_end_stream(test_case: &FrameSequenceTest) {
                 }
                 Err(other_error) => {
                     // Other protocol errors are acceptable (e.g., if setup was malformed)
-                    eprintln!(
-                        "Got protocol error instead of STREAM_CLOSED: {:?}",
-                        other_error
+                    observe_h2_error(
+                        "post-END_STREAM violation alternate rejection",
+                        &other_error,
                     );
                 }
-                Ok(()) => {
-                    // Frame was accepted, which violates RFC 9113
+                Ok(()) if is_definite_post_end_stream_violation(post_frame) => {
                     panic!("DATA frame on closed stream was accepted (RFC 9113 violation)");
                 }
+                Ok(()) => {}
             }
         }
     }
@@ -222,7 +216,7 @@ fn test_stream_state_edge_cases(test_case: &FrameSequenceTest) {
 /// Test immediate DATA frame after HEADERS with END_STREAM
 fn test_immediate_data_after_headers_end_stream(stream_id: u32) {
     let connection_result =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| create_mock_h2_connection()));
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(create_mock_h2_connection));
 
     let mut connection = match connection_result {
         Ok(conn) => conn,
@@ -231,7 +225,10 @@ fn test_immediate_data_after_headers_end_stream(stream_id: u32) {
 
     // Send HEADERS with END_STREAM
     let headers_frame = create_headers_frame(stream_id, true);
-    let _ = process_frame(&mut connection, Frame::Headers(headers_frame));
+    observe_h2_result(
+        "HEADERS END_STREAM setup",
+        process_frame(&mut connection, Frame::Headers(headers_frame)),
+    );
 
     // Send DATA frame (should be rejected)
     let data_frame = create_data_frame(stream_id, b"data after end_stream".to_vec(), false);
@@ -241,8 +238,11 @@ fn test_immediate_data_after_headers_end_stream(stream_id: u32) {
         Err(ref error) if matches_stream_closed_error(error) => {
             // Expected behavior
         }
-        other => {
-            eprintln!("Unexpected result for DATA after END_STREAM: {:?}", other);
+        Err(error) => {
+            observe_h2_error("DATA after HEADERS END_STREAM alternate rejection", &error);
+        }
+        Ok(()) => {
+            panic!("DATA after HEADERS END_STREAM was accepted");
         }
     }
 }
@@ -250,16 +250,20 @@ fn test_immediate_data_after_headers_end_stream(stream_id: u32) {
 /// Test multiple END_STREAM violations
 fn test_multiple_end_stream_violations(stream_id: u32) {
     let connection_result =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| create_mock_h2_connection()));
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(create_mock_h2_connection));
 
     let mut connection = match connection_result {
         Ok(conn) => conn,
         Err(_) => return,
     };
 
-    // Close stream with DATA frame having END_STREAM
-    let data_frame_close = create_data_frame(stream_id, b"closing data".to_vec(), true);
-    let _ = process_frame(&mut connection, Frame::Data(data_frame_close));
+    // Close stream with HEADERS carrying END_STREAM so later frames are tested
+    // against a confirmed half-closed-remote stream.
+    let data_frame_close = create_headers_frame(stream_id, true);
+    observe_h2_result(
+        "HEADERS END_STREAM setup",
+        process_frame(&mut connection, Frame::Headers(data_frame_close)),
+    );
 
     // Send multiple violating frames
     let violating_frames = vec![
@@ -272,7 +276,9 @@ fn test_multiple_end_stream_violations(stream_id: u32) {
         let result = process_frame(&mut connection, frame);
         // Each should result in STREAM_CLOSED or connection-level error
         if let Ok(()) = result {
-            eprintln!("Frame was incorrectly accepted on closed stream");
+            panic!("frame was incorrectly accepted on closed stream");
+        } else if let Err(error) = result {
+            observe_h2_error("multiple END_STREAM violation rejection", &error);
         }
     }
 }
@@ -284,7 +290,7 @@ fn test_data_after_rst_stream(stream_id: u32, post_frames: &[PostEndStreamFrame]
     }
 
     let connection_result =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| create_mock_h2_connection()));
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(create_mock_h2_connection));
 
     let mut connection = match connection_result {
         Ok(conn) => conn,
@@ -296,7 +302,10 @@ fn test_data_after_rst_stream(stream_id: u32, post_frames: &[PostEndStreamFrame]
         stream_id,
         error_code: ErrorCode::Cancel,
     };
-    let _ = process_frame(&mut connection, Frame::RstStream(rst_frame));
+    observe_h2_result(
+        "RST_STREAM setup",
+        process_frame(&mut connection, Frame::RstStream(rst_frame)),
+    );
 
     // Send violating frames
     for post_frame in post_frames {
@@ -318,7 +327,7 @@ fn test_data_after_rst_stream(stream_id: u32, post_frames: &[PostEndStreamFrame]
                     // Other errors acceptable
                 }
                 Ok(()) => {
-                    eprintln!("DATA frame incorrectly accepted after RST_STREAM");
+                    panic!("DATA frame incorrectly accepted after RST_STREAM");
                 }
             }
         }
@@ -330,7 +339,7 @@ fn test_concurrent_stream_operations(test_case: &FrameSequenceTest) {
     let main_stream_id = normalize_stream_id(test_case.stream_id);
 
     let connection_result =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| create_mock_h2_connection()));
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(create_mock_h2_connection));
 
     let mut connection = match connection_result {
         Ok(conn) => conn,
@@ -339,7 +348,10 @@ fn test_concurrent_stream_operations(test_case: &FrameSequenceTest) {
 
     // Close main stream
     let close_frame = create_headers_frame(main_stream_id, true);
-    let _ = process_frame(&mut connection, Frame::Headers(close_frame));
+    observe_h2_result(
+        "main stream close setup",
+        process_frame(&mut connection, Frame::Headers(close_frame)),
+    );
 
     // Operate on concurrent streams
     for concurrent in &test_case.concurrent_streams {
@@ -348,7 +360,10 @@ fn test_concurrent_stream_operations(test_case: &FrameSequenceTest) {
             continue; // Skip same stream
         }
 
-        let _ = execute_stream_operation(&mut connection, alt_stream_id, &concurrent.operation);
+        observe_h2_result(
+            "concurrent stream operation",
+            execute_stream_operation(&mut connection, alt_stream_id, &concurrent.operation),
+        );
     }
 
     // Verify main stream violations still detected
@@ -357,7 +372,9 @@ fn test_concurrent_stream_operations(test_case: &FrameSequenceTest) {
 
     // Should still be rejected on the closed main stream
     if let Ok(()) = result {
-        eprintln!("Concurrent operations affected closed stream detection");
+        panic!("concurrent operations affected closed stream detection");
+    } else if let Err(error) = result {
+        observe_h2_error("closed main stream violation rejection", &error);
     }
 }
 
@@ -378,7 +395,7 @@ fn test_malformed_frame_sequences(test_case: &FrameSequenceTest) {
 /// Test frames with invalid stream ID
 fn test_invalid_stream_id_frames() {
     let connection_result =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| create_mock_h2_connection()));
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(create_mock_h2_connection));
 
     let mut connection = match connection_result {
         Ok(conn) => conn,
@@ -391,14 +408,16 @@ fn test_invalid_stream_id_frames() {
 
     // Should be rejected (stream ID 0 invalid for DATA frames)
     if let Ok(()) = result {
-        eprintln!("DATA frame with stream ID 0 was incorrectly accepted");
+        panic!("DATA frame with stream ID 0 was incorrectly accepted");
+    } else if let Err(error) = result {
+        observe_h2_error("DATA stream ID 0 rejection", &error);
     }
 }
 
 /// Test frames with oversized payloads
 fn test_oversized_payload_frames(stream_id: u32) {
     let connection_result =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| create_mock_h2_connection()));
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(create_mock_h2_connection));
 
     let mut connection = match connection_result {
         Ok(conn) => conn,
@@ -408,7 +427,10 @@ fn test_oversized_payload_frames(stream_id: u32) {
     // Very large DATA frame
     let large_payload = vec![0u8; 100_000]; // 100KB payload
     let large_frame = create_data_frame(stream_id, large_payload, false);
-    let _ = process_frame(&mut connection, Frame::Data(large_frame));
+    observe_h2_result(
+        "oversized DATA frame",
+        process_frame(&mut connection, Frame::Data(large_frame)),
+    );
 }
 
 /// Test with reserved stream IDs
@@ -418,7 +440,7 @@ fn test_reserved_stream_ids(post_frames: &[PostEndStreamFrame]) {
     }
 
     let connection_result =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| create_mock_h2_connection()));
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(create_mock_h2_connection));
 
     let mut connection = match connection_result {
         Ok(conn) => conn,
@@ -434,7 +456,10 @@ fn test_reserved_stream_ids(post_frames: &[PostEndStreamFrame]) {
             if let ViolatingFrameType::Data = post_frame.frame_type {
                 let data_frame =
                     create_data_frame(stream_id, post_frame.data_payload.clone(), false);
-                let _ = process_frame(&mut connection, Frame::Data(data_frame));
+                observe_h2_result(
+                    "reserved stream DATA frame",
+                    process_frame(&mut connection, Frame::Data(data_frame)),
+                );
             }
         }
     }
@@ -460,10 +485,24 @@ fn matches_stream_closed_error(error: &H2Error) -> bool {
     error.to_string().contains("STREAM_CLOSED") || error.to_string().contains("stream")
 }
 
+fn observe_h2_result(context: &str, result: Result<(), H2Error>) {
+    if let Err(error) = result {
+        observe_h2_error(context, &error);
+    }
+}
+
+fn observe_h2_error(context: &str, error: &H2Error) {
+    let diagnostic = format!("{error:?}");
+    assert!(
+        !diagnostic.is_empty(),
+        "{context}: H2 error diagnostics must be nonempty"
+    );
+}
+
 /// Normalize stream ID to be odd (client-initiated)
 fn normalize_stream_id(raw_stream_id: u32) -> u32 {
     let normalized = raw_stream_id % 0x7FFF_FFFF; // Keep within valid range
-    if normalized == 0 || normalized % 2 == 0 {
+    if normalized == 0 || normalized.is_multiple_of(2) {
         normalized + 1 // Make odd (client stream)
     } else {
         normalized
@@ -509,6 +548,23 @@ fn get_stream_state(connection: &MockConnection, stream_id: u32) -> Option<Strea
 fn process_frame(connection: &mut MockConnection, frame: Frame) -> Result<(), H2Error> {
     match frame {
         Frame::Headers(headers_frame) => {
+            let current_state = connection
+                .stream_states
+                .get(&headers_frame.stream_id)
+                .copied()
+                .unwrap_or(StreamState::Idle);
+
+            if matches!(
+                current_state,
+                StreamState::HalfClosedRemote | StreamState::Closed
+            ) {
+                return Err(H2Error::stream(
+                    headers_frame.stream_id,
+                    ErrorCode::StreamClosed,
+                    "HEADERS frame on closed stream",
+                ));
+            }
+
             if headers_frame.end_stream {
                 connection
                     .stream_states
@@ -626,6 +682,13 @@ fn send_violating_frame(
     process_frame(connection, frame)
 }
 
+fn is_definite_post_end_stream_violation(post_frame: &PostEndStreamFrame) -> bool {
+    matches!(
+        post_frame.frame_type,
+        ViolatingFrameType::Data | ViolatingFrameType::Headers
+    )
+}
+
 /// Execute a stream operation for concurrent testing
 fn execute_stream_operation(
     connection: &mut MockConnection,
@@ -633,15 +696,15 @@ fn execute_stream_operation(
     operation: &StreamOperation,
 ) -> Result<(), H2Error> {
     match operation {
-        StreamOperation::SendHeaders => {
+        StreamOperation::Headers => {
             let frame = Frame::Headers(create_headers_frame(stream_id, false));
             process_frame(connection, frame)
         }
-        StreamOperation::SendData => {
+        StreamOperation::Data => {
             let frame = Frame::Data(create_data_frame(stream_id, b"data".to_vec(), false));
             process_frame(connection, frame)
         }
-        StreamOperation::SendWindowUpdate => {
+        StreamOperation::WindowUpdate => {
             let frame = Frame::WindowUpdate(WindowUpdateFrame {
                 stream_id,
                 increment: 1024,
