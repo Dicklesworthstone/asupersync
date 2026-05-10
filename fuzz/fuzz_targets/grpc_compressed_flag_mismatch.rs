@@ -174,11 +174,7 @@ fn compress_deflate(data: &[u8]) -> Vec<u8> {
     encoder.finish().unwrap_or_else(|_| data.to_vec())
 }
 
-fn observe_compression_write(
-    result: Result<(), std::io::Error>,
-    context: &str,
-    input_len: usize,
-) {
+fn observe_compression_write(result: Result<(), std::io::Error>, context: &str, input_len: usize) {
     match result {
         Ok(()) => {
             assert!(

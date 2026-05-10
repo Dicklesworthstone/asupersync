@@ -5264,6 +5264,7 @@ name = "grpc_compressed_flag_mismatch"
 path = "fuzz_targets/grpc_compressed_flag_mismatch.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_rst_stream_flood"
