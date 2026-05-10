@@ -4,7 +4,6 @@ use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 use std::future::Future;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::thread;
@@ -80,6 +79,9 @@ impl CancelTracker {
                     Err(LockError::Poisoned) => {
                         // Poisoned state is valid but should be consistent
                     }
+                    Err(LockError::TimedOut(_)) => {
+                        // Timeout is valid for bounded lock attempts.
+                    }
                     Err(LockError::PolledAfterCompletion) => {
                         // This should not happen in normal cancellation flow
                         panic!(
@@ -96,10 +98,6 @@ impl CancelTracker {
 
         // Check that lock states are consistent
         if let Ok(states) = self.lock_states.lock() {
-            let cancelled_count = states
-                .values()
-                .filter(|state| matches!(state, LockState::Cancelled))
-                .count();
             let acquired_count = states
                 .values()
                 .filter(|state| matches!(state, LockState::LockAcquired))
@@ -133,14 +131,9 @@ impl TrackedWaker {
     fn create_waker(&self) -> Waker {
         let data = Arc::new(self.clone());
         let raw = RawWaker::new(Arc::into_raw(data) as *const (), &TRACKED_WAKER_VTABLE);
+        // SAFETY: the raw waker data is an Arc<TrackedWaker> produced above, and
+        // TRACKED_WAKER_VTABLE reconstructs that same allocation shape.
         unsafe { Waker::from_raw(raw) }
-    }
-
-    fn was_waked(&self) -> bool {
-        self.waked
-            .lock()
-            .unwrap_or_else(|_| panic!("Lock poisoned"))
-            .clone()
     }
 }
 
@@ -162,7 +155,8 @@ static TRACKED_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
 );
 
 unsafe fn tracked_waker_clone(data: *const ()) -> RawWaker {
-    let arc = Arc::from_raw(data as *const TrackedWaker);
+    // SAFETY: RawWaker data is always created from Arc<TrackedWaker> in create_waker.
+    let arc = unsafe { Arc::from_raw(data as *const TrackedWaker) };
     let cloned = arc.clone();
     std::mem::forget(arc);
     let new_data = Arc::into_raw(cloned) as *const ();
@@ -170,7 +164,8 @@ unsafe fn tracked_waker_clone(data: *const ()) -> RawWaker {
 }
 
 unsafe fn tracked_waker_wake(data: *const ()) {
-    let arc = Arc::from_raw(data as *const TrackedWaker);
+    // SAFETY: RawWaker data is always created from Arc<TrackedWaker> in create_waker.
+    let arc = unsafe { Arc::from_raw(data as *const TrackedWaker) };
     if let Ok(mut waked) = arc.waked.lock() {
         *waked = true;
     }
@@ -178,7 +173,8 @@ unsafe fn tracked_waker_wake(data: *const ()) {
 }
 
 unsafe fn tracked_waker_wake_by_ref(data: *const ()) {
-    let arc = Arc::from_raw(data as *const TrackedWaker);
+    // SAFETY: RawWaker data is always created from Arc<TrackedWaker> in create_waker.
+    let arc = unsafe { Arc::from_raw(data as *const TrackedWaker) };
     if let Ok(mut waked) = arc.waked.lock() {
         *waked = true;
     }
@@ -188,7 +184,8 @@ unsafe fn tracked_waker_wake_by_ref(data: *const ()) {
 }
 
 unsafe fn tracked_waker_drop(data: *const ()) {
-    let _arc = Arc::from_raw(data as *const TrackedWaker);
+    // SAFETY: RawWaker data is always created from Arc<TrackedWaker> in create_waker.
+    let _arc = unsafe { Arc::from_raw(data as *const TrackedWaker) };
 }
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -207,16 +204,6 @@ enum CancelPattern {
     MultiOperationCancel { cancel_indices: Vec<u8> },
     DelayedCancel { delay_ms: u16 },
     InterleavedLockCancel { operations: Vec<bool> }, // true=lock, false=cancel
-}
-
-#[derive(Debug, Clone, Arbitrary)]
-enum CancelOperation {
-    StartLockOwned { op_id: u8 },
-    PollOperation { op_id: u8 },
-    CancelOperation { op_id: u8 },
-    ValidateLockState,
-    TestLockAvailability,
-    CreateCancelledCx { op_id: u8 },
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -241,9 +228,9 @@ fuzz_target!(|data: &[u8]| {
     // Create contexts and lock futures for operations
     for i in 0..config.operation_count {
         let cx = Cx::new(
-            RegionId::from_arena(ArenaIndex::new(i as u64, 0)),
-            TaskId::from_arena(ArenaIndex::new(i as u64, 0)),
-            Budget::infinite(),
+            RegionId::from_arena(ArenaIndex::new(u32::from(i), 0)),
+            TaskId::from_arena(ArenaIndex::new(u32::from(i), 0)),
+            Budget::unlimited(),
         );
 
         contexts.push(cx);
@@ -333,7 +320,7 @@ fuzz_target!(|data: &[u8]| {
             let fresh_cx = Cx::new(
                 RegionId::from_arena(ArenaIndex::new(100, 0)),
                 TaskId::from_arena(ArenaIndex::new(100, 0)),
-                Budget::infinite(),
+                Budget::unlimited(),
             );
 
             let fresh_lock = OwnedMutexGuard::lock(Arc::clone(&mutex), &fresh_cx);
@@ -450,19 +437,35 @@ fuzz_target!(|data: &[u8]| {
                 let mut context = Context::from_waker(&waker);
 
                 // First poll
-                let _ = pinned.as_mut().poll(&mut context);
+                let delayed_result = match pinned.as_mut().poll(&mut context) {
+                    Poll::Ready(Ok(_guard)) => {
+                        tracker.record_lock_state(0, LockState::LockAcquired);
+                        Ok(())
+                    }
+                    Poll::Ready(Err(e)) => {
+                        tracker.record_lock_state(0, LockState::Failed(format!("{:?}", e)));
+                        Err(e)
+                    }
+                    Poll::Pending => {
+                        tracker.record_lock_state(0, LockState::WaitingForLock);
+                        Err(LockError::Cancelled)
+                    }
+                };
                 tracker.record_operation("delayed_first_poll");
 
                 // Simulate delay then cancel
                 let delay = Duration::from_millis(delay_ms.min(100) as u64);
                 thread::sleep(delay);
+                drop(pinned);
 
                 tracker.record_operation("delayed_cancel");
-                tracker.record_lock_state(0, LockState::Cancelled);
+                if matches!(&delayed_result, Err(LockError::Cancelled)) {
+                    tracker.record_lock_state(0, LockState::Cancelled);
+                }
 
                 tracker.record_cancel_result(CancelResult {
                     operation_id: 0,
-                    result: Err(LockError::Cancelled),
+                    result: delayed_result,
                     lock_available_after: true,
                 });
             }
@@ -527,7 +530,7 @@ fuzz_target!(|data: &[u8]| {
     let final_cx = Cx::new(
         RegionId::from_arena(ArenaIndex::new(999, 0)),
         TaskId::from_arena(ArenaIndex::new(999, 0)),
-        Budget::infinite(),
+        Budget::unlimited(),
     );
 
     let final_lock = OwnedMutexGuard::lock(Arc::clone(&mutex), &final_cx);
