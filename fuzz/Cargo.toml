@@ -5138,6 +5138,7 @@ name = "h2_continuation_no_headers"
 path = "fuzz_targets/h2_continuation_no_headers.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_data_zero_length"
