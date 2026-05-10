@@ -4684,6 +4684,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "sync_semaphore_concurrent_acquire"
+path = "fuzz_targets/sync_semaphore_concurrent_acquire.rs"
+test = false
+doc = false
+bench = false
+
 # Structure-aware fuzzer for concurrent Pool acquire/release. Tracks checked-out
 # resource ids across worker threads and verifies final pool stats drain cleanly.
 [[bin]]
