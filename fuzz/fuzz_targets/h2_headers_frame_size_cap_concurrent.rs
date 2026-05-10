@@ -37,8 +37,6 @@ pub struct MockH2HeaderConnection {
 /// Per-stream state for header fragment accumulation
 #[derive(Debug, Clone)]
 pub struct MockStream {
-    /// Stream ID
-    stream_id: u32,
     /// Accumulated header fragments
     header_fragments: Vec<Vec<u8>>,
     /// Maximum allowed fragment size for this stream
@@ -344,7 +342,6 @@ impl MockH2HeaderConnection {
         // Create stream if it doesn't exist
         if !self.streams.contains_key(&stream_id) {
             let stream = MockStream {
-                stream_id,
                 header_fragments: Vec::new(),
                 max_fragment_size: self.max_fragment_size(),
                 expecting_continuation: !headers.end_headers,
@@ -580,7 +577,7 @@ impl MockH2HeaderConnection {
             issues.push("High total fragment bytes".to_string());
         }
 
-        if self.streams.len() > 100 {
+        if self.streams.len() > self.settings.max_concurrent_streams as usize {
             issues.push("Too many concurrent streams".to_string());
         }
 
@@ -738,14 +735,35 @@ fuzz_target!(|scenario: HeadersSizeConcurrentScenario| {
     }
 
     // Check for resource exhaustion
+    let stats = conn.stats();
+    let open_streams = conn.streams.len();
+    let streams_expecting_continuation = conn
+        .streams
+        .values()
+        .filter(|stream| stream.expecting_continuation)
+        .count();
     let exhaustion_issues = conn.check_resource_exhaustion();
     for issue in &exhaustion_issues {
-        // Log resource exhaustion for analysis
-        eprintln!("Resource exhaustion detected: {}", issue);
+        match issue.as_str() {
+            "High total fragment bytes" => assert!(
+                stats.total_fragment_bytes > 1024 * 1024,
+                "high-fragment-byte exhaustion issue should match total_fragment_bytes={}",
+                stats.total_fragment_bytes
+            ),
+            "Too many concurrent streams" => assert!(
+                open_streams > conn.settings.max_concurrent_streams as usize,
+                "concurrent-stream exhaustion issue should match open_streams={open_streams}, max_concurrent_streams={}",
+                conn.settings.max_concurrent_streams
+            ),
+            "Too many incomplete header sequences" => assert!(
+                streams_expecting_continuation > 10,
+                "incomplete-header exhaustion issue should match streams_expecting_continuation={streams_expecting_continuation}"
+            ),
+            other => panic!("unknown resource exhaustion issue reported: {other}"),
+        }
     }
 
     // Validate final statistics
-    let stats = conn.stats();
     assert!(stats.total_fragment_bytes <= 10 * 1024 * 1024); // 10MB reasonable upper bound
     assert!(stats.max_accumulated_size_seen <= MAX_HEADER_FRAGMENT_SIZE);
 
