@@ -5004,6 +5004,7 @@ name = "h1_connection_transition"
 path = "fuzz_targets/h1_connection_transition.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h1_expect_100_continue"
