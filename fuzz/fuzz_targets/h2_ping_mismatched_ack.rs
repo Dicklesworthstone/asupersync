@@ -3,7 +3,6 @@
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
-use std::panic;
 
 /// PING frame payload is exactly 8 octets per RFC 9113 §6.7
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Arbitrary)]
@@ -12,10 +11,6 @@ struct PingPayload([u8; 8]);
 impl PingPayload {
     fn new(data: [u8; 8]) -> Self {
         Self(data)
-    }
-
-    fn as_bytes(&self) -> &[u8] {
-        &self.0
     }
 }
 
@@ -28,6 +23,7 @@ struct PingFrame {
 
 /// Connection error codes per RFC 9113 §7
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)]
 enum ErrorCode {
     NoError = 0x0,
     ProtocolError = 0x1,
@@ -246,11 +242,8 @@ fn test_ping_ack_mismatch(scenario: PingAckMismatchScenario) -> Result<(), Strin
                 ack_flag: true,
             };
 
-            match connection.receive_ping(orphan_ack) {
-                Err(ErrorCode::ProtocolError) => {
-                    protocol_errors_detected += 1;
-                }
-                _ => {}
+            if let Err(ErrorCode::ProtocolError) = connection.receive_ping(orphan_ack) {
+                protocol_errors_detected += 1;
             }
         }
     }
@@ -408,23 +401,21 @@ fn test_orphan_ack() -> Result<(), String> {
 }
 
 fuzz_target!(|data: &[u8]| {
-    let result = panic::catch_unwind(|| {
-        let mut unstructured = Unstructured::new(data);
+    let mut unstructured = Unstructured::new(data);
 
-        // Try to generate scenario from fuzz input
-        if let Ok(scenario) = PingAckMismatchScenario::arbitrary(&mut unstructured) {
-            let _ = test_ping_ack_mismatch(scenario);
-        }
+    // Try to generate scenario from fuzz input
+    if let Ok(scenario) = PingAckMismatchScenario::arbitrary(&mut unstructured) {
+        test_ping_ack_mismatch(scenario)
+            .unwrap_or_else(|message| panic!("PING ACK mismatch scenario failed: {message}"));
+    }
 
-        // Run deterministic test cases
-        if data.len() > 100 {
-            let _ = test_ping_ack_comprehensive();
-            let _ = test_multiple_outstanding_pings();
-            let _ = test_orphan_ack();
-        }
-    });
-
-    if result.is_err() {
-        eprintln!("Panic in PING ACK mismatch fuzzing");
+    // Run deterministic test cases
+    if data.len() > 100 {
+        test_ping_ack_comprehensive()
+            .unwrap_or_else(|message| panic!("PING ACK comprehensive case failed: {message}"));
+        test_multiple_outstanding_pings()
+            .unwrap_or_else(|message| panic!("multiple outstanding PING case failed: {message}"));
+        test_orphan_ack()
+            .unwrap_or_else(|message| panic!("orphan PING ACK case failed: {message}"));
     }
 });
