@@ -181,21 +181,11 @@ static TRACKING_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
     },
     // wake
     |data| unsafe {
-        let tracking_waker = Box::from_raw(data as *mut TrackingWaker);
-        if !tracking_waker.completed.load(Ordering::SeqCst) {
-            // This is a legitimate wake - mark completion
-            tracking_waker.completed.store(true, Ordering::SeqCst);
-            tracking_waker.tracker.record_completion();
-        }
+        let _tracking_waker = Box::from_raw(data as *mut TrackingWaker);
     },
     // wake_by_ref
     |data| unsafe {
-        let tracking_waker = &*(data as *const TrackingWaker);
-        if !tracking_waker.completed.load(Ordering::SeqCst) {
-            // This is a legitimate wake - mark completion
-            tracking_waker.completed.store(true, Ordering::SeqCst);
-            tracking_waker.tracker.record_completion();
-        }
+        let _tracking_waker = &*(data as *const TrackingWaker);
     },
     // drop
     |data| unsafe {
@@ -232,13 +222,19 @@ impl TrackedWaiter {
         }
     }
 
-    fn poll(&mut self) -> Poll<()> {
-        if let Some(ref waker) = self.waker {
+    fn poll(&mut self, tracker: &SpuriousWakeTracker) -> Poll<()> {
+        let poll = if let Some(ref waker) = self.waker {
             let mut context = Context::from_waker(waker);
             self.notified_future.as_mut().poll(&mut context)
         } else {
             Poll::Pending
+        };
+
+        if poll.is_ready() && !self.completed.swap(true, Ordering::SeqCst) {
+            tracker.record_completion();
         }
+
+        poll
     }
 
     fn send_spurious_wake(&mut self, tracker: &SpuriousWakeTracker) {
@@ -248,16 +244,12 @@ impl TrackedWaiter {
             waker.wake_by_ref();
 
             // Check if this caused spurious completion
-            if self.completed.load(Ordering::SeqCst) {
-                // This should not happen - spurious wakes shouldn't complete the future
-                tracker.record_spurious_filtered(); // This tracks that we detected the issue
+            if !self.completed.load(Ordering::SeqCst) {
+                tracker.record_spurious_filtered();
             }
         }
     }
 
-    fn is_completed(&self) -> bool {
-        self.completed.load(Ordering::SeqCst)
-    }
 }
 
 /// Test spurious wake scenarios
@@ -332,7 +324,9 @@ fn test_spurious_wake_scenario(
             NotifyOperation::CheckState => {
                 // Poll all waiters to process any pending wakes
                 for waiter in waiters.values_mut() {
-                    let _ = waiter.poll();
+                    match waiter.poll(tracker) {
+                        Poll::Ready(()) | Poll::Pending => {}
+                    }
                 }
 
                 if let Err(msg) = tracker.check_invariants() {
@@ -343,7 +337,9 @@ fn test_spurious_wake_scenario(
 
         // Always poll all waiters after each operation to process state changes
         for waiter in waiters.values_mut() {
-            let _ = waiter.poll();
+            match waiter.poll(tracker) {
+                Poll::Ready(()) | Poll::Pending => {}
+            }
         }
     }
 
