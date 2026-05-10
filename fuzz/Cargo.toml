@@ -864,6 +864,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h2_frame_sequence"
+path = "fuzz_targets/h2_frame_sequence.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_websocket_deflate"
 path = "fuzz_targets/websocket_deflate.rs"
 test = false

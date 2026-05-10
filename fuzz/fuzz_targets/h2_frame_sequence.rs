@@ -34,14 +34,14 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::bytes::{Bytes, BytesMut};
+use asupersync::bytes::BytesMut;
 use asupersync::http::h2::{
-    connection::{Connection, ConnectionSettings, ConnectionState},
-    frame::{
-        DataFrame, Frame, FrameHeader, FrameType, GoAwayFrame, HeadersFrame,
-        PingFrame, RstStreamFrame, Setting, SettingsFrame, WindowUpdateFrame, FRAME_HEADER_SIZE
-    },
+    connection::{Connection, ConnectionState},
     error::{ErrorCode, H2Error},
+    frame::{
+        FRAME_HEADER_SIZE, Frame, FrameHeader, PingFrame, RstStreamFrame, Setting, SettingsFrame,
+        WindowUpdateFrame, parse_frame as parse_h2_frame,
+    },
     settings::Settings,
 };
 use libfuzzer_sys::fuzz_target;
@@ -173,21 +173,29 @@ fuzz_target!(|input: FrameSequenceInput| {
 fn test_no_panic_frame_sequence(input: &FrameSequenceInput) {
     let frame_sequence = generate_frame_sequence(input);
 
-    let _result = std::panic::catch_unwind(|| {
+    let result = std::panic::catch_unwind(|| {
         let mut connection = create_test_connection(&input.connection_config);
 
         // Process the client preface if this is a server connection
-        if let Ok(preface_bytes) = std::str::from_utf8(asupersync::http::h2::connection::CLIENT_PREFACE) {
+        if std::str::from_utf8(asupersync::http::h2::connection::CLIENT_PREFACE).is_ok() {
             let _ = connection.process_frame(create_settings_frame(false));
         }
 
         // Process frame sequence
-        for frame_bytes in frame_sequence.iter().take(100) { // Limit for performance
+        for (frame_index, frame_bytes) in frame_sequence.iter().take(100).enumerate() {
             if let Ok(frame) = parse_frame_from_bytes(frame_bytes) {
-                let _ = connection.process_frame(frame);
+                let _ = connection
+                    .process_frame(frame)
+                    .map_err(|err| (frame_index, err));
             }
         }
     });
+    assert!(
+        result.is_ok(),
+        "HTTP/2 frame sequence processing panicked for scenario {:?} with {} generated frames",
+        input.attack_scenario,
+        frame_sequence.len()
+    );
 }
 
 /// Property 2: Connection state machine invariants
@@ -195,8 +203,7 @@ fn test_connection_state_invariants(input: &FrameSequenceInput) {
     let frame_sequence = generate_frame_sequence(input);
     let mut connection = create_test_connection(&input.connection_config);
 
-    let initial_state = connection.state();
-    let mut current_state = initial_state;
+    assert!(matches!(connection.state(), ConnectionState::Handshaking));
 
     for frame_bytes in frame_sequence.iter().take(50) {
         if let Ok(frame) = parse_frame_from_bytes(frame_bytes) {
@@ -208,14 +215,20 @@ fn test_connection_state_invariants(input: &FrameSequenceInput) {
 
                     // Verify valid state transitions
                     assert_valid_state_transition(before_state, after_state);
-                    current_state = after_state;
                 }
                 Err(_) => {
                     // Error is acceptable - connection should remain in valid state
                     let error_state = connection.state();
                     assert!(
-                        matches!(error_state, ConnectionState::Open | ConnectionState::Closing | ConnectionState::Closed),
-                        "Connection in invalid state after error: {:?}", error_state
+                        matches!(
+                            error_state,
+                            ConnectionState::Handshaking
+                                | ConnectionState::Open
+                                | ConnectionState::Closing
+                                | ConnectionState::Closed
+                        ),
+                        "Connection in invalid state after error: {:?}",
+                        error_state
                     );
                 }
             }
@@ -258,7 +271,8 @@ fn test_multi_stream_coordination(input: &FrameSequenceInput) {
             if let Ok(frame) = parse_frame_from_bytes(frame_bytes) {
                 let stream_id = get_frame_stream_id(&frame);
 
-                if stream_id > 0 && stream_id % 2 == 1 { // Client-initiated stream
+                if stream_id > 0 && stream_id % 2 == 1 {
+                    // Client-initiated stream
                     active_streams.insert(stream_id);
                 }
 
@@ -267,7 +281,8 @@ fn test_multi_stream_coordination(input: &FrameSequenceInput) {
                         // Verify no stream state corruption
                         assert!(
                             active_streams.len() <= MAX_CONCURRENT_STREAMS as usize,
-                            "Too many concurrent streams: {}", active_streams.len()
+                            "Too many concurrent streams: {}",
+                            active_streams.len()
                         );
                     }
                     Err(_) => {
@@ -298,13 +313,17 @@ fn test_resource_exhaustion_protection(input: &FrameSequenceInput) {
                     // Ensure reasonable resource limits
                     assert!(
                         total_processed <= 1000,
-                        "Connection processed too many frames: {}", total_processed
+                        "Connection processed too many frames: {}",
+                        total_processed
                     );
                 }
                 Err(err) => {
                     // Check for proper resource exhaustion errors
                     let error_msg = format!("{err}");
-                    if error_msg.contains("flood") || error_msg.contains("limit") || error_msg.contains("too many") {
+                    if error_msg.contains("flood")
+                        || error_msg.contains("limit")
+                        || error_msg.contains("too many")
+                    {
                         // Expected protection activated
                         break;
                     }
@@ -323,9 +342,7 @@ fn generate_frame_sequence(input: &FrameSequenceInput) -> Vec<Vec<u8>> {
             // Send non-SETTINGS frames first (violation of RFC 9113 §3.4)
             for frame in &input.frames {
                 if !matches!(frame.frame_type, FuzzFrameType::Settings) {
-                    if let Some(frame_bytes) = serialize_frame(frame) {
-                        sequence.push(frame_bytes);
-                    }
+                    push_serialized_frame(&mut sequence, frame);
                 }
             }
             // Add settings after
@@ -337,27 +354,23 @@ fn generate_frame_sequence(input: &FrameSequenceInput) -> Vec<Vec<u8>> {
             sequence.push(serialize_settings_frame(false)); // Proper handshake
 
             // Add headers frame with END_HEADERS=false
-            sequence.push(create_headers_frame_bytes(1, false, false));
+            sequence.push(create_headers_frame_bytes(1, false, false, None, None));
 
             // Insert non-CONTINUATION frames (protocol violation)
             for frame in input.frames.iter().take(5) {
                 if !matches!(frame.frame_type, FuzzFrameType::Headers) {
-                    if let Some(frame_bytes) = serialize_frame(frame) {
-                        sequence.push(frame_bytes);
-                    }
+                    push_serialized_frame(&mut sequence, frame);
                 }
             }
         }
 
         AttackScenario::PostGoAwayFrames => {
             sequence.push(serialize_settings_frame(false)); // Proper handshake
-            sequence.push(create_goaway_frame_bytes()); // Send GOAWAY
+            sequence.push(create_goaway_frame_bytes(0, ErrorCode::NoError, &[])); // Send GOAWAY
 
             // Send frames after GOAWAY (should be handled gracefully)
             for frame in &input.frames {
-                if let Some(frame_bytes) = serialize_frame(frame) {
-                    sequence.push(frame_bytes);
-                }
+                push_serialized_frame(&mut sequence, frame);
             }
         }
 
@@ -366,9 +379,7 @@ fn generate_frame_sequence(input: &FrameSequenceInput) -> Vec<Vec<u8>> {
             sequence.push(serialize_settings_frame(false));
 
             for frame in &input.frames {
-                if let Some(frame_bytes) = serialize_frame(frame) {
-                    sequence.push(frame_bytes);
-                }
+                push_serialized_frame(&mut sequence, frame);
             }
         }
     }
@@ -376,15 +387,25 @@ fn generate_frame_sequence(input: &FrameSequenceInput) -> Vec<Vec<u8>> {
     sequence
 }
 
+fn push_serialized_frame(sequence: &mut Vec<Vec<u8>>, frame: &OrderedFrame) {
+    if let Some(frame_bytes) = serialize_frame(frame) {
+        if frame.force_disorder && !sequence.is_empty() {
+            sequence.insert(0, frame_bytes);
+        } else {
+            sequence.push(frame_bytes);
+        }
+    }
+}
+
 /// Create test connection with configuration
 fn create_test_connection(config: &ConnectionConfig) -> Connection {
-    let mut connection = Connection::new_server();
+    let mut settings = Settings::server();
+    settings.initial_window_size = config.initial_window_size.min(0x7fff_ffff);
+    settings.max_frame_size = config.max_frame_size.clamp(16_384, 0x00ff_ffff);
+    settings.enable_push = config.enable_push;
+    settings.max_header_list_size = config.max_header_list_size.min(1_048_576);
 
-    // Apply configuration settings if needed
-    // This would require the Connection to expose configuration methods
-    // For now, use defaults
-
-    connection
+    Connection::server(settings)
 }
 
 /// Serialize a frame to bytes
@@ -392,15 +413,15 @@ fn serialize_frame(frame: &OrderedFrame) -> Option<Vec<u8>> {
     match &frame.payload {
         FramePayload::Settings { settings, ack } => {
             let mut frame_settings = Vec::new();
-            for setting in settings.iter().take(10) { // Limit settings
-                frame_settings.push(Setting {
-                    id: setting.setting_type,
-                    value: setting.value,
-                });
+            for setting in settings.iter().take(10) {
+                // Limit settings
+                if let Some(setting) = Setting::from_id_value(setting.setting_type, setting.value) {
+                    frame_settings.push(setting);
+                }
             }
 
             let settings_frame = SettingsFrame {
-                ack: *ack,
+                ack: *ack || frame.flags & 0x01 != 0,
                 settings: frame_settings,
             };
 
@@ -409,17 +430,19 @@ fn serialize_frame(frame: &OrderedFrame) -> Option<Vec<u8>> {
 
         FramePayload::Ping { data, ack } => {
             let ping_frame = PingFrame {
-                ack: *ack,
-                data: *data,
+                ack: *ack || frame.flags & 0x01 != 0,
+                opaque_data: *data,
             };
 
             Some(serialize_ping_frame_struct(&ping_frame))
         }
 
-        FramePayload::WindowUpdate { window_size_increment } => {
+        FramePayload::WindowUpdate {
+            window_size_increment,
+        } => {
             let window_frame = WindowUpdateFrame {
                 stream_id: frame.stream_id,
-                window_size_increment: *window_size_increment,
+                increment: *window_size_increment,
             };
 
             Some(serialize_window_update_frame_struct(&window_frame))
@@ -428,13 +451,17 @@ fn serialize_frame(frame: &OrderedFrame) -> Option<Vec<u8>> {
         FramePayload::RstStream { error_code } => {
             let rst_frame = RstStreamFrame {
                 stream_id: frame.stream_id,
-                error_code: ErrorCode::InternalError, // Map from u32
+                error_code: ErrorCode::from_u32(*error_code),
             };
 
             Some(serialize_rst_stream_frame_struct(&rst_frame))
         }
 
-        FramePayload::Data { data, end_stream, .. } => {
+        FramePayload::Data {
+            data,
+            end_stream,
+            padded,
+        } => {
             // Limit data size to prevent excessive memory usage
             let limited_data = if data.len() > MAX_FRAME_SIZE {
                 &data[..MAX_FRAME_SIZE]
@@ -442,10 +469,49 @@ fn serialize_frame(frame: &OrderedFrame) -> Option<Vec<u8>> {
                 data
             };
 
-            Some(create_data_frame_bytes(frame.stream_id, limited_data, *end_stream))
+            let mut bytes = create_data_frame_bytes(
+                frame.stream_id,
+                limited_data,
+                *end_stream || frame.flags & 0x01 != 0,
+            );
+            if *padded || frame.flags & 0x08 != 0 {
+                bytes[4] |= 0x08;
+            }
+            Some(bytes)
         }
 
-        _ => None, // For complex frames like Headers, use simplified versions
+        FramePayload::Headers {
+            headers,
+            end_stream,
+            end_headers,
+            priority_exclusive,
+            priority_dependency,
+            priority_weight,
+        } => {
+            let header_block = build_header_block(headers);
+            let priority = priority_dependency
+                .map(|dependency| (*priority_exclusive, dependency, *priority_weight));
+            Some(create_headers_frame_bytes(
+                frame.stream_id,
+                *end_stream || frame.flags & 0x01 != 0,
+                *end_headers || frame.flags & 0x04 != 0,
+                Some(&header_block),
+                priority,
+            ))
+        }
+
+        FramePayload::GoAway {
+            last_stream_id,
+            error_code,
+            debug_data,
+        } => {
+            let debug_len = debug_data.len().min(256);
+            Some(create_goaway_frame_bytes(
+                *last_stream_id,
+                ErrorCode::from_u32(*error_code),
+                &debug_data[..debug_len],
+            ))
+        }
     }
 }
 
@@ -454,9 +520,9 @@ fn serialize_settings_frame(ack: bool) -> Vec<u8> {
     let settings_frame = SettingsFrame {
         ack,
         settings: vec![
-            Setting { id: 2, value: 0 }, // ENABLE_PUSH = 0
-            Setting { id: 3, value: 128 }, // MAX_CONCURRENT_STREAMS = 128
-            Setting { id: 4, value: 65536 }, // INITIAL_WINDOW_SIZE = 64K
+            Setting::EnablePush(false),
+            Setting::MaxConcurrentStreams(128),
+            Setting::InitialWindowSize(65536),
         ],
     };
     serialize_settings_frame_struct(&settings_frame)
@@ -474,8 +540,8 @@ fn serialize_settings_frame_struct(frame: &SettingsFrame) -> Vec<u8> {
 
     // Settings payload
     for setting in &frame.settings {
-        bytes.extend_from_slice(&setting.id.to_be_bytes());
-        bytes.extend_from_slice(&setting.value.to_be_bytes());
+        bytes.extend_from_slice(&setting.id().to_be_bytes());
+        bytes.extend_from_slice(&setting.value().to_be_bytes());
     }
 
     bytes
@@ -491,7 +557,7 @@ fn serialize_ping_frame_struct(frame: &PingFrame) -> Vec<u8> {
     bytes.extend_from_slice(&0u32.to_be_bytes()); // Stream ID = 0
 
     // Ping data
-    bytes.extend_from_slice(&frame.data);
+    bytes.extend_from_slice(&frame.opaque_data);
 
     bytes
 }
@@ -506,7 +572,7 @@ fn serialize_window_update_frame_struct(frame: &WindowUpdateFrame) -> Vec<u8> {
     bytes.extend_from_slice(&frame.stream_id.to_be_bytes());
 
     // Window size increment (clear reserved bit)
-    bytes.extend_from_slice(&(frame.window_size_increment & 0x7FFFFFFF).to_be_bytes());
+    bytes.extend_from_slice(&(frame.increment & 0x7FFFFFFF).to_be_bytes());
 
     bytes
 }
@@ -542,42 +608,91 @@ fn create_data_frame_bytes(stream_id: u32, data: &[u8], end_stream: bool) -> Vec
     bytes
 }
 
-fn create_headers_frame_bytes(stream_id: u32, end_stream: bool, end_headers: bool) -> Vec<u8> {
+fn build_header_block(headers: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
+    let mut block = Vec::new();
+    for (name, value) in headers.iter().take(8) {
+        let name_len = name.len().min(64);
+        let value_len = value.len().min(128);
+        block.extend_from_slice(&name[..name_len]);
+        block.push(b':');
+        block.extend_from_slice(&value[..value_len]);
+        block.push(b'\n');
+    }
+    block.truncate(MAX_FRAME_SIZE);
+    block
+}
+
+fn create_headers_frame_bytes(
+    stream_id: u32,
+    end_stream: bool,
+    end_headers: bool,
+    header_block: Option<&[u8]>,
+    priority: Option<(bool, u32, u8)>,
+) -> Vec<u8> {
     let mut bytes = Vec::new();
 
     // Minimal headers frame with pseudo-headers
-    let headers_data = b":method GET\r\n:path /\r\n:scheme https\r\n:authority example.com\r\n\r\n";
+    let default_headers =
+        b":method GET\r\n:path /\r\n:scheme https\r\n:authority example.com\r\n\r\n";
+    let headers_data = match header_block {
+        Some(block) if !block.is_empty() => block,
+        _ => default_headers,
+    };
+
+    let mut payload = Vec::new();
+    if let Some((exclusive, dependency, weight)) = priority {
+        let mut stream_dependency = dependency & 0x7fff_ffff;
+        if exclusive {
+            stream_dependency |= 0x8000_0000;
+        }
+        payload.extend_from_slice(&stream_dependency.to_be_bytes());
+        payload.push(weight);
+    }
+    payload.extend_from_slice(headers_data);
 
     // Frame header
-    let length = headers_data.len();
+    let length = payload.len();
     bytes.extend_from_slice(&(length as u32).to_be_bytes()[1..4]); // 24-bit length
     bytes.push(0x01); // HEADERS frame type
 
     let mut flags = 0;
-    if end_stream { flags |= 0x01; }
-    if end_headers { flags |= 0x04; }
+    if end_stream {
+        flags |= 0x01;
+    }
+    if end_headers {
+        flags |= 0x04;
+    }
+    if priority.is_some() {
+        flags |= 0x20;
+    }
     bytes.push(flags);
 
     bytes.extend_from_slice(&stream_id.to_be_bytes());
 
     // Headers data
-    bytes.extend_from_slice(headers_data);
+    bytes.extend_from_slice(&payload);
 
     bytes
 }
 
-fn create_goaway_frame_bytes() -> Vec<u8> {
+fn create_goaway_frame_bytes(
+    last_stream_id: u32,
+    error_code: ErrorCode,
+    debug_data: &[u8],
+) -> Vec<u8> {
     let mut bytes = Vec::new();
 
     // Frame header
-    bytes.extend_from_slice(&[0, 0, 8]); // Length = 8 (last_stream_id + error_code)
+    let length = 8 + debug_data.len();
+    bytes.extend_from_slice(&(length as u32).to_be_bytes()[1..4]); // last_stream_id + error_code + debug
     bytes.push(0x07); // GOAWAY frame type
     bytes.push(0x00); // No flags
     bytes.extend_from_slice(&0u32.to_be_bytes()); // Stream ID = 0
 
     // GOAWAY payload
-    bytes.extend_from_slice(&0u32.to_be_bytes()); // Last stream ID = 0
-    bytes.extend_from_slice(&0u32.to_be_bytes()); // Error code = NO_ERROR
+    bytes.extend_from_slice(&(last_stream_id & 0x7fff_ffff).to_be_bytes());
+    bytes.extend_from_slice(&(error_code as u32).to_be_bytes());
+    bytes.extend_from_slice(debug_data);
 
     bytes
 }
@@ -585,34 +700,31 @@ fn create_goaway_frame_bytes() -> Vec<u8> {
 fn create_settings_frame(ack: bool) -> Frame {
     Frame::Settings(SettingsFrame {
         ack,
-        settings: vec![
-            Setting { id: 2, value: 0 }, // ENABLE_PUSH = 0
-        ],
+        settings: vec![Setting::EnablePush(false)],
     })
 }
 
 /// Parse frame from bytes (simplified)
 fn parse_frame_from_bytes(bytes: &[u8]) -> Result<Frame, H2Error> {
     if bytes.len() < FRAME_HEADER_SIZE {
-        return Err(H2Error::frame("incomplete frame header"));
+        return Err(H2Error::protocol("incomplete frame header"));
     }
 
-    // For fuzzing purposes, create a simple frame based on frame type
-    let frame_type = bytes[3];
-    let flags = bytes[4];
-    let stream_id = u32::from_be_bytes([bytes[5], bytes[6], bytes[7], bytes[8]]) & 0x7FFFFFFF;
-
-    match frame_type {
-        0x04 => Ok(Frame::Settings(SettingsFrame { ack: (flags & 0x01) != 0, settings: vec![] })),
-        0x06 => {
-            let mut data = [0u8; 8];
-            if bytes.len() >= FRAME_HEADER_SIZE + 8 {
-                data.copy_from_slice(&bytes[FRAME_HEADER_SIZE..FRAME_HEADER_SIZE + 8]);
-            }
-            Ok(Frame::Ping(PingFrame { ack: (flags & 0x01) != 0, data }))
-        },
-        _ => Ok(Frame::Settings(SettingsFrame { ack: false, settings: vec![] })) // Fallback
+    let mut src = BytesMut::from(bytes);
+    let header = FrameHeader::parse(&mut src)?;
+    let payload_len = match usize::try_from(header.length) {
+        Ok(len) => len,
+        Err(_) => {
+            return Err(H2Error::frame_size(
+                "frame payload length does not fit usize",
+            ));
+        }
+    };
+    if src.len() < payload_len {
+        return Err(H2Error::protocol("incomplete frame payload"));
     }
+    let payload = src.split_to(payload_len).freeze();
+    parse_h2_frame(&header, payload)
 }
 
 fn get_frame_stream_id(frame: &Frame) -> u32 {
@@ -640,7 +752,11 @@ fn assert_valid_state_transition(before: ConnectionState, after: ConnectionState
         _ => false,
     };
 
-    assert!(valid, "Invalid state transition: {:?} -> {:?}", before, after);
+    assert!(
+        valid,
+        "Invalid state transition: {:?} -> {:?}",
+        before, after
+    );
 }
 
 /// Test specific attack scenarios
@@ -706,7 +822,7 @@ fn test_post_goaway_frames(input: &FrameSequenceInput) {
                 goaway_sent = true;
             }
 
-            let result = connection.process_frame(frame);
+            let _ = connection.process_frame(frame);
 
             if goaway_sent {
                 // After GOAWAY, connection should be in closing state
@@ -723,20 +839,19 @@ fn test_general_ordering(input: &FrameSequenceInput) {
     let frame_sequence = generate_frame_sequence(input);
     let mut connection = create_test_connection(&input.connection_config);
 
-    let mut frame_count = 0;
-
     for frame_bytes in frame_sequence.iter().take(50) {
         if let Ok(frame) = parse_frame_from_bytes(frame_bytes) {
             let result = connection.process_frame(frame);
 
             match result {
                 Ok(_) => {
-                    frame_count += 1;
-
                     // Connection should remain in valid state
                     assert!(matches!(
                         connection.state(),
-                        ConnectionState::Handshaking | ConnectionState::Open | ConnectionState::Closing | ConnectionState::Closed
+                        ConnectionState::Handshaking
+                            | ConnectionState::Open
+                            | ConnectionState::Closing
+                            | ConnectionState::Closed
                     ));
                 }
                 Err(_) => {
