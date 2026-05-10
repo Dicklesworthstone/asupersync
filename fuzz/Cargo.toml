@@ -5412,6 +5412,7 @@ name = "h1_chunked_terminator_missing"
 path = "fuzz_targets/h1_chunked_terminator_missing.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h1_chunked_terminator"

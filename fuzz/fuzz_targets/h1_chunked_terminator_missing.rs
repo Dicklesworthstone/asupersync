@@ -24,8 +24,6 @@ struct FuzzInput {
 
 #[derive(Arbitrary, Debug, Clone)]
 struct ChunkedMessage {
-    /// Initial HTTP headers (before chunked body)
-    headers: Vec<String>,
     /// Sequence of chunks
     chunks: Vec<ChunkData>,
     /// Termination scenario
@@ -69,7 +67,6 @@ enum ChunkedParserState {
     ExpectingChunkTrailer,
     ExpectingFinalTrailer,
     Complete,
-    Error(String),
 }
 
 /// Mock HTTP/1.1 chunked encoding parser with termination validation
@@ -77,8 +74,6 @@ struct MockH1ChunkedParser {
     state: ChunkedParserState,
     total_bytes_read: usize,
     chunks_received: Vec<Vec<u8>>,
-    trailer_headers: Vec<String>,
-    errors: Vec<String>,
 }
 
 impl MockH1ChunkedParser {
@@ -87,8 +82,6 @@ impl MockH1ChunkedParser {
             state: ChunkedParserState::ExpectingChunkSize,
             total_bytes_read: 0,
             chunks_received: Vec::new(),
-            trailer_headers: Vec::new(),
-            errors: Vec::new(),
         }
     }
 
@@ -183,9 +176,6 @@ impl MockH1ChunkedParser {
                     // Should not have more data after completion
                     return Err("Unexpected data after chunked encoding completion".into());
                 }
-                ChunkedParserState::Error(error) => {
-                    return Err(error.clone());
-                }
             }
         }
 
@@ -204,7 +194,6 @@ impl MockH1ChunkedParser {
             ChunkedParserState::ExpectingFinalTrailer => {
                 Err("Truncated chunked encoding: missing final terminator (\\r\\n)".into())
             }
-            ChunkedParserState::Error(error) => Err(error.clone()),
         }
     }
 
@@ -288,12 +277,8 @@ impl MockH1ChunkedParser {
 
     /// Find next \r\n sequence
     fn find_crlf(&self, data: &[u8], start_pos: usize) -> Option<usize> {
-        for i in start_pos..data.len().saturating_sub(1) {
-            if data[i] == b'\r' && data[i + 1] == b'\n' {
-                return Some(i);
-            }
-        }
-        None
+        (start_pos..data.len().saturating_sub(1))
+            .find(|&i| data[i] == b'\r' && data[i + 1] == b'\n')
     }
 
     /// Get parsed chunks
@@ -381,7 +366,7 @@ fuzz_target!(|data: &[u8]| {
                 );
 
                 // Verify all non-zero chunks were parsed
-                let expected_chunks: Vec<_> = input
+                let expected_chunks = input
                     .chunked_message
                     .chunks
                     .iter()
@@ -434,12 +419,6 @@ fuzz_target!(|data: &[u8]| {
                 "Complete state should only occur with proper termination"
             );
         }
-        ChunkedParserState::Error(_) => {
-            assert!(
-                result.is_err(),
-                "Error state should correspond to failed result"
-            );
-        }
         _ => {
             // Incomplete states should have error result
             if matches!(
@@ -463,7 +442,6 @@ mod tests {
     #[test]
     fn test_proper_termination() {
         let message = ChunkedMessage {
-            headers: vec!["Transfer-Encoding: chunked".to_string()],
             chunks: vec![
                 ChunkData {
                     size: 5,
@@ -494,7 +472,6 @@ mod tests {
     #[test]
     fn test_missing_terminator() {
         let message = ChunkedMessage {
-            headers: vec![],
             chunks: vec![ChunkData {
                 size: 5,
                 extensions: vec![],
@@ -514,7 +491,6 @@ mod tests {
     #[test]
     fn test_incomplete_zero_chunk() {
         let message = ChunkedMessage {
-            headers: vec![],
             chunks: vec![ChunkData {
                 size: 3,
                 extensions: vec![],
@@ -536,7 +512,6 @@ mod tests {
     #[test]
     fn test_incomplete_zero_rn() {
         let message = ChunkedMessage {
-            headers: vec![],
             chunks: vec![],
             termination: TerminationScenario::IncompleteZeroRN,
             trailer_headers: vec![],
@@ -552,7 +527,6 @@ mod tests {
     #[test]
     fn test_extra_data_after_terminator() {
         let message = ChunkedMessage {
-            headers: vec![],
             chunks: vec![ChunkData {
                 size: 2,
                 extensions: vec![],
@@ -575,7 +549,6 @@ mod tests {
     #[test]
     fn test_malformed_chunk_size() {
         let message = ChunkedMessage {
-            headers: vec![],
             chunks: vec![ChunkData {
                 size: 0,
                 extensions: vec![],
@@ -594,7 +567,6 @@ mod tests {
     #[test]
     fn test_insufficient_chunk_data() {
         let message = ChunkedMessage {
-            headers: vec![],
             chunks: vec![
                 ChunkData {
                     size: 10,
@@ -619,7 +591,6 @@ mod tests {
     #[test]
     fn test_zero_size_chunks() {
         let message = ChunkedMessage {
-            headers: vec![],
             chunks: vec![
                 ChunkData {
                     size: 0,
@@ -646,7 +617,6 @@ mod tests {
     #[test]
     fn test_chunk_extensions() {
         let message = ChunkedMessage {
-            headers: vec![],
             chunks: vec![ChunkData {
                 size: 4,
                 extensions: vec!["name=value".to_string()],
