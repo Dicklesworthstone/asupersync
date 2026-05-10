@@ -2,7 +2,6 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashMap;
 
 // Mock HTTP/2 SETTINGS frame and HPACK dynamic table for fuzzing
 #[derive(Debug, Clone, Arbitrary)]
@@ -63,6 +62,53 @@ const SETTINGS_HEADER_TABLE_SIZE: u16 = 0x1;
 const DEFAULT_HEADER_TABLE_SIZE: u32 = 4096;
 const MAX_HEADER_TABLE_SIZE: u32 = 65536; // Common implementation limit
 
+fn observe_hpack_operation(result: Result<(), String>, context: &str) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(error) => {
+            let diagnostic = format!("{context}: {error}");
+            assert!(
+                !diagnostic.trim().is_empty(),
+                "HPACK operation failures must expose diagnostics"
+            );
+            assert!(
+                diagnostic.len() < 1024,
+                "HPACK operation diagnostics must stay bounded"
+            );
+            false
+        }
+    }
+}
+
+fn observe_generated_dimensions(test_case: &SettingsUpdateTestCase) {
+    let mut timing_score = 0u32;
+    for update in &test_case.update_sequence {
+        timing_score = timing_score.wrapping_add(u32::from(update.acknowledgment_delay));
+        timing_score = timing_score.wrapping_add(match update.timing {
+            UpdateTiming::BeforeHeaders => 1,
+            UpdateTiming::DuringHeaders => 2,
+            UpdateTiming::AfterHeaders => 3,
+            UpdateTiming::Immediate => 4,
+            UpdateTiming::Delayed(delay) => 5 + u32::from(delay),
+        });
+    }
+
+    let malformed_flags = u8::from(test_case.malformed_scenarios.size_exceeds_limit)
+        + u8::from(test_case.malformed_scenarios.size_reduction_mid_block)
+        + u8::from(test_case.malformed_scenarios.unacknowledged_update)
+        + u8::from(test_case.malformed_scenarios.duplicate_updates)
+        + u8::from(test_case.malformed_scenarios.zero_size_table)
+        + u8::from(test_case.malformed_scenarios.negative_size_as_u32)
+        + u8::from(test_case.malformed_scenarios.rapid_size_changes)
+        + u8::from(test_case.malformed_scenarios.interleaved_headers);
+    assert!(
+        malformed_flags <= 8,
+        "malformed scenario bit count must stay bounded"
+    );
+
+    std::hint::black_box((timing_score, SETTINGS_HEADER_TABLE_SIZE));
+}
+
 fuzz_target!(|data: &[u8]| {
     // Guard against excessively large inputs
     if data.len() > 100_000 {
@@ -76,6 +122,8 @@ fuzz_target!(|data: &[u8]| {
         Ok(case) => case,
         Err(_) => return, // Invalid input for generating test case
     };
+
+    observe_generated_dimensions(&test_case);
 
     // Test scenario 1: Basic SETTINGS_HEADER_TABLE_SIZE update
     test_basic_header_table_size_update(&test_case);
@@ -119,13 +167,24 @@ fn test_basic_header_table_size_update(test_case: &SettingsUpdateTestCase) {
         ("content-encoding", "gzip"),
     ];
 
+    let mut initial_successes = 0;
     for (name, value) in &initial_entries {
-        let result = hpack_context.add_to_dynamic_table(name, value);
-        assert!(result.is_ok(), "Should be able to add initial entries");
+        if observe_hpack_operation(
+            hpack_context.add_to_dynamic_table(name, value),
+            "basic update seed insert",
+        ) {
+            initial_successes += 1;
+        }
     }
 
     let initial_count = hpack_context.dynamic_table.len();
-    assert!(initial_count > 0, "Should have initial entries");
+    assert_eq!(
+        initial_count, initial_successes,
+        "Seed insert observations should match dynamic table length"
+    );
+    if initial_count == 0 {
+        return;
+    }
 
     // Test first update in sequence
     if let Some(first_update) = test_case.update_sequence.first() {
@@ -192,6 +251,10 @@ fn test_table_size_reduction(test_case: &SettingsUpdateTestCase) {
 
     let initial_size = hpack_context.current_table_size;
     let initial_count = hpack_context.dynamic_table.len();
+    assert_eq!(
+        added_entries, initial_count,
+        "Added-entry counter should match dynamic-table length before reduction"
+    );
 
     // Find a size update that reduces table size
     if let Some(reduction_update) = test_case
@@ -255,8 +318,14 @@ fn test_table_size_increase(test_case: &SettingsUpdateTestCase) {
     let mut hpack_context = create_hpack_context(small_size);
 
     // Fill the small table
-    let _ = hpack_context.add_to_dynamic_table("x-header-1", "value-1");
-    let _ = hpack_context.add_to_dynamic_table("x-header-2", "value-2");
+    observe_hpack_operation(
+        hpack_context.add_to_dynamic_table("x-header-1", "value-1"),
+        "table size increase seed insert x-header-1",
+    );
+    observe_hpack_operation(
+        hpack_context.add_to_dynamic_table("x-header-2", "value-2"),
+        "table size increase seed insert x-header-2",
+    );
 
     let initial_count = hpack_context.dynamic_table.len();
 
@@ -310,8 +379,14 @@ fn test_rapid_size_changes(test_case: &SettingsUpdateTestCase) {
     let mut hpack_context = create_hpack_context(test_case.initial_table_size);
 
     // Add some entries to test preservation across changes
-    let _ = hpack_context.add_to_dynamic_table("x-persistent", "should-survive");
-    let _ = hpack_context.add_to_dynamic_table("x-test", "rapid-changes");
+    observe_hpack_operation(
+        hpack_context.add_to_dynamic_table("x-persistent", "should-survive"),
+        "rapid size changes seed insert persistent",
+    );
+    observe_hpack_operation(
+        hpack_context.add_to_dynamic_table("x-test", "rapid-changes"),
+        "rapid size changes seed insert test",
+    );
 
     let mut previous_size = test_case.initial_table_size;
 
@@ -321,6 +396,18 @@ fn test_rapid_size_changes(test_case: &SettingsUpdateTestCase) {
 
         match result {
             Ok(eviction_info) => {
+                if eviction_info.entries_evicted == 0 {
+                    assert_eq!(
+                        eviction_info.bytes_freed, 0,
+                        "No evictions should free zero entries but nonzero bytes"
+                    );
+                } else {
+                    assert!(
+                        eviction_info.bytes_freed > 0,
+                        "Evicting entries should free table bytes"
+                    );
+                }
+
                 // Verify table maintains consistency
                 assert!(
                     hpack_context.current_table_size <= hpack_context.max_table_size,
@@ -367,14 +454,20 @@ fn test_size_update_during_headers(test_case: &SettingsUpdateTestCase) {
     for operation in test_case.header_operations.iter().take(3) {
         match operation.operation_type {
             HeaderOperationType::LiteralWithIncrementalIndexing => {
-                let _ = hpack_context.process_literal_header_with_indexing(
-                    &operation.header_name,
-                    &operation.header_value,
+                observe_hpack_operation(
+                    hpack_context.process_literal_header_with_indexing(
+                        &operation.header_name,
+                        &operation.header_value,
+                    ),
+                    "header block literal with incremental indexing",
                 );
             }
             HeaderOperationType::IndexedHeaderField => {
                 if let Some(index) = operation.indexed_position {
-                    let _ = hpack_context.process_indexed_header(index);
+                    observe_hpack_operation(
+                        hpack_context.process_indexed_header(index),
+                        "header block indexed header field",
+                    );
                 }
             }
             HeaderOperationType::DynamicTableSizeUpdate => {
@@ -401,13 +494,16 @@ fn test_size_update_during_headers(test_case: &SettingsUpdateTestCase) {
             }
             _ => {
                 // Other operations
-                let _ = hpack_context
-                    .process_literal_header(&operation.header_name, &operation.header_value);
+                observe_hpack_operation(
+                    hpack_context
+                        .process_literal_header(&operation.header_name, &operation.header_value),
+                    "header block literal without indexing",
+                );
             }
         }
     }
 
-    let _ = hpack_context.end_header_block();
+    observe_hpack_operation(hpack_context.end_header_block(), "end header block");
 }
 
 /// Test zero table size edge case
@@ -419,7 +515,10 @@ fn test_zero_table_size(test_case: &SettingsUpdateTestCase) {
     let mut hpack_context = create_hpack_context(test_case.initial_table_size);
 
     // Add some entries first
-    let _ = hpack_context.add_to_dynamic_table("x-header", "value");
+    observe_hpack_operation(
+        hpack_context.add_to_dynamic_table("x-header", "value"),
+        "zero table size seed insert",
+    );
     let initial_count = hpack_context.dynamic_table.len();
 
     // Set table size to zero
