@@ -19,7 +19,6 @@ struct MultiWaiterTracker {
 #[derive(Debug, Clone, PartialEq)]
 enum WaiterState {
     Created,
-    Polled,
     Ready,
     Pending,
 }
@@ -110,13 +109,6 @@ impl TrackedWaker {
         }
     }
 
-    fn was_waked(&self) -> bool {
-        self.waked
-            .lock()
-            .unwrap_or_else(|_| std::sync::MutexGuard::new(&false))
-            .clone()
-    }
-
     fn create_waker(&self) -> Waker {
         let data = Arc::new(self.clone());
         let raw = RawWaker::new(Arc::into_raw(data) as *const (), &TRACKED_WAKER_VTABLE);
@@ -143,7 +135,7 @@ static TRACKED_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
 );
 
 unsafe fn tracked_waker_clone(data: *const ()) -> RawWaker {
-    let arc = Arc::from_raw(data as *const TrackedWaker);
+    let arc = unsafe { Arc::from_raw(data as *const TrackedWaker) };
     let cloned = arc.clone();
     std::mem::forget(arc); // Don't drop the original
     let new_data = Arc::into_raw(cloned) as *const ();
@@ -151,7 +143,7 @@ unsafe fn tracked_waker_clone(data: *const ()) -> RawWaker {
 }
 
 unsafe fn tracked_waker_wake(data: *const ()) {
-    let arc = Arc::from_raw(data as *const TrackedWaker);
+    let arc = unsafe { Arc::from_raw(data as *const TrackedWaker) };
     if let Ok(mut waked) = arc.waked.lock() {
         *waked = true;
     }
@@ -160,7 +152,7 @@ unsafe fn tracked_waker_wake(data: *const ()) {
 }
 
 unsafe fn tracked_waker_wake_by_ref(data: *const ()) {
-    let arc = Arc::from_raw(data as *const TrackedWaker);
+    let arc = unsafe { Arc::from_raw(data as *const TrackedWaker) };
     if let Ok(mut waked) = arc.waked.lock() {
         *waked = true;
     }
@@ -170,8 +162,31 @@ unsafe fn tracked_waker_wake_by_ref(data: *const ()) {
 }
 
 unsafe fn tracked_waker_drop(data: *const ()) {
-    let _arc = Arc::from_raw(data as *const TrackedWaker);
+    let _arc = unsafe { Arc::from_raw(data as *const TrackedWaker) };
     // Arc drop happens automatically
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WaiterPollObservation {
+    Pending,
+    Ready,
+}
+
+fn observe_waiter_poll(
+    tracker: &MultiWaiterTracker,
+    waiter_id: usize,
+    result: Poll<()>,
+) -> WaiterPollObservation {
+    match result {
+        Poll::Pending => {
+            tracker.record_waiter_state(waiter_id, WaiterState::Pending);
+            WaiterPollObservation::Pending
+        }
+        Poll::Ready(()) => {
+            tracker.record_waiter_state(waiter_id, WaiterState::Ready);
+            WaiterPollObservation::Ready
+        }
+    }
 }
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -187,16 +202,6 @@ enum NotifyPattern {
     NotifyOneThenWaiters { additional_waiters: u8 },
     InterleavedCreateNotify { interleaving: Vec<bool> }, // true=create, false=notify
     RapidNotifyOne { rapid_count: u8 },
-}
-
-#[derive(Debug, Clone, Arbitrary)]
-enum MultiWaiterOperation {
-    CreateWaiter { waiter_id: u8 },
-    PollWaiter { waiter_id: u8 },
-    NotifyOne,
-    NotifyWaiters { count: u8 },
-    CheckInvariants,
-    ValidateExactlyOneReady,
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -236,15 +241,7 @@ fuzz_target!(|data: &[u8]| {
                 let waker = tracked_wakers[i].create_waker();
                 let mut context = Context::from_waker(&waker);
 
-                let poll_result = Pin::new(waiter).poll(&mut context);
-                match poll_result {
-                    Poll::Ready(()) => {
-                        tracker.record_waiter_state(i, WaiterState::Ready);
-                    }
-                    Poll::Pending => {
-                        tracker.record_waiter_state(i, WaiterState::Pending);
-                    }
-                }
+                observe_waiter_poll(&tracker, i, Pin::new(waiter).poll(&mut context));
             }
 
             // Now call notify_one() - should wake exactly one
@@ -256,15 +253,7 @@ fuzz_target!(|data: &[u8]| {
                 let waker = tracked_wakers[i].create_waker();
                 let mut context = Context::from_waker(&waker);
 
-                let poll_result = Pin::new(waiter).poll(&mut context);
-                match poll_result {
-                    Poll::Ready(()) => {
-                        tracker.record_waiter_state(i, WaiterState::Ready);
-                    }
-                    Poll::Pending => {
-                        tracker.record_waiter_state(i, WaiterState::Pending);
-                    }
-                }
+                observe_waiter_poll(&tracker, i, Pin::new(waiter).poll(&mut context));
             }
 
             // Validate: exactly one should be ready
@@ -272,14 +261,13 @@ fuzz_target!(|data: &[u8]| {
         }
 
         NotifyPattern::MultipleNotifyOne { count } => {
-            let notify_count = (count.min(10).max(1)) as usize;
+            let notify_count = count.clamp(1, 10) as usize;
 
             // Poll all waiters first
             for (i, waiter) in waiters.iter_mut().enumerate() {
                 let waker = tracked_wakers[i].create_waker();
                 let mut context = Context::from_waker(&waker);
-                let _ = Pin::new(waiter).poll(&mut context);
-                tracker.record_waiter_state(i, WaiterState::Pending);
+                observe_waiter_poll(&tracker, i, Pin::new(waiter).poll(&mut context));
             }
 
             // Call notify_one() multiple times
@@ -292,9 +280,7 @@ fuzz_target!(|data: &[u8]| {
                     let waker = tracked_wakers[i].create_waker();
                     let mut context = Context::from_waker(&waker);
 
-                    if let Poll::Ready(()) = Pin::new(waiter).poll(&mut context) {
-                        tracker.record_waiter_state(i, WaiterState::Ready);
-                    }
+                    observe_waiter_poll(&tracker, i, Pin::new(waiter).poll(&mut context));
                 }
             }
 
@@ -314,8 +300,7 @@ fuzz_target!(|data: &[u8]| {
             for (i, waiter) in waiters.iter_mut().enumerate() {
                 let waker = tracked_wakers[i].create_waker();
                 let mut context = Context::from_waker(&waker);
-                let _ = Pin::new(waiter).poll(&mut context);
-                tracker.record_waiter_state(i, WaiterState::Pending);
+                observe_waiter_poll(&tracker, i, Pin::new(waiter).poll(&mut context));
             }
 
             // Call notify_one() first
@@ -327,9 +312,7 @@ fuzz_target!(|data: &[u8]| {
                 let waker = tracked_wakers[i].create_waker();
                 let mut context = Context::from_waker(&waker);
 
-                if let Poll::Ready(()) = Pin::new(waiter).poll(&mut context) {
-                    tracker.record_waiter_state(i, WaiterState::Ready);
-                }
+                observe_waiter_poll(&tracker, i, Pin::new(waiter).poll(&mut context));
             }
 
             // Should have exactly one ready at this point
@@ -344,7 +327,12 @@ fuzz_target!(|data: &[u8]| {
 
                 let waker = extra_waker.create_waker();
                 let mut context = Context::from_waker(&waker);
-                let _ = Pin::new(&mut Box::pin(notified)).poll(&mut context);
+                let mut pinned = Box::pin(notified);
+                observe_waiter_poll(
+                    &tracker,
+                    config.waiter_count as usize + i,
+                    pinned.as_mut().poll(&mut context),
+                );
             }
         }
 
@@ -355,11 +343,13 @@ fuzz_target!(|data: &[u8]| {
                 // Limit operations
                 if is_create && waiter_idx < waiters.len() {
                     // Poll a waiter to register it
-                    let waker =
-                        std::task::Waker::from(Arc::new(tracked_wakers[waiter_idx].clone()));
+                    let waker = tracked_wakers[waiter_idx].create_waker();
                     let mut context = Context::from_waker(&waker);
-                    let _ = Pin::new(&mut waiters[waiter_idx]).poll(&mut context);
-                    tracker.record_waiter_state(waiter_idx, WaiterState::Pending);
+                    observe_waiter_poll(
+                        &tracker,
+                        waiter_idx,
+                        Pin::new(&mut waiters[waiter_idx]).poll(&mut context),
+                    );
                     waiter_idx += 1;
                 } else {
                     // Call notify_one()
@@ -371,9 +361,11 @@ fuzz_target!(|data: &[u8]| {
                         let waker = tracked_wakers[i].create_waker();
                         let mut context = Context::from_waker(&waker);
 
-                        if let Poll::Ready(()) = Pin::new(&mut waiters[i]).poll(&mut context) {
-                            tracker.record_waiter_state(i, WaiterState::Ready);
-                        }
+                        observe_waiter_poll(
+                            &tracker,
+                            i,
+                            Pin::new(&mut waiters[i]).poll(&mut context),
+                        );
                     }
                 }
             }
@@ -384,8 +376,7 @@ fuzz_target!(|data: &[u8]| {
             for (i, waiter) in waiters.iter_mut().enumerate() {
                 let waker = tracked_wakers[i].create_waker();
                 let mut context = Context::from_waker(&waker);
-                let _ = Pin::new(waiter).poll(&mut context);
-                tracker.record_waiter_state(i, WaiterState::Pending);
+                observe_waiter_poll(&tracker, i, Pin::new(waiter).poll(&mut context));
             }
 
             // Rapid notify_one() calls
@@ -398,9 +389,7 @@ fuzz_target!(|data: &[u8]| {
                     let waker = tracked_wakers[i].create_waker();
                     let mut context = Context::from_waker(&waker);
 
-                    if let Poll::Ready(()) = Pin::new(waiter).poll(&mut context) {
-                        tracker.record_waiter_state(i, WaiterState::Ready);
-                    }
+                    observe_waiter_poll(&tracker, i, Pin::new(waiter).poll(&mut context));
                 }
             }
 
