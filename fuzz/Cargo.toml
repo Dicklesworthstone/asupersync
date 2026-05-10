@@ -5038,6 +5038,7 @@ name = "h1_malformed_lf_terminator"
 path = "fuzz_targets/h1_malformed_lf_terminator.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h1_transfer_encoding_precedence"
