@@ -451,6 +451,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "raptorq_decode_random_loss"
+path = "fuzz_targets/raptorq_decode_random_loss.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "grpc_protobuf_decode"
 path = "fuzz_targets/grpc_protobuf_decode.rs"
 test = false
