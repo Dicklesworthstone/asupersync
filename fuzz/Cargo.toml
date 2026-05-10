@@ -5390,6 +5390,13 @@ test = false
 doc = false
 
 [[bin]]
+name = "h2_settings_negative_value"
+path = "fuzz_targets/h2_settings_negative_value.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "h2_data_after_end_stream"
 path = "fuzz_targets/h2_data_after_end_stream.rs"
 test = false
