@@ -379,13 +379,18 @@ fn execute_attribute_scenario(scenario: AttributeFrameScenario) {
 
         // Test partial parsing (feed bytes incrementally)
         if scenario.test_nesting && frame_bytes.len() > 2 {
-            let _ = std::panic::catch_unwind(|| {
+            let partial_result = std::panic::catch_unwind(|| {
                 for chunk_size in 1..=frame_bytes.len().min(10) {
                     for chunk in frame_bytes.chunks(chunk_size) {
                         let _ = RespValue::try_decode_with_limits(chunk, &limits);
                     }
                 }
             });
+            assert!(
+                partial_result.is_ok(),
+                "RESP3 attribute partial parsing panicked for pattern {frame_idx}; frame prefix: {:?}",
+                &frame_bytes[..frame_bytes.len().min(100)]
+            );
         }
     }
 }
@@ -420,8 +425,13 @@ fuzz_target!(|data: &[u8]| {
             max_bulk_string_len: MAX_INPUT_SIZE,
         };
 
-        let _ = std::panic::catch_unwind(|| {
+        let raw_result = std::panic::catch_unwind(|| {
             let _ = RespValue::try_decode_with_limits(data, &limits);
         });
+        assert!(
+            raw_result.is_ok(),
+            "RESP3 raw attribute parsing panicked; data prefix: {:?}",
+            &data[..data.len().min(100)]
+        );
     }
 });
