@@ -27,6 +27,8 @@ use asupersync::bytes::BytesMut;
 use asupersync::codec::{Decoder, Encoder, LinesCodec};
 use libfuzzer_sys::fuzz_target;
 
+const MAX_GENERATED_LINE_LEN: usize = 4096;
+
 /// Structure-aware line codec input generator
 #[derive(Debug, Clone, Arbitrary)]
 struct LineCodecInput {
@@ -57,42 +59,42 @@ enum LineContent {
     Ascii(String),
     Utf8Valid(String),
     Utf8Invalid(Vec<u8>),
-    AtMaxLength(usize), // Exactly at length boundary
+    AtMaxLength(usize),   // Exactly at length boundary
     OverMaxLength(usize), // Exceeds length by N bytes
-    SpecialChars, // CR/LF embedded in content
+    SpecialChars,         // CR/LF embedded in content
 }
 
 #[derive(Debug, Clone, Arbitrary)]
 enum LineDelimiter {
-    Lf,           // \n
-    Crlf,         // \r\n
-    BareCr,       // \r (should NOT be treated as delimiter)
-    Mixed,        // Inconsistent across lines
-    None,         // No delimiter (for EOF testing)
-    Truncated,    // Partial delimiter (\r without \n)
+    Lf,        // \n
+    Crlf,      // \r\n
+    BareCr,    // \r (should NOT be treated as delimiter)
+    Mixed,     // Inconsistent across lines
+    None,      // No delimiter (for EOF testing)
+    Truncated, // Partial delimiter (\r without \n)
 }
 
 #[derive(Debug, Clone, Arbitrary)]
 enum LinePosition {
-    Complete,     // Full line in buffer
-    Split,        // Line spans multiple buffer fills
-    Boundary,     // Delimiter at exact buffer boundary
+    Complete, // Full line in buffer
+    Split,    // Line spans multiple buffer fills
+    Boundary, // Delimiter at exact buffer boundary
 }
 
 #[derive(Debug, Clone, Arbitrary)]
 enum MaxLengthConfig {
-    Default,      // Use DEFAULT_MAX_LINE_LENGTH
-    Tiny(u8),     // 1-255 bytes
-    Large(u16),   // Up to 64K
-    Unbounded,    // usize::MAX
+    Default,    // Use DEFAULT_MAX_LINE_LENGTH
+    Tiny(u8),   // 1-255 bytes
+    Large(u16), // Up to 64K
+    Unbounded,  // usize::MAX
 }
 
 #[derive(Debug, Clone, Arbitrary)]
 enum BufferStrategy {
-    SinglePass,   // All data at once
-    Chunked(u8),  // Split into N chunks
-    ByteByByte,   // Extreme partial reads
-    Random,       // Random chunk sizes
+    SinglePass,  // All data at once
+    Chunked(u8), // Split into N chunks
+    ByteByByte,  // Extreme partial reads
+    Random,      // Random chunk sizes
 }
 
 impl LineCodecInput {
@@ -110,14 +112,23 @@ impl LineCodecInput {
                     data.extend_from_slice(s.as_bytes());
                     data.push(b'\n');
                 }
-                _ => {} // Other ops handled during execution
+                CodecOperation::PartialRead(width) => {
+                    let width = (*width).clamp(1, 32);
+                    data.extend(std::iter::repeat_n(b'P', width));
+                    data.push(b'\n');
+                }
+                CodecOperation::DecodeEof | CodecOperation::ClearBuffer => {}
             }
         }
 
         Ok(data)
     }
 
-    fn generate_line_bytes(&self, line_data: &LineData, u: &mut Unstructured) -> Result<Vec<u8>, arbitrary::Error> {
+    fn generate_line_bytes(
+        &self,
+        line_data: &LineData,
+        u: &mut Unstructured,
+    ) -> Result<Vec<u8>, arbitrary::Error> {
         let mut line = Vec::new();
 
         // Generate content
@@ -133,7 +144,8 @@ impl LineCodecInput {
                 line.extend_from_slice(bytes);
             }
             LineContent::AtMaxLength(len) => {
-                line.extend(vec![b'X'; *len]);
+                let len = (*len).min(MAX_GENERATED_LINE_LEN);
+                line.extend(vec![b'X'; len]);
             }
             LineContent::OverMaxLength(extra) => {
                 // Generate content that will trigger MaxLineLengthExceeded
@@ -142,11 +154,28 @@ impl LineCodecInput {
                     MaxLengthConfig::Large(n) => n as usize,
                     _ => 1000,
                 };
-                line.extend(vec![b'Y'; base_len + extra]);
+                let len = base_len
+                    .saturating_add((*extra).min(256))
+                    .min(MAX_GENERATED_LINE_LEN);
+                line.extend(vec![b'Y'; len]);
             }
             LineContent::SpecialChars => {
                 // Embed CR/LF that should NOT be treated as delimiters
                 line.extend_from_slice(b"before\rmiddle\rafter");
+            }
+        }
+
+        match line_data.position {
+            LinePosition::Complete => {}
+            LinePosition::Split => {
+                if line.len() > 1 {
+                    line.insert(line.len() / 2, b'\n');
+                }
+            }
+            LinePosition::Boundary => {
+                while line.len() % 16 != 15 && line.len() < MAX_GENERATED_LINE_LEN {
+                    line.push(b'B');
+                }
             }
         }
 
@@ -186,11 +215,11 @@ impl LineCodecInput {
 fn generate_invalid_utf8(u: &mut Unstructured) -> Result<Vec<u8>, arbitrary::Error> {
     let pattern = u.int_in_range(0u8..=5)?;
     match pattern {
-        0 => Ok(vec![0x80]), // Lone continuation byte
-        1 => Ok(vec![0xC3, 0x28]), // Invalid 2-byte sequence
-        2 => Ok(vec![0xF0, 0x9F]), // Truncated 4-byte sequence
-        3 => Ok(vec![0xFF, 0xFE]), // Invalid bytes
-        4 => Ok(b"valid\xFF".to_vec()), // Valid UTF-8 + garbage
+        0 => Ok(vec![0x80]),             // Lone continuation byte
+        1 => Ok(vec![0xC3, 0x28]),       // Invalid 2-byte sequence
+        2 => Ok(vec![0xF0, 0x9F]),       // Truncated 4-byte sequence
+        3 => Ok(vec![0xFF, 0xFE]),       // Invalid bytes
+        4 => Ok(b"valid\xFF".to_vec()),  // Valid UTF-8 + garbage
         _ => Ok(vec![0xED, 0xA0, 0x80]), // Surrogate (invalid in UTF-8)
     }
 }

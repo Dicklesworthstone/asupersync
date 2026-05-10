@@ -3539,6 +3539,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "lines_codec_boundaries"
+path = "fuzz_targets/lines_codec_boundaries.rs"
+test = false
+doc = false
+bench = false
+
 # Structure-aware fuzzer for Redis RESP3 Big-Number type encoding.
 # Tests src/messaging/redis.rs RESP3 Big-Number parsing with intelligent input generation
 # targeting UTF-8 validation, CRLF injection, buffer overflow, and malformed wire formats.
