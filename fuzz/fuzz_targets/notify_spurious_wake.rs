@@ -88,19 +88,19 @@ impl SpuriousWakeTracker {
         }
 
         // Check for any spurious wakes and panic if found
-        if let Ok(wakes) = self.spurious_wakes.lock() {
-            if !wakes.is_empty() {
-                for wake in wakes.iter() {
-                    self.record_operation(&format!(
-                        "SPURIOUS_WAKE: Waiter {} - {}",
-                        wake.waiter_id, wake.description
-                    ));
-                }
-                panic!(
-                    "Spurious wake violations detected: {} spurious wakes",
-                    wakes.len()
-                );
+        if let Ok(wakes) = self.spurious_wakes.lock()
+            && !wakes.is_empty()
+        {
+            for wake in wakes.iter() {
+                self.record_operation(&format!(
+                    "SPURIOUS_WAKE waiter {} poll {} op {} - {}",
+                    wake.waiter_id, wake.poll_attempt, wake.operation_id, wake.description
+                ));
             }
+            panic!(
+                "Spurious wake violations detected: {} spurious wakes",
+                wakes.len()
+            );
         }
     }
 }
@@ -120,15 +120,9 @@ impl TrackedWaker {
         }
     }
 
-    fn was_waked(&self) -> bool {
-        if let Ok(waked) = self.waked.lock() {
-            *waked
-        } else {
-            false
-        }
-    }
-
     fn create_waker(&self) -> Waker {
+        self.tracker
+            .record_operation(&format!("create_waker_{}", self.waiter_id));
         let data = Arc::new(self.clone());
         let raw = RawWaker::new(Arc::into_raw(data) as *const (), &TRACKED_WAKER_VTABLE);
         unsafe { Waker::from_raw(raw) }
@@ -154,7 +148,7 @@ static TRACKED_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
 );
 
 unsafe fn tracked_waker_clone(data: *const ()) -> RawWaker {
-    let arc = Arc::from_raw(data as *const TrackedWaker);
+    let arc = unsafe { Arc::from_raw(data as *const TrackedWaker) };
     let cloned = arc.clone();
     std::mem::forget(arc);
     let new_data = Arc::into_raw(cloned) as *const ();
@@ -162,7 +156,7 @@ unsafe fn tracked_waker_clone(data: *const ()) -> RawWaker {
 }
 
 unsafe fn tracked_waker_wake(data: *const ()) {
-    let arc = Arc::from_raw(data as *const TrackedWaker);
+    let arc = unsafe { Arc::from_raw(data as *const TrackedWaker) };
     if let Ok(mut waked) = arc.waked.lock() {
         *waked = true;
     }
@@ -171,7 +165,7 @@ unsafe fn tracked_waker_wake(data: *const ()) {
 }
 
 unsafe fn tracked_waker_wake_by_ref(data: *const ()) {
-    let arc = Arc::from_raw(data as *const TrackedWaker);
+    let arc = unsafe { Arc::from_raw(data as *const TrackedWaker) };
     if let Ok(mut waked) = arc.waked.lock() {
         *waked = true;
     }
@@ -181,7 +175,7 @@ unsafe fn tracked_waker_wake_by_ref(data: *const ()) {
 }
 
 unsafe fn tracked_waker_drop(data: *const ()) {
-    let _arc = Arc::from_raw(data as *const TrackedWaker);
+    let _arc = unsafe { Arc::from_raw(data as *const TrackedWaker) };
 }
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -232,6 +226,42 @@ enum NonNotifyOperation {
     CheckStoredNotifications,
 }
 
+fn observe_waiter_poll(
+    tracker: &SpuriousWakeTracker,
+    waiter_id: usize,
+    poll_attempt: usize,
+    operation_id: usize,
+    notify_sent_before: bool,
+    poll: Poll<()>,
+) {
+    let outcome = match poll {
+        Poll::Ready(()) => PollOutcome::Ready,
+        Poll::Pending => PollOutcome::Pending,
+    };
+    tracker.record_operation(&format!(
+        "waiter_poll_waiter_{waiter_id}_attempt_{poll_attempt}_op_{operation_id}_{outcome:?}"
+    ));
+    tracker.record_poll_result(PollResult {
+        waiter_id,
+        poll_attempt,
+        result: outcome,
+        operation_id,
+        notify_sent_before,
+    });
+}
+
+fn observe_thread_join(
+    tracker: &SpuriousWakeTracker,
+    context: &str,
+    handle_index: usize,
+    handle: thread::JoinHandle<()>,
+) {
+    match handle.join() {
+        Ok(()) => tracker.record_operation(&format!("{context}_thread_{handle_index}_joined")),
+        Err(_) => panic!("{context} thread {handle_index} panicked"),
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
     let mut u = Unstructured::new(data);
 
@@ -259,7 +289,7 @@ fuzz_target!(|data: &[u8]| {
         }
 
         SpuriousPattern::MultipleWaitersNoNotify { waiters } => {
-            test_multiple_waiters_no_notify(&tracker, &notify, waiters.min(8).max(1));
+            test_multiple_waiters_no_notify(&tracker, &notify, waiters.clamp(1, 8));
         }
 
         SpuriousPattern::InterleavedPollsNoNotify { interleaving } => {
@@ -272,7 +302,7 @@ fuzz_target!(|data: &[u8]| {
         } => {
             test_concurrent_polling_no_notify(
                 &tracker,
-                &notify,
+                Arc::clone(&notify),
                 config.waiter_count,
                 thread_count.min(6),
                 polls_per_thread.min(5),
@@ -324,19 +354,7 @@ fn test_simple_poll_without_notify(
         let waker = tracked_wakers[i].create_waker();
         let mut context = Context::from_waker(&waker);
 
-        let poll_result = Pin::new(waiter).poll(&mut context);
-        let outcome = match poll_result {
-            Poll::Ready(()) => PollOutcome::Ready,
-            Poll::Pending => PollOutcome::Pending,
-        };
-
-        tracker.record_poll_result(PollResult {
-            waiter_id: i,
-            poll_attempt: 1,
-            result: outcome,
-            operation_id: 1,
-            notify_sent_before: false, // No notify was sent
-        });
+        observe_waiter_poll(tracker, i, 1, 1, false, Pin::new(waiter).poll(&mut context));
     }
 }
 
@@ -365,19 +383,14 @@ fn test_repeated_polls(
             let waker = tracked_wakers[i].create_waker();
             let mut context = Context::from_waker(&waker);
 
-            let poll_result = Pin::new(waiter).poll(&mut context);
-            let outcome = match poll_result {
-                Poll::Ready(()) => PollOutcome::Ready,
-                Poll::Pending => PollOutcome::Pending,
-            };
-
-            tracker.record_poll_result(PollResult {
-                waiter_id: i,
-                poll_attempt: poll_attempt as usize,
-                result: outcome,
-                operation_id: 2,
-                notify_sent_before: false,
-            });
+            observe_waiter_poll(
+                tracker,
+                i,
+                poll_attempt as usize,
+                2,
+                false,
+                Pin::new(waiter).poll(&mut context),
+            );
         }
     }
 }
@@ -405,19 +418,7 @@ fn test_multiple_waiters_no_notify(
         let waker = tracked_wakers[i].create_waker();
         let mut context = Context::from_waker(&waker);
 
-        let poll_result = Pin::new(waiter).poll(&mut context);
-        let outcome = match poll_result {
-            Poll::Ready(()) => PollOutcome::Ready,
-            Poll::Pending => PollOutcome::Pending,
-        };
-
-        tracker.record_poll_result(PollResult {
-            waiter_id: i,
-            poll_attempt: 1,
-            result: outcome,
-            operation_id: 3,
-            notify_sent_before: false,
-        });
+        observe_waiter_poll(tracker, i, 1, 3, false, Pin::new(waiter).poll(&mut context));
     }
 }
 
@@ -457,19 +458,14 @@ fn test_interleaved_polls_no_notify(
                     let waker = tracked_waker.create_waker();
                     let mut context = Context::from_waker(&waker);
 
-                    let poll_result = Pin::new(waiter).poll(&mut context);
-                    let outcome = match poll_result {
-                        Poll::Ready(()) => PollOutcome::Ready,
-                        Poll::Pending => PollOutcome::Pending,
-                    };
-
-                    tracker.record_poll_result(PollResult {
-                        waiter_id: waiter_idx,
-                        poll_attempt: *attempt_num,
-                        result: outcome,
-                        operation_id: 4,
-                        notify_sent_before: false,
-                    });
+                    observe_waiter_poll(
+                        tracker,
+                        waiter_idx,
+                        *attempt_num,
+                        4,
+                        false,
+                        Pin::new(waiter).poll(&mut context),
+                    );
                 }
             }
 
@@ -507,7 +503,7 @@ fn test_interleaved_polls_no_notify(
 
 fn test_concurrent_polling_no_notify(
     tracker: &SpuriousWakeTracker,
-    notify: &Notify,
+    notify: Arc<Notify>,
     waiter_count: u8,
     thread_count: u8,
     polls_per_thread: u8,
@@ -529,15 +525,21 @@ fn test_concurrent_polling_no_notify(
     for (i, waiter) in waiters.iter_mut().enumerate() {
         let waker = tracked_wakers[i].create_waker();
         let mut context = Context::from_waker(&waker);
-        let _ = Pin::new(waiter).poll(&mut context);
+        observe_waiter_poll(
+            tracker,
+            i,
+            1,
+            50,
+            false,
+            Pin::new(waiter).poll(&mut context),
+        );
     }
 
-    let notify = Arc::new(notify);
     let mut handles = Vec::new();
 
     // Spawn threads that poll without notify
     for thread_id in 0..thread_count {
-        let notify_clone = Arc::clone(notify);
+        let notify_clone = Arc::clone(&notify);
         let tracker_clone = tracker.clone();
 
         let handle = thread::spawn(move || {
@@ -553,19 +555,14 @@ fn test_concurrent_polling_no_notify(
                 let mut context = Context::from_waker(&waker);
                 let mut waiter = waiter;
 
-                let poll_result = Pin::new(&mut waiter).poll(&mut context);
-                let outcome = match poll_result {
-                    Poll::Ready(()) => PollOutcome::Ready,
-                    Poll::Pending => PollOutcome::Pending,
-                };
-
-                tracker_clone.record_poll_result(PollResult {
-                    waiter_id: tracked_waker.waiter_id,
-                    poll_attempt: poll_num as usize,
-                    result: outcome,
-                    operation_id: 5,
-                    notify_sent_before: false,
-                });
+                observe_waiter_poll(
+                    &tracker_clone,
+                    tracked_waker.waiter_id,
+                    poll_num as usize,
+                    5,
+                    false,
+                    Pin::new(&mut waiter).poll(&mut context),
+                );
             }
         });
 
@@ -573,8 +570,13 @@ fn test_concurrent_polling_no_notify(
     }
 
     // Wait for all threads
-    for handle in handles {
-        let _ = handle.join();
+    for (handle_index, handle) in handles.into_iter().enumerate() {
+        observe_thread_join(
+            tracker,
+            "concurrent_polling_no_notify",
+            handle_index,
+            handle,
+        );
     }
 }
 
@@ -602,7 +604,14 @@ fn test_mixed_notify_and_non_notify(
     for (i, waiter) in waiters.iter_mut().enumerate() {
         let waker = tracked_wakers[i].create_waker();
         let mut context = Context::from_waker(&waker);
-        let _ = Pin::new(waiter).poll(&mut context);
+        observe_waiter_poll(
+            tracker,
+            i,
+            1,
+            60,
+            false,
+            Pin::new(waiter).poll(&mut context),
+        );
     }
 
     let mut notifications_sent = 0;
@@ -621,22 +630,17 @@ fn test_mixed_notify_and_non_notify(
         let waker = tracked_wakers[i].create_waker();
         let mut context = Context::from_waker(&waker);
 
-        let poll_result = Pin::new(waiter).poll(&mut context);
-        let outcome = match poll_result {
-            Poll::Ready(()) => PollOutcome::Ready,
-            Poll::Pending => PollOutcome::Pending,
-        };
-
         // Only the first `notifications_sent` waiters should be Ready
         let should_be_notified = notify_some && (i < notifications_sent as usize);
 
-        tracker.record_poll_result(PollResult {
-            waiter_id: i,
-            poll_attempt: 1,
-            result: outcome,
-            operation_id: 6,
-            notify_sent_before: should_be_notified,
-        });
+        observe_waiter_poll(
+            tracker,
+            i,
+            2,
+            6,
+            should_be_notified,
+            Pin::new(waiter).poll(&mut context),
+        );
     }
 }
 
@@ -672,7 +676,14 @@ fn test_polling_after_operations(
                     let waker = tracked_waker.create_waker();
                     let mut context = Context::from_waker(&waker);
                     let mut waiter = waiter;
-                    let _ = Pin::new(&mut waiter).poll(&mut context);
+                    observe_waiter_poll(
+                        tracker,
+                        waiter_id,
+                        1,
+                        70,
+                        false,
+                        Pin::new(&mut waiter).poll(&mut context),
+                    );
 
                     waiters.insert(waiter_id, waiter);
                     tracked_wakers.insert(waiter_id, tracked_waker);
@@ -695,28 +706,23 @@ fn test_polling_after_operations(
                         let waker = tracked_waker.create_waker();
                         let mut context = Context::from_waker(&waker);
 
-                        let poll_result = Pin::new(waiter).poll(&mut context);
-                        let outcome = match poll_result {
-                            Poll::Ready(()) => PollOutcome::Ready,
-                            Poll::Pending => PollOutcome::Pending,
-                        };
-
-                        tracker.record_poll_result(PollResult {
-                            waiter_id: waiter_idx,
-                            poll_attempt: poll_attempt as usize,
-                            result: outcome,
-                            operation_id: 7,
-                            notify_sent_before: false,
-                        });
+                        observe_waiter_poll(
+                            tracker,
+                            waiter_idx,
+                            poll_attempt as usize,
+                            7,
+                            false,
+                            Pin::new(&mut *waiter).poll(&mut context),
+                        );
                     }
                 }
             }
 
             NonNotifyOperation::CheckStoredNotifications => {
-                let stored = notify
-                    .stored_notifications
-                    .load(std::sync::atomic::Ordering::Acquire);
-                tracker.record_operation(&format!("stored_notifications_{}", stored));
+                tracker.record_operation(&format!(
+                    "stored_notifications_opaque_waiter_count_{}",
+                    notify.waiter_count()
+                ));
             }
         }
     }
@@ -727,19 +733,14 @@ fn test_polling_after_operations(
             let waker = tracked_waker.create_waker();
             let mut context = Context::from_waker(&waker);
 
-            let poll_result = Pin::new(waiter).poll(&mut context);
-            let outcome = match poll_result {
-                Poll::Ready(()) => PollOutcome::Ready,
-                Poll::Pending => PollOutcome::Pending,
-            };
-
-            tracker.record_poll_result(PollResult {
-                waiter_id: *waiter_id,
-                poll_attempt: 99, // Final poll marker
-                result: outcome,
-                operation_id: 7,
-                notify_sent_before: false,
-            });
+            observe_waiter_poll(
+                tracker,
+                *waiter_id,
+                99,
+                7,
+                false,
+                Pin::new(waiter).poll(&mut context),
+            );
         }
     }
 }
