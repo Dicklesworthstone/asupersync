@@ -3957,6 +3957,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "grpc_protobuf_varint"
+path = "fuzz_targets/grpc_protobuf_varint.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "grpc_streaming_client_half_close"
 path = "fuzz_targets/grpc_streaming_client_half_close.rs"
 test = false

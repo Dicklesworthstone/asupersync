@@ -24,8 +24,10 @@
 
 use arbitrary::Arbitrary;
 use asupersync::bytes::Bytes;
+use asupersync::grpc::codec::Codec;
 use asupersync::grpc::protobuf::ProstCodec;
 use libfuzzer_sys::fuzz_target;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 const MAX_INPUT_SIZE: usize = 1_000_000;
 const MAX_MESSAGE_SIZE: usize = 64 * 1024;
@@ -40,6 +42,15 @@ enum WireType {
     Fixed32 = 5,
 }
 
+fn confused_wire_type(wire_type: WireType) -> WireType {
+    match wire_type {
+        WireType::Varint => WireType::LengthDelimited,
+        WireType::Fixed64 => WireType::Fixed32,
+        WireType::LengthDelimited => WireType::Varint,
+        WireType::Fixed32 => WireType::Fixed64,
+    }
+}
+
 /// Structure-aware protobuf message components
 #[derive(Arbitrary, Debug, Clone)]
 struct ProtobufField {
@@ -51,15 +62,22 @@ struct ProtobufField {
 #[derive(Arbitrary, Debug, Clone)]
 enum FieldPayload {
     /// Varint payload with potential overflow
-    Varint { value: u64, malformed: bool },
+    Varint {
+        value: u64,
+        malformed: bool,
+    },
     /// Length-delimited with adversarial length
     LengthDelimited {
         claimed_length: u32,
         actual_data: Vec<u8>,
     },
     /// Fixed-width payloads
-    Fixed32 { data: [u8; 4] },
-    Fixed64 { data: [u8; 8] },
+    Fixed32 {
+        data: [u8; 4],
+    },
+    Fixed64 {
+        data: [u8; 8],
+    },
 }
 
 #[derive(Arbitrary, Debug)]
@@ -83,10 +101,10 @@ struct CorruptionAttacks {
 #[derive(Arbitrary, Debug)]
 enum FieldNumberAttack {
     None,
-    Zero,          // Invalid field number
-    Reserved,      // Reserved range 19000-19999
-    MaxValue,      // Field number near 2^29
-    Collision,     // Duplicate field numbers
+    Zero,      // Invalid field number
+    Reserved,  // Reserved range 19000-19999
+    MaxValue,  // Field number near 2^29
+    Collision, // Duplicate field numbers
 }
 
 // Test message types for differential testing
@@ -159,23 +177,32 @@ fn test_no_panic_varint_decoding(wire_bytes: &[u8]) {
     let bytes = Bytes::from(wire_bytes.to_vec());
 
     // Test with different message types to exercise various varint patterns
-    let _simple_result = std::panic::catch_unwind(|| {
+    let simple_result = catch_unwind(AssertUnwindSafe(|| {
         let mut codec: ProstCodec<SimpleTestMessage, SimpleTestMessage> =
-            ProstCodec::with_max_message_size(MAX_MESSAGE_SIZE);
+            ProstCodec::with_max_size(MAX_MESSAGE_SIZE);
         let _ = codec.decode(&bytes);
-    });
+    }));
+    assert!(
+        simple_result.is_ok(),
+        "Simple protobuf varint decode panicked"
+    );
 
-    let _nested_result = std::panic::catch_unwind(|| {
+    let nested_result = catch_unwind(AssertUnwindSafe(|| {
         let mut codec: ProstCodec<NestedTestMessage, NestedTestMessage> =
-            ProstCodec::with_max_message_size(MAX_MESSAGE_SIZE);
+            ProstCodec::with_max_size(MAX_MESSAGE_SIZE);
         let _ = codec.decode(&bytes);
-    });
+    }));
+    assert!(
+        nested_result.is_ok(),
+        "Nested protobuf varint decode panicked"
+    );
 
-    let _varint_result = std::panic::catch_unwind(|| {
+    let varint_result = catch_unwind(AssertUnwindSafe(|| {
         let mut codec: ProstCodec<VarintTestMessage, VarintTestMessage> =
-            ProstCodec::with_max_message_size(MAX_MESSAGE_SIZE);
+            ProstCodec::with_max_size(MAX_MESSAGE_SIZE);
         let _ = codec.decode(&bytes);
-    });
+    }));
+    assert!(varint_result.is_ok(), "Varint protobuf decode panicked");
 }
 
 /// Property 2: Valid messages should round-trip correctly
@@ -184,13 +211,13 @@ fn test_round_trip_property(wire_bytes: &[u8], _input: &FuzzMessage) {
 
     // Try to decode as each message type
     let mut codec: ProstCodec<SimpleTestMessage, SimpleTestMessage> =
-        ProstCodec::with_max_message_size(MAX_MESSAGE_SIZE);
+        ProstCodec::with_max_size(MAX_MESSAGE_SIZE);
 
     if let Ok(decoded) = codec.decode(&bytes) {
         // If decode succeeded, re-encode should produce equivalent message
         if let Ok(re_encoded) = codec.encode(&decoded) {
             let mut codec2: ProstCodec<SimpleTestMessage, SimpleTestMessage> =
-                ProstCodec::with_max_message_size(MAX_MESSAGE_SIZE);
+                ProstCodec::with_max_size(MAX_MESSAGE_SIZE);
 
             if let Ok(re_decoded) = codec2.decode(&re_encoded) {
                 assert_eq!(decoded, re_decoded, "Round-trip property violated");
@@ -206,7 +233,7 @@ fn test_varint_rejection_property(wire_bytes: &[u8], input: &FuzzMessage) {
         // decoding should fail gracefully
         let bytes = Bytes::from(wire_bytes.to_vec());
         let mut codec: ProstCodec<VarintTestMessage, VarintTestMessage> =
-            ProstCodec::with_max_message_size(MAX_MESSAGE_SIZE);
+            ProstCodec::with_max_size(MAX_MESSAGE_SIZE);
 
         match codec.decode(&bytes) {
             Ok(_) => {
@@ -217,10 +244,10 @@ fn test_varint_rejection_property(wire_bytes: &[u8], input: &FuzzMessage) {
                 // Error should be descriptive and not panic
                 let error_msg = format!("{e}");
                 assert!(
-                    error_msg.contains("protobuf") ||
-                    error_msg.contains("decode") ||
-                    error_msg.contains("invalid") ||
-                    error_msg.contains("varint"),
+                    error_msg.contains("protobuf")
+                        || error_msg.contains("decode")
+                        || error_msg.contains("invalid")
+                        || error_msg.contains("varint"),
                     "Error message should be descriptive: {error_msg}"
                 );
             }
@@ -233,7 +260,7 @@ fn test_length_delimited_boundaries(wire_bytes: &[u8], input: &FuzzMessage) {
     if input.corruption_attacks.length_overflow_attack {
         let bytes = Bytes::from(wire_bytes.to_vec());
         let mut codec: ProstCodec<NestedTestMessage, NestedTestMessage> =
-            ProstCodec::with_max_message_size(MAX_MESSAGE_SIZE);
+            ProstCodec::with_max_size(MAX_MESSAGE_SIZE);
 
         // Length overflow should be caught by size limits
         match codec.decode(&bytes) {
@@ -280,7 +307,11 @@ fn generate_protobuf_wire_format(input: &FuzzMessage) -> Vec<u8> {
     for field in &input.fields {
         // Generate field tag (field_number << 3 | wire_type)
         let field_number = field.field_number.min(536_870_911); // Max field number 2^29 - 1
-        let wire_type = field.wire_type as u8;
+        let wire_type = if input.corruption_attacks.wire_type_confusion {
+            confused_wire_type(field.wire_type)
+        } else {
+            field.wire_type
+        } as u8;
 
         // Apply field number attacks
         let final_field_number = match &input.corruption_attacks.field_number_attack {
@@ -302,7 +333,10 @@ fn generate_protobuf_wire_format(input: &FuzzMessage) -> Vec<u8> {
                     encode_varint(&mut wire_data, *value);
                 }
             }
-            FieldPayload::LengthDelimited { claimed_length, actual_data } => {
+            FieldPayload::LengthDelimited {
+                claimed_length,
+                actual_data,
+            } => {
                 let length = if input.corruption_attacks.length_overflow_attack {
                     *claimed_length as u64
                 } else {
