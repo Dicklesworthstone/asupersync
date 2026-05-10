@@ -40,9 +40,9 @@ struct MaxFrameLengthConfig {
 
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum FieldWidth {
-    One,   // u8 - max 255
-    Two,   // u16 - max 65535
-    Four,  // u32 - max 4294967295
+    One,  // u8 - max 255
+    Two,  // u16 - max 65535
+    Four, // u32 - max 4294967295
 }
 
 impl FieldWidth {
@@ -138,7 +138,8 @@ impl FuzzInput {
                     payload
                 };
 
-                self.config.encode_length(bounded_payload.len() as u64, &mut frame);
+                self.config
+                    .encode_length(bounded_payload.len() as u64, &mut frame);
                 frame.extend_from_slice(bounded_payload);
             }
 
@@ -156,7 +157,10 @@ impl FuzzInput {
                 frame.extend_from_slice(bounded_payload);
             }
 
-            BoundaryTest::WayPastLimit { oversized_length, payload } => {
+            BoundaryTest::WayPastLimit {
+                oversized_length,
+                payload,
+            } => {
                 // Frame way over max_frame_length
                 let declared_len = (*oversized_length as u64)
                     .max((self.config.max_frame_length as u64).saturating_add(100));
@@ -182,6 +186,37 @@ impl FuzzInput {
     }
 }
 
+fn observe_final_decode(
+    result: Result<Option<BytesMut>, Error>,
+    context: &str,
+    max_frame_length: usize,
+) {
+    match result {
+        Ok(Some(decoded)) => {
+            assert!(
+                decoded.len() <= max_frame_length,
+                "{context} decoded frame above max_frame_length: {} > {}",
+                decoded.len(),
+                max_frame_length
+            );
+            std::hint::black_box((context, decoded.len()));
+        }
+        Ok(None) => {
+            std::hint::black_box((context, "pending"));
+        }
+        Err(error) => {
+            let message = error.to_string();
+            assert!(!message.is_empty(), "{context} returned an empty error");
+            assert!(
+                message.len() <= 4096,
+                "{context} returned an oversized error: {} bytes",
+                message.len()
+            );
+            std::hint::black_box((context, error.kind(), message));
+        }
+    }
+}
+
 fuzz_target!(|input: FuzzInput| {
     let frame_bytes = input.construct_test_frame();
 
@@ -203,8 +238,11 @@ fuzz_target!(|input: FuzzInput| {
                 }
                 Err(e) => {
                     // If it fails, it should be a proper error, not a panic
-                    assert_eq!(e.kind(), ErrorKind::InvalidData,
-                        "Frame at max_frame_length should either succeed or return InvalidData");
+                    assert_eq!(
+                        e.kind(),
+                        ErrorKind::InvalidData,
+                        "Frame at max_frame_length should either succeed or return InvalidData"
+                    );
                 }
             }
         }
@@ -213,14 +251,19 @@ fuzz_target!(|input: FuzzInput| {
             // Frame 1 byte over limit should be rejected
             let result = decoder.decode(&mut test_frame);
             if let Err(e) = result {
-                assert_eq!(e.kind(), ErrorKind::InvalidData,
-                    "Oversized frame should return InvalidData error");
+                assert_eq!(
+                    e.kind(),
+                    ErrorKind::InvalidData,
+                    "Oversized frame should return InvalidData error"
+                );
             }
             // Note: We don't assert it MUST fail because the length field width
             // might be too small to express the oversized length
         }
 
-        BoundaryTest::WayPastLimit { oversized_length, .. } => {
+        BoundaryTest::WayPastLimit {
+            oversized_length, ..
+        } => {
             // Significantly oversized frame should be rejected
             if *oversized_length > input.config.length_field_width.max_value() as u32 {
                 // Length is too big for field width, will be clamped during encoding
@@ -229,13 +272,18 @@ fuzz_target!(|input: FuzzInput| {
 
             let result = decoder.decode(&mut test_frame);
             if let Err(e) = result {
-                assert_eq!(e.kind(), ErrorKind::InvalidData,
-                    "Way oversized frame should return InvalidData error");
+                assert_eq!(
+                    e.kind(),
+                    ErrorKind::InvalidData,
+                    "Way oversized frame should return InvalidData error"
+                );
 
                 // Verify error message mentions max_frame_length
                 let error_msg = e.to_string();
-                assert!(error_msg.contains("max_frame_length") || error_msg.contains("frame length"),
-                    "Error message should mention frame length limit");
+                assert!(
+                    error_msg.contains("max_frame_length") || error_msg.contains("frame length"),
+                    "Error message should mention frame length limit"
+                );
             }
         }
 
@@ -244,7 +292,10 @@ fuzz_target!(|input: FuzzInput| {
             let result = decoder.decode(&mut test_frame);
             match result {
                 Ok(Some(decoded)) => {
-                    assert!(decoded.is_empty(), "Zero-length frame should decode to empty bytes");
+                    assert!(
+                        decoded.is_empty(),
+                        "Zero-length frame should decode to empty bytes"
+                    );
                 }
                 Ok(None) => {
                     // Incomplete frame (might need more data)
@@ -260,17 +311,26 @@ fuzz_target!(|input: FuzzInput| {
             // (unless max_frame_length is also at the field width maximum)
             let result = decoder.decode(&mut test_frame);
             if let Err(e) = result {
-                assert_eq!(e.kind(), ErrorKind::InvalidData,
-                    "Max field width length should return InvalidData error");
+                assert_eq!(
+                    e.kind(),
+                    ErrorKind::InvalidData,
+                    "Max field width length should return InvalidData error"
+                );
             }
         }
     }
 
-    // Test that decoder doesn't panic on malformed input
-    let _ = decoder.decode(&mut test_frame);
+    observe_final_decode(
+        decoder.decode(&mut test_frame),
+        "final malformed decode",
+        input.config.max_frame_length as usize,
+    );
 
     // Test round-trip for valid cases
-    if matches!(input.test, BoundaryTest::ExactlyAtLimit { .. } | BoundaryTest::ZeroLength) {
+    if matches!(
+        input.test,
+        BoundaryTest::ExactlyAtLimit { .. } | BoundaryTest::ZeroLength
+    ) {
         let mut encoder = input.config.build_codec();
         let mut encoded = BytesMut::new();
 
@@ -289,8 +349,11 @@ fuzz_target!(|input: FuzzInput| {
                     let mut decode_buf = encoded.clone();
                     if let Ok(Some(decoded)) = round_trip_decoder.decode(&mut decode_buf) {
                         // Round-trip should preserve the payload
-                        assert_eq!(decoded.len(), bounded_payload.len(),
-                            "Round-trip preserved wrong payload length");
+                        assert_eq!(
+                            decoded.len(),
+                            bounded_payload.len(),
+                            "Round-trip preserved wrong payload length"
+                        );
                     }
                 }
             }
