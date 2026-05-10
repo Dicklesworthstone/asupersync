@@ -914,6 +914,10 @@ fn observe_additional_priority_result(
     }
 }
 
+fn decoded_dependency_id(frame: &PriorityFrame) -> u32 {
+    frame.stream_dependency & 0x7FFF_FFFF
+}
+
 fn observe_priority_validation_result(result: &PriorityValidationResult) {
     match result {
         PriorityValidationResult::Valid => {}
@@ -1091,25 +1095,25 @@ fn test_priority_tree_invariants(
     );
 
     // Invariant: Zero dependency is always valid (RFC 7540 §5.3.1)
-    let has_zero_dependency = input.priority_frame.stream_dependency == ROOT_STREAM_ID
-        || input
-            .additional_frames
-            .iter()
-            .any(|f| f.stream_dependency == ROOT_STREAM_ID);
+    let processable_zero_dependency_frames = usize::from(
+        decoded_dependency_id(&input.priority_frame) == ROOT_STREAM_ID
+            && input.priority_frame.stream_id != ROOT_STREAM_ID,
+    ) + input
+        .additional_frames
+        .iter()
+        .filter(|frame| {
+            decoded_dependency_id(frame) == ROOT_STREAM_ID && frame.stream_id != ROOT_STREAM_ID
+        })
+        .count();
 
-    if has_zero_dependency && input.priority_frame.stream_id != ROOT_STREAM_ID {
-        // At least one zero dependency should be processed successfully
-        let has_successful_zero_dep = matches!(primary_result, Ok(parsed) if parsed.priority.is_root_dependent)
-            || parsing_stats.root_dependency_frames > 0;
-
-        if !has_successful_zero_dep
-            && matches!(input.test_scenario.cycle_detection, CycleDetection::Enabled)
-        {
-            // Zero dependencies should generally succeed unless there are other issues
-            eprintln!(
-                "WARNING: Zero dependency frame may have been rejected for non-dependency reasons"
-            );
-        }
+    if processable_zero_dependency_frames > 0 {
+        assert!(
+            parsing_stats.root_dependency_frames > 0,
+            "processable zero-dependency PRIORITY frames should be observed as root dependencies: submitted={}, primary_result={:?}, parsing_stats={:?}",
+            processable_zero_dependency_frames,
+            primary_result,
+            parsing_stats
+        );
     }
 
     // Invariant: Cycle detection should prevent cycles when enabled
