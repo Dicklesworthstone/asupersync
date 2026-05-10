@@ -210,6 +210,12 @@ pub enum HttpVersion {
     Unknown(String),
 }
 
+impl Default for MockStatusLineParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MockStatusLineParser {
     pub fn new() -> Self {
         Self {
@@ -658,15 +664,15 @@ fuzz_target!(|data: &[u8]| {
         }
 
         // Test edge case: very long lines
-        if let Ok(line) = parser.build_status_line(&test_case) {
-            if line.len() > parser.max_line_length {
-                let result = parser.parse_status_line(&line);
-                assert!(
-                    result.is_err(),
-                    "Overly long line should be rejected: length {}",
-                    line.len()
-                );
-            }
+        if let Ok(line) = parser.build_status_line(&test_case)
+            && line.len() > parser.max_line_length
+        {
+            let result = parser.parse_status_line(&line);
+            assert!(
+                result.is_err(),
+                "Overly long line should be rejected: length {}",
+                line.len()
+            );
         }
 
         // Test strict vs lenient modes

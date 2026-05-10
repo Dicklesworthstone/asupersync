@@ -5018,6 +5018,7 @@ name = "h1_response_status_line"
 path = "fuzz_targets/h1_response_status_line.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_data_padding_validation"
