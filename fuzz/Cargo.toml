@@ -3113,6 +3113,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "h1_request_target_forms"
+path = "fuzz_targets/h1_request_target_forms.rs"
+test = false
+doc = false
+bench = false
+
 # br-asupersync-zv7n9x — H3 QPACK required-insert-count decoder fuzz
 [[bin]]
 name = "h3_qpack_decode_required_insert_count"

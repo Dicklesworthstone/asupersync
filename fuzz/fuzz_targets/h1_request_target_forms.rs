@@ -98,7 +98,7 @@ impl FuzzMethod {
 
 impl RequestTargetCase {
     fn target(&self) -> Vec<u8> {
-        let base = match self.shape {
+        match self.shape {
             TargetShape::Valid => self.valid_target(),
             TargetShape::Empty => Vec::new(),
             TargetShape::SpaceInjected => {
@@ -120,8 +120,7 @@ impl RequestTargetCase {
             TargetShape::MissingAbsoluteAuthority => b"http:///path".to_vec(),
             TargetShape::MissingAuthorityHost => b":443".to_vec(),
             TargetShape::MissingAuthorityPort => b"example.com:".to_vec(),
-        };
-        base
+        }
     }
 
     fn valid_target(&self) -> Vec<u8> {
