@@ -202,7 +202,7 @@ impl SnapshotSeed {
             })
             .collect();
 
-        serde_json::to_string(&serde_json::json!({
+        let snapshot_json = serde_json::json!({
             "snapshot": {
                 "regions": regions,
                 "tasks": tasks,
@@ -211,8 +211,15 @@ impl SnapshotSeed {
             },
             "schema_version": self.schema_version,
             "content_hash": self.content_hash,
-        }))
-        .unwrap_or_default()
+        });
+
+        serde_json::to_string(&snapshot_json).unwrap_or_else(|err| {
+            panic!(
+                "lab snapshot fuzz seed serialization failed: schema_version={}, \
+                 content_hash={}, regions={}, tasks={}, obligations={}: {err}",
+                self.schema_version, self.content_hash, region_count, task_count, obligation_count
+            )
+        })
     }
 }
 
