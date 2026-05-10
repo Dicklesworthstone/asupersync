@@ -5064,6 +5064,7 @@ name = "h1_request_method_case_sensitivity"
 path = "fuzz_targets/h1_request_method_case_sensitivity.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "notify_drop_pending_fut"
