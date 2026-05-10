@@ -46,6 +46,7 @@ struct MockMaxConcurrentStreamsConnection {
     violations: Vec<ViolationType>,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 enum StreamState {
     Idle,
@@ -56,6 +57,7 @@ enum StreamState {
     Closed,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 enum ConnectionState {
     Open,
@@ -107,15 +109,7 @@ impl MockMaxConcurrentStreamsConnection {
             return Err(H2Error::ProtocolError);
         }
 
-        let old_limit = self.max_concurrent_streams;
         self.max_concurrent_streams = max_concurrent_streams;
-
-        // If new limit is lower and we have too many active streams,
-        // we don't close existing streams but refuse new ones
-        let current_active = self.active_count.load(Ordering::Acquire);
-        if current_active > max_concurrent_streams {
-            // This is allowed - existing streams continue, new ones are refused
-        }
 
         Ok(())
     }
@@ -132,7 +126,8 @@ impl MockMaxConcurrentStreamsConnection {
 
         // Check against MAX_CONCURRENT_STREAMS limit
         if current_active >= self.max_concurrent_streams {
-            self.violations.push(ViolationType::MaxConcurrentStreamsExceeded);
+            self.violations
+                .push(ViolationType::MaxConcurrentStreamsExceeded);
             self.stats.streams_refused += 1;
             return Err(H2Error::RefusedStream);
         }
@@ -187,7 +182,9 @@ impl MockMaxConcurrentStreamsConnection {
     fn close_stream(&mut self, stream_id: u32) -> Result<(), H2Error> {
         if let Some(state) = self.active_streams.get_mut(&stream_id) {
             match state {
-                StreamState::Open | StreamState::HalfClosedLocal | StreamState::HalfClosedRemote => {
+                StreamState::Open
+                | StreamState::HalfClosedLocal
+                | StreamState::HalfClosedRemote => {
                     *state = StreamState::Closed;
 
                     // Decrement active count
@@ -235,7 +232,7 @@ impl MockMaxConcurrentStreamsConnection {
         let initial_active = self.active_count.load(Ordering::Acquire);
 
         for i in 0..count {
-            match self.create_stream(i % 2 == 0) {
+            match self.create_stream(i.is_multiple_of(2)) {
                 Ok(_) => created += 1,
                 Err(H2Error::RefusedStream) => refused += 1,
                 Err(_) => errors += 1,
@@ -288,6 +285,261 @@ enum H2Error {
     RefusedStream,
     ConnectionClosed,
     InternalError,
+}
+
+fn last_violation_matches(
+    connection: &MockMaxConcurrentStreamsConnection,
+    expected: fn(&ViolationType) -> bool,
+) -> bool {
+    connection.violations.last().is_some_and(expected)
+}
+
+fn is_active_stream_state(state: &StreamState) -> bool {
+    matches!(
+        state,
+        StreamState::Open | StreamState::HalfClosedLocal | StreamState::HalfClosedRemote
+    )
+}
+
+fn observe_handle_settings(
+    connection: &mut MockMaxConcurrentStreamsConnection,
+    max_concurrent_streams: u32,
+    context: &str,
+) {
+    let before_limit = connection.max_concurrent_streams;
+    let before_protocol_errors = connection.stats.protocol_errors;
+    let before_settings = connection.stats.settings_frames_received;
+
+    match connection.handle_settings(max_concurrent_streams) {
+        Ok(()) => {
+            assert!(
+                max_concurrent_streams <= MAX_CONCURRENT_STREAMS_LIMIT,
+                "{context}: accepted invalid MAX_CONCURRENT_STREAMS"
+            );
+            assert_eq!(
+                connection.max_concurrent_streams, max_concurrent_streams,
+                "{context}: valid setting did not update the active limit"
+            );
+            assert_eq!(
+                connection.stats.settings_frames_received,
+                before_settings.saturating_add(1),
+                "{context}: settings-frame counter did not advance"
+            );
+        }
+        Err(H2Error::ProtocolError) => {
+            assert!(
+                max_concurrent_streams > MAX_CONCURRENT_STREAMS_LIMIT,
+                "{context}: rejected an in-range MAX_CONCURRENT_STREAMS"
+            );
+            assert_eq!(
+                connection.max_concurrent_streams, before_limit,
+                "{context}: invalid setting mutated the active limit"
+            );
+            assert_eq!(
+                connection.stats.protocol_errors,
+                before_protocol_errors.saturating_add(1),
+                "{context}: invalid setting did not count a protocol error"
+            );
+            assert!(
+                last_violation_matches(connection, |violation| matches!(
+                    violation,
+                    ViolationType::SettingsValueTooHigh
+                )),
+                "{context}: invalid setting did not record SettingsValueTooHigh"
+            );
+        }
+        Err(other) => panic!("{context}: SETTINGS handling returned unexpected error {other:?}"),
+    }
+}
+
+fn observe_create_stream(
+    connection: &mut MockMaxConcurrentStreamsConnection,
+    is_client: bool,
+    context: &str,
+) {
+    let before_active = connection.active_count.load(Ordering::Acquire);
+    let before_created = connection.stats.streams_created;
+    let before_refused = connection.stats.streams_refused;
+    let before_overflow_attempts = connection.stats.overflow_attempts;
+
+    match connection.create_stream(is_client) {
+        Ok(stream_id) => {
+            if is_client {
+                assert!(
+                    !stream_id.is_multiple_of(2),
+                    "{context}: client stream ID was not odd"
+                );
+            } else {
+                assert!(
+                    stream_id.is_multiple_of(2),
+                    "{context}: server stream ID was not even"
+                );
+            }
+            assert_eq!(
+                connection.active_count.load(Ordering::Acquire),
+                before_active.saturating_add(1),
+                "{context}: accepted stream did not increase active count"
+            );
+            assert!(
+                matches!(
+                    connection.active_streams.get(&stream_id),
+                    Some(StreamState::Open)
+                ),
+                "{context}: accepted stream was not recorded as open"
+            );
+            assert_eq!(
+                connection.stats.streams_created,
+                before_created.saturating_add(1),
+                "{context}: accepted stream did not advance created counter"
+            );
+        }
+        Err(H2Error::RefusedStream) => {
+            assert!(
+                before_active >= connection.max_concurrent_streams,
+                "{context}: refused stream while below MAX_CONCURRENT_STREAMS"
+            );
+            assert_eq!(
+                connection.active_count.load(Ordering::Acquire),
+                before_active,
+                "{context}: refused stream mutated active count"
+            );
+            assert_eq!(
+                connection.stats.streams_refused,
+                before_refused.saturating_add(1),
+                "{context}: refused stream did not advance refusal counter"
+            );
+            assert!(
+                last_violation_matches(connection, |violation| matches!(
+                    violation,
+                    ViolationType::MaxConcurrentStreamsExceeded
+                )),
+                "{context}: refused stream did not record max-concurrency violation"
+            );
+        }
+        Err(H2Error::ProtocolError) => {
+            assert_eq!(
+                connection.active_count.load(Ordering::Acquire),
+                before_active,
+                "{context}: stream-id overflow mutated active count"
+            );
+            assert!(
+                connection.stats.overflow_attempts > before_overflow_attempts,
+                "{context}: stream-id overflow did not advance overflow counter"
+            );
+            assert!(
+                last_violation_matches(connection, |violation| matches!(
+                    violation,
+                    ViolationType::StreamIdOverflow
+                )),
+                "{context}: stream-id overflow did not record the violation"
+            );
+        }
+        Err(H2Error::ConnectionClosed) => {
+            assert!(
+                matches!(connection.state, ConnectionState::Closed),
+                "{context}: ConnectionClosed returned while connection state was open"
+            );
+            assert_eq!(
+                connection.active_count.load(Ordering::Acquire),
+                before_active,
+                "{context}: closed connection stream attempt mutated active count"
+            );
+        }
+        Err(H2Error::InternalError) => {
+            assert_eq!(
+                connection.active_count.load(Ordering::Acquire),
+                before_active,
+                "{context}: integer-overflow path mutated active count"
+            );
+            assert!(
+                connection.stats.overflow_attempts > before_overflow_attempts,
+                "{context}: integer overflow did not advance overflow counter"
+            );
+            assert!(
+                last_violation_matches(connection, |violation| matches!(
+                    violation,
+                    ViolationType::IntegerOverflow
+                )),
+                "{context}: integer overflow did not record the violation"
+            );
+        }
+    }
+}
+
+fn observe_close_stream(
+    connection: &mut MockMaxConcurrentStreamsConnection,
+    stream_id: u32,
+    context: &str,
+) {
+    let before_active = connection.active_count.load(Ordering::Acquire);
+    let before_violations = connection.violations.len();
+    let was_active = connection
+        .active_streams
+        .get(&stream_id)
+        .is_some_and(is_active_stream_state);
+
+    match connection.close_stream(stream_id) {
+        Ok(()) => {
+            let expected_active = if was_active {
+                before_active.saturating_sub(1)
+            } else {
+                before_active
+            };
+            assert_eq!(
+                connection.active_count.load(Ordering::Acquire),
+                expected_active,
+                "{context}: close-stream active count did not match prior state"
+            );
+        }
+        Err(H2Error::ProtocolError) => {
+            assert!(
+                !was_active,
+                "{context}: rejected close for a stream that was active before close"
+            );
+            assert_eq!(
+                connection.active_count.load(Ordering::Acquire),
+                before_active,
+                "{context}: rejected close mutated active count"
+            );
+            assert!(
+                connection.violations.len() == before_violations
+                    || last_violation_matches(connection, |violation| matches!(
+                        violation,
+                        ViolationType::InvalidStreamState
+                    )),
+                "{context}: rejected close recorded an unexpected violation"
+            );
+        }
+        Err(other) => panic!("{context}: close-stream returned unexpected error {other:?}"),
+    }
+}
+
+fn observe_stress_test_result(result: &StressTestResult, requested_count: u32) {
+    assert_eq!(
+        result.attempted, requested_count,
+        "stress test attempted count did not preserve the requested bound"
+    );
+    assert!(
+        result
+            .created
+            .saturating_add(result.refused)
+            .saturating_add(result.errors)
+            <= result.attempted,
+        "stress test outcome counters exceeded attempted count"
+    );
+    assert!(
+        result.final_active >= result.initial_active,
+        "stress test creates streams only, so final active count cannot decrease"
+    );
+    assert_eq!(
+        result.final_active,
+        result.initial_active.saturating_add(result.created),
+        "stress test final active count does not match created streams"
+    );
+    assert!(
+        result.final_active <= MAX_CONCURRENT_STREAMS_LIMIT,
+        "stress test exceeded the RFC MAX_CONCURRENT_STREAMS bound"
+    );
 }
 
 /// Fuzz input structure
@@ -346,12 +598,14 @@ fuzz_target!(|input: FuzzInput| {
         input.initial_max_streams.min(MAX_CONCURRENT_STREAMS_LIMIT)
     };
 
-    let _ = connection.handle_settings(initial_setting);
+    observe_handle_settings(&mut connection, initial_setting, "initial setting");
 
     // Process operations
     for operation in input.operations {
         match operation {
-            Operation::UpdateSettings { max_concurrent_streams } => {
+            Operation::UpdateSettings {
+                max_concurrent_streams,
+            } => {
                 // Focus on maximum and near-maximum values
                 let setting_value = match max_concurrent_streams % 10 {
                     0 => MAX_CONCURRENT_STREAMS_LIMIT,
@@ -360,29 +614,30 @@ fuzz_target!(|input: FuzzInput| {
                     3 => MAX_CONCURRENT_STREAMS_LIMIT - 1000,
                     4 => MAX_CONCURRENT_STREAMS_LIMIT / 2,
                     5 => MAX_CONCURRENT_STREAMS_LIMIT + 1, // Invalid, should be rejected
-                    6 => u32::MAX, // Invalid, should be rejected
+                    6 => u32::MAX,                         // Invalid, should be rejected
                     7 => max_concurrent_streams.min(MAX_CONCURRENT_STREAMS_LIMIT),
                     _ => max_concurrent_streams,
                 };
 
-                let _ = connection.handle_settings(setting_value);
+                observe_handle_settings(&mut connection, setting_value, "operation setting");
             }
 
             Operation::CreateClientStream => {
-                let _ = connection.create_stream(true);
+                observe_create_stream(&mut connection, true, "client stream create");
             }
 
             Operation::CreateServerStream => {
-                let _ = connection.create_stream(false);
+                observe_create_stream(&mut connection, false, "server stream create");
             }
 
             Operation::CloseStream { stream_id } => {
-                let _ = connection.close_stream(stream_id);
+                observe_close_stream(&mut connection, stream_id, "stream close");
             }
 
             Operation::CreateBurst { count, is_client } => {
-                for _ in 0..count.min(100) { // Limit burst size
-                    let _ = connection.create_stream(is_client);
+                for _ in 0..count.min(100) {
+                    // Limit burst size
+                    observe_create_stream(&mut connection, is_client, "burst stream create");
                 }
             }
 
@@ -392,14 +647,19 @@ fuzz_target!(|input: FuzzInput| {
                 let summary = connection.get_state_summary();
 
                 // Active streams should never exceed MAX_CONCURRENT_STREAMS
-                assert!(summary.active_streams <= connection.max_concurrent_streams);
+                assert!(summary.active_streams <= summary.max_concurrent_streams);
 
                 // Stream IDs should be valid
-                assert!(summary.next_client_id % 2 == 1); // Client IDs are odd
-                assert!(summary.next_server_id % 2 == 0); // Server IDs are even
+                assert!(!summary.next_client_id.is_multiple_of(2)); // Client IDs are odd
+                assert!(summary.next_server_id.is_multiple_of(2)); // Server IDs are even
 
                 // Active count should not overflow
                 assert!(summary.active_streams <= MAX_CONCURRENT_STREAMS_LIMIT);
+                assert_eq!(summary.violations_count, connection.violations.len() as u32);
+                assert_eq!(
+                    summary.connection_open,
+                    matches!(connection.state, ConnectionState::Open)
+                );
             }
         }
 
@@ -413,14 +673,15 @@ fuzz_target!(|input: FuzzInput| {
     // Run stress test if requested
     if input.run_stress_test {
         let stress_count = input.stress_test_count.min(10000);
-        let _result = connection.stress_test_stream_creation(stress_count);
+        let result = connection.stress_test_stream_creation(stress_count);
+        observe_stress_test_result(&result, stress_count);
     }
 
     // Final state validation
     let final_state = connection.get_state_summary();
 
     // Ensure active streams never exceed the configured limit
-    assert!(final_state.active_streams <= connection.max_concurrent_streams);
+    assert!(final_state.active_streams <= final_state.max_concurrent_streams);
 
     // Ensure no integer overflow occurred in stream tracking
     assert!(final_state.active_streams <= MAX_CONCURRENT_STREAMS_LIMIT);
@@ -428,6 +689,14 @@ fuzz_target!(|input: FuzzInput| {
     // Verify connection remains in valid state
     assert!(final_state.next_client_id >= 1);
     assert!(final_state.next_server_id >= 2);
+    assert_eq!(
+        final_state.violations_count,
+        connection.violations.len() as u32
+    );
+    assert_eq!(
+        final_state.connection_open,
+        matches!(connection.state, ConnectionState::Open)
+    );
 
     // Test edge case: try to create one more stream when at limit
     if final_state.active_streams == connection.max_concurrent_streams {
