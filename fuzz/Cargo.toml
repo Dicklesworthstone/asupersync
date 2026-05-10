@@ -2359,6 +2359,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h2_data_frame_padding"
+path = "fuzz_targets/h2_data_frame_padding.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "quic_stream_flow"
 path = "fuzz_targets/quic_stream_flow.rs"
 test = false

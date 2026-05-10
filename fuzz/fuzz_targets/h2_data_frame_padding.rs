@@ -15,11 +15,11 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
-use asupersync::bytes::{Bytes, BytesMut, BufMut};
-use asupersync::http::h2::{H2Error, Frame, FrameType};
-use asupersync::http::h2::frame::{DataFrame, FrameHeader, data_flags, parse_frame};
+use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::http::h2::error::ErrorCode;
+use asupersync::http::h2::frame::{FrameHeader, data_flags, parse_frame};
+use asupersync::http::h2::{Frame, H2Error};
+use libfuzzer_sys::fuzz_target;
 
 /// Maximum input size to prevent OOM
 const MAX_INPUT_SIZE: usize = 4096;
@@ -45,13 +45,16 @@ fuzz_target!(|data: &[u8]| {
                 let _payload = &data_frame.data;
                 // Should contain only the actual data, padding stripped
             }
-            Err(H2Error { code: ErrorCode::ProtocolError, .. }) => {
+            Err(H2Error {
+                code: ErrorCode::ProtocolError,
+                ..
+            }) => {
                 // Expected for malformed padding (pad_length > payload_length)
             }
             Err(_) => {
                 // Other errors acceptable for malformed input
             }
-            _ => {}, // Non-DATA frames from parsing
+            _ => {} // Non-DATA frames from parsing
         }
     }
 
@@ -68,7 +71,7 @@ fuzz_target!(|data: &[u8]| {
             Err(_) => {
                 // Parse errors acceptable for malformed frame structure
             }
-            _ => {},
+            _ => {}
         }
     }
 
@@ -95,17 +98,17 @@ fuzz_target!(|data: &[u8]| {
 
             // Try to create frame with no data but padding
             let result = create_padded_data_frame(&[], pad_length, 1);
-            match result {
-                Ok(frame) => {
-                    let parse_result = validate_data_frame_padding(&frame);
-                    // Should either succeed (valid zero-data) or fail (invalid padding)
-                    match parse_result {
-                        Ok(_) => {}, // Valid zero-length data
-                        Err(H2Error { code: ErrorCode::ProtocolError, .. }) => {}, // Invalid padding
-                        Err(_) => {}, // Other errors
-                    }
+            if let Ok(frame) = result {
+                let parse_result = validate_data_frame_padding(&frame);
+                // Should either succeed (valid zero-data) or fail (invalid padding)
+                match parse_result {
+                    Ok(_) => {} // Valid zero-length data
+                    Err(H2Error {
+                        code: ErrorCode::ProtocolError,
+                        ..
+                    }) => {} // Invalid padding
+                    Err(_) => {} // Other errors
                 }
-                Err(_) => {},
             }
         }
     }
@@ -115,12 +118,9 @@ fuzz_target!(|data: &[u8]| {
         // Test with maximum possible padding length (255)
         if data.len() >= 256 {
             let result = create_padded_data_frame(&data[256..], 255, 1);
-            match result {
-                Ok(frame) => {
-                    let _parse_result = validate_data_frame_padding(&frame);
-                    // Should handle max padding correctly
-                }
-                Err(_) => {},
+            if let Ok(frame) = result {
+                let _parse_result = validate_data_frame_padding(&frame);
+                // Should handle max padding correctly
             }
         }
     }
@@ -131,19 +131,17 @@ fuzz_target!(|data: &[u8]| {
         let pad_length = payload_data.len() as u8;
 
         let result = create_padded_data_frame(payload_data, pad_length, 1);
-        match result {
-            Ok(frame) => {
-                let parse_result = validate_data_frame_padding(&frame);
-                // This should result in zero application data (all padding)
-                match parse_result {
-                    Ok(Frame::Data(data_frame)) => {
-                        // All data was padding, so payload should be empty
-                        assert!(data_frame.data.is_empty());
-                    }
-                    Err(_) => {},
+        if let Ok(frame) = result {
+            let parse_result = validate_data_frame_padding(&frame);
+            // This should result in zero application data (all padding)
+            match parse_result {
+                Ok(Frame::Data(data_frame)) => {
+                    // All data was padding, so payload should be empty
+                    assert!(data_frame.data.is_empty());
                 }
+                Ok(_) => {}
+                Err(_) => {}
             }
-            Err(_) => {},
         }
     }
 
@@ -153,20 +151,20 @@ fuzz_target!(|data: &[u8]| {
         let pad_length = (payload_data.len() as u8).saturating_add(1); // One more than available
 
         let result = create_padded_data_frame(payload_data, pad_length, 1);
-        match result {
-            Ok(frame) => {
-                let parse_result = validate_data_frame_padding(&frame);
-                // Should fail with PROTOCOL_ERROR
-                match parse_result {
-                    Err(H2Error { code: ErrorCode::ProtocolError, .. }) => {
-                        // Expected - padding exceeds data length
-                    }
-                    _ => {
-                        // Unexpected - should have failed
-                    }
+        if let Ok(frame) = result {
+            let parse_result = validate_data_frame_padding(&frame);
+            // Should fail with PROTOCOL_ERROR
+            match parse_result {
+                Err(H2Error {
+                    code: ErrorCode::ProtocolError,
+                    ..
+                }) => {
+                    // Expected - padding exceeds data length
+                }
+                _ => {
+                    // Unexpected - should have failed
                 }
             }
-            Err(_) => {},
         }
     }
 
@@ -202,7 +200,7 @@ fuzz_target!(|data: &[u8]| {
             Err(_) => {
                 // Parse errors are acceptable for malformed input
             }
-            _ => {}, // Other frame types
+            _ => {} // Other frame types
         }
     }
 
@@ -211,8 +209,12 @@ fuzz_target!(|data: &[u8]| {
         let test_sizes = [0, 1, 2, 16, 64, 255, 256, 1024];
 
         for &size in &test_sizes {
-            if data.len() >= size + 1 {
-                let pad_length = if size == 0 { 0 } else { data[0] % (size as u8 + 1) };
+            if data.len() > size {
+                let pad_length = if size == 0 {
+                    0
+                } else {
+                    data[0] % (size as u8 + 1)
+                };
                 let payload = &data[1..=size];
 
                 let result = create_padded_data_frame(payload, pad_length, 1);
@@ -242,7 +244,7 @@ fn parse_data_frame_with_padding(data: &[u8], padded: bool) -> Result<Frame, H2E
 fn create_padded_data_frame(
     app_data: &[u8],
     pad_length: u8,
-    stream_id: u32
+    stream_id: u32,
 ) -> Result<Frame, H2Error> {
     let mut payload = BytesMut::new();
 
@@ -250,7 +252,7 @@ fn create_padded_data_frame(
     payload.put_u8(pad_length);
 
     // Add application data
-    payload.put(app_data);
+    payload.extend_from_slice(app_data);
 
     // Add padding bytes (zeros)
     for _ in 0..pad_length {
@@ -304,14 +306,6 @@ fn parse_raw_data_frame(data: &[u8]) -> Result<Frame, H2Error> {
     };
 
     parse_frame(&header, Bytes::copy_from_slice(data))
-}
-
-/// Extract application data from DATA frame after padding removal
-fn extract_application_data(frame: &Frame) -> Option<Bytes> {
-    match frame {
-        Frame::Data(data_frame) => Some(data_frame.data.clone()),
-        _ => None,
-    }
 }
 
 #[cfg(test)]
