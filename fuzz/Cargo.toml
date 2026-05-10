@@ -381,6 +381,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "http_h1_request_line"
+path = "fuzz_targets/http_h1_request_line.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "h1_status_line"
 path = "fuzz_targets/h1_status_line.rs"
 test = false

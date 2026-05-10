@@ -18,7 +18,7 @@
 use arbitrary::Arbitrary;
 use asupersync::bytes::BytesMut;
 use asupersync::codec::Decoder;
-use asupersync::http::h1::codec::Http1Codec;
+use asupersync::http::h1::codec::{Http1Codec, HttpError};
 use libfuzzer_sys::fuzz_target;
 use std::hint::black_box;
 
@@ -180,10 +180,10 @@ impl RequestLineFuzz {
         match &self.method {
             HttpMethodFuzz::Standard(method) => line.extend_from_slice(method.as_bytes()),
             HttpMethodFuzz::Custom(method) => line.extend_from_slice(method.as_bytes()),
-            HttpMethodFuzz::Empty => {}, // No method
+            HttpMethodFuzz::Empty => {} // No method
             HttpMethodFuzz::Invalid(bytes) => line.extend_from_slice(bytes),
             HttpMethodFuzz::Long(len) => {
-                line.extend(std::iter::repeat(b'M').take(*len));
+                line.extend(std::iter::repeat_n(b'M', *len));
             }
         }
 
@@ -199,11 +199,11 @@ impl RequestLineFuzz {
                     line.extend_from_slice(query.as_bytes());
                 }
                 UriFuzz::Root => line.push(b'/'),
-                UriFuzz::Empty => {}, // No URI
+                UriFuzz::Empty => {} // No URI
                 UriFuzz::Invalid(bytes) => line.extend_from_slice(bytes),
                 UriFuzz::Long(len) => {
                     line.push(b'/');
-                    line.extend(std::iter::repeat(b'x').take(*len));
+                    line.extend(std::iter::repeat_n(b'x', *len));
                 }
                 UriFuzz::Encoded(uri) => {
                     for byte in uri.bytes() {
@@ -270,7 +270,7 @@ impl RequestLineFuzz {
                 }
             }
         } else {
-            line.extend(std::iter::repeat(whitespace_char).take(count as usize));
+            line.extend(std::iter::repeat_n(whitespace_char, count as usize));
         }
     }
 }
@@ -289,6 +289,28 @@ fn generate_corpus_entry(spec: &RequestLineFuzz) -> Vec<u8> {
     request_line
 }
 
+fn observe_decode_result<T>(context: &str, result: Result<Option<T>, HttpError>) {
+    match result {
+        Ok(Some(decoded)) => {
+            black_box((context, "complete"));
+            black_box(decoded);
+        }
+        Ok(None) => {
+            black_box((context, "pending"));
+        }
+        Err(error) => {
+            let message = error.to_string();
+            assert!(!message.is_empty(), "{context} returned an empty error");
+            assert!(
+                message.len() <= 4096,
+                "{context} returned an oversized error: {} bytes",
+                message.len()
+            );
+            black_box((context, error, message));
+        }
+    }
+}
+
 fuzz_target!(|fuzz_spec: RequestLineFuzz| {
     // Generate the request line
     let request_data = generate_corpus_entry(&fuzz_spec);
@@ -303,24 +325,32 @@ fuzz_target!(|fuzz_spec: RequestLineFuzz| {
     let mut buf = BytesMut::from(request_data.as_slice());
 
     // Test the parsing - we don't care if it fails, just that it doesn't crash
-    let result = black_box(codec.decode(&mut buf));
+    observe_decode_result(
+        "direct request-line decode",
+        black_box(codec.decode(&mut buf)),
+    );
 
     // Also test with partial data to exercise buffering logic
     if request_data.len() > 10 {
         let mut partial_buf = BytesMut::from(&request_data[..request_data.len() / 2]);
-        let _ = black_box(codec.decode(&mut partial_buf));
+        observe_decode_result(
+            "split request-line prefix",
+            black_box(codec.decode(&mut partial_buf)),
+        );
 
         // Add the rest of the data
         partial_buf.extend_from_slice(&request_data[request_data.len() / 2..]);
-        let _ = black_box(codec.decode(&mut partial_buf));
+        observe_decode_result(
+            "split request-line completion",
+            black_box(codec.decode(&mut partial_buf)),
+        );
     }
 
     // Test with extra data after complete request
     let mut extended_buf = BytesMut::from(request_data.as_slice());
     extended_buf.extend_from_slice(b"GET /extra HTTP/1.1\r\n\r\n");
-    let _ = black_box(codec.decode(&mut extended_buf));
-
-    // Exercise any remaining state
-    drop(result);
-    drop(codec);
+    observe_decode_result(
+        "extended request-line decode",
+        black_box(codec.decode(&mut extended_buf)),
+    );
 });
