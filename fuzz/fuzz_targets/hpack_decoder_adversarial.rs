@@ -81,14 +81,16 @@ fuzz_target!(|input: AdversarialInput| {
             } => {
                 encode_literal(
                     &mut block,
-                    0x40,
-                    6,
-                    name_indexed,
-                    name_index,
-                    &name_literal,
-                    &value_literal,
-                    huffman_name,
-                    huffman_value,
+                    LiteralEncoding {
+                        prefix: 0x40,
+                        prefix_bits: 6,
+                        name_indexed,
+                        name_index,
+                        name_literal: &name_literal,
+                        value_literal: &value_literal,
+                        huffman_name,
+                        huffman_value,
+                    },
                 );
             }
             HpackOp::LiteralWithoutIndexing {
@@ -101,14 +103,16 @@ fuzz_target!(|input: AdversarialInput| {
             } => {
                 encode_literal(
                     &mut block,
-                    0x00,
-                    4,
-                    name_indexed,
-                    name_index,
-                    &name_literal,
-                    &value_literal,
-                    huffman_name,
-                    huffman_value,
+                    LiteralEncoding {
+                        prefix: 0x00,
+                        prefix_bits: 4,
+                        name_indexed,
+                        name_index,
+                        name_literal: &name_literal,
+                        value_literal: &value_literal,
+                        huffman_name,
+                        huffman_value,
+                    },
                 );
             }
             HpackOp::LiteralNeverIndexed {
@@ -121,14 +125,16 @@ fuzz_target!(|input: AdversarialInput| {
             } => {
                 encode_literal(
                     &mut block,
-                    0x10,
-                    4,
-                    name_indexed,
-                    name_index,
-                    &name_literal,
-                    &value_literal,
-                    huffman_name,
-                    huffman_value,
+                    LiteralEncoding {
+                        prefix: 0x10,
+                        prefix_bits: 4,
+                        name_indexed,
+                        name_index,
+                        name_literal: &name_literal,
+                        value_literal: &value_literal,
+                        huffman_name,
+                        huffman_value,
+                    },
                 );
             }
             HpackOp::RawBytes(bytes) => {
@@ -186,24 +192,30 @@ fn encode_integer(dst: &mut Vec<u8>, value: usize, prefix_bits: u8, prefix: u8) 
     }
 }
 
-fn encode_literal(
-    dst: &mut Vec<u8>,
+struct LiteralEncoding<'a> {
     prefix: u8,
     prefix_bits: u8,
     name_indexed: bool,
     name_index: u32,
-    name_literal: &[u8],
-    value_literal: &[u8],
+    name_literal: &'a [u8],
+    value_literal: &'a [u8],
     huffman_name: bool,
     huffman_value: bool,
-) {
-    if name_indexed {
-        encode_integer(dst, name_index as usize, prefix_bits, prefix);
+}
+
+fn encode_literal(dst: &mut Vec<u8>, encoding: LiteralEncoding<'_>) {
+    if encoding.name_indexed {
+        encode_integer(
+            dst,
+            encoding.name_index as usize,
+            encoding.prefix_bits,
+            encoding.prefix,
+        );
     } else {
-        dst.push(prefix);
-        encode_string(dst, name_literal, huffman_name);
+        dst.push(encoding.prefix);
+        encode_string(dst, encoding.name_literal, encoding.huffman_name);
     }
-    encode_string(dst, value_literal, huffman_value);
+    encode_string(dst, encoding.value_literal, encoding.huffman_value);
 }
 
 fn encode_string(dst: &mut Vec<u8>, data: &[u8], huffman: bool) {

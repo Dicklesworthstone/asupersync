@@ -190,6 +190,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "hpack_decoder_adversarial"
+path = "fuzz_targets/hpack_decoder_adversarial.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_http2_frame"
 path = "fuzz_targets/http2_frame.rs"
 test = false
