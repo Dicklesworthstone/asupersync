@@ -5198,6 +5198,7 @@ name = "h1_chunked_chunk_extension"
 path = "fuzz_targets/h1_chunked_chunk_extension.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h1_request_line_invalid"

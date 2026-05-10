@@ -2,7 +2,6 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashMap;
 
 /// Fuzz target for HTTP/1.1 chunked encoding chunk extensions.
 ///
@@ -27,8 +26,6 @@ struct ChunkExtensionTest {
     chunk_size: String,
     /// Extension name=value pairs
     extensions: Vec<Extension>,
-    /// Whether this should be accepted or rejected
-    should_accept: bool,
 }
 
 #[derive(Debug, Arbitrary, Clone)]
@@ -58,7 +55,7 @@ enum ChunkError {
     MalformedChunkLine,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct ChunkInfo {
     /// Chunk size in bytes
     size: usize,
@@ -70,19 +67,9 @@ struct ChunkInfo {
 
 /// Mock HTTP/1.1 chunked decoder for testing chunk extensions
 struct MockChunkedDecoder {
-    state: DecoderState,
     current_chunk: Option<ChunkInfo>,
     security_policy: ChunkSecurityPolicy,
     stats: DecoderStats,
-}
-
-#[derive(Debug, Clone)]
-enum DecoderState {
-    ReadingChunkSize,
-    ReadingChunkData { remaining: usize },
-    ReadingTrailingCrlf,
-    Complete,
-    Error(ChunkError),
 }
 
 #[derive(Debug, Clone)]
@@ -125,7 +112,6 @@ impl Default for ChunkSecurityPolicy {
 impl MockChunkedDecoder {
     fn new() -> Self {
         Self {
-            state: DecoderState::ReadingChunkSize,
             current_chunk: None,
             security_policy: ChunkSecurityPolicy::default(),
             stats: DecoderStats::default(),
@@ -134,7 +120,6 @@ impl MockChunkedDecoder {
 
     fn with_policy(policy: ChunkSecurityPolicy) -> Self {
         Self {
-            state: DecoderState::ReadingChunkSize,
             current_chunk: None,
             security_policy: policy,
             stats: DecoderStats::default(),
@@ -144,10 +129,10 @@ impl MockChunkedDecoder {
     /// Parse a chunk size line with extensions per RFC 9112
     fn parse_chunk_size_line(&mut self, line: &str) -> Result<ChunkParseResult, ChunkError> {
         // Remove trailing CRLF
-        let line = if line.ends_with("\r\n") {
-            &line[..line.len() - 2]
-        } else if line.ends_with('\n') {
-            &line[..line.len() - 1]
+        let line = if let Some(stripped) = line.strip_suffix("\r\n") {
+            stripped
+        } else if let Some(stripped) = line.strip_suffix('\n') {
+            stripped
         } else {
             line
         };
@@ -158,13 +143,13 @@ impl MockChunkedDecoder {
         }
 
         // Security check - detect CRLF injection
-        if self.security_policy.strict_crlf_validation {
-            if line.contains('\r') || line.contains('\n') {
-                self.stats.security_violations += 1;
-                return Ok(ChunkParseResult::SecurityRisk(
-                    "CRLF injection detected in chunk line".to_string(),
-                ));
-            }
+        if self.security_policy.strict_crlf_validation
+            && (line.contains('\r') || line.contains('\n'))
+        {
+            self.stats.security_violations += 1;
+            return Ok(ChunkParseResult::SecurityRisk(
+                "CRLF injection detected in chunk line".to_string(),
+            ));
         }
 
         // Split at first semicolon to separate size from extensions
@@ -326,10 +311,10 @@ impl MockChunkedDecoder {
         }
 
         // Check for CRLF injection
-        if self.security_policy.strict_crlf_validation {
-            if value.contains('\r') || value.contains('\n') {
-                return Err(ChunkError::CrlfInjection);
-            }
+        if self.security_policy.strict_crlf_validation
+            && (value.contains('\r') || value.contains('\n'))
+        {
+            return Err(ChunkError::CrlfInjection);
         }
 
         // Handle quoted string
@@ -357,10 +342,8 @@ impl MockChunkedDecoder {
                     '\r' | '\n' => {
                         return Err(ChunkError::CrlfInjection);
                     }
-                    c if !c.is_ascii() => {
-                        if !self.security_policy.allow_unicode_in_extensions {
-                            return Err(ChunkError::UnicodeSecurityRisk);
-                        }
+                    c if !c.is_ascii() && !self.security_policy.allow_unicode_in_extensions => {
+                        return Err(ChunkError::UnicodeSecurityRisk);
                     }
                     _ => {
                         // Other characters allowed in quoted string
@@ -407,10 +390,6 @@ impl MockChunkedDecoder {
         }
 
         Ok(())
-    }
-
-    fn get_current_chunk(&self) -> Option<&ChunkInfo> {
-        self.current_chunk.as_ref()
     }
 
     fn get_stats(&self) -> &DecoderStats {
