@@ -22,6 +22,7 @@
 //! - DPOR race condition detection stability
 
 #![no_main]
+#![allow(dead_code)] // Fuzz input schemas intentionally include fields for scenario coverage.
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
@@ -143,10 +144,16 @@ impl FuzzReplayEvent {
                 task: self.task_id_from_idx(*task_idx),
                 at_tick: *at_tick,
             },
-            Self::TaskYielded { task_idx, at_tick } => ReplayEvent::TaskYielded {
+            Self::TaskYielded {
+                task_idx,
+                at_tick: _,
+            } => ReplayEvent::TaskYielded {
                 task: self.task_id_from_idx(*task_idx),
             },
-            Self::TaskCompleted { task_idx, at_tick } => ReplayEvent::TaskCompleted {
+            Self::TaskCompleted {
+                task_idx,
+                at_tick: _,
+            } => ReplayEvent::TaskCompleted {
                 task: self.task_id_from_idx(*task_idx),
                 outcome: 0, // Ok outcome
             },
@@ -158,7 +165,7 @@ impl FuzzReplayEvent {
             Self::RngSeed { seed } => ReplayEvent::RngSeed { seed: *seed },
             Self::ChaosInjection {
                 severity,
-                description,
+                description: _,
             } => ReplayEvent::ChaosInjection {
                 kind: *severity,
                 task: None,
@@ -245,7 +252,7 @@ impl TraceRecorderTestHarness {
     }
 
     /// Create a new recorder with the given seed
-    fn create_recorder(&mut self, seed: u64) -> Result<(), String> {
+    fn create_recorder(&mut self, _seed: u64) -> Result<(), String> {
         // Create a simple trace manually since recorder interface may differ
         self.recorder = None; // Placeholder - we'll build trace manually
         Ok(())
@@ -315,7 +322,7 @@ impl TraceRecorderTestHarness {
                 expected_events: trace.events.len(),
                 actual_events: truncation_point,
             }),
-            Err(e) => Ok(ReplayState::new()), // Expected failure, return empty state
+            Err(_) => Ok(ReplayState::new()), // Expected failure, return empty state
         }
     }
 
@@ -329,11 +336,11 @@ impl TraceRecorderTestHarness {
             ReplayEvent::TaskScheduled { task, at_tick } => {
                 state.scheduled_tasks.insert(task.0, *at_tick);
             }
-            ReplayEvent::TaskCompleted { task, outcome } => {
+            ReplayEvent::TaskCompleted { task, outcome: _ } => {
                 state.completed_tasks.insert(task.0, 0); // Use dummy timestamp
             }
             ReplayEvent::TimeAdvanced {
-                from_nanos,
+                from_nanos: _,
                 to_nanos,
             } => {
                 state.current_time = Time::from_nanos(*to_nanos);
@@ -611,10 +618,9 @@ fn states_have_consistent_ordering(baseline: &ReplayState, minimized: &ReplaySta
                 if let (Some(&min_completed_a), Some(&min_completed_b)) = (
                     minimized.completed_tasks.get(&task_a),
                     minimized.completed_tasks.get(&task_b),
-                ) {
-                    if min_completed_a >= min_completed_b {
-                        return false; // Ordering violated
-                    }
+                ) && min_completed_a >= min_completed_b
+                {
+                    return false; // Ordering violated
                 }
             }
         }
@@ -789,16 +795,7 @@ fuzz_target!(|input: TraceRecorderFuzz| {
             // Test passed - all assertions satisfied
         }
         Err(msg) => {
-            // For debugging: we could log the failure, but in fuzzing we typically
-            // want to continue and let the fuzzer find more issues
-            #[cfg(debug_assertions)]
-            eprintln!("Trace recorder assertion failed: {}", msg);
-
-            // In some cases we might want to panic to signal a real bug
-            // But for robustness testing, we usually continue
-            if msg.contains("PANIC") {
-                panic!("Trace recorder panic detected: {}", msg);
-            }
+            panic!("Trace recorder assertion failed: {msg}");
         }
     }
 });
