@@ -12,8 +12,10 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use asupersync::bytes::Bytes;
-use asupersync::raptorq::decoder::{DecodeError, InactivationDecoder, ReceivedSymbol};
+use asupersync::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
+use asupersync::raptorq::gf256::Gf256;
+
+use core::fmt::Debug;
 
 /// RFC 6330 maximum ESI value (2^20 - 1).
 const RFC6330_N_MAX: u32 = (1u32 << 20) - 1; // 1,048,575
@@ -52,7 +54,7 @@ enum SmallK {
 impl SmallK {
     fn as_usize(self) -> usize {
         match self {
-            SmallK::Minimal(k) => (k as usize).max(1).min(100), // 1-100 for high padding
+            SmallK::Minimal(k) => (k as usize).clamp(1, 100), // 1-100 for high padding
             SmallK::TableBoundary(tb) => tb.as_usize(),
         }
     }
@@ -62,17 +64,17 @@ impl SmallK {
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum TableBoundaryK {
     /// K values that trigger large K' jumps
-    SmallJump, // K around 10
-    MediumJump, // K around 100
-    LargeJump,  // K around 1000
+    Small, // K around 10
+    Medium, // K around 100
+    Large,  // K around 1000
 }
 
 impl TableBoundaryK {
     fn as_usize(self) -> usize {
         match self {
-            TableBoundaryK::SmallJump => 10,   // K'=17 → padding=7
-            TableBoundaryK::MediumJump => 100, // K'=104 → padding=4
-            TableBoundaryK::LargeJump => 1000, // K'=1009 → padding=9
+            TableBoundaryK::Small => 10,   // K'=17 → padding=7
+            TableBoundaryK::Medium => 100, // K'=104 → padding=4
+            TableBoundaryK::Large => 1000, // K'=1009 → padding=9
         }
     }
 }
@@ -171,7 +173,7 @@ impl BoundaryEsi {
             BoundaryEsi::NMaxPlus1 => RFC6330_N_MAX + 1,
             BoundaryEsi::NMaxMinus(offset) => RFC6330_N_MAX.saturating_sub(u32::from(offset)),
             BoundaryEsi::PowerOfTwo(pot) => match pot {
-                PowerOfTwoNearNMax::Pow19 => (1u32 << 19),
+                PowerOfTwoNearNMax::Pow19 => 1u32 << 19,
                 PowerOfTwoNearNMax::Pow20Minus1 => RFC6330_N_MAX,
                 PowerOfTwoNearNMax::Pow21Minus1 => (1u32 << 21) - 1,
             },
@@ -305,7 +307,7 @@ fn test_n_max_boundary_decoding(scenario: &NMaxBoundaryScenario) {
 
     // Process operations
     for operation in &scenario.operations {
-        let result = match operation {
+        let result: Result<(), String> = match operation {
             DecoderOperation::AddSource { esi, data } => {
                 if *esi >= k as u32 {
                     continue; // Invalid source ESI
@@ -315,7 +317,7 @@ fn test_n_max_boundary_decoding(scenario: &NMaxBoundaryScenario) {
                     esi: *esi,
                     is_source: true,
                     columns: vec![*esi as usize],
-                    coefficients: vec![1.into()], // GF(256) one
+                    coefficients: vec![Gf256::ONE],
                     data: symbol_data,
                 };
                 received_symbols.push(symbol);
@@ -355,7 +357,7 @@ fn test_n_max_boundary_decoding(scenario: &NMaxBoundaryScenario) {
                         received_symbols.push(symbol);
                         Ok(())
                     }
-                    Err(_) => Err(()), // Expected for invalid ESIs
+                    Err(error) => Err(format!("repair equation for ESI {esi}: {error:?}")),
                 }
             }
 
@@ -374,29 +376,34 @@ fn test_n_max_boundary_decoding(scenario: &NMaxBoundaryScenario) {
                 };
 
                 // This tests the core N_max boundary logic
-                match decoder.repair_equation(esi) {
-                    Ok(_) => Ok(()),
-                    Err(_) => Err(()), // Expected for ESI >= 2^20 or overflow cases
-                }
+                decoder
+                    .repair_equation(esi)
+                    .map(|_| ())
+                    .map_err(|error| format!("repair equation for ESI {esi}: {error:?}"))
             }
 
             DecoderOperation::Decode => {
                 // Attempt decode with current symbols
-                match decoder.decode(&received_symbols) {
-                    Ok(_) => Ok(()),
-                    Err(_) => Err(()), // Decode failure is expected in many test cases
-                }
+                decoder
+                    .decode(&received_symbols)
+                    .map(|_| ())
+                    .map_err(|error| format!("decode attempt: {error:?}"))
             }
 
             DecoderOperation::Inspect => {
-                // Just verify we can query decoder state
-                let _ = decoder.params();
+                // Verify decoder state stays internally consistent.
+                let params = decoder.params();
+                assert!(params.k > 0, "decoder K must remain nonzero");
+                assert!(
+                    params.k_prime >= params.k,
+                    "decoder K' must cover source symbol count"
+                );
                 Ok(())
             }
         };
 
         // Don't fail on expected errors - we're testing error handling
-        let _ = result;
+        observe_expected_result(result, "decoder operation");
     }
 }
 
@@ -428,8 +435,12 @@ fn test_overflow_protection(scenario: &NMaxBoundaryScenario) {
             Ok(_) => {
                 // If it succeeds, the ESI must be valid (unlikely for these values)
             }
-            Err(_) => {
+            Err(error) => {
                 // Expected failure for ESI values that would overflow or exceed N_max
+                observe_expected_result::<(), String>(
+                    Err(format!("repair equation for overflow ESI {esi}: {error:?}")),
+                    "overflow protection",
+                );
             }
         }
     }
@@ -469,10 +480,38 @@ fn test_rfc_conformance(scenario: &NMaxBoundaryScenario) {
 
     // For fuzzing purposes, we don't assert specific outcomes
     // but verify that the decoder doesn't panic or produce undefined behavior
-    let _ = result_n_max;
-    let _ = result_above_n_max;
-    let _ = result_large_valid;
-    let _ = pow19_result;
-    let _ = pow20_minus1_result;
-    let _ = pow21_minus1_result;
+    observe_result(result_n_max, "RFC boundary ESI N_max");
+    observe_result(result_above_n_max, "RFC boundary ESI N_max plus one");
+    observe_result(result_large_valid, "RFC boundary large valid ESI");
+    observe_result(pow19_result, "RFC boundary 2^19 ESI");
+    observe_result(pow20_minus1_result, "RFC boundary 2^20 minus one ESI");
+    observe_result(pow21_minus1_result, "RFC boundary 2^21 minus one ESI");
+}
+
+fn observe_expected_result<T, E: Debug>(result: Result<T, E>, context: &str) {
+    if let Err(error) = result {
+        let diagnostic = format!("{context}: {error:?}");
+        assert!(
+            !diagnostic.trim().is_empty(),
+            "expected decoder failures must expose diagnostics"
+        );
+        assert!(
+            diagnostic.len() < 1024,
+            "expected decoder failure diagnostics must stay bounded"
+        );
+    }
+}
+
+fn observe_result<T, E: Debug>(result: Result<T, E>, context: &str) {
+    if let Err(error) = result {
+        let diagnostic = format!("{context}: {error:?}");
+        assert!(
+            !diagnostic.trim().is_empty(),
+            "decoder boundary probes must expose diagnostics"
+        );
+        assert!(
+            diagnostic.len() < 1024,
+            "decoder boundary probe diagnostics must stay bounded"
+        );
+    }
 }
