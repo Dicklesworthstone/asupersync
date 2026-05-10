@@ -608,6 +608,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "jetstream_ack_subject_parser"
+path = "fuzz_targets/jetstream_ack_subject_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "jetstream_parser"
 path = "fuzz_targets/jetstream_parser.rs"
 test = false

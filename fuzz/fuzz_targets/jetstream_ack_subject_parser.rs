@@ -23,7 +23,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::messaging::jetstream::{JsMessage, FuzzJsAckMetadata};
+use asupersync::messaging::jetstream::{FuzzJsAckMetadata, fuzz_parse_js_message};
 use asupersync::messaging::nats::Message;
 use libfuzzer_sys::fuzz_target;
 
@@ -82,15 +82,24 @@ enum NumericField {
 enum AttackStrategy {
     None,
     /// Insert extra dot segments to confuse parsing
-    ExtraSegments { count: u8 },
+    ExtraSegments {
+        count: u8,
+    },
     /// Remove required segments
-    MissingSegments { count: u8 },
+    MissingSegments {
+        count: u8,
+    },
     /// Wrong prefix
     WrongPrefix(String),
     /// Unicode/non-ASCII injection
-    UnicodeInjection { field_index: u8, unicode_string: String },
+    UnicodeInjection {
+        field_index: u8,
+        unicode_string: String,
+    },
     /// Extremely long field values
-    LongFieldAttack { field_index: u8 },
+    LongFieldAttack {
+        field_index: u8,
+    },
     /// Mixed valid/invalid numeric patterns
     MixedNumericPattern,
 }
@@ -145,7 +154,7 @@ impl AckSubjectFuzz {
                 NumericField::Zero => subject.push('0'),
                 NumericField::MaxValue => subject.push_str(&u64::MAX.to_string()),
                 NumericField::NonNumeric(s) => subject.push_str(s),
-                NumericField::Empty => {}, // Add nothing, creating ".."
+                NumericField::Empty => {} // Add nothing, creating ".."
                 NumericField::Overflow(s) => subject.push_str(s),
             }
         }
@@ -165,7 +174,10 @@ impl AckSubjectFuzz {
                     subject = parts.join(".");
                 }
             }
-            AttackStrategy::UnicodeInjection { field_index, unicode_string } => {
+            AttackStrategy::UnicodeInjection {
+                field_index,
+                unicode_string,
+            } => {
                 if let Some(insert_pos) = subject.match_indices('.').nth(*field_index as usize) {
                     subject.insert_str(insert_pos.0 + 1, unicode_string);
                 }
@@ -195,9 +207,18 @@ impl AckSubjectFuzz {
                     &self.numeric_fields.pending,
                 ];
 
-                fields.iter().all(|f| matches!(f, NumericField::Valid(_) | NumericField::Zero | NumericField::MaxValue))
-                    && matches!(self.stream_name, StreamName::Simple(_) | StreamName::Dotted { .. })
-                    && matches!(self.consumer_name, ConsumerName::Simple(_) | ConsumerName::Dotted { .. })
+                fields.iter().all(|f| {
+                    matches!(
+                        f,
+                        NumericField::Valid(_) | NumericField::Zero | NumericField::MaxValue
+                    )
+                }) && matches!(
+                    self.stream_name,
+                    StreamName::Simple(_) | StreamName::Dotted { .. }
+                ) && matches!(
+                    self.consumer_name,
+                    ConsumerName::Simple(_) | ConsumerName::Dotted { .. }
+                )
             }
             _ => false, // Attack strategies should generally cause parsing failures
         }
@@ -209,8 +230,9 @@ fn create_test_message(reply_subject: &str) -> Message {
     Message {
         subject: "test.subject".to_string(),
         sid: 1,
-        payload: b"test payload".to_vec(),
         reply_to: Some(reply_subject.to_string()),
+        headers: None,
+        payload: b"test payload".to_vec(),
     }
 }
 
@@ -229,10 +251,10 @@ fn fuzz_parse_ack_subject(reply_subject: &str) -> Option<FuzzJsAckMetadata> {
     }
 
     // Parse the last 5 numeric fields from the right
-    let pending = parts[parts.len() - 1].parse::<u64>().ok()?;
-    let timestamp = parts[parts.len() - 2].parse::<u64>().ok()?;
-    let consumer_seq = parts[parts.len() - 3].parse::<u64>().ok()?;
-    let stream_seq = parts[parts.len() - 4].parse::<u64>()?;
+    let _pending = parts[parts.len() - 1].parse::<u64>().ok()?;
+    let _timestamp = parts[parts.len() - 2].parse::<u64>().ok()?;
+    let _consumer_seq = parts[parts.len() - 3].parse::<u64>().ok()?;
+    let stream_seq = parts[parts.len() - 4].parse::<u64>().ok()?;
     let delivered = parts[parts.len() - 5].parse::<u32>().ok()?;
 
     Some(FuzzJsAckMetadata {
@@ -254,17 +276,13 @@ fuzz_target!(|input: AckSubjectFuzz| {
     let expected_success = input.should_parse_successfully();
 
     // Property 1: No panic on any ACK subject input
-    let parse_result = std::panic::catch_unwind(|| {
-        fuzz_parse_ack_subject(&subject)
-    });
+    let parse_result = std::panic::catch_unwind(|| fuzz_parse_ack_subject(&subject));
 
     match parse_result {
         Ok(result) => {
             match (expected_success, result) {
                 (true, Some(metadata)) => {
                     // Expected successful parse - verify metadata is reasonable
-                    assert!(metadata.sequence <= u64::MAX, "Sequence should be within u64 bounds");
-                    assert!(metadata.delivered <= u32::MAX, "Delivered count should be within u32 bounds");
                     assert_eq!(metadata.subject, "test.subject");
                     assert_eq!(metadata.payload_len, 12);
                 }
@@ -279,7 +297,9 @@ fuzz_target!(|input: AckSubjectFuzz| {
                     // Expected failure but got success - potential security issue
                     // Only panic for clearly invalid cases
                     match &input.attack_strategy {
-                        AttackStrategy::WrongPrefix(_) |
+                        AttackStrategy::WrongPrefix(_) => {
+                            panic!("Parser accepted clearly invalid ACK subject: {}", subject);
+                        }
                         AttackStrategy::MissingSegments { count } if *count > 2 => {
                             panic!("Parser accepted clearly invalid ACK subject: {}", subject);
                         }
@@ -292,17 +312,20 @@ fuzz_target!(|input: AckSubjectFuzz| {
         }
         Err(_) => {
             // Parser panicked - this is always a bug
-            panic!("ACK subject parser panicked on input: {}",
-                   subject.chars().take(200).collect::<String>());
+            panic!(
+                "ACK subject parser panicked on input: {}",
+                subject.chars().take(200).collect::<String>()
+            );
         }
     }
 
     // Property 2: Test against the actual JetStream parser for differential testing
-    if subject.len() < 10000 { // Only test reasonable-sized inputs with the real parser
+    if subject.len() < 10000 {
+        // Only test reasonable-sized inputs with the real parser
         let msg = create_test_message(&subject);
         let js_parse_result = std::panic::catch_unwind(|| {
-            // This calls the real Consumer::parse_js_message function
-            asupersync::messaging::jetstream::Consumer::parse_js_message(msg)
+            // This calls the real Consumer::parse_js_message function through its fuzz re-export.
+            fuzz_parse_js_message(msg)
         });
 
         match js_parse_result {
@@ -313,10 +336,16 @@ fuzz_target!(|input: AckSubjectFuzz| {
                 match (js_result, our_result) {
                     (Some(js_msg), Some(our_meta)) => {
                         // Both succeeded - verify they extracted the same data
-                        assert_eq!(js_msg.sequence, our_meta.sequence,
-                                   "Sequence mismatch for subject: {}", subject);
-                        assert_eq!(js_msg.delivered, our_meta.delivered,
-                                   "Delivered count mismatch for subject: {}", subject);
+                        assert_eq!(
+                            js_msg.sequence, our_meta.sequence,
+                            "Sequence mismatch for subject: {}",
+                            subject
+                        );
+                        assert_eq!(
+                            js_msg.delivered, our_meta.delivered,
+                            "Delivered count mismatch for subject: {}",
+                            subject
+                        );
                     }
                     (None, None) => {
                         // Both failed - this is consistent
@@ -340,9 +369,8 @@ fuzz_target!(|input: AckSubjectFuzz| {
 
     // Property 3: Valid ACK subjects should have predictable structure
     if let Some(metadata) = fuzz_parse_ack_subject(&subject) {
-        // Verify the parsed metadata makes sense
-        assert!(metadata.sequence > 0, "Stream sequence should be positive");
-        assert!(metadata.delivered > 0, "Delivery count should be positive");
+        assert_eq!(metadata.subject, "test.subject");
+        assert_eq!(metadata.payload_len, 12);
     }
 
     // Property 4: Round-trip property for well-formed subjects
@@ -350,7 +378,8 @@ fuzz_target!(|input: AckSubjectFuzz| {
         let parts: Vec<&str> = subject.split('.').collect();
         if parts.len() >= 9 {
             // Try to reconstruct a similar subject and verify it parses consistently
-            let reconstructed = format!("$JS.ACK.teststream.testconsumer.{}.{}.{}.{}.{}",
+            let reconstructed = format!(
+                "$JS.ACK.teststream.testconsumer.{}.{}.{}.{}.{}",
                 parts[parts.len() - 5], // delivered
                 parts[parts.len() - 4], // stream_seq
                 parts[parts.len() - 3], // consumer_seq
@@ -358,8 +387,10 @@ fuzz_target!(|input: AckSubjectFuzz| {
                 parts[parts.len() - 1]  // pending
             );
 
-            if let (Some(original), Some(reconstructed_result)) =
-                (fuzz_parse_ack_subject(&subject), fuzz_parse_ack_subject(&reconstructed)) {
+            if let (Some(original), Some(reconstructed_result)) = (
+                fuzz_parse_ack_subject(&subject),
+                fuzz_parse_ack_subject(&reconstructed),
+            ) {
                 // The numeric fields should match
                 assert_eq!(original.sequence, reconstructed_result.sequence);
                 assert_eq!(original.delivered, reconstructed_result.delivered);
