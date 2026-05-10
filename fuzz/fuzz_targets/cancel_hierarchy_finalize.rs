@@ -2,17 +2,16 @@
 
 use arbitrary::Arbitrary;
 use asupersync::{
-    cancel::symbol_cancel::{SymbolCancelToken, CancelListener},
+    cancel::symbol_cancel::{CancelListener, SymbolCancelToken},
     types::{CancelKind, CancelReason, ObjectId, Time},
     util::DetRng,
 };
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::thread;
 
 // Focus on 3-deep hierarchies as requested
-const MAX_HIERARCHY_DEPTH: usize = 3;
+const MAX_HIERARCHY_DEPTH: u8 = 3;
 const MAX_OPS: usize = 100;
 const MAX_THREADS: usize = 3;
 
@@ -62,20 +61,11 @@ enum HierarchyOperation {
         listener_type: PhaseListenerType,
     },
     /// Poll status at specific level
-    PollLevel {
-        level: u8,
-        check_type: StatusCheck,
-    },
+    PollLevel { level: u8, check_type: StatusCheck },
     /// Create additional child at level (testing late children)
-    CreateLateChild {
-        parent_level: u8,
-        rng_seed: u64,
-    },
+    CreateLateChild { parent_level: u8, rng_seed: u64 },
     /// Simulate work during drain phase
-    SimulateDrainWork {
-        level: u8,
-        work_duration_ms: u8,
-    },
+    SimulateDrainWork { level: u8, work_duration_ms: u8 },
 }
 
 #[derive(Debug, Clone, Copy, Arbitrary)]
@@ -122,7 +112,7 @@ impl From<CancelReasonFuzz> for CancelKind {
 }
 
 /// Phase-tracking listener to detect protocol violations
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct PhaseTracker {
     phase_type: PhaseListenerType,
     call_count: Arc<Mutex<u32>>,
@@ -133,10 +123,12 @@ struct PhaseTracker {
 
 impl PhaseTracker {
     fn new(phase_type: PhaseListenerType, token_level: u8) -> Self {
-        let should_panic = matches!(
-            phase_type,
-            PhaseListenerType::PanickingListener { .. }
-        );
+        let should_panic = match &phase_type {
+            PhaseListenerType::PanickingListener { panic_in_phase } => {
+                panic_in_phase % MAX_HIERARCHY_DEPTH == token_level
+            }
+            _ => false,
+        };
 
         Self {
             phase_type,
@@ -159,7 +151,10 @@ impl PhaseTracker {
 impl CancelListener for PhaseTracker {
     fn on_cancel(&self, reason: &CancelReason, at: Time) {
         if self.should_panic {
-            panic!("PhaseTracker intentional panic at level {}", self.token_level);
+            panic!(
+                "PhaseTracker intentional panic at level {}",
+                self.token_level
+            );
         }
 
         let mut count = self.call_count.lock().unwrap();
@@ -174,8 +169,11 @@ impl CancelListener for PhaseTracker {
         };
 
         let entry = (
-            format!("{}(level={}, kind={:?})", phase_name, self.token_level, reason.kind),
-            at
+            format!(
+                "{}(level={}, kind={:?})",
+                phase_name, self.token_level, reason.kind
+            ),
+            at,
         );
 
         let mut history = self.phase_history.lock().unwrap();
@@ -183,17 +181,11 @@ impl CancelListener for PhaseTracker {
     }
 }
 
-impl CancelListener for Arc<PhaseTracker> {
-    fn on_cancel(&self, reason: &CancelReason, at: Time) {
-        self.as_ref().on_cancel(reason, at);
-    }
-}
-
 /// Hierarchy state for 3-deep testing
 #[derive(Debug)]
 struct HierarchyState {
-    root: SymbolCancelToken,        // Level 0
-    children: Vec<SymbolCancelToken>,    // Level 1
+    root: SymbolCancelToken,               // Level 0
+    children: Vec<SymbolCancelToken>,      // Level 1
     grandchildren: Vec<SymbolCancelToken>, // Level 2
     listeners: HashMap<u8, Vec<Arc<PhaseTracker>>>,
     operation_log: Arc<Mutex<Vec<String>>>,
@@ -244,9 +236,9 @@ impl HierarchyState {
     fn add_phase_listener(&mut self, level: u8, listener_type: PhaseListenerType) {
         if let Some(token) = self.get_token_at_level(level) {
             let tracker = Arc::new(PhaseTracker::new(listener_type, level));
-            token.add_listener(tracker.clone());
+            token.add_listener(tracker.as_ref().clone());
 
-            self.listeners.entry(level).or_insert_with(Vec::new).push(tracker);
+            self.listeners.entry(level).or_default().push(tracker);
         }
     }
 
@@ -255,19 +247,21 @@ impl HierarchyState {
 
         // INVARIANT 1: If a token is cancelled, all descendants must be cancelled
         if self.root.is_cancelled() {
-            for child in &self.children {
+            for child in self.get_all_tokens_at_level(1) {
                 if !child.is_cancelled() {
-                    violations.push(format!(
+                    violations.push(
                         "INVARIANT VIOLATION: Root cancelled but child at level 1 not cancelled"
-                    ));
+                            .to_string(),
+                    );
                 }
+            }
 
-                for grandchild in &self.grandchildren {
-                    if !grandchild.is_cancelled() {
-                        violations.push(format!(
-                            "INVARIANT VIOLATION: Root cancelled but grandchild at level 2 not cancelled"
-                        ));
-                    }
+            for grandchild in self.get_all_tokens_at_level(2) {
+                if !grandchild.is_cancelled() {
+                    violations.push(
+                        "INVARIANT VIOLATION: Root cancelled but grandchild at level 2 not cancelled"
+                            .to_string(),
+                    );
                 }
             }
         }
@@ -275,14 +269,13 @@ impl HierarchyState {
         // INVARIANT 2: Parent cancellation timestamp should be <= child cancellation timestamp
         if let (Some(root_time), Some(child_time)) = (
             self.root.cancelled_at(),
-            self.children.first().and_then(|c| c.cancelled_at())
-        ) {
-            if root_time > child_time {
-                violations.push(format!(
-                    "INVARIANT VIOLATION: Parent cancelled after child (parent={:?}, child={:?})",
-                    root_time, child_time
-                ));
-            }
+            self.children.first().and_then(|c| c.cancelled_at()),
+        ) && root_time > child_time
+        {
+            violations.push(format!(
+                "INVARIANT VIOLATION: Parent cancelled after child (parent={:?}, child={:?})",
+                root_time, child_time
+            ));
         }
 
         // INVARIANT 3: Check that all listeners were notified
@@ -290,13 +283,13 @@ impl HierarchyState {
             for tracker in trackers {
                 if tracker.call_count() == 0 {
                     let token = self.get_token_at_level(*level);
-                    if let Some(token) = token {
-                        if token.is_cancelled() {
-                            violations.push(format!(
-                                "INVARIANT VIOLATION: Token at level {} cancelled but listener never called",
-                                level
-                            ));
-                        }
+                    if let Some(token) = token
+                        && token.is_cancelled()
+                    {
+                        violations.push(format!(
+                            "INVARIANT VIOLATION: Token at level {} cancelled but listener never called",
+                            level
+                        ));
                     }
                 }
             }
@@ -337,9 +330,13 @@ fn execute_hierarchy_operation(
     op: &HierarchyOperation,
     base_time: Time,
 ) {
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let operation_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         match op {
-            HierarchyOperation::CancelAtLevel { level, reason, time_offset } => {
+            HierarchyOperation::CancelAtLevel {
+                level,
+                reason,
+                time_offset,
+            } => {
                 if let Some(token) = state.get_token_at_level(*level) {
                     let cancel_time = Time::from_nanos(base_time.as_nanos() + *time_offset);
                     let cancel_reason = CancelReason::new((*reason).into());
@@ -351,15 +348,18 @@ fn execute_hierarchy_operation(
 
                     token.cancel(&cancel_reason, cancel_time);
                 }
-            },
+            }
 
-            HierarchyOperation::AddPhaseListener { level, listener_type } => {
+            HierarchyOperation::AddPhaseListener {
+                level,
+                listener_type,
+            } => {
                 state.log_operation(&format!(
                     "ADD_LISTENER level={} type={:?}",
                     level, listener_type
                 ));
                 state.add_phase_listener(*level, listener_type.clone());
-            },
+            }
 
             HierarchyOperation::PollLevel { level, check_type } => {
                 if let Some(token) = state.get_token_at_level(*level) {
@@ -375,16 +375,20 @@ fn execute_hierarchy_operation(
                         level, check_type, result
                     ));
                 }
-            },
+            }
 
-            HierarchyOperation::CreateLateChild { parent_level, rng_seed } => {
+            HierarchyOperation::CreateLateChild {
+                parent_level,
+                rng_seed,
+            } => {
                 if let Some(parent_token) = state.get_token_at_level(*parent_level) {
                     let mut rng = DetRng::new(*rng_seed);
                     let late_child = parent_token.child(&mut rng);
 
                     state.log_operation(&format!(
                         "CREATE_LATE_CHILD parent_level={} cancelled={}",
-                        parent_level, late_child.is_cancelled()
+                        parent_level,
+                        late_child.is_cancelled()
                     ));
 
                     // Add late child to appropriate collection
@@ -392,16 +396,19 @@ fn execute_hierarchy_operation(
                         0 => {
                             // This is mutable access - we need to handle this carefully
                             // For fuzzing purposes, we'll just check the invariants
-                        },
+                        }
                         1 => {
                             // Late grandchild
-                        },
-                        _ => {},
+                        }
+                        _ => {}
                     }
                 }
-            },
+            }
 
-            HierarchyOperation::SimulateDrainWork { level, work_duration_ms } => {
+            HierarchyOperation::SimulateDrainWork {
+                level,
+                work_duration_ms,
+            } => {
                 state.log_operation(&format!(
                     "DRAIN_WORK level={} duration_ms={}",
                     level, work_duration_ms
@@ -409,34 +416,44 @@ fn execute_hierarchy_operation(
 
                 // Simulate cleanup work during drain phase
                 std::thread::sleep(std::time::Duration::from_millis(*work_duration_ms as u64));
-            },
+            }
         }
     }));
+    assert!(
+        operation_result.is_ok(),
+        "cancel hierarchy operation panicked: op={op:?}, base_time={base_time:?}"
+    );
 }
 
 /// Test the full request→drain→finalize protocol across 3-deep hierarchy
 fn test_request_drain_finalize_protocol(input: &FuzzInput) {
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let protocol_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut state = HierarchyState::new(12345);
-        let base_time = Time::from_nanos(1000);
+        let base_time =
+            Time::from_nanos(1000 + interleaving_delay_nanos(&input.interleaving_pattern));
 
         // Execute operations according to the scenario
-        match input.scenario {
+        match &input.scenario {
             CancellationScenario::TopDown => {
                 test_topdown_cancellation(&mut state, &input.operations, base_time);
-            },
+            }
             CancellationScenario::BottomUp => {
                 test_bottomup_cancellation(&mut state, &input.operations, base_time);
-            },
+            }
             CancellationScenario::MiddleOut => {
                 test_middleout_cancellation(&mut state, &input.operations, base_time);
-            },
+            }
             CancellationScenario::Concurrent => {
-                test_concurrent_cancellation(&mut state, &input.operations, base_time, input.thread_count);
-            },
+                test_concurrent_cancellation(
+                    &mut state,
+                    &input.operations,
+                    base_time,
+                    input.thread_count,
+                );
+            }
             CancellationScenario::RapidFire => {
                 test_rapid_fire_cancellation(&mut state, &input.operations, base_time);
-            },
+            }
         }
 
         // Verify critical invariants
@@ -447,6 +464,22 @@ fn test_request_drain_finalize_protocol(input: &FuzzInput) {
             violations
         );
     }));
+    assert!(
+        protocol_result.is_ok(),
+        "cancel hierarchy request-drain-finalize protocol panicked: scenario={:?}, operations={}, thread_count={}, interleaving={:?}",
+        input.scenario,
+        input.operations.len(),
+        input.thread_count,
+        input.interleaving_pattern
+    );
+}
+
+fn interleaving_delay_nanos(pattern: &InterleavingPattern) -> u64 {
+    match pattern {
+        InterleavingPattern::Sequential => 0,
+        InterleavingPattern::RandomDelay { delay_scale } => u64::from(*delay_scale),
+        InterleavingPattern::BarrierSync => 1,
+    }
 }
 
 fn test_topdown_cancellation(
@@ -455,7 +488,7 @@ fn test_topdown_cancellation(
     base_time: Time,
 ) {
     // Add listeners to track all phases at all levels
-    for level in 0..=2 {
+    for level in 0..MAX_HIERARCHY_DEPTH {
         state.add_phase_listener(level, PhaseListenerType::RequestPhase);
         state.add_phase_listener(level, PhaseListenerType::DrainPhase);
         state.add_phase_listener(level, PhaseListenerType::FinalizePhase);
