@@ -11,15 +11,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Comprehensive fuzz target for Semaphore acquire-with-cancel race conditions
-///
-/// Tests critical race conditions in async semaphore acquire:
-/// 1. No permit leaks when acquire futures are dropped mid-flight
-/// 2. Waiter queue integrity under heavy cancellation
-/// 3. Permit count conservation under cancel pressure
-/// 4. FIFO fairness when some acquires are cancelled
-/// 5. Proper wakeup delivery after cancellation
-/// 6. State machine consistency during simultaneous acquire/cancel/release
+// Comprehensive fuzz target for Semaphore acquire-with-cancel race conditions.
+//
+// Tests critical race conditions in async semaphore acquire:
+// 1. No permit leaks when acquire futures are dropped mid-flight
+// 2. Waiter queue integrity under heavy cancellation
+// 3. Permit count conservation under cancel pressure
+// 4. FIFO fairness when some acquires are cancelled
+// 5. Proper wakeup delivery after cancellation
+// 6. State machine consistency during simultaneous acquire/cancel/release
 
 const MAX_INITIAL_PERMITS: usize = 16;
 const MAX_ACQUIRE_TASKS: usize = 12;
@@ -57,9 +57,9 @@ struct CancelTaskPlan {
 
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum ReleaseMode {
-    DropPermit,
-    CommitPermit,
-    ForgetPermit,
+    Drop,
+    Commit,
+    Forget,
 }
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -121,8 +121,7 @@ impl PermitTracker {
         // Core conservation law: initial = available + active + leaked
         let total_accounted = final_available + active + leaked;
         assert_eq!(
-            initial_permits,
-            total_accounted,
+            initial_permits, total_accounted,
             "Permit conservation violated: initial={}, available={}, active={}, leaked={}, total={}",
             initial_permits, final_available, active, leaked, total_accounted
         );
@@ -130,8 +129,7 @@ impl PermitTracker {
         // Accounting balance: acquired = released + active + leaked
         let total_disposed = released + active + leaked;
         assert_eq!(
-            acquired,
-            total_disposed,
+            acquired, total_disposed,
             "Permit accounting imbalance: acquired={}, released={}, active={}, leaked={}, disposed={}",
             acquired, released, active, leaked, total_disposed
         );
@@ -140,14 +138,28 @@ impl PermitTracker {
 
 fuzz_target!(|input: SemaphoreAcquireCancelFuzz| {
     let initial_permits = (input.initial_permits as usize).clamp(1, MAX_INITIAL_PERMITS);
-    let acquire_tasks: Vec<_> = input.acquire_tasks.into_iter().take(MAX_ACQUIRE_TASKS).collect();
-    let cancel_tasks: Vec<_> = input.cancel_tasks.into_iter().take(MAX_CANCEL_TASKS).collect();
+    let acquire_tasks: Vec<_> = input
+        .acquire_tasks
+        .into_iter()
+        .take(MAX_ACQUIRE_TASKS)
+        .collect();
+    let cancel_tasks: Vec<_> = input
+        .cancel_tasks
+        .into_iter()
+        .take(MAX_CANCEL_TASKS)
+        .collect();
 
     if acquire_tasks.is_empty() {
         return; // Need at least one acquire task
     }
 
-    execute_acquire_cancel_scenario(input.seed, initial_permits, acquire_tasks, cancel_tasks, input.config);
+    execute_acquire_cancel_scenario(
+        input.seed,
+        initial_permits,
+        acquire_tasks,
+        cancel_tasks,
+        input.config,
+    );
 });
 
 fn execute_acquire_cancel_scenario(
@@ -157,7 +169,7 @@ fn execute_acquire_cancel_scenario(
     cancel_tasks: Vec<CancelTaskPlan>,
     config: TestConfig,
 ) {
-    let max_ops = (config.max_operations as u64).max(1000).min(MAX_STEPS);
+    let max_ops = (config.max_operations as u64).clamp(1000, MAX_STEPS);
     let mut runtime = LabRuntime::new(LabConfig::new(seed).max_steps(max_ops));
     let region = runtime.state.create_root_region(Budget::INFINITE);
     let semaphore = Arc::new(Semaphore::new(initial_permits));
@@ -172,7 +184,9 @@ fn execute_acquire_cancel_scenario(
     for (task_idx, plan) in acquire_tasks.into_iter().enumerate() {
         let semaphore_clone = Arc::clone(&semaphore);
         let tracker_clone = Arc::clone(&tracker);
-        let permit_count = (plan.permit_count as usize).clamp(1, MAX_PERMITS_PER_ACQUIRE).min(initial_permits);
+        let permit_count = (plan.permit_count as usize)
+            .clamp(1, MAX_PERMITS_PER_ACQUIRE)
+            .min(initial_permits);
         let priority = plan.priority;
         let plan_clone = plan.clone();
         let config_clone = config.clone();
@@ -180,7 +194,16 @@ fn execute_acquire_cancel_scenario(
         let (task_id, handle) = runtime
             .state
             .create_task(region, Budget::INFINITE, async move {
-                run_acquire_task(task_idx, plan_clone, permit_count, semaphore_clone, tracker_clone, config_clone).await
+                run_acquire_task(
+                    task_idx,
+                    plan_clone,
+                    permit_count,
+                    initial_permits,
+                    semaphore_clone,
+                    tracker_clone,
+                    config_clone,
+                )
+                .await
             })
             .expect("acquire task should spawn");
 
@@ -221,12 +244,23 @@ fn execute_acquire_cancel_scenario(
     // Verify final permit conservation
     let final_available = semaphore.available_permits();
     tracker.verify_conservation(initial_permits, final_available);
+    if config.enable_fairness_checks {
+        assert_eq!(
+            tracker.active.load(Ordering::SeqCst),
+            0,
+            "fairness check: no permits should remain actively held after quiescence"
+        );
+        assert!(
+            final_available <= initial_permits,
+            "fairness check: available permits exceeded initial capacity"
+        );
+    }
 
     // Join acquire tasks and verify no panics
     for mut handle in acquire_handles {
         match handle.try_join() {
-            Ok(Some(_)) => {}, // Task completed normally
-            Ok(None) => {},    // Task was cancelled
+            Ok(Some(_)) => {} // Task completed normally
+            Ok(None) => {}    // Task was cancelled
             Err(e) => panic!("Acquire task panicked: {:?}", e),
         }
     }
@@ -234,8 +268,8 @@ fn execute_acquire_cancel_scenario(
     // Join cancel tasks and verify no panics
     for mut handle in cancel_handles {
         match handle.try_join() {
-            Ok(Some(_)) => {}, // Task completed normally
-            Ok(None) => {},    // Task was cancelled
+            Ok(Some(_)) => {} // Task completed normally
+            Ok(None) => {}    // Task was cancelled
             Err(e) => panic!("Cancel task panicked: {:?}", e),
         }
     }
@@ -245,15 +279,15 @@ async fn run_acquire_task(
     _task_idx: usize,
     plan: AcquireTaskPlan,
     permit_count: usize,
+    initial_permits: usize,
     semaphore: Arc<Semaphore>,
     tracker: Arc<PermitTracker>,
     config: TestConfig,
 ) -> usize {
     // Pre-acquire yields for race condition timing
-    for _ in 0..plan.pre_acquire_yields.min(MAX_YIELDS) {
-        if config.enable_aggressive_yield {
-            yield_now().await;
-        } else {
+    for step in 0..plan.pre_acquire_yields.min(MAX_YIELDS) {
+        yield_now().await;
+        if config.enable_aggressive_yield && step.is_multiple_of(2) {
             yield_now().await;
         }
     }
@@ -277,7 +311,7 @@ async fn run_acquire_task(
                 actual_count, permit_count,
                 "Semaphore returned wrong permit count: expected {permit_count}, got {actual_count}"
             );
-            tracker.record_acquire(actual_count, semaphore.available_permits() + actual_count);
+            tracker.record_acquire(actual_count, initial_permits);
             permit
         }
         Err(_e) => {
@@ -294,15 +328,15 @@ async fn run_acquire_task(
     // Release the permit according to plan
     let held_count = permit.count();
     match plan.release_mode {
-        ReleaseMode::DropPermit => {
+        ReleaseMode::Drop => {
             tracker.record_release(held_count);
             drop(permit); // RAII release
         }
-        ReleaseMode::CommitPermit => {
+        ReleaseMode::Commit => {
             tracker.record_release(held_count);
             permit.commit(); // Explicit release
         }
-        ReleaseMode::ForgetPermit => {
+        ReleaseMode::Forget => {
             tracker.record_leak(held_count);
             permit.forget(); // Intentional leak
         }
@@ -316,7 +350,7 @@ async fn run_acquire_task(
     permit_count
 }
 
-async fn run_cancel_task(cancel_plan: CancelTaskPlan, _target_task_id: asupersync::types::TaskId) -> () {
+async fn run_cancel_task(cancel_plan: CancelTaskPlan, _target_task_id: asupersync::types::TaskId) {
     // Delay before cancellation attempt
     for _ in 0..cancel_plan.delay_yields.min(MAX_YIELDS) {
         yield_now().await;
@@ -341,7 +375,7 @@ mod tests {
             hold_duration_yields: 1,
             post_release_yields: 1,
             priority: 100,
-            release_mode: ReleaseMode::DropPermit,
+            release_mode: ReleaseMode::Drop,
             cancel_probability: 250, // High cancel probability
         };
 
@@ -363,7 +397,7 @@ mod tests {
                 hold_duration_yields: 2,
                 post_release_yields: 1,
                 priority: 100,
-                release_mode: ReleaseMode::DropPermit,
+                release_mode: ReleaseMode::Drop,
                 cancel_probability: 0,
             },
             AcquireTaskPlan {
@@ -372,7 +406,7 @@ mod tests {
                 hold_duration_yields: 1,
                 post_release_yields: 1,
                 priority: 100,
-                release_mode: ReleaseMode::CommitPermit,
+                release_mode: ReleaseMode::Commit,
                 cancel_probability: 0,
             },
             AcquireTaskPlan {
@@ -381,7 +415,7 @@ mod tests {
                 hold_duration_yields: 1,
                 post_release_yields: 1,
                 priority: 100,
-                release_mode: ReleaseMode::ForgetPermit,
+                release_mode: ReleaseMode::Forget,
                 cancel_probability: 0,
             },
         ];
@@ -404,7 +438,7 @@ mod tests {
                 hold_duration_yields: 5,
                 post_release_yields: 2,
                 priority: 100,
-                release_mode: ReleaseMode::DropPermit,
+                release_mode: ReleaseMode::Drop,
                 cancel_probability: 128, // 50% cancel probability
             },
             AcquireTaskPlan {
@@ -413,7 +447,7 @@ mod tests {
                 hold_duration_yields: 3,
                 post_release_yields: 1,
                 priority: 100,
-                release_mode: ReleaseMode::CommitPermit,
+                release_mode: ReleaseMode::Commit,
                 cancel_probability: 200, // ~78% cancel probability
             },
             AcquireTaskPlan {
@@ -422,7 +456,7 @@ mod tests {
                 hold_duration_yields: 2,
                 post_release_yields: 1,
                 priority: 100,
-                release_mode: ReleaseMode::DropPermit,
+                release_mode: ReleaseMode::Drop,
                 cancel_probability: 64, // 25% cancel probability
             },
         ];
@@ -446,7 +480,7 @@ mod tests {
                 hold_duration_yields: 10, // Hold long
                 post_release_yields: 1,
                 priority: 100,
-                release_mode: ReleaseMode::DropPermit,
+                release_mode: ReleaseMode::Drop,
                 cancel_probability: 0, // Don't cancel the holder
             },
             AcquireTaskPlan {
@@ -455,7 +489,7 @@ mod tests {
                 hold_duration_yields: 1,
                 post_release_yields: 1,
                 priority: 100,
-                release_mode: ReleaseMode::DropPermit,
+                release_mode: ReleaseMode::Drop,
                 cancel_probability: 255, // Always cancel - should be waiting
             },
             AcquireTaskPlan {
@@ -464,7 +498,7 @@ mod tests {
                 hold_duration_yields: 1,
                 post_release_yields: 1,
                 priority: 100,
-                release_mode: ReleaseMode::DropPermit,
+                release_mode: ReleaseMode::Drop,
                 cancel_probability: 255, // Always cancel - should be waiting
             },
         ];
