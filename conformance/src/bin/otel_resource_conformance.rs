@@ -9,21 +9,29 @@ use opentelemetry_sdk::Resource as SdkResource;
 use opentelemetry_sdk::resource::{EnvResourceDetector, SdkProvidedResourceDetector};
 use std::collections::BTreeMap;
 use std::env;
+use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
-const OTEL_ENV_VARS: &[&str] = &[
+const RESOURCE_ENV_VARS: &[&str] = &[
     "OTEL_SERVICE_NAME",
     "OTEL_SERVICE_VERSION",
     "OTEL_SERVICE_NAMESPACE",
     "OTEL_RESOURCE_ATTRIBUTES",
     "OTEL_SDK_DISABLED",
+    "HOSTNAME",
+    "COMPUTERNAME",
 ];
 
 /// Conformance test result tracking
 #[derive(Debug, Clone, PartialEq)]
 enum ConformanceTestResult {
     Pass,
-    Fail { reason: String },
-    ExpectedFailure { reason: String },
+    Fail {
+        reason: String,
+    },
+    #[allow(dead_code)]
+    ExpectedFailure {
+        reason: String,
+    },
 }
 
 /// Test metadata for conformance tracking
@@ -82,7 +90,6 @@ fn main() {
         "comprehensive" => exit_if_not_pass("comprehensive", run_comprehensive_test(verbose)),
         "report" => {
             generate_compliance_report();
-            return;
         }
         "all" => run_all_tests(verbose),
         _ => {
@@ -281,7 +288,7 @@ fn run_env_vars_test(verbose: bool) -> ConformanceTestResult {
 fn run_hostname_test(verbose: bool) -> ConformanceTestResult {
     let test_case = ConformanceCase {
         name: "hostname_detection",
-        description: "Hostname detection produces identical host.name attribute",
+        description: "Hostname detection produces the expected host.name attribute",
         requirement_level: RequirementLevel::Should,
     };
 
@@ -289,11 +296,23 @@ fn run_hostname_test(verbose: bool) -> ConformanceTestResult {
         println!("Running {}: {}", test_case.name, test_case.description);
     }
 
-    let _guard = OtelEnvGuard::clear();
+    let _guard = OtelEnvGuard::with(&[
+        ("HOSTNAME", Some("asupersync-conformance-host")),
+        ("COMPUTERNAME", None),
+    ]);
 
-    let result = ConformanceTestResult::ExpectedFailure {
-        reason: "host.name detection is not implemented by OtlpResourceBuilder; opentelemetry 0.31 keeps host detectors outside opentelemetry_sdk".to_string(),
-    };
+    let our_resource: BTreeMap<String, String> = OtlpResourceBuilder::new()
+        .with_detected_host_name()
+        .build()
+        .into_iter()
+        .collect();
+    let our_attrs = select_attrs(&our_resource, &["host.name"]);
+    let expected_attrs = BTreeMap::from([(
+        "host.name".to_string(),
+        "asupersync-conformance-host".to_string(),
+    )]);
+
+    let result = compare_resource_attributes(&our_attrs, &expected_attrs, "hostname detection");
 
     if verbose {
         match &result {
@@ -527,12 +546,18 @@ fn compare_resource_attributes(
 
 /// Clear OpenTelemetry environment variables for clean testing
 fn clear_otel_env_vars() {
-    for var in OTEL_ENV_VARS {
+    for var in RESOURCE_ENV_VARS {
         remove_env_var(var);
     }
 }
 
+fn resource_env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 struct OtelEnvGuard {
+    _guard: MutexGuard<'static, ()>,
     previous: BTreeMap<&'static str, Option<String>>,
 }
 
@@ -542,7 +567,10 @@ impl OtelEnvGuard {
     }
 
     fn with(updates: &[(&'static str, Option<&str>)]) -> Self {
-        let previous = OTEL_ENV_VARS
+        let guard = resource_env_lock()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let previous = RESOURCE_ENV_VARS
             .iter()
             .map(|var| (*var, env::var(var).ok()))
             .collect();
@@ -556,7 +584,10 @@ impl OtelEnvGuard {
             }
         }
 
-        Self { previous }
+        Self {
+            _guard: guard,
+            previous,
+        }
     }
 }
 
@@ -645,6 +676,7 @@ fn generate_compliance_report() {
 mod tests {
     use super::{
         ConformanceTestResult, exit_code_for_result, exit_code_for_summary, final_status_line,
+        run_hostname_test,
     };
 
     #[test]
@@ -670,5 +702,10 @@ mod tests {
 
         assert!(status.contains("NO FAILURES; PARTIAL COVERAGE"));
         assert!(!status.contains("ALL TESTS PASSED"));
+    }
+
+    #[test]
+    fn hostname_detection_uses_deterministic_host_name() {
+        assert_eq!(run_hostname_test(false), ConformanceTestResult::Pass);
     }
 }
