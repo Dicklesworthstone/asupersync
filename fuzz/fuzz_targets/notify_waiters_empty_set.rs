@@ -7,7 +7,7 @@
 //! Critical invariants:
 //! - notify_waiters() with zero waiters is always a no-op
 //! - No stored notifications created from empty-set broadcasts
-//! - Generation counter advances properly even with no waiters
+//! - Empty-set broadcasts do not make later waiters immediately ready
 //! - Subsequent waiters behave correctly after empty broadcasts
 
 #![no_main]
@@ -69,8 +69,7 @@ impl NotifyWaitersEmptyConfig {
 struct EmptyNotifyTracker {
     empty_notify_waiters_calls: AtomicUsize,
     empty_notify_one_calls: AtomicUsize,
-    stored_notifications_created: AtomicUsize,
-    generation_advances: AtomicUsize,
+    stored_tokens_created: AtomicUsize,
     waiters_created: AtomicUsize,
     waiters_completed: AtomicUsize,
     invariant_violations: AtomicUsize,
@@ -81,8 +80,7 @@ impl EmptyNotifyTracker {
         Self {
             empty_notify_waiters_calls: AtomicUsize::new(0),
             empty_notify_one_calls: AtomicUsize::new(0),
-            stored_notifications_created: AtomicUsize::new(0),
-            generation_advances: AtomicUsize::new(0),
+            stored_tokens_created: AtomicUsize::new(0),
             waiters_created: AtomicUsize::new(0),
             waiters_completed: AtomicUsize::new(0),
             invariant_violations: AtomicUsize::new(0),
@@ -98,13 +96,8 @@ impl EmptyNotifyTracker {
         self.empty_notify_one_calls.fetch_add(1, Ordering::SeqCst);
     }
 
-    fn record_stored_notification_created(&self) {
-        self.stored_notifications_created
-            .fetch_add(1, Ordering::SeqCst);
-    }
-
-    fn record_generation_advance(&self) {
-        self.generation_advances.fetch_add(1, Ordering::SeqCst);
+    fn record_stored_token_created(&self) {
+        self.stored_tokens_created.fetch_add(1, Ordering::SeqCst);
     }
 
     fn record_waiter_created(&self) {
@@ -122,19 +115,11 @@ impl EmptyNotifyTracker {
     fn check_invariants(&self) -> Result<(), String> {
         let empty_waiters_calls = self.empty_notify_waiters_calls.load(Ordering::SeqCst);
         let empty_one_calls = self.empty_notify_one_calls.load(Ordering::SeqCst);
-        let stored_created = self.stored_notifications_created.load(Ordering::SeqCst);
-        let generations = self.generation_advances.load(Ordering::SeqCst);
         let violations = self.invariant_violations.load(Ordering::SeqCst);
 
         // Core invariant: no invariant violations should be detected
         if violations > 0 {
             return Err(format!("Detected {} invariant violations", violations));
-        }
-
-        // Empty notify_waiters should not create stored notifications
-        if empty_waiters_calls > 0 && stored_created > 0 {
-            // Note: This might be ok if notify_one was also called, so we need to check more carefully
-            // For now, we'll allow stored notifications if notify_one was called
         }
 
         // Sanity checks
@@ -153,6 +138,12 @@ impl EmptyNotifyTracker {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WaiterPollObservation {
+    Pending,
+    Ready,
+}
+
 /// Tracks a waiter for testing purposes
 struct TrackedWaiter {
     notify_future: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
@@ -164,11 +155,12 @@ impl TrackedWaiter {
     fn new(notify: Arc<Notify>, waiter_id: u8, tracker: Arc<EmptyNotifyTracker>) -> Self {
         let completed = Arc::new(AtomicBool::new(false));
         let completed_clone = completed.clone();
+        let completion_tracker = tracker.clone();
 
         let notify_future = Box::pin(async move {
             notify.notified().await;
             completed_clone.store(true, Ordering::SeqCst);
-            tracker.record_waiter_completed();
+            completion_tracker.record_waiter_completed();
         });
 
         tracker.record_waiter_created();
@@ -209,6 +201,86 @@ impl TrackedWaiter {
     }
 }
 
+fn observe_waiter_poll(waiter: &mut TrackedWaiter) -> WaiterPollObservation {
+    let observation = match waiter.poll() {
+        Poll::Pending => WaiterPollObservation::Pending,
+        Poll::Ready(()) => WaiterPollObservation::Ready,
+    };
+
+    match observation {
+        WaiterPollObservation::Pending => {
+            assert!(
+                waiter.notify_future.is_some(),
+                "waiter {} reported pending after its future was removed",
+                waiter.waiter_id
+            );
+        }
+        WaiterPollObservation::Ready => {
+            assert!(
+                waiter.is_completed() || waiter.notify_future.is_none(),
+                "waiter {} reported ready without completion or future removal",
+                waiter.waiter_id
+            );
+        }
+    }
+
+    observation
+}
+
+fn probe_stored_notification(
+    notify: &Arc<Notify>,
+    tracker: &Arc<EmptyNotifyTracker>,
+    waiter_id: u8,
+) -> WaiterPollObservation {
+    let mut probe = TrackedWaiter::new(notify.clone(), waiter_id, tracker.clone());
+    let observation = observe_waiter_poll(&mut probe);
+    probe.drop_future();
+    observation
+}
+
+fn assert_empty_notify_waiters_did_not_store(
+    notify: &Arc<Notify>,
+    tracker: &Arc<EmptyNotifyTracker>,
+    expected_stored_tokens: &mut usize,
+    context: &str,
+) -> Result<(), String> {
+    const PROBE_WAITER_ID: u8 = 250;
+    let expected_before_probe = *expected_stored_tokens;
+
+    for token_index in 0..expected_before_probe {
+        if probe_stored_notification(notify, tracker, PROBE_WAITER_ID)
+            != WaiterPollObservation::Ready
+        {
+            return Err(format!(
+                "{} lost expected stored notification {} of {}",
+                context,
+                token_index + 1,
+                expected_before_probe
+            ));
+        }
+    }
+
+    *expected_stored_tokens = 0;
+
+    if probe_stored_notification(notify, tracker, PROBE_WAITER_ID) == WaiterPollObservation::Ready {
+        tracker.record_invariant_violation();
+        return Err(format!(
+            "{} created a stored notification from notify_waiters() with no waiters",
+            context
+        ));
+    }
+
+    let waiter_count = notify.waiter_count();
+    if waiter_count != 0 {
+        return Err(format!(
+            "{} probe waiter leaked, {} waiters remain",
+            context, waiter_count
+        ));
+    }
+
+    Ok(())
+}
+
 fn noop_waker() -> Waker {
     use std::task::{RawWaker, RawWakerVTable};
 
@@ -225,10 +297,11 @@ fn noop_waker() -> Waker {
 /// Test notify_waiters behavior with empty waiter sets
 fn test_empty_notify_waiters_scenario(
     config: &NotifyWaitersEmptyConfig,
-    tracker: &EmptyNotifyTracker,
+    tracker: Arc<EmptyNotifyTracker>,
 ) -> Result<(), String> {
     let notify = Arc::new(Notify::new());
     let mut waiters: HashMap<u8, TrackedWaiter> = HashMap::new();
+    let mut expected_stored_tokens = 0usize;
 
     let max_ops = config
         .max_operations
@@ -246,22 +319,16 @@ fn test_empty_notify_waiters_scenario(
                     ));
                 }
 
-                // Record state before call
-                let stored_before = notify.stored_notifications.load(Ordering::Acquire);
-
                 // Call notify_waiters with empty set
                 notify.notify_waiters();
                 tracker.record_empty_notify_waiters();
 
-                // Verify no stored notifications created
-                let stored_after = notify.stored_notifications.load(Ordering::Acquire);
-                if stored_after > stored_before {
-                    tracker.record_invariant_violation();
-                    return Err(format!(
-                        "notify_waiters() with empty waiter set created stored notification: {} -> {}",
-                        stored_before, stored_after
-                    ));
-                }
+                assert_empty_notify_waiters_did_not_store(
+                    &notify,
+                    &tracker,
+                    &mut expected_stored_tokens,
+                    "notify_waiters() with empty waiter set",
+                )?;
             }
 
             EmptyNotifyOperation::NotifyOneEmpty => {
@@ -274,37 +341,33 @@ fn test_empty_notify_waiters_scenario(
                     ));
                 }
 
-                // Record state before call
-                let stored_before = notify.stored_notifications.load(Ordering::Acquire);
-
                 // Call notify_one with empty set
-                notify.notify_one();
+                let notified_waiter = notify.notify_one();
                 tracker.record_empty_notify_one();
 
                 // notify_one SHOULD create stored notification even with no waiters
-                let stored_after = notify.stored_notifications.load(Ordering::Acquire);
-                if stored_after == stored_before + 1 {
-                    tracker.record_stored_notification_created();
-                } else if stored_after == stored_before {
-                    // This might be ok if stored notifications are capped
-                } else {
-                    return Err(format!(
-                        "notify_one() created unexpected stored notification count: {} -> {}",
-                        stored_before, stored_after
-                    ));
+                if notified_waiter {
+                    tracker.record_invariant_violation();
+                    return Err(
+                        "notify_one() reported a waiter notification with empty waiter set"
+                            .to_string(),
+                    );
                 }
+                expected_stored_tokens = expected_stored_tokens.saturating_add(1);
+                tracker.record_stored_token_created();
             }
 
             EmptyNotifyOperation::TemporaryWaiter { waiter_id } => {
                 let id = *waiter_id % 10;
 
                 // Create a waiter briefly then drop it immediately
-                let waiter =
-                    TrackedWaiter::new(notify.clone(), id, Arc::new(EmptyNotifyTracker::new()));
+                let waiter = TrackedWaiter::new(notify.clone(), id, tracker.clone());
 
                 // Poll once to register it
                 let mut temp_waiter = waiter;
-                let _ = temp_waiter.poll();
+                if observe_waiter_poll(&mut temp_waiter) == WaiterPollObservation::Ready {
+                    expected_stored_tokens = expected_stored_tokens.saturating_sub(1);
+                }
 
                 // Drop immediately
                 temp_waiter.drop_future();
@@ -333,18 +396,16 @@ fn test_empty_notify_waiters_scenario(
                         ));
                     }
 
-                    let stored_before = notify.stored_notifications.load(Ordering::Acquire);
                     notify.notify_waiters();
                     tracker.record_empty_notify_waiters();
 
-                    let stored_after = notify.stored_notifications.load(Ordering::Acquire);
-                    if stored_after > stored_before {
-                        tracker.record_invariant_violation();
-                        return Err(format!(
-                            "Repeated notify_waiters[{}] created stored notification: {} -> {}",
-                            i, stored_before, stored_after
-                        ));
-                    }
+                    let context = format!("Repeated notify_waiters[{}]", i);
+                    assert_empty_notify_waiters_did_not_store(
+                        &notify,
+                        &tracker,
+                        &mut expected_stored_tokens,
+                        &context,
+                    )?;
                 }
             }
 
@@ -360,30 +421,31 @@ fn test_empty_notify_waiters_scenario(
                         ));
                     }
 
-                    let stored_before = notify.stored_notifications.load(Ordering::Acquire);
-
                     if op % 2 == 0 {
                         notify.notify_waiters();
                         tracker.record_empty_notify_waiters();
 
-                        // notify_waiters should not create stored notifications
-                        let stored_after = notify.stored_notifications.load(Ordering::Acquire);
-                        if stored_after > stored_before {
-                            tracker.record_invariant_violation();
-                            return Err(format!(
-                                "Mixed notify_waiters[{}] created stored notification: {} -> {}",
-                                i, stored_before, stored_after
-                            ));
-                        }
+                        let context = format!("Mixed notify_waiters[{}]", i);
+                        assert_empty_notify_waiters_did_not_store(
+                            &notify,
+                            &tracker,
+                            &mut expected_stored_tokens,
+                            &context,
+                        )?;
                     } else {
-                        notify.notify_one();
+                        let notified_waiter = notify.notify_one();
                         tracker.record_empty_notify_one();
 
                         // notify_one should create stored notifications
-                        let stored_after = notify.stored_notifications.load(Ordering::Acquire);
-                        if stored_after >= stored_before {
-                            tracker.record_stored_notification_created();
+                        if notified_waiter {
+                            tracker.record_invariant_violation();
+                            return Err(format!(
+                                "Mixed notify_one[{}] reported a waiter notification with empty waiter set",
+                                i
+                            ));
                         }
+                        expected_stored_tokens = expected_stored_tokens.saturating_add(1);
+                        tracker.record_stored_token_created();
                     }
                 }
             }
@@ -392,18 +454,15 @@ fn test_empty_notify_waiters_scenario(
                 let id = *waiter_id % 10;
 
                 // Create waiter after empty notifications
-                if !waiters.contains_key(&id) {
-                    let waiter =
-                        TrackedWaiter::new(notify.clone(), id, Arc::new(EmptyNotifyTracker::new()));
-                    waiters.insert(id, waiter);
-                }
+                waiters
+                    .entry(id)
+                    .or_insert_with(|| TrackedWaiter::new(notify.clone(), id, tracker.clone()));
 
                 // Poll the waiter to see its initial state
                 if let Some(waiter) = waiters.get_mut(&id) {
-                    let poll_result = waiter.poll();
-
                     // Check if it's immediately ready (consumed stored notification)
-                    if poll_result.is_ready() {
+                    if observe_waiter_poll(waiter) == WaiterPollObservation::Ready {
+                        expected_stored_tokens = expected_stored_tokens.saturating_sub(1);
                         waiters.remove(&id);
                     }
                 }
@@ -431,8 +490,8 @@ fn test_empty_notify_waiters_scenario(
         // Always poll active waiters to make progress
         let mut to_remove = Vec::new();
         for (&id, waiter) in waiters.iter_mut() {
-            let _ = waiter.poll();
-            if waiter.is_completed() {
+            if observe_waiter_poll(waiter) == WaiterPollObservation::Ready {
+                expected_stored_tokens = expected_stored_tokens.saturating_sub(1);
                 to_remove.push(id);
             }
         }
@@ -461,10 +520,10 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    let tracker = EmptyNotifyTracker::new();
+    let tracker = Arc::new(EmptyNotifyTracker::new());
 
     // Test the empty notify_waiters scenario
-    if let Err(msg) = test_empty_notify_waiters_scenario(&config, &tracker) {
+    if let Err(msg) = test_empty_notify_waiters_scenario(&config, tracker.clone()) {
         panic!("Empty notify_waiters scenario test failed: {}", msg);
     }
 
@@ -472,10 +531,10 @@ fuzz_target!(|data: &[u8]| {
     if config.test_concurrency {
         use std::thread;
 
-        let tracker2 = EmptyNotifyTracker::new();
+        let tracker2 = Arc::new(EmptyNotifyTracker::new());
         let config2 = config.clone();
 
-        let handle = thread::spawn(move || test_empty_notify_waiters_scenario(&config2, &tracker2));
+        let handle = thread::spawn(move || test_empty_notify_waiters_scenario(&config2, tracker2));
 
         match handle.join() {
             Ok(Ok(())) => {
