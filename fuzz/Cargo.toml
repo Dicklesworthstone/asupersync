@@ -1585,6 +1585,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "unix_ancillary_state_machine"
+path = "fuzz_targets/unix_ancillary_state_machine.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "hpack_integer"
 path = "fuzz_targets/hpack_integer.rs"
 test = false

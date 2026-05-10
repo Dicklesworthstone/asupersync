@@ -72,11 +72,7 @@ fuzz_target!(|case: Case| {
                 anc.clear();
                 shadow_send.clear();
                 // Invariant 2: capacity preserved across clear.
-                assert_eq!(
-                    anc.capacity(),
-                    capacity,
-                    "clear() changed capacity",
-                );
+                assert_eq!(anc.capacity(), capacity, "clear() changed capacity",);
                 assert!(anc.is_empty(), "clear() did not empty SocketAncillary");
                 assert!(!anc.is_truncated(), "clear() did not reset truncated");
             }
