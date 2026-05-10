@@ -66,7 +66,13 @@ fuzz_target!(|scenario: Scenario| match scenario {
         repair_overhead,
         payload,
         object_id_raw,
-    } => fuzz_basic_encoding(symbol_size, max_block_size, repair_overhead, payload, object_id_raw),
+    } => fuzz_basic_encoding(
+        symbol_size,
+        max_block_size,
+        repair_overhead,
+        payload,
+        object_id_raw
+    ),
     Scenario::EmptyPayload {
         symbol_size,
         max_block_size,
@@ -124,7 +130,7 @@ fn fuzz_basic_encoding(
     object_id_raw: u64,
 ) {
     let config = sanitize_config(symbol_size, max_block_size, repair_overhead);
-    let mut pipeline = create_pipeline(config);
+    let mut pipeline = create_pipeline(config.clone());
     let payload = sanitize_payload(payload);
     let object_id = ObjectId::new_for_test(object_id_raw);
 
@@ -143,16 +149,20 @@ fn fuzz_basic_encoding(
                 assert!(symbol_data.len() <= config.symbol_size as usize);
 
                 // Symbol should have valid kind
-                let kind = symbol.symbol().id().kind();
+                let kind = symbol.symbol().kind();
                 assert!(matches!(kind, SymbolKind::Source | SymbolKind::Repair));
             }
 
             // If payload was not empty, we should have at least one source symbol
             if !payload.is_empty() {
-                let source_count = symbols.iter()
-                    .filter(|s| s.symbol().id().kind() == SymbolKind::Source)
+                let source_count = symbols
+                    .iter()
+                    .filter(|s| s.symbol().kind() == SymbolKind::Source)
                     .count();
-                assert!(source_count > 0, "Non-empty payload should generate at least one source symbol");
+                assert!(
+                    source_count > 0,
+                    "Non-empty payload should generate at least one source symbol"
+                );
             }
         }
         Err(_) => {
@@ -168,7 +178,7 @@ fn fuzz_empty_payload(
     object_id_raw: u64,
 ) {
     let config = sanitize_config(symbol_size, max_block_size, repair_overhead);
-    let mut pipeline = create_pipeline(config);
+    let mut pipeline = create_pipeline(config.clone());
     let object_id = ObjectId::new_for_test(object_id_raw);
 
     // Empty payload encoding should not crash
@@ -178,7 +188,10 @@ fn fuzz_empty_payload(
     match symbols {
         Ok(symbols) => {
             // Empty payload should produce no symbols
-            assert!(symbols.is_empty(), "Empty payload should produce no symbols");
+            assert!(
+                symbols.is_empty(),
+                "Empty payload should produce no symbols"
+            );
         }
         Err(_) => {
             // Configuration errors are acceptable
@@ -194,7 +207,7 @@ fn fuzz_oversized_payload(
     object_id_raw: u64,
 ) {
     let config = sanitize_config(symbol_size, max_block_size, repair_overhead);
-    let mut pipeline = create_pipeline(config);
+    let mut pipeline = create_pipeline(config.clone());
     let object_id = ObjectId::new_for_test(object_id_raw);
 
     // Create payload that exceeds reasonable limits
@@ -230,7 +243,7 @@ fn fuzz_edge_case_symbol_sizes(
     // Test very small symbol sizes (which should fail)
     let symbol_size = symbol_size.clamp(0, 16) as u16;
     let config = sanitize_config(symbol_size, max_block_size, repair_overhead);
-    let mut pipeline = create_pipeline(config);
+    let mut pipeline = create_pipeline(config.clone());
     let payload = sanitize_payload(payload);
     let object_id = ObjectId::new_for_test(object_id_raw);
 
@@ -260,7 +273,7 @@ fn fuzz_repair_symbol_count(
     object_id_raw: u64,
 ) {
     let config = sanitize_config(symbol_size, max_block_size, repair_overhead);
-    let mut pipeline = create_pipeline(config);
+    let mut pipeline = create_pipeline(config.clone());
     let payload = sanitize_payload(payload);
     let object_id = ObjectId::new_for_test(object_id_raw);
     let repair_count = explicit_repair_count.clamp(0, 32) as usize;
@@ -271,11 +284,13 @@ fn fuzz_repair_symbol_count(
 
     match symbols {
         Ok(symbols) => {
-            let source_count = symbols.iter()
-                .filter(|s| s.symbol().id().kind() == SymbolKind::Source)
+            let source_count = symbols
+                .iter()
+                .filter(|s| s.symbol().kind() == SymbolKind::Source)
                 .count();
-            let _repair_count_actual = symbols.iter()
-                .filter(|s| s.symbol().id().kind() == SymbolKind::Repair)
+            let _repair_count_actual = symbols
+                .iter()
+                .filter(|s| s.symbol().kind() == SymbolKind::Repair)
                 .count();
 
             // Basic sanity checks
@@ -286,7 +301,10 @@ fn fuzz_repair_symbol_count(
 
             // If we have a non-empty payload, we should have source symbols
             if !payload.is_empty() {
-                assert!(source_count > 0, "Non-empty payload should generate source symbols");
+                assert!(
+                    source_count > 0,
+                    "Non-empty payload should generate source symbols"
+                );
             }
         }
         Err(_) => {
@@ -297,10 +315,7 @@ fn fuzz_repair_symbol_count(
 
 fn sanitize_config(symbol_size: u16, max_block_size: u16, repair_overhead: u8) -> EncodingConfig {
     let symbol_size = symbol_size.clamp(1, MAX_SYMBOL_SIZE).max(1);
-    let max_block_size = (max_block_size as usize).clamp(
-        symbol_size as usize,
-        MAX_MAX_BLOCK_SIZE
-    );
+    let max_block_size = (max_block_size as usize).clamp(symbol_size as usize, MAX_MAX_BLOCK_SIZE);
     let repair_overhead = (repair_overhead as f64 / 255.0)
         * (MAX_REPAIR_OVERHEAD - MIN_REPAIR_OVERHEAD)
         + MIN_REPAIR_OVERHEAD;
