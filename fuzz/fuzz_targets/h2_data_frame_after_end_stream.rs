@@ -127,14 +127,7 @@ fuzz_target!(|data: &[u8]| {
 fn test_data_after_end_stream(test_case: &FrameSequenceTest) {
     let stream_id = normalize_stream_id(test_case.stream_id);
 
-    // Create mock connection and codec
-    let connection_result =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(create_mock_h2_connection));
-
-    let mut connection = match connection_result {
-        Ok(conn) => conn,
-        Err(_) => return, // Connection creation failed
-    };
+    let mut connection = create_mock_h2_connection_or_panic("DATA after END_STREAM main scenario");
 
     // Step 1: Set up the stream with normal frames
     for step in &test_case.setup_frames {
@@ -175,7 +168,10 @@ fn test_data_after_end_stream(test_case: &FrameSequenceTest) {
             send_violating_frame(&mut connection, stream_id, post_frame)
         }));
 
-        assert!(violation_result.is_ok(), "Violating frame should not panic");
+        assert!(
+            violation_result.is_ok(),
+            "violating frame panicked after END_STREAM: stream_id={stream_id}, frame={post_frame:?}"
+        );
 
         if let Ok(error_result) = violation_result {
             // Should return STREAM_CLOSED error
@@ -215,13 +211,8 @@ fn test_stream_state_edge_cases(test_case: &FrameSequenceTest) {
 
 /// Test immediate DATA frame after HEADERS with END_STREAM
 fn test_immediate_data_after_headers_end_stream(stream_id: u32) {
-    let connection_result =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(create_mock_h2_connection));
-
-    let mut connection = match connection_result {
-        Ok(conn) => conn,
-        Err(_) => return,
-    };
+    let mut connection =
+        create_mock_h2_connection_or_panic("immediate DATA after HEADERS END_STREAM");
 
     // Send HEADERS with END_STREAM
     let headers_frame = create_headers_frame(stream_id, true);
@@ -249,13 +240,7 @@ fn test_immediate_data_after_headers_end_stream(stream_id: u32) {
 
 /// Test multiple END_STREAM violations
 fn test_multiple_end_stream_violations(stream_id: u32) {
-    let connection_result =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(create_mock_h2_connection));
-
-    let mut connection = match connection_result {
-        Ok(conn) => conn,
-        Err(_) => return,
-    };
+    let mut connection = create_mock_h2_connection_or_panic("multiple END_STREAM violations");
 
     // Close stream with HEADERS carrying END_STREAM so later frames are tested
     // against a confirmed half-closed-remote stream.
@@ -289,13 +274,7 @@ fn test_data_after_rst_stream(stream_id: u32, post_frames: &[PostEndStreamFrame]
         return;
     }
 
-    let connection_result =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(create_mock_h2_connection));
-
-    let mut connection = match connection_result {
-        Ok(conn) => conn,
-        Err(_) => return,
-    };
+    let mut connection = create_mock_h2_connection_or_panic("DATA after RST_STREAM");
 
     // Send RST_STREAM to forcibly close stream
     let rst_frame = RstStreamFrame {
@@ -338,13 +317,7 @@ fn test_data_after_rst_stream(stream_id: u32, post_frames: &[PostEndStreamFrame]
 fn test_concurrent_stream_operations(test_case: &FrameSequenceTest) {
     let main_stream_id = normalize_stream_id(test_case.stream_id);
 
-    let connection_result =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(create_mock_h2_connection));
-
-    let mut connection = match connection_result {
-        Ok(conn) => conn,
-        Err(_) => return,
-    };
+    let mut connection = create_mock_h2_connection_or_panic("concurrent stream operations");
 
     // Close main stream
     let close_frame = create_headers_frame(main_stream_id, true);
@@ -394,13 +367,7 @@ fn test_malformed_frame_sequences(test_case: &FrameSequenceTest) {
 
 /// Test frames with invalid stream ID
 fn test_invalid_stream_id_frames() {
-    let connection_result =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(create_mock_h2_connection));
-
-    let mut connection = match connection_result {
-        Ok(conn) => conn,
-        Err(_) => return,
-    };
+    let mut connection = create_mock_h2_connection_or_panic("invalid stream-id frames");
 
     // DATA frame with stream ID 0 (invalid)
     let invalid_frame = create_data_frame(0, b"invalid".to_vec(), false);
@@ -416,13 +383,7 @@ fn test_invalid_stream_id_frames() {
 
 /// Test frames with oversized payloads
 fn test_oversized_payload_frames(stream_id: u32) {
-    let connection_result =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(create_mock_h2_connection));
-
-    let mut connection = match connection_result {
-        Ok(conn) => conn,
-        Err(_) => return,
-    };
+    let mut connection = create_mock_h2_connection_or_panic("oversized payload frames");
 
     // Very large DATA frame
     let large_payload = vec![0u8; 100_000]; // 100KB payload
@@ -439,13 +400,7 @@ fn test_reserved_stream_ids(post_frames: &[PostEndStreamFrame]) {
         return;
     }
 
-    let connection_result =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(create_mock_h2_connection));
-
-    let mut connection = match connection_result {
-        Ok(conn) => conn,
-        Err(_) => return,
-    };
+    let mut connection = create_mock_h2_connection_or_panic("reserved stream-id frames");
 
     // Test with reserved stream IDs (even numbers are server-initiated)
     let reserved_stream_ids = [2, 4, 8, 0x80000000u32];
@@ -476,6 +431,15 @@ struct MockConnection {
 fn create_mock_h2_connection() -> MockConnection {
     MockConnection {
         stream_states: std::collections::HashMap::new(),
+    }
+}
+
+fn create_mock_h2_connection_or_panic(context: &str) -> MockConnection {
+    let connection_result =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(create_mock_h2_connection));
+    match connection_result {
+        Ok(connection) => connection,
+        Err(_) => panic!("create_mock_h2_connection panicked during {context}"),
     }
 }
 
