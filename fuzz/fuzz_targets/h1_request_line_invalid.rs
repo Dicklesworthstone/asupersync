@@ -2,7 +2,6 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashMap;
 
 /// Fuzz target for HTTP/1.1 request line validation.
 ///
@@ -42,7 +41,6 @@ enum RequestParseResult {
 
 #[derive(Debug, Clone, PartialEq)]
 enum RequestError {
-    MalformedLine,
     InvalidMethod(String),
     InvalidTarget(String),
     InvalidVersion(String),
@@ -135,10 +133,10 @@ impl MockRequestLineParser {
         self.stats.lines_parsed += 1;
 
         // Remove trailing CRLF
-        let line = if line.ends_with("\r\n") {
-            &line[..line.len() - 2]
-        } else if line.ends_with('\n') {
-            &line[..line.len() - 1]
+        let line = if let Some(stripped) = line.strip_suffix("\r\n") {
+            stripped
+        } else if let Some(stripped) = line.strip_suffix('\n') {
+            stripped
         } else {
             line
         };
@@ -202,7 +200,7 @@ impl MockRequestLineParser {
     }
 
     /// Validate HTTP method per RFC 9112
-    fn validate_method(&self, method: &str) -> Result<(), RequestError> {
+    fn validate_method(&mut self, method: &str) -> Result<(), RequestError> {
         if method.is_empty() {
             return Err(RequestError::InvalidMethod("Empty method".to_string()));
         }
@@ -265,7 +263,7 @@ impl MockRequestLineParser {
     }
 
     /// Validate request target per RFC 9112
-    fn validate_target(&self, target: &str) -> Result<(), RequestError> {
+    fn validate_target(&mut self, target: &str) -> Result<(), RequestError> {
         if target.is_empty() {
             return Err(RequestError::InvalidTarget("Empty target".to_string()));
         }
@@ -276,11 +274,9 @@ impl MockRequestLineParser {
 
         // Check for control characters
         for c in target.chars() {
-            if c.is_control() && c != '\t' {
-                if !self.policy.allow_control_chars_in_target {
-                    self.stats.security_violations += 1;
-                    return Err(RequestError::ControlCharacters);
-                }
+            if c.is_control() && c != '\t' && !self.policy.allow_control_chars_in_target {
+                self.stats.security_violations += 1;
+                return Err(RequestError::ControlCharacters);
             }
         }
 
@@ -362,13 +358,13 @@ impl MockRequestLineParser {
                 // Check other ambiguous cases
 
                 // Method case sensitivity
-                if request.method.chars().any(|c| c.is_lowercase()) {
-                    if matches!(
+                if request.method.chars().any(|c| c.is_lowercase())
+                    && matches!(
                         request.method.to_uppercase().as_str(),
                         "GET" | "POST" | "PUT" | "DELETE" | "HEAD" | "OPTIONS" | "PATCH"
-                    ) {
-                        return Some("Method should be uppercase".to_string());
-                    }
+                    )
+                {
+                    return Some("Method should be uppercase".to_string());
                 }
 
                 // Target with unusual characters
@@ -557,7 +553,7 @@ fuzz_target!(|data: &[u8]| {
     let result = parser.parse_request_line(&request_line);
 
     // Validate result consistency
-    match result {
+    match &result {
         Ok(RequestParseResult::Valid(request)) => {
             // Valid requests should have reasonable properties
             assert!(!request.method.is_empty(), "Valid method cannot be empty");
@@ -618,9 +614,7 @@ fuzz_target!(|data: &[u8]| {
         Err(error) => {
             // Direct parsing errors
             match error {
-                RequestError::MissingComponents
-                | RequestError::ExtraWhitespace
-                | RequestError::MalformedLine => {
+                RequestError::MissingComponents | RequestError::ExtraWhitespace => {
                     // Expected for malformed input
                 }
                 _ => {

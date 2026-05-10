@@ -5213,6 +5213,7 @@ name = "h1_request_line_invalid"
 path = "fuzz_targets/h1_request_line_invalid.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_settings_initial_window_size_change"
