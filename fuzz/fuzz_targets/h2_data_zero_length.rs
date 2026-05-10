@@ -64,7 +64,6 @@ enum FollowUpFrame {
 struct MockZeroDataConnection {
     stream_states: HashMap<u32, StreamState>,
     connection_error: Option<u32>,
-    flow_control_window: HashMap<u32, i32>, // Per-stream flow control windows
     connection_window: i32,
     zero_data_frames_received: Vec<ZeroDataFrameInfo>,
     protocol_violations: Vec<String>,
@@ -93,7 +92,6 @@ struct StreamState {
 enum StreamStateEnum {
     Open,
     HalfClosedRemote,
-    HalfClosedLocal,
     Closed,
 }
 
@@ -103,8 +101,6 @@ const FRAME_TYPE_HEADERS: u8 = 0x1;
 const FRAME_TYPE_PRIORITY: u8 = 0x2;
 const FRAME_TYPE_RST_STREAM: u8 = 0x3;
 const FRAME_TYPE_SETTINGS: u8 = 0x4;
-const FRAME_TYPE_PING: u8 = 0x6;
-const FRAME_TYPE_GOAWAY: u8 = 0x7;
 const FRAME_TYPE_WINDOW_UPDATE: u8 = 0x8;
 
 /// HTTP/2 frame flags
@@ -125,7 +121,6 @@ impl MockZeroDataConnection {
         Self {
             stream_states: HashMap::new(),
             connection_error: None,
-            flow_control_window: HashMap::new(),
             connection_window: INITIAL_WINDOW_SIZE,
             zero_data_frames_received: Vec::new(),
             protocol_violations: Vec::new(),
@@ -266,14 +261,8 @@ impl MockZeroDataConnection {
 
         if end_stream {
             stream_state.ended_remotely = true;
-            match stream_state.state {
-                StreamStateEnum::Open => {
-                    stream_state.state = StreamStateEnum::HalfClosedRemote;
-                }
-                StreamStateEnum::HalfClosedLocal => {
-                    stream_state.state = StreamStateEnum::Closed;
-                }
-                _ => {}
+            if stream_state.state == StreamStateEnum::Open {
+                stream_state.state = StreamStateEnum::HalfClosedRemote;
             }
         }
     }
@@ -299,14 +288,8 @@ impl MockZeroDataConnection {
         let end_stream = (flags & FLAG_END_STREAM) != 0;
         if end_stream {
             stream_state.ended_remotely = true;
-            match stream_state.state {
-                StreamStateEnum::Open => {
-                    stream_state.state = StreamStateEnum::HalfClosedRemote;
-                }
-                StreamStateEnum::HalfClosedLocal => {
-                    stream_state.state = StreamStateEnum::Closed;
-                }
-                _ => {}
+            if stream_state.state == StreamStateEnum::Open {
+                stream_state.state = StreamStateEnum::HalfClosedRemote;
             }
         }
     }
@@ -323,7 +306,6 @@ impl MockZeroDataConnection {
             self.connection_error = Some(PROTOCOL_ERROR);
             self.protocol_violations
                 .push("PRIORITY frame with stream ID 0".to_string());
-            return;
         }
 
         // PRIORITY frames don't affect stream state for zero-length DATA testing
@@ -351,11 +333,10 @@ impl MockZeroDataConnection {
     }
 
     fn process_settings_frame(&mut self, payload: &[u8]) {
-        if payload.len() % 6 != 0 {
+        if !payload.len().is_multiple_of(6) {
             self.connection_error = Some(PROTOCOL_ERROR);
             self.protocol_violations
                 .push("SETTINGS frame with invalid length".to_string());
-            return;
         }
         // SETTINGS frames don't affect zero-length DATA testing
     }

@@ -5147,6 +5147,7 @@ name = "h2_data_zero_length"
 path = "fuzz_targets/h2_data_zero_length.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_settings_invalid_value"
