@@ -20,11 +20,12 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
-use asupersync::codec::{Decoder, LengthDelimitedCodec};
 use asupersync::bytes::BytesMut;
+use asupersync::codec::{Decoder, LengthDelimitedCodec};
+use libfuzzer_sys::fuzz_target;
 use std::collections::VecDeque;
+use std::fmt::Display;
 
 /// Maximum iterations to prevent infinite loops
 const MAX_DECODE_ITERATIONS: usize = 1000;
@@ -34,29 +35,29 @@ const MAX_TOTAL_DATA: usize = 1_000_000;
 #[derive(Arbitrary, Debug, Clone)]
 struct FramingConfig {
     /// Length field configuration
-    length_field_offset: u8,        // 0..=32
-    length_field_length: u8,        // 1..=8
-    length_adjustment: i16,         // Adjustment to length value
-    num_skip: u8,                   // Skip bytes after header
-    max_frame_length: u16,          // Maximum allowed frame
-    big_endian: bool,               // Byte order
+    length_field_offset: u8, // 0..=32
+    length_field_length: u8, // 1..=8
+    length_adjustment: i16,  // Adjustment to length value
+    num_skip: u8,            // Skip bytes after header
+    max_frame_length: u16,   // Maximum allowed frame
+    big_endian: bool,        // Byte order
 
     /// Protocol version (for version mismatch testing)
     protocol_version: u8,
 
     /// Multiplexing configuration
-    stream_id_offset: u8,           // Offset for stream ID field
-    enable_checksum: bool,          // Include checksum fields
+    stream_id_offset: u8, // Offset for stream ID field
+    enable_checksum: bool, // Include checksum fields
 
     /// State machine stress testing
-    induce_parse_errors: bool,      // Intentionally corrupt length fields
-    fragment_reassembly: bool,      // Test fragmented frame handling
+    induce_parse_errors: bool, // Intentionally corrupt length fields
+    fragment_reassembly: bool, // Test fragmented frame handling
 }
 
 #[derive(Arbitrary, Debug, Clone)]
 struct FrameOperation {
     /// Type of operation to perform
-    op_type: u8,  // 0 = normal frame, 1 = corrupt length, 2 = inject bytes, 3 = truncate
+    op_type: u8, // 0 = normal frame, 1 = corrupt length, 2 = inject bytes, 3 = truncate
 
     /// Frame data
     frame_data: Vec<u8>,
@@ -71,11 +72,11 @@ struct FrameOperation {
 #[derive(Arbitrary, Debug)]
 struct FragmentationStrategy {
     /// How to split frames across chunks
-    chunk_sizes: Vec<u16>,          // Variable chunk sizes
-    interleave_noise: bool,         // Add noise between chunks
-    drop_chunks: bool,              // Randomly drop chunks
-    reorder_chunks: bool,           // Reorder chunks
-    duplicate_chunks: bool,         // Duplicate some chunks
+    chunk_sizes: Vec<u16>, // Variable chunk sizes
+    interleave_noise: bool, // Add noise between chunks
+    drop_chunks: bool,      // Randomly drop chunks
+    reorder_chunks: bool,   // Reorder chunks
+    duplicate_chunks: bool, // Duplicate some chunks
 }
 
 #[derive(Arbitrary, Debug)]
@@ -165,7 +166,8 @@ fn test_corruption_recovery(mut config: FramingConfig, operations: &[FrameOperat
     }
 
     // Build codec
-    let length_field_length = std::cmp::max(1, std::cmp::min(8, config.length_field_length as usize));
+    let length_field_length =
+        std::cmp::max(1, std::cmp::min(8, config.length_field_length as usize));
     let length_field_offset = std::cmp::min(32, config.length_field_offset as usize);
     let max_frame_length = std::cmp::max(1, config.max_frame_length as usize);
 
@@ -186,7 +188,8 @@ fn test_corruption_recovery(mut config: FramingConfig, operations: &[FrameOperat
     let mut buf = BytesMut::new();
 
     // Apply operations to test state transitions
-    for op in operations.iter().take(10) { // Limit operations
+    for op in operations.iter().take(10) {
+        // Limit operations
         match op.op_type % 4 {
             0 => {
                 // Normal frame - construct valid length-prefixed frame
@@ -206,7 +209,12 @@ fn test_corruption_recovery(mut config: FramingConfig, operations: &[FrameOperat
             }
             2 => {
                 // Inject random bytes at arbitrary position
-                let injection_data = &op.injection_data.iter().take(100).copied().collect::<Vec<_>>();
+                let injection_data = &op
+                    .injection_data
+                    .iter()
+                    .take(100)
+                    .copied()
+                    .collect::<Vec<_>>();
                 if !injection_data.is_empty() && buf.len() < MAX_CHUNK_SIZE {
                     let injection_point = if buf.is_empty() {
                         0
@@ -258,7 +266,8 @@ fn test_corruption_recovery(mut config: FramingConfig, operations: &[FrameOperat
 
 /// Construct a valid length-prefixed frame
 fn construct_valid_frame(buf: &mut BytesMut, payload: &[u8], config: &FramingConfig) {
-    let length_field_length = std::cmp::max(1, std::cmp::min(8, config.length_field_length as usize));
+    let length_field_length =
+        std::cmp::max(1, std::cmp::min(8, config.length_field_length as usize));
     let length_field_offset = std::cmp::min(32, config.length_field_offset as usize);
 
     // Add padding to reach length field offset
@@ -308,8 +317,11 @@ fn test_protocol_version_mismatch(config: &FramingConfig, data: &[u8]) {
     let mut codec = LengthDelimitedCodec::new();
     let mut buf = versioned_data;
 
-    // Should not panic regardless of version byte
-    let _ = codec.decode(&mut buf);
+    observe_decode_outcome(
+        codec.decode(&mut buf),
+        "protocol version mismatch",
+        MAX_TOTAL_DATA,
+    );
 }
 
 /// Test resource exhaustion scenarios
@@ -321,9 +333,9 @@ fn test_resource_exhaustion(config: &FramingConfig, data: &[u8]) {
 
     // Test with various large frame configurations
     let large_configs = [
-        (1, 1_000_000),    // Large max frame
-        (8, 100_000),      // Large length field
-        (0, 50_000),       // No offset, medium frame
+        (1, 1_000_000), // Large max frame
+        (8, 100_000),   // Large length field
+        (0, 50_000),    // No offset, medium frame
     ];
 
     for (offset, max_frame) in large_configs {
@@ -354,6 +366,37 @@ fn test_resource_exhaustion(config: &FramingConfig, data: &[u8]) {
     }
 }
 
+fn observe_decode_outcome<E: Display>(
+    result: Result<Option<BytesMut>, E>,
+    context: &str,
+    max_frame_len: usize,
+) {
+    match result {
+        Ok(Some(frame)) => {
+            assert!(
+                frame.len() <= max_frame_len,
+                "{context} decoded oversized frame: {} > {}",
+                frame.len(),
+                max_frame_len
+            );
+            std::hint::black_box((context, frame.len()));
+        }
+        Ok(None) => {
+            std::hint::black_box((context, "pending"));
+        }
+        Err(error) => {
+            let message = error.to_string();
+            assert!(!message.is_empty(), "{context} returned an empty error");
+            assert!(
+                message.len() <= 4096,
+                "{context} returned an oversized error: {} bytes",
+                message.len()
+            );
+            std::hint::black_box((context, message));
+        }
+    }
+}
+
 fuzz_target!(|input: FuzzInput| {
     // Guard against excessively large inputs
     if input.raw_data.len() > MAX_TOTAL_DATA {
@@ -361,7 +404,10 @@ fuzz_target!(|input: FuzzInput| {
     }
 
     // Test 1: Basic codec fuzzing with configuration variations
-    let length_field_length = std::cmp::max(1, std::cmp::min(8, input.config.length_field_length as usize));
+    let length_field_length = std::cmp::max(
+        1,
+        std::cmp::min(8, input.config.length_field_length as usize),
+    );
     let length_field_offset = std::cmp::min(32, input.config.length_field_offset as usize);
     let max_frame_length = std::cmp::max(1, input.config.max_frame_length as usize);
 
@@ -399,9 +445,11 @@ fuzz_target!(|input: FuzzInput| {
 
     // Test 2: Fragmented parsing with variable chunk sizes
     if !input.fragmentation.chunk_sizes.is_empty() {
-        let chunk_sizes: Vec<u16> = input.fragmentation.chunk_sizes
+        let chunk_sizes: Vec<u16> = input
+            .fragmentation
+            .chunk_sizes
             .iter()
-            .take(20)  // Limit chunks
+            .take(20) // Limit chunks
             .map(|&size| std::cmp::max(1, std::cmp::min(MAX_CHUNK_SIZE as u16, size)))
             .collect();
 
@@ -450,9 +498,16 @@ fuzz_target!(|input: FuzzInput| {
         let mut buf1 = BytesMut::from(&input.raw_data[..input.raw_data.len() / 2]);
         let mut buf2 = BytesMut::from(&input.raw_data[input.raw_data.len() / 2..]);
 
-        // Decode from both streams
-        let _ = codec1.decode(&mut buf1);
-        let _ = codec2.decode(&mut buf2);
+        observe_decode_outcome(
+            codec1.decode(&mut buf1),
+            "multiplexed stream 1",
+            MAX_TOTAL_DATA,
+        );
+        observe_decode_outcome(
+            codec2.decode(&mut buf2),
+            "multiplexed stream 2",
+            MAX_TOTAL_DATA,
+        );
     }
 
     // Test 8: Edge cases
@@ -467,7 +522,11 @@ fuzz_target!(|input: FuzzInput| {
     if !input.raw_data.is_empty() {
         let mut single_codec = LengthDelimitedCodec::new();
         let mut single_buf = BytesMut::from(&input.raw_data[..1]);
-        let _ = single_codec.decode(&mut single_buf);
+        observe_decode_outcome(
+            single_codec.decode(&mut single_buf),
+            "single byte buffer",
+            MAX_TOTAL_DATA,
+        );
     }
 
     // Large length field edge case
@@ -477,6 +536,10 @@ fuzz_target!(|input: FuzzInput| {
             .max_frame_length(1_000_000)
             .new_codec();
         let mut large_buf = BytesMut::from(&input.raw_data[..]);
-        let _ = large_field_codec.decode(&mut large_buf);
+        observe_decode_outcome(
+            large_field_codec.decode(&mut large_buf),
+            "large length field",
+            1_000_000,
+        );
     }
 });
