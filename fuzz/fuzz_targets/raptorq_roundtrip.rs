@@ -24,18 +24,15 @@
 
 #![no_main]
 
-use arbitrary::Arbitrary;
+use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 
 use asupersync::config::EncodingConfig;
-use asupersync::decoding::{DecodingConfig, DecodingPipeline};
+use asupersync::decoding::{DecodingConfig, DecodingPipeline, SymbolAcceptResult};
 use asupersync::encoding::{EncodingError, EncodingPipeline};
-use asupersync::security::SecurityContext;
 use asupersync::security::{AuthenticatedSymbol, tag::AuthenticationTag};
-use asupersync::types::resource::SymbolPool;
-use asupersync::types::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
-
-use std::collections::{HashMap, HashSet};
+use asupersync::types::resource::{PoolConfig, SymbolPool};
+use asupersync::types::{ObjectId, ObjectParams, Symbol};
 use std::time::Duration;
 
 /// Maximum source data size for fuzzing (prevents OOM)
@@ -147,7 +144,7 @@ fn execute_roundtrip(input: &RaptorQRoundtripInput) -> Result<RoundtripResult, S
     }
 
     // Calculate number of source symbols (K parameter)
-    let k = (input.source_data.len() + input.symbol_size as usize - 1) / input.symbol_size as usize;
+    let k = input.source_data.len().div_ceil(input.symbol_size as usize);
 
     // Assertion 5: K parameter within supported range
     if k == 0 || k > MAX_SOURCE_SYMBOLS {
@@ -176,28 +173,31 @@ fn execute_roundtrip(input: &RaptorQRoundtripInput) -> Result<RoundtripResult, S
     };
 
     // Create symbol pool
-    let pool = SymbolPool::with_capacity(1000, input.symbol_size as usize)
-        .map_err(|e| format!("Failed to create symbol pool: {:?}", e))?;
+    let pool = SymbolPool::new(PoolConfig::new(input.symbol_size, 0, 0, false, 0));
 
     // Create encoding pipeline
     let mut encoder = EncodingPipeline::new(encoding_config.clone(), pool);
+    let object_id = ObjectId::new_for_test(1);
 
     // Encode the source data
-    let encoded_symbols = match encoder.encode(&input.source_data) {
-        Ok(symbols) => symbols,
-        Err(EncodingError::DataTooLarge { size, limit }) => {
-            return Ok(RoundtripResult {
-                encoding_success: false,
-                decoding_success: false,
-                data_matches: false,
-                symbols_encoded: 0,
-                symbols_available: 0,
-                symbols_used: 0,
-                error: Some(format!("Data too large: {} > {}", size, limit)),
-            });
+    let mut encoded_symbols = Vec::new();
+    for encoded in encoder.encode(object_id, &input.source_data) {
+        match encoded {
+            Ok(symbol) => encoded_symbols.push(symbol.into_symbol()),
+            Err(EncodingError::DataTooLarge { size, limit }) => {
+                return Ok(RoundtripResult {
+                    encoding_success: false,
+                    decoding_success: false,
+                    data_matches: false,
+                    symbols_encoded: 0,
+                    symbols_available: 0,
+                    symbols_used: 0,
+                    error: Some(format!("Data too large: {size} > {limit}")),
+                });
+            }
+            Err(e) => return Err(format!("Encoding failed: {e:?}")),
         }
-        Err(e) => return Err(format!("Encoding failed: {:?}", e)),
-    };
+    }
 
     // Simulate network conditions (loss and reordering)
     let received_symbols = simulate_network(&encoded_symbols, &input.simulation);
@@ -221,54 +221,65 @@ fn execute_roundtrip(input: &RaptorQRoundtripInput) -> Result<RoundtripResult, S
     let mut decoder = DecodingPipeline::new(decoding_config);
 
     // Create object parameters for decoding
-    let object_id = ObjectId::new_for_test(1);
+    let source_blocks = input
+        .source_data
+        .len()
+        .div_ceil(encoding_config.max_block_size);
+    let source_blocks = u16::try_from(source_blocks)
+        .map_err(|_| format!("Source block count {source_blocks} does not fit u16"))?;
+    let symbols_per_block =
+        u16::try_from(k).map_err(|_| format!("K parameter {k} does not fit u16"))?;
     let object_params = ObjectParams::new(
         object_id,
         input.source_data.len() as u64,
         input.symbol_size,
-        1, // Single block
-        k,
+        source_blocks,
+        symbols_per_block,
     );
+    decoder
+        .set_object_params(object_params)
+        .map_err(|e| format!("Decoder rejected object params: {e:?}"))?;
 
     // Feed received symbols to decoder
     let mut symbols_used = 0;
     for symbol in &received_symbols {
         let authenticated_symbol =
-            AuthenticatedSymbol::new_verified(symbol.clone(), AuthenticationTag::zero());
+            AuthenticatedSymbol::from_parts(symbol.clone(), AuthenticationTag::zero());
 
-        match decoder.add_symbol(&authenticated_symbol) {
-            Ok(_) => symbols_used += 1,
-            Err(_) => {} // Symbol was rejected, continue
+        let accept = decoder
+            .feed(authenticated_symbol)
+            .map_err(|e| format!("Decoder feed failed unexpectedly: {e:?}"))?;
+        match accept {
+            SymbolAcceptResult::Accepted { .. }
+            | SymbolAcceptResult::DecodingStarted { .. }
+            | SymbolAcceptResult::BlockComplete { .. } => {
+                symbols_used = decoder.progress().symbols_received;
+            }
+            SymbolAcceptResult::Duplicate | SymbolAcceptResult::Rejected(_) => {}
         }
 
-        // Check if we can decode yet
-        if decoder.can_decode(&object_params) {
+        if decoder.is_complete() {
             break;
         }
     }
 
     // Attempt to decode
-    let decoded_data = match decoder.decode(&object_params) {
+    let decoded_data = match decoder.into_data() {
         Ok(data) => data,
         Err(e) => {
-            // If loss rate was too high, this is expected
-            if loss_rate > expected_loss_threshold {
-                return Ok(RoundtripResult {
-                    encoding_success: true,
-                    decoding_success: false,
-                    data_matches: false,
-                    symbols_encoded: encoded_symbols.len(),
-                    symbols_available: received_symbols.len(),
-                    symbols_used,
-                    error: Some(format!(
-                        "Decoding failed with high loss rate {:.1}%: {:?}",
-                        loss_rate * 100.0,
-                        e
-                    )),
-                });
-            } else {
-                return Err(format!("Decoding failed unexpectedly: {:?}", e));
-            }
+            return Ok(RoundtripResult {
+                encoding_success: true,
+                decoding_success: false,
+                data_matches: false,
+                symbols_encoded: encoded_symbols.len(),
+                symbols_available: received_symbols.len(),
+                symbols_used,
+                error: Some(format!(
+                    "Decoding incomplete at {:.1}% observed loss (configured threshold {:.1}%): {e:?}",
+                    loss_rate * 100.0,
+                    expected_loss_threshold * 100.0
+                )),
+            });
         }
     };
 
@@ -315,16 +326,19 @@ fn simulate_network(encoded_symbols: &[Symbol], simulation: &NetworkSimulation) 
     received_symbols
 }
 
-fuzz_target!(|mut input: RaptorQRoundtripInput| {
+fuzz_target!(|data: &[u8]| {
+    let mut u = Unstructured::new(data);
+    let Ok(mut input) = RaptorQRoundtripInput::arbitrary(&mut u) else {
+        return;
+    };
+
     normalize_input(&mut input);
 
     // Execute the roundtrip test
     let result = match execute_roundtrip(&input) {
         Ok(result) => result,
         Err(e) => {
-            // Unexpected errors should not panic - this could indicate bugs
-            eprintln!("Unexpected roundtrip error: {}", e);
-            return;
+            panic!("Unexpected RaptorQ roundtrip error: {e}");
         }
     };
 
@@ -389,6 +403,13 @@ fuzz_target!(|mut input: RaptorQRoundtripInput| {
     }
 
     // Additional global invariants
+    if let Some(error) = &result.error {
+        assert!(
+            !result.encoding_success || !result.decoding_success,
+            "Successful roundtrip recorded an error: {error}"
+        );
+    }
+
     if result.encoding_success && result.decoding_success {
         // If both encoding and decoding succeeded, data must match
         assert!(
@@ -472,8 +493,7 @@ mod tests {
             scenario: TestScenario::BoundaryConditions,
         };
 
-        let k =
-            (input.source_data.len() + input.symbol_size as usize - 1) / input.symbol_size as usize;
+        let k = input.source_data.len().div_ceil(input.symbol_size as usize);
         if k == 0 || k > MAX_SOURCE_SYMBOLS {
             let result = execute_roundtrip(&input).unwrap();
             assert!(
