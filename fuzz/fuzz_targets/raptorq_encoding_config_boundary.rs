@@ -2,15 +2,22 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashMap;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use asupersync::codec::raptorq::{EncodingConfig, EncodingPipeline};
-use asupersync::types::{ObjectId, resource::{PoolConfig, SymbolPool}};
+use asupersync::codec::raptorq::{EncodingConfig, EncodingError, EncodingPipeline};
+use asupersync::types::{
+    ObjectId, SymbolKind,
+    resource::{PoolConfig, SymbolPool},
+};
 
 /// Maximum input size to prevent OOM during fuzzing
 const MAX_INPUT_SIZE: usize = 16 * 1024;
 /// Maximum data size to test block planning arithmetic
 const MAX_DATA_SIZE: usize = 1024 * 1024;
+/// Maximum buffers preallocated by arbitrary pool configs.
+const MAX_POOL_BUFFERS: usize = 64;
+/// Maximum buffers added by one arbitrary pool growth step.
+const MAX_POOL_GROWTH: usize = 16;
 
 /// Structure-aware fuzzer for RaptorQ encoder configuration boundary cases.
 ///
@@ -76,6 +83,8 @@ struct FuzzPoolConfig {
     max_size: u32,
     /// Whether to allow growth
     allow_growth: bool,
+    /// Number of buffers to add when growing
+    growth_increment: u32,
 }
 
 /// Data patterns designed to trigger boundary conditions
@@ -102,7 +111,11 @@ impl DataPattern {
             DataPattern::Empty => Vec::new(),
             DataPattern::SingleByte { byte } => vec![*byte],
             DataPattern::MaxSourceBlocks { symbol_size } => {
-                let symbol_size = if *symbol_size == 0 { 1 } else { *symbol_size as usize };
+                let symbol_size = if *symbol_size == 0 {
+                    usize::from(fallback_symbol_size.max(1))
+                } else {
+                    usize::from(*symbol_size)
+                };
                 // Generate data that would require exactly 256 blocks
                 let target_size = symbol_size * 256;
                 vec![0x42; target_size.min(MAX_DATA_SIZE)]
@@ -113,8 +126,15 @@ impl DataPattern {
                 let total = base_size + (*excess_bytes as usize);
                 vec![0x69; total.min(MAX_DATA_SIZE)]
             }
-            DataPattern::DivCeilEdge { symbol_size, target_k } => {
-                let symbol_size = if *symbol_size == 0 { 1 } else { *symbol_size as usize };
+            DataPattern::DivCeilEdge {
+                symbol_size,
+                target_k,
+            } => {
+                let symbol_size = if *symbol_size == 0 {
+                    usize::from(fallback_symbol_size.max(1))
+                } else {
+                    usize::from(*symbol_size)
+                };
                 // Generate data that tests div_ceil edge cases
                 let target_size = symbol_size * (*target_k as usize);
                 // Add 1 byte to trigger the ceiling behavior
@@ -129,12 +149,14 @@ impl DataPattern {
 }
 
 /// Execute the boundary testing scenario
-fn execute_boundary_scenario(scenario: EncodingBoundaryScenario) -> Result<(), Box<dyn std::error::Error>> {
+fn execute_boundary_scenario(scenario: EncodingBoundaryScenario) {
     // Create encoding config - sanitize to prevent NaN/infinity issues in Arbitrary
     let encoding_config = EncodingConfig {
         symbol_size: scenario.config.symbol_size,
         max_block_size: scenario.config.max_block_size as usize,
-        repair_overhead: if scenario.config.repair_overhead.is_finite() && scenario.config.repair_overhead >= 0.0 {
+        repair_overhead: if scenario.config.repair_overhead.is_finite()
+            && scenario.config.repair_overhead >= 0.0
+        {
             scenario.config.repair_overhead
         } else {
             // Deliberately test invalid values
@@ -145,11 +167,17 @@ fn execute_boundary_scenario(scenario: EncodingBoundaryScenario) -> Result<(), B
     };
 
     // Create symbol pool with potentially mismatched symbol size
+    let initial_size = (scenario.pool_config.initial_size as usize).min(MAX_POOL_BUFFERS);
+    let max_size = (scenario.pool_config.max_size as usize)
+        .min(MAX_POOL_BUFFERS)
+        .max(initial_size);
+    let growth_increment = (scenario.pool_config.growth_increment as usize).min(MAX_POOL_GROWTH);
     let pool_config = PoolConfig {
         symbol_size: scenario.pool_config.symbol_size,
-        initial_size: scenario.pool_config.initial_size as usize,
-        max_size: scenario.pool_config.max_size as usize,
+        initial_size,
+        max_size,
         allow_growth: scenario.pool_config.allow_growth,
+        growth_increment,
     };
     let symbol_pool = SymbolPool::new(pool_config);
 
@@ -164,17 +192,18 @@ fn execute_boundary_scenario(scenario: EncodingBoundaryScenario) -> Result<(), B
             continue; // Skip oversized data
         }
 
-        let object_id = ObjectId::new_for_test((pattern_idx as u128) << 64);
+        let object_id = ObjectId::new_for_test(pattern_idx as u64);
 
         // Test encoding (expect either success or controlled error)
-        let encoding_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let encoding_result = catch_unwind(AssertUnwindSafe(|| {
             let mut symbol_count = 0;
             let mut source_count = 0;
             let mut repair_count = 0;
 
             // Iterate through all symbols (may produce errors)
             for (idx, result) in pipeline.encode(object_id, &data).enumerate() {
-                if idx >= 10000 { // Limit iterations to prevent infinite loops
+                if idx >= 10000 {
+                    // Limit iterations to prevent infinite loops
                     break;
                 }
 
@@ -182,23 +211,22 @@ fn execute_boundary_scenario(scenario: EncodingBoundaryScenario) -> Result<(), B
                     Ok(encoded_symbol) => {
                         symbol_count += 1;
                         match encoded_symbol.kind() {
-                            crate::types::SymbolKind::Source => source_count += 1,
-                            crate::types::SymbolKind::Repair => repair_count += 1,
+                            SymbolKind::Source => source_count += 1,
+                            SymbolKind::Repair => repair_count += 1,
                         }
 
-                        // Verify symbol ID bounds
-                        let id = encoded_symbol.id();
-                        assert!(id.sbn() <= 255, "SBN exceeded u8 bounds: {}", id.sbn());
-                        assert!(encoded_symbol.symbol().data().len() <= u16::MAX as usize,
-                               "Symbol data exceeded u16 bounds");
+                        assert!(
+                            encoded_symbol.symbol().data().len() <= u16::MAX as usize,
+                            "Symbol data exceeded u16 bounds"
+                        );
                     }
                     Err(err) => {
                         // Expected errors for boundary conditions
                         match err {
-                            crate::codec::raptorq::EncodingError::InvalidConfig { .. } => {},
-                            crate::codec::raptorq::EncodingError::DataTooLarge { .. } => {},
-                            crate::codec::raptorq::EncodingError::PoolExhausted => {},
-                            crate::codec::raptorq::EncodingError::ComputationFailed { .. } => {},
+                            EncodingError::InvalidConfig { .. } => {}
+                            EncodingError::DataTooLarge { .. } => {}
+                            EncodingError::PoolExhausted => {}
+                            EncodingError::ComputationFailed { .. } => {}
                         }
                         break; // Stop on error
                     }
@@ -220,10 +248,12 @@ fn execute_boundary_scenario(scenario: EncodingBoundaryScenario) -> Result<(), B
                 // Successful encoding or controlled error
             }
             Err(_) => {
-                // Panic occurred - this should not happen
-                eprintln!("PANIC during encoding with config: symbol_size={}, max_block_size={}, repair_overhead={}",
-                         scenario.config.symbol_size, scenario.config.max_block_size, scenario.config.repair_overhead);
-                return Err("Encoding panicked".into());
+                panic!(
+                    "RaptorQ encoding panicked for config: symbol_size={}, max_block_size={}, repair_overhead={}",
+                    scenario.config.symbol_size,
+                    scenario.config.max_block_size,
+                    scenario.config.repair_overhead
+                );
             }
         }
     }
@@ -238,40 +268,46 @@ fn execute_boundary_scenario(scenario: EncodingBoundaryScenario) -> Result<(), B
             let object_id = ObjectId::new_for_test(0xBBBBBBBB);
 
             // This should either succeed or fail with DataTooLarge
-            let _ = std::panic::catch_unwind(|| {
+            let boundary_result = catch_unwind(AssertUnwindSafe(|| {
                 for result in pipeline.encode(object_id, &boundary_data).take(100) {
                     match result {
-                        Ok(_) => {},
+                        Ok(_) => {}
                         Err(_) => break,
                     }
                 }
-            });
+            }));
+            assert!(
+                boundary_result.is_ok(),
+                "RaptorQ encoding panicked at exact object-size boundary"
+            );
         }
 
         // Test data just over the boundary
-        if max_object_size > 0 && max_object_size + 1 <= MAX_DATA_SIZE {
+        if max_object_size > 0 && max_object_size < MAX_DATA_SIZE {
             let over_boundary_data = vec![0xFF; max_object_size + 1];
             let object_id = ObjectId::new_for_test(0xCCCCCCCC);
 
             // This should fail with DataTooLarge
-            let _ = std::panic::catch_unwind(|| {
+            let over_boundary_result = catch_unwind(AssertUnwindSafe(|| {
                 for result in pipeline.encode(object_id, &over_boundary_data).take(1) {
                     match result {
                         Ok(_) => {
                             // Unexpected success
-                        },
-                        Err(crate::codec::raptorq::EncodingError::DataTooLarge { .. }) => {
+                        }
+                        Err(EncodingError::DataTooLarge { .. }) => {
                             // Expected error
                             break;
-                        },
+                        }
                         Err(_) => break,
                     }
                 }
-            });
+            }));
+            assert!(
+                over_boundary_result.is_ok(),
+                "RaptorQ encoding panicked over object-size boundary"
+            );
         }
     }
-
-    Ok(())
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -283,12 +319,6 @@ fuzz_target!(|data: &[u8]| {
 
     // Generate boundary scenario from input data
     if let Ok(scenario) = EncodingBoundaryScenario::arbitrary(&mut u) {
-        // Execute with panic handler
-        let _ = std::panic::catch_unwind(|| {
-            if let Err(e) = execute_boundary_scenario(scenario) {
-                // Log error but don't panic - errors are expected for boundary cases
-                eprintln!("Boundary scenario error: {}", e);
-            }
-        });
+        execute_boundary_scenario(scenario);
     }
 });

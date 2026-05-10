@@ -2472,6 +2472,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "raptorq_encoding_config_boundary"
+path = "fuzz_targets/raptorq_encoding_config_boundary.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "grpc_codec"
 path = "fuzz_targets/grpc_codec.rs"
 test = false
