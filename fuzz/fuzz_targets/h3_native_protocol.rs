@@ -10,7 +10,9 @@ use asupersync::http::h3_native::{
     qpack_decode_field_section, qpack_decode_request_field_section,
     qpack_decode_response_field_section, qpack_encode_field_section,
 };
-use asupersync::net::quic_core::{QUIC_VARINT_MAX, QuicCoreError, decode_varint};
+use asupersync::net::quic_core::{
+    QUIC_VARINT_MAX, QuicCoreError, decode_varint, encode_varint as quic_encode_varint,
+};
 
 /// Fuzz input for HTTP/3 native protocol parsing
 #[derive(Arbitrary, Debug)]
@@ -331,8 +333,15 @@ fn test_settings_operation(operation: SettingsOperation) {
             let mut payload = Vec::new();
             for value in values.into_iter().take(10) {
                 // Limit to 10 duplicates
-                encode_varint(setting_id, &mut payload);
-                encode_varint(value, &mut payload);
+                let mut setting_pair = Vec::new();
+                if observe_varint_encode(
+                    "duplicate SETTINGS identifier",
+                    setting_id,
+                    &mut setting_pair,
+                ) && observe_varint_encode("duplicate SETTINGS value", value, &mut setting_pair)
+                {
+                    payload.extend_from_slice(&setting_pair);
+                }
             }
 
             let result = H3Settings::decode_payload(&payload);
@@ -577,8 +586,9 @@ fn test_edge_case_operation(operation: EdgeCaseOperation) {
         EdgeCaseOperation::LargeVarint { value } => {
             // Test large varint values
             let mut data = Vec::new();
-            encode_varint(value, &mut data);
-            observe_quic_varint_decode("large varint", &data);
+            if observe_varint_encode("large QUIC varint edge case", value, &mut data) {
+                observe_quic_varint_decode("large varint", &data);
+            }
         }
 
         EdgeCaseOperation::OverlappingFrames {
@@ -922,8 +932,10 @@ fn construct_frame_bytes(frame_type: FrameType, payload: &[u8]) -> Vec<u8> {
         FrameType::Unknown(t) => t,
     };
 
-    encode_varint(type_value, &mut data);
-    encode_varint(payload.len() as u64, &mut data);
+    if !observe_varint_encode("H3 frame type", type_value, &mut data) {
+        return data;
+    }
+    assert_varint_encoded("H3 frame payload length", payload.len() as u64, &mut data);
     data.extend_from_slice(payload);
 
     data
@@ -943,17 +955,38 @@ fn construct_settings_payload(settings: &[SettingPair]) -> Vec<u8> {
             SettingId::Unknown(id) => id,
         };
 
-        encode_varint(id_value, &mut payload);
-        encode_varint(setting.value, &mut payload);
+        let mut setting_pair = Vec::new();
+        if observe_varint_encode("H3 SETTINGS identifier", id_value, &mut setting_pair)
+            && observe_varint_encode("H3 SETTINGS value", setting.value, &mut setting_pair)
+        {
+            payload.extend_from_slice(&setting_pair);
+        }
     }
 
     payload
 }
 
-fn encode_varint(value: u64, output: &mut Vec<u8>) {
-    // Simple varint encoding
-    use asupersync::net::quic_core::encode_varint;
-    let _ = encode_varint(value, output);
+fn assert_varint_encoded(context: &str, value: u64, output: &mut Vec<u8>) {
+    quic_encode_varint(value, output).unwrap_or_else(|error| {
+        panic!("{context}: expected H3 varint value {value} to encode, got {error}")
+    });
+}
+
+fn observe_varint_encode(context: &str, value: u64, output: &mut Vec<u8>) -> bool {
+    match quic_encode_varint(value, output) {
+        Ok(()) => true,
+        Err(error) => {
+            observe_varint_encode_error(context, value, &error);
+            false
+        }
+    }
+}
+
+fn observe_varint_encode_error(context: &str, value: u64, error: &QuicCoreError) {
+    assert!(
+        !error.to_string().is_empty(),
+        "{context}: H3 varint encode error for value {value} must include diagnostics"
+    );
 }
 
 fn convert_qpack_mode(mode: QpackMode) -> H3QpackMode {
