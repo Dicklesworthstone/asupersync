@@ -212,14 +212,10 @@ fuzz_target!(|data: &[u8]| {
 
 /// Test flow control window handling during RST_STREAM
 fn test_flow_control_window_rst_stream(test_case: &FlowControlTest) {
-    let connection_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        create_test_connection(test_case.initial_window_size)
-    }));
-
-    let mut connection = match connection_result {
-        Ok(conn) => conn,
-        Err(_) => return, // Connection creation failed
-    };
+    let mut connection = create_test_connection_or_panic(
+        "flow-control stream operations",
+        test_case.initial_window_size,
+    );
 
     // Track expected window state
     let mut window_tracker = WindowTracker::new(
@@ -244,7 +240,8 @@ fn test_flow_control_window_rst_stream(test_case: &FlowControlTest) {
         // Operation should not panic
         assert!(
             operation_result.is_ok(),
-            "Stream operation should not panic"
+            "stream operation panicked: stream_id={stream_id}, operation={:?}",
+            stream_op.operation
         );
     }
 
@@ -254,14 +251,10 @@ fn test_flow_control_window_rst_stream(test_case: &FlowControlTest) {
 
 /// Test connection-level WINDOW_UPDATE and DATA consumption paths.
 fn test_connection_window_operations(test_case: &FlowControlTest) {
-    let connection_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        create_test_connection(test_case.initial_window_size)
-    }));
-
-    let mut connection = match connection_result {
-        Ok(conn) => conn,
-        Err(_) => return,
-    };
+    let mut connection = create_test_connection_or_panic(
+        "connection-window operations",
+        test_case.initial_window_size,
+    );
 
     let stream_id = normalize_stream_id(1);
     let mut window_tracker = WindowTracker::new(
@@ -310,14 +303,8 @@ fn test_connection_window_operations(test_case: &FlowControlTest) {
 
 /// Test window credit recovery when RST_STREAM clears pending data
 fn test_window_credit_recovery(test_case: &FlowControlTest) {
-    let connection_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        create_test_connection(test_case.initial_window_size)
-    }));
-
-    let mut connection = match connection_result {
-        Ok(conn) => conn,
-        Err(_) => return,
-    };
+    let mut connection =
+        create_test_connection_or_panic("window credit recovery", test_case.initial_window_size);
 
     let stream_id = normalize_stream_id(1);
 
@@ -361,14 +348,10 @@ fn test_window_credit_recovery(test_case: &FlowControlTest) {
 
 /// Test concurrent RST_STREAM operations on multiple streams
 fn test_concurrent_rst_stream_operations(test_case: &FlowControlTest) {
-    let connection_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        create_test_connection(test_case.initial_window_size)
-    }));
-
-    let mut connection = match connection_result {
-        Ok(conn) => conn,
-        Err(_) => return,
-    };
+    let mut connection = create_test_connection_or_panic(
+        "concurrent RST_STREAM operations",
+        test_case.initial_window_size,
+    );
 
     let max_streams = test_case.max_concurrent_streams.min(5);
     let mut active_streams = Vec::new();
@@ -412,14 +395,7 @@ fn test_concurrent_rst_stream_operations(test_case: &FlowControlTest) {
 
 /// Test window exhaustion scenarios with RST_STREAM recovery
 fn test_window_exhaustion_with_rst(_test_case: &FlowControlTest) {
-    let connection_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        create_test_connection(8192) // Small window for easy exhaustion
-    }));
-
-    let mut connection = match connection_result {
-        Ok(conn) => conn,
-        Err(_) => return,
-    };
+    let mut connection = create_test_connection_or_panic("window exhaustion setup", 8192);
 
     let stream_id = normalize_stream_id(1);
 
@@ -461,6 +437,20 @@ fn test_window_exhaustion_with_rst(_test_case: &FlowControlTest) {
 // Helper functions for connection management and frame operations
 
 /// Create a test connection with specified initial window size
+fn create_test_connection_or_panic(context: &str, initial_window_size: u32) -> Connection {
+    let connection_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        create_test_connection(initial_window_size)
+    }));
+
+    match connection_result {
+        Ok(connection) => connection,
+        Err(_) => panic!(
+            "create_test_connection panicked during {context}: \
+             initial_window_size={initial_window_size}"
+        ),
+    }
+}
+
 fn create_test_connection(initial_window_size: u32) -> Connection {
     let settings = Settings {
         initial_window_size: bounded_initial_window_size(initial_window_size),
