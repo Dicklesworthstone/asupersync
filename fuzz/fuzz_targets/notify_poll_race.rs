@@ -59,13 +59,13 @@ enum PollPattern {
 #[derive(Debug, Arbitrary, Clone)]
 enum NotifyPattern {
     /// Single immediate notification
-    SingleNotify,
+    Single,
     /// Notification after delay
-    DelayedNotify { delay_micros: u16 },
+    Delayed { delay_micros: u16 },
     /// Rapid burst of notifications
-    BurstNotify { count: u8, interval_micros: u16 },
+    Burst { count: u8, interval_micros: u16 },
     /// Notification synchronized with barrier
-    SynchronizedNotify,
+    Synchronized,
 }
 
 impl NotifyPollConfig {
@@ -78,7 +78,7 @@ impl NotifyPollConfig {
         self.poll_patterns
             .resize(self.poller_count as usize, PollPattern::SinglePoll);
         self.notify_patterns
-            .resize(self.notifier_count as usize, NotifyPattern::SingleNotify);
+            .resize(self.notifier_count as usize, NotifyPattern::Single);
 
         // Normalize pattern parameters
         for pattern in &mut self.poll_patterns {
@@ -94,11 +94,8 @@ impl NotifyPollConfig {
         }
 
         for pattern in &mut self.notify_patterns {
-            match pattern {
-                NotifyPattern::BurstNotify { count, .. } => {
-                    *count = (*count % 10).max(1);
-                }
-                _ => {}
+            if let NotifyPattern::Burst { count, .. } = pattern {
+                *count = (*count % 10).max(1);
             }
         }
     }
@@ -112,7 +109,6 @@ struct TestResults {
     polls_pending: AtomicUsize,
     notifications_sent: AtomicUsize,
     spurious_wakeups: AtomicUsize,
-    lost_notifications: AtomicUsize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -200,7 +196,6 @@ impl CountingWaker {
 
 /// Manual future for controlled polling
 struct ManualNotified {
-    notify: Arc<Notify>,
     future: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
     polls_attempted: u32,
 }
@@ -213,7 +208,6 @@ impl ManualNotified {
         });
 
         Self {
-            notify,
             future: Some(future),
             polls_attempted: 0,
         }
@@ -378,6 +372,11 @@ fuzz_target!(|data: &[u8]| {
                     }
                 }
 
+                assert!(
+                    manual_notified.poll_count() > 0,
+                    "notify_poll_race poller performed no polls"
+                );
+
                 // Check for spurious wakeups
                 let final_wake_count = wake_count.load(Ordering::SeqCst);
                 if final_wake_count > 1 {
@@ -408,12 +407,12 @@ fuzz_target!(|data: &[u8]| {
                 }
 
                 match pattern {
-                    NotifyPattern::SingleNotify => {
+                    NotifyPattern::Single => {
                         notify.notify_one();
                         results.notifications_sent.fetch_add(1, Ordering::SeqCst);
                     }
 
-                    NotifyPattern::DelayedNotify { delay_micros } => {
+                    NotifyPattern::Delayed { delay_micros } => {
                         if delay_micros > 0 {
                             thread::sleep(Duration::from_micros(delay_micros as u64));
                         }
@@ -421,7 +420,7 @@ fuzz_target!(|data: &[u8]| {
                         results.notifications_sent.fetch_add(1, Ordering::SeqCst);
                     }
 
-                    NotifyPattern::BurstNotify {
+                    NotifyPattern::Burst {
                         count,
                         interval_micros,
                     } => {
@@ -435,7 +434,7 @@ fuzz_target!(|data: &[u8]| {
                         }
                     }
 
-                    NotifyPattern::SynchronizedNotify => {
+                    NotifyPattern::Synchronized => {
                         // Immediate notify right after barrier
                         notify.notify_one();
                         results.notifications_sent.fetch_add(1, Ordering::SeqCst);
@@ -463,7 +462,6 @@ fuzz_target!(|data: &[u8]| {
     let polls_pending = results.polls_pending.load(Ordering::SeqCst);
     let notifications_sent = results.notifications_sent.load(Ordering::SeqCst);
     let spurious_wakeups = results.spurious_wakeups.load(Ordering::SeqCst);
-    let lost_notifications = results.lost_notifications.load(Ordering::SeqCst);
 
     // Verify poll accounting
     assert_eq!(
