@@ -140,18 +140,12 @@ fn test_max_concurrent_streams_enforcement(test_seq: &MaxConcurrentStreamsSequen
 
     // Send initial SETTINGS frame to establish MAX_CONCURRENT_STREAMS
     let settings_frame = create_settings_frame(max_streams);
-    match observe_frame_encode(
+    expect_frame_encode(
         "initial MAX_CONCURRENT_STREAMS SETTINGS frame",
         &mut codec,
         settings_frame,
         &mut buffer,
-    ) {
-        Ok(()) => {}
-        Err(_) => {
-            // Settings encoding failed - skip this test
-            return;
-        }
-    }
+    );
 
     // Test stream opening attempts
     for (attempt_index, attempt) in test_seq.stream_attempts.iter().enumerate() {
@@ -170,8 +164,10 @@ fn test_max_concurrent_streams_enforcement(test_seq: &MaxConcurrentStreamsSequen
             attempt.end_stream,
         );
 
-        // Test expected behavior based on current stream count
-        let expected_result = state.open_stream(stream_id);
+        let before_active = state.active_streams.len();
+        let before_refused = state.refused_streams.len();
+        let before_successful = state.successful_opens.len();
+        let before_protocol_errors = state.protocol_errors;
 
         match observe_frame_encode(
             "stream-opening HEADERS frame",
@@ -180,6 +176,7 @@ fn test_max_concurrent_streams_enforcement(test_seq: &MaxConcurrentStreamsSequen
             &mut buffer,
         ) {
             Ok(()) => {
+                let expected_result = state.open_stream(stream_id);
                 match expected_result {
                     Ok(()) => {
                         // Stream should have opened successfully
@@ -234,7 +231,27 @@ fn test_max_concurrent_streams_enforcement(test_seq: &MaxConcurrentStreamsSequen
             }
             Err(_) => {
                 // Frame encoding failed - may be due to protocol violations
-                // This is acceptable for fuzz testing
+                // This is acceptable for fuzz testing, but failed encoding must
+                // not affect the stream-limit model.
+                assert_eq!(
+                    state.active_streams.len(),
+                    before_active,
+                    "failed HEADERS encode should not change active stream count"
+                );
+                assert_eq!(
+                    state.refused_streams.len(),
+                    before_refused,
+                    "failed HEADERS encode should not record a refused stream"
+                );
+                assert_eq!(
+                    state.successful_opens.len(),
+                    before_successful,
+                    "failed HEADERS encode should not record a successful open"
+                );
+                assert_eq!(
+                    state.protocol_errors, before_protocol_errors,
+                    "failed HEADERS encode should not record protocol model errors"
+                );
             }
         }
 
@@ -385,7 +402,12 @@ fn observe_data_frame_encode(
 
     let before_active = state.active_streams.len();
     let frame = create_data_frame(stream_id, data_spec);
-    match observe_frame_encode("DATA frame for successfully opened stream", codec, frame, buffer) {
+    match observe_frame_encode(
+        "DATA frame for successfully opened stream",
+        codec,
+        frame,
+        buffer,
+    ) {
         Ok(()) => {
             assert_eq!(
                 state.active_streams.len(),
@@ -417,14 +439,9 @@ fn observe_data_frame_encode(
     }
 }
 
-fn expect_interleaved_frame_encode(
-    context: &str,
-    codec: &mut FrameCodec,
-    frame: Frame,
-    buffer: &mut BytesMut,
-) {
+fn expect_frame_encode(context: &str, codec: &mut FrameCodec, frame: Frame, buffer: &mut BytesMut) {
     if let Err(err) = observe_frame_encode(context, codec, frame, buffer) {
-        panic!("{context}: expected interleaved frame to encode, got {err}");
+        panic!("{context}: expected frame to encode, got {err}");
     }
 }
 
@@ -444,7 +461,7 @@ fn test_interleaved_frame(
                 .collect();
 
             let frame = Frame::Settings(SettingsFrame::new(settings_list));
-            expect_interleaved_frame_encode("interleaved SETTINGS frame", codec, frame, buffer);
+            expect_frame_encode("interleaved SETTINGS frame", codec, frame, buffer);
         }
         InterleavedFrame::RstStream {
             stream_id,
@@ -481,12 +498,7 @@ fn test_interleaved_frame(
                 normalize_stream_id(*stream_id),
                 normalized_increment,
             ));
-            expect_interleaved_frame_encode(
-                "interleaved WINDOW_UPDATE frame",
-                codec,
-                frame,
-                buffer,
-            );
+            expect_frame_encode("interleaved WINDOW_UPDATE frame", codec, frame, buffer);
         }
         InterleavedFrame::Ping { ack } => {
             let ping_frame = if ack == &true {
@@ -495,7 +507,7 @@ fn test_interleaved_frame(
                 asupersync::http::h2::frame::PingFrame::new([0u8; 8])
             };
             let frame = Frame::Ping(ping_frame);
-            expect_interleaved_frame_encode("interleaved PING frame", codec, frame, buffer);
+            expect_frame_encode("interleaved PING frame", codec, frame, buffer);
         }
     }
 }
