@@ -8,6 +8,7 @@ use asupersync::{
 };
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 
@@ -33,10 +34,7 @@ enum Operation {
         force_high_token_id: bool,
     },
     /// Create a child token from a parent
-    CreateChild {
-        parent_index: u8,
-        rng_seed: u64,
-    },
+    CreateChild { parent_index: u8, rng_seed: u64 },
     /// Cancel a token with specific reason
     Cancel {
         token_index: u8,
@@ -44,18 +42,11 @@ enum Operation {
         time_ns: u64,
     },
     /// Add a listener to a token
-    AddListener {
-        token_index: u8,
-        listener_id: u8,
-    },
+    AddListener { token_index: u8, listener_id: u8 },
     /// Check if token is cancelled (polling operation)
-    Poll {
-        token_index: u8,
-    },
+    Poll { token_index: u8 },
     /// Get cancellation reason (another polling operation)
-    GetReason {
-        token_index: u8,
-    },
+    GetReason { token_index: u8 },
     /// Multi-threaded stress test with barrier synchronization
     BarrierStress {
         token_index: u8,
@@ -120,10 +111,6 @@ impl MockListener {
             panic_on_call,
         }
     }
-
-    fn call_count(&self) -> u32 {
-        *self.called_count.lock().unwrap()
-    }
 }
 
 impl asupersync::cancel::symbol_cancel::CancelListener for MockListener {
@@ -158,7 +145,8 @@ struct OperationResult {
 impl SharedFuzzState {
     fn new(thread_count: usize) -> Self {
         let mut barriers = Vec::new();
-        for _ in 0..8 {  // Create multiple barriers for different synchronization points
+        for _ in 0..8 {
+            // Create multiple barriers for different synchronization points
             barriers.push(Arc::new(Barrier::new(thread_count)));
         }
 
@@ -192,7 +180,12 @@ fuzz_target!(|data: FuzzInput| {
     test_single_threaded(&shared_state, &data.operations, data.use_token_wraparound);
 
     // 2. Multi-threaded execution with race conditions
-    test_multi_threaded(shared_state.clone(), &data.operations, thread_count, data.use_token_wraparound);
+    test_multi_threaded(
+        shared_state.clone(),
+        &data.operations,
+        thread_count,
+        data.use_token_wraparound,
+    );
 
     // 3. Hierarchical nesting stress test
     test_nested_scope_drain_ordering(&data.operations, nesting_depth);
@@ -202,11 +195,19 @@ fuzz_target!(|data: FuzzInput| {
 });
 
 /// Test single-threaded execution for baseline behavior
-fn test_single_threaded(shared_state: &SharedFuzzState, operations: &[Operation], use_wraparound: bool) {
+fn test_single_threaded(
+    shared_state: &SharedFuzzState,
+    operations: &[Operation],
+    use_wraparound: bool,
+) {
     for (op_idx, op) in operations.iter().enumerate() {
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
             execute_operation_single_threaded(shared_state, op, op_idx, use_wraparound);
         }));
+        assert!(
+            result.is_ok(),
+            "symbol cancel single-threaded operation {op_idx} panicked: {op:?}"
+        );
     }
 }
 
@@ -215,7 +216,7 @@ fn test_multi_threaded(
     shared_state: Arc<SharedFuzzState>,
     operations: &[Operation],
     thread_count: usize,
-    use_wraparound: bool
+    use_wraparound: bool,
 ) {
     let ops_per_thread = operations.len().max(1) / thread_count;
     let mut handles = Vec::new();
@@ -232,22 +233,35 @@ fn test_multi_threaded(
 
         handles.push(thread::spawn(move || {
             for (op_idx, op) in thread_ops.iter().enumerate() {
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    execute_operation_multi_threaded(&state, op, thread_id, start + op_idx, use_wraparound);
+                let operation_id = start + op_idx;
+                let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    execute_operation_multi_threaded(
+                        &state,
+                        op,
+                        thread_id,
+                        operation_id,
+                        use_wraparound,
+                    );
                 }));
+                assert!(
+                    result.is_ok(),
+                    "symbol cancel worker {thread_id} operation {operation_id} panicked: {op:?}"
+                );
             }
         }));
     }
 
     // Wait for all threads
     for handle in handles {
-        handle.join().unwrap_or_default();
+        if handle.join().is_err() {
+            panic!("symbol cancel worker thread panicked");
+        }
     }
 }
 
 /// Test nested scope drain ordering with deep hierarchies
 fn test_nested_scope_drain_ordering(operations: &[Operation], max_depth: usize) {
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
         let mut rng = DetRng::new(0x1234_5678_9abc_def0);
         let object_id = ObjectId::new_for_test(42);
 
@@ -270,6 +284,10 @@ fn test_nested_scope_drain_ordering(operations: &[Operation], max_depth: usize) 
         test_reverse_cancel(&tokens);
         test_random_cancel(&tokens, operations);
     }));
+    assert!(
+        result.is_ok(),
+        "nested symbol cancel drain ordering panicked"
+    );
 }
 
 /// Test cascading cancellation from root to leaves
@@ -287,8 +305,10 @@ fn test_cascade_cancel(tokens: &[SymbolCancelToken]) {
     let final_cancelled_count = tokens.iter().filter(|t| t.is_cancelled()).count();
 
     // Metamorphic relation: Cancelling root should cancel all descendants
-    assert!(final_cancelled_count >= initial_cancelled_count,
-        "MR: Root cancellation should not decrease cancelled token count");
+    assert!(
+        final_cancelled_count >= initial_cancelled_count,
+        "MR: Root cancellation should not decrease cancelled token count"
+    );
 }
 
 /// Test reverse cancellation from leaves to root
@@ -311,7 +331,12 @@ fn test_reverse_cancel(tokens: &[SymbolCancelToken]) {
 /// Test random cancellation pattern with listener verification
 fn test_random_cancel(tokens: &[SymbolCancelToken], operations: &[Operation]) {
     for (idx, op) in operations.iter().enumerate().take(10) {
-        if let Operation::Cancel { cancel_kind, time_ns, .. } = op {
+        if let Operation::Cancel {
+            cancel_kind,
+            time_ns,
+            ..
+        } = op
+        {
             let token_idx = idx % tokens.len();
             if token_idx < tokens.len() {
                 let reason = CancelReason::new((*cancel_kind).into());
@@ -323,9 +348,15 @@ fn test_random_cancel(tokens: &[SymbolCancelToken], operations: &[Operation]) {
 
                 // Metamorphic relation: cancel() idempotency
                 if was_cancelled_before {
-                    assert!(!cancel_result, "MR: Cancelling already-cancelled token should return false");
+                    assert!(
+                        !cancel_result,
+                        "MR: Cancelling already-cancelled token should return false"
+                    );
                 }
-                assert!(was_cancelled_after, "MR: Token should be cancelled after cancel() call");
+                assert!(
+                    was_cancelled_after,
+                    "MR: Token should be cancelled after cancel() call"
+                );
             }
         }
     }
@@ -336,10 +367,14 @@ fn execute_operation_single_threaded(
     shared_state: &SharedFuzzState,
     operation: &Operation,
     op_idx: usize,
-    use_wraparound: bool
+    use_wraparound: bool,
 ) {
     match operation {
-        Operation::CreateRootToken { object_high, rng_seed, force_high_token_id } => {
+        Operation::CreateRootToken {
+            object_high,
+            rng_seed,
+            force_high_token_id,
+        } => {
             let mut rng = if use_wraparound && *force_high_token_id {
                 // Force RNG to generate high token IDs for wraparound testing
                 DetRng::new(u64::MAX - (*rng_seed % 1000))
@@ -355,66 +390,87 @@ fn execute_operation_single_threaded(
             }
         }
 
-        Operation::CreateChild { parent_index, rng_seed } => {
+        Operation::CreateChild {
+            parent_index,
+            rng_seed,
+        } => {
             let mut rng = DetRng::new(*rng_seed);
-            if let Ok(tokens) = shared_state.tokens.try_lock() {
-                if !tokens.is_empty() {
-                    let parent_idx = (*parent_index as usize) % tokens.len();
-                    let child = tokens[parent_idx].child(&mut rng);
-                    drop(tokens);
+            if let Ok(tokens) = shared_state.tokens.try_lock()
+                && !tokens.is_empty()
+            {
+                let parent_idx = (*parent_index as usize) % tokens.len();
+                let child = tokens[parent_idx].child(&mut rng);
+                drop(tokens);
 
-                    if let Ok(mut tokens) = shared_state.tokens.try_lock() {
-                        tokens.push(child);
-                    }
+                if let Ok(mut tokens) = shared_state.tokens.try_lock() {
+                    tokens.push(child);
                 }
             }
         }
 
-        Operation::Cancel { token_index, cancel_kind, time_ns } => {
-            if let Ok(tokens) = shared_state.tokens.try_lock() {
-                if !tokens.is_empty() {
-                    let idx = (*token_index as usize) % tokens.len();
-                    let reason = CancelReason::new((*cancel_kind).into());
-                    let now = Time::from_nanos(*time_ns);
-                    let cancel_result = tokens[idx].cancel(&reason, now);
+        Operation::Cancel {
+            token_index,
+            cancel_kind,
+            time_ns,
+        } => {
+            if let Ok(tokens) = shared_state.tokens.try_lock()
+                && !tokens.is_empty()
+            {
+                let idx = (*token_index as usize) % tokens.len();
+                let reason = CancelReason::new((*cancel_kind).into());
+                let now = Time::from_nanos(*time_ns);
+                let cancel_result = tokens[idx].cancel(&reason, now);
 
-                    let result = OperationResult {
-                        operation_id: op_idx,
-                        thread_id: 0,
-                        token_id: Some(tokens[idx].token_id()),
-                        was_cancelled: tokens[idx].is_cancelled(),
-                        cancel_result,
-                        listener_panics: Some(tokens[idx].listener_panic_count()),
-                    };
+                let result = OperationResult {
+                    operation_id: op_idx,
+                    thread_id: 0,
+                    token_id: Some(tokens[idx].token_id()),
+                    was_cancelled: tokens[idx].is_cancelled(),
+                    cancel_result,
+                    listener_panics: Some(tokens[idx].listener_panic_count()),
+                };
 
-                    if let Ok(mut results) = shared_state.operation_results.try_lock() {
-                        results.push(result);
-                    }
+                if let Ok(mut results) = shared_state.operation_results.try_lock() {
+                    results.push(result);
                 }
             }
         }
 
-        Operation::AddListener { token_index, listener_id } => {
-            if let Ok(tokens) = shared_state.tokens.try_lock() {
-                if !tokens.is_empty() {
-                    let idx = (*token_index as usize) % tokens.len();
-                    let listener = MockListener::new(*listener_id, false);
+        Operation::AddListener {
+            token_index,
+            listener_id,
+        } => {
+            if let Ok(tokens) = shared_state.tokens.try_lock()
+                && !tokens.is_empty()
+            {
+                let idx = (*token_index as usize) % tokens.len();
+                let listener = MockListener::new(*listener_id, false);
+                tokens[idx].add_listener(MockListener::new(*listener_id, false));
 
-                    if let Ok(mut listeners) = shared_state.listeners.try_lock() {
-                        listeners.insert(*listener_id, listener);
-                    }
+                if let Ok(mut listeners) = shared_state.listeners.try_lock() {
+                    listeners.insert(*listener_id, listener);
                 }
             }
         }
 
         Operation::Poll { token_index } => {
-            if let Ok(tokens) = shared_state.tokens.try_lock() {
-                if !tokens.is_empty() {
-                    let idx = (*token_index as usize) % tokens.len();
-                    let _is_cancelled = tokens[idx].is_cancelled();
-                    let _reason = tokens[idx].reason();
-                    let _cancelled_at = tokens[idx].cancelled_at();
-                }
+            if let Ok(tokens) = shared_state.tokens.try_lock()
+                && !tokens.is_empty()
+            {
+                let idx = (*token_index as usize) % tokens.len();
+                let _is_cancelled = tokens[idx].is_cancelled();
+                let _reason = tokens[idx].reason();
+                let _cancelled_at = tokens[idx].cancelled_at();
+            }
+        }
+
+        Operation::GetReason { token_index } => {
+            if let Ok(tokens) = shared_state.tokens.try_lock()
+                && !tokens.is_empty()
+            {
+                let idx = (*token_index as usize) % tokens.len();
+                let _reason = tokens[idx].reason();
+                let _cancelled_at = tokens[idx].cancelled_at();
             }
         }
 
@@ -428,36 +484,40 @@ fn execute_operation_multi_threaded(
     operation: &Operation,
     thread_id: usize,
     op_idx: usize,
-    use_wraparound: bool
+    use_wraparound: bool,
 ) {
     match operation {
-        Operation::BarrierStress { token_index, operation_type } => {
+        Operation::BarrierStress {
+            token_index,
+            operation_type,
+        } => {
             // Use barrier to synchronize threads for race testing
             let barrier = shared_state.get_barrier(0);
             barrier.wait();
 
-            if let Ok(tokens) = shared_state.tokens.try_lock() {
-                if !tokens.is_empty() {
-                    let idx = (*token_index as usize) % tokens.len();
+            if let Ok(tokens) = shared_state.tokens.try_lock()
+                && !tokens.is_empty()
+            {
+                let idx = (*token_index as usize) % tokens.len();
 
-                    match operation_type {
-                        StressOp::Cancel => {
-                            let reason = CancelReason::new(CancelKind::RaceLost);
-                            let now = Time::from_nanos((thread_id as u64) * 1000);
-                            tokens[idx].cancel(&reason, now);
-                        }
-                        StressOp::CreateChild => {
-                            let mut rng = DetRng::new((thread_id as u64) * 0x1337);
-                            let _child = tokens[idx].child(&mut rng);
-                        }
-                        StressOp::AddListener => {
-                            let listener = MockListener::new(thread_id as u8, thread_id % 3 == 0);
-                            tokens[idx].add_listener(listener);
-                        }
-                        StressOp::Poll => {
-                            let _is_cancelled = tokens[idx].is_cancelled();
-                            let _token_id = tokens[idx].token_id();
-                        }
+                match operation_type {
+                    StressOp::Cancel => {
+                        let reason = CancelReason::new(CancelKind::RaceLost);
+                        let now = Time::from_nanos((thread_id as u64) * 1000);
+                        tokens[idx].cancel(&reason, now);
+                    }
+                    StressOp::CreateChild => {
+                        let mut rng = DetRng::new((thread_id as u64) * 0x1337);
+                        let _child = tokens[idx].child(&mut rng);
+                    }
+                    StressOp::AddListener => {
+                        let listener =
+                            MockListener::new(thread_id as u8, thread_id.is_multiple_of(3));
+                        tokens[idx].add_listener(listener);
+                    }
+                    StressOp::Poll => {
+                        let _is_cancelled = tokens[idx].is_cancelled();
+                        let _token_id = tokens[idx].token_id();
                     }
                 }
             }
@@ -472,56 +532,71 @@ fn execute_operation_multi_threaded(
 
 /// Verify metamorphic properties across all test scenarios
 fn verify_metamorphic_properties(shared_state: &SharedFuzzState) {
-    if let Ok(tokens) = shared_state.tokens.try_lock() {
-        if let Ok(results) = shared_state.operation_results.try_lock() {
-            // MR1: Token ID uniqueness (check for wraparound collisions)
-            let mut token_ids = std::collections::HashSet::new();
-            let mut collision_count = 0;
+    if let Ok(tokens) = shared_state.tokens.try_lock()
+        && let Ok(results) = shared_state.operation_results.try_lock()
+    {
+        // MR1: Token ID uniqueness (check for wraparound collisions)
+        let mut token_ids = std::collections::HashSet::new();
+        let mut collision_count = 0;
 
-            for token in tokens.iter() {
-                let id = token.token_id();
-                if !token_ids.insert(id) {
-                    collision_count += 1;
-                }
+        for token in tokens.iter() {
+            let id = token.token_id();
+            if !token_ids.insert(id) {
+                collision_count += 1;
             }
+        }
 
-            if collision_count > 0 {
-                // This could indicate either legitimate wraparound or a bug
-                // Log for analysis but don't fail - wraparound is theoretically possible
+        if collision_count > 0 {
+            // This could indicate either legitimate wraparound or a bug
+            // Log for analysis but don't fail - wraparound is theoretically possible
+        }
+
+        // MR2: Cancellation monotonicity - once cancelled, stays cancelled
+        let cancelled_tokens: Vec<_> = tokens.iter().filter(|t| t.is_cancelled()).collect();
+
+        for token in cancelled_tokens {
+            assert!(
+                token.is_cancelled(),
+                "MR2: Cancelled token should remain cancelled"
+            );
+            assert!(
+                token.reason().is_some(),
+                "MR2: Cancelled token should have a reason"
+            );
+        }
+
+        // MR3: Recorded operation metadata stays within the fuzz input bounds.
+        for result in results.iter() {
+            assert!(
+                result.operation_id < MAX_OPS,
+                "MR3: recorded operation id exceeded MAX_OPS"
+            );
+            assert!(
+                result.thread_id < MAX_THREADS,
+                "MR3: recorded thread id exceeded MAX_THREADS"
+            );
+            if result.cancel_result {
+                assert!(
+                    result.was_cancelled,
+                    "MR3: successful cancel result should leave token cancelled"
+                );
             }
-
-            // MR2: Cancellation monotonicity - once cancelled, stays cancelled
-            let cancelled_tokens: Vec<_> = tokens.iter()
-                .filter(|t| t.is_cancelled())
-                .collect();
-
-            for token in cancelled_tokens {
-                assert!(token.is_cancelled(),
-                    "MR2: Cancelled token should remain cancelled");
-                assert!(token.reason().is_some(),
-                    "MR2: Cancelled token should have a reason");
+            if let Some(listener_panics) = result.listener_panics {
+                let _observed_listener_panics = listener_panics;
             }
+        }
 
-            // MR3: Listener panic count monotonicity
-            for token in tokens.iter() {
-                let panic_count = token.listener_panic_count();
-                // Panic count should never decrease
-                assert!(panic_count >= 0,
-                    "MR3: Listener panic count should be non-negative");
-            }
+        // MR4: Cancel operation idempotency
+        let cancel_operations: Vec<_> = results.iter().filter(|r| r.was_cancelled).collect();
 
-            // MR4: Cancel operation idempotency
-            let cancel_operations: Vec<_> = results.iter()
-                .filter(|r| r.was_cancelled)
-                .collect();
-
-            for op in cancel_operations {
-                if let Some(token_id) = op.token_id {
-                    if let Some(token) = tokens.iter().find(|t| t.token_id() == token_id) {
-                        assert!(token.is_cancelled(),
-                            "MR4: Token recorded as cancelled should still be cancelled");
-                    }
-                }
+        for op in cancel_operations {
+            if let Some(token_id) = op.token_id
+                && let Some(token) = tokens.iter().find(|t| t.token_id() == token_id)
+            {
+                assert!(
+                    token.is_cancelled(),
+                    "MR4: Token recorded as cancelled should still be cancelled"
+                );
             }
         }
     }
