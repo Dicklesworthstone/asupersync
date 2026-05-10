@@ -41,9 +41,7 @@ enum Case {
         diff_bit: u16, // bit index to flip for the inequality check
     },
     /// from_bytes/as_bytes lossless round-trip.
-    RoundTrip {
-        bytes: [u8; TAG_SIZE],
-    },
+    RoundTrip { bytes: [u8; TAG_SIZE] },
     /// Zero-tag sentinel never verifies any normal symbol.
     ZeroTagNeverVerifies {
         key_seed: u64,
@@ -57,7 +55,11 @@ enum Case {
 
 fn make_symbol(object_id: u128, sbn: u8, esi: u32, kind_bit: bool, payload: Vec<u8>) -> Symbol {
     let id = SymbolId::new(ObjectId::from_u128(object_id), sbn, esi);
-    let kind = if kind_bit { SymbolKind::Source } else { SymbolKind::Repair };
+    let kind = if kind_bit {
+        SymbolKind::Source
+    } else {
+        SymbolKind::Repair
+    };
     let payload = if payload.len() > MAX_PAYLOAD {
         payload[..MAX_PAYLOAD].to_vec()
     } else {

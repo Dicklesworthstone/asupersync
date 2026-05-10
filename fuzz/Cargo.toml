@@ -2387,6 +2387,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "security_tag_boundary"
+path = "fuzz_targets/security_tag_boundary.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "authenticated_mac_verification"
 path = "fuzz_targets/authenticated_mac_verification.rs"
 test = false
