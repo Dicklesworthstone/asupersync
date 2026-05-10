@@ -1,7 +1,8 @@
 #![no_main]
 
-use arbitrary::{Arbitrary, Unstructured};
+use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
+use std::fmt;
 
 /// HTTP/1.1 request parsing result
 #[derive(Debug, PartialEq)]
@@ -45,12 +46,6 @@ struct MockH1RequestParser {
 }
 
 impl MockH1RequestParser {
-    fn new() -> Self {
-        Self {
-            strict_rfc_mode: true,
-        }
-    }
-
     fn with_strict_mode(strict: bool) -> Self {
         Self {
             strict_rfc_mode: strict,
@@ -143,7 +138,7 @@ impl MockH1RequestParser {
                 // Check if all Content-Length headers have the same value
                 let all_same = content_length_headers
                     .iter()
-                    .all(|cl| cl.trim().parse::<u64>().map_or(false, |val| val == length));
+                    .all(|cl| cl.trim().parse::<u64>() == Ok(length));
 
                 if !all_same {
                     return RequestParseResult::ProtocolError(
@@ -261,19 +256,19 @@ enum HttpMethod {
     Custom(String),
 }
 
-impl HttpMethod {
-    fn to_string(&self) -> String {
+impl fmt::Display for HttpMethod {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            HttpMethod::Get => "GET".to_string(),
-            HttpMethod::Post => "POST".to_string(),
-            HttpMethod::Put => "PUT".to_string(),
-            HttpMethod::Delete => "DELETE".to_string(),
-            HttpMethod::Head => "HEAD".to_string(),
-            HttpMethod::Options => "OPTIONS".to_string(),
-            HttpMethod::Patch => "PATCH".to_string(),
-            HttpMethod::Trace => "TRACE".to_string(),
-            HttpMethod::Connect => "CONNECT".to_string(),
-            HttpMethod::Custom(s) => s.clone(),
+            HttpMethod::Get => f.write_str("GET"),
+            HttpMethod::Post => f.write_str("POST"),
+            HttpMethod::Put => f.write_str("PUT"),
+            HttpMethod::Delete => f.write_str("DELETE"),
+            HttpMethod::Head => f.write_str("HEAD"),
+            HttpMethod::Options => f.write_str("OPTIONS"),
+            HttpMethod::Patch => f.write_str("PATCH"),
+            HttpMethod::Trace => f.write_str("TRACE"),
+            HttpMethod::Connect => f.write_str("CONNECT"),
+            HttpMethod::Custom(s) => f.write_str(s),
         }
     }
 }
@@ -286,13 +281,13 @@ enum HttpVersion {
     Custom(String),
 }
 
-impl HttpVersion {
-    fn to_string(&self) -> String {
+impl fmt::Display for HttpVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            HttpVersion::Http10 => "HTTP/1.0".to_string(),
-            HttpVersion::Http11 => "HTTP/1.1".to_string(),
-            HttpVersion::Http2 => "HTTP/2.0".to_string(),
-            HttpVersion::Custom(s) => s.clone(),
+            HttpVersion::Http10 => f.write_str("HTTP/1.0"),
+            HttpVersion::Http11 => f.write_str("HTTP/1.1"),
+            HttpVersion::Http2 => f.write_str("HTTP/2.0"),
+            HttpVersion::Custom(s) => f.write_str(s),
         }
     }
 }
@@ -301,13 +296,13 @@ fuzz_target!(|input: FuzzInput| {
     // Build HTTP request
     let mut request = format!(
         "{} {} {}\r\n",
-        input.method.to_string(),
+        input.method,
         if input.uri.is_empty() {
             "/"
         } else {
             &input.uri
         },
-        input.version.to_string()
+        input.version
     );
 
     // Add Transfer-Encoding headers
@@ -351,7 +346,7 @@ fuzz_target!(|input: FuzzInput| {
     let result = parser.parse_request(request.as_bytes());
 
     // Validate behavior based on RFC 9112 §6.1
-    match result {
+    match &result {
         RequestParseResult::Valid {
             has_transfer_encoding_chunked,
             has_content_length,
@@ -360,6 +355,8 @@ fuzz_target!(|input: FuzzInput| {
             ..
         } => {
             // Request parsed successfully - validate RFC compliance
+            let has_transfer_encoding_chunked = *has_transfer_encoding_chunked;
+            let has_content_length = *has_content_length;
 
             if has_transfer_encoding_chunked && has_content_length {
                 if !input.use_non_strict_mode {
@@ -370,9 +367,8 @@ fuzz_target!(|input: FuzzInput| {
                     );
                 } else {
                     // Non-strict mode: should mark as ambiguous
-                    assert_eq!(
-                        effective_transfer_mechanism,
-                        TransferMechanism::Ambiguous,
+                    assert!(
+                        matches!(effective_transfer_mechanism, TransferMechanism::Ambiguous),
                         "Non-strict mode with both headers should be marked as ambiguous"
                     );
                 }
@@ -381,7 +377,7 @@ fuzz_target!(|input: FuzzInput| {
             if has_transfer_encoding_chunked && !has_content_length {
                 assert_eq!(
                     effective_transfer_mechanism,
-                    TransferMechanism::Chunked,
+                    &TransferMechanism::Chunked,
                     "Transfer-Encoding: chunked should result in chunked transfer mechanism"
                 );
             }
@@ -389,7 +385,7 @@ fuzz_target!(|input: FuzzInput| {
             if !has_transfer_encoding_chunked && has_content_length {
                 if let TransferMechanism::ContentLength(length) = effective_transfer_mechanism {
                     assert_eq!(
-                        length, input.content_length_value,
+                        *length, input.content_length_value,
                         "Content-Length transfer should use specified length"
                     );
                 } else {
@@ -399,7 +395,7 @@ fuzz_target!(|input: FuzzInput| {
 
             // Test header normalization (RFC requirement to remove Content-Length)
             if has_transfer_encoding_chunked && !input.use_non_strict_mode {
-                let normalized_headers = parser.normalize_headers(&headers);
+                let normalized_headers = parser.normalize_headers(headers);
                 let has_cl_after_normalization = normalized_headers
                     .iter()
                     .any(|(name, _)| name.to_lowercase() == "content-length");
@@ -459,8 +455,8 @@ fuzz_target!(|input: FuzzInput| {
         && input.include_content_length
         && !input.use_non_strict_mode
     {
-        match result {
-            RequestParseResult::ProtocolError(ref msg) => {
+        match &result {
+            RequestParseResult::ProtocolError(msg) => {
                 // Expected - verify it's the right kind of protocol error
                 assert!(
                     msg.contains("Transfer-Encoding") && msg.contains("Content-Length"),
@@ -524,12 +520,7 @@ fuzz_target!(|input: FuzzInput| {
                 // Even better - rejected entirely
             }
             RequestParseResult::Valid { .. } => {
-                // DANGEROUS: parsed as completely valid, no warning
-                // This would enable silent request smuggling
-                eprintln!(
-                    "WARNING: Non-strict mode silently accepted CL.TE smuggling pattern - \
-                     this could enable attacks if deployed"
-                );
+                panic!("non-strict mode silently accepted CL.TE smuggling pattern");
             }
             _ => {}
         }
