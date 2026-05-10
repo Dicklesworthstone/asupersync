@@ -15,7 +15,7 @@
 //! - Constraint matrix structural boundaries around k values
 
 use arbitrary::{Arbitrary, Unstructured};
-use asupersync::raptorq::decoder::{DecodeError, InactivationDecoder, ReceivedSymbol};
+use asupersync::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::gf256::Gf256;
 use asupersync::raptorq::systematic::{SystematicEncoder, SystematicParams};
 use asupersync::types::ObjectId;
@@ -530,15 +530,14 @@ fn test_decode_with_boundary_symbols(
                 assert!(!symbol.is_empty(), "Decoded symbols should not be empty");
             }
         }
-        Err(DecodeError::SingularMatrix) => {
-            // Expected for rank-deficient cases - this is correct behavior
+        Err(error) if error.is_recoverable() => {
+            // Expected for rank-deficient or underdetermined boundary cases.
         }
-        Err(DecodeError::InsufficientSymbols) => {
-            // Expected when we have too few symbols - this is correct behavior
-        }
-        Err(other) => {
-            // Other errors should not panic, but are allowed
-            eprintln!("Decode error (boundary condition): {:?}", other);
+        Err(error) => {
+            assert!(
+                error.is_unrecoverable(),
+                "decode error was neither recoverable nor unrecoverable: {error:?}"
+            );
         }
     }
 
