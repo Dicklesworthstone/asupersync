@@ -462,12 +462,10 @@ impl HpackDynamicTable {
 
         let dynamic_index = index as usize - STATIC_TABLE_SIZE - 1;
 
+        let table_size = self.entries.len();
         self.entries
             .get(dynamic_index)
-            .ok_or_else(|| HpackDecodingError::InvalidIndex {
-                index,
-                table_size: self.entries.len(),
-            })
+            .ok_or(HpackDecodingError::InvalidIndex { index, table_size })
     }
 
     fn get_state(&self) -> TableState {
@@ -802,17 +800,15 @@ fn test_hpack_table_invariants(
     );
 
     // Invariant: After zero reduction, table should be empty
-    if input.table_size_sequence.include_zero_reduction {
-        if let Ok(_) = result {
-            assert_eq!(
-                table_state.entry_count, 0,
-                "Table should be empty after size reduction to 0"
-            );
-            assert_eq!(
-                table_state.size, 0,
-                "Table size should be 0 after evicting all entries"
-            );
-        }
+    if input.table_size_sequence.include_zero_reduction && result.is_ok() {
+        assert_eq!(
+            table_state.entry_count, 0,
+            "Table should be empty after size reduction to 0"
+        );
+        assert_eq!(
+            table_state.size, 0,
+            "Table size should be 0 after evicting all entries"
+        );
     }
 
     // Invariant: Table max size should match final configured size
