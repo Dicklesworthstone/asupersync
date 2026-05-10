@@ -5045,6 +5045,7 @@ name = "h1_transfer_encoding_precedence"
 path = "fuzz_targets/h1_transfer_encoding_precedence.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_continuation_timeout"
