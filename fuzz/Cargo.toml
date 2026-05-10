@@ -2465,6 +2465,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "raptorq_symbol_set_frame_transitions"
+path = "fuzz_targets/raptorq_symbol_set_frame_transitions.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "grpc_codec"
 path = "fuzz_targets/grpc_codec.rs"
 test = false

@@ -30,10 +30,8 @@ use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
-use asupersync::types::{Symbol, SymbolId, SymbolKind, ObjectId};
-use asupersync::types::symbol_set::{SymbolSet, ThresholdConfig, InsertResult, BlockProgress};
-use asupersync::codec::raptorq::{EncodedSymbol, EncodingPipeline, EncodingConfig};
-use asupersync::types::resource::{SymbolPool, PoolConfig};
+use asupersync::types::symbol_set::{InsertResult, SymbolSet, ThresholdConfig};
+use asupersync::types::{ObjectId, Symbol, SymbolId, SymbolKind};
 
 /// Maximum input size to prevent OOM during fuzzing
 const MAX_INPUT_SIZE: usize = 64 * 1024;
@@ -55,30 +53,17 @@ enum SymbolSetOperation {
         data: Vec<u8>,
     },
     /// Insert a batch of symbols
-    InsertBatch {
-        symbols: Vec<FuzzSymbol>,
-    },
+    InsertBatch { symbols: Vec<FuzzSymbol> },
     /// Set block K parameter (source symbol count)
-    SetBlockK {
-        sbn: u8,
-        k: u16,
-    },
+    SetBlockK { sbn: u8, k: u16 },
     /// Remove symbol by ID
-    RemoveSymbol {
-        sbn: u8,
-        esi: u16,
-    },
+    RemoveSymbol { sbn: u8, esi: u16 },
     /// Query operations
-    QuerySymbol {
-        sbn: u8,
-        esi: u16,
-    },
+    QuerySymbol { sbn: u8, esi: u16 },
     /// Serialize current state to frame format
     SerializeToFrame,
     /// Memory pressure test: insert until limit reached
-    MemoryPressureTest {
-        target_bytes: usize,
-    },
+    MemoryPressureTest { target_bytes: usize },
 }
 
 /// Fuzzable symbol kind
@@ -155,7 +140,8 @@ struct FuzzThresholdConfig {
 impl From<FuzzThresholdConfig> for ThresholdConfig {
     fn from(config: FuzzThresholdConfig) -> Self {
         // Sanitize inputs to prevent NaN/infinity
-        let overhead_factor = if config.overhead_factor.is_finite() && config.overhead_factor > 0.0 {
+        let overhead_factor = if config.overhead_factor.is_finite() && config.overhead_factor > 0.0
+        {
             config.overhead_factor.clamp(1.0, 10.0)
         } else {
             1.02
@@ -191,7 +177,12 @@ fn execute_scenario(scenario: FuzzScenario) -> Result<(), Box<dyn std::error::Er
     // Execute operations sequence
     for operation in scenario.operations {
         match operation {
-            SymbolSetOperation::InsertSymbol { sbn, esi, kind, mut data } => {
+            SymbolSetOperation::InsertSymbol {
+                sbn,
+                esi,
+                kind,
+                mut data,
+            } => {
                 if sbn > MAX_SOURCE_BLOCKS || data.len() > MAX_SYMBOL_SIZE {
                     continue;
                 }
@@ -199,8 +190,8 @@ fn execute_scenario(scenario: FuzzScenario) -> Result<(), Box<dyn std::error::Er
                 // Bound data size
                 data.truncate(MAX_SYMBOL_SIZE);
 
-                let symbol_id = SymbolId::new(ObjectId::new_for_test(0), sbn, esi);
-                let symbol = Symbol::new_for_test(symbol_id, kind.into(), data.clone());
+                let symbol_id = SymbolId::new(ObjectId::new_for_test(0), sbn, u32::from(esi));
+                let symbol = Symbol::new(symbol_id, data.clone(), kind.into());
 
                 let result = symbol_set.insert(symbol.clone());
 
@@ -233,21 +224,41 @@ fn execute_scenario(scenario: FuzzScenario) -> Result<(), Box<dyn std::error::Er
             }
 
             SymbolSetOperation::InsertBatch { symbols } => {
-                let batch_symbols: Vec<Symbol> = symbols.into_iter()
+                let batch_symbols: Vec<Symbol> = symbols
+                    .into_iter()
                     .filter(|s| s.sbn <= MAX_SOURCE_BLOCKS && s.data.len() <= MAX_SYMBOL_SIZE)
                     .take(MAX_SYMBOLS_PER_SET / 4) // Limit batch size
                     .map(|fuzz_sym| {
                         let mut data = fuzz_sym.data;
                         data.truncate(MAX_SYMBOL_SIZE);
-                        let symbol_id = SymbolId::new(ObjectId::new_for_test(0), fuzz_sym.sbn, fuzz_sym.esi);
-                        Symbol::new_for_test(symbol_id, fuzz_sym.kind.into(), data)
+                        let symbol_id = SymbolId::new(
+                            ObjectId::new_for_test(0),
+                            fuzz_sym.sbn,
+                            u32::from(fuzz_sym.esi),
+                        );
+                        Symbol::new(symbol_id, data, fuzz_sym.kind.into())
                     })
                     .collect();
 
-                let results = symbol_set.insert_batch(batch_symbols.into_iter());
+                let results = symbol_set.insert_batch(batch_symbols.clone().into_iter());
 
                 // Verify batch results consistency
-                assert!(!results.is_empty());
+                assert!(results.len() <= MAX_SYMBOLS_PER_SET / 4);
+                for (symbol, result) in batch_symbols.into_iter().zip(results.iter()) {
+                    if let InsertResult::Inserted { block_progress, .. } = result {
+                        expected_symbols.insert(symbol.id(), symbol.clone());
+                        let entry = block_progress_tracker
+                            .entry(symbol.sbn())
+                            .or_insert((0, 0, None));
+                        match symbol.kind() {
+                            SymbolKind::Source => entry.0 += 1,
+                            SymbolKind::Repair => entry.1 += 1,
+                        }
+                        assert_eq!(block_progress.sbn, symbol.sbn());
+                        assert_eq!(block_progress.source_symbols, entry.0);
+                        assert_eq!(block_progress.repair_symbols, entry.1);
+                    }
+                }
             }
 
             SymbolSetOperation::SetBlockK { sbn, k } => {
@@ -259,17 +270,19 @@ fn execute_scenario(scenario: FuzzScenario) -> Result<(), Box<dyn std::error::Er
                     entry.2 = Some(k);
 
                     // Verify threshold logic
-                    let total_symbols = entry.0 + entry.1;
-                    let expected_threshold = total_symbols >= k as usize;
-                    if expected_threshold {
-                        // May or may not reach threshold depending on overhead factor
+                    let progress = symbol_set
+                        .block_progress(sbn)
+                        .expect("set_block_k must create block progress");
+                    assert_eq!(threshold_reached, progress.threshold_reached);
+                    if progress.total() < usize::from(k) {
+                        assert!(!threshold_reached);
                     }
                 }
             }
 
             SymbolSetOperation::RemoveSymbol { sbn, esi } => {
                 if sbn <= MAX_SOURCE_BLOCKS {
-                    let symbol_id = SymbolId::new(ObjectId::new_for_test(0), sbn, esi);
+                    let symbol_id = SymbolId::new(ObjectId::new_for_test(0), sbn, u32::from(esi));
                     let removed = symbol_set.remove(&symbol_id);
 
                     if let Some(symbol) = removed {
@@ -288,7 +301,7 @@ fn execute_scenario(scenario: FuzzScenario) -> Result<(), Box<dyn std::error::Er
 
             SymbolSetOperation::QuerySymbol { sbn, esi } => {
                 if sbn <= MAX_SOURCE_BLOCKS {
-                    let symbol_id = SymbolId::new(ObjectId::new_for_test(0), sbn, esi);
+                    let symbol_id = SymbolId::new(ObjectId::new_for_test(0), sbn, u32::from(esi));
                     let exists = symbol_set.contains(&symbol_id);
                     let get_result = symbol_set.get(&symbol_id);
 
@@ -303,12 +316,21 @@ fn execute_scenario(scenario: FuzzScenario) -> Result<(), Box<dyn std::error::Er
 
             SymbolSetOperation::SerializeToFrame => {
                 // Test frame serialization (simplified implementation)
-                let frame_data = serialize_symbol_set_to_frame(&symbol_set, &scenario.frame_format)?;
+                let frame_data = serialize_symbol_set_to_frame(&symbol_set, &scenario.frame_format);
 
                 if scenario.test_roundtrip && !frame_data.is_empty() {
                     // Test round-trip: frame → symbols → frame
-                    let _deserialized = deserialize_frame_to_symbols(&frame_data, &scenario.frame_format)?;
-                    // Note: Full round-trip verification would require more complex state tracking
+                    match deserialize_frame_to_symbols(&frame_data, &scenario.frame_format) {
+                        Ok(deserialized) => {
+                            assert!(deserialized.len() <= MAX_SYMBOLS_PER_SET);
+                        }
+                        Err(_)
+                            if matches!(&scenario.frame_format, FrameFormat::Malformed { .. }) =>
+                        {
+                            // Malformed frame variants are expected to be rejected cleanly.
+                        }
+                        Err(error) => return Err(error),
+                    }
                 }
             }
 
@@ -321,13 +343,24 @@ fn execute_scenario(scenario: FuzzScenario) -> Result<(), Box<dyn std::error::Er
                 let mut count = 0;
                 let data = vec![0u8; 256]; // Fixed size data
 
-                while count < 100 { // Limit iterations
+                while count < 100 {
+                    // Limit iterations
                     let symbol_id = SymbolId::new(ObjectId::new_for_test(0), 0, count);
-                    let symbol = Symbol::new_for_test(symbol_id, SymbolKind::Source, data.clone());
+                    let symbol = Symbol::new(symbol_id, data.clone(), SymbolKind::Source);
 
                     match symbol_set.insert(symbol) {
                         InsertResult::MemoryLimitReached => break,
-                        _ => {}
+                        InsertResult::Inserted { block_progress, .. } => {
+                            let inserted_id = SymbolId::new(ObjectId::new_for_test(0), 0, count);
+                            let inserted =
+                                Symbol::new(inserted_id, data.clone(), SymbolKind::Source);
+                            expected_symbols.insert(inserted_id, inserted);
+                            let entry = block_progress_tracker.entry(0).or_insert((0, 0, None));
+                            entry.0 += 1;
+                            assert_eq!(block_progress.sbn, 0);
+                            assert_eq!(block_progress.source_symbols, entry.0);
+                        }
+                        InsertResult::Duplicate | InsertResult::BlockLimitReached { .. } => {}
                     }
                     count += 1;
                 }
@@ -339,47 +372,42 @@ fn execute_scenario(scenario: FuzzScenario) -> Result<(), Box<dyn std::error::Er
 }
 
 /// Serialize symbol set to frame format (simplified implementation for testing)
-fn serialize_symbol_set_to_frame(
-    _symbol_set: &SymbolSet,
-    format: &FrameFormat
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+fn serialize_symbol_set_to_frame(_symbol_set: &SymbolSet, format: &FrameFormat) -> Vec<u8> {
     match format {
         FrameFormat::SimpleBinary => {
             // Simplified: just return a valid-looking frame header
-            Ok(vec![0x01, 0x02, 0x03, 0x04])
+            vec![0x01, 0x02, 0x03, 0x04]
         }
         FrameFormat::LengthPrefixed => {
             let mut frame = Vec::new();
             frame.extend_from_slice(&4u32.to_le_bytes()); // Total length
             frame.extend_from_slice(&0u16.to_le_bytes()); // Symbol count
-            Ok(frame)
+            frame
         }
         FrameFormat::Compressed => {
             // Minimal compressed format
-            Ok(vec![0xFF, 0x00])
+            vec![0xFF, 0x00]
         }
-        FrameFormat::Malformed { corruption_type } => {
-            match corruption_type {
-                CorruptionType::TruncatedHeader => Ok(vec![0x01]),
-                CorruptionType::InvalidLength => Ok(vec![0xFF, 0xFF, 0xFF, 0xFF]),
-                CorruptionType::MissingTerminator => Ok(vec![0x01, 0x02, 0x03]),
-                CorruptionType::DataCorruption { offset } => {
-                    let mut data = vec![0u8; 16];
-                    if *offset < data.len() {
-                        data[*offset] = 0xFF;
-                    }
-                    Ok(data)
+        FrameFormat::Malformed { corruption_type } => match corruption_type {
+            CorruptionType::TruncatedHeader => vec![0x01],
+            CorruptionType::InvalidLength => vec![0xFF, 0xFF, 0xFF, 0xFF],
+            CorruptionType::MissingTerminator => vec![0x01, 0x02, 0x03],
+            CorruptionType::DataCorruption { offset } => {
+                let mut data = vec![0u8; 16];
+                if *offset < data.len() {
+                    data[*offset] = 0xFF;
                 }
-                CorruptionType::CountMismatch => Ok(vec![0x10, 0x00, 0x01, 0x02]), // Claims 16 symbols but has 2 bytes
+                data
             }
-        }
+            CorruptionType::CountMismatch => vec![0x10, 0x00, 0x01, 0x02],
+        },
     }
 }
 
 /// Deserialize frame back to symbols (simplified implementation for testing)
 fn deserialize_frame_to_symbols(
     data: &[u8],
-    format: &FrameFormat
+    format: &FrameFormat,
 ) -> Result<Vec<Symbol>, Box<dyn std::error::Error>> {
     match format {
         FrameFormat::SimpleBinary => {
@@ -418,12 +446,8 @@ fuzz_target!(|data: &[u8]| {
 
     // Generate fuzz scenario from input data
     if let Ok(scenario) = FuzzScenario::arbitrary(&mut u) {
-        // Execute with panic handler
-        let _ = std::panic::catch_unwind(|| {
-            if let Err(e) = execute_scenario(scenario) {
-                // Log error but don't panic - errors are expected
-                eprintln!("Scenario error: {}", e);
-            }
+        execute_scenario(scenario).unwrap_or_else(|error| {
+            panic!("RaptorQ SymbolSet frame transition failed: {error}");
         });
     }
 });
