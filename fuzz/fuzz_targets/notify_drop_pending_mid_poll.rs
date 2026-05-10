@@ -62,13 +62,13 @@ enum DropTiming {
 #[derive(Debug, Arbitrary, Clone)]
 enum NotifyPattern {
     /// Single notification after brief delay
-    DelayedNotify { delay_micros: u16 },
+    Delayed { delay_micros: u16 },
     /// Rapid burst of notifications
-    BurstNotify { count: u8, interval_micros: u16 },
+    Burst { count: u8, interval_micros: u16 },
     /// Notification synchronized with barrier
-    SynchronizedNotify,
+    Synchronized,
     /// Multiple notifications with varying delays
-    StaggeredNotify { delays: Vec<u16> },
+    Staggered { delays: Vec<u16> },
 }
 
 impl NotifyDropMidPollConfig {
@@ -83,7 +83,7 @@ impl NotifyDropMidPollConfig {
             .resize(self.future_count as usize, DropTiming::CompleteWait);
         self.notify_patterns.resize(
             self.notifier_count as usize,
-            NotifyPattern::DelayedNotify { delay_micros: 100 },
+            NotifyPattern::Delayed { delay_micros: 100 },
         );
 
         // Normalize timing parameters
@@ -96,7 +96,7 @@ impl NotifyDropMidPollConfig {
                     *target_poll = (*target_poll % 10).max(1);
                 }
                 DropTiming::DropBeforeWakeup { delay_micros } => {
-                    *delay_micros = *delay_micros % 500; // Max 0.5ms
+                    *delay_micros %= 500; // Max 0.5ms
                 }
                 _ => {}
             }
@@ -104,20 +104,20 @@ impl NotifyDropMidPollConfig {
 
         for pattern in &mut self.notify_patterns {
             match pattern {
-                NotifyPattern::DelayedNotify { delay_micros } => {
-                    *delay_micros = *delay_micros % 1000; // Max 1ms
+                NotifyPattern::Delayed { delay_micros } => {
+                    *delay_micros %= 1000; // Max 1ms
                 }
-                NotifyPattern::BurstNotify {
+                NotifyPattern::Burst {
                     count,
                     interval_micros,
                 } => {
                     *count = (*count % 5).max(1);
-                    *interval_micros = *interval_micros % 200;
+                    *interval_micros %= 200;
                 }
-                NotifyPattern::StaggeredNotify { delays } => {
+                NotifyPattern::Staggered { delays } => {
                     delays.truncate(5); // Max 5 staggered notifications
                     for delay in delays.iter_mut() {
-                        *delay = *delay % 300;
+                        *delay %= 300;
                     }
                 }
                 _ => {}
@@ -167,7 +167,7 @@ impl TrackingWaker {
         use std::task::{RawWaker, RawWakerVTable};
 
         unsafe fn clone_tracking_waker(data: *const ()) -> RawWaker {
-            let waker = &*(data as *const TrackingWaker);
+            let waker = unsafe { &*(data as *const TrackingWaker) };
             let cloned = TrackingWaker {
                 wake_count: Arc::clone(&waker.wake_count),
                 results: Arc::clone(&waker.results),
@@ -180,7 +180,7 @@ impl TrackingWaker {
         }
 
         unsafe fn wake_tracking_waker(data: *const ()) {
-            let waker = Box::from_raw(data as *mut TrackingWaker);
+            let waker = unsafe { Box::from_raw(data as *mut TrackingWaker) };
             waker.wake_count.fetch_add(1, Ordering::SeqCst);
 
             if waker.future_dropped.load(Ordering::SeqCst) {
@@ -192,7 +192,7 @@ impl TrackingWaker {
         }
 
         unsafe fn wake_by_ref_tracking_waker(data: *const ()) {
-            let waker = &*(data as *const TrackingWaker);
+            let waker = unsafe { &*(data as *const TrackingWaker) };
             waker.wake_count.fetch_add(1, Ordering::SeqCst);
 
             if waker.future_dropped.load(Ordering::SeqCst) {
@@ -204,7 +204,7 @@ impl TrackingWaker {
         }
 
         unsafe fn drop_tracking_waker(data: *const ()) {
-            let _ = Box::from_raw(data as *mut TrackingWaker);
+            drop(unsafe { Box::from_raw(data as *mut TrackingWaker) });
         }
 
         static TRACKING_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
@@ -225,11 +225,9 @@ impl TrackingWaker {
 
 /// Controllable notified future that can be dropped mid-poll
 struct MidPollNotified {
-    notify: Arc<Notify>,
     future: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
     poll_count: u32,
     drop_timing: DropTiming,
-    poll_intensity: u8,
     future_dropped_flag: Arc<AtomicBool>,
     completed: AtomicBool,
 }
@@ -238,7 +236,6 @@ impl MidPollNotified {
     fn new(
         notify: Arc<Notify>,
         drop_timing: DropTiming,
-        poll_intensity: u8,
         future_dropped_flag: Arc<AtomicBool>,
     ) -> Self {
         let notify_clone = Arc::clone(&notify);
@@ -247,11 +244,9 @@ impl MidPollNotified {
         });
 
         Self {
-            notify,
             future: Some(future),
             poll_count: 0,
             drop_timing,
-            poll_intensity,
             future_dropped_flag,
             completed: AtomicBool::new(false),
         }
@@ -272,7 +267,7 @@ impl MidPollNotified {
             DropTiming::DropDuringPoll { target_poll } => self.poll_count == *target_poll as u32,
             DropTiming::DropRandomDuringPoll => {
                 // Simple pseudo-random based on poll count
-                (self.poll_count * 7) % 5 == 0
+                (self.poll_count * 7).is_multiple_of(5)
             }
             DropTiming::DropBeforeWakeup { delay_micros } => {
                 // Drop after a brief delay (simulating drop just before wakeup)
@@ -325,6 +320,17 @@ impl MidPollNotified {
     fn is_dropped(&self) -> bool {
         self.future.is_none()
     }
+
+    fn mark_dropped(&mut self) {
+        self.future_dropped_flag.store(true, Ordering::SeqCst);
+        self.future = None;
+    }
+}
+
+fn observe_thread_join(handle_index: usize, handle: thread::JoinHandle<()>) {
+    if handle.join().is_err() {
+        panic!("notify_drop_pending_mid_poll worker thread {handle_index} panicked");
+    }
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -363,8 +369,8 @@ fuzz_target!(|data: &[u8]| {
                 TrackingWaker::new(Arc::clone(&results));
             let waker = tracking_waker.into_waker();
 
-            let mut notified =
-                MidPollNotified::new(notify, drop_timing, poll_intensity, future_dropped_flag);
+            let mut notified = MidPollNotified::new(notify, drop_timing, future_dropped_flag);
+            let mut outcome_recorded = false;
 
             // Synchronize start if requested
             if let Some(barrier) = barrier {
@@ -377,12 +383,12 @@ fuzz_target!(|data: &[u8]| {
                     Poll::Ready(()) => {
                         if notified.is_completed() {
                             results.futures_completed.fetch_add(1, Ordering::SeqCst);
+                            outcome_recorded = true;
                         }
                         break;
                     }
                     Poll::Pending => {
                         if notified.is_dropped() {
-                            results.futures_dropped.fetch_add(1, Ordering::SeqCst);
                             break;
                         }
                         // Brief wait between polls
@@ -392,7 +398,8 @@ fuzz_target!(|data: &[u8]| {
             }
 
             // Final accounting
-            if notified.is_dropped() && !notified.is_completed() {
+            if !outcome_recorded {
+                notified.mark_dropped();
                 results.futures_dropped.fetch_add(1, Ordering::SeqCst);
             }
         });
@@ -417,7 +424,7 @@ fuzz_target!(|data: &[u8]| {
             thread::sleep(Duration::from_micros(50));
 
             match pattern {
-                NotifyPattern::DelayedNotify { delay_micros } => {
+                NotifyPattern::Delayed { delay_micros } => {
                     if delay_micros > 0 {
                         thread::sleep(Duration::from_micros(delay_micros as u64));
                     }
@@ -425,7 +432,7 @@ fuzz_target!(|data: &[u8]| {
                     results.notifications_sent.fetch_add(1, Ordering::SeqCst);
                 }
 
-                NotifyPattern::BurstNotify {
+                NotifyPattern::Burst {
                     count,
                     interval_micros,
                 } => {
@@ -439,13 +446,13 @@ fuzz_target!(|data: &[u8]| {
                     }
                 }
 
-                NotifyPattern::SynchronizedNotify => {
+                NotifyPattern::Synchronized => {
                     // Immediate notification after barrier
                     notify.notify_one();
                     results.notifications_sent.fetch_add(1, Ordering::SeqCst);
                 }
 
-                NotifyPattern::StaggeredNotify { delays } => {
+                NotifyPattern::Staggered { delays } => {
                     for delay in delays {
                         if delay > 0 {
                             thread::sleep(Duration::from_micros(delay as u64));
@@ -461,8 +468,8 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Wait for all threads to complete
-    for handle in handles {
-        let _ = handle.join();
+    for (handle_index, handle) in handles.into_iter().enumerate() {
+        observe_thread_join(handle_index, handle);
     }
 
     // Verify results and race condition handling
