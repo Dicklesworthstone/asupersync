@@ -461,11 +461,49 @@ fn test_truncated_replay_safety(
         let truncation = (truncation_point as usize).min(events.len());
 
         // This should not panic, even with corrupted/truncated data
-        let _result = harness.replay_truncated(&trace, truncation);
-        // The fuzz target itself will catch any panics
+        let result = harness.replay_truncated(&trace, truncation);
+        assert_truncated_replay_result(result, trace.events.len(), truncation)?;
     }
 
     Ok(())
+}
+
+fn assert_truncated_replay_result(
+    result: Result<ReplayState, ReplayError>,
+    trace_len: usize,
+    truncation: usize,
+) -> Result<(), String> {
+    if truncation < trace_len {
+        return match result {
+            Err(ReplayError::Incomplete {
+                expected_events,
+                actual_events,
+            }) if expected_events == trace_len && actual_events == truncation => Ok(()),
+            Err(ReplayError::Incomplete {
+                expected_events,
+                actual_events,
+            }) => Err(format!(
+                "truncated replay reported wrong Incomplete counts: trace_len={trace_len}, \
+                 truncation={truncation}, expected_events={expected_events}, \
+                 actual_events={actual_events}"
+            )),
+            Err(err) => Err(format!(
+                "truncated replay returned non-Incomplete error: trace_len={trace_len}, \
+                 truncation={truncation}, error={err:?}"
+            )),
+            Ok(state) => Err(format!(
+                "truncated replay unexpectedly succeeded: trace_len={trace_len}, \
+                 truncation={truncation}, state={state:?}"
+            )),
+        };
+    }
+
+    result.map(|_| ()).map_err(|err| {
+        format!(
+            "non-truncated replay failed: trace_len={trace_len}, truncation={truncation}, \
+             error={err:?}"
+        )
+    })
 }
 
 /// **Assertion 3**: Event ordering preserved under DPOR minimization
