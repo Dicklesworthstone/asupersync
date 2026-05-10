@@ -5418,6 +5418,7 @@ name = "h1_chunked_terminator"
 path = "fuzz_targets/h1_chunked_terminator.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_priority_max_weight"
