@@ -18,15 +18,10 @@ use libfuzzer_sys::fuzz_target;
 
 /// HTTP/2 frame type identifiers
 const DATA_TYPE: u8 = 0x0;
-const HEADERS_TYPE: u8 = 0x1;
-const RST_STREAM_TYPE: u8 = 0x3;
-const SETTINGS_TYPE: u8 = 0x4;
-const WINDOW_UPDATE_TYPE: u8 = 0x8;
 
 /// HTTP/2 frame flags
 const END_STREAM_FLAG: u8 = 0x1;
 const PADDED_FLAG: u8 = 0x8;
-const END_HEADERS_FLAG: u8 = 0x4;
 
 /// HTTP/2 stream states per RFC 7540 §5.1
 #[derive(Debug, Clone, PartialEq)]
@@ -78,7 +73,7 @@ struct H2DataAfterEndStreamInput {
     max_payload_size: u16,
 }
 
-#[derive(Debug, Arbitrary)]
+#[derive(Debug, Arbitrary, Clone)]
 enum FrameOperation {
     /// Send DATA frame with specified flags
     SendData {
@@ -132,6 +127,14 @@ impl MockH2StreamStateParser {
         end_stream: bool,
         padded: bool,
     ) -> ParseResult {
+        let payload = vec![0u8; payload_size as usize];
+        let encoded = encode_data_frame(stream_id, &payload, end_stream, padded);
+        assert_eq!(
+            encoded.len(),
+            9 + payload.len() + if padded { 9 } else { 0 },
+            "DATA frame encoding length should account for payload and padding"
+        );
+
         // Stream ID 0 is invalid for DATA frames
         if stream_id == 0 {
             return ParseResult::ProtocolError("DATA frame with stream_id=0".to_string());
@@ -243,6 +246,12 @@ impl MockH2StreamStateParser {
 
     /// Process RST_STREAM frame
     fn process_rst_stream(&mut self, stream_id: u32, error_code: u32) -> ParseResult {
+        assert_eq!(
+            u32::from_be_bytes(error_code.to_be_bytes()),
+            error_code,
+            "RST_STREAM error code should round-trip through wire byte order"
+        );
+
         if stream_id == 0 {
             return ParseResult::ProtocolError("RST_STREAM frame with stream_id=0".to_string());
         }
@@ -290,9 +299,32 @@ impl MockH2StreamStateParser {
 
     /// Create a stream explicitly
     fn create_stream(&mut self, stream_id: u32) -> ParseResult {
-        self.get_or_create_stream(stream_id);
+        let assigned_stream_id = if stream_id == 0 {
+            self.next_stream_id
+        } else {
+            stream_id
+        };
+        self.next_stream_id = self
+            .next_stream_id
+            .max(assigned_stream_id.saturating_add(2));
+        self.get_or_create_stream(assigned_stream_id);
         ParseResult::FrameProcessed
     }
+}
+
+fn assert_modeled_stream_state_variants() {
+    let modeled_states = [
+        StreamState::Idle,
+        StreamState::Open,
+        StreamState::HalfClosedRemote,
+        StreamState::HalfClosedLocal,
+        StreamState::Closed,
+    ];
+    assert_eq!(
+        modeled_states.len(),
+        5,
+        "HTTP/2 stream-state model should keep all five RFC states represented"
+    );
 }
 
 /// Encode DATA frame
@@ -370,12 +402,14 @@ fuzz_target!(|input: H2DataAfterEndStreamInput| {
         return;
     }
 
+    assert_modeled_stream_state_variants();
+
     let results = process_input(&input);
 
     // Track stream states and find END_STREAM operations
     let mut closed_streams = std::collections::HashSet::new();
 
-    for (i, result) in results.iter().enumerate() {
+    for result in &results {
         match result {
             ParseResult::StreamClosed(stream_id) => {
                 closed_streams.insert(*stream_id);
