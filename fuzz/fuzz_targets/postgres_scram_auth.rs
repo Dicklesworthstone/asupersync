@@ -637,12 +637,26 @@ fn test_channel_binding(channel_data: &[u8]) -> Result<String, String> {
     use base64::Engine;
 
     // Test empty channel binding (no TLS)
-    let _empty_binding = base64::engine::general_purpose::STANDARD.encode(b"n,,");
+    let empty_binding = base64::engine::general_purpose::STANDARD.encode(b"n,,");
+    let empty_binding_bytes = base64::engine::general_purpose::STANDARD
+        .decode(empty_binding.as_bytes())
+        .expect("encoded empty GS2 header must decode");
+    assert_eq!(
+        empty_binding_bytes, b"n,,",
+        "empty GS2 header must round-trip through base64"
+    );
 
     // Test with channel data
     let mut binding_data = b"n,,".to_vec();
     binding_data.extend_from_slice(channel_data);
     let data_binding = base64::engine::general_purpose::STANDARD.encode(&binding_data);
+    let decoded_binding_data = base64::engine::general_purpose::STANDARD
+        .decode(data_binding.as_bytes())
+        .expect("encoded channel-binding data must decode");
+    assert_eq!(
+        decoded_binding_data, binding_data,
+        "channel-binding data must round-trip through base64"
+    );
 
     // Test GS2 header variations
     let gs2_headers = [
@@ -652,7 +666,15 @@ fn test_channel_binding(channel_data: &[u8]) -> Result<String, String> {
     ];
 
     for header in &gs2_headers {
-        let _ = base64::engine::general_purpose::STANDARD.encode(header.as_bytes());
+        let encoded = base64::engine::general_purpose::STANDARD.encode(header.as_bytes());
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(encoded.as_bytes())
+            .expect("encoded GS2 header must decode");
+        assert_eq!(
+            decoded,
+            header.as_bytes(),
+            "GS2 header must round-trip through base64"
+        );
     }
 
     Ok(data_binding)
