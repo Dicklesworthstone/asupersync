@@ -5025,6 +5025,7 @@ name = "h2_data_padding_validation"
 path = "fuzz_targets/h2_data_padding_validation.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h1_content_length_body_mismatch"

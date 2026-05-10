@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 
 /// HTTP/2 DATA frame padding length validation fuzzing.
 ///
@@ -43,9 +43,9 @@ pub enum StreamIdConfig {
     /// Valid stream IDs
     Valid(u32), // 1-2147483647
     /// Edge cases
-    Zero,      // Invalid for DATA frames
-    MaxValid,  // 0x7FFFFFFF
-    Reserved,  // With high bit set
+    Zero, // Invalid for DATA frames
+    MaxValid, // 0x7FFFFFFF
+    Reserved, // With high bit set
 }
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -69,9 +69,7 @@ pub enum PayloadConfig {
         padding_bytes: PaddingContent,
     },
     /// Payload without PADDED flag but with suspicious content
-    UnflaggedData {
-        data: Vec<u8>,
-    },
+    UnflaggedData { data: Vec<u8> },
     /// Malformed payloads
     Malformed(MalformedPayload),
 }
@@ -79,9 +77,9 @@ pub enum PayloadConfig {
 #[derive(Arbitrary, Debug, Clone)]
 pub enum DataContent {
     Empty,
-    Short(Vec<u8>), // 1-100 bytes
+    Short(Vec<u8>),  // 1-100 bytes
     Medium(Vec<u8>), // 101-1000 bytes
-    Large(Vec<u8>), // 1001+ bytes (up to max frame size)
+    Large(Vec<u8>),  // 1001+ bytes (up to max frame size)
     Pattern(PatternType),
     Binary(BinaryContent),
 }
@@ -145,6 +143,8 @@ pub enum PaddingScenario {
     EmptyFrameWithPadding,
     MissingPaddingFlag,
     InvalidStreamId,
+    FrameTooLarge,
+    MalformedFrame,
     /// Edge cases
     LargeFrameWithPadding,
     MultipleFlags,
@@ -159,7 +159,6 @@ pub enum PaddingScenario {
 #[derive(Debug)]
 pub struct MockDataFrameParser {
     max_frame_size: u32,
-    strict_validation: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -184,7 +183,6 @@ impl MockDataFrameParser {
     pub fn new() -> Self {
         Self {
             max_frame_size: 16 * 1024 * 1024, // 16MB default
-            strict_validation: true,
         }
     }
 
@@ -193,7 +191,10 @@ impl MockDataFrameParser {
         self
     }
 
-    pub fn parse_data_frame(&self, test_case: &DataPaddingTestCase) -> Result<ParsedDataFrame, FrameParseError> {
+    pub fn parse_data_frame(
+        &self,
+        test_case: &DataPaddingTestCase,
+    ) -> Result<ParsedDataFrame, FrameParseError> {
         // Build frame from test case
         let (header_bytes, payload_bytes) = self.build_frame(test_case)?;
 
@@ -210,10 +211,11 @@ impl MockDataFrameParser {
 
         // Validate payload length matches header
         if payload_bytes.len() != parsed_header.length as usize {
-            return Err(FrameParseError::MalformedFrame(
-                format!("Payload length {} doesn't match declared length {}",
-                        payload_bytes.len(), parsed_header.length)
-            ));
+            return Err(FrameParseError::MalformedFrame(format!(
+                "Payload length {} doesn't match declared length {}",
+                payload_bytes.len(),
+                parsed_header.length
+            )));
         }
 
         // Validate stream ID for DATA frames
@@ -225,7 +227,10 @@ impl MockDataFrameParser {
         self.parse_data_payload(parsed_header, payload_bytes)
     }
 
-    fn build_frame(&self, test_case: &DataPaddingTestCase) -> Result<(Vec<u8>, Vec<u8>), FrameParseError> {
+    fn build_frame(
+        &self,
+        test_case: &DataPaddingTestCase,
+    ) -> Result<(Vec<u8>, Vec<u8>), FrameParseError> {
         // Build payload first to determine actual length
         let payload_bytes = self.build_payload(&test_case.payload, &test_case.header.flags)?;
 
@@ -235,7 +240,7 @@ impl MockDataFrameParser {
             PaddingScenario::FrameTooLarge | PaddingScenario::MalformedFrame => {
                 // Use declared length that doesn't match actual
                 test_case.header.declared_length
-            },
+            }
             _ => actual_length,
         };
 
@@ -268,7 +273,7 @@ impl MockDataFrameParser {
                 // Ensure it's in valid range (1-0x7FFFFFFF) and odd (client-initiated)
                 let id = *id % 0x7FFFFFFF;
                 if id == 0 { 1 } else { id | 1 }
-            },
+            }
             StreamIdConfig::Zero => 0,
             StreamIdConfig::MaxValid => 0x7FFFFFFF,
             StreamIdConfig::Reserved => 0x80000001, // Set reserved bit
@@ -292,11 +297,19 @@ impl MockDataFrameParser {
         flags
     }
 
-    fn build_payload(&self, config: &PayloadConfig, flags: &FlagsConfig) -> Result<Vec<u8>, FrameParseError> {
+    fn build_payload(
+        &self,
+        config: &PayloadConfig,
+        flags: &FlagsConfig,
+    ) -> Result<Vec<u8>, FrameParseError> {
         match config {
             PayloadConfig::Empty => Ok(Vec::new()),
 
-            PayloadConfig::WithPadding { padding_length_byte, data, padding_bytes } => {
+            PayloadConfig::WithPadding {
+                padding_length_byte,
+                data,
+                padding_bytes,
+            } => {
                 let mut payload = Vec::new();
 
                 // Add padding length byte if PADDED flag is set
@@ -311,13 +324,11 @@ impl MockDataFrameParser {
                 payload.extend_from_slice(&self.build_padding_content(padding_bytes));
 
                 Ok(payload)
-            },
+            }
 
             PayloadConfig::UnflaggedData { data } => Ok(data.clone()),
 
-            PayloadConfig::Malformed(malformed) => {
-                self.build_malformed_payload(malformed, flags)
-            },
+            PayloadConfig::Malformed(malformed) => self.build_malformed_payload(malformed, flags),
         }
     }
 
@@ -336,15 +347,16 @@ impl MockDataFrameParser {
                     PatternType::Random(size) => {
                         // Deterministic "random" pattern for fuzzing reproducibility
                         (0..*size % 1000).map(|i| (i * 17 + 42) as u8).collect()
-                    },
+                    }
                     PatternType::HttpLike(content) => {
-                        format!("GET {} HTTP/1.1\r\nHost: example.com\r\n\r\n", content).into_bytes()
-                    },
+                        format!("GET {} HTTP/1.1\r\nHost: example.com\r\n\r\n", content)
+                            .into_bytes()
+                    }
                     PatternType::JsonLike(content) => {
                         format!("{{\"data\":\"{}\",\"type\":\"test\"}}", content).into_bytes()
-                    },
+                    }
                 }
-            },
+            }
 
             DataContent::Binary(binary) => {
                 match binary {
@@ -353,12 +365,10 @@ impl MockDataFrameParser {
                     BinaryContent::Base64Like(text) => {
                         // Simulate base64-like content
                         text.chars().map(|c| c as u8).collect()
-                    },
-                    BinaryContent::HighBitSet(bytes) => {
-                        bytes.iter().map(|&b| b | 0x80).collect()
-                    },
+                    }
+                    BinaryContent::HighBitSet(bytes) => bytes.iter().map(|&b| b | 0x80).collect(),
                 }
-            },
+            }
         }
     }
 
@@ -372,7 +382,11 @@ impl MockDataFrameParser {
         }
     }
 
-    fn build_malformed_payload(&self, malformed: &MalformedPayload, flags: &FlagsConfig) -> Result<Vec<u8>, FrameParseError> {
+    fn build_malformed_payload(
+        &self,
+        malformed: &MalformedPayload,
+        flags: &FlagsConfig,
+    ) -> Result<Vec<u8>, FrameParseError> {
         match malformed {
             MalformedPayload::PaddingByteOnly(byte) => {
                 if flags.padded {
@@ -380,7 +394,7 @@ impl MockDataFrameParser {
                 } else {
                     Ok(Vec::new())
                 }
-            },
+            }
 
             MalformedPayload::ExcessivePadding(padding_len, data) => {
                 let mut payload = Vec::new();
@@ -389,12 +403,12 @@ impl MockDataFrameParser {
                 }
                 payload.extend_from_slice(data);
                 Ok(payload)
-            },
+            }
 
             MalformedPayload::MissingPaddingByte => {
                 // PADDED flag set but no padding length byte
                 Ok(Vec::new())
-            },
+            }
 
             MalformedPayload::Truncated(data) => Ok(data.clone()),
             MalformedPayload::TooLong(data) => Ok(data.clone()),
@@ -403,37 +417,44 @@ impl MockDataFrameParser {
 
     fn parse_frame_header(&self, header_bytes: &[u8]) -> Result<FrameHeader, FrameParseError> {
         if header_bytes.len() != 9 {
-            return Err(FrameParseError::MalformedFrame("Invalid header size".to_string()));
+            return Err(FrameParseError::MalformedFrame(
+                "Invalid header size".to_string(),
+            ));
         }
 
-        let length = ((header_bytes[0] as u32) << 16) |
-                     ((header_bytes[1] as u32) << 8) |
-                      (header_bytes[2] as u32);
+        let length = ((header_bytes[0] as u32) << 16)
+            | ((header_bytes[1] as u32) << 8)
+            | (header_bytes[2] as u32);
 
         let frame_type = header_bytes[3];
         let flags = header_bytes[4];
 
-        let stream_id = ((header_bytes[5] as u32) << 24) |
-                        ((header_bytes[6] as u32) << 16) |
-                        ((header_bytes[7] as u32) << 8) |
-                         (header_bytes[8] as u32);
+        let stream_id = ((header_bytes[5] as u32) << 24)
+            | ((header_bytes[6] as u32) << 16)
+            | ((header_bytes[7] as u32) << 8)
+            | (header_bytes[8] as u32);
 
         // Clear reserved bit
         let stream_id = stream_id & 0x7FFFFFFF;
 
         if frame_type != 0x0 {
-            return Err(FrameParseError::MalformedFrame("Not a DATA frame".to_string()));
+            return Err(FrameParseError::MalformedFrame(
+                "Not a DATA frame".to_string(),
+            ));
         }
 
         Ok(FrameHeader {
             length,
-            frame_type,
             flags,
             stream_id,
         })
     }
 
-    fn parse_data_payload(&self, header: FrameHeader, mut payload: Vec<u8>) -> Result<ParsedDataFrame, FrameParseError> {
+    fn parse_data_payload(
+        &self,
+        header: FrameHeader,
+        mut payload: Vec<u8>,
+    ) -> Result<ParsedDataFrame, FrameParseError> {
         let end_stream = (header.flags & 0x1) != 0;
         let padded = (header.flags & 0x8) != 0;
         let mut padding_removed = 0;
@@ -471,10 +492,15 @@ impl MockDataFrameParser {
     }
 }
 
+impl Default for MockDataFrameParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Clone)]
 struct FrameHeader {
     length: u32,
-    frame_type: u8,
     flags: u8,
     stream_id: u32,
 }
@@ -492,17 +518,23 @@ fuzz_target!(|data: &[u8]| {
         match result {
             Ok(parsed_frame) => {
                 // Basic invariants
-                assert_ne!(parsed_frame.stream_id, 0, "DATA frame must have non-zero stream ID");
+                assert_ne!(
+                    parsed_frame.stream_id, 0,
+                    "DATA frame must have non-zero stream ID"
+                );
 
                 // Padding invariants
-                if let PayloadConfig::WithPadding { padding_length_byte, .. } = &test_case.payload {
-                    if test_case.header.flags.padded {
-                        // If parsing succeeded with padding, validate constraints
-                        assert!(
-                            *padding_length_byte as usize >= parsed_frame.padding_removed,
-                            "Padding removed should not exceed declared padding length"
-                        );
-                    }
+                if let PayloadConfig::WithPadding {
+                    padding_length_byte,
+                    ..
+                } = &test_case.payload
+                    && test_case.header.flags.padded
+                {
+                    // If parsing succeeded with padding, validate constraints
+                    assert!(
+                        *padding_length_byte as usize >= parsed_frame.padding_removed,
+                        "Padding removed should not exceed declared padding length"
+                    );
                 }
 
                 // Data integrity
@@ -523,7 +555,10 @@ fuzz_target!(|data: &[u8]| {
                 // Validate error conditions are appropriate
                 match error {
                     FrameParseError::FrameTooLarge { declared, max } => {
-                        assert!(declared > max, "Frame too large error should only trigger when declared > max");
+                        assert!(
+                            declared > max,
+                            "Frame too large error should only trigger when declared > max"
+                        );
                     }
 
                     FrameParseError::InvalidStreamId => {
@@ -573,20 +608,32 @@ fuzz_target!(|data: &[u8]| {
 fn test_padding_edge_cases(parser: &MockDataFrameParser, test_case: &DataPaddingTestCase) {
     // Test zero padding
     let mut zero_padding_case = test_case.clone();
-    if let PayloadConfig::WithPadding { ref mut padding_length_byte, .. } = zero_padding_case.payload {
+    if let PayloadConfig::WithPadding {
+        ref mut padding_length_byte,
+        ..
+    } = zero_padding_case.payload
+    {
         *padding_length_byte = 0;
         let result = parser.parse_data_frame(&zero_padding_case);
 
         // Zero padding should be valid
-        if test_case.header.flags.padded && matches!(test_case.header.stream_id, StreamIdConfig::Valid(_)) {
-            assert!(result.is_ok() || matches!(result, Err(FrameParseError::MalformedFrame(_))),
-                   "Zero padding should be valid or fail for structural reasons");
+        if test_case.header.flags.padded
+            && matches!(test_case.header.stream_id, StreamIdConfig::Valid(_))
+        {
+            assert!(
+                result.is_ok() || matches!(result, Err(FrameParseError::MalformedFrame(_))),
+                "Zero padding should be valid or fail for structural reasons"
+            );
         }
     }
 
     // Test maximum padding (255 bytes)
     let mut max_padding_case = test_case.clone();
-    if let PayloadConfig::WithPadding { ref mut padding_length_byte, .. } = max_padding_case.payload {
+    if let PayloadConfig::WithPadding {
+        ref mut padding_length_byte,
+        ..
+    } = max_padding_case.payload
+    {
         *padding_length_byte = 255;
         let result = parser.parse_data_frame(&max_padding_case);
 
@@ -604,10 +651,13 @@ fn test_frame_size_limits(parser: &MockDataFrameParser, test_case: &DataPaddingT
     let result = restricted_parser.parse_data_frame(test_case);
 
     // Large frames should be rejected
-    if let Ok((_, payload)) = parser.build_frame(test_case) {
-        if payload.len() > 1024 {
-            assert!(result.is_err(), "Large frames should be rejected by restricted parser");
-        }
+    if let Ok((_, payload)) = parser.build_frame(test_case)
+        && payload.len() > 1024
+    {
+        assert!(
+            result.is_err(),
+            "Large frames should be rejected by restricted parser"
+        );
     }
 }
 
@@ -623,7 +673,10 @@ fn test_flag_combinations(parser: &MockDataFrameParser, test_case: &DataPaddingT
 
     // Should succeed if stream ID is valid
     if matches!(no_padding_case.header.stream_id, StreamIdConfig::Valid(_)) {
-        assert!(result.is_ok(), "Unflagged data should parse successfully with valid stream ID");
+        assert!(
+            result.is_ok(),
+            "Unflagged data should parse successfully with valid stream ID"
+        );
     }
 }
 
@@ -633,7 +686,11 @@ fn test_padding_boundaries(parser: &MockDataFrameParser, test_case: &DataPadding
         let data_bytes = parser.build_data_content(data);
         let mut exact_padding_case = test_case.clone();
 
-        if let PayloadConfig::WithPadding { ref mut padding_length_byte, .. } = exact_padding_case.payload {
+        if let PayloadConfig::WithPadding {
+            ref mut padding_length_byte,
+            ..
+        } = exact_padding_case.payload
+        {
             *padding_length_byte = data_bytes.len() as u8;
 
             let result = parser.parse_data_frame(&exact_padding_case);
@@ -641,7 +698,10 @@ fn test_padding_boundaries(parser: &MockDataFrameParser, test_case: &DataPadding
             // This should result in empty data (all padding) or an error
             match result {
                 Ok(parsed) => {
-                    assert!(parsed.data.is_empty(), "Exact padding should result in empty data");
+                    assert!(
+                        parsed.data.is_empty(),
+                        "Exact padding should result in empty data"
+                    );
                 }
                 Err(FrameParseError::PaddingExceedsData { .. }) => {
                     // Also acceptable if padding calculation includes the padding length byte
@@ -650,4 +710,4 @@ fn test_padding_boundaries(parser: &MockDataFrameParser, test_case: &DataPadding
             }
         }
     }
-};
+}
