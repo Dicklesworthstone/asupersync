@@ -2658,7 +2658,7 @@ mod platform {
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     const ADDRESS_SPACE_FALLBACK: u64 = 16 * 1024 * 1024 * 1024;
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     pub fn process_rss_bytes() -> std::io::Result<u64> {
         let status = std::fs::read_to_string("/proc/self/status")?;
         for line in status.lines() {
@@ -2678,7 +2678,7 @@ mod platform {
         ))
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     pub fn memory_max_bytes() -> std::io::Result<u64> {
         // Prefer the address-space rlimit; fall back to MemTotal when
         // the rlimit is `RLIM_INFINITY` (the common production shape).
@@ -2702,13 +2702,13 @@ mod platform {
         Ok(ADDRESS_SPACE_FALLBACK)
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     pub fn process_fd_count() -> std::io::Result<u64> {
         let count = std::fs::read_dir("/proc/self/fd")?.count();
         Ok(count as u64)
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     pub fn load_avg_1min_scaled() -> std::io::Result<u64> {
         let s = std::fs::read_to_string("/proc/loadavg")?;
         let first = s.split_whitespace().next().ok_or_else(|| {
@@ -2722,7 +2722,7 @@ mod platform {
         Ok(pct.round() as u64)
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     pub fn process_connection_count() -> std::io::Result<u64> {
         let mut total: u64 = 0;
         for path in [
@@ -2842,6 +2842,7 @@ mod platform {
 
     #[cfg(not(any(
         target_os = "linux",
+        target_os = "android",
         target_os = "macos",
         target_os = "freebsd",
         target_os = "netbsd",
@@ -2853,7 +2854,7 @@ mod platform {
             std::io::ErrorKind::Unsupported,
             format!(
                 "resource_monitor: {what} is not implemented on this platform \
-                 (Linux, macOS, FreeBSD, NetBSD, OpenBSD, DragonFly only). \
+                 (Linux, Android, macOS, FreeBSD, NetBSD, OpenBSD, DragonFly only). \
                  Wire a platform-specific collector via \
                  ResourceMonitor::register_resource."
             ),
@@ -2862,6 +2863,7 @@ mod platform {
 
     #[cfg(not(any(
         target_os = "linux",
+        target_os = "android",
         target_os = "macos",
         target_os = "freebsd",
         target_os = "netbsd",
@@ -2873,6 +2875,7 @@ mod platform {
     }
     #[cfg(not(any(
         target_os = "linux",
+        target_os = "android",
         target_os = "macos",
         target_os = "freebsd",
         target_os = "netbsd",
@@ -2884,6 +2887,7 @@ mod platform {
     }
     #[cfg(not(any(
         target_os = "linux",
+        target_os = "android",
         target_os = "macos",
         target_os = "freebsd",
         target_os = "netbsd",
@@ -2895,6 +2899,7 @@ mod platform {
     }
     #[cfg(not(any(
         target_os = "linux",
+        target_os = "android",
         target_os = "macos",
         target_os = "freebsd",
         target_os = "netbsd",
@@ -2906,6 +2911,7 @@ mod platform {
     }
     #[cfg(not(any(
         target_os = "linux",
+        target_os = "android",
         target_os = "macos",
         target_os = "freebsd",
         target_os = "netbsd",
@@ -3831,6 +3837,7 @@ mod tests {
 
     #[cfg(any(
         target_os = "linux",
+        target_os = "android",
         target_os = "macos",
         target_os = "freebsd",
         target_os = "netbsd",
@@ -3861,6 +3868,7 @@ mod tests {
 
     #[cfg(any(
         target_os = "linux",
+        target_os = "android",
         target_os = "macos",
         target_os = "freebsd",
         target_os = "netbsd",
@@ -3883,6 +3891,7 @@ mod tests {
 
     #[cfg(any(
         target_os = "linux",
+        target_os = "android",
         target_os = "macos",
         target_os = "freebsd",
         target_os = "netbsd",
@@ -3900,14 +3909,14 @@ mod tests {
         assert!(m.current <= 100, "load percentage in range");
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     #[test]
     fn thfiyk_collect_network_usage_returns_real_count() {
         let pressure = Arc::new(ResourcePressure::new());
         let collector = SystemResourceCollector::new(pressure, Duration::from_secs(1));
         let m = collector
             .collect_network_usage()
-            .expect("connection count read should succeed on Linux");
+            .expect("connection count read should succeed on Linux or Android");
         // Connection count can legitimately be 0 (a fresh test
         // process opens no sockets), so assert only that the ceiling
         // is sane and the reader did not return the legacy mock 50.
