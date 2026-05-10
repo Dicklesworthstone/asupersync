@@ -3447,6 +3447,16 @@ test = false
 doc = false
 bench = false
 
+# Structure-aware fuzzer for RESP3 attribute (`|`) frame boundary cases.
+# Covers malformed pair counts, truncated key/value sequences, nested
+# attributes, CRLF variants, and raw malformed attribute bytes.
+[[bin]]
+name = "redis_resp3_attribute_frames"
+path = "fuzz_targets/redis_resp3_attribute_frames.rs"
+test = false
+doc = false
+bench = false
+
 # Structure-aware fuzzer for RESP3 verbatim strings with exact label preservation.
 # Targets src/messaging/redis.rs verbatim parsing for arbitrary payload bytes while
 # asserting that valid `txt`/`mkd` frames preserve the 3-byte label across

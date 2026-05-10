@@ -2,9 +2,8 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashMap;
 
-use asupersync::messaging::redis::{RespValue, RedisError, RedisProtocolLimits};
+use asupersync::messaging::redis::{RedisError, RedisProtocolLimits, RespValue};
 
 /// Maximum input size to prevent OOM during fuzzing
 const MAX_INPUT_SIZE: usize = 64 * 1024;
@@ -57,7 +56,7 @@ struct FuzzProtocolLimits {
     /// Maximum nesting depth
     max_nesting_depth: usize,
     /// Maximum single value size
-    max_value_size: usize,
+    max_frame_size: usize,
 }
 
 impl From<FuzzProtocolLimits> for RedisProtocolLimits {
@@ -65,7 +64,8 @@ impl From<FuzzProtocolLimits> for RedisProtocolLimits {
         Self {
             max_array_len: limits.max_array_len.min(MAX_ATTR_PAIRS * 2), // Sanitize
             max_nesting_depth: limits.max_nesting_depth.min(100),
-            max_value_size: limits.max_value_size.min(MAX_INPUT_SIZE),
+            max_frame_size: limits.max_frame_size.min(MAX_INPUT_SIZE),
+            max_bulk_string_len: limits.max_frame_size.min(MAX_INPUT_SIZE),
         }
     }
 }
@@ -94,10 +94,7 @@ enum AttributeFramePattern {
         truncate_at: TruncationPoint,
     },
     /// Attribute with nested attributes
-    NestedAttribute {
-        depth: u8,
-        pairs_per_level: u8,
-    },
+    NestedAttribute { depth: u8, pairs_per_level: u8 },
     /// Malformed CRLF in attribute header
     MalformedCrlf {
         use_lf_only: bool,
@@ -105,9 +102,7 @@ enum AttributeFramePattern {
         missing_terminator: bool,
     },
     /// Raw malformed bytes for boundary testing
-    RawBytes {
-        data: Vec<u8>,
-    },
+    RawBytes { data: Vec<u8> },
 }
 
 /// Attribute value types for testing
@@ -143,9 +138,7 @@ impl AttributeValue {
                 buf.extend_from_slice(b"\r\n");
                 buf
             }
-            Self::Integer(i) => {
-                format!(":{i}\r\n").into_bytes()
-            }
+            Self::Integer(i) => format!(":{i}\r\n").into_bytes(),
             Self::BulkString(Some(data)) => {
                 let mut buf = format!("${}\r\n", data.len()).into_bytes();
                 buf.extend_from_slice(data);
@@ -190,11 +183,11 @@ enum TruncationPoint {
     /// Truncate between CRLF of header
     InHeaderCrlf,
     /// Truncate in the middle of a key
-    InKey { pair_index: u8, byte_offset: u8 },
+    InKey { _pair_index: u8, byte_offset: u8 },
     /// Truncate in the middle of a value
-    InValue { pair_index: u8, byte_offset: u8 },
+    InValue { _pair_index: u8, byte_offset: u8 },
     /// Truncate between key and value
-    BetweenKeyValue { pair_index: u8 },
+    BetweenKeyValue { _pair_index: u8 },
 }
 
 impl AttributeFramePattern {
@@ -210,10 +203,11 @@ impl AttributeFramePattern {
                 buf
             }
             AttributeFramePattern::EmptyAttribute => b"|0\r\n".to_vec(),
-            AttributeFramePattern::NegativeCount { count } => {
-                format!("|{count}\r\n").into_bytes()
-            }
-            AttributeFramePattern::OversizedCount { declared_count, actual_pairs } => {
+            AttributeFramePattern::NegativeCount { count } => format!("|{count}\r\n").into_bytes(),
+            AttributeFramePattern::OversizedCount {
+                declared_count,
+                actual_pairs,
+            } => {
                 let mut buf = format!("|{declared_count}\r\n").into_bytes();
                 // Add fewer pairs than declared
                 for i in 0..*actual_pairs {
@@ -222,7 +216,10 @@ impl AttributeFramePattern {
                 }
                 buf
             }
-            AttributeFramePattern::TruncatedFrame { complete_pairs, truncate_at } => {
+            AttributeFramePattern::TruncatedFrame {
+                complete_pairs,
+                truncate_at,
+            } => {
                 let mut buf = format!("|{}\r\n", complete_pairs + 1).into_bytes();
 
                 // Add complete pairs first
@@ -244,22 +241,31 @@ impl AttributeFramePattern {
                         buf = prefix.into_bytes();
                         buf.push(b'\r'); // Missing \n
                     }
-                    TruncationPoint::InKey { pair_index: _, byte_offset } => {
+                    TruncationPoint::InKey {
+                        _pair_index: _,
+                        byte_offset,
+                    } => {
                         buf.push(b'+');
                         buf.extend_from_slice(&b"trunckey"[..(*byte_offset as usize).min(8)]);
                     }
-                    TruncationPoint::InValue { pair_index: _, byte_offset } => {
+                    TruncationPoint::InValue {
+                        _pair_index: _,
+                        byte_offset,
+                    } => {
                         buf.extend_from_slice(b"+key\r\n+");
                         buf.extend_from_slice(&b"truncval"[..(*byte_offset as usize).min(8)]);
                     }
-                    TruncationPoint::BetweenKeyValue { pair_index: _ } => {
+                    TruncationPoint::BetweenKeyValue { _pair_index: _ } => {
                         buf.extend_from_slice(b"+key\r\n");
                         // Missing value
                     }
                 }
                 buf
             }
-            AttributeFramePattern::NestedAttribute { depth, pairs_per_level } => {
+            AttributeFramePattern::NestedAttribute {
+                depth,
+                pairs_per_level,
+            } => {
                 fn build_nested(level: u8, max_depth: u8, pairs_per_level: u8) -> Vec<u8> {
                     if level >= max_depth {
                         return b"+leaf\r\n".to_vec();
@@ -275,7 +281,11 @@ impl AttributeFramePattern {
 
                 build_nested(0, *depth, *pairs_per_level)
             }
-            AttributeFramePattern::MalformedCrlf { use_lf_only, use_cr_only, missing_terminator } => {
+            AttributeFramePattern::MalformedCrlf {
+                use_lf_only,
+                use_cr_only,
+                missing_terminator,
+            } => {
                 let mut buf = b"|2".to_vec();
                 if *missing_terminator {
                     // No terminator at all
@@ -295,7 +305,7 @@ impl AttributeFramePattern {
 }
 
 /// Execute the attribute frame boundary testing scenario
-fn execute_attribute_scenario(scenario: AttributeFrameScenario) -> Result<(), Box<dyn std::error::Error>> {
+fn execute_attribute_scenario(scenario: AttributeFrameScenario) {
     let limits = RedisProtocolLimits::from(scenario.limits);
 
     // Test each frame pattern
@@ -311,11 +321,17 @@ fn execute_attribute_scenario(scenario: AttributeFrameScenario) -> Result<(), Bo
             match RespValue::try_decode_with_limits(&frame_bytes, &limits) {
                 Ok(Some((value, consumed))) => {
                     // Successful parse - verify invariants
-                    assert!(consumed <= frame_bytes.len(), "Consumed more bytes than available");
+                    assert!(
+                        consumed <= frame_bytes.len(),
+                        "Consumed more bytes than available"
+                    );
 
-                    if let RespValue::Attribute(pairs) = value {
+                    if let RespValue::Attribute(ref pairs) = value {
                         // Verify attribute-specific invariants
-                        assert!(pairs.len() <= limits.max_array_len, "Attribute pairs exceed limit");
+                        assert!(
+                            pairs.len() <= limits.max_array_len,
+                            "Attribute pairs exceed limit"
+                        );
 
                         // Test encoding round-trip for valid attributes
                         let encoded = value.encode();
@@ -354,10 +370,10 @@ fn execute_attribute_scenario(scenario: AttributeFrameScenario) -> Result<(), Bo
                 }
             }
             Err(_) => {
-                // Panic occurred - this should not happen
-                eprintln!("PANIC during attribute frame parsing for pattern {frame_idx}");
-                eprintln!("Frame bytes: {:?}", &frame_bytes[..frame_bytes.len().min(100)]);
-                return Err("Attribute frame parsing panicked".into());
+                panic!(
+                    "RESP3 attribute frame parsing panicked for pattern {frame_idx}; frame prefix: {:?}",
+                    &frame_bytes[..frame_bytes.len().min(100)]
+                );
             }
         }
 
@@ -372,8 +388,6 @@ fn execute_attribute_scenario(scenario: AttributeFrameScenario) -> Result<(), Bo
             });
         }
     }
-
-    Ok(())
 }
 
 #[derive(Debug)]
@@ -394,13 +408,7 @@ fuzz_target!(|data: &[u8]| {
 
     // Generate attribute scenario from input data
     if let Ok(scenario) = AttributeFrameScenario::arbitrary(&mut u) {
-        // Execute with panic handler
-        let _ = std::panic::catch_unwind(|| {
-            if let Err(e) = execute_attribute_scenario(scenario) {
-                // Log error but don't panic - errors are expected for boundary cases
-                eprintln!("Attribute scenario error: {}", e);
-            }
-        });
+        execute_attribute_scenario(scenario);
     }
 
     // Also test raw bytes directly as attribute frames
@@ -408,7 +416,8 @@ fuzz_target!(|data: &[u8]| {
         let limits = RedisProtocolLimits {
             max_array_len: 1000,
             max_nesting_depth: 50,
-            max_value_size: MAX_INPUT_SIZE,
+            max_frame_size: MAX_INPUT_SIZE,
+            max_bulk_string_len: MAX_INPUT_SIZE,
         };
 
         let _ = std::panic::catch_unwind(|| {
