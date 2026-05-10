@@ -1,0 +1,25 @@
+{
+  "agent_mail": {
+    "status": "fixture",
+    "reservations": []
+  },
+  "beads": {
+    "status": "fixture",
+    "ready": []
+  },
+  "dirty_tree": {
+    "status": "ok",
+    "entries": []
+  },
+  "fallback_lanes": [
+    {
+      "candidate_id": "custom-scan:src",
+      "lane": "custom-scan",
+      "title": "Unapproved custom scan",
+      "priority": 1,
+      "paths": [
+        "src"
+      ]
+    }
+  ]
+}

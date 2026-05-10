@@ -1,0 +1,41 @@
+{
+  "agent_mail": {
+    "status": "fixture",
+    "reservations": [
+      {
+        "agent_name": "GentleCitadel",
+        "path_pattern": "scripts/closeout_verifier.py",
+        "exclusive": true,
+        "expires_ts": "2026-05-10T09:30:00Z"
+      }
+    ]
+  },
+  "beads": {
+    "status": "fixture",
+    "ready": [
+      {
+        "id": "asupersync-ready-blocked",
+        "title": "Extend closeout verifier report",
+        "priority": 1,
+        "paths": [
+          "scripts/closeout_verifier.py"
+        ]
+      }
+    ]
+  },
+  "dirty_tree": {
+    "status": "ok",
+    "entries": []
+  },
+  "fallback_lanes": [
+    {
+      "candidate_id": "mock-code-finder:src-http",
+      "lane": "mock-code-finder",
+      "title": "Scan src/http for placeholder code",
+      "priority": 2,
+      "paths": [
+        "src/http"
+      ]
+    }
+  ]
+}

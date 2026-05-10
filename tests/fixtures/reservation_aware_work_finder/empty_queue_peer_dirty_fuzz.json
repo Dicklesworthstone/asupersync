@@ -1,0 +1,46 @@
+{
+  "agent_mail": {
+    "status": "fixture",
+    "reservations": [
+      {
+        "agent_name": "GentleCitadel",
+        "path_pattern": "fuzz/fuzz_targets/h2_rst_stream.rs",
+        "exclusive": true,
+        "expires_ts": "2026-05-10T09:40:00Z"
+      }
+    ]
+  },
+  "beads": {
+    "status": "fixture",
+    "ready": []
+  },
+  "dirty_tree": {
+    "status": "ok",
+    "entries": [
+      {
+        "status": " M",
+        "path": "fuzz/fuzz_targets/h2_rst_stream.rs"
+      }
+    ]
+  },
+  "fallback_lanes": [
+    {
+      "candidate_id": "testing-fuzzing:h2_rst_stream",
+      "lane": "testing-fuzzing",
+      "title": "H2 RST_STREAM fuzz target",
+      "priority": 1,
+      "paths": [
+        "fuzz/fuzz_targets/h2_rst_stream.rs"
+      ]
+    },
+    {
+      "candidate_id": "mock-code-finder:tests",
+      "lane": "mock-code-finder",
+      "title": "Scan tests for placeholder assertions",
+      "priority": 2,
+      "paths": [
+        "tests"
+      ]
+    }
+  ]
+}

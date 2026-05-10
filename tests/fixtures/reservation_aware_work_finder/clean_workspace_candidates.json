@@ -1,0 +1,37 @@
+{
+  "agent_mail": {
+    "status": "fixture",
+    "reservations": []
+  },
+  "beads": {
+    "status": "fixture",
+    "ready": []
+  },
+  "dirty_tree": {
+    "status": "ok",
+    "entries": []
+  },
+  "fallback_lanes": [
+    {
+      "candidate_id": "testing-fuzzing:postgres_row_description",
+      "lane": "testing-fuzzing",
+      "title": "PostgreSQL RowDescription fuzz target",
+      "priority": 1,
+      "paths": [
+        "fuzz/fuzz_targets/postgres_row_description.rs"
+      ],
+      "proof_commands": [
+        "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_<agent>_postgres_row_description cargo check --manifest-path fuzz/Cargo.toml --bin postgres_row_description"
+      ]
+    },
+    {
+      "candidate_id": "testing-golden-artifacts:trace",
+      "lane": "testing-golden-artifacts",
+      "title": "Trace golden artifact refresh",
+      "priority": 2,
+      "paths": [
+        "tests/fixtures/trace"
+      ]
+    }
+  ]
+}
