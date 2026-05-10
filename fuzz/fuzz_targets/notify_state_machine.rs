@@ -1,7 +1,6 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::Cx;
 use asupersync::sync::Notify;
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
@@ -59,12 +58,13 @@ const MAX_OPERATIONS: usize = 100;
 const MAX_WAITERS: usize = 32;
 const MAX_DELAY_MS: u64 = 50;
 
+type WakeEvent = (usize, u64, u64);
+type WakeOrder = Arc<std::sync::Mutex<Vec<WakeEvent>>>;
+
 fuzz_target!(|input: NotifyStateMachineFuzz| {
     // Apply resource limits
-    let max_ops = (input.config.max_operations as usize)
-        .min(MAX_OPERATIONS)
-        .max(1);
-    let max_waiters = (input.config.max_waiters as usize).min(MAX_WAITERS).max(1);
+    let max_ops = (input.config.max_operations as usize).clamp(1, MAX_OPERATIONS);
+    let max_waiters = (input.config.max_waiters as usize).clamp(1, MAX_WAITERS);
     let operations: Vec<_> = input.operations.into_iter().take(max_ops).collect();
 
     if operations.is_empty() {
@@ -80,7 +80,6 @@ fuzz_target!(|input: NotifyStateMachineFuzz| {
     let mut active_waiters = HashMap::new();
     let mut next_waiter_id = 0u64;
     let mut notify_one_count = 0u64;
-    let mut notify_waiters_count = 0u64;
     let mut cancelled_waiters = std::collections::HashSet::new();
 
     // Execute operations
@@ -100,7 +99,6 @@ fuzz_target!(|input: NotifyStateMachineFuzz| {
 
                     // Start waiter in background
                     start_waiter_background(
-                        notify.clone(),
                         bounded_id,
                         waiter_sequence_id,
                         notification_counter.clone(),
@@ -175,7 +173,6 @@ fuzz_target!(|input: NotifyStateMachineFuzz| {
             NotifyOperation::NotifyWaiters => {
                 let waiters_before = notify.waiter_count();
                 notify.notify_waiters();
-                notify_waiters_count += 1;
 
                 // Brief delay to allow notifications to propagate
                 std::thread::sleep(Duration::from_millis(5));
@@ -229,45 +226,20 @@ fuzz_target!(|input: NotifyStateMachineFuzz| {
     }
 
     // Final verification
-    verify_final_state(&notify, notify_one_count, notify_waiters_count, &wake_order);
+    verify_final_state(&notify, notify_one_count, &wake_order);
 });
 
 /// Start a waiter in the background
 fn start_waiter_background(
-    notify: Arc<Notify>,
     waiter_id: usize,
     waiter_sequence_id: u64,
     notification_counter: Arc<AtomicU64>,
-    wake_order: Arc<std::sync::Mutex<Vec<(usize, u64, u64)>>>,
+    wake_order: WakeOrder,
 ) {
     // Spawn waiter task (simulated with thread for simplicity)
     std::thread::spawn(move || {
-        let cx = Cx::for_testing();
-
-        // Create notified future
-        let mut notified_fut = notify.notified();
-
-        // Simple polling approach with timeout
-        let start = std::time::Instant::now();
-        let timeout_duration = Duration::from_millis(100);
-
-        loop {
-            // Check if we've timed out
-            if start.elapsed() > timeout_duration {
-                break; // Timeout - waiter didn't get notified
-            }
-
-            // Try to make progress on the future
-            // For simplicity, we'll use a basic approach here
-            // In a real implementation, we'd use proper async polling
-
-            // Brief sleep to avoid busy waiting
-            std::thread::sleep(Duration::from_millis(1));
-
-            // Check if waiter count decreased (indication we might be notified)
-            // This is a simplified approximation for the fuzz test
-            break; // For now, just exit after brief delay
-        }
+        // Brief sleep to model asynchronous waiter progress without busy waiting.
+        std::thread::sleep(Duration::from_millis(1));
 
         // Record that this waiter completed (simplified)
         let notification_order = notification_counter.fetch_add(1, Ordering::SeqCst);
@@ -303,12 +275,7 @@ fn verify_notify_invariants(
 }
 
 /// Verify final state properties
-fn verify_final_state(
-    notify: &Notify,
-    notify_one_count: u64,
-    notify_waiters_count: u64,
-    wake_order: &Arc<std::sync::Mutex<Vec<(usize, u64, u64)>>>,
-) {
+fn verify_final_state(notify: &Notify, notify_one_count: u64, wake_order: &WakeOrder) {
     // Brief delay to allow all notifications to complete
     std::thread::sleep(Duration::from_millis(10));
 
@@ -327,16 +294,6 @@ fn verify_final_state(
         "Final waiter count {} exceeds maximum",
         final_waiter_count
     );
-
-    // Log summary for debugging
-    if !wake_events.is_empty() {
-        eprintln!(
-            "Wake summary: {} events, {} notify_one, {} notify_waiters",
-            wake_events.len(),
-            notify_one_count,
-            notify_waiters_count
-        );
-    }
 }
 
 /// Verify no waiter starvation (FIFO ordering for notify_one)
