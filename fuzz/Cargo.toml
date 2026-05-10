@@ -5350,6 +5350,7 @@ name = "h1_te_chunked_extension_dos"
 path = "fuzz_targets/h1_te_chunked_extension_dos.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_request_header_too_large"
