@@ -221,11 +221,10 @@ fn test_key_isolation(input: &AeadFuzzInput) {
             let tag1 = AuthenticationTag::compute(&key1, &symbol);
             let tag2 = AuthenticationTag::compute(&key2, &symbol);
 
-            // Different keys should produce different tags (except for negligible collision probability)
-            if tag1 == tag2 {
-                // Extremely unlikely but not impossible - log for investigation
-                eprintln!("RARE: Same tag from different keys - possible collision");
-            }
+            assert!(
+                tag1 != tag2,
+                "Same tag produced for different keys - key isolation collision"
+            );
 
             // Tag computed with key1 should not verify with key2
             assert!(
