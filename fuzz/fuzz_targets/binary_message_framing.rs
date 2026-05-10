@@ -137,7 +137,8 @@ fn test_fragmented_parsing(codec: &mut LengthDelimitedCodec, data: &[u8], chunk_
                         let has_non_null = frame.iter().any(|&b| b != 0);
                         if !has_non_null && frame.len() > 100 {
                             // Suspicious: large frame of all zeros might indicate parsing error
-                            // But don't panic - this could be legitimate
+                            // but this may be legitimate, so only keep it visible to the fuzzer.
+                            std::hint::black_box(("large zero frame", frame.len()));
                         }
                     }
                 }
@@ -160,16 +161,15 @@ fn test_fragmented_parsing(codec: &mut LengthDelimitedCodec, data: &[u8], chunk_
 }
 
 /// Test state machine transitions with corrupted length fields
-fn test_corruption_recovery(mut config: FramingConfig, operations: &[FrameOperation]) {
+fn test_corruption_recovery(config: FramingConfig, operations: &[FrameOperation]) {
     if operations.is_empty() {
         return;
     }
 
     // Build codec
-    let length_field_length =
-        std::cmp::max(1, std::cmp::min(8, config.length_field_length as usize));
+    let length_field_length = (config.length_field_length as usize).clamp(1, 8);
     let length_field_offset = std::cmp::min(32, config.length_field_offset as usize);
-    let max_frame_length = std::cmp::max(1, config.max_frame_length as usize);
+    let max_frame_length = (config.max_frame_length as usize).max(1);
 
     let mut codec = LengthDelimitedCodec::builder()
         .length_field_offset(length_field_offset)
@@ -266,8 +266,7 @@ fn test_corruption_recovery(mut config: FramingConfig, operations: &[FrameOperat
 
 /// Construct a valid length-prefixed frame
 fn construct_valid_frame(buf: &mut BytesMut, payload: &[u8], config: &FramingConfig) {
-    let length_field_length =
-        std::cmp::max(1, std::cmp::min(8, config.length_field_length as usize));
+    let length_field_length = (config.length_field_length as usize).clamp(1, 8);
     let length_field_offset = std::cmp::min(32, config.length_field_offset as usize);
 
     // Add padding to reach length field offset
@@ -280,17 +279,17 @@ fn construct_valid_frame(buf: &mut BytesMut, payload: &[u8], config: &FramingCon
     let mut length_bytes = vec![0u8; length_field_length];
 
     if config.big_endian {
-        for i in 0..length_field_length {
+        for (i, byte) in length_bytes.iter_mut().enumerate() {
             let shift = (length_field_length - 1 - i) * 8;
             if shift < 64 {
-                length_bytes[i] = (payload_len >> shift) as u8;
+                *byte = (payload_len >> shift) as u8;
             }
         }
     } else {
-        for i in 0..length_field_length {
+        for (i, byte) in length_bytes.iter_mut().enumerate() {
             let shift = i * 8;
             if shift < 64 {
-                length_bytes[i] = (payload_len >> shift) as u8;
+                *byte = (payload_len >> shift) as u8;
             }
         }
     }
@@ -331,8 +330,11 @@ fn test_resource_exhaustion(config: &FramingConfig, data: &[u8]) {
         return;
     }
 
-    // Test with various large frame configurations
+    // Test with various large frame configurations, including the fuzzed one.
+    let configured_offset = std::cmp::min(32, config.length_field_offset as usize);
+    let configured_max_frame = (config.max_frame_length as usize).clamp(1, 1_000_000);
     let large_configs = [
+        (configured_offset, configured_max_frame),
         (1, 1_000_000), // Large max frame
         (8, 100_000),   // Large length field
         (0, 50_000),    // No offset, medium frame
@@ -404,12 +406,9 @@ fuzz_target!(|input: FuzzInput| {
     }
 
     // Test 1: Basic codec fuzzing with configuration variations
-    let length_field_length = std::cmp::max(
-        1,
-        std::cmp::min(8, input.config.length_field_length as usize),
-    );
+    let length_field_length = (input.config.length_field_length as usize).clamp(1, 8);
     let length_field_offset = std::cmp::min(32, input.config.length_field_offset as usize);
-    let max_frame_length = std::cmp::max(1, input.config.max_frame_length as usize);
+    let max_frame_length = (input.config.max_frame_length as usize).max(1);
 
     let mut main_codec = LengthDelimitedCodec::builder()
         .length_field_offset(length_field_offset)
@@ -445,13 +444,33 @@ fuzz_target!(|input: FuzzInput| {
 
     // Test 2: Fragmented parsing with variable chunk sizes
     if !input.fragmentation.chunk_sizes.is_empty() {
-        let chunk_sizes: Vec<u16> = input
+        let mut chunk_sizes: Vec<u16> = input
             .fragmentation
             .chunk_sizes
             .iter()
             .take(20) // Limit chunks
-            .map(|&size| std::cmp::max(1, std::cmp::min(MAX_CHUNK_SIZE as u16, size)))
+            .map(|&size| size.max(1))
             .collect();
+        if input.fragmentation.drop_chunks {
+            chunk_sizes.retain(|size| size % 2 == 1);
+        }
+        if input.fragmentation.duplicate_chunks {
+            chunk_sizes.extend(chunk_sizes.iter().copied().take(4).collect::<Vec<_>>());
+        }
+        if input.fragmentation.reorder_chunks {
+            chunk_sizes.reverse();
+        }
+        if chunk_sizes.is_empty() {
+            chunk_sizes.push(1);
+        }
+        let mut fragmented_data = input.raw_data.clone();
+        if input.fragmentation.interleave_noise {
+            fragmented_data.extend_from_slice(&[
+                input.config.protocol_version,
+                input.config.stream_id_offset,
+                u8::from(input.config.enable_checksum),
+            ]);
+        }
 
         let mut frag_codec = LengthDelimitedCodec::builder()
             .length_field_offset(length_field_offset)
@@ -459,7 +478,7 @@ fuzz_target!(|input: FuzzInput| {
             .max_frame_length(max_frame_length)
             .new_codec();
 
-        test_fragmented_parsing(&mut frag_codec, &input.raw_data, &chunk_sizes);
+        test_fragmented_parsing(&mut frag_codec, &fragmented_data, &chunk_sizes);
     }
 
     // Test 3: Corruption and recovery
@@ -516,7 +535,7 @@ fuzz_target!(|input: FuzzInput| {
     let mut empty_codec = LengthDelimitedCodec::new();
     let mut empty_buf = BytesMut::new();
     let result = empty_codec.decode(&mut empty_buf);
-    assert!(result.is_ok() && result.unwrap().is_none());
+    assert!(matches!(result, Ok(None)));
 
     // Single byte buffer
     if !input.raw_data.is_empty() {

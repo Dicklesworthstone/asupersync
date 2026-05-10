@@ -367,6 +367,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "binary_message_framing"
+path = "fuzz_targets/binary_message_framing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_lines_codec"
 path = "fuzz_targets/lines_codec.rs"
 test = false
