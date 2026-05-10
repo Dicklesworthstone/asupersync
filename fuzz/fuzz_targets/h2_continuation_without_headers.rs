@@ -3,10 +3,12 @@
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 
-use asupersync::bytes::BytesMut;
-use asupersync::codec::Encoder;
 use asupersync::http::h2::error::{ErrorCode, H2Error};
-use asupersync::http::h2::frame::{ContinuationFrame, DataFrame, Frame, SettingsFrame};
+use asupersync::http::h2::frame::{
+    ContinuationFrame, DataFrame, Frame, GoAwayFrame, PingFrame, RstStreamFrame, SettingsFrame,
+    WindowUpdateFrame,
+};
+use asupersync::http::h2::{Connection, Settings};
 
 /// HTTP/2 frame sequence for testing CONTINUATION-without-HEADERS scenarios
 #[derive(Debug, Clone, Arbitrary)]
@@ -68,58 +70,35 @@ fuzz_target!(|data: &[u8]| {
 
     // Test variations to ensure robustness
     test_continuation_in_various_positions(&test_seq);
+    std::hint::black_box(test_seq.suffix_frames.len());
 });
 
 /// Core test: CONTINUATION frame without preceding HEADERS should trigger PROTOCOL_ERROR
 fn test_orphaned_continuation_protocol_error(test_seq: &ContinuationTestSequence) {
-    let mut codec = FrameCodec::new();
-    let mut buffer = BytesMut::new();
+    let mut connection = open_test_connection();
 
     // Send prefix frames (none of which are HEADERS)
     for prefix_frame in &test_seq.prefix_frames {
-        if let Ok(frame) = create_frame_from_fuzz(prefix_frame) {
-            observe_prefix_encode(
-                codec.encode(frame, &mut buffer),
-                "orphaned-continuation prefix",
-            );
+        match create_frame_from_fuzz(prefix_frame) {
+            Ok(frame) => {
+                observe_prefix_process(
+                    connection.process_frame(frame),
+                    "orphaned-continuation prefix",
+                );
+            }
+            Err(error) => {
+                observe_process_error(error, "orphaned-continuation prefix construction");
+            }
         }
     }
 
     // Now send the orphaned CONTINUATION frame
     let continuation_frame = create_continuation_frame(&test_seq.continuation_frame);
 
-    // This should fail with PROTOCOL_ERROR
-    match codec.encode(continuation_frame, &mut buffer) {
-        Err(error) => {
-            // Verify it's the correct error type
-            match error.downcast_ref::<H2Error>() {
-                Some(h2_err) => {
-                    assert_eq!(
-                        h2_err.code(),
-                        ErrorCode::ProtocolError,
-                        "CONTINUATION without HEADERS should return PROTOCOL_ERROR, got: {:?}",
-                        h2_err.code()
-                    );
-                }
-                None => {
-                    // Other errors are acceptable if they indicate protocol violation
-                    let error_str = format!("{:?}", error);
-                    assert!(
-                        error_str.contains("protocol")
-                            || error_str.contains("CONTINUATION")
-                            || error_str.contains("invalid"),
-                        "Expected protocol error for orphaned CONTINUATION, got: {}",
-                        error_str
-                    );
-                }
-            }
-        }
-        Ok(_) => {
-            panic!(
-                "Orphaned CONTINUATION frame should not be accepted - this is a protocol violation!"
-            );
-        }
-    }
+    expect_orphaned_continuation_error(
+        connection.process_frame(continuation_frame),
+        "orphaned CONTINUATION",
+    );
 }
 
 /// Test CONTINUATION frames in various positions within a frame sequence
@@ -131,116 +110,150 @@ fn test_continuation_in_various_positions(test_seq: &ContinuationTestSequence) {
             continue;
         }
 
-        let mut codec = FrameCodec::new();
-        let mut buffer = BytesMut::new();
+        let mut connection = open_test_connection();
 
         // Send frames up to position
         for (i, prefix_frame) in test_seq.prefix_frames.iter().enumerate() {
             if i >= pos {
                 break;
             }
-            if let Ok(frame) = create_frame_from_fuzz(prefix_frame) {
-                observe_prefix_encode(
-                    codec.encode(frame, &mut buffer),
-                    "positioned-continuation prefix",
-                );
+            match create_frame_from_fuzz(prefix_frame) {
+                Ok(frame) => {
+                    observe_prefix_process(
+                        connection.process_frame(frame),
+                        "positioned-continuation prefix",
+                    );
+                }
+                Err(error) => {
+                    observe_process_error(error, "positioned-continuation prefix construction");
+                }
             }
         }
 
         // Insert CONTINUATION at this position
         let continuation_frame = create_continuation_frame(&test_seq.continuation_frame);
 
-        let result = codec.encode(continuation_frame, &mut buffer);
+        expect_orphaned_continuation_error(
+            connection.process_frame(continuation_frame),
+            "positioned orphaned CONTINUATION",
+        );
+    }
+}
 
-        // Should always fail for orphaned CONTINUATION regardless of position
-        match result {
-            Err(_) => {
-                // Expected: CONTINUATION without HEADERS should be rejected
-            }
-            Ok(_) => {
-                // This would be a protocol violation
-                panic!(
-                    "CONTINUATION frame accepted at position {} without preceding HEADERS",
-                    pos
-                );
-            }
+fn open_test_connection() -> Connection {
+    let mut connection = Connection::server(Settings::default());
+    let settings_result = connection.process_frame(Frame::Settings(SettingsFrame::new(Vec::new())));
+    match settings_result {
+        Ok(received) => {
+            assert!(
+                received.is_none(),
+                "initial SETTINGS should not surface inbound data"
+            );
+        }
+        Err(error) => {
+            panic!("initial SETTINGS must be accepted: {error:?}");
+        }
+    }
+    connection
+}
+
+fn observe_prefix_process(
+    result: Result<Option<asupersync::http::h2::connection::ReceivedFrame>, H2Error>,
+    context: &str,
+) {
+    match result {
+        Ok(received) => {
+            std::hint::black_box(received.is_some());
+            std::hint::black_box(context);
+        }
+        Err(error) => {
+            observe_process_error(error, context);
         }
     }
 }
 
-fn observe_prefix_encode(result: Result<(), H2Error>, context: &str) {
+fn observe_process_error(error: H2Error, context: &str) {
+    assert!(
+        !error.message.trim().is_empty(),
+        "{context} rejection should expose a diagnostic"
+    );
+    assert!(
+        error.message.len() <= 2048,
+        "{context} rejection diagnostic should stay bounded: {} bytes",
+        error.message.len()
+    );
+    std::hint::black_box((context, error.code, error.stream_id, error.message));
+}
+
+fn expect_orphaned_continuation_error(
+    result: Result<Option<asupersync::http::h2::connection::ReceivedFrame>, H2Error>,
+    context: &str,
+) {
     match result {
-        Ok(()) => {
-            std::hint::black_box(context);
+        Ok(received) => {
+            panic!("{context} should not be accepted, got {received:?}");
         }
         Err(error) => {
-            let message = error.to_string();
-            assert!(
-                !message.trim().is_empty(),
-                "{context} rejection should expose a diagnostic"
+            assert_eq!(
+                error.code,
+                ErrorCode::ProtocolError,
+                "{context} should return PROTOCOL_ERROR"
+            );
+            assert_eq!(
+                error.stream_id, None,
+                "{context} should be a connection-level error"
             );
             assert!(
-                message.len() <= 2048,
-                "{context} rejection diagnostic should stay bounded: {} bytes",
-                message.len()
+                error.message.contains("CONTINUATION"),
+                "{context} diagnostic should identify CONTINUATION: {}",
+                error.message
             );
-            std::hint::black_box((context, message));
+            std::hint::black_box(error.message);
         }
     }
 }
 
 /// Create a frame from fuzz input
-fn create_frame_from_fuzz(fuzz_frame: &FuzzFrame) -> Result<Frame, Box<dyn std::error::Error>> {
+fn create_frame_from_fuzz(fuzz_frame: &FuzzFrame) -> Result<Frame, H2Error> {
     let stream_id = normalize_stream_id(fuzz_frame.stream_id);
     let payload_size = (fuzz_frame.payload_size as usize).min(16384); // Cap at max frame size
     let payload = vec![0u8; payload_size];
 
     match fuzz_frame.frame_type {
-        FrameTypeChoice::Data => {
-            Ok(Frame::Data(DataFrame::new(
-                stream_id,
-                payload.into(),
-                fuzz_frame.flags & 0x01 != 0, // END_STREAM flag
-                fuzz_frame.flags & 0x08 != 0, // PADDED flag
-            )?))
-        }
-        FrameTypeChoice::Settings => {
-            Ok(Frame::Settings(SettingsFrame::new(
-                Vec::new(),                   // Empty settings for simplicity
-                fuzz_frame.flags & 0x01 != 0, // ACK flag
-            )?))
-        }
+        FrameTypeChoice::Data => Ok(Frame::Data(DataFrame::new(
+            stream_id,
+            payload.into(),
+            fuzz_frame.flags & 0x01 != 0, // END_STREAM flag
+        ))),
+        FrameTypeChoice::Settings => Ok(Frame::Settings(if fuzz_frame.flags & 0x01 != 0 {
+            SettingsFrame::ack()
+        } else {
+            SettingsFrame::new(Vec::new())
+        })),
         FrameTypeChoice::Ping => {
             let ping_data = [0u8; 8]; // Standard ping payload
-            Ok(Frame::Ping(asupersync::http::h2::frame::PingFrame::new(
-                ping_data,
-                fuzz_frame.flags & 0x01 != 0, // ACK flag
-            )?))
+            Ok(Frame::Ping(if fuzz_frame.flags & 0x01 != 0 {
+                PingFrame::ack(ping_data)
+            } else {
+                PingFrame::new(ping_data)
+            }))
         }
-        FrameTypeChoice::GoAway => {
-            Ok(Frame::GoAway(
-                asupersync::http::h2::frame::GoAwayFrame::new(
-                    0, // Last stream ID
-                    ErrorCode::NoError,
-                    payload.into(),
-                )?,
-            ))
-        }
-        FrameTypeChoice::WindowUpdate => {
-            Ok(Frame::WindowUpdate(
-                asupersync::http::h2::frame::WindowUpdateFrame::new(
-                    stream_id, 1, // Window size increment (must be > 0)
-                )?,
-            ))
-        }
+        FrameTypeChoice::GoAway => Ok(Frame::GoAway(GoAwayFrame::new(
+            0, // Last stream ID
+            ErrorCode::NoError,
+        ))),
+        FrameTypeChoice::WindowUpdate => Ok(Frame::WindowUpdate(WindowUpdateFrame::new(
+            stream_id, 1, // Window size increment (must be > 0)
+        ))),
         FrameTypeChoice::RstStream => {
             if stream_id == 0 {
                 // RST_STREAM cannot be on stream 0
-                return Err("RST_STREAM on stream 0".into());
+                return Err(H2Error::protocol("RST_STREAM on stream 0"));
             }
-            Ok(Frame::RstStream(
-                asupersync::http::h2::frame::RstStreamFrame::new(stream_id, ErrorCode::Cancel)?,
-            ))
+            Ok(Frame::RstStream(RstStreamFrame::new(
+                stream_id,
+                ErrorCode::Cancel,
+            )))
         }
     }
 }
@@ -257,10 +270,11 @@ fn create_continuation_frame(cont_data: &ContinuationFrameData) -> Frame {
         cont_data.payload.clone()
     };
 
-    Frame::Continuation(
-        ContinuationFrame::new(stream_id, payload.into(), end_headers)
-            .expect("Failed to create CONTINUATION frame"),
-    )
+    Frame::Continuation(ContinuationFrame {
+        stream_id,
+        header_block: payload.into(),
+        end_headers,
+    })
 }
 
 /// Normalize stream ID to valid range (1-2^31-1, odd for client)
@@ -268,7 +282,7 @@ fn normalize_stream_id(stream_id: u32) -> u32 {
     let normalized = stream_id & 0x7FFFFFFF; // Clear reserved bit
     if normalized == 0 {
         1 // Default to stream 1
-    } else if normalized % 2 == 0 {
+    } else if normalized.is_multiple_of(2) {
         normalized + 1 // Make odd (client-initiated)
     } else {
         normalized
