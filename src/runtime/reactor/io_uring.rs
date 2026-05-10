@@ -15,7 +15,7 @@
 //! NOTE: This module uses unsafe to submit SQEs and manage eventfd FDs.
 //! The safety invariants are documented inline.
 
-#[cfg(all(target_os = "linux", feature = "io-uring"))]
+#[cfg(all(any(target_os = "linux", target_os = "android"), feature = "io-uring"))]
 mod imp {
     #![allow(unsafe_code)]
     #![allow(clippy::significant_drop_tightening)]
@@ -1970,10 +1970,10 @@ mod imp {
     }
 }
 
-#[cfg(all(target_os = "linux", feature = "io-uring"))]
+#[cfg(all(any(target_os = "linux", target_os = "android"), feature = "io-uring"))]
 pub use imp::IoUringReactor;
 
-#[cfg(not(all(target_os = "linux", feature = "io-uring")))]
+#[cfg(not(all(any(target_os = "linux", target_os = "android"), feature = "io-uring")))]
 mod imp {
     use super::super::{Events, Interest, Reactor, Source, Token};
     use std::io;
@@ -2106,5 +2106,5 @@ mod imp {
     }
 }
 
-#[cfg(not(all(target_os = "linux", feature = "io-uring")))]
+#[cfg(not(all(any(target_os = "linux", target_os = "android"), feature = "io-uring")))]
 pub use imp::IoUringReactor;
