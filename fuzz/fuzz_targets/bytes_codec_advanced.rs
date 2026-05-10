@@ -2,34 +2,34 @@
 
 use arbitrary::Arbitrary;
 use asupersync::bytes::{Bytes, BytesMut};
-use asupersync::codec::{BytesCodec, Decoder, Encoder, FramedRead, FramedWrite};
-use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf, WriteAvail};
+use asupersync::codec::{BytesCodec, Decoder, Encoder, FramedRead};
+use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
 use libfuzzer_sys::fuzz_target;
 use std::collections::VecDeque;
 use std::io::{self, ErrorKind};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-/// Advanced fuzz target for BytesCodec with focus on edge cases, memory pressure,
-/// and state machine corruption scenarios.
-///
-/// This fuzzer complements the existing bytes_codec_framing.rs by focusing on:
-/// - Buffer reallocation and capacity management edge cases
-/// - Memory pressure scenarios with varying buffer sizes
-/// - State machine corruption through interleaved operations
-/// - Error injection and recovery testing
-/// - Advanced framing scenarios with complex I/O patterns
-/// - Cross-operation state consistency verification
-///
-/// # Attack Vectors Tested
-/// - Buffer capacity exhaustion and reallocation bugs
-/// - Integer overflow in buffer management
-/// - Use-after-free in buffer operations
-/// - State corruption via interleaved decode/encode operations
-/// - Memory pressure-induced allocation failures
-/// - EOF handling in complex scenarios
-/// - Framed I/O with adversarial read/write patterns
-/// - Codec state inconsistency across operations
+// Advanced fuzz target for BytesCodec with focus on edge cases, memory pressure,
+// and state machine corruption scenarios.
+//
+// This fuzzer complements the existing bytes_codec_framing.rs by focusing on:
+// - Buffer reallocation and capacity management edge cases
+// - Memory pressure scenarios with varying buffer sizes
+// - State machine corruption through interleaved operations
+// - Error injection and recovery testing
+// - Advanced framing scenarios with complex I/O patterns
+// - Cross-operation state consistency verification
+//
+// Attack vectors tested:
+// - Buffer capacity exhaustion and reallocation bugs
+// - Integer overflow in buffer management
+// - Use-after-free in buffer operations
+// - State corruption via interleaved decode/encode operations
+// - Memory pressure-induced allocation failures
+// - EOF handling in complex scenarios
+// - Framed I/O with adversarial read/write patterns
+// - Codec state inconsistency across operations
 
 /// Maximum operations per test to prevent timeouts
 const MAX_OPERATIONS: usize = 100;
@@ -64,7 +64,7 @@ struct BufferConfig {
     aggressive_reallocation: bool,
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Debug, Clone)]
 struct IoConfig {
     /// Mock I/O pattern for FramedRead/Write testing
     io_pattern: IoPattern,
@@ -74,7 +74,7 @@ struct IoConfig {
     fragmentation: FragmentationConfig,
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Debug, Clone)]
 enum IoPattern {
     /// Normal sequential I/O
     Sequential,
@@ -88,7 +88,7 @@ enum IoPattern {
     Bursty,
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Debug, Clone)]
 struct ErrorInjectionConfig {
     /// Inject I/O errors at specific operation indices
     error_at_ops: Vec<u8>,
@@ -98,7 +98,7 @@ struct ErrorInjectionConfig {
     test_recovery: bool,
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Debug, Clone)]
 enum ErrorType {
     UnexpectedEof,
     WouldBlock,
@@ -106,7 +106,7 @@ enum ErrorType {
     Other,
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Debug, Clone)]
 struct FragmentationConfig {
     /// Minimum fragment size
     min_fragment_size: u8,
@@ -250,6 +250,10 @@ impl AdvancedMockIo {
     }
 
     fn should_inject_error(&self) -> Option<io::Error> {
+        if !self.error_injection.test_recovery || self.error_injection.error_types.is_empty() {
+            return None;
+        }
+
         if self
             .error_injection
             .error_at_ops
@@ -269,7 +273,7 @@ impl AdvancedMockIo {
                 ErrorType::InvalidData => {
                     io::Error::new(ErrorKind::InvalidData, "injected invalid data")
                 }
-                ErrorType::Other => io::Error::new(ErrorKind::Other, "injected error"),
+                ErrorType::Other => io::Error::other("injected error"),
             })
         } else {
             None
@@ -317,7 +321,7 @@ impl AsyncRead for AdvancedMockIo {
             }
 
             IoPattern::IntermittentBlocking => {
-                if self.operation_count % 3 == 0 {
+                if self.operation_count.is_multiple_of(3) {
                     Poll::Pending
                 } else if let Some(data) = self.read_data.pop_front() {
                     let to_copy = data.len().min(buf.remaining());
@@ -346,7 +350,7 @@ impl AsyncRead for AdvancedMockIo {
 
             IoPattern::Bursty => {
                 // Alternate between active and silent periods
-                if (self.operation_count / 10) % 2 == 0 {
+                if (self.operation_count / 10).is_multiple_of(2) {
                     // Active period
                     if let Some(data) = self.read_data.pop_front() {
                         let to_copy = data.len().min(buf.remaining());
@@ -434,15 +438,15 @@ fn estimate_memory_usage(input: &AdvancedFuzzInput) -> usize {
             CodecOperation::StressTest { data_size, .. } => {
                 total += *data_size as usize;
             }
-            CodecOperation::BufferManipulation { action } => {
-                if let BufferAction::ExtendFrom(data) = action {
-                    total += data.len();
-                }
+            CodecOperation::BufferManipulation {
+                action: BufferAction::ExtendFrom(data),
+            } => {
+                total += data.len();
             }
-            CodecOperation::FramedIoOp { operation } => {
-                if let FramedOp::WriteFrame(data) = operation {
-                    total += data.len();
-                }
+            CodecOperation::FramedIoOp {
+                operation: FramedOp::WriteFrame(data),
+            } => {
+                total += data.len();
             }
             _ => {}
         }
@@ -526,8 +530,7 @@ fn test_memory_pressure(input: &AdvancedFuzzInput) {
                 if data.len() <= MAX_BUFFER_SIZE {
                     // Force buffer reallocation by filling to capacity
                     if *force_reallocation && buffer.capacity() > 0 {
-                        let fill_amount = buffer.capacity() - buffer.len();
-                        buffer.extend(std::iter::repeat(0u8).take(fill_amount));
+                        buffer.resize(buffer.capacity(), 0);
                     }
 
                     test_encode_with_memory_pressure(&mut codec, &mut buffer, data, data_type);
@@ -595,13 +598,13 @@ fn test_advanced_framing(input: &AdvancedFuzzInput) {
 
     // Add some test data for framed operations
     for operation in &input.operations {
-        if let CodecOperation::FramedIoOp {
-            operation: FramedOp::WriteFrame(data),
-        } = operation
-        {
-            if data.len() <= MAX_BUFFER_SIZE {
+        match operation {
+            CodecOperation::FramedIoOp {
+                operation: FramedOp::WriteFrame(data),
+            } if data.len() <= MAX_BUFFER_SIZE => {
                 mock_io.add_read_data(data.clone());
             }
+            _ => {}
         }
     }
 
@@ -669,6 +672,15 @@ fn create_initial_buffer(config: &BufferConfig) -> BytesMut {
         buffer.extend_from_slice(&config.pre_fill_pattern[..pattern_len]);
     }
 
+    if config.aggressive_reallocation && buffer.capacity() < MAX_BUFFER_SIZE {
+        let target_len = buffer
+            .len()
+            .saturating_add(capacity.clamp(1, 256))
+            .min(MAX_BUFFER_SIZE);
+        buffer.resize(target_len, 0);
+        compact_buffer_to_len(&mut buffer);
+    }
+
     buffer
 }
 
@@ -701,11 +713,11 @@ fn verify_decode_invariants(
 }
 
 fn verify_buffer_consistency(buffer: &BytesMut, prev_state: &(usize, usize, bool)) {
-    let (prev_len, prev_cap, prev_empty) = *prev_state;
+    let (_prev_len, _prev_cap, prev_empty) = *prev_state;
 
     // Basic invariants should hold
     assert!(buffer.len() <= buffer.capacity());
-    assert_eq!(buffer.is_empty(), buffer.len() == 0);
+    assert_eq!(buffer.is_empty(), buffer.as_ref().is_empty());
 
     // Capacity should not decrease (unless explicitly shrunk)
     if !prev_empty {
@@ -852,7 +864,7 @@ fn test_interleaved_operations(
                 }
             }
             SimpleOp::BufferShrink => {
-                buffer.shrink_to_fit();
+                compact_buffer_to_len(buffer);
             }
         }
 
@@ -914,6 +926,10 @@ fn test_error_injection_and_recovery(
 
     // Verify state is still consistent after recovery
     verify_codec_state_invariants(codec, buffer);
+    assert!(
+        buffer.capacity() <= MAX_BUFFER_SIZE,
+        "recovery grew buffer beyond fuzz envelope from state {pre_test_state:?}"
+    );
 }
 
 fn test_framed_read_advanced_scenarios<R>(
@@ -957,13 +973,10 @@ fn execute_operation(codec: &mut BytesCodec, buffer: &mut BytesMut, operation: &
 fn execute_operation_on_codec(
     codec: &mut BytesCodec,
     buffer: &mut BytesMut,
-    operation: &CodecOperation,
+    _operation: &CodecOperation,
 ) -> Option<BytesMut> {
     // Execute operation and return result for consistency checking
-    match codec.decode(buffer) {
-        Ok(result) => result,
-        Err(_) => None,
-    }
+    codec.decode(buffer).unwrap_or_default()
 }
 
 fn verify_cross_codec_consistency(result1: &Option<BytesMut>, result2: &Option<BytesMut>) {
@@ -972,6 +985,7 @@ fn verify_cross_codec_consistency(result1: &Option<BytesMut>, result2: &Option<B
         (Some(r1), Some(r2)) => {
             // Both decoded something - lengths should match for same input
             // (Note: This might not always hold depending on buffer state)
+            std::hint::black_box((r1.len(), r2.len()));
         }
         (None, None) => {
             // Both returned None - consistent
@@ -980,6 +994,12 @@ fn verify_cross_codec_consistency(result1: &Option<BytesMut>, result2: &Option<B
             // Different results - may be valid depending on buffer state
         }
     }
+}
+
+fn compact_buffer_to_len(buffer: &mut BytesMut) {
+    let mut compacted = BytesMut::with_capacity(buffer.len());
+    compacted.extend_from_slice(buffer.as_ref());
+    *buffer = compacted;
 }
 
 fn execute_buffer_action(buffer: &mut BytesMut, action: &BufferAction) {
@@ -994,7 +1014,7 @@ fn execute_buffer_action(buffer: &mut BytesMut, action: &BufferAction) {
             buffer.resize(new_len, 0);
         }
         BufferAction::ShrinkToFit => {
-            buffer.shrink_to_fit();
+            compact_buffer_to_len(buffer);
         }
         BufferAction::Split(at) => {
             if !buffer.is_empty() {
@@ -1123,7 +1143,7 @@ fn observe_encode_outcome(
 fn verify_buffer_post_operation_invariants(buffer: &BytesMut) {
     // Basic buffer invariants that should always hold
     assert!(buffer.len() <= buffer.capacity());
-    assert_eq!(buffer.is_empty(), buffer.len() == 0);
+    assert_eq!(buffer.is_empty(), buffer.as_ref().is_empty());
 
     // Buffer should not have grown unreasonably
     assert!(buffer.capacity() <= MAX_BUFFER_SIZE * 2);
