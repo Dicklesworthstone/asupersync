@@ -16,9 +16,7 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
-use asupersync::raptorq::gf256::Gf256;
-use asupersync::raptorq::systematic::{SystematicEncoder, SystematicParams};
-use asupersync::types::ObjectId;
+use asupersync::raptorq::systematic::SystematicEncoder;
 use libfuzzer_sys::fuzz_target;
 
 /// Fuzzing configuration for Gaussian elimination boundary conditions
@@ -76,11 +74,11 @@ enum EliminationOperation {
 
 #[derive(Debug, Clone, Arbitrary)]
 enum ZeroPattern {
-    ZeroRow,
-    ZeroColumn,
-    ZeroDiagonal,
-    ZeroAntiDiagonal,
-    ZeroBlock,
+    Row,
+    Column,
+    Diagonal,
+    AntiDiagonal,
+    Block,
 }
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -92,10 +90,10 @@ enum PivotStressType {
 
 #[derive(Debug, Clone, Arbitrary)]
 enum ConstraintBoundaryType {
-    MinimalConstraints,   // Exactly k constraints
-    ExcessiveConstraints, // >> k constraints
-    SparseConstraints,    // Very sparse constraint matrix
-    DenseConstraints,     // Very dense constraint matrix
+    Minimal,   // Exactly k constraints
+    Excessive, // >> k constraints
+    Sparse,    // Very sparse constraint matrix
+    Dense,     // Very dense constraint matrix
 }
 
 /// Custom arbitrary for k values focusing on boundary conditions
@@ -118,6 +116,7 @@ fn k_boundary_arbitrary(u: &mut Unstructured) -> arbitrary::Result<usize> {
             let base: u16 = u.arbitrary()?;
             (base as usize % 500) + 2
         }
+        _ => unreachable!("choice modulo 12 is always in 0..12"),
     })
 }
 
@@ -137,6 +136,7 @@ fn symbol_size_arbitrary(u: &mut Unstructured) -> arbitrary::Result<usize> {
             let base: u8 = u.arbitrary()?;
             (base as usize % 256) + 1
         }
+        _ => unreachable!("choice modulo 8 is always in 0..8"),
     })
 }
 
@@ -144,11 +144,11 @@ fn symbol_size_arbitrary(u: &mut Unstructured) -> arbitrary::Result<usize> {
 fn zero_pattern_arbitrary(u: &mut Unstructured) -> arbitrary::Result<ZeroPattern> {
     let choice: u8 = u.arbitrary()?;
     Ok(match choice % 5 {
-        0 => ZeroPattern::ZeroRow,
-        1 => ZeroPattern::ZeroColumn,
-        2 => ZeroPattern::ZeroDiagonal,
-        3 => ZeroPattern::ZeroAntiDiagonal,
-        4 => ZeroPattern::ZeroBlock,
+        0 => ZeroPattern::Row,
+        1 => ZeroPattern::Column,
+        2 => ZeroPattern::Diagonal,
+        3 => ZeroPattern::AntiDiagonal,
+        4 => ZeroPattern::Block,
         _ => unreachable!(),
     })
 }
@@ -170,10 +170,10 @@ fn constraint_boundary_arbitrary(
 ) -> arbitrary::Result<ConstraintBoundaryType> {
     let choice: u8 = u.arbitrary()?;
     Ok(match choice % 4 {
-        0 => ConstraintBoundaryType::MinimalConstraints,
-        1 => ConstraintBoundaryType::ExcessiveConstraints,
-        2 => ConstraintBoundaryType::SparseConstraints,
-        3 => ConstraintBoundaryType::DenseConstraints,
+        0 => ConstraintBoundaryType::Minimal,
+        1 => ConstraintBoundaryType::Excessive,
+        2 => ConstraintBoundaryType::Sparse,
+        3 => ConstraintBoundaryType::Dense,
         _ => unreachable!(),
     })
 }
@@ -217,8 +217,8 @@ fn fuzz_gauss_elimination_boundaries(mut input: GaussElimBoundaryInput) {
     // Create decoder and encoder
     let decoder = InactivationDecoder::new(k, symbol_size, input.seed);
     let encoder = match SystematicEncoder::new(&source, symbol_size, input.seed) {
-        Ok(enc) => enc,
-        Err(_) => return, // Skip invalid configurations
+        Some(enc) => enc,
+        None => return, // Skip invalid configurations
     };
 
     for operation in input.operations {
@@ -285,7 +285,7 @@ fn fuzz_gauss_elimination_boundaries(mut input: GaussElimBoundaryInput) {
 
 /// Create matrix with exact rank deficit
 fn create_rank_deficit_matrix(
-    decoder: &InactivationDecoder,
+    _decoder: &InactivationDecoder,
     source: &[Vec<u8>],
     symbols: &mut Vec<ReceivedSymbol>,
     deficit: usize,
@@ -294,8 +294,8 @@ fn create_rank_deficit_matrix(
     let effective_rank = k.saturating_sub(deficit);
 
     // Add source symbols with linear dependencies
-    for i in 0..effective_rank {
-        symbols.push(ReceivedSymbol::source(i as u32, source[i].clone()));
+    for (i, symbol) in source.iter().enumerate().take(effective_rank) {
+        symbols.push(ReceivedSymbol::source(i as u32, symbol.clone()));
     }
 
     // Add linearly dependent symbols (combinations of existing ones)
@@ -319,7 +319,7 @@ fn create_rank_deficit_matrix(
 
 /// Create specific zero patterns in the matrix
 fn create_zero_pattern(
-    decoder: &InactivationDecoder,
+    _decoder: &InactivationDecoder,
     source: &[Vec<u8>],
     symbols: &mut Vec<ReceivedSymbol>,
     pattern: ZeroPattern,
@@ -329,14 +329,14 @@ fn create_zero_pattern(
     let symbol_size = source[0].len();
 
     // Add normal source symbols first
-    for i in 0..k {
+    for (i, symbol) in source.iter().enumerate() {
         if i != target_index {
-            symbols.push(ReceivedSymbol::source(i as u32, source[i].clone()));
+            symbols.push(ReceivedSymbol::source(i as u32, symbol.clone()));
         }
     }
 
     match pattern {
-        ZeroPattern::ZeroRow => {
+        ZeroPattern::Row => {
             // Create zero row by making target symbol all zeros
             symbols.push(ReceivedSymbol::source(
                 target_index as u32,
@@ -344,21 +344,19 @@ fn create_zero_pattern(
             ));
         }
 
-        ZeroPattern::ZeroColumn => {
+        ZeroPattern::Column => {
             // Skip the target symbol to create a "zero column" effect
             // (In practice, this creates an incomplete system)
         }
 
-        ZeroPattern::ZeroDiagonal => {
+        ZeroPattern::Diagonal => {
             // Create pattern where diagonal elements are effectively zero
             let mut zero_data = source[target_index].clone();
-            for byte in &mut zero_data {
-                *byte = 0;
-            }
+            zero_data.fill(0);
             symbols.push(ReceivedSymbol::source(target_index as u32, zero_data));
         }
 
-        ZeroPattern::ZeroAntiDiagonal => {
+        ZeroPattern::AntiDiagonal => {
             // Create anti-diagonal zero pattern
             let anti_target = k.saturating_sub(1).saturating_sub(target_index);
             let mut zero_data = source[target_index].clone();
@@ -372,7 +370,7 @@ fn create_zero_pattern(
             symbols.push(ReceivedSymbol::source(target_index as u32, zero_data));
         }
 
-        ZeroPattern::ZeroBlock => {
+        ZeroPattern::Block => {
             // Create block of zeros
             symbols.push(ReceivedSymbol::source(
                 target_index as u32,
@@ -390,19 +388,19 @@ fn create_zero_pattern(
 
 /// Create singular submatrix at specific position
 fn create_singular_submatrix(
-    decoder: &InactivationDecoder,
+    _decoder: &InactivationDecoder,
     source: &[Vec<u8>],
     symbols: &mut Vec<ReceivedSymbol>,
     start_row: usize,
-    start_col: usize,
+    _start_col: usize,
     size: usize,
 ) {
     let k = source.len();
 
     // Add most source symbols normally
-    for i in 0..k {
+    for (i, symbol) in source.iter().enumerate().take(k) {
         if i < start_row || i >= start_row + size {
-            symbols.push(ReceivedSymbol::source(i as u32, source[i].clone()));
+            symbols.push(ReceivedSymbol::source(i as u32, symbol.clone()));
         }
     }
 
@@ -422,8 +420,8 @@ fn create_singular_submatrix(
 
 /// Create pivot selection stress conditions
 fn create_pivot_stress(
-    decoder: &InactivationDecoder,
-    encoder: &SystematicEncoder,
+    _decoder: &InactivationDecoder,
+    _encoder: &SystematicEncoder,
     source: &[Vec<u8>],
     symbols: &mut Vec<ReceivedSymbol>,
     stress_type: PivotStressType,
@@ -450,11 +448,9 @@ fn create_pivot_stress(
 
         PivotStressType::WeakPivot => {
             // Create very small values that might cause numerical issues
-            for i in 0..k {
-                let mut weak_data = source[i].clone();
-                for byte in &mut weak_data {
-                    *byte = if *byte == 0 { 1 } else { 1 }; // Very small values
-                }
+            for (i, symbol) in source.iter().enumerate().take(k) {
+                let mut weak_data = symbol.clone();
+                weak_data.fill(1); // Very small non-zero values.
                 symbols.push(ReceivedSymbol::source(i as u32, weak_data));
             }
         }
@@ -472,27 +468,29 @@ fn create_constraint_boundary(
     let k = source.len();
 
     match boundary_type {
-        ConstraintBoundaryType::MinimalConstraints => {
+        ConstraintBoundaryType::Minimal => {
             // Exactly k symbols (minimal for solvability)
-            for i in 0..k {
-                symbols.push(ReceivedSymbol::source(i as u32, source[i].clone()));
+            for (i, symbol) in source.iter().enumerate().take(k) {
+                symbols.push(ReceivedSymbol::source(i as u32, symbol.clone()));
             }
         }
 
-        ConstraintBoundaryType::ExcessiveConstraints => {
+        ConstraintBoundaryType::Excessive => {
             // Many more than k symbols
-            for i in 0..k {
-                symbols.push(ReceivedSymbol::source(i as u32, source[i].clone()));
+            for (i, symbol) in source.iter().enumerate().take(k) {
+                symbols.push(ReceivedSymbol::source(i as u32, symbol.clone()));
             }
             // Add repair symbols up to reasonable limit
             for i in 0..(k.min(20)) {
-                if let Ok(repair) = encoder.generate_repair_symbol(k as u32 + i as u32) {
-                    symbols.push(ReceivedSymbol::repair(k as u32 + i as u32, repair));
+                let esi = k as u32 + i as u32;
+                if let Ok((columns, coefficients)) = decoder.repair_equation(esi) {
+                    let repair = encoder.repair_symbol(esi);
+                    symbols.push(ReceivedSymbol::repair(esi, columns, coefficients, repair));
                 }
             }
         }
 
-        ConstraintBoundaryType::SparseConstraints => {
+        ConstraintBoundaryType::Sparse => {
             // Very few symbols, likely insufficient
             let sparse_count = k / 3;
             for i in (0..k).step_by(3).take(sparse_count) {
@@ -500,15 +498,17 @@ fn create_constraint_boundary(
             }
         }
 
-        ConstraintBoundaryType::DenseConstraints => {
+        ConstraintBoundaryType::Dense => {
             // Dense system with many interconnected constraints
-            for i in 0..k {
-                symbols.push(ReceivedSymbol::source(i as u32, source[i].clone()));
+            for (i, symbol) in source.iter().enumerate().take(k) {
+                symbols.push(ReceivedSymbol::source(i as u32, symbol.clone()));
             }
             // Add a few repair symbols for density
             for i in 0..(k.min(5)) {
-                if let Ok(repair) = encoder.generate_repair_symbol(k as u32 + i as u32) {
-                    symbols.push(ReceivedSymbol::repair(k as u32 + i as u32, repair));
+                let esi = k as u32 + i as u32;
+                if let Ok((columns, coefficients)) = decoder.repair_equation(esi) {
+                    let repair = encoder.repair_symbol(esi);
+                    symbols.push(ReceivedSymbol::repair(esi, columns, coefficients, repair));
                 }
             }
         }
@@ -525,8 +525,12 @@ fn test_decode_with_boundary_symbols(
     match decoder.decode(&symbols) {
         Ok(result) => {
             // Verify result has expected length
-            assert_eq!(result.len(), k, "Decode result length should match k");
-            for symbol in &result {
+            assert_eq!(
+                result.source.len(),
+                k,
+                "Decode result length should match k"
+            );
+            for symbol in &result.source {
                 assert!(!symbol.is_empty(), "Decoded symbols should not be empty");
             }
         }
