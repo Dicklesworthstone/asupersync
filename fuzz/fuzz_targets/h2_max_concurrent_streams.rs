@@ -191,14 +191,13 @@ fn test_max_concurrent_streams_enforcement(test_seq: &MaxConcurrentStreamsSequen
 
                         // Send DATA frame if specified
                         if let Some(data_spec) = &attempt.data_frame {
-                            let data_frame = create_data_frame(stream_id, data_spec);
-                            let data_encoded = observe_frame_encode(
-                                "DATA frame for successfully opened stream",
+                            let data_encoded = observe_data_frame_encode(
                                 &mut codec,
-                                data_frame,
                                 &mut buffer,
-                            )
-                            .is_ok();
+                                &state,
+                                stream_id,
+                                data_spec,
+                            );
 
                             // Close stream if END_STREAM was set
                             if data_encoded && data_spec.end_stream {
@@ -372,6 +371,52 @@ fn observe_frame_encode(
     }
 }
 
+fn observe_data_frame_encode(
+    codec: &mut FrameCodec,
+    buffer: &mut BytesMut,
+    state: &ConcurrentStreamState,
+    stream_id: u32,
+    data_spec: &DataFrameSpec,
+) -> bool {
+    assert!(
+        state.active_streams.contains(&stream_id),
+        "DATA frame should only be attempted for active stream {stream_id}"
+    );
+
+    let before_active = state.active_streams.len();
+    let frame = create_data_frame(stream_id, data_spec);
+    match observe_frame_encode("DATA frame for successfully opened stream", codec, frame, buffer) {
+        Ok(()) => {
+            assert_eq!(
+                state.active_streams.len(),
+                before_active,
+                "DATA frame encode should not mutate the stream model directly"
+            );
+            assert!(
+                state.active_streams.contains(&stream_id),
+                "DATA frame encode should keep stream {stream_id} active until END_STREAM handling"
+            );
+            true
+        }
+        Err(err) => {
+            assert_eq!(
+                state.active_streams.len(),
+                before_active,
+                "rejected DATA frame encode should not mutate the stream model"
+            );
+            assert!(
+                state.active_streams.contains(&stream_id),
+                "rejected DATA frame encode should leave stream {stream_id} active"
+            );
+            assert!(
+                !err.message.is_empty(),
+                "DATA frame encode failure should expose a diagnostic"
+            );
+            false
+        }
+    }
+}
+
 fn expect_interleaved_frame_encode(
     context: &str,
     codec: &mut FrameCodec,
@@ -412,11 +457,18 @@ fn test_interleaved_frame(
                     normalized_stream_id,
                     ErrorCode::from_u32(u32::from(*error_code)),
                 ));
-                if observe_frame_encode("interleaved RST_STREAM frame", codec, frame, buffer)
-                    .is_ok()
-                {
-                    // Close the stream in our state tracking only after the frame is observable.
-                    state.close_stream(normalized_stream_id);
+                match observe_frame_encode("interleaved RST_STREAM frame", codec, frame, buffer) {
+                    Ok(()) => {
+                        // Close the stream in our state tracking only after the frame is observable.
+                        state.close_stream(normalized_stream_id);
+                    }
+                    Err(_) => {
+                        assert!(
+                            state.active_streams.contains(&normalized_stream_id)
+                                || !state.successful_opens.contains(&normalized_stream_id),
+                            "failed RST_STREAM encode should not close active stream {normalized_stream_id}"
+                        );
+                    }
                 }
             }
         }
