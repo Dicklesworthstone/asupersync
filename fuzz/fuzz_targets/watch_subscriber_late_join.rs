@@ -15,10 +15,6 @@
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::channel::watch;
 use libfuzzer_sys::fuzz_target;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier};
-use std::thread;
-use std::time::Duration;
 
 #[derive(Debug, Clone, Arbitrary)]
 struct WatchConfig {
@@ -49,6 +45,22 @@ impl WatchSequence {
 
     fn max_post_join() -> usize {
         20 // Additional updates after late join
+    }
+}
+
+fn observe_update_delay_shape(delays: &[u16]) -> u64 {
+    delays
+        .iter()
+        .take(WatchSequence::max_updates())
+        .fold(0u64, |sum, delay| sum.saturating_add(u64::from(*delay)))
+}
+
+fn send_watch_update(sender: &watch::Sender<u32>, value: u32, context: &str) {
+    match sender.send(value) {
+        Ok(()) => {}
+        Err(error) => {
+            panic!("{context} watch update send failed for value {value}: {error:?}");
+        }
     }
 }
 
@@ -85,66 +97,41 @@ fuzz_target!(|data: &[u8]| {
     let update_count = sequence.config.update_values.len();
     let late_join_point =
         (sequence.config.late_join_point as usize).min(update_count.saturating_sub(1));
+    let delay_shape = observe_update_delay_shape(&sequence.config.update_delays);
+    let max_delay_shape =
+        (0..WatchSequence::max_updates()).fold(0u64, |sum, _| sum + u64::from(u16::MAX));
+    assert!(
+        delay_shape <= max_delay_shape,
+        "watch delay shape exceeded configured bound: {delay_shape} > {max_delay_shape}"
+    );
 
     // Create watch channel with initial value
     let initial_value = 0u32;
     let (sender, _initial_receiver) = watch::channel(initial_value);
 
-    // Track the test state
-    let historical_values = Arc::new(parking_lot::Mutex::new(Vec::new()));
-    let latest_value_at_join = Arc::new(AtomicUsize::new(0));
-    let late_join_barrier = Arc::new(Barrier::new(2)); // Main thread + late subscriber thread
+    // Replay deterministically: watch::Sender is intentionally single-producer.
+    let mut historical_values = Vec::new();
+    let mut all_sent_values = vec![initial_value];
+    let mut latest_value_at_join = initial_value;
 
-    // Start the update sequence in the main thread
-    let sender_clone = sender.clone();
-    let historical_values_clone = Arc::clone(&historical_values);
-    let latest_value_clone = Arc::clone(&latest_value_at_join);
-    let barrier_clone = Arc::clone(&late_join_barrier);
+    for (i, &value) in sequence.config.update_values.iter().enumerate() {
+        send_watch_update(&sender, value, "Pre-late-join");
+        all_sent_values.push(value);
+        historical_values.push(value);
 
-    let update_handle = thread::spawn(move || {
-        let mut all_sent_values = vec![initial_value];
-
-        // Send updates before late join point
-        for (i, &value) in sequence.config.update_values.iter().enumerate() {
-            // Apply delay if specified
-            if let Some(&delay) = sequence.config.update_delays.get(i) {
-                if delay > 0 {
-                    thread::sleep(Duration::from_micros(delay as u64));
-                }
-            }
-
-            // Send the update
-            if sender_clone.send(value).is_ok() {
-                all_sent_values.push(value);
-                historical_values_clone.lock().push(value);
-            }
-
-            // Signal late subscriber to join at the specified point
-            if i == late_join_point {
-                latest_value_clone.store(value as usize, Ordering::SeqCst);
-                barrier_clone.wait(); // Signal late subscriber can now join
-            }
+        if i == late_join_point {
+            latest_value_at_join = value;
+            break;
         }
-
-        // Send post-join updates to test change detection
-        for &value in &sequence.config.post_join_updates {
-            thread::sleep(Duration::from_millis(5)); // Small delay
-            let _ = sender_clone.send(value);
-        }
-
-        all_sent_values
-    });
-
-    // Wait for the signal to create late subscriber
-    late_join_barrier.wait();
+    }
 
     // Create late subscriber at the specified point
-    let late_subscriber = sender.subscribe();
+    let mut late_subscriber = sender.subscribe();
 
     // Immediately check what value the late subscriber sees
     let initial_value_seen = late_subscriber.borrow_and_clone();
-    let expected_latest = latest_value_at_join.load(Ordering::SeqCst) as u32;
-    let historical_snapshot = historical_values.lock().clone();
+    let expected_latest = latest_value_at_join;
+    let historical_snapshot = historical_values.clone();
 
     // Validate late subscriber behavior
     let result = LateJoinResult {
@@ -169,41 +156,60 @@ fuzz_target!(|data: &[u8]| {
         result.initial_value_seen, result.historical_values, result.expected_latest_value
     );
 
-    // Test change detection for late subscriber
-    if sequence.test_update_tracking && !sequence.config.post_join_updates.is_empty() {
-        let mut late_subscriber_mut = late_subscriber;
+    // The late subscriber should start with seen_version = current_version.
+    let initial_seen_version = late_subscriber.seen_version();
+    assert!(
+        initial_seen_version > 0,
+        "Late subscriber seen_version should reflect pre-join sends, got {initial_seen_version}"
+    );
+    assert!(
+        !late_subscriber.has_changed(),
+        "Late subscriber should not see changes immediately after join"
+    );
 
-        // The late subscriber should start with seen_version = current_version
-        let initial_seen_version = late_subscriber_mut.seen_version();
+    for &value in sequence
+        .config
+        .update_values
+        .iter()
+        .skip(late_join_point + 1)
+    {
+        send_watch_update(&sender, value, "Post-late-join sequence");
+        all_sent_values.push(value);
+    }
+
+    for &value in &sequence.config.post_join_updates {
+        send_watch_update(&sender, value, "Post-join");
+        all_sent_values.push(value);
+    }
+
+    let Some(final_sent_value) = all_sent_values.last().copied() else {
+        panic!("Watch fuzz sequence must retain at least the initial value");
+    };
+    assert_eq!(
+        *sender.borrow(),
+        final_sent_value,
+        "Watch sender should expose the latest sent value"
+    );
+
+    // Test change detection for late subscriber.
+    if sequence.test_update_tracking
+        && let Some(expected_final) = sequence.config.post_join_updates.last().copied()
+    {
         assert!(
-            !late_subscriber_mut.has_changed(),
-            "Late subscriber should not see changes immediately after join"
+            late_subscriber.has_changed(),
+            "Late subscriber should detect changes after post-join updates"
         );
 
-        // Wait for post-join updates to complete
-        update_handle.join().expect("Update thread should complete");
-
-        // Small delay to ensure updates propagate
-        thread::sleep(Duration::from_millis(10));
-
-        // After post-join updates, late subscriber should detect changes
-        if !sequence.config.post_join_updates.is_empty() {
-            assert!(
-                late_subscriber_mut.has_changed(),
-                "Late subscriber should detect changes after post-join updates"
-            );
-
-            let updated_value = late_subscriber_mut.borrow_and_clone();
-            let expected_final = sequence.config.post_join_updates.last().copied().unwrap();
-            assert_eq!(
-                updated_value, expected_final,
-                "Late subscriber should see final post-join value {} but saw {}",
-                expected_final, updated_value
-            );
-        }
-    } else {
-        // Just wait for updates to complete
-        update_handle.join().expect("Update thread should complete");
+        let updated_value = late_subscriber.borrow_and_update_clone();
+        assert_eq!(
+            updated_value, expected_final,
+            "Late subscriber should see final post-join value {} but saw {}",
+            expected_final, updated_value
+        );
+        assert!(
+            !late_subscriber.has_changed(),
+            "borrow_and_update_clone should acknowledge the final post-join value"
+        );
     }
 
     // Test multiple late subscribers if requested
@@ -223,17 +229,16 @@ fuzz_target!(|data: &[u8]| {
 
         // Send one more update to test all subscribers see it
         let final_test_value = 99999u32;
-        if sender.send(final_test_value).is_ok() {
-            thread::sleep(Duration::from_millis(5));
+        send_watch_update(&sender, final_test_value, "Multiple-late-subscriber");
+        all_sent_values.push(final_test_value);
 
-            // All subscribers should see the new value
-            let new_value_2 = late_subscriber_2.borrow_and_clone();
-            let new_value_3 = late_subscriber_3.borrow_and_clone();
+        // All subscribers should see the new value
+        let new_value_2 = late_subscriber_2.borrow_and_clone();
+        let new_value_3 = late_subscriber_3.borrow_and_clone();
 
-            assert_eq!(new_value_2, final_test_value);
-            assert_eq!(new_value_3, final_test_value);
-            assert_eq!(new_value_2, new_value_3);
-        }
+        assert_eq!(new_value_2, final_test_value);
+        assert_eq!(new_value_3, final_test_value);
+        assert_eq!(new_value_2, new_value_3);
     }
 
     // Additional invariant: late subscriber should have reasonable seen_version
@@ -245,7 +250,7 @@ fuzz_target!(|data: &[u8]| {
     );
 
     // Verify no value is lost - latest value should always be accessible
-    let final_current_value = sender.borrow().clone();
+    let final_current_value = *sender.borrow();
     let receiver_final_value = late_subscriber.borrow_and_clone();
     assert_eq!(
         final_current_value, receiver_final_value,
