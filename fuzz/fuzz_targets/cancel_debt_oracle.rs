@@ -2,6 +2,7 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
+use std::panic::AssertUnwindSafe;
 
 use asupersync::lab::oracle::cancel_debt::{CancelDebtConfig, CancelDebtOracle, CleanupWorkType};
 use asupersync::types::{RegionId, TaskId, Time};
@@ -35,6 +36,7 @@ struct FuzzConfig {
 
 impl From<FuzzConfig> for CancelDebtConfig {
     fn from(config: FuzzConfig) -> Self {
+        let _panic_on_violation = config.panic_on_violation;
         Self {
             max_debt_items: config.max_debt_items as usize,
             measurement_window_ns: config.measurement_window_ms as u64 * 1_000_000, // ms to ns
@@ -194,14 +196,15 @@ fn test_no_panic(input: &CancelDebtFuzzInput) {
     let base_time = Time::from_nanos(1_000_000_000); // 1 second
 
     // Process all operations - should never panic
-    for operation in &input.operation_sequence {
-        let _result = std::panic::catch_unwind(|| {
+    for (index, operation) in input.operation_sequence.iter().enumerate() {
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
             process_operation(&oracle, operation, base_time);
-        });
+        }));
+        assert!(
+            result.is_ok(),
+            "CancelDebtOracle panicked while processing operation {index}: {operation:?}"
+        );
     }
-
-    // If we reach here without panic, the property holds
-    assert!(true, "Oracle handled operation sequence without panic");
 }
 
 /// Property 2: Statistics consistency
@@ -210,25 +213,8 @@ fn test_statistics_consistency(input: &CancelDebtFuzzInput) {
     let oracle = CancelDebtOracle::new(config);
     let base_time = Time::from_nanos(1_000_000_000);
 
-    let mut work_items_added = 0u64;
-    let mut work_items_completed = 0u64;
-
     // Track operations and verify statistics make sense
     for operation in &input.operation_sequence {
-        match operation {
-            DebtOperation::AddWorkItem { .. } => {
-                work_items_added += 1;
-            }
-            DebtOperation::CompleteWorkItems { count, .. } => {
-                work_items_completed += *count as u64;
-            }
-            DebtOperation::Reset => {
-                work_items_added = 0;
-                work_items_completed = 0;
-            }
-            _ => {}
-        }
-
         process_operation(&oracle, operation, base_time);
 
         // Check that statistics are reasonable
@@ -268,7 +254,7 @@ fn test_debt_accumulation_detection(input: &CancelDebtFuzzInput) {
             let timestamp = Time::from_nanos(base_time.as_nanos() + i as u64 * 1_000_000); // 1ms apart
             oracle.on_work_item_added(
                 &queue_name,
-                Some(TaskId(i as u64)),
+                Some(fuzz_task_id(i as u64)),
                 None,
                 work_type_converted,
                 timestamp,
@@ -282,8 +268,6 @@ fn test_debt_accumulation_detection(input: &CancelDebtFuzzInput) {
         // With enough work items, we should detect violations
         // This is probabilistic based on thresholds, so we don't assert hard requirements
         let _violation_count = violations.len();
-
-        assert!(true, "Debt accumulation detection completed without panic");
     }
 }
 
@@ -332,9 +316,6 @@ fn test_timestamp_handling(input: &CancelDebtFuzzInput) {
             // Process with future timestamp context
             process_operation(&oracle, operation, future_time);
         }
-
-        // Should handle future timestamps gracefully
-        assert!(true, "Future timestamp handling completed without panic");
     }
 }
 
@@ -355,7 +336,7 @@ fn test_attack_scenarios(input: &CancelDebtFuzzInput) {
             for i in 0..*work_count {
                 oracle.on_work_item_added(
                     &queue_name,
-                    Some(TaskId(i as u64)),
+                    Some(fuzz_task_id(i as u64)),
                     None,
                     CleanupWorkType::TaskFinalization,
                     Time::from_nanos(base_time.as_nanos() + i as u64 * 1_000_000),
@@ -363,8 +344,7 @@ fn test_attack_scenarios(input: &CancelDebtFuzzInput) {
             }
 
             // Check for stalls/violations
-            oracle.check(Time::from_nanos(base_time.as_nanos() + 10_000_000_000)); // 10 seconds later
-            assert!(true, "Starvation scenario handled without panic");
+            let _ = oracle.check(Time::from_nanos(base_time.as_nanos() + 10_000_000_000)); // 10 seconds later
         }
         AttackScenario::ResourceExhaustion { memory_target_kb } => {
             // Try to exhaust memory by adding large work items
@@ -377,7 +357,7 @@ fn test_attack_scenarios(input: &CancelDebtFuzzInput) {
                 // Safety limit
                 oracle.on_work_item_added(
                     queue_name,
-                    Some(TaskId(added_items)),
+                    Some(fuzz_task_id(added_items)),
                     None,
                     CleanupWorkType::RegionCleanup, // Larger estimated size
                     Time::from_nanos(base_time.as_nanos() + added_items * 1_000_000),
@@ -392,8 +372,48 @@ fn test_attack_scenarios(input: &CancelDebtFuzzInput) {
             }
 
             // Should handle memory pressure gracefully
-            oracle.check(base_time);
-            assert!(true, "Resource exhaustion scenario handled without panic");
+            let _ = oracle.check(base_time);
+        }
+        AttackScenario::QueueTypeSwitching {
+            queue_type,
+            pattern_count,
+        } => {
+            let queue_name: String = (*queue_type).into();
+
+            for i in 0..*pattern_count {
+                oracle.on_work_item_added(
+                    &queue_name,
+                    Some(fuzz_task_id(i as u64)),
+                    None,
+                    CleanupWorkType::ObligationDischarge,
+                    Time::from_nanos(base_time.as_nanos() + i as u64 * 1_000_000),
+                );
+
+                if i % 2 == 0 {
+                    oracle.on_work_items_completed(&queue_name, 1, base_time);
+                }
+            }
+
+            let _ = oracle.check(base_time);
+        }
+        AttackScenario::CompletionRateManipulation {
+            add_rate,
+            complete_rate,
+        } => {
+            let queue_name = "completion_rate_queue";
+
+            for i in 0..*add_rate {
+                oracle.on_work_item_added(
+                    queue_name,
+                    Some(fuzz_task_id(i as u64)),
+                    None,
+                    CleanupWorkType::FinalizerExecution,
+                    Time::from_nanos(base_time.as_nanos() + i as u64 * 1_000_000),
+                );
+            }
+
+            oracle.on_work_items_completed(queue_name, *complete_rate as usize, base_time);
+            let _ = oracle.check(base_time);
         }
         _ => {}
     }
@@ -418,7 +438,7 @@ fn test_configuration_bounds(input: &CancelDebtFuzzInput) {
         for i in 0..*target_debt {
             oracle.on_work_item_added(
                 &queue_name,
-                Some(TaskId(i as u64)),
+                Some(fuzz_task_id(i as u64)),
                 None,
                 CleanupWorkType::TaskFinalization,
                 Time::from_nanos(base_time.as_nanos() + i as u64 * 1_000_000),
@@ -428,23 +448,29 @@ fn test_configuration_bounds(input: &CancelDebtFuzzInput) {
         // Add one more to exceed threshold
         oracle.on_work_item_added(
             &queue_name,
-            Some(TaskId(*target_debt as u64)),
+            Some(fuzz_task_id(*target_debt as u64)),
             None,
             CleanupWorkType::TaskFinalization,
             Time::from_nanos(base_time.as_nanos() + *target_debt as u64 * 1_000_000),
         );
 
         // Check that threshold violation is detected
-        oracle.check(base_time);
+        let _ = oracle.check(base_time);
 
         let violations = oracle.get_recent_violations(5);
         // Should detect threshold violation
         let _has_threshold_violation = violations.iter().any(|v| {
             matches!(v, asupersync::lab::oracle::cancel_debt::CancelDebtViolation::DebtThresholdExceeded { .. })
         });
-
-        assert!(true, "Boundary test completed without panic");
     }
+}
+
+fn fuzz_task_id(value: u64) -> TaskId {
+    TaskId::new_for_test(value as u32, (value >> 32) as u32)
+}
+
+fn fuzz_region_id(value: u64) -> RegionId {
+    RegionId::new_for_test(value as u32, (value >> 32) as u32)
 }
 
 /// Helper function to process a debt operation
@@ -463,8 +489,8 @@ fn process_operation(oracle: &CancelDebtOracle, operation: &DebtOperation, base_
 
             oracle.on_work_item_added(
                 &queue_name,
-                task_id.map(|id| TaskId(id as u64)),
-                region_id.map(|id| RegionId(id as u64)),
+                task_id.map(|id| fuzz_task_id(id as u64)),
+                region_id.map(|id| fuzz_region_id(id as u64)),
                 (*work_type).into(),
                 timestamp,
             );
