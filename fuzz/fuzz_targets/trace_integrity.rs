@@ -30,6 +30,15 @@ const HEADER_SIZE: usize = 16; // magic(11) + version(2) + flags(2) + compressio
 const MAX_EVENTS: usize = 100;
 const MAX_BLOB_SIZE: usize = 1_048_576; // 1MB max to prevent memory exhaustion
 
+fn encode_msgpack<T: serde::Serialize + ?Sized>(
+    value: &T,
+    context: impl std::fmt::Display,
+) -> Vec<u8> {
+    rmp_serde::to_vec(value).unwrap_or_else(|err| {
+        panic!("trace integrity msgpack serialization failed for {context}: {err}")
+    })
+}
+
 // =============================================================================
 // Fuzz Input Structure
 // =============================================================================
@@ -260,14 +269,16 @@ fn generate_trace_blob(
                         config_hash: 0,
                         description: None,
                     };
-                    let meta_bytes = rmp_serde::to_vec(&metadata).unwrap_or_default();
+                    let meta_bytes =
+                        encode_msgpack(&metadata, format!("schema mismatch v{version}"));
                     blob.extend_from_slice(&(meta_bytes.len() as u32).to_le_bytes());
                     blob.extend_from_slice(&meta_bytes);
                 }
 
                 MetadataOperation::ValidMetadata { replay_id } => {
                     let metadata = TraceMetadata::new(*replay_id);
-                    let meta_bytes = rmp_serde::to_vec(&metadata).unwrap_or_default();
+                    let meta_bytes =
+                        encode_msgpack(&metadata, format!("valid metadata replay_id={replay_id}"));
                     blob.extend_from_slice(&(meta_bytes.len() as u32).to_le_bytes());
                     blob.extend_from_slice(&meta_bytes);
                 }
@@ -477,7 +488,7 @@ fn write_corrupted_header(blob: &mut Vec<u8>) {
 
 fn write_valid_metadata(blob: &mut Vec<u8>) {
     let metadata = TraceMetadata::new(42);
-    let meta_bytes = rmp_serde::to_vec(&metadata).unwrap_or_default();
+    let meta_bytes = encode_msgpack(&metadata, "valid metadata helper");
     blob.extend_from_slice(&(meta_bytes.len() as u32).to_le_bytes());
     blob.extend_from_slice(&meta_bytes);
 }
@@ -488,7 +499,7 @@ fn write_corrupted_metadata(blob: &mut Vec<u8>) {
 }
 
 fn write_event(blob: &mut Vec<u8>, event: &ReplayEvent) {
-    let event_bytes = rmp_serde::to_vec(event).unwrap_or_default();
+    let event_bytes = encode_msgpack(event, "replay event helper");
     blob.extend_from_slice(&(event_bytes.len() as u32).to_le_bytes());
     blob.extend_from_slice(&event_bytes);
 }
