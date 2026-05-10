@@ -521,6 +521,24 @@ fn observe_quic_core_error(context: &str, error: &QuicCoreError) {
     );
 }
 
+fn observe_qpack_result(result: Result<(), String>, context: &str) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(error) => {
+            let diagnostic = format!("{context}: {error}");
+            assert!(
+                !diagnostic.trim().is_empty(),
+                "QPACK instruction failures must expose diagnostics"
+            );
+            assert!(
+                diagnostic.len() < 1024,
+                "QPACK instruction diagnostics must stay bounded"
+            );
+            false
+        }
+    }
+}
+
 /// Test QPACK varint integer encoding/decoding bounds (Assertion 1)
 fn test_varint_bounds(data: &[u8]) -> Result<(), String> {
     let data = &data[..data.len().min(MAX_FUZZ_INPUT_SIZE)];
@@ -590,15 +608,24 @@ fn test_duplicate_handling(
     _operations: &[QpackStreamOperation],
 ) -> Result<(), String> {
     // Insert some entries to create duplicates
-    let _ = state
-        .dynamic_table
-        .insert_with_literal_name("test-name".to_string(), "value1".to_string());
-    let _ = state
-        .dynamic_table
-        .insert_with_literal_name("test-name".to_string(), "value2".to_string());
-    let _ = state
-        .dynamic_table
-        .insert_with_literal_name("another-name".to_string(), "value3".to_string());
+    observe_qpack_result(
+        state
+            .dynamic_table
+            .insert_with_literal_name("test-name".to_string(), "value1".to_string()),
+        "duplicate handling seed insert value1",
+    );
+    observe_qpack_result(
+        state
+            .dynamic_table
+            .insert_with_literal_name("test-name".to_string(), "value2".to_string()),
+        "duplicate handling seed insert value2",
+    );
+    observe_qpack_result(
+        state
+            .dynamic_table
+            .insert_with_literal_name("another-name".to_string(), "value3".to_string()),
+        "duplicate handling seed insert alternate name",
+    );
 
     // Test duplicate instruction
     let duplicate_result = state.dynamic_table.duplicate(0);
@@ -627,18 +654,25 @@ fn test_insertion_count_tracking(state: &mut QpackStreamState) -> Result<(), Str
     let initial_count = state.dynamic_table.insert_count;
 
     // Perform several insertions
-    let _ = state
-        .dynamic_table
-        .insert_with_literal_name("name1".to_string(), "value1".to_string());
-    let _ = state
-        .dynamic_table
-        .insert_with_literal_name("name2".to_string(), "value2".to_string());
+    let inserted_first = observe_qpack_result(
+        state
+            .dynamic_table
+            .insert_with_literal_name(String::new(), String::new()),
+        "insertion count seed insert first",
+    );
+    let inserted_second = observe_qpack_result(
+        state
+            .dynamic_table
+            .insert_with_literal_name(String::new(), String::new()),
+        "insertion count seed insert second",
+    );
 
     // Insert count should have increased
-    if state.dynamic_table.insert_count <= initial_count {
+    let expected_increment = u64::from(inserted_first) + u64::from(inserted_second);
+    if state.dynamic_table.insert_count < initial_count + expected_increment {
         return Err(format!(
-            "Insert count did not increase: {} -> {}",
-            initial_count, state.dynamic_table.insert_count
+            "Insert count did not increase by observed successful inserts: {} + {} -> {}",
+            initial_count, expected_increment, state.dynamic_table.insert_count
         ));
     }
 
@@ -758,7 +792,10 @@ fuzz_target!(|input: QpackStreamFuzzInput| {
     // Process encoder instructions
     for encoder_instr_fuzz in &input.encoder_instructions {
         let encoder_instr = QpackEncoderInstruction::from(encoder_instr_fuzz.clone());
-        let _ = state.process_encoder_instruction(encoder_instr);
+        observe_qpack_result(
+            state.process_encoder_instruction(encoder_instr),
+            "fuzz encoder instruction",
+        );
 
         // Validate invariants after each operation
         state.validate_invariants().unwrap_or_else(|e| {
@@ -769,7 +806,10 @@ fuzz_target!(|input: QpackStreamFuzzInput| {
     // Process decoder instructions
     for decoder_instr_fuzz in &input.decoder_instructions {
         let decoder_instr = QpackDecoderInstruction::from(decoder_instr_fuzz.clone());
-        let _ = state.process_decoder_instruction(decoder_instr);
+        observe_qpack_result(
+            state.process_decoder_instruction(decoder_instr),
+            "fuzz decoder instruction",
+        );
 
         // Validate invariants after each operation
         state.validate_invariants().unwrap_or_else(|e| {
