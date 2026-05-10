@@ -39,6 +39,7 @@
     "runs_git_mutation": false
   },
   "generated_at": "2026-05-08T05:10:00Z",
+  "guarantee": "unspecified",
   "log_path": "/data/projects/asupersync/tests/fixtures/rch_retrieval_receipt/remote_success.log",
   "markers": {
     "artifact_bytes": 356,
@@ -67,5 +68,6 @@
     "summary": "remote proof and artifact retrieval completed"
   },
   "schema_version": "rch-retrieval-receipt-v1",
+  "target_dir": "${TMPDIR:-/tmp}/rch_target_rch_retrieval_receipt_docs",
   "wrapper_exit_code": null
 }

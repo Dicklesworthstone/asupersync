@@ -11,6 +11,7 @@ import argparse
 import datetime as dt
 import json
 import re
+import shlex
 import sys
 from pathlib import Path
 from typing import Any
@@ -63,6 +64,19 @@ def last_remote_exit(text: str) -> int | None:
     failure = REMOTE_FAILED_RE.search(text)
     if failure:
         return int(failure.group("exit"))
+    return None
+
+
+def extract_target_dir(command: str) -> str | None:
+    if not command:
+        return None
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        tokens = command.split()
+    for token in tokens:
+        if token.startswith("CARGO_TARGET_DIR="):
+            return token.split("=", 1)[1]
     return None
 
 
@@ -299,6 +313,8 @@ def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
         "log_path": str(log_path),
         "command": args.command,
         "proof_lane": args.proof_lane or "unspecified",
+        "target_dir": extract_target_dir(args.command),
+        "guarantee": args.guarantee or "unspecified",
         "wrapper_exit_code": args.wrapper_exit_code,
         "classification": analysis["classification"],
         "decision": decision,
@@ -320,6 +336,11 @@ def main() -> int:
     parser.add_argument("--log", required=True, help="Path to an rch stdout/stderr log")
     parser.add_argument("--command", default="", help="Proof command represented by the log")
     parser.add_argument("--proof-lane", default="", help="Stable proof-lane id for budget reporting")
+    parser.add_argument(
+        "--guarantee",
+        default="",
+        help="Exact guarantee this proof lane establishes when the receipt is green",
+    )
     parser.add_argument(
         "--max-retrieval-ms",
         type=int,

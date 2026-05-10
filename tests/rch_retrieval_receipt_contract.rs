@@ -136,6 +136,11 @@ fn completed_artifact_retrieval_is_clean_remote_success() {
     );
     assert_eq!(receipt["generated_at"].as_str(), Some(GENERATED_AT));
     assert_eq!(receipt["current_date"].as_str(), Some("2026-05-08"));
+    assert_eq!(
+        receipt["target_dir"].as_str(),
+        Some("${TMPDIR:-/tmp}/rch_target_rch_retrieval_receipt_docs")
+    );
+    assert_eq!(receipt["guarantee"].as_str(), Some("unspecified"));
     assert_eq!(receipt["classification"].as_str(), Some("remote_success"));
     assert_eq!(receipt["decision"].as_str(), Some("passed"));
     assert_eq!(receipt["markers"]["remote_exit_code"].as_i64(), Some(0));
@@ -155,6 +160,39 @@ fn completed_artifact_retrieval_is_clean_remote_success() {
     assert_eq!(
         receipt["artifact_budget"]["status"].as_str(),
         Some("not-configured")
+    );
+}
+
+#[test]
+fn receipt_schema_records_target_dir_and_lane_guarantee() {
+    let receipt = receipt_json_with_args(
+        "remote_success.log",
+        None,
+        &[
+            "--proof-lane",
+            "bin-scoped-fuzz-smoke",
+            "--guarantee",
+            "bin-scoped fuzz target compiles and one-input smoke runs without panic",
+        ],
+    );
+
+    assert_eq!(
+        receipt["target_dir"].as_str(),
+        Some("${TMPDIR:-/tmp}/rch_target_rch_retrieval_receipt_docs")
+    );
+    assert_eq!(
+        receipt["guarantee"].as_str(),
+        Some("bin-scoped fuzz target compiles and one-input smoke runs without panic")
+    );
+    assert_eq!(
+        receipt["proof_lane"].as_str(),
+        Some("bin-scoped-fuzz-smoke")
+    );
+    assert_eq!(receipt["markers"]["local_fallback"].as_bool(), Some(false));
+    assert_eq!(receipt["markers"]["remote_exit_code"].as_i64(), Some(0));
+    assert_eq!(
+        receipt["markers"]["retrieval_completed"].as_bool(),
+        Some(true)
     );
 }
 
