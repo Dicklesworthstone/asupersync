@@ -12,6 +12,7 @@ use arbitrary::Arbitrary;
 use asupersync::bytes::Bytes;
 use asupersync::http::h2::hpack::{Decoder, Header};
 use libfuzzer_sys::fuzz_target;
+use std::fmt::Display;
 
 #[derive(Arbitrary, Debug)]
 struct AdversarialInput {
@@ -24,13 +25,9 @@ struct AdversarialInput {
 #[derive(Arbitrary, Debug)]
 enum HpackOp {
     /// Dynamic Table Size Update (001xxxxx)
-    SizeUpdate {
-        new_size: u32,
-    },
+    SizeUpdate { new_size: u32 },
     /// Indexed Header Field (1xxxxxxx)
-    IndexedField {
-        index: u32,
-    },
+    IndexedField { index: u32 },
     /// Literal Header Field with Incremental Indexing (01xxxxxx)
     LiteralWithIndexing {
         name_indexed: bool,
@@ -64,7 +61,7 @@ enum HpackOp {
 
 fuzz_target!(|input: AdversarialInput| {
     let mut decoder = Decoder::with_max_size(input.initial_max_table_size as usize);
-    
+
     let mut block = Vec::new();
     for op in input.ops {
         match op {
@@ -74,38 +71,105 @@ fuzz_target!(|input: AdversarialInput| {
             HpackOp::IndexedField { index } => {
                 encode_integer(&mut block, index as usize, 7, 0x80);
             }
-            HpackOp::LiteralWithIndexing { 
-                name_indexed, name_index, name_literal, value_literal, huffman_name, huffman_value 
+            HpackOp::LiteralWithIndexing {
+                name_indexed,
+                name_index,
+                name_literal,
+                value_literal,
+                huffman_name,
+                huffman_value,
             } => {
-                encode_literal(&mut block, 0x40, 6, name_indexed, name_index, &name_literal, &value_literal, huffman_name, huffman_value);
+                encode_literal(
+                    &mut block,
+                    0x40,
+                    6,
+                    name_indexed,
+                    name_index,
+                    &name_literal,
+                    &value_literal,
+                    huffman_name,
+                    huffman_value,
+                );
             }
-            HpackOp::LiteralWithoutIndexing { 
-                name_indexed, name_index, name_literal, value_literal, huffman_name, huffman_value 
+            HpackOp::LiteralWithoutIndexing {
+                name_indexed,
+                name_index,
+                name_literal,
+                value_literal,
+                huffman_name,
+                huffman_value,
             } => {
-                encode_literal(&mut block, 0x00, 4, name_indexed, name_index, &name_literal, &value_literal, huffman_name, huffman_value);
+                encode_literal(
+                    &mut block,
+                    0x00,
+                    4,
+                    name_indexed,
+                    name_index,
+                    &name_literal,
+                    &value_literal,
+                    huffman_name,
+                    huffman_value,
+                );
             }
-            HpackOp::LiteralNeverIndexed { 
-                name_indexed, name_index, name_literal, value_literal, huffman_name, huffman_value 
+            HpackOp::LiteralNeverIndexed {
+                name_indexed,
+                name_index,
+                name_literal,
+                value_literal,
+                huffman_name,
+                huffman_value,
             } => {
-                encode_literal(&mut block, 0x10, 4, name_indexed, name_index, &name_literal, &value_literal, huffman_name, huffman_value);
+                encode_literal(
+                    &mut block,
+                    0x10,
+                    4,
+                    name_indexed,
+                    name_index,
+                    &name_literal,
+                    &value_literal,
+                    huffman_name,
+                    huffman_value,
+                );
             }
             HpackOp::RawBytes(bytes) => {
                 block.extend_from_slice(&bytes);
             }
         }
-        
+
         // After each op (or a few ops), try to decode
         if block.len() > 1024 {
             let mut src = Bytes::from(std::mem::take(&mut block));
-            let _ = decoder.decode(&mut src);
+            observe_decode_outcome(decoder.decode(&mut src), "chunked adversarial block");
         }
     }
-    
+
     if !block.is_empty() {
         let mut src = Bytes::from(block);
-        let _ = decoder.decode(&mut src);
+        observe_decode_outcome(decoder.decode(&mut src), "final adversarial block");
     }
 });
+
+fn observe_decode_outcome<E: Display>(result: Result<Vec<Header>, E>, context: &str) {
+    match result {
+        Ok(headers) => {
+            let total_size: usize = headers.iter().map(Header::size).sum();
+            std::hint::black_box((context, headers.len(), total_size));
+        }
+        Err(error) => {
+            let message = error.to_string();
+            assert!(
+                !message.trim().is_empty(),
+                "{context} HPACK rejection should expose a diagnostic"
+            );
+            assert!(
+                message.len() <= 2048,
+                "{context} HPACK rejection diagnostic should stay bounded: {} bytes",
+                message.len()
+            );
+            std::hint::black_box((context, message));
+        }
+    }
+}
 
 fn encode_integer(dst: &mut Vec<u8>, value: usize, prefix_bits: u8, prefix: u8) {
     let max_first = (1 << prefix_bits) - 1;
