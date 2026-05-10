@@ -199,6 +199,81 @@ impl SpaceDelimiterFuzz {
     }
 }
 
+fn escaped_first_line(request_data: &[u8]) -> String {
+    let debug_str = String::from_utf8_lossy(request_data);
+    debug_str
+        .lines()
+        .next()
+        .unwrap_or(&debug_str)
+        .escape_debug()
+        .to_string()
+}
+
+fn decode_or_panic<T>(
+    stage: &str,
+    request_data: &[u8],
+    decode: impl FnOnce() -> Result<Option<T>, HttpError>,
+) -> Result<Option<T>, HttpError> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(decode)) {
+        Ok(parse_result) => parse_result,
+        Err(_) => {
+            panic!(
+                "HTTP/1.1 codec panicked during {}: '{}'",
+                stage,
+                escaped_first_line(request_data)
+            );
+        }
+    }
+}
+
+fn assert_complete_decode<T>(
+    stage: &str,
+    expected_rejection: bool,
+    request_data: &[u8],
+    parse_result: Result<Option<T>, HttpError>,
+) {
+    match (expected_rejection, parse_result) {
+        (true, Ok(Some(_))) => {
+            // Codec accepted input that should have been rejected
+            panic!(
+                "Codec accepted request with invalid space delimiters during {}: '{}'",
+                stage,
+                escaped_first_line(request_data)
+            );
+        }
+        (false, Err(HttpError::BadRequestLine)) => {
+            // Codec rejected a valid single-space request
+            panic!(
+                "Codec rejected valid single-space request during {}: '{}'",
+                stage,
+                escaped_first_line(request_data)
+            );
+        }
+        (true, Err(HttpError::BadRequestLine)) => {
+            // Expected: codec correctly rejected invalid delimiters
+        }
+        (false, Ok(Some(_))) => {
+            // Expected: codec correctly accepted single-space delimiters
+        }
+        (_, Ok(None)) => {
+            // Incomplete request (needs more data) - OK for fuzzing
+        }
+        (_, Err(_)) => {
+            // Other error types are acceptable (bad method, version, etc.)
+        }
+    }
+}
+
+fn observe_prefix_decode<T>(parse_result: Result<Option<T>, HttpError>) {
+    let observation = match parse_result {
+        Ok(Some(_)) => "accepted-prefix",
+        Ok(None) => "incomplete-prefix",
+        Err(HttpError::BadRequestLine) => "bad-request-line-prefix",
+        Err(_) => "other-error-prefix",
+    };
+    std::hint::black_box(observation);
+}
+
 fuzz_target!(|fuzz_spec: SpaceDelimiterFuzz| {
     let request_data = fuzz_spec.generate_request_line();
 
@@ -213,65 +288,33 @@ fuzz_target!(|fuzz_spec: SpaceDelimiterFuzz| {
     let mut codec = Http1Codec::new();
     let mut buf = BytesMut::from(request_data.as_slice());
 
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| codec.decode(&mut buf)));
-
-    match result {
-        Ok(parse_result) => {
-            match (expected_rejection, parse_result) {
-                (true, Ok(Some(_))) => {
-                    // Codec accepted input that should have been rejected
-                    let debug_str = String::from_utf8_lossy(&request_data);
-                    let debug_line = debug_str.lines().next().unwrap_or(&debug_str);
-                    panic!(
-                        "Codec accepted request with invalid space delimiters: '{}'",
-                        debug_line.escape_debug()
-                    );
-                }
-                (false, Err(HttpError::BadRequestLine)) => {
-                    // Codec rejected a valid single-space request
-                    let debug_str = String::from_utf8_lossy(&request_data);
-                    let debug_line = debug_str.lines().next().unwrap_or(&debug_str);
-                    panic!(
-                        "Codec rejected valid single-space request: '{}'",
-                        debug_line.escape_debug()
-                    );
-                }
-                (true, Err(HttpError::BadRequestLine)) => {
-                    // Expected: codec correctly rejected invalid delimiters
-                }
-                (false, Ok(Some(_))) => {
-                    // Expected: codec correctly accepted single-space delimiters
-                }
-                (_, Ok(None)) => {
-                    // Incomplete request (needs more data) - OK for fuzzing
-                }
-                (_, Err(_)) => {
-                    // Other error types are acceptable (bad method, version, etc.)
-                }
-            }
-        }
-        Err(_) => {
-            // Codec panicked - this is a bug regardless of input
-            let debug_str = String::from_utf8_lossy(&request_data);
-            panic!(
-                "HTTP/1.1 codec panicked on space delimiter test: '{}'",
-                debug_str
-                    .lines()
-                    .next()
-                    .unwrap_or("(non-UTF8)")
-                    .escape_debug()
-            );
-        }
-    }
+    let parse_result = decode_or_panic("direct decode", &request_data, || codec.decode(&mut buf));
+    assert_complete_decode(
+        "direct decode",
+        expected_rejection,
+        &request_data,
+        parse_result,
+    );
 
     // Test partial parsing to exercise buffer management
     if request_data.len() > 10 {
         let mut partial_codec = Http1Codec::new();
         let mut partial_buf = BytesMut::from(&request_data[..request_data.len() / 2]);
-        let _ = partial_codec.decode(&mut partial_buf);
+        let prefix_result = decode_or_panic("split decode prefix", &request_data, || {
+            partial_codec.decode(&mut partial_buf)
+        });
+        observe_prefix_decode(prefix_result);
 
         // Add remaining data
         partial_buf.extend_from_slice(&request_data[request_data.len() / 2..]);
-        let _ = partial_codec.decode(&mut partial_buf);
+        let split_result = decode_or_panic("split decode completion", &request_data, || {
+            partial_codec.decode(&mut partial_buf)
+        });
+        assert_complete_decode(
+            "split decode completion",
+            expected_rejection,
+            &request_data,
+            split_result,
+        );
     }
 });
