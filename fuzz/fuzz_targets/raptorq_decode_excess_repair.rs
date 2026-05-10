@@ -39,7 +39,8 @@ impl ExcessRepairInput {
     }
 }
 
-fuzz_target!(|mut input: ExcessRepairInput| {
+fuzz_target!(|input: ExcessRepairInput| {
+    let mut input = input;
     input.normalize();
     exercise_excess_repair_decode(&input);
 });

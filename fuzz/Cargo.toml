@@ -458,6 +458,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "raptorq_decode_excess_repair"
+path = "fuzz_targets/raptorq_decode_excess_repair.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "grpc_protobuf_decode"
 path = "fuzz_targets/grpc_protobuf_decode.rs"
 test = false
