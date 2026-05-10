@@ -54,10 +54,27 @@ where
 /// Test malformed JSON inputs don't cause panics
 fn test_malformed_json_handling<T>(malformed_json: &[u8])
 where
-    T: for<'de> serde::Deserialize<'de>,
+    T: serde::Serialize + for<'de> serde::Deserialize<'de>,
 {
-    // Should handle malformed input gracefully (error, not panic)
-    let _ = serde_json::from_slice::<T>(malformed_json);
+    // Should handle malformed input gracefully (error, not panic), and any
+    // accepted edge-case value must remain serializable.
+    match serde_json::from_slice::<T>(malformed_json) {
+        Ok(value) => {
+            let json_value = serde_json::to_value(&value)
+                .expect("accepted malformed-input edge case should serialize");
+            assert!(
+                json_value.is_object(),
+                "accepted federation config JSON should serialize as an object"
+            );
+        }
+        Err(error) => {
+            let diagnostic = error.to_string();
+            assert!(
+                !diagnostic.is_empty(),
+                "malformed JSON rejection should expose a diagnostic"
+            );
+        }
+    }
 }
 
 /// Generate malformed JSON test cases
