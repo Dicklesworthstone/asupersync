@@ -111,6 +111,9 @@ def classify(text: str, wrapper_exit_code: int | None) -> dict[str, Any]:
     elif remote_success:
         classification = "remote_success_retrieval_unknown"
         decision = "pass-with-retrieval-unknown"
+    elif timeout_observed:
+        classification = "wrapper_interrupted"
+        decision = "unknown-interrupted"
     else:
         classification = "needs-human-escalation"
         decision = "unknown"
@@ -289,6 +292,19 @@ def remediation_for(classification: str) -> dict[str, Any]:
             "summary": "rch attempted or used local fallback",
             "operator_note": "Reject local cargo/test output for this repo's proof lanes.",
             "next_steps": ["rerun through rch remote execution after worker health is restored"],
+        }
+    if classification == "wrapper_interrupted":
+        return {
+            "summary": "local wrapper stopped before a remote proof verdict was captured",
+            "operator_note": (
+                "Do not infer pass or fail without a Remote command finished marker "
+                "or a remote failure marker."
+            ),
+            "next_steps": [
+                "capture a complete rch log with the remote exit marker",
+                "check whether an old wrapper or rsync process is still running",
+                "rerun the exact focused proof lane with the same CARGO_TARGET_DIR discipline",
+            ],
         }
     return {
         "summary": "rch log did not contain enough markers for an automated verdict",

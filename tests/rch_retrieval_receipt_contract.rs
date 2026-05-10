@@ -449,6 +449,27 @@ fn remote_failure_matches_full_output_golden() {
 }
 
 #[test]
+fn interrupted_wrapper_without_remote_verdict_is_unknown() {
+    let receipt = receipt_json("wrapper_interrupted.log", Some(143));
+
+    assert_eq!(
+        receipt["classification"].as_str(),
+        Some("wrapper_interrupted")
+    );
+    assert_eq!(receipt["decision"].as_str(), Some("unknown-interrupted"));
+    assert_eq!(receipt["markers"]["remote_exit_code"].as_i64(), None);
+    assert_eq!(receipt["markers"]["remote_success"].as_bool(), Some(false));
+    assert_eq!(receipt["markers"]["remote_failure"].as_bool(), Some(false));
+    assert_eq!(receipt["markers"]["timeout_observed"].as_bool(), Some(true));
+    assert!(
+        receipt["remediation"]["operator_note"]
+            .as_str()
+            .expect("operator note")
+            .contains("Do not infer pass or fail")
+    );
+}
+
+#[test]
 fn local_fallback_invalidates_captured_cargo_output() {
     let receipt = receipt_json("local_fallback.log", None);
 
