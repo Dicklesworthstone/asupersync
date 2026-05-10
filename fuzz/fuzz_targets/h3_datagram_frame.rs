@@ -3,8 +3,8 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use asupersync::http::h3_native::{H3Frame, H3NativeError};
-use asupersync::net::quic_core::encode_varint;
+use asupersync::http::h3_native::{H3ConnectionConfig, H3Frame, H3NativeError};
+use asupersync::net::quic_core::{QuicCoreError, encode_varint};
 
 /// Fuzz input for HTTP/3 DATAGRAM frame parsing (RFC 9297)
 #[derive(Arbitrary, Debug)]
@@ -21,6 +21,7 @@ struct DatagramFrameFuzz {
 
 /// DATAGRAM frame parsing operations
 #[derive(Arbitrary, Debug)]
+#[allow(clippy::enum_variant_names)]
 enum DatagramOperation {
     /// Parse DATAGRAM frame from raw bytes
     ParseRaw { data: Vec<u8> },
@@ -101,6 +102,7 @@ enum BoundaryCase {
 
 /// Varint encoding boundary types
 #[derive(Arbitrary, Debug)]
+#[allow(clippy::enum_variant_names)]
 enum VarintBoundaryType {
     /// 6-bit boundary (63)
     SixBit,
@@ -153,6 +155,33 @@ const MAX_QUARTER_STREAM_ID: u64 = (1u64 << 62) - 1; // Maximum valid QUIC strea
 const MAX_OPERATIONS: usize = 50;
 const MAX_FRAMES: usize = 10;
 
+fn assert_varint_encoded(context: &str, value: u64, output: &mut Vec<u8>) {
+    encode_varint(value, output).unwrap_or_else(|error| {
+        panic!("{context}: expected DATAGRAM varint value {value} to encode, got {error}")
+    });
+}
+
+fn observe_varint_encode(context: &str, value: u64, output: &mut Vec<u8>) -> bool {
+    match encode_varint(value, output) {
+        Ok(()) => true,
+        Err(error) => {
+            observe_varint_error(context, value, &error);
+            false
+        }
+    }
+}
+
+fn observe_varint_error(context: &str, value: u64, error: &QuicCoreError) {
+    assert!(
+        !error.to_string().is_empty(),
+        "{context}: DATAGRAM varint encode error for value {value} must include diagnostics"
+    );
+}
+
+fn decode_h3_frame(input: &[u8]) -> Result<(H3Frame, usize), H3NativeError> {
+    H3Frame::decode(input, &H3ConnectionConfig::default())
+}
+
 fuzz_target!(|input: DatagramFrameFuzz| {
     // Limit total operations to prevent timeout
     let total_operations = input.datagram_operations.len()
@@ -194,7 +223,7 @@ fn test_datagram_operation(operation: DatagramOperation) {
             }
 
             // Test raw DATAGRAM frame parsing - should not panic
-            let result = H3Frame::decode(&data);
+            let result = decode_h3_frame(&data);
 
             match result {
                 Ok((frame, consumed)) => {
@@ -232,7 +261,7 @@ fn test_datagram_operation(operation: DatagramOperation) {
 
             // Construct well-formed DATAGRAM frame
             let frame_bytes = construct_datagram_frame(clamped_qsid, &payload);
-            let result = H3Frame::decode(&frame_bytes);
+            let result = decode_h3_frame(&frame_bytes);
 
             match result {
                 Ok((
@@ -251,8 +280,10 @@ fn test_datagram_operation(operation: DatagramOperation) {
                     panic!("Expected DATAGRAM frame, got: {:?}", other_frame);
                 }
                 Err(err) => {
-                    // Shouldn't fail for well-formed frames unless there's a size limit
-                    eprintln!("Unexpected error for well-formed DATAGRAM frame: {:?}", err);
+                    panic!(
+                        "well-formed DATAGRAM frame should decode successfully: {:?}",
+                        err
+                    );
                 }
             }
         }
@@ -279,7 +310,7 @@ fn test_datagram_operation(operation: DatagramOperation) {
             let mut parsed_count = 0;
 
             while offset < combined_data.len() && parsed_count < limited_frames.len() {
-                match H3Frame::decode(&combined_data[offset..]) {
+                match decode_h3_frame(&combined_data[offset..]) {
                     Ok((frame, consumed)) => {
                         if let H3Frame::Datagram {
                             quarter_stream_id,
@@ -318,7 +349,7 @@ fn test_datagram_operation(operation: DatagramOperation) {
             let truncated = &complete_bytes[..truncate_pos];
 
             // Should handle truncated input gracefully
-            let result = H3Frame::decode(truncated);
+            let result = decode_h3_frame(truncated);
             match result {
                 Ok((frame, consumed)) => {
                     // If parsing succeeded, the frame must be complete within truncated data
@@ -348,7 +379,7 @@ fn test_datagram_edge_case(edge_case: DatagramEdgeCase) {
             let clamped_qsid = quarter_stream_id.min(MAX_QUARTER_STREAM_ID);
             let frame_bytes = construct_datagram_frame(clamped_qsid, &[]);
 
-            let result = H3Frame::decode(&frame_bytes);
+            let result = decode_h3_frame(&frame_bytes);
             match result {
                 Ok((
                     H3Frame::Datagram {
@@ -379,7 +410,7 @@ fn test_datagram_edge_case(edge_case: DatagramEdgeCase) {
             let max_qsid = MAX_QUARTER_STREAM_ID;
             let frame_bytes = construct_datagram_frame(max_qsid, &payload);
 
-            let result = H3Frame::decode(&frame_bytes);
+            let result = decode_h3_frame(&frame_bytes);
             match result {
                 Ok((
                     H3Frame::Datagram {
@@ -410,7 +441,7 @@ fn test_datagram_edge_case(edge_case: DatagramEdgeCase) {
             let payload = vec![fill_byte; payload_size];
 
             let frame_bytes = construct_datagram_frame(clamped_qsid, &payload);
-            let result = H3Frame::decode(&frame_bytes);
+            let result = decode_h3_frame(&frame_bytes);
 
             match result {
                 Ok((
@@ -452,11 +483,15 @@ fn test_datagram_edge_case(edge_case: DatagramEdgeCase) {
             let mut frame_data = Vec::new();
 
             // DATAGRAM frame type
-            let _ = encode_varint(0x30, &mut frame_data);
+            assert_varint_encoded("invalid-varint DATAGRAM frame type", 0x30, &mut frame_data);
 
             // Frame length (varint + payload)
             let frame_length = malformed_varint.len() + payload.len();
-            let _ = encode_varint(frame_length as u64, &mut frame_data);
+            assert_varint_encoded(
+                "invalid-varint DATAGRAM frame length",
+                frame_length as u64,
+                &mut frame_data,
+            );
 
             // Malformed quarter_stream_id varint
             frame_data.extend_from_slice(&malformed_varint);
@@ -465,7 +500,7 @@ fn test_datagram_edge_case(edge_case: DatagramEdgeCase) {
             frame_data.extend_from_slice(&payload);
 
             // Should handle malformed varint gracefully
-            let result = H3Frame::decode(&frame_data);
+            let result = decode_h3_frame(&frame_data);
             match result {
                 Ok((frame, _)) => {
                     // If it somehow parsed, verify it's reasonable
@@ -486,7 +521,7 @@ fn test_datagram_edge_case(edge_case: DatagramEdgeCase) {
 
         DatagramEdgeCase::SingleByte { byte } => {
             // Test single byte input - should fail gracefully
-            let result = H3Frame::decode(&[byte]);
+            let result = decode_h3_frame(&[byte]);
             match result {
                 Err(H3NativeError::UnexpectedEof) => {
                     // Expected - single byte can't contain complete frame
@@ -503,11 +538,15 @@ fn test_datagram_edge_case(edge_case: DatagramEdgeCase) {
         DatagramEdgeCase::TypeLengthOnly => {
             // Construct frame with only type and length, no payload
             let mut frame_data = Vec::new();
-            let _ = encode_varint(0x30, &mut frame_data);
-            let _ = encode_varint(0, &mut frame_data); // Length = 0 (no payload)
+            assert_varint_encoded(
+                "type-length-only DATAGRAM frame type",
+                0x30,
+                &mut frame_data,
+            );
+            assert_varint_encoded("type-length-only DATAGRAM frame length", 0, &mut frame_data);
 
             // Should fail because DATAGRAM frame requires at least quarter_stream_id
-            let result = H3Frame::decode(&frame_data);
+            let result = decode_h3_frame(&frame_data);
             match result {
                 Err(H3NativeError::UnexpectedEof) => {
                     // Expected - no quarter_stream_id
@@ -536,21 +575,39 @@ fn test_datagram_edge_case(edge_case: DatagramEdgeCase) {
 
             // Construct frame with claimed length > actual length
             let mut frame_data = Vec::new();
-            let _ = encode_varint(0x30, &mut frame_data);
+            assert_varint_encoded(
+                "oversized-length DATAGRAM frame type",
+                0x30,
+                &mut frame_data,
+            );
 
             let actual_length = {
                 let mut qsid_bytes = Vec::new();
-                let _ = encode_varint(clamped_qsid, &mut qsid_bytes);
+                assert_varint_encoded(
+                    "oversized-length DATAGRAM quarter stream id",
+                    clamped_qsid,
+                    &mut qsid_bytes,
+                );
                 qsid_bytes.len() + actual_payload.len()
             };
-            let claimed_length = claimed_length.max(actual_length as u64 + 1).min(u64::MAX);
+            let claimed_length = claimed_length.max(actual_length as u64 + 1);
 
-            let _ = encode_varint(claimed_length, &mut frame_data);
-            let _ = encode_varint(clamped_qsid, &mut frame_data);
+            if !observe_varint_encode(
+                "oversized-length DATAGRAM claimed length",
+                claimed_length,
+                &mut frame_data,
+            ) {
+                return;
+            }
+            assert_varint_encoded(
+                "oversized-length DATAGRAM quarter stream id",
+                clamped_qsid,
+                &mut frame_data,
+            );
             frame_data.extend_from_slice(&actual_payload);
 
             // Should detect length mismatch
-            let result = H3Frame::decode(&frame_data);
+            let result = decode_h3_frame(&frame_data);
             match result {
                 Err(H3NativeError::UnexpectedEof) => {
                     // Expected - claimed length exceeds available data
@@ -583,7 +640,7 @@ fn test_datagram_roundtrip(roundtrip: DatagramRoundTrip) {
             let encoded = construct_datagram_frame(clamped_qsid, limited_payload);
 
             // Decode frame
-            match H3Frame::decode(&encoded) {
+            match decode_h3_frame(&encoded) {
                 Ok((
                     H3Frame::Datagram {
                         quarter_stream_id,
@@ -647,7 +704,7 @@ fn test_datagram_roundtrip(roundtrip: DatagramRoundTrip) {
             let payload = b"boundary test payload".to_vec();
             let encoded = construct_datagram_frame(qsid, &payload);
 
-            match H3Frame::decode(&encoded) {
+            match decode_h3_frame(&encoded) {
                 Ok((
                     H3Frame::Datagram {
                         quarter_stream_id,
@@ -736,7 +793,7 @@ fn test_datagram_roundtrip(roundtrip: DatagramRoundTrip) {
             let qsid = 42; // Arbitrary quarter_stream_id
             let encoded = construct_datagram_frame(qsid, &payload);
 
-            match H3Frame::decode(&encoded) {
+            match decode_h3_frame(&encoded) {
                 Ok((
                     H3Frame::Datagram {
                         quarter_stream_id,
@@ -776,7 +833,7 @@ fn test_datagram_metamorphic(metamorphic: DatagramMetamorphic) {
 
             // Test that frames with empty payloads decode consistently
             let empty_frame = construct_datagram_frame(clamped_qsid, &[]);
-            let result = H3Frame::decode(&empty_frame);
+            let result = decode_h3_frame(&empty_frame);
 
             match result {
                 Ok((
@@ -819,14 +876,15 @@ fn test_datagram_metamorphic(metamorphic: DatagramMetamorphic) {
                 let frame_bytes = construct_datagram_frame(clamped_qsid, limited_payload);
 
                 // Parse individual frame
-                if let Ok((frame_parsed, _)) = H3Frame::decode(&frame_bytes) {
-                    if let H3Frame::Datagram {
+                if let Ok((
+                    H3Frame::Datagram {
                         quarter_stream_id,
                         payload,
-                    } = frame_parsed
-                    {
-                        individual_results.push((quarter_stream_id, payload));
-                    }
+                    },
+                    _,
+                )) = decode_h3_frame(&frame_bytes)
+                {
+                    individual_results.push((quarter_stream_id, payload));
                 }
 
                 concatenated_data.extend_from_slice(&frame_bytes);
@@ -839,7 +897,7 @@ fn test_datagram_metamorphic(metamorphic: DatagramMetamorphic) {
             while offset < concatenated_data.len()
                 && concatenated_results.len() < individual_results.len()
             {
-                match H3Frame::decode(&concatenated_data[offset..]) {
+                match decode_h3_frame(&concatenated_data[offset..]) {
                     Ok((
                         H3Frame::Datagram {
                             quarter_stream_id,
@@ -917,7 +975,7 @@ fn test_datagram_metamorphic(metamorphic: DatagramMetamorphic) {
                     },
                     _,
                 )),
-            ) = (H3Frame::decode(&encoded1), H3Frame::decode(&encoded2))
+            ) = (decode_h3_frame(&encoded1), decode_h3_frame(&encoded2))
             {
                 // Verify round-trip consistency
                 assert_eq!(qsid1, clamped_qsid1);
@@ -963,8 +1021,8 @@ fn test_datagram_metamorphic(metamorphic: DatagramMetamorphic) {
                     _,
                 )),
             ) = (
-                H3Frame::decode(&original_encoded),
-                H3Frame::decode(&reversed_encoded),
+                decode_h3_frame(&original_encoded),
+                decode_h3_frame(&reversed_encoded),
             ) {
                 // Quarter stream IDs should be identical
                 assert_eq!(
@@ -992,13 +1050,21 @@ fn construct_datagram_frame(quarter_stream_id: u64, payload: &[u8]) -> Vec<u8> {
     let mut frame_data = Vec::new();
 
     // Frame type: DATAGRAM (0x30)
-    let _ = encode_varint(0x30, &mut frame_data);
+    assert_varint_encoded("DATAGRAM frame type", 0x30, &mut frame_data);
 
     // Frame length: quarter_stream_id varint + payload
     let mut qsid_bytes = Vec::new();
-    let _ = encode_varint(quarter_stream_id, &mut qsid_bytes);
+    assert_varint_encoded(
+        "DATAGRAM quarter stream id",
+        quarter_stream_id,
+        &mut qsid_bytes,
+    );
     let frame_length = qsid_bytes.len() + payload.len();
-    let _ = encode_varint(frame_length as u64, &mut frame_data);
+    assert_varint_encoded(
+        "DATAGRAM frame length",
+        frame_length as u64,
+        &mut frame_data,
+    );
 
     // Quarter stream ID (varint)
     frame_data.extend_from_slice(&qsid_bytes);
@@ -1063,7 +1129,7 @@ fn test_datagram_frame_reencode(quarter_stream_id: u64, payload: &[u8]) {
     let re_encoded = construct_datagram_frame(quarter_stream_id, payload);
 
     // Re-parse the re-encoded frame
-    match H3Frame::decode(&re_encoded) {
+    match decode_h3_frame(&re_encoded) {
         Ok((
             H3Frame::Datagram {
                 quarter_stream_id: re_qsid,
