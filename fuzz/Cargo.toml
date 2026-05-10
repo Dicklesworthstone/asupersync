@@ -5412,6 +5412,7 @@ name = "h2_continuation_after_data"
 path = "fuzz_targets/h2_continuation_after_data.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_settings_max_concurrent_streams_unlimited"

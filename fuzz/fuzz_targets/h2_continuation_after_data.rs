@@ -2,6 +2,7 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
+use std::hint::black_box;
 
 /// HTTP/2 HEADERS/CONTINUATION sequence interruption testing.
 /// Per RFC 7540 §6.10, CONTINUATION frames must IMMEDIATELY follow
@@ -126,19 +127,19 @@ enum ParserState {
 /// Mock HTTP/2 frame parser with strict CONTINUATION sequence enforcement
 struct MockH2StrictParser {
     state: ParserState,
-    errors: Vec<String>,
 }
 
 impl MockH2StrictParser {
     fn new() -> Self {
         Self {
             state: ParserState::Idle,
-            errors: Vec::new(),
         }
     }
 
     /// Process frame with strict CONTINUATION enforcement
     fn process_frame(&mut self, frame: &FrameType) -> Result<(), String> {
+        Self::observe_frame_metadata(frame);
+
         // If we're expecting CONTINUATION, NO other frames are allowed
         if let ParserState::ExpectingContinuation(expected_stream_id) = self.state {
             match frame {
@@ -307,6 +308,47 @@ impl MockH2StrictParser {
         }
     }
 
+    fn observe_frame_metadata(frame: &FrameType) {
+        match frame {
+            FrameType::Data(f) => {
+                black_box(f.flags);
+                black_box(f.data.len());
+            }
+            FrameType::Headers(f) => {
+                black_box(f.header_block_fragment.len());
+            }
+            FrameType::Priority(f) => {
+                black_box(f.exclusive);
+                black_box(f.dependency);
+                black_box(f.weight);
+            }
+            FrameType::RstStream(f) => {
+                black_box(f.error_code);
+            }
+            FrameType::Settings(f) => {
+                black_box(f.flags);
+                black_box(f.settings.len());
+            }
+            FrameType::PushPromise(f) => {
+                black_box(f.promised_stream_id);
+                black_box(f.header_block_fragment.len());
+            }
+            FrameType::Ping(f) => {
+                black_box(f.flags);
+                black_box(f.data);
+            }
+            FrameType::GoAway(f) => {
+                black_box(f.last_stream_id);
+                black_box(f.error_code);
+                black_box(f.debug_data.len());
+            }
+            FrameType::WindowUpdate(_) => {}
+            FrameType::Continuation(f) => {
+                black_box(f.header_block_fragment.len());
+            }
+        }
+    }
+
     /// Process complete frame sequence
     fn process_sequence(&mut self, input: &FuzzInput) -> Result<(), String> {
         // Process initial HEADERS frame (force END_HEADERS=0)
@@ -339,11 +381,6 @@ impl MockH2StrictParser {
     /// Get current parser state
     fn get_state(&self) -> &ParserState {
         &self.state
-    }
-
-    /// Get error messages
-    fn get_errors(&self) -> &[String] {
-        &self.errors
     }
 }
 
@@ -479,22 +516,22 @@ fuzz_target!(|data: &[u8]| {
 
     // Test 4: Stream ID mismatches in CONTINUATION should be caught
     for frame in &input.interrupting_frames {
-        if let FrameType::Continuation(cont) = frame {
-            if cont.stream_id != input.headers_frame.stream_id {
-                assert!(
-                    result.is_err(),
-                    "CONTINUATION with wrong stream ID should be rejected"
-                );
+        if let FrameType::Continuation(cont) = frame
+            && cont.stream_id != input.headers_frame.stream_id
+        {
+            assert!(
+                result.is_err(),
+                "CONTINUATION with wrong stream ID should be rejected"
+            );
 
-                if let Err(error_msg) = &result {
-                    assert!(
-                        error_msg.contains("stream ID") && error_msg.contains("does not match"),
-                        "Stream ID mismatch error should be clear: {}",
-                        error_msg
-                    );
-                }
-                return;
+            if let Err(error_msg) = &result {
+                assert!(
+                    error_msg.contains("stream ID") && error_msg.contains("does not match"),
+                    "Stream ID mismatch error should be clear: {}",
+                    error_msg
+                );
             }
+            return;
         }
     }
 });
