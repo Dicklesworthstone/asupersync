@@ -594,6 +594,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "resp3_pubsub_decoder"
+path = "fuzz_targets/resp3_pubsub_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_http_accept_encoding_negotiation"
 path = "fuzz_targets/http_accept_encoding_negotiation.rs"
 test = false

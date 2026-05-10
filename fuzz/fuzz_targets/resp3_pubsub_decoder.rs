@@ -24,7 +24,7 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
-use asupersync::messaging::redis::{parse_pubsub_event_for_fuzz, RespValue};
+use asupersync::messaging::redis::{RespValue, parse_pubsub_event_for_fuzz};
 use libfuzzer_sys::fuzz_target;
 
 /// Structure-aware RESP3 pubsub message fuzzing input
@@ -63,15 +63,15 @@ enum MessagePayload {
     Binary(Vec<u8>),
     Text(String),
     Empty,
-    Large(usize), // Will generate payload of this size
+    Large(usize),  // Will generate payload of this size
     InvalidLength, // Mismatched declared vs actual length
 }
 
 #[derive(Debug, Clone, Arbitrary)]
 enum RespEncoding {
-    Array,      // RESP2 array format
-    Push,       // RESP3 push format
-    Malformed,  // Intentionally broken structure
+    Array,     // RESP2 array format
+    Push,      // RESP3 push format
+    Malformed, // Intentionally broken structure
 }
 
 impl Resp3PubSubMessage {
@@ -223,7 +223,8 @@ impl Resp3PubSubMessage {
             _ => {
                 // Embedded nulls
                 if buf.len() > 10 {
-                    buf[buf.len() / 2] = 0;
+                    let middle = buf.len() / 2;
+                    buf[middle] = 0;
                 }
             }
         }
@@ -240,7 +241,12 @@ impl Resp3PubSubMessage {
         Ok(())
     }
 
-    fn encode_message_string(&self, buf: &mut Vec<u8>, msg_str: &MessageString, u: &mut Unstructured) -> Result<(), arbitrary::Error> {
+    fn encode_message_string(
+        &self,
+        buf: &mut Vec<u8>,
+        msg_str: &MessageString,
+        _u: &mut Unstructured,
+    ) -> Result<(), arbitrary::Error> {
         match msg_str {
             MessageString::Valid(s) => {
                 self.encode_bulk_string(buf, s.as_bytes())?;
@@ -256,14 +262,19 @@ impl Resp3PubSubMessage {
                 self.encode_bulk_string(buf, long_str.as_bytes())?;
             }
             MessageString::SpecialChars => {
-                let special = "\0\r\n\t\x1b\xff\u{FEFF}channel*?[]{}";
-                self.encode_bulk_string(buf, special.as_bytes())?;
+                let special = b"\0\r\n\t\x1b\xff\xef\xbb\xbfchannel*?[]{}";
+                self.encode_bulk_string(buf, special)?;
             }
         }
         Ok(())
     }
 
-    fn encode_message_payload(&self, buf: &mut Vec<u8>, payload: &MessagePayload, u: &mut Unstructured) -> Result<(), arbitrary::Error> {
+    fn encode_message_payload(
+        &self,
+        buf: &mut Vec<u8>,
+        payload: &MessagePayload,
+        _u: &mut Unstructured,
+    ) -> Result<(), arbitrary::Error> {
         match payload {
             MessagePayload::Binary(data) => {
                 self.encode_bulk_string(buf, data)?;
@@ -299,13 +310,13 @@ fuzz_target!(|data: &[u8]| {
     let mut u = Unstructured::new(data);
 
     // Test 1: Structure-aware fuzzing with generated RESP3 pubsub messages
-    if let Ok(msg) = Resp3PubSubMessage::arbitrary(&mut u) {
-        if let Ok(resp_bytes) = msg.to_resp_bytes(&mut u) {
-            // Parse RESP value - should not panic
-            if let Ok(Some((resp_value, _consumed))) = RespValue::try_decode(&resp_bytes) {
-                // Parse pubsub event - should be robust against invalid inputs
-                let _ = parse_pubsub_event_for_fuzz(resp_value);
-            }
+    if let Ok(msg) = Resp3PubSubMessage::arbitrary(&mut u)
+        && let Ok(resp_bytes) = msg.to_resp_bytes(&mut u)
+    {
+        // Parse RESP value - should not panic
+        if let Ok(Some((resp_value, _consumed))) = RespValue::try_decode(&resp_bytes) {
+            // Parse pubsub event - should be robust against invalid inputs
+            let _ = parse_pubsub_event_for_fuzz(resp_value);
         }
     }
 
