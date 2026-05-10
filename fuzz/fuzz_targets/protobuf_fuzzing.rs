@@ -1,8 +1,10 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
+use asupersync::bytes::Bytes;
 use asupersync::grpc::Codec;
 use libfuzzer_sys::fuzz_target;
+use std::fmt::Display;
 
 /// Comprehensive protobuf fuzzing for varint boundary conditions and large messages
 #[derive(Arbitrary, Debug)]
@@ -269,13 +271,13 @@ fn test_varint_encoding_value(value: &VarintValue) {
             }
             *base
         }
-        VarintValue::MaxValue(_) => {
+        VarintValue::MaxValue(base) => {
             // Test maximum values
             let max_values = [u64::MAX - 1, u64::MAX];
             for &val in &max_values {
                 test_single_varint_value(&mut codec, val);
             }
-            u64::MAX
+            *base
         }
         VarintValue::Custom(val) => *val,
     };
@@ -721,7 +723,7 @@ where
         Ok(encoded) => {
             match codec.decode(&encoded) {
                 Ok(decoded) => {
-                    assert_eq!(*message, decoded, "Round-trip consistency failed");
+                    assert!(message.eq(&decoded), "Round-trip consistency failed");
                 }
                 Err(_) => {
                     // Decode failed - may be due to size limits or malformed data
@@ -758,10 +760,28 @@ fn create_test_message_from_config(config: &MessageConfig) -> TestMessage {
         &config.string_content
     };
 
-    TestMessage {
-        name: safe_string.to_string(),
-        value: config.numeric_value,
+    let mut name = safe_string.to_string();
+    if config.include_optional && name.len() < MAX_STRING_SIZE {
+        name.push('?');
     }
+    if config.include_repeated {
+        for index in 0..config.repeated_count.min(16) {
+            if name.len() >= MAX_STRING_SIZE {
+                break;
+            }
+            name.push(char::from(b'a' + (index % 26)));
+        }
+    }
+
+    let mut value = config.numeric_value;
+    if config.include_optional {
+        value ^= 1 << 63;
+    }
+    if config.include_repeated {
+        value = value.wrapping_add(u64::from(config.repeated_count));
+    }
+
+    TestMessage { name, value }
 }
 
 /// Test different codec configurations
@@ -955,7 +975,7 @@ fn test_many_small_messages(count: usize, _stress_level: u8) {
             value: i as u64,
         };
 
-        let _ = codec.encode(&message);
+        observe_test_message_encode(codec.encode(&message), "many small message");
     }
 }
 
@@ -988,7 +1008,7 @@ fn test_mixed_message_sizes(small_count: u8, large_count: u8, _stress_level: u8)
             name: format!("small_{}", i),
             value: i as u64,
         };
-        let _ = codec.encode(&message);
+        observe_test_message_encode(codec.encode(&message), "mixed small message");
     }
 
     // Large messages
@@ -997,7 +1017,7 @@ fn test_mixed_message_sizes(small_count: u8, large_count: u8, _stress_level: u8)
             name: "X".repeat(1000), // Moderately large
             value: i as u64,
         };
-        let _ = codec.encode(&message);
+        observe_test_message_encode(codec.encode(&message), "mixed large message");
     }
 }
 
@@ -1039,7 +1059,26 @@ fn test_memory_pressure(allocation_size: usize, _stress_level: u8) {
         value: 999,
     };
 
-    let _ = codec.encode(&message);
+    observe_test_message_encode(codec.encode(&message), "memory pressure message");
+}
+
+fn observe_test_message_encode<E: Display>(result: Result<Bytes, E>, context: &str) {
+    match result {
+        Ok(encoded) => {
+            assert!(
+                !encoded.is_empty(),
+                "{context} encoded to an empty protobuf payload"
+            );
+            assert!(
+                encoded.len() <= MAX_BYTES_SIZE + 128,
+                "{context} encoded payload exceeded fuzz envelope: {} bytes",
+                encoded.len()
+            );
+        }
+        Err(error) => {
+            panic!("{context} protobuf encode failed: {error}");
+        }
+    }
 }
 
 // Test message definitions (using prost derive macros)
