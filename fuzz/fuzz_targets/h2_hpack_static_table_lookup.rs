@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::bytes::{Bytes, BytesMut};
+use asupersync::bytes::BytesMut;
 use asupersync::http::h2::error::ErrorCode;
 use asupersync::http::h2::{H2Error, HpackDecoder};
 use libfuzzer_sys::fuzz_target;
@@ -193,7 +193,7 @@ fn decode_indexed(
 }
 
 fn dynamic_entries(inputs: &[DynamicEntryInput]) -> Vec<ExpectedHeader> {
-    let mut entries = Vec::with_capacity(inputs.len().min(MAX_DYNAMIC_ENTRIES).max(1));
+    let mut entries = Vec::with_capacity(inputs.len().clamp(1, MAX_DYNAMIC_ENTRIES));
     entries.push(ExpectedHeader {
         name: "x-hpack-static-fuzz".to_string(),
         value: "seed".to_string(),

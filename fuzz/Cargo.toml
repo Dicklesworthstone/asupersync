@@ -2415,6 +2415,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h2_hpack_static_table_lookup"
+path = "fuzz_targets/h2_hpack_static_table_lookup.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_hpack_static_indexed"
 path = "fuzz_targets/fuzz_hpack_static_indexed.rs"
 test = false
