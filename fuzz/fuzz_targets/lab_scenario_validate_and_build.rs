@@ -251,7 +251,16 @@ impl ScenarioSeed {
             "participants": participants,
             "oracles": oracles,
         });
-        serde_json::to_string(&scenario).unwrap_or_default()
+        serde_json::to_string(&scenario).unwrap_or_else(|err| {
+            panic!(
+                "lab scenario seed JSON serialization failed for id {:?} \
+                 with {} links, {} faults, {} participants: {err}",
+                self.id.0,
+                self.links.0.len(),
+                self.faults.0.len(),
+                self.participants.0.len()
+            )
+        })
     }
 }
 
