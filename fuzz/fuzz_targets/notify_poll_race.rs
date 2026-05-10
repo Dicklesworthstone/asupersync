@@ -115,6 +115,21 @@ struct TestResults {
     lost_notifications: AtomicUsize,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum WorkerKind {
+    Poller,
+    Notifier,
+}
+
+impl WorkerKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            WorkerKind::Poller => "poller",
+            WorkerKind::Notifier => "notifier",
+        }
+    }
+}
+
 /// Custom waker that counts wakeup calls
 struct CountingWaker {
     wake_count: Arc<AtomicUsize>,
@@ -374,7 +389,7 @@ fuzz_target!(|data: &[u8]| {
             }
         });
 
-        handles.push(handle);
+        handles.push((WorkerKind::Poller, i, handle));
     }
 
     // Spawn notifier threads
@@ -429,12 +444,18 @@ fuzz_target!(|data: &[u8]| {
             }
         });
 
-        handles.push(handle);
+        handles.push((WorkerKind::Notifier, i, handle));
     }
 
     // Wait for all threads to complete
-    for handle in handles {
-        let _ = handle.join();
+    for (kind, index, handle) in handles {
+        if handle.join().is_err() {
+            panic!(
+                "notify_poll_race {} worker {} panicked",
+                kind.as_str(),
+                index
+            );
+        }
     }
 
     let polls_attempted = results.polls_attempted.load(Ordering::SeqCst);
