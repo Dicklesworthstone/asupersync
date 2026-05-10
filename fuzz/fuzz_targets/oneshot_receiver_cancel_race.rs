@@ -95,6 +95,24 @@ impl CancelRaceTracker {
         // Core invariant: receiver gets either Cancelled OR value, never both
         // Also: cancelled receiver should never receive a value after cancellation
 
+        if let Ok(events) = self.cancel_results.lock() {
+            for event in events.iter() {
+                self.record_operation(&format!(
+                    "cancel_event_{}_{}_{}",
+                    event.cancel_time, event.cancel_kind, event.cancel_message
+                ));
+            }
+        }
+
+        if let Ok(events) = self.recv_results.lock() {
+            for event in events.iter() {
+                self.record_operation(&format!(
+                    "recv_event_{}_cancelled_{}_{:?}",
+                    event.recv_attempt_id, event.was_cancelled_at_poll, event.outcome
+                ));
+            }
+        }
+
         if let Ok(outcomes) = self.race_outcomes.lock() {
             for outcome in outcomes.iter() {
                 if outcome.invariant_violated {
@@ -135,6 +153,39 @@ impl CancelRaceTracker {
             }
         }
     }
+}
+
+fn recv_outcome_from_poll(poll: Poll<Result<u32, RecvError>>) -> RecvOutcome {
+    match poll {
+        Poll::Ready(Ok(v)) => RecvOutcome::GotValue(v),
+        Poll::Ready(Err(RecvError::Cancelled)) => RecvOutcome::GotCancelled,
+        Poll::Ready(Err(RecvError::Closed)) => RecvOutcome::GotClosed,
+        Poll::Ready(Err(RecvError::PolledAfterCompletion)) => RecvOutcome::GotPolledAfterCompletion,
+        Poll::Pending => RecvOutcome::StillPending,
+    }
+}
+
+fn observe_active_recv_poll(
+    tracker: &CancelRaceTracker,
+    recv_attempt_id: usize,
+    cx: &Cx<cap::All>,
+    poll: Poll<Result<u32, RecvError>>,
+    phase: &str,
+) -> RecvOutcome {
+    let outcome = recv_outcome_from_poll(poll);
+    tracker.record_recv_event(RecvEvent {
+        recv_attempt_id,
+        outcome: outcome.clone(),
+        was_cancelled_at_poll: cx.is_cancel_requested(),
+    });
+
+    if outcome == RecvOutcome::GotPolledAfterCompletion {
+        panic!(
+            "receiver poll unexpectedly completed after completion during {phase} for attempt {recv_attempt_id}"
+        );
+    }
+
+    outcome
 }
 
 struct TrackedWaker {
@@ -405,11 +456,9 @@ fn test_simple_cancel(
     }
 
     // If receiver got both a value AND the context was cancelled, this is suspicious
-    if let RecvOutcome::GotValue(_) = final_recv_state {
-        if cx.is_cancel_requested() {
-            // This might be OK if send happened before cancel was processed
-            tracker.record_operation("value_received_while_cancelled_context");
-        }
+    if matches!(&final_recv_state, RecvOutcome::GotValue(_)) && cx.is_cancel_requested() {
+        // This might be OK if send happened before cancel was processed
+        tracker.record_operation("value_received_while_cancelled_context");
     }
 
     tracker.record_race_outcome(RaceOutcome {
@@ -629,7 +678,16 @@ fn test_rapid_cancel_send(tracker: &CancelRaceTracker, test_id: usize, value: u3
             thread::sleep(Duration::from_micros(1));
         }
 
-        let _send_result = sender.send(&cx, value);
+        let send_result = sender.send(&cx, value);
+        match send_result {
+            Ok(()) => tracker.record_operation("rapid_send_succeeded"),
+            Err(SendError::Cancelled(v)) => {
+                tracker.record_operation(&format!("rapid_send_cancelled_with_value_{}", v));
+            }
+            Err(SendError::Disconnected(v)) => {
+                tracker.record_operation(&format!("rapid_send_disconnected_with_value_{}", v));
+            }
+        }
 
         if i % 2 == 1 {
             cx.cancel_with(CancelKind::User, Some("rapid_cancel"));
@@ -640,7 +698,13 @@ fn test_rapid_cancel_send(tracker: &CancelRaceTracker, test_id: usize, value: u3
         let recv_waker = TrackedWaker::new(test_id + i as usize, tracker.clone()).create_waker();
         let mut recv_context = Context::from_waker(&recv_waker);
 
-        let _ = pinned_recv.as_mut().poll(&mut recv_context);
+        observe_active_recv_poll(
+            tracker,
+            test_id + i as usize,
+            &cx,
+            pinned_recv.as_mut().poll(&mut recv_context),
+            "rapid_cancel_send",
+        );
     }
 }
 
@@ -682,14 +746,45 @@ fn test_delayed_operations(
     let recv_waker = TrackedWaker::new(test_id, tracker.clone()).create_waker();
     let mut recv_context = Context::from_waker(&recv_waker);
 
-    let _ = pinned_recv.as_mut().poll(&mut recv_context);
+    let mut final_recv_state = observe_active_recv_poll(
+        tracker,
+        test_id,
+        &cx,
+        pinned_recv.as_mut().poll(&mut recv_context),
+        "delayed_operations_initial",
+    );
 
     // Wait for operations
-    let _ = send_handle.join();
-    let _ = cancel_handle.join();
+    let send_occurred = match send_handle.join() {
+        Ok(sent) => sent,
+        Err(_) => {
+            tracker.record_operation("delayed_send_panicked");
+            false
+        }
+    };
+    if cancel_handle.join().is_err() {
+        tracker.record_operation("delayed_cancel_panicked");
+    }
 
-    // Final poll
-    let _ = pinned_recv.as_mut().poll(&mut recv_context);
+    // Final poll only if the first poll registered interest instead of completing.
+    if final_recv_state == RecvOutcome::StillPending {
+        final_recv_state = observe_active_recv_poll(
+            tracker,
+            test_id,
+            &cx,
+            pinned_recv.as_mut().poll(&mut recv_context),
+            "delayed_operations_final",
+        );
+    }
+
+    tracker.record_race_outcome(RaceOutcome {
+        test_id,
+        final_recv_state,
+        cancel_occurred: true,
+        send_occurred,
+        invariant_violated: false,
+        violation_description: String::new(),
+    });
 }
 
 fn test_concurrent_multiple_recv(
@@ -713,7 +808,8 @@ fn test_concurrent_multiple_recv(
 
     // This is technically misuse of the API (receiver should only be used once)
     // but we test it to ensure robustness
-    for i in 0..recv_count.min(3) {
+    if recv_count != 0 {
+        let i = 0_u8;
         let test_ctx: Cx<cap::All> = Cx::new(
             RegionId::from_arena(ArenaIndex::new((test_id + i as usize) as u32, 0)),
             TaskId::from_arena(ArenaIndex::new((test_id + i as usize) as u32, 0)),
@@ -726,7 +822,6 @@ fn test_concurrent_multiple_recv(
 
         // Note: This creates undefined behavior as receiver is moved multiple times
         // This test might not be valid - oneshot receiver is move-only
-        break;
     }
 
     // Send the value
