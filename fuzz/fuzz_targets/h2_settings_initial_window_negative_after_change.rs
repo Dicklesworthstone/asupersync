@@ -1,22 +1,11 @@
 #![no_main]
 
-use arbitrary::{Arbitrary, Unstructured};
+use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
-/// HTTP/2 frame header length per RFC 7540 §4.1
-const FRAME_HEADER_LEN: usize = 9;
-
-/// HTTP/2 frame types per RFC 7540 §6
-const SETTINGS_FRAME_TYPE: u8 = 0x4;
-const WINDOW_UPDATE_FRAME_TYPE: u8 = 0x8;
-const DATA_FRAME_TYPE: u8 = 0x0;
-
 /// HTTP/2 SETTINGS parameters per RFC 7540 §6.5.2
 const SETTINGS_INITIAL_WINDOW_SIZE: u16 = 0x4;
-
-/// SETTINGS frame flags
-const SETTINGS_ACK_FLAG: u8 = 0x1;
 
 /// Default initial window size per RFC 7540 §6.9.2
 const DEFAULT_INITIAL_WINDOW_SIZE: i64 = 65535;
@@ -24,168 +13,11 @@ const DEFAULT_INITIAL_WINDOW_SIZE: i64 = 65535;
 /// Maximum window size per RFC 7540 §6.9.1 (2^31 - 1)
 const MAX_WINDOW_SIZE: i64 = 2147483647;
 
-/// HTTP/2 error codes per RFC 7540 §7
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u32)]
-enum Http2ErrorCode {
-    NoError = 0x0,
-    ProtocolError = 0x1,
-    InternalError = 0x2,
-    FlowControlError = 0x3,
-    SettingsTimeout = 0x4,
-    StreamClosed = 0x5,
-    FrameSizeError = 0x6,
-    RefusedStream = 0x7,
-    Cancel = 0x8,
-    CompressionError = 0x9,
-    ConnectError = 0xa,
-    EnhanceYourCalm = 0xb,
-    InadequateSecurity = 0xc,
-    Http11Required = 0xd,
-}
-
-/// Flow control operation result
-#[derive(Debug, PartialEq)]
-enum FlowControlResult {
-    Success,
-    FlowControlError(String),
-    ProtocolError(String),
-    FrameSizeError,
-    IncompleteFrame,
-    InvalidStreamId,
-}
-
-/// HTTP/2 frame header per RFC 7540 §4.1
-#[derive(Debug, Clone)]
-struct FrameHeader {
-    length: u32,
-    frame_type: u8,
-    flags: u8,
-    stream_id: u32,
-}
-
-impl FrameHeader {
-    fn encode(&self) -> [u8; 9] {
-        let mut buf = [0u8; 9];
-
-        // Length (24 bits, big-endian)
-        buf[0] = (self.length >> 16) as u8;
-        buf[1] = (self.length >> 8) as u8;
-        buf[2] = self.length as u8;
-
-        // Type and flags
-        buf[3] = self.frame_type;
-        buf[4] = self.flags;
-
-        // Stream ID (31 bits + reserved bit, big-endian)
-        let stream_id = self.stream_id & 0x7FFF_FFFF;
-        buf[5] = (stream_id >> 24) as u8;
-        buf[6] = (stream_id >> 16) as u8;
-        buf[7] = (stream_id >> 8) as u8;
-        buf[8] = stream_id as u8;
-
-        buf
-    }
-
-    fn decode(buf: &[u8]) -> Result<Self, &'static str> {
-        if buf.len() < 9 {
-            return Err("incomplete header");
-        }
-
-        let length = ((buf[0] as u32) << 16) | ((buf[1] as u32) << 8) | (buf[2] as u32);
-
-        let frame_type = buf[3];
-        let flags = buf[4];
-
-        let stream_id = ((buf[5] as u32 & 0x7F) << 24)
-            | ((buf[6] as u32) << 16)
-            | ((buf[7] as u32) << 8)
-            | (buf[8] as u32);
-
-        Ok(FrameHeader {
-            length,
-            frame_type,
-            flags,
-            stream_id,
-        })
-    }
-}
-
 /// SETTINGS frame parameter per RFC 7540 §6.5
 #[derive(Debug, Clone)]
 struct SettingsParameter {
     id: u16,
     value: u32,
-}
-
-impl SettingsParameter {
-    fn encode(&self) -> [u8; 6] {
-        let mut buf = [0u8; 6];
-
-        // Parameter ID (16 bits, big-endian)
-        buf[0] = (self.id >> 8) as u8;
-        buf[1] = self.id as u8;
-
-        // Value (32 bits, big-endian)
-        buf[2] = (self.value >> 24) as u8;
-        buf[3] = (self.value >> 16) as u8;
-        buf[4] = (self.value >> 8) as u8;
-        buf[5] = self.value as u8;
-
-        buf
-    }
-
-    fn decode(buf: &[u8]) -> Result<Self, &'static str> {
-        if buf.len() < 6 {
-            return Err("insufficient data");
-        }
-
-        let id = ((buf[0] as u16) << 8) | (buf[1] as u16);
-        let value = ((buf[2] as u32) << 24)
-            | ((buf[3] as u32) << 16)
-            | ((buf[4] as u32) << 8)
-            | (buf[5] as u32);
-
-        Ok(SettingsParameter { id, value })
-    }
-}
-
-/// WINDOW_UPDATE frame data per RFC 7540 §6.9
-#[derive(Debug, Clone)]
-struct WindowUpdateData {
-    window_size_increment: u32,
-}
-
-impl WindowUpdateData {
-    fn encode(&self) -> [u8; 4] {
-        let mut buf = [0u8; 4];
-        // Reserved bit (R) must be 0, so mask with 0x7FFFFFFF
-        let value = self.window_size_increment & 0x7FFF_FFFF;
-        buf[0] = (value >> 24) as u8;
-        buf[1] = (value >> 16) as u8;
-        buf[2] = (value >> 8) as u8;
-        buf[3] = value as u8;
-        buf
-    }
-
-    fn decode(buf: &[u8]) -> Result<Self, &'static str> {
-        if buf.len() < 4 {
-            return Err("insufficient data");
-        }
-
-        let value = ((buf[0] as u32 & 0x7F) << 24)
-            | ((buf[1] as u32) << 16)
-            | ((buf[2] as u32) << 8)
-            | (buf[3] as u32);
-
-        if value == 0 {
-            return Err("window size increment cannot be zero");
-        }
-
-        Ok(WindowUpdateData {
-            window_size_increment: value,
-        })
-    }
 }
 
 /// Per-stream flow control state
@@ -243,15 +75,7 @@ impl StreamFlowState {
         self.window_size = new_window;
         self.blocked = self.window_size <= 0;
 
-        // Log the change for debugging
-        eprintln!(
-            "Stream window change: {} + ({} - {}) = {} (blocked: {})",
-            self.window_size - delta,
-            new_size,
-            old_size,
-            self.window_size,
-            self.blocked
-        );
+        self.assert_window_consistency("SETTINGS_INITIAL_WINDOW_SIZE stream delta");
 
         Ok(())
     }
@@ -277,6 +101,20 @@ impl StreamFlowState {
         self.blocked = self.window_size <= 0;
 
         Ok(true) // Successfully sent
+    }
+
+    fn assert_window_consistency(&self, context: &str) {
+        assert_eq!(
+            self.blocked,
+            self.window_size <= 0,
+            "{context}: blocked flag inconsistent with stream window {}",
+            self.window_size
+        );
+        assert!(
+            self.window_size >= -MAX_WINDOW_SIZE,
+            "{context}: stream window underflowed: {}",
+            self.window_size
+        );
     }
 }
 
@@ -333,12 +171,7 @@ impl MockH2FlowControl {
 
                 self.initial_window_size = new_window_size;
 
-                eprintln!(
-                    "Updated SETTINGS_INITIAL_WINDOW_SIZE: {} -> {} (delta: {})",
-                    old_window_size,
-                    new_window_size,
-                    new_window_size - old_window_size
-                );
+                self.assert_all_streams_consistent("SETTINGS_INITIAL_WINDOW_SIZE change");
             }
         }
         Ok(())
@@ -393,12 +226,15 @@ impl MockH2FlowControl {
         self.initial_window_size
     }
 
-    /// Check if stream is flow-control blocked
-    fn is_stream_blocked(&self, stream_id: u32) -> bool {
-        self.streams
-            .get(&stream_id)
-            .map(|s| s.blocked)
-            .unwrap_or(false)
+    fn assert_all_streams_consistent(&self, context: &str) {
+        for (stream_id, state) in &self.streams {
+            state.assert_window_consistency(context);
+            assert!(
+                state.window_size <= MAX_WINDOW_SIZE,
+                "{context}: stream {stream_id} window overflowed: {}",
+                state.window_size
+            );
+        }
     }
 }
 
@@ -436,8 +272,9 @@ fuzz_target!(|input: FuzzInput| {
         value: input.initial_window_size.min(MAX_WINDOW_SIZE as u32),
     }];
 
-    if let Err(_) = flow_control.process_settings(&initial_params) {
-        return; // Invalid initial settings
+    match flow_control.process_settings(&initial_params) {
+        Ok(()) => {}
+        Err(_) => return, // Invalid initial settings
     }
 
     // Add classic negative window test case if requested
@@ -505,11 +342,11 @@ fuzz_target!(|input: FuzzInput| {
 
                 match flow_control.process_window_update(stream_id, increment) {
                     Ok(()) => {
-                        // Window update succeeded
                         if stream_id != 0 {
-                            // Verify stream window was updated
-                            let stream_state = flow_control.get_stream_state(stream_id);
-                            // Note: Window might still be negative after update
+                            let stream_state = flow_control.get_stream_state(stream_id).expect(
+                                "successful stream WINDOW_UPDATE should create stream state",
+                            );
+                            stream_state.assert_window_consistency("WINDOW_UPDATE");
                         }
                     }
                     Err(_) => {
@@ -563,12 +400,19 @@ fuzz_target!(|input: FuzzInput| {
 
                 // Creating stream should use current initial window size
                 let initial_window = flow_control.get_initial_window_size();
+                let existed = flow_control.get_stream_state(stream_id).is_some();
                 let _stream = flow_control.get_or_create_stream(stream_id);
 
                 // Verify new stream has correct initial window
                 if let Some(state) = flow_control.get_stream_state(stream_id) {
-                    // For newly created streams, window should match current initial setting
-                    // But existing streams might have been affected by previous changes
+                    if !existed {
+                        assert_eq!(
+                            state.window_size, initial_window,
+                            "New stream {} did not inherit current SETTINGS_INITIAL_WINDOW_SIZE",
+                            stream_id
+                        );
+                    }
+                    state.assert_window_consistency("stream creation");
                 }
             }
         }
@@ -578,10 +422,7 @@ fuzz_target!(|input: FuzzInput| {
     if input.test_classic_negative {
         // Verify the classic scenario worked as expected
         if let Some(stream_state) = flow_control.get_stream_state(1) {
-            eprintln!(
-                "Classic scenario result - Window: {}, Blocked: {}, Data sent: {}",
-                stream_state.window_size, stream_state.blocked, stream_state.data_sent
-            );
+            stream_state.assert_window_consistency("classic negative-window scenario");
 
             // The stream should be flow-control blocked with negative window
             assert!(
