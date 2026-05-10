@@ -29,7 +29,6 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashMap;
 
 /// HTTP version for connection semantics testing
 #[derive(Debug, Clone, Copy, PartialEq, Arbitrary)]
@@ -39,13 +38,6 @@ enum HttpVersion {
 }
 
 impl HttpVersion {
-    fn as_str(self) -> &'static str {
-        match self {
-            HttpVersion::Http10 => "HTTP/1.0",
-            HttpVersion::Http11 => "HTTP/1.1",
-        }
-    }
-
     /// Default connection behavior without explicit Connection header
     fn default_closes(self) -> bool {
         match self {
@@ -82,8 +74,6 @@ struct TestRequest {
     version: HttpVersion,
     /// Multiple Connection headers (RFC allows multiple instances)
     connection_headers: Vec<String>,
-    /// Whether request has other headers that might affect semantics
-    has_other_headers: bool,
 }
 
 /// HTTP response with Connection header
@@ -91,8 +81,6 @@ struct TestRequest {
 struct TestResponse {
     /// Connection headers in response
     connection_headers: Vec<String>,
-    /// Whether response body is present (affects HEAD semantics)
-    has_body: bool,
 }
 
 /// Connection semantics test scenario
@@ -124,10 +112,10 @@ impl MockConnectionAnalyzer {
         }
 
         // Request limit reached forces close
-        if let Some(max_requests) = self.config.max_requests_per_connection {
-            if self.config.requests_served + 1 >= max_requests {
-                return true;
-            }
+        if let Some(max_requests) = self.config.max_requests_per_connection
+            && self.config.requests_served + 1 >= max_requests
+        {
+            return true;
         }
 
         // Parse Connection headers
@@ -208,114 +196,93 @@ fn generate_edge_cases() -> Vec<TestRequest> {
         TestRequest {
             version: HttpVersion::Http11,
             connection_headers: vec!["close".to_string()],
-            has_other_headers: false,
         },
         TestRequest {
             version: HttpVersion::Http11,
             connection_headers: vec!["keep-alive".to_string()],
-            has_other_headers: false,
         },
         TestRequest {
             version: HttpVersion::Http10,
             connection_headers: vec!["keep-alive".to_string()],
-            has_other_headers: false,
         },
         // Case sensitivity tests
         TestRequest {
             version: HttpVersion::Http11,
             connection_headers: vec!["CLOSE".to_string()],
-            has_other_headers: false,
         },
         TestRequest {
             version: HttpVersion::Http11,
             connection_headers: vec!["Close".to_string()],
-            has_other_headers: false,
         },
         TestRequest {
             version: HttpVersion::Http11,
             connection_headers: vec!["keep-ALIVE".to_string()],
-            has_other_headers: false,
         },
         // Whitespace handling
         TestRequest {
             version: HttpVersion::Http11,
             connection_headers: vec!["  close  ".to_string()],
-            has_other_headers: false,
         },
         TestRequest {
             version: HttpVersion::Http11,
             connection_headers: vec!["\t keep-alive \r".to_string()],
-            has_other_headers: false,
         },
         // Comma-separated tokens
         TestRequest {
             version: HttpVersion::Http11,
             connection_headers: vec!["close, keep-alive".to_string()],
-            has_other_headers: false,
         },
         TestRequest {
             version: HttpVersion::Http11,
             connection_headers: vec!["upgrade, close".to_string()],
-            has_other_headers: false,
         },
         TestRequest {
             version: HttpVersion::Http11,
             connection_headers: vec!["keep-alive, upgrade".to_string()],
-            has_other_headers: false,
         },
         // Multiple Connection headers
         TestRequest {
             version: HttpVersion::Http11,
             connection_headers: vec!["keep-alive".to_string(), "close".to_string()],
-            has_other_headers: false,
         },
         TestRequest {
             version: HttpVersion::Http11,
             connection_headers: vec!["upgrade".to_string(), "close".to_string()],
-            has_other_headers: false,
         },
         // Malformed values
         TestRequest {
             version: HttpVersion::Http11,
             connection_headers: vec!["".to_string()],
-            has_other_headers: false,
         },
         TestRequest {
             version: HttpVersion::Http11,
             connection_headers: vec!["invalid-token".to_string()],
-            has_other_headers: false,
         },
         TestRequest {
             version: HttpVersion::Http11,
             connection_headers: vec!["close,".to_string()],
-            has_other_headers: false,
         },
         TestRequest {
             version: HttpVersion::Http11,
             connection_headers: vec![",close".to_string()],
-            has_other_headers: false,
         },
         TestRequest {
             version: HttpVersion::Http11,
             connection_headers: vec!["close,,keep-alive".to_string()],
-            has_other_headers: false,
         },
         // Version defaults
         TestRequest {
             version: HttpVersion::Http10,
             connection_headers: vec![],
-            has_other_headers: false,
         },
         TestRequest {
             version: HttpVersion::Http11,
             connection_headers: vec![],
-            has_other_headers: false,
         },
         // Complex cases
         TestRequest {
             version: HttpVersion::Http11,
             connection_headers: vec!["Te, close, upgrade".to_string()],
-            has_other_headers: true,
         },
     ]
 }
@@ -337,7 +304,7 @@ fuzz_target!(|scenario: ConnectionSemanticsScenario| {
     let test_requests = if scenario.include_edge_cases {
         generate_edge_cases()
     } else {
-        vec![scenario.request]
+        vec![scenario.request.clone()]
     };
 
     for test_request in &test_requests {
@@ -437,13 +404,13 @@ fn validate_semantic_rules(
     }
 
     // Rule 2: Request limit forces close
-    if let Some(max_requests) = config.max_requests_per_connection {
-        if config.requests_served + 1 >= max_requests {
-            assert!(
-                decision,
-                "Connection should close when request limit reached"
-            );
-        }
+    if let Some(max_requests) = config.max_requests_per_connection
+        && config.requests_served + 1 >= max_requests
+    {
+        assert!(
+            decision,
+            "Connection should close when request limit reached"
+        );
     }
 
     // Rule 3: Explicit close always wins
@@ -526,28 +493,24 @@ fn test_server_config_semantics(scenario: &ConnectionSemanticsScenario) {
     // Test unlimited requests
     let mut config_unlimited = scenario.config.clone();
     config_unlimited.max_requests_per_connection = None;
-    config_unlimited.requests_served = 1000; // Large number
+    config_unlimited.requests_served = u8::MAX; // Large number
 
-    let analyzer_unlimited = MockConnectionAnalyzer::new(config_unlimited);
+    let analyzer_unlimited = MockConnectionAnalyzer::new(config_unlimited.clone());
 
     // Should not close due to request limit with unlimited setting
     let should_close_unlimited = analyzer_unlimited.should_close_after_request(&scenario.request);
 
     // Only close if explicit close token or version default (not due to limit)
-    let (has_close, _) =
+    let (has_close, has_keep_alive) =
         analyzer_unlimited.parse_connection_tokens(&scenario.request.connection_headers);
     let expected_close = has_close
-        || (!config_unlimited.keep_alive_enabled)
-        || (scenario.request.version.default_closes()
-            && !analyzer_unlimited
-                .parse_connection_tokens(&scenario.request.connection_headers)
-                .1);
+        || !config_unlimited.keep_alive_enabled
+        || (scenario.request.version.default_closes() && !has_keep_alive);
 
-    // This is a complex assertion, so let's be more lenient for fuzzing
-    // Just ensure unlimited doesn't force close
-    if !has_close && config_unlimited.keep_alive_enabled {
-        // With unlimited requests and keep-alive enabled, should follow normal rules
-    }
+    assert_eq!(
+        should_close_unlimited, expected_close,
+        "Unlimited request count should follow only header/version keep-alive semantics"
+    );
 }
 
 #[cfg(test)]
@@ -562,7 +525,6 @@ mod tests {
         let req = TestRequest {
             version: HttpVersion::Http11,
             connection_headers: vec!["close".to_string()],
-            has_other_headers: false,
         };
 
         assert!(analyzer.should_close_after_request(&req));
@@ -576,7 +538,6 @@ mod tests {
         let req = TestRequest {
             version: HttpVersion::Http11,
             connection_headers: vec!["keep-alive".to_string()],
-            has_other_headers: false,
         };
 
         assert!(!analyzer.should_close_after_request(&req));
@@ -590,7 +551,6 @@ mod tests {
         let req = TestRequest {
             version: HttpVersion::Http10,
             connection_headers: vec![],
-            has_other_headers: false,
         };
 
         assert!(analyzer.should_close_after_request(&req));
@@ -604,7 +564,6 @@ mod tests {
         let req = TestRequest {
             version: HttpVersion::Http11,
             connection_headers: vec![],
-            has_other_headers: false,
         };
 
         assert!(!analyzer.should_close_after_request(&req));
@@ -619,7 +578,6 @@ mod tests {
         let req = TestRequest {
             version: HttpVersion::Http11,
             connection_headers: vec!["keep-alive".to_string()],
-            has_other_headers: false,
         };
 
         assert!(analyzer.should_close_after_request(&req));
@@ -635,7 +593,6 @@ mod tests {
         let req = TestRequest {
             version: HttpVersion::Http11,
             connection_headers: vec!["keep-alive".to_string()],
-            has_other_headers: false,
         };
 
         assert!(analyzer.should_close_after_request(&req));
@@ -652,7 +609,6 @@ mod tests {
             let req = TestRequest {
                 version: HttpVersion::Http11,
                 connection_headers: vec![variation.to_string()],
-                has_other_headers: false,
             };
 
             assert!(
@@ -671,7 +627,6 @@ mod tests {
         let req = TestRequest {
             version: HttpVersion::Http11,
             connection_headers: vec!["upgrade, close".to_string()],
-            has_other_headers: false,
         };
 
         assert!(analyzer.should_close_after_request(&req));
@@ -685,7 +640,6 @@ mod tests {
         let req = TestRequest {
             version: HttpVersion::Http11,
             connection_headers: vec!["  close  ".to_string()],
-            has_other_headers: false,
         };
 
         assert!(analyzer.should_close_after_request(&req));
@@ -699,7 +653,6 @@ mod tests {
         let req = TestRequest {
             version: HttpVersion::Http11,
             connection_headers: vec!["keep-alive".to_string(), "close".to_string()],
-            has_other_headers: false,
         };
 
         // Close should win over keep-alive
@@ -713,7 +666,6 @@ mod tests {
 
         let resp = TestResponse {
             connection_headers: vec!["close".to_string()],
-            has_body: true,
         };
 
         let override_result = analyzer.response_overrides_close(&resp);
