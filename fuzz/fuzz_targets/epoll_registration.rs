@@ -19,6 +19,7 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use std::collections::{HashMap, HashSet};
+use std::io;
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,6 +32,14 @@ use asupersync::runtime::reactor::{Events, Interest, Reactor, Token, epoll::Epol
 const MAX_OPERATIONS: usize = 500;
 const MAX_CONCURRENT_FDS: usize = 64;
 const MAX_TOKEN_VALUE: usize = 1000;
+
+fn observe_io_error(context: &str, error: &io::Error) -> String {
+    assert!(
+        error.raw_os_error().is_some() || !error.to_string().is_empty(),
+        "{context} error must carry either an OS code or diagnostic text"
+    );
+    format!("{context}: {error}")
+}
 
 /// Fuzz input structure for epoll registration testing
 #[derive(Arbitrary, Debug)]
@@ -101,25 +110,25 @@ impl InterestFlags {
         let mut interest = Interest::NONE;
 
         if self.readable {
-            interest = interest | Interest::READABLE;
+            interest |= Interest::READABLE;
         }
         if self.writable {
-            interest = interest | Interest::WRITABLE;
+            interest |= Interest::WRITABLE;
         }
         if self.error {
-            interest = interest | Interest::ERROR;
+            interest |= Interest::ERROR;
         }
         if self.hup {
-            interest = interest | Interest::HUP;
+            interest |= Interest::HUP;
         }
         if self.priority {
-            interest = interest | Interest::PRIORITY;
+            interest |= Interest::PRIORITY;
         }
         if self.oneshot {
-            interest = interest | Interest::ONESHOT;
+            interest |= Interest::ONESHOT;
         }
         if self.edge_triggered {
-            interest = interest | Interest::EDGE_TRIGGERED;
+            interest |= Interest::EDGE_TRIGGERED;
         }
 
         interest
@@ -214,6 +223,16 @@ impl ShadowState {
         self.closed_fds.insert(fd);
     }
 
+    /// Record an expected reactor error for diagnostics coverage.
+    fn record_expected_error(&mut self, context: &str, error: &io::Error) {
+        self.expected_errors.push(observe_io_error(context, error));
+    }
+
+    /// Count expected reactor errors observed by the harness.
+    fn expected_error_count(&self) -> usize {
+        self.expected_errors.len()
+    }
+
     /// Modify registration
     fn modify(&mut self, token: Token, interest: Interest) {
         if let Some((fd, _)) = self.registrations.get(&token) {
@@ -266,7 +285,7 @@ impl EpollFuzzHarness {
         }
 
         let fd = &self.fds[fd_idx];
-        if fd.closed {
+        if fd.closed || self.shadow.is_fd_closed(fd.read_fd()) {
             return;
         }
 
@@ -285,6 +304,7 @@ impl EpollFuzzHarness {
                 self.shadow.register(token, fd.read_fd(), interest);
             }
             Err(e) => {
+                self.shadow.record_expected_error("register", &e);
                 // Should fail if already registered or fd is invalid
                 match e.kind() {
                     std::io::ErrorKind::AlreadyExists => {
@@ -317,6 +337,7 @@ impl EpollFuzzHarness {
                 self.shadow.modify(token, interest);
             }
             Err(e) => {
+                self.shadow.record_expected_error("modify", &e);
                 // Should fail if not registered
                 match e.kind() {
                     std::io::ErrorKind::NotFound => {
@@ -341,7 +362,8 @@ impl EpollFuzzHarness {
                 // Always succeeds even for non-registered tokens (idempotent)
                 self.shadow.deregister(token);
             }
-            Err(_) => {
+            Err(error) => {
+                self.shadow.record_expected_error("deregister", &error);
                 // Deregister errors are generally acceptable in fuzzing
                 self.shadow.deregister(token);
             }
@@ -354,7 +376,69 @@ impl EpollFuzzHarness {
         let mut events = Events::with_capacity(64);
 
         // Poll should not panic even with invalid state
-        let _ = self.reactor.poll(&mut events, timeout);
+        let result = self.reactor.poll(&mut events, timeout);
+        self.observe_poll_result(result, &events);
+    }
+
+    fn observe_poll_result(&mut self, result: io::Result<usize>, events: &Events) {
+        match result {
+            Ok(count) => {
+                assert_eq!(
+                    count,
+                    events.len(),
+                    "poll result count must match events placed in the output buffer"
+                );
+            }
+            Err(error) => self.shadow.record_expected_error("poll", &error),
+        }
+    }
+
+    fn observe_burst_register_result(
+        &mut self,
+        token: Token,
+        fd: i32,
+        interest: Interest,
+        result: io::Result<()>,
+    ) {
+        match result {
+            Ok(()) => {
+                assert!(
+                    !self.shadow.should_be_registered(token),
+                    "burst register succeeded but token was already registered: {token:?}"
+                );
+                self.shadow.register(token, fd, interest);
+            }
+            Err(error) => self.shadow.record_expected_error("burst register", &error),
+        }
+    }
+
+    fn observe_burst_modify_result(
+        &mut self,
+        token: Token,
+        interest: Interest,
+        result: io::Result<()>,
+    ) {
+        match result {
+            Ok(()) => {
+                assert!(
+                    self.shadow.should_be_registered(token),
+                    "burst modify succeeded but token was not registered: {token:?}"
+                );
+                self.shadow.modify(token, interest);
+            }
+            Err(error) => self.shadow.record_expected_error("burst modify", &error),
+        }
+    }
+
+    fn observe_burst_deregister_result(&mut self, token: Token, result: io::Result<()>) {
+        match result {
+            Ok(()) => self.shadow.deregister(token),
+            Err(error) => {
+                self.shadow
+                    .record_expected_error("burst deregister", &error);
+                self.shadow.deregister(token);
+            }
+        }
     }
 
     /// Close a file descriptor
@@ -382,8 +466,17 @@ impl EpollFuzzHarness {
                     // Register then immediately deregister
                     if !self.fds.is_empty() {
                         let source = MockSource::new(self.fds[0].read_fd());
-                        let _ = self.reactor.register(&source, token, Interest::READABLE);
-                        let _ = self.reactor.deregister(token);
+                        let fd = source.as_raw_fd();
+                        let register_result =
+                            self.reactor.register(&source, token, Interest::READABLE);
+                        self.observe_burst_register_result(
+                            token,
+                            fd,
+                            Interest::READABLE,
+                            register_result,
+                        );
+                        let deregister_result = self.reactor.deregister(token);
+                        self.observe_burst_deregister_result(token, deregister_result);
                     }
                 }
                 BurstType::ModifyInterest => {
@@ -396,7 +489,8 @@ impl EpollFuzzHarness {
                         Interest::WRITABLE | Interest::ONESHOT,
                     ];
                     let interest = interests[i % interests.len()];
-                    let _ = self.reactor.modify(token, interest);
+                    let result = self.reactor.modify(token, interest);
+                    self.observe_burst_modify_result(token, interest, result);
                 }
                 BurstType::Mixed => {
                     // Mixed rapid operations
@@ -405,14 +499,24 @@ impl EpollFuzzHarness {
                             if !self.fds.is_empty() {
                                 let source =
                                     MockSource::new(self.fds[i % self.fds.len()].read_fd());
-                                let _ = self.reactor.register(&source, token, Interest::READABLE);
+                                let fd = source.as_raw_fd();
+                                let result =
+                                    self.reactor.register(&source, token, Interest::READABLE);
+                                self.observe_burst_register_result(
+                                    token,
+                                    fd,
+                                    Interest::READABLE,
+                                    result,
+                                );
                             }
                         }
                         1 => {
-                            let _ = self.reactor.modify(token, Interest::WRITABLE);
+                            let result = self.reactor.modify(token, Interest::WRITABLE);
+                            self.observe_burst_modify_result(token, Interest::WRITABLE, result);
                         }
                         2 => {
-                            let _ = self.reactor.deregister(token);
+                            let result = self.reactor.deregister(token);
+                            self.observe_burst_deregister_result(token, result);
                         }
                         _ => unreachable!(),
                     }
@@ -489,9 +593,16 @@ fuzz_target!(|input: EpollRegistrationFuzz| {
 
     // Final cleanup poll to ensure no crashes
     let mut events = Events::with_capacity(64);
-    let _ = harness
+    let poll_result = harness
         .reactor
         .poll(&mut events, Some(Duration::from_millis(1)));
+    harness.observe_poll_result(poll_result, &events);
+
+    let max_expected_error_observations = MAX_OPERATIONS * 51 + 1;
+    assert!(
+        harness.shadow.expected_error_count() <= max_expected_error_observations,
+        "expected reactor error observations exceeded the bounded operation budget"
+    );
 });
 
 #[cfg(not(target_os = "linux"))]
