@@ -2,6 +2,7 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
+use std::hint::black_box;
 
 /// HTTP/2 HEADERS/CONTINUATION frame ordering violation testing.
 /// Per RFC 7540 §6.10, when HEADERS has END_HEADERS=0, only CONTINUATION
@@ -138,6 +139,8 @@ impl MockH2FrameParser {
 
     /// Process HEADERS frame
     fn process_headers(&mut self, frame: &HeadersFrame) -> Result<(), String> {
+        black_box(frame.header_block_fragment.len());
+
         // Validate stream ID
         if frame.stream_id == 0 {
             return Err("HEADERS frame stream ID must not be 0".into());
@@ -164,6 +167,8 @@ impl MockH2FrameParser {
 
     /// Process frame in CONTINUATION-awaiting state
     fn process_frame_during_continuation(&mut self, frame: &FrameType) -> Result<(), String> {
+        Self::observe_frame_metadata(frame);
+
         if let ParserState::AwaitingContinuation(expected_stream_id) = self.state {
             match frame {
                 FrameType::Continuation(cont_frame) => {
@@ -239,6 +244,47 @@ impl MockH2FrameParser {
         }
     }
 
+    fn observe_frame_metadata(frame: &FrameType) {
+        match frame {
+            FrameType::Settings(f) => {
+                black_box(f.flags);
+                black_box(f.settings.len());
+            }
+            FrameType::Priority(f) => {
+                black_box(f.exclusive);
+                black_box(f.dependency);
+                black_box(f.weight);
+            }
+            FrameType::Data(f) => {
+                black_box(f.flags);
+                black_box(f.data.len());
+            }
+            FrameType::WindowUpdate(f) => {
+                black_box(f.increment);
+            }
+            FrameType::Ping(f) => {
+                black_box(f.flags);
+                black_box(f.data);
+            }
+            FrameType::GoAway(f) => {
+                black_box(f.last_stream_id);
+                black_box(f.error_code);
+                black_box(f.debug_data.len());
+            }
+            FrameType::RstStream(f) => {
+                black_box(f.error_code);
+            }
+            FrameType::Continuation(f) => {
+                black_box(f.header_block_fragment.len());
+            }
+            FrameType::PushPromise(f) => {
+                black_box(f.flags);
+                black_box(f.promised_stream_id);
+                black_box(f.header_block_fragment.len());
+            }
+        }
+    }
+
     /// Process complete frame sequence
     fn process_sequence(&mut self, input: &FuzzInput) -> Result<(), String> {
         // Process initial HEADERS frame (with END_HEADERS=0 forced)
@@ -297,6 +343,8 @@ fuzz_target!(|data: &[u8]| {
 
     let mut parser = MockH2FrameParser::new();
     let result = parser.process_sequence(&input);
+    black_box(parser.get_state());
+    black_box(parser.errors.len());
 
     // Test 1: SETTINGS frame should cause PROTOCOL_ERROR
     let has_settings_frame = input
@@ -390,38 +438,36 @@ fuzz_target!(|data: &[u8]| {
             .map(|cont| cont.stream_id == input.headers_frame.stream_id)
             .unwrap_or(true);
 
-        if all_matching_stream_id && final_matches {
-            if result.is_err() {
-                // Valid sequence failed - check if it's due to stream ID mismatch or other valid reason
-                if let Err(error_msg) = &result {
-                    assert!(
-                        error_msg.contains("stream ID")
-                            || error_msg.contains("incomplete")
-                            || error_msg.contains("PRIORITY frame during CONTINUATION sequence"),
-                        "Valid CONTINUATION sequence failed unexpectedly: {}",
-                        error_msg
-                    );
-                }
+        if all_matching_stream_id && final_matches && result.is_err() {
+            // Valid sequence failed - check if it's due to stream ID mismatch or other valid reason
+            if let Err(error_msg) = &result {
+                assert!(
+                    error_msg.contains("stream ID")
+                        || error_msg.contains("incomplete")
+                        || error_msg.contains("PRIORITY frame during CONTINUATION sequence"),
+                    "Valid CONTINUATION sequence failed unexpectedly: {}",
+                    error_msg
+                );
             }
         }
     }
 
     // Test 4: Stream ID mismatches should be caught
     for frame in &input.following_frames {
-        if let FrameType::Continuation(cont) = frame {
-            if cont.stream_id != input.headers_frame.stream_id {
-                assert!(
-                    result.is_err(),
-                    "CONTINUATION with mismatched stream ID should be rejected"
-                );
+        if let FrameType::Continuation(cont) = frame
+            && cont.stream_id != input.headers_frame.stream_id
+        {
+            assert!(
+                result.is_err(),
+                "CONTINUATION with mismatched stream ID should be rejected"
+            );
 
-                if let Err(error_msg) = &result {
-                    assert!(
-                        error_msg.contains("stream ID") && error_msg.contains("PROTOCOL_ERROR"),
-                        "Stream ID mismatch should generate specific error: {}",
-                        error_msg
-                    );
-                }
+            if let Err(error_msg) = &result {
+                assert!(
+                    error_msg.contains("stream ID") && error_msg.contains("PROTOCOL_ERROR"),
+                    "Stream ID mismatch should generate specific error: {}",
+                    error_msg
+                );
             }
         }
     }
