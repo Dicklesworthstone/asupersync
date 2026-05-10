@@ -32,9 +32,11 @@ struct WindowSizeChangeTest {
 #[derive(Debug, Clone, PartialEq)]
 enum WindowUpdateResult {
     Success(WindowState),
-    Error(WindowError),
     Warning(WindowState, String),
 }
+
+type StreamAdjustment = (u32, i32);
+type WindowSizeTestCase = (String, u32, u32, Vec<StreamAdjustment>, WindowUpdateResult);
 
 #[derive(Debug, Clone, PartialEq)]
 enum WindowError {
@@ -245,7 +247,7 @@ impl MockH2Connection {
     /// Verify window state integrity
     fn verify_integrity(&self) -> Result<(), WindowError> {
         // Check all windows are within bounds
-        for (stream_id, window) in &self.state.stream_windows {
+        for window in self.state.stream_windows.values() {
             if *window < self.policy.min_window_size && !self.policy.allow_negative_windows {
                 return Err(WindowError::NegativeWindow);
             }
@@ -263,8 +265,21 @@ impl MockH2Connection {
     }
 }
 
+fn observe_fuzz_setup_adjustment(result: Result<(), WindowError>, context: &str) {
+    match result {
+        Ok(()) | Err(WindowError::WindowOverflow) => {}
+        Err(error) => panic!("{context} failed with unexpected setup error: {error:?}"),
+    }
+}
+
+fn expect_predefined_setup(result: Result<(), WindowError>, context: &str) {
+    if let Err(error) = result {
+        panic!("{context} failed: {error:?}");
+    }
+}
+
 /// Generate predefined test cases for window size changes
-fn generate_test_cases() -> Vec<(String, u32, u32, Vec<(u32, i32)>, WindowUpdateResult)> {
+fn generate_test_cases() -> Vec<WindowSizeTestCase> {
     vec![
         // Test case 1: Increase from 1MB to 16MB (delta = +15MB)
         (
@@ -401,7 +416,7 @@ fuzz_target!(|data: &[u8]| {
     // Limit window sizes to reasonable ranges for fuzzing
     let initial_window_size = test.initial_window_size.min(64 * 1024 * 1024); // Max 64MB
     let new_window_size = test.new_window_size.min(64 * 1024 * 1024); // Max 64MB
-    let num_streams = test.num_streams.min(50).max(1);
+    let num_streams = test.num_streams.clamp(1, 50);
 
     // Create connection with initial window size
     let mut connection = MockH2Connection::new(initial_window_size);
@@ -419,10 +434,18 @@ fuzz_target!(|data: &[u8]| {
         if let Some(&adjustment) = test.stream_adjustments.get(i as usize) {
             if adjustment < 0 {
                 // Negative adjustment = send data (reduce window)
-                let _ = connection.send_data(stream_id, (-adjustment) as u32);
+                let context = format!("fuzz stream {stream_id} send_data setup");
+                observe_fuzz_setup_adjustment(
+                    connection.send_data(stream_id, (-adjustment) as u32),
+                    &context,
+                );
             } else if adjustment > 0 {
                 // Positive adjustment = receive WINDOW_UPDATE (increase window)
-                let _ = connection.receive_window_update(stream_id, adjustment as u32);
+                let context = format!("fuzz stream {stream_id} WINDOW_UPDATE setup");
+                observe_fuzz_setup_adjustment(
+                    connection.receive_window_update(stream_id, adjustment as u32),
+                    &context,
+                );
             }
         }
     }
@@ -514,26 +537,6 @@ fuzz_target!(|data: &[u8]| {
             );
         }
 
-        Ok(WindowUpdateResult::Error(error)) => {
-            // Error case - verify error is reasonable
-            match error {
-                WindowError::InvalidWindowSize => {
-                    // Should happen for out-of-range window sizes
-                    assert!(
-                        new_window_size > (1u32 << 31) - 1,
-                        "InvalidWindowSize error for valid size: {}",
-                        new_window_size
-                    );
-                }
-                WindowError::WindowOverflow => {
-                    // Should happen for window calculations that would overflow
-                }
-                _ => {
-                    // Other errors are also acceptable
-                }
-            }
-        }
-
         Err(error) => {
             // Direct error during processing
             match error {
@@ -562,11 +565,15 @@ fuzz_target!(|data: &[u8]| {
     // Create streams for permissive test
     for i in 0..num_streams.min(10) {
         let stream_id = (i as u32 * 2) + 1;
-        let _ = permissive_connection.create_stream(stream_id);
+        let context = format!("permissive setup stream {stream_id}");
+        expect_predefined_setup(permissive_connection.create_stream(stream_id), &context);
     }
 
-    let _permissive_result =
-        permissive_connection.apply_initial_window_size_change(new_window_size);
+    let permissive_result = permissive_connection.apply_initial_window_size_change(new_window_size);
+    assert!(
+        permissive_result.is_ok(),
+        "permissive policy should accept bounded initial-window changes"
+    );
     // Permissive policy should allow more edge cases
 
     // Run predefined test cases to ensure correctness
@@ -575,12 +582,22 @@ fuzz_target!(|data: &[u8]| {
 
         // Set up test streams
         for (stream_id, adjustment) in adjustments {
-            let _ = test_connection.create_stream(stream_id);
+            let create_context = format!("Test '{test_name}': create stream {stream_id}");
+            expect_predefined_setup(test_connection.create_stream(stream_id), &create_context);
 
             if adjustment < 0 {
-                let _ = test_connection.send_data(stream_id, (-adjustment) as u32);
+                let send_context = format!("Test '{test_name}': send_data stream {stream_id}");
+                expect_predefined_setup(
+                    test_connection.send_data(stream_id, (-adjustment) as u32),
+                    &send_context,
+                );
             } else if adjustment > 0 {
-                let _ = test_connection.receive_window_update(stream_id, adjustment as u32);
+                let update_context =
+                    format!("Test '{test_name}': WINDOW_UPDATE stream {stream_id}");
+                expect_predefined_setup(
+                    test_connection.receive_window_update(stream_id, adjustment as u32),
+                    &update_context,
+                );
             }
         }
 
