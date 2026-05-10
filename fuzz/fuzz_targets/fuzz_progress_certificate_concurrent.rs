@@ -1,7 +1,9 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 
-use asupersync::cancel::progress_certificate::{ProgressCertificate, ProgressConfig};
+use asupersync::cancel::progress_certificate::{
+    CertificateVerdict, ProgressCertificate, ProgressConfig,
+};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
@@ -21,6 +23,11 @@ enum Operation {
     ConcurrentObserve(f64),
     /// Start concurrent compact operation
     ConcurrentCompact(usize),
+}
+
+struct ConcurrentWorker {
+    handle: thread::JoinHandle<()>,
+    rx: mpsc::Receiver<thread::Result<CertificateVerdict>>,
 }
 
 /// Test configuration for fuzzing
@@ -118,7 +125,7 @@ fn parse_operations(data: &[u8]) -> Vec<Operation> {
                     _ => (param as f64) / 10.0 - 12.8, // Range approximately -12.8 to 12.7
                 };
                 Operation::Observe(potential)
-            },
+            }
             1 => Operation::Verdict,
             2 => Operation::Compact((param as usize).clamp(0, 100)),
             3 => Operation::Reset,
@@ -128,7 +135,7 @@ fn parse_operations(data: &[u8]) -> Vec<Operation> {
                     _ => (param as f64) - 128.0,
                 };
                 Operation::ConcurrentObserve(potential)
-            },
+            }
             5 => Operation::ConcurrentCompact((param as usize).clamp(0, 50)),
             _ => Operation::Observe(1.0),
         };
@@ -143,6 +150,53 @@ fn parse_operations(data: &[u8]) -> Vec<Operation> {
     }
 
     operations
+}
+
+fn observe_worker_result(
+    result: Result<thread::Result<CertificateVerdict>, mpsc::RecvTimeoutError>,
+    join_result: thread::Result<()>,
+) {
+    match join_result {
+        Ok(()) => {}
+        Err(_) => panic!("concurrent progress certificate worker panicked outside catch_unwind"),
+    }
+
+    match result {
+        Ok(Ok(_verdict)) => {}
+        Ok(Err(_)) => panic!("concurrent progress certificate operation panicked"),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            panic!("concurrent progress certificate worker did not report before timeout")
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("concurrent progress certificate worker exited without reporting")
+        }
+    }
+}
+
+fn wait_for_worker(worker: ConcurrentWorker) {
+    let result = worker.rx.recv_timeout(Duration::from_millis(100));
+    let join_result = worker.handle.join();
+    observe_worker_result(result, join_result);
+}
+
+fn drain_completed_workers(workers: &mut Vec<ConcurrentWorker>) {
+    let mut index = 0;
+    while index < workers.len() {
+        match workers[index].rx.try_recv() {
+            Ok(result) => {
+                let worker = workers.swap_remove(index);
+                observe_worker_result(Ok(result), worker.handle.join());
+            }
+            Err(mpsc::TryRecvError::Empty) => index += 1,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                let worker = workers.swap_remove(index);
+                observe_worker_result(
+                    Err(mpsc::RecvTimeoutError::Disconnected),
+                    worker.handle.join(),
+                );
+            }
+        }
+    }
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -181,8 +235,12 @@ fuzz_target!(|data: &[u8]| {
                 step_count += 1;
 
                 if let Some(prev) = last_step {
-                    assert!(current_step > prev,
-                           "Step ordering violated: {} should be > {}", current_step, prev);
+                    assert!(
+                        current_step > prev,
+                        "Step ordering violated: {} should be > {}",
+                        current_step,
+                        prev
+                    );
                 }
                 last_step = Some(current_step);
 
@@ -201,21 +259,29 @@ fuzz_target!(|data: &[u8]| {
 
                 // If potential is finite, it should be recorded
                 if potential.is_finite() {
-                    assert!(observations_after > observations_before || observations_after == config.min_observations.saturating_add(100),
-                           "Valid finite potential {} should be recorded or list should be at capacity", potential);
+                    assert!(
+                        observations_after > observations_before
+                            || observations_after == config.min_observations.saturating_add(100),
+                        "Valid finite potential {} should be recorded or list should be at capacity",
+                        potential
+                    );
                 }
 
                 // Check that NaN/Infinity values don't corrupt certificate state
                 if !potential.is_finite() {
                     // Non-finite values might be rejected, but should not crash or corrupt state
-                    let current_potential = cert_guard.observations().last().map(|obs| obs.potential);
+                    let current_potential =
+                        cert_guard.observations().last().map(|obs| obs.potential);
                     if let (Some(before), Some(current)) = (potential_before, current_potential) {
-                        assert!(before.is_finite() == current.is_finite() || potential.is_finite(),
-                               "Non-finite potential {} should not corrupt previous state", potential);
+                        assert!(
+                            before.is_finite() == current.is_finite() || potential.is_finite(),
+                            "Non-finite potential {} should not corrupt previous state",
+                            potential
+                        );
                     }
                 }
                 drop(cert_guard);
-            },
+            }
 
             Operation::Verdict => {
                 // INVARIANT 2: Certificate validity under concurrent operations
@@ -224,8 +290,13 @@ fuzz_target!(|data: &[u8]| {
 
                 // Verdict should always be deterministic given the current state
                 let verdict2 = cert_guard.verdict();
-                assert_eq!(format!("{:?}", verdict), format!("{:?}", verdict2),
-                          "Verdict should be deterministic: first={:?}, second={:?}", verdict, verdict2);
+                assert_eq!(
+                    format!("{:?}", verdict),
+                    format!("{:?}", verdict2),
+                    "Verdict should be deterministic: first={:?}, second={:?}",
+                    verdict,
+                    verdict2
+                );
 
                 // If we have enough observations, verdict should be meaningful
                 if cert_guard.observations().len() >= config.min_observations {
@@ -233,7 +304,7 @@ fuzz_target!(|data: &[u8]| {
                     let _verdict_result = verdict;
                 }
                 drop(cert_guard);
-            },
+            }
 
             Operation::Compact(keep_last) => {
                 let mut cert_guard = certificate_shared.lock().unwrap();
@@ -245,16 +316,23 @@ fuzz_target!(|data: &[u8]| {
                 let obs_after = cert_guard.observations().len();
 
                 // INVARIANT: Compact should keep at most keep_last observations
-                assert!(obs_after <= keep_last || keep_last == 0,
-                       "Compact should keep at most {} observations, but kept {}", keep_last, obs_after);
+                assert!(
+                    obs_after <= keep_last || keep_last == 0,
+                    "Compact should keep at most {} observations, but kept {}",
+                    keep_last,
+                    obs_after
+                );
 
                 // INVARIANT: If we had fewer than keep_last, nothing should be removed
                 if obs_before <= keep_last {
-                    assert_eq!(obs_after, obs_before,
-                              "Compact should not remove observations if count {} <= keep_last {}", obs_before, keep_last);
+                    assert_eq!(
+                        obs_after, obs_before,
+                        "Compact should not remove observations if count {} <= keep_last {}",
+                        obs_before, keep_last
+                    );
                 }
                 drop(cert_guard);
-            },
+            }
 
             Operation::Reset => {
                 let mut cert_guard = certificate_shared.lock().unwrap();
@@ -263,14 +341,17 @@ fuzz_target!(|data: &[u8]| {
                 cert_guard.reset();
 
                 // INVARIANT: After reset, observations should be empty
-                assert_eq!(cert_guard.observations().len(), 0,
-                          "Reset should clear all observations");
+                assert_eq!(
+                    cert_guard.observations().len(),
+                    0,
+                    "Reset should clear all observations"
+                );
 
                 // Reset the step counter for our invariant tracking
                 step_count = 0;
                 last_step = None;
                 drop(cert_guard);
-            },
+            }
 
             Operation::ConcurrentObserve(potential) => {
                 // INVARIANT 2: Certificate validity under concurrent revoke operations
@@ -283,20 +364,20 @@ fuzz_target!(|data: &[u8]| {
                         cert.observe(potential);
                         cert.verdict()
                     });
-                    let _ = tx.send(result);
+                    tx.send(result)
+                        .expect("concurrent progress certificate receiver should remain alive");
                 });
 
                 // Don't wait forever for concurrent operations
-                concurrent_handles.push((handle, rx));
+                concurrent_handles.push(ConcurrentWorker { handle, rx });
 
                 // Limit concurrent operations to prevent resource exhaustion
-                if concurrent_handles.len() > 5 {
-                    if let Some((handle, rx)) = concurrent_handles.pop() {
-                        let _ = handle.join();
-                        let _ = rx.recv_timeout(Duration::from_millis(100));
-                    }
+                if concurrent_handles.len() > 5
+                    && let Some(worker) = concurrent_handles.pop()
+                {
+                    wait_for_worker(worker);
                 }
-            },
+            }
 
             Operation::ConcurrentCompact(keep_last) => {
                 // INVARIANT 2: Certificate validity under concurrent revoke operations
@@ -309,31 +390,29 @@ fuzz_target!(|data: &[u8]| {
                         cert.compact(keep_last);
                         cert.verdict()
                     });
-                    let _ = tx.send(result);
+                    tx.send(result)
+                        .expect("concurrent progress certificate receiver should remain alive");
                 });
 
-                concurrent_handles.push((handle, rx));
+                concurrent_handles.push(ConcurrentWorker { handle, rx });
 
-                if concurrent_handles.len() > 5 {
-                    if let Some((handle, rx)) = concurrent_handles.pop() {
-                        let _ = handle.join();
-                        let _ = rx.recv_timeout(Duration::from_millis(100));
-                    }
+                if concurrent_handles.len() > 5
+                    && let Some(worker) = concurrent_handles.pop()
+                {
+                    wait_for_worker(worker);
                 }
-            },
+            }
         }
 
         // Periodically clean up completed concurrent operations
         if concurrent_handles.len() > 3 {
-            concurrent_handles.retain(|(_, rx)| {
-                matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty))
-            });
+            drain_completed_workers(&mut concurrent_handles);
         }
     }
 
     // Clean up remaining concurrent operations before exit
-    for (handle, _rx) in concurrent_handles {
-        let _ = handle.join();
+    for worker in concurrent_handles {
+        wait_for_worker(worker);
     }
 
     // Final invariant check: certificate should still be in a valid state
