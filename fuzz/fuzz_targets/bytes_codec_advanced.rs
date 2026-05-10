@@ -146,24 +146,15 @@ enum CodecOperation {
         data_type: EncodingDataType,
     },
     /// Multiple interleaved operations
-    InterleavedOps {
-        operations: Vec<SimpleOp>,
-    },
+    InterleavedOps { operations: Vec<SimpleOp> },
     /// Buffer manipulation
-    BufferManipulation {
-        action: BufferAction,
-    },
+    BufferManipulation { action: BufferAction },
     /// Framed I/O operation
-    FramedIoOp {
-        operation: FramedOp,
-    },
+    FramedIoOp { operation: FramedOp },
     /// State consistency verification
     VerifyState,
     /// Stress test with large data
-    StressTest {
-        data_size: u16,
-        operation_count: u8,
-    },
+    StressTest { data_size: u16, operation_count: u8 },
     /// Error injection test
     ErrorInjectionTest {
         error_type: ErrorType,
@@ -249,7 +240,8 @@ impl AdvancedMockIo {
                     min_size + (remaining.len() - min_size).min(max_size - min_size)
                 };
 
-                self.read_data.push_back(remaining[..fragment_size].to_vec());
+                self.read_data
+                    .push_back(remaining[..fragment_size].to_vec());
                 remaining = &remaining[fragment_size..];
             }
         } else {
@@ -258,15 +250,25 @@ impl AdvancedMockIo {
     }
 
     fn should_inject_error(&self) -> Option<io::Error> {
-        if self.error_injection.error_at_ops.contains(&(self.operation_count as u8)) {
-            let error_type = self.error_injection.error_types
+        if self
+            .error_injection
+            .error_at_ops
+            .contains(&(self.operation_count as u8))
+        {
+            let error_type = self
+                .error_injection
+                .error_types
                 .get(self.operation_count % self.error_injection.error_types.len())
                 .unwrap_or(&ErrorType::Other);
 
             Some(match error_type {
-                ErrorType::UnexpectedEof => io::Error::new(ErrorKind::UnexpectedEof, "injected EOF"),
+                ErrorType::UnexpectedEof => {
+                    io::Error::new(ErrorKind::UnexpectedEof, "injected EOF")
+                }
                 ErrorType::WouldBlock => io::Error::new(ErrorKind::WouldBlock, "injected blocking"),
-                ErrorType::InvalidData => io::Error::new(ErrorKind::InvalidData, "injected invalid data"),
+                ErrorType::InvalidData => {
+                    io::Error::new(ErrorKind::InvalidData, "injected invalid data")
+                }
                 ErrorType::Other => io::Error::new(ErrorKind::Other, "injected error"),
             })
         } else {
@@ -299,7 +301,7 @@ impl AsyncRead for AdvancedMockIo {
                     }
                 }
                 Poll::Ready(Ok(()))
-            },
+            }
 
             IoPattern::Chunked(_pattern) => {
                 // Read in smaller chunks
@@ -312,7 +314,7 @@ impl AsyncRead for AdvancedMockIo {
                     }
                 }
                 Poll::Ready(Ok(()))
-            },
+            }
 
             IoPattern::IntermittentBlocking => {
                 if self.operation_count % 3 == 0 {
@@ -328,7 +330,7 @@ impl AsyncRead for AdvancedMockIo {
                 } else {
                     Poll::Ready(Ok(()))
                 }
-            },
+            }
 
             IoPattern::HighFrequencySmall => {
                 if let Some(data) = self.read_data.pop_front() {
@@ -340,7 +342,7 @@ impl AsyncRead for AdvancedMockIo {
                     }
                 }
                 Poll::Ready(Ok(()))
-            },
+            }
 
             IoPattern::Bursty => {
                 // Alternate between active and silent periods
@@ -359,7 +361,7 @@ impl AsyncRead for AdvancedMockIo {
                     // Silent period
                     Poll::Pending
                 }
-            },
+            }
         }
     }
 }
@@ -428,21 +430,21 @@ fn estimate_memory_usage(input: &AdvancedFuzzInput) -> usize {
         match op {
             CodecOperation::EncodeWithPressure { data, .. } => {
                 total += data.len();
-            },
+            }
             CodecOperation::StressTest { data_size, .. } => {
                 total += *data_size as usize;
-            },
+            }
             CodecOperation::BufferManipulation { action } => {
                 if let BufferAction::ExtendFrom(data) = action {
                     total += data.len();
                 }
-            },
+            }
             CodecOperation::FramedIoOp { operation } => {
                 if let FramedOp::WriteFrame(data) = operation {
                     total += data.len();
                 }
-            },
-            _ => {},
+            }
+            _ => {}
         }
     }
 
@@ -458,7 +460,10 @@ fn test_basic_operations(input: &AdvancedFuzzInput) {
         let buffer_state_before = capture_buffer_state(&buffer);
 
         match operation {
-            CodecOperation::DecodeWithConfig { drain_amount, verify_state } => {
+            CodecOperation::DecodeWithConfig {
+                drain_amount,
+                verify_state,
+            } => {
                 let original_len = buffer.len();
 
                 // Optionally drain some data first
@@ -473,17 +478,27 @@ fn test_basic_operations(input: &AdvancedFuzzInput) {
                 if *verify_state {
                     verify_buffer_consistency(&buffer, &buffer_state_before);
                 }
-            },
+            }
 
-            CodecOperation::EncodeWithPressure { data, force_reallocation, data_type } => {
+            CodecOperation::EncodeWithPressure {
+                data,
+                force_reallocation,
+                data_type,
+            } => {
                 if data.len() <= MAX_BUFFER_SIZE {
-                    test_encode_with_pressure(&mut codec, &mut buffer, data, *force_reallocation, data_type);
+                    test_encode_with_pressure(
+                        &mut codec,
+                        &mut buffer,
+                        data,
+                        *force_reallocation,
+                        data_type,
+                    );
                 }
-            },
+            }
 
             CodecOperation::VerifyState => {
                 verify_codec_state_invariants(&codec, &buffer);
-            },
+            }
 
             _ => {
                 // Handle other operations
@@ -503,7 +518,11 @@ fn test_memory_pressure(input: &AdvancedFuzzInput) {
 
     for operation in &input.operations {
         match operation {
-            CodecOperation::EncodeWithPressure { data, force_reallocation, data_type } => {
+            CodecOperation::EncodeWithPressure {
+                data,
+                force_reallocation,
+                data_type,
+            } => {
                 if data.len() <= MAX_BUFFER_SIZE {
                     // Force buffer reallocation by filling to capacity
                     if *force_reallocation && buffer.capacity() > 0 {
@@ -513,13 +532,16 @@ fn test_memory_pressure(input: &AdvancedFuzzInput) {
 
                     test_encode_with_memory_pressure(&mut codec, &mut buffer, data, data_type);
                 }
-            },
+            }
 
-            CodecOperation::StressTest { data_size, operation_count } => {
+            CodecOperation::StressTest {
+                data_size,
+                operation_count,
+            } => {
                 if (*data_size as usize) <= MAX_BUFFER_SIZE {
                     test_memory_stress(&mut codec, &mut buffer, *data_size, *operation_count);
                 }
-            },
+            }
 
             _ => {
                 execute_operation(&mut codec, &mut buffer, operation);
@@ -527,7 +549,10 @@ fn test_memory_pressure(input: &AdvancedFuzzInput) {
         }
 
         // Verify memory usage stays within bounds
-        assert!(buffer.capacity() <= MAX_BUFFER_SIZE * 2, "Buffer capacity grew too large");
+        assert!(
+            buffer.capacity() <= MAX_BUFFER_SIZE * 2,
+            "Buffer capacity grew too large"
+        );
     }
 }
 
@@ -540,11 +565,19 @@ fn test_state_machine_corruption(input: &AdvancedFuzzInput) {
         match operation {
             CodecOperation::InterleavedOps { operations } => {
                 test_interleaved_operations(&mut codec, &mut buffer, operations);
-            },
+            }
 
-            CodecOperation::ErrorInjectionTest { error_type, recovery_action } => {
-                test_error_injection_and_recovery(&mut codec, &mut buffer, error_type, recovery_action);
-            },
+            CodecOperation::ErrorInjectionTest {
+                error_type,
+                recovery_action,
+            } => {
+                test_error_injection_and_recovery(
+                    &mut codec,
+                    &mut buffer,
+                    error_type,
+                    recovery_action,
+                );
+            }
 
             _ => {
                 execute_operation(&mut codec, &mut buffer, operation);
@@ -562,7 +595,10 @@ fn test_advanced_framing(input: &AdvancedFuzzInput) {
 
     // Add some test data for framed operations
     for operation in &input.operations {
-        if let CodecOperation::FramedIoOp { operation: FramedOp::WriteFrame(data) } = operation {
+        if let CodecOperation::FramedIoOp {
+            operation: FramedOp::WriteFrame(data),
+        } = operation
+        {
             if data.len() <= MAX_BUFFER_SIZE {
                 mock_io.add_read_data(data.clone());
             }
@@ -606,7 +642,7 @@ fn test_buffer_management_edge_cases(input: &AdvancedFuzzInput) {
                 // Test decode after buffer manipulation
                 let decode_result = codec.decode(&mut buffer);
                 verify_decode_invariants(&decode_result, buffer.len(), &buffer);
-            },
+            }
 
             _ => {
                 execute_operation(&mut codec, &mut buffer, operation);
@@ -649,15 +685,18 @@ fn verify_decode_invariants(
         Ok(Some(decoded)) => {
             // BytesCodec should return all data and clear the buffer
             assert!(buffer.is_empty(), "BytesCodec should consume all data");
-            assert!(decoded.len() <= original_len, "Decoded data can't be larger than input");
-        },
+            assert!(
+                decoded.len() <= original_len,
+                "Decoded data can't be larger than input"
+            );
+        }
         Ok(None) => {
             // No data to decode - buffer should be empty
             assert!(buffer.is_empty(), "Empty decode should leave empty buffer");
-        },
+        }
         Err(_) => {
             // BytesCodec decode should never error in normal conditions
-        },
+        }
     }
 }
 
@@ -688,30 +727,34 @@ fn test_encode_with_pressure(
         EncodingDataType::Bytes => {
             let bytes_data = Bytes::from(data.to_vec());
             codec.encode(bytes_data, buffer)
-        },
+        }
         EncodingDataType::BytesMut => {
             let bytes_mut_data = BytesMut::from(data);
             codec.encode(bytes_mut_data, buffer)
-        },
-        EncodingDataType::Vec => {
-            codec.encode(data.to_vec(), buffer)
-        },
+        }
+        EncodingDataType::Vec => codec.encode(data.to_vec(), buffer),
     };
 
     match result {
         Ok(()) => {
             // Encoding succeeded - verify data was added
-            assert!(buffer.len() >= data.len(), "Data should have been added to buffer");
+            assert!(
+                buffer.len() >= data.len(),
+                "Data should have been added to buffer"
+            );
 
             if force_reallocation && data.len() > original_capacity / 2 {
                 // Should have triggered reallocation
-                assert!(buffer.capacity() >= original_capacity, "Capacity should have grown");
+                assert!(
+                    buffer.capacity() >= original_capacity,
+                    "Capacity should have grown"
+                );
             }
-        },
+        }
         Err(_) => {
             // Encoding failed - this shouldn't happen for BytesCodec
             panic!("BytesCodec encode should not fail");
-        },
+        }
     }
 }
 
@@ -733,10 +776,10 @@ fn test_encode_with_memory_pressure(
         Ok(()) => {
             assert!(buffer.len() >= pre_encode_len + data.len());
             assert!(buffer.capacity() <= MAX_BUFFER_SIZE * 2); // Reasonable upper bound
-        },
+        }
         Err(_) => {
             // Should not happen for BytesCodec
-        },
+        }
     }
 }
 
@@ -751,11 +794,21 @@ fn test_memory_stress(
     for _ in 0..operation_count {
         // Encode stress
         if buffer.len() + test_data.len() <= MAX_BUFFER_SIZE {
-            let _ = codec.encode(Bytes::from(test_data.clone()), buffer);
+            let before_len = buffer.len();
+            let encode_result = codec.encode(Bytes::from(test_data.clone()), buffer);
+            observe_encode_outcome(
+                "memory stress encode",
+                &encode_result,
+                before_len,
+                test_data.len(),
+                buffer,
+            );
         }
 
         // Decode stress
-        let _ = codec.decode(buffer);
+        let original_len = buffer.len();
+        let decode_result = codec.decode(buffer);
+        observe_decode_outcome("memory stress decode", &decode_result, original_len, buffer);
 
         // Verify memory bounds
         assert!(buffer.capacity() <= MAX_BUFFER_SIZE * 2);
@@ -771,21 +824,36 @@ fn test_interleaved_operations(
         match op {
             SimpleOp::SmallEncode(data) => {
                 if data.len() <= 1024 && buffer.len() + data.len() <= MAX_BUFFER_SIZE {
-                    let _ = codec.encode(Bytes::from(data.clone()), buffer);
+                    let before_len = buffer.len();
+                    let encode_result = codec.encode(Bytes::from(data.clone()), buffer);
+                    observe_encode_outcome(
+                        "interleaved small encode",
+                        &encode_result,
+                        before_len,
+                        data.len(),
+                        buffer,
+                    );
                 }
-            },
+            }
             SimpleOp::SmallDecode => {
-                let _ = codec.decode(buffer);
-            },
+                let original_len = buffer.len();
+                let decode_result = codec.decode(buffer);
+                observe_decode_outcome(
+                    "interleaved small decode",
+                    &decode_result,
+                    original_len,
+                    buffer,
+                );
+            }
             SimpleOp::BufferReserve(additional) => {
                 let new_cap = buffer.capacity() + (*additional as usize);
                 if new_cap <= MAX_BUFFER_SIZE {
                     buffer.reserve(*additional as usize);
                 }
-            },
+            }
             SimpleOp::BufferShrink => {
                 buffer.shrink_to_fit();
-            },
+            }
         }
 
         // Verify state after each interleaved operation
@@ -806,20 +874,42 @@ fn test_error_injection_and_recovery(
     match recovery_action {
         RecoveryAction::Continue => {
             // Continue with normal operations
-            let _ = codec.decode(buffer);
-        },
+            let original_len = buffer.len();
+            let decode_result = codec.decode(buffer);
+            observe_decode_outcome(
+                "recovery continue decode",
+                &decode_result,
+                original_len,
+                buffer,
+            );
+        }
         RecoveryAction::Reset => {
             buffer.clear();
-        },
+        }
         RecoveryAction::Retry => {
             // Retry the decode operation
-            let _ = codec.decode(buffer);
-            let _ = codec.decode(buffer);
-        },
+            let first_len = buffer.len();
+            let first_result = codec.decode(buffer);
+            observe_decode_outcome(
+                "recovery retry first decode",
+                &first_result,
+                first_len,
+                buffer,
+            );
+
+            let second_len = buffer.len();
+            let second_result = codec.decode(buffer);
+            observe_decode_outcome(
+                "recovery retry second decode",
+                &second_result,
+                second_len,
+                buffer,
+            );
+        }
         RecoveryAction::Abort => {
             // Stop operations
             return;
-        },
+        }
     }
 
     // Verify state is still consistent after recovery
@@ -841,22 +931,25 @@ fn test_framed_read_advanced_scenarios<R>(
     let _ = _framed_read.read_buffer();
 }
 
-fn execute_operation(
-    codec: &mut BytesCodec,
-    buffer: &mut BytesMut,
-    operation: &CodecOperation,
-) {
+fn execute_operation(codec: &mut BytesCodec, buffer: &mut BytesMut, operation: &CodecOperation) {
     // Generic operation executor
     match operation {
         CodecOperation::DecodeWithConfig { .. } => {
             // Already handled in specific test
-        },
+        }
         CodecOperation::EncodeWithPressure { .. } => {
             // Already handled in specific test
-        },
+        }
         _ => {
             // Handle other operations as needed
-            let _ = codec.decode(buffer);
+            let original_len = buffer.len();
+            let decode_result = codec.decode(buffer);
+            observe_decode_outcome(
+                "generic operation decode",
+                &decode_result,
+                original_len,
+                buffer,
+            );
         }
     }
 }
@@ -873,22 +966,19 @@ fn execute_operation_on_codec(
     }
 }
 
-fn verify_cross_codec_consistency(
-    result1: &Option<BytesMut>,
-    result2: &Option<BytesMut>,
-) {
+fn verify_cross_codec_consistency(result1: &Option<BytesMut>, result2: &Option<BytesMut>) {
     // BytesCodec should behave consistently across instances
     match (result1, result2) {
         (Some(r1), Some(r2)) => {
             // Both decoded something - lengths should match for same input
             // (Note: This might not always hold depending on buffer state)
-        },
+        }
         (None, None) => {
             // Both returned None - consistent
-        },
+        }
         _ => {
             // Different results - may be valid depending on buffer state
-        },
+        }
     }
 }
 
@@ -898,44 +988,136 @@ fn execute_buffer_action(buffer: &mut BytesMut, action: &BufferAction) {
             if buffer.capacity() + (*additional as usize) <= MAX_BUFFER_SIZE {
                 buffer.reserve(*additional as usize);
             }
-        },
+        }
         BufferAction::Resize(new_len) => {
             let new_len = (*new_len as usize).min(MAX_BUFFER_SIZE);
             buffer.resize(new_len, 0);
-        },
+        }
         BufferAction::ShrinkToFit => {
             buffer.shrink_to_fit();
-        },
+        }
         BufferAction::Split(at) => {
             if !buffer.is_empty() {
                 let split_point = (*at as usize).min(buffer.len());
                 let _ = buffer.split_to(split_point);
             }
-        },
+        }
         BufferAction::Truncate(len) => {
             let new_len = (*len as usize).min(buffer.len());
             buffer.truncate(new_len);
-        },
+        }
         BufferAction::Clear => {
             buffer.clear();
-        },
+        }
         BufferAction::ExtendFrom(data) => {
             if buffer.len() + data.len() <= MAX_BUFFER_SIZE {
                 buffer.extend_from_slice(data);
             }
-        },
+        }
     }
 }
 
 fn verify_codec_state_invariants(codec: &BytesCodec, buffer: &BytesMut) {
     // BytesCodec is stateless, so mainly verify it can still operate
     let mut test_buffer = buffer.clone();
-    let _ = codec.clone().decode(&mut test_buffer);
+    let original_len = test_buffer.len();
+    let decode_result = codec.clone().decode(&mut test_buffer);
+    observe_decode_outcome(
+        "state invariant decode",
+        &decode_result,
+        original_len,
+        &test_buffer,
+    );
 
     // Verify codec can still be used for encoding
     let test_data = Bytes::from_static(b"test");
     let mut encode_buffer = BytesMut::new();
-    let _ = codec.clone().encode(test_data, &mut encode_buffer);
+    let before_len = encode_buffer.len();
+    let data_len = test_data.len();
+    let encode_result = codec.clone().encode(test_data, &mut encode_buffer);
+    observe_encode_outcome(
+        "state invariant encode",
+        &encode_result,
+        before_len,
+        data_len,
+        &encode_buffer,
+    );
+}
+
+fn observe_decode_outcome(
+    context: &str,
+    result: &io::Result<Option<BytesMut>>,
+    original_len: usize,
+    buffer: &BytesMut,
+) {
+    match result {
+        Ok(Some(decoded)) => {
+            assert!(
+                decoded.len() <= original_len,
+                "{context} decoded more bytes than the input buffer held"
+            );
+            assert!(
+                buffer.len() <= original_len,
+                "{context} left an impossible buffer length after decode"
+            );
+            std::hint::black_box((context, decoded.len(), buffer.len()));
+        }
+        Ok(None) => {
+            assert!(
+                buffer.len() <= original_len,
+                "{context} left an impossible buffer length while pending"
+            );
+            std::hint::black_box((context, "pending", buffer.len()));
+        }
+        Err(error) => {
+            let message = error.to_string();
+            assert!(
+                !message.trim().is_empty(),
+                "{context} rejection should expose a diagnostic"
+            );
+            assert!(
+                message.len() <= 4096,
+                "{context} rejection diagnostic should stay bounded: {} bytes",
+                message.len()
+            );
+            std::hint::black_box((context, message));
+        }
+    }
+}
+
+fn observe_encode_outcome(
+    context: &str,
+    result: &io::Result<()>,
+    before_len: usize,
+    encoded_len: usize,
+    buffer: &BytesMut,
+) {
+    match result {
+        Ok(()) => {
+            assert!(
+                buffer.len() >= before_len + encoded_len,
+                "{context} did not append the encoded payload"
+            );
+            assert!(
+                buffer.capacity() <= MAX_BUFFER_SIZE * 2,
+                "{context} grew buffer capacity beyond the fuzz envelope"
+            );
+            std::hint::black_box((context, buffer.len(), buffer.capacity()));
+        }
+        Err(error) => {
+            let message = error.to_string();
+            assert!(
+                !message.trim().is_empty(),
+                "{context} rejection should expose a diagnostic"
+            );
+            assert!(
+                message.len() <= 4096,
+                "{context} rejection diagnostic should stay bounded: {} bytes",
+                message.len()
+            );
+            std::hint::black_box((context, message));
+        }
+    }
 }
 
 fn verify_buffer_post_operation_invariants(buffer: &BytesMut) {
