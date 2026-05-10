@@ -4,32 +4,33 @@
 //! configurable thresholds, and trend analysis for long-term conformance
 //! maintenance.
 
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
-use serde::{Deserialize, Serialize};
 
-use crate::coverage_matrix::CoverageMatrix;
+use super::coverage_matrix::CoverageMatrix;
 
 /// Historical conformance record
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConformanceRecord {
-    pub timestamp: String,           // ISO timestamp
-    pub commit_sha: String,          // Git commit hash
-    pub branch: String,              // Git branch name
-    pub compliance_score: f64,       // Overall compliance score
-    pub must_coverage: f64,          // MUST clause coverage percentage
-    pub should_coverage: f64,        // SHOULD clause coverage percentage
-    pub total_tests: usize,          // Total test count
-    pub passing_tests: usize,        // Passing test count
-    pub conformance_level: String,   // FullyConformant, PartiallyConformant, NonConformant
+    pub timestamp: String,                     // ISO timestamp
+    pub commit_sha: String,                    // Git commit hash
+    pub branch: String,                        // Git branch name
+    pub compliance_score: f64,                 // Overall compliance score
+    pub must_coverage: f64,                    // MUST clause coverage percentage
+    pub should_coverage: f64,                  // SHOULD clause coverage percentage
+    pub total_tests: usize,                    // Total test count
+    pub passing_tests: usize,                  // Passing test count
+    pub conformance_level: String, // FullyConformant, PartiallyConformant, NonConformant
     pub section_scores: BTreeMap<String, f64>, // Per-section scores
 }
 
 impl ConformanceRecord {
     /// Create conformance record from coverage matrix
     pub fn from_matrix(matrix: &CoverageMatrix, commit_sha: String, branch: String) -> Self {
-        let section_scores = matrix.sections
+        let section_scores = matrix
+            .sections
             .iter()
             .map(|(k, v)| (k.clone(), v.score))
             .collect();
@@ -95,10 +96,7 @@ impl ConformanceHistory {
 
     /// Get conformance records for a specific branch
     pub fn records_for_branch(&self, branch: &str) -> Vec<&ConformanceRecord> {
-        self.records
-            .iter()
-            .filter(|r| r.branch == branch)
-            .collect()
+        self.records.iter().filter(|r| r.branch == branch).collect()
     }
 
     /// Calculate conformance trend (positive = improving, negative = declining)
@@ -128,31 +126,37 @@ impl ConformanceHistory {
     pub fn records_since(&self, since: &str) -> Vec<&ConformanceRecord> {
         self.records
             .iter()
-            .filter(|r| r.timestamp > since)
+            .filter(|r| r.timestamp.as_str() > since)
             .collect()
+    }
+}
+
+impl Default for ConformanceHistory {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 /// Regression detection configuration
 #[derive(Debug, Clone)]
 pub struct RegressionConfig {
-    pub compliance_threshold: f64,    // Minimum acceptable compliance score
-    pub must_threshold: f64,          // Minimum acceptable MUST coverage
-    pub should_threshold: f64,        // Minimum acceptable SHOULD coverage
-    pub max_score_drop: f64,          // Maximum allowable score drop
-    pub baseline_branch: String,      // Branch to compare against (e.g., "main")
-    pub window_size: usize,           // Number of commits for trend analysis
+    pub compliance_threshold: f64, // Minimum acceptable compliance score
+    pub must_threshold: f64,       // Minimum acceptable MUST coverage
+    pub should_threshold: f64,     // Minimum acceptable SHOULD coverage
+    pub max_score_drop: f64,       // Maximum allowable score drop
+    pub baseline_branch: String,   // Branch to compare against (e.g., "main")
+    pub window_size: usize,        // Number of commits for trend analysis
 }
 
 impl Default for RegressionConfig {
     fn default() -> Self {
         Self {
-            compliance_threshold: 90.0,   // 90% minimum compliance
-            must_threshold: 95.0,         // 95% minimum MUST coverage
-            should_threshold: 85.0,       // 85% minimum SHOULD coverage
-            max_score_drop: 5.0,          // 5% maximum drop allowed
+            compliance_threshold: 90.0, // 90% minimum compliance
+            must_threshold: 95.0,       // 95% minimum MUST coverage
+            should_threshold: 85.0,     // 85% minimum SHOULD coverage
+            max_score_drop: 5.0,        // 5% maximum drop allowed
             baseline_branch: "main".to_string(),
-            window_size: 10,              // Last 10 commits
+            window_size: 10, // Last 10 commits
         }
     }
 }
@@ -201,7 +205,12 @@ impl RegressionDetector {
     }
 
     /// Check for conformance regressions
-    pub fn check_regression(&self, current: &CoverageMatrix, commit_sha: String, branch: String) -> RegressionResult {
+    pub fn check_regression(
+        &self,
+        current: &CoverageMatrix,
+        _commit_sha: String,
+        branch: String,
+    ) -> RegressionResult {
         // Check absolute thresholds
         if let Some(failure) = self.check_absolute_thresholds(current) {
             return failure;
@@ -251,12 +260,18 @@ impl RegressionDetector {
     }
 
     /// Check for regression against baseline branch
-    fn check_baseline_regression(&self, current: &CoverageMatrix, branch: &str) -> Option<RegressionResult> {
+    fn check_baseline_regression(
+        &self,
+        current: &CoverageMatrix,
+        branch: &str,
+    ) -> Option<RegressionResult> {
         if branch == self.config.baseline_branch {
             return None; // Don't compare baseline against itself
         }
 
-        let baseline_records = self.history.records_for_branch(&self.config.baseline_branch);
+        let baseline_records = self
+            .history
+            .records_for_branch(&self.config.baseline_branch);
         if let Some(baseline) = baseline_records.last() {
             let score_drop = baseline.compliance_score - current.compliance_score;
 
@@ -286,13 +301,15 @@ impl RegressionDetector {
 
     /// Check trend-based regression detection
     fn check_trend_regression(&self, branch: &str) -> Option<RegressionResult> {
-        if let Some(trend) = self.history.compliance_trend(branch, self.config.window_size) {
-            if trend < -self.config.max_score_drop {
-                return Some(RegressionResult::Warning(format!(
-                    "Negative compliance trend detected: {:.1}% drop over {} commits",
-                    -trend, self.config.window_size
-                )));
-            }
+        if let Some(trend) = self
+            .history
+            .compliance_trend(branch, self.config.window_size)
+            && trend < -self.config.max_score_drop
+        {
+            return Some(RegressionResult::Warning(format!(
+                "Negative compliance trend detected: {:.1}% drop over {} commits",
+                -trend, self.config.window_size
+            )));
         }
 
         None
@@ -344,27 +361,54 @@ impl RegressionDetector {
                 record.conformance_level
             ));
         }
-        report.push_str("\n");
+        report.push('\n');
 
         // Trend analysis
-        if let Some(trend) = self.history.compliance_trend(branch, self.config.window_size) {
+        if let Some(trend) = self
+            .history
+            .compliance_trend(branch, self.config.window_size)
+        {
             report.push_str("## Trend Analysis\n\n");
             if trend > 0.0 {
-                report.push_str(&format!("✅ **Improving trend**: +{:.1}% over last {} commits\n\n", trend, self.config.window_size));
+                report.push_str(&format!(
+                    "✅ **Improving trend**: +{:.1}% over last {} commits\n\n",
+                    trend, self.config.window_size
+                ));
             } else if trend < -1.0 {
-                report.push_str(&format!("⚠️ **Declining trend**: {:.1}% over last {} commits\n\n", trend, self.config.window_size));
+                report.push_str(&format!(
+                    "⚠️ **Declining trend**: {:.1}% over last {} commits\n\n",
+                    trend, self.config.window_size
+                ));
             } else {
-                report.push_str(&format!("➡️ **Stable trend**: {:.1}% over last {} commits\n\n", trend, self.config.window_size));
+                report.push_str(&format!(
+                    "➡️ **Stable trend**: {:.1}% over last {} commits\n\n",
+                    trend, self.config.window_size
+                ));
             }
         }
 
         // Thresholds
         report.push_str("## Configured Thresholds\n\n");
-        report.push_str(&format!("- **Compliance Score**: ≥{:.1}%\n", self.config.compliance_threshold));
-        report.push_str(&format!("- **MUST Coverage**: ≥{:.1}%\n", self.config.must_threshold));
-        report.push_str(&format!("- **SHOULD Coverage**: ≥{:.1}%\n", self.config.should_threshold));
-        report.push_str(&format!("- **Maximum Score Drop**: {:.1}%\n", self.config.max_score_drop));
-        report.push_str(&format!("- **Baseline Branch**: {}\n", self.config.baseline_branch));
+        report.push_str(&format!(
+            "- **Compliance Score**: ≥{:.1}%\n",
+            self.config.compliance_threshold
+        ));
+        report.push_str(&format!(
+            "- **MUST Coverage**: ≥{:.1}%\n",
+            self.config.must_threshold
+        ));
+        report.push_str(&format!(
+            "- **SHOULD Coverage**: ≥{:.1}%\n",
+            self.config.should_threshold
+        ));
+        report.push_str(&format!(
+            "- **Maximum Score Drop**: {:.1}%\n",
+            self.config.max_score_drop
+        ));
+        report.push_str(&format!(
+            "- **Baseline Branch**: {}\n",
+            self.config.baseline_branch
+        ));
 
         report
     }
@@ -372,8 +416,8 @@ impl RegressionDetector {
 
 #[cfg(test)]
 mod tests {
+    use super::super::coverage_matrix::CoverageMatrix;
     use super::*;
-    use crate::coverage_matrix::{CoverageMatrix, OverallCoverage, ConformanceLevel};
 
     fn create_test_matrix(compliance_score: f64) -> CoverageMatrix {
         let mut matrix = CoverageMatrix::new("test-version".to_string());
@@ -388,7 +432,8 @@ mod tests {
     #[test]
     fn test_conformance_record_creation() {
         let matrix = create_test_matrix(95.0);
-        let record = ConformanceRecord::from_matrix(&matrix, "abc123".to_string(), "main".to_string());
+        let record =
+            ConformanceRecord::from_matrix(&matrix, "abc123".to_string(), "main".to_string());
 
         assert_eq!(record.commit_sha, "abc123");
         assert_eq!(record.branch, "main");
@@ -401,7 +446,7 @@ mod tests {
         let record = ConformanceRecord::from_matrix(
             &create_test_matrix(90.0),
             "abc123".to_string(),
-            "main".to_string()
+            "main".to_string(),
         );
 
         history.add_record(record);
@@ -422,12 +467,14 @@ mod tests {
 
         // Test passing case
         let good_matrix = create_test_matrix(95.0);
-        let result = detector.check_regression(&good_matrix, "abc123".to_string(), "feature".to_string());
+        let result =
+            detector.check_regression(&good_matrix, "abc123".to_string(), "feature".to_string());
         assert_eq!(result, RegressionResult::Pass);
 
         // Test failing case
         let bad_matrix = create_test_matrix(80.0);
-        let result = detector.check_regression(&bad_matrix, "def456".to_string(), "feature".to_string());
+        let result =
+            detector.check_regression(&bad_matrix, "def456".to_string(), "feature".to_string());
         assert!(result.is_failure());
     }
 
@@ -440,7 +487,7 @@ mod tests {
             let record = ConformanceRecord::from_matrix(
                 &create_test_matrix(i as f64),
                 format!("commit{}", i),
-                "main".to_string()
+                "main".to_string(),
             );
             history.add_record(record);
         }

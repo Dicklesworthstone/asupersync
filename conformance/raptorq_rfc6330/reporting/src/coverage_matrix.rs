@@ -4,10 +4,10 @@
 //! section-by-section scoring with MUST/SHOULD/MAY breakdown, and overall
 //! conformance level determination.
 
-use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
-use crate::raptorq_rfc6330::{ConformanceResult, TestExecution, RequirementLevel};
+use crate::raptorq_rfc6330::{ConformanceResult, RequirementLevel, TestExecution};
 
 /// Overall conformance status based on coverage thresholds
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,15 +51,15 @@ impl std::fmt::Display for SectionConformanceStatus {
 /// Coverage statistics for individual RFC sections
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SectionCoverage {
-    pub section: String,           // "4.2", "5.3", etc.
-    pub title: String,             // Human-readable section title
-    pub must_total: usize,         // Total MUST clauses in section
-    pub must_passing: usize,       // Passing MUST clauses
-    pub should_total: usize,       // Total SHOULD clauses in section
-    pub should_passing: usize,     // Passing SHOULD clauses
-    pub may_total: usize,          // Total MAY clauses in section
-    pub may_passing: usize,        // Passing MAY clauses
-    pub score: f64,               // (must_passing + should_passing) / (must_total + should_total)
+    pub section: String,       // "4.2", "5.3", etc.
+    pub title: String,         // Human-readable section title
+    pub must_total: usize,     // Total MUST clauses in section
+    pub must_passing: usize,   // Passing MUST clauses
+    pub should_total: usize,   // Total SHOULD clauses in section
+    pub should_passing: usize, // Passing SHOULD clauses
+    pub may_total: usize,      // Total MAY clauses in section
+    pub may_passing: usize,    // Passing MAY clauses
+    pub score: f64,            // (must_passing + should_passing) / (must_total + should_total)
     pub conformance_status: SectionConformanceStatus,
     pub failing_tests: Vec<String>, // IDs of failing test cases
 }
@@ -138,7 +138,7 @@ impl SectionCoverage {
 }
 
 /// Overall coverage statistics across all sections
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OverallCoverage {
     pub must_total: usize,
     pub must_passing: usize,
@@ -211,10 +211,10 @@ impl OverallCoverage {
 pub struct CoverageMatrix {
     pub sections: BTreeMap<String, SectionCoverage>,
     pub overall: OverallCoverage,
-    pub compliance_score: f64,  // (MUST_passing + SHOULD_passing) / (MUST_total + SHOULD_total)
+    pub compliance_score: f64, // (MUST_passing + SHOULD_passing) / (MUST_total + SHOULD_total)
     pub conformance_level: ConformanceLevel,
-    pub generated_at: String,   // ISO timestamp
-    pub rfc_version: String,    // "RFC 6330"
+    pub generated_at: String,           // ISO timestamp
+    pub rfc_version: String,            // "RFC 6330"
     pub implementation_version: String, // Git commit or version tag
 }
 
@@ -233,31 +233,27 @@ impl CoverageMatrix {
     }
 
     /// Calculate coverage matrix from test execution results
-    pub fn from_test_results(
-        executions: &[TestExecution],
-        implementation_version: String,
-    ) -> Self {
+    pub fn from_test_results(executions: &[TestExecution], implementation_version: String) -> Self {
         let mut matrix = Self::new(implementation_version);
 
         // Group tests by section
         let mut section_tests: BTreeMap<String, Vec<&TestExecution>> = BTreeMap::new();
         for execution in executions {
-            let section = execution.test.section();
-            section_tests.entry(section.to_string())
+            let section = &execution.section;
+            section_tests
+                .entry(section.clone())
                 .or_default()
                 .push(execution);
         }
 
         // Calculate coverage for each section
         for (section, tests) in section_tests {
-            let mut section_coverage = SectionCoverage::new(
-                section.clone(),
-                format!("Section {}", section), // TODO: Get actual titles from RFC
-            );
+            let mut section_coverage =
+                SectionCoverage::new(section.clone(), rfc6330_section_title(&section).to_string());
 
             for test_execution in tests {
-                let level = test_execution.test.requirement_level();
-                let is_passing = matches!(test_execution.result, ConformanceResult::Pass);
+                let level = test_execution.level;
+                let is_passing = test_execution.result.is_passing();
 
                 match level {
                     RequirementLevel::Must => {
@@ -265,7 +261,9 @@ impl CoverageMatrix {
                         if is_passing {
                             section_coverage.must_passing += 1;
                         } else {
-                            section_coverage.failing_tests.push(test_execution.test.rfc_clause().to_string());
+                            section_coverage
+                                .failing_tests
+                                .push(test_execution.rfc_clause.clone());
                         }
                     }
                     RequirementLevel::Should => {
@@ -273,7 +271,9 @@ impl CoverageMatrix {
                         if is_passing {
                             section_coverage.should_passing += 1;
                         } else {
-                            section_coverage.failing_tests.push(test_execution.test.rfc_clause().to_string());
+                            section_coverage
+                                .failing_tests
+                                .push(test_execution.rfc_clause.clone());
                         }
                     }
                     RequirementLevel::May => {
@@ -315,6 +315,9 @@ impl CoverageMatrix {
                 }
                 ConformanceResult::ExpectedFailure { .. } => {
                     matrix.overall.passing_tests += 1; // XFAIL counts as passing
+                }
+                ConformanceResult::Blocked { .. } | ConformanceResult::Unsupported { .. } => {
+                    matrix.overall.skipped_tests += 1;
                 }
             }
         }
@@ -381,66 +384,69 @@ impl CoverageMatrix {
     /// Generate conformance badge text
     pub fn badge_text(&self) -> String {
         match self.conformance_level {
-            ConformanceLevel::FullyConformant => format!("{:.1}% Conformant", self.compliance_score),
-            ConformanceLevel::PartiallyConformant => format!("{:.1}% Partial", self.compliance_score),
-            ConformanceLevel::NonConformant => format!("{:.1}% Non-Conformant", self.compliance_score),
+            ConformanceLevel::FullyConformant => {
+                format!("{:.1}% Conformant", self.compliance_score)
+            }
+            ConformanceLevel::PartiallyConformant => {
+                format!("{:.1}% Partial", self.compliance_score)
+            }
+            ConformanceLevel::NonConformant => {
+                format!("{:.1}% Non-Conformant", self.compliance_score)
+            }
         }
+    }
+}
+
+fn rfc6330_section_title(section: &str) -> &str {
+    match section {
+        "4.1" => "Objects and Source Blocks",
+        "4.2" => "Encoding Process",
+        "4.3" => "Decoding Process",
+        "5.1" => "Systematic Index",
+        "5.2" => "Parameter Derivation",
+        "5.3" => "Tuple Generation",
+        "5.4" => "Constraint Matrix Structure",
+        "5.5" => "Lookup Tables",
+        _ => "Unknown RFC 6330 Section",
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::raptorq_rfc6330::{ConformanceTest, ConformanceContext, TestCategory};
+    use crate::raptorq_rfc6330::{EvidenceKind, EvidenceMetadata, TestCategory, TestStatus};
 
-    // Mock test implementation for testing
-    struct MockTest {
-        clause: String,
-        section: String,
+    fn passing_execution(
+        rfc_clause: &str,
+        section: &str,
         level: RequirementLevel,
-        category: TestCategory,
-        description: String,
-    }
-
-    impl ConformanceTest for MockTest {
-        fn rfc_clause(&self) -> &str { &self.clause }
-        fn section(&self) -> &str { &self.section }
-        fn requirement_level(&self) -> RequirementLevel { self.level }
-        fn category(&self) -> TestCategory { self.category }
-        fn description(&self) -> &str { &self.description }
-        fn run(&self, _ctx: &ConformanceContext) -> ConformanceResult {
-            ConformanceResult::Pass
+    ) -> TestExecution {
+        TestExecution {
+            test_name: rfc_clause.to_string(),
+            rfc_clause: rfc_clause.to_string(),
+            section: section.to_string(),
+            level,
+            category: TestCategory::Unit,
+            description: format!("{rfc_clause} coverage fixture"),
+            result: ConformanceResult::Pass,
+            evidence: EvidenceMetadata {
+                evidence_kind: EvidenceKind::LiveChecked,
+                test_status: TestStatus::Pass,
+                blocker_id: None,
+                fixture_reference: None,
+                production_seam_path: Some("conformance/raptorq_rfc6330/reporting".to_string()),
+            },
+            duration: std::time::Duration::from_millis(100),
+            timestamp: std::time::SystemTime::UNIX_EPOCH,
         }
-        fn tags(&self) -> Vec<&str> { vec![] }
     }
 
     #[test]
     fn test_coverage_matrix_calculation() {
-        let tests: Vec<Box<dyn ConformanceTest>> = vec![
-            Box::new(MockTest {
-                clause: "RFC6330-4.1.1".to_string(),
-                section: "4.1".to_string(),
-                level: RequirementLevel::Must,
-                category: TestCategory::Unit,
-                description: "Test 1".to_string(),
-            }),
-            Box::new(MockTest {
-                clause: "RFC6330-4.1.2".to_string(),
-                section: "4.1".to_string(),
-                level: RequirementLevel::Should,
-                category: TestCategory::Unit,
-                description: "Test 2".to_string(),
-            }),
+        let executions = vec![
+            passing_execution("RFC6330-4.1.1", "4.1", RequirementLevel::Must),
+            passing_execution("RFC6330-4.1.2", "4.1", RequirementLevel::Should),
         ];
-
-        let executions: Vec<TestExecution> = tests.iter().map(|test| {
-            TestExecution {
-                test: test.as_ref(),
-                result: ConformanceResult::Pass,
-                duration: std::time::Duration::from_millis(100),
-                timestamp: std::time::SystemTime::now(),
-            }
-        }).collect();
 
         let matrix = CoverageMatrix::from_test_results(&executions, "test-version".to_string());
 
@@ -450,6 +456,21 @@ mod tests {
         assert_eq!(matrix.overall.should_passing, 1);
         assert_eq!(matrix.compliance_score, 100.0);
         assert_eq!(matrix.conformance_level, ConformanceLevel::FullyConformant);
+
+        let section = matrix.sections.get("4.1").expect("section 4.1 coverage");
+        assert_eq!(section.title, "Objects and Source Blocks");
+    }
+
+    #[test]
+    fn test_rfc6330_section_title_mapping() {
+        assert_eq!(rfc6330_section_title("4.2"), "Encoding Process");
+        assert_eq!(rfc6330_section_title("4.3"), "Decoding Process");
+        assert_eq!(rfc6330_section_title("5.1"), "Systematic Index");
+        assert_eq!(rfc6330_section_title("5.2"), "Parameter Derivation");
+        assert_eq!(rfc6330_section_title("5.3"), "Tuple Generation");
+        assert_eq!(rfc6330_section_title("5.4"), "Constraint Matrix Structure");
+        assert_eq!(rfc6330_section_title("5.5"), "Lookup Tables");
+        assert_eq!(rfc6330_section_title("9.9"), "Unknown RFC 6330 Section");
     }
 
     #[test]
@@ -457,7 +478,7 @@ mod tests {
         let mut section = SectionCoverage::new("4.1".to_string(), "Test Section".to_string());
 
         section.must_total = 10;
-        section.must_passing = 9;  // 90% MUST coverage
+        section.must_passing = 9; // 90% MUST coverage
         section.should_total = 5;
         section.should_passing = 4; // 80% SHOULD coverage
 
@@ -466,7 +487,10 @@ mod tests {
         assert_eq!(section.must_coverage_percent(), 90.0);
         assert_eq!(section.should_coverage_percent(), 80.0);
         assert!((section.score - 86.67).abs() < 0.1); // (9+4)/(10+5) * 100
-        assert_eq!(section.conformance_status, SectionConformanceStatus::Warning);
+        assert_eq!(
+            section.conformance_status,
+            SectionConformanceStatus::Warning
+        );
     }
 
     #[test]
@@ -475,20 +499,23 @@ mod tests {
 
         // Test FullyConformant
         matrix.overall.must_total = 20;
-        matrix.overall.must_passing = 19;  // 95% MUST
+        matrix.overall.must_passing = 19; // 95% MUST
         matrix.overall.should_total = 10;
         matrix.overall.should_passing = 9; // 90% SHOULD
         matrix.calculate_compliance_score();
         assert_eq!(matrix.conformance_level, ConformanceLevel::FullyConformant);
 
         // Test PartiallyConformant
-        matrix.overall.must_passing = 17;  // 85% MUST
+        matrix.overall.must_passing = 17; // 85% MUST
         matrix.overall.should_passing = 7; // 70% SHOULD
         matrix.calculate_compliance_score();
-        assert_eq!(matrix.conformance_level, ConformanceLevel::PartiallyConformant);
+        assert_eq!(
+            matrix.conformance_level,
+            ConformanceLevel::PartiallyConformant
+        );
 
         // Test NonConformant
-        matrix.overall.must_passing = 15;  // 75% MUST (below 85% threshold)
+        matrix.overall.must_passing = 15; // 75% MUST (below 85% threshold)
         matrix.calculate_compliance_score();
         assert_eq!(matrix.conformance_level, ConformanceLevel::NonConformant);
     }

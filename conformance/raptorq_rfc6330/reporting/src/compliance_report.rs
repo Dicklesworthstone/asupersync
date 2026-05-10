@@ -6,10 +6,10 @@
 //! - HTML reports with interactive features
 //! - SVG badges for README display
 
-use std::collections::BTreeMap;
 use serde_json;
+use std::collections::BTreeMap;
 
-use crate::coverage_matrix::{CoverageMatrix, SectionCoverage, ConformanceLevel};
+use super::coverage_matrix::{ConformanceLevel, CoverageMatrix, SectionCoverage};
 
 /// Report generation configuration
 #[derive(Debug, Clone)]
@@ -91,53 +91,77 @@ impl ComplianceReportGenerator {
         let mut report = String::new();
 
         // Header
-        report.push_str(&format!("# RFC 6330 RaptorQ Conformance Report\n\n"));
+        report.push_str("# RFC 6330 RaptorQ Conformance Report\n\n");
         report.push_str(&format!("**Generated:** {}\n", matrix.generated_at));
-        report.push_str(&format!("**Implementation Version:** {}\n", matrix.implementation_version));
+        report.push_str(&format!(
+            "**Implementation Version:** {}\n",
+            matrix.implementation_version
+        ));
         report.push_str(&format!("**RFC Version:** {}\n\n", matrix.rfc_version));
 
         // Overall status
         report.push_str("## Overall Conformance Status\n\n");
         report.push_str(&format!("**Status:** {}\n", matrix.conformance_level));
-        report.push_str(&format!("**Compliance Score:** {:.1}%\n\n", matrix.compliance_score));
+        report.push_str(&format!(
+            "**Compliance Score:** {:.1}%\n\n",
+            matrix.compliance_score
+        ));
 
         // Conformance badge
         report.push_str("### Conformance Badge\n\n");
-        report.push_str(&format!("```markdown\n"));
-        report.push_str(&format!("![RFC 6330 Conformance]({})\n", self.generate_badge_url(matrix)));
-        report.push_str(&format!("```\n\n"));
+        report.push_str("```markdown\n");
+        report.push_str(&format!(
+            "![RFC 6330 Conformance]({})\n",
+            self.generate_badge_url(matrix)
+        ));
+        report.push_str("```\n\n");
 
         // Coverage summary
         report.push_str("## Coverage Summary\n\n");
         report.push_str("| Requirement Level | Total | Passing | Coverage |\n");
         report.push_str("|-------------------|-------|---------|----------|\n");
-        report.push_str(&format!("| **MUST**          | {}    | {}      | {:.1}%   |\n",
+        report.push_str(&format!(
+            "| **MUST**          | {}    | {}      | {:.1}%   |\n",
             matrix.overall.must_total,
             matrix.overall.must_passing,
-            matrix.overall.must_coverage_percent()));
-        report.push_str(&format!("| **SHOULD**        | {}    | {}      | {:.1}%   |\n",
+            matrix.overall.must_coverage_percent()
+        ));
+        report.push_str(&format!(
+            "| **SHOULD**        | {}    | {}      | {:.1}%   |\n",
             matrix.overall.should_total,
             matrix.overall.should_passing,
-            matrix.overall.should_coverage_percent()));
-        report.push_str(&format!("| **MAY**           | {}    | {}      | {:.1}%   |\n\n",
+            matrix.overall.should_coverage_percent()
+        ));
+        report.push_str(&format!(
+            "| **MAY**           | {}    | {}      | {:.1}%   |\n\n",
             matrix.overall.may_total,
             matrix.overall.may_passing,
-            matrix.overall.may_coverage_percent()));
+            matrix.overall.may_coverage_percent()
+        ));
 
         // Test execution summary
         report.push_str("### Test Execution Summary\n\n");
         report.push_str("| Status | Count | Percentage |\n");
         report.push_str("|--------|-------|------------|\n");
-        report.push_str(&format!("| Passing | {} | {:.1}% |\n",
+        report.push_str(&format!(
+            "| Passing | {} | {:.1}% |\n",
             matrix.overall.passing_tests,
-            (matrix.overall.passing_tests as f64 / matrix.overall.total_tests as f64) * 100.0));
-        report.push_str(&format!("| Failing | {} | {:.1}% |\n",
+            (matrix.overall.passing_tests as f64 / matrix.overall.total_tests as f64) * 100.0
+        ));
+        report.push_str(&format!(
+            "| Failing | {} | {:.1}% |\n",
             matrix.overall.failing_tests,
-            (matrix.overall.failing_tests as f64 / matrix.overall.total_tests as f64) * 100.0));
-        report.push_str(&format!("| Skipped | {} | {:.1}% |\n",
+            (matrix.overall.failing_tests as f64 / matrix.overall.total_tests as f64) * 100.0
+        ));
+        report.push_str(&format!(
+            "| Skipped | {} | {:.1}% |\n",
             matrix.overall.skipped_tests,
-            (matrix.overall.skipped_tests as f64 / matrix.overall.total_tests as f64) * 100.0));
-        report.push_str(&format!("| **Total** | **{}** | **100.0%** |\n\n", matrix.overall.total_tests));
+            (matrix.overall.skipped_tests as f64 / matrix.overall.total_tests as f64) * 100.0
+        ));
+        report.push_str(&format!(
+            "| **Total** | **{}** | **100.0%** |\n\n",
+            matrix.overall.total_tests
+        ));
 
         // Section-by-section breakdown
         report.push_str("## Section-by-Section Coverage\n\n");
@@ -155,7 +179,7 @@ impl ComplianceReportGenerator {
                 section.conformance_status
             ));
         }
-        report.push_str("\n");
+        report.push('\n');
 
         // Overall row
         report.push_str(&format!(
@@ -211,30 +235,46 @@ impl ComplianceReportGenerator {
         report.push_str("- **Non-Conformant**: Below partial conformance thresholds\n\n");
 
         report.push_str("---\n");
-        report.push_str(&format!("*Generated by asupersync RFC 6330 conformance pipeline at {}*\n", matrix.generated_at));
+        report.push_str(&format!(
+            "*Generated by asupersync RFC 6330 conformance pipeline at {}*\n",
+            matrix.generated_at
+        ));
 
         report
     }
 
     /// Add detailed section analysis to report
     fn add_section_details(&self, report: &mut String, section: &SectionCoverage, icon: &str) {
-        report.push_str(&format!("#### {} Section {} - {}\n\n", icon, section.section, section.title));
-        report.push_str(&format!("- **MUST Coverage**: {:.1}% ({}/{})\n",
-            section.must_coverage_percent(), section.must_passing, section.must_total));
-        report.push_str(&format!("- **SHOULD Coverage**: {:.1}% ({}/{})\n",
-            section.should_coverage_percent(), section.should_passing, section.should_total));
+        report.push_str(&format!(
+            "#### {} Section {} - {}\n\n",
+            icon, section.section, section.title
+        ));
+        report.push_str(&format!(
+            "- **MUST Coverage**: {:.1}% ({}/{})\n",
+            section.must_coverage_percent(),
+            section.must_passing,
+            section.must_total
+        ));
+        report.push_str(&format!(
+            "- **SHOULD Coverage**: {:.1}% ({}/{})\n",
+            section.should_coverage_percent(),
+            section.should_passing,
+            section.should_total
+        ));
         report.push_str(&format!("- **Overall Score**: {:.1}%\n", section.score));
 
         if !section.failing_tests.is_empty() {
-            report.push_str(&format!("- **Failing Tests**: {}\n", section.failing_tests.join(", ")));
+            report.push_str(&format!(
+                "- **Failing Tests**: {}\n",
+                section.failing_tests.join(", ")
+            ));
         }
-        report.push_str("\n");
+        report.push('\n');
     }
 
     /// Generate JSON report for CI integration
     fn generate_json_report(&self, matrix: &CoverageMatrix) -> String {
-        serde_json::to_string_pretty(matrix)
-            .unwrap_or_else(|_| "{}".to_string())
+        serde_json::to_string_pretty(matrix).unwrap_or_else(|_| "{}".to_string())
     }
 
     /// Generate HTML report with interactive features
@@ -253,16 +293,28 @@ impl ComplianceReportGenerator {
         html.push_str("  <div class=\"container\">\n");
         html.push_str("    <header>\n");
         html.push_str("      <h1>RFC 6330 RaptorQ Conformance Report</h1>\n");
-        html.push_str(&format!("      <p><strong>Generated:</strong> {}</p>\n", matrix.generated_at));
-        html.push_str(&format!("      <p><strong>Implementation:</strong> {}</p>\n", matrix.implementation_version));
+        html.push_str(&format!(
+            "      <p><strong>Generated:</strong> {}</p>\n",
+            matrix.generated_at
+        ));
+        html.push_str(&format!(
+            "      <p><strong>Implementation:</strong> {}</p>\n",
+            matrix.implementation_version
+        ));
         html.push_str("    </header>\n\n");
 
         // Overall status
         html.push_str("    <section class=\"status\">\n");
         html.push_str("      <h2>Overall Conformance</h2>\n");
-        html.push_str(&format!("      <div class=\"status-badge {}\">{}</div>\n",
-            matrix.badge_color(), matrix.conformance_level));
-        html.push_str(&format!("      <p><strong>Compliance Score:</strong> {:.1}%</p>\n", matrix.compliance_score));
+        html.push_str(&format!(
+            "      <div class=\"status-badge {}\">{}</div>\n",
+            matrix.badge_color(),
+            matrix.conformance_level
+        ));
+        html.push_str(&format!(
+            "      <p><strong>Compliance Score:</strong> {:.1}%</p>\n",
+            matrix.compliance_score
+        ));
         html.push_str("    </section>\n\n");
 
         // Coverage table
@@ -277,14 +329,29 @@ impl ComplianceReportGenerator {
         for section in matrix.sections.values() {
             html.push_str("          <tr>\n");
             html.push_str(&format!("            <td>§{}</td>\n", section.section));
-            html.push_str(&format!("            <td>{}/{} ({:.1}%)</td>\n",
-                section.must_passing, section.must_total, section.must_coverage_percent()));
-            html.push_str(&format!("            <td>{}/{} ({:.1}%)</td>\n",
-                section.should_passing, section.should_total, section.should_coverage_percent()));
-            html.push_str(&format!("            <td>{}/{} ({:.1}%)</td>\n",
-                section.may_passing, section.may_total, section.may_coverage_percent()));
+            html.push_str(&format!(
+                "            <td>{}/{} ({:.1}%)</td>\n",
+                section.must_passing,
+                section.must_total,
+                section.must_coverage_percent()
+            ));
+            html.push_str(&format!(
+                "            <td>{}/{} ({:.1}%)</td>\n",
+                section.should_passing,
+                section.should_total,
+                section.should_coverage_percent()
+            ));
+            html.push_str(&format!(
+                "            <td>{}/{} ({:.1}%)</td>\n",
+                section.may_passing,
+                section.may_total,
+                section.may_coverage_percent()
+            ));
             html.push_str(&format!("            <td>{:.1}%</td>\n", section.score));
-            html.push_str(&format!("            <td>{}</td>\n", section.conformance_status));
+            html.push_str(&format!(
+                "            <td>{}</td>\n",
+                section.conformance_status
+            ));
             html.push_str("          </tr>\n");
         }
 
@@ -317,33 +384,52 @@ impl ComplianceReportGenerator {
 pub fn generate_ci_summary(matrix: &CoverageMatrix) -> BTreeMap<String, serde_json::Value> {
     let mut summary = BTreeMap::new();
 
-    summary.insert("conformance_level".to_string(),
-        serde_json::Value::String(format!("{:?}", matrix.conformance_level)));
-    summary.insert("compliance_score".to_string(),
-        serde_json::Value::Number(serde_json::Number::from_f64(matrix.compliance_score).unwrap()));
-    summary.insert("must_coverage".to_string(),
-        serde_json::Value::Number(serde_json::Number::from_f64(matrix.overall.must_coverage_percent()).unwrap()));
-    summary.insert("should_coverage".to_string(),
-        serde_json::Value::Number(serde_json::Number::from_f64(matrix.overall.should_coverage_percent()).unwrap()));
-    summary.insert("total_tests".to_string(),
-        serde_json::Value::Number(matrix.overall.total_tests.into()));
-    summary.insert("passing_tests".to_string(),
-        serde_json::Value::Number(matrix.overall.passing_tests.into()));
-    summary.insert("failing_tests".to_string(),
-        serde_json::Value::Number(matrix.overall.failing_tests.into()));
+    summary.insert(
+        "conformance_level".to_string(),
+        serde_json::Value::String(format!("{:?}", matrix.conformance_level)),
+    );
+    summary.insert(
+        "compliance_score".to_string(),
+        serde_json::Value::Number(serde_json::Number::from_f64(matrix.compliance_score).unwrap()),
+    );
+    summary.insert(
+        "must_coverage".to_string(),
+        serde_json::Value::Number(
+            serde_json::Number::from_f64(matrix.overall.must_coverage_percent()).unwrap(),
+        ),
+    );
+    summary.insert(
+        "should_coverage".to_string(),
+        serde_json::Value::Number(
+            serde_json::Number::from_f64(matrix.overall.should_coverage_percent()).unwrap(),
+        ),
+    );
+    summary.insert(
+        "total_tests".to_string(),
+        serde_json::Value::Number(matrix.overall.total_tests.into()),
+    );
+    summary.insert(
+        "passing_tests".to_string(),
+        serde_json::Value::Number(matrix.overall.passing_tests.into()),
+    );
+    summary.insert(
+        "failing_tests".to_string(),
+        serde_json::Value::Number(matrix.overall.failing_tests.into()),
+    );
 
     summary
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::coverage_matrix::{CoverageMatrix, SectionCoverage};
     use super::*;
-    use crate::coverage_matrix::{CoverageMatrix, SectionCoverage, OverallCoverage};
 
     fn create_test_matrix() -> CoverageMatrix {
         let mut matrix = CoverageMatrix::new("test-v1.0.0".to_string());
 
-        let mut section = SectionCoverage::new("4.1".to_string(), "Parameter Derivation".to_string());
+        let mut section =
+            SectionCoverage::new("4.1".to_string(), "Parameter Derivation".to_string());
         section.must_total = 10;
         section.must_passing = 9;
         section.should_total = 5;

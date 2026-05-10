@@ -1468,14 +1468,6 @@ mod tests {
         );
     }
 
-    /// A no-op waker that does nothing when woken.
-    struct NoopWaker;
-
-    impl std::task::Wake for NoopWaker {
-        fn wake(self: std::sync::Arc<Self>) {}
-        fn wake_by_ref(self: &std::sync::Arc<Self>) {}
-    }
-
     fn block_on_simple<F: Future>(future: F) -> F::Output {
         let waker = std::task::Waker::noop().clone();
         let mut context = Context::from_waker(&waker);

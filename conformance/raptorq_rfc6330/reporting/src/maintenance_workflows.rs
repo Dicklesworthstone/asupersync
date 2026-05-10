@@ -51,31 +51,30 @@ impl ReferenceVersion {
     /// Update version information from git repository
     pub fn update_from_git<P: AsRef<Path>>(&mut self, repo_path: P) -> Result<(), std::io::Error> {
         let repo_path = repo_path.as_ref();
+        let repo_path_arg = repo_path.to_string_lossy();
 
         // Get latest commit hash
         if let Ok(output) = Command::new("git")
-            .args(&["-C", &repo_path.to_string_lossy(), "rev-parse", "HEAD"])
+            .args(["-C", repo_path_arg.as_ref(), "rev-parse", "HEAD"])
             .output()
+            && output.status.success()
         {
-            if output.status.success() {
-                self.commit_hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            }
+            self.commit_hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
         }
 
         // Get latest tag version
         if let Ok(output) = Command::new("git")
-            .args(&[
+            .args([
                 "-C",
-                &repo_path.to_string_lossy(),
+                repo_path_arg.as_ref(),
                 "describe",
                 "--tags",
                 "--abbrev=0",
             ])
             .output()
+            && output.status.success()
         {
-            if output.status.success() {
-                self.version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            }
+            self.version = String::from_utf8_lossy(&output.stdout).trim().to_string();
         }
 
         self.last_updated = chrono::Utc::now().to_rfc3339();
@@ -130,7 +129,7 @@ impl ReferenceVersion {
         // Execute generation command
         let output = if cfg!(target_os = "windows") {
             Command::new("cmd")
-                .args(&["/C", &self.generation_command])
+                .args(["/C", self.generation_command.as_str()])
                 .current_dir(&self.fixture_directory)
                 .output()?
         } else {
@@ -175,7 +174,7 @@ impl ReferenceVersion {
 
         let output = if cfg!(target_os = "windows") {
             Command::new("cmd")
-                .args(&["/C", validation_command])
+                .args(["/C", validation_command.as_str()])
                 .current_dir(&self.fixture_directory)
                 .output()?
         } else {
@@ -340,13 +339,13 @@ impl MaintenanceManager {
             }
 
             // Check fixture age
-            if let Ok(age_days) = Self::calculate_fixture_age(&reference.fixture_directory) {
-                if age_days > self.config.max_fixture_age_days {
-                    actions.push(MaintenanceAction::ReviewRequired {
-                        reference_name: name.clone(),
-                        reason: format!("Fixtures are {} days old", age_days),
-                    });
-                }
+            if let Ok(age_days) = Self::calculate_fixture_age(&reference.fixture_directory)
+                && age_days > self.config.max_fixture_age_days
+            {
+                actions.push(MaintenanceAction::ReviewRequired {
+                    reference_name: name.clone(),
+                    reason: format!("Fixtures are {} days old", age_days),
+                });
             }
         }
 
@@ -456,18 +455,16 @@ impl MaintenanceManager {
         for entry in fs::read_dir(fixture_dir)? {
             let entry = entry?;
             let metadata = entry.metadata()?;
-            if let Ok(modified) = metadata.modified() {
-                if modified > newest_time {
-                    newest_time = modified;
-                }
+            if let Ok(modified) = metadata.modified()
+                && modified > newest_time
+            {
+                newest_time = modified;
             }
         }
 
         let duration = std::time::SystemTime::now()
             .duration_since(newest_time)
-            .map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::Other, "Time calculation error")
-            })?;
+            .map_err(|_| std::io::Error::other("Time calculation error"))?;
 
         Ok(duration.as_secs() / 86400) // Convert to days
     }
@@ -556,7 +553,7 @@ impl MaintenanceManager {
                 status
             ));
         }
-        report.push_str("\n");
+        report.push('\n');
 
         // Recommended actions
         let actions = self.check_for_updates();

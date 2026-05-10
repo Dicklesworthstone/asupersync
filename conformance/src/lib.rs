@@ -56,6 +56,8 @@ pub mod logging;
 pub mod mysql_conformance;
 pub mod otlp_wire_format;
 pub mod raptorq_rfc6330;
+#[path = "../raptorq_rfc6330/reporting/src/mod.rs"]
+pub mod raptorq_rfc6330_reporting;
 pub mod reference_registry;
 pub mod report;
 pub mod rfc6330_fixtures;
