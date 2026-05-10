@@ -27,7 +27,7 @@ struct CodecConfig {
     big_endian: bool,
 }
 
-#[derive(Arbitrary, Debug, Clone)]
+#[derive(Arbitrary, Debug, Clone, Copy)]
 enum LengthFieldLength {
     One = 1,
     Two = 2,
@@ -41,25 +41,39 @@ enum LengthFieldLength {
 
 impl From<LengthFieldLength> for usize {
     fn from(val: LengthFieldLength) -> Self {
-        val as usize
+        match val {
+            LengthFieldLength::One => 1,
+            LengthFieldLength::Two => 2,
+            LengthFieldLength::Three => 3,
+            LengthFieldLength::Four => 4,
+            LengthFieldLength::Five => 5,
+            LengthFieldLength::Six => 6,
+            LengthFieldLength::Seven => 7,
+            LengthFieldLength::Eight => 8,
+        }
     }
 }
 
-#[derive(Arbitrary, Debug, Clone)]
+#[derive(Arbitrary, Debug, Clone, Copy)]
 enum MaxFrameLength {
     /// Very small limit to trigger length errors
-    Small = 64,
+    Small,
     /// Medium limit
-    Medium = 8192,
+    Medium,
     /// Large limit
-    Large = 1024 * 1024,
+    Large,
     /// Maximum practical limit
-    Maximum = usize::MAX,
+    Maximum,
 }
 
 impl From<MaxFrameLength> for usize {
     fn from(val: MaxFrameLength) -> Self {
-        val as usize
+        match val {
+            MaxFrameLength::Small => 64,
+            MaxFrameLength::Medium => 8192,
+            MaxFrameLength::Large => 1024 * 1024,
+            MaxFrameLength::Maximum => usize::MAX,
+        }
     }
 }
 
@@ -92,13 +106,27 @@ fn build_codec_from_config(config: &CodecConfig) -> LengthDelimitedCodec {
     builder.new_codec()
 }
 
+fn observe_encode_result<E: std::fmt::Display>(result: Result<(), E>, dst_len: usize) {
+    match result {
+        Ok(()) => {
+            std::hint::black_box(("encoded", dst_len));
+        }
+        Err(error) => {
+            let error_msg = error.to_string();
+            assert!(!error_msg.is_empty(), "encoder returned an empty error");
+            std::hint::black_box(("rejected", error_msg));
+        }
+    }
+}
+
 fn test_encoder_robustness(input: &LengthDelimitedEncoderFuzzInput) {
     let mut codec = build_codec_from_config(&input.codec_config);
     let frame_data = BytesMut::from(input.frame_data.as_slice());
     let mut dst = BytesMut::new();
 
     // Encoder should never panic - errors are acceptable
-    let _ = codec.encode(frame_data, &mut dst);
+    let result = codec.encode(frame_data, &mut dst);
+    observe_encode_result(result, dst.len());
 }
 
 fn test_length_field_capacity(input: &LengthDelimitedEncoderFuzzInput) {
@@ -113,21 +141,21 @@ fn test_length_field_capacity(input: &LengthDelimitedEncoderFuzzInput) {
     let max_field_value = match length_field_len {
         1 => u8::MAX as u64,
         2 => u16::MAX as u64,
-        3 => 0xFF_FFFF,
+        3 => (1_u64 << 24) - 1,
         4 => u32::MAX as u64,
-        5 => 0xFF_FFFF_FFFF,
-        6 => 0xFF_FFFF_FFFF_FFFF,
-        7 => 0xFF_FFFF_FFFF_FFFF_FF,
+        5 => (1_u64 << 40) - 1,
+        6 => (1_u64 << 48) - 1,
+        7 => (1_u64 << 56) - 1,
         8 => u64::MAX,
         _ => unreachable!("length_field_length validated to 1-8"),
     };
 
     // Check that large frames correctly fail when they exceed field capacity
-    if input.frame_data.len() as u64 > max_field_value {
-        if let Err(e) = result {
-            // Should fail with length field capacity error
-            assert!(e.to_string().contains("capacity") || e.to_string().contains("exceeds"));
-        }
+    if input.frame_data.len() as u64 > max_field_value
+        && let Err(e) = result
+    {
+        // Should fail with length field capacity error
+        assert!(e.to_string().contains("capacity") || e.to_string().contains("exceeds"));
     }
 }
 
@@ -139,7 +167,7 @@ fn test_length_adjustment_edge_cases(input: &LengthDelimitedEncoderFuzzInput) {
     let result = codec.encode(frame_data, &mut dst);
 
     let frame_len = input.frame_data.len() as i64;
-    let adjustment = input.codec_config.length_adjustment;
+    let adjustment = input.codec_config.length_adjustment as i64;
 
     // Check underflow cases
     if let Some(adjusted_len) = frame_len.checked_sub(adjustment) {
@@ -148,7 +176,8 @@ fn test_length_adjustment_edge_cases(input: &LengthDelimitedEncoderFuzzInput) {
             if let Err(e) = result {
                 assert!(
                     e.to_string().contains("underflow") || e.to_string().contains("negative"),
-                    "Expected underflow/negative error, got: {}", e
+                    "Expected underflow/negative error, got: {}",
+                    e
                 );
             }
         }
@@ -157,7 +186,8 @@ fn test_length_adjustment_edge_cases(input: &LengthDelimitedEncoderFuzzInput) {
         if let Err(e) = result {
             assert!(
                 e.to_string().contains("underflow") || e.to_string().contains("overflow"),
-                "Expected underflow/overflow error, got: {}", e
+                "Expected underflow/overflow error, got: {}",
+                e
             );
         }
     }
@@ -174,13 +204,23 @@ fn test_buffer_overflow_safety(input: &LengthDelimitedEncoderFuzzInput) {
     let length_field_len: usize = input.codec_config.length_field_length.into();
     if let Some(_total_len) = length_field_len.checked_add(input.frame_data.len()) {
         // If no overflow in calculation, encoder should either succeed or fail gracefully
-        assert!(result.is_ok() || result.is_err(), "Encoder must return a result");
+        match &result {
+            Ok(()) => {
+                std::hint::black_box(dst.len());
+            }
+            Err(error) => {
+                let error_msg = error.to_string();
+                assert!(!error_msg.is_empty(), "encoder returned an empty error");
+                std::hint::black_box(error_msg);
+            }
+        }
     } else {
         // If overflow in calculation, should fail with overflow error
-        if let Err(e) = result {
+        if let Err(ref e) = result {
             assert!(
                 e.to_string().contains("overflow"),
-                "Expected overflow error, got: {}", e
+                "Expected overflow error, got: {}",
+                e
             );
         }
     }
@@ -191,7 +231,9 @@ fn test_buffer_overflow_safety(input: &LengthDelimitedEncoderFuzzInput) {
         let expected_min_len = length_field_len + input.frame_data.len();
         assert!(
             dst.len() >= expected_min_len,
-            "Output buffer too small: {} < {}", dst.len(), expected_min_len
+            "Output buffer too small: {} < {}",
+            dst.len(),
+            expected_min_len
         );
     }
 }

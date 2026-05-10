@@ -1391,6 +1391,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "length_delimited_encoder"
+path = "fuzz_targets/length_delimited_encoder.rs"
+test = false
+doc = false
+bench = false
+
 # Structure-aware encoder write_buf fuzz for LengthDelimitedCodec. Drives
 # prefilled destination buffers plus decode-only builder knobs through the
 # encode path and asserts exact append bytes, prefix preservation, and
