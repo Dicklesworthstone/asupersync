@@ -1,0 +1,11 @@
+[package]
+name = "fixture-fuzz"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "h2_settings_window"
+path = "fuzz_targets/h2_settings_window.rs"
+test = false
+doc = false
+bench = false

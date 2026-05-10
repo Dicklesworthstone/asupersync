@@ -1,0 +1,11 @@
+[package]
+name = "fixture-fuzz"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "redis_resp_parser"
+path = "fuzz_targets/postgres_row_description.rs"
+test = false
+doc = false
+bench = false
