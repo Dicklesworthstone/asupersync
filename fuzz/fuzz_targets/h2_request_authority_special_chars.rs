@@ -1,6 +1,6 @@
 #![no_main]
 
-use arbitrary::{Arbitrary, Unstructured};
+use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 /// HTTP/2 frame header length per RFC 7540 §4.1
@@ -11,30 +11,9 @@ const HEADERS_FRAME_TYPE: u8 = 0x1;
 
 /// HEADERS frame flags
 const END_HEADERS_FLAG: u8 = 0x4;
-const END_STREAM_FLAG: u8 = 0x1;
 
 /// Maximum port number per RFC 3986
 const MAX_PORT_NUMBER: u32 = 65535;
-
-/// HTTP/2 error codes per RFC 7540 §7
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u32)]
-enum Http2ErrorCode {
-    NoError = 0x0,
-    ProtocolError = 0x1,
-    InternalError = 0x2,
-    FlowControlError = 0x3,
-    SettingsTimeout = 0x4,
-    StreamClosed = 0x5,
-    FrameSizeError = 0x6,
-    RefusedStream = 0x7,
-    Cancel = 0x8,
-    CompressionError = 0x9,
-    ConnectError = 0xa,
-    EnhanceYourCalm = 0xb,
-    InadequateSecurity = 0xc,
-    Http11Required = 0xd,
-}
 
 /// Authority parsing result per RFC 3986 + RFC 7540
 #[derive(Debug, PartialEq)]
@@ -59,7 +38,7 @@ enum AuthorityParseResult {
 }
 
 /// HTTP/2 header field per RFC 7540 §6.2
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct HeaderField {
     name: String,
     value: String,
@@ -111,9 +90,9 @@ impl HeaderField {
                 if remaining.is_empty() {
                     // Just IPv6, no port
                     (ipv6_part, None)
-                } else if remaining.starts_with(':') {
+                } else if let Some(port) = remaining.strip_prefix(':') {
                     // IPv6 + port
-                    (ipv6_part, Some(&remaining[1..]))
+                    (ipv6_part, Some(port))
                 } else {
                     return AuthorityParseResult::InvalidIpv6(
                         "Invalid characters after IPv6 literal".to_string(),
@@ -133,10 +112,10 @@ impl HeaderField {
                     (&authority[..colon_pos], Some(potential_port))
                 } else {
                     // Colon but no valid port - treat as part of host
-                    (authority, None)
+                    (authority.as_str(), None)
                 }
             } else {
-                (authority, None)
+                (authority.as_str(), None)
             }
         };
 
@@ -362,7 +341,6 @@ enum HeadersParseResult {
     },
     ProtocolError(String),
     IncompleteFrame,
-    InvalidStreamId,
 }
 
 /// Mock HTTP/2 HEADERS frame parser with :authority validation
@@ -505,22 +483,22 @@ enum ValidAuthority {
     Empty,
 }
 
-impl AuthorityVariant {
-    fn to_string(&self) -> String {
+impl std::fmt::Display for AuthorityVariant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AuthorityVariant::Valid(valid) => match valid {
-                ValidAuthority::Hostname(host) => host.clone(),
-                ValidAuthority::HostnamePort(host, port) => format!("{}:{}", host, port),
-                ValidAuthority::Ipv6Simple(addr) => format!("[{}]", addr),
-                ValidAuthority::Ipv6WithPort(addr, port) => format!("[{}]:{}", addr, port),
-                ValidAuthority::IdnDomain(domain) => domain.clone(),
-                ValidAuthority::IdnDomainPort(domain, port) => format!("{}:{}", domain, port),
-                ValidAuthority::Empty => String::new(),
+                ValidAuthority::Hostname(host) => f.write_str(host),
+                ValidAuthority::HostnamePort(host, port) => write!(f, "{}:{}", host, port),
+                ValidAuthority::Ipv6Simple(addr) => write!(f, "[{}]", addr),
+                ValidAuthority::Ipv6WithPort(addr, port) => write!(f, "[{}]:{}", addr, port),
+                ValidAuthority::IdnDomain(domain) => f.write_str(domain),
+                ValidAuthority::IdnDomainPort(domain, port) => write!(f, "{}:{}", domain, port),
+                ValidAuthority::Empty => Ok(()),
             },
-            AuthorityVariant::Ipv6Literal(literal) => literal.clone(),
-            AuthorityVariant::IdnPunycode(punycode) => punycode.clone(),
-            AuthorityVariant::InvalidPort(host, port) => format!("{}:{}", host, port),
-            AuthorityVariant::Custom(custom) => custom.clone(),
+            AuthorityVariant::Ipv6Literal(literal) => f.write_str(literal),
+            AuthorityVariant::IdnPunycode(punycode) => f.write_str(punycode),
+            AuthorityVariant::InvalidPort(host, port) => write!(f, "{}:{}", host, port),
+            AuthorityVariant::Custom(custom) => f.write_str(custom),
         }
     }
 }
@@ -638,7 +616,7 @@ fuzz_target!(|input: FuzzInput| {
         } => {
             match auth_result {
                 AuthorityParseResult::Valid {
-                    host,
+                    host: _,
                     port,
                     is_ipv6_literal,
                     is_idn_punycode,
@@ -722,6 +700,16 @@ fuzz_target!(|input: FuzzInput| {
                         authority_value
                     );
                 }
+
+                AuthorityParseResult::ProtocolError(_)
+                | AuthorityParseResult::InvalidPort(_)
+                | AuthorityParseResult::InvalidIpv6(_)
+                | AuthorityParseResult::InvalidIdn(_) => {
+                    panic!(
+                        "invalid authority result should be surfaced as HeadersParseResult::ProtocolError: {:?}",
+                        auth_result
+                    );
+                }
             }
         }
 
@@ -786,11 +774,6 @@ fuzz_target!(|input: FuzzInput| {
         HeadersParseResult::IncompleteFrame => {
             // Expected for malformed frames
         }
-
-        HeadersParseResult::InvalidStreamId => {
-            // Should not happen with our stream ID logic
-            panic!("Unexpected InvalidStreamId with stream_id: {}", stream_id);
-        }
     }
 
     // Test specific known invalid patterns
@@ -812,7 +795,7 @@ fuzz_target!(|input: FuzzInput| {
     ];
 
     for &invalid_pattern in &invalid_patterns {
-        let mut test_headers = vec![
+        let test_headers = vec![
             HeaderField::new(":method", "GET"),
             HeaderField::new(":path", "/"),
             HeaderField::new(":scheme", "https"),
@@ -897,9 +880,8 @@ fuzz_target!(|input: FuzzInput| {
                 // Expected - valid pattern correctly accepted
             }
             HeadersParseResult::ProtocolError(msg) => {
-                // Should not happen for valid patterns
-                eprintln!(
-                    "WARNING: Valid authority pattern '{}' was rejected: {}",
+                panic!(
+                    "valid authority pattern should not be rejected: pattern='{}', error={}",
                     valid_pattern, msg
                 );
             }
