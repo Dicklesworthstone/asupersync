@@ -20,6 +20,31 @@ fn run_receipt(fixture: &str, wrapper_exit_code: Option<i32>) -> Output {
     run_receipt_with_args(fixture, wrapper_exit_code, &[])
 }
 
+fn run_receipt_with_command(
+    fixture: &str,
+    wrapper_exit_code: Option<i32>,
+    receipt_command: &str,
+    extra_args: &[&str],
+) -> Output {
+    let mut command = Command::new("python3");
+    command
+        .arg(repo_root().join(SCRIPT_PATH))
+        .arg("--log")
+        .arg(repo_root().join(FIXTURE_ROOT).join(fixture))
+        .arg("--command")
+        .arg(receipt_command)
+        .arg("--generated-at")
+        .arg(GENERATED_AT)
+        .arg("--output")
+        .arg("json")
+        .current_dir(repo_root());
+    command.args(extra_args);
+    if let Some(code) = wrapper_exit_code {
+        command.arg("--wrapper-exit-code").arg(code.to_string());
+    }
+    command.output().expect("run rch retrieval receipt script")
+}
+
 fn run_receipt_with_args(
     fixture: &str,
     wrapper_exit_code: Option<i32>,
@@ -61,6 +86,16 @@ fn receipt_json_with_args(
 fn receipt_from_output(output: Output) -> Value {
     let text = receipt_text_from_output(output);
     serde_json::from_str(&text).expect("receipt output must be JSON")
+}
+
+fn receipt_json_with_command(
+    fixture: &str,
+    wrapper_exit_code: Option<i32>,
+    receipt_command: &str,
+    extra_args: &[&str],
+) -> Value {
+    let output = run_receipt_with_command(fixture, wrapper_exit_code, receipt_command, extra_args);
+    receipt_from_output(output)
 }
 
 fn receipt_text_from_output(output: Output) -> String {
@@ -160,6 +195,129 @@ fn completed_artifact_retrieval_is_clean_remote_success() {
     assert_eq!(
         receipt["artifact_budget"]["status"].as_str(),
         Some("not-configured")
+    );
+}
+
+#[test]
+fn target_dir_auditor_passes_unique_remote_cargo_proof() {
+    let receipt = receipt_json_with_args(
+        "remote_success.log",
+        None,
+        &[
+            "--audit-target-dir",
+            "--active-target-dir",
+            "/tmp/rch_target_other_agent",
+        ],
+    );
+
+    assert_eq!(receipt["target_dir_audit"]["status"].as_str(), Some("pass"));
+    assert_eq!(
+        receipt["target_dir_audit"]["summary"]["blockers"].as_u64(),
+        Some(0)
+    );
+    assert_eq!(
+        receipt["target_dir_audit"]["summary"]["warnings"].as_u64(),
+        Some(0)
+    );
+    assert_eq!(
+        receipt["target_dir_audit"]["command_classification"]["runs_cargo"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        receipt["target_dir_audit"]["command_classification"]["runs_rch"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        receipt["target_dir_audit"]["command_classification"]["target_dir"].as_str(),
+        Some("${TMPDIR:-/tmp}/rch_target_rch_retrieval_receipt_docs")
+    );
+}
+
+#[test]
+fn target_dir_auditor_blocks_cargo_without_target_dir() {
+    let receipt = receipt_json_with_command(
+        "remote_success.log",
+        None,
+        "rch exec -- cargo test --test proof_runner_contract -- --nocapture",
+        &["--audit-target-dir"],
+    );
+
+    assert_eq!(
+        receipt["target_dir_audit"]["status"].as_str(),
+        Some("blocker")
+    );
+    assert!(
+        receipt["target_dir_audit"]["findings"]
+            .as_array()
+            .expect("findings")
+            .iter()
+            .any(|finding| finding["code"].as_str() == Some("missing-cargo-target-dir"))
+    );
+}
+
+#[test]
+fn target_dir_auditor_warns_on_reused_concurrent_target_dir() {
+    let receipt = receipt_json_with_args(
+        "remote_success.log",
+        None,
+        &[
+            "--audit-target-dir",
+            "--active-target-dir",
+            "${TMPDIR:-/tmp}/rch_target_rch_retrieval_receipt_docs",
+        ],
+    );
+
+    assert_eq!(
+        receipt["target_dir_audit"]["status"].as_str(),
+        Some("warning")
+    );
+    assert!(
+        receipt["target_dir_audit"]["findings"]
+            .as_array()
+            .expect("findings")
+            .iter()
+            .any(|finding| finding["code"].as_str() == Some("reused-target-dir"))
+    );
+}
+
+#[test]
+fn target_dir_auditor_blocks_local_fallback_markers() {
+    let receipt = receipt_json_with_args("local_fallback.log", None, &["--audit-target-dir"]);
+
+    assert_eq!(
+        receipt["target_dir_audit"]["status"].as_str(),
+        Some("blocker")
+    );
+    assert_eq!(
+        receipt["target_dir_audit"]["command_classification"]["local_fallback"].as_bool(),
+        Some(true)
+    );
+    assert!(
+        receipt["target_dir_audit"]["findings"]
+            .as_array()
+            .expect("findings")
+            .iter()
+            .any(|finding| finding["code"].as_str() == Some("local-fallback-marker"))
+    );
+}
+
+#[test]
+fn target_dir_auditor_does_not_fail_non_cargo_local_checks() {
+    let receipt = receipt_json_with_command(
+        "remote_success.log",
+        None,
+        "git diff --check -- scripts/rch_retrieval_receipt.py",
+        &["--audit-target-dir"],
+    );
+
+    assert_eq!(receipt["target_dir_audit"]["status"].as_str(), Some("pass"));
+    assert_eq!(
+        receipt["target_dir_audit"]["command_classification"]["runs_cargo"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        receipt["target_dir_audit"]["command_classification"]["target_dir"].as_str(),
+        None
     );
 }
 

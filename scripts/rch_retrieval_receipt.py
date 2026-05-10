@@ -80,6 +80,90 @@ def extract_target_dir(command: str) -> str | None:
     return None
 
 
+def command_tokens(command: str) -> list[str]:
+    if not command:
+        return []
+    try:
+        return shlex.split(command)
+    except ValueError:
+        return command.split()
+
+
+def audit_target_dir(
+    args: argparse.Namespace, analysis: dict[str, Any], target_dir: str | None
+) -> dict[str, Any]:
+    tokens = command_tokens(args.command)
+    runs_cargo = "cargo" in tokens
+    runs_rch = "rch" in tokens and "exec" in tokens
+    active_target_dirs = args.active_target_dir or []
+    findings: list[dict[str, Any]] = []
+
+    if analysis["markers"]["local_fallback"]:
+        findings.append(
+            {
+                "severity": "blocker",
+                "code": "local-fallback-marker",
+                "message": "rch log contains a local fallback marker",
+                "closeout_note": "Do not use this receipt as remote proof; rerun through rch remote execution.",
+            }
+        )
+    if runs_cargo and not runs_rch:
+        findings.append(
+            {
+                "severity": "blocker",
+                "code": "cargo-without-rch",
+                "message": "cargo command is not routed through rch exec",
+                "closeout_note": "Cargo proof lanes in this repo must use rch exec.",
+            }
+        )
+    if runs_cargo and target_dir is None:
+        findings.append(
+            {
+                "severity": "blocker",
+                "code": "missing-cargo-target-dir",
+                "message": "cargo proof command is missing CARGO_TARGET_DIR",
+                "closeout_note": "Rerun with a per-agent CARGO_TARGET_DIR before citing this proof lane.",
+            }
+        )
+    if target_dir is not None and target_dir in active_target_dirs:
+        findings.append(
+            {
+                "severity": "warning",
+                "code": "reused-target-dir",
+                "message": "target dir matches a concurrently active target dir",
+                "target_dir": target_dir,
+                "closeout_note": "Use a fresh CARGO_TARGET_DIR for concurrent proof lanes.",
+            }
+        )
+
+    blocker_count = sum(1 for finding in findings if finding["severity"] == "blocker")
+    warning_count = sum(1 for finding in findings if finding["severity"] == "warning")
+    if blocker_count > 0:
+        status = "blocker"
+    elif warning_count > 0:
+        status = "warning"
+    else:
+        status = "pass"
+
+    return {
+        "schema_version": "rch-target-dir-audit-v1",
+        "status": status,
+        "findings": findings,
+        "summary": {
+            "blockers": blocker_count,
+            "warnings": warning_count,
+        },
+        "command_classification": {
+            "runs_cargo": runs_cargo,
+            "runs_rch": runs_rch,
+            "target_dir": target_dir,
+            "active_target_dirs": active_target_dirs,
+            "local_fallback": analysis["markers"]["local_fallback"],
+        },
+        "non_mutating": True,
+    }
+
+
 def classify(text: str, wrapper_exit_code: int | None) -> dict[str, Any]:
     local_fallback = LOCAL_FALLBACK_RE.search(text) is not None
     remote_exit = last_remote_exit(text)
@@ -318,18 +402,19 @@ def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
     text = log_path.read_text(encoding="utf-8", errors="replace")
     generated_at = args.generated_at or utc_now()
     analysis = classify(text, args.wrapper_exit_code)
+    target_dir = extract_target_dir(args.command)
     budget = artifact_budget(args, analysis["markers"])
     decision = analysis["decision"]
     if analysis["classification"] == "remote_success" and budget["status"] == "over-budget":
         decision = "passed-with-artifact-budget-warning"
-    return {
+    receipt = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated_at,
         "current_date": current_date(generated_at),
         "log_path": str(log_path),
         "command": args.command,
         "proof_lane": args.proof_lane or "unspecified",
-        "target_dir": extract_target_dir(args.command),
+        "target_dir": target_dir,
         "guarantee": args.guarantee or "unspecified",
         "wrapper_exit_code": args.wrapper_exit_code,
         "classification": analysis["classification"],
@@ -345,6 +430,9 @@ def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
             "runs_destructive_command": False,
         },
     }
+    if args.audit_target_dir:
+        receipt["target_dir_audit"] = audit_target_dir(args, analysis, target_dir)
+    return receipt
 
 
 def main() -> int:
@@ -371,6 +459,17 @@ def main() -> int:
         "--max-artifact-bytes",
         type=int,
         help="Warn when retrieved artifact bytes exceed this",
+    )
+    parser.add_argument(
+        "--audit-target-dir",
+        action="store_true",
+        help="Emit read-only CARGO_TARGET_DIR/local-fallback audit findings",
+    )
+    parser.add_argument(
+        "--active-target-dir",
+        action="append",
+        default=[],
+        help="Target dir currently in use by another active proof lane; repeatable",
     )
     parser.add_argument("--generated-at", default="", help="UTC timestamp for deterministic receipts")
     parser.add_argument("--wrapper-exit-code", type=int, help="Local wrapper exit code, if known")
