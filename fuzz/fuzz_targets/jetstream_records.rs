@@ -165,54 +165,82 @@ fn fuzz_jetstream_records(input: JetstreamFuzzInput) {
     }
 }
 
+fn assert_no_panic(context: String, f: impl FnOnce()) {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    assert!(
+        result.is_ok(),
+        "JetStream records fuzz target panicked: {context}"
+    );
+}
+
+fn parse_reply_subject_checked(reply: &str, context: String) -> Option<(u64, u32)> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        parse_js_reply_subject_simulation(reply)
+    })) {
+        Ok(result) => result,
+        Err(_) => panic!("JetStream reply subject parser panicked: {context}"),
+    }
+}
+
+fn preview_bytes(bytes: &[u8]) -> &[u8] {
+    &bytes[..bytes.len().min(64)]
+}
+
+fn preview_str(value: &str) -> &str {
+    value.get(..value.len().min(64)).unwrap_or(value)
+}
+
 fn fuzz_api_response_parsing(json_bytes: &[u8]) {
     let json_str = String::from_utf8_lossy(json_bytes);
 
     // Test JSON string extraction functions
-    let _ = std::panic::catch_unwind(|| {
-        extract_json_string_simple(&json_str, "name");
-        extract_json_string_simple(&json_str, "stream");
-        extract_json_string_simple(&json_str, "description");
-    });
+    assert_no_panic(
+        format!("api string extraction len={}", json_bytes.len()),
+        || {
+            extract_json_string_simple(&json_str, "name");
+            extract_json_string_simple(&json_str, "stream");
+            extract_json_string_simple(&json_str, "description");
+        },
+    );
 
     // Test JSON u64 extraction
-    let _ = std::panic::catch_unwind(|| {
-        extract_json_u64(&json_str, "seq");
-        extract_json_u64(&json_str, "messages");
-        extract_json_u64(&json_str, "bytes");
-        extract_json_u64(&json_str, "first_seq");
-        extract_json_u64(&json_str, "last_seq");
-        extract_json_u64(&json_str, "code");
-        extract_json_u64(&json_str, "err_code");
-    });
+    assert_no_panic(
+        format!("api u64 extraction len={}", json_bytes.len()),
+        || {
+            extract_json_u64(&json_str, "seq");
+            extract_json_u64(&json_str, "messages");
+            extract_json_u64(&json_str, "bytes");
+            extract_json_u64(&json_str, "first_seq");
+            extract_json_u64(&json_str, "last_seq");
+            extract_json_u64(&json_str, "code");
+            extract_json_u64(&json_str, "err_code");
+        },
+    );
 
     // Test error detection - ASSERTION 3: API errors properly classified
     let has_error = json_str.contains("\"error\":{\"code\":");
     if has_error {
         // Should not panic on error parsing
-        let _ = std::panic::catch_unwind(|| {
-            parse_api_error_simulation(&json_str);
-        });
+        assert_no_panic(
+            format!(
+                "api error parsing len={} prefix={:?}",
+                json_bytes.len(),
+                preview_bytes(json_bytes)
+            ),
+            || {
+                parse_api_error_simulation(&json_str);
+            },
+        );
     }
 }
 
 fn fuzz_reply_subject_parsing(reply: &str) {
     // ASSERTION 1: Sequence number parsing must be monotonic and consistent
-    let result = std::panic::catch_unwind(|| parse_js_reply_subject_simulation(reply));
+    let result =
+        parse_reply_subject_checked(reply, format!("reply prefix={:?}", preview_str(reply)));
 
-    if let Ok(Some((sequence, delivered))) = result {
+    if let Some((sequence, delivered)) = result {
         // ASSERTION 1: Sequence numbers should be reasonable values
-        assert!(
-            sequence <= u64::MAX,
-            "Sequence number overflow: {}",
-            sequence
-        );
-        assert!(
-            delivered <= u32::MAX,
-            "Delivered count overflow: {}",
-            delivered
-        );
-
         // Sequence should be non-zero for valid messages
         if sequence > 0 {
             assert!(
@@ -233,40 +261,47 @@ fn fuzz_stream_config_serialization(config: FuzzStreamConfig) {
     }
 
     // ASSERTION 2: Subject wildcards parsed correctly
-    let _ = std::panic::catch_unwind(|| {
-        for subject in &config.subjects {
-            validate_subject_pattern(subject);
-        }
-    });
+    for subject in &config.subjects {
+        let _ = subject_pattern_error(subject);
+    }
 
     // Test JSON serialization doesn't panic
-    let _ = std::panic::catch_unwind(|| {
-        serialize_stream_config_simulation(&config);
-    });
+    assert_no_panic(
+        format!(
+            "stream config serialization name_prefix={:?} subjects={}",
+            preview_str(&config.name),
+            config.subjects.len()
+        ),
+        || {
+            serialize_stream_config_simulation(&config);
+        },
+    );
 }
 
 fn fuzz_consumer_config_serialization(config: FuzzConsumerConfig) {
     // ASSERTION 2: Subject wildcards in filter_subject
     if let Some(ref filter) = config.filter_subject {
-        let _ = std::panic::catch_unwind(|| {
-            validate_subject_pattern(filter);
-        });
+        let _ = subject_pattern_error(filter);
     }
 
     // ASSERTION 5: Heartbeat intervals should be reasonable
     let ack_wait_duration = Duration::from_nanos(config.ack_wait_nanos);
     if ack_wait_duration.as_secs() > 0 {
         // Should be able to create timeout without panic
-        let _ = std::panic::catch_unwind(|| {
-            // Simulate timeout computation
-            let _ = ack_wait_duration.saturating_add(Duration::from_millis(100));
-        });
+        let _ = ack_wait_duration.saturating_add(Duration::from_millis(100));
     }
 
     // Test JSON serialization
-    let _ = std::panic::catch_unwind(|| {
-        serialize_consumer_config_simulation(&config);
-    });
+    assert_no_panic(
+        format!(
+            "consumer config serialization name={:?} durable={:?}",
+            config.name.as_deref().map(preview_str),
+            config.durable_name.as_deref().map(preview_str)
+        ),
+        || {
+            serialize_consumer_config_simulation(&config);
+        },
+    );
 }
 
 fn fuzz_message_sequence_validation(messages: Vec<FuzzMessage>) {
@@ -292,9 +327,16 @@ fn fuzz_message_sequence_validation(messages: Vec<FuzzMessage>) {
     // Test message parsing for each message
     for msg in &messages {
         if let Some(ref reply) = msg.reply_subject {
-            let _ = std::panic::catch_unwind(|| {
-                parse_js_reply_subject_simulation(reply);
-            });
+            let _ = parse_reply_subject_checked(
+                reply,
+                format!(
+                    "message subject_prefix={:?} reply_prefix={:?} sequence={} delivered={}",
+                    preview_str(&msg.subject),
+                    preview_str(reply),
+                    msg.sequence,
+                    msg.delivered
+                ),
+            );
         }
 
         // ASSERTION 4: Message size limits
@@ -313,25 +355,23 @@ fn fuzz_heartbeat_interval_handling(heartbeat: FuzzHeartbeat) {
     let slack = Duration::from_nanos(heartbeat.slack_nanos);
 
     // Test timeout computation doesn't overflow
-    let _ = std::panic::catch_unwind(|| {
-        let total_timeout = pull_timeout.saturating_add(slack);
-        let timeout_nanos = total_timeout.as_nanos();
+    let total_timeout = pull_timeout.saturating_add(slack);
+    let timeout_nanos = total_timeout.as_nanos();
 
-        // Should not exceed reasonable bounds
-        if timeout_nanos > u64::MAX as u128 {
-            panic!("Timeout overflow: {} nanoseconds", timeout_nanos);
-        }
+    // Should not exceed reasonable bounds
+    if timeout_nanos > u64::MAX as u128 {
+        panic!("Timeout overflow: {} nanoseconds", timeout_nanos);
+    }
 
-        // Batch size should be reasonable
-        if heartbeat.batch_size > 10000 {
-            panic!("Batch size too large: {}", heartbeat.batch_size);
-        }
+    // Batch size should be reasonable
+    if heartbeat.batch_size > 10000 {
+        panic!("Batch size too large: {}", heartbeat.batch_size);
+    }
 
-        // Expected interval should not be zero unless explicitly disabled
-        if expected_interval.is_zero() && pull_timeout.as_secs() > 0 {
-            // This might indicate a configuration error
-        }
-    });
+    // Expected interval should not be zero unless explicitly disabled
+    if expected_interval.is_zero() && pull_timeout.as_secs() > 0 {
+        // This might indicate a configuration error
+    }
 }
 
 fn fuzz_edge_case(edge: EdgeCaseVariant) {
@@ -342,42 +382,43 @@ fn fuzz_edge_case(edge: EdgeCaseVariant) {
         }
 
         EdgeCaseVariant::MalformedReplySubject(malformed) => {
-            let _ = std::panic::catch_unwind(|| {
-                parse_js_reply_subject_simulation(&malformed);
-            });
+            let _ = parse_reply_subject_checked(
+                &malformed,
+                format!("malformed reply prefix={:?}", preview_str(&malformed)),
+            );
         }
 
         EdgeCaseVariant::SubjectWildcards(subjects) => {
             for subject in &subjects {
-                let _ = std::panic::catch_unwind(|| {
-                    validate_subject_pattern(subject);
-                });
+                let _ = subject_pattern_error(subject);
             }
         }
 
         EdgeCaseVariant::SizeLimits(limits) => {
             // ASSERTION 4: Oversized records rejected
-            if let Some(max_size) = limits.max_msg_size {
-                if max_size > 0 && limits.actual_msg_size > max_size as usize {
-                    // Should be rejected
-                    assert!(
-                        limits.actual_msg_size <= max_size as usize,
-                        "Message size {} exceeds limit {}",
-                        limits.actual_msg_size,
-                        max_size
-                    );
-                }
+            if let Some(max_size) = limits.max_msg_size
+                && max_size > 0
+                && limits.actual_msg_size > max_size as usize
+            {
+                // Should be rejected
+                assert!(
+                    limits.actual_msg_size <= max_size as usize,
+                    "Message size {} exceeds limit {}",
+                    limits.actual_msg_size,
+                    max_size
+                );
             }
 
-            if let Some(max_bytes) = limits.max_bytes {
-                if max_bytes > 0 && limits.actual_bytes > max_bytes as usize {
-                    assert!(
-                        limits.actual_bytes <= max_bytes as usize,
-                        "Total bytes {} exceeds limit {}",
-                        limits.actual_bytes,
-                        max_bytes
-                    );
-                }
+            if let Some(max_bytes) = limits.max_bytes
+                && max_bytes > 0
+                && limits.actual_bytes > max_bytes as usize
+            {
+                assert!(
+                    limits.actual_bytes <= max_bytes as usize,
+                    "Total bytes {} exceeds limit {}",
+                    limits.actual_bytes,
+                    max_bytes
+                );
             }
         }
 
@@ -461,11 +502,18 @@ fn fuzz_json_parsing(data: &[u8]) {
     let json_str = String::from_utf8_lossy(data);
 
     // Should not panic on any input
-    let _ = std::panic::catch_unwind(|| {
-        extract_json_string_simple(&json_str, "test");
-        extract_json_u64(&json_str, "value");
-        json_escape(&json_str);
-    });
+    assert_no_panic(
+        format!(
+            "raw json parsing len={} prefix={:?}",
+            data.len(),
+            preview_bytes(data)
+        ),
+        || {
+            extract_json_string_simple(&json_str, "test");
+            extract_json_u64(&json_str, "value");
+            json_escape(&json_str);
+        },
+    );
 }
 
 // Simulation functions (mimicking the actual implementation behavior)
@@ -487,7 +535,7 @@ fn parse_js_reply_subject_simulation(reply: &str) -> Option<(u64, u32)> {
     Some((sequence, delivered))
 }
 
-fn validate_subject_pattern(subject: &str) {
+fn subject_pattern_error(subject: &str) -> Option<String> {
     // ASSERTION 2: Subject wildcards parsed
     // Basic validation that subject patterns don't contain invalid characters
     for ch in subject.chars() {
@@ -497,8 +545,8 @@ fn validate_subject_pattern(subject: &str) {
             }
             _ => {
                 // Invalid character in subject
-                if subject.len() > 0 {
-                    panic!("Invalid character '{}' in subject: {}", ch, subject);
+                if !subject.is_empty() {
+                    return Some(format!("Invalid character '{ch}' in subject: {subject}"));
                 }
             }
         }
@@ -506,7 +554,18 @@ fn validate_subject_pattern(subject: &str) {
 
     // Validate wildcard rules
     if subject.contains(">.") {
-        panic!("Invalid wildcard pattern: '>' must be at end: {}", subject);
+        return Some(format!(
+            "Invalid wildcard pattern: '>' must be at end: {subject}"
+        ));
+    }
+
+    None
+}
+
+#[cfg(test)]
+fn validate_subject_pattern(subject: &str) {
+    if let Some(error) = subject_pattern_error(subject) {
+        panic!("{error}");
     }
 }
 
@@ -532,6 +591,28 @@ fn serialize_stream_config_simulation(config: &FuzzStreamConfig) -> String {
         }
         json.push_str(&format!(",\"max_msgs\":{}", max));
     }
+    if let Some(max) = config.max_bytes {
+        json.push_str(&format!(",\"max_bytes\":{}", max));
+    }
+    if let Some(max) = config.max_msg_size {
+        json.push_str(&format!(",\"max_msg_size\":{}", max));
+    }
+    json.push_str(&format!(",\"retention\":{}", config.retention % 3));
+    json.push_str(&format!(
+        ",\"storage\":\"{}\"",
+        if config.storage { "file" } else { "memory" }
+    ));
+    json.push_str(&format!(
+        ",\"discard\":\"{}\"",
+        if config.discard { "new" } else { "old" }
+    ));
+    json.push_str(&format!(",\"num_replicas\":{}", config.replicas));
+    if let Some(max_age) = config.max_age_nanos {
+        json.push_str(&format!(",\"max_age\":{}", max_age));
+    }
+    if let Some(duplicate_window) = config.duplicate_window_nanos {
+        json.push_str(&format!(",\"duplicate_window\":{}", duplicate_window));
+    }
 
     json.push('}');
 
@@ -555,6 +636,19 @@ fn serialize_consumer_config_simulation(config: &FuzzConsumerConfig) -> String {
     // Add other fields...
     parts.push(format!("\"ack_wait\":{}", config.ack_wait_nanos));
     parts.push(format!("\"max_deliver\":{}", config.max_deliver));
+    parts.push(format!("\"deliver_policy\":{}", config.deliver_policy % 5));
+    parts.push(format!("\"ack_policy\":{}", config.ack_policy % 3));
+    parts.push(format!("\"max_ack_pending\":{}", config.max_ack_pending));
+
+    if let Some(start_seq) = config.opt_start_seq {
+        parts.push(format!("\"opt_start_seq\":{start_seq}"));
+    }
+    if let Some(ref filter_subject) = config.filter_subject {
+        parts.push(format!(
+            "\"filter_subject\":\"{}\"",
+            json_escape(filter_subject)
+        ));
+    }
 
     json.push_str(&parts.join(","));
     json.push('}');
