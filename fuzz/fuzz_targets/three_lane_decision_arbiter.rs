@@ -435,8 +435,8 @@ fn test_decision_determinism(weights: &PotentialWeights, snapshots: &[StateSnaps
         return true; // Vacuously true
     }
 
-    let governor1 = LyapunovGovernor::new(weights.clone());
-    let governor2 = LyapunovGovernor::new(weights.clone());
+    let governor1 = LyapunovGovernor::new(*weights);
+    let governor2 = LyapunovGovernor::new(*weights);
 
     for snapshot in snapshots {
         let suggestion1 = governor1.suggest(snapshot);
@@ -481,6 +481,27 @@ fn burst_task_id(round: usize, lane_offset: u32, index: usize) -> TaskId {
     )
 }
 
+fn request_cancel_mask_task(record: &mut TaskRecord, task_id: TaskId, phase: &str) {
+    assert!(
+        record.request_cancel_with_budget(CancelReason::timeout(), Budget::INFINITE),
+        "cancel-mask {phase} task {task_id:?} must accept its initial cancel request"
+    );
+}
+
+fn acknowledge_cancel_mask_task(record: &mut TaskRecord, task_id: TaskId, phase: &str) {
+    assert!(
+        record.acknowledge_cancel().is_some(),
+        "cancel-mask {phase} task {task_id:?} must transition from requested to cancelling"
+    );
+}
+
+fn finish_cancel_mask_cleanup(record: &mut TaskRecord, task_id: TaskId, phase: &str) {
+    assert!(
+        record.cleanup_done(),
+        "cancel-mask {phase} task {task_id:?} must transition from cancelling to finalizing"
+    );
+}
+
 fn install_cancel_mask(state: &Arc<ContendedMutex<RuntimeState>>, snapshot: &FuzzStateSnapshot) {
     let total_cancel_tasks = snapshot.total_cancel_mask_tasks();
     if total_cancel_tasks == 0 {
@@ -501,7 +522,7 @@ fn install_cancel_mask(state: &Arc<ContendedMutex<RuntimeState>>, snapshot: &Fuz
         let task_id = TaskId::from_arena(inserted);
         state
             .update_task(task_id, |record| {
-                record.request_cancel_with_budget(CancelReason::timeout(), Budget::INFINITE);
+                request_cancel_mask_task(record, task_id, "cancel-requested");
             })
             .expect("cancel-requested task must exist");
     }
@@ -517,8 +538,8 @@ fn install_cancel_mask(state: &Arc<ContendedMutex<RuntimeState>>, snapshot: &Fuz
         let task_id = TaskId::from_arena(inserted);
         state
             .update_task(task_id, |record| {
-                record.request_cancel_with_budget(CancelReason::timeout(), Budget::INFINITE);
-                let _ = record.acknowledge_cancel();
+                request_cancel_mask_task(record, task_id, "cancelling");
+                acknowledge_cancel_mask_task(record, task_id, "cancelling");
             })
             .expect("cancelling task must exist");
     }
@@ -534,9 +555,9 @@ fn install_cancel_mask(state: &Arc<ContendedMutex<RuntimeState>>, snapshot: &Fuz
         let task_id = TaskId::from_arena(inserted);
         state
             .update_task(task_id, |record| {
-                record.request_cancel_with_budget(CancelReason::timeout(), Budget::INFINITE);
-                let _ = record.acknowledge_cancel();
-                let _ = record.cleanup_done();
+                request_cancel_mask_task(record, task_id, "finalizing");
+                acknowledge_cancel_mask_task(record, task_id, "finalizing");
+                finish_cancel_mask_cleanup(record, task_id, "finalizing");
             })
             .expect("finalizing task must exist");
     }
@@ -1305,7 +1326,7 @@ fn assert_concurrent_multi_victim_steal_no_double_steal(
         thief_ids.insert(worker_count - 1);
     }
 
-    let attempts_per_thief = seeded.len().max(1).min(32);
+    let attempts_per_thief = seeded.len().clamp(1, 32);
     let barrier = Arc::new(Barrier::new(thief_ids.len()));
     let stolen = Arc::new(Mutex::new(Vec::<u64>::new()));
     let mut workers: Vec<_> = scheduler.take_workers().into_iter().map(Some).collect();
@@ -1356,7 +1377,7 @@ fn assert_adaptive_budget_governor(
         return;
     }
 
-    let governor = LyapunovGovernor::new(weights.clone());
+    let governor = LyapunovGovernor::new(*weights);
     let mut policy = AdaptiveCancelStreakPolicyBench::new(scenario.epoch_steps);
 
     let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(10_000)));
@@ -1514,7 +1535,7 @@ fuzz_target!(|input: DecisionArbiterInput| {
     }
 
     // Test 2: Governor suggestion generation
-    let governor = LyapunovGovernor::new(weights.clone());
+    let governor = LyapunovGovernor::new(weights);
     for snapshot in &snapshots {
         match governor.suggest(snapshot) {
             SchedulingSuggestion::DrainObligations
