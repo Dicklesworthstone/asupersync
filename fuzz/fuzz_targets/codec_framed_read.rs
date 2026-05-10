@@ -82,13 +82,20 @@ enum PollAction {
     ReEntrancePoll,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum PollNextObservation {
+    Frame,
+    Error,
+    End,
+    Pending,
+}
+
 /// Mock decoder for testing custom error propagation
 struct TestDecoder {
     max_frame_length: u16,
     calls_count: u8,
     error_after: u8,
     error_type: CustomErrorType,
-    partial_frame_buffer: BytesMut,
 }
 
 /// Custom decoder errors for testing propagation
@@ -133,7 +140,6 @@ impl TestDecoder {
             calls_count: 0,
             error_after: error_after.clamp(1, 20),
             error_type,
-            partial_frame_buffer: BytesMut::new(),
         }
     }
 }
@@ -242,7 +248,7 @@ impl AsyncRead for TestAsyncReader {
             }
             ReaderPattern::Intermittent => {
                 this.chunk_counter = this.chunk_counter.wrapping_add(1);
-                if this.chunk_counter % 3 == 0 {
+                if this.chunk_counter.is_multiple_of(3) {
                     return Poll::Pending;
                 }
                 std::cmp::min(remaining.len(), 4)
@@ -286,6 +292,41 @@ impl Wake for TestWaker {
     }
 }
 
+fn observe_poll_next_result(
+    poll_result: Poll<Option<Result<Vec<u8>, TestDecoderError>>>,
+    max_frame_length: usize,
+    frames_received: &mut usize,
+    errors_received: &mut usize,
+) -> Result<PollNextObservation, String> {
+    match poll_result {
+        Poll::Ready(Some(Ok(frame))) => {
+            *frames_received += 1;
+
+            if frame.len() > max_frame_length {
+                return Err(format!(
+                    "Frame length {} exceeds max_frame_length {}",
+                    frame.len(),
+                    max_frame_length
+                ));
+            }
+
+            Ok(PollNextObservation::Frame)
+        }
+        Poll::Ready(Some(Err(err))) => {
+            *errors_received += 1;
+
+            let diagnostic = err.to_string();
+            if diagnostic.trim().is_empty() {
+                return Err("Decoder error propagated with an empty diagnostic".to_string());
+            }
+
+            Ok(PollNextObservation::Error)
+        }
+        Poll::Ready(None) => Ok(PollNextObservation::End),
+        Poll::Pending => Ok(PollNextObservation::Pending),
+    }
+}
+
 /// Test the 5 FramedRead invariants
 fn test_framed_read_invariants(input: FramedReadFuzzInput) -> Result<(), String> {
     // Normalize input
@@ -302,14 +343,15 @@ fn test_framed_read_invariants(input: FramedReadFuzzInput) -> Result<(), String>
 
     let mut framed = FramedRead::with_capacity(reader, decoder, initial_capacity);
 
-    let (test_waker, woke_flag) = TestWaker::new();
+    let (test_waker, _woke_flag) = TestWaker::new();
     let waker = Waker::from(Arc::new(test_waker));
+    let (cancel_waker, _) = TestWaker::new();
+    let cancel_waker = Waker::from(Arc::new(cancel_waker));
     let mut cx = Context::from_waker(&waker);
 
     let mut poll_count = 0;
-    let mut frames_received = 0;
-    let mut errors_received = 0;
-    let mut last_buffer_len = 0;
+    let mut frames_received = 0usize;
+    let mut errors_received = 0usize;
 
     for (action_idx, action) in input.poll_sequence.iter().enumerate() {
         if action_idx > 50 {
@@ -323,31 +365,17 @@ fn test_framed_read_invariants(input: FramedReadFuzzInput) -> Result<(), String>
                 // INVARIANT 3: poll_next re-entrance safe
                 let poll_result = Pin::new(&mut framed).poll_next(&mut cx);
 
-                match poll_result {
-                    Poll::Ready(Some(Ok(frame))) => {
-                        frames_received += 1;
-
-                        // INVARIANT 1: Frame length should be within bounds
-                        if frame.len() > max_frame_length as usize {
-                            return Err(format!(
-                                "Frame length {} exceeds max_frame_length {}",
-                                frame.len(),
-                                max_frame_length
-                            ));
-                        }
-                    }
-                    Poll::Ready(Some(Err(_err))) => {
-                        // INVARIANT 4: Custom Decoder errors propagated
-                        errors_received += 1;
-                    }
-                    Poll::Ready(None) => {
-                        // INVARIANT 2: Stream::next() termination on EOF correct
-                        // This is the correct EOF termination
-                        break;
-                    }
-                    Poll::Pending => {
-                        // Valid state, continue
-                    }
+                if matches!(
+                    observe_poll_next_result(
+                        poll_result,
+                        max_frame_length as usize,
+                        &mut frames_received,
+                        &mut errors_received,
+                    )?,
+                    PollNextObservation::End
+                ) {
+                    // INVARIANT 2: Stream::next() termination on EOF correct.
+                    break;
                 }
 
                 if matches!(action, PollAction::PollAndInspect) {
@@ -361,8 +389,6 @@ fn test_framed_read_invariants(input: FramedReadFuzzInput) -> Result<(), String>
                             current_buffer_len, max_frame_length
                         ));
                     }
-
-                    last_buffer_len = current_buffer_len;
                 }
 
                 // Test cancellation scenario
@@ -390,11 +416,16 @@ fn test_framed_read_invariants(input: FramedReadFuzzInput) -> Result<(), String>
                 // INVARIANT 5: Cancellation drains buffered bytes
                 let buffer_before = framed.read_buffer().len();
 
-                let _poll_result = Pin::new(&mut framed).poll_next(&mut cx);
+                let poll_result = Pin::new(&mut framed).poll_next(&mut cx);
+                let _observation = observe_poll_next_result(
+                    poll_result,
+                    max_frame_length as usize,
+                    &mut frames_received,
+                    &mut errors_received,
+                )?;
 
-                // Simulate cancellation by creating new context
-                let (new_waker, _) = TestWaker::new();
-                cx = Context::from_waker(&Waker::from(Arc::new(new_waker)));
+                // Simulate cancellation by switching to a distinct stable waker.
+                cx = Context::from_waker(&cancel_waker);
 
                 // Buffer should remain consistent across cancellation
                 let buffer_after = framed.read_buffer().len();
@@ -411,7 +442,13 @@ fn test_framed_read_invariants(input: FramedReadFuzzInput) -> Result<(), String>
                 // INVARIANT 3: poll_next re-entrance safe
                 // Call poll_next multiple times rapidly
                 for _ in 0..3 {
-                    let _poll_result = Pin::new(&mut framed).poll_next(&mut cx);
+                    let poll_result = Pin::new(&mut framed).poll_next(&mut cx);
+                    let _observation = observe_poll_next_result(
+                        poll_result,
+                        max_frame_length as usize,
+                        &mut frames_received,
+                        &mut errors_received,
+                    )?;
                 }
 
                 // Should not panic or corrupt state
