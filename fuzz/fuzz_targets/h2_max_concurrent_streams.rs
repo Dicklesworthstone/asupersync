@@ -469,6 +469,9 @@ fn test_interleaved_frame(
         } => {
             let normalized_stream_id = normalize_stream_id(*stream_id);
             if normalized_stream_id != 0 {
+                let was_active = state.active_streams.contains(&normalized_stream_id);
+                let before_active = state.active_streams.len();
+
                 // Create RST_STREAM frame
                 let frame = Frame::RstStream(asupersync::http::h2::frame::RstStreamFrame::new(
                     normalized_stream_id,
@@ -479,11 +482,21 @@ fn test_interleaved_frame(
                         // Close the stream in our state tracking only after the frame is observable.
                         state.close_stream(normalized_stream_id);
                     }
-                    Err(_) => {
+                    Err(err) => {
+                        assert_eq!(
+                            state.active_streams.len(),
+                            before_active,
+                            "failed RST_STREAM encode should not change active stream count"
+                        );
+                        if was_active {
+                            assert!(
+                                state.active_streams.contains(&normalized_stream_id),
+                                "failed RST_STREAM encode should not close active stream {normalized_stream_id}"
+                            );
+                        }
                         assert!(
-                            state.active_streams.contains(&normalized_stream_id)
-                                || !state.successful_opens.contains(&normalized_stream_id),
-                            "failed RST_STREAM encode should not close active stream {normalized_stream_id}"
+                            !err.message.is_empty(),
+                            "RST_STREAM encode failure should expose a diagnostic"
                         );
                     }
                 }
