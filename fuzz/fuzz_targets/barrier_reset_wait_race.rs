@@ -140,6 +140,10 @@ impl BarrierResetTracker {
             return Err(format!("Excessive cancellations: {}", cancelled));
         }
 
+        if resets > 100 {
+            return Err(format!("Excessive reset cycles: {}", resets));
+        }
+
         Ok(())
     }
 }
@@ -215,6 +219,25 @@ impl TrackedWaiter {
     }
 }
 
+fn observe_waiter_poll(
+    waiter: &mut TrackedWaiter,
+    tracker: &BarrierResetTracker,
+    waiter_id: u8,
+    context: &str,
+) -> Result<(), String> {
+    match waiter.poll() {
+        Poll::Pending | Poll::Ready(Ok(_)) | Poll::Ready(Err(BarrierWaitError::Cancelled)) => {
+            Ok(())
+        }
+        Poll::Ready(Err(BarrierWaitError::PolledAfterCompletion)) => {
+            tracker.record_inconsistency();
+            Err(format!(
+                "Waiter {waiter_id} was polled after completion during {context}"
+            ))
+        }
+    }
+}
+
 fn noop_waker() -> Waker {
     use std::task::{RawWaker, RawWakerVTable};
 
@@ -245,11 +268,9 @@ fn test_barrier_reset_scenario(
         match operation {
             BarrierOperation::AddWaiter { waiter_id } => {
                 let id = *waiter_id % 20; // Limit to reasonable number
-                if !waiters.contains_key(&id) {
-                    let waiter =
-                        TrackedWaiter::new(barrier.clone(), Arc::new(BarrierResetTracker::new()));
-                    waiters.insert(id, waiter);
-                }
+                waiters.entry(id).or_insert_with(|| {
+                    TrackedWaiter::new(barrier.clone(), Arc::new(BarrierResetTracker::new()))
+                });
             }
 
             BarrierOperation::CancelWaiter { waiter_id } => {
@@ -274,7 +295,7 @@ fn test_barrier_reset_scenario(
             BarrierOperation::PollWaiter { waiter_id } => {
                 let id = *waiter_id % 20;
                 if let Some(waiter) = waiters.get_mut(&id) {
-                    let _ = waiter.poll();
+                    observe_waiter_poll(waiter, tracker, id, "PollWaiter")?;
                     if waiter.is_completed() {
                         waiters.remove(&id);
                     }
@@ -284,7 +305,7 @@ fn test_barrier_reset_scenario(
             BarrierOperation::PollAllWaiters => {
                 let mut to_remove = Vec::new();
                 for (id, waiter) in waiters.iter_mut() {
-                    let _ = waiter.poll();
+                    observe_waiter_poll(waiter, tracker, *id, "PollAllWaiters")?;
                     if waiter.is_completed() {
                         to_remove.push(*id);
                     }
@@ -301,13 +322,9 @@ fn test_barrier_reset_scenario(
 
                 for i in 0..gen_count {
                     let id = start_id + i as u8;
-                    if !waiters.contains_key(&id) {
-                        let waiter = TrackedWaiter::new(
-                            barrier.clone(),
-                            Arc::new(BarrierResetTracker::new()),
-                        );
-                        waiters.insert(id, waiter);
-                    }
+                    waiters.entry(id).or_insert_with(|| {
+                        TrackedWaiter::new(barrier.clone(), Arc::new(BarrierResetTracker::new()))
+                    });
                 }
             }
 
@@ -343,7 +360,7 @@ fn test_barrier_reset_scenario(
         // Always poll all waiters after each operation to drive progress
         let mut to_remove = Vec::new();
         for (id, waiter) in waiters.iter_mut() {
-            let _ = waiter.poll();
+            observe_waiter_poll(waiter, tracker, *id, "post-operation progress poll")?;
             if waiter.is_completed() {
                 to_remove.push(*id);
             }
