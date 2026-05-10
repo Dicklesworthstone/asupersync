@@ -94,7 +94,7 @@ impl<S: fmt::Debug, F> fmt::Debug for Steer<S, F> {
         let services: Vec<String> = self
             .services
             .iter()
-            .map(|service| format!("{:?}", &*service.lock()))
+            .map(|service| format!("{:?}", *service.lock()))
             .collect();
         f.debug_struct("Steer")
             .field("services", &services)

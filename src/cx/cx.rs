@@ -981,10 +981,10 @@ impl<Caps> Cx<Caps> {
     #[must_use]
     pub fn attenuate(&self, predicate: super::macaroon::CaveatPredicate) -> Option<Self> {
         let token = self.handles.macaroon.as_ref()?;
-        if let Err(error) = predicate.validate() {
+        if let Err(_error) = predicate.validate() {
             error!(
                 token_id = %token.identifier(),
-                error = %error,
+                error = %_error,
                 "macaroon attenuation rejected unencodable caveat"
             );
             return None;

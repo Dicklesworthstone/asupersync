@@ -614,7 +614,7 @@ impl CancellationDebtMonitor {
         let processing_rate = {
             let mut stats = self.processing_stats.lock();
             let mut total_rate = 0.0;
-            for (_, stat) in stats.iter_mut() {
+            for stat in stats.values_mut() {
                 total_rate += stat.calculate_rate(self.config.rate_sampling_window, now);
             }
             total_rate

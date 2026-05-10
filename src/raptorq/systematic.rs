@@ -1181,7 +1181,7 @@ impl SystematicEncoder {
             degree += 1;
         }
 
-        debug_assert!(degree == lt_tuple.d + lt_tuple.d1);
+        debug_assert_eq!(degree, lt_tuple.d + lt_tuple.d1);
         degree
     }
 

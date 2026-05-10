@@ -667,8 +667,8 @@ impl PressureGovernor {
         envelopes.insert(envelope_id, envelope);
         self.envelope_metrics
             .envelopes_active
-            .set(envelopes.len() as i64);
-        self.update_envelope_metrics(&*envelopes)?;
+            .set(usize_to_i64_saturating(envelopes.len()));
+        self.update_envelope_metrics(&envelopes)?;
         Ok(())
     }
 
@@ -691,7 +691,7 @@ impl PressureGovernor {
                 self.envelope_metrics.envelope_violations.increment();
             }
 
-            self.update_envelope_metrics(&*envelopes)?;
+            self.update_envelope_metrics(&envelopes)?;
         }
 
         Ok(())
@@ -707,8 +707,8 @@ impl PressureGovernor {
         envelopes.remove(&envelope_id);
         self.envelope_metrics
             .envelopes_active
-            .set(envelopes.len() as i64);
-        self.update_envelope_metrics(&*envelopes)?;
+            .set(usize_to_i64_saturating(envelopes.len()));
+        self.update_envelope_metrics(&envelopes)?;
         Ok(())
     }
 
@@ -726,7 +726,7 @@ impl PressureGovernor {
         swarm_state.peer_states.insert(peer_id, pressure_state);
         self.swarm_metrics
             .peers_active
-            .set(swarm_state.peer_states.len() as i64);
+            .set(usize_to_i64_saturating(swarm_state.peer_states.len()));
 
         // Update max peer pressure metric
         if let Some(max_pressure) = swarm_state
@@ -1069,13 +1069,13 @@ impl PressureGovernor {
 
         self.envelope_metrics
             .envelope_memory_used
-            .set(total_memory as i64);
+            .set(u64_to_i64_saturating(total_memory));
         self.envelope_metrics
             .envelope_cpu_utilization
             .set((avg_cpu * 10000.0) as i64); // scaled
         self.envelope_metrics
             .envelope_io_active
-            .set(total_io as i64);
+            .set(u64_to_i64_saturating(total_io));
 
         Ok(())
     }
@@ -1210,6 +1210,10 @@ fn f64_to_u64_saturating(value: f64) -> u64 {
 }
 
 fn u64_to_i64_saturating(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn usize_to_i64_saturating(value: usize) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
 }
 

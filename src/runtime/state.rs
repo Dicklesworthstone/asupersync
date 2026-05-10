@@ -4208,8 +4208,7 @@ impl RuntimeState {
             .unwrap_or(config.default_memory_budget_bytes);
         let cpu_budget_ns_per_sec = budget
             .deadline
-            .map(Time::as_nanos)
-            .unwrap_or(config.default_cpu_budget_ns_per_sec);
+            .map_or(config.default_cpu_budget_ns_per_sec, Time::as_nanos);
         let io_budget_ops_per_sec = config.default_io_budget_ops_per_sec;
 
         Ok(ResourceEnvelope::new(
