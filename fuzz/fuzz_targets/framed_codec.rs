@@ -667,7 +667,7 @@ fn test_framed_operations_lines<T>(
             FramedOperation::PollNext => {
                 // Test stream polling with proper error handling
                 let poll_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let _ = Pin::new(&mut *framed).poll_next(&mut cx);
+                    observe_poll_next(&mut *framed, &mut cx);
                 }));
                 assert!(
                     poll_result.is_ok(),
@@ -680,16 +680,16 @@ fn test_framed_operations_lines<T>(
                 let limited_data = data.iter().take(MAX_INPUT_SIZE).cloned().collect();
                 // Convert Vec<u8> to String for LinesCodec
                 if let Ok(string_data) = String::from_utf8(limited_data) {
-                    let _ = framed.send(string_data);
+                    observe_lines_send(framed, string_data);
                 }
             }
 
             FramedOperation::PollFlush => {
-                let _ = framed.poll_flush(&mut cx);
+                observe_poll_flush(framed, &mut cx);
             }
 
             FramedOperation::PollClose => {
-                let _ = framed.poll_close(&mut cx);
+                observe_poll_close(framed, &mut cx);
             }
 
             FramedOperation::InspectReadBuffer => {
@@ -724,7 +724,7 @@ fn test_framed_operations_bytes<T, U>(
             FramedOperation::PollNext => {
                 // Test stream polling with proper error handling
                 let poll_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let _ = Pin::new(&mut *framed).poll_next(&mut cx);
+                    observe_poll_next(&mut *framed, &mut cx);
                 }));
                 assert!(
                     poll_result.is_ok(),
@@ -736,15 +736,15 @@ fn test_framed_operations_bytes<T, U>(
                 // Limit data size to prevent memory exhaustion
                 let limited_data: Vec<u8> = data.iter().take(MAX_INPUT_SIZE).cloned().collect();
                 let bytes_data = BytesMut::from(&limited_data[..]);
-                let _ = framed.send(bytes_data);
+                observe_bytes_send(framed, bytes_data);
             }
 
             FramedOperation::PollFlush => {
-                let _ = framed.poll_flush(&mut cx);
+                observe_poll_flush(framed, &mut cx);
             }
 
             FramedOperation::PollClose => {
-                let _ = framed.poll_close(&mut cx);
+                observe_poll_close(framed, &mut cx);
             }
 
             FramedOperation::InspectReadBuffer => {
@@ -760,6 +760,79 @@ fn test_framed_operations_bytes<T, U>(
                 let _ = framed.codec_mut();
             }
         }
+    }
+}
+
+fn observe_poll_next<T, U>(framed: &mut Framed<T, U>, cx: &mut Context<'_>)
+where
+    T: AsyncRead + Unpin,
+    U: Decoder + Unpin,
+{
+    match Pin::new(framed).poll_next(cx) {
+        Poll::Ready(Some(Ok(_))) | Poll::Ready(Some(Err(_))) | Poll::Ready(None) => {}
+        Poll::Pending => {}
+    }
+}
+
+fn observe_lines_send<T>(framed: &mut Framed<T, LinesCodec>, item: String)
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    let before_len = framed.write_buffer().len();
+    framed
+        .send(item)
+        .expect("LinesCodec should encode fuzz-generated UTF-8 strings");
+    assert!(
+        framed.write_buffer().len() > before_len,
+        "LinesCodec send should append a newline-delimited frame"
+    );
+}
+
+fn observe_bytes_send<T, U>(framed: &mut Framed<T, U>, item: BytesMut)
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+    U: Decoder + Encoder<BytesMut> + Unpin,
+{
+    let before_len = framed.write_buffer().len();
+    let result = framed.send(item);
+    let after_len = framed.write_buffer().len();
+
+    if result.is_ok() {
+        assert!(
+            after_len >= before_len,
+            "successful byte-frame send should not shrink the write buffer"
+        );
+    } else {
+        assert_eq!(
+            after_len, before_len,
+            "failed byte-frame send should leave the write buffer unchanged"
+        );
+    }
+}
+
+fn observe_poll_flush<T, U>(framed: &mut Framed<T, U>, cx: &mut Context<'_>)
+where
+    T: AsyncWrite + Unpin,
+{
+    match framed.poll_flush(cx) {
+        Poll::Ready(Ok(())) => assert!(
+            framed.write_buffer().is_empty(),
+            "successful Framed::poll_flush should empty the write buffer"
+        ),
+        Poll::Ready(Err(_)) | Poll::Pending => {}
+    }
+}
+
+fn observe_poll_close<T, U>(framed: &mut Framed<T, U>, cx: &mut Context<'_>)
+where
+    T: AsyncWrite + Unpin,
+{
+    match framed.poll_close(cx) {
+        Poll::Ready(Ok(())) => assert!(
+            framed.write_buffer().is_empty(),
+            "successful Framed::poll_close should empty the write buffer"
+        ),
+        Poll::Ready(Err(_)) | Poll::Pending => {}
     }
 }
 
