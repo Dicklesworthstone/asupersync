@@ -5318,6 +5318,7 @@ name = "h2_request_with_huge_authority"
 path = "fuzz_targets/h2_request_with_huge_authority.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "sync_oneshot_cancel_recv"
