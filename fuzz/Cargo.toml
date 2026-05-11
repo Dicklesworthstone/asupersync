@@ -2980,6 +2980,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "raptorq_gf256_simd_scalar_parity"
+path = "fuzz_targets/raptorq_gf256_simd_scalar_parity.rs"
+test = false
+doc = false
+bench = false
+
 # br-asupersync-6ugt3c — NATS INFO JSON extractor + HMSG header-block
 # decoder. Mirrors the production extract_json_string/_i64/_bool
 # functions and the HMSG name:value parser; feeds arbitrary bytes to

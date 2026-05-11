@@ -12,34 +12,54 @@
 
 #![no_main]
 
-use std::sync::Mutex;
 use asupersync::raptorq::gf256::{
-    Gf256, gf256_add_slice, gf256_addmul_slice, gf256_add_slices2,
-    gf256_addmul_slices2, gf256_mul_slices2
+    Gf256, gf256_add_slice, gf256_add_slices2, gf256_addmul_slice, gf256_addmul_slices2,
+    gf256_mul_slices2,
 };
 use libfuzzer_sys::fuzz_target;
+use std::sync::{Mutex, MutexGuard};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 const MAX_SLICE_LEN: usize = 2048; // Realistic for RaptorQ symbols
 const SCALAR_PROFILE: &str = "scalar-conservative-v1";
+const PROFILE_PACK_ENV: &str = "ASUPERSYNC_GF256_PROFILE_PACK";
+const DUAL_POLICY_ENV: &str = "ASUPERSYNC_GF256_DUAL_POLICY";
+
+fn env_guard() -> MutexGuard<'static, ()> {
+    ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn set_env_var(key: &str, value: &str) {
+    // SAFETY: this fuzz target serializes its own GF256 environment overrides
+    // with ENV_LOCK and does not spawn helper threads while the overrides are active.
+    unsafe { std::env::set_var(key, value) };
+}
+
+fn remove_env_var(key: &str) {
+    // SAFETY: this fuzz target serializes its own GF256 environment overrides
+    // with ENV_LOCK and does not spawn helper threads while the overrides are active.
+    unsafe { std::env::remove_var(key) };
+}
 
 /// Force scalar-only execution by overriding environment
 fn with_forced_scalar<T>(f: impl FnOnce() -> T) -> T {
-    let _lock = ENV_LOCK.lock().unwrap();
-    std::env::set_var("ASUPERSYNC_GF256_PROFILE_PACK", SCALAR_PROFILE);
-    std::env::set_var("ASUPERSYNC_GF256_DUAL_POLICY", "never");
+    let _lock = env_guard();
+    set_env_var(PROFILE_PACK_ENV, SCALAR_PROFILE);
+    set_env_var(DUAL_POLICY_ENV, "never");
     let result = f();
-    std::env::remove_var("ASUPERSYNC_GF256_PROFILE_PACK");
-    std::env::remove_var("ASUPERSYNC_GF256_DUAL_POLICY");
+    remove_env_var(PROFILE_PACK_ENV);
+    remove_env_var(DUAL_POLICY_ENV);
     result
 }
 
 /// Allow auto-detection (SIMD if available, scalar fallback)
 fn with_auto_kernel<T>(f: impl FnOnce() -> T) -> T {
-    let _lock = ENV_LOCK.lock().unwrap();
-    std::env::remove_var("ASUPERSYNC_GF256_PROFILE_PACK");
-    std::env::remove_var("ASUPERSYNC_GF256_DUAL_POLICY");
+    let _lock = env_guard();
+    remove_env_var(PROFILE_PACK_ENV);
+    remove_env_var(DUAL_POLICY_ENV);
     f()
 }
 
@@ -167,7 +187,7 @@ impl GfOperation {
 }
 
 fuzz_target!(|data: &[u8]| {
-    if data.len() < 8 || data.len() > 65536 { // Reasonable bounds
+    if !(8..=65_536).contains(&data.len()) {
         return;
     }
 
@@ -186,8 +206,7 @@ fuzz_target!(|data: &[u8]| {
     match (auto_result, scalar_result) {
         (Ok(auto_output), Ok(scalar_output)) => {
             assert_eq!(
-                auto_output,
-                scalar_output,
+                auto_output, scalar_output,
                 "GF256 SIMD/scalar parity violation: op_type={}, coef={}, len_a={}, len_b={}",
                 operation.op_type, operation.coef, operation.len_a, operation.len_b
             );
