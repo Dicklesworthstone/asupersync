@@ -5234,6 +5234,7 @@ name = "h2_priority_dependency_loop"
 path = "fuzz_targets/h2_priority_dependency_loop.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_priority_dependency_chain"

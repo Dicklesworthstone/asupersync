@@ -173,31 +173,29 @@ impl MockPriorityManager {
         }
 
         // Create stream if it doesn't exist
-        if !self.tree.streams.contains_key(&frame.stream_id) {
-            self.tree.streams.insert(
-                frame.stream_id,
-                StreamNode {
-                    id: frame.stream_id,
-                    parent: 0,
-                    children: Vec::new(),
-                    weight: 16, // Default weight
-                    exclusive: false,
-                },
-            );
-        }
+        self.tree
+            .streams
+            .entry(frame.stream_id)
+            .or_insert_with(|| StreamNode {
+                id: frame.stream_id,
+                parent: 0,
+                children: Vec::new(),
+                weight: 16, // Default weight
+                exclusive: false,
+            });
 
         // Create dependency stream if it doesn't exist (and not root)
-        if frame.dependency != 0 && !self.tree.streams.contains_key(&frame.dependency) {
-            self.tree.streams.insert(
-                frame.dependency,
-                StreamNode {
+        if frame.dependency != 0 {
+            self.tree
+                .streams
+                .entry(frame.dependency)
+                .or_insert_with(|| StreamNode {
                     id: frame.dependency,
                     parent: 0,
                     children: Vec::new(),
                     weight: 16,
                     exclusive: false,
-                },
-            );
+                });
         }
 
         // Check for cycles before applying the change
@@ -207,6 +205,10 @@ impl MockPriorityManager {
                     PriorityError::CyclicDependency(cycle),
                 ));
             } else if self.policy.allow_cycle_resolution {
+                if self.tree.stats.cycles_resolved >= self.policy.max_resolution_attempts {
+                    return Ok(PriorityResult::ProtocolError(PriorityError::DependencyLoop));
+                }
+
                 // Attempt to resolve the cycle per RFC 7540 §5.3.3
                 match self.resolve_cycle(frame)? {
                     Some(resolution_msg) => {
@@ -289,12 +291,11 @@ impl MockPriorityManager {
         }
 
         // Check parent of current stream
-        if let Some(stream) = self.tree.streams.get(&current) {
-            if stream.parent != 0 {
-                if self.dfs_cycle_check(stream.parent, target, visited, path, depth + 1)? {
-                    return Ok(true);
-                }
-            }
+        if let Some(stream) = self.tree.streams.get(&current)
+            && stream.parent != 0
+            && self.dfs_cycle_check(stream.parent, target, visited, path, depth + 1)?
+        {
+            return Ok(true);
         }
 
         path.pop();
@@ -322,20 +323,26 @@ impl MockPriorityManager {
         let dependency_to_move = new_dependency;
 
         // Move the dependency to the old parent
-        if let Some(dep_stream) = self.tree.streams.get_mut(&dependency_to_move) {
-            // Remove from current parent's children
-            if let Some(current_parent) = self.tree.streams.get_mut(&dep_stream.parent) {
+        let dependency_parent = self
+            .tree
+            .streams
+            .get(&dependency_to_move)
+            .map(|stream| stream.parent);
+
+        if let Some(parent_id) = dependency_parent {
+            if let Some(current_parent) = self.tree.streams.get_mut(&parent_id) {
                 current_parent.children.retain(|&x| x != dependency_to_move);
             }
 
-            // Set new parent
-            dep_stream.parent = old_parent;
+            if let Some(dep_stream) = self.tree.streams.get_mut(&dependency_to_move) {
+                dep_stream.parent = old_parent;
+            }
 
             // Add to new parent's children
-            if old_parent != 0 {
-                if let Some(new_parent) = self.tree.streams.get_mut(&old_parent) {
-                    new_parent.children.push(dependency_to_move);
-                }
+            if old_parent != 0
+                && let Some(new_parent) = self.tree.streams.get_mut(&old_parent)
+            {
+                new_parent.children.push(dependency_to_move);
             }
         }
 
@@ -356,10 +363,10 @@ impl MockPriorityManager {
         // Remove stream from current parent's children
         if let Some(stream) = self.tree.streams.get(&stream_id) {
             let old_parent = stream.parent;
-            if old_parent != 0 {
-                if let Some(parent) = self.tree.streams.get_mut(&old_parent) {
-                    parent.children.retain(|&x| x != stream_id);
-                }
+            if old_parent != 0
+                && let Some(parent) = self.tree.streams.get_mut(&old_parent)
+            {
+                parent.children.retain(|&x| x != stream_id);
             }
         }
 
@@ -381,11 +388,11 @@ impl MockPriorityManager {
 
                 // Move existing children to be children of stream_id
                 if let Some(stream) = self.tree.streams.get_mut(&stream_id) {
-                    stream.children = existing_children;
+                    stream.children = existing_children.clone();
                 }
 
                 // Update parent pointers for moved children
-                for &child in &existing_children {
+                for child in existing_children {
                     if let Some(child_stream) = self.tree.streams.get_mut(&child) {
                         child_stream.parent = stream_id;
                     }
@@ -393,10 +400,10 @@ impl MockPriorityManager {
             }
         } else if new_parent != 0 {
             // Non-exclusive: just add to parent's children
-            if let Some(parent) = self.tree.streams.get_mut(&new_parent) {
-                if !parent.children.contains(&stream_id) {
-                    parent.children.push(stream_id);
-                }
+            if let Some(parent) = self.tree.streams.get_mut(&new_parent)
+                && !parent.children.contains(&stream_id)
+            {
+                parent.children.push(stream_id);
             }
         }
 
@@ -621,7 +628,7 @@ fuzz_target!(|data: &[u8]| {
     let mut frames = test.priority_frames;
     for frame in &mut frames {
         frame.stream_id = (frame.stream_id % test.max_stream_id.max(1) as u32) + 1;
-        frame.dependency = frame.dependency % (test.max_stream_id.max(1) as u32 + 1);
+        frame.dependency %= test.max_stream_id.max(1) as u32 + 1;
         frame.weight = frame.weight.max(1); // Weight must be 1-256
     }
 
@@ -674,7 +681,7 @@ fuzz_target!(|data: &[u8]| {
                 }
             }
 
-            Ok(PriorityResult::Restructured(new_tree, message)) => {
+            Ok(PriorityResult::Restructured(_new_tree, message)) => {
                 // Restructuring should maintain integrity
                 assert!(
                     manager.verify_integrity().is_ok(),
