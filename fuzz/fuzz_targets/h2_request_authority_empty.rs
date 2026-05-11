@@ -126,9 +126,10 @@ enum AuthorityValidationError {
 
 impl MockH2AuthorityParser {
     fn validate_authority_header(
-        input: &H2AuthorityInput
+        input: &H2AuthorityInput,
     ) -> Result<Option<String>, AuthorityValidationError> {
         let authority_value = Self::generate_authority_value(input);
+        let _connection_type = &input.test_params.connection_type;
 
         // Handle missing authority
         if matches!(input.authority_strategy, AuthorityStrategy::Missing) {
@@ -155,12 +156,8 @@ impl MockH2AuthorityParser {
             AuthorityStrategy::Empty => String::new(),
             AuthorityStrategy::Missing => String::new(), // Will be handled specially
             AuthorityStrategy::Whitespace(ws) => ws.clone(),
-            AuthorityStrategy::ValidHostname(hostname) => {
-                Self::sanitize_hostname(hostname)
-            }
-            AuthorityStrategy::ValidIP(ip_type) => {
-                Self::format_ip(ip_type)
-            }
+            AuthorityStrategy::ValidHostname(hostname) => Self::sanitize_hostname(hostname),
+            AuthorityStrategy::ValidIP(ip_type) => Self::format_ip(ip_type),
             AuthorityStrategy::HostnameWithPort { hostname, port } => {
                 format!("{}:{}", Self::sanitize_hostname(hostname), port)
             }
@@ -172,28 +169,28 @@ impl MockH2AuthorityParser {
                     format!("{}:{}", ip_str, port)
                 }
             }
-            AuthorityStrategy::Invalid(invalid_type) => {
-                match invalid_type {
-                    InvalidAuthorityType::WithUserinfo { userinfo, host } => {
-                        format!("{}@{}", userinfo, host)
-                    }
-                    InvalidAuthorityType::InvalidChars(chars) => chars.clone(),
-                    InvalidAuthorityType::EmptyHostWithPort(port) => {
-                        format!(":{}", port)
-                    }
-                    InvalidAuthorityType::InvalidPort(port_str) => {
-                        format!("example.com:{}", port_str)
-                    }
-                    InvalidAuthorityType::MultipleColons(malformed) => malformed.clone(),
-                    InvalidAuthorityType::MalformedIPv6(malformed) => {
-                        format!("[{}]", malformed)
-                    }
+            AuthorityStrategy::Invalid(invalid_type) => match invalid_type {
+                InvalidAuthorityType::WithUserinfo { userinfo, host } => {
+                    format!("{}@{}", userinfo, host)
                 }
-            }
+                InvalidAuthorityType::InvalidChars(chars) => chars.clone(),
+                InvalidAuthorityType::EmptyHostWithPort(port) => {
+                    format!(":{}", port)
+                }
+                InvalidAuthorityType::InvalidPort(port_str) => {
+                    format!("example.com:{}", port_str)
+                }
+                InvalidAuthorityType::MultipleColons(malformed) => malformed.clone(),
+                InvalidAuthorityType::MalformedIPv6(malformed) => {
+                    format!("[{}]", malformed)
+                }
+            },
         }
     }
 
-    fn validate_missing_authority(input: &H2AuthorityInput) -> Result<Option<String>, AuthorityValidationError> {
+    fn validate_missing_authority(
+        input: &H2AuthorityInput,
+    ) -> Result<Option<String>, AuthorityValidationError> {
         // RFC 7540 §8.1.2.3: Authority MAY be omitted for certain request types
 
         match &input.scheme {
@@ -211,7 +208,7 @@ impl MockH2AuthorityParser {
                     _ => {
                         // For origin-form with HTTPS, authority is usually required
                         Err(AuthorityValidationError::RequiredButMissing {
-                            scheme: "https".to_string()
+                            scheme: "https".to_string(),
                         })
                     }
                 }
@@ -220,14 +217,17 @@ impl MockH2AuthorityParser {
                 // HTTP is more lenient about missing authority
                 Ok(None)
             }
-            SchemeType::Custom(_) => {
+            SchemeType::Custom(custom_scheme) => {
                 // Custom schemes - allow missing authority
+                let _custom_scheme_len = custom_scheme.len();
                 Ok(None)
             }
         }
     }
 
-    fn validate_empty_authority(input: &H2AuthorityInput) -> Result<Option<String>, AuthorityValidationError> {
+    fn validate_empty_authority(
+        input: &H2AuthorityInput,
+    ) -> Result<Option<String>, AuthorityValidationError> {
         // Empty authority is generally acceptable per RFC 7540 §8.1.2.3
         // "this pseudo-header field MUST be omitted when translating from an HTTP/1.1
         // request that has a request target in origin or asterisk form"
@@ -240,7 +240,7 @@ impl MockH2AuthorityParser {
             TargetFormat::Authority => {
                 // For authority-form (CONNECT), empty authority doesn't make sense
                 Err(AuthorityValidationError::RequiredButMissing {
-                    scheme: "connect".to_string()
+                    scheme: "connect".to_string(),
                 })
             }
             TargetFormat::Absolute => {
@@ -252,7 +252,7 @@ impl MockH2AuthorityParser {
 
     fn validate_non_empty_authority(
         authority: &str,
-        input: &H2AuthorityInput
+        input: &H2AuthorityInput,
     ) -> Result<Option<String>, AuthorityValidationError> {
         // Check for forbidden userinfo
         if authority.contains('@') {
@@ -283,7 +283,9 @@ impl MockH2AuthorityParser {
         Ok(Some(authority.to_string()))
     }
 
-    fn parse_host_port(authority: &str) -> Result<(String, Option<String>), AuthorityValidationError> {
+    fn parse_host_port(
+        authority: &str,
+    ) -> Result<(String, Option<String>), AuthorityValidationError> {
         // Handle IPv6 addresses in brackets
         if authority.starts_with('[') {
             if let Some(bracket_end) = authority.find(']') {
@@ -292,8 +294,7 @@ impl MockH2AuthorityParser {
 
                 if remaining.is_empty() {
                     return Ok((format!("[{}]", ipv6_part), None));
-                } else if remaining.starts_with(':') {
-                    let port_part = &remaining[1..];
+                } else if let Some(port_part) = remaining.strip_prefix(':') {
                     return Ok((format!("[{}]", ipv6_part), Some(port_part.to_string())));
                 } else {
                     return Err(AuthorityValidationError::MalformedIP);
@@ -319,7 +320,7 @@ impl MockH2AuthorityParser {
 
         // Handle bracketed IPv6
         if host.starts_with('[') && host.ends_with(']') {
-            let ipv6_addr = &host[1..host.len()-1];
+            let ipv6_addr = &host[1..host.len() - 1];
             return Self::validate_ipv6(ipv6_addr);
         }
 
@@ -350,9 +351,7 @@ impl MockH2AuthorityParser {
         }
 
         for part in parts {
-            if let Ok(octet) = part.parse::<u8>() {
-                // Valid octet
-            } else {
+            if part.parse::<u8>().is_err() {
                 return Err(AuthorityValidationError::MalformedIP);
             }
         }
@@ -420,7 +419,7 @@ impl MockH2AuthorityParser {
 
     fn check_host_authority_conflict(
         authority: &str,
-        host_header: &str
+        host_header: &str,
     ) -> Result<(), AuthorityValidationError> {
         // RFC 7540: If both Host header and :authority are present, they should match
         // or at least be compatible
@@ -432,7 +431,8 @@ impl MockH2AuthorityParser {
 
     fn sanitize_hostname(hostname: &str) -> String {
         // Basic sanitization for test hostname generation
-        hostname.chars()
+        hostname
+            .chars()
             .filter(|&c| c.is_alphanumeric() || c == '.' || c == '-')
             .take(63) // Max label length
             .collect()
@@ -443,12 +443,11 @@ impl MockH2AuthorityParser {
             IpType::V4 { octets } => {
                 format!("{}.{}.{}.{}", octets[0], octets[1], octets[2], octets[3])
             }
-            IpType::V6 { segments } => {
-                segments.iter()
-                    .map(|seg| format!("{:x}", seg))
-                    .collect::<Vec<_>>()
-                    .join(":")
-            }
+            IpType::V6 { segments } => segments
+                .iter()
+                .map(|seg| format!("{:x}", seg))
+                .collect::<Vec<_>>()
+                .join(":"),
         }
     }
 }
@@ -477,17 +476,29 @@ fuzz_target!(|input: H2AuthorityInput| {
                         }
                         Err(other) => {
                             // Unexpected error for empty authority
-                            panic!("Unexpected error for empty authority in origin/asterisk form: {:?}", other);
+                            panic!(
+                                "Unexpected error for empty authority in origin/asterisk form: {:?}",
+                                other
+                            );
                         }
                     }
                 }
                 TargetFormat::Authority => {
                     // CONNECT method requires authority
-                    assert!(matches!(result, Err(AuthorityValidationError::RequiredButMissing { .. })));
+                    assert!(matches!(
+                        result,
+                        Err(AuthorityValidationError::RequiredButMissing { .. })
+                    ));
                 }
                 TargetFormat::Absolute => {
                     // Absolute form may accept empty authority
-                    assert!(result.is_ok() || matches!(result, Err(AuthorityValidationError::RequiredButMissing { .. })));
+                    assert!(
+                        result.is_ok()
+                            || matches!(
+                                result,
+                                Err(AuthorityValidationError::RequiredButMissing { .. })
+                            )
+                    );
                 }
             }
         }
@@ -496,7 +507,10 @@ fuzz_target!(|input: H2AuthorityInput| {
             match (&input.scheme, &input.test_params.target_format) {
                 (SchemeType::Https, TargetFormat::Origin) => {
                     // HTTPS with origin-form typically requires authority
-                    if !matches!(result, Ok(None) | Err(AuthorityValidationError::RequiredButMissing { .. })) {
+                    if !matches!(
+                        result,
+                        Ok(None) | Err(AuthorityValidationError::RequiredButMissing { .. })
+                    ) {
                         // Either accepted or properly rejected
                     }
                 }
@@ -510,14 +524,20 @@ fuzz_target!(|input: H2AuthorityInput| {
                 }
                 _ => {
                     // Other combinations are generally acceptable
-                    assert!(result.is_ok() || matches!(result, Err(AuthorityValidationError::RequiredButMissing { .. })));
+                    assert!(
+                        result.is_ok()
+                            || matches!(
+                                result,
+                                Err(AuthorityValidationError::RequiredButMissing { .. })
+                            )
+                    );
                 }
             }
         }
-        AuthorityStrategy::ValidHostname(_) |
-        AuthorityStrategy::ValidIP(_) |
-        AuthorityStrategy::HostnameWithPort { .. } |
-        AuthorityStrategy::IpWithPort { .. } => {
+        AuthorityStrategy::ValidHostname(_)
+        | AuthorityStrategy::ValidIP(_)
+        | AuthorityStrategy::HostnameWithPort { .. }
+        | AuthorityStrategy::IpWithPort { .. } => {
             // Valid authority formats should be accepted
             match result {
                 Ok(_) => {
@@ -526,22 +546,31 @@ fuzz_target!(|input: H2AuthorityInput| {
                 Err(AuthorityValidationError::HostAuthorityConflict) => {
                     // Expected: conflict with Host header
                 }
-                Err(other_error) => {
+                Err(_) => {
                     // May be rejected due to generation artifacts or validation strictness
                 }
             }
         }
         AuthorityStrategy::Invalid(_) => {
             // Invalid authority formats should be rejected
-            assert!(result.is_err(), "Invalid authority was incorrectly accepted");
+            assert!(
+                result.is_err(),
+                "Invalid authority was incorrectly accepted"
+            );
 
             // Check that the right type of error is reported
             match &input.authority_strategy {
                 AuthorityStrategy::Invalid(InvalidAuthorityType::WithUserinfo { .. }) => {
-                    assert!(matches!(result, Err(AuthorityValidationError::ContainsUserinfo)));
+                    assert!(matches!(
+                        result,
+                        Err(AuthorityValidationError::ContainsUserinfo)
+                    ));
                 }
                 AuthorityStrategy::Invalid(InvalidAuthorityType::EmptyHostWithPort(_)) => {
-                    assert!(matches!(result, Err(AuthorityValidationError::EmptyHostWithPort)));
+                    assert!(matches!(
+                        result,
+                        Err(AuthorityValidationError::EmptyHostWithPort)
+                    ));
                 }
                 AuthorityStrategy::Invalid(InvalidAuthorityType::InvalidPort(_)) => {
                     assert!(matches!(result, Err(AuthorityValidationError::InvalidPort)));
@@ -562,19 +591,23 @@ fuzz_target!(|input: H2AuthorityInput| {
 
 fn test_authority_invariants(
     input: &H2AuthorityInput,
-    result: &Result<Option<String>, AuthorityValidationError>
+    result: &Result<Option<String>, AuthorityValidationError>,
 ) {
     // Invariant: Userinfo in authority must always be rejected per RFC 7540
     let authority_value = MockH2AuthorityParser::generate_authority_value(input);
     if authority_value.contains('@') {
-        assert!(matches!(result, Err(AuthorityValidationError::ContainsUserinfo)));
+        assert!(matches!(
+            result,
+            Err(AuthorityValidationError::ContainsUserinfo)
+        ));
     }
 
     // Invariant: Host/Authority conflict should be detected
-    if input.test_params.include_host_header &&
-       !input.test_params.host_header_value.is_empty() &&
-       !authority_value.is_empty() &&
-       input.test_params.host_header_value != authority_value {
+    if input.test_params.include_host_header
+        && !input.test_params.host_header_value.is_empty()
+        && !authority_value.is_empty()
+        && input.test_params.host_header_value != authority_value
+    {
         if matches!(result, Err(AuthorityValidationError::HostAuthorityConflict)) {
             // Expected conflict detected
         } else {
@@ -583,9 +616,16 @@ fn test_authority_invariants(
     }
 
     // Invariant: Authority-form requests (CONNECT) need non-empty authority
-    if matches!(input.test_params.target_format, TargetFormat::Authority) &&
-       matches!(input.authority_strategy, AuthorityStrategy::Empty | AuthorityStrategy::Missing) {
-        assert!(matches!(result, Err(AuthorityValidationError::RequiredButMissing { .. })));
+    if matches!(input.test_params.target_format, TargetFormat::Authority)
+        && matches!(
+            input.authority_strategy,
+            AuthorityStrategy::Empty | AuthorityStrategy::Missing
+        )
+    {
+        assert!(matches!(
+            result,
+            Err(AuthorityValidationError::RequiredButMissing { .. })
+        ));
     }
 
     // Invariant: Invalid port formats should be rejected
@@ -595,7 +635,10 @@ fn test_authority_invariants(
 
     // Invariant: Empty hostname with port should be rejected
     if authority_value.starts_with(':') && authority_value.len() > 1 {
-        assert!(matches!(result, Err(AuthorityValidationError::EmptyHostWithPort)));
+        assert!(matches!(
+            result,
+            Err(AuthorityValidationError::EmptyHostWithPort)
+        ));
     }
 }
 
@@ -619,7 +662,10 @@ mod tests {
         };
 
         let result = MockH2AuthorityParser::validate_authority_header(&input);
-        assert!(result.is_ok(), "Empty authority should be accepted for origin-form");
+        assert!(
+            result.is_ok(),
+            "Empty authority should be accepted for origin-form"
+        );
     }
 
     #[test]
@@ -645,12 +691,10 @@ mod tests {
     #[test]
     fn test_userinfo_rejected() {
         let input = H2AuthorityInput {
-            authority_strategy: AuthorityStrategy::Invalid(
-                InvalidAuthorityType::WithUserinfo {
-                    userinfo: "user:pass".to_string(),
-                    host: "example.com".to_string(),
-                }
-            ),
+            authority_strategy: AuthorityStrategy::Invalid(InvalidAuthorityType::WithUserinfo {
+                userinfo: "user:pass".to_string(),
+                host: "example.com".to_string(),
+            }),
             scheme: SchemeType::Https,
             method: "GET".to_string(),
             path: "/".to_string(),
@@ -663,7 +707,10 @@ mod tests {
         };
 
         let result = MockH2AuthorityParser::validate_authority_header(&input);
-        assert!(matches!(result, Err(AuthorityValidationError::ContainsUserinfo)));
+        assert!(matches!(
+            result,
+            Err(AuthorityValidationError::ContainsUserinfo)
+        ));
     }
 
     #[test]
@@ -704,14 +751,17 @@ mod tests {
         };
 
         let result = MockH2AuthorityParser::validate_authority_header(&input);
-        assert!(result.is_ok(), "Valid hostname with port should be accepted");
+        assert!(
+            result.is_ok(),
+            "Valid hostname with port should be accepted"
+        );
     }
 
     #[test]
     fn test_ipv4_address() {
         let input = H2AuthorityInput {
             authority_strategy: AuthorityStrategy::ValidIP(IpType::V4 {
-                octets: [192, 168, 1, 1]
+                octets: [192, 168, 1, 1],
             }),
             scheme: SchemeType::Http,
             method: "GET".to_string(),
@@ -732,7 +782,9 @@ mod tests {
     fn test_ipv6_address_with_port() {
         let input = H2AuthorityInput {
             authority_strategy: AuthorityStrategy::IpWithPort {
-                ip: IpType::V6 { segments: [0x2001, 0xdb8, 0, 0, 0, 0, 0, 1] },
+                ip: IpType::V6 {
+                    segments: [0x2001, 0xdb8, 0, 0, 0, 0, 0, 1],
+                },
                 port: 443,
             },
             scheme: SchemeType::Https,
@@ -747,7 +799,10 @@ mod tests {
         };
 
         let result = MockH2AuthorityParser::validate_authority_header(&input);
-        assert!(result.is_ok(), "Valid IPv6 address with port should be accepted");
+        assert!(
+            result.is_ok(),
+            "Valid IPv6 address with port should be accepted"
+        );
     }
 
     #[test]
@@ -766,7 +821,10 @@ mod tests {
         };
 
         let result = MockH2AuthorityParser::validate_authority_header(&input);
-        assert!(matches!(result, Err(AuthorityValidationError::RequiredButMissing { .. })));
+        assert!(matches!(
+            result,
+            Err(AuthorityValidationError::RequiredButMissing { .. })
+        ));
     }
 
     #[test]
