@@ -5263,6 +5263,7 @@ name = "h2_goaway_then_data"
 path = "fuzz_targets/h2_goaway_then_data.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "oneshot_sender_close_receiver_poll"

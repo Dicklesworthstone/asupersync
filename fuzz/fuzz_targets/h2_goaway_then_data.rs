@@ -281,15 +281,15 @@ impl MockGoAwayConnection {
     /// Process a GOAWAY frame
     pub fn process_goaway_frame(&mut self, frame: MockGoAwayFrame) -> FrameProcessingResult {
         // Check for monotonic decrease if we already have GOAWAY
-        if let Some(ref existing) = self.goaway_state {
-            if frame.last_stream_id > existing.last_stream_id {
-                self.violations
-                    .push(GoAwayViolation::NonMonotonicLastStreamId {
-                        previous_last_stream_id: existing.last_stream_id,
-                        new_last_stream_id: frame.last_stream_id,
-                    });
-                return FrameProcessingResult::ProtocolViolation;
-            }
+        if let Some(ref existing) = self.goaway_state
+            && frame.last_stream_id > existing.last_stream_id
+        {
+            self.violations
+                .push(GoAwayViolation::NonMonotonicLastStreamId {
+                    previous_last_stream_id: existing.last_stream_id,
+                    new_last_stream_id: frame.last_stream_id,
+                });
+            return FrameProcessingResult::ProtocolViolation;
         }
 
         let goaway_count = self
@@ -383,26 +383,26 @@ impl MockGoAwayConnection {
             self.total_bytes_discarded += frame.payload_size as u64;
 
             // Check if this should have been processed (violation)
-            if let Some(ref goaway) = self.goaway_state {
-                if frame.stream_id <= goaway.last_stream_id {
-                    let stream_state = self
-                        .streams
-                        .get(&frame.stream_id)
-                        .cloned()
-                        .unwrap_or(StreamState::Idle);
+            if let Some(ref goaway) = self.goaway_state
+                && frame.stream_id <= goaway.last_stream_id
+            {
+                let stream_state = self
+                    .streams
+                    .get(&frame.stream_id)
+                    .cloned()
+                    .unwrap_or(StreamState::Idle);
 
-                    // Should be processed if stream is not closed/reset
-                    if !matches!(
-                        stream_state,
-                        StreamState::Closed | StreamState::Reset | StreamState::Discarded
-                    ) {
-                        self.violations
-                            .push(GoAwayViolation::DiscardedWithinLastStream {
-                                stream_id: frame.stream_id,
-                                last_stream_id: goaway.last_stream_id,
-                                payload_size: frame.payload_size,
-                            });
-                    }
+                // Should be processed if stream is not closed/reset
+                if !matches!(
+                    stream_state,
+                    StreamState::Closed | StreamState::Reset | StreamState::Discarded
+                ) {
+                    self.violations
+                        .push(GoAwayViolation::DiscardedWithinLastStream {
+                            stream_id: frame.stream_id,
+                            last_stream_id: goaway.last_stream_id,
+                            payload_size: frame.payload_size,
+                        });
                 }
             }
 
@@ -413,21 +413,21 @@ impl MockGoAwayConnection {
     /// Process a stream lifecycle event
     pub fn process_stream_event(&mut self, event: MockStreamEvent) -> FrameProcessingResult {
         // Check if we should allow this stream operation after GOAWAY
-        if let Some(ref goaway) = self.goaway_state {
-            if event.stream_id > goaway.last_stream_id {
-                match event.event_type {
-                    StreamEventType::Open => {
-                        self.violations
-                            .push(GoAwayViolation::NewStreamBeyondGoAway {
-                                stream_id: event.stream_id,
-                                last_stream_id: goaway.last_stream_id,
-                            });
-                        return FrameProcessingResult::ProtocolViolation;
-                    }
-                    _ => {
-                        // Other events on beyond-GOAWAY streams should be ignored
-                        return FrameProcessingResult::Discarded;
-                    }
+        if let Some(ref goaway) = self.goaway_state
+            && event.stream_id > goaway.last_stream_id
+        {
+            match event.event_type {
+                StreamEventType::Open => {
+                    self.violations
+                        .push(GoAwayViolation::NewStreamBeyondGoAway {
+                            stream_id: event.stream_id,
+                            last_stream_id: goaway.last_stream_id,
+                        });
+                    return FrameProcessingResult::ProtocolViolation;
+                }
+                _ => {
+                    // Other events on beyond-GOAWAY streams should be ignored
+                    return FrameProcessingResult::Discarded;
                 }
             }
         }
@@ -753,8 +753,10 @@ fuzz_target!(|scenario: GoAwayDataScenario| {
         .take(5) // Limit GOAWAY frames
         .collect();
 
-    let mut config = GoAwayConfig::default();
-    config.max_tracked_streams = 100; // Smaller limit for fuzzing
+    let config = GoAwayConfig {
+        max_tracked_streams: 100, // Smaller limit for fuzzing
+        ..GoAwayConfig::default()
+    };
 
     let mut conn = MockGoAwayConnection::new(config);
 
@@ -820,15 +822,15 @@ fuzz_target!(|scenario: GoAwayDataScenario| {
 
         // Verify discarded frames were actually beyond last_stream_id or on closed streams
         for discarded in &conn.discarded_frames {
-            if discarded.frame_type == MockFrameType::Data {
-                if discarded.discard_reason == DiscardReason::BeyondLastStreamId {
-                    assert!(
-                        discarded.stream_id > goaway.last_stream_id,
-                        "DATA frame on stream {} discarded with BeyondLastStreamId but <= last_stream_id={}",
-                        discarded.stream_id,
-                        goaway.last_stream_id
-                    );
-                }
+            if discarded.frame_type == MockFrameType::Data
+                && discarded.discard_reason == DiscardReason::BeyondLastStreamId
+            {
+                assert!(
+                    discarded.stream_id > goaway.last_stream_id,
+                    "DATA frame on stream {} discarded with BeyondLastStreamId but <= last_stream_id={}",
+                    discarded.stream_id,
+                    goaway.last_stream_id
+                );
             }
         }
     }
