@@ -53,15 +53,19 @@ pub struct TaskTable {
     /// Incremental telemetry for pooled vs heap-fallback behavior.
     task_record_pool_stats: TaskRecordPoolStats,
     /// Incremental counters for tasks in each phase (Created, Running, etc.).
-    /// Used for O(1) Lyapunov snapshots (br-asupersync-xxcss5).
+    ///
+    /// These counters are maintained for mutation paths that go through
+    /// `TaskTable::update_task`, but some legacy scheduler paths still mutate
+    /// `TaskRecord` phases through direct record access. Public phase-count
+    /// accessors therefore derive authoritative counts from the arena.
     /// Indexed by `TaskPhase` enum values 0..5.
     #[allow(dead_code)]
     phase_counts: [usize; LIVE_PHASE_COUNT],
     /// Incremental total of all non-terminal task phases.
     ///
-    /// This is the read-mostly value consumed by `RuntimeState::live_task_count`
-    /// and `StateSnapshot::from_runtime_state`. Keeping it beside
-    /// `phase_counts` avoids summing the buckets on every governor snapshot.
+    /// Kept as a mutation-side cache for future fully-encapsulated task phase
+    /// updates. Read-side access currently scans the arena so direct legacy
+    /// `TaskRecord` phase mutations cannot panic or leak stale health metrics.
     live_task_count: usize,
     /// Sum of all deadlines (in nanoseconds) for live tasks that have a
     /// non-infinite deadline. Combined with virtual-time `now`, allows O(1)
@@ -281,7 +285,10 @@ impl TaskTable {
     pub fn count_in_phase(&self, phase: TaskPhase) -> usize {
         let idx = phase as usize;
         if idx < LIVE_PHASE_COUNT {
-            self.phase_counts[idx]
+            self.tasks
+                .iter()
+                .filter(|(_, record)| record.phase.load() == phase)
+                .count()
         } else {
             0
         }
@@ -579,17 +586,13 @@ impl TaskTable {
     }
 
     /// Returns the number of live tasks (non-terminal).
-    ///
-    /// O(1) — maintained incrementally for Lyapunov snapshots.
     #[must_use]
     #[inline]
     pub fn live_task_count(&self) -> usize {
-        debug_assert_eq!(
-            self.live_task_count,
-            self.phase_counts.iter().sum::<usize>(),
-            "live task scalar drifted from phase buckets"
-        );
-        self.live_task_count
+        self.tasks
+            .iter()
+            .filter(|(_, record)| (record.phase.load() as usize) < LIVE_PHASE_COUNT)
+            .count()
     }
 
     /// Returns the number of stored futures.
@@ -716,6 +719,28 @@ mod tests {
         table.remove_task(task2);
         assert_eq!(table.live_task_count(), live_phase_sum(&table));
         assert_eq!(table.live_task_count(), 0);
+    }
+
+    #[test]
+    fn live_phase_accessors_survive_direct_record_phase_mutation() {
+        let mut table = TaskTable::new();
+        let owner = RegionId::from_arena(ArenaIndex::new(1, 0));
+        let idx = table.insert_task(make_task_record(owner));
+        let task = TaskId::from_arena(idx);
+
+        table
+            .task_mut(task)
+            .expect("task should exist")
+            .start_running();
+
+        assert_eq!(table.live_task_count(), 1);
+        assert_eq!(table.count_in_phase(TaskPhase::Created), 0);
+        assert_eq!(table.count_in_phase(TaskPhase::Running), 1);
+
+        table.remove_task(task);
+        assert_eq!(table.live_task_count(), 0);
+        assert_eq!(table.count_in_phase(TaskPhase::Created), 0);
+        assert_eq!(table.count_in_phase(TaskPhase::Running), 0);
     }
 
     #[test]
