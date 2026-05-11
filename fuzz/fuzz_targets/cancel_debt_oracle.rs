@@ -344,7 +344,10 @@ fn test_attack_scenarios(input: &CancelDebtFuzzInput) {
             }
 
             // Check for stalls/violations
-            let _ = oracle.check(Time::from_nanos(base_time.as_nanos() + 10_000_000_000)); // 10 seconds later
+            observe_oracle_check(
+                &oracle,
+                Time::from_nanos(base_time.as_nanos() + 10_000_000_000),
+            ); // 10 seconds later
         }
         AttackScenario::ResourceExhaustion { memory_target_kb } => {
             // Try to exhaust memory by adding large work items
@@ -372,7 +375,7 @@ fn test_attack_scenarios(input: &CancelDebtFuzzInput) {
             }
 
             // Should handle memory pressure gracefully
-            let _ = oracle.check(base_time);
+            observe_oracle_check(&oracle, base_time);
         }
         AttackScenario::QueueTypeSwitching {
             queue_type,
@@ -394,7 +397,7 @@ fn test_attack_scenarios(input: &CancelDebtFuzzInput) {
                 }
             }
 
-            let _ = oracle.check(base_time);
+            observe_oracle_check(&oracle, base_time);
         }
         AttackScenario::CompletionRateManipulation {
             add_rate,
@@ -413,7 +416,7 @@ fn test_attack_scenarios(input: &CancelDebtFuzzInput) {
             }
 
             oracle.on_work_items_completed(queue_name, *complete_rate as usize, base_time);
-            let _ = oracle.check(base_time);
+            observe_oracle_check(&oracle, base_time);
         }
         _ => {}
     }
@@ -455,7 +458,7 @@ fn test_configuration_bounds(input: &CancelDebtFuzzInput) {
         );
 
         // Check that threshold violation is detected
-        let _ = oracle.check(base_time);
+        observe_oracle_check(&oracle, base_time);
 
         let violations = oracle.get_recent_violations(5);
         // Should detect threshold violation
@@ -471,6 +474,34 @@ fn fuzz_task_id(value: u64) -> TaskId {
 
 fn fuzz_region_id(value: u64) -> RegionId {
     RegionId::new_for_test(value as u32, (value >> 32) as u32)
+}
+
+fn observe_oracle_check(oracle: &CancelDebtOracle, timestamp: Time) {
+    let stats_before = oracle.get_statistics();
+    let result = oracle.check(timestamp);
+    let stats_after = oracle.get_statistics();
+
+    assert_eq!(
+        stats_after.debt_checks_performed,
+        stats_before.debt_checks_performed + 1,
+        "CancelDebtOracle::check should run exactly one debt scan"
+    );
+    assert!(
+        stats_after.violations_detected >= stats_before.violations_detected,
+        "CancelDebtOracle violation counter should be monotonic"
+    );
+
+    if result.is_ok() {
+        assert_eq!(
+            stats_after.total_violations, 0,
+            "CancelDebtOracle::check returned Ok despite retained violations"
+        );
+    } else {
+        assert!(
+            stats_after.total_violations > 0,
+            "CancelDebtOracle::check returned Err without retaining a violation"
+        );
+    }
 }
 
 /// Helper function to process a debt operation
@@ -518,7 +549,7 @@ fn process_operation(oracle: &CancelDebtOracle, operation: &DebtOperation, base_
         } => {
             let timestamp =
                 Time::from_nanos(base_time.as_nanos() + (*timestamp_offset_ms as u64) * 1_000_000);
-            let _ = oracle.check(timestamp);
+            observe_oracle_check(oracle, timestamp);
         }
         DebtOperation::Reset => {
             oracle.reset();
