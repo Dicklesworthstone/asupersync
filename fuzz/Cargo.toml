@@ -1939,6 +1939,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fs_uring_drop_path_race"
+path = "fuzz_targets/fs_uring_drop_path_race.rs"
+test = false
+doc = false
+bench = false
+
 # io_uring user_data encoding boundary and completion-tracking fuzzer.
 [[bin]]
 name = "fs_uring_user_data_overflow"

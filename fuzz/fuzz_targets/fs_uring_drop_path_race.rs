@@ -22,16 +22,14 @@
 //! - No segfault during ring teardown
 
 #![no_main]
-#![cfg(all(target_os = "linux", feature = "io-uring"))]
 
 use arbitrary::Arbitrary;
-use asupersync::fs::uring::IoUringFile;
+use asupersync::fs::IoUringFile;
 use libfuzzer_sys::fuzz_target;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::NamedTempFile;
 
-const MAX_CONCURRENT_FILES: usize = 8; // Multiple files to amplify Arc contention
 const MAX_OPERATIONS_PER_FILE: usize = 16; // Force operation tracking pressure
 const MAX_BUFFER_SIZE: usize = 1024;
 
@@ -39,13 +37,13 @@ const MAX_BUFFER_SIZE: usize = 1024;
 #[derive(Debug, Clone, Copy, Arbitrary)]
 enum DropAttackVector {
     /// Drop immediately after submitting operations
-    DropDuringInflight,
+    DuringInflight,
     /// Drop during completion collection window
-    DropDuringCompletion,
+    DuringCompletion,
     /// Drop with concurrent operations from multiple threads
-    DropUnderConcurrency,
+    UnderConcurrency,
     /// Drop with user_data collision scenarios
-    DropWithUserDataCollision,
+    WithUserDataCollision,
 }
 
 /// Configuration for a file operation during drop testing
@@ -94,16 +92,10 @@ impl DropRaceHarness {
         operations: &[FileOperation],
     ) -> Result<(), String> {
         match attack {
-            DropAttackVector::DropDuringInflight => {
-                self.test_drop_during_inflight(operations)
-            }
-            DropAttackVector::DropDuringCompletion => {
-                self.test_drop_during_completion(operations)
-            }
-            DropAttackVector::DropUnderConcurrency => {
-                self.test_drop_under_concurrency(operations)
-            }
-            DropAttackVector::DropWithUserDataCollision => {
+            DropAttackVector::DuringInflight => self.test_drop_during_inflight(operations),
+            DropAttackVector::DuringCompletion => self.test_drop_during_completion(operations),
+            DropAttackVector::UnderConcurrency => self.test_drop_under_concurrency(operations),
+            DropAttackVector::WithUserDataCollision => {
                 self.test_drop_with_user_data_collision(operations)
             }
         }
@@ -111,52 +103,60 @@ impl DropRaceHarness {
 
     fn test_drop_during_inflight(&mut self, operations: &[FileOperation]) -> Result<(), String> {
         for op_config in operations.iter().take(MAX_OPERATIONS_PER_FILE) {
-            let temp_file = self.create_test_file(1024)
+            let temp_file = self
+                .create_test_file(1024)
                 .map_err(|e| format!("Failed to create temp file: {e}"))?;
 
             let file_path = temp_file.path().to_path_buf();
             self.temp_files.push(temp_file);
 
+            let op = op_config.clone();
+
             // RACE CONDITION TEST: Start operation then immediately drop file
-            {
-                let uring_file = match OperationType::Read {
-                    OperationType::Read => IoUringFile::open(&file_path),
-                    OperationType::Write => IoUringFile::create(&file_path),
-                    OperationType::Sync => IoUringFile::open(&file_path),
-                }.map_err(|e| format!("Failed to open file: {e}"))?;
+            let uring_file = match op.operation_type {
+                OperationType::Read => IoUringFile::open(&file_path),
+                OperationType::Write => IoUringFile::create(&file_path),
+                OperationType::Sync => IoUringFile::open(&file_path),
+            }
+            .map_err(|e| format!("Failed to open file: {e}"))?;
 
-                let arc_file = Arc::new(uring_file);
-                let arc_file_clone = Arc::clone(&arc_file);
+            let arc_file = Arc::new(uring_file);
+            let arc_file_clone = Arc::clone(&arc_file);
 
-                // Start an operation that will be in-flight
-                std::thread::spawn(move || {
-                    let _result = futures::executor::block_on(async {
-                        let mut buffer = vec![0u8; op_config.buffer_size as usize];
+            // Start an operation that will be in-flight
+            let handle = std::thread::spawn(move || {
+                let _result = futures::executor::block_on(async {
+                    let mut buffer = vec![0u8; (op.buffer_size as usize).min(MAX_BUFFER_SIZE)];
 
-                        match op_config.operation_type {
-                            OperationType::Read => {
-                                // This read may be cancelled during Drop
-                                arc_file_clone.read_at(&mut buffer, op_config.file_offset as u64).await
-                            }
-                            OperationType::Write => {
-                                buffer.fill(0x33);
-                                arc_file_clone.write_at(&buffer, op_config.file_offset as u64).await
-                            }
-                            OperationType::Sync => {
-                                arc_file_clone.sync_all().await
-                            }
+                    match op.operation_type {
+                        OperationType::Read => {
+                            // This read may be cancelled during Drop
+                            arc_file_clone
+                                .read_at(&mut buffer, op.file_offset as u64)
+                                .await
+                                .map(|_| ())
                         }
-                    });
+                        OperationType::Write => {
+                            buffer.fill(0x33);
+                            arc_file_clone
+                                .write_at(&buffer, op.file_offset as u64)
+                                .await
+                                .map(|_| ())
+                        }
+                        OperationType::Sync => arc_file_clone.sync_all().await,
+                    }
                 });
+            });
 
-                // Inject timing variance to hit different Drop race windows
-                if op_config.delay_before_drop_ms > 0 {
-                    std::thread::sleep(Duration::from_millis(op_config.delay_before_drop_ms as u64));
-                }
+            // Inject timing variance to hit different Drop race windows
+            if op_config.delay_before_drop_ms > 0 {
+                std::thread::sleep(Duration::from_millis(op_config.delay_before_drop_ms as u64));
+            }
 
-                // VULNERABILITY: Drop arc_file while operation may be in-flight
-                // This triggers the Drop cleanup path with pending operations
-            } // arc_file drops here - triggers Drop::drop with potential in-flight ops
+            // VULNERABILITY: Drop arc_file while operation may be in-flight
+            // This triggers the Drop cleanup path with pending operations
+            drop(arc_file);
+            let _ = handle.join();
         }
 
         Ok(())
@@ -164,15 +164,17 @@ impl DropRaceHarness {
 
     fn test_drop_during_completion(&mut self, operations: &[FileOperation]) -> Result<(), String> {
         // Similar to above but designed to hit the completion collection window
-        for op_config in operations.iter().take(4) { // Fewer operations for focused testing
-            let temp_file = self.create_test_file(1024)
+        for op_config in operations.iter().take(4) {
+            // Fewer operations for focused testing
+            let temp_file = self
+                .create_test_file(1024)
                 .map_err(|e| format!("Failed to create temp file: {e}"))?;
 
             let file_path = temp_file.path().to_path_buf();
             self.temp_files.push(temp_file);
 
-            let uring_file = IoUringFile::open(&file_path)
-                .map_err(|e| format!("Failed to open file: {e}"))?;
+            let uring_file =
+                IoUringFile::open(&file_path).map_err(|e| format!("Failed to open file: {e}"))?;
 
             // RACE: Start multiple operations, let some complete, then drop during completion handling
             let arc_file = Arc::new(uring_file);
@@ -180,7 +182,7 @@ impl DropRaceHarness {
 
             for i in 0..3 {
                 let arc_clone = Arc::clone(&arc_file);
-                let buffer_size = op_config.buffer_size as usize;
+                let buffer_size = (op_config.buffer_size as usize).min(MAX_BUFFER_SIZE);
 
                 let handle = std::thread::spawn(move || {
                     futures::executor::block_on(async {
@@ -193,7 +195,9 @@ impl DropRaceHarness {
             }
 
             // Let some operations start/complete
-            std::thread::sleep(Duration::from_millis(op_config.delay_before_drop_ms as u64 / 2));
+            std::thread::sleep(Duration::from_millis(
+                op_config.delay_before_drop_ms as u64 / 2,
+            ));
 
             // VULNERABILITY: Drop while some operations are completing
             drop(arc_file);
@@ -210,14 +214,15 @@ impl DropRaceHarness {
     fn test_drop_under_concurrency(&mut self, operations: &[FileOperation]) -> Result<(), String> {
         // Test Arc::strong_count() race where multiple threads think they're the last owner
         for op_config in operations.iter().take(2) {
-            let temp_file = self.create_test_file(1024)
+            let temp_file = self
+                .create_test_file(1024)
                 .map_err(|e| format!("Failed to create temp file: {e}"))?;
 
             let file_path = temp_file.path().to_path_buf();
             self.temp_files.push(temp_file);
 
-            let uring_file = IoUringFile::open(&file_path)
-                .map_err(|e| format!("Failed to open file: {e}"))?;
+            let uring_file =
+                IoUringFile::open(&file_path).map_err(|e| format!("Failed to open file: {e}"))?;
 
             let arc_file = Arc::new(uring_file);
 
@@ -226,7 +231,7 @@ impl DropRaceHarness {
 
             for _ in 0..4 {
                 let arc_clone = Arc::clone(&arc_file);
-                let buffer_size = op_config.buffer_size as usize;
+                let buffer_size = (op_config.buffer_size as usize).min(MAX_BUFFER_SIZE);
 
                 let handle = std::thread::spawn(move || {
                     // Start operation
@@ -254,17 +259,21 @@ impl DropRaceHarness {
         Ok(())
     }
 
-    fn test_drop_with_user_data_collision(&mut self, operations: &[FileOperation]) -> Result<(), String> {
+    fn test_drop_with_user_data_collision(
+        &mut self,
+        operations: &[FileOperation],
+    ) -> Result<(), String> {
         // Test user_data collision scenarios during Drop cancellation
         for op_config in operations.iter().take(3) {
-            let temp_file = self.create_test_file(1024)
+            let temp_file = self
+                .create_test_file(1024)
                 .map_err(|e| format!("Failed to create temp file: {e}"))?;
 
             let file_path = temp_file.path().to_path_buf();
             self.temp_files.push(temp_file);
 
-            let uring_file = IoUringFile::open(&file_path)
-                .map_err(|e| format!("Failed to open file: {e}"))?;
+            let uring_file =
+                IoUringFile::open(&file_path).map_err(|e| format!("Failed to open file: {e}"))?;
 
             // Force rapid operation submission to increase user_data collision probability
             let _result = futures::executor::block_on(async {
@@ -283,10 +292,14 @@ impl DropRaceHarness {
                     futures.push(fut);
                 }
 
-                // Let some start, then drop the main Arc to trigger Drop cancellation
-                tokio::time::timeout(Duration::from_millis(op_config.delay_before_drop_ms as u64),
-                    futures::future::join_all(futures)
-                ).await
+                // Let some start, then drop the main Arc to trigger Drop cancellation.
+                if op_config.delay_before_drop_ms > 0 {
+                    std::thread::sleep(Duration::from_millis(
+                        op_config.delay_before_drop_ms as u64,
+                    ));
+                }
+                drop(arc_file);
+                futures::future::join_all(futures).await
             });
 
             // VULNERABILITY: Drop will try to cancel operations by user_data,
