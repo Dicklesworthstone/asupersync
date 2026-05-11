@@ -1939,6 +1939,14 @@ test = false
 doc = false
 bench = false
 
+# io_uring user_data encoding boundary and completion-tracking fuzzer.
+[[bin]]
+name = "fs_uring_user_data_overflow"
+path = "fuzz_targets/fs_uring_user_data_overflow.rs"
+test = false
+doc = false
+bench = false
+
 [[bin]]
 name = "h3_error_codes"
 path = "fuzz_targets/h3_error_codes.rs"
