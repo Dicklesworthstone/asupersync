@@ -5099,6 +5099,7 @@ name = "oneshot_sender_drop_receiver_poll"
 path = "fuzz_targets/oneshot_sender_drop_receiver_poll.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "mutex_drop_after_panic"
@@ -5308,6 +5309,7 @@ name = "oneshot_sender_close_receiver_poll"
 path = "fuzz_targets/oneshot_sender_close_receiver_poll.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "mutex_arc_clone_race"
@@ -5356,6 +5358,7 @@ name = "sync_oneshot_cancel_recv"
 path = "fuzz_targets/sync_oneshot_cancel_recv.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h1_header_continuation"
