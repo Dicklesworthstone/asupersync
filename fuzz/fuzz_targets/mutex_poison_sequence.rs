@@ -66,9 +66,7 @@ const MAX_TIMEOUT_SECONDS: u64 = 5;
 
 fuzz_target!(|input: MutexPoisonFuzz| {
     // Apply resource limits
-    let max_ops = (input.config.max_operations as usize)
-        .min(MAX_OPERATIONS)
-        .max(1);
+    let max_ops = (input.config.max_operations as usize).clamp(1, MAX_OPERATIONS);
     let operations: Vec<_> = input.operations.into_iter().take(max_ops).collect();
 
     if operations.is_empty() {
