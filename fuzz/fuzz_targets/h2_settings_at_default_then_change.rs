@@ -1,4 +1,5 @@
 #![no_main]
+#![allow(dead_code)]
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
@@ -45,17 +46,17 @@ enum ChangedSettingsStrategy {
     ExtremeValues(Vec<ExtremeSetting>),
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Debug, Clone)]
 struct DefaultSetting {
     id: DefaultSettingId,
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Debug, Clone)]
 enum DefaultSettingId {
-    HeaderTableSize,     // 4096
-    EnablePush,          // 1
-    InitialWindowSize,   // 65535
-    MaxFrameSize,        // 16384
+    HeaderTableSize,   // 4096
+    EnablePush,        // 1
+    InitialWindowSize, // 65535
+    MaxFrameSize,      // 16384
 }
 
 #[derive(Arbitrary, Debug)]
@@ -259,33 +260,39 @@ impl MockH2SettingsStateMachine {
 
     fn validate_setting(&self, id: u16, value: u32) -> Result<(), SettingsValidationError> {
         match id {
-            1 => { // SETTINGS_HEADER_TABLE_SIZE
+            1 => {
+                // SETTINGS_HEADER_TABLE_SIZE
                 // Any value is valid
                 Ok(())
             }
-            2 => { // SETTINGS_ENABLE_PUSH
+            2 => {
+                // SETTINGS_ENABLE_PUSH
                 if value > 1 {
                     return Err(SettingsValidationError::InvalidValue { id, value });
                 }
                 Ok(())
             }
-            3 => { // SETTINGS_MAX_CONCURRENT_STREAMS
+            3 => {
+                // SETTINGS_MAX_CONCURRENT_STREAMS
                 // Any value is valid (0 means no new streams)
                 Ok(())
             }
-            4 => { // SETTINGS_INITIAL_WINDOW_SIZE
+            4 => {
+                // SETTINGS_INITIAL_WINDOW_SIZE
                 if value > MAX_INITIAL_WINDOW_SIZE {
                     return Err(SettingsValidationError::InvalidValue { id, value });
                 }
                 Ok(())
             }
-            5 => { // SETTINGS_MAX_FRAME_SIZE
-                if value < MIN_MAX_FRAME_SIZE || value > MAX_MAX_FRAME_SIZE {
+            5 => {
+                // SETTINGS_MAX_FRAME_SIZE
+                if !(MIN_MAX_FRAME_SIZE..=MAX_MAX_FRAME_SIZE).contains(&value) {
                     return Err(SettingsValidationError::InvalidValue { id, value });
                 }
                 Ok(())
             }
-            6 => { // SETTINGS_MAX_HEADER_LIST_SIZE
+            6 => {
+                // SETTINGS_MAX_HEADER_LIST_SIZE
                 // Any value is valid
                 Ok(())
             }
@@ -324,10 +331,18 @@ impl MockH2SettingsStateMachine {
                 let mut settings = Vec::new();
                 for default in defaults {
                     match default.id {
-                        DefaultSettingId::HeaderTableSize => settings.push((1, DEFAULT_HEADER_TABLE_SIZE)),
-                        DefaultSettingId::EnablePush => settings.push((2, if DEFAULT_ENABLE_PUSH { 1 } else { 0 })),
-                        DefaultSettingId::InitialWindowSize => settings.push((4, DEFAULT_INITIAL_WINDOW_SIZE)),
-                        DefaultSettingId::MaxFrameSize => settings.push((5, DEFAULT_MAX_FRAME_SIZE)),
+                        DefaultSettingId::HeaderTableSize => {
+                            settings.push((1, DEFAULT_HEADER_TABLE_SIZE))
+                        }
+                        DefaultSettingId::EnablePush => {
+                            settings.push((2, if DEFAULT_ENABLE_PUSH { 1 } else { 0 }))
+                        }
+                        DefaultSettingId::InitialWindowSize => {
+                            settings.push((4, DEFAULT_INITIAL_WINDOW_SIZE))
+                        }
+                        DefaultSettingId::MaxFrameSize => {
+                            settings.push((5, DEFAULT_MAX_FRAME_SIZE))
+                        }
                     }
                 }
                 settings
@@ -337,7 +352,7 @@ impl MockH2SettingsStateMachine {
             }
             InitialSettingsStrategy::MixedDefaults { defaults, customs } => {
                 let mut settings = Self::generate_default_settings_frame(
-                    &InitialSettingsStrategy::ExplicitDefaults(defaults.clone())
+                    &InitialSettingsStrategy::ExplicitDefaults(defaults.clone()),
                 );
                 for custom in customs {
                     settings.push((custom.id, custom.value));
@@ -353,20 +368,19 @@ impl MockH2SettingsStateMachine {
                 vec![vec![Self::setting_change_to_tuple(change)]]
             }
             ChangedSettingsStrategy::MultipleChanges(changes) => {
-                let settings: Vec<(u16, u32)> = changes.iter()
-                    .map(Self::setting_change_to_tuple)
-                    .collect();
+                let settings: Vec<(u16, u32)> =
+                    changes.iter().map(Self::setting_change_to_tuple).collect();
                 vec![settings]
             }
-            ChangedSettingsStrategy::Progressive(progressive) => {
-                progressive.iter()
-                    .map(|prog| {
-                        prog.changes.iter()
-                            .map(Self::setting_change_to_tuple)
-                            .collect()
-                    })
-                    .collect()
-            }
+            ChangedSettingsStrategy::Progressive(progressive) => progressive
+                .iter()
+                .map(|prog| {
+                    prog.changes
+                        .iter()
+                        .map(Self::setting_change_to_tuple)
+                        .collect()
+                })
+                .collect(),
             ChangedSettingsStrategy::ResetToDefaults => {
                 vec![vec![
                     (1, DEFAULT_HEADER_TABLE_SIZE),
@@ -376,8 +390,9 @@ impl MockH2SettingsStateMachine {
                 ]]
             }
             ChangedSettingsStrategy::ExtremeValues(extremes) => {
-                let settings: Vec<(u16, u32)> = extremes.iter()
-                    .map(|extreme| Self::extreme_setting_to_tuple(extreme))
+                let settings: Vec<(u16, u32)> = extremes
+                    .iter()
+                    .map(Self::extreme_setting_to_tuple)
                     .collect();
                 vec![settings]
             }
@@ -423,7 +438,10 @@ impl MockH2SettingsStateMachine {
         (id, value)
     }
 
-    fn simulate_settings_sequence(&mut self, input: &H2SettingsTransitionInput) -> Result<(), SettingsValidationError> {
+    fn simulate_settings_sequence(
+        &mut self,
+        input: &H2SettingsTransitionInput,
+    ) -> Result<(), SettingsValidationError> {
         // Process initial SETTINGS frame
         let initial_settings = Self::generate_default_settings_frame(&input.initial_settings);
         self.process_settings_frame(&initial_settings, false)?;
@@ -450,7 +468,9 @@ impl MockH2SettingsStateMachine {
                 self.process_settings_ack()?;
             }
 
-            let frame_settings: Vec<(u16, u32)> = additional.changes.iter()
+            let frame_settings: Vec<(u16, u32)> = additional
+                .changes
+                .iter()
                 .map(Self::setting_change_to_tuple)
                 .collect();
 
@@ -465,9 +485,6 @@ impl MockH2SettingsStateMachine {
     }
 
     fn verify_settings_transition(&self, input: &H2SettingsTransitionInput) -> bool {
-        // Verify that settings transitioned correctly
-        let current = &self.current_settings;
-
         // Check that initial defaults were properly set if ACKed
         if input.test_context.test_ack_behavior {
             // Should have proper state transition
@@ -475,14 +492,10 @@ impl MockH2SettingsStateMachine {
                 return false;
             }
 
-            // Verify the transition occurred
-            let initial_state = &self.settings_history[0];
-            let final_state = &self.settings_history[self.settings_history.len() - 1];
-
             // Default values should have been maintained initially
             match input.initial_settings {
-                InitialSettingsStrategy::AllDefaults |
-                InitialSettingsStrategy::ExplicitDefaults(_) => {
+                InitialSettingsStrategy::AllDefaults
+                | InitialSettingsStrategy::ExplicitDefaults(_) => {
                     // Settings should be at defaults initially if explicitly set
                 }
                 InitialSettingsStrategy::Empty => {
@@ -515,8 +528,7 @@ fuzz_target!(|input: H2SettingsTransitionInput| {
 
     // Apply test assertions based on the settings strategy
     match input.initial_settings {
-        InitialSettingsStrategy::AllDefaults |
-        InitialSettingsStrategy::ExplicitDefaults(_) => {
+        InitialSettingsStrategy::AllDefaults | InitialSettingsStrategy::ExplicitDefaults(_) => {
             // Default settings should always be accepted
             match result {
                 Ok(()) => {
@@ -567,7 +579,7 @@ fn test_settings_transition_invariants(
     input: &H2SettingsTransitionInput,
     result: &Result<(), SettingsValidationError>,
     state_machine: &MockH2SettingsStateMachine,
-    initial_state: &SettingsState,
+    _initial_state: &SettingsState,
 ) {
     // Invariant: Empty SETTINGS frame should always succeed
     if matches!(input.initial_settings, InitialSettingsStrategy::Empty) && result.is_err() {
@@ -576,11 +588,16 @@ fn test_settings_transition_invariants(
 
     // Invariant: Default values should always be valid
     let default_settings = MockH2SettingsStateMachine::generate_default_settings_frame(
-        &InitialSettingsStrategy::AllDefaults
+        &InitialSettingsStrategy::AllDefaults,
     );
     for &(id, value) in &default_settings {
         let validation = state_machine.validate_setting(id, value);
-        assert!(validation.is_ok(), "Default setting {}={} should be valid", id, value);
+        assert!(
+            validation.is_ok(),
+            "Default setting {}={} should be valid",
+            id,
+            value
+        );
     }
 
     // Invariant: If ACK behavior is tested, state should properly transition
@@ -618,7 +635,7 @@ fn test_settings_transition_invariants(
     // Invariant: Settings history should be monotonically increasing if ACKs processed
     if input.test_context.test_ack_behavior && state_machine.settings_history.len() > 1 {
         // Each entry should represent a state after processing a SETTINGS frame
-        assert!(state_machine.settings_history.len() >= 1);
+        assert!(!state_machine.settings_history.is_empty());
     }
 }
 
@@ -656,17 +673,24 @@ mod tests {
 
         // Send settings with default values
         let default_settings = vec![(1, DEFAULT_HEADER_TABLE_SIZE)];
-        state_machine.process_settings_frame(&default_settings, false).unwrap();
+        state_machine
+            .process_settings_frame(&default_settings, false)
+            .unwrap();
 
         // ACK the settings
         state_machine.process_settings_ack().unwrap();
 
         // Settings should be applied
-        assert_eq!(state_machine.current_settings.header_table_size, DEFAULT_HEADER_TABLE_SIZE);
+        assert_eq!(
+            state_machine.current_settings.header_table_size,
+            DEFAULT_HEADER_TABLE_SIZE
+        );
 
         // Send settings with changed values
         let changed_settings = vec![(1, 8192)];
-        state_machine.process_settings_frame(&changed_settings, false).unwrap();
+        state_machine
+            .process_settings_frame(&changed_settings, false)
+            .unwrap();
         state_machine.process_settings_ack().unwrap();
 
         // Settings should be updated
@@ -681,17 +705,26 @@ mod tests {
         // Invalid ENABLE_PUSH value
         let invalid_settings = vec![(2, 5)];
         let result = state_machine.process_settings_frame(&invalid_settings, false);
-        assert!(matches!(result, Err(SettingsValidationError::InvalidValue { .. })));
+        assert!(matches!(
+            result,
+            Err(SettingsValidationError::InvalidValue { .. })
+        ));
 
         // Invalid MAX_FRAME_SIZE (too small)
         let invalid_settings = vec![(5, 1000)];
         let result = state_machine.process_settings_frame(&invalid_settings, false);
-        assert!(matches!(result, Err(SettingsValidationError::InvalidValue { .. })));
+        assert!(matches!(
+            result,
+            Err(SettingsValidationError::InvalidValue { .. })
+        ));
 
         // Invalid INITIAL_WINDOW_SIZE (too large)
         let invalid_settings = vec![(4, MAX_INITIAL_WINDOW_SIZE + 1)];
         let result = state_machine.process_settings_frame(&invalid_settings, false);
-        assert!(matches!(result, Err(SettingsValidationError::InvalidValue { .. })));
+        assert!(matches!(
+            result,
+            Err(SettingsValidationError::InvalidValue { .. })
+        ));
     }
 
     #[test]
@@ -700,7 +733,10 @@ mod tests {
 
         // Try to ACK without sending SETTINGS first
         let result = state_machine.process_settings_ack();
-        assert!(matches!(result, Err(SettingsValidationError::AckWithoutPending)));
+        assert!(matches!(
+            result,
+            Err(SettingsValidationError::AckWithoutPending)
+        ));
     }
 
     #[test]
