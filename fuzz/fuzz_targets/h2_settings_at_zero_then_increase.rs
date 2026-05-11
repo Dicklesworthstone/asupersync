@@ -28,16 +28,22 @@
 //! - Settings acknowledgment timing issues
 
 #![no_main]
+#![allow(dead_code)]
 
 use arbitrary::Arbitrary;
-use asupersync::bytes::Bytes;
-use asupersync::http::h2::connection::{Connection, ConnectionState, Side};
+use asupersync::http::h2::connection::ConnectionState;
 use asupersync::http::h2::error::ErrorCode;
-use asupersync::http::h2::frame::{Frame, HeadersFrame, Setting, SettingsFrame, PriorityFrame, RstStreamFrame, WindowUpdateFrame};
-use asupersync::http::h2::settings::{DEFAULT_MAX_CONCURRENT_STREAMS, Settings};
+use asupersync::http::h2::frame::{Setting, SettingsFrame};
+use asupersync::http::h2::settings::Settings;
 use libfuzzer_sys::fuzz_target;
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
+
+#[derive(Debug, Clone, Copy)]
+pub enum Side {
+    Client,
+    Server,
+}
 
 /// Test input for dynamic MAX_CONCURRENT_STREAMS transitions
 #[derive(Debug, Arbitrary)]
@@ -224,10 +230,10 @@ pub struct SettingsHistoryEntry {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TransitionPhase {
-    Initial,           // Before any settings
-    ZeroLimitActive,   // MAX_CONCURRENT_STREAMS=0
-    Transitioning,     // During limit change
-    PostTransition,    // After limit increase
+    Initial,         // Before any settings
+    ZeroLimitActive, // MAX_CONCURRENT_STREAMS=0
+    Transitioning,   // During limit change
+    PostTransition,  // After limit increase
 }
 
 #[derive(Debug, Clone)]
@@ -270,21 +276,21 @@ pub enum ViolationType {
     StateTransitionError,      // State machine failed to transition
     PendingStreamNotProcessed, // Pending streams not processed on limit increase
     StreamCountingError,       // Incorrect active stream count
-    TimingViolation,          // Settings timing issues
-    MemoryLeak,               // Pending streams not cleaned up
-    SettingsInconsistency,    // Settings state inconsistent
-    RaceCondition,            // Detected race condition
+    TimingViolation,           // Settings timing issues
+    MemoryLeak,                // Pending streams not cleaned up
+    SettingsInconsistency,     // Settings state inconsistent
+    RaceCondition,             // Detected race condition
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ViolationSeverity {
-    Critical,   // State machine corruption
-    High,       // RFC violation or data loss
-    Medium,     // Performance or timing issue
-    Low,        // Style or recommendation
+    Critical, // State machine corruption
+    High,     // RFC violation or data loss
+    Medium,   // Performance or timing issue
+    Low,      // Style or recommendation
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct TransitionStats {
     settings_updates: u32,
     stream_creation_attempts: u32,
@@ -319,6 +325,12 @@ impl SimulatedTime {
 
     pub fn advance(&mut self, duration_ms: u64) {
         self.time_offset_ms += duration_ms;
+    }
+}
+
+impl Default for SimulatedTime {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -375,22 +387,22 @@ impl MockSettingsTransitionConnection {
                 Setting::MaxConcurrentStreams(new_limit) => {
                     new_max_concurrent = *new_limit;
                     self.settings.max_concurrent_streams = *new_limit;
-                },
+                }
                 Setting::HeaderTableSize(size) => {
                     self.settings.header_table_size = *size;
-                },
+                }
                 Setting::EnablePush(enabled) => {
                     self.settings.enable_push = *enabled;
-                },
+                }
                 Setting::InitialWindowSize(size) => {
                     self.settings.initial_window_size = *size;
-                },
+                }
                 Setting::MaxFrameSize(size) => {
                     self.settings.max_frame_size = *size;
-                },
+                }
                 Setting::MaxHeaderListSize(size) => {
                     self.settings.max_header_list_size = *size;
-                },
+                }
             }
         }
 
@@ -407,7 +419,10 @@ impl MockSettingsTransitionConnection {
         }
 
         // Handle limit changes (non-zero to different non-zero)
-        if old_max_concurrent > 0 && new_max_concurrent > 0 && old_max_concurrent != new_max_concurrent {
+        if old_max_concurrent > 0
+            && new_max_concurrent > 0
+            && old_max_concurrent != new_max_concurrent
+        {
             self.handle_limit_change(old_max_concurrent, new_max_concurrent)?;
         }
 
@@ -434,12 +449,16 @@ impl MockSettingsTransitionConnection {
         let transition_duration = self.simulated_time.now().duration_since(transition_start);
         self.stats.transition_duration_ms = transition_duration.as_millis() as u64;
 
-        if self.config.validate_ack_timing &&
-           transition_duration.as_millis() > self.config.max_transition_time_ms as u128 {
+        if self.config.validate_ack_timing
+            && transition_duration.as_millis() > self.config.max_transition_time_ms as u128
+        {
             self.violations.push(TransitionViolation {
                 violation_type: ViolationType::TimingViolation,
-                description: format!("Transition took {}ms, max allowed {}ms",
-                    transition_duration.as_millis(), self.config.max_transition_time_ms),
+                description: format!(
+                    "Transition took {}ms, max allowed {}ms",
+                    transition_duration.as_millis(),
+                    self.config.max_transition_time_ms
+                ),
                 phase: TransitionPhase::Transitioning,
                 stream_id: None,
                 settings_value: Some(new_limit),
@@ -478,16 +497,18 @@ impl MockSettingsTransitionConnection {
         let mut processed = 0;
         let current_active = self.active_stream_count();
 
-        while !self.pending_streams.is_empty() &&
-              current_active + processed < limit as usize {
+        while !self.pending_streams.is_empty() && current_active + processed < limit as usize {
             if let Some(pending) = self.pending_streams.pop_front() {
                 // Create the stream
-                self.streams.insert(pending.stream_id, StreamInfo {
-                    id: pending.stream_id,
-                    state: StreamState::Open,
-                    created_at_phase: TransitionPhase::PostTransition,
-                    priority_info: None,
-                });
+                self.streams.insert(
+                    pending.stream_id,
+                    StreamInfo {
+                        id: pending.stream_id,
+                        state: StreamState::Open,
+                        created_at_phase: TransitionPhase::PostTransition,
+                        priority_info: None,
+                    },
+                );
 
                 self.stats.streams_created_post_transition += 1;
                 processed += 1;
@@ -498,7 +519,10 @@ impl MockSettingsTransitionConnection {
         if self.config.check_pending_stream_leaks && !self.pending_streams.is_empty() && limit > 0 {
             self.violations.push(TransitionViolation {
                 violation_type: ViolationType::MemoryLeak,
-                description: format!("{} pending streams remain after transition", self.pending_streams.len()),
+                description: format!(
+                    "{} pending streams remain after transition",
+                    self.pending_streams.len()
+                ),
                 phase: TransitionPhase::PostTransition,
                 stream_id: None,
                 settings_value: Some(limit),
@@ -511,7 +535,11 @@ impl MockSettingsTransitionConnection {
     }
 
     /// Attempt to create a stream
-    pub fn attempt_stream_creation(&mut self, stream_id: u32, headers: Vec<(String, String)>) -> Result<(), ErrorCode> {
+    pub fn attempt_stream_creation(
+        &mut self,
+        stream_id: u32,
+        headers: Vec<(String, String)>,
+    ) -> Result<(), ErrorCode> {
         self.stats.stream_creation_attempts += 1;
 
         let normalized_id = self.normalize_stream_id(stream_id);
@@ -554,12 +582,15 @@ impl MockSettingsTransitionConnection {
         }
 
         // Create the stream
-        self.streams.insert(normalized_id, StreamInfo {
-            id: normalized_id,
-            state: StreamState::Open,
-            created_at_phase: self.current_phase(),
-            priority_info: None,
-        });
+        self.streams.insert(
+            normalized_id,
+            StreamInfo {
+                id: normalized_id,
+                state: StreamState::Open,
+                created_at_phase: self.current_phase(),
+                priority_info: None,
+            },
+        );
 
         match self.current_phase() {
             TransitionPhase::ZeroLimitActive => {
@@ -575,7 +606,7 @@ impl MockSettingsTransitionConnection {
                     timestamp: self.simulated_time.now(),
                     severity: ViolationSeverity::Critical,
                 });
-            },
+            }
             _ => {
                 self.stats.streams_created_post_transition += 1;
             }
@@ -586,7 +617,7 @@ impl MockSettingsTransitionConnection {
     }
 
     /// Close a stream
-    pub fn close_stream(&mut self, stream_id: u32, use_rst: bool) -> Result<(), ErrorCode> {
+    pub fn close_stream(&mut self, stream_id: u32, _use_rst: bool) -> Result<(), ErrorCode> {
         let normalized_id = self.normalize_stream_id(stream_id);
 
         if let Some(stream) = self.streams.get_mut(&normalized_id) {
@@ -610,24 +641,38 @@ impl MockSettingsTransitionConnection {
 
     /// Get current active stream count
     pub fn active_stream_count(&self) -> usize {
-        self.streams.values()
-            .filter(|s| matches!(s.state, StreamState::Open | StreamState::HalfClosedLocal | StreamState::HalfClosedRemote))
+        self.streams
+            .values()
+            .filter(|s| {
+                matches!(
+                    s.state,
+                    StreamState::Open
+                        | StreamState::HalfClosedLocal
+                        | StreamState::HalfClosedRemote
+                )
+            })
             .count()
     }
 
     /// Normalize stream ID based on connection side
     fn normalize_stream_id(&self, raw_id: u32) -> u32 {
         let mut id = raw_id & 0x7fff_ffff; // Ensure 31-bit
-        if id == 0 { id = 1; }
+        if id == 0 {
+            id = 1;
+        }
 
         match self.side {
             Side::Client => {
                 // Client streams are odd
-                if id % 2 == 0 { id = id.saturating_add(1); }
-            },
+                if id.is_multiple_of(2) {
+                    id = id.saturating_add(1);
+                }
+            }
             Side::Server => {
                 // Server streams are even
-                if id % 2 == 1 { id = id.saturating_add(1); }
+                if !id.is_multiple_of(2) {
+                    id = id.saturating_add(1);
+                }
             }
         }
 
@@ -666,7 +711,10 @@ impl MockSettingsTransitionConnection {
             if expected_active > actual_limit && actual_limit > 0 {
                 self.violations.push(TransitionViolation {
                     violation_type: ViolationType::StreamCountingError,
-                    description: format!("Active streams {} exceeds limit {}", expected_active, actual_limit),
+                    description: format!(
+                        "Active streams {} exceeds limit {}",
+                        expected_active, actual_limit
+                    ),
                     phase: self.current_phase(),
                     stream_id: None,
                     settings_value: Some(actual_limit as u32),
@@ -700,12 +748,14 @@ impl MockSettingsTransitionConnection {
         // 2. Pending streams were processed when limit increased
         // 3. Current state is consistent
 
-        let critical_violations = self.violations.iter()
+        let critical_violations = self
+            .violations
+            .iter()
             .filter(|v| v.severity == ViolationSeverity::Critical)
             .count();
 
-        critical_violations == 0 &&
-        (self.pending_streams.is_empty() || self.settings.max_concurrent_streams == 0)
+        critical_violations == 0
+            && (self.pending_streams.is_empty() || self.settings.max_concurrent_streams == 0)
     }
 }
 
@@ -747,40 +797,57 @@ fuzz_target!(|input: SettingsTransitionInput| {
 
     // Phase 1: Apply initial settings with MAX_CONCURRENT_STREAMS=0
     let initial_result = conn.apply_initial_zero_limit();
-    assert!(initial_result.is_ok(), "Initial zero limit setting should succeed");
-    assert_eq!(conn.settings.max_concurrent_streams, 0, "Initial limit should be zero");
+    assert!(
+        initial_result.is_ok(),
+        "Initial zero limit setting should succeed"
+    );
+    assert_eq!(
+        conn.settings.max_concurrent_streams, 0,
+        "Initial limit should be zero"
+    );
 
     // Phase 2: Initial phase operations (during zero limit)
     for operation in input.initial_phase_ops.iter().take(10) {
         match operation {
-            InitialPhaseOperation::AttemptStreamCreation { stream_id, headers, expect_blocked } => {
+            InitialPhaseOperation::AttemptStreamCreation {
+                stream_id,
+                headers,
+                expect_blocked,
+            } => {
                 let stream_id = cap_u32(*stream_id, 0x7fff_ffff);
-                let headers = headers.iter().take(5)
-                    .map(|(k, v)| (k[..k.len().min(50)].to_string(), v[..v.len().min(100)].to_string()))
+                let headers = headers
+                    .iter()
+                    .take(5)
+                    .map(|(k, v)| {
+                        (
+                            k[..k.len().min(50)].to_string(),
+                            v[..v.len().min(100)].to_string(),
+                        )
+                    })
                     .collect();
 
                 let result = conn.attempt_stream_creation(stream_id, headers);
 
                 if *expect_blocked {
-                    // During zero limit, streams should be queued, not failed
-                    assert!(result.is_ok() || result.is_err(), "Stream attempt during zero limit should be queued or failed");
-
                     // Should have been queued if successful
                     if result.is_ok() {
-                        assert!(!conn.pending_streams.is_empty(), "Successful attempt during zero limit should queue stream");
+                        assert!(
+                            !conn.pending_streams.is_empty(),
+                            "Successful attempt during zero limit should queue stream"
+                        );
                     }
                 } else {
                     // Non-blocked streams during zero limit is unusual but not necessarily invalid
                 }
-            },
+            }
             InitialPhaseOperation::SendPing { data: _ } => {
                 // PING frames should work normally regardless of stream limit
                 // This tests that connection-level operations are unaffected
-            },
+            }
             InitialPhaseOperation::SendWindowUpdate { increment } => {
-                let increment = cap_u32(*increment, 0x7fff_ffff);
+                let _increment = cap_u32(*increment, 0x7fff_ffff);
                 // Connection-level WINDOW_UPDATE should work normally
-            },
+            }
             InitialPhaseOperation::SendAdditionalSettings { settings } => {
                 // Test additional settings during zero limit phase
                 let mut settings_vec = vec![];
@@ -788,63 +855,90 @@ fuzz_target!(|input: SettingsTransitionInput| {
                     match setting {
                         AdditionalSetting::HeaderTableSize(size) => {
                             settings_vec.push(Setting::HeaderTableSize(*size));
-                        },
+                        }
                         AdditionalSetting::EnablePush(enabled) => {
                             settings_vec.push(Setting::EnablePush(*enabled));
-                        },
+                        }
                         AdditionalSetting::InitialWindowSize(size) => {
                             settings_vec.push(Setting::InitialWindowSize(*size));
-                        },
+                        }
                         AdditionalSetting::MaxFrameSize(size) => {
                             settings_vec.push(Setting::MaxFrameSize(*size));
-                        },
+                        }
                         AdditionalSetting::MaxHeaderListSize(size) => {
                             settings_vec.push(Setting::MaxHeaderListSize(*size));
-                        },
+                        }
                     }
                 }
 
                 let settings_frame = SettingsFrame::new(settings_vec);
                 let _ = conn.handle_settings_frame(&settings_frame);
-            },
+            }
             InitialPhaseOperation::WaitDuration { duration_ms } => {
                 let duration = cap_u16(*duration_ms, 2000); // Max 2 seconds
                 conn.advance_time(duration as u64);
-            },
+            }
         }
     }
 
     // Verify zero limit state
-    assert_eq!(conn.settings.max_concurrent_streams, 0, "Should still have zero limit after initial ops");
-    assert_eq!(conn.active_stream_count(), 0, "Should have no active streams during zero limit");
+    assert_eq!(
+        conn.settings.max_concurrent_streams, 0,
+        "Should still have zero limit after initial ops"
+    );
+    assert_eq!(
+        conn.active_stream_count(),
+        0,
+        "Should have no active streams during zero limit"
+    );
 
     // Phase 3: Transition - advance time and increase limit
     let delay = cap_u16(input.transition_config.delay_before_increase_ms, 5000);
     conn.advance_time(delay as u64);
 
     let new_limit = cap_u8(input.transition_config.new_limit, 50).max(1); // At least 1 for transition test
-    let transition_settings = SettingsFrame::new(vec![Setting::MaxConcurrentStreams(new_limit as u32)]);
+    let transition_settings =
+        SettingsFrame::new(vec![Setting::MaxConcurrentStreams(new_limit as u32)]);
 
     let transition_result = conn.handle_settings_frame(&transition_settings);
-    assert!(transition_result.is_ok(), "Transition settings should succeed");
-    assert_eq!(conn.settings.max_concurrent_streams, new_limit as u32, "Limit should be updated");
+    assert!(
+        transition_result.is_ok(),
+        "Transition settings should succeed"
+    );
+    assert_eq!(
+        conn.settings.max_concurrent_streams, new_limit as u32,
+        "Limit should be updated"
+    );
 
     // Verify pending streams were processed if any were queued
     let pending_before = conn.stats.streams_queued;
     let processed = conn.stats.pending_streams_processed;
 
     if pending_before > 0 && new_limit > 0 {
-        assert!(processed > 0 || conn.pending_streams.len() < pending_before as usize,
-            "Some pending streams should be processed when limit increases");
+        assert!(
+            processed > 0 || conn.pending_streams.len() < pending_before as usize,
+            "Some pending streams should be processed when limit increases"
+        );
     }
 
     // Phase 4: Post-transition operations
     for operation in input.post_transition_ops.iter().take(15) {
         match operation {
-            PostTransitionOperation::CreateStream { stream_id, headers, expect_success } => {
+            PostTransitionOperation::CreateStream {
+                stream_id,
+                headers,
+                expect_success,
+            } => {
                 let stream_id = cap_u32(*stream_id, 0x7fff_ffff);
-                let headers = headers.iter().take(5)
-                    .map(|(k, v)| (k[..k.len().min(50)].to_string(), v[..v.len().min(100)].to_string()))
+                let headers = headers
+                    .iter()
+                    .take(5)
+                    .map(|(k, v)| {
+                        (
+                            k[..k.len().min(50)].to_string(),
+                            v[..v.len().min(100)].to_string(),
+                        )
+                    })
                     .collect();
 
                 let result = conn.attempt_stream_creation(stream_id, headers);
@@ -858,19 +952,28 @@ fuzz_target!(|input: SettingsTransitionInput| {
                     // Should fail if at limit
                     assert!(result.is_err(), "Stream creation should fail when at limit");
                 }
-            },
-            PostTransitionOperation::SendDataOnStream { stream_id, data_size: _ } => {
+            }
+            PostTransitionOperation::SendDataOnStream {
+                stream_id,
+                data_size: _,
+            } => {
                 let stream_id = cap_u32(*stream_id, 0x7fff_ffff);
                 // Test data sending on existing streams
-                if conn.streams.contains_key(&conn.normalize_stream_id(stream_id)) {
-                    // Stream exists, data should be sendable
-                }
-            },
-            PostTransitionOperation::CloseStream { stream_id, use_rst: _ } => {
+                let _stream_exists = conn
+                    .streams
+                    .contains_key(&conn.normalize_stream_id(stream_id));
+            }
+            PostTransitionOperation::CloseStream {
+                stream_id,
+                use_rst: _,
+            } => {
                 let stream_id = cap_u32(*stream_id, 0x7fff_ffff);
                 let _ = conn.close_stream(stream_id, false);
-            },
-            PostTransitionOperation::CreateMultipleStreams { count, base_stream_id } => {
+            }
+            PostTransitionOperation::CreateMultipleStreams {
+                count,
+                base_stream_id,
+            } => {
                 let count = cap_u8(*count, 10);
                 let base_id = cap_u32(*base_stream_id, 0x7fff_fff0);
 
@@ -880,11 +983,19 @@ fuzz_target!(|input: SettingsTransitionInput| {
                 }
 
                 // Should not exceed the limit
-                assert!(conn.active_stream_count() <= new_limit as usize,
+                assert!(
+                    conn.active_stream_count() <= new_limit as usize,
                     "Active stream count {} should not exceed limit {}",
-                    conn.active_stream_count(), new_limit);
-            },
-            PostTransitionOperation::SetStreamPriority { stream_id, dependency, weight, exclusive } => {
+                    conn.active_stream_count(),
+                    new_limit
+                );
+            }
+            PostTransitionOperation::SetStreamPriority {
+                stream_id,
+                dependency,
+                weight,
+                exclusive,
+            } => {
                 let stream_id = cap_u32(*stream_id, 0x7fff_ffff);
                 let dependency = cap_u32(*dependency, 0x7fff_ffff);
 
@@ -895,11 +1006,11 @@ fuzz_target!(|input: SettingsTransitionInput| {
                         exclusive: *exclusive,
                     });
                 }
-            },
+            }
             PostTransitionOperation::WaitForPendingProcessing { timeout_ms } => {
                 let timeout = cap_u16(*timeout_ms, 1000);
                 conn.advance_time(timeout as u64);
-            },
+            }
         }
     }
 
@@ -909,29 +1020,33 @@ fuzz_target!(|input: SettingsTransitionInput| {
             EdgeCaseTest::RapidLimitChanges { limits } => {
                 for &limit in limits.iter().take(5) {
                     let limit = cap_u8(limit, 100);
-                    let settings = SettingsFrame::new(vec![Setting::MaxConcurrentStreams(limit as u32)]);
+                    let settings =
+                        SettingsFrame::new(vec![Setting::MaxConcurrentStreams(limit as u32)]);
                     let _ = conn.handle_settings_frame(&settings);
 
                     // Verify state consistency after each change
-                    assert!(conn.active_stream_count() <= conn.settings.max_concurrent_streams as usize,
-                        "Active streams should not exceed limit after rapid change");
+                    assert!(
+                        conn.active_stream_count() <= conn.settings.max_concurrent_streams as usize,
+                        "Active streams should not exceed limit after rapid change"
+                    );
                 }
-            },
+            }
             EdgeCaseTest::ConcurrentStreamCreationAndLimitChange => {
                 // Simulate concurrent operations
                 let _ = conn.attempt_stream_creation(1001, vec![]);
                 let settings = SettingsFrame::new(vec![Setting::MaxConcurrentStreams(5)]);
                 let _ = conn.handle_settings_frame(&settings);
                 let _ = conn.attempt_stream_creation(1003, vec![]);
-            },
+            }
             EdgeCaseTest::LimitDecreaseAfterIncrease { final_limit } => {
                 let final_limit = cap_u8(*final_limit, new_limit);
-                let settings = SettingsFrame::new(vec![Setting::MaxConcurrentStreams(final_limit as u32)]);
+                let settings =
+                    SettingsFrame::new(vec![Setting::MaxConcurrentStreams(final_limit as u32)]);
                 let _ = conn.handle_settings_frame(&settings);
 
                 // Verify no streams were forcibly closed
                 // (Existing streams should be allowed to continue)
-            },
+            }
             EdgeCaseTest::ZeroDelayTransition => {
                 // Test immediate transition back to zero and then non-zero
                 let zero_settings = SettingsFrame::new(vec![Setting::MaxConcurrentStreams(0)]);
@@ -939,7 +1054,7 @@ fuzz_target!(|input: SettingsTransitionInput| {
 
                 let non_zero_settings = SettingsFrame::new(vec![Setting::MaxConcurrentStreams(1)]);
                 let _ = conn.handle_settings_frame(&non_zero_settings);
-            },
+            }
             _ => {
                 // Other edge cases
                 let test_settings = SettingsFrame::new(vec![Setting::MaxConcurrentStreams(2)]);
@@ -952,22 +1067,35 @@ fuzz_target!(|input: SettingsTransitionInput| {
     let results = conn.results();
 
     // Verify transition completed successfully
-    assert!(conn.transition_successful(), "Transition should complete successfully");
+    assert!(
+        conn.transition_successful(),
+        "Transition should complete successfully"
+    );
 
     // Verify no critical violations
-    let critical_violations: Vec<_> = results.violations.iter()
+    let critical_violations: Vec<_> = results
+        .violations
+        .iter()
         .filter(|v| v.severity == ViolationSeverity::Critical)
         .collect();
 
-    assert!(critical_violations.is_empty(),
-        "No critical violations should occur: {:?}", critical_violations);
+    assert!(
+        critical_violations.is_empty(),
+        "No critical violations should occur: {:?}",
+        critical_violations
+    );
 
     // Verify settings history makes sense
-    assert!(!results.settings_history.is_empty(), "Should have settings history");
+    assert!(
+        !results.settings_history.is_empty(),
+        "Should have settings history"
+    );
 
     // Verify final state consistency
-    assert!(results.streams.len() <= conn.settings.max_concurrent_streams as usize,
-        "Final active stream count should not exceed limit");
+    assert!(
+        results.streams.len() <= conn.settings.max_concurrent_streams as usize,
+        "Final active stream count should not exceed limit"
+    );
 
     // Check for memory leaks in pending streams
     if conn.settings.max_concurrent_streams > 0 && !results.pending_streams.is_empty() {
@@ -977,16 +1105,22 @@ fuzz_target!(|input: SettingsTransitionInput| {
 
         if active_count < limit {
             // If we're under the limit but still have pending streams, that's suspicious
-            assert!(false, "Pending streams remain despite being under limit");
+            panic!("Pending streams remain despite being under limit");
         }
     }
 
     // Verify statistics are reasonable
-    assert!(results.stats.settings_updates > 0, "Should have processed settings updates");
+    assert!(
+        results.stats.settings_updates > 0,
+        "Should have processed settings updates"
+    );
 
     if results.stats.streams_queued > 0 {
-        assert!(results.stats.pending_streams_processed > 0 || conn.settings.max_concurrent_streams == 0,
-            "Queued streams should be processed unless limit is still zero");
+        assert!(
+            results.stats.pending_streams_processed > 0
+                || conn.settings.max_concurrent_streams == 0,
+            "Queued streams should be processed unless limit is still zero"
+        );
     }
 });
 
@@ -1079,7 +1213,9 @@ mod tests {
         assert!(conn.handle_settings_frame(&settings).is_ok());
 
         // Should have timing violation due to simulated delay
-        let timing_violations: Vec<_> = conn.violations.iter()
+        let timing_violations: Vec<_> = conn
+            .violations
+            .iter()
             .filter(|v| matches!(v.violation_type, ViolationType::TimingViolation))
             .collect();
 
