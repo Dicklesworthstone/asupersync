@@ -145,8 +145,6 @@ enum FrameValidationError {
     InvalidStreamId,
     /// Stream is in invalid state for DATA frame
     InvalidStreamState,
-    /// Flow control violation
-    FlowControlViolation,
 }
 
 const RFC_MIN_FRAME_SIZE: u32 = 16384; // 2^14
@@ -167,8 +165,10 @@ impl MockH2MaxFrameSizeParser {
 
     fn process_settings_frame(&mut self, max_frame_size: u32) -> Result<(), FrameValidationError> {
         // RFC 7540 §6.5.2: Value must be between 2^14 and 2^24-1 inclusive
-        if max_frame_size < RFC_MIN_FRAME_SIZE || max_frame_size > RFC_MAX_FRAME_SIZE {
-            return Err(FrameValidationError::InvalidMaxFrameSize { value: max_frame_size });
+        if !(RFC_MIN_FRAME_SIZE..=RFC_MAX_FRAME_SIZE).contains(&max_frame_size) {
+            return Err(FrameValidationError::InvalidMaxFrameSize {
+                value: max_frame_size,
+            });
         }
 
         // Update the setting
@@ -177,6 +177,57 @@ impl MockH2MaxFrameSizeParser {
         self.connection_state.settings_applied = true;
 
         Ok(())
+    }
+
+    fn apply_protocol_context(&mut self, context: &ProtocolContext) {
+        self.connection_state.settings_applied |= context.hpack_table_size > 0;
+        self.connection_state.max_frame_size_setting = self
+            .max_frame_size
+            .max(context.initial_window_size.min(RFC_MAX_FRAME_SIZE));
+
+        let tracked_streams = context.concurrent_streams.min(8);
+        for stream_index in 0..tracked_streams {
+            let stream_id = u32::from(stream_index) + 1;
+            self.connection_state
+                .stream_states
+                .entry(stream_id)
+                .or_insert(StreamState {
+                    state: StreamStateType::Open,
+                    received_bytes: u64::from(context.initial_window_size),
+                });
+        }
+
+        match context.connection_state {
+            ConnectionState::New => {}
+            ConnectionState::Active => {
+                self.connection_state
+                    .stream_states
+                    .entry(1)
+                    .or_insert(StreamState {
+                        state: StreamStateType::HalfClosedLocal,
+                        received_bytes: 0,
+                    });
+            }
+            ConnectionState::FlowControlLimited => {
+                self.connection_state
+                    .stream_states
+                    .entry(1)
+                    .or_insert(StreamState {
+                        state: StreamStateType::HalfClosedRemote,
+                        received_bytes: u64::from(context.initial_window_size),
+                    });
+            }
+        }
+    }
+
+    fn data_pattern_marker(pattern: &DataPattern) -> u8 {
+        match pattern {
+            DataPattern::Zeros => 0,
+            DataPattern::Ones => u8::MAX,
+            DataPattern::Incrementing => 1,
+            DataPattern::Random(seed) => seed.to_le_bytes()[0],
+            DataPattern::Repeated(bytes) => bytes.first().copied().unwrap_or(0),
+        }
     }
 
     fn process_data_frame(
@@ -191,7 +242,11 @@ impl MockH2MaxFrameSizeParser {
         }
 
         // Calculate total frame size including padding
-        let padding_size = if properties.padded { 1 + properties.padding_length as u32 } else { 0 };
+        let padding_size = if properties.padded {
+            1 + properties.padding_length as u32
+        } else {
+            0
+        };
         let total_frame_size = payload_size + padding_size;
 
         // RFC 7540 §6.5.2: Frame size must not exceed SETTINGS_MAX_FRAME_SIZE
@@ -207,8 +262,12 @@ impl MockH2MaxFrameSizeParser {
             return Err(FrameValidationError::PaddingExceedsFrame);
         }
 
+        let _pattern_marker = Self::data_pattern_marker(&properties.data_pattern);
+
         // Update stream state
-        let stream_state = self.connection_state.stream_states
+        let stream_state = self
+            .connection_state
+            .stream_states
             .entry(stream_id)
             .or_insert(StreamState {
                 state: StreamStateType::Open,
@@ -241,22 +300,21 @@ impl MockH2MaxFrameSizeParser {
     fn generate_frame_size(size_spec: &PayloadSize, max_frame_size: u32) -> u32 {
         match size_spec {
             PayloadSize::AtMaximum => max_frame_size,
-            PayloadSize::NearMaximum { offset } => {
-                max_frame_size.saturating_sub(*offset as u32)
-            }
+            PayloadSize::NearMaximum { offset } => max_frame_size.saturating_sub(*offset as u32),
             PayloadSize::AtDefault => RFC_DEFAULT_FRAME_SIZE.min(max_frame_size),
             PayloadSize::Small(size) => (*size as u32).min(max_frame_size),
-            PayloadSize::Medium(size) => {
-                (1000 + (*size as u32 % 7192)).min(max_frame_size)
-            }
-            PayloadSize::Large(size) => {
-                (8192 + (*size as u32 % 57343)).min(max_frame_size)
-            }
+            PayloadSize::Medium(size) => (1000 + (*size as u32 % 7192)).min(max_frame_size),
+            PayloadSize::Large(size) => (8192 + (*size as u32 % 57343)).min(max_frame_size),
             PayloadSize::Custom(size) => (*size).min(max_frame_size),
         }
     }
 
-    fn simulate_frame_sequence(&mut self, input: &H2MaxFrameSizeInput) -> Result<(), FrameValidationError> {
+    fn simulate_frame_sequence(
+        &mut self,
+        input: &H2MaxFrameSizeInput,
+    ) -> Result<(), FrameValidationError> {
+        self.apply_protocol_context(&input.protocol_context);
+
         // First, apply the SETTINGS frame
         let target_frame_size = match input.setting_strategy {
             SettingStrategy::ExactMax => RFC_MAX_FRAME_SIZE,
@@ -286,10 +344,8 @@ impl MockH2MaxFrameSizeParser {
 
         // Now test DATA frames with the new setting
         for data_frame_test in &input.data_frame_tests {
-            let frame_size = Self::generate_frame_size(
-                &data_frame_test.payload_size,
-                self.max_frame_size
-            );
+            let frame_size =
+                Self::generate_frame_size(&data_frame_test.payload_size, self.max_frame_size);
 
             let result = self.process_data_frame(
                 data_frame_test.stream_id,
@@ -328,10 +384,10 @@ fuzz_target!(|input: H2MaxFrameSizeInput| {
     let result = parser.simulate_frame_sequence(&input);
 
     // Apply test assertions based on the strategy and expected behavior
-    match input.setting_strategy {
+    match &input.setting_strategy {
         SettingStrategy::ExactMax => {
             // Setting to exact maximum (2^24-1 = 16777215) should succeed
-            match result {
+            match &result {
                 Ok(()) => {
                     // Expected: maximum frame size should be accepted
                     assert_eq!(parser.max_frame_size, RFC_MAX_FRAME_SIZE);
@@ -342,19 +398,19 @@ fuzz_target!(|input: H2MaxFrameSizeInput| {
                 Err(FrameValidationError::FrameSizeExceeded { size, max }) => {
                     // Expected if DATA frame exceeded the limit
                     assert!(size > max, "Frame size {} should exceed max {}", size, max);
-                    assert_eq!(max, RFC_MAX_FRAME_SIZE);
+                    assert_eq!(*max, RFC_MAX_FRAME_SIZE);
                 }
-                Err(other_error) => {
+                Err(_) => {
                     // Other errors may be acceptable depending on test conditions
                 }
             }
         }
         SettingStrategy::NearMax { offset } => {
-            let target_size = RFC_MAX_FRAME_SIZE - offset as u32;
+            let target_size = RFC_MAX_FRAME_SIZE - *offset as u32;
 
             if target_size >= RFC_MIN_FRAME_SIZE {
                 // Should be valid
-                match result {
+                match &result {
                     Ok(()) => {
                         assert_eq!(parser.max_frame_size, target_size);
                     }
@@ -362,7 +418,10 @@ fuzz_target!(|input: H2MaxFrameSizeInput| {
                         // Expected if DATA frame exceeded the limit
                     }
                     Err(FrameValidationError::InvalidMaxFrameSize { .. }) => {
-                        panic!("Frame size {} should be valid (>= {})", target_size, RFC_MIN_FRAME_SIZE);
+                        panic!(
+                            "Frame size {} should be valid (>= {})",
+                            target_size, RFC_MIN_FRAME_SIZE
+                        );
                     }
                     Err(_) => {
                         // Other errors may occur due to test conditions
@@ -370,14 +429,17 @@ fuzz_target!(|input: H2MaxFrameSizeInput| {
                 }
             } else {
                 // Should be invalid (below minimum)
-                assert!(matches!(result, Err(FrameValidationError::InvalidMaxFrameSize { .. })));
+                assert!(matches!(
+                    &result,
+                    Err(FrameValidationError::InvalidMaxFrameSize { .. })
+                ));
             }
         }
-        SettingStrategy::DefaultThenMax |
-        SettingStrategy::Progressive { .. } |
-        SettingStrategy::MinToMax => {
+        SettingStrategy::DefaultThenMax
+        | SettingStrategy::Progressive { .. }
+        | SettingStrategy::MinToMax => {
             // Progressive setting changes should all succeed
-            match result {
+            match &result {
                 Ok(()) => {
                     // Expected: should end up with maximum frame size
                     assert_eq!(parser.max_frame_size, RFC_MAX_FRAME_SIZE);
@@ -402,12 +464,15 @@ fuzz_target!(|input: H2MaxFrameSizeInput| {
 fn test_frame_size_invariants(
     input: &H2MaxFrameSizeInput,
     result: &Result<(), FrameValidationError>,
-    final_max_frame_size: u32
+    final_max_frame_size: u32,
 ) {
     // Invariant: Maximum frame size should never exceed RFC_MAX_FRAME_SIZE
-    assert!(final_max_frame_size <= RFC_MAX_FRAME_SIZE,
+    assert!(
+        final_max_frame_size <= RFC_MAX_FRAME_SIZE,
         "Final max frame size {} exceeds RFC maximum {}",
-        final_max_frame_size, RFC_MAX_FRAME_SIZE);
+        final_max_frame_size,
+        RFC_MAX_FRAME_SIZE
+    );
 
     // Invariant: If we set to exact maximum, it should equal RFC_MAX_FRAME_SIZE
     if matches!(input.setting_strategy, SettingStrategy::ExactMax) && result.is_ok() {
@@ -442,7 +507,7 @@ fn test_frame_size_invariants(
     for data_test in &input.data_frame_tests {
         let frame_size = MockH2MaxFrameSizeParser::generate_frame_size(
             &data_test.payload_size,
-            final_max_frame_size
+            final_max_frame_size,
         );
 
         // Add padding to frame size
@@ -507,7 +572,10 @@ mod tests {
 
         // Setting above RFC maximum should fail
         let result = parser.process_settings_frame(RFC_MAX_FRAME_SIZE + 1);
-        assert!(matches!(result, Err(FrameValidationError::InvalidMaxFrameSize { .. })));
+        assert!(matches!(
+            result,
+            Err(FrameValidationError::InvalidMaxFrameSize { .. })
+        ));
     }
 
     #[test]
@@ -516,7 +584,10 @@ mod tests {
 
         // Setting below RFC minimum should fail
         let result = parser.process_settings_frame(RFC_MIN_FRAME_SIZE - 1);
-        assert!(matches!(result, Err(FrameValidationError::InvalidMaxFrameSize { .. })));
+        assert!(matches!(
+            result,
+            Err(FrameValidationError::InvalidMaxFrameSize { .. })
+        ));
     }
 
     #[test]
@@ -555,7 +626,10 @@ mod tests {
 
         // This would exceed any possible frame size limit
         let result = parser.process_data_frame(1, RFC_MAX_FRAME_SIZE + 1, &properties);
-        assert!(matches!(result, Err(FrameValidationError::FrameSizeExceeded { .. })));
+        assert!(matches!(
+            result,
+            Err(FrameValidationError::FrameSizeExceeded { .. })
+        ));
     }
 
     #[test]
@@ -599,7 +673,10 @@ mod tests {
         let payload_size = RFC_MAX_FRAME_SIZE - 5; // Not enough room for padding overhead
 
         let result = parser.process_data_frame(1, payload_size, &properties);
-        assert!(matches!(result, Err(FrameValidationError::FrameSizeExceeded { .. })));
+        assert!(matches!(
+            result,
+            Err(FrameValidationError::FrameSizeExceeded { .. })
+        ));
     }
 
     #[test]
@@ -638,7 +715,11 @@ mod tests {
 
         // Test boundaries around RFC_MAX_FRAME_SIZE
         assert!(parser.process_settings_frame(RFC_MAX_FRAME_SIZE).is_ok());
-        assert!(parser.process_settings_frame(RFC_MAX_FRAME_SIZE - 1).is_ok());
+        assert!(
+            parser
+                .process_settings_frame(RFC_MAX_FRAME_SIZE - 1)
+                .is_ok()
+        );
         assert!(matches!(
             parser.process_settings_frame(RFC_MAX_FRAME_SIZE + 1),
             Err(FrameValidationError::InvalidMaxFrameSize { .. })
