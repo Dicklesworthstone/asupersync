@@ -5365,6 +5365,7 @@ name = "h2_settings_max_frame_size_change"
 path = "fuzz_targets/h2_settings_max_frame_size_change.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_settings_max_frame_size_change_mid"

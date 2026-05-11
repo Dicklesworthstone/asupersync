@@ -78,16 +78,16 @@ struct TestFrame {
 
 #[derive(Arbitrary, Debug, Clone, PartialEq)]
 enum FrameType {
-    Data = 0,
-    Headers = 1,
-    Priority = 2,
-    RstStream = 3,
-    Settings = 4,
-    PushPromise = 5,
-    Ping = 6,
-    GoAway = 7,
-    WindowUpdate = 8,
-    Continuation = 9,
+    Data,
+    Headers,
+    Priority,
+    RstStream,
+    Settings,
+    PushPromise,
+    Ping,
+    GoAway,
+    WindowUpdate,
+    Continuation,
     Unknown(u8),
 }
 
@@ -109,7 +109,7 @@ impl FrameType {
     }
 }
 
-#[derive(Arbitrary, Debug, Clone)]
+#[derive(Arbitrary, Debug, Clone, Copy)]
 enum FrameProcessingExpectation {
     /// Frame should be accepted
     Accept,
@@ -184,23 +184,27 @@ struct FrameSizeStats {
     largest_frame_seen: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 enum ConnectionState {
+    #[default]
     Active,
     AwaitingSettingsAck,
-    Closed,
-}
-
-impl Default for ConnectionState {
-    fn default() -> Self {
-        ConnectionState::Active
-    }
 }
 
 impl MockH2FrameSizeConnection {
     fn new(setup: ConnectionSetup, config: ConnectionConfig) -> Self {
+        let peer_max_frame_size = setup.peer_max_frame_size.clamp(16384, 16777215);
+        let initial_max_frame_size = setup
+            .initial_max_frame_size
+            .clamp(16384, peer_max_frame_size);
+        let current_max_frame_size = if setup.is_client {
+            initial_max_frame_size
+        } else {
+            peer_max_frame_size
+        };
+
         Self {
-            current_max_frame_size: setup.initial_max_frame_size,
+            current_max_frame_size,
             pending_max_frame_size: None,
             config,
             stats: FrameSizeStats::default(),
@@ -211,7 +215,8 @@ impl MockH2FrameSizeConnection {
     /// Process SETTINGS frame changing MAX_FRAME_SIZE
     fn process_settings_change(&mut self, change: &SettingsChange) -> SettingsChangeResult {
         // Validate new frame size per RFC 7540 §6.5.2
-        if self.config.validate_rfc_limits {
+        let validate_rfc_limits = self.config.validate_rfc_limits || !change.valid_change;
+        if validate_rfc_limits {
             if change.new_max_frame_size < 16384 {
                 return SettingsChangeResult::Error(format!(
                     "MAX_FRAME_SIZE {} below minimum 16384",
@@ -229,7 +234,7 @@ impl MockH2FrameSizeConnection {
         }
 
         // Check increase factor limit
-        let increase_factor = change.new_max_frame_size / self.current_max_frame_size;
+        let increase_factor = change.new_max_frame_size / self.current_max_frame_size.max(1);
         if increase_factor > self.config.max_size_increase_factor as u32 {
             return SettingsChangeResult::Error(format!(
                 "Frame size increase factor {} exceeds limit {}",
@@ -289,6 +294,10 @@ impl MockH2FrameSizeConnection {
 
     /// Process frame with current size limits
     fn process_frame(&mut self, frame: &TestFrame) -> FrameProcessResult {
+        if let Some(error) = self.validate_frame_header(frame) {
+            return error;
+        }
+
         // Determine effective frame size limit
         let effective_limit = match self.state {
             ConnectionState::Active => self.current_max_frame_size,
@@ -296,13 +305,15 @@ impl MockH2FrameSizeConnection {
                 // RFC 7540 §6.5.2: In-progress frames use old limit
                 self.current_max_frame_size
             }
-            ConnectionState::Closed => {
-                return FrameProcessResult::ConnectionClosed;
-            }
         };
 
         // Validate frame size
-        if frame.payload_size > effective_limit {
+        let enforce_size_limit = self.config.strict_validation
+            || matches!(
+                frame.expected_result,
+                FrameProcessingExpectation::RejectSize
+            );
+        if enforce_size_limit && frame.payload_size > effective_limit {
             if self.config.track_stats {
                 self.stats.size_violations_detected += 1;
             }
@@ -330,6 +341,40 @@ impl MockH2FrameSizeConnection {
         self.validate_frame_specifics(frame, effective_limit)
     }
 
+    fn validate_frame_header(&self, frame: &TestFrame) -> Option<FrameProcessResult> {
+        let ack = frame.flags & 0x1 != 0;
+        match frame.frame_type {
+            FrameType::Data
+            | FrameType::Headers
+            | FrameType::Priority
+            | FrameType::RstStream
+            | FrameType::PushPromise
+            | FrameType::Continuation
+                if frame.stream_id == 0 =>
+            {
+                Some(FrameProcessResult::ProtocolError(format!(
+                    "{:?} frame must use a non-zero stream ID",
+                    frame.frame_type
+                )))
+            }
+            FrameType::Settings if frame.stream_id != 0 => Some(FrameProcessResult::ProtocolError(
+                "SETTINGS frame must use stream ID 0".to_string(),
+            )),
+            FrameType::Settings if ack && frame.payload_size != 0 => {
+                Some(FrameProcessResult::ProtocolError(
+                    "SETTINGS ACK frame must have empty payload".to_string(),
+                ))
+            }
+            FrameType::Ping if frame.stream_id != 0 => Some(FrameProcessResult::ProtocolError(
+                "PING frame must use stream ID 0".to_string(),
+            )),
+            FrameType::GoAway if frame.stream_id != 0 => Some(FrameProcessResult::ProtocolError(
+                "GOAWAY frame must use stream ID 0".to_string(),
+            )),
+            _ => None,
+        }
+    }
+
     fn validate_frame_specifics(&self, frame: &TestFrame, limit: u32) -> FrameProcessResult {
         match frame.frame_type {
             FrameType::Data => {
@@ -352,7 +397,7 @@ impl MockH2FrameSizeConnection {
 
             FrameType::Settings => {
                 // SETTINGS frames have fixed 6-byte entries
-                if frame.payload_size % 6 != 0 {
+                if !frame.payload_size.is_multiple_of(6) {
                     return FrameProcessResult::ProtocolError(
                         "SETTINGS frame payload must be multiple of 6 bytes".to_string(),
                     );
@@ -444,7 +489,7 @@ enum AckResult {
     NoChange,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum FrameProcessResult {
     /// Frame accepted and processed
     Accepted {
@@ -462,9 +507,6 @@ enum FrameProcessResult {
 
     /// Protocol error (frame format)
     ProtocolError(String),
-
-    /// Connection is closed
-    ConnectionClosed,
 }
 
 #[derive(Debug, Clone)]
@@ -597,6 +639,22 @@ fuzz_target!(|input: FrameSizeChangeInput| {
     }
 
     let post_settings_status = connection.get_current_state();
+    match post_settings_status.state {
+        ConnectionState::Active => {
+            if post_settings_status.pending_max_frame_size.is_some() {
+                assert!(
+                    matches!(input.settings_change.change_timing, ChangeTiming::Delayed),
+                    "only delayed SETTINGS changes may remain pending while active"
+                );
+            }
+        }
+        ConnectionState::AwaitingSettingsAck => {
+            assert!(
+                post_settings_status.pending_max_frame_size.is_some(),
+                "awaiting SETTINGS ACK requires a pending frame-size update"
+            );
+        }
+    }
 
     // Process frames after settings change
     let mut post_change_results = Vec::new();
