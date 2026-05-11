@@ -188,6 +188,65 @@ fn observe_active_recv_poll(
     outcome
 }
 
+fn observe_unit_thread_join(
+    tracker: &CancelRaceTracker,
+    handle: thread::JoinHandle<()>,
+    operation: &str,
+) -> bool {
+    match handle.join() {
+        Ok(()) => {
+            tracker.record_operation(operation);
+            true
+        }
+        Err(_) => {
+            tracker.record_operation(&format!("{operation}_panicked"));
+            false
+        }
+    }
+}
+
+fn observe_bool_thread_join(
+    tracker: &CancelRaceTracker,
+    handle: thread::JoinHandle<bool>,
+    operation: &str,
+) -> Option<bool> {
+    match handle.join() {
+        Ok(true) => {
+            tracker.record_operation(&format!("{operation}_true"));
+            Some(true)
+        }
+        Ok(false) => {
+            tracker.record_operation(&format!("{operation}_false"));
+            Some(false)
+        }
+        Err(_) => {
+            tracker.record_operation(&format!("{operation}_panicked"));
+            None
+        }
+    }
+}
+
+fn observe_send_result(
+    tracker: &CancelRaceTracker,
+    result: Result<(), SendError<u32>>,
+    operation: &str,
+) -> bool {
+    match result {
+        Ok(()) => {
+            tracker.record_operation(&format!("{operation}_succeeded"));
+            true
+        }
+        Err(SendError::Cancelled(v)) => {
+            tracker.record_operation(&format!("{operation}_cancelled_with_value_{v}"));
+            false
+        }
+        Err(SendError::Disconnected(v)) => {
+            tracker.record_operation(&format!("{operation}_disconnected_with_value_{v}"));
+            true
+        }
+    }
+}
+
 struct TrackedWaker {
     op_id: usize,
     tracker: CancelRaceTracker,
@@ -421,9 +480,12 @@ fn test_simple_cancel(
         final_recv_state = RecvOutcome::PanicOccurred;
     }
 
-    // Wait for cancel to complete
-    let _ = cancel_handle.join();
-    let cancel_occurred = true;
+    // Wait for cancel to complete and make helper panics fuzz-visible.
+    let cancel_occurred =
+        observe_unit_thread_join(tracker, cancel_handle, "simple_cancel_thread_joined");
+    if !cancel_occurred {
+        final_recv_state = RecvOutcome::PanicOccurred;
+    }
 
     // If receiver was still pending, poll again to see final state
     if final_recv_state == RecvOutcome::StillPending {
@@ -461,12 +523,13 @@ fn test_simple_cancel(
         tracker.record_operation("value_received_while_cancelled_context");
     }
 
+    let panic_occurred = final_recv_state == RecvOutcome::PanicOccurred;
     tracker.record_race_outcome(RaceOutcome {
         test_id,
         final_recv_state,
         cancel_occurred,
         send_occurred,
-        invariant_violated: violation,
+        invariant_violated: violation || panic_occurred,
         violation_description: violation_desc,
     });
 }
@@ -525,35 +588,43 @@ fn test_cancel_during_send(
     let mut recv_context = Context::from_waker(&recv_waker);
 
     let recv_result = pinned_recv.as_mut().poll(&mut recv_context);
-    let final_recv_state = match recv_result {
+    let mut final_recv_state = match recv_result {
         Poll::Ready(Ok(v)) => RecvOutcome::GotValue(v),
         Poll::Ready(Err(RecvError::Cancelled)) => RecvOutcome::GotCancelled,
         Poll::Ready(Err(RecvError::Closed)) => RecvOutcome::GotClosed,
         Poll::Ready(Err(RecvError::PolledAfterCompletion)) => RecvOutcome::GotPolledAfterCompletion,
-        Poll::Pending => {
-            // Poll again after operations complete
-            let _ = send_handle.join();
-            let _ = cancel_handle.join();
-
-            let recv_result_2 = pinned_recv.as_mut().poll(&mut recv_context);
-            match recv_result_2 {
-                Poll::Ready(Ok(v)) => RecvOutcome::GotValue(v),
-                Poll::Ready(Err(RecvError::Cancelled)) => RecvOutcome::GotCancelled,
-                Poll::Ready(Err(RecvError::Closed)) => RecvOutcome::GotClosed,
-                Poll::Ready(Err(RecvError::PolledAfterCompletion)) => {
-                    RecvOutcome::GotPolledAfterCompletion
-                }
-                Poll::Pending => RecvOutcome::StillPending,
-            }
-        }
+        Poll::Pending => RecvOutcome::StillPending,
     };
 
+    let send_join_result =
+        observe_bool_thread_join(tracker, send_handle, "concurrent_send_thread_joined");
+    let send_occurred = send_join_result.unwrap_or(false);
+    let cancel_occurred =
+        observe_unit_thread_join(tracker, cancel_handle, "concurrent_cancel_thread_joined");
+    if send_join_result.is_none() || !cancel_occurred {
+        final_recv_state = RecvOutcome::PanicOccurred;
+    }
+
+    if final_recv_state == RecvOutcome::StillPending {
+        let recv_result_2 = pinned_recv.as_mut().poll(&mut recv_context);
+        final_recv_state = match recv_result_2 {
+            Poll::Ready(Ok(v)) => RecvOutcome::GotValue(v),
+            Poll::Ready(Err(RecvError::Cancelled)) => RecvOutcome::GotCancelled,
+            Poll::Ready(Err(RecvError::Closed)) => RecvOutcome::GotClosed,
+            Poll::Ready(Err(RecvError::PolledAfterCompletion)) => {
+                RecvOutcome::GotPolledAfterCompletion
+            }
+            Poll::Pending => RecvOutcome::StillPending,
+        }
+    }
+
+    let panic_occurred = final_recv_state == RecvOutcome::PanicOccurred;
     tracker.record_race_outcome(RaceOutcome {
         test_id,
         final_recv_state,
-        cancel_occurred: true,
-        send_occurred: true,
-        invariant_violated: false,
+        cancel_occurred,
+        send_occurred,
+        invariant_violated: panic_occurred,
         violation_description: String::new(),
     });
 }
@@ -824,6 +895,6 @@ fn test_concurrent_multiple_recv(
         // This test might not be valid - oneshot receiver is move-only
     }
 
-    // Send the value
-    let _ = sender.send(&cx, value);
+    // Send the value and record the exact send outcome.
+    observe_send_result(tracker, sender.send(&cx, value), "multi_recv_send");
 }
