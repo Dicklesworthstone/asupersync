@@ -2,6 +2,7 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -85,6 +86,16 @@ impl SendDropTracker {
     }
 }
 
+fn observe_thread_join(handle: thread::JoinHandle<()>, tracker: &SendDropTracker, operation: &str) {
+    match handle.join() {
+        Ok(()) => tracker.record_operation(operation),
+        Err(_) => {
+            tracker.record_operation(operation);
+            tracker.record_panic();
+        }
+    }
+}
+
 #[derive(Debug, Clone, Arbitrary)]
 enum SendDropOperation {
     DropReceiver,
@@ -118,7 +129,7 @@ fuzz_target!(|data: &[u8]| {
     let cx = Cx::new(
         RegionId::from_arena(ArenaIndex::new(0, 0)),
         TaskId::from_arena(ArenaIndex::new(0, 0)),
-        Budget::infinite(),
+        Budget::unlimited(),
     );
     let (sender, receiver) = oneshot::channel::<u32>();
 
@@ -140,7 +151,8 @@ fuzz_target!(|data: &[u8]| {
                     tracker_clone.record_panic();
                 }));
 
-                let result = std::panic::catch_unwind(|| sender.send(&cx, test_value));
+                let result =
+                    std::panic::catch_unwind(AssertUnwindSafe(|| sender.send(&cx, test_value)));
 
                 std::panic::set_hook(prev_hook);
 
@@ -162,7 +174,8 @@ fuzz_target!(|data: &[u8]| {
                     tracker_clone.record_panic();
                 }));
 
-                let result = std::panic::catch_unwind(|| sender.send(&cx, test_value));
+                let result =
+                    std::panic::catch_unwind(AssertUnwindSafe(|| sender.send(&cx, test_value)));
 
                 std::panic::set_hook(prev_hook);
 
@@ -183,7 +196,8 @@ fuzz_target!(|data: &[u8]| {
                     tracker_clone.record_panic();
                 }));
 
-                let result = std::panic::catch_unwind(|| sender.send(&cx, test_value));
+                let result =
+                    std::panic::catch_unwind(AssertUnwindSafe(|| sender.send(&cx, test_value)));
 
                 std::panic::set_hook(prev_hook);
 
@@ -207,11 +221,13 @@ fuzz_target!(|data: &[u8]| {
                 // Spawn concurrent operations
                 let send_handle = thread::spawn(move || {
                     let prev_hook = std::panic::take_hook();
+                    let panic_tracker = tracker1.clone();
                     std::panic::set_hook(Box::new(move |_| {
-                        tracker1.record_panic();
+                        panic_tracker.record_panic();
                     }));
 
-                    let result = std::panic::catch_unwind(|| sender.send(&cx, test_value));
+                    let result =
+                        std::panic::catch_unwind(AssertUnwindSafe(|| sender.send(&cx, test_value)));
 
                     std::panic::set_hook(prev_hook);
 
@@ -226,8 +242,8 @@ fuzz_target!(|data: &[u8]| {
                     drop(receiver);
                 });
 
-                let _ = send_handle.join();
-                let _ = drop_handle.join();
+                observe_thread_join(send_handle, &tracker, "rapid_send_joined");
+                observe_thread_join(drop_handle, &tracker, "rapid_drop_joined");
                 break;
             }
 
@@ -247,11 +263,13 @@ fuzz_target!(|data: &[u8]| {
                     thread::sleep(send_delay);
 
                     let prev_hook = std::panic::take_hook();
+                    let panic_tracker = tracker1.clone();
                     std::panic::set_hook(Box::new(move |_| {
-                        tracker1.record_panic();
+                        panic_tracker.record_panic();
                     }));
 
-                    let result = std::panic::catch_unwind(|| sender.send(&cx, test_value));
+                    let result =
+                        std::panic::catch_unwind(AssertUnwindSafe(|| sender.send(&cx, test_value)));
 
                     std::panic::set_hook(prev_hook);
 
@@ -267,8 +285,8 @@ fuzz_target!(|data: &[u8]| {
                     drop(receiver);
                 });
 
-                let _ = send_handle.join();
-                let _ = drop_handle.join();
+                observe_thread_join(send_handle, &tracker, "delayed_send_joined");
+                observe_thread_join(drop_handle, &tracker, "delayed_drop_joined");
                 break;
             }
         }
