@@ -78,11 +78,18 @@ fn clean_manifest_derives_bin_scoped_rch_proof_lanes() {
     assert_eq!(receipt["generated_at"].as_str(), Some(GENERATED_AT));
     assert_eq!(receipt["summary"]["passes"].as_bool(), Some(true));
     assert_eq!(receipt["summary"]["registered_targets"].as_u64(), Some(1));
-    assert_eq!(receipt["summary"]["target_files"].as_u64(), Some(1));
+    assert_eq!(receipt["summary"]["target_files"].as_u64(), Some(2));
     assert_eq!(
         receipt["registered_targets"][0]["name"].as_str(),
         Some("h2_settings_window")
     );
+    assert_eq!(
+        receipt["included_target_files"][0].as_str(),
+        Some(
+            "tests/fixtures/fuzz_target_registry_contract/clean/fuzz/fuzz_targets/h2_settings_window_body.rs"
+        )
+    );
+    assert_eq!(receipt["orphan_target_files"].as_array().unwrap().len(), 0);
     assert_eq!(
         receipt["registered_targets"][0]["proof_lane"]["check"].as_str(),
         Some(

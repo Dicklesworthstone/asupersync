@@ -19,6 +19,7 @@ from typing import Any
 SCHEMA_VERSION = "fuzz-target-registry-contract-v1"
 DEFAULT_PROOF_MANIFEST_PATH = "fuzz/Cargo.toml"
 DEFAULT_TARGET_ROOT = "fuzz/fuzz_targets"
+INCLUDE_RE = re.compile(r'include!\s*\(\s*"([^"]+)"\s*\)')
 
 
 def utc_now() -> str:
@@ -120,6 +121,37 @@ def target_files(target_root: Path) -> list[str]:
     return sorted(display_path(path) for path in target_root.glob("*.rs") if path.is_file())
 
 
+def included_target_files(rows: list[dict[str, Any]], file_set: set[str]) -> set[str]:
+    included: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(source_path_text: str) -> None:
+        if source_path_text in visited:
+            return
+        visited.add(source_path_text)
+
+        source_path = Path(source_path_text)
+        if not source_path.exists():
+            return
+
+        try:
+            source_text = source_path.read_text(encoding="utf-8")
+        except OSError:
+            return
+
+        for match in INCLUDE_RE.finditer(source_text):
+            include_path = display_path(source_path.parent / normalize_path(match.group(1)))
+            if include_path not in file_set:
+                continue
+            included.add(include_path)
+            visit(include_path)
+
+    for row in rows:
+        visit(row["target_path"])
+
+    return included
+
+
 def issue(code: str, severity: str, **fields: Any) -> dict[str, Any]:
     row: dict[str, Any] = {"code": code, "severity": severity}
     row.update(fields)
@@ -137,6 +169,8 @@ def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
     paths = Counter(row["target_path"] for row in rows)
     registered_paths = {row["target_path"] for row in rows}
     file_set = set(files)
+    included_paths = included_target_files(rows, file_set)
+    covered_paths = registered_paths | included_paths
     issues: list[dict[str, Any]] = []
 
     for name, count in sorted(names.items()):
@@ -146,7 +180,7 @@ def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
         if count > 1:
             issues.append(issue("duplicate-target-path", "blocker", path=path, count=count))
     for path in files:
-        if path not in registered_paths:
+        if path not in covered_paths:
             issues.append(issue("missing-registration", "blocker", path=path))
     for row in rows:
         if row["target_path"] not in file_set:
@@ -198,7 +232,8 @@ def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
             "warnings": warning_count,
         },
         "registered_targets": rows,
-        "orphan_target_files": sorted(path for path in files if path not in registered_paths),
+        "included_target_files": sorted(included_paths),
+        "orphan_target_files": sorted(path for path in files if path not in covered_paths),
         "issues": sorted(issues, key=lambda row: (row["code"], row.get("path", ""), row.get("name", ""))),
         "requirements": {
             "every_target_file_has_one_bin": not any(
