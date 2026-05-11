@@ -20,7 +20,7 @@ use libfuzzer_sys::fuzz_target;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{
     Arc, Barrier, Weak,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    atomic::{AtomicUsize, Ordering},
 };
 use std::thread;
 use std::time::Duration;
@@ -85,15 +85,15 @@ enum AccessPattern {
 #[derive(Debug, Arbitrary, Clone)]
 enum DropPattern {
     /// Drop Arc immediately
-    DropImmediate,
+    Immediate,
     /// Drop after delay
-    DropDelayed { delay_micros: u16 },
+    Delayed { delay_micros: u16 },
     /// Drop while holding lock
-    DropWhileLocked,
+    WhileLocked,
     /// Drop all clones simultaneously
-    DropAll,
+    All,
     /// Selective drop pattern
-    DropSelective { keep_ratio: u8 },
+    Selective { keep_ratio: u8 },
 }
 
 impl MutexArcCloneConfig {
@@ -110,10 +110,8 @@ impl MutexArcCloneConfig {
             self.accessor_thread_count as usize,
             AccessPattern::SingleLock,
         );
-        self.drop_patterns.resize(
-            self.dropper_thread_count as usize,
-            DropPattern::DropImmediate,
-        );
+        self.drop_patterns
+            .resize(self.dropper_thread_count as usize, DropPattern::Immediate);
 
         // Normalize pattern parameters
         for pattern in &mut self.clone_patterns {
@@ -126,17 +124,17 @@ impl MutexArcCloneConfig {
                     delay_micros,
                 } => {
                     *clones = (*clones % 8).max(1);
-                    *delay_micros = *delay_micros % 200; // Max 0.2ms
+                    *delay_micros %= 200; // Max 0.2ms
                 }
                 ClonePattern::CloneWhileLocked { work_duration } => {
-                    *work_duration = *work_duration % 100; // Max 0.1ms
+                    *work_duration %= 100; // Max 0.1ms
                 }
                 ClonePattern::BurstClone {
                     burst_size,
                     timing_delay,
                 } => {
                     *burst_size = (*burst_size % 5).max(1);
-                    *timing_delay = *timing_delay % 300;
+                    *timing_delay %= 300;
                 }
                 ClonePattern::WeakUpgrade { attempts } => {
                     *attempts = (*attempts % 15).max(1);
@@ -152,13 +150,13 @@ impl MutexArcCloneConfig {
                     work_delay,
                 } => {
                     *work_items = (*work_items % 20).max(1);
-                    *work_delay = *work_delay % 50; // Max 0.05ms per work item
+                    *work_delay %= 50; // Max 0.05ms per work item
                 }
                 AccessPattern::RapidLockUnlock { cycles } => {
                     *cycles = (*cycles % 25).max(1);
                 }
                 AccessPattern::LongHeldLock { hold_duration } => {
-                    *hold_duration = *hold_duration % 500; // Max 0.5ms
+                    *hold_duration %= 500; // Max 0.5ms
                 }
                 AccessPattern::LockThenClone { clone_count } => {
                     *clone_count = (*clone_count % 5).max(1);
@@ -169,10 +167,10 @@ impl MutexArcCloneConfig {
 
         for pattern in &mut self.drop_patterns {
             match pattern {
-                DropPattern::DropDelayed { delay_micros } => {
-                    *delay_micros = *delay_micros % 400; // Max 0.4ms
+                DropPattern::Delayed { delay_micros } => {
+                    *delay_micros %= 400; // Max 0.4ms
                 }
-                DropPattern::DropSelective { keep_ratio } => {
+                DropPattern::Selective { keep_ratio } => {
                     *keep_ratio = (*keep_ratio % 80).max(10); // Keep 10-80%
                 }
                 _ => {}
@@ -252,11 +250,7 @@ fuzz_target!(|data: &[u8]| {
                 ClonePattern::SingleClone => {
                     let source_arc = {
                         let clones = arc_clones.lock();
-                        if let Some(arc) = clones.first() {
-                            Some(arc.clone())
-                        } else {
-                            None
-                        }
+                        clones.first().cloned()
                     };
 
                     if let Some(arc) = source_arc {
@@ -270,11 +264,7 @@ fuzz_target!(|data: &[u8]| {
                     for _ in 0..count {
                         let source_arc = {
                             let clones = arc_clones.lock();
-                            if let Some(arc) = clones.first() {
-                                Some(arc.clone())
-                            } else {
-                                None
-                            }
+                            clones.first().cloned()
                         };
 
                         if let Some(arc) = source_arc {
@@ -292,11 +282,7 @@ fuzz_target!(|data: &[u8]| {
                     for _ in 0..clones {
                         let source_arc = {
                             let clones = arc_clones.lock();
-                            if let Some(arc) = clones.first() {
-                                Some(arc.clone())
-                            } else {
-                                None
-                            }
+                            clones.first().cloned()
                         };
 
                         if let Some(arc) = source_arc {
@@ -314,11 +300,7 @@ fuzz_target!(|data: &[u8]| {
                 ClonePattern::CloneWhileLocked { work_duration } => {
                     let source_arc = {
                         let clones = arc_clones.lock();
-                        if let Some(arc) = clones.first() {
-                            Some(arc.clone())
-                        } else {
-                            None
-                        }
+                        clones.first().cloned()
                     };
 
                     if let Some(arc) = source_arc {
@@ -356,11 +338,7 @@ fuzz_target!(|data: &[u8]| {
                     for _ in 0..burst_size {
                         let source_arc = {
                             let clones = arc_clones.lock();
-                            if let Some(arc) = clones.first() {
-                                Some(arc.clone())
-                            } else {
-                                None
-                            }
+                            clones.first().cloned()
                         };
 
                         if let Some(arc) = source_arc {
@@ -386,11 +364,7 @@ fuzz_target!(|data: &[u8]| {
                     // Create weak reference first
                     let weak = {
                         let clones = arc_clones.lock();
-                        if let Some(arc) = clones.first() {
-                            Some(Arc::downgrade(arc))
-                        } else {
-                            None
-                        }
+                        clones.first().map(Arc::downgrade)
                     };
 
                     if let Some(weak_ref) = weak {
@@ -658,7 +632,7 @@ fuzz_target!(|data: &[u8]| {
             thread::sleep(Duration::from_micros(100));
 
             match pattern {
-                DropPattern::DropImmediate => {
+                DropPattern::Immediate => {
                     let to_drop = {
                         let mut clones = arc_clones.lock();
                         if clones.len() > 1 { clones.pop() } else { None }
@@ -669,7 +643,7 @@ fuzz_target!(|data: &[u8]| {
                     }
                 }
 
-                DropPattern::DropDelayed { delay_micros } => {
+                DropPattern::Delayed { delay_micros } => {
                     if delay_micros > 0 {
                         thread::sleep(Duration::from_micros(delay_micros as u64));
                     }
@@ -684,7 +658,7 @@ fuzz_target!(|data: &[u8]| {
                     }
                 }
 
-                DropPattern::DropWhileLocked => {
+                DropPattern::WhileLocked => {
                     let arc_to_use = {
                         let clones = arc_clones.lock();
                         clones.get(i as usize % clones.len().max(1)).cloned()
@@ -714,22 +688,21 @@ fuzz_target!(|data: &[u8]| {
                     }
                 }
 
-                DropPattern::DropAll => {
-                    let mut dropped_count = 0;
+                DropPattern::All => {
                     let to_drop = {
                         let mut clones = arc_clones.lock();
                         let to_drop = clones.split_off(1); // Keep at least one
-                        dropped_count = to_drop.len();
+                        let dropped_count = to_drop.len();
+                        results
+                            .arc_drops_completed
+                            .fetch_add(dropped_count, Ordering::SeqCst);
                         to_drop
                     };
 
                     drop(to_drop);
-                    results
-                        .arc_drops_completed
-                        .fetch_add(dropped_count, Ordering::SeqCst);
                 }
 
-                DropPattern::DropSelective { keep_ratio } => {
+                DropPattern::Selective { keep_ratio } => {
                     let mut dropped_count = 0;
                     {
                         let mut clones = arc_clones.lock();
@@ -751,9 +724,12 @@ fuzz_target!(|data: &[u8]| {
         handles.push(handle);
     }
 
-    // Wait for all threads to complete
+    // Expected lock-and-panic cases are caught inside the accessor worker; a
+    // thread-level panic means the target found an unexpected race outcome.
     for handle in handles {
-        let _ = handle.join(); // Ignore panics - they're expected in some patterns
+        if let Err(panic) = handle.join() {
+            std::panic::resume_unwind(panic);
+        }
     }
 
     // Verify results and race condition consistency
@@ -811,21 +787,26 @@ fuzz_target!(|data: &[u8]| {
         );
     }
 
-    // Poison detection consistency
-    if panics_occurred > 0 {
-        // If panics occurred, some poison detection is expected (but not guaranteed due to timing)
-    }
+    assert!(
+        panics_occurred <= lock_attempts,
+        "Panics should not exceed lock attempts"
+    );
+    assert!(
+        poison_detected <= lock_attempts + try_lock_attempts,
+        "Poison observations should not exceed lock attempts"
+    );
 
     // Arc clone consistency
     assert!(
-        arc_clones_created >= cloner_threads_started,
-        "Should have at least as many clones as cloner threads (each does minimum 1)"
+        arc_drops_completed <= arc_clones_created,
+        "Arc drops should not exceed created clones"
     );
 
-    // Nested operations tracking
-    if nested_operations > 0 {
-        // Nested operations occurred - this is fine and expected in some patterns
-    }
+    // Nested operations either create a clone or drop an existing clone.
+    assert!(
+        nested_operations <= arc_clones_created + arc_drops_completed,
+        "Nested operations should be backed by clone/drop accounting"
+    );
 
     // Peak concurrent clones should be reasonable
     assert!(

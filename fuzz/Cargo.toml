@@ -5302,6 +5302,7 @@ name = "mutex_arc_clone_race"
 path = "fuzz_targets/mutex_arc_clone_race.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "grpc_compressed_flag_mismatch"
