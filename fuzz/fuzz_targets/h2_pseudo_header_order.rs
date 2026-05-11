@@ -78,7 +78,6 @@ struct MockPseudoHeaderOrderConnection {
     connection_error: Option<u32>,
     protocol_violations: Vec<String>,
     ordering_violations_detected: Vec<OrderingViolationInfo>,
-    last_stream_error: Option<u32>,
 }
 
 /// Information about pseudo-header ordering violations detected
@@ -95,7 +94,6 @@ enum OrderingViolationType {
     PseudoAfterRegular,    // Pseudo-header found after regular header
     DuplicatePseudoHeader, // Same pseudo-header appears multiple times
     UnknownPseudoHeader,   // Pseudo-header not in allowed set
-    MissingRequiredPseudo, // Required pseudo-header missing (:method, :scheme, :path)
 }
 
 /// Track the state of each stream for header ordering validation
@@ -142,7 +140,6 @@ impl MockPseudoHeaderOrderConnection {
             connection_error: None,
             protocol_violations: Vec::new(),
             ordering_violations_detected: Vec::new(),
-            last_stream_error: None,
         }
     }
 
@@ -182,8 +179,8 @@ impl MockPseudoHeaderOrderConnection {
             return;
         }
 
-        // Get or create stream state
-        let stream_state = self.stream_states.entry(stream_id).or_insert(StreamState {
+        // Get or create stream state.
+        self.stream_states.entry(stream_id).or_insert(StreamState {
             headers_started: false,
             regular_headers_started: false,
             pseudo_headers_seen: HashMap::new(),
@@ -192,13 +189,14 @@ impl MockPseudoHeaderOrderConnection {
             ordering_violation_detected: false,
         });
 
-        stream_state.headers_started = true;
-
         let end_stream = (flags & FLAG_END_STREAM) != 0;
         let _end_headers = (flags & FLAG_END_HEADERS) != 0;
 
-        if end_stream {
-            stream_state.ended_remotely = true;
+        if let Some(stream_state) = self.stream_states.get_mut(&stream_id) {
+            stream_state.headers_started = true;
+            if end_stream {
+                stream_state.ended_remotely = true;
+            }
         }
 
         // Parse the headers from the payload and validate ordering
@@ -209,7 +207,9 @@ impl MockPseudoHeaderOrderConnection {
 
         if let Err(violation_info) = header_validation_result {
             // Invalid header ordering detected
-            stream_state.ordering_violation_detected = true;
+            if let Some(stream_state) = self.stream_states.get_mut(&stream_id) {
+                stream_state.ordering_violation_detected = true;
+            }
 
             self.ordering_violations_detected
                 .push(violation_info.clone());
@@ -220,7 +220,6 @@ impl MockPseudoHeaderOrderConnection {
                 "Invalid pseudo-header ordering on stream {}: {:?}",
                 stream_id, violation_info
             ));
-            return; // Stop processing after ordering violation
         }
     }
 
@@ -237,7 +236,7 @@ impl MockPseudoHeaderOrderConnection {
 
         // For simulation, we'll parse the payload as a simple representation of headers
         // In practice, this would be much more complex with HPACK
-        let headers = self.simulate_header_parsing(payload);
+        let headers = Self::simulate_header_parsing(payload);
 
         for (name, value) in &headers {
             // Check if this is a pseudo-header
@@ -292,7 +291,7 @@ impl MockPseudoHeaderOrderConnection {
         Ok(())
     }
 
-    fn simulate_header_parsing(&self, payload: &[u8]) -> Vec<(String, String)> {
+    fn simulate_header_parsing(payload: &[u8]) -> Vec<(String, String)> {
         // Simple simulation of header parsing from payload
         // In reality, this would be HPACK decoding
 
@@ -333,7 +332,6 @@ impl MockPseudoHeaderOrderConnection {
             self.connection_error = Some(PROTOCOL_ERROR);
             self.protocol_violations
                 .push("PRIORITY frame with stream ID 0".to_string());
-            return;
         }
 
         // PRIORITY frames don't affect pseudo-header ordering
@@ -361,11 +359,10 @@ impl MockPseudoHeaderOrderConnection {
     }
 
     fn process_settings_frame(&mut self, payload: &[u8]) {
-        if payload.len() % 6 != 0 {
+        if !payload.len().is_multiple_of(6) {
             self.connection_error = Some(PROTOCOL_ERROR);
             self.protocol_violations
                 .push("SETTINGS frame with invalid length".to_string());
-            return;
         }
         // SETTINGS frames don't affect pseudo-header ordering
     }
@@ -433,6 +430,36 @@ impl MockPseudoHeaderOrderConnection {
             .iter()
             .filter(|info| info.violation_type == OrderingViolationType::UnknownPseudoHeader)
             .count()
+    }
+
+    fn assert_ordering_violation_details(&self) {
+        for violation in &self.ordering_violations_detected {
+            assert_ne!(
+                violation.stream_id, 0,
+                "ordering violations should refer to a stream-local HEADERS frame"
+            );
+            assert!(
+                violation.pseudo_header.starts_with(':'),
+                "ordering violation pseudo-header should retain the offending header: {:?}",
+                violation
+            );
+
+            match violation.violation_type {
+                OrderingViolationType::PseudoAfterRegular => {
+                    assert!(
+                        !violation.previous_regular_header.is_empty(),
+                        "pseudo-after-regular diagnostics should retain the preceding regular header"
+                    );
+                }
+                OrderingViolationType::DuplicatePseudoHeader
+                | OrderingViolationType::UnknownPseudoHeader => {
+                    assert!(
+                        violation.previous_regular_header.is_empty(),
+                        "duplicate/unknown pseudo-header diagnostics should not invent a regular predecessor"
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -631,6 +658,7 @@ fuzz_target!(|input: PseudoHeaderOrderInput| {
             !conn.get_ordering_violations().is_empty(),
             "Expected ordering violation to be detected and recorded"
         );
+        conn.assert_ordering_violation_details();
     } else {
         // Valid ordering should not cause error (unless other validation fails)
         // Note: We might still get errors for other reasons (malformed headers, etc.)
@@ -798,7 +826,7 @@ fn test_pseudo_header_ordering_scenarios(_input: &PseudoHeaderOrderInput) {
     }
 
     // Scenario 11: Valid request headers
-    let valid_requests = [
+    let valid_requests: [&[u8]; 3] = [
         b":method:GET\n:scheme:https\n:authority:example.com\n:path:/\nhost:example.com\n",
         b":method:POST\n:scheme:http\n:path:/submit\ncontent-type:application/json\n",
         b":method:OPTIONS\n:scheme:https\n:authority:api.example.com\n:path:*\norigin:https://example.com\n",
@@ -817,7 +845,7 @@ fn test_pseudo_header_ordering_scenarios(_input: &PseudoHeaderOrderInput) {
     }
 
     // Scenario 12: Invalid request headers with ordering violations
-    let invalid_requests = [
+    let invalid_requests: [&[u8]; 3] = [
         b"host:example.com\n:method:GET\n", // Regular before pseudo
         b":method:GET\nhost:example.com\n:scheme:https\n", // Pseudo after regular
         b"content-type:text/plain\n:method:POST\n:path:/submit\n", // Multiple violations
