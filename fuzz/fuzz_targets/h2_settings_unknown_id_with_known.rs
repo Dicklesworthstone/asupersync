@@ -1,6 +1,11 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
+use asupersync::bytes::{Bytes, BytesMut};
+use asupersync::http::h2::frame::{
+    FrameHeader, FrameType, Setting, SettingsFrame as H2SettingsFrame, settings_flags,
+};
+use asupersync::http::h2::{ErrorCode, H2Error, Settings};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
@@ -186,6 +191,7 @@ fuzz_target!(|data: &[u8]| {
 
     let mut parser = MockH2SettingsParser::new();
     let result = parser.parse_settings_frame(&input);
+    assert_live_settings_behavior(&input, &parser);
 
     // Test 1: Known settings should be applied, unknown ignored
     match result {
@@ -265,6 +271,135 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 });
+
+fn assert_live_settings_behavior(input: &FuzzInput, parser: &MockH2SettingsParser) {
+    let wire = build_settings_frame_wire(input);
+    let mut src = BytesMut::from(wire.as_slice());
+    let header = FrameHeader::parse(&mut src).expect("generated SETTINGS header is complete");
+    let payload = src.freeze();
+    assert_eq!(header.frame_type, FrameType::Settings as u8);
+    assert_eq!(
+        header.length as usize,
+        payload.len(),
+        "generated SETTINGS header length must match payload"
+    );
+
+    let result = H2SettingsFrame::parse(&header, &payload);
+
+    if header.stream_id != 0 {
+        assert_error_code(result, ErrorCode::ProtocolError);
+        return;
+    }
+
+    let ack_flag_set = header.has_flag(settings_flags::ACK);
+    if ack_flag_set && !payload.is_empty() {
+        assert_error_code(result, ErrorCode::FrameSizeError);
+        return;
+    }
+
+    if let Some(code) = first_live_setting_error(&payload) {
+        assert_error_code(result, code);
+        return;
+    }
+
+    let parsed = result.expect("valid mixed SETTINGS frame should parse");
+    assert_eq!(parsed.ack, ack_flag_set);
+    if ack_flag_set {
+        assert!(
+            parsed.settings.is_empty(),
+            "SETTINGS ACK must not expose payload settings"
+        );
+        return;
+    }
+
+    assert_eq!(
+        parsed.settings,
+        expected_known_settings(&payload),
+        "live SETTINGS parser must preserve known settings and ignore unknown IDs"
+    );
+
+    let mut live_settings = Settings::default();
+    for setting in parsed.settings {
+        live_settings
+            .apply(setting)
+            .expect("settings accepted by parser must apply");
+    }
+
+    if input.flags == 0 && input.stream_id == 0 && parser.errors.is_empty() {
+        assert_live_settings_match_mock(&live_settings, &parser.applied_settings);
+    }
+}
+
+fn build_settings_frame_wire(input: &FuzzInput) -> Vec<u8> {
+    let payload = build_settings_payload(&input.settings);
+    let header = FrameHeader {
+        length: payload.len() as u32,
+        frame_type: FrameType::Settings as u8,
+        flags: input.flags,
+        stream_id: input.stream_id & 0x7fff_ffff,
+    };
+
+    let mut wire = BytesMut::new();
+    header.write(&mut wire);
+    wire.extend_from_slice(&payload);
+    wire.to_vec()
+}
+
+fn build_settings_payload(settings: &[SettingEntry]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(settings.len() * 6);
+    for setting in settings {
+        payload.extend_from_slice(&setting.id.to_be_bytes());
+        payload.extend_from_slice(&setting.value.to_be_bytes());
+    }
+    payload
+}
+
+fn first_live_setting_error(payload: &Bytes) -> Option<ErrorCode> {
+    for chunk in payload.chunks_exact(6) {
+        let id = u16::from_be_bytes([chunk[0], chunk[1]]);
+        let value = u32::from_be_bytes([chunk[2], chunk[3], chunk[4], chunk[5]]);
+        match id {
+            0x2 if value > 1 => return Some(ErrorCode::ProtocolError),
+            0x4 if value > 0x7fff_ffff => return Some(ErrorCode::FlowControlError),
+            0x5 if !(16_384..=16_777_215).contains(&value) => {
+                return Some(ErrorCode::ProtocolError);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn expected_known_settings(payload: &Bytes) -> Vec<Setting> {
+    payload
+        .chunks_exact(6)
+        .filter_map(|chunk| {
+            let id = u16::from_be_bytes([chunk[0], chunk[1]]);
+            let value = u32::from_be_bytes([chunk[2], chunk[3], chunk[4], chunk[5]]);
+            Setting::from_id_value(id, value)
+        })
+        .collect()
+}
+
+fn assert_error_code(result: Result<H2SettingsFrame, H2Error>, expected: ErrorCode) {
+    match result {
+        Ok(frame) => panic!("expected {expected:?}, parsed SETTINGS frame: {frame:?}"),
+        Err(err) => assert_eq!(err.code, expected, "unexpected SETTINGS parse error: {err}"),
+    }
+}
+
+fn assert_live_settings_match_mock(live: &Settings, applied_settings: &HashMap<KnownSetting, u32>) {
+    for (setting, value) in applied_settings {
+        match setting {
+            KnownSetting::HeaderTableSize => assert_eq!(live.header_table_size, *value),
+            KnownSetting::EnablePush => assert_eq!(live.enable_push, *value != 0),
+            KnownSetting::MaxConcurrentStreams => assert_eq!(live.max_concurrent_streams, *value),
+            KnownSetting::InitialWindowSize => assert_eq!(live.initial_window_size, *value),
+            KnownSetting::MaxFrameSize => assert_eq!(live.max_frame_size, *value),
+            KnownSetting::MaxHeaderListSize => assert_eq!(live.max_header_list_size, *value),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

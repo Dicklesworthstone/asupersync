@@ -5411,6 +5411,7 @@ name = "h2_settings_unknown_id_with_known"
 path = "fuzz_targets/h2_settings_unknown_id_with_known.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_window_update_combined_increments"
