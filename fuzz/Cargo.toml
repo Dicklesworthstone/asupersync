@@ -3786,6 +3786,15 @@ test = false
 doc = false
 bench = false
 
+# RaptorQ codec symbol corruption fuzzer.
+# Exercises malformed ESI, symbol size, coefficient, and payload corruption paths.
+[[bin]]
+name = "raptorq_codec_symbol_corruption"
+path = "fuzz_targets/raptorq_codec_symbol_corruption.rs"
+test = false
+doc = false
+bench = false
+
 # br-asupersync-clf22o — structure-aware malformed source-block harness for
 # src/raptorq/decoder.rs. Builds valid source blocks from fuzzed K/source bytes,
 # then mutates source-symbol metadata and repair packets while asserting the
