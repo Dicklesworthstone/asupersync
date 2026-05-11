@@ -179,14 +179,6 @@ impl MockTlsTransport {
         }
     }
 
-    fn should_drop_connection(&self) -> bool {
-        if let Some(ref drop_config) = self.timing.connection_drop {
-            self.operation_index >= drop_config.at_operation as usize
-        } else {
-            false
-        }
-    }
-
     fn should_delay_io(&self, is_read: bool) -> bool {
         self.timing.io_delays.iter().any(|delay| {
             delay.operation_index as usize == self.operation_index
@@ -195,8 +187,13 @@ impl MockTlsTransport {
     }
 
     fn process_next_operation(&mut self) -> Option<TlsOperation> {
-        if self.should_drop_connection() {
+        if let Some(drop_config) = &self.timing.connection_drop
+            && self.operation_index >= drop_config.at_operation as usize
+        {
             self.closed = true;
+            if !drop_config.clean_drop {
+                self.read_buffer.push_back(0xff);
+            }
             return None;
         }
 
@@ -207,7 +204,13 @@ impl MockTlsTransport {
         let mut buffer = Vec::new();
 
         // TLS record header: [type][version][length]
-        buffer.push(record.record_type);
+        let record_type = self
+            .violations
+            .invalid_record_types
+            .first()
+            .copied()
+            .unwrap_or(record.record_type);
+        buffer.push(record_type);
         buffer.extend_from_slice(&record.protocol_version);
         buffer.extend_from_slice(&record.length.to_be_bytes());
 
@@ -255,6 +258,11 @@ impl MockTlsTransport {
 
         // Message data
         buffer.extend_from_slice(data);
+        if matches!(msg_type, HandshakeMessageType::ClientHello) {
+            for suite in &self.violations.invalid_cipher_suites {
+                buffer.extend_from_slice(&suite.to_be_bytes());
+            }
+        }
 
         // Apply violations
         if self.violations.invalid_lengths {
@@ -287,10 +295,34 @@ impl asupersync::io::AsyncRead for MockTlsTransport {
             self.operation_index += 1;
 
             match operation {
+                TlsOperation::StartHandshake => {
+                    self.current_state = TlsState::Handshaking;
+                    continue;
+                }
+                TlsOperation::WriteApplicationData(data) => {
+                    self.write_buffer.extend(data);
+                    continue;
+                }
+                TlsOperation::ReadData => {
+                    continue;
+                }
+                TlsOperation::Shutdown => {
+                    self.current_state = TlsState::ShuttingDown;
+                    self.closed = true;
+                    return Poll::Ready(Ok(()));
+                }
                 TlsOperation::SendMalformedRecord(record) => {
                     let data = self.create_malformed_tls_record(&record);
                     self.read_buffer.extend(data);
                     break;
+                }
+                TlsOperation::ForceStateTransition(state) => {
+                    self.current_state = state;
+                    if matches!(state, TlsState::Closed) {
+                        self.closed = true;
+                        return Poll::Ready(Ok(()));
+                    }
+                    continue;
                 }
                 TlsOperation::PartialHandshakeMessage(msg_type, data) => {
                     let msg = self.create_handshake_message(msg_type, &data);
@@ -317,12 +349,23 @@ impl asupersync::io::AsyncRead for MockTlsTransport {
                     break;
                 }
                 TlsOperation::AbruptDisconnect => {
+                    self.current_state = TlsState::Closed;
                     self.closed = true;
                     return Poll::Ready(Ok(()));
                 }
-                _ => {
-                    // Other operations don't generate read data
-                    continue;
+                TlsOperation::VersionMismatch(version) => {
+                    self.current_state = TlsState::Handshaking;
+                    let version_bytes = match version {
+                        ProtocolVersion::Ssl30 => [0x03, 0x00],
+                        ProtocolVersion::Tls10 => [0x03, 0x01],
+                        ProtocolVersion::Tls11 => [0x03, 0x02],
+                        ProtocolVersion::Tls12 => [0x03, 0x03],
+                        ProtocolVersion::Tls13 => [0x03, 0x04],
+                        ProtocolVersion::Invalid(raw) => raw.to_be_bytes(),
+                    };
+                    self.read_buffer
+                        .extend([22, version_bytes[0], version_bytes[1], 0, 0]);
+                    break;
                 }
             }
         }
@@ -342,7 +385,7 @@ impl asupersync::io::AsyncWrite for MockTlsTransport {
         _cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        if self.closed {
+        if self.closed || matches!(self.current_state, TlsState::Closed) {
             return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
         }
 
@@ -359,14 +402,12 @@ impl asupersync::io::AsyncWrite for MockTlsTransport {
 
         // Capture written data for analysis
         self.write_buffer.extend_from_slice(&buf[..write_len]);
+        self.current_state = TlsState::Ready;
 
         Poll::Ready(Ok(write_len))
     }
 
-    fn poll_flush(
-        self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-    ) -> Poll<io::Result<()>> {
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         if self.closed {
             Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()))
         } else {
@@ -374,10 +415,7 @@ impl asupersync::io::AsyncWrite for MockTlsTransport {
         }
     }
 
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-    ) -> Poll<io::Result<()>> {
+    fn poll_shutdown(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         self.closed = true;
         Poll::Ready(Ok(()))
     }
@@ -396,8 +434,8 @@ fn fuzz_tls_state_machine(input: TlsStateMachineFuzzInput) {
 
     // Create simple runtime for async execution
     let rt = match create_simple_runtime() {
-        Ok(rt) => rt,
-        Err(_) => return,
+        Some(rt) => rt,
+        None => return,
     };
 
     // Execute fuzzing with timeout to prevent hangs
@@ -409,13 +447,14 @@ fn fuzz_tls_state_machine(input: TlsStateMachineFuzzInput) {
             // Use TlsConnector to create connection (exercises state machine)
             let tls_stream_result = connector.connect("fuzz.test", mock_transport).await;
             match tls_stream_result {
-                Ok(mut tls_stream) => {
+                Ok(tls_stream) => {
                     // Exercise the stream operations
                     fuzz_stream_operations(tls_stream).await
                 }
                 Err(e) => Err(e), // Connection failed - this is expected for many fuzz inputs
             }
-        }).await
+        })
+        .await
     });
 
     // Analyze results (errors are expected and useful for finding bugs)
@@ -435,7 +474,7 @@ fn fuzz_tls_state_machine(input: TlsStateMachineFuzzInput) {
 
 /// Execute a sequence of operations on the TLS stream
 async fn fuzz_stream_operations(
-    mut tls_stream: asupersync::tls::TlsStream<MockTlsTransport>
+    mut tls_stream: asupersync::tls::TlsStream<MockTlsTransport>,
 ) -> Result<(), TlsError> {
     use asupersync::io::{AsyncRead, AsyncWrite};
 
@@ -453,7 +492,8 @@ async fn fuzz_stream_operations(
 
     // Try to flush writes
     use std::future::poll_fn;
-    poll_fn(|cx| Pin::new(&mut tls_stream).poll_flush(cx)).await
+    poll_fn(|cx| Pin::new(&mut tls_stream).poll_flush(cx))
+        .await
         .map_err(TlsError::Io)?;
 
     // Try to read response
@@ -461,10 +501,12 @@ async fn fuzz_stream_operations(
     let _ = poll_fn(|cx| {
         let mut async_buf = asupersync::io::ReadBuf::new(&mut read_buf);
         Pin::new(&mut tls_stream).poll_read(cx, &mut async_buf)
-    }).await;
+    })
+    .await;
 
     // Attempt graceful shutdown
-    poll_fn(|cx| Pin::new(&mut tls_stream).poll_shutdown(cx)).await
+    poll_fn(|cx| Pin::new(&mut tls_stream).poll_shutdown(cx))
+        .await
         .map_err(TlsError::Io)?;
 
     Ok(())
@@ -482,8 +524,10 @@ fn create_test_tls_connector() -> Result<TlsConnector, TlsError> {
 }
 
 /// Create simple runtime for testing
-fn create_simple_runtime() -> Result<asupersync::runtime::Runtime, asupersync::error::Error> {
-    asupersync::runtime::RuntimeBuilder::current_thread().build()
+fn create_simple_runtime() -> Option<asupersync::runtime::Runtime> {
+    asupersync::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .ok()
 }
 
 /// Verify TLS error handling is correct
