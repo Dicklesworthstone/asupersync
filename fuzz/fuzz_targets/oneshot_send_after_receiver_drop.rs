@@ -12,12 +12,15 @@ use asupersync::types::TaskId;
 use asupersync::util::ArenaIndex;
 use asupersync::{Budget, Cx, RegionId};
 
+type Shared<T> = Arc<Mutex<T>>;
+type SendAttempt = Option<Result<(), SendError<u32>>>;
+
 #[derive(Debug, Clone)]
 struct SendDropTracker {
-    operations_completed: Arc<Mutex<Vec<String>>>,
-    send_result: Arc<Mutex<Option<Result<(), SendError<u32>>>>>,
+    operations_completed: Shared<Vec<String>>,
+    send_result: Shared<SendAttempt>,
     test_value: u32,
-    panic_occurred: Arc<Mutex<bool>>,
+    panic_occurred: Shared<bool>,
 }
 
 impl SendDropTracker {
@@ -118,9 +121,9 @@ fuzz_target!(|data: &[u8]| {
         .arbitrary()
         .unwrap_or_else(|_| vec![SendDropOperation::DropReceiverThenSend]);
 
-    if operations.is_empty() {
+    let Some(operation) = operations.into_iter().next() else {
         return;
-    }
+    };
 
     // Create tracking infrastructure
     let tracker = SendDropTracker::new(test_value);
@@ -133,162 +136,155 @@ fuzz_target!(|data: &[u8]| {
     );
     let (sender, receiver) = oneshot::channel::<u32>();
 
-    // Execute operations based on fuzz input
-    for operation in operations {
-        match operation {
-            SendDropOperation::DropReceiver => {
-                tracker.record_operation("drop_receiver");
-                drop(receiver);
-                break; // Receiver dropped, further operations will fail
+    // Execute the selected operation. The sender/receiver are single-use, so only
+    // the first generated operation can be meaningful for this target.
+    match operation {
+        SendDropOperation::DropReceiver => {
+            tracker.record_operation("drop_receiver");
+            drop(receiver);
+        }
+
+        SendDropOperation::SendValue => {
+            tracker.record_operation("send_value");
+            // Install panic handler
+            let tracker_clone = tracker.clone();
+            let prev_hook = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |_| {
+                tracker_clone.record_panic();
+            }));
+
+            let result =
+                std::panic::catch_unwind(AssertUnwindSafe(|| sender.send(&cx, test_value)));
+
+            std::panic::set_hook(prev_hook);
+
+            match result {
+                Ok(send_result) => tracker.record_send_result(send_result),
+                Err(_) => tracker.record_panic(),
             }
+        }
 
-            SendDropOperation::SendValue => {
-                tracker.record_operation("send_value");
-                // Install panic handler
-                let tracker_clone = tracker.clone();
-                let prev_hook = std::panic::take_hook();
-                std::panic::set_hook(Box::new(move |_| {
-                    tracker_clone.record_panic();
-                }));
+        SendDropOperation::DropReceiverThenSend => {
+            tracker.record_operation("drop_receiver_then_send");
+            drop(receiver);
 
-                let result =
-                    std::panic::catch_unwind(AssertUnwindSafe(|| sender.send(&cx, test_value)));
+            // Install panic handler for send operation
+            let tracker_clone = tracker.clone();
+            let prev_hook = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |_| {
+                tracker_clone.record_panic();
+            }));
 
-                std::panic::set_hook(prev_hook);
+            let result =
+                std::panic::catch_unwind(AssertUnwindSafe(|| sender.send(&cx, test_value)));
 
-                match result {
-                    Ok(send_result) => tracker.record_send_result(send_result),
-                    Err(_) => tracker.record_panic(),
-                }
-                break; // Sender consumed
+            std::panic::set_hook(prev_hook);
+
+            match result {
+                Ok(send_result) => tracker.record_send_result(send_result),
+                Err(_) => tracker.record_panic(),
             }
+        }
 
-            SendDropOperation::DropReceiverThenSend => {
-                tracker.record_operation("drop_receiver_then_send");
-                drop(receiver);
+        SendDropOperation::SendThenDropReceiver => {
+            tracker.record_operation("send_then_drop_receiver");
 
-                // Install panic handler for send operation
-                let tracker_clone = tracker.clone();
-                let prev_hook = std::panic::take_hook();
-                std::panic::set_hook(Box::new(move |_| {
-                    tracker_clone.record_panic();
-                }));
+            // Install panic handler for send operation
+            let tracker_clone = tracker.clone();
+            let prev_hook = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |_| {
+                tracker_clone.record_panic();
+            }));
 
-                let result =
-                    std::panic::catch_unwind(AssertUnwindSafe(|| sender.send(&cx, test_value)));
+            let result =
+                std::panic::catch_unwind(AssertUnwindSafe(|| sender.send(&cx, test_value)));
 
-                std::panic::set_hook(prev_hook);
+            std::panic::set_hook(prev_hook);
 
-                match result {
-                    Ok(send_result) => tracker.record_send_result(send_result),
-                    Err(_) => tracker.record_panic(),
-                }
-                break;
-            }
-
-            SendDropOperation::SendThenDropReceiver => {
-                tracker.record_operation("send_then_drop_receiver");
-
-                // Install panic handler for send operation
-                let tracker_clone = tracker.clone();
-                let prev_hook = std::panic::take_hook();
-                std::panic::set_hook(Box::new(move |_| {
-                    tracker_clone.record_panic();
-                }));
-
-                let result =
-                    std::panic::catch_unwind(AssertUnwindSafe(|| sender.send(&cx, test_value)));
-
-                std::panic::set_hook(prev_hook);
-
-                match result {
-                    Ok(send_result) => {
-                        tracker.record_send_result(send_result);
-                        // Drop receiver after successful send - this is the normal case
-                        drop(receiver);
-                    }
-                    Err(_) => tracker.record_panic(),
-                }
-                break;
-            }
-
-            SendDropOperation::RapidSequence => {
-                tracker.record_operation("rapid_sequence");
-
-                let tracker1 = tracker.clone();
-                let tracker2 = tracker.clone();
-
-                // Spawn concurrent operations
-                let send_handle = thread::spawn(move || {
-                    let prev_hook = std::panic::take_hook();
-                    let panic_tracker = tracker1.clone();
-                    std::panic::set_hook(Box::new(move |_| {
-                        panic_tracker.record_panic();
-                    }));
-
-                    let result =
-                        std::panic::catch_unwind(AssertUnwindSafe(|| sender.send(&cx, test_value)));
-
-                    std::panic::set_hook(prev_hook);
-
-                    match result {
-                        Ok(send_result) => tracker1.record_send_result(send_result),
-                        Err(_) => tracker1.record_panic(),
-                    }
-                });
-
-                let drop_handle = thread::spawn(move || {
-                    tracker2.record_operation("concurrent_drop");
+            match result {
+                Ok(send_result) => {
+                    tracker.record_send_result(send_result);
+                    // Drop receiver after successful send - this is the normal case
                     drop(receiver);
-                });
-
-                observe_thread_join(send_handle, &tracker, "rapid_send_joined");
-                observe_thread_join(drop_handle, &tracker, "rapid_drop_joined");
-                break;
+                }
+                Err(_) => tracker.record_panic(),
             }
+        }
 
-            SendDropOperation::DelayedOperations {
-                send_delay_us,
-                drop_delay_us,
-            } => {
-                tracker.record_operation("delayed_operations");
+        SendDropOperation::RapidSequence => {
+            tracker.record_operation("rapid_sequence");
 
-                let tracker1 = tracker.clone();
-                let tracker2 = tracker.clone();
+            let tracker1 = tracker.clone();
+            let tracker2 = tracker.clone();
 
-                let send_delay = Duration::from_micros(send_delay_us.min(10000) as u64);
-                let drop_delay = Duration::from_micros(drop_delay_us.min(10000) as u64);
+            // Spawn concurrent operations
+            let send_handle = thread::spawn(move || {
+                let prev_hook = std::panic::take_hook();
+                let panic_tracker = tracker1.clone();
+                std::panic::set_hook(Box::new(move |_| {
+                    panic_tracker.record_panic();
+                }));
 
-                let send_handle = thread::spawn(move || {
-                    thread::sleep(send_delay);
+                let result =
+                    std::panic::catch_unwind(AssertUnwindSafe(|| sender.send(&cx, test_value)));
 
-                    let prev_hook = std::panic::take_hook();
-                    let panic_tracker = tracker1.clone();
-                    std::panic::set_hook(Box::new(move |_| {
-                        panic_tracker.record_panic();
-                    }));
+                std::panic::set_hook(prev_hook);
 
-                    let result =
-                        std::panic::catch_unwind(AssertUnwindSafe(|| sender.send(&cx, test_value)));
+                match result {
+                    Ok(send_result) => tracker1.record_send_result(send_result),
+                    Err(_) => tracker1.record_panic(),
+                }
+            });
 
-                    std::panic::set_hook(prev_hook);
+            let drop_handle = thread::spawn(move || {
+                tracker2.record_operation("concurrent_drop");
+                drop(receiver);
+            });
 
-                    match result {
-                        Ok(send_result) => tracker1.record_send_result(send_result),
-                        Err(_) => tracker1.record_panic(),
-                    }
-                });
+            observe_thread_join(send_handle, &tracker, "rapid_send_joined");
+            observe_thread_join(drop_handle, &tracker, "rapid_drop_joined");
+        }
 
-                let drop_handle = thread::spawn(move || {
-                    thread::sleep(drop_delay);
-                    tracker2.record_operation("delayed_drop");
-                    drop(receiver);
-                });
+        SendDropOperation::DelayedOperations {
+            send_delay_us,
+            drop_delay_us,
+        } => {
+            tracker.record_operation("delayed_operations");
 
-                observe_thread_join(send_handle, &tracker, "delayed_send_joined");
-                observe_thread_join(drop_handle, &tracker, "delayed_drop_joined");
-                break;
-            }
+            let tracker1 = tracker.clone();
+            let tracker2 = tracker.clone();
+
+            let send_delay = Duration::from_micros(send_delay_us.min(10000) as u64);
+            let drop_delay = Duration::from_micros(drop_delay_us.min(10000) as u64);
+
+            let send_handle = thread::spawn(move || {
+                thread::sleep(send_delay);
+
+                let prev_hook = std::panic::take_hook();
+                let panic_tracker = tracker1.clone();
+                std::panic::set_hook(Box::new(move |_| {
+                    panic_tracker.record_panic();
+                }));
+
+                let result =
+                    std::panic::catch_unwind(AssertUnwindSafe(|| sender.send(&cx, test_value)));
+
+                std::panic::set_hook(prev_hook);
+
+                match result {
+                    Ok(send_result) => tracker1.record_send_result(send_result),
+                    Err(_) => tracker1.record_panic(),
+                }
+            });
+
+            let drop_handle = thread::spawn(move || {
+                thread::sleep(drop_delay);
+                tracker2.record_operation("delayed_drop");
+                drop(receiver);
+            });
+
+            observe_thread_join(send_handle, &tracker, "delayed_send_joined");
+            observe_thread_join(drop_handle, &tracker, "delayed_drop_joined");
         }
     }
 
