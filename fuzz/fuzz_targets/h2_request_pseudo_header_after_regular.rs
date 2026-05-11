@@ -1,4 +1,5 @@
 #![no_main]
+#![allow(dead_code)]
 
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
@@ -185,7 +186,7 @@ impl MockH2HeadersOrderingParser {
         value: &str,
     ) -> Result<(), String> {
         // Check for case sensitivity (must be lowercase)
-        if name != name.to_lowercase() {
+        if name.chars().any(|c| c.is_ascii_uppercase()) {
             return Err(format!(
                 "PROTOCOL_ERROR: pseudo-header {} not lowercase",
                 name
@@ -385,7 +386,7 @@ fuzz_target!(|data: &[u8]| {
         .headers_request
         .headers
         .iter()
-        .any(|h| h.name.starts_with(':') && h.name != h.name.to_lowercase());
+        .any(|h| h.name.starts_with(':') && h.name.chars().any(|c| c.is_ascii_uppercase()));
 
     if has_case_violations {
         assert!(

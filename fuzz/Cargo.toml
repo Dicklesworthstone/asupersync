@@ -5481,6 +5481,7 @@ name = "h2_request_pseudo_header_after_regular"
 path = "fuzz_targets/h2_request_pseudo_header_after_regular.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_settings_max_concurrent_streams_at_zero"
