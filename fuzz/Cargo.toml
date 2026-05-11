@@ -5110,6 +5110,7 @@ name = "h2_headers_continuation_sequencing"
 path = "fuzz_targets/h2_headers_continuation_sequencing.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_settings_max_frame_size_minimum"
