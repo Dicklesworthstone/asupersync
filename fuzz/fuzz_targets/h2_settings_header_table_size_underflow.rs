@@ -313,7 +313,7 @@ pub enum ConsistencyViolation {
 }
 
 impl HeaderName {
-    fn to_string(&self) -> String {
+    fn bounded_string(&self) -> String {
         match self {
             HeaderName::ContentType => "content-type".to_string(),
             HeaderName::Authorization => "authorization".to_string(),
@@ -326,7 +326,7 @@ impl HeaderName {
 }
 
 impl HeaderValue {
-    fn to_string(&self) -> String {
+    fn bounded_string(&self) -> String {
         match self {
             HeaderValue::Short(s) => s.chars().take(20).collect(),
             HeaderValue::Medium(s) => s.chars().take(200).collect(),
@@ -461,8 +461,8 @@ fuzz_target!(|scenario: HeaderTableSizeScenario| {
         // Insert headers as specified in the scenario
         for insertion in &scenario.header_insertions {
             if insertion.insert_at_step as usize == step {
-                let name = insertion.name.to_string();
-                let value = insertion.value.to_string();
+                let name = insertion.name.bounded_string();
+                let value = insertion.value.bounded_string();
                 let entry = HeaderEntry::new(name, value);
 
                 let insert_result = table.insert_entry(entry);

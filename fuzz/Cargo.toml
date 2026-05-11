@@ -5099,6 +5099,7 @@ name = "h2_settings_header_table_size_underflow"
 path = "fuzz_targets/h2_settings_header_table_size_underflow.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "notify_drop_pending_mid_poll"
