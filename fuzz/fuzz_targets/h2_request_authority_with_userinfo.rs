@@ -102,6 +102,37 @@ impl Default for RequestContext {
     }
 }
 
+fn normalize_request_context(context: &mut RequestContext) {
+    const MAX_METHOD_LEN: usize = 32;
+    const MAX_PATH_LEN: usize = 256;
+    const MAX_SCHEME_LEN: usize = 16;
+    const MAX_HEADER_COUNT: usize = 16;
+    const MAX_HEADER_NAME_LEN: usize = 64;
+    const MAX_HEADER_VALUE_LEN: usize = 256;
+
+    if context.method.len() > MAX_METHOD_LEN {
+        context.method.truncate(MAX_METHOD_LEN);
+    }
+    if context.path.len() > MAX_PATH_LEN {
+        context.path.truncate(MAX_PATH_LEN);
+    }
+    if context.scheme.len() > MAX_SCHEME_LEN {
+        context.scheme.truncate(MAX_SCHEME_LEN);
+    }
+
+    if context.other_headers.len() > MAX_HEADER_COUNT {
+        context.other_headers.truncate(MAX_HEADER_COUNT);
+    }
+    for (name, value) in &mut context.other_headers {
+        if name.len() > MAX_HEADER_NAME_LEN {
+            name.truncate(MAX_HEADER_NAME_LEN);
+        }
+        if value.len() > MAX_HEADER_VALUE_LEN {
+            value.truncate(MAX_HEADER_VALUE_LEN);
+        }
+    }
+}
+
 #[derive(Arbitrary, Debug, Clone)]
 struct AuthorityParserConfig {
     /// Whether to enforce strict RFC 7540 compliance
@@ -151,6 +182,7 @@ impl MockAuthorityParser {
         self.rejection_stats.total_parses += 1;
 
         if authority.is_empty() {
+            self.rejection_stats.other_rejections += 1;
             return AuthorityParseResult::Invalid("Empty authority header".to_string());
         }
 
@@ -165,7 +197,11 @@ impl MockAuthorityParser {
         }
 
         // Parse authority components
-        self.parse_authority_components(authority, context)
+        let result = self.parse_authority_components(authority, context);
+        if matches!(&result, AuthorityParseResult::Invalid(_)) {
+            self.rejection_stats.other_rejections += 1;
+        }
+        result
     }
 
     fn detect_userinfo(&self, authority: &str) -> Option<UserInfoViolation> {
@@ -188,10 +224,10 @@ impl MockAuthorityParser {
         }
 
         // Check for encoded @ symbols if enabled
-        if self.config.detect_encoded_userinfo {
-            if let Some(encoded_violation) = self.detect_encoded_userinfo(authority) {
-                return Some(encoded_violation);
-            }
+        if self.config.detect_encoded_userinfo
+            && let Some(encoded_violation) = self.detect_encoded_userinfo(authority)
+        {
+            return Some(encoded_violation);
         }
 
         None
@@ -335,10 +371,10 @@ impl MockAuthorityParser {
         }
 
         // Validate port if present
-        if let Some(port) = port {
-            if let Err(msg) = self.validate_port(port, &context.scheme) {
-                return AuthorityParseResult::Invalid(msg);
-            }
+        if let Some(port) = port
+            && let Err(msg) = self.validate_port(port, &context.scheme)
+        {
+            return AuthorityParseResult::Invalid(msg);
         }
 
         AuthorityParseResult::Valid {
@@ -416,14 +452,19 @@ impl MockAuthorityParser {
     }
 
     fn is_scheme_compatible(&self, host: &str, port: Option<u16>, scheme: &str) -> bool {
+        let is_local_development_host = host.eq_ignore_ascii_case("localhost")
+            || host.starts_with("127.")
+            || host == "[::1]"
+            || host == "::1";
+
         match scheme {
             "https" => {
                 // HTTPS should use secure port or default 443
-                port.map_or(true, |p| p == 443 || p >= 1024)
+                port.is_none_or(|p| p == 443 || p >= 1024 || is_local_development_host)
             }
             "http" => {
                 // HTTP typically uses port 80 or high ports
-                port.map_or(true, |p| p == 80 || p >= 1024)
+                port.is_none_or(|p| p == 80 || p >= 1024 || is_local_development_host)
             }
             _ => true, // Unknown schemes are compatible
         }
@@ -482,6 +523,7 @@ fuzz_target!(|input: AuthorityUserInfoInput| {
     if input.userinfo_patterns.len() > 10 {
         input.userinfo_patterns.truncate(10); // Limit for performance
     }
+    normalize_request_context(&mut input.request_context);
 
     let mut parser = MockAuthorityParser::new(input.parser_config.clone());
 
@@ -527,7 +569,11 @@ fuzz_target!(|input: AuthorityUserInfoInput| {
             }
         }
 
-        AuthorityParseResult::Valid { ref host, port, .. } => {
+        AuthorityParseResult::Valid {
+            ref host,
+            port,
+            scheme_compatible,
+        } => {
             // Valid authority should not contain @ symbols in problematic positions
             if input.authority.contains('@') {
                 // If @ is present but result is valid, verify it's not user-info pattern
@@ -547,6 +593,13 @@ fuzz_target!(|input: AuthorityUserInfoInput| {
 
             if let Some(p) = port {
                 assert!(p > 0, "Valid port should be non-zero");
+            }
+
+            if scheme_compatible {
+                assert!(
+                    input.request_context.scheme.len() <= 16,
+                    "Normalized scheme should remain bounded"
+                );
             }
         }
 
@@ -584,10 +637,10 @@ fuzz_target!(|input: AuthorityUserInfoInput| {
                 match pattern {
                     UserInfoPattern::SimpleUser { .. }
                     | UserInfoPattern::UserPassword { .. }
-                    | UserInfoPattern::EmptyUser { .. } => {
-                        if parser.config.strict_rfc_compliance {
-                            panic!("User-info pattern should be rejected: {:?}", pattern);
-                        }
+                    | UserInfoPattern::EmptyUser { .. }
+                        if parser.config.strict_rfc_compliance =>
+                    {
+                        panic!("User-info pattern should be rejected: {:?}", pattern);
                     }
                     _ => {
                         // Edge cases might be valid
@@ -658,6 +711,11 @@ fuzz_target!(|input: AuthorityUserInfoInput| {
     // Verify statistics consistency
     let stats = parser.get_rejection_stats();
     assert!(stats.total_parses > 0, "Should have processed some parses");
+    let accounted_rejections = stats.userinfo_rejections + stats.other_rejections;
+    assert!(
+        accounted_rejections <= stats.total_parses,
+        "Rejection counts should not exceed total parses"
+    );
 
     // Verify no panics occurred during user-info detection
     // (Implicit - if we reach here without panicking, the test passed)
