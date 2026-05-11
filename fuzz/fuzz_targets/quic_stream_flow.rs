@@ -184,9 +184,77 @@ impl From<StreamRoleFuzz> for asupersync::net::quic_native::streams::StreamRole 
     }
 }
 
+fn observe_reset_send(
+    stream: &mut asupersync::net::quic_native::streams::QuicStream,
+    error_code: u64,
+    final_size: u64,
+    context: &str,
+) -> bool {
+    use asupersync::net::quic_native::streams::QuicStreamError;
+
+    let prior_reset = stream.send_reset;
+    let sent_offset = stream.send_offset;
+    match stream.reset_send(error_code, final_size) {
+        Ok(()) => {
+            assert!(
+                final_size >= sent_offset,
+                "{context}: reset succeeded with final_size {final_size} below sent offset {sent_offset}"
+            );
+            assert_eq!(
+                stream.send_reset,
+                Some((error_code, final_size)),
+                "{context}: successful reset did not record the requested error code/final size"
+            );
+            true
+        }
+        Err(QuicStreamError::InvalidFinalSize {
+            final_size: observed,
+            received,
+        }) => {
+            assert!(
+                final_size < sent_offset,
+                "{context}: invalid-final-size error without a too-small requested final size"
+            );
+            assert_eq!(observed, final_size, "{context}: final size mismatch");
+            assert_eq!(received, sent_offset, "{context}: sent offset mismatch");
+            assert_eq!(
+                stream.send_reset, prior_reset,
+                "{context}: invalid reset changed the recorded reset state"
+            );
+            false
+        }
+        Err(QuicStreamError::InconsistentReset {
+            previous_final_size,
+            new_final_size,
+        }) => {
+            let Some((_, prior_final_size)) = prior_reset else {
+                panic!("{context}: inconsistent reset without a prior reset");
+            };
+            assert_ne!(
+                prior_final_size, final_size,
+                "{context}: inconsistent reset reported for matching final size"
+            );
+            assert_eq!(
+                previous_final_size, prior_final_size,
+                "{context}: previous final size mismatch"
+            );
+            assert_eq!(
+                new_final_size, final_size,
+                "{context}: new final size mismatch"
+            );
+            assert_eq!(
+                stream.send_reset, prior_reset,
+                "{context}: inconsistent reset changed the recorded reset state"
+            );
+            false
+        }
+        Err(err) => panic!("{context}: unexpected reset_send error: {err:?}"),
+    }
+}
+
 /// Execute QUIC stream flow control fuzzing
 fn fuzz_quic_stream_flow(input: QuicStreamFlowFuzz) {
-    use asupersync::net::quic_native::streams::{StreamDirection, StreamId, StreamTable};
+    use asupersync::net::quic_native::streams::StreamTable;
 
     // Create stream table with fuzzed flow control configuration
     let role = input.flow_config.role.into();
@@ -249,7 +317,7 @@ fn execute_flow_control_operation(
     table: &mut asupersync::net::quic_native::streams::StreamTable,
     stream_ids: &[asupersync::net::quic_native::streams::StreamId],
     op: FlowControlOperation,
-    role: asupersync::net::quic_native::streams::StreamRole,
+    _role: asupersync::net::quic_native::streams::StreamRole,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match op {
         FlowControlOperation::SendData {
@@ -258,10 +326,14 @@ fn execute_flow_control_operation(
         } => {
             if let Some(&id) = stream_ids.get(stream_index as usize % stream_ids.len().max(1)) {
                 // Test flow control violation detection
+                let before_connection_send = table.connection_send_remaining();
                 let result = table.write_stream(id, data_len as u64);
                 if result.is_err() {
-                    // Should handle flow control errors gracefully
-                    assert!(table.connection_send_remaining() >= 0); // Credit shouldn't go negative
+                    assert_eq!(
+                        table.connection_send_remaining(),
+                        before_connection_send,
+                        "failed writes must not consume connection send credit"
+                    );
                 }
             }
         }
@@ -287,11 +359,11 @@ fn execute_flow_control_operation(
             stream_index,
             new_limit,
         } => {
-            if let Some(&id) = stream_ids.get(stream_index as usize % stream_ids.len().max(1)) {
-                if let Ok(stream) = table.stream_mut(id) {
-                    // Test window increase on individual stream
-                    let _ = stream.send_credit.increase_limit(new_limit as u64);
-                }
+            if let Some(&id) = stream_ids.get(stream_index as usize % stream_ids.len().max(1))
+                && let Ok(stream) = table.stream_mut(id)
+            {
+                // Test window increase on individual stream
+                let _ = stream.send_credit.increase_limit(new_limit as u64);
             }
         }
         FlowControlOperation::ConnectionWindowUpdate {
@@ -325,18 +397,18 @@ fn execute_flow_control_operation(
                             }) if final_size == requested_final_size && received == sent_bytes
                         ));
                         assert_eq!(stream.send_reset, prior_reset);
-                    } else if let Some((_, previous_final_size)) = prior_reset {
-                        if previous_final_size != requested_final_size {
-                            assert!(matches!(
-                                result,
-                                Err(asupersync::net::quic_native::streams::QuicStreamError::InconsistentReset {
-                                    previous_final_size: seen_previous,
-                                    new_final_size,
-                                }) if seen_previous == previous_final_size
-                                    && new_final_size == requested_final_size
-                            ));
-                            assert_eq!(stream.send_reset, prior_reset);
-                        }
+                    } else if let Some((_, previous_final_size)) = prior_reset
+                        && previous_final_size != requested_final_size
+                    {
+                        assert!(matches!(
+                            result,
+                            Err(asupersync::net::quic_native::streams::QuicStreamError::InconsistentReset {
+                                previous_final_size: seen_previous,
+                                new_final_size,
+                            }) if seen_previous == previous_final_size
+                                && new_final_size == requested_final_size
+                        ));
+                        assert_eq!(stream.send_reset, prior_reset);
                     }
                 }
                 if let Some((reset_code, reset_final_size)) =
@@ -352,10 +424,10 @@ fn execute_flow_control_operation(
             stream_index,
             error_code,
         } => {
-            if let Some(&id) = stream_ids.get(stream_index as usize % stream_ids.len().max(1)) {
-                if let Ok(stream) = table.stream_mut(id) {
-                    stream.on_stop_sending(error_code as u64);
-                }
+            if let Some(&id) = stream_ids.get(stream_index as usize % stream_ids.len().max(1))
+                && let Ok(stream) = table.stream_mut(id)
+            {
+                stream.on_stop_sending(error_code as u64);
             }
         }
         FlowControlOperation::ExhaustCredit {
@@ -379,7 +451,7 @@ fn execute_flow_control_operation(
         } => {
             if let Some(&id) = stream_ids.get(stream_index as usize % stream_ids.len().max(1)) {
                 // Interleave send and receive operations to test race conditions
-                for (send, recv) in send_chunks.into_iter().zip(recv_chunks.into_iter()) {
+                for (send, recv) in send_chunks.into_iter().zip(recv_chunks) {
                     let _ = table.write_stream(id, send as u64);
                     let _ = table.receive_stream(id, recv as u64);
                 }
@@ -413,10 +485,10 @@ fn execute_connection_flow_test(
         } => {
             // Close some streams then try to write to others (credit redistribution)
             for &stream_idx in &close_streams {
-                if let Some(&id) = stream_ids.get(stream_idx as usize % stream_ids.len().max(1)) {
-                    if let Ok(stream) = table.stream_mut(id) {
-                        let _ = stream.reset_send(0, stream.send_offset);
-                    }
+                if let Some(&id) = stream_ids.get(stream_idx as usize % stream_ids.len().max(1))
+                    && let Ok(stream) = table.stream_mut(id)
+                {
+                    observe_reset_send(stream, 0, stream.send_offset, "credit_redistribution");
                 }
             }
             // Try new writes after closing streams
@@ -444,12 +516,14 @@ fn execute_connection_flow_test(
         } => {
             // Rapidly exhaust and recover connection credit
             for _ in 0..repeat_count.min(10) {
-                if let Some(&id) = stream_ids.get(0) {
+                if let Some(&id) = stream_ids.first() {
                     let _ = table.write_stream(id, exhaust_amount as u64);
                 }
-                let _ = table.increase_connection_send_limit(
-                    table.send_connection_credit.limit() + recovery_amount as u64,
-                );
+                let recovery_limit = table
+                    .connection_send_remaining()
+                    .saturating_add(exhaust_amount as u64)
+                    .saturating_add(recovery_amount as u64);
+                let _ = table.increase_connection_send_limit(recovery_limit);
             }
         }
     }
@@ -464,25 +538,25 @@ fn execute_window_update_test(
 ) -> Result<(), Box<dyn std::error::Error>> {
     match test {
         WindowUpdateTest::ZeroByteUpdate { stream_index } => {
-            if let Some(&id) = stream_ids.get(stream_index as usize % stream_ids.len().max(1)) {
-                if let Ok(stream) = table.stream_mut(id) {
-                    // Zero-byte window update should be handled gracefully
-                    let current_limit = stream.send_credit.limit();
-                    let _ = stream.send_credit.increase_limit(current_limit);
-                }
+            if let Some(&id) = stream_ids.get(stream_index as usize % stream_ids.len().max(1))
+                && let Ok(stream) = table.stream_mut(id)
+            {
+                // Zero-byte window update should be handled gracefully
+                let current_limit = stream.send_credit.limit();
+                let _ = stream.send_credit.increase_limit(current_limit);
             }
         }
         WindowUpdateTest::MassiveIncrease {
             stream_index,
             increase,
         } => {
-            if let Some(&id) = stream_ids.get(stream_index as usize % stream_ids.len().max(1)) {
-                if let Ok(stream) = table.stream_mut(id) {
-                    // Test potential overflow in window increases
-                    let result = stream.send_credit.increase_limit(increase);
-                    // Should either succeed or fail gracefully, never panic
-                    let _ = result;
-                }
+            if let Some(&id) = stream_ids.get(stream_index as usize % stream_ids.len().max(1))
+                && let Ok(stream) = table.stream_mut(id)
+            {
+                // Test potential overflow in window increases
+                let result = stream.send_credit.increase_limit(increase);
+                // Should either succeed or fail gracefully, never panic
+                let _ = result;
             }
         }
         WindowUpdateTest::DuplicateUpdate {
@@ -490,14 +564,14 @@ fn execute_window_update_test(
             limit,
             repeat_count,
         } => {
-            if let Some(&id) = stream_ids.get(stream_index as usize % stream_ids.len().max(1)) {
-                if let Ok(stream) = table.stream_mut(id) {
-                    // Duplicate window updates should be idempotent
-                    for _ in 0..repeat_count.min(20) {
-                        let _ = stream.send_credit.increase_limit(limit as u64);
-                    }
-                    assert_eq!(stream.send_credit.limit(), limit as u64);
+            if let Some(&id) = stream_ids.get(stream_index as usize % stream_ids.len().max(1))
+                && let Ok(stream) = table.stream_mut(id)
+            {
+                // Duplicate window updates should be idempotent
+                for _ in 0..repeat_count.min(20) {
+                    let _ = stream.send_credit.increase_limit(limit as u64);
                 }
+                assert_eq!(stream.send_credit.limit(), limit as u64);
             }
         }
         WindowUpdateTest::UpdateAfterReset {
@@ -524,18 +598,18 @@ fn execute_window_update_test(
             stream_index,
             limits,
         } => {
-            if let Some(&id) = stream_ids.get(stream_index as usize % stream_ids.len().max(1)) {
-                if let Ok(stream) = table.stream_mut(id) {
-                    // Multiple conflicting updates - only monotonically increasing should succeed
-                    let mut expected_limit = stream.send_credit.limit();
-                    for limit in limits {
-                        if limit as u64 >= expected_limit {
-                            expected_limit = limit as u64;
-                        }
-                        let _ = stream.send_credit.increase_limit(limit as u64);
+            if let Some(&id) = stream_ids.get(stream_index as usize % stream_ids.len().max(1))
+                && let Ok(stream) = table.stream_mut(id)
+            {
+                // Multiple conflicting updates - only monotonically increasing should succeed
+                let mut expected_limit = stream.send_credit.limit();
+                for limit in limits {
+                    if limit as u64 >= expected_limit {
+                        expected_limit = limit as u64;
                     }
-                    assert!(stream.send_credit.limit() >= expected_limit);
+                    let _ = stream.send_credit.increase_limit(limit as u64);
                 }
+                assert!(stream.send_credit.limit() >= expected_limit);
             }
         }
     }
@@ -665,7 +739,12 @@ fn execute_flow_control_edge_case(
                         }
                         CreditOp::Reset(final_size) => {
                             if let Ok(stream) = table.stream_mut(id) {
-                                let _ = stream.reset_send(0, final_size as u64);
+                                observe_reset_send(
+                                    stream,
+                                    0,
+                                    final_size as u64,
+                                    "credit_consistency_reset",
+                                );
                             }
                         }
                     }
@@ -683,17 +762,9 @@ fn verify_flow_control_invariants(
     table: &asupersync::net::quic_native::streams::StreamTable,
     stream_ids: &[asupersync::net::quic_native::streams::StreamId],
 ) {
-    // Connection-level invariants
-    assert!(table.connection_send_remaining() >= 0);
-    assert!(table.connection_recv_remaining() >= 0);
-
     // Stream-level invariants
     for &id in stream_ids {
         if let Ok(stream) = table.stream(id) {
-            // Send credit should never go negative
-            assert!(stream.send_credit.remaining() >= 0);
-            assert!(stream.recv_credit.remaining() >= 0);
-
             // Used credit should never exceed limit
             assert!(stream.send_credit.used() <= stream.send_credit.limit());
             assert!(stream.recv_credit.used() <= stream.recv_credit.limit());
