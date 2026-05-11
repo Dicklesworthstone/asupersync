@@ -19,7 +19,6 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashMap;
 
 /// HTTP/2 header representation
 #[derive(Debug, Clone, Arbitrary)]
@@ -46,7 +45,7 @@ impl Header {
 /// HPACK dynamic table entry
 #[derive(Debug, Clone)]
 struct TableEntry {
-    header: Header,
+    _header: Header,
     size: usize,
 }
 
@@ -75,7 +74,7 @@ impl MockDynamicTable {
     fn add_entry(&mut self, header: Header) {
         let entry_size = header.size();
         let entry = TableEntry {
-            header,
+            _header: header,
             size: entry_size,
         };
 
@@ -146,10 +145,10 @@ impl MockHpackEncoder {
         // Emit pending size updates first per RFC 7541 §6.3
         if let Some(pending_size) = self.pending_size_update {
             // RFC 7541 §4.2: If table shrank then grew, emit min size first
-            if let Some(min_size) = self.min_size_update {
-                if min_size < pending_size {
-                    output.extend(self.encode_size_update(min_size));
-                }
+            if let Some(min_size) = self.min_size_update
+                && min_size < pending_size
+            {
+                output.extend(self.encode_size_update(min_size));
             }
             output.extend(self.encode_size_update(pending_size));
             self.pending_size_update = None;
@@ -330,11 +329,6 @@ fuzz_target!(|scenario: HeaderTableSizeScenario| {
         scenario.operations
     };
 
-    // Track state for validation
-    let mut previous_table_size = initial_size;
-    let mut size_update_count = 0;
-    let mut encoded_blocks = 0;
-
     // Process each operation
     for operation in &operations {
         match operation {
@@ -355,9 +349,6 @@ fuzz_target!(|scenario: HeaderTableSizeScenario| {
                     encoder.has_pending_size_update(),
                     "Size update should be pending after set_max_table_size"
                 );
-
-                size_update_count += 1;
-                previous_table_size = new_size_usize;
             }
             TableOperation::EncodeHeaders(header_data) => {
                 // Convert to Header objects, limiting size to prevent timeouts
@@ -391,8 +382,6 @@ fuzz_target!(|scenario: HeaderTableSizeScenario| {
                     encoder.dynamic_table_size(),
                     encoder.dynamic_table_max_size()
                 );
-
-                encoded_blocks += 1;
             }
         }
     }
