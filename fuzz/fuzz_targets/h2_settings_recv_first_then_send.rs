@@ -1,7 +1,24 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
+use asupersync::bytes::{Bytes, BytesMut};
+use asupersync::http::h2::frame::{
+    DataFrame, GoAwayFrame, HeadersFrame, PingFrame, PriorityFrame, PrioritySpec, RstStreamFrame,
+    SettingsFrame, WindowUpdateFrame,
+};
+use asupersync::http::h2::{
+    Connection, ConnectionState as H2ConnectionState, ErrorCode, Frame, Header, HpackEncoder,
+    Setting, Settings,
+};
 use libfuzzer_sys::fuzz_target;
+
+const MAX_EARLY_FRAMES: usize = 16;
+const MAX_POST_FRAMES: usize = 16;
+const MAX_SETTINGS: usize = 16;
+const MAX_HEADERS: usize = 8;
+const MAX_COMPONENT_LEN: usize = 96;
+const MAX_DATA_LEN: usize = 256;
+const MAX_DRAIN_FRAMES: usize = 32;
 
 /// HTTP/2 connection handshake timing test input for RFC 7540 §3.5 compliance
 #[derive(Arbitrary, Debug)]
@@ -39,10 +56,7 @@ enum ClientEarlyFrame {
         exclusive: bool,
     },
     /// WINDOW_UPDATE frame
-    WindowUpdate {
-        stream_id: u32,
-        increment: u32,
-    },
+    WindowUpdate { stream_id: u32, increment: u32 },
 }
 
 #[derive(Arbitrary, Debug)]
@@ -63,7 +77,7 @@ enum PostHandshakeFrame {
     },
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Debug, Clone)]
 struct SettingsParameter {
     id: u16,
     value: u32,
@@ -102,16 +116,12 @@ enum ConnectionState {
     ClientEarlyFramesPending,
     /// Full handshake complete
     Connected,
-    /// Connection failed
-    Error(HandshakeError),
 }
 
 #[derive(Debug, PartialEq)]
 enum HandshakeError {
     /// Client sent non-SETTINGS frame before preface
     FrameBeforePreface,
-    /// Invalid preface sequence
-    InvalidPreface,
     /// Server sent SETTINGS with ACK flag initially
     ServerSettingsWithAck,
     /// Invalid frame type during handshake
@@ -172,7 +182,12 @@ impl MockH2HandshakeParser {
                 }
                 Ok(())
             }
-            ClientEarlyFrame::Headers { stream_id, end_stream: _, end_headers: _, headers: _ } => {
+            ClientEarlyFrame::Headers {
+                stream_id,
+                end_stream: _,
+                end_headers: _,
+                headers: _,
+            } => {
                 self.validate_stream_id(*stream_id, true)?;
 
                 // RFC 7540 §3.5: Client can send frames before server SETTINGS
@@ -184,7 +199,12 @@ impl MockH2HandshakeParser {
                 // PING frames are allowed at any time
                 Ok(())
             }
-            ClientEarlyFrame::Priority { stream_id, dependency, weight: _, exclusive: _ } => {
+            ClientEarlyFrame::Priority {
+                stream_id,
+                dependency,
+                weight: _,
+                exclusive: _,
+            } => {
                 self.validate_stream_id(*stream_id, true)?;
 
                 // Priority dependency validation
@@ -195,7 +215,10 @@ impl MockH2HandshakeParser {
 
                 Ok(())
             }
-            ClientEarlyFrame::WindowUpdate { stream_id, increment } => {
+            ClientEarlyFrame::WindowUpdate {
+                stream_id,
+                increment,
+            } => {
                 if *increment == 0 {
                     return Err(HandshakeError::InvalidFrameType);
                 }
@@ -209,7 +232,11 @@ impl MockH2HandshakeParser {
         }
     }
 
-    fn process_server_settings(&mut self, params: &[SettingsParameter], ack: bool) -> Result<(), HandshakeError> {
+    fn process_server_settings(
+        &mut self,
+        params: &[SettingsParameter],
+        ack: bool,
+    ) -> Result<(), HandshakeError> {
         if ack && !self.server_settings_sent {
             // RFC 7540 §6.5: SETTINGS with ACK cannot be first SETTINGS frame
             return Err(HandshakeError::ServerSettingsWithAck);
@@ -228,26 +255,34 @@ impl MockH2HandshakeParser {
         Ok(())
     }
 
-    fn validate_stream_id(&self, stream_id: u32, client_initiated: bool) -> Result<(), HandshakeError> {
+    fn validate_stream_id(
+        &self,
+        stream_id: u32,
+        client_initiated: bool,
+    ) -> Result<(), HandshakeError> {
         if stream_id == 0 {
             return Err(HandshakeError::StreamIdZero);
         }
 
         // RFC 7540 §5.1.1: Client-initiated streams are odd, server-initiated are even
-        if client_initiated && stream_id % 2 == 0 {
+        if client_initiated && stream_id.is_multiple_of(2) {
             return Err(HandshakeError::InvalidStreamId);
         }
 
         Ok(())
     }
 
-    fn validate_settings_parameters(&self, params: &[SettingsParameter]) -> Result<(), HandshakeError> {
+    fn validate_settings_parameters(
+        &self,
+        params: &[SettingsParameter],
+    ) -> Result<(), HandshakeError> {
         for param in params {
             match param.id {
                 1 => { // SETTINGS_HEADER_TABLE_SIZE
                     // Any value is valid
                 }
-                2 => { // SETTINGS_ENABLE_PUSH
+                2 => {
+                    // SETTINGS_ENABLE_PUSH
                     if param.value > 1 {
                         return Err(HandshakeError::InvalidFrameType);
                     }
@@ -255,13 +290,17 @@ impl MockH2HandshakeParser {
                 3 => { // SETTINGS_MAX_CONCURRENT_STREAMS
                     // Any value is valid (0 means no new streams allowed)
                 }
-                4 => { // SETTINGS_INITIAL_WINDOW_SIZE
-                    if param.value > 2147483647 { // 2^31 - 1
+                4 => {
+                    // SETTINGS_INITIAL_WINDOW_SIZE
+                    if param.value > 2147483647 {
+                        // 2^31 - 1
                         return Err(HandshakeError::InvalidFrameType);
                     }
                 }
-                5 => { // SETTINGS_MAX_FRAME_SIZE
-                    if param.value < 16384 || param.value > 16777215 { // 2^14 to 2^24-1
+                5 => {
+                    // SETTINGS_MAX_FRAME_SIZE
+                    if param.value < 16384 || param.value > 16777215 {
+                        // 2^14 to 2^24-1
                         return Err(HandshakeError::InvalidFrameType);
                     }
                 }
@@ -276,14 +315,18 @@ impl MockH2HandshakeParser {
         Ok(())
     }
 
-    fn simulate_handshake_timing(&mut self, input: &H2HandshakeTimingInput) -> Result<(), HandshakeError> {
+    fn simulate_handshake_timing(
+        &mut self,
+        input: &H2HandshakeTimingInput,
+    ) -> Result<(), HandshakeError> {
         // Always start with client preface
         self.process_client_preface()?;
 
         match input.timing_scenario {
             TimingScenario::ClientWaits => {
                 // Client sends SETTINGS first
-                if let Some(ClientEarlyFrame::Settings(params)) = input.client_early_frames.first() {
+                if let Some(ClientEarlyFrame::Settings(params)) = input.client_early_frames.first()
+                {
                     self.process_client_frame(&ClientEarlyFrame::Settings(params.clone()))?;
                 }
 
@@ -306,7 +349,8 @@ impl MockH2HandshakeParser {
             }
             TimingScenario::ClientFlood => {
                 // Client sends SETTINGS
-                if let Some(ClientEarlyFrame::Settings(params)) = input.client_early_frames.first() {
+                if let Some(ClientEarlyFrame::Settings(params)) = input.client_early_frames.first()
+                {
                     self.process_client_frame(&ClientEarlyFrame::Settings(params.clone()))?;
                 }
 
@@ -322,7 +366,8 @@ impl MockH2HandshakeParser {
             }
             TimingScenario::ServerDelayed => {
                 // Client sends SETTINGS
-                if let Some(ClientEarlyFrame::Settings(params)) = input.client_early_frames.first() {
+                if let Some(ClientEarlyFrame::Settings(params)) = input.client_early_frames.first()
+                {
                     self.process_client_frame(&ClientEarlyFrame::Settings(params.clone()))?;
                 }
 
@@ -336,7 +381,8 @@ impl MockH2HandshakeParser {
             }
             TimingScenario::Concurrent => {
                 // Interleave client and server frames
-                if let Some(ClientEarlyFrame::Settings(params)) = input.client_early_frames.first() {
+                if let Some(ClientEarlyFrame::Settings(params)) = input.client_early_frames.first()
+                {
                     self.process_client_frame(&ClientEarlyFrame::Settings(params.clone()))?;
                 }
 
@@ -360,13 +406,17 @@ fuzz_target!(|input: H2HandshakeTimingInput| {
         return;
     }
 
+    exercise_production_recv_first_then_send(&input);
+
     let mut parser = MockH2HandshakeParser::new();
 
     // Test the handshake timing scenario
     let result = parser.simulate_handshake_timing(&input);
 
     match input.timing_scenario {
-        TimingScenario::ClientSendsEarly | TimingScenario::ClientFlood | TimingScenario::ServerDelayed => {
+        TimingScenario::ClientSendsEarly
+        | TimingScenario::ClientFlood
+        | TimingScenario::ServerDelayed => {
             // RFC 7540 §3.5: "To avoid unnecessary latency, clients are permitted
             // to send additional frames to the server immediately after sending
             // the client connection preface, without waiting to receive the
@@ -376,8 +426,10 @@ fuzz_target!(|input: H2HandshakeTimingInput| {
             match result {
                 Ok(()) => {
                     // Expected: client early frames should be accepted
-                    assert!(parser.state == ConnectionState::Connected ||
-                           parser.state == ConnectionState::ClientEarlyFramesPending);
+                    assert!(
+                        parser.state == ConnectionState::Connected
+                            || parser.state == ConnectionState::ClientEarlyFramesPending
+                    );
                 }
                 Err(HandshakeError::ServerSettingsWithAck) => {
                     // Expected: server sent invalid SETTINGS with ACK
@@ -391,7 +443,7 @@ fuzz_target!(|input: H2HandshakeTimingInput| {
                 Err(HandshakeError::InvalidStreamId) => {
                     // Expected: even stream ID from client
                 }
-                Err(other_error) => {
+                Err(ref _other_error) => {
                     // Debug unexpected errors in early frame scenarios
                     // These might indicate over-strict validation
                 }
@@ -407,14 +459,17 @@ fuzz_target!(|input: H2HandshakeTimingInput| {
                 Err(HandshakeError::ServerSettingsWithAck) => {
                     // Expected: server sent invalid SETTINGS with ACK
                 }
-                Err(HandshakeError::InvalidFrameType) |
-                Err(HandshakeError::StreamIdZero) |
-                Err(HandshakeError::InvalidStreamId) => {
+                Err(HandshakeError::InvalidFrameType)
+                | Err(HandshakeError::StreamIdZero)
+                | Err(HandshakeError::InvalidStreamId) => {
                     // Expected: validation errors
                 }
                 Err(other_error) => {
                     // Unexpected errors in normal scenarios
-                    panic!("Unexpected handshake error in normal scenario: {:?}", other_error);
+                    panic!(
+                        "Unexpected handshake error in normal scenario: {:?}",
+                        other_error
+                    );
                 }
             }
         }
@@ -427,7 +482,7 @@ fuzz_target!(|input: H2HandshakeTimingInput| {
 fn test_handshake_invariants(
     parser: &MockH2HandshakeParser,
     input: &H2HandshakeTimingInput,
-    result: &Result<(), HandshakeError>
+    result: &Result<(), HandshakeError>,
 ) {
     // Invariant: If server sends SETTINGS with ACK as first frame, it must fail
     if input.server_settings_ack && !parser.server_settings_sent {
@@ -436,21 +491,22 @@ fn test_handshake_invariants(
 
     // Invariant: Stream ID 0 for stream-specific frames must fail
     for frame in &input.client_early_frames {
-        if let ClientEarlyFrame::Headers { stream_id, .. } = frame {
-            if *stream_id == 0 && result.is_err() {
-                assert!(matches!(result, Err(HandshakeError::StreamIdZero)));
-            }
+        if let ClientEarlyFrame::Headers { stream_id, .. } = frame
+            && *stream_id == 0
+            && result.is_err()
+        {
+            assert!(matches!(result, Err(HandshakeError::StreamIdZero)));
         }
     }
 
     // Invariant: Even stream IDs from client must fail
     for frame in &input.client_early_frames {
         match frame {
-            ClientEarlyFrame::Headers { stream_id, .. } |
-            ClientEarlyFrame::Priority { stream_id, .. } => {
-                if *stream_id != 0 && *stream_id % 2 == 0 && result.is_err() {
-                    assert!(matches!(result, Err(HandshakeError::InvalidStreamId)));
-                }
+            ClientEarlyFrame::Headers { stream_id, .. }
+            | ClientEarlyFrame::Priority { stream_id, .. }
+                if *stream_id != 0 && stream_id.is_multiple_of(2) && result.is_err() =>
+            {
+                assert!(matches!(result, Err(HandshakeError::InvalidStreamId)));
             }
             _ => {}
         }
@@ -466,11 +522,300 @@ fn test_handshake_invariants(
 
     // Invariant: WINDOW_UPDATE with zero increment should fail
     for frame in &input.client_early_frames {
-        if let ClientEarlyFrame::WindowUpdate { increment, .. } = frame {
-            if *increment == 0 && result.is_err() {
-                assert!(matches!(result, Err(HandshakeError::InvalidFrameType)));
-            }
+        if let ClientEarlyFrame::WindowUpdate { increment, .. } = frame
+            && *increment == 0
+            && result.is_err()
+        {
+            assert!(matches!(result, Err(HandshakeError::InvalidFrameType)));
         }
+    }
+}
+
+fn exercise_production_recv_first_then_send(input: &H2HandshakeTimingInput) {
+    let mut connection = Connection::server(Settings::server());
+
+    if matches!(input.timing_scenario, TimingScenario::Concurrent) {
+        connection.queue_initial_settings();
+    }
+
+    let initial_settings = first_client_settings(input).map_or_else(
+        || settings_from_params(&input.server_settings),
+        settings_from_params,
+    );
+    let first_result =
+        connection.process_frame(Frame::Settings(SettingsFrame::new(initial_settings)));
+    assert!(
+        first_result.is_ok(),
+        "production server must accept a valid SETTINGS first frame",
+    );
+    assert_eq!(
+        connection.state(),
+        H2ConnectionState::Open,
+        "valid first SETTINGS should open the production connection",
+    );
+
+    for frame in input.client_early_frames.iter().take(MAX_EARLY_FRAMES) {
+        if matches!(frame, ClientEarlyFrame::Settings(_)) {
+            continue;
+        }
+        assert_not_first_frame_error(process_production_early_frame(&mut connection, frame));
+    }
+
+    if !matches!(input.timing_scenario, TimingScenario::Concurrent) {
+        connection.queue_initial_settings();
+    }
+
+    let (settings_seen, ack_seen) = drain_production_pending(&mut connection);
+    assert!(
+        settings_seen,
+        "server should be able to send its SETTINGS after receiving peer SETTINGS",
+    );
+    assert!(ack_seen, "peer SETTINGS should queue a SETTINGS ACK");
+
+    for frame in input.post_handshake_frames.iter().take(MAX_POST_FRAMES) {
+        assert_not_first_frame_error(process_production_post_frame(&mut connection, frame));
+    }
+}
+
+fn first_client_settings(input: &H2HandshakeTimingInput) -> Option<&[SettingsParameter]> {
+    input.client_early_frames.iter().find_map(|frame| {
+        if let ClientEarlyFrame::Settings(params) = frame {
+            Some(params.as_slice())
+        } else {
+            None
+        }
+    })
+}
+
+fn settings_from_params(params: &[SettingsParameter]) -> Vec<Setting> {
+    params
+        .iter()
+        .take(MAX_SETTINGS)
+        .map(setting_from_param)
+        .collect()
+}
+
+fn setting_from_param(param: &SettingsParameter) -> Setting {
+    match param.id % 7 {
+        1 => Setting::HeaderTableSize(param.value),
+        2 => Setting::EnablePush(param.value % 2 == 1),
+        3 => Setting::MaxConcurrentStreams(param.value),
+        4 => Setting::InitialWindowSize(param.value.min(0x7fff_ffff)),
+        5 => Setting::MaxFrameSize(16_384 + (param.value % (16_777_215 - 16_384 + 1))),
+        6 => Setting::MaxHeaderListSize(param.value),
+        _ => Setting::MaxConcurrentStreams(param.value),
+    }
+}
+
+fn process_production_early_frame(
+    connection: &mut Connection,
+    frame: &ClientEarlyFrame,
+) -> Result<Option<asupersync::http::h2::connection::ReceivedFrame>, asupersync::http::h2::H2Error>
+{
+    match frame {
+        ClientEarlyFrame::Settings(params) => connection.process_frame(Frame::Settings(
+            SettingsFrame::new(settings_from_params(params)),
+        )),
+        ClientEarlyFrame::Headers {
+            stream_id,
+            end_stream,
+            end_headers,
+            headers,
+        } => connection.process_frame(Frame::Headers(HeadersFrame::new(
+            client_stream_id(*stream_id),
+            encode_headers(headers),
+            *end_stream,
+            *end_headers,
+        ))),
+        ClientEarlyFrame::Ping { ack, payload } => {
+            let ping = if *ack {
+                PingFrame::ack(*payload)
+            } else {
+                PingFrame::new(*payload)
+            };
+            connection.process_frame(Frame::Ping(ping))
+        }
+        ClientEarlyFrame::Priority {
+            stream_id,
+            dependency,
+            weight,
+            exclusive,
+        } => connection.process_frame(Frame::Priority(PriorityFrame {
+            stream_id: client_stream_id(*stream_id),
+            priority: PrioritySpec {
+                exclusive: *exclusive,
+                dependency: dependency & 0x7fff_ffff,
+                weight: *weight,
+            },
+        })),
+        ClientEarlyFrame::WindowUpdate {
+            stream_id,
+            increment,
+        } => connection.process_frame(Frame::WindowUpdate(WindowUpdateFrame::new(
+            *stream_id & 0x7fff_ffff,
+            *increment & 0x7fff_ffff,
+        ))),
+    }
+}
+
+fn process_production_post_frame(
+    connection: &mut Connection,
+    frame: &PostHandshakeFrame,
+) -> Result<Option<asupersync::http::h2::connection::ReceivedFrame>, asupersync::http::h2::H2Error>
+{
+    match frame {
+        PostHandshakeFrame::Data {
+            stream_id,
+            data,
+            end_stream,
+        } => connection.process_frame(Frame::Data(DataFrame::new(
+            client_stream_id(*stream_id),
+            Bytes::copy_from_slice(&data[..data.len().min(MAX_DATA_LEN)]),
+            *end_stream,
+        ))),
+        PostHandshakeFrame::RstStream {
+            stream_id,
+            error_code,
+        } => connection.process_frame(Frame::RstStream(RstStreamFrame::new(
+            client_stream_id(*stream_id),
+            ErrorCode::from_u32(*error_code),
+        ))),
+        PostHandshakeFrame::GoAway {
+            last_stream_id,
+            error_code,
+            debug_data,
+        } => {
+            let mut goaway = GoAwayFrame::new(
+                *last_stream_id & 0x7fff_ffff,
+                ErrorCode::from_u32(*error_code),
+            );
+            goaway.debug_data =
+                Bytes::copy_from_slice(&debug_data[..debug_data.len().min(MAX_DATA_LEN)]);
+            connection.process_frame(Frame::GoAway(goaway))
+        }
+    }
+}
+
+fn assert_not_first_frame_error(
+    result: Result<
+        Option<asupersync::http::h2::connection::ReceivedFrame>,
+        asupersync::http::h2::H2Error,
+    >,
+) {
+    if let Err(err) = result {
+        assert_ne!(
+            err.code,
+            ErrorCode::NoError,
+            "errors must carry a real HTTP/2 code"
+        );
+        assert!(
+            !err.message.contains("first frame"),
+            "after peer SETTINGS, production frame handling should not reject as first-frame ordering: {err}",
+        );
+    }
+}
+
+fn drain_production_pending(connection: &mut Connection) -> (bool, bool) {
+    let mut settings_seen = false;
+    let mut ack_seen = false;
+    for _ in 0..MAX_DRAIN_FRAMES {
+        let Some(frame) = connection.next_frame() else {
+            break;
+        };
+        match frame {
+            Frame::Settings(settings) => {
+                if settings.ack {
+                    ack_seen = true;
+                    assert!(
+                        settings.settings.is_empty(),
+                        "SETTINGS ACK must not carry payload",
+                    );
+                } else {
+                    settings_seen = true;
+                    assert!(
+                        !settings.settings.is_empty(),
+                        "initial non-ACK SETTINGS should carry settings",
+                    );
+                }
+            }
+            Frame::Ping(ping) => {
+                assert!(ping.ack, "only PING ACKs should be emitted while draining");
+            }
+            Frame::Headers(headers) => {
+                assert_ne!(headers.stream_id, 0, "HEADERS must be stream-scoped");
+            }
+            _ => {}
+        }
+    }
+    (settings_seen, ack_seen)
+}
+
+fn encode_headers(headers: &[(String, String)]) -> Bytes {
+    let normalized = if headers.is_empty() {
+        default_request_headers()
+    } else {
+        let mut out = default_request_headers();
+        for (index, (name, value)) in headers.iter().take(MAX_HEADERS).enumerate() {
+            out.push(Header::new(
+                normalized_header_name(name, index),
+                bounded_visible_ascii(value, "value", MAX_COMPONENT_LEN),
+            ));
+        }
+        out
+    };
+
+    let mut encoded = BytesMut::new();
+    HpackEncoder::new().encode(&normalized, &mut encoded);
+    encoded.freeze()
+}
+
+fn default_request_headers() -> Vec<Header> {
+    vec![
+        Header::new(":method", "GET"),
+        Header::new(":path", "/"),
+        Header::new(":scheme", "https"),
+        Header::new(":authority", "example.test"),
+    ]
+}
+
+fn client_stream_id(stream_id: u32) -> u32 {
+    let mut id = stream_id & 0x7fff_ffff;
+    if id == 0 {
+        id = 1;
+    }
+    id | 1
+}
+
+fn normalized_header_name(name: &str, index: usize) -> String {
+    let mut normalized = String::new();
+    for byte in name.bytes().take(MAX_COMPONENT_LEN) {
+        let lower = byte.to_ascii_lowercase();
+        if lower.is_ascii_lowercase() || lower.is_ascii_digit() || lower == b'-' {
+            normalized.push(char::from(lower));
+        }
+    }
+
+    if normalized.is_empty() || normalized.starts_with(':') {
+        format!("x-fuzz-{index}")
+    } else {
+        normalized
+    }
+}
+
+fn bounded_visible_ascii(input: &str, fallback: &str, max_len: usize) -> String {
+    let mut out = String::new();
+    for byte in input.bytes().take(max_len) {
+        match byte {
+            b'\r' | b'\n' | b'\0' => out.push('-'),
+            0x20..=0x7e => out.push(char::from(byte)),
+            _ => {}
+        }
+    }
+
+    if out.is_empty() {
+        fallback.to_string()
+    } else {
+        out
     }
 }
 
@@ -486,7 +831,9 @@ mod tests {
         parser.process_client_preface().unwrap();
 
         // Client SETTINGS
-        parser.process_client_frame(&ClientEarlyFrame::Settings(vec![])).unwrap();
+        parser
+            .process_client_frame(&ClientEarlyFrame::Settings(vec![]))
+            .unwrap();
 
         // Server SETTINGS
         parser.process_server_settings(&[], false).unwrap();
@@ -502,7 +849,9 @@ mod tests {
         parser.process_client_preface().unwrap();
 
         // Client SETTINGS
-        parser.process_client_frame(&ClientEarlyFrame::Settings(vec![])).unwrap();
+        parser
+            .process_client_frame(&ClientEarlyFrame::Settings(vec![]))
+            .unwrap();
 
         // Client sends HEADERS before server SETTINGS (RFC 7540 §3.5 allows this)
         let result = parser.process_client_frame(&ClientEarlyFrame::Headers {
@@ -530,7 +879,9 @@ mod tests {
         let mut parser = MockH2HandshakeParser::new();
 
         parser.process_client_preface().unwrap();
-        parser.process_client_frame(&ClientEarlyFrame::Settings(vec![])).unwrap();
+        parser
+            .process_client_frame(&ClientEarlyFrame::Settings(vec![]))
+            .unwrap();
 
         // Server sends SETTINGS with ACK as first frame (invalid)
         let result = parser.process_server_settings(&[], true);
@@ -551,7 +902,9 @@ mod tests {
         let mut parser = MockH2HandshakeParser::new();
 
         parser.process_client_preface().unwrap();
-        parser.process_client_frame(&ClientEarlyFrame::Settings(vec![])).unwrap();
+        parser
+            .process_client_frame(&ClientEarlyFrame::Settings(vec![]))
+            .unwrap();
 
         // Stream ID 0 for HEADERS frame
         let result = parser.process_client_frame(&ClientEarlyFrame::Headers {
@@ -586,7 +939,10 @@ mod tests {
 
         // Invalid SETTINGS_INITIAL_WINDOW_SIZE value
         let result = parser.process_client_frame(&ClientEarlyFrame::Settings(vec![
-            SettingsParameter { id: 4, value: 2147483648 }, // > 2^31 - 1
+            SettingsParameter {
+                id: 4,
+                value: 2147483648,
+            }, // > 2^31 - 1
         ]));
         assert!(result.is_err());
 
@@ -602,7 +958,10 @@ mod tests {
         let input = H2HandshakeTimingInput {
             client_early_frames: vec![
                 ClientEarlyFrame::Settings(vec![]),
-                ClientEarlyFrame::Ping { ack: false, payload: [0; 8] },
+                ClientEarlyFrame::Ping {
+                    ack: false,
+                    payload: [0; 8],
+                },
                 ClientEarlyFrame::Headers {
                     stream_id: 1,
                     end_stream: false,
