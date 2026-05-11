@@ -5159,6 +5159,7 @@ name = "h2_settings_invalid_value"
 path = "fuzz_targets/h2_settings_invalid_value.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_request_method_invalid"

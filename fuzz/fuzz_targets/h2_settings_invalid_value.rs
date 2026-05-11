@@ -167,7 +167,7 @@ impl MockInvalidSettingsConnection {
         }
 
         // Payload length must be multiple of 6 (each parameter is 6 bytes)
-        if payload.len() % 6 != 0 {
+        if !payload.len().is_multiple_of(6) {
             self.connection_error = Some(PROTOCOL_ERROR);
             self.protocol_violations
                 .push("SETTINGS frame payload length not multiple of 6".to_string());
@@ -205,6 +205,10 @@ impl MockInvalidSettingsConnection {
     }
 
     fn validate_settings_parameter(&self, parameter_id: u16, value: u32) -> Option<ViolationType> {
+        Self::validate_parameter_value(parameter_id, value)
+    }
+
+    fn validate_parameter_value(parameter_id: u16, value: u32) -> Option<ViolationType> {
         match parameter_id {
             SETTINGS_HEADER_TABLE_SIZE => {
                 // Any value is valid per RFC 7540 §6.5.2
@@ -234,7 +238,7 @@ impl MockInvalidSettingsConnection {
             }
             SETTINGS_MAX_FRAME_SIZE => {
                 // Values outside 2^14 to 2^24-1 are PROTOCOL_ERROR per RFC 7540 §6.5.2
-                if value < MIN_MAX_FRAME_SIZE || value > MAX_MAX_FRAME_SIZE {
+                if !(MIN_MAX_FRAME_SIZE..=MAX_MAX_FRAME_SIZE).contains(&value) {
                     Some(ViolationType::MaxFrameSizeInvalid)
                 } else {
                     None
@@ -416,26 +420,8 @@ fuzz_target!(|input: InvalidSettingsInput| {
         payload.extend_from_slice(&param_id.to_be_bytes());
         payload.extend_from_slice(&value.to_be_bytes());
 
-        // Check if this parameter should be invalid
-        match param.parameter_type {
-            SettingsParameterType::EnablePush => {
-                if value != 0 && value != 1 {
-                    has_invalid_setting = true;
-                }
-            }
-            SettingsParameterType::InitialWindowSize => {
-                if value > MAX_INITIAL_WINDOW_SIZE {
-                    has_invalid_setting = true;
-                }
-            }
-            SettingsParameterType::MaxFrameSize => {
-                if value < MIN_MAX_FRAME_SIZE || value > MAX_MAX_FRAME_SIZE {
-                    has_invalid_setting = true;
-                }
-            }
-            _ => {
-                // Other parameters don't have validation constraints in this test
-            }
+        if MockInvalidSettingsConnection::validate_parameter_value(param_id, value).is_some() {
+            has_invalid_setting = true;
         }
     }
 
@@ -444,7 +430,24 @@ fuzz_target!(|input: InvalidSettingsInput| {
     // Send the SETTINGS frame with potentially invalid values
     conn.process_frame(FRAME_TYPE_SETTINGS, 0, flags, &payload);
 
-    if has_invalid_setting {
+    assert!(
+        conn.get_received_settings().len() <= input.settings_parameters.len(),
+        "SETTINGS parser recorded more parameters than were sent"
+    );
+    if input.ack_flag {
+        assert!(
+            conn.get_received_settings().is_empty(),
+            "SETTINGS ACK frames must not parse payload parameters"
+        );
+    }
+
+    if input.ack_flag && !payload.is_empty() {
+        // ACK with payload is always PROTOCOL_ERROR and does not parse parameters.
+        assert!(
+            conn.has_protocol_error(),
+            "SETTINGS ACK with payload must be PROTOCOL_ERROR"
+        );
+    } else if has_invalid_setting {
         // CRITICAL: Invalid SETTINGS parameter values MUST cause PROTOCOL_ERROR
         assert!(
             conn.has_protocol_error(),
@@ -468,19 +471,22 @@ fuzz_target!(|input: InvalidSettingsInput| {
             !conn.get_invalid_settings().is_empty(),
             "Expected invalid settings to be detected and recorded"
         );
-    } else if !input.ack_flag && !payload.is_empty() {
+        let first_invalid = &conn.get_invalid_settings()[0];
+        assert!(
+            MockInvalidSettingsConnection::validate_parameter_value(
+                first_invalid.parameter_id,
+                first_invalid.invalid_value
+            )
+            .is_some(),
+            "Recorded invalid setting should be invalid by the RFC value rules"
+        );
+    } else if !payload.is_empty() {
         // All parameters valid, should not cause error (unless ACK with payload)
         assert!(
             !conn.has_protocol_error(),
             "Valid SETTINGS parameters should not cause PROTOCOL_ERROR. \
              Violations: {:?}",
             conn.get_violations()
-        );
-    } else if input.ack_flag && !payload.is_empty() {
-        // ACK with payload is always PROTOCOL_ERROR
-        assert!(
-            conn.has_protocol_error(),
-            "SETTINGS ACK with payload must be PROTOCOL_ERROR"
         );
     }
 
@@ -514,6 +520,9 @@ fn test_invalid_settings_scenarios(input: &InvalidSettingsInput) {
             "SETTINGS_ENABLE_PUSH=2 must be PROTOCOL_ERROR (only 0/1 valid)"
         );
         assert_eq!(conn.count_invalid_enable_push(), 1);
+        let invalid = &conn.get_invalid_settings()[0];
+        assert_eq!(invalid.parameter_id, SETTINGS_ENABLE_PUSH);
+        assert_eq!(invalid.invalid_value, 2);
     }
 
     // Scenario 2: SETTINGS_INITIAL_WINDOW_SIZE = 2^31 (invalid, max is 2^31-1)
@@ -530,6 +539,9 @@ fn test_invalid_settings_scenarios(input: &InvalidSettingsInput) {
             "SETTINGS_INITIAL_WINDOW_SIZE=2^31 must be PROTOCOL_ERROR (max is 2^31-1)"
         );
         assert_eq!(conn.count_invalid_window_size(), 1);
+        let invalid = &conn.get_invalid_settings()[0];
+        assert_eq!(invalid.parameter_id, SETTINGS_INITIAL_WINDOW_SIZE);
+        assert_eq!(invalid.invalid_value, 0x80000000);
     }
 
     // Scenario 3: Multiple invalid parameters (should stop at first)
@@ -651,26 +663,25 @@ fn test_invalid_settings_scenarios(input: &InvalidSettingsInput) {
                 "SETTINGS_MAX_FRAME_SIZE={} must be valid",
                 value
             );
+            assert_eq!(conn.count_invalid_frame_size(), 0);
         } else {
             assert!(
                 conn.has_protocol_error(),
                 "SETTINGS_MAX_FRAME_SIZE={} must be PROTOCOL_ERROR (out of range)",
                 value
             );
+            assert_eq!(conn.count_invalid_frame_size(), 1);
         }
     }
 
     // Scenario 8: Valid settings should not cause errors
     if !input.ack_flag
         && input.settings_parameters.iter().all(|p| {
-            match p.parameter_type {
-                SettingsParameterType::EnablePush => p.value == 0 || p.value == 1,
-                SettingsParameterType::InitialWindowSize => p.value <= MAX_INITIAL_WINDOW_SIZE,
-                SettingsParameterType::MaxFrameSize => {
-                    p.value >= MIN_MAX_FRAME_SIZE && p.value <= MAX_MAX_FRAME_SIZE
-                }
-                _ => true, // Other parameters don't have validation constraints
-            }
+            MockInvalidSettingsConnection::validate_parameter_value(
+                p.parameter_type.to_id(),
+                p.value,
+            )
+            .is_none()
         })
     {
         let mut conn = MockInvalidSettingsConnection::new();
