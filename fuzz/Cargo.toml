@@ -1719,6 +1719,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "sqlite_pragma_serialization"
+path = "fuzz_targets/sqlite_pragma_serialization.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "sqlite_bind_values"
 path = "fuzz_targets/sqlite_bind_values.rs"
 test = false

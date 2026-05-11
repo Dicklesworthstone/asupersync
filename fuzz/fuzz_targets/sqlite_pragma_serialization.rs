@@ -11,9 +11,7 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use asupersync::database::sqlite::{SqliteConnection, SqliteError, SqliteValue};
-use asupersync::cx::Cx;
-use asupersync::types::Outcome;
+use asupersync::database::sqlite::SqliteError;
 
 /// Common PRAGMA settings that have different serialization formats
 #[derive(Arbitrary, Debug, Clone)]
@@ -76,52 +74,42 @@ impl PragmaType {
 #[derive(Arbitrary, Debug, Clone)]
 enum PragmaValue {
     /// Boolean values with different representations
-    Boolean {
-        value: bool,
-        format: BooleanFormat,
-    },
+    Boolean { value: bool, format: BooleanFormat },
     /// Integer values with potential edge cases
-    Integer {
-        value: i64,
-        format: IntegerFormat,
-    },
+    Integer { value: i64, format: IntegerFormat },
     /// String values with quoting and escaping variations
     String {
         content: String,
         format: StringFormat,
     },
     /// Keywords that might have special meaning
-    Keyword {
-        keyword: PragmaKeyword,
-    },
+    Keyword { keyword: PragmaKeyword },
     /// Raw values that could test injection
-    Raw {
-        content: String,
-    },
+    Raw { content: String },
 }
 
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum BooleanFormat {
-    ZeroOne,      // 0, 1
-    OnOff,        // ON, OFF
-    TrueFalse,    // TRUE, FALSE
-    YesNo,        // YES, NO
+    ZeroOne,   // 0, 1
+    OnOff,     // ON, OFF
+    TrueFalse, // TRUE, FALSE
+    YesNo,     // YES, NO
 }
 
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum IntegerFormat {
-    Decimal,      // 12345
-    Hexadecimal,  // 0x3039
-    Negative,     // -12345
-    Large,        // i64::MAX/MIN boundary
+    Decimal,     // 12345
+    Hexadecimal, // 0x3039
+    Negative,    // -12345
+    Large,       // i64::MAX/MIN boundary
 }
 
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum StringFormat {
-    SingleQuoted,    // 'value'
-    DoubleQuoted,    // "value"
-    Unquoted,        // value
-    EscapedQuotes,   // 'val''ue' or "val""ue"
+    SingleQuoted,  // 'value'
+    DoubleQuoted,  // "value"
+    Unquoted,      // value
+    EscapedQuotes, // 'val''ue' or "val""ue"
 }
 
 #[derive(Arbitrary, Debug, Clone, Copy)]
@@ -204,18 +192,18 @@ enum LeadingFormat {
 
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum CaseFormat {
-    Upper,     // PRAGMA
-    Lower,     // pragma
-    Mixed,     // PrAgMa
-    Title,     // Pragma
+    Upper, // PRAGMA
+    Lower, // pragma
+    Mixed, // PrAgMa
+    Title, // Pragma
 }
 
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum SpacingFormat {
-    None,       // pragma foreign_keys=1
-    Spaces,     // pragma foreign_keys = 1
-    Tabs,       // pragma foreign_keys	=	1
-    Mixed,      // pragma foreign_keys= 1
+    None,   // pragma foreign_keys=1
+    Spaces, // pragma foreign_keys = 1
+    Tabs,   // pragma foreign_keys	=	1
+    Mixed,  // pragma foreign_keys= 1
 }
 
 #[derive(Arbitrary, Debug, Clone, Copy)]
@@ -229,10 +217,10 @@ enum TrailingFormat {
 
 fuzz_target!(|stmt: PragmaStatement| {
     // Limit complexity to maintain fuzzer performance
-    if let Some(PragmaValue::String { ref content, .. }) = stmt.value {
-        if content.len() > 256 {
-            return;
-        }
+    if let Some(PragmaValue::String { content, .. } | PragmaValue::Raw { content }) = &stmt.value
+        && content.len() > 256
+    {
+        return;
     }
 
     let sql = build_pragma_statement(&stmt);
@@ -306,19 +294,24 @@ fn build_pragma_statement(stmt: &PragmaStatement) -> String {
 
 fn serialize_pragma_value(value: &PragmaValue) -> String {
     match value {
-        PragmaValue::Boolean { value, format } => {
-            match format {
-                BooleanFormat::ZeroOne => if *value { "1" } else { "0" }.to_string(),
-                BooleanFormat::OnOff => if *value { "ON" } else { "OFF" }.to_string(),
-                BooleanFormat::TrueFalse => if *value { "TRUE" } else { "FALSE" }.to_string(),
-                BooleanFormat::YesNo => if *value { "YES" } else { "NO" }.to_string(),
-            }
-        }
+        PragmaValue::Boolean { value, format } => match format {
+            BooleanFormat::ZeroOne => if *value { "1" } else { "0" }.to_string(),
+            BooleanFormat::OnOff => if *value { "ON" } else { "OFF" }.to_string(),
+            BooleanFormat::TrueFalse => if *value { "TRUE" } else { "FALSE" }.to_string(),
+            BooleanFormat::YesNo => if *value { "YES" } else { "NO" }.to_string(),
+        },
         PragmaValue::Integer { value, format } => {
             match format {
                 IntegerFormat::Decimal => value.to_string(),
-                IntegerFormat::Hexadecimal => format!("0x{:X}", value.abs() as u64),
-                IntegerFormat::Negative => (-value.abs()).to_string(),
+                IntegerFormat::Hexadecimal => format!("0x{:X}", value.unsigned_abs()),
+                IntegerFormat::Negative => {
+                    let magnitude = value.unsigned_abs();
+                    if magnitude == 1_u64 << 63 {
+                        i64::MIN.to_string()
+                    } else {
+                        format!("-{magnitude}")
+                    }
+                }
                 IntegerFormat::Large => {
                     // Test boundary values
                     if *value % 2 == 0 {
@@ -354,7 +347,11 @@ fn test_pragma_parsing(sql: &str) {
 
     // PRAGMA statements should always be rejected on checked surface
     if sql.trim_start().to_ascii_uppercase().starts_with("PRAGMA") {
-        assert!(result.is_err(), "PRAGMA statement should be rejected on checked surface: {}", sql);
+        assert!(
+            result.is_err(),
+            "PRAGMA statement should be rejected on checked surface: {}",
+            sql
+        );
     }
 }
 
@@ -362,37 +359,28 @@ fn test_pragma_serialization(stmt: &PragmaStatement, sql: &str) {
     // Test that PRAGMA value serialization is handled correctly
     // This would exercise the actual SQLite value binding and result parsing
 
-    // For certain PRAGMA types, verify the serialization doesn't introduce
-    // SQL injection or parsing errors
-    match stmt.pragma_type {
-        PragmaType::ForeignKeys | PragmaType::ReadUncommitted => {
-            // Boolean pragmas should accept various boolean formats
-            if let Some(PragmaValue::Boolean { .. }) = stmt.value {
-                // Verify the statement structure is valid
-                assert!(is_valid_pragma_structure(sql), "Invalid boolean PRAGMA structure: {}", sql);
-            }
+    // Generated SQL can intentionally contain invalid shapes. Keep those as
+    // observations so the harness only panics on real target-surface violations.
+    match (&stmt.pragma_type, &stmt.value) {
+        (
+            PragmaType::ForeignKeys | PragmaType::ReadUncommitted,
+            Some(PragmaValue::Boolean { .. }),
+        ) => {
+            let _structure_valid = is_valid_pragma_structure(sql);
         }
-        PragmaType::UserVersion | PragmaType::ApplicationId => {
-            // Integer pragmas should handle boundary values
-            if let Some(PragmaValue::Integer { value, .. }) = stmt.value {
-                // Verify integer serialization doesn't break parsing
-                assert!(value.abs() <= i64::MAX, "Integer value out of bounds in PRAGMA");
-            }
+        (
+            PragmaType::UserVersion | PragmaType::ApplicationId,
+            Some(PragmaValue::Integer { value, .. }),
+        ) => {
+            let _integer_magnitude = (*value).unsigned_abs();
         }
-        PragmaType::JournalMode => {
-            // String pragmas should handle quoting correctly
-            match &stmt.value {
-                Some(PragmaValue::String { content, format }) => {
-                    match format {
-                        StringFormat::SingleQuoted | StringFormat::DoubleQuoted => {
-                            // Quoted strings should be properly escaped
-                            assert!(!content.contains("\0"), "Null bytes not allowed in PRAGMA values");
-                        }
-                        _ => {}
-                    }
-                }
-                _ => {}
-            }
+        (PragmaType::JournalMode, Some(PragmaValue::String { content, format }))
+            if matches!(
+                *format,
+                StringFormat::SingleQuoted | StringFormat::DoubleQuoted
+            ) =>
+        {
+            let _contains_nul = content.contains('\0');
         }
         _ => {}
     }
@@ -402,17 +390,9 @@ fn test_sql_structure_parsing(sql: &str) {
     // Test edge cases in SQL structure parsing
     // Look for potential parsing vulnerabilities
 
-    // Check for null bytes which can terminate parsing early
-    assert!(!sql.contains('\0'), "Null bytes can break SQL parsing");
-
-    // Check for extremely long statements that could cause DoS
-    assert!(sql.len() <= 1024, "SQL statement too long");
-
-    // Verify comment parsing doesn't break PRAGMA detection
-    if sql.contains("/*") && !sql.contains("*/") {
-        // Unclosed block comment could break parsing
-        assert!(false, "Unclosed block comment in SQL: {}", sql);
-    }
+    let _contains_nul = sql.contains('\0');
+    let _within_size_limit = sql.len() <= 1024;
+    let _has_unclosed_block_comment = sql.contains("/*") && !sql.contains("*/");
 }
 
 fn is_valid_pragma_structure(sql: &str) -> bool {
@@ -441,7 +421,7 @@ fn test_checked_sql_surface(sql: &str) -> Result<(), SqliteError> {
         let trimmed = line.trim_start();
         if trimmed.starts_with("PRAGMA") {
             return Err(SqliteError::UnsafeSql(
-                "PRAGMA statements require the explicit *_unchecked SQLite APIs".to_string()
+                "PRAGMA statements require the explicit *_unchecked SQLite APIs".to_string(),
             ));
         }
         // Handle comments
@@ -450,7 +430,7 @@ fn test_checked_sql_surface(sql: &str) -> Result<(), SqliteError> {
             let before_pragma = &trimmed[..pragma_pos];
             if !before_pragma.contains("/*") && !before_pragma.contains("--") {
                 return Err(SqliteError::UnsafeSql(
-                    "PRAGMA statements require *_unchecked APIs".to_string()
+                    "PRAGMA statements require *_unchecked APIs".to_string(),
                 ));
             }
         }
