@@ -31,7 +31,7 @@
 
 use arbitrary::Arbitrary;
 use asupersync::bytes::Bytes;
-use asupersync::http::h2::hpack::Decoder;
+use asupersync::http::h2::hpack::{Decoder, Header};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_BLOCK_BYTES: usize = 64 * 1024;
@@ -85,49 +85,98 @@ enum Scenario {
     },
 }
 
-fuzz_target!(|s: Scenario| match s {
-    Scenario::HuffmanPrefixEdge {
-        name_len_bump,
-        value_len_bump,
-        payload,
-        use_huffman_flag,
-    } => fuzz_huffman_prefix_edge(name_len_bump, value_len_bump, &payload, use_huffman_flag),
-    Scenario::SizeUpdateMidBlock {
-        prelude_size_update,
-        first_header_index,
-        mid_block_new_size,
-        trailing_header,
-    } => fuzz_size_update_mid_block(
-        prelude_size_update,
-        first_header_index,
-        mid_block_new_size,
-        trailing_header,
-    ),
-    Scenario::LiteralNoIndexing {
-        never_indexed,
-        name_index,
-        value_payload,
-        use_huffman,
-    } => fuzz_literal_no_indexing(never_indexed, name_index, &value_payload, use_huffman),
-    Scenario::TableShrinkEviction {
-        allowed_size,
-        size_updates,
-        insertions,
-        post_insert_size,
-        followup_index_lookups,
-    } => fuzz_table_shrink_eviction(
-        allowed_size,
-        &size_updates,
-        &insertions,
-        post_insert_size,
-        &followup_index_lookups,
-    ),
-    Scenario::MalformedVarint {
-        prefix_pattern,
-        prefix_bits,
-        continuation,
-    } => fuzz_malformed_varint(prefix_pattern, prefix_bits, &continuation),
+fuzz_target!(|s: Scenario| {
+    assert_table_shrink_rejects_stale_index_and_recovers();
+
+    match s {
+        Scenario::HuffmanPrefixEdge {
+            name_len_bump,
+            value_len_bump,
+            payload,
+            use_huffman_flag,
+        } => fuzz_huffman_prefix_edge(name_len_bump, value_len_bump, &payload, use_huffman_flag),
+        Scenario::SizeUpdateMidBlock {
+            prelude_size_update,
+            first_header_index,
+            mid_block_new_size,
+            trailing_header,
+        } => fuzz_size_update_mid_block(
+            prelude_size_update,
+            first_header_index,
+            mid_block_new_size,
+            trailing_header,
+        ),
+        Scenario::LiteralNoIndexing {
+            never_indexed,
+            name_index,
+            value_payload,
+            use_huffman,
+        } => fuzz_literal_no_indexing(never_indexed, name_index, &value_payload, use_huffman),
+        Scenario::TableShrinkEviction {
+            allowed_size,
+            size_updates,
+            insertions,
+            post_insert_size,
+            followup_index_lookups,
+        } => fuzz_table_shrink_eviction(
+            allowed_size,
+            &size_updates,
+            &insertions,
+            post_insert_size,
+            &followup_index_lookups,
+        ),
+        Scenario::MalformedVarint {
+            prefix_pattern,
+            prefix_bits,
+            continuation,
+        } => fuzz_malformed_varint(prefix_pattern, prefix_bits, &continuation),
+    }
 });
+
+fn assert_table_shrink_rejects_stale_index_and_recovers() {
+    let mut decoder = Decoder::new();
+
+    let mut seed = Vec::new();
+    seed.push(0x40); // Literal header field with incremental indexing, literal name.
+    encode_string_len(&mut seed, "x-evict-me".len(), false);
+    seed.extend_from_slice(b"x-evict-me");
+    encode_string_len(&mut seed, "value".len(), false);
+    seed.extend_from_slice(b"value");
+
+    let decoded = decoder
+        .decode(&mut Bytes::from(seed))
+        .expect("seed dynamic table entry");
+    assert_eq!(decoded, vec![Header::new("x-evict-me", "value")]);
+    assert!(
+        decoder.dynamic_table_size() > 0,
+        "seeded header must populate the dynamic table"
+    );
+
+    let mut evict_then_read = Vec::new();
+    evict_then_read.push(0x20); // Dynamic table size update at block start.
+    encode_integer_into(&mut evict_then_read, 0, 5);
+    evict_then_read.push(0x80); // Indexed header field.
+    encode_integer_into(&mut evict_then_read, 62, 7);
+
+    let err = decoder
+        .decode(&mut Bytes::from(evict_then_read))
+        .expect_err("stale dynamic-table index must fail after shrink-to-zero");
+    let message = err.to_string();
+    assert!(
+        message.contains("invalid dynamic index"),
+        "unexpected stale-index error: {message}"
+    );
+    assert_eq!(
+        decoder.dynamic_table_size(),
+        0,
+        "shrink-to-zero must evict seeded dynamic entries"
+    );
+
+    let decoded = decoder
+        .decode(&mut Bytes::from(vec![0x82]))
+        .expect("decoder should remain usable after stale-index rejection");
+    assert_eq!(decoded, vec![Header::new(":method", "GET")]);
+}
 
 fn observe_decode(decoder: &mut Decoder, bytes: &mut Bytes, scenario: &str) {
     let before_len = bytes.len();

@@ -153,6 +153,7 @@ name = "fuzz_hpack_decode"
 path = "fuzz_targets/hpack_decode.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "fuzz_hpack_decoder_comprehensive"
