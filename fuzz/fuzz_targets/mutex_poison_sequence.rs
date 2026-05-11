@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use asupersync::cx::Cx;
-use asupersync::sync::{LockError, Mutex, TryLockError};
+use asupersync::sync::{Mutex, TryLockError};
 use asupersync::types::Budget;
 use asupersync::util::ArenaIndex;
 use asupersync::{RegionId, TaskId};
@@ -62,7 +62,7 @@ struct TestConfig {
 const MAX_OPERATIONS: usize = 100;
 const MAX_GUARDS: usize = 16;
 const MAX_DELAY_MS: u64 = 3;
-const OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_TIMEOUT_SECONDS: u64 = 5;
 
 fuzz_target!(|input: MutexPoisonFuzz| {
     // Apply resource limits
@@ -76,7 +76,11 @@ fuzz_target!(|input: MutexPoisonFuzz| {
     }
 
     // Execute the poison sequence test
-    execute_and_verify_poison_correctness(input.start_poisoned, operations);
+    execute_and_verify_poison_correctness(
+        input.start_poisoned,
+        operations,
+        input.config.timeout_seconds,
+    );
 });
 
 /// Tracks mutex operations during testing
@@ -192,6 +196,81 @@ impl MutexTracker {
                 self.successful_acquires
             );
         }
+
+        let now = Instant::now();
+        for (guard_id, info) in &self.held_guards {
+            assert!(
+                (*guard_id as usize) < MAX_GUARDS,
+                "Tracked guard id is outside the bounded guard range: {}",
+                guard_id
+            );
+            assert!(
+                info.acquired_at <= now,
+                "Tracked guard acquisition timestamp is in the future"
+            );
+        }
+
+        for event in &self.operation_log {
+            match event {
+                OperationEvent::TryAcquireSuccess {
+                    guard_id,
+                    timestamp,
+                }
+                | OperationEvent::GuardReleased {
+                    guard_id,
+                    timestamp,
+                } => {
+                    assert!(
+                        (*guard_id as usize) < MAX_GUARDS,
+                        "Operation log guard id is outside the bounded guard range: {}",
+                        guard_id
+                    );
+                    assert!(
+                        *timestamp <= now,
+                        "Operation log timestamp is in the future"
+                    );
+                }
+                OperationEvent::TryAcquireFailed {
+                    guard_id,
+                    reason,
+                    timestamp,
+                } => {
+                    assert!(
+                        (*guard_id as usize) < MAX_GUARDS,
+                        "Failed-acquire guard id is outside the bounded guard range: {}",
+                        guard_id
+                    );
+                    assert!(
+                        matches!(reason.as_str(), "poisoned" | "locked"),
+                        "Unexpected try_lock failure reason: {}",
+                        reason
+                    );
+                    assert!(
+                        *timestamp <= now,
+                        "Operation log timestamp is in the future"
+                    );
+                }
+                OperationEvent::StateChecked {
+                    check_type,
+                    value,
+                    timestamp,
+                } => {
+                    assert!(
+                        matches!(check_type.as_str(), "poisoned" | "locked" | "waiters"),
+                        "Unexpected state-check type: {}",
+                        check_type
+                    );
+                    assert!(
+                        !value.is_empty(),
+                        "State-check log should record the observed value"
+                    );
+                    assert!(
+                        *timestamp <= now,
+                        "Operation log timestamp is in the future"
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -242,7 +321,11 @@ fn create_poisoned_mutex() -> Arc<Mutex<u32>> {
 }
 
 /// Execute poison operations and verify correctness
-fn execute_and_verify_poison_correctness(start_poisoned: bool, operations: Vec<MutexOperation>) {
+fn execute_and_verify_poison_correctness(
+    start_poisoned: bool,
+    operations: Vec<MutexOperation>,
+    timeout_seconds: u8,
+) {
     // Create mutex (poisoned or clean)
     let mutex = if start_poisoned {
         create_poisoned_mutex()
@@ -254,10 +337,12 @@ fn execute_and_verify_poison_correctness(start_poisoned: bool, operations: Vec<M
     let mut guards: HashMap<u8, asupersync::sync::MutexGuard<'_, u32>> = HashMap::new();
 
     let start_time = Instant::now();
+    let operation_timeout =
+        Duration::from_secs(u64::from(timeout_seconds).clamp(1, MAX_TIMEOUT_SECONDS));
 
     for operation in operations {
         // Check timeout
-        if start_time.elapsed() > OPERATION_TIMEOUT {
+        if start_time.elapsed() > operation_timeout {
             break;
         }
 
@@ -413,7 +498,7 @@ mod tests {
             MutexOperation::Release { guard_id: 1 },
             MutexOperation::CheckLocked, // Should be false
         ];
-        execute_and_verify_poison_correctness(false, operations);
+        execute_and_verify_poison_correctness(false, operations, MAX_TIMEOUT_SECONDS as u8);
     }
 
     #[test]
@@ -424,7 +509,7 @@ mod tests {
             MutexOperation::CheckLocked,                // State undefined but shouldn't crash
             MutexOperation::CheckWaiters,               // Should be 0
         ];
-        execute_and_verify_poison_correctness(true, operations);
+        execute_and_verify_poison_correctness(true, operations, MAX_TIMEOUT_SECONDS as u8);
     }
 
     #[test]
@@ -435,7 +520,7 @@ mod tests {
             MutexOperation::TryAcquire { guard_id: 3 }, // Should fail
             MutexOperation::CheckPoisoned,              // Should be true
         ];
-        execute_and_verify_poison_correctness(true, operations);
+        execute_and_verify_poison_correctness(true, operations, MAX_TIMEOUT_SECONDS as u8);
     }
 
     #[test]
@@ -447,7 +532,7 @@ mod tests {
             MutexOperation::Release { guard_id: 1 },  // Should work
             MutexOperation::Release { guard_id: 1 },  // Should be no-op
         ];
-        execute_and_verify_poison_correctness(false, operations);
+        execute_and_verify_poison_correctness(false, operations, MAX_TIMEOUT_SECONDS as u8);
     }
 
     #[test]
@@ -463,6 +548,6 @@ mod tests {
             MutexOperation::Release { guard_id: 2 },
             MutexOperation::CheckWaiters,
         ];
-        execute_and_verify_poison_correctness(false, operations);
+        execute_and_verify_poison_correctness(false, operations, MAX_TIMEOUT_SECONDS as u8);
     }
 }
