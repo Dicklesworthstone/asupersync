@@ -17,7 +17,6 @@ use libfuzzer_sys::fuzz_target;
 
 /// HTTP/2 frame type identifiers
 const SETTINGS_TYPE: u8 = 0x4;
-const DATA_TYPE: u8 = 0x0;
 
 /// HTTP/2 SETTINGS parameter identifiers (RFC 7540 §6.5.2)
 const SETTINGS_HEADER_TABLE_SIZE: u16 = 0x1;
@@ -26,9 +25,6 @@ const SETTINGS_MAX_CONCURRENT_STREAMS: u16 = 0x3;
 const SETTINGS_INITIAL_WINDOW_SIZE: u16 = 0x4;
 const SETTINGS_MAX_FRAME_SIZE: u16 = 0x5;
 const SETTINGS_MAX_HEADER_LIST_SIZE: u16 = 0x6;
-
-/// HTTP/2 frame flags
-const SETTINGS_ACK_FLAG: u8 = 0x1;
 
 /// RFC 7540 §6.5.2: Maximum valid value for SETTINGS_INITIAL_WINDOW_SIZE
 const MAX_INITIAL_WINDOW_SIZE: u32 = 2_147_483_647; // 2^31 - 1
@@ -247,6 +243,13 @@ fn process_input(input: &H2InitialWindowSizeInput) -> Vec<ParseResult> {
         if test.test_with_streams && test.stream_count > 0 {
             let stream_id = 3; // First created stream
             results.push(parser.apply_window_update(stream_id, 1000));
+            if let Some(window) = parser.get_stream_window(stream_id) {
+                assert!(
+                    window <= MAX_INITIAL_WINDOW_SIZE as i64 || window < 0,
+                    "Tracked stream window exceeded maximum after update: {}",
+                    window
+                );
+            }
         }
     }
 
@@ -263,6 +266,18 @@ fuzz_target!(|input: H2InitialWindowSizeInput| {
 
     // Test key invariants
     for (i, test) in input.test_values.iter().enumerate() {
+        let encoded_settings = encode_settings_frame(
+            &[(SETTINGS_INITIAL_WINDOW_SIZE, test.window_size)],
+            input.max_frame_size,
+        );
+        assert_eq!(encoded_settings[3], SETTINGS_TYPE);
+        assert!(
+            encoded_settings.len() <= input.max_frame_size as usize + 9,
+            "Encoded SETTINGS frame exceeded max frame size envelope: {} > {}",
+            encoded_settings.len(),
+            input.max_frame_size as usize + 9
+        );
+
         if let Some(result) = results.get(i) {
             match result {
                 ParseResult::SettingsProcessed(window_size) => {
@@ -323,6 +338,12 @@ fuzz_target!(|input: H2InitialWindowSizeInput| {
             }
             (Err(_), false) => {
                 // Expected failure
+            }
+            (Ok(result), true) => {
+                panic!(
+                    "Parser returned unexpected result for valid window size {}: {:?}",
+                    value, result
+                );
             }
             (Ok(_), false) => {
                 panic!("Parser incorrectly accepted invalid window size: {}", value);
