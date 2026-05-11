@@ -273,7 +273,7 @@ fuzz_target!(|input: H2PathInput| {
             Err(PathValidationError::InvalidEncoding) => {
                 // Acceptable - encoding errors can occur with percent sequences
             }
-            Err(other_error) => {
+            Err(_) => {
                 // Other errors are also acceptable ways to reject invalid paths
                 // Real HTTP/2 implementation might use different error categories
             }

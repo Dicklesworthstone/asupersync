@@ -5527,6 +5527,7 @@ name = "h2_request_path_relative"
 path = "fuzz_targets/h2_request_path_relative.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_settings_recv_first_then_send"
