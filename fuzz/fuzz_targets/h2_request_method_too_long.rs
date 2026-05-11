@@ -1,4 +1,5 @@
 #![no_main]
+#![allow(dead_code)]
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
@@ -25,7 +26,10 @@ enum MethodStrategy {
     /// Generated method of specific length
     Generated { target_length: usize },
     /// Padded standard method
-    Padded { base: StandardMethod, padding: String },
+    Padded {
+        base: StandardMethod,
+        padding: String,
+    },
     /// Repeated character method
     Repeated { character: char, count: usize },
     /// Mixed case method
@@ -204,10 +208,8 @@ impl MockH2MethodParser {
         }
 
         // Extension method check
-        if !self.config.allow_extensions {
-            if !Self::is_standard_method(method) {
-                return Err(MethodValidationError::UnknownMethod);
-            }
+        if !self.config.allow_extensions && !Self::is_standard_method(method) {
+            return Err(MethodValidationError::UnknownMethod);
         }
 
         Ok(())
@@ -215,15 +217,30 @@ impl MockH2MethodParser {
 
     fn is_valid_method_char(ch: char) -> bool {
         // RFC 9110 tchar
-        ch.is_ascii_alphanumeric() ||
-        matches!(ch, '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' | '-' | '.' |
-                     '^' | '_' | '`' | '|' | '~')
+        ch.is_ascii_alphanumeric()
+            || matches!(
+                ch,
+                '!' | '#'
+                    | '$'
+                    | '%'
+                    | '&'
+                    | '\''
+                    | '*'
+                    | '+'
+                    | '-'
+                    | '.'
+                    | '^'
+                    | '_'
+                    | '`'
+                    | '|'
+                    | '~'
+            )
     }
 
     fn is_standard_method(method: &str) -> bool {
-        matches!(method.to_uppercase().as_str(),
-            "GET" | "POST" | "PUT" | "DELETE" | "HEAD" |
-            "OPTIONS" | "PATCH" | "TRACE" | "CONNECT"
+        matches!(
+            method.to_uppercase().as_str(),
+            "GET" | "POST" | "PUT" | "DELETE" | "HEAD" | "OPTIONS" | "PATCH" | "TRACE" | "CONNECT"
         )
     }
 
@@ -240,7 +257,8 @@ impl MockH2MethodParser {
                     StandardMethod::Patch => "PATCH",
                     StandardMethod::Trace => "TRACE",
                     StandardMethod::Connect => "CONNECT",
-                }.to_string();
+                }
+                .to_string();
 
                 Self::apply_properties(base, &input.method_properties)
             }
@@ -307,7 +325,7 @@ impl MockH2MethodParser {
 
         if props.unicode && method.len() < 100 {
             // Add some unicode, but this will likely cause NonAscii error
-            method.push_str("🚀");
+            method.push('🚀');
         }
 
         if props.control_chars && method.len() < 100 {
@@ -326,15 +344,13 @@ impl MockH2MethodParser {
             LengthCategory::LongExtension => 48,
             LengthCategory::VeryLong => 128,
             LengthCategory::ExtremelyLong => 512,
-            LengthCategory::Boundary(test) => {
-                match test {
-                    BoundaryTest::Around64 { offset } => (64i32 + *offset as i32).max(0) as usize,
-                    BoundaryTest::Around128 { offset } => (128i32 + *offset as i32).max(0) as usize,
-                    BoundaryTest::Around256 { offset } => (256i32 + *offset as i32).max(0) as usize,
-                    BoundaryTest::Around512 { offset } => (512i32 + *offset as i32).max(0) as usize,
-                    BoundaryTest::Around1024 { offset } => (1024i32 + *offset as i32).max(0) as usize,
-                }
-            }
+            LengthCategory::Boundary(test) => match test {
+                BoundaryTest::Around64 { offset } => (64i32 + *offset as i32).max(0) as usize,
+                BoundaryTest::Around128 { offset } => (128i32 + *offset as i32).max(0) as usize,
+                BoundaryTest::Around256 { offset } => (256i32 + *offset as i32).max(0) as usize,
+                BoundaryTest::Around512 { offset } => (512i32 + *offset as i32).max(0) as usize,
+                BoundaryTest::Around1024 { offset } => (1024i32 + *offset as i32).max(0) as usize,
+            },
         }
     }
 }
@@ -359,57 +375,101 @@ fuzz_target!(|input: H2MethodLengthInput| {
         let result = parser.validate_method(&method);
 
         // Apply fuzzing assertions based on parser type and method characteristics
-        match parser_name {
+        match *parser_name {
             "permissive" => {
                 // Permissive parser (256 char limit)
                 if method.len() > 256 {
-                    assert!(matches!(result, Err(MethodValidationError::MethodTooLong { .. })));
+                    assert!(matches!(
+                        result,
+                        Err(MethodValidationError::MethodTooLong { .. })
+                    ));
                 } else if method.is_empty() {
                     assert!(matches!(result, Err(MethodValidationError::Empty)));
                 } else if !method.is_ascii() {
                     assert!(matches!(result, Err(MethodValidationError::NonAscii)));
                 } else if method.chars().any(|c| c.is_control()) {
-                    assert!(matches!(result, Err(MethodValidationError::ControlCharacters)));
-                } else if method.chars().any(|c| !MockH2MethodParser::is_valid_method_char(c)) {
-                    assert!(matches!(result, Err(MethodValidationError::InvalidCharacters)));
+                    assert!(matches!(
+                        result,
+                        Err(MethodValidationError::ControlCharacters)
+                    ));
+                } else if method
+                    .chars()
+                    .any(|c| !MockH2MethodParser::is_valid_method_char(c))
+                {
+                    assert!(matches!(
+                        result,
+                        Err(MethodValidationError::InvalidCharacters)
+                    ));
                 } else {
                     // Should accept valid methods up to 256 characters
-                    assert!(result.is_ok(), "Permissive parser rejected valid method: '{}'", method);
+                    assert!(
+                        result.is_ok(),
+                        "Permissive parser rejected valid method: '{}'",
+                        method
+                    );
                 }
             }
             "strict" => {
                 // Strict parser (64 char limit, no extensions)
                 if method.len() > 64 {
-                    assert!(matches!(result, Err(MethodValidationError::MethodTooLong { .. })));
+                    assert!(matches!(
+                        result,
+                        Err(MethodValidationError::MethodTooLong { .. })
+                    ));
                 } else if method.is_empty() {
                     assert!(matches!(result, Err(MethodValidationError::Empty)));
                 } else if !method.is_ascii() {
                     assert!(matches!(result, Err(MethodValidationError::NonAscii)));
                 } else if method.chars().any(|c| c.is_control()) {
-                    assert!(matches!(result, Err(MethodValidationError::ControlCharacters)));
-                } else if method.chars().any(|c| !MockH2MethodParser::is_valid_method_char(c)) {
-                    assert!(matches!(result, Err(MethodValidationError::InvalidCharacters)));
+                    assert!(matches!(
+                        result,
+                        Err(MethodValidationError::ControlCharacters)
+                    ));
+                } else if method
+                    .chars()
+                    .any(|c| !MockH2MethodParser::is_valid_method_char(c))
+                {
+                    assert!(matches!(
+                        result,
+                        Err(MethodValidationError::InvalidCharacters)
+                    ));
                 } else if method != method.to_uppercase() {
                     assert!(matches!(result, Err(MethodValidationError::InvalidCase)));
                 } else if !MockH2MethodParser::is_standard_method(&method) {
                     assert!(matches!(result, Err(MethodValidationError::UnknownMethod)));
                 } else {
                     // Should accept standard methods in uppercase
-                    assert!(result.is_ok(), "Strict parser rejected valid standard method: '{}'", method);
+                    assert!(
+                        result.is_ok(),
+                        "Strict parser rejected valid standard method: '{}'",
+                        method
+                    );
                 }
             }
             "very_strict" => {
                 // Very strict parser (16 char limit, no extensions, uppercase only)
                 if method.len() > 16 {
-                    assert!(matches!(result, Err(MethodValidationError::MethodTooLong { .. })));
+                    assert!(matches!(
+                        result,
+                        Err(MethodValidationError::MethodTooLong { .. })
+                    ));
                 } else if method.is_empty() {
                     assert!(matches!(result, Err(MethodValidationError::Empty)));
                 } else if !method.is_ascii() {
                     assert!(matches!(result, Err(MethodValidationError::NonAscii)));
                 } else if method.chars().any(|c| c.is_control()) {
-                    assert!(matches!(result, Err(MethodValidationError::ControlCharacters)));
-                } else if method.chars().any(|c| !MockH2MethodParser::is_valid_method_char(c)) {
-                    assert!(matches!(result, Err(MethodValidationError::InvalidCharacters)));
+                    assert!(matches!(
+                        result,
+                        Err(MethodValidationError::ControlCharacters)
+                    ));
+                } else if method
+                    .chars()
+                    .any(|c| !MockH2MethodParser::is_valid_method_char(c))
+                {
+                    assert!(matches!(
+                        result,
+                        Err(MethodValidationError::InvalidCharacters)
+                    ));
                 } else if method != method.to_uppercase() {
                     assert!(matches!(result, Err(MethodValidationError::InvalidCase)));
                 } else if !MockH2MethodParser::is_standard_method(&method) {
@@ -417,7 +477,11 @@ fuzz_target!(|input: H2MethodLengthInput| {
                 } else {
                     // Should accept standard methods in uppercase under 16 chars
                     // All standard methods are under 16 chars, so this should work
-                    assert!(result.is_ok(), "Very strict parser rejected valid standard method: '{}'", method);
+                    assert!(
+                        result.is_ok(),
+                        "Very strict parser rejected valid standard method: '{}'",
+                        method
+                    );
                 }
             }
             _ => unreachable!(),
@@ -432,25 +496,40 @@ fn test_method_invariants(method: &str, input: &H2MethodLengthInput) {
     // Invariant: Empty methods must always be rejected
     if method.is_empty() {
         let parser = MockH2MethodParser::new_permissive();
-        assert!(matches!(parser.validate_method(method), Err(MethodValidationError::Empty)));
+        assert!(matches!(
+            parser.validate_method(method),
+            Err(MethodValidationError::Empty)
+        ));
     }
 
     // Invariant: Non-ASCII methods must always be rejected
     if !method.is_ascii() {
         let parser = MockH2MethodParser::new_permissive();
-        assert!(matches!(parser.validate_method(method), Err(MethodValidationError::NonAscii)));
+        assert!(matches!(
+            parser.validate_method(method),
+            Err(MethodValidationError::NonAscii)
+        ));
     }
 
     // Invariant: Control characters must always be rejected
     if method.chars().any(|c| c.is_control()) {
         let parser = MockH2MethodParser::new_permissive();
-        assert!(matches!(parser.validate_method(method), Err(MethodValidationError::ControlCharacters)));
+        assert!(matches!(
+            parser.validate_method(method),
+            Err(MethodValidationError::ControlCharacters)
+        ));
     }
 
     // Invariant: Invalid characters must always be rejected
-    if method.chars().any(|c| !MockH2MethodParser::is_valid_method_char(c)) {
+    if method
+        .chars()
+        .any(|c| !MockH2MethodParser::is_valid_method_char(c))
+    {
         let parser = MockH2MethodParser::new_permissive();
-        assert!(matches!(parser.validate_method(method), Err(MethodValidationError::InvalidCharacters)));
+        assert!(matches!(
+            parser.validate_method(method),
+            Err(MethodValidationError::InvalidCharacters)
+        ));
     }
 
     // Invariant: Extremely long methods (>1024) should be rejected by all parsers
@@ -460,32 +539,44 @@ fn test_method_invariants(method: &str, input: &H2MethodLengthInput) {
             MockH2MethodParser::new_strict(),
             MockH2MethodParser::new_very_strict(),
         ] {
-            assert!(parser.validate_method(method).is_err(),
-                "Parser should reject method longer than 1024 characters");
+            assert!(
+                parser.validate_method(method).is_err(),
+                "Parser should reject method longer than 1024 characters"
+            );
         }
     }
 
     // Invariant: Boundary testing should be consistent
     if let LengthCategory::Boundary(boundary_test) = &input.length_category {
         match boundary_test {
-            BoundaryTest::Around64 { offset } => {
-                let target_len = (64i32 + *offset as i32).max(0) as usize;
+            BoundaryTest::Around64 { offset: _ } => {
                 // Methods around 64 characters should be handled consistently
                 let strict_parser = MockH2MethodParser::new_strict();
                 let result = strict_parser.validate_method(method);
 
-                if method.len() > 64 && method.chars().all(|c| MockH2MethodParser::is_valid_method_char(c)) && method.is_ascii() {
-                    assert!(matches!(result, Err(MethodValidationError::MethodTooLong { .. })));
+                if method.len() > 64
+                    && method.chars().all(MockH2MethodParser::is_valid_method_char)
+                    && method.is_ascii()
+                {
+                    assert!(matches!(
+                        result,
+                        Err(MethodValidationError::MethodTooLong { .. })
+                    ));
                 }
             }
-            BoundaryTest::Around256 { offset } => {
-                let target_len = (256i32 + *offset as i32).max(0) as usize;
+            BoundaryTest::Around256 { offset: _ } => {
                 // Methods around 256 characters should be handled consistently
                 let permissive_parser = MockH2MethodParser::new_permissive();
                 let result = permissive_parser.validate_method(method);
 
-                if method.len() > 256 && method.chars().all(|c| MockH2MethodParser::is_valid_method_char(c)) && method.is_ascii() {
-                    assert!(matches!(result, Err(MethodValidationError::MethodTooLong { .. })));
+                if method.len() > 256
+                    && method.chars().all(MockH2MethodParser::is_valid_method_char)
+                    && method.is_ascii()
+                {
+                    assert!(matches!(
+                        result,
+                        Err(MethodValidationError::MethodTooLong { .. })
+                    ));
                 }
             }
             _ => {
@@ -503,8 +594,14 @@ mod tests {
     fn test_standard_methods() {
         let parser = MockH2MethodParser::new_permissive();
 
-        for method in ["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "TRACE", "CONNECT"] {
-            assert!(parser.validate_method(method).is_ok(), "Standard method should be valid: {}", method);
+        for method in [
+            "GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "TRACE", "CONNECT",
+        ] {
+            assert!(
+                parser.validate_method(method).is_ok(),
+                "Standard method should be valid: {}",
+                method
+            );
         }
     }
 
@@ -518,31 +615,58 @@ mod tests {
         let method_64 = "X".repeat(64);
         assert!(permissive.validate_method(&method_64).is_ok());
         assert!(strict.validate_method(&method_64).is_ok());
-        assert!(matches!(very_strict.validate_method(&method_64), Err(MethodValidationError::MethodTooLong { .. })));
+        assert!(matches!(
+            very_strict.validate_method(&method_64),
+            Err(MethodValidationError::MethodTooLong { .. })
+        ));
 
         // 65 character method
         let method_65 = "X".repeat(65);
         assert!(permissive.validate_method(&method_65).is_ok());
-        assert!(matches!(strict.validate_method(&method_65), Err(MethodValidationError::MethodTooLong { .. })));
-        assert!(matches!(very_strict.validate_method(&method_65), Err(MethodValidationError::MethodTooLong { .. })));
+        assert!(matches!(
+            strict.validate_method(&method_65),
+            Err(MethodValidationError::MethodTooLong { .. })
+        ));
+        assert!(matches!(
+            very_strict.validate_method(&method_65),
+            Err(MethodValidationError::MethodTooLong { .. })
+        ));
 
         // 256 character method
         let method_256 = "X".repeat(256);
         assert!(permissive.validate_method(&method_256).is_ok());
-        assert!(matches!(strict.validate_method(&method_256), Err(MethodValidationError::MethodTooLong { .. })));
-        assert!(matches!(very_strict.validate_method(&method_256), Err(MethodValidationError::MethodTooLong { .. })));
+        assert!(matches!(
+            strict.validate_method(&method_256),
+            Err(MethodValidationError::MethodTooLong { .. })
+        ));
+        assert!(matches!(
+            very_strict.validate_method(&method_256),
+            Err(MethodValidationError::MethodTooLong { .. })
+        ));
 
         // 257 character method
         let method_257 = "X".repeat(257);
-        assert!(matches!(permissive.validate_method(&method_257), Err(MethodValidationError::MethodTooLong { .. })));
-        assert!(matches!(strict.validate_method(&method_257), Err(MethodValidationError::MethodTooLong { .. })));
-        assert!(matches!(very_strict.validate_method(&method_257), Err(MethodValidationError::MethodTooLong { .. })));
+        assert!(matches!(
+            permissive.validate_method(&method_257),
+            Err(MethodValidationError::MethodTooLong { .. })
+        ));
+        assert!(matches!(
+            strict.validate_method(&method_257),
+            Err(MethodValidationError::MethodTooLong { .. })
+        ));
+        assert!(matches!(
+            very_strict.validate_method(&method_257),
+            Err(MethodValidationError::MethodTooLong { .. })
+        ));
     }
 
     #[test]
     fn test_empty_method() {
         let parser = MockH2MethodParser::new_permissive();
-        assert!(matches!(parser.validate_method(""), Err(MethodValidationError::Empty)));
+        assert!(matches!(
+            parser.validate_method(""),
+            Err(MethodValidationError::Empty)
+        ));
     }
 
     #[test]
@@ -550,13 +674,22 @@ mod tests {
         let parser = MockH2MethodParser::new_permissive();
 
         // Control character
-        assert!(matches!(parser.validate_method("GET\x01"), Err(MethodValidationError::ControlCharacters)));
+        assert!(matches!(
+            parser.validate_method("GET\x01"),
+            Err(MethodValidationError::ControlCharacters)
+        ));
 
         // Unicode
-        assert!(matches!(parser.validate_method("GETé"), Err(MethodValidationError::NonAscii)));
+        assert!(matches!(
+            parser.validate_method("GETé"),
+            Err(MethodValidationError::NonAscii)
+        ));
 
         // Invalid tchar
-        assert!(matches!(parser.validate_method("GET<>"), Err(MethodValidationError::InvalidCharacters)));
+        assert!(matches!(
+            parser.validate_method("GET<>"),
+            Err(MethodValidationError::InvalidCharacters)
+        ));
     }
 
     #[test]
@@ -567,7 +700,10 @@ mod tests {
         let extension_method = "CUSTOMMETHOD";
 
         assert!(permissive.validate_method(extension_method).is_ok());
-        assert!(matches!(strict.validate_method(extension_method), Err(MethodValidationError::UnknownMethod)));
+        assert!(matches!(
+            strict.validate_method(extension_method),
+            Err(MethodValidationError::UnknownMethod)
+        ));
     }
 
     #[test]
@@ -579,7 +715,10 @@ mod tests {
         assert!(permissive.validate_method("GET").is_ok());
 
         assert!(strict.validate_method("GET").is_ok());
-        assert!(matches!(strict.validate_method("get"), Err(MethodValidationError::InvalidCase)));
+        assert!(matches!(
+            strict.validate_method("get"),
+            Err(MethodValidationError::InvalidCase)
+        ));
     }
 
     #[test]
@@ -597,7 +736,10 @@ mod tests {
 
             // One over limit
             let method_over_limit = "X".repeat(limit + 1);
-            assert!(matches!(parser.validate_method(&method_over_limit), Err(MethodValidationError::MethodTooLong { .. })));
+            assert!(matches!(
+                parser.validate_method(&method_over_limit),
+                Err(MethodValidationError::MethodTooLong { .. })
+            ));
         }
     }
 }
