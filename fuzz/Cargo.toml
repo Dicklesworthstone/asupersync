@@ -5234,6 +5234,7 @@ name = "h2_settings_initial_window_size_change"
 path = "fuzz_targets/h2_settings_initial_window_size_change.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_priority_dependency_loop"
