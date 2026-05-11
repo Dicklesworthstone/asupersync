@@ -5135,6 +5135,7 @@ name = "h2_settings_max_frame_size_overflow"
 path = "fuzz_targets/h2_settings_max_frame_size_overflow.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_settings_unknown_id"

@@ -219,22 +219,21 @@ impl ProductionSettingsConnection {
             }
         }
 
-        if err.code == ErrorCode::FlowControlError {
-            if let Some(value) = frame.find_parameter(SettingsId::InitialWindowSize) {
-                if value > MAX_INITIAL_WINDOW_SIZE {
-                    self.protocol_errors
-                        .push(SettingsError::InvalidWindowSize { value });
-                    return;
-                }
-            }
+        if err.code == ErrorCode::FlowControlError
+            && let Some(value) = frame.find_parameter(SettingsId::InitialWindowSize)
+            && value > MAX_INITIAL_WINDOW_SIZE
+        {
+            self.protocol_errors
+                .push(SettingsError::InvalidWindowSize { value });
+            return;
         }
 
-        if let Some(value) = frame.find_parameter(SettingsId::EnablePush) {
-            if value > 1 {
-                self.protocol_errors
-                    .push(SettingsError::InvalidEnablePush { value });
-                return;
-            }
+        if let Some(value) = frame.find_parameter(SettingsId::EnablePush)
+            && value > 1
+        {
+            self.protocol_errors
+                .push(SettingsError::InvalidEnablePush { value });
+            return;
         }
 
         self.protocol_errors.push(SettingsError::ProductionRejected);
@@ -338,7 +337,7 @@ fuzz_target!(|input: SettingsMaxFrameSizeInput| {
                 let frame = SettingsFrame::new_max_frame_size(value);
                 let accepted = test_conn.process_settings_frame(&frame);
 
-                if value >= 16384 && value <= 16777215 {
+                if (MIN_MAX_FRAME_SIZE..=MAX_MAX_FRAME_SIZE).contains(&value) {
                     assert!(accepted, "Value {} should be valid", value);
                     assert!(
                         !test_conn.has_protocol_errors(),
@@ -376,7 +375,7 @@ fuzz_target!(|input: SettingsMaxFrameSizeInput| {
 
             // Validation should depend on MAX_FRAME_SIZE value
             let max_frame_size_valid =
-                input.max_frame_size >= 16384 && input.max_frame_size <= 16777215;
+                (MIN_MAX_FRAME_SIZE..=MAX_MAX_FRAME_SIZE).contains(&input.max_frame_size);
             if max_frame_size_valid {
                 // Other parameters might still cause errors, but MAX_FRAME_SIZE should be OK
                 if !accepted {
@@ -430,7 +429,7 @@ fuzz_target!(|input: SettingsMaxFrameSizeInput| {
 
     // Verify frame size is within valid range after successful operations
     assert!(
-        conn.current_max_frame_size() >= 16384 && conn.current_max_frame_size() <= 16777215,
+        (MIN_MAX_FRAME_SIZE..=MAX_MAX_FRAME_SIZE).contains(&conn.current_max_frame_size()),
         "Current max frame size should always be in valid range"
     );
 });
