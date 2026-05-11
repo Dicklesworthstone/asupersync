@@ -5874,3 +5874,10 @@ path = "fuzz_targets/http_header_map_invariants.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_h1_codec_arbitrary_headers"
+path = "fuzz_targets/fuzz_h1_codec_arbitrary_headers.rs"
+test = false
+doc = false
+bench = false

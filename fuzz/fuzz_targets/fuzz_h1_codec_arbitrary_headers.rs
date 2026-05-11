@@ -12,7 +12,6 @@
 
 use arbitrary::{Arbitrary, Result as ArbitraryResult, Unstructured};
 use libfuzzer_sys::fuzz_target;
-use std::fmt::Write as FmtWrite;
 
 use asupersync::bytes::BytesMut;
 use asupersync::codec::Decoder;
@@ -68,7 +67,10 @@ enum BodyConfig {
     /// Chunked encoding with arbitrary chunk data
     Chunked { chunks: Vec<ArbitraryChunk> },
     /// Both Content-Length and Transfer-Encoding (smuggling test)
-    Ambiguous { content_length: u64, chunks: Vec<ArbitraryChunk> },
+    Ambiguous {
+        content_length: u64,
+        chunks: Vec<ArbitraryChunk>,
+    },
 }
 
 #[derive(Debug)]
@@ -167,7 +169,7 @@ impl<'a> Arbitrary<'a> for BodyConfig {
                     chunks.push(ArbitraryChunk::arbitrary(u)?);
                 }
                 Self::Chunked { chunks }
-            },
+            }
             _ => {
                 let chunk_count = u.int_in_range(0..=MAX_CHUNK_COUNT)?;
                 let mut chunks = Vec::with_capacity(chunk_count);
@@ -176,9 +178,9 @@ impl<'a> Arbitrary<'a> for BodyConfig {
                 }
                 Self::Ambiguous {
                     content_length: u.arbitrary::<u32>()? as u64,
-                    chunks
+                    chunks,
                 }
-            },
+            }
         })
     }
 }
@@ -218,7 +220,11 @@ impl<'a> Arbitrary<'a> for ChunkMalformType {
     }
 }
 
-fn apply_header_attack(name_bytes: &[u8], value_bytes: &[u8], attack_type: HeaderAttackType) -> (Vec<u8>, Vec<u8>) {
+fn apply_header_attack(
+    name_bytes: &[u8],
+    value_bytes: &[u8],
+    attack_type: HeaderAttackType,
+) -> (Vec<u8>, Vec<u8>) {
     let mut name = name_bytes.to_vec();
     let mut value = value_bytes.to_vec();
 
@@ -235,32 +241,34 @@ fn apply_header_attack(name_bytes: &[u8], value_bytes: &[u8], attack_type: Heade
                     *b = b' ';
                 }
             }
-        },
+        }
         HeaderAttackType::CrlfInjection => {
             // Inject CRLF sequences for injection testing
             value.extend_from_slice(b"\r\nInjected: malicious\r\n");
-        },
+        }
         HeaderAttackType::NullBytes => {
             // Insert null bytes
             if !name.is_empty() {
-                name[name.len() / 2] = 0;
+                let midpoint = name.len() / 2;
+                name[midpoint] = 0;
             }
             if !value.is_empty() {
-                value[value.len() / 2] = 0;
+                let midpoint = value.len() / 2;
+                value[midpoint] = 0;
             }
-        },
+        }
         HeaderAttackType::HighAscii => {
             // Insert high ASCII/unicode bytes
             value.extend_from_slice(&[0xFF, 0xFE, 0xC0, 0x80]);
-        },
+        }
         HeaderAttackType::MixedControl => {
             // Mix various control characters
             value.extend_from_slice(&[0x01, 0x02, 0x0C, 0x1F, 0x7F]);
-        },
+        }
         HeaderAttackType::LineFolding => {
             // Obsolete line folding (should be rejected)
             value.extend_from_slice(b"\r\n\t continuation");
-        },
+        }
     }
 
     (name, value)
@@ -285,7 +293,8 @@ fn build_http_request(input: &ArbitraryHeaderInput) -> Vec<u8> {
 
     // Add arbitrary headers
     for header in &input.headers {
-        let (name_bytes, value_bytes) = apply_header_attack(&header.name_bytes, &header.value_bytes, header.attack_type);
+        let (name_bytes, value_bytes) =
+            apply_header_attack(&header.name_bytes, &header.value_bytes, header.attack_type);
 
         request.extend_from_slice(&name_bytes);
         request.push(b':');
@@ -296,20 +305,20 @@ fn build_http_request(input: &ArbitraryHeaderInput) -> Vec<u8> {
 
     // Add body-related headers
     match &input.body_config {
-        BodyConfig::None => {},
+        BodyConfig::None => {}
         BodyConfig::ContentLength(len) => {
             let header = format!("Content-Length: {len}\r\n");
             request.extend_from_slice(header.as_bytes());
-        },
+        }
         BodyConfig::Chunked { .. } => {
             request.extend_from_slice(b"Transfer-Encoding: chunked\r\n");
-        },
+        }
         BodyConfig::Ambiguous { content_length, .. } => {
             // Potential request smuggling: both headers present
             let cl_header = format!("Content-Length: {content_length}\r\n");
             request.extend_from_slice(cl_header.as_bytes());
             request.extend_from_slice(b"Transfer-Encoding: chunked\r\n");
-        },
+        }
     }
 
     // End headers
@@ -325,7 +334,7 @@ fn build_http_request(input: &ArbitraryHeaderInput) -> Vec<u8> {
                     request.push((i % 256) as u8);
                 }
             }
-        },
+        }
         BodyConfig::Chunked { chunks } | BodyConfig::Ambiguous { chunks, .. } => {
             for chunk in chunks {
                 let size_line = apply_chunk_malformation(&chunk.size_line_bytes, chunk.malform);
@@ -336,7 +345,7 @@ fn build_http_request(input: &ArbitraryHeaderInput) -> Vec<u8> {
             }
             // End chunked body
             request.extend_from_slice(b"0\r\n\r\n");
-        },
+        }
     }
 
     request
@@ -348,64 +357,66 @@ fn apply_chunk_malformation(size_bytes: &[u8], malform: ChunkMalformType) -> Vec
             // Generate a valid hex size
             let size = size_bytes.len() % 256;
             format!("{:x}", size).into_bytes()
-        },
+        }
         ChunkMalformType::BadSizeLine => {
             // Return raw bytes that might not be valid hex
             size_bytes.to_vec()
-        },
+        }
         ChunkMalformType::MissingSeparator => {
             let mut result = format!("{:x}", size_bytes.len() % 256).into_bytes();
             // Don't add proper CRLF separator - this will be added by caller
             result.extend_from_slice(b"invalid");
             result
-        },
+        }
         ChunkMalformType::ExtraBytes => {
             let mut result = format!("{:x}", size_bytes.len() % 256).into_bytes();
             result.extend_from_slice(b" extra garbage");
             result
-        },
+        }
         ChunkMalformType::BadExtensions => {
             let mut result = format!("{:x}", size_bytes.len() % 256).into_bytes();
             result.extend_from_slice(b";invalid=extension\x00\x01");
             result
-        },
+        }
         ChunkMalformType::InvalidHex => {
             // Mix valid hex with invalid characters
             b"XYZ123".to_vec()
-        },
+        }
     }
 }
 
 fn is_expected_error(err: &HttpError) -> bool {
-    matches!(err,
-        HttpError::BadRequestLine |
-        HttpError::BadHeader |
-        HttpError::UnsupportedVersion |
-        HttpError::BadMethod |
-        HttpError::BadContentLength |
-        HttpError::DuplicateContentLength |
-        HttpError::DuplicateTransferEncoding |
-        HttpError::BadTransferEncoding |
-        HttpError::InvalidHeaderName |
-        HttpError::InvalidHeaderValue |
-        HttpError::HeadersTooLarge |
-        HttpError::TooManyHeaders |
-        HttpError::RequestLineTooLong |
-        HttpError::BadChunkedEncoding |
-        HttpError::BodyTooLarge |
-        HttpError::BodyTooLargeDetailed { .. } |
-        HttpError::AmbiguousBodyLength |
-        HttpError::TrailersNotAllowed |
-        HttpError::PrefetchedDataRemaining(_) |
-        HttpError::Io(_)
+    matches!(
+        err,
+        HttpError::BadRequestLine
+            | HttpError::BadHeader
+            | HttpError::UnsupportedVersion
+            | HttpError::BadMethod
+            | HttpError::BadContentLength
+            | HttpError::DuplicateContentLength
+            | HttpError::DuplicateTransferEncoding
+            | HttpError::BadTransferEncoding
+            | HttpError::InvalidHeaderName
+            | HttpError::InvalidHeaderValue
+            | HttpError::HeadersTooLarge
+            | HttpError::TooManyHeaders
+            | HttpError::RequestLineTooLong
+            | HttpError::BadChunkedEncoding
+            | HttpError::BodyTooLarge
+            | HttpError::BodyTooLargeDetailed { .. }
+            | HttpError::AmbiguousBodyLength
+            | HttpError::TrailersNotAllowed
+            | HttpError::PrefetchedDataRemaining(_)
+            | HttpError::Io(_)
     )
 }
 
 fuzz_target!(|input: ArbitraryHeaderInput| {
     // Skip inputs that would create excessively large requests
-    if input.headers.len() > MAX_HEADER_COUNT ||
-       input.max_headers_size < 128 ||
-       input.max_headers_size > 16384 {
+    if input.headers.len() > MAX_HEADER_COUNT
+        || input.max_headers_size < 128
+        || input.max_headers_size > 16384
+    {
         return;
     }
 
@@ -424,10 +435,7 @@ fuzz_target!(|input: ArbitraryHeaderInput| {
         Ok(Some(request)) => {
             // If parsing succeeded, verify no control characters leaked into headers
             for (name, value) in &request.headers {
-                assert!(
-                    !name.contains('\0'),
-                    "null byte in header name: {name:?}"
-                );
+                assert!(!name.contains('\0'), "null byte in header name: {name:?}");
                 assert!(
                     !value.contains('\0'),
                     "null byte in header value: {value:?}"
@@ -444,29 +452,28 @@ fuzz_target!(|input: ArbitraryHeaderInput| {
 
             // Verify method and URI are clean
             assert!(
-                !request.method.as_str().contains('\0') &&
-                !request.method.as_str().contains('\r') &&
-                !request.method.as_str().contains('\n'),
-                "control characters in method: {:?}", request.method
+                !request.method.as_str().contains('\0')
+                    && !request.method.as_str().contains('\r')
+                    && !request.method.as_str().contains('\n'),
+                "control characters in method: {:?}",
+                request.method
             );
 
             assert!(
-                !request.uri.contains('\0') &&
-                !request.uri.contains('\r') &&
-                !request.uri.contains('\n'),
-                "control characters in URI: {:?}", request.uri
+                !request.uri.contains('\0')
+                    && !request.uri.contains('\r')
+                    && !request.uri.contains('\n'),
+                "control characters in URI: {:?}",
+                request.uri
             );
-        },
+        }
         Ok(None) => {
             // Incomplete - this is fine for fuzzing
-        },
+        }
         Err(err) => {
             // Malformed input should return expected error types, not panic
-            assert!(
-                is_expected_error(&err),
-                "unexpected error type: {err:?}"
-            );
-        },
+            assert!(is_expected_error(&err), "unexpected error type: {err:?}");
+        }
     }
 
     // Test eof handling if we have remaining bytes
@@ -479,11 +486,11 @@ fuzz_target!(|input: ArbitraryHeaderInput| {
                     assert!(!name.contains('\r') && !name.contains('\n'));
                     assert!(!value.contains('\r') && !value.contains('\n'));
                 }
-            },
-            Ok(None) => {},
+            }
+            Ok(None) => {}
             Err(err) => {
                 assert!(is_expected_error(&err), "unexpected EOF error: {err:?}");
-            },
+            }
         }
     }
 });
