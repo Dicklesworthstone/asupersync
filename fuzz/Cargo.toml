@@ -5867,6 +5867,15 @@ test = false
 doc = false
 bench = false
 
+# LabIoCap submit/complete counter consistency fuzzer.
+# Compares public IoStats snapshots against a shadow model across arbitrary event streams.
+[[bin]]
+name = "io_cap_counter_overflow"
+path = "fuzz_targets/io_cap_counter_overflow.rs"
+test = false
+doc = false
+bench = false
+
 # Progress certificate concurrent operations and ordering invariants fuzzer
 # Tests certificate validity under concurrent revoke operations, step ordering
 # monotonicity, and floating-point boundary edge cases (NaN, infinity, epsilon)

@@ -8,10 +8,9 @@
 //! - record_complete() -> completed.fetch_add(1, Ordering::Relaxed)
 //!
 //! **ATTACK VECTORS**:
-//! 1. Integer overflow: u64 counters wrap around after 2^64 operations
-//! 2. Stats corruption: submitted/completed counts become invalid
-//! 3. Accounting bypass: rate limits/quotas based on counters can be evaded
-//! 4. Logic errors: code assuming monotonic increase breaks on wrap
+//! 1. Stats corruption: submitted/completed counts diverge from recorded events
+//! 2. Accounting bypass: rate limits/quotas based on counters can be evaded
+//! 3. Logic errors: code assuming counter reads are internally inconsistent
 //!
 //! **ORACLE**: Shadow model tracking - compare fuzzer's expected counts
 //! against actual IoStats to detect overflow-induced corruption.
@@ -23,8 +22,8 @@ use asupersync::io::cap::{IoCap, IoStats, LabIoCap};
 use libfuzzer_sys::fuzz_target;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-const MAX_OPERATIONS: usize = 100_000; // Reasonable limit for exec/s
-const OVERFLOW_THRESHOLD: u64 = u64::MAX - 1000; // Near-overflow testing
+const MAX_OPERATIONS: usize = 256;
+const MAX_REPETITIONS: usize = 64;
 
 #[derive(Debug, Clone, Arbitrary)]
 struct IoCapOperation {
@@ -36,9 +35,9 @@ struct IoCapOperation {
 enum IoOpType {
     Submit,
     Complete,
-    SubmitBurst(u8),  // Submit 1-255 operations in tight loop
+    SubmitBurst(u8),   // Submit 1-255 operations in tight loop
     CompleteBurst(u8), // Complete 1-255 operations in tight loop
-    CheckStats,       // Verify stats consistency
+    CheckStats,        // Verify stats consistency
 }
 
 #[derive(Debug)]
@@ -69,21 +68,10 @@ impl ShadowStatsTracker {
             completed: self.completed.load(Ordering::Relaxed),
         }
     }
-
-    fn reset(&self) {
-        self.submitted.store(0, Ordering::Relaxed);
-        self.completed.store(0, Ordering::Relaxed);
-    }
-
-    fn set_near_overflow(&self) {
-        // Set counters near overflow boundary for targeted testing
-        self.submitted.store(OVERFLOW_THRESHOLD, Ordering::Relaxed);
-        self.completed.store(OVERFLOW_THRESHOLD, Ordering::Relaxed);
-    }
 }
 
 fn execute_operation(cap: &LabIoCap, shadow: &ShadowStatsTracker, op: &IoCapOperation) {
-    let repeat = (op.repeat_count as usize).max(1).min(1000); // Bound repetitions
+    let repeat = usize::from(op.repeat_count).clamp(1, MAX_REPETITIONS);
 
     match op.op_type {
         IoOpType::Submit => {
@@ -123,16 +111,9 @@ fn execute_operation(cap: &LabIoCap, shadow: &ShadowStatsTracker, op: &IoCapOper
                 cap_stats, shadow_stats
             );
 
-            // Invariant: completed should never exceed submitted in valid usage
-            // NOTE: This can be violated by malicious/corrupted input, but our
-            // fuzzer should respect this invariant to test realistic scenarios
-            if shadow_stats.completed > shadow_stats.submitted {
-                // This indicates potential overflow wrap-around corruption
-                panic!(
-                    "OVERFLOW CORRUPTION: completed ({}) > submitted ({})",
-                    shadow_stats.completed, shadow_stats.submitted
-                );
-            }
+            // `record_submit` and `record_complete` are independent counters.
+            // Arbitrary fuzz input may complete first; only divergence from the
+            // shadow model is a bug here.
         }
     }
 }
@@ -145,7 +126,6 @@ fuzz_target!(|input: Vec<IoCapOperation>| {
     let cap = LabIoCap::new_for_tests();
     let shadow = ShadowStatsTracker::new();
 
-    // Test scenario 1: Normal operation sequence
     for op in &input {
         execute_operation(&cap, &shadow, op);
 
@@ -155,56 +135,17 @@ fuzz_target!(|input: Vec<IoCapOperation>| {
 
         assert_eq!(
             cap_stats, shadow_stats,
-            "Stats consistency violation after {:?}", op
+            "Stats consistency violation after {:?}",
+            op
         );
-    }
-
-    // Test scenario 2: Near-overflow boundary testing
-    shadow.set_near_overflow();
-
-    // Force the IoCap to match shadow state by performing enough operations
-    // This is a test harness limitation - we can't directly set IoCap state
-    let current_cap_stats = cap.stats();
-    let target_submitted = OVERFLOW_THRESHOLD - current_cap_stats.submitted;
-    let target_completed = OVERFLOW_THRESHOLD - current_cap_stats.completed;
-
-    // Only proceed if the gap is reasonable (avoid infinite loops)
-    if target_submitted < 10_000 && target_completed < 10_000 {
-        for _ in 0..target_submitted {
-            cap.record_submit();
-        }
-        for _ in 0..target_completed {
-            cap.record_complete();
-        }
-
-        // Now both should be near overflow - test boundary operations
-        let near_overflow_ops = [
-            IoCapOperation { op_type: IoOpType::Submit, repeat_count: 5000 },
-            IoCapOperation { op_type: IoOpType::Complete, repeat_count: 3000 },
-            IoCapOperation { op_type: IoOpType::CheckStats, repeat_count: 1 },
-        ];
-
-        for op in &near_overflow_ops {
-            execute_operation(&cap, &shadow, op);
-        }
     }
 
     // Final consistency check
     let final_cap_stats = cap.stats();
+    let final_shadow_stats = shadow.stats();
 
-    // Validate final invariants
-    assert!(
-        final_cap_stats.submitted >= final_cap_stats.completed,
-        "INVARIANT VIOLATION: completed ({}) > submitted ({})",
-        final_cap_stats.completed, final_cap_stats.submitted
+    assert_eq!(
+        final_cap_stats, final_shadow_stats,
+        "Final stats consistency violation"
     );
-
-    // Check for overflow wrap-around indicators
-    if final_cap_stats.submitted < 1000 && input.len() > 1000 {
-        // Suspiciously low counter after many operations - possible overflow
-        panic!(
-            "POTENTIAL OVERFLOW: submitted counter ({}) suspiciously low after {} operations",
-            final_cap_stats.submitted, input.len()
-        );
-    }
 });
