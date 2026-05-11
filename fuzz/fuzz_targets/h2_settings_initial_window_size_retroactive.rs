@@ -30,8 +30,6 @@ enum StreamState {
     HalfClosedLocal,
     HalfClosedRemote,
     Closed,
-    ReservedLocal,
-    ReservedRemote,
 }
 
 impl StreamState {
@@ -47,7 +45,6 @@ impl StreamState {
 /// Stream flow control information
 #[derive(Debug, Clone)]
 struct StreamFlowControl {
-    stream_id: u32,
     state: StreamState,
     initial_send_window: i32,
     current_send_window: i32,
@@ -55,10 +52,9 @@ struct StreamFlowControl {
 }
 
 impl StreamFlowControl {
-    fn new(stream_id: u32, initial_window_size: u32) -> Self {
+    fn new(initial_window_size: u32) -> Self {
         let initial = i32::try_from(initial_window_size).unwrap_or(i32::MAX);
         Self {
-            stream_id,
             state: StreamState::Idle,
             initial_send_window: initial,
             current_send_window: initial,
@@ -69,7 +65,7 @@ impl StreamFlowControl {
     /// Update initial window size retroactively (mimics Stream::update_initial_window_size)
     fn update_initial_window_size(&mut self, new_size: u32) -> Result<(), String> {
         let new_size_i32 =
-            i32::try_from(new_size).map_err(|_| "initial window size too large".to_string())?;
+            i32::try_from(new_size).map_err(|_| String::from("initial window size too large"))?;
 
         let delta = new_size_i32 - self.initial_send_window;
 
@@ -79,7 +75,7 @@ impl StreamFlowControl {
             self.current_send_window = new_window;
             Ok(())
         } else {
-            Err("send window overflow".to_string())
+            Err(String::from("send window overflow"))
         }
     }
 
@@ -152,7 +148,6 @@ struct WindowUpdateConfig {
 struct MockStreamStore {
     streams: HashMap<u32, StreamFlowControl>,
     initial_window_size: u32,
-    errors: Vec<String>,
 }
 
 impl MockStreamStore {
@@ -160,14 +155,15 @@ impl MockStreamStore {
         Self {
             streams: HashMap::new(),
             initial_window_size,
-            errors: Vec::new(),
         }
     }
 
     /// Create a stream with the current initial window size
     fn create_stream(&mut self, stream_id: u32) -> &mut StreamFlowControl {
-        let stream = StreamFlowControl::new(stream_id, self.initial_window_size);
-        self.streams.entry(stream_id).or_insert(stream)
+        let initial_window_size = self.initial_window_size;
+        self.streams
+            .entry(stream_id)
+            .or_insert_with(|| StreamFlowControl::new(initial_window_size))
     }
 
     /// Get a stream by ID
@@ -183,7 +179,9 @@ impl MockStreamStore {
     fn set_initial_window_size(&mut self, new_size: u32) -> Result<(), String> {
         // RFC 7540 §6.9.2: Values above 2^31-1 MUST be treated as FLOW_CONTROL_ERROR
         if new_size > 0x7fff_ffff {
-            return Err("FLOW_CONTROL_ERROR: initial window size exceeds maximum".to_string());
+            return Err(String::from(
+                "FLOW_CONTROL_ERROR: initial window size exceeds maximum",
+            ));
         }
 
         // Stage the update - collect all streams that would be affected
@@ -205,10 +203,6 @@ impl MockStreamStore {
 
         self.initial_window_size = new_size;
         Ok(())
-    }
-
-    fn stream_count(&self) -> usize {
-        self.streams.len()
     }
 
     fn open_stream_count(&self) -> usize {
@@ -287,9 +281,6 @@ fuzz_target!(|scenario: WindowSizeScenario| {
     // Set up streams with various configurations
     for stream_config in &scenario.streams {
         let stream_id = (stream_config.stream_id % 50) + 1; // Keep in reasonable range
-        if stream_id == 0 {
-            continue;
-        } // Skip stream 0 (connection-level)
 
         let stream = store.create_stream(stream_id);
 
@@ -314,18 +305,16 @@ fuzz_target!(|scenario: WindowSizeScenario| {
         scenario.window_updates
     };
 
-    // Record initial state for validation
-    let initial_stream_windows: HashMap<u32, i32> = store
-        .streams
-        .iter()
-        .map(|(&id, stream)| (id, stream.current_send_window))
-        .collect();
-
     let initial_open_count = store.open_stream_count();
 
     // Apply window size updates and validate behavior
-    for (i, update) in test_updates.iter().enumerate() {
+    for (update_index, update) in test_updates.iter().enumerate() {
         let old_window_size = store.initial_window_size;
+        let stream_windows_before: HashMap<u32, (StreamState, i32)> = store
+            .streams
+            .iter()
+            .map(|(&id, stream)| (id, (stream.state, stream.current_send_window)))
+            .collect();
         let result = store.set_initial_window_size(update.new_window_size);
 
         match result {
@@ -341,16 +330,25 @@ fuzz_target!(|scenario: WindowSizeScenario| {
                 if update.new_window_size <= 0x7fff_ffff {
                     assert_eq!(store.initial_window_size, update.new_window_size);
 
-                    // Check that open streams had their windows adjusted correctly
+                    // Check that open streams had their windows adjusted correctly.
                     let delta = (update.new_window_size as i32) - (old_window_size as i32);
-                    for (&stream_id, &old_window) in &initial_stream_windows {
+                    for (&stream_id, &(old_state, old_window)) in &stream_windows_before {
                         if let Some(stream) = store.get_stream(stream_id) {
-                            if stream.state.is_open() {
-                                let expected_window = old_window.saturating_add(delta);
-                                if stream.current_send_window != expected_window {
-                                    // This might be due to multiple updates - recalculate from scratch
-                                    // For now, just verify it's not the old window
-                                }
+                            if old_state.is_open() {
+                                let Some(expected_window) = old_window.checked_add(delta) else {
+                                    panic!(
+                                        "successful window update {update_index} overflowed stream {stream_id}"
+                                    );
+                                };
+                                assert_eq!(
+                                    stream.current_send_window, expected_window,
+                                    "window update {update_index} adjusted stream {stream_id} incorrectly"
+                                );
+                            } else {
+                                assert_eq!(
+                                    stream.current_send_window, old_window,
+                                    "window update {update_index} changed inactive stream {stream_id}"
+                                );
                             }
                         }
                     }
@@ -376,10 +374,25 @@ fuzz_target!(|scenario: WindowSizeScenario| {
                 // Verify atomic failure - store state should be unchanged
                 assert_eq!(
                     store.initial_window_size, old_window_size,
-                    "Store window size should not change on failed update"
+                    "Store window size should not change on failed update {update_index}"
                 );
+                for (&stream_id, &(_, old_window)) in &stream_windows_before {
+                    let stream = store
+                        .get_stream(stream_id)
+                        .unwrap_or_else(|| panic!("stream {stream_id} disappeared"));
+                    assert_eq!(
+                        stream.current_send_window, old_window,
+                        "failed window update {update_index} changed stream {stream_id}"
+                    );
+                }
             }
         }
+
+        assert_eq!(
+            store.open_stream_count(),
+            initial_open_count,
+            "window update {update_index} changed stream liveness"
+        );
     }
 
     // Additional specific tests for critical scenarios
@@ -401,23 +414,20 @@ fn test_retroactive_overflow_protection(store: &mut MockStreamStore) {
     // Try to set a very large window size that would cause overflow
     let result = store.set_initial_window_size(0x7fff_ffff);
 
-    // This might overflow or might not depending on the delta - either way it should be handled gracefully
-    match result {
-        Ok(()) => {
-            // If it succeeded, verify the window is reasonable
-            if let Some(stream) = store.get_stream(100) {
-                // Window should be valid (no overflow occurred)
-            }
-        }
-        Err(_) => {
-            // If it failed, verify original state is preserved
-            if let Some(stream) = store.get_stream(100) {
-                assert_eq!(
-                    stream.initial_send_window, 65535,
-                    "Original initial window should be preserved on overflow"
-                );
-            }
-        }
+    assert!(
+        result.is_err(),
+        "large positive delta should reject overflow-prone stream windows"
+    );
+    if let Some(stream) = store.get_stream(100) {
+        assert_eq!(
+            stream.initial_send_window, 65535,
+            "Original initial window should be preserved on overflow"
+        );
+        assert_eq!(
+            stream.current_send_window,
+            i32::MAX - 1000,
+            "Current send window should be preserved on overflow"
+        );
     }
 }
 
