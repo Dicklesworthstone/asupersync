@@ -5421,6 +5421,7 @@ name = "h2_request_pseudo_header_duplicate"
 path = "fuzz_targets/h2_request_pseudo_header_duplicate.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_priority_self_dependency"

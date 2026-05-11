@@ -1,8 +1,9 @@
 #![no_main]
+#![allow(dead_code)]
 
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// HTTP/2 request pseudo-header duplicate validation testing.
 /// Per RFC 7540 §8.1.2.1, all pseudo-headers (:method, :path, :scheme, :authority)
@@ -135,7 +136,7 @@ impl MockH2RequestParser {
         // Store regular header (multiple values allowed)
         self.regular_headers
             .entry(name.to_string())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(value.to_string());
 
         Ok(())
@@ -157,7 +158,7 @@ impl MockH2RequestParser {
         }
 
         // Check for case sensitivity - pseudo-headers must be lowercase
-        if name != name.to_lowercase() {
+        if name.chars().any(|c| c.is_ascii_uppercase()) {
             return Err(format!(
                 "PROTOCOL_ERROR: pseudo-header not lowercase: {}",
                 name
@@ -287,7 +288,7 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Ensure valid stream ID for requests (must be odd and > 0)
-    if input.stream_id == 0 || input.stream_id % 2 == 0 || input.stream_id > 1_000_000 {
+    if input.stream_id == 0 || input.stream_id.is_multiple_of(2) || input.stream_id > 1_000_000 {
         return;
     }
 
@@ -356,7 +357,7 @@ fuzz_target!(|data: &[u8]| {
     let has_uppercase_pseudo = input
         .headers
         .iter()
-        .any(|h| h.name.starts_with(':') && h.name != h.name.to_lowercase());
+        .any(|h| h.name.starts_with(':') && h.name.chars().any(|c| c.is_ascii_uppercase()));
 
     if has_uppercase_pseudo {
         assert!(
