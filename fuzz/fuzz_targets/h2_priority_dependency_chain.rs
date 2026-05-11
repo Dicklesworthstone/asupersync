@@ -1438,7 +1438,7 @@ fn normalize_stream_id(seed: u16) -> u32 {
 }
 
 fn normalize_dependency(seed: u16) -> u32 {
-    if seed % 17 == 0 {
+    if seed.is_multiple_of(17) {
         0
     } else {
         (u32::from(seed % 1024) * 2).saturating_add(1)

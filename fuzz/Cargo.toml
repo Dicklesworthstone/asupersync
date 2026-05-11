@@ -5240,6 +5240,7 @@ name = "h2_priority_dependency_chain"
 path = "fuzz_targets/h2_priority_dependency_chain.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_continuation_overflow"
