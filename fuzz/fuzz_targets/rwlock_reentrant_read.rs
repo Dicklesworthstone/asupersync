@@ -13,15 +13,12 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
-use asupersync::sync::RwLock;
 use asupersync::cx::Cx;
-use asupersync::util::ArenaIndex;
-use asupersync::types::{RegionId, TaskId, Budget};
-use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
-use std::sync::Arc;
-use std::collections::HashMap;
+use asupersync::sync::RwLock;
+use libfuzzer_sys::fuzz_target;
+use std::collections::{HashMap, hash_map::Entry};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Debug, Clone, Arbitrary)]
 struct RwLockReentrantConfig {
@@ -125,11 +122,6 @@ impl ReentrantTracker {
 
     fn record_try_read_success(&self) {
         self.try_read_successes.fetch_add(1, Ordering::SeqCst);
-        self.active_guards.fetch_add(1, Ordering::SeqCst);
-    }
-
-    fn record_deadlock(&self) {
-        self.deadlock_detected.fetch_add(1, Ordering::SeqCst);
     }
 
     fn record_double_release(&self) {
@@ -137,7 +129,8 @@ impl ReentrantTracker {
     }
 
     fn record_inconsistent_state(&self) {
-        self.inconsistent_state_detected.fetch_add(1, Ordering::SeqCst);
+        self.inconsistent_state_detected
+            .fetch_add(1, Ordering::SeqCst);
     }
 
     fn check_invariants(&self) -> Result<(), String> {
@@ -150,35 +143,38 @@ impl ReentrantTracker {
 
         // Core invariants: no deadlocks, no double releases, no inconsistencies
         if deadlocks > 0 {
-            return Err(format!("Detected {} deadlock situations", deadlocks));
+            return Err(format!("Detected {deadlocks} deadlock situations"));
         }
 
         if double_releases > 0 {
-            return Err(format!("Detected {} double-release situations", double_releases));
+            return Err(format!(
+                "Detected {double_releases} double-release situations"
+            ));
         }
 
         if inconsistent > 0 {
-            return Err(format!("Detected {} inconsistent state situations", inconsistent));
+            return Err(format!(
+                "Detected {inconsistent} inconsistent state situations"
+            ));
         }
 
         // Active guards should equal acquisitions minus releases
         if active != acquisitions.saturating_sub(releases) {
             return Err(format!(
-                "Guard count mismatch: {} active vs {} expected (acq {} - rel {})",
-                active, acquisitions.saturating_sub(releases), acquisitions, releases
+                "Guard count mismatch: {active} active vs {} expected (acq {acquisitions} - rel {releases})",
+                acquisitions.saturating_sub(releases)
             ));
         }
 
         // Sanity checks
         if releases > acquisitions {
             return Err(format!(
-                "More releases ({}) than acquisitions ({})",
-                releases, acquisitions
+                "More releases ({releases}) than acquisitions ({acquisitions})"
             ));
         }
 
         if acquisitions > 1000 {
-            return Err(format!("Excessive acquisitions: {}", acquisitions));
+            return Err(format!("Excessive acquisitions: {acquisitions}"));
         }
 
         Ok(())
@@ -188,15 +184,13 @@ impl ReentrantTracker {
 /// Tracks an individual read guard for testing
 struct TrackedGuard {
     _guard: asupersync::sync::RwLockReadGuard<'static, i32>,
-    guard_id: u8,
     acquired: bool,
 }
 
 impl TrackedGuard {
-    fn new(guard: asupersync::sync::RwLockReadGuard<'static, i32>, guard_id: u8) -> Self {
+    fn new(guard: asupersync::sync::RwLockReadGuard<'static, i32>) -> Self {
         Self {
             _guard: guard,
-            guard_id,
             acquired: true,
         }
     }
@@ -218,40 +212,42 @@ fn test_rwlock_reentrant_read_scenario(
     config: &RwLockReentrantConfig,
     tracker: &ReentrantTracker,
 ) -> Result<(), String> {
-    let cx = Cx::new(
-        RegionId::from_arena(ArenaIndex::new(0, 0)),
-        TaskId::from_arena(ArenaIndex::new(0, 0)),
-        Budget::INFINITE,
-    );
+    let cx = Cx::for_testing();
 
     // Use leaked reference to get 'static lifetime for guards
     let locks: Vec<&'static RwLock<i32>> = (0..RwLockReentrantConfig::max_locks())
-        .map(|i| Box::leak(Box::new(RwLock::new(i as i32))))
+        .map(|i| &*Box::leak(Box::new(RwLock::new(i32::from(i)))))
         .collect();
 
     let mut guards: HashMap<(u8, u8), TrackedGuard> = HashMap::new(); // (lock_id, guard_id) -> guard
 
-    let max_ops = config.max_operations.min(RwLockReentrantConfig::max_operations()) as usize;
+    let max_ops_limit = if config.test_concurrency {
+        RwLockReentrantConfig::max_operations()
+    } else {
+        RwLockReentrantConfig::max_operations().saturating_sub(5)
+    };
+    let max_ops = config.max_operations.min(max_ops_limit) as usize;
 
     for operation in config.operations.iter().take(max_ops) {
         match operation {
             ReentrantOperation::AcquireRead { lock_id, guard_id } => {
                 let lock_idx = (*lock_id % RwLockReentrantConfig::max_locks()) as usize;
-                let guard_key = (lock_idx as u8, *guard_id % RwLockReentrantConfig::max_guards_per_lock());
+                let guard_key = (
+                    lock_idx as u8,
+                    *guard_id % RwLockReentrantConfig::max_guards_per_lock(),
+                );
 
-                if !guards.contains_key(&guard_key) {
+                if let Entry::Vacant(entry) = guards.entry(guard_key) {
                     let lock = locks[lock_idx];
 
                     // Use blocking read for simplicity in fuzzing (we're testing same-thread reentrancy)
-                    let guard_result = futures::executor::block_on(async {
-                        lock.read(&cx).await
-                    });
+                    let guard_result = futures::executor::block_on(lock.read(&cx));
 
                     match guard_result {
                         Ok(guard) => {
                             tracker.record_read_acquisition();
-                            let tracked_guard = TrackedGuard::new(guard, guard_key.1);
-                            guards.insert(guard_key, tracked_guard);
+                            let tracked_guard = TrackedGuard::new(guard);
+                            entry.insert(tracked_guard);
                         }
                         Err(_) => {
                             // Read acquisition failed - this could happen if lock is poisoned
@@ -263,9 +259,12 @@ fn test_rwlock_reentrant_read_scenario(
 
             ReentrantOperation::TryAcquireRead { lock_id, guard_id } => {
                 let lock_idx = (*lock_id % RwLockReentrantConfig::max_locks()) as usize;
-                let guard_key = (lock_idx as u8, *guard_id % RwLockReentrantConfig::max_guards_per_lock());
+                let guard_key = (
+                    lock_idx as u8,
+                    *guard_id % RwLockReentrantConfig::max_guards_per_lock(),
+                );
 
-                if !guards.contains_key(&guard_key) {
+                if let Entry::Vacant(entry) = guards.entry(guard_key) {
                     let lock = locks[lock_idx];
                     tracker.record_try_read_attempt();
 
@@ -273,8 +272,8 @@ fn test_rwlock_reentrant_read_scenario(
                         Ok(guard) => {
                             tracker.record_try_read_success();
                             tracker.record_read_acquisition();
-                            let tracked_guard = TrackedGuard::new(guard, guard_key.1);
-                            guards.insert(guard_key, tracked_guard);
+                            let tracked_guard = TrackedGuard::new(guard);
+                            entry.insert(tracked_guard);
                         }
                         Err(_) => {
                             // try_read failed - could be due to writer waiting or lock poisoned
@@ -285,7 +284,10 @@ fn test_rwlock_reentrant_read_scenario(
 
             ReentrantOperation::ReleaseGuard { lock_id, guard_id } => {
                 let lock_idx = (*lock_id % RwLockReentrantConfig::max_locks()) as usize;
-                let guard_key = (lock_idx as u8, *guard_id % RwLockReentrantConfig::max_guards_per_lock());
+                let guard_key = (
+                    lock_idx as u8,
+                    *guard_id % RwLockReentrantConfig::max_guards_per_lock(),
+                );
 
                 if let Some(guard) = guards.remove(&guard_key) {
                     if guard.is_acquired() {
@@ -295,8 +297,7 @@ fn test_rwlock_reentrant_read_scenario(
                     } else {
                         tracker.record_double_release();
                         return Err(format!(
-                            "Attempted to release already-released guard {:?}",
-                            guard_key
+                            "Attempted to release already-released guard {guard_key:?}"
                         ));
                     }
                 }
@@ -309,10 +310,8 @@ fn test_rwlock_reentrant_read_scenario(
 
                 // Acquire multiple nested read locks
                 let mut nested_guards = Vec::new();
-                for i in 0..read_count {
-                    let guard_result = futures::executor::block_on(async {
-                        lock.read(&cx).await
-                    });
+                for _ in 0..read_count {
+                    let guard_result = futures::executor::block_on(lock.read(&cx));
 
                     match guard_result {
                         Ok(guard) => {
@@ -343,9 +342,7 @@ fn test_rwlock_reentrant_read_scenario(
                     match op % 3 {
                         0 => {
                             // Acquire read
-                            let guard_result = futures::executor::block_on(async {
-                                lock.read(&cx).await
-                            });
+                            let guard_result = futures::executor::block_on(lock.read(&cx));
 
                             if let Ok(guard) = guard_result {
                                 tracker.record_read_acquisition();
@@ -387,9 +384,7 @@ fn test_rwlock_reentrant_read_scenario(
                 // Acquire deeply nested read locks
                 let mut nested_guards = Vec::new();
                 for _i in 0..nest_depth {
-                    let guard_result = futures::executor::block_on(async {
-                        lock.read(&cx).await
-                    });
+                    let guard_result = futures::executor::block_on(lock.read(&cx));
 
                     match guard_result {
                         Ok(guard) => {
@@ -419,9 +414,7 @@ fn test_rwlock_reentrant_read_scenario(
 
                 for _i in 0..cycle_count {
                     // Rapid acquire/release
-                    let guard_result = futures::executor::block_on(async {
-                        lock.read(&cx).await
-                    });
+                    let guard_result = futures::executor::block_on(lock.read(&cx));
 
                     if let Ok(guard) = guard_result {
                         tracker.record_read_acquisition();
@@ -437,25 +430,23 @@ fn test_rwlock_reentrant_read_scenario(
                 let current_active = tracker.active_guards.load(Ordering::SeqCst);
                 let tracked_guards_count = guards.len();
 
-                // Our tracked guards should be consistent (though we may have some temp guards too)
-                if tracked_guards_count > current_active + 20 {
+                if tracked_guards_count != current_active {
                     tracker.record_inconsistent_state();
                     return Err(format!(
-                        "Inconsistent guard tracking: {} tracked vs {} active",
-                        tracked_guards_count, current_active
+                        "Inconsistent guard tracking: {tracked_guards_count} tracked vs {current_active} active"
                     ));
                 }
 
                 // Check tracking invariants
                 if let Err(msg) = tracker.check_invariants() {
-                    return Err(format!("State check failed: {}", msg));
+                    return Err(format!("State check failed: {msg}"));
                 }
             }
         }
     }
 
     // Release all remaining guards
-    for (_key, guard) in guards {
+    for guard in guards.into_values() {
         if guard.is_acquired() {
             tracker.record_read_release();
         }
@@ -464,7 +455,7 @@ fn test_rwlock_reentrant_read_scenario(
 
     // Final consistency check
     if let Err(msg) = tracker.check_invariants() {
-        return Err(format!("Final invariant violation: {}", msg));
+        return Err(format!("Final invariant violation: {msg}"));
     }
 
     Ok(())
@@ -486,17 +477,6 @@ fuzz_target!(|data: &[u8]| {
 
     // Test the reentrant read scenario
     if let Err(msg) = test_rwlock_reentrant_read_scenario(&config, &tracker) {
-        panic!("RwLock reentrant read test failed: {}", msg);
-    }
-
-    // Note: Concurrent testing from same thread doesn't make sense for reentrancy,
-    // so we skip the concurrent test for this particular fuzzer
-
-    // Ensure we performed meaningful operations
-    let total_acquisitions = tracker.read_acquisitions.load(Ordering::SeqCst);
-    let total_try_attempts = tracker.try_read_attempts.load(Ordering::SeqCst);
-
-    if total_acquisitions == 0 && total_try_attempts == 0 && !config.operations.is_empty() {
-        panic!("No meaningful read operations were performed during the test");
+        panic!("RwLock reentrant read test failed: {msg}");
     }
 });

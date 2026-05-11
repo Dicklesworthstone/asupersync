@@ -3965,6 +3965,15 @@ test = false
 doc = false
 bench = false
 
+# RwLock same-thread recursive read acquisition fuzzing.
+# Exercises nested read guard acquisition/release sequences and try_read accounting.
+[[bin]]
+name = "rwlock_reentrant_read"
+path = "fuzz_targets/rwlock_reentrant_read.rs"
+test = false
+doc = false
+bench = false
+
 # Tick #170 — Oneshot receiver cancel-during-await race condition testing
 # Tests arbitrary cancellation timing during receiver await operations to verify receiver gets
 # either Cancelled OR value, never both. Validates cancel-safety and proper race resolution.
