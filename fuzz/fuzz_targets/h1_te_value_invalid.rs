@@ -1,8 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
-use std::collections::HashMap;
+use libfuzzer_sys::fuzz_target;
 
 /// Fuzz target for HTTP/1.1 Transfer-Encoding header validation.
 ///
@@ -40,11 +39,9 @@ enum TeValidationResult {
 
 #[derive(Debug, Clone, PartialEq)]
 enum TeError {
-    InvalidCoding(String),
     ConflictWithContentLength,
     ChunkedNotLast,
     IdentityNotAllowed,
-    UnknownCoding(String),
     MalformedHeader,
     EmptyValue,
     ClientOnlyChunkedAllowed,
@@ -147,12 +144,16 @@ impl MockTeValidator {
         // RFC 9112 §6.1: Transfer-Encoding and Content-Length are mutually exclusive
         if has_content_length {
             self.stats.content_length_conflicts += 1;
-            return Ok(TeValidationResult::Invalid(TeError::ConflictWithContentLength));
+            self.stats.invalid_headers += 1;
+            return Ok(TeValidationResult::Invalid(
+                TeError::ConflictWithContentLength,
+            ));
         }
 
         // Handle empty header
         if te_value.trim().is_empty() {
             if self.policy.allow_empty_header {
+                self.stats.valid_headers += 1;
                 return Ok(TeValidationResult::Valid(TeInfo {
                     codings: vec![],
                     chunked_last: false,
@@ -161,15 +162,28 @@ impl MockTeValidator {
                     warnings: vec![],
                 }));
             } else {
+                self.stats.invalid_headers += 1;
                 return Ok(TeValidationResult::Invalid(TeError::EmptyValue));
             }
         }
 
         // Parse transfer codings
-        let codings = self.parse_transfer_codings(te_value)?;
+        let codings = match self.parse_transfer_codings(te_value) {
+            Ok(codings) => codings,
+            Err(error) => {
+                self.stats.invalid_headers += 1;
+                return Err(error);
+            }
+        };
 
         // Validate parsed codings
-        let validation_result = self.validate_codings(&codings, is_request, te_value)?;
+        let validation_result = match self.validate_codings(&codings, is_request, te_value) {
+            Ok(result) => result,
+            Err(error) => {
+                self.stats.invalid_headers += 1;
+                return Err(error);
+            }
+        };
 
         match validation_result {
             TeValidationResult::Valid(_) => {
@@ -255,7 +269,7 @@ impl MockTeValidator {
             match coding.as_str() {
                 "chunked" => {
                     has_chunked = true;
-                    chunked_last = (i == codings.len() - 1);
+                    chunked_last = i == codings.len() - 1;
                 }
                 "identity" => {
                     // RFC 9112: "identity" is not a valid transfer-coding
@@ -267,9 +281,10 @@ impl MockTeValidator {
                     // Check if it's a known coding
                     if !self.policy.known_codings.contains(coding) {
                         // Unknown coding - should respond with 501 Not Implemented
-                        return Ok(TeValidationResult::NotImplemented(
-                            format!("Unknown transfer-coding: {}", coding)
-                        ));
+                        return Ok(TeValidationResult::NotImplemented(format!(
+                            "Unknown transfer-coding: {}",
+                            coding
+                        )));
                     }
                 }
             }
@@ -284,7 +299,9 @@ impl MockTeValidator {
         if is_request && self.policy.client_chunked_only {
             // For client→server requests, typically only "chunked" is allowed
             if codings.len() != 1 || codings[0] != "chunked" {
-                return Ok(TeValidationResult::Invalid(TeError::ClientOnlyChunkedAllowed));
+                return Ok(TeValidationResult::Invalid(
+                    TeError::ClientOnlyChunkedAllowed,
+                ));
             }
         }
 
@@ -341,54 +358,50 @@ fn generate_test_cases() -> Vec<(String, String, bool, bool, TeValidationResult)
                 is_chunked: true,
                 raw_value: "chunked".to_string(),
                 warnings: vec![],
-            })
+            }),
         ),
-
         // Test case 2: Invalid "chunked, identity" (RFC 9112 violation)
         (
             "Invalid chunked, identity".to_string(),
             "chunked, identity".to_string(),
             true,  // is_request
             false, // no Content-Length
-            TeValidationResult::Invalid(TeError::IdentityNotAllowed)
+            TeValidationResult::Invalid(TeError::IdentityNotAllowed),
         ),
-
         // Test case 3: "gzip" without "chunked" suffix (problematic)
         (
             "gzip without chunked".to_string(),
             "gzip".to_string(),
             true,  // is_request
             false, // no Content-Length
-            TeValidationResult::Invalid(TeError::ClientOnlyChunkedAllowed)
+            TeValidationResult::Invalid(TeError::ClientOnlyChunkedAllowed),
         ),
-
         // Test case 4: Transfer-Encoding with Content-Length (conflict)
         (
             "TE with Content-Length conflict".to_string(),
             "chunked".to_string(),
             true, // is_request
             true, // has Content-Length
-            TeValidationResult::Invalid(TeError::ConflictWithContentLength)
+            TeValidationResult::Invalid(TeError::ConflictWithContentLength),
         ),
-
         // Test case 5: Unknown transfer-coding (501 Not Implemented)
         (
             "Unknown transfer-coding".to_string(),
             "custom-encoding".to_string(),
             true,  // is_request
             false, // no Content-Length
-            TeValidationResult::NotImplemented("Unknown transfer-coding: custom-encoding".to_string())
+            TeValidationResult::NotImplemented(
+                "Unknown transfer-coding: custom-encoding".to_string(),
+            ),
         ),
-
         // Test case 6: "chunked" not last (invalid order)
         (
             "chunked not last".to_string(),
             "chunked, gzip".to_string(),
             false, // is_response
             false, // no Content-Length
-            TeValidationResult::Invalid(TeError::InvalidCodingOrder)
+            TeValidationResult::Invalid(TeError::ChunkedNotLast),
         ),
-
         // Test case 7: Valid response with multiple codings
         (
             "Valid gzip, chunked response".to_string(),
@@ -401,27 +414,24 @@ fn generate_test_cases() -> Vec<(String, String, bool, bool, TeValidationResult)
                 is_chunked: true,
                 raw_value: "gzip, chunked".to_string(),
                 warnings: vec![],
-            })
+            }),
         ),
-
         // Test case 8: Empty Transfer-Encoding header
         (
             "Empty TE header".to_string(),
             "".to_string(),
             true,  // is_request
             false, // no Content-Length
-            TeValidationResult::Invalid(TeError::EmptyValue)
+            TeValidationResult::Invalid(TeError::EmptyValue),
         ),
-
         // Test case 9: Malformed header with just comma
         (
             "Malformed comma-only".to_string(),
             ", , ,".to_string(),
             true,  // is_request
             false, // no Content-Length
-            TeValidationResult::Invalid(TeError::EmptyValue)
+            TeValidationResult::Invalid(TeError::EmptyValue),
         ),
-
         // Test case 10: Case sensitivity test
         (
             "Case sensitivity test".to_string(),
@@ -434,7 +444,7 @@ fn generate_test_cases() -> Vec<(String, String, bool, bool, TeValidationResult)
                 is_chunked: true,
                 raw_value: "CHUNKED".to_string(),
                 warnings: vec![],
-            })
+            }),
         ),
     ]
 }
@@ -455,6 +465,7 @@ fuzz_target!(|data: &[u8]| {
     if test.te_value.len() > 1024 {
         return;
     }
+    let _content_length_observation = test.content_length;
 
     // Test with default (strict) policy
     let mut validator = MockTeValidator::new();
@@ -469,41 +480,54 @@ fuzz_target!(|data: &[u8]| {
     match result {
         Ok(TeValidationResult::Valid(info)) => {
             // Valid results should have consistent properties
-            assert_eq!(info.is_chunked, info.codings.contains(&"chunked".to_string()),
-                "is_chunked flag should match presence of 'chunked' in codings");
+            assert_eq!(
+                info.is_chunked,
+                info.codings.contains(&"chunked".to_string()),
+                "is_chunked flag should match presence of 'chunked' in codings"
+            );
 
-            if info.is_chunked {
-                if validator.policy.require_chunked_last {
-                    assert!(info.chunked_last,
-                        "chunked should be last when present and policy requires it");
-                }
+            if info.is_chunked && validator.policy.require_chunked_last {
+                assert!(
+                    info.chunked_last,
+                    "chunked should be last when present and policy requires it"
+                );
             }
 
             // Codings should not be empty for valid results (unless policy allows)
             if !validator.policy.allow_empty_header {
-                assert!(!info.codings.is_empty(),
-                    "Valid result should have non-empty codings");
+                assert!(
+                    !info.codings.is_empty(),
+                    "Valid result should have non-empty codings"
+                );
             }
 
             // Raw value should match input
-            assert_eq!(info.raw_value, test.te_value,
-                "Raw value should match input");
+            assert_eq!(
+                info.raw_value, test.te_value,
+                "Raw value should match input"
+            );
         }
 
         Ok(TeValidationResult::Invalid(error)) => {
             // Invalid results should have clear reasons
             match error {
                 TeError::ConflictWithContentLength => {
-                    assert!(test.has_content_length,
-                        "Content-Length conflict error should only occur when Content-Length present");
+                    assert!(
+                        test.has_content_length,
+                        "Content-Length conflict error should only occur when Content-Length present"
+                    );
                 }
                 TeError::ClientOnlyChunkedAllowed => {
-                    assert!(test.is_request,
-                        "Client-only chunked error should only occur for requests");
+                    assert!(
+                        test.is_request,
+                        "Client-only chunked error should only occur for requests"
+                    );
                 }
                 TeError::IdentityNotAllowed => {
-                    assert!(test.te_value.to_lowercase().contains("identity"),
-                        "Identity error should only occur when identity is present");
+                    assert!(
+                        test.te_value.to_lowercase().contains("identity"),
+                        "Identity error should only occur when identity is present"
+                    );
                 }
                 _ => {
                     // Other errors are acceptable
@@ -511,18 +535,24 @@ fuzz_target!(|data: &[u8]| {
             }
 
             // Stats should be updated
-            assert!(validator.get_stats().invalid_headers > 0,
-                "Invalid headers count should be incremented");
+            assert!(
+                validator.get_stats().invalid_headers > 0,
+                "Invalid headers count should be incremented"
+            );
         }
 
         Ok(TeValidationResult::NotImplemented(reason)) => {
             // Not implemented should have non-empty reason
-            assert!(!reason.is_empty(),
-                "Not implemented result should have non-empty reason");
+            assert!(
+                !reason.is_empty(),
+                "Not implemented result should have non-empty reason"
+            );
 
             // Stats should be updated
-            assert!(validator.get_stats().not_implemented_responses > 0,
-                "Not implemented responses count should be incremented");
+            assert!(
+                validator.get_stats().not_implemented_responses > 0,
+                "Not implemented responses count should be incremented"
+            );
         }
 
         Err(error) => {
@@ -568,25 +598,41 @@ fuzz_target!(|data: &[u8]| {
     // Run predefined test cases to ensure correctness
     for (test_name, te_value, is_request, has_content_length, expected) in generate_test_cases() {
         let mut test_validator = MockTeValidator::new();
-        let test_result = test_validator.validate_transfer_encoding(
-            &te_value,
-            is_request,
-            has_content_length,
-        );
+        let test_result =
+            test_validator.validate_transfer_encoding(&te_value, is_request, has_content_length);
 
         match (&test_result, &expected) {
-            (Ok(TeValidationResult::Valid(actual_info)), TeValidationResult::Valid(expected_info)) => {
-                assert_eq!(actual_info.codings, expected_info.codings,
-                    "Test '{}': codings mismatch", test_name);
-                assert_eq!(actual_info.is_chunked, expected_info.is_chunked,
-                    "Test '{}': is_chunked mismatch", test_name);
-                assert_eq!(actual_info.chunked_last, expected_info.chunked_last,
-                    "Test '{}': chunked_last mismatch", test_name);
+            (
+                Ok(TeValidationResult::Valid(actual_info)),
+                TeValidationResult::Valid(expected_info),
+            ) => {
+                assert_eq!(
+                    actual_info.codings, expected_info.codings,
+                    "Test '{}': codings mismatch",
+                    test_name
+                );
+                assert_eq!(
+                    actual_info.is_chunked, expected_info.is_chunked,
+                    "Test '{}': is_chunked mismatch",
+                    test_name
+                );
+                assert_eq!(
+                    actual_info.chunked_last, expected_info.chunked_last,
+                    "Test '{}': chunked_last mismatch",
+                    test_name
+                );
             }
 
-            (Ok(TeValidationResult::Invalid(actual_error)), TeValidationResult::Invalid(expected_error)) => {
-                assert_eq!(std::mem::discriminant(actual_error), std::mem::discriminant(expected_error),
-                    "Test '{}': invalid error type mismatch", test_name);
+            (
+                Ok(TeValidationResult::Invalid(actual_error)),
+                TeValidationResult::Invalid(expected_error),
+            ) => {
+                assert_eq!(
+                    std::mem::discriminant(actual_error),
+                    std::mem::discriminant(expected_error),
+                    "Test '{}': invalid error type mismatch",
+                    test_name
+                );
             }
 
             (Ok(TeValidationResult::NotImplemented(_)), TeValidationResult::NotImplemented(_)) => {
@@ -604,12 +650,16 @@ fuzz_target!(|data: &[u8]| {
     let final_stats = validator.get_stats();
     assert_eq!(
         final_stats.headers_validated,
-        final_stats.valid_headers + final_stats.invalid_headers + final_stats.not_implemented_responses,
+        final_stats.valid_headers
+            + final_stats.invalid_headers
+            + final_stats.not_implemented_responses,
         "Total validated should equal sum of valid, invalid, and not implemented"
     );
 
     if test.has_content_length {
-        assert!(final_stats.content_length_conflicts > 0,
-            "Content-Length conflicts should be recorded when present");
+        assert!(
+            final_stats.content_length_conflicts > 0,
+            "Content-Length conflicts should be recorded when present"
+        );
     }
 });

@@ -5478,6 +5478,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h1_te_value_invalid"
+path = "fuzz_targets/h1_te_value_invalid.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "h2_request_header_too_large"
 path = "fuzz_targets/h2_request_header_too_large.rs"
 test = false
