@@ -11,11 +11,15 @@
 //!
 //! Expected behavior:
 //! - WINDOW_UPDATE with delta=0: PROTOCOL_ERROR
-//! - WINDOW_UPDATE with delta>0: accepted
+//! - WINDOW_UPDATE with delta>0: accepted unless the flow-control window overflows
 //! - Delta too large (>i32::MAX): flow_control error
-//! - Valid range deltas: accepted with proper window updates
+//! - Valid range deltas: accepted with proper window updates or rejected on overflow
 
 use arbitrary::Arbitrary;
+use asupersync::http::h2::{
+    Connection, ErrorCode, Frame, Settings,
+    frame::{SettingsFrame, WindowUpdateFrame as LiveWindowUpdateFrame},
+};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
@@ -30,14 +34,12 @@ struct WindowUpdateFrame {
 #[derive(Debug, Clone)]
 struct FlowControlState {
     send_window: i32,
-    recv_window: i32,
 }
 
 impl Default for FlowControlState {
     fn default() -> Self {
         Self {
             send_window: 65535, // Default window size
-            recv_window: 65535,
         }
     }
 }
@@ -55,18 +57,14 @@ struct WindowUpdateScenario {
 /// Mock HTTP/2 connection for WINDOW_UPDATE validation
 struct MockH2Connection {
     connection_send_window: i32,
-    connection_recv_window: i32,
     streams: HashMap<u32, FlowControlState>,
-    errors: Vec<String>,
 }
 
 impl MockH2Connection {
     fn new() -> Self {
         Self {
             connection_send_window: 65535, // Default connection window
-            connection_recv_window: 65535,
             streams: HashMap::new(),
-            errors: Vec::new(),
         }
     }
 
@@ -87,31 +85,27 @@ impl MockH2Connection {
         // Apply window update
         if frame.stream_id == 0 {
             // Connection-level window update
-            self.connection_send_window = self.connection_send_window.saturating_add(increment);
+            let new_window = i64::from(self.connection_send_window) + i64::from(increment);
 
             // Check for window overflow per RFC 9113 §6.9.1
-            if self.connection_send_window > i32::MAX {
+            if new_window > i64::from(i32::MAX) {
                 return Err("flow control window overflow".to_string());
             }
+
+            self.connection_send_window = new_window as i32;
         } else {
             // Stream-level window update
             let stream = self.streams.entry(frame.stream_id).or_default();
-            stream.send_window = stream.send_window.saturating_add(increment);
+            let new_window = i64::from(stream.send_window) + i64::from(increment);
 
-            if stream.send_window > i32::MAX {
+            if new_window > i64::from(i32::MAX) {
                 return Err("flow control window overflow".to_string());
             }
+
+            stream.send_window = new_window as i32;
         }
 
         Ok(())
-    }
-
-    fn get_connection_window(&self) -> i32 {
-        self.connection_send_window
-    }
-
-    fn get_stream_window(&self, stream_id: u32) -> Option<i32> {
-        self.streams.get(&stream_id).map(|s| s.send_window)
     }
 }
 
@@ -185,12 +179,7 @@ fuzz_target!(|scenario: WindowUpdateScenario| {
 
     let mut connection = MockH2Connection::new();
     let mut zero_delta_errors = 0;
-    let mut overflow_errors = 0;
-    let mut successful_updates = 0;
     let mut expected_zero_failures = 0;
-
-    // Get initial connection window for comparison
-    let initial_conn_window = connection.get_connection_window();
 
     // Test edge cases if requested
     let test_frames = if scenario.include_edge_cases {
@@ -206,7 +195,7 @@ fuzz_target!(|scenario: WindowUpdateScenario| {
     for frame in &test_frames {
         // Limit stream IDs to reasonable range
         let mut test_frame = frame.clone();
-        test_frame.stream_id = test_frame.stream_id % 20; // 0-19 range
+        test_frame.stream_id %= 20; // 0-19 range
 
         // Track expected failures
         if test_frame.increment == 0 {
@@ -217,22 +206,12 @@ fuzz_target!(|scenario: WindowUpdateScenario| {
 
         match result {
             Ok(()) => {
-                successful_updates += 1;
-
                 // Verify zero delta was not accepted (should always fail)
                 if test_frame.increment == 0 {
                     panic!(
                         "WINDOW_UPDATE with zero delta incorrectly accepted: stream_id={}",
                         test_frame.stream_id
                     );
-                }
-
-                // Verify window was actually updated for connection-level
-                if test_frame.stream_id == 0 {
-                    let new_window = connection.get_connection_window();
-                    if new_window <= initial_conn_window {
-                        // Window should have increased (unless overflow/saturation)
-                    }
                 }
             }
             Err(err) => {
@@ -247,15 +226,13 @@ fuzz_target!(|scenario: WindowUpdateScenario| {
                         );
                     }
                 } else if test_frame.increment > i32::MAX as u32 {
-                    overflow_errors += 1;
-
                     // Verify correct error message for overflow
                     if !err.contains("window increment too large")
                         && !err.contains("flow control window overflow")
                     {
-                        // Either "too large" (at parse) or "overflow" (at application) is valid
+                        panic!("Wrong error message for invalid WINDOW_UPDATE increment: {err}");
                     }
-                } else {
+                } else if !err.contains("flow control window overflow") {
                     // Unexpected error for valid increment
                     panic!(
                         "Unexpected error for valid WINDOW_UPDATE increment {}: {}",
@@ -276,6 +253,7 @@ fuzz_target!(|scenario: WindowUpdateScenario| {
 
     // Test specific RFC violations
     test_specific_rfc_violations(&mut connection);
+    assert_live_window_update_delta_zero();
 });
 
 /// Test specific RFC 9113 §6.9.1 violations
@@ -348,17 +326,69 @@ fn test_specific_rfc_violations(connection: &mut MockH2Connection) {
     );
     assert!(result.unwrap_err().contains("window increment too large"));
 
-    // Test 6: Maximum valid increment should succeed
-    let max_valid_frame = WindowUpdateFrame {
+    // Test 6: Maximum in-range increment overflows the current stream window.
+    let max_in_range_frame = WindowUpdateFrame {
         stream_id: 3,
         increment: i32::MAX as u32,
     };
-    let result = connection.process_window_update(&max_valid_frame);
+    let result = connection.process_window_update(&max_in_range_frame);
     assert!(
-        result.is_ok(),
-        "WINDOW_UPDATE with increment=i32::MAX should succeed: {:?}",
+        result.is_err(),
+        "WINDOW_UPDATE that exceeds i32::MAX window should fail: {:?}",
         result
     );
+    assert!(result.unwrap_err().contains("flow control window overflow"));
+}
+
+fn open_live_connection() -> Connection {
+    let mut connection = Connection::server(Settings::default());
+    connection
+        .process_frame(Frame::Settings(SettingsFrame::new(Vec::new())))
+        .expect("initial SETTINGS should open live H2 connection");
+    while connection.next_frame().is_some() {}
+    connection
+}
+
+fn assert_live_window_update_delta_zero() {
+    let mut connection = open_live_connection();
+
+    let err = connection
+        .process_frame(Frame::WindowUpdate(LiveWindowUpdateFrame::new(0, 0)))
+        .expect_err("connection-level zero WINDOW_UPDATE should fail");
+    assert_eq!(err.code, ErrorCode::ProtocolError);
+    assert_eq!(err.stream_id, None);
+    assert!(err.message.contains("WINDOW_UPDATE with zero increment"));
+
+    let err = connection
+        .process_frame(Frame::WindowUpdate(LiveWindowUpdateFrame::new(1, 0)))
+        .expect_err("stream-level zero WINDOW_UPDATE should fail");
+    assert_eq!(err.code, ErrorCode::ProtocolError);
+    assert_eq!(err.stream_id, Some(1));
+    assert!(err.message.contains("WINDOW_UPDATE with zero increment"));
+
+    connection
+        .process_frame(Frame::WindowUpdate(LiveWindowUpdateFrame::new(0, 1)))
+        .expect("connection-level WINDOW_UPDATE increment 1 should succeed");
+
+    let err = connection
+        .process_frame(Frame::WindowUpdate(LiveWindowUpdateFrame::new(
+            0,
+            i32::MAX as u32,
+        )))
+        .expect_err("connection-level WINDOW_UPDATE overflow should fail");
+    assert_eq!(err.code, ErrorCode::FlowControlError);
+    assert_eq!(err.stream_id, None);
+    assert!(err.message.contains("connection window overflow"));
+
+    let err = connection
+        .process_frame(Frame::WindowUpdate(LiveWindowUpdateFrame::new(
+            0,
+            (i32::MAX as u32) + 1,
+        )))
+        .expect_err("oversized WINDOW_UPDATE should fail");
+    assert_eq!(err.code, ErrorCode::FlowControlError);
+    assert_eq!(err.stream_id, None);
+    assert!(err.message.contains("window increment too large"));
 }
 
 #[cfg(test)]

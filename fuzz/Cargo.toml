@@ -4882,6 +4882,7 @@ name = "h2_window_update_delta_zero"
 path = "fuzz_targets/h2_window_update_delta_zero.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_settings_initial_window_size_retroactive"
