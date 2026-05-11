@@ -2,9 +2,9 @@
 
 use arbitrary::Arbitrary;
 use asupersync::{
-    codec::{Decoder, FramedRead, length_delimited::LengthDelimitedCodecBuilder},
-    cx::Cx,
+    codec::{FramedRead, length_delimited::LengthDelimitedCodec},
     io::{AsyncRead, ReadBuf},
+    stream::Stream,
 };
 use libfuzzer_sys::fuzz_target;
 use std::{
@@ -80,17 +80,15 @@ fuzz_target!(|data: FuzzInput| {
         _ => 4,
     };
 
-    let mut builder = LengthDelimitedCodecBuilder::new();
-    builder.max_frame_length((data.max_frame_len as usize).max(1));
-    builder.length_field_length(length_field_len);
-    builder.num_skip(data.num_skip as usize);
-    builder.length_adjustment(data.length_adjustment as isize);
-
-    let codec = builder.new_codec();
+    let codec = LengthDelimitedCodec::builder()
+        .max_frame_length((data.max_frame_len as usize).max(1))
+        .length_field_length(length_field_len)
+        .num_skip(data.num_skip as usize)
+        .length_adjustment(data.length_adjustment as isize)
+        .new_codec();
     let transport = MockTransport::new(data.chunks);
     let mut framed = FramedRead::new(transport, codec);
 
-    let cx = Cx::for_testing();
     let waker = futures_util::task::noop_waker();
     let mut ctx = Context::from_waker(&waker);
 
@@ -98,7 +96,7 @@ fuzz_target!(|data: FuzzInput| {
         // Run under a panic catch block just to be defensive, though libfuzzer catches panics anyway.
         // We want to ensure NO panic happens on partial frames or underflow.
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut pin_framed = Pin::new(&mut framed);
+            let pin_framed = Pin::new(&mut framed);
             pin_framed.poll_next(&mut ctx)
         }));
 

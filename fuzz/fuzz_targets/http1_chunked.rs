@@ -2,7 +2,7 @@
 
 use asupersync::bytes::BytesMut;
 use asupersync::codec::Decoder;
-use asupersync::http::h1::codec::{Http1Codec, HttpError};
+use asupersync::http::h1::codec::Http1Codec;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -19,28 +19,21 @@ fuzz_target!(|data: &[u8]| {
     // Append fuzzed data which will be parsed as chunked body
     buf.extend_from_slice(data);
 
-    // Call decode repeatedly until it returns None or Error
-    loop {
-        // Run under a panic catch block to be defensive
-        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| codec.decode(&mut buf)));
+    // Run one decode under a panic catch block to be defensive.
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| codec.decode(&mut buf)));
 
-        match res {
-            Ok(Ok(Some(_req))) => {
-                // Successfully decoded the request.
-                // If there's pipelined data, we could keep going, but one is enough.
-                break;
-            }
-            Ok(Ok(None)) => {
-                // Incomplete input.
-                break;
-            }
-            Ok(Err(_e)) => {
-                // Valid rejection (e.g. invalid hex, too large chunk, bad CRLF)
-                break;
-            }
-            Err(e) => {
-                std::panic::resume_unwind(e); // Panic is a bug
-            }
+    match res {
+        Ok(Ok(Some(_req))) => {
+            // Successfully decoded the request.
+        }
+        Ok(Ok(None)) => {
+            // Incomplete input.
+        }
+        Ok(Err(_e)) => {
+            // Valid rejection (e.g. invalid hex, too large chunk, bad CRLF)
+        }
+        Err(e) => {
+            std::panic::resume_unwind(e); // Panic is a bug
         }
     }
 });

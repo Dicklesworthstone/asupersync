@@ -977,13 +977,6 @@ doc = false
 bench = false
 
 [[bin]]
-name = "fuzz_http1_chunked"
-path = "fuzz_targets/http1_chunked.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "fuzz_distributed_snapshot"
 path = "fuzz_targets/distributed_snapshot.rs"
 test = false
@@ -2646,12 +2639,6 @@ path = "fuzz_targets/hpack_block_start.rs"
 test = false
 doc = false
 bench = false
-
-[[bin]]
-name = "fuzz_framed_length_delimited_underflow"
-path = "fuzz_targets/framed_length_delimited_underflow.rs"
-test = false
-doc = false
 
 [[bin]]
 name = "fuzz_length_delimited_eof_retention"
