@@ -23,10 +23,8 @@
 #![allow(clippy::too_many_lines)]
 
 use arbitrary::Arbitrary;
-use asupersync::raptorq::decoder::{DecodeError, InactivationDecoder, ReceivedSymbol};
-use asupersync::raptorq::rfc6330::{derive_encoding_params, EncodingParams};
-use asupersync::raptorq::systematic::SystematicEncoder;
-use asupersync::types::ObjectId;
+use asupersync::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
+use asupersync::raptorq::systematic::{SystematicEncoder, SystematicParams};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashSet;
 
@@ -35,7 +33,7 @@ const MAX_EXTRA_REPAIRS: usize = 16;
 
 // Focus on K values that create interesting K..K' gaps
 const BOUNDARY_K_VALUES: &[usize] = &[
-    7, 8, 9,    // Small boundary cases
+    7, 8, 9, // Small boundary cases
     15, 16, 17, // Power-of-2 boundaries
     31, 32, 33, // Another power-of-2 boundary
     63, 64, 65, // 64-byte boundary
@@ -67,13 +65,13 @@ enum BoundaryScenario {
 
 #[derive(Debug, Arbitrary)]
 struct KPrimeBoundaryInput {
-    k_selector: u8,           // Index into BOUNDARY_K_VALUES
-    symbol_size: u16,         // 1-1024 bytes per symbol
+    k_selector: u8,   // Index into BOUNDARY_K_VALUES
+    symbol_size: u16, // 1-1024 bytes per symbol
     scenario: BoundaryScenario,
     missing_pattern: MissingPattern,
-    extra_repairs: u8,        // Additional repair symbols
-    seed: u64,                // For deterministic randomness
-    force_failure: bool,      // Test intentional decode failures
+    extra_repairs: u8,   // Additional repair symbols
+    seed: u64,           // For deterministic randomness
+    force_failure: bool, // Test intentional decode failures
 }
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -93,8 +91,8 @@ struct BoundaryTestCase {
     k: usize,
     k_prime: usize,
     symbol_size: usize,
-    source_data: Vec<u8>,
-    encoding_params: EncodingParams,
+    seed: u64,
+    source_symbols: Vec<Vec<u8>>,
 }
 
 impl BoundaryTestCase {
@@ -104,38 +102,44 @@ impl BoundaryTestCase {
             return None;
         }
 
-        // Generate deterministic source data
-        let mut source_data = vec![0u8; total_bytes];
+        // Generate deterministic source symbols.
+        let mut source_symbols = vec![vec![0u8; symbol_size]; k];
         let mut rng_state = seed;
-        for byte in &mut source_data {
-            rng_state = rng_state.wrapping_mul(1103515245).wrapping_add(12345);
-            *byte = (rng_state >> 16) as u8;
+        for symbol in &mut source_symbols {
+            for byte in symbol {
+                rng_state = rng_state.wrapping_mul(1103515245).wrapping_add(12345);
+                *byte = (rng_state >> 16) as u8;
+            }
         }
 
-        let encoding_params = match derive_encoding_params(total_bytes, symbol_size) {
+        let params = match SystematicParams::try_for_source_block(k, symbol_size) {
             Ok(params) => params,
             Err(_) => return None,
         };
 
         // Verify we have a meaningful K..K' gap for testing
-        if encoding_params.k_prime <= encoding_params.k {
+        if params.k_prime <= params.k {
             return None; // No gap to test
         }
 
         Some(Self {
             k,
-            k_prime: encoding_params.k_prime,
+            k_prime: params.k_prime,
             symbol_size,
-            source_data,
-            encoding_params,
+            seed,
+            source_symbols,
         })
     }
 
-    fn create_encoder(&self) -> Result<SystematicEncoder, Box<dyn std::error::Error>> {
-        SystematicEncoder::new(ObjectId::new([0; 32]), &self.source_data, self.symbol_size)
+    fn create_encoder(&self) -> Option<SystematicEncoder> {
+        SystematicEncoder::new(&self.source_symbols, self.symbol_size, self.seed)
     }
 
-    fn apply_missing_pattern(&self, pattern: &MissingPattern, total_symbols: usize) -> HashSet<usize> {
+    fn apply_missing_pattern(
+        &self,
+        pattern: &MissingPattern,
+        total_symbols: usize,
+    ) -> HashSet<usize> {
         let mut missing = HashSet::new();
 
         match pattern {
@@ -180,26 +184,30 @@ impl BoundaryTestCase {
         &self,
         scenario: BoundaryScenario,
         missing_pattern: &MissingPattern,
-        extra_repairs: u8
+        extra_repairs: u8,
     ) -> Result<BoundaryTestResult, String> {
-        let encoder = self.create_encoder().map_err(|e| format!("Encoder creation failed: {}", e))?;
+        let Some(encoder) = self.create_encoder() else {
+            return Err("encoder creation returned None".to_string());
+        };
+        let decoder = InactivationDecoder::new(self.k, self.symbol_size, self.seed);
 
         // Generate source and repair symbols
         let mut available_symbols = Vec::new();
 
         // Add source symbols (K symbols)
-        for i in 0..self.k {
-            if let Some(symbol) = encoder.source_symbol(i) {
-                available_symbols.push((i, symbol));
-            }
+        for (i, symbol) in self.source_symbols.iter().enumerate() {
+            available_symbols.push(ReceivedSymbol::source(i as u32, symbol.clone()));
         }
 
         // Add repair symbols
         let repair_count = extra_repairs.min(MAX_EXTRA_REPAIRS as u8) as usize;
         for i in 0..repair_count {
-            if let Some(symbol) = encoder.repair_symbol(i) {
-                available_symbols.push((self.k + i, symbol));
-            }
+            let esi = self.k as u32 + i as u32;
+            let (columns, coefficients) = decoder
+                .repair_equation(esi)
+                .map_err(|err| format!("repair equation failed: {err:?}"))?;
+            let data = encoder.repair_symbol(esi);
+            available_symbols.push(ReceivedSymbol::repair(esi, columns, coefficients, data));
         }
 
         // Apply scenario-specific modifications
@@ -283,59 +291,47 @@ impl BoundaryTestCase {
             .into_iter()
             .enumerate()
             .filter(|(idx, _)| !missing_indices.contains(idx))
-            .map(|(_, (symbol_id, symbol_data))| ReceivedSymbol {
-                id: symbol_id,
-                data: symbol_data,
-            })
+            .map(|(_, symbol)| symbol)
             .collect();
 
-        // Attempt decoding
-        let mut decoder = InactivationDecoder::new(self.encoding_params.clone());
-
-        // Add symbols to decoder
-        for received in &filtered_symbols {
-            if let Err(e) = decoder.add_symbol(received.clone()) {
-                return Ok(BoundaryTestResult::AddSymbolFailed(format!("{:?}", e)));
-            }
-        }
-
         // Attempt decode
-        match decoder.decode() {
-            Ok(decoded_data) => {
+        match decoder.decode(&filtered_symbols) {
+            Ok(decoded) => {
                 // Verify decoded data matches original
-                if decoded_data == self.source_data {
-                    Ok(BoundaryTestResult::DecodeSuccess {
+                if decoded.source == self.source_symbols {
+                    Ok(BoundaryTestResult::Success {
                         symbols_used: filtered_symbols.len(),
                         k_gap: self.k_prime - self.k,
                     })
                 } else {
-                    Ok(BoundaryTestResult::DecodeCorruption {
-                        expected_len: self.source_data.len(),
-                        actual_len: decoded_data.len(),
-                        first_diff: self.source_data.iter()
-                            .zip(decoded_data.iter())
+                    Ok(BoundaryTestResult::Corruption {
+                        expected_len: self.source_symbols.len(),
+                        actual_len: decoded.source.len(),
+                        first_diff: self
+                            .source_symbols
+                            .iter()
+                            .zip(decoded.source.iter())
                             .position(|(a, b)| a != b),
                     })
                 }
             }
-            Err(e) => Ok(BoundaryTestResult::DecodeFailed(format!("{:?}", e))),
+            Err(e) => Ok(BoundaryTestResult::Failed(format!("{:?}", e))),
         }
     }
 }
 
 #[derive(Debug, PartialEq)]
 enum BoundaryTestResult {
-    DecodeSuccess {
+    Success {
         symbols_used: usize,
         k_gap: usize,
     },
-    DecodeFailed(String),
-    DecodeCorruption {
+    Failed(String),
+    Corruption {
         expected_len: usize,
         actual_len: usize,
         first_diff: Option<usize>,
     },
-    AddSymbolFailed(String),
 }
 
 fuzz_target!(|input: KPrimeBoundaryInput| {
@@ -365,7 +361,10 @@ fuzz_target!(|input: KPrimeBoundaryInput| {
     );
 
     match result {
-        Ok(BoundaryTestResult::DecodeSuccess { symbols_used, k_gap }) => {
+        Ok(BoundaryTestResult::Success {
+            symbols_used,
+            k_gap,
+        }) => {
             // Success is expected when we have enough symbols
             // Verify the K..K' gap was properly handled
             assert!(k_gap > 0, "Expected meaningful K..K' gap, got {}", k_gap);
@@ -378,33 +377,36 @@ fuzz_target!(|input: KPrimeBoundaryInput| {
                 );
             }
         }
-        Ok(BoundaryTestResult::DecodeCorruption { expected_len, actual_len, first_diff }) => {
+        Ok(BoundaryTestResult::Corruption {
+            expected_len,
+            actual_len,
+            first_diff,
+        }) => {
             // Data corruption is never acceptable
             panic!(
                 "K..K' BOUNDARY CORRUPTION: expected {} bytes, got {} bytes, first diff at {:?} (K={}, K'={}, gap={})",
-                expected_len, actual_len, first_diff, test_case.k, test_case.k_prime, test_case.k_prime - test_case.k
+                expected_len,
+                actual_len,
+                first_diff,
+                test_case.k,
+                test_case.k_prime,
+                test_case.k_prime - test_case.k
             );
         }
-        Ok(BoundaryTestResult::DecodeFailed(err)) => {
+        Ok(BoundaryTestResult::Failed(err)) => {
             // Decode failures are acceptable when insufficient symbols
             // But should not be due to K..K' boundary bugs
             if err.contains("matrix") || err.contains("zero") || err.contains("padding") {
                 panic!(
                     "K..K' MATRIX ERROR: Decode failed with matrix/padding error: {} (K={}, K'={}, gap={})",
-                    err, test_case.k, test_case.k_prime, test_case.k_prime - test_case.k
+                    err,
+                    test_case.k,
+                    test_case.k_prime,
+                    test_case.k_prime - test_case.k
                 );
             }
         }
-        Ok(BoundaryTestResult::AddSymbolFailed(err)) => {
-            // Symbol addition should not fail due to K..K' boundary issues
-            if err.contains("index") || err.contains("bound") || err.contains("range") {
-                panic!(
-                    "K..K' INDEX ERROR: Add symbol failed with indexing error: {} (K={}, K'={}, gap={})",
-                    err, test_case.k, test_case.k_prime, test_case.k_prime - test_case.k
-                );
-            }
-        }
-        Err(setup_err) => {
+        Err(_setup_err) => {
             // Setup errors are acceptable - skip this input
             return;
         }
@@ -412,26 +414,28 @@ fuzz_target!(|input: KPrimeBoundaryInput| {
 
     // Additional invariant checks for K..K' boundary consistency
     assert!(test_case.k_prime >= test_case.k, "K' must be >= K");
-    assert!(test_case.k_prime - test_case.k < 100, "K..K' gap should be reasonable (got {})", test_case.k_prime - test_case.k);
+    assert!(
+        test_case.k_prime - test_case.k < 100,
+        "K..K' gap should be reasonable (got {})",
+        test_case.k_prime - test_case.k
+    );
 
     // If force_failure is set, verify we can create scenarios that legitimately fail
     if input.force_failure {
         // Try decoding with deliberately insufficient symbols
-        let encoder = test_case.create_encoder().unwrap();
         let insufficient_count = (test_case.k / 2).max(1);
 
-        let mut decoder = InactivationDecoder::new(test_case.encoding_params.clone());
-        for i in 0..insufficient_count {
-            if let Some(symbol) = encoder.source_symbol(i) {
-                let _ = decoder.add_symbol(ReceivedSymbol {
-                    id: i,
-                    data: symbol,
-                });
-            }
-        }
+        let decoder = InactivationDecoder::new(test_case.k, test_case.symbol_size, test_case.seed);
+        let received: Vec<_> = test_case
+            .source_symbols
+            .iter()
+            .take(insufficient_count)
+            .enumerate()
+            .map(|(esi, symbol)| ReceivedSymbol::source(esi as u32, symbol.clone()))
+            .collect();
 
         // This should fail - verify it fails gracefully
-        match decoder.decode() {
+        match decoder.decode(&received) {
             Ok(_) => {
                 panic!(
                     "INSUFFICIENT SYMBOLS SUCCESS: Decoded with {} symbols but K={} (should fail)",

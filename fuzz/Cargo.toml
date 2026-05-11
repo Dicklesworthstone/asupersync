@@ -466,6 +466,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "raptorq_decoder_k_kprime_boundary"
+path = "fuzz_targets/raptorq_decoder_k_kprime_boundary.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "grpc_protobuf_decode"
 path = "fuzz_targets/grpc_protobuf_decode.rs"
 test = false
