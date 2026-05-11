@@ -5595,6 +5595,7 @@ name = "h2_request_method_lowercase"
 path = "fuzz_targets/h2_request_method_lowercase.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_priority_zero_dependency"

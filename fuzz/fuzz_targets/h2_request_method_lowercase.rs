@@ -1,4 +1,6 @@
 #![no_main]
+#![allow(dead_code)]
+#![allow(clippy::enum_variant_names)]
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
@@ -141,7 +143,7 @@ struct TestScenario {
     error_handling: ErrorHandling,
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Clone, Debug)]
 enum RequestContext {
     /// HTTP/2 request
     Request,
@@ -153,7 +155,7 @@ enum RequestContext {
     OptionsAsterisk,
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Clone, Debug)]
 enum ValidationMode {
     /// Strict RFC compliance
     StrictRFC,
@@ -163,7 +165,7 @@ enum ValidationMode {
     Security,
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Clone, Debug)]
 enum CaseEnforcement {
     /// Enforce case sensitivity for method values
     Strict,
@@ -173,7 +175,7 @@ enum CaseEnforcement {
     PreserveOriginal,
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Clone, Debug)]
 enum ErrorHandling {
     /// Fail on case violations
     FailOnViolation,
@@ -286,7 +288,10 @@ enum HeaderParsingError {
     /// Multiple :method pseudo-headers
     DuplicateMethod(String),
     /// Method value contains invalid characters
-    InvalidMethodCharacters { method: String, invalid_chars: String },
+    InvalidMethodCharacters {
+        method: String,
+        invalid_chars: String,
+    },
     /// Empty method value
     EmptyMethod,
     /// Method case handling inconsistency
@@ -295,11 +300,12 @@ enum HeaderParsingError {
 
 // Standard HTTP methods (case-sensitive per RFC 9110)
 const STANDARD_METHODS: &[&str] = &[
-    "GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "CONNECT", "TRACE"
+    "GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "CONNECT", "TRACE",
 ];
 
 // Valid method characters per RFC 9110 (tchar)
-const VALID_METHOD_CHARS: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$&-+.^_`|~";
+const VALID_METHOD_CHARS: &str =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$&-+.^_`|~";
 
 impl MockH2HeaderParser {
     fn new(
@@ -325,7 +331,10 @@ impl MockH2HeaderParser {
         }
     }
 
-    fn parse_headers(&mut self, headers: &[(&str, &str)]) -> Result<ParsedHeaders, HeaderParsingError> {
+    fn parse_headers(
+        &mut self,
+        headers: &[(&str, &str)],
+    ) -> Result<ParsedHeaders, HeaderParsingError> {
         let mut method_value = None;
         let mut pseudo_headers = Vec::new();
         let mut regular_headers = Vec::new();
@@ -370,7 +379,8 @@ impl MockH2HeaderParser {
 
                         // Record case preservation
                         self.case_preservation_state.original_method_case = Some(value.to_string());
-                        self.case_preservation_state.normalized_method = Some(parsed_method.normalized.clone());
+                        self.case_preservation_state.normalized_method =
+                            Some(parsed_method.normalized.clone());
 
                         // Method values should preserve case (RFC 7540 §8.1.2.1)
                         if parsed_method.original_case != *value {
@@ -390,11 +400,13 @@ impl MockH2HeaderParser {
                     }
                     _ => {
                         // Other pseudo-headers
-                        pseudo_headers.push((normalized_name, value.to_string()));
+                        pseudo_headers.push((normalized_name.clone(), value.to_string()));
                     }
                 }
 
-                self.parsing_context.pseudo_headers_found.push(normalized_name);
+                self.parsing_context
+                    .pseudo_headers_found
+                    .push(normalized_name);
             } else {
                 // Regular header
                 pseudo_header_phase = false;
@@ -410,13 +422,15 @@ impl MockH2HeaderParser {
                     });
                 }
 
-                case_analysis.header_name_lowercased.push(normalized_name.clone());
-                self.case_preservation_state.header_name_transformations.push(
-                    (name.to_string(), normalized_name.clone())
-                );
+                case_analysis
+                    .header_name_lowercased
+                    .push(normalized_name.clone());
+                self.case_preservation_state
+                    .header_name_transformations
+                    .push((name.to_string(), normalized_name.clone()));
 
                 // Header values should preserve case
-                regular_headers.push((normalized_name, value.to_string()));
+                regular_headers.push((normalized_name.clone(), value.to_string()));
 
                 case_analysis.method_case_changes.push(CaseChange {
                     original: name.to_string(),
@@ -427,8 +441,14 @@ impl MockH2HeaderParser {
         }
 
         // Validate method presence for requests
-        if matches!(self.parsing_context.request_context, RequestContext::Request) && method_value.is_none() {
-            return Err(HeaderParsingError::InvalidMethodFormat("Missing :method pseudo-header".to_string()));
+        if matches!(
+            self.parsing_context.request_context,
+            RequestContext::Request
+        ) && method_value.is_none()
+        {
+            return Err(HeaderParsingError::InvalidMethodFormat(
+                "Missing :method pseudo-header".to_string(),
+            ));
         }
 
         // Determine validation result
@@ -455,7 +475,8 @@ impl MockH2HeaderParser {
         }
 
         // Validate method characters (RFC 9110 tchar)
-        let invalid_chars: String = method.chars()
+        let invalid_chars: String = method
+            .chars()
             .filter(|&c| !VALID_METHOD_CHARS.contains(c))
             .collect();
 
@@ -527,56 +548,66 @@ impl MockH2HeaderParser {
             }
             CasePattern::RandomMixed => {
                 // Deterministic "random" based on character position
-                text.chars().enumerate().map(|(i, c)| {
-                    if i % 3 == 0 {
-                        c.to_uppercase().next().unwrap_or(c)
-                    } else {
-                        c.to_lowercase().next().unwrap_or(c)
-                    }
-                }).collect()
+                text.chars()
+                    .enumerate()
+                    .map(|(i, c)| {
+                        if i % 3 == 0 {
+                            c.to_uppercase().next().unwrap_or(c)
+                        } else {
+                            c.to_lowercase().next().unwrap_or(c)
+                        }
+                    })
+                    .collect()
             }
-            CasePattern::Alternating => {
-                text.chars().enumerate().map(|(i, c)| {
+            CasePattern::Alternating => text
+                .chars()
+                .enumerate()
+                .map(|(i, c)| {
                     if i % 2 == 0 {
                         c.to_uppercase().next().unwrap_or(c)
                     } else {
                         c.to_lowercase().next().unwrap_or(c)
                     }
-                }).collect()
-            }
+                })
+                .collect(),
         }
     }
 
     fn apply_mixed_case_pattern(text: &str, pattern: &MixedCasePattern) -> String {
         match pattern {
-            MixedCasePattern::PerCharacter(case_flags) => {
-                text.chars().enumerate().map(|(i, c)| {
+            MixedCasePattern::PerCharacter(case_flags) => text
+                .chars()
+                .enumerate()
+                .map(|(i, c)| {
                     let uppercase = case_flags.get(i).unwrap_or(&false);
                     if *uppercase {
                         c.to_uppercase().next().unwrap_or(c)
                     } else {
                         c.to_lowercase().next().unwrap_or(c)
                     }
-                }).collect()
-            }
-            MixedCasePattern::AtPositions(positions) => {
-                text.chars().enumerate().map(|(i, c)| {
+                })
+                .collect(),
+            MixedCasePattern::AtPositions(positions) => text
+                .chars()
+                .enumerate()
+                .map(|(i, c)| {
                     if positions.contains(&i) {
                         c.to_uppercase().next().unwrap_or(c)
                     } else {
                         c.to_lowercase().next().unwrap_or(c)
                     }
-                }).collect()
-            }
-            MixedCasePattern::VowelConsonant => {
-                text.chars().map(|c| {
+                })
+                .collect(),
+            MixedCasePattern::VowelConsonant => text
+                .chars()
+                .map(|c| {
                     if "aeiouAEIOU".contains(c) {
                         c.to_uppercase().next().unwrap_or(c)
                     } else {
                         c.to_lowercase().next().unwrap_or(c)
                     }
-                }).collect()
-            }
+                })
+                .collect(),
             MixedCasePattern::FirstLastMiddle => {
                 let chars: Vec<char> = text.chars().collect();
                 if chars.len() <= 2 {
@@ -601,11 +632,17 @@ impl MockH2HeaderParser {
 
         // Add method header based on strategy
         match &input.method_strategy {
-            MethodCaseStrategy::StandardMethod { method, case_pattern } => {
+            MethodCaseStrategy::StandardMethod {
+                method,
+                case_pattern,
+            } => {
                 let method_value = Self::generate_method_with_case(method, case_pattern);
                 headers.push((":method".to_string(), method_value));
             }
-            MethodCaseStrategy::CustomMethod { base_name, case_pattern } => {
+            MethodCaseStrategy::CustomMethod {
+                base_name,
+                case_pattern,
+            } => {
                 let method_value = Self::apply_case_pattern(base_name, case_pattern);
                 headers.push((":method".to_string(), method_value));
             }
@@ -616,7 +653,10 @@ impl MockH2HeaderParser {
                     headers.push((":method".to_string(), method_value));
                 }
             }
-            MethodCaseStrategy::EdgeCaseMethod { edge_type, case_pattern } => {
+            MethodCaseStrategy::EdgeCaseMethod {
+                edge_type,
+                case_pattern,
+            } => {
                 let base_method = match edge_type {
                     MethodEdgeType::Short(s) => s.clone(),
                     MethodEdgeType::Long(multiplier) => "CUSTOM".repeat(*multiplier as usize),
@@ -628,7 +668,10 @@ impl MockH2HeaderParser {
                 let method_value = Self::apply_case_pattern(&base_method, case_pattern);
                 headers.push((":method".to_string(), method_value));
             }
-            MethodCaseStrategy::MixedCaseMethod { method, mixed_pattern } => {
+            MethodCaseStrategy::MixedCaseMethod {
+                method,
+                mixed_pattern,
+            } => {
                 let base_method = Self::generate_method_with_case(method, &CasePattern::Uppercase);
                 let method_value = Self::apply_mixed_case_pattern(&base_method, mixed_pattern);
                 headers.push((":method".to_string(), method_value));
@@ -684,7 +727,8 @@ fuzz_target!(|input: H2MethodCaseInput| {
     );
 
     // Convert to slice of tuples for parsing
-    let header_refs: Vec<(&str, &str)> = header_list.iter()
+    let header_refs: Vec<(&str, &str)> = header_list
+        .iter()
         .map(|(n, v)| (n.as_str(), v.as_str()))
         .collect();
 
@@ -692,43 +736,56 @@ fuzz_target!(|input: H2MethodCaseInput| {
 
     // Test case sensitivity behavior based on method strategy
     match input.method_strategy {
-        MethodCaseStrategy::StandardMethod { ref method, ref case_pattern } => {
-            let expected_method = MockH2HeaderParser::generate_method_with_case(method, case_pattern);
+        MethodCaseStrategy::StandardMethod {
+            ref method,
+            ref case_pattern,
+        } => {
+            let expected_method =
+                MockH2HeaderParser::generate_method_with_case(method, case_pattern);
 
-            match parse_result {
+            match &parse_result {
                 Ok(parsed) => {
                     if let Some(method_value) = &parsed.method {
                         // RFC 7540 §8.1.2.1: pseudo-header values preserve case
-                        assert_eq!(method_value.original_case, expected_method,
+                        assert_eq!(
+                            method_value.original_case, expected_method,
                             "Method value case should be preserved: expected '{}', got '{}'",
-                            expected_method, method_value.original_case);
+                            expected_method, method_value.original_case
+                        );
 
                         // For standard methods, verify normalization
                         if method_value.is_standard {
                             let expected_normalized = expected_method.to_uppercase();
-                            assert_eq!(method_value.normalized, expected_normalized,
+                            assert_eq!(
+                                method_value.normalized, expected_normalized,
                                 "Standard method should normalize to uppercase: expected '{}', got '{}'",
-                                expected_normalized, method_value.normalized);
+                                expected_normalized, method_value.normalized
+                            );
                         }
                     } else {
                         panic!("Method should be present in parsed headers");
                     }
                 }
                 Err(HeaderParsingError::MethodCaseNotPreserved { original, modified }) => {
-                    panic!("Method case should be preserved but was changed: '{}' → '{}'", original, modified);
+                    panic!(
+                        "Method case should be preserved but was changed: '{}' → '{}'",
+                        original, modified
+                    );
                 }
                 Err(error) => {
                     // Other errors may be valid depending on input
                     match error {
-                        HeaderParsingError::InvalidMethodCharacters { .. } |
-                        HeaderParsingError::EmptyMethod => {
+                        HeaderParsingError::InvalidMethodCharacters { .. }
+                        | HeaderParsingError::EmptyMethod => {
                             // Expected for edge case methods
                         }
                         _ => {
                             // Unexpected error for standard methods
-                            if !matches!(input.method_strategy,
-                                        MethodCaseStrategy::EdgeCaseMethod { .. } |
-                                        MethodCaseStrategy::MultipleMethod { .. }) {
+                            if !matches!(
+                                input.method_strategy,
+                                MethodCaseStrategy::EdgeCaseMethod { .. }
+                                    | MethodCaseStrategy::MultipleMethod { .. }
+                            ) {
                                 panic!("Unexpected error for standard method: {:?}", error);
                             }
                         }
@@ -740,7 +797,7 @@ fuzz_target!(|input: H2MethodCaseInput| {
             // Edge case methods may be rejected
             match edge_type {
                 MethodEdgeType::Empty => {
-                    match parse_result {
+                    match &parse_result {
                         Err(HeaderParsingError::EmptyMethod) => {
                             // Expected: empty method should be rejected
                         }
@@ -750,7 +807,7 @@ fuzz_target!(|input: H2MethodCaseInput| {
                     }
                 }
                 MethodEdgeType::WithWhitespace => {
-                    match parse_result {
+                    match &parse_result {
                         Err(HeaderParsingError::InvalidMethodCharacters { .. }) => {
                             // Expected: whitespace in method should be rejected
                         }
@@ -761,11 +818,13 @@ fuzz_target!(|input: H2MethodCaseInput| {
                 }
                 _ => {
                     // Other edge cases may be accepted or rejected
-                    match parse_result {
+                    match &parse_result {
                         Ok(parsed) => {
                             if let Some(method_value) = &parsed.method {
-                                assert!(!method_value.original_case.is_empty(),
-                                    "Parsed method should not be empty");
+                                assert!(
+                                    !method_value.original_case.is_empty(),
+                                    "Parsed method should not be empty"
+                                );
                             }
                         }
                         Err(_) => {
@@ -777,7 +836,7 @@ fuzz_target!(|input: H2MethodCaseInput| {
         }
         MethodCaseStrategy::MultipleMethod { .. } => {
             // Multiple :method headers should be rejected
-            match parse_result {
+            match &parse_result {
                 Err(HeaderParsingError::DuplicateMethod(_)) => {
                     // Expected: duplicate method headers should be rejected
                 }
@@ -788,11 +847,13 @@ fuzz_target!(|input: H2MethodCaseInput| {
         }
         _ => {
             // Other strategies: verify basic case preservation
-            match parse_result {
+            match &parse_result {
                 Ok(parsed) => {
                     if let Some(method_value) = &parsed.method {
-                        assert!(!method_value.original_case.is_empty(),
-                            "Method value should not be empty");
+                        assert!(
+                            !method_value.original_case.is_empty(),
+                            "Method value should not be empty"
+                        );
                     }
                 }
                 Err(_) => {
@@ -814,42 +875,56 @@ fn test_case_sensitivity_invariants(
         Ok(parsed) => {
             // Invariant: Method case should always be preserved
             if let Some(method_value) = &parsed.method {
-                assert!(!method_value.original_case.is_empty(),
-                    "Method value should not be empty");
+                assert!(
+                    !method_value.original_case.is_empty(),
+                    "Method value should not be empty"
+                );
 
                 // For standard methods, verify they can be normalized
                 if method_value.is_standard {
                     let uppercase_version = method_value.original_case.to_uppercase();
-                    assert!(STANDARD_METHODS.contains(&uppercase_version.as_str()),
+                    assert!(
+                        STANDARD_METHODS.contains(&uppercase_version.as_str()),
                         "Standard method should normalize to known method: {}",
-                        uppercase_version);
+                        uppercase_version
+                    );
                 }
             }
 
             // Invariant: Header names should be lowercased (HTTP/2 requirement)
             for (name, _) in &parsed.regular_headers {
                 let lowercase_name = name.to_lowercase();
-                assert_eq!(*name, lowercase_name,
+                assert_eq!(
+                    *name, lowercase_name,
                     "Regular header names should be lowercase: expected '{}', got '{}'",
-                    lowercase_name, name);
+                    lowercase_name, name
+                );
             }
 
             // Invariant: Case violations should be properly detected
             for violation in &parsed.case_analysis.case_violations {
                 match violation.violation_type {
                     ViolationType::PseudoHeaderNameNotLowercase => {
-                        assert!(violation.header_name.starts_with(':'),
-                            "Pseudo-header case violation should be for pseudo-header");
-                        assert_ne!(violation.expected, violation.actual,
-                            "Case violation should show different expected vs actual");
+                        assert!(
+                            violation.header_name.starts_with(':'),
+                            "Pseudo-header case violation should be for pseudo-header"
+                        );
+                        assert_ne!(
+                            violation.expected, violation.actual,
+                            "Case violation should show different expected vs actual"
+                        );
                     }
                     ViolationType::RegularHeaderNameNotLowercase => {
-                        assert!(!violation.header_name.starts_with(':'),
-                            "Regular header case violation should be for regular header");
+                        assert!(
+                            !violation.header_name.starts_with(':'),
+                            "Regular header case violation should be for regular header"
+                        );
                     }
                     ViolationType::MethodValueChanged => {
-                        assert_eq!(violation.header_name, ":method",
-                            "Method value violation should be for :method header");
+                        assert_eq!(
+                            violation.header_name, ":method",
+                            "Method value violation should be for :method header"
+                        );
                     }
                     _ => {}
                 }
@@ -860,29 +935,47 @@ fn test_case_sensitivity_invariants(
             match error {
                 HeaderParsingError::EmptyMethod => {
                     // Should only occur for empty method strategies
-                    let has_empty_method = matches!(input.method_strategy,
+                    let has_empty_method = matches!(
+                        input.method_strategy,
                         MethodCaseStrategy::EdgeCaseMethod {
-                            edge_type: MethodEdgeType::Empty, ..
-                        });
-                    assert!(has_empty_method,
-                        "Empty method error should only occur for empty method strategy");
+                            edge_type: MethodEdgeType::Empty,
+                            ..
+                        }
+                    );
+                    assert!(
+                        has_empty_method,
+                        "Empty method error should only occur for empty method strategy"
+                    );
                 }
-                HeaderParsingError::InvalidMethodCharacters { method, invalid_chars } => {
-                    assert!(!invalid_chars.is_empty(),
-                        "Invalid characters error should specify which characters are invalid");
-                    assert!(!method.is_empty(),
-                        "Method with invalid characters should not be empty");
+                HeaderParsingError::InvalidMethodCharacters {
+                    method,
+                    invalid_chars,
+                } => {
+                    assert!(
+                        !invalid_chars.is_empty(),
+                        "Invalid characters error should specify which characters are invalid"
+                    );
+                    assert!(
+                        !method.is_empty(),
+                        "Method with invalid characters should not be empty"
+                    );
                 }
                 HeaderParsingError::DuplicateMethod(_) => {
                     // Should only occur for multiple method strategies
-                    let has_multiple_methods = matches!(input.method_strategy,
-                        MethodCaseStrategy::MultipleMethod { .. });
-                    assert!(has_multiple_methods,
-                        "Duplicate method error should only occur for multiple method strategy");
+                    let has_multiple_methods = matches!(
+                        input.method_strategy,
+                        MethodCaseStrategy::MultipleMethod { .. }
+                    );
+                    assert!(
+                        has_multiple_methods,
+                        "Duplicate method error should only occur for multiple method strategy"
+                    );
                 }
                 HeaderParsingError::MethodCaseNotPreserved { original, modified } => {
-                    assert_ne!(*original, *modified,
-                        "Case preservation error should show different original vs modified");
+                    assert_ne!(
+                        *original, *modified,
+                        "Case preservation error should show different original vs modified"
+                    );
                 }
                 _ => {
                     // Other errors may be valid depending on input
@@ -892,7 +985,11 @@ fn test_case_sensitivity_invariants(
     }
 
     // Invariant: Standard methods in different cases should still be recognizable
-    if let MethodCaseStrategy::StandardMethod { method, case_pattern } = &input.method_strategy {
+    if let MethodCaseStrategy::StandardMethod {
+        method,
+        case_pattern,
+    } = &input.method_strategy
+    {
         let expected_base = match method {
             StandardMethod::Get => "GET",
             StandardMethod::Post => "POST",
@@ -903,9 +1000,11 @@ fn test_case_sensitivity_invariants(
         let case_modified = MockH2HeaderParser::apply_case_pattern(expected_base, case_pattern);
         let normalized = case_modified.to_uppercase();
 
-        assert_eq!(normalized, expected_base,
+        assert_eq!(
+            normalized, expected_base,
             "Standard method should normalize back to expected base: '{}' → '{}' → '{}'",
-            expected_base, case_modified, normalized);
+            expected_base, case_modified, normalized
+        );
     }
 
     // Invariant: Valid method characters should not be rejected
@@ -914,13 +1013,12 @@ fn test_case_sensitivity_invariants(
             let method_value = &header.1;
             if !method_value.is_empty() {
                 let all_valid = method_value.chars().all(|c| VALID_METHOD_CHARS.contains(c));
-                if all_valid {
-                    match result {
-                        Err(HeaderParsingError::InvalidMethodCharacters { .. }) => {
-                            panic!("Valid method characters should not be rejected: '{}'", method_value);
-                        }
-                        _ => {} // Valid or other error type
-                    }
+                if all_valid && let Err(HeaderParsingError::InvalidMethodCharacters { .. }) = result
+                {
+                    panic!(
+                        "Valid method characters should not be rejected: '{}'",
+                        method_value
+                    );
                 }
             }
         }
@@ -940,10 +1038,7 @@ mod tests {
         );
 
         // Test lowercase method
-        let headers = vec![
-            (":method", "get"),
-            (":path", "/"),
-        ];
+        let headers = vec![(":method", "get"), (":path", "/")];
 
         let result = parser.parse_headers(&headers).unwrap();
         let method = result.method.unwrap();
@@ -961,10 +1056,7 @@ mod tests {
             RequestContext::Request,
         );
 
-        let headers = vec![
-            (":method", "PoSt"),
-            (":path", "/api"),
-        ];
+        let headers = vec![(":method", "PoSt"), (":path", "/api")];
 
         let result = parser.parse_headers(&headers).unwrap();
         let method = result.method.unwrap();
@@ -982,10 +1074,7 @@ mod tests {
             RequestContext::Request,
         );
 
-        let headers = vec![
-            (":method", "CustomMethod"),
-            (":path", "/api"),
-        ];
+        let headers = vec![(":method", "CustomMethod"), (":path", "/api")];
 
         let result = parser.parse_headers(&headers).unwrap();
         let method = result.method.unwrap();
@@ -1035,7 +1124,10 @@ mod tests {
         ];
 
         let result = parser.parse_headers(&headers);
-        assert!(matches!(result, Err(HeaderParsingError::InvalidMethodCharacters { .. })));
+        assert!(matches!(
+            result,
+            Err(HeaderParsingError::InvalidMethodCharacters { .. })
+        ));
     }
 
     #[test]
@@ -1046,10 +1138,7 @@ mod tests {
             RequestContext::Request,
         );
 
-        let headers = vec![
-            (":method", ""),
-            (":path", "/"),
-        ];
+        let headers = vec![(":method", ""), (":path", "/")];
 
         let result = parser.parse_headers(&headers);
         assert!(matches!(result, Err(HeaderParsingError::EmptyMethod)));
@@ -1063,14 +1152,13 @@ mod tests {
             RequestContext::Request,
         );
 
-        let headers = vec![
-            (":method", "GET"),
-            (":method", "POST"),
-            (":path", "/"),
-        ];
+        let headers = vec![(":method", "GET"), (":method", "POST"), (":path", "/")];
 
         let result = parser.parse_headers(&headers);
-        assert!(matches!(result, Err(HeaderParsingError::DuplicateMethod(_))));
+        assert!(matches!(
+            result,
+            Err(HeaderParsingError::DuplicateMethod(_))
+        ));
     }
 
     #[test]
@@ -1150,8 +1238,11 @@ mod tests {
 
         for (method_str, should_be_standard) in test_cases {
             let method_value = parser.parse_method_value(method_str).unwrap();
-            assert_eq!(method_value.is_standard, should_be_standard,
-                "Method '{}' standard detection failed", method_str);
+            assert_eq!(
+                method_value.is_standard, should_be_standard,
+                "Method '{}' standard detection failed",
+                method_str
+            );
             assert_eq!(method_value.original_case, method_str);
         }
     }
