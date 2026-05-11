@@ -1,4 +1,5 @@
 #![no_main]
+#![allow(dead_code)]
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
@@ -56,12 +57,12 @@ struct SettingEntry {
 
 #[derive(Arbitrary, Debug, Clone, PartialEq, Eq, Hash)]
 enum SettingId {
-    HeaderTableSize = 1,
-    EnablePush = 2,
-    MaxConcurrentStreams = 3,
-    InitialWindowSize = 4,
-    MaxFrameSize = 5,
-    MaxHeaderListSize = 6,
+    HeaderTableSize,
+    EnablePush,
+    MaxConcurrentStreams,
+    InitialWindowSize,
+    MaxFrameSize,
+    MaxHeaderListSize,
     Unknown(u16),
 }
 
@@ -249,16 +250,16 @@ impl MockSettingsParser {
                     self.duplicate_stats
                         .duplicate_settings
                         .entry(setting.setting_id.clone())
-                        .or_insert(Vec::new())
+                        .or_default()
                         .push(setting.value);
                 }
             }
 
             // Validate setting value if enabled
-            if self.config.validate_ranges {
-                if let Err(msg) = self.validate_setting_value(&setting.setting_id, setting.value) {
-                    return SettingsParseResult::ProtocolError(msg);
-                }
+            if self.config.validate_ranges
+                && let Err(msg) = self.validate_setting_value(&setting.setting_id, setting.value)
+            {
+                return SettingsParseResult::ProtocolError(msg);
             }
 
             // Last value wins - this overwrites any previous value
@@ -310,7 +311,7 @@ impl MockSettingsParser {
             }
 
             SettingId::MaxFrameSize => {
-                if value < 16384 || value > 16777215 {
+                if !(16384..=16777215).contains(&value) {
                     // 2^14 to 2^24-1
                     return Err(format!("MAX_FRAME_SIZE {} out of valid range", value));
                 }
@@ -376,13 +377,13 @@ impl MockSettingsParser {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 struct DuplicateStats {
     total_duplicates: u32,
     duplicate_settings: HashMap<SettingId, Vec<u32>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 struct SettingUpdate {
     setting_id: SettingId,
     old_value: Option<u32>,
@@ -480,7 +481,8 @@ fuzz_target!(|input: SettingsDuplicateInput| {
                 }
 
                 // Verify processing order integrity
-                for (i, (setting_id, value, original_index)) in processing_order.iter().enumerate()
+                for (i, (_setting_id, _value, original_index)) in
+                    processing_order.iter().enumerate()
                 {
                     assert_eq!(
                         *original_index, i,
@@ -563,8 +565,8 @@ fuzz_target!(|input: SettingsDuplicateInput| {
                         .settings_frame
                         .settings
                         .iter()
-                        .filter(|s| s.setting_id == setting_id)
-                        .last();
+                        .rev()
+                        .find(|s| s.setting_id == setting_id);
 
                     if let Some(last_setting) = last_occurrence {
                         assert_eq!(
@@ -591,7 +593,7 @@ fuzz_target!(|input: SettingsDuplicateInput| {
     // (Implicit - if we reach here without panicking, the test passed)
 
     // Additional edge case: alternating values for same setting
-    let mut alternating_frame = SettingsFrame {
+    let alternating_frame = SettingsFrame {
         settings: vec![
             SettingEntry {
                 setting_id: SettingId::MaxConcurrentStreams,

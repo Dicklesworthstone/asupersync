@@ -5351,6 +5351,7 @@ name = "h2_settings_duplicate_id"
 path = "fuzz_targets/h2_settings_duplicate_id.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_settings_max_frame_size_change"
