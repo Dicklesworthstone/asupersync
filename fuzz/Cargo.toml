@@ -5451,6 +5451,7 @@ name = "h2_settings_max_concurrent_streams_unlimited"
 path = "fuzz_targets/h2_settings_max_concurrent_streams_unlimited.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h1_chunked_terminator_missing"

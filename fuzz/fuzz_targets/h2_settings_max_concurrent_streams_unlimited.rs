@@ -1,7 +1,7 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 
 /// HTTP/2 SETTINGS_MAX_CONCURRENT_STREAMS unlimited handling testing.
 /// Per RFC 7540 §6.5.2, omitted SETTINGS_MAX_CONCURRENT_STREAMS means unlimited.
@@ -96,7 +96,8 @@ impl MockH2SettingsLimiter {
                 SETTINGS_HEADER_TABLE_SIZE => {
                     // Validate but don't process for this test
                     if setting.value > 65536 {
-                        self.warnings.push(format!("Large header table size: {}", setting.value));
+                        self.warnings
+                            .push(format!("Large header table size: {}", setting.value));
                     }
                 }
                 SETTINGS_ENABLE_PUSH => {
@@ -106,11 +107,13 @@ impl MockH2SettingsLimiter {
                 }
                 SETTINGS_INITIAL_WINDOW_SIZE => {
                     if setting.value > 2_147_483_647 {
-                        return Err("FLOW_CONTROL_ERROR: INITIAL_WINDOW_SIZE exceeds maximum".into());
+                        return Err(
+                            "FLOW_CONTROL_ERROR: INITIAL_WINDOW_SIZE exceeds maximum".into()
+                        );
                     }
                 }
                 SETTINGS_MAX_FRAME_SIZE => {
-                    if setting.value < 16384 || setting.value > 16777215 {
+                    if !(16_384..=16_777_215).contains(&setting.value) {
                         return Err("PROTOCOL_ERROR: MAX_FRAME_SIZE out of range".into());
                     }
                 }
@@ -119,7 +122,8 @@ impl MockH2SettingsLimiter {
                 }
                 _ => {
                     // Unknown settings are ignored per RFC 7540 §6.5
-                    self.warnings.push(format!("Unknown setting ID: {}", setting.id));
+                    self.warnings
+                        .push(format!("Unknown setting ID: {}", setting.id));
                 }
             }
         }
@@ -132,32 +136,27 @@ impl MockH2SettingsLimiter {
         // Store the RFC value
         self.max_concurrent_streams = Some(value);
 
-        // Apply practical limits
-        self.effective_limit = match value {
-            0 => {
-                // 0 means "disable concurrent streams" - respect this exactly
-                0
-            }
-            1..=ABSOLUTE_MAX_CONCURRENT_STREAMS => {
-                // Reasonable value - use as-is
-                value
-            }
-            ABSOLUTE_MAX_CONCURRENT_STREAMS + 1..=RESOURCE_EXHAUSTION_THRESHOLD => {
-                // Large but not obviously malicious - cap to maximum
-                self.warnings.push(format!(
-                    "Capping MAX_CONCURRENT_STREAMS from {} to {}",
-                    value, ABSOLUTE_MAX_CONCURRENT_STREAMS
-                ));
-                ABSOLUTE_MAX_CONCURRENT_STREAMS
-            }
-            _ => {
-                // Clearly excessive - potential resource exhaustion attack
-                self.warnings.push(format!(
-                    "Suspected resource exhaustion: MAX_CONCURRENT_STREAMS = {} capped to {}",
-                    value, ABSOLUTE_MAX_CONCURRENT_STREAMS
-                ));
-                ABSOLUTE_MAX_CONCURRENT_STREAMS
-            }
+        // Apply practical limits.
+        self.effective_limit = if value == 0 {
+            // 0 means "disable concurrent streams" - respect this exactly.
+            0
+        } else if value <= ABSOLUTE_MAX_CONCURRENT_STREAMS {
+            // Reasonable value - use as-is.
+            value
+        } else if value <= RESOURCE_EXHAUSTION_THRESHOLD {
+            // Large but not obviously malicious - cap to maximum.
+            self.warnings.push(format!(
+                "Capping MAX_CONCURRENT_STREAMS from {} to {}",
+                value, ABSOLUTE_MAX_CONCURRENT_STREAMS
+            ));
+            ABSOLUTE_MAX_CONCURRENT_STREAMS
+        } else {
+            // Clearly excessive - potential resource exhaustion attack.
+            self.warnings.push(format!(
+                "Suspected resource exhaustion: MAX_CONCURRENT_STREAMS = {} capped to {}",
+                value, ABSOLUTE_MAX_CONCURRENT_STREAMS
+            ));
+            ABSOLUTE_MAX_CONCURRENT_STREAMS
         };
 
         Ok(())
@@ -206,15 +205,19 @@ fuzz_target!(|data: &[u8]| {
 
     // Test 1: Frame validation errors
     if input.settings_frame.stream_id != 0 {
-        assert!(result.is_err(),
-            "SETTINGS frame with non-zero stream ID should be rejected");
+        assert!(
+            result.is_err(),
+            "SETTINGS frame with non-zero stream ID should be rejected"
+        );
         return;
     }
 
     let is_ack = (input.settings_frame.flags & 0x01) != 0;
     if is_ack && !input.settings_frame.settings.is_empty() {
-        assert!(result.is_err(),
-            "SETTINGS ACK frame with payload should be rejected");
+        assert!(
+            result.is_err(),
+            "SETTINGS ACK frame with payload should be rejected"
+        );
         return;
     }
 
@@ -223,24 +226,25 @@ fuzz_target!(|data: &[u8]| {
         match setting.id {
             SETTINGS_ENABLE_PUSH => {
                 if setting.value > 1 {
-                    assert!(result.is_err(),
-                        "Invalid ENABLE_PUSH value should be rejected");
+                    assert!(
+                        result.is_err(),
+                        "Invalid ENABLE_PUSH value should be rejected"
+                    );
                     return;
                 }
             }
             SETTINGS_INITIAL_WINDOW_SIZE => {
                 if setting.value > 2_147_483_647 {
-                    assert!(result.is_err(),
-                        "Invalid INITIAL_WINDOW_SIZE should be rejected");
+                    assert!(
+                        result.is_err(),
+                        "Invalid INITIAL_WINDOW_SIZE should be rejected"
+                    );
                     return;
                 }
             }
-            SETTINGS_MAX_FRAME_SIZE => {
-                if setting.value < 16384 || setting.value > 16777215 {
-                    assert!(result.is_err(),
-                        "Invalid MAX_FRAME_SIZE should be rejected");
-                    return;
-                }
+            SETTINGS_MAX_FRAME_SIZE if !(16_384..=16_777_215).contains(&setting.value) => {
+                assert!(result.is_err(), "Invalid MAX_FRAME_SIZE should be rejected");
+                return;
             }
             _ => {}
         }
@@ -249,16 +253,24 @@ fuzz_target!(|data: &[u8]| {
     // For valid frames, test concurrent streams handling
     if result.is_ok() && !is_ack {
         // Test 3: Check if MAX_CONCURRENT_STREAMS was specified
-        let has_max_concurrent_streams = input.settings_frame.settings.iter()
+        let has_max_concurrent_streams = input
+            .settings_frame
+            .settings
+            .iter()
             .any(|s| s.id == SETTINGS_MAX_CONCURRENT_STREAMS);
 
         if !has_max_concurrent_streams {
             // No MAX_CONCURRENT_STREAMS specified - should use default cap
-            assert!(limiter.is_unlimited_scenario(),
-                "Should recognize unlimited scenario when MAX_CONCURRENT_STREAMS not specified");
+            assert!(
+                limiter.is_unlimited_scenario(),
+                "Should recognize unlimited scenario when MAX_CONCURRENT_STREAMS not specified"
+            );
 
-            assert_eq!(limiter.get_effective_limit(), DEFAULT_MAX_CONCURRENT_STREAMS,
-                "Should apply default cap when unlimited per RFC");
+            assert_eq!(
+                limiter.get_effective_limit(),
+                DEFAULT_MAX_CONCURRENT_STREAMS,
+                "Should apply default cap when unlimited per RFC"
+            );
         }
 
         // Test 4: MAX_CONCURRENT_STREAMS value handling
@@ -267,53 +279,75 @@ fuzz_target!(|data: &[u8]| {
                 let rfc_value = limiter.get_rfc_max_concurrent_streams();
                 let effective_limit = limiter.get_effective_limit();
 
-                assert_eq!(rfc_value, Some(setting.value),
-                    "RFC value should match setting value");
+                assert_eq!(
+                    rfc_value,
+                    Some(setting.value),
+                    "RFC value should match setting value"
+                );
 
                 match setting.value {
                     0 => {
-                        assert_eq!(effective_limit, 0,
-                            "Zero value should be respected exactly");
+                        assert_eq!(effective_limit, 0, "Zero value should be respected exactly");
                     }
                     1..=ABSOLUTE_MAX_CONCURRENT_STREAMS => {
-                        assert_eq!(effective_limit, setting.value,
-                            "Reasonable values should be used as-is");
+                        assert_eq!(
+                            effective_limit, setting.value,
+                            "Reasonable values should be used as-is"
+                        );
                     }
                     _ => {
-                        assert_eq!(effective_limit, ABSOLUTE_MAX_CONCURRENT_STREAMS,
-                            "Excessive values should be capped");
+                        assert_eq!(
+                            effective_limit, ABSOLUTE_MAX_CONCURRENT_STREAMS,
+                            "Excessive values should be capped"
+                        );
 
                         let warnings = limiter.get_warnings();
-                        assert!(warnings.iter().any(|w| w.contains("Capping") || w.contains("exhaustion")),
-                            "Should generate warning for excessive values");
+                        assert!(
+                            warnings
+                                .iter()
+                                .any(|w| w.contains("Capping") || w.contains("exhaustion")),
+                            "Should generate warning for excessive values"
+                        );
                     }
                 }
             }
         }
 
         // Test 5: Stream allocation simulation
-        assert!(limiter.can_allocate_streams(0),
-            "Should always allow 0 streams");
+        assert!(
+            limiter.can_allocate_streams(0),
+            "Should always allow 0 streams"
+        );
 
         if limiter.get_effective_limit() > 0 {
-            assert!(limiter.can_allocate_streams(1),
-                "Should allow single stream when limit > 0");
+            assert!(
+                limiter.can_allocate_streams(1),
+                "Should allow single stream when limit > 0"
+            );
 
-            assert!(limiter.can_allocate_streams(limiter.get_effective_limit()),
-                "Should allow allocation up to effective limit");
+            assert!(
+                limiter.can_allocate_streams(limiter.get_effective_limit()),
+                "Should allow allocation up to effective limit"
+            );
 
             if limiter.get_effective_limit() < u32::MAX {
-                assert!(!limiter.can_allocate_streams(limiter.get_effective_limit() + 1),
-                    "Should reject allocation beyond effective limit");
+                assert!(
+                    !limiter.can_allocate_streams(limiter.get_effective_limit() + 1),
+                    "Should reject allocation beyond effective limit"
+                );
             }
         } else {
-            assert!(!limiter.can_allocate_streams(1),
-                "Should reject all streams when limit is 0");
+            assert!(
+                !limiter.can_allocate_streams(1),
+                "Should reject all streams when limit is 0"
+            );
         }
 
         // Test 6: Resource exhaustion protection
-        assert!(!limiter.can_allocate_streams(RESOURCE_EXHAUSTION_THRESHOLD),
-            "Should protect against clear resource exhaustion attempts");
+        assert!(
+            !limiter.can_allocate_streams(RESOURCE_EXHAUSTION_THRESHOLD),
+            "Should protect against clear resource exhaustion attempts"
+        );
     }
 });
 
@@ -327,8 +361,14 @@ mod tests {
             flags: 0,
             stream_id: 0,
             settings: vec![
-                SettingEntry { id: SETTINGS_HEADER_TABLE_SIZE, value: 4096 },
-                SettingEntry { id: SETTINGS_ENABLE_PUSH, value: 1 },
+                SettingEntry {
+                    id: SETTINGS_HEADER_TABLE_SIZE,
+                    value: 4096,
+                },
+                SettingEntry {
+                    id: SETTINGS_ENABLE_PUSH,
+                    value: 1,
+                },
                 // No MAX_CONCURRENT_STREAMS setting
             ],
         };
@@ -339,7 +379,10 @@ mod tests {
         assert!(result.is_ok());
         assert!(limiter.is_unlimited_scenario());
         assert_eq!(limiter.get_rfc_max_concurrent_streams(), None);
-        assert_eq!(limiter.get_effective_limit(), DEFAULT_MAX_CONCURRENT_STREAMS);
+        assert_eq!(
+            limiter.get_effective_limit(),
+            DEFAULT_MAX_CONCURRENT_STREAMS
+        );
     }
 
     #[test]
@@ -347,9 +390,10 @@ mod tests {
         let frame = SettingsFrame {
             flags: 0,
             stream_id: 0,
-            settings: vec![
-                SettingEntry { id: SETTINGS_MAX_CONCURRENT_STREAMS, value: 500 },
-            ],
+            settings: vec![SettingEntry {
+                id: SETTINGS_MAX_CONCURRENT_STREAMS,
+                value: 500,
+            }],
         };
 
         let mut limiter = MockH2SettingsLimiter::new();
@@ -366,9 +410,10 @@ mod tests {
         let frame = SettingsFrame {
             flags: 0,
             stream_id: 0,
-            settings: vec![
-                SettingEntry { id: SETTINGS_MAX_CONCURRENT_STREAMS, value: 0 },
-            ],
+            settings: vec![SettingEntry {
+                id: SETTINGS_MAX_CONCURRENT_STREAMS,
+                value: 0,
+            }],
         };
 
         let mut limiter = MockH2SettingsLimiter::new();
@@ -385,9 +430,10 @@ mod tests {
         let frame = SettingsFrame {
             flags: 0,
             stream_id: 0,
-            settings: vec![
-                SettingEntry { id: SETTINGS_MAX_CONCURRENT_STREAMS, value: 1_000_000 },
-            ],
+            settings: vec![SettingEntry {
+                id: SETTINGS_MAX_CONCURRENT_STREAMS,
+                value: 1_000_000,
+            }],
         };
 
         let mut limiter = MockH2SettingsLimiter::new();
@@ -395,7 +441,10 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(limiter.get_rfc_max_concurrent_streams(), Some(1_000_000));
-        assert_eq!(limiter.get_effective_limit(), ABSOLUTE_MAX_CONCURRENT_STREAMS);
+        assert_eq!(
+            limiter.get_effective_limit(),
+            ABSOLUTE_MAX_CONCURRENT_STREAMS
+        );
 
         let warnings = limiter.get_warnings();
         assert!(warnings.iter().any(|w| w.contains("exhaustion")));
@@ -406,19 +455,20 @@ mod tests {
         let frame = SettingsFrame {
             flags: 0,
             stream_id: 0,
-            settings: vec![
-                SettingEntry {
-                    id: SETTINGS_MAX_CONCURRENT_STREAMS,
-                    value: ABSOLUTE_MAX_CONCURRENT_STREAMS
-                },
-            ],
+            settings: vec![SettingEntry {
+                id: SETTINGS_MAX_CONCURRENT_STREAMS,
+                value: ABSOLUTE_MAX_CONCURRENT_STREAMS,
+            }],
         };
 
         let mut limiter = MockH2SettingsLimiter::new();
         let result = limiter.process_settings_frame(&frame);
 
         assert!(result.is_ok());
-        assert_eq!(limiter.get_effective_limit(), ABSOLUTE_MAX_CONCURRENT_STREAMS);
+        assert_eq!(
+            limiter.get_effective_limit(),
+            ABSOLUTE_MAX_CONCURRENT_STREAMS
+        );
         assert!(limiter.get_warnings().is_empty()); // Should not warn for exactly at limit
     }
 
@@ -427,19 +477,20 @@ mod tests {
         let frame = SettingsFrame {
             flags: 0,
             stream_id: 0,
-            settings: vec![
-                SettingEntry {
-                    id: SETTINGS_MAX_CONCURRENT_STREAMS,
-                    value: ABSOLUTE_MAX_CONCURRENT_STREAMS + 1
-                },
-            ],
+            settings: vec![SettingEntry {
+                id: SETTINGS_MAX_CONCURRENT_STREAMS,
+                value: ABSOLUTE_MAX_CONCURRENT_STREAMS + 1,
+            }],
         };
 
         let mut limiter = MockH2SettingsLimiter::new();
         let result = limiter.process_settings_frame(&frame);
 
         assert!(result.is_ok());
-        assert_eq!(limiter.get_effective_limit(), ABSOLUTE_MAX_CONCURRENT_STREAMS);
+        assert_eq!(
+            limiter.get_effective_limit(),
+            ABSOLUTE_MAX_CONCURRENT_STREAMS
+        );
 
         let warnings = limiter.get_warnings();
         assert!(warnings.iter().any(|w| w.contains("Capping")));
@@ -450,9 +501,10 @@ mod tests {
         let frame = SettingsFrame {
             flags: 0,
             stream_id: 0,
-            settings: vec![
-                SettingEntry { id: SETTINGS_MAX_CONCURRENT_STREAMS, value: 100 },
-            ],
+            settings: vec![SettingEntry {
+                id: SETTINGS_MAX_CONCURRENT_STREAMS,
+                value: 100,
+            }],
         };
 
         let mut limiter = MockH2SettingsLimiter::new();
@@ -481,7 +533,10 @@ mod tests {
         assert!(result.is_ok());
         // ACK frame should not change state
         assert!(limiter.is_unlimited_scenario());
-        assert_eq!(limiter.get_effective_limit(), DEFAULT_MAX_CONCURRENT_STREAMS);
+        assert_eq!(
+            limiter.get_effective_limit(),
+            DEFAULT_MAX_CONCURRENT_STREAMS
+        );
     }
 
     #[test]
@@ -490,7 +545,10 @@ mod tests {
             flags: 0,
             stream_id: 0,
             settings: vec![
-                SettingEntry { id: SETTINGS_ENABLE_PUSH, value: 2 }, // Invalid
+                SettingEntry {
+                    id: SETTINGS_ENABLE_PUSH,
+                    value: 2,
+                }, // Invalid
             ],
         };
 
@@ -506,12 +564,10 @@ mod tests {
         let frame = SettingsFrame {
             flags: 0,
             stream_id: 0,
-            settings: vec![
-                SettingEntry {
-                    id: SETTINGS_INITIAL_WINDOW_SIZE,
-                    value: 2_147_483_648 // > 2^31 - 1
-                },
-            ],
+            settings: vec![SettingEntry {
+                id: SETTINGS_INITIAL_WINDOW_SIZE,
+                value: 2_147_483_648, // > 2^31 - 1
+            }],
         };
 
         let mut limiter = MockH2SettingsLimiter::new();
@@ -527,8 +583,14 @@ mod tests {
             flags: 0,
             stream_id: 0,
             settings: vec![
-                SettingEntry { id: 99, value: 12345 }, // Unknown setting
-                SettingEntry { id: SETTINGS_MAX_CONCURRENT_STREAMS, value: 200 },
+                SettingEntry {
+                    id: 99,
+                    value: 12345,
+                }, // Unknown setting
+                SettingEntry {
+                    id: SETTINGS_MAX_CONCURRENT_STREAMS,
+                    value: 200,
+                },
             ],
         };
 
@@ -539,6 +601,10 @@ mod tests {
         assert_eq!(limiter.get_effective_limit(), 200);
 
         let warnings = limiter.get_warnings();
-        assert!(warnings.iter().any(|w| w.contains("Unknown setting ID: 99")));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("Unknown setting ID: 99"))
+        );
     }
 }
