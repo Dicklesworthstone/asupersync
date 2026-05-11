@@ -3803,6 +3803,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "kafka_fetch_response"
+path = "fuzz_targets/kafka_fetch_response.rs"
+test = false
+doc = false
+bench = false
+
 # Tests RaptorQ decoder robustness under symbol corruption with structure-aware corruption patterns.
 # Exercises bit flips, burst errors, coefficient corruption, column index corruption, systematic
 # corruption patterns, error detection accuracy, corruption timing effects, and decoder stability

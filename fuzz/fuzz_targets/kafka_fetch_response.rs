@@ -18,7 +18,6 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashMap;
 
 /// Maximum size for FetchResponse to prevent OOM during fuzzing
 const MAX_RESPONSE_SIZE: usize = 256 * 1024;
@@ -313,11 +312,14 @@ impl KafkaFetchResponse {
         buf.extend_from_slice(&batch.partition_leader_epoch.to_be_bytes());
 
         // Magic byte (possibly corrupted)
-        let magic = if self.params.corrupt_magic { 99 } else { batch.magic };
+        let magic = if self.params.corrupt_magic {
+            99
+        } else {
+            batch.magic
+        };
         buf.extend_from_slice(&magic.to_be_bytes());
 
         // CRC placeholder - we'll calculate later
-        let crc_pos = buf.len();
         let crc = if self.params.corrupt_crc {
             0xDEADBEEF_u32
         } else {
@@ -413,20 +415,23 @@ fn parse_fetch_response(data: &[u8]) -> Result<(), String> {
 
     // Parse header
     let throttle_time = i32::from_be_bytes(
-        data[offset..offset + 4].try_into()
-            .map_err(|_| "Invalid throttle time")?
+        data[offset..offset + 4]
+            .try_into()
+            .map_err(|_| "Invalid throttle time")?,
     );
     offset += 4;
 
-    let error_code = i16::from_be_bytes(
-        data[offset..offset + 2].try_into()
-            .map_err(|_| "Invalid error code")?
+    let _error_code = i16::from_be_bytes(
+        data[offset..offset + 2]
+            .try_into()
+            .map_err(|_| "Invalid error code")?,
     );
     offset += 2;
 
-    let session_id = i32::from_be_bytes(
-        data[offset..offset + 4].try_into()
-            .map_err(|_| "Invalid session ID")?
+    let _session_id = i32::from_be_bytes(
+        data[offset..offset + 4]
+            .try_into()
+            .map_err(|_| "Invalid session ID")?,
     );
     offset += 4;
 
@@ -441,8 +446,9 @@ fn parse_fetch_response(data: &[u8]) -> Result<(), String> {
     }
 
     let topic_count = i32::from_be_bytes(
-        data[offset..offset + 4].try_into()
-            .map_err(|_| "Invalid topic count")?
+        data[offset..offset + 4]
+            .try_into()
+            .map_err(|_| "Invalid topic count")?,
     );
     offset += 4;
 
@@ -474,8 +480,9 @@ fn parse_topic_response(data: &[u8], mut offset: usize) -> Result<usize, String>
     }
 
     let topic_name_len = i16::from_be_bytes(
-        data[offset..offset + 2].try_into()
-            .map_err(|_| "Invalid topic name length")?
+        data[offset..offset + 2]
+            .try_into()
+            .map_err(|_| "Invalid topic name length")?,
     ) as usize;
     offset += 2;
 
@@ -495,8 +502,9 @@ fn parse_topic_response(data: &[u8], mut offset: usize) -> Result<usize, String>
     }
 
     let partition_count = i32::from_be_bytes(
-        data[offset..offset + 4].try_into()
-            .map_err(|_| "Invalid partition count")?
+        data[offset..offset + 4]
+            .try_into()
+            .map_err(|_| "Invalid partition count")?,
     );
     offset += 4;
 
@@ -526,8 +534,9 @@ fn parse_partition_response(data: &[u8], mut offset: usize) -> Result<usize, Str
 
     // Parse aborted transaction array
     let aborted_count = i32::from_be_bytes(
-        data[offset..offset + 4].try_into()
-            .map_err(|_| "Invalid aborted count")?
+        data[offset..offset + 4]
+            .try_into()
+            .map_err(|_| "Invalid aborted count")?,
     );
     offset += 4;
 
@@ -548,8 +557,9 @@ fn parse_partition_response(data: &[u8], mut offset: usize) -> Result<usize, Str
     }
 
     let record_set_len = i32::from_be_bytes(
-        data[offset..offset + 4].try_into()
-            .map_err(|_| "Invalid record set length")?
+        data[offset..offset + 4]
+            .try_into()
+            .map_err(|_| "Invalid record set length")?,
     );
     offset += 4;
 
@@ -581,16 +591,18 @@ fn parse_record_batch(data: &[u8], mut offset: usize, batch_len: usize) -> Resul
     }
 
     // Parse base offset
-    let base_offset = i64::from_be_bytes(
-        data[offset..offset + 8].try_into()
-            .map_err(|_| "Invalid base offset")?
+    let _base_offset = i64::from_be_bytes(
+        data[offset..offset + 8]
+            .try_into()
+            .map_err(|_| "Invalid base offset")?,
     );
     offset += 8;
 
     // Parse batch length
     let batch_length = i32::from_be_bytes(
-        data[offset..offset + 4].try_into()
-            .map_err(|_| "Invalid batch length")?
+        data[offset..offset + 4]
+            .try_into()
+            .map_err(|_| "Invalid batch length")?,
     );
     offset += 4;
 
@@ -613,8 +625,9 @@ fn parse_record_batch(data: &[u8], mut offset: usize, batch_len: usize) -> Resul
     }
 
     let record_count = i32::from_be_bytes(
-        data[offset..offset + 4].try_into()
-            .map_err(|_| "Invalid record count")?
+        data[offset..offset + 4]
+            .try_into()
+            .map_err(|_| "Invalid record count")?,
     );
     offset += 4;
 
@@ -643,8 +656,9 @@ fn parse_record(data: &[u8], mut offset: usize, batch_end: usize) -> Result<usiz
     }
 
     let record_len = i32::from_be_bytes(
-        data[offset..offset + 4].try_into()
-            .map_err(|_| "Invalid record length")?
+        data[offset..offset + 4]
+            .try_into()
+            .map_err(|_| "Invalid record length")?,
     );
     offset += 4;
 
@@ -670,7 +684,9 @@ fuzz_target!(|fetch_response: KafkaFetchResponse| {
         return;
     }
 
-    let total_partitions: usize = fetch_response.topics.iter()
+    let total_partitions: usize = fetch_response
+        .topics
+        .iter()
         .map(|t| t.partitions.len())
         .sum();
     if total_partitions > MAX_TOPICS * MAX_PARTITIONS_PER_TOPIC {
@@ -689,7 +705,11 @@ fuzz_target!(|fetch_response: KafkaFetchResponse| {
     let _ = parse_fetch_response(&wire_data);
 
     // Test with truncated inputs for boundary conditions
-    for truncate_at in [wire_data.len() / 4, wire_data.len() / 2, wire_data.len() * 3 / 4] {
+    for truncate_at in [
+        wire_data.len() / 4,
+        wire_data.len() / 2,
+        wire_data.len() * 3 / 4,
+    ] {
         if truncate_at > 0 && truncate_at < wire_data.len() {
             let _ = parse_fetch_response(&wire_data[..truncate_at]);
         }
