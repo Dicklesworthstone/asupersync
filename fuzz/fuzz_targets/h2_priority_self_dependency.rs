@@ -36,6 +36,16 @@ struct PriorityFrame {
     weight: u8,
 }
 
+impl PriorityFrame {
+    fn encoded_dependency_field(&self) -> u32 {
+        (self.stream_dependency & 0x7fff_ffff) | (u32::from(self.exclusive) << 31)
+    }
+
+    fn dependency_stream_id(&self) -> u32 {
+        self.encoded_dependency_field() & 0x7fff_ffff
+    }
+}
+
 /// Mock HTTP/2 PRIORITY frame parser with dependency validation
 struct MockH2PriorityParser {
     /// Stream dependency tree for validation
@@ -64,7 +74,7 @@ impl MockH2PriorityParser {
         }
 
         // Extract actual dependency (clear exclusive bit if set)
-        let dependency = frame.stream_dependency & 0x7FFFFFFF; // Clear bit 31
+        let dependency = frame.dependency_stream_id();
 
         // RFC 7540 §5.3.1: A stream cannot depend on itself
         if dependency == frame.stream_id {
@@ -75,17 +85,12 @@ impl MockH2PriorityParser {
         }
 
         // Validate weight (actual weight is encoded value + 1)
-        let actual_weight = frame.weight as u32 + 1; // Weight range: 1-256
-        if actual_weight < 1 || actual_weight > 256 {
+        let actual_weight = frame.weight as u16 + 1; // Weight range: 1-256
+        if !(1..=256).contains(&actual_weight) {
             return Err(format!(
                 "PROTOCOL_ERROR: invalid weight {} (must be 1-256)",
                 actual_weight
             ));
-        }
-
-        // Additional validation: dependency stream ID bounds
-        if dependency > 0x7FFFFFFF {
-            return Err("PROTOCOL_ERROR: stream dependency exceeds maximum stream ID".into());
         }
 
         // Check for potential circular dependencies (simplified check)
@@ -159,7 +164,7 @@ fuzz_target!(|data: &[u8]| {
     let result = parser.parse_priority_frame(&input.priority_frame);
 
     let frame = &input.priority_frame;
-    let dependency = frame.stream_dependency & 0x7FFFFFFF; // Clear exclusive bit
+    let dependency = frame.dependency_stream_id();
 
     // Test 1: Self-dependency must be PROTOCOL_ERROR
     if dependency == frame.stream_id && frame.stream_id != 0 {
@@ -234,13 +239,22 @@ fuzz_target!(|data: &[u8]| {
             Some(&dependency),
             "Dependency should be stored correctly"
         );
+        assert_eq!(
+            stored_deps.len(),
+            1,
+            "single valid PRIORITY frame should store exactly one dependency"
+        );
+        assert!(
+            parser.get_errors().is_empty(),
+            "fresh parser should not report a cycle for one non-self dependency"
+        );
     }
 
     // Test 5: Weight validation (implicit - weight is u8 so always valid range)
-    let actual_weight = frame.weight as u32 + 1;
+    let actual_weight = frame.weight as u16 + 1;
     if result.is_ok() {
         assert!(
-            actual_weight >= 1 && actual_weight <= 256,
+            (1..=256).contains(&actual_weight),
             "Weight should be in valid range 1-256, got {}",
             actual_weight
         );
