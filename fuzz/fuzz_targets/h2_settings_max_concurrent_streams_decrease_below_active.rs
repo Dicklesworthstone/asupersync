@@ -33,9 +33,6 @@ struct MockConcurrentStreamsDecreaseConnection {
     /// Next stream ID to assign (client = odd, server = even)
     next_stream_id: u32,
 
-    /// Connection state
-    state: ConnectionState,
-
     /// Statistics tracking
     stats: ConcurrentStreamsStats,
 
@@ -50,7 +47,7 @@ struct MockConcurrentStreamsDecreaseConnection {
 struct StreamInfo {
     stream_id: u32,
     state: StreamState,
-    created_at_limit: u32,  // What MAX_CONCURRENT_STREAMS was when this stream was created
+    created_at_limit: u32, // What MAX_CONCURRENT_STREAMS was when this stream was created
     is_client_stream: bool,
 }
 
@@ -64,14 +61,6 @@ struct SettingsChange {
 
 #[derive(Clone, Debug)]
 enum StreamState {
-    Open,
-    HalfClosedLocal,
-    HalfClosedRemote,
-    Closed,
-}
-
-#[derive(Clone, Debug)]
-enum ConnectionState {
     Open,
     Closed,
 }
@@ -90,10 +79,10 @@ struct ConcurrentStreamsStats {
 
 #[derive(Clone, Debug)]
 enum ViolationType {
-    ExistingStreamTerminated,     // Existing stream was incorrectly terminated
-    NewStreamAllowedAboveLimit,   // New stream created when above limit
-    LimitNotEnforced,             // Limit was not properly enforced
-    StateInconsistency,           // Stream count doesn't match reality
+    ExistingStreamTerminated,   // Existing stream was incorrectly terminated
+    NewStreamAllowedAboveLimit, // New stream created when above limit
+    LimitNotEnforced,           // Limit was not properly enforced
+    StateInconsistency,         // Stream count doesn't match reality
 }
 
 impl MockConcurrentStreamsDecreaseConnection {
@@ -102,7 +91,6 @@ impl MockConcurrentStreamsDecreaseConnection {
             max_concurrent_streams: 100, // Default high limit
             active_streams: HashMap::new(),
             next_stream_id: 1,
-            state: ConnectionState::Open,
             stats: ConcurrentStreamsStats::default(),
             violations: Vec::new(),
             settings_history: Vec::new(),
@@ -149,6 +137,15 @@ impl MockConcurrentStreamsDecreaseConnection {
         }
 
         Ok(())
+    }
+
+    fn expect_settings_update(&mut self, new_limit: u32, context: &str) {
+        if let Err(err) = self.handle_settings_max_concurrent_streams(new_limit) {
+            self.violations.push(ViolationType::StateInconsistency);
+            panic!(
+                "{context}: MAX_CONCURRENT_STREAMS update to {new_limit} failed unexpectedly: {err:?}"
+            );
+        }
     }
 
     /// Attempt to create a new stream
@@ -208,6 +205,13 @@ impl MockConcurrentStreamsDecreaseConnection {
         }
     }
 
+    fn expect_tracked_stream_close(&mut self, stream_id: u32, context: &str) {
+        if let Err(err) = self.close_stream(stream_id) {
+            self.violations.push(ViolationType::StateInconsistency);
+            panic!("{context}: tracked stream {stream_id} failed to close: {err:?}");
+        }
+    }
+
     /// Get current active stream count
     fn get_active_stream_count(&self) -> u32 {
         self.active_streams.len() as u32
@@ -218,10 +222,8 @@ impl MockConcurrentStreamsDecreaseConnection {
         let mut result = DecreaseScenarioResult::default();
 
         // Step 1: Set MAX_CONCURRENT_STREAMS=10
-        result.step1_success = self.handle_settings_max_concurrent_streams(10).is_ok();
-        if !result.step1_success {
-            return result;
-        }
+        self.expect_settings_update(10, "scenario step 1 initial limit");
+        result.step1_success = true;
 
         // Step 2: Create 8 active streams
         let mut created_streams = Vec::new();
@@ -235,16 +237,15 @@ impl MockConcurrentStreamsDecreaseConnection {
         result.active_before_decrease = self.get_active_stream_count();
 
         // Step 3: Set MAX_CONCURRENT_STREAMS=5 (below current 8)
-        result.step3_success = self.handle_settings_max_concurrent_streams(5).is_ok();
-        if !result.step3_success {
-            return result;
-        }
+        self.expect_settings_update(5, "scenario step 3 decreased limit");
+        result.step3_success = true;
         result.active_after_decrease = self.get_active_stream_count();
 
         // Step 4: Verify existing streams are still active
         for &stream_id in &created_streams {
             if !self.active_streams.contains_key(&stream_id) {
-                self.violations.push(ViolationType::ExistingStreamTerminated);
+                self.violations
+                    .push(ViolationType::ExistingStreamTerminated);
                 result.existing_streams_terminated = true;
             }
         }
@@ -252,7 +253,8 @@ impl MockConcurrentStreamsDecreaseConnection {
         // Step 5: Try to create a new stream - should be refused
         match self.create_stream(true) {
             Ok(_) => {
-                self.violations.push(ViolationType::NewStreamAllowedAboveLimit);
+                self.violations
+                    .push(ViolationType::NewStreamAllowedAboveLimit);
                 result.new_stream_incorrectly_allowed = true;
             }
             Err(H2Error::RefusedStream) => {
@@ -264,9 +266,10 @@ impl MockConcurrentStreamsDecreaseConnection {
         }
 
         // Step 6: Close streams until below the limit (5), then try creating
-        let streams_to_close = (self.get_active_stream_count().saturating_sub(4)).min(created_streams.len() as u32);
+        let streams_to_close =
+            (self.get_active_stream_count().saturating_sub(4)).min(created_streams.len() as u32);
         for i in 0..(streams_to_close as usize) {
-            let _ = self.close_stream(created_streams[i]);
+            self.expect_tracked_stream_close(created_streams[i], "scenario step 6 close");
         }
         result.active_after_closures = self.get_active_stream_count();
 
@@ -301,6 +304,31 @@ impl MockConcurrentStreamsDecreaseConnection {
                 violations.push(format!(
                     "Closed stream {} still in active map",
                     stream.stream_id
+                ));
+            }
+
+            if stream.created_at_limit == 0 {
+                violations.push(format!(
+                    "Stream {} was created while MAX_CONCURRENT_STREAMS was zero",
+                    stream.stream_id
+                ));
+            }
+
+            let stream_is_client = stream.stream_id % 2 == 1;
+            if stream_is_client != stream.is_client_stream {
+                violations.push(format!(
+                    "Stream {} parity does not match client/server ownership",
+                    stream.stream_id
+                ));
+            }
+        }
+
+        for change in &self.settings_history {
+            let active_exceeded_new_limit = change.active_count_at_time > change.new_limit;
+            if change.streams_above_new_limit != active_exceeded_new_limit {
+                violations.push(format!(
+                    "Settings change {} -> {} recorded inconsistent above-limit state",
+                    change.old_limit, change.new_limit
                 ));
             }
         }
@@ -343,7 +371,6 @@ struct DecreaseScenarioResult {
 enum H2Error {
     RefusedStream,
     StreamNotFound,
-    ProtocolError,
 }
 
 /// Fuzz input structure
@@ -390,7 +417,7 @@ fuzz_target!(|input: FuzzInput| {
 
     // Step 1: Set initial limit
     let initial_limit = input.initial_limit.min(100); // Reasonable limit
-    let _ = connection.handle_settings_max_concurrent_streams(initial_limit);
+    connection.expect_settings_update(initial_limit, "fuzz step 1 initial limit");
 
     // Step 2: Create initial streams
     let initial_count = input.initial_stream_count.min(initial_limit + 5); // Allow some above limit for testing
@@ -405,13 +432,15 @@ fuzz_target!(|input: FuzzInput| {
 
     // Step 3: Decrease the limit
     let decreased_limit = input.decreased_limit.min(100);
-    let _ = connection.handle_settings_max_concurrent_streams(decreased_limit);
+    connection.expect_settings_update(decreased_limit, "fuzz step 3 decreased limit");
 
     let streams_after_decrease = connection.get_active_stream_count();
 
     // Critical validation: existing streams should NOT be closed
-    assert_eq!(streams_after_decrease, streams_before_decrease,
-               "Existing streams were closed when limit decreased");
+    assert_eq!(
+        streams_after_decrease, streams_before_decrease,
+        "Existing streams were closed when limit decreased"
+    );
 
     // Process additional operations
     for operation in input.operations {
@@ -424,15 +453,20 @@ fuzz_target!(|input: FuzzInput| {
                     Ok(_) => {
                         // Stream creation succeeded
                         if current_count >= connection.max_concurrent_streams {
-                            panic!("Stream created when at or above limit: count={}, limit={}",
-                                   current_count, connection.max_concurrent_streams);
+                            connection.violations.push(ViolationType::LimitNotEnforced);
+                            panic!(
+                                "Stream created when at or above limit: count={}, limit={}",
+                                current_count, connection.max_concurrent_streams
+                            );
                         }
                     }
                     Err(H2Error::RefusedStream) => {
                         // Stream creation was refused - this should happen when at/above limit
                         if current_count < connection.max_concurrent_streams {
-                            panic!("Stream refused when below limit: count={}, limit={}",
-                                   current_count, connection.max_concurrent_streams);
+                            panic!(
+                                "Stream refused when below limit: count={}, limit={}",
+                                current_count, connection.max_concurrent_streams
+                            );
                         }
                     }
                     Err(_) => {
@@ -445,7 +479,7 @@ fuzz_target!(|input: FuzzInput| {
                 if !created_streams.is_empty() {
                     let index = (stream_index as usize) % created_streams.len();
                     let stream_id = created_streams[index];
-                    let _ = connection.close_stream(stream_id);
+                    connection.expect_tracked_stream_close(stream_id, "operation close stream");
                     created_streams.remove(index);
                 }
             }
@@ -453,12 +487,14 @@ fuzz_target!(|input: FuzzInput| {
             StreamOperation::ChangeLimit { new_limit } => {
                 let safe_limit = new_limit.min(100);
                 let before_count = connection.get_active_stream_count();
-                let _ = connection.handle_settings_max_concurrent_streams(safe_limit);
+                connection.expect_settings_update(safe_limit, "operation change limit");
                 let after_count = connection.get_active_stream_count();
 
                 // Existing streams should never be closed due to limit changes
-                assert_eq!(after_count, before_count,
-                           "Stream count changed after limit change");
+                assert_eq!(
+                    after_count, before_count,
+                    "Stream count changed after limit change"
+                );
             }
 
             StreamOperation::ValidateState => {
@@ -477,16 +513,22 @@ fuzz_target!(|input: FuzzInput| {
         // Validate scenario-specific requirements
         if scenario_result.step1_success && scenario_result.step3_success {
             // Existing streams should not be terminated
-            assert!(!scenario_result.existing_streams_terminated,
-                   "Existing streams were incorrectly terminated");
+            assert!(
+                !scenario_result.existing_streams_terminated,
+                "Existing streams were incorrectly terminated"
+            );
 
             // New stream creation should be refused when above limit
-            assert!(scenario_result.new_stream_correctly_refused,
-                   "New stream should have been refused when above limit");
+            assert!(
+                scenario_result.new_stream_correctly_refused,
+                "New stream should have been refused when above limit"
+            );
 
             // Should not allow new streams when above limit
-            assert!(!scenario_result.new_stream_incorrectly_allowed,
-                   "New stream was incorrectly allowed when above limit");
+            assert!(
+                !scenario_result.new_stream_incorrectly_allowed,
+                "New stream was incorrectly allowed when above limit"
+            );
         }
     }
 
@@ -509,6 +551,12 @@ fuzz_target!(|input: FuzzInput| {
         }
     }
 
+    assert_eq!(
+        connection.get_stats().settings_changes as usize,
+        connection.get_settings_history().len(),
+        "Every settings update should have a matching history entry"
+    );
+
     // Validate final state consistency
     let consistency_violations = connection.validate_stream_count_consistency();
     if !consistency_violations.is_empty() {
@@ -525,23 +573,31 @@ fn test_edge_cases(connection: &mut MockConcurrentStreamsDecreaseConnection) {
     let original_count = connection.get_active_stream_count();
 
     // Edge case 1: Decrease to 0 (no new streams allowed)
-    let _ = connection.handle_settings_max_concurrent_streams(0);
+    connection.expect_settings_update(0, "edge case decrease to zero");
     let count_after_zero = connection.get_active_stream_count();
 
     // Existing streams should still be active
-    assert_eq!(count_after_zero, original_count,
-               "Streams closed when limit set to 0");
+    assert_eq!(
+        count_after_zero, original_count,
+        "Streams closed when limit set to 0"
+    );
 
     // New stream should be refused
     let result = connection.create_stream(true);
-    assert!(result.is_err(), "Stream creation should be refused with limit=0");
+    assert!(
+        result.is_err(),
+        "Stream creation should be refused with limit=0"
+    );
 
     // Edge case 2: Increase limit again
-    let _ = connection.handle_settings_max_concurrent_streams(original_limit);
+    connection.expect_settings_update(original_limit, "edge case restore original limit");
 
     // Should be able to create streams again (if below limit)
     if connection.get_active_stream_count() < original_limit {
         let result = connection.create_stream(true);
-        assert!(result.is_ok(), "Stream creation should succeed after limit increase");
+        assert!(
+            result.is_ok(),
+            "Stream creation should succeed after limit increase"
+        );
     }
 }
