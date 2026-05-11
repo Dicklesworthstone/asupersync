@@ -28,7 +28,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::grpc::status::Status;
+use asupersync::grpc::status::{Code, Status};
 use asupersync::grpc::streaming::{RequestSink, ResponseStream, Streaming, StreamingRequest};
 use libfuzzer_sys::fuzz_target;
 use std::pin::Pin;
@@ -38,6 +38,7 @@ use std::task::{Context, Poll};
 /// libfuzzer from spending the entire budget on one pathological seed
 /// that calls Push 1M times.
 const MAX_OPS_PER_SCENARIO: usize = 256;
+const STREAM_BUFFER_CAP: usize = 1024;
 
 #[derive(Arbitrary, Debug)]
 enum Op {
@@ -96,6 +97,101 @@ enum RequestSinkOp {
     Close,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum PushExpectation {
+    Accepted,
+    Closed,
+    Full,
+}
+
+#[derive(Debug)]
+struct StreamShadow {
+    open: bool,
+    buffered: usize,
+}
+
+impl StreamShadow {
+    const fn new(open: bool) -> Self {
+        Self { open, buffered: 0 }
+    }
+
+    const fn push_expectation(&self) -> PushExpectation {
+        if !self.open {
+            PushExpectation::Closed
+        } else if self.buffered >= STREAM_BUFFER_CAP {
+            PushExpectation::Full
+        } else {
+            PushExpectation::Accepted
+        }
+    }
+
+    fn observe_push(&mut self, result: Result<(), Status>, context: &str) {
+        match (self.push_expectation(), result) {
+            (PushExpectation::Accepted, Ok(())) => {
+                self.buffered += 1;
+            }
+            (PushExpectation::Accepted, Err(status)) => {
+                panic!(
+                    "{context}: push rejected while shadow expected acceptance: {:?}",
+                    status.code()
+                );
+            }
+            (PushExpectation::Closed, Ok(())) => {
+                panic!("{context}: push accepted after shadow stream was closed");
+            }
+            (PushExpectation::Closed, Err(status)) => {
+                assert_eq!(
+                    status.code(),
+                    Code::FailedPrecondition,
+                    "{context}: closed stream rejection used wrong status code"
+                );
+            }
+            (PushExpectation::Full, Ok(())) => {
+                panic!("{context}: push accepted with shadow buffer at cap");
+            }
+            (PushExpectation::Full, Err(status)) => {
+                assert_eq!(
+                    status.code(),
+                    Code::ResourceExhausted,
+                    "{context}: full stream rejection used wrong status code"
+                );
+            }
+        }
+    }
+
+    fn close(&mut self) {
+        self.open = false;
+    }
+
+    fn observe_poll<T>(&mut self, poll: Poll<Option<Result<T, Status>>>, context: &str) {
+        match poll {
+            Poll::Ready(Some(_)) => {
+                assert!(
+                    self.buffered > 0,
+                    "{context}: poll yielded an item with an empty shadow buffer"
+                );
+                self.buffered -= 1;
+            }
+            Poll::Ready(None) => {
+                assert!(
+                    !self.open && self.buffered == 0,
+                    "{context}: poll completed while shadow open={} buffered={}",
+                    self.open,
+                    self.buffered
+                );
+            }
+            Poll::Pending => {
+                assert!(
+                    self.open && self.buffered == 0,
+                    "{context}: poll pending while shadow open={} buffered={}",
+                    self.open,
+                    self.buffered
+                );
+            }
+        }
+    }
+}
+
 /// Build a `Context<'_>` from a leaked noop waker. Sound because the
 /// waker has 'static lifetime and we never drop the Box.
 fn ctx() -> Context<'static> {
@@ -104,49 +200,81 @@ fn ctx() -> Context<'static> {
     Context::from_waker(&WAKER)
 }
 
-fn apply_to_streaming_request(stream: &mut StreamingRequest<u32>, ops: &[Op]) {
+fn apply_to_streaming_request(stream: &mut StreamingRequest<u32>, start_open: bool, ops: &[Op]) {
     let mut cx = ctx();
+    let mut shadow = StreamShadow::new(start_open);
     for op in ops.iter().take(MAX_OPS_PER_SCENARIO) {
         match op {
             Op::Push(v) => {
-                let _ = stream.push(*v);
+                shadow.observe_push(stream.push(*v), "StreamingRequest::push");
             }
             Op::PushCancelled => {
-                let _ = stream.push_result(Err(Status::cancelled("fuzz cancel")));
+                shadow.observe_push(
+                    stream.push_result(Err(Status::cancelled("fuzz cancel"))),
+                    "StreamingRequest::push_result(cancelled)",
+                );
             }
             Op::PushDeadline => {
-                let _ = stream.push_result(Err(Status::deadline_exceeded("fuzz deadline")));
+                shadow.observe_push(
+                    stream.push_result(Err(Status::deadline_exceeded("fuzz deadline"))),
+                    "StreamingRequest::push_result(deadline)",
+                );
             }
             Op::PushInternal => {
-                let _ = stream.push_result(Err(Status::internal("fuzz internal")));
+                shadow.observe_push(
+                    stream.push_result(Err(Status::internal("fuzz internal"))),
+                    "StreamingRequest::push_result(internal)",
+                );
             }
-            Op::Close => stream.close(),
+            Op::Close => {
+                stream.close();
+                shadow.close();
+            }
             Op::Poll => {
-                let _ = Pin::new(&mut *stream).poll_next(&mut cx);
+                shadow.observe_poll(
+                    Pin::new(&mut *stream).poll_next(&mut cx),
+                    "StreamingRequest::poll_next",
+                );
             }
         }
     }
 }
 
-fn apply_to_response_stream(stream: &mut ResponseStream<u32>, ops: &[Op]) {
+fn apply_to_response_stream(stream: &mut ResponseStream<u32>, start_open: bool, ops: &[Op]) {
     let mut cx = ctx();
+    let mut shadow = StreamShadow::new(start_open);
     for op in ops.iter().take(MAX_OPS_PER_SCENARIO) {
         match op {
             Op::Push(v) => {
-                let _ = stream.push(Ok(*v));
+                shadow.observe_push(stream.push(Ok(*v)), "ResponseStream::push(ok)");
             }
             Op::PushCancelled => {
-                let _ = stream.push(Err(Status::cancelled("fuzz cancel")));
+                shadow.observe_push(
+                    stream.push(Err(Status::cancelled("fuzz cancel"))),
+                    "ResponseStream::push(cancelled)",
+                );
             }
             Op::PushDeadline => {
-                let _ = stream.push(Err(Status::deadline_exceeded("fuzz deadline")));
+                shadow.observe_push(
+                    stream.push(Err(Status::deadline_exceeded("fuzz deadline"))),
+                    "ResponseStream::push(deadline)",
+                );
             }
             Op::PushInternal => {
-                let _ = stream.push(Err(Status::internal("fuzz internal")));
+                shadow.observe_push(
+                    stream.push(Err(Status::internal("fuzz internal"))),
+                    "ResponseStream::push(internal)",
+                );
             }
-            Op::Close => stream.close(),
+            Op::Close => {
+                stream.close();
+                shadow.close();
+            }
             Op::Poll => {
-                let _ = Pin::new(&mut *stream).poll_next(&mut cx);
+                shadow.observe_poll(
+                    Pin::new(&mut *stream).poll_next(&mut cx),
+                    "ResponseStream::poll_next",
+                );
             }
         }
     }
@@ -159,7 +287,7 @@ fuzz_target!(|s: Scenario| match s {
         } else {
             StreamingRequest::<u32>::new()
         };
-        apply_to_streaming_request(&mut stream, &ops);
+        apply_to_streaming_request(&mut stream, start_open, &ops);
     }
     Scenario::ResponseStreamOps { start_open, ops } => {
         let mut stream = if start_open {
@@ -167,23 +295,53 @@ fuzz_target!(|s: Scenario| match s {
         } else {
             ResponseStream::<u32>::new()
         };
-        apply_to_response_stream(&mut stream, &ops);
+        apply_to_response_stream(&mut stream, start_open, &ops);
     }
     Scenario::RequestSinkOps { ops } => {
         let mut sink = RequestSink::<u32>::new();
-        let pre_close_count = sink.sent_count();
-        let _ = pre_close_count;
         futures::executor::block_on(async {
+            let mut closed = false;
+            let mut expected_sent_count = 0usize;
             for op in ops.iter().take(MAX_OPS_PER_SCENARIO) {
                 match op {
                     RequestSinkOp::Send(v) => {
-                        let _ = sink.send(*v).await;
+                        let before = sink.sent_count();
+                        let result = sink.send(*v).await;
+                        if closed {
+                            assert!(result.is_err(), "RequestSink::send succeeded after close");
+                            assert_eq!(
+                                sink.sent_count(),
+                                before,
+                                "failed RequestSink::send must not advance sent_count"
+                            );
+                        } else {
+                            assert!(result.is_ok(), "RequestSink::send failed before close");
+                            expected_sent_count += 1;
+                            assert_eq!(
+                                sink.sent_count(),
+                                expected_sent_count,
+                                "successful RequestSink::send must advance sent_count once"
+                            );
+                        }
                     }
                     RequestSinkOp::Close => {
-                        let _ = sink.close().await;
+                        let before = sink.sent_count();
+                        let result = sink.close().await;
+                        assert!(result.is_ok(), "RequestSink::close must be idempotent");
+                        assert_eq!(
+                            sink.sent_count(),
+                            before,
+                            "RequestSink::close must preserve sent_count"
+                        );
+                        closed = true;
                     }
                 }
             }
+            assert_eq!(
+                sink.sent_count(),
+                expected_sent_count,
+                "final RequestSink sent_count drifted from shadow model"
+            );
         });
     }
     Scenario::CancelOrDeadlineBeforeBody {
@@ -199,15 +357,35 @@ fuzz_target!(|s: Scenario| match s {
         } else {
             Status::cancelled("fuzz: pre-body cancel")
         };
-        let _ = stream.push_result(Err(status));
+        let expected_code = status.code();
+        let mut shadow = StreamShadow::new(true);
+        shadow.observe_push(
+            stream.push_result(Err(status)),
+            "CancelOrDeadlineBeforeBody::push_result",
+        );
         if then_close {
             stream.close();
+            shadow.close();
         }
         let mut cx = ctx();
+        match Pin::new(&mut stream).poll_next(&mut cx) {
+            Poll::Ready(Some(Err(status))) => {
+                assert_eq!(
+                    status.code(),
+                    expected_code,
+                    "pre-body terminal status code changed while queued"
+                );
+                shadow.buffered -= 1;
+            }
+            other => panic!("pre-body terminal status should be observed first, got {other:?}"),
+        }
         // Drain at most 4 items — should observe the status then None
         // (or Pending if not closed and queue is drained).
-        for _ in 0..4 {
-            let _ = Pin::new(&mut stream).poll_next(&mut cx);
+        for _ in 0..3 {
+            shadow.observe_poll(
+                Pin::new(&mut stream).poll_next(&mut cx),
+                "CancelOrDeadlineBeforeBody::poll_next",
+            );
         }
     }
     Scenario::BufferCapStress { push_count } => {
@@ -227,10 +405,9 @@ fuzz_target!(|s: Scenario| match s {
         // Invariant: at most 1024 pushes accepted; the rest are
         // rejected. If accepted exceeds the cap, the buffer-cap
         // contract is violated and libfuzzer surfaces the panic.
-        const CAP: usize = 1024;
         assert!(
-            accepted <= CAP,
-            "accepted {accepted} exceeded MAX_STREAM_BUFFERED {CAP}"
+            accepted <= STREAM_BUFFER_CAP,
+            "accepted {accepted} exceeded MAX_STREAM_BUFFERED {STREAM_BUFFER_CAP}"
         );
         assert_eq!(
             accepted + rejected,
@@ -240,7 +417,7 @@ fuzz_target!(|s: Scenario| match s {
         // Drain via poll — at most CAP items observed.
         let mut cx = ctx();
         let mut polled_items = 0usize;
-        for _ in 0..(CAP + 8) {
+        for _ in 0..(STREAM_BUFFER_CAP + 8) {
             match Pin::new(&mut stream).poll_next(&mut cx) {
                 Poll::Ready(Some(_)) => polled_items += 1,
                 Poll::Ready(None) | Poll::Pending => break,
