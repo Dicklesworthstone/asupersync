@@ -1,8 +1,16 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
+use asupersync::bytes::BytesMut;
+use asupersync::http::h2::{Header, HpackDecoder, HpackEncoder};
 use libfuzzer_sys::fuzz_target;
 use std::collections::VecDeque;
+
+const MAX_PRODUCTION_TABLE_SIZE: usize = 1024 * 1024;
+const MAX_PRODUCTION_INITIAL_ENTRIES: usize = 8;
+const MAX_PRODUCTION_BLOCKS: usize = 4;
+const MAX_PRODUCTION_HEADERS: usize = 8;
+const MAX_PRODUCTION_COMPONENT_LEN: usize = 96;
 
 /// HTTP/2 SETTINGS_HEADER_TABLE_SIZE=0 HPACK fuzz target.
 ///
@@ -257,9 +265,16 @@ impl MockHpackDecoder {
 
     fn evict_to_size(&mut self, target_size: u32) -> u32 {
         let mut evicted = 0;
+        let _eviction_strategy = &self.config.eviction_strategy;
 
         if target_size == 0 {
             // Complete eviction for zero size
+            let sensitive_evictions = self
+                .dynamic_table
+                .iter()
+                .filter(|entry| entry.sensitive)
+                .count();
+            debug_assert!(sensitive_evictions <= self.dynamic_table.len());
             evicted = self.dynamic_table.len() as u32;
             self.dynamic_table.clear();
             self.current_size = 0;
@@ -286,11 +301,8 @@ impl MockHpackDecoder {
         // Process table size update first if present
         if let Some(size_update) = block.table_size_update {
             let update_result = self.update_table_size(size_update);
-            match update_result {
-                TableUpdateResult::Error(msg) => {
-                    return HeaderBlockResult::Error(format!("Table size update failed: {}", msg));
-                }
-                _ => {} // Continue processing
+            if let TableUpdateResult::Error(msg) = update_result {
+                return HeaderBlockResult::Error(format!("Table size update failed: {}", msg));
             }
         }
 
@@ -390,6 +402,9 @@ impl MockHpackDecoder {
         // Dynamic table
         let dynamic_index = index - self.static_table.len() - 1;
         if dynamic_index >= self.dynamic_table.len() {
+            if !self.config.strict_index_validation {
+                return Ok(None);
+            }
             return Err(format!(
                 "Dynamic table index {} out of range (table size {})",
                 dynamic_index,
@@ -498,13 +513,14 @@ fuzz_target!(|input: HpackTableInput| {
         input.new_table_size = 0; // Focus on zero case
     }
 
+    exercise_production_hpack_zero_size(&input);
+
     let mut decoder = MockHpackDecoder::new(input.decoder_config.clone());
 
     // Set initial table size
     let initial_update = decoder.update_table_size(input.initial_table_size);
-    match initial_update {
-        TableUpdateResult::Error(_) => return, // Invalid initial config
-        _ => {}
+    if let TableUpdateResult::Error(_) = initial_update {
+        return; // Invalid initial config
     }
 
     // Pre-populate dynamic table
@@ -557,10 +573,15 @@ fuzz_target!(|input: HpackTableInput| {
     }
 
     let post_update_state = decoder.get_table_state();
+    assert!(
+        post_update_state.current_size <= post_update_state.size_limit,
+        "Post-update table size should not exceed limit"
+    );
 
     // Test subsequent header block processing
     for (block_idx, block) in input.header_blocks.iter().enumerate().take(3) {
         // Limit for performance
+        let _expected_result = &block.expected_result;
         let decode_result = decoder.decode_header_block(block);
 
         match decode_result {
@@ -591,15 +612,16 @@ fuzz_target!(|input: HpackTableInput| {
                 if input.new_table_size == 0 {
                     // Index references to dynamic table should fail after zero-size eviction
                     for repr in &block.headers {
-                        if let HpackRepresentation::IndexedHeader { index } = repr {
-                            if *index as usize > decoder.static_table.len() {
-                                assert!(
-                                    msg.contains("out of range") || msg.contains("invalid"),
-                                    "Should properly detect invalid dynamic table references: {}",
-                                    msg
-                                );
-                                break;
-                            }
+                        if let HpackRepresentation::IndexedHeader { index } = repr
+                            && *index as usize > decoder.static_table.len()
+                        {
+                            assert!(
+                                msg.contains("out of range") || msg.contains("invalid"),
+                                "Block {} should properly detect invalid dynamic table references: {}",
+                                block_idx,
+                                msg
+                            );
+                            break;
                         }
                     }
                 }
@@ -644,3 +666,245 @@ fuzz_target!(|input: HpackTableInput| {
         );
     }
 });
+
+fn exercise_production_hpack_zero_size(input: &HpackTableInput) {
+    let initial_size = bounded_production_table_size(input.initial_table_size);
+    let mut encoder = HpackEncoder::with_max_size(initial_size);
+    let mut decoder = HpackDecoder::with_max_size(initial_size);
+    decoder.set_allowed_table_size(initial_size);
+
+    production_encode_decode_headers(
+        &mut encoder,
+        &mut decoder,
+        &initial_production_headers(input),
+        input
+            .initial_entries
+            .iter()
+            .take(MAX_PRODUCTION_INITIAL_ENTRIES)
+            .any(|entry| entry.sensitive),
+    );
+
+    production_apply_zero_table_size(&mut encoder, &mut decoder);
+
+    for (block_index, block) in input
+        .header_blocks
+        .iter()
+        .take(MAX_PRODUCTION_BLOCKS)
+        .enumerate()
+    {
+        if let Some(update) = block.table_size_update {
+            let size = if update == 0 {
+                0
+            } else {
+                bounded_production_table_size(update)
+            };
+            production_apply_table_size(&mut encoder, &mut decoder, size);
+            if size != 0 {
+                production_apply_zero_table_size(&mut encoder, &mut decoder);
+            }
+        }
+
+        let headers = block_production_headers(block, block_index);
+        production_encode_decode_headers(
+            &mut encoder,
+            &mut decoder,
+            &headers,
+            block
+                .headers
+                .iter()
+                .any(|repr| matches!(repr, HpackRepresentation::LiteralNeverIndex { .. })),
+        );
+
+        assert_eq!(
+            encoder.dynamic_table_size(),
+            0,
+            "encoder dynamic table must stay empty after zero table size"
+        );
+        assert_eq!(
+            decoder.dynamic_table_size(),
+            0,
+            "decoder dynamic table must stay empty after zero table size"
+        );
+    }
+}
+
+fn production_apply_zero_table_size(encoder: &mut HpackEncoder, decoder: &mut HpackDecoder) {
+    production_apply_table_size(encoder, decoder, 0);
+    assert_eq!(
+        encoder.dynamic_table_size(),
+        0,
+        "encoder must evict every dynamic entry after table size zero"
+    );
+    assert_eq!(
+        decoder.dynamic_table_size(),
+        0,
+        "decoder must evict every dynamic entry after table size zero"
+    );
+}
+
+fn production_apply_table_size(
+    encoder: &mut HpackEncoder,
+    decoder: &mut HpackDecoder,
+    size: usize,
+) {
+    encoder.set_max_table_size(size);
+    decoder.set_allowed_table_size(size);
+
+    let mut encoded = BytesMut::new();
+    encoder.encode(&[], &mut encoded);
+    let decoded = decoder
+        .decode(&mut encoded.freeze())
+        .expect("production HPACK table-size update must decode");
+    assert!(
+        decoded.is_empty(),
+        "table-size update block should not produce headers"
+    );
+    assert!(
+        encoder.dynamic_table_size() <= encoder.dynamic_table_max_size(),
+        "encoder table exceeds configured maximum"
+    );
+    assert!(
+        decoder.dynamic_table_size() <= decoder.dynamic_table_max_size(),
+        "decoder table exceeds configured maximum"
+    );
+}
+
+fn production_encode_decode_headers(
+    encoder: &mut HpackEncoder,
+    decoder: &mut HpackDecoder,
+    headers: &[Header],
+    sensitive: bool,
+) {
+    let mut encoded = BytesMut::new();
+    if sensitive {
+        encoder.encode_sensitive(headers, &mut encoded);
+    } else {
+        encoder.encode(headers, &mut encoded);
+    }
+
+    let decoded = decoder
+        .decode(&mut encoded.freeze())
+        .expect("production HPACK block encoded by local encoder must decode");
+    assert_eq!(
+        decoded, headers,
+        "production HPACK round-trip changed headers"
+    );
+    assert!(
+        encoder.dynamic_table_size() <= encoder.dynamic_table_max_size(),
+        "encoder table exceeds configured maximum after header block"
+    );
+    assert!(
+        decoder.dynamic_table_size() <= decoder.dynamic_table_max_size(),
+        "decoder table exceeds configured maximum after header block"
+    );
+}
+
+fn initial_production_headers(input: &HpackTableInput) -> Vec<Header> {
+    let mut headers: Vec<Header> = input
+        .initial_entries
+        .iter()
+        .take(MAX_PRODUCTION_INITIAL_ENTRIES)
+        .enumerate()
+        .map(|(index, entry)| {
+            Header::new(
+                normalized_header_name(&entry.name, "x-initial", index),
+                bounded_visible_ascii(&entry.value, "value", MAX_PRODUCTION_COMPONENT_LEN),
+            )
+        })
+        .collect();
+
+    if headers.is_empty() {
+        headers.push(Header::new(":method", "GET"));
+        headers.push(Header::new(":path", "/"));
+        headers.push(Header::new(":scheme", "https"));
+        headers.push(Header::new(":authority", "example.test"));
+        headers.push(Header::new("x-seed", "value"));
+    }
+
+    headers
+}
+
+fn block_production_headers(block: &HpackHeaderBlock, block_index: usize) -> Vec<Header> {
+    let mut headers = Vec::new();
+
+    for (header_index, repr) in block
+        .headers
+        .iter()
+        .take(MAX_PRODUCTION_HEADERS)
+        .enumerate()
+    {
+        match repr {
+            HpackRepresentation::IndexedHeader { index } => {
+                headers.push(static_or_fallback_header(*index, block_index, header_index));
+            }
+            HpackRepresentation::LiteralIncremental { name, value, .. }
+            | HpackRepresentation::LiteralNoIndex { name, value, .. }
+            | HpackRepresentation::LiteralNeverIndex { name, value, .. } => {
+                headers.push(Header::new(
+                    normalized_header_name(name, "x-block", header_index),
+                    bounded_visible_ascii(value, "value", MAX_PRODUCTION_COMPONENT_LEN),
+                ));
+            }
+            HpackRepresentation::TableSizeUpdate { .. } => {}
+        }
+    }
+
+    if headers.is_empty() {
+        headers.push(Header::new(format!("x-block-{block_index}"), "value"));
+    }
+
+    headers
+}
+
+fn static_or_fallback_header(index: u8, block_index: usize, header_index: usize) -> Header {
+    match index {
+        1 => Header::new(":authority", "example.test"),
+        2 => Header::new(":method", "GET"),
+        3 => Header::new(":method", "POST"),
+        4 => Header::new(":path", "/"),
+        5 => Header::new(":path", "/index.html"),
+        6 => Header::new(":scheme", "http"),
+        7 => Header::new(":scheme", "https"),
+        _ => Header::new(
+            format!("x-index-{block_index}-{header_index}"),
+            bounded_visible_ascii(&index.to_string(), "value", MAX_PRODUCTION_COMPONENT_LEN),
+        ),
+    }
+}
+
+fn bounded_production_table_size(size: u32) -> usize {
+    (size as usize).min(MAX_PRODUCTION_TABLE_SIZE)
+}
+
+fn normalized_header_name(raw: &str, prefix: &str, index: usize) -> String {
+    let mut normalized = String::new();
+    for byte in raw.bytes().take(MAX_PRODUCTION_COMPONENT_LEN) {
+        let lower = byte.to_ascii_lowercase();
+        if lower.is_ascii_lowercase() || lower.is_ascii_digit() || lower == b'-' {
+            normalized.push(char::from(lower));
+        }
+    }
+
+    if normalized.is_empty() {
+        format!("{prefix}-{index}")
+    } else {
+        normalized
+    }
+}
+
+fn bounded_visible_ascii(input: &str, fallback: &str, max_len: usize) -> String {
+    let mut out = String::new();
+    for byte in input.bytes().take(max_len) {
+        match byte {
+            b'\r' | b'\n' | b'\0' => out.push('-'),
+            0x20..=0x7e => out.push(char::from(byte)),
+            _ => {}
+        }
+    }
+
+    if out.is_empty() {
+        fallback.to_string()
+    } else {
+        out
+    }
+}
