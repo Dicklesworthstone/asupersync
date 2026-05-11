@@ -5643,6 +5643,7 @@ name = "h2_request_pseudo_path_with_query"
 path = "fuzz_targets/h2_request_pseudo_path_with_query.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_request_pseudo_authority_with_userinfo"

@@ -26,13 +26,9 @@
 //! - Path normalization without losing query information
 
 #![no_main]
+#![allow(dead_code)]
 
 use arbitrary::Arbitrary;
-use asupersync::bytes::Bytes;
-use asupersync::http::h2::connection::{Connection, Side};
-use asupersync::http::h2::error::ErrorCode;
-use asupersync::http::h2::frame::{Frame, HeadersFrame, Setting, SettingsFrame};
-use asupersync::http::h2::headers::{HeaderMap, HeaderName, HeaderValue};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
@@ -132,7 +128,7 @@ pub struct RequestConfig {
 }
 
 /// Validation configuration
-#[derive(Debug, Arbitrary)]
+#[derive(Debug, Arbitrary, Clone)]
 pub struct ValidationConfig {
     /// Enforce path component validation
     validate_path_component: bool,
@@ -168,7 +164,10 @@ pub enum EdgeCaseTest {
     /// Very long combined path+query
     VeryLongCombined { target_length: u16 },
     /// International characters in both components
-    InternationalChars { path_lang: String, query_lang: String },
+    InternationalChars {
+        path_lang: String,
+        query_lang: String,
+    },
     /// Query with JSON-like structure
     JsonLikeQuery { path: String, json_data: String },
     /// Path with dots and query
@@ -247,24 +246,24 @@ pub struct PathQueryViolation {
 
 #[derive(Debug, Clone)]
 pub enum ViolationType {
-    PathComponentLoss,     // Path component lost during parsing
-    QueryComponentLoss,    // Query component lost during parsing
-    IncorrectSplitting,    // Path/query split incorrectly
-    EncodingCorruption,    // Percent encoding corrupted
-    UnicodeHandling,       // Unicode handling issues
-    PerformanceIssue,      // Parsing performance problems
-    ValidationBypass,      // Validation bypassed incorrectly
+    PathComponentLoss,  // Path component lost during parsing
+    QueryComponentLoss, // Query component lost during parsing
+    IncorrectSplitting, // Path/query split incorrectly
+    EncodingCorruption, // Percent encoding corrupted
+    UnicodeHandling,    // Unicode handling issues
+    PerformanceIssue,   // Parsing performance problems
+    ValidationBypass,   // Validation bypassed incorrectly
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ViolationSeverity {
-    Critical,   // Data loss or corruption
-    High,       // Incorrect parsing behavior
-    Medium,     // Performance or compliance issue
-    Low,        // Style or recommendation
+    Critical, // Data loss or corruption
+    High,     // Incorrect parsing behavior
+    Medium,   // Performance or compliance issue
+    Low,      // Style or recommendation
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ParserStats {
     requests_processed: u32,
     paths_with_query_processed: u32,
@@ -292,7 +291,11 @@ impl MockH2PathWithQueryParser {
     }
 
     /// Process headers frame with :path parsing
-    pub fn process_headers_frame(&mut self, stream_id: u32, headers: Vec<(String, String)>) -> Result<(), PathQueryError> {
+    pub fn process_headers_frame(
+        &mut self,
+        stream_id: u32,
+        headers: Vec<(String, String)>,
+    ) -> Result<(), PathQueryError> {
         self.current_stream_id = stream_id;
         self.state = ParsingState::ProcessingPseudoHeaders;
         self.stats.requests_processed += 1;
@@ -304,7 +307,9 @@ impl MockH2PathWithQueryParser {
                 // Pseudo-header
                 if name == ":path" {
                     if found_path {
-                        return Err(PathQueryError::InvalidPathFormat("Duplicate :path header".to_string()));
+                        return Err(PathQueryError::InvalidPathFormat(
+                            "Duplicate :path header".to_string(),
+                        ));
                     }
                     found_path = true;
                     self.parse_path_with_query(&value)?;
@@ -331,7 +336,8 @@ impl MockH2PathWithQueryParser {
         self.stats.paths_with_query_processed += 1;
 
         // Basic validation
-        if path_value.len() > (self.config.max_path_length + self.config.max_query_length) as usize {
+        if path_value.len() > (self.config.max_path_length + self.config.max_query_length) as usize
+        {
             return Err(PathQueryError::PathTooLong {
                 length: path_value.len(),
                 max: (self.config.max_path_length + self.config.max_query_length) as usize,
@@ -385,9 +391,10 @@ impl MockH2PathWithQueryParser {
     fn validate_path_component(&mut self, path: &str) -> Result<(), PathQueryError> {
         // Path must start with '/' for absolute-path
         if !path.starts_with('/') && !path.is_empty() {
-            return Err(PathQueryError::PathComponentParsingFailed(
-                format!("Path component must start with '/', got: {}", path)
-            ));
+            return Err(PathQueryError::PathComponentParsingFailed(format!(
+                "Path component must start with '/', got: {}",
+                path
+            )));
         }
 
         // Check path length
@@ -401,15 +408,15 @@ impl MockH2PathWithQueryParser {
         // Allow empty path only if configured
         if path.is_empty() && !self.config.allow_empty_path {
             return Err(PathQueryError::PathComponentParsingFailed(
-                "Empty path component not allowed".to_string()
+                "Empty path component not allowed".to_string(),
             ));
         }
 
         // Validate percent encoding in path
+        if path.contains('%') && self.validate_percent_encoding(path).is_err() {
+            return Err(PathQueryError::InvalidPercentEncoding(path.to_string()));
+        }
         if path.contains('%') {
-            if let Err(_) = self.validate_percent_encoding(path) {
-                return Err(PathQueryError::InvalidPercentEncoding(path.to_string()));
-            }
             self.stats.encoding_operations += 1;
         }
 
@@ -429,15 +436,15 @@ impl MockH2PathWithQueryParser {
         // Allow empty query if configured
         if query.is_empty() && !self.config.allow_empty_query {
             return Err(PathQueryError::QueryComponentParsingFailed(
-                "Empty query component not allowed".to_string()
+                "Empty query component not allowed".to_string(),
             ));
         }
 
         // Validate percent encoding in query
+        if query.contains('%') && self.validate_percent_encoding(query).is_err() {
+            return Err(PathQueryError::InvalidPercentEncoding(query.to_string()));
+        }
         if query.contains('%') {
-            if let Err(_) = self.validate_percent_encoding(query) {
-                return Err(PathQueryError::InvalidPercentEncoding(query.to_string()));
-            }
             self.stats.encoding_operations += 1;
         }
 
@@ -478,15 +485,20 @@ impl MockH2PathWithQueryParser {
         let reconstructed = match (&self.path_component, &self.query_component) {
             (Some(path), Some(query)) => format!("{}?{}", path, query),
             (Some(path), None) => path.clone(),
-            _ => return Err(PathQueryError::PathComponentParsingFailed(
-                "Failed to extract path component".to_string()
-            )),
+            _ => {
+                return Err(PathQueryError::PathComponentParsingFailed(
+                    "Failed to extract path component".to_string(),
+                ));
+            }
         };
 
         if reconstructed != original {
             self.violations.push(PathQueryViolation {
                 violation_type: ViolationType::PathComponentLoss,
-                description: format!("Parsing lost information: '{}' != '{}'", original, reconstructed),
+                description: format!(
+                    "Parsing lost information: '{}' != '{}'",
+                    original, reconstructed
+                ),
                 path_value: original.to_string(),
                 parsed_path: self.path_component.clone(),
                 parsed_query: self.query_component.clone(),
@@ -495,10 +507,10 @@ impl MockH2PathWithQueryParser {
             self.stats.violations_detected += 1;
 
             if self.config.strict_mode {
-                return Err(PathQueryError::PathComponentParsingFailed(
-                    format!("Parsing integrity check failed: original='{}', reconstructed='{}'",
-                        original, reconstructed)
-                ));
+                return Err(PathQueryError::PathComponentParsingFailed(format!(
+                    "Parsing integrity check failed: original='{}', reconstructed='{}'",
+                    original, reconstructed
+                )));
             }
         }
 
@@ -506,31 +518,57 @@ impl MockH2PathWithQueryParser {
     }
 
     /// Generate test path with query based on format
-    pub fn generate_path_with_query(format: &PathQueryFormat, path: &str, query: &str, options: &ComplexityOptions) -> String {
+    pub fn generate_path_with_query(
+        format: &PathQueryFormat,
+        path: &str,
+        query: &str,
+        options: &ComplexityOptions,
+    ) -> String {
         let base_path = if path.is_empty() { "/default" } else { path };
-        let base_query = if query.is_empty() { "param=value" } else { query };
+        let base_query = if query.is_empty() {
+            "param=value"
+        } else {
+            query
+        };
 
         let mut result = match format {
             PathQueryFormat::Simple => format!("{}?{}", base_path, base_query),
-            PathQueryFormat::NestedPath => format!("/api/v1/users/{}?{}", base_path.trim_start_matches('/'), base_query),
-            PathQueryFormat::MultipleParams => format!("{}?param1=value1&param2=value2&{}", base_path, base_query),
-            PathQueryFormat::EncodedChars => format!("{}?encoded=%20space%21exclamation&{}", base_path, base_query),
-            PathQueryFormat::SpecialChars => format!("{}?filter=date%3E2023-01-01&{}", base_path, base_query),
+            PathQueryFormat::NestedPath => format!(
+                "/api/v1/users/{}?{}",
+                base_path.trim_start_matches('/'),
+                base_query
+            ),
+            PathQueryFormat::MultipleParams => {
+                format!("{}?param1=value1&param2=value2&{}", base_path, base_query)
+            }
+            PathQueryFormat::EncodedChars => format!(
+                "{}?encoded=%20space%21exclamation&{}",
+                base_path, base_query
+            ),
+            PathQueryFormat::SpecialChars => {
+                format!("{}?filter=date%3E2023-01-01&{}", base_path, base_query)
+            }
             PathQueryFormat::Unicode => format!("/用户?名前=太郎&{}", base_query),
             PathQueryFormat::EmptyQuery => format!("{}?", base_path),
-            PathQueryFormat::ComplexNesting => format!("{}?fields[]=name&fields[]=email&data[user][name]=test&{}", base_path, base_query),
+            PathQueryFormat::ComplexNesting => format!(
+                "{}?fields[]=name&fields[]=email&data[user][name]=test&{}",
+                base_path, base_query
+            ),
             PathQueryFormat::LongComponents => {
-                let long_path = format!("/very/long/path/with/many/segments/{}", "segment/".repeat(10));
+                let long_path = format!(
+                    "/very/long/path/with/many/segments/{}",
+                    "segment/".repeat(10)
+                );
                 let long_query = format!("param={}&{}", "value".repeat(50), base_query);
                 format!("{}?{}", long_path, long_query)
-            },
+            }
             PathQueryFormat::EdgeCases => {
                 if base_path == "/" {
                     format!("/?{}", base_query)
                 } else {
                     format!("{}?{}", base_path, base_query)
                 }
-            },
+            }
         };
 
         // Apply complexity options
@@ -538,7 +576,7 @@ impl MockH2PathWithQueryParser {
             result = result.replace(" ", "%20").replace("!", "%21");
         }
 
-        if options.use_unicode && !result.chars().any(|c| !c.is_ascii()) {
+        if options.use_unicode && result.is_ascii() {
             result = result.replace("value", "値");
         }
 
@@ -574,14 +612,18 @@ impl MockH2PathWithQueryParser {
 
     /// Check if parsing was successful
     pub fn is_successful(&self) -> bool {
-        matches!(self.state, ParsingState::Complete) &&
-        self.path_component.is_some() &&
-        self.violations.iter().all(|v| v.severity != ViolationSeverity::Critical)
+        matches!(self.state, ParsingState::Complete)
+            && self.path_component.is_some()
+            && self
+                .violations
+                .iter()
+                .all(|v| v.severity != ViolationSeverity::Critical)
     }
 
     /// Get critical violations
     pub fn critical_violations(&self) -> Vec<&PathQueryViolation> {
-        self.violations.iter()
+        self.violations
+            .iter()
             .filter(|v| v.severity == ViolationSeverity::Critical)
             .collect()
     }
@@ -612,6 +654,10 @@ fn cap_u32(value: u32, max: u32) -> u32 {
     value.min(max)
 }
 
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
+}
+
 fuzz_target!(|input: PathWithQueryInput| {
     let config = ValidationConfig {
         validate_path_component: true,
@@ -626,36 +672,50 @@ fuzz_target!(|input: PathWithQueryInput| {
     // Process each path+query combination
     for combination in input.path_query_combinations.iter().take(10) {
         let mut parser = MockH2PathWithQueryParser::new(config.clone());
+        let path_component = truncate_chars(&combination.path_component, 200);
+        let query_component = truncate_chars(&combination.query_component, 500);
 
         // Generate test path with query
         let test_path = MockH2PathWithQueryParser::generate_path_with_query(
             &combination.format_type,
-            &combination.path_component[..combination.path_component.len().min(200)],
-            &combination.query_component[..combination.query_component.len().min(500)],
-            &combination.complexity_options
+            &path_component,
+            &query_component,
+            &combination.complexity_options,
         );
 
         // Ensure reasonable length for fuzzing
         let final_path = if test_path.len() > 4096 {
-            format!("/path?{}", &test_path[test_path.find('?').unwrap_or(5) + 1..1024])
+            let query_start = test_path
+                .find('?')
+                .map(|question_pos| &test_path[question_pos + 1..])
+                .unwrap_or(&test_path);
+            format!("/path?{}", truncate_chars(query_start, 1023))
         } else {
             test_path
         };
 
         // Build headers for request
-        let mut headers = Vec::new();
-
-        // Add required pseudo-headers
-        headers.push((":method".to_string(), input.request_config.method[..input.request_config.method.len().min(10)].to_string()));
-        headers.push((":path".to_string(), final_path.clone()));
-        headers.push((":scheme".to_string(), input.request_config.scheme[..input.request_config.scheme.len().min(10)].to_string()));
-        headers.push((":authority".to_string(), input.request_config.authority[..input.request_config.authority.len().min(100)].to_string()));
+        let mut headers = vec![
+            (
+                ":method".to_string(),
+                truncate_chars(&input.request_config.method, 10),
+            ),
+            (":path".to_string(), final_path.clone()),
+            (
+                ":scheme".to_string(),
+                truncate_chars(&input.request_config.scheme, 10),
+            ),
+            (
+                ":authority".to_string(),
+                truncate_chars(&input.request_config.authority, 100),
+            ),
+        ];
 
         // Add additional headers
         for header in input.additional_headers.iter().take(5) {
             if !header.is_pseudo_header && !header.name.starts_with(':') {
-                let name = header.name[..header.name.len().min(50)].to_string();
-                let value = header.value[..header.value.len().min(200)].to_string();
+                let name = truncate_chars(&header.name, 50);
+                let value = truncate_chars(&header.value, 200);
                 headers.push((name, value));
             }
         }
@@ -673,14 +733,21 @@ fuzz_target!(|input: PathWithQueryInput| {
                     let results = parser.results();
 
                     // Should have extracted both components
-                    assert!(results.path_component.is_some(), "Path component should be extracted");
+                    assert!(
+                        results.path_component.is_some(),
+                        "Path component should be extracted"
+                    );
 
                     if final_path.contains('?') {
-                        assert!(results.query_component.is_some(), "Query component should be extracted for path with query");
+                        assert!(
+                            results.query_component.is_some(),
+                            "Query component should be extracted for path with query"
+                        );
                     }
 
                     // Verify integrity
-                    if let (Some(path), query) = (&results.path_component, &results.query_component) {
+                    if let (Some(path), query) = (&results.path_component, &results.query_component)
+                    {
                         let reconstructed = if let Some(q) = query {
                             format!("{}?{}", path, q)
                         } else {
@@ -690,18 +757,23 @@ fuzz_target!(|input: PathWithQueryInput| {
                         if reconstructed != final_path {
                             // Check if this is due to normalization or if it's actual data loss
                             if !final_path.contains("//") && !final_path.contains("/./") {
-                                assert_eq!(reconstructed, final_path,
-                                    "Path+query parsing should preserve original structure");
+                                assert_eq!(
+                                    reconstructed, final_path,
+                                    "Path+query parsing should preserve original structure"
+                                );
                             }
                         }
                     }
 
                     // Check for critical violations
                     let critical_violations = parser.critical_violations();
-                    assert!(critical_violations.is_empty(),
-                        "Valid path+query should not have critical violations: {:?}", critical_violations);
-                },
-                Err(e) => {
+                    assert!(
+                        critical_violations.is_empty(),
+                        "Valid path+query should not have critical violations: {:?}",
+                        critical_violations
+                    );
+                }
+                Err(_) => {
                     // Valid paths might still fail due to length limits or other constraints
                     // Only assert for clearly valid, simple cases
                     if final_path.len() < 1000 && !final_path.chars().any(|c| c.is_control()) {
@@ -713,10 +785,16 @@ fuzz_target!(|input: PathWithQueryInput| {
 
         // Verify parser statistics
         let results = parser.results();
-        assert!(results.stats.requests_processed > 0, "Should have processed at least one request");
+        assert!(
+            results.stats.requests_processed > 0,
+            "Should have processed at least one request"
+        );
 
         if final_path.contains('?') {
-            assert!(results.stats.paths_with_query_processed > 0, "Should have processed path with query");
+            assert!(
+                results.stats.paths_with_query_processed > 0,
+                "Should have processed path with query"
+            );
         }
     }
 
@@ -736,51 +814,82 @@ fuzz_target!(|input: PathWithQueryInput| {
 
         let test_path = match edge_case {
             EdgeCaseTest::RootPathWithQuery { query } => {
-                let query_part = query[..query.len().min(200)].to_string();
+                let query_part = truncate_chars(query, 200);
                 format!("/?{}", query_part)
-            },
+            }
             EdgeCaseTest::DeepNestedPath { depth, query } => {
                 let depth = cap_u8(*depth, 10);
-                let segments = (0..depth).map(|i| format!("segment{}", i)).collect::<Vec<_>>().join("/");
-                let query_part = query[..query.len().min(200)].to_string();
+                let segments = (0..depth)
+                    .map(|i| format!("segment{}", i))
+                    .collect::<Vec<_>>()
+                    .join("/");
+                let query_part = truncate_chars(query, 200);
                 format!("/{}?{}", segments, query_part)
-            },
+            }
             EdgeCaseTest::QueryNoValue { path, flags } => {
-                let path_part = path[..path.len().min(100)].to_string();
-                let flags_part = flags.iter().take(5)
-                    .map(|f| f[..f.len().min(20)].to_string())
+                let path_part = truncate_chars(path, 100);
+                let flags_part = flags
+                    .iter()
+                    .take(5)
+                    .map(|f| truncate_chars(f, 20))
                     .collect::<Vec<_>>()
                     .join("&");
-                format!("{}?{}", if path_part.starts_with('/') { path_part } else { format!("/{}", path_part) }, flags_part)
-            },
+                let normalized_path = if path_part.starts_with('/') {
+                    path_part
+                } else {
+                    format!("/{}", path_part)
+                };
+                format!("{}?{}", normalized_path, flags_part)
+            }
             EdgeCaseTest::QueryEmptyValues { path, keys } => {
-                let path_part = path[..path.len().min(100)].to_string();
-                let empty_values = keys.iter().take(5)
-                    .map(|k| format!("{}=", k[..k.len().min(20)].to_string()))
+                let path_part = truncate_chars(path, 100);
+                let empty_values = keys
+                    .iter()
+                    .take(5)
+                    .map(|k| format!("{}=", truncate_chars(k, 20)))
                     .collect::<Vec<_>>()
                     .join("&");
-                format!("{}?{}", if path_part.starts_with('/') { path_part } else { format!("/{}", path_part) }, empty_values)
-            },
+                let normalized_path = if path_part.starts_with('/') {
+                    path_part
+                } else {
+                    format!("/{}", path_part)
+                };
+                format!("{}?{}", normalized_path, empty_values)
+            }
             EdgeCaseTest::TrailingSlashWithQuery { path, query } => {
-                let path_part = path[..path.len().min(100)].to_string();
-                let query_part = query[..query.len().min(200)].to_string();
-                let path_with_slash = if path_part.ends_with('/') { path_part } else { format!("{}/", path_part) };
-                format!("{}?{}", if path_with_slash.starts_with('/') { path_with_slash } else { format!("/{}", path_with_slash) }, query_part)
-            },
+                let path_part = truncate_chars(path, 100);
+                let query_part = truncate_chars(query, 200);
+                let path_with_slash = if path_part.ends_with('/') {
+                    path_part
+                } else {
+                    format!("{}/", path_part)
+                };
+                let normalized_path = if path_with_slash.starts_with('/') {
+                    path_with_slash
+                } else {
+                    format!("/{}", path_with_slash)
+                };
+                format!("{}?{}", normalized_path, query_part)
+            }
             EdgeCaseTest::VeryLongCombined { target_length } => {
                 let length = cap_u16(*target_length, 8192);
                 let path_len = length as usize / 2;
                 let query_len = length as usize / 2;
-                let long_path = format!("/{}", "segment/".repeat(path_len / 8).trim_end_matches('/'));
+                let long_path =
+                    format!("/{}", "segment/".repeat(path_len / 8).trim_end_matches('/'));
                 let long_query = format!("param={}", "value".repeat(query_len / 10));
                 format!("{}?{}", long_path, long_query)
-            },
+            }
             _ => "/edge_case?test=value".to_string(),
         };
 
         // Ensure path is reasonable for testing
         let final_test_path = if test_path.len() > 8192 {
-            format!("/path?{}", &test_path[test_path.find('?').unwrap_or(5) + 1..1000])
+            let query_start = test_path
+                .find('?')
+                .map(|question_pos| &test_path[question_pos + 1..])
+                .unwrap_or(&test_path);
+            format!("/path?{}", truncate_chars(query_start, 999))
         } else {
             test_path
         };
@@ -801,14 +910,23 @@ fuzz_target!(|input: PathWithQueryInput| {
                     let results = parser.results();
 
                     // Verify basic parsing worked
-                    assert!(results.path_component.is_some(), "Edge case should have path component");
+                    assert!(
+                        results.path_component.is_some(),
+                        "Edge case should have path component"
+                    );
 
                     if final_test_path.contains('?') {
                         // Should have query component for paths with queries
-                        assert!(results.query_component.is_some() || results.query_component.as_ref().map_or(true, |q| q.is_empty()),
-                            "Edge case with query should extract query component");
+                        assert!(
+                            results.query_component.is_some()
+                                || results
+                                    .query_component
+                                    .as_ref()
+                                    .is_none_or(|q| q.is_empty()),
+                            "Edge case with query should extract query component"
+                        );
                     }
-                },
+                }
                 Err(_) => {
                     // Some edge cases may legitimately fail due to length or other constraints
                 }
@@ -840,7 +958,10 @@ mod tests {
 
         let headers = vec![
             (":method".to_string(), "GET".to_string()),
-            (":path".to_string(), "/api/users?id=123&name=john".to_string()),
+            (
+                ":path".to_string(),
+                "/api/users?id=123&name=john".to_string(),
+            ),
             (":scheme".to_string(), "https".to_string()),
             (":authority".to_string(), "example.com".to_string()),
         ];
@@ -850,8 +971,14 @@ mod tests {
 
         let results = parser.results();
         assert_eq!(results.path_component, Some("/api/users".to_string()));
-        assert_eq!(results.query_component, Some("id=123&name=john".to_string()));
-        assert_eq!(results.full_path, Some("/api/users?id=123&name=john".to_string()));
+        assert_eq!(
+            results.query_component,
+            Some("id=123&name=john".to_string())
+        );
+        assert_eq!(
+            results.full_path,
+            Some("/api/users?id=123&name=john".to_string())
+        );
     }
 
     #[test]
@@ -958,7 +1085,10 @@ mod tests {
 
         let headers = vec![
             (":method".to_string(), "GET".to_string()),
-            (":path".to_string(), "/users/john%20doe?name=Jane%20Smith&age=30".to_string()),
+            (
+                ":path".to_string(),
+                "/users/john%20doe?name=Jane%20Smith&age=30".to_string(),
+            ),
             (":scheme".to_string(), "https".to_string()),
             (":authority".to_string(), "example.com".to_string()),
         ];
@@ -967,8 +1097,14 @@ mod tests {
         assert!(result.is_ok());
 
         let results = parser.results();
-        assert_eq!(results.path_component, Some("/users/john%20doe".to_string()));
-        assert_eq!(results.query_component, Some("name=Jane%20Smith&age=30".to_string()));
+        assert_eq!(
+            results.path_component,
+            Some("/users/john%20doe".to_string())
+        );
+        assert_eq!(
+            results.query_component,
+            Some("name=Jane%20Smith&age=30".to_string())
+        );
     }
 
     #[test]
@@ -999,7 +1135,9 @@ mod tests {
         let results = parser.results();
 
         // Reconstruct and verify
-        let reconstructed = if let (Some(path), Some(query)) = (&results.path_component, &results.query_component) {
+        let reconstructed = if let (Some(path), Some(query)) =
+            (&results.path_component, &results.query_component)
+        {
             format!("{}?{}", path, query)
         } else if let Some(path) = &results.path_component {
             path.clone()
@@ -1007,8 +1145,14 @@ mod tests {
             String::new()
         };
 
-        assert_eq!(reconstructed, original_path, "Parsing should preserve original structure exactly");
-        assert!(results.violations.is_empty(), "Should have no violations for valid path+query");
+        assert_eq!(
+            reconstructed, original_path,
+            "Parsing should preserve original structure exactly"
+        );
+        assert!(
+            results.violations.is_empty(),
+            "Should have no violations for valid path+query"
+        );
     }
 
     #[test]
@@ -1025,7 +1169,7 @@ mod tests {
             &PathQueryFormat::Simple,
             "/test",
             "key=value",
-            &options
+            &options,
         );
         assert_eq!(simple, "/test?key=value");
 
@@ -1033,7 +1177,7 @@ mod tests {
             &PathQueryFormat::NestedPath,
             "profile",
             "id=123",
-            &options
+            &options,
         );
         assert_eq!(nested, "/api/v1/users/profile?id=123");
     }
