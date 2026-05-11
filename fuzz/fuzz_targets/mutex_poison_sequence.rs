@@ -228,8 +228,12 @@ fn create_poisoned_mutex() -> Arc<Mutex<u32>> {
         }
     });
 
-    // Wait for the thread to panic
-    let _ = handle.join(); // Will be Err because thread panicked
+    // Wait for the thread to panic. An Ok join means the helper exited
+    // without poisoning the mutex, so make that outcome fuzz-visible.
+    assert!(
+        handle.join().is_err(),
+        "poison helper exited without panicking"
+    );
 
     // Verify the mutex is actually poisoned
     assert!(mutex.is_poisoned(), "Mutex should be poisoned after panic");
