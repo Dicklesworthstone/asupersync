@@ -5594,6 +5594,7 @@ name = "h2_priority_zero_dependency"
 path = "fuzz_targets/h2_priority_zero_dependency.rs"
 test = false
 doc = false
+bench = false
 
 # br-asupersync-u3xx8w — narrow PriorityFrame::parse round-trip + invariants
 [[bin]]
