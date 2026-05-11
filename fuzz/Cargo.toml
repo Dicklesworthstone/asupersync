@@ -5114,6 +5114,7 @@ name = "notify_drop_pending_mid_poll"
 path = "fuzz_targets/notify_drop_pending_mid_poll.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_headers_continuation_sequencing"
