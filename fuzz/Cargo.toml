@@ -5252,6 +5252,7 @@ name = "h2_headers_frame_size_cap_concurrent"
 path = "fuzz_targets/h2_headers_frame_size_cap_concurrent.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_priority_idle_stream"
