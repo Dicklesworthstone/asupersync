@@ -19,14 +19,11 @@
 //! Usage: cargo fuzz run jetstream_ack_subject_splitter
 
 use arbitrary::{Arbitrary, Unstructured};
-use asupersync::messaging::{nats::Message, jetstream::{FuzzJsAckMetadata, fuzz_parse_js_message}};
+use asupersync::messaging::{jetstream::fuzz_parse_js_message, nats::Message};
 use libfuzzer_sys::fuzz_target;
 
 /// Maximum subject length (reasonable upper bound for NATS subjects)
 const MAX_SUBJECT_LENGTH: usize = 4096;
-
-/// Maximum individual token length (prevent excessive memory usage)
-const MAX_TOKEN_LENGTH: usize = 256;
 
 /// Structure-aware generator for JetStream ACK reply subjects
 #[derive(Arbitrary, Debug, Clone)]
@@ -120,7 +117,7 @@ enum LengthMutation {
 
 #[derive(Arbitrary, Debug, Clone)]
 enum BoundaryType {
-    Minimum, // Exactly 9 tokens
+    Minimum,  // Exactly 9 tokens
     Overflow, // Way too many tokens
 }
 
@@ -168,14 +165,12 @@ impl SimpleToken {
         let base_length = usize::from(self.length % 32) + 1; // 1-32 chars
 
         match &self.content {
-            TokenContent::Alphanumeric => {
-                (0..base_length)
-                    .map(|i| {
-                        let chars = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-                        char::from(chars[i % chars.len()])
-                    })
-                    .collect()
-            }
+            TokenContent::Alphanumeric => (0..base_length)
+                .map(|i| {
+                    let chars = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+                    char::from(chars[i % chars.len()])
+                })
+                .collect(),
             TokenContent::WithDots => {
                 format!("seg1.seg2.seg{}", base_length % 10)
             }
@@ -186,7 +181,8 @@ impl SimpleToken {
                 format!("stream_{}.v{}", base_length % 10, base_length % 3)
             }
             TokenContent::Binary(bytes) => {
-                String::from_utf8_lossy(&bytes[..std::cmp::min(bytes.len(), base_length)]).into_owned()
+                String::from_utf8_lossy(&bytes[..std::cmp::min(bytes.len(), base_length)])
+                    .into_owned()
             }
         }
     }
@@ -224,8 +220,10 @@ impl AckReplySubject {
                 timestamp,
                 pending,
             } => {
-                let stream_name: Vec<String> = stream_segments.iter().map(|s| s.materialize()).collect();
-                let consumer_name: Vec<String> = consumer_segments.iter().map(|s| s.materialize()).collect();
+                let stream_name: Vec<String> =
+                    stream_segments.iter().map(|s| s.materialize()).collect();
+                let consumer_name: Vec<String> =
+                    consumer_segments.iter().map(|s| s.materialize()).collect();
 
                 format!(
                     "$JS.ACK.{}.{}.{}.{}.{}.{}.{}",
@@ -247,7 +245,8 @@ impl AckReplySubject {
     fn apply_fuzz_params(&self, mut subject: String) -> String {
         // Apply extra dots
         let leading_dots = ".".repeat(usize::from(self.fuzz_params.extra_dots.leading_count % 10));
-        let trailing_dots = ".".repeat(usize::from(self.fuzz_params.extra_dots.trailing_count % 10));
+        let trailing_dots =
+            ".".repeat(usize::from(self.fuzz_params.extra_dots.trailing_count % 10));
         subject = format!("{leading_dots}{subject}{trailing_dots}");
 
         // Apply embedded empty tokens
@@ -277,8 +276,7 @@ impl AckReplySubject {
             NumericCorruption::None => subject,
             NumericCorruption::EmptyFields => {
                 // Replace some numeric fields with empty strings
-                subject.replace(".123.", "..")
-                    .replace(".456.", "..")
+                subject.replace(".123.", "..").replace(".456.", "..")
             }
             NumericCorruption::NonNumeric(bytes) => {
                 // Inject non-numeric data where numbers expected
@@ -294,12 +292,10 @@ impl AckReplySubject {
                 };
                 subject.replace(".123.", &format!(".{replacement}."))
             }
-            NumericCorruption::Mixed => {
-                subject
-                    .replace(".123.", ".abc.")
-                    .replace(".456.", ".-999.")
-                    .replace(".789.", "..")
-            }
+            NumericCorruption::Mixed => subject
+                .replace(".123.", ".abc.")
+                .replace(".456.", ".-999.")
+                .replace(".789.", ".."),
         }
     }
 
@@ -321,7 +317,7 @@ impl AckReplySubject {
                 subject
             }
             SpecialInjection::HighBitSet => {
-                subject.push_str("\xFF\xFE\xFD");
+                subject.push_str(&String::from_utf8_lossy(&[0xFF, 0xFE, 0xFD]));
                 subject
             }
         }
@@ -373,14 +369,20 @@ impl AckReplySubject {
                 let tokens: Vec<String> = (0..token_count).map(|i| format!("t{i}")).collect();
                 format!("$JS.ACK.{}", tokens.join("."))
             }
-            MalformedSubject::RandomGarbage(bytes) => {
-                String::from_utf8_lossy(bytes).into_owned()
-            }
+            MalformedSubject::RandomGarbage(bytes) => String::from_utf8_lossy(bytes).into_owned(),
             MalformedSubject::InjectionAttempt(injection_type) => match injection_type {
-                InjectionType::PathTraversal => "$JS.ACK.../../etc/passwd.consumer.1.2.3.4.5".to_string(),
-                InjectionType::SqlInjection => "$JS.ACK.'; DROP TABLE streams; --.consumer.1.2.3.4.5".to_string(),
-                InjectionType::ScriptInjection => "$JS.ACK.<script>alert('xss')</script>.consumer.1.2.3.4.5".to_string(),
-                InjectionType::NullInjection => "$JS.ACK.stream\0inject.consumer.1.2.3.4.5".to_string(),
+                InjectionType::PathTraversal => {
+                    "$JS.ACK.../../etc/passwd.consumer.1.2.3.4.5".to_string()
+                }
+                InjectionType::SqlInjection => {
+                    "$JS.ACK.'; DROP TABLE streams; --.consumer.1.2.3.4.5".to_string()
+                }
+                InjectionType::ScriptInjection => {
+                    "$JS.ACK.<script>alert('xss')</script>.consumer.1.2.3.4.5".to_string()
+                }
+                InjectionType::NullInjection => {
+                    "$JS.ACK.stream\0inject.consumer.1.2.3.4.5".to_string()
+                }
             },
         }
     }
@@ -429,6 +431,7 @@ fn test_raw_subject_parsing(data: &[u8]) {
     let msg = Message {
         subject: "test.subject".to_string(),
         sid: 1,
+        headers: None,
         payload: b"test payload".to_vec(),
         reply_to: Some(subject_string.into_owned()),
     };
@@ -458,6 +461,7 @@ fn test_structured_subject_parsing(ack_subject: &AckReplySubject) {
     let msg = Message {
         subject: "generated.test".to_string(),
         sid: 42,
+        headers: None,
         payload: b"structured test".to_vec(),
         reply_to: Some(generated_subject.clone()),
     };
@@ -470,14 +474,6 @@ fn test_structured_subject_parsing(ack_subject: &AckReplySubject) {
             // Valid parse of well-formed input
             assert_eq!(metadata.subject, "generated.test");
             assert_eq!(metadata.payload_len, 15);
-
-            // For valid subjects, verify the numeric fields are reasonable
-            if matches!(ack_subject.structure, SubjectStructure::ValidMinimal { .. } | SubjectStructure::ValidDotted { .. }) {
-                // Basic sanity checks - values should be in reasonable ranges
-                // (specific values depend on the arbitrary generation)
-                assert!(metadata.delivered > 0 || true); // delivered can be 0
-                assert!(metadata.sequence > 0 || true);   // sequence can be 0 in some cases
-            }
         }
         (None, true) => {
             // This might happen due to fuzz params corrupting otherwise valid input
@@ -502,6 +498,7 @@ fn test_boundary_conditions(data: &[u8]) {
         let msg = Message {
             subject: "boundary".to_string(),
             sid: 1,
+            headers: None,
             payload: Vec::new(),
             reply_to: Some(short_subject.into_owned()),
         };
@@ -510,7 +507,10 @@ fn test_boundary_conditions(data: &[u8]) {
 
     // Test exact minimum token count (9 tokens)
     if data.len() >= 9 {
-        let tokens: Vec<String> = data.iter().take(9).enumerate()
+        let tokens: Vec<String> = data
+            .iter()
+            .take(9)
+            .enumerate()
             .map(|(i, &b)| {
                 if i < 2 {
                     // Fixed prefix for first two tokens
@@ -529,6 +529,7 @@ fn test_boundary_conditions(data: &[u8]) {
         let msg = Message {
             subject: "boundary".to_string(),
             sid: 1,
+            headers: None,
             payload: Vec::new(),
             reply_to: Some(boundary_subject),
         };
@@ -539,15 +540,16 @@ fn test_boundary_conditions(data: &[u8]) {
     let overflow_subjects = [
         "$JS.ACK.s.c.4294967296.0.0.0.0", // u32::MAX + 1 for delivered
         "$JS.ACK.s.c.0.18446744073709551616.0.0.0", // u64::MAX + 1 for stream_seq
-        "$JS.ACK.s.c.-1.0.0.0.0", // Negative number
-        "$JS.ACK.s.c.abc.0.0.0.0", // Non-numeric
-        "$JS.ACK.s.c..0.0.0.0", // Empty field
+        "$JS.ACK.s.c.-1.0.0.0.0",         // Negative number
+        "$JS.ACK.s.c.abc.0.0.0.0",        // Non-numeric
+        "$JS.ACK.s.c..0.0.0.0",           // Empty field
     ];
 
     for subject in overflow_subjects {
         let msg = Message {
             subject: "overflow".to_string(),
             sid: 1,
+            headers: None,
             payload: Vec::new(),
             reply_to: Some(subject.to_string()),
         };
@@ -563,6 +565,7 @@ fn test_boundary_conditions(data: &[u8]) {
         let msg = Message {
             subject: "utf8".to_string(),
             sid: 1,
+            headers: None,
             payload: Vec::new(),
             reply_to: Some(utf8_subject),
         };

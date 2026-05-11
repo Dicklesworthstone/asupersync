@@ -3381,6 +3381,16 @@ test = false
 doc = false
 bench = false
 
+# Structure-aware JetStream ACK reply subject splitter fuzz target.
+# Exercises dotted stream/consumer names plus malformed numeric tails against
+# the test-internals ACK metadata parser.
+[[bin]]
+name = "jetstream_ack_subject_splitter"
+path = "fuzz_targets/jetstream_ack_subject_splitter.rs"
+test = false
+doc = false
+bench = false
+
 # Focused fuzz target for JetStream PubAck duplicate detection logic.
 # Tests edge cases in extract_json_bool parsing of "duplicate" field:
 # boolean variants, numeric values, case variations, whitespace, JSON structure corruption.
