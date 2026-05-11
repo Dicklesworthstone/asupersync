@@ -5888,3 +5888,10 @@ path = "fuzz_targets/fuzz_h2_frame_variant_decoder.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "h3_varint_frame_fuzzer"
+path = "fuzz_targets/h3_varint_frame_fuzzer.rs"
+test = false
+doc = false
+bench = false

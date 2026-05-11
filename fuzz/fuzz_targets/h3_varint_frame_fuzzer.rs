@@ -21,8 +21,10 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use asupersync::http::h3_native::{H3ConnectionConfig, H3Frame, H3Settings, H3QpackMode, H3EndpointRole};
-use asupersync::net::quic_core::{encode_varint, decode_varint, QUIC_VARINT_MAX};
+use asupersync::http::h3_native::{
+    H3ConnectionConfig, H3EndpointRole, H3Frame, H3QpackMode, H3Settings,
+};
+use asupersync::net::quic_core::{QUIC_VARINT_MAX, decode_varint, encode_varint};
 
 const MAX_FRAME_PAYLOAD_SIZE: usize = 16 * 1024; // Prevent memory exhaustion
 const MAX_OPERATIONS: usize = 32; // Limit fuzz case complexity
@@ -47,9 +49,7 @@ enum H3VarintOperation {
         actual_payload: Vec<u8>,
     },
     /// Test settings frame with problematic ID/value pairs
-    SettingsTest {
-        settings_pairs: Vec<SettingPair>,
-    },
+    SettingsTest { settings_pairs: Vec<SettingPair> },
     /// Test stream ID varints in frame contexts
     StreamIdTest {
         frame_variant: StreamIdFrameType,
@@ -63,9 +63,7 @@ enum H3VarintOperation {
         truncate_varint: bool,
     },
     /// Raw malformed frame construction
-    MalformedFrame {
-        raw_bytes: Vec<u8>,
-    },
+    MalformedFrame { raw_bytes: Vec<u8> },
 }
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -111,6 +109,10 @@ fuzz_target!(|input: H3VarintFuzzInput| {
         max_concurrent_request_streams: Some(100),
     };
 
+    let operation_count = input.operations.len() as u64;
+    let _ = test_varint_roundtrip_consistency(operation_count);
+    test_malformed_varint_rejection(operation_count as u8);
+
     for operation in input.operations {
         execute_h3_varint_operation(&config, operation, &input.attack_mode);
     }
@@ -125,14 +127,14 @@ fn execute_h3_varint_operation(
         H3VarintOperation::FrameTypeTest {
             frame_type,
             payload_size,
-            malform_type
+            malform_type,
         } => {
             test_frame_type_varint(config, frame_type, payload_size, malform_type, attack_mode);
         }
 
         H3VarintOperation::FrameLengthTest {
             declared_length,
-            actual_payload
+            actual_payload,
         } => {
             test_frame_length_mismatch(config, declared_length, &actual_payload);
         }
@@ -144,7 +146,7 @@ fn execute_h3_varint_operation(
         H3VarintOperation::StreamIdTest {
             frame_variant,
             stream_id,
-            extra_payload
+            extra_payload,
         } => {
             test_stream_id_varint(config, frame_variant, stream_id, &extra_payload);
         }
@@ -152,7 +154,7 @@ fn execute_h3_varint_operation(
         H3VarintOperation::DatagramTest {
             quarter_stream_id,
             payload,
-            truncate_varint
+            truncate_varint,
         } => {
             test_datagram_quarter_stream_id(config, quarter_stream_id, &payload, truncate_varint);
         }
@@ -383,9 +385,9 @@ fn test_varint_roundtrip_consistency(value: u64) -> bool {
 /// Test that malformed varint prefixes are rejected consistently
 fn test_malformed_varint_rejection(first_byte: u8) {
     let malformed_sequences = [
-        vec![first_byte], // Single byte with invalid pattern
-        vec![first_byte, 0xFF], // Two bytes
-        vec![first_byte, 0xFF, 0xFF], // Three bytes
+        vec![first_byte],                   // Single byte with invalid pattern
+        vec![first_byte, 0xFF],             // Two bytes
+        vec![first_byte, 0xFF, 0xFF],       // Three bytes
         vec![first_byte, 0xFF, 0xFF, 0xFF], // Four bytes
     ];
 
