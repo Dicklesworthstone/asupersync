@@ -2644,6 +2644,7 @@ name = "fuzz_hpack_block_start"
 path = "fuzz_targets/hpack_block_start.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "fuzz_framed_length_delimited_underflow"

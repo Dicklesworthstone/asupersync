@@ -19,6 +19,8 @@ struct BlockStartTest {
 }
 
 fuzz_target!(|data: BlockStartTest| {
+    assert_block_start_table_size_updates_evict_stale_dynamic_entry();
+
     // The target sets up a specific scenario with some fuzzed parameters
     // around consecutive block-start table-size updates.
 
@@ -41,43 +43,26 @@ fuzz_target!(|data: BlockStartTest| {
         return; // If we can't even insert, the parameters are too small
     }
 
-    // 3. Next header block: dynamic table size update 0, then a second update back to 128
+    // 3. Next header block: fuzzed table size update, dynamic table size update 0,
+    // then a second update back to the fuzzed size.
     // Then attempt an indexed reference to the previously inserted dynamic entry (index 62)
-    // 0010 0000 (0x20) = Size update 0
-    // 0011 1111 (0x3F) = Size update 128 (requires 1 byte: 128 - 31 = 97 = 0x61)
     // 1011 1110 (0xBE) = Indexed header field 62 (first dynamic entry)
     let mut bad_block = BytesMut::new();
 
-    // First update: 0
-    bad_block.extend_from_slice(&[0x20]);
+    // Fuzzed pre-shrink update. Consecutive updates are valid at block start.
+    let first_size = data.update_1.clamp(0, allowed_size);
+    append_dynamic_table_size_update(&mut bad_block, first_size);
+
+    // Shrink to 0, which must evict the dynamic entry inserted above.
+    append_dynamic_table_size_update(&mut bad_block, 0);
 
     // Second update: back to some size
     let size_2 = data.update_2.clamp(0, allowed_size);
-    if size_2 < 31 {
-        bad_block.extend_from_slice(&[0x20 | (size_2 as u8)]);
-    } else {
-        bad_block.extend_from_slice(&[0x3F]);
-        let mut rem = size_2 - 31;
-        while rem >= 128 {
-            bad_block.extend_from_slice(&[(rem % 128 + 128) as u8]);
-            rem /= 128;
-        }
-        bad_block.extend_from_slice(&[rem as u8]);
-    }
+    append_dynamic_table_size_update(&mut bad_block, size_2);
 
     // Then access an index
     let idx = data.accessed_index.clamp(1, 255);
-    if idx < 128 {
-        bad_block.extend_from_slice(&[0x80 | (idx as u8)]);
-    } else {
-        bad_block.extend_from_slice(&[0xFF]);
-        let mut rem = idx - 127;
-        while rem >= 128 {
-            bad_block.extend_from_slice(&[(rem % 128 + 128) as u8]);
-            rem /= 128;
-        }
-        bad_block.extend_from_slice(&[rem as u8]);
-    }
+    append_indexed_header(&mut bad_block, idx);
 
     // Oracle 1: Consecutive dynamic table size updates are only accepted at block start.
     // (Our block above has them at the start, so it should not fail on that specific rule).
@@ -105,3 +90,62 @@ fuzz_target!(|data: BlockStartTest| {
         "Decoder state must remain usable after rejecting stale index"
     );
 });
+
+fn append_dynamic_table_size_update(block: &mut BytesMut, size: usize) {
+    if size < 31 {
+        block.extend_from_slice(&[0x20 | (size as u8)]);
+    } else {
+        block.extend_from_slice(&[0x3F]);
+        let mut rem = size - 31;
+        while rem >= 128 {
+            block.extend_from_slice(&[(rem % 128 + 128) as u8]);
+            rem /= 128;
+        }
+        block.extend_from_slice(&[rem as u8]);
+    }
+}
+
+fn append_indexed_header(block: &mut BytesMut, idx: usize) {
+    if idx < 128 {
+        block.extend_from_slice(&[0x80 | (idx as u8)]);
+    } else {
+        block.extend_from_slice(&[0xFF]);
+        let mut rem = idx - 127;
+        while rem >= 128 {
+            block.extend_from_slice(&[(rem % 128 + 128) as u8]);
+            rem /= 128;
+        }
+        block.extend_from_slice(&[rem as u8]);
+    }
+}
+
+fn assert_block_start_table_size_updates_evict_stale_dynamic_entry() {
+    let mut decoder = Decoder::new();
+    decoder.set_max_header_list_size(4096);
+
+    let mut insert_block = BytesMut::new();
+    insert_block.extend_from_slice(&[0x41, 0x03, b'f', b'o', b'o']);
+    decoder
+        .decode(&mut insert_block.freeze())
+        .expect("seed dynamic :authority entry");
+
+    let mut stale_index_block = BytesMut::new();
+    append_dynamic_table_size_update(&mut stale_index_block, 0);
+    append_dynamic_table_size_update(&mut stale_index_block, 128);
+    append_indexed_header(&mut stale_index_block, 62);
+
+    let err = decoder
+        .decode(&mut stale_index_block.freeze())
+        .expect_err("stale dynamic-table index must be rejected after eviction");
+    assert!(
+        err.message.contains("invalid dynamic index"),
+        "unexpected stale-index error: {err:?}"
+    );
+
+    let mut good_block = BytesMut::new();
+    good_block.extend_from_slice(&[0x82]);
+    let headers = decoder
+        .decode(&mut good_block.freeze())
+        .expect("decoder should remain usable after stale-index rejection");
+    assert_eq!(headers, vec![Header::new(":method", "GET")]);
+}
