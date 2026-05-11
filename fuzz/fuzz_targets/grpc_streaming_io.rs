@@ -28,8 +28,10 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
+use asupersync::grpc::ResponseStream;
+use asupersync::grpc::client::RequestSink;
 use asupersync::grpc::status::{Code, Status};
-use asupersync::grpc::streaming::{RequestSink, ResponseStream, Streaming, StreamingRequest};
+use asupersync::grpc::streaming::{Streaming, StreamingRequest};
 use libfuzzer_sys::fuzz_target;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -75,7 +77,9 @@ enum Scenario {
     ResponseStreamOps { start_open: bool, ops: Vec<Op> },
     /// `RequestSink<u32>::send` + `close` are async; we drive them on a
     /// synchronous executor (futures_lite::block_on) to confirm the
-    /// state machine: send-after-close MUST fail; close is idempotent.
+    /// loopback state machine: first send succeeds, a second pre-close
+    /// send fails until the transport grows multi-message loopback
+    /// support, send-after-close fails, and close is idempotent.
     RequestSinkOps { ops: Vec<RequestSinkOp> },
     /// Cancel-after-headers-before-body: open the stream, immediately
     /// push a Cancelled status, then drain. The first poll MUST yield
@@ -301,47 +305,40 @@ fuzz_target!(|s: Scenario| match s {
         let mut sink = RequestSink::<u32>::new();
         futures::executor::block_on(async {
             let mut closed = false;
-            let mut expected_sent_count = 0usize;
+            let mut sent_once = false;
             for op in ops.iter().take(MAX_OPS_PER_SCENARIO) {
                 match op {
                     RequestSinkOp::Send(v) => {
-                        let before = sink.sent_count();
                         let result = sink.send(*v).await;
                         if closed {
-                            assert!(result.is_err(), "RequestSink::send succeeded after close");
+                            let status =
+                                result.expect_err("RequestSink::send succeeded after close");
                             assert_eq!(
-                                sink.sent_count(),
-                                before,
-                                "failed RequestSink::send must not advance sent_count"
+                                status.code(),
+                                Code::FailedPrecondition,
+                                "RequestSink::send after close used wrong status code"
+                            );
+                        } else if sent_once {
+                            let status = result.expect_err(
+                                "loopback RequestSink accepted a second pre-close send",
+                            );
+                            assert_eq!(
+                                status.code(),
+                                Code::FailedPrecondition,
+                                "second loopback RequestSink::send used wrong status code"
                             );
                         } else {
-                            assert!(result.is_ok(), "RequestSink::send failed before close");
-                            expected_sent_count += 1;
-                            assert_eq!(
-                                sink.sent_count(),
-                                expected_sent_count,
-                                "successful RequestSink::send must advance sent_count once"
-                            );
+                            result.expect("first RequestSink::send failed before close");
+                            sent_once = true;
                         }
                     }
                     RequestSinkOp::Close => {
-                        let before = sink.sent_count();
                         let result = sink.close().await;
                         assert!(result.is_ok(), "RequestSink::close must be idempotent");
-                        assert_eq!(
-                            sink.sent_count(),
-                            before,
-                            "RequestSink::close must preserve sent_count"
-                        );
                         closed = true;
                     }
                 }
             }
-            assert_eq!(
-                sink.sent_count(),
-                expected_sent_count,
-                "final RequestSink sent_count drifted from shadow model"
-            );
         });
     }
     Scenario::CancelOrDeadlineBeforeBody {
