@@ -5494,6 +5494,7 @@ name = "h2_settings_zero_window_after_init"
 path = "fuzz_targets/h2_settings_zero_window_after_init.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_request_pseudo_header_after_regular"

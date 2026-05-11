@@ -1,8 +1,11 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
+use asupersync::http::h2::{ErrorCode, Setting, Settings};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
+
+const MAX_INITIAL_WINDOW_SIZE: u32 = 0x7fff_ffff;
 
 /// HTTP/2 flow control state machine zero window handling testing.
 /// Per RFC 7540 §6.9, when INITIAL_WINDOW_SIZE changes, existing streams
@@ -138,8 +141,6 @@ struct MockH2FlowController {
     stream_windows: HashMap<u32, FlowWindow>,
     /// Current initial window size setting
     initial_window_size: u32,
-    /// Processing errors
-    errors: Vec<String>,
 }
 
 impl MockH2FlowController {
@@ -148,7 +149,6 @@ impl MockH2FlowController {
             connection_window: FlowWindow::new(initial_window_size),
             stream_windows: HashMap::new(),
             initial_window_size,
-            errors: Vec::new(),
         }
     }
 
@@ -157,7 +157,7 @@ impl MockH2FlowController {
         let old_size = self.initial_window_size;
 
         // Validate new window size (max 2^31 - 1)
-        if new_size > 2_147_483_647 {
+        if new_size > MAX_INITIAL_WINDOW_SIZE {
             return Err("FLOW_CONTROL_ERROR: INITIAL_WINDOW_SIZE exceeds maximum".into());
         }
 
@@ -182,14 +182,11 @@ impl MockH2FlowController {
             return Err("PROTOCOL_ERROR: DATA frame stream ID must not be 0".into());
         }
 
-        // Ensure stream window exists
-        if !self.stream_windows.contains_key(&stream_id) {
-            let window = FlowWindow::new(self.initial_window_size);
-            self.stream_windows.insert(stream_id, window);
-        }
-
-        // Check stream-level window
-        let stream_window = self.stream_windows.get_mut(&stream_id).unwrap();
+        let initial_window_size = self.initial_window_size;
+        let stream_window = self
+            .stream_windows
+            .entry(stream_id)
+            .or_insert_with(|| FlowWindow::new(initial_window_size));
         if stream_window.is_paused() {
             return Err(format!("Stream {} is flow control paused", stream_id));
         }
@@ -217,14 +214,11 @@ impl MockH2FlowController {
             self.connection_window.add_window(increment);
         } else {
             // Stream-level WINDOW_UPDATE
-            if let Some(window) = self.stream_windows.get_mut(&stream_id) {
-                window.add_window(increment);
-            } else {
-                // Create new window for unknown stream
-                let mut window = FlowWindow::new(self.initial_window_size);
-                window.add_window(increment);
-                self.stream_windows.insert(stream_id, window);
-            }
+            let initial_window_size = self.initial_window_size;
+            self.stream_windows
+                .entry(stream_id)
+                .or_insert_with(|| FlowWindow::new(initial_window_size))
+                .add_window(increment);
         }
 
         Ok(())
@@ -274,10 +268,28 @@ impl MockH2FlowController {
             .filter(|w| w.is_paused())
             .count()
     }
+}
 
-    /// Get processing errors
-    fn get_errors(&self) -> &[String] {
-        &self.errors
+fn assert_live_initial_window_size(value: u32) {
+    let mut live_settings = Settings::default();
+    let result = live_settings.apply(Setting::InitialWindowSize(value));
+
+    if value <= MAX_INITIAL_WINDOW_SIZE {
+        assert!(
+            result.is_ok(),
+            "live INITIAL_WINDOW_SIZE should accept {value}: {result:?}"
+        );
+        assert_eq!(
+            live_settings.initial_window_size, value,
+            "live settings should apply INITIAL_WINDOW_SIZE"
+        );
+    } else {
+        let err = result.expect_err("live INITIAL_WINDOW_SIZE should reject overflow values");
+        assert_eq!(
+            err.code,
+            ErrorCode::FlowControlError,
+            "INITIAL_WINDOW_SIZE overflow should be FLOW_CONTROL_ERROR"
+        );
     }
 }
 
@@ -293,9 +305,13 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    // Bound values to reasonable ranges
-    let initial_window_size = input.scenario.initial_window_size.min(2_147_483_647);
-    let window_update = input.scenario.window_size_update.min(2_147_483_647);
+    // Bound initial state to a valid connection configuration, then feed the raw
+    // update value through both the mock and live SETTINGS validation paths.
+    let initial_window_size = input
+        .scenario
+        .initial_window_size
+        .min(MAX_INITIAL_WINDOW_SIZE);
+    let window_update = input.scenario.window_size_update;
 
     let mut controller = MockH2FlowController::new(initial_window_size);
 
@@ -342,9 +358,10 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Test 2: Change INITIAL_WINDOW_SIZE (typically to 0)
+    assert_live_initial_window_size(window_update);
     let settings_result = controller.process_settings_initial_window_size(window_update);
 
-    if window_update <= 2_147_483_647 {
+    if window_update <= MAX_INITIAL_WINDOW_SIZE {
         assert!(
             settings_result.is_ok(),
             "Valid INITIAL_WINDOW_SIZE change should succeed"
@@ -359,21 +376,18 @@ fuzz_target!(|data: &[u8]| {
 
         // Test 4: Check stream pausing behavior when window_update = 0
         if window_update == 0 {
-            let paused_count = controller.count_paused_streams();
-
             // Streams that had consumed their window should now be paused
             // (This depends on the specific operations, but we can check consistency)
-            for (stream_id, _) in controller.stream_windows.iter() {
+            for stream_id in controller.stream_windows.keys() {
                 if let Some((window_size, is_paused)) =
                     controller.get_stream_window_state(*stream_id)
+                    && window_size <= 0
                 {
-                    if window_size <= 0 {
-                        assert!(
-                            is_paused,
-                            "Stream {} with window size {} should be paused",
-                            stream_id, window_size
-                        );
-                    }
+                    assert!(
+                        is_paused,
+                        "Stream {} with window size {} should be paused",
+                        stream_id, window_size
+                    );
                 }
             }
 
@@ -407,19 +421,21 @@ fuzz_target!(|data: &[u8]| {
 
             // Check if WINDOW_UPDATE resumed paused streams
             let after_paused = controller.count_paused_streams();
+            assert!(
+                after_paused <= before_paused,
+                "WINDOW_UPDATE should not increase paused streams"
+            );
 
-            if window_update.stream_id > 0 {
-                if let Some((window_size, is_paused)) =
+            if window_update.stream_id > 0
+                && let Some((window_size, is_paused)) =
                     controller.get_stream_window_state(window_update.stream_id)
-                {
-                    if window_size > 0 {
-                        assert!(
-                            !is_paused,
-                            "Stream {} with positive window {} should not be paused",
-                            window_update.stream_id, window_size
-                        );
-                    }
-                }
+                && window_size > 0
+            {
+                assert!(
+                    !is_paused,
+                    "Stream {} with positive window {} should not be paused",
+                    window_update.stream_id, window_size
+                );
             }
         }
     }
@@ -428,6 +444,11 @@ fuzz_target!(|data: &[u8]| {
     let (conn_size, conn_paused) = controller.get_connection_window_state();
 
     if conn_paused {
+        assert!(
+            conn_size <= 0,
+            "paused connection window should be non-positive"
+        );
+
         // If connection is paused, no stream should be able to send
         for stream_id in 1..=5 {
             let can_send = controller.can_send_data(stream_id, 1);
