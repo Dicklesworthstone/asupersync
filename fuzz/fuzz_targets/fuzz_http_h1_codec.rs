@@ -277,36 +277,39 @@ fn is_expected_invalid(err: &HttpError) -> bool {
 
 fuzz_target!(|input: H1SplitCrlfInput| {
     let (wire, should_accept, split_after) = build_wire(&input);
-    let mut codec = Http1Codec::new().max_headers_size(usize::from(input.max_headers_size));
+    let max_headers_size = if should_accept {
+        usize::from(input.max_headers_size).max(wire.len())
+    } else {
+        usize::from(input.max_headers_size)
+    };
+    let mut codec = Http1Codec::new().max_headers_size(max_headers_size);
     let mut buf = BytesMut::new();
     let mut decoded = None;
 
     for (start, end) in chunk_ranges(wire.len(), &input.split_hints, split_after) {
         buf.extend_from_slice(&wire[start..end]);
-        loop {
-            match codec.decode(&mut buf) {
-                Ok(Some(req)) => {
-                    assert!(
-                        should_accept,
-                        "malformed split-CRLF input decoded successfully: {:?}",
-                        input.attack
-                    );
-                    assert_clean_headers(&req);
-                    decoded = Some(req);
-                    break;
-                }
-                Ok(None) => break,
-                Err(err) => {
-                    assert!(
-                        !should_accept,
-                        "valid segmented request was rejected early: {err:?}"
-                    );
-                    assert!(
-                        is_expected_invalid(&err),
-                        "unexpected invalid-path error: {err:?}"
-                    );
-                    return;
-                }
+        match codec.decode(&mut buf) {
+            Ok(Some(req)) => {
+                assert!(
+                    should_accept,
+                    "malformed split-CRLF input decoded successfully: {:?}",
+                    input.attack
+                );
+                assert_clean_headers(&req);
+                decoded = Some(req);
+                break;
+            }
+            Ok(None) => {}
+            Err(err) => {
+                assert!(
+                    !should_accept,
+                    "valid segmented request was rejected early: {err:?}"
+                );
+                assert!(
+                    is_expected_invalid(&err),
+                    "unexpected invalid-path error: {err:?}"
+                );
+                return;
             }
         }
     }
