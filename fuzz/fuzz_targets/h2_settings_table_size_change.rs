@@ -2,7 +2,16 @@
 #![allow(dead_code)]
 
 use arbitrary::Arbitrary;
+use asupersync::bytes::BytesMut;
+use asupersync::http::h2::{Header, HpackDecoder, HpackEncoder};
 use libfuzzer_sys::fuzz_target;
+
+const MAX_PRODUCTION_TABLE_SIZE: usize = 1024 * 1024;
+const MAX_PRODUCTION_SIZE_CHANGES: usize = 16;
+const MAX_PRODUCTION_HEADER_SEQUENCES: usize = 16;
+const MAX_PRODUCTION_HEADERS: usize = 8;
+const MAX_PRODUCTION_HEADERS_AFTER_CHANGE: usize = 4;
+const MAX_PRODUCTION_COMPONENT_LEN: usize = 96;
 
 /// HTTP/2 HPACK header table size change test input
 #[derive(Arbitrary, Debug)]
@@ -707,6 +716,8 @@ fuzz_target!(|input: H2TableSizeChangeInput| {
         return;
     }
 
+    exercise_production_hpack_table_size_changes(&input);
+
     let mut decoder = MockHpackDecoder::new(input.table_size_sequence.initial_size);
     let simulation_result = decoder.simulate_table_size_sequence(&input);
 
@@ -881,6 +892,242 @@ fn test_hpack_table_invariants(
         "Table size {} should equal sum of entry sizes {}",
         table_state.size, calculated_size
     );
+}
+
+fn exercise_production_hpack_table_size_changes(input: &H2TableSizeChangeInput) {
+    let initial_size = bounded_production_table_size(input.table_size_sequence.initial_size);
+    let mut encoder = HpackEncoder::with_max_size(initial_size);
+    encoder.set_use_huffman(!matches!(
+        input.encoding_options.huffman_encoding,
+        HuffmanPreference::Disabled
+    ));
+
+    let mut decoder = HpackDecoder::with_max_size(initial_size);
+    decoder.set_allowed_table_size(initial_size);
+
+    let mut header_seq_index = 0;
+    if header_seq_index < input.header_sequences.len() {
+        production_encode_decode_sequence(
+            &mut encoder,
+            &mut decoder,
+            &input.header_sequences[header_seq_index],
+            header_seq_index,
+        );
+        header_seq_index += 1;
+    }
+
+    for size_change in input
+        .table_size_sequence
+        .size_changes
+        .iter()
+        .take(MAX_PRODUCTION_SIZE_CHANGES)
+    {
+        let new_size = production_size_change_value(size_change);
+        production_apply_table_size(&mut encoder, &mut decoder, new_size);
+
+        for _ in 0..usize::from(size_change.headers_after).min(MAX_PRODUCTION_HEADERS_AFTER_CHANGE)
+        {
+            if header_seq_index >= input.header_sequences.len()
+                || header_seq_index >= MAX_PRODUCTION_HEADER_SEQUENCES
+            {
+                break;
+            }
+            production_encode_decode_sequence(
+                &mut encoder,
+                &mut decoder,
+                &input.header_sequences[header_seq_index],
+                header_seq_index,
+            );
+            header_seq_index += 1;
+        }
+    }
+
+    if input.table_size_sequence.include_zero_reduction {
+        production_apply_table_size(&mut encoder, &mut decoder, 0);
+
+        while header_seq_index < input.header_sequences.len()
+            && header_seq_index < MAX_PRODUCTION_HEADER_SEQUENCES
+        {
+            production_encode_decode_sequence(
+                &mut encoder,
+                &mut decoder,
+                &input.header_sequences[header_seq_index],
+                header_seq_index,
+            );
+            header_seq_index += 1;
+        }
+    }
+
+    let final_size = bounded_production_table_size(input.table_size_sequence.final_size);
+    production_apply_table_size(&mut encoder, &mut decoder, final_size);
+}
+
+fn production_apply_table_size(
+    encoder: &mut HpackEncoder,
+    decoder: &mut HpackDecoder,
+    size: usize,
+) {
+    encoder.set_max_table_size(size);
+    decoder.set_allowed_table_size(size);
+
+    let mut encoded = BytesMut::new();
+    encoder.encode(&[], &mut encoded);
+    let decoded = decoder
+        .decode(&mut encoded.freeze())
+        .expect("production HPACK table-size update must decode");
+    assert!(
+        decoded.is_empty(),
+        "table-size update block should not produce headers"
+    );
+    assert!(
+        encoder.dynamic_table_size() <= encoder.dynamic_table_max_size(),
+        "production encoder table exceeds configured maximum"
+    );
+    assert!(
+        decoder.dynamic_table_size() <= decoder.dynamic_table_max_size(),
+        "production decoder table exceeds configured maximum"
+    );
+}
+
+fn production_encode_decode_sequence(
+    encoder: &mut HpackEncoder,
+    decoder: &mut HpackDecoder,
+    sequence: &HeaderSequence,
+    sequence_index: usize,
+) {
+    let headers = production_headers(sequence, sequence_index);
+    let mut encoded = BytesMut::new();
+
+    if production_use_sensitive_encoding(sequence) {
+        encoder.encode_sensitive(&headers, &mut encoded);
+    } else {
+        encoder.encode(&headers, &mut encoded);
+    }
+
+    let decoded = decoder
+        .decode(&mut encoded.freeze())
+        .expect("production HPACK block encoded by local encoder must decode");
+    assert_eq!(
+        decoded, headers,
+        "production HPACK round-trip changed headers"
+    );
+    assert!(
+        encoder.dynamic_table_size() <= encoder.dynamic_table_max_size(),
+        "production encoder table exceeds configured maximum after header block"
+    );
+    assert!(
+        decoder.dynamic_table_size() <= decoder.dynamic_table_max_size(),
+        "production decoder table exceeds configured maximum after header block"
+    );
+}
+
+fn production_headers(sequence: &HeaderSequence, sequence_index: usize) -> Vec<Header> {
+    let mut headers: Vec<Header> = sequence
+        .headers
+        .iter()
+        .take(MAX_PRODUCTION_HEADERS)
+        .enumerate()
+        .map(|(header_index, header)| {
+            Header::new(
+                production_header_name(&header.name, sequence_index, header_index),
+                bounded_visible_ascii(&header.value, "value", MAX_PRODUCTION_COMPONENT_LEN),
+            )
+        })
+        .collect();
+
+    if headers.is_empty() {
+        headers.push(Header::new(":method", "GET"));
+        headers.push(Header::new(":path", "/"));
+        headers.push(Header::new(":scheme", "https"));
+        headers.push(Header::new(":authority", "example.test"));
+    }
+
+    headers
+}
+
+fn production_use_sensitive_encoding(sequence: &HeaderSequence) -> bool {
+    matches!(
+        sequence.encoding_strategy,
+        HeaderEncodingStrategy::MinimizeDynamic | HeaderEncodingStrategy::PrepareReduction
+    ) || sequence
+        .headers
+        .iter()
+        .any(|header| matches!(header.indexing, IndexingStrategy::LiteralNeverIndexed))
+}
+
+fn production_size_change_value(change: &TableSizeChange) -> usize {
+    match change.change_type {
+        SizeChangeType::ImmediateZero => 0,
+        SizeChangeType::BoundaryValues => match change.new_size % 6 {
+            0 => 0,
+            1 => 1,
+            2 => ENTRY_OVERHEAD as usize,
+            3 => DEFAULT_TABLE_SIZE as usize,
+            4 => MAX_PRODUCTION_TABLE_SIZE,
+            _ => bounded_production_table_size(change.new_size),
+        },
+        SizeChangeType::Gradual
+        | SizeChangeType::IncreaseAfterReduction
+        | SizeChangeType::RapidChanges => bounded_production_table_size(change.new_size),
+    }
+}
+
+fn bounded_production_table_size(size: u32) -> usize {
+    (size as usize).min(MAX_PRODUCTION_TABLE_SIZE)
+}
+
+fn production_header_name(name: &HeaderName, sequence_index: usize, header_index: usize) -> String {
+    match name {
+        HeaderName::Method => ":method".to_string(),
+        HeaderName::Path => ":path".to_string(),
+        HeaderName::Scheme => ":scheme".to_string(),
+        HeaderName::Authority => ":authority".to_string(),
+        HeaderName::ContentType => "content-type".to_string(),
+        HeaderName::UserAgent => "user-agent".to_string(),
+        HeaderName::Accept => "accept".to_string(),
+        HeaderName::Authorization => "authorization".to_string(),
+        HeaderName::Custom(raw) => {
+            let normalized = normalized_header_name(raw, sequence_index, header_index);
+            if normalized.is_empty() {
+                format!("x-fuzz-{sequence_index}-{header_index}")
+            } else {
+                normalized
+            }
+        }
+    }
+}
+
+fn normalized_header_name(raw: &str, sequence_index: usize, header_index: usize) -> String {
+    let mut normalized = String::new();
+    for byte in raw.bytes().take(MAX_PRODUCTION_COMPONENT_LEN) {
+        let lower = byte.to_ascii_lowercase();
+        if lower.is_ascii_lowercase() || lower.is_ascii_digit() || lower == b'-' {
+            normalized.push(char::from(lower));
+        }
+    }
+
+    if normalized.is_empty() {
+        format!("x-fuzz-{sequence_index}-{header_index}")
+    } else {
+        normalized
+    }
+}
+
+fn bounded_visible_ascii(input: &str, fallback: &str, max_len: usize) -> String {
+    let mut out = String::new();
+    for byte in input.bytes().take(max_len) {
+        match byte {
+            b'\r' | b'\n' | b'\0' => out.push('-'),
+            0x20..=0x7e => out.push(char::from(byte)),
+            _ => {}
+        }
+    }
+
+    if out.is_empty() {
+        fallback.to_string()
+    } else {
+        out
+    }
 }
 
 #[cfg(test)]
