@@ -33,7 +33,9 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::raptorq::decoder::{DecodeError, InactivationDecoder, ReceivedSymbol};
+use asupersync::raptorq::decoder::{
+    DecodeError, DecodeResult, InactivationDecoder, ReceivedSymbol,
+};
 use asupersync::raptorq::gf256::Gf256;
 use asupersync::raptorq::systematic::{SystematicEncoder, SystematicParams};
 use libfuzzer_sys::fuzz_target;
@@ -213,7 +215,10 @@ enum ExtraSymbolType {
     ZeroRepair { columns: Vec<u8> },
 
     /// Repair that references non-existent columns
-    InvalidRepair { invalid_columns: Vec<u8>, coefficients: Vec<u8> },
+    InvalidRepair {
+        invalid_columns: Vec<u8>,
+        coefficients: Vec<u8>,
+    },
 
     /// Source with wrong ESI
     WrongEsiSource { claimed_esi: u16, actual_esi: u8 },
@@ -227,7 +232,7 @@ fuzz_target!(|input: PeelBoundaryFuzzInput| {
 
 fn normalize_input(input: &mut PeelBoundaryFuzzInput) {
     // Normalize to valid ranges
-    input.k = ((input.k as usize % (MAX_K - 1)) + 2) as u8;  // k ∈ [2, MAX_K]
+    input.k = ((input.k as usize % (MAX_K - 1)) + 2) as u8; // k ∈ [2, MAX_K]
     input.symbol_size = ((input.symbol_size as usize % MAX_SYMBOL_SIZE) + 1) as u8;
 
     // Truncate to prevent OOM
@@ -244,7 +249,10 @@ fn normalize_input(input: &mut PeelBoundaryFuzzInput) {
         EquationMalformation::InvalidSourceEquation { source_esi, .. } => {
             *source_esi %= input.k;
         }
-        EquationMalformation::SymbolSizeMismatch { symbol_index, wrong_size } => {
+        EquationMalformation::SymbolSizeMismatch {
+            symbol_index,
+            wrong_size,
+        } => {
             *symbol_index %= input.k;
             *wrong_size = ((*wrong_size as usize % MAX_SYMBOL_SIZE) + 1) as u8;
         }
@@ -253,22 +261,34 @@ fn normalize_input(input: &mut PeelBoundaryFuzzInput) {
 
     // Normalize rank deficiency patterns
     match &mut input.rank_deficiency {
-        RankDeficiencyPattern::ExactDuplicates { duplicate_count, base_index } => {
+        RankDeficiencyPattern::ExactDuplicates {
+            duplicate_count,
+            base_index,
+        } => {
             *duplicate_count = (*duplicate_count % input.k) + 1;
             *base_index %= input.k;
         }
-        RankDeficiencyPattern::LinearCombinationZero { coefficients, equation_indices } => {
+        RankDeficiencyPattern::LinearCombinationZero {
+            coefficients,
+            equation_indices,
+        } => {
             equation_indices.truncate(input.k as usize);
             coefficients.truncate(input.k as usize);
             for idx in equation_indices {
                 *idx %= input.k;
             }
         }
-        RankDeficiencyPattern::BlockRankDeficit { block_size, deficient_blocks } => {
+        RankDeficiencyPattern::BlockRankDeficit {
+            block_size,
+            deficient_blocks,
+        } => {
             *block_size = ((*block_size % input.k) + 1).min(input.k / 2);
             deficient_blocks.truncate(input.k as usize / *block_size as usize);
         }
-        RankDeficiencyPattern::ProgressiveRankLoss { steps, elimination_order } => {
+        RankDeficiencyPattern::ProgressiveRankLoss {
+            steps,
+            elimination_order,
+        } => {
             *steps = (*steps % input.k) + 1;
             elimination_order.truncate(*steps as usize);
             for var in elimination_order {
@@ -280,33 +300,42 @@ fn normalize_input(input: &mut PeelBoundaryFuzzInput) {
 
     // Normalize strategy parameters
     match &mut input.strategy {
-        BoundaryTestStrategy::PartialPeelThenRankDeficit { peel_solvable, remaining_degrees } => {
+        BoundaryTestStrategy::PartialPeelThenRankDeficit {
+            peel_solvable,
+            remaining_degrees,
+        } => {
             *peel_solvable = (*peel_solvable % input.k) + 1;
             remaining_degrees.truncate((input.k - *peel_solvable) as usize);
             for deg in remaining_degrees {
-                *deg = ((*deg % input.k) + 2).min(input.k);  // degree ≥ 2
+                *deg = ((*deg % input.k) + 2).min(input.k); // degree ≥ 2
             }
         }
         BoundaryTestStrategy::AlternatingDegreePattern { degree_pattern, .. } => {
-            degree_pattern.truncate(10);  // Reasonable pattern length
+            degree_pattern.truncate(10); // Reasonable pattern length
             for deg in degree_pattern {
                 *deg = ((*deg % input.k) + 1).min(input.k);
             }
         }
-        BoundaryTestStrategy::DependencyChainCollapse { chain_length, collapse_point } => {
+        BoundaryTestStrategy::DependencyChainCollapse {
+            chain_length,
+            collapse_point,
+        } => {
             *chain_length = (*chain_length % input.k) + 1;
             *collapse_point = (*collapse_point % *chain_length) + 1;
         }
         BoundaryTestStrategy::SourceOnlyIncomplete { missing_indices } => {
-            missing_indices.truncate((input.k / 2) as usize);  // Don't remove too many
-            for idx in missing_indices {
+            missing_indices.truncate((input.k / 2) as usize); // Don't remove too many
+            for idx in &mut *missing_indices {
                 *idx %= input.k;
             }
             missing_indices.sort();
             missing_indices.dedup();
         }
-        BoundaryTestStrategy::RepairLinearDependence { repair_count, dependence_pattern } => {
-            *repair_count = (*repair_count % 10) + 1;  // Reasonable repair count
+        BoundaryTestStrategy::RepairLinearDependence {
+            repair_count,
+            dependence_pattern,
+        } => {
+            *repair_count = (*repair_count % 10) + 1; // Reasonable repair count
             dependence_pattern.truncate(*repair_count as usize);
             for dep in dependence_pattern {
                 *dep %= *repair_count;
@@ -322,16 +351,15 @@ fn test_peel_boundary_robustness(input: PeelBoundaryFuzzInput) {
     // Create systematic parameters
     let params = match SystematicParams::try_for_source_block(k, symbol_size) {
         Ok(p) => p,
-        Err(_) => return,  // Invalid parameters
+        Err(_) => return, // Invalid parameters
     };
 
     // Generate base source data
     let source_data = generate_source_data(k, symbol_size, input.seed);
 
     // Create encoder for generating repair symbols
-    let encoder = match SystematicEncoder::new(&source_data, symbol_size, input.seed) {
-        Ok(e) => e,
-        Err(_) => return,
+    let Some(encoder) = SystematicEncoder::new(&source_data, symbol_size, input.seed) else {
+        return;
     };
 
     // Build symbol set based on strategy and rank deficiency pattern
@@ -341,15 +369,17 @@ fn test_peel_boundary_robustness(input: PeelBoundaryFuzzInput) {
     test_decoder_with_symbols(&input, k, symbol_size, symbols);
 }
 
-fn generate_source_data(k: usize, symbol_size: usize, seed: u64) -> Vec<u8> {
+fn generate_source_data(k: usize, symbol_size: usize, seed: u64) -> Vec<Vec<u8>> {
     // Use seed to generate deterministic but varied source data
-    let mut data = vec![0u8; k * symbol_size];
+    let mut data = vec![vec![0u8; symbol_size]; k];
     let mut rng_state = seed;
 
-    for byte in &mut data {
-        // Simple PRNG for deterministic data generation
-        rng_state = rng_state.wrapping_mul(1103515245).wrapping_add(12345);
-        *byte = (rng_state >> 16) as u8;
+    for symbol in &mut data {
+        for byte in symbol {
+            // Simple PRNG for deterministic data generation
+            rng_state = rng_state.wrapping_mul(1103515245).wrapping_add(12345);
+            *byte = (rng_state >> 16) as u8;
+        }
     }
 
     data
@@ -357,9 +387,9 @@ fn generate_source_data(k: usize, symbol_size: usize, seed: u64) -> Vec<u8> {
 
 fn build_symbol_set(
     input: &PeelBoundaryFuzzInput,
-    params: &SystematicParams,
+    _params: &SystematicParams,
     encoder: &SystematicEncoder,
-    source_data: &[u8],
+    source_data: &[Vec<u8>],
 ) -> Vec<ReceivedSymbol> {
     let mut symbols = Vec::new();
     let k = input.k as usize;
@@ -367,7 +397,10 @@ fn build_symbol_set(
 
     // Apply test strategy to generate initial symbol set
     match &input.strategy {
-        BoundaryTestStrategy::PartialPeelThenRankDeficit { peel_solvable, remaining_degrees } => {
+        BoundaryTestStrategy::PartialPeelThenRankDeficit {
+            peel_solvable,
+            remaining_degrees,
+        } => {
             // Add enough sources/repairs to solve `peel_solvable` symbols via peeling
             for i in 0..*peel_solvable as usize {
                 let source_symbol = create_source_symbol(i, source_data, symbol_size);
@@ -378,12 +411,20 @@ fn build_symbol_set(
             for (i, &degree) in remaining_degrees.iter().enumerate() {
                 let repair_esi = k as u32 + i as u32;
                 let repair_symbol = create_repair_symbol_with_degree(
-                    repair_esi, degree as usize, k, encoder, symbol_size);
+                    repair_esi,
+                    degree as usize,
+                    k,
+                    encoder,
+                    symbol_size,
+                );
                 symbols.push(repair_symbol);
             }
         }
 
-        BoundaryTestStrategy::AlternatingDegreePattern { degree_pattern, add_dependent_sources } => {
+        BoundaryTestStrategy::AlternatingDegreePattern {
+            degree_pattern,
+            add_dependent_sources,
+        } => {
             let mut esi_counter = 0u32;
 
             for (i, &degree) in degree_pattern.iter().cycle().take(k * 2).enumerate() {
@@ -394,13 +435,21 @@ fn build_symbol_set(
                     // Add repair symbol with specified degree
                     let repair_esi = k as u32 + esi_counter;
                     symbols.push(create_repair_symbol_with_degree(
-                        repair_esi, degree as usize, k, encoder, symbol_size));
+                        repair_esi,
+                        degree as usize,
+                        k,
+                        encoder,
+                        symbol_size,
+                    ));
                     esi_counter += 1;
                 }
             }
         }
 
-        BoundaryTestStrategy::DependencyChainCollapse { chain_length, collapse_point } => {
+        BoundaryTestStrategy::DependencyChainCollapse {
+            chain_length,
+            collapse_point,
+        } => {
             // Create dependency chain that becomes rank-deficient at collapse_point
             for i in 0..k {
                 if i < *chain_length as usize {
@@ -411,7 +460,12 @@ fn build_symbol_set(
                         // Start creating dependent equations that collapse rank
                         let repair_esi = k as u32 + i as u32;
                         symbols.push(create_dependent_repair_symbol(
-                            repair_esi, i, k, encoder, symbol_size));
+                            repair_esi,
+                            i,
+                            k,
+                            encoder,
+                            symbol_size,
+                        ));
                     }
                 } else {
                     symbols.push(create_source_symbol(i, source_data, symbol_size));
@@ -428,7 +482,10 @@ fn build_symbol_set(
             }
         }
 
-        BoundaryTestStrategy::RepairLinearDependence { repair_count, dependence_pattern } => {
+        BoundaryTestStrategy::RepairLinearDependence {
+            repair_count: _,
+            dependence_pattern,
+        } => {
             // Add all source symbols
             for i in 0..k {
                 symbols.push(create_source_symbol(i, source_data, symbol_size));
@@ -437,9 +494,15 @@ fn build_symbol_set(
             // Add linearly dependent repair symbols
             for (i, &dep_idx) in dependence_pattern.iter().enumerate() {
                 let repair_esi = k as u32 + i as u32;
-                let base_esi = k as u32 + (dep_idx % dependence_pattern.len()) as u32;
+                let base_offset = usize::from(dep_idx) % dependence_pattern.len();
+                let base_esi = k as u32 + base_offset as u32;
                 symbols.push(create_linearly_dependent_repair(
-                    repair_esi, base_esi, k, encoder, symbol_size));
+                    repair_esi,
+                    base_esi,
+                    k,
+                    encoder,
+                    symbol_size,
+                ));
             }
         }
     }
@@ -460,18 +523,12 @@ fn build_symbol_set(
     symbols
 }
 
-fn create_source_symbol(esi: usize, source_data: &[u8], symbol_size: usize) -> ReceivedSymbol {
-    let start = esi * symbol_size;
-    let end = start + symbol_size;
-    let data = source_data.get(start..end).unwrap_or(&vec![0u8; symbol_size]).to_vec();
-
-    ReceivedSymbol {
-        esi: esi as u32,
-        is_source: true,
-        columns: vec![esi],
-        coefficients: vec![Gf256::new(1)],
-        data,
-    }
+fn create_source_symbol(esi: usize, source_data: &[Vec<u8>], symbol_size: usize) -> ReceivedSymbol {
+    let data = source_data
+        .get(esi)
+        .cloned()
+        .unwrap_or_else(|| vec![0u8; symbol_size]);
+    ReceivedSymbol::source(esi as u32, data)
 }
 
 fn create_repair_symbol_with_degree(
@@ -479,7 +536,7 @@ fn create_repair_symbol_with_degree(
     degree: usize,
     k: usize,
     encoder: &SystematicEncoder,
-    symbol_size: usize
+    _symbol_size: usize,
 ) -> ReceivedSymbol {
     let degree = degree.min(k).max(1);
     let mut columns = Vec::with_capacity(degree);
@@ -493,7 +550,11 @@ fn create_repair_symbol_with_degree(
         columns.push(col);
 
         rng_state = rng_state.wrapping_mul(1103515245).wrapping_add(12345);
-        let coef = if (rng_state & 0xFF) == 0 { 1 } else { (rng_state & 0xFF) as u8 };
+        let coef = if (rng_state & 0xFF) == 0 {
+            1
+        } else {
+            (rng_state & 0xFF) as u8
+        };
         coefficients.push(Gf256::new(coef));
     }
 
@@ -504,11 +565,8 @@ fn create_repair_symbol_with_degree(
 
     let (columns, coefficients): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
 
-    // Generate symbol data using encoder
-    let data = match encoder.repair_symbol(esi, symbol_size) {
-        Ok(d) => d,
-        Err(_) => vec![0u8; symbol_size],
-    };
+    // Generate symbol data using the live systematic encoder.
+    let data = encoder.repair_symbol(esi);
 
     ReceivedSymbol {
         esi,
@@ -524,16 +582,13 @@ fn create_dependent_repair_symbol(
     dependency_base: usize,
     k: usize,
     encoder: &SystematicEncoder,
-    symbol_size: usize,
+    _symbol_size: usize,
 ) -> ReceivedSymbol {
     // Create a repair that's linearly dependent on previous equations
     let columns = vec![dependency_base, (dependency_base + 1) % k];
-    let coefficients = vec![Gf256::new(1), Gf256::new(1)];  // Just sum two symbols
+    let coefficients = vec![Gf256::new(1), Gf256::new(1)]; // Just sum two symbols
 
-    let data = match encoder.repair_symbol(esi, symbol_size) {
-        Ok(d) => d,
-        Err(_) => vec![0u8; symbol_size],
-    };
+    let data = encoder.repair_symbol(esi);
 
     ReceivedSymbol {
         esi,
@@ -549,16 +604,13 @@ fn create_linearly_dependent_repair(
     base_esi: u32,
     k: usize,
     encoder: &SystematicEncoder,
-    symbol_size: usize,
+    _symbol_size: usize,
 ) -> ReceivedSymbol {
     // Create repair that copies another repair's equation structure
     let columns = vec![base_esi as usize % k, (base_esi as usize + 1) % k];
     let coefficients = vec![Gf256::new(1), Gf256::new(1)];
 
-    let data = match encoder.repair_symbol(esi, symbol_size) {
-        Ok(d) => d,
-        Err(_) => vec![0u8; symbol_size],
-    };
+    let data = encoder.repair_symbol(esi);
 
     ReceivedSymbol {
         esi,
@@ -580,7 +632,10 @@ fn apply_rank_deficiency(
             // No modification needed
         }
 
-        RankDeficiencyPattern::ExactDuplicates { duplicate_count, base_index } => {
+        RankDeficiencyPattern::ExactDuplicates {
+            duplicate_count,
+            base_index,
+        } => {
             if let Some(base_symbol) = symbols.get(*base_index as usize) {
                 let base_clone = base_symbol.clone();
                 for i in 0..*duplicate_count {
@@ -607,15 +662,18 @@ fn apply_rank_deficiency(
 }
 
 fn apply_malformation(
-    symbols: &mut Vec<ReceivedSymbol>,
+    symbols: &mut [ReceivedSymbol],
     malformation: &EquationMalformation,
-    k: usize,
-    symbol_size: usize,
+    _k: usize,
+    _symbol_size: usize,
 ) {
     match malformation {
         EquationMalformation::None => {}
 
-        EquationMalformation::ArityMismatch { equation_index, mismatch_delta } => {
+        EquationMalformation::ArityMismatch {
+            equation_index,
+            mismatch_delta,
+        } => {
             if let Some(symbol) = symbols.get_mut(*equation_index as usize) {
                 if *mismatch_delta > 0 {
                     // Add extra coefficients
@@ -625,29 +683,47 @@ fn apply_malformation(
                 } else {
                     // Remove coefficients
                     let to_remove = (-*mismatch_delta as usize).min(symbol.coefficients.len());
-                    symbol.coefficients.truncate(symbol.coefficients.len() - to_remove);
+                    symbol
+                        .coefficients
+                        .truncate(symbol.coefficients.len() - to_remove);
                 }
             }
         }
 
-        EquationMalformation::ColumnOutOfRange { equation_index, invalid_column } => {
-            if let Some(symbol) = symbols.get_mut(*equation_index as usize) {
-                if !symbol.columns.is_empty() {
-                    symbol.columns[0] = *invalid_column as usize;
-                }
+        EquationMalformation::ColumnOutOfRange {
+            equation_index,
+            invalid_column,
+        } => {
+            if let Some(symbol) = symbols.get_mut(*equation_index as usize)
+                && !symbol.columns.is_empty()
+            {
+                symbol.columns[0] = *invalid_column as usize;
             }
         }
 
-        EquationMalformation::SymbolSizeMismatch { symbol_index, wrong_size } => {
+        EquationMalformation::SymbolSizeMismatch {
+            symbol_index,
+            wrong_size,
+        } => {
             if let Some(symbol) = symbols.get_mut(*symbol_index as usize) {
                 symbol.data = vec![0u8; *wrong_size as usize];
             }
         }
 
-        EquationMalformation::InvalidSourceEquation { source_esi, malformed_columns, malformed_coefficients } => {
-            if let Some(symbol) = symbols.iter_mut().find(|s| s.esi == *source_esi as u32 && s.is_source) {
+        EquationMalformation::InvalidSourceEquation {
+            source_esi,
+            malformed_columns,
+            malformed_coefficients,
+        } => {
+            if let Some(symbol) = symbols
+                .iter_mut()
+                .find(|s| s.esi == *source_esi as u32 && s.is_source)
+            {
                 symbol.columns = malformed_columns.iter().map(|&c| c as usize).collect();
-                symbol.coefficients = malformed_coefficients.iter().map(|&c| Gf256::new(c)).collect();
+                symbol.coefficients = malformed_coefficients
+                    .iter()
+                    .map(|&c| Gf256::new(c))
+                    .collect();
             }
         }
     }
@@ -662,14 +738,11 @@ fn create_extra_symbol(
     match &extra.symbol_type {
         ExtraSymbolType::RedundantSource { esi } => {
             let esi = *esi as usize % k;
-            let data = extra.data.get(0..symbol_size).unwrap_or(&vec![0u8; symbol_size]).to_vec();
-            Some(ReceivedSymbol {
-                esi: esi as u32,
-                is_source: true,
-                columns: vec![esi],
-                coefficients: vec![Gf256::new(1)],
-                data,
-            })
+            let data = extra
+                .data
+                .get(0..symbol_size)
+                .map_or_else(|| vec![0u8; symbol_size], ToOwned::to_owned);
+            Some(ReceivedSymbol::source(esi as u32, data))
         }
 
         ExtraSymbolType::ZeroRepair { columns } => {
@@ -677,7 +750,7 @@ fn create_extra_symbol(
             let coefficients = vec![Gf256::new(0); columns.len()];
             let data = vec![0u8; symbol_size];
             Some(ReceivedSymbol {
-                esi: k as u32 + 9999,  // High ESI
+                esi: k as u32 + 9999, // High ESI
                 is_source: false,
                 columns,
                 coefficients,
@@ -685,21 +758,24 @@ fn create_extra_symbol(
             })
         }
 
-        ExtraSymbolType::HighDegreeRepair { degree, columns, coefficients } => {
+        ExtraSymbolType::HighDegreeRepair {
+            degree,
+            columns,
+            coefficients,
+        } => {
             let degree = (*degree as usize % k).max(1);
-            let columns: Vec<usize> = columns.iter()
+            let columns: Vec<usize> = columns
+                .iter()
                 .take(degree)
                 .map(|&c| c as usize % k)
                 .collect();
-            let coefficients: Vec<Gf256> = coefficients.iter()
+            let coefficients: Vec<Gf256> = coefficients
+                .iter()
                 .take(degree)
                 .map(|&c| Gf256::new(c))
                 .collect();
 
-            let data = match encoder.repair_symbol(k as u32 + 8888, symbol_size) {
-                Ok(d) => d,
-                Err(_) => vec![0u8; symbol_size],
-            };
+            let data = encoder.repair_symbol(k as u32 + 8888);
 
             Some(ReceivedSymbol {
                 esi: k as u32 + 8888,
@@ -710,7 +786,41 @@ fn create_extra_symbol(
             })
         }
 
-        _ => None,  // Skip other types for now
+        ExtraSymbolType::InvalidRepair {
+            invalid_columns,
+            coefficients,
+        } => {
+            let columns: Vec<usize> = invalid_columns
+                .iter()
+                .map(|&column| k + usize::from(column))
+                .collect();
+            let coefficients: Vec<Gf256> = coefficients
+                .iter()
+                .take(columns.len())
+                .map(|&coefficient| Gf256::new(coefficient))
+                .collect();
+            let coefficients = if coefficients.len() == columns.len() {
+                coefficients
+            } else {
+                vec![Gf256::new(1); columns.len()]
+            };
+
+            Some(ReceivedSymbol {
+                esi: k as u32 + 7777,
+                is_source: false,
+                columns,
+                coefficients,
+                data: vec![0u8; symbol_size],
+            })
+        }
+
+        ExtraSymbolType::WrongEsiSource {
+            claimed_esi,
+            actual_esi,
+        } => {
+            let data = vec![*actual_esi; symbol_size];
+            Some(ReceivedSymbol::source(u32::from(*claimed_esi), data))
+        }
     }
 }
 
@@ -725,11 +835,9 @@ fn test_decoder_with_symbols(
         Err(_) => return,
     };
 
-    // Test basic decode
-    let result1 = decoder.decode(symbols.clone());
-
-    // Test decode with proof (should have same outcome)
-    let result2 = decoder.decode_with_proof(symbols.clone());
+    // Test basic decode and the bounded wavefront decode path.
+    let result1 = decoder.decode(&symbols);
+    let result2 = decoder.decode_wavefront(&symbols, 4);
 
     // Apply oracles
     apply_oracles(input, &symbols, k, &result1, &result2);
@@ -739,13 +847,15 @@ fn apply_oracles(
     input: &PeelBoundaryFuzzInput,
     _symbols: &[ReceivedSymbol],
     k: usize,
-    result1: &Result<Vec<u8>, DecodeError>,
-    result2: &Result<(Vec<u8>, asupersync::raptorq::proof::DecodeProof), DecodeError>,
+    result1: &Result<DecodeResult, DecodeError>,
+    result2: &Result<DecodeResult, DecodeError>,
 ) {
     // Oracle 1: Determinism - same symbols should produce same results
-    let comparable_result2 = result2.as_ref().map(|(data, _proof)| data.clone()).map_err(|e| e.clone());
-    assert_eq!(result1, &comparable_result2,
-        "Decoder results should be deterministic across different API calls");
+    assert_eq!(
+        decode_observation(result1),
+        decode_observation(result2),
+        "Decoder results should be deterministic across sequential and wavefront paths"
+    );
 
     // Oracle 2: Failure classification - rank-deficient cases should produce appropriate errors
     match (&input.rank_deficiency, result1) {
@@ -755,7 +865,10 @@ fn apply_oracles(
         (RankDeficiencyPattern::FullRank, _) => {
             // May succeed or fail, but shouldn't panic
         }
-        (RankDeficiencyPattern::ExactDuplicates { .. }, Err(DecodeError::SingularMatrix { .. })) => {
+        (
+            RankDeficiencyPattern::ExactDuplicates { .. },
+            Err(DecodeError::SingularMatrix { .. }),
+        ) => {
             // Expected - duplicates should cause rank deficiency
         }
         _ => {
@@ -767,11 +880,15 @@ fn apply_oracles(
     // This oracle is implicitly satisfied if we reach this point
 
     // Oracle 4: Witness row should be deterministic for same error
-    if let (Err(DecodeError::SingularMatrix { row: row1 }),
-            Err(DecodeError::SingularMatrix { row: row2 })) =
-           (result1, comparable_result2.as_ref()) {
-        assert_eq!(row1, row2,
-            "Witness row should be deterministic for same singular matrix");
+    if let (
+        Err(DecodeError::SingularMatrix { row: row1 }),
+        Err(DecodeError::SingularMatrix { row: row2 }),
+    ) = (result1, result2)
+    {
+        assert_eq!(
+            row1, row2,
+            "Witness row should be deterministic for same singular matrix"
+        );
     }
 
     // Oracle 5: Malformation should be detected appropriately
@@ -796,8 +913,31 @@ fn apply_oracles(
 
     // Oracle 6: If decode succeeds, result should be correct length
     if let Ok(decoded) = result1 {
-        assert_eq!(decoded.len(), k * input.symbol_size as usize,
-            "Successful decode should produce correct amount of data");
+        assert_eq!(
+            decoded.source.len(),
+            k,
+            "Successful decode should produce K source symbols"
+        );
+        assert!(
+            decoded
+                .source
+                .iter()
+                .all(|symbol| symbol.len() == input.symbol_size as usize),
+            "Successful decode should produce source symbols with the configured symbol size"
+        );
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DecodeObservation {
+    Success(Vec<Vec<u8>>),
+    Failure(String),
+}
+
+fn decode_observation(result: &Result<DecodeResult, DecodeError>) -> DecodeObservation {
+    match result {
+        Ok(decoded) => DecodeObservation::Success(decoded.source.clone()),
+        Err(err) => DecodeObservation::Failure(format!("{err:?}")),
     }
 }
 
