@@ -5094,6 +5094,7 @@ name = "mutex_drop_after_panic"
 path = "fuzz_targets/mutex_drop_after_panic.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_settings_enable_push_invalid"

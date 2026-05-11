@@ -16,7 +16,7 @@
 use arbitrary::Arbitrary;
 use asupersync::sync::Mutex;
 use libfuzzer_sys::fuzz_target;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::resume_unwind;
 use std::sync::{
     Arc, Barrier,
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -27,11 +27,11 @@ use std::time::Duration;
 /// Configuration for mutex drop after panic test
 #[derive(Debug, Arbitrary)]
 struct MutexDropPanicConfig {
-    /// Number of threads that will cause panics (1-8)
+    /// Number of threads that will simulate panic poisoning (1-8)
     panic_thread_count: u8,
     /// Number of threads that will access poisoned mutex (1-16)
     accessor_thread_count: u8,
-    /// Panic patterns for each panic thread
+    /// Panic-poison patterns for each poisoner thread
     panic_patterns: Vec<PanicPattern>,
     /// Access patterns for accessor threads
     access_patterns: Vec<AccessPattern>,
@@ -84,13 +84,13 @@ impl MutexDropPanicConfig {
         );
 
         // Normalize delays
-        self.drop_delay = self.drop_delay % 1000; // Max 1ms
+        self.drop_delay %= 1000; // Max 1ms
 
         // Normalize pattern parameters
         for pattern in &mut self.panic_patterns {
             match pattern {
                 PanicPattern::PanicDuringWork { work_delay } => {
-                    *work_delay = *work_delay % 200; // Max 0.2ms
+                    *work_delay %= 200; // Max 0.2ms
                 }
                 PanicPattern::WorkThenPanic { work_items } => {
                     *work_items = (*work_items % 10).max(1);
@@ -102,7 +102,7 @@ impl MutexDropPanicConfig {
         for pattern in &mut self.access_patterns {
             match pattern {
                 AccessPattern::TryLockWithTimeout { timeout_micros } => {
-                    *timeout_micros = *timeout_micros % 500; // Max 0.5ms
+                    *timeout_micros %= 500; // Max 0.5ms
                 }
                 AccessPattern::RapidLockAttempts { attempts } => {
                     *attempts = (*attempts % 20).max(1);
@@ -118,7 +118,7 @@ impl MutexDropPanicConfig {
 struct TestResults {
     panic_threads_started: AtomicUsize,
     accessor_threads_started: AtomicUsize,
-    panics_occurred: AtomicUsize,
+    poison_events: AtomicUsize,
     poison_detected: AtomicUsize,
     lock_attempts: AtomicUsize,
     lock_successes: AtomicUsize,
@@ -126,6 +126,28 @@ struct TestResults {
     lock_timeouts: AtomicUsize,
     mutex_dropped: AtomicBool,
     drop_completed: AtomicBool,
+}
+
+fn observe_worker_join(handle: thread::JoinHandle<()>) {
+    if let Err(payload) = handle.join() {
+        resume_unwind(payload);
+    }
+}
+
+fn simulate_poison_after_lock<F>(mutex: &Mutex<u32>, mutate: F) -> bool
+where
+    F: FnOnce(&mut u32),
+{
+    let cx = asupersync::Cx::for_testing();
+    let mut guard = match futures::executor::block_on(mutex.lock(&cx)) {
+        Ok(guard) => guard,
+        Err(asupersync::sync::LockError::Poisoned) => return false,
+        Err(error) => panic!("unexpected mutex lock error while simulating poison: {error:?}"),
+    };
+
+    mutate(&mut guard);
+    mutex.poison_for_testing();
+    true
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -149,7 +171,8 @@ fuzz_target!(|data: &[u8]| {
 
     let mut handles = Vec::new();
 
-    // Spawn panic threads - these will cause the mutex to become poisoned
+    // Spawn poisoner threads - these model post-panic poison state without
+    // intentionally panicking inside the fuzz process.
     for i in 0..config.panic_thread_count {
         let mutex = Arc::clone(&mutex);
         let results = Arc::clone(&results);
@@ -164,54 +187,32 @@ fuzz_target!(|data: &[u8]| {
                 barrier.wait();
             }
 
-            let panic_result = catch_unwind(AssertUnwindSafe(|| {
-                let cx = asupersync::Cx::for_testing();
-                match pattern {
-                    PanicPattern::PanicAfterLock => {
-                        let _guard = futures::executor::block_on(mutex.lock(&cx))
-                            .expect("Lock should succeed");
-                        panic!("Intentional panic after acquiring lock");
-                    }
+            let poisoned = match pattern {
+                PanicPattern::PanicAfterLock | PanicPattern::PanicDuringAcquisition => {
+                    simulate_poison_after_lock(&mutex, |_| {})
+                }
 
-                    PanicPattern::PanicDuringWork { work_delay } => {
-                        let mut guard = futures::executor::block_on(mutex.lock(&cx))
-                            .expect("Lock should succeed");
+                PanicPattern::PanicDuringWork { work_delay } => {
+                    simulate_poison_after_lock(&mutex, |value| {
                         if work_delay > 0 {
                             thread::sleep(Duration::from_micros(work_delay as u64));
                         }
-                        *guard += 1; // Do some work
-                        panic!("Intentional panic during work");
-                    }
+                        *value += 1;
+                    })
+                }
 
-                    PanicPattern::PanicDuringAcquisition => {
-                        // This is tricky - we'll panic during a custom operation
-                        // that involves lock acquisition
-                        let _guard = futures::executor::block_on(mutex.lock(&cx))
-                            .expect("Lock should succeed");
-                        // Simulate some complex operation that panics
-                        panic!("Intentional panic during acquisition");
-                    }
-
-                    PanicPattern::WorkThenPanic { work_items } => {
-                        let mut guard = futures::executor::block_on(mutex.lock(&cx))
-                            .expect("Lock should succeed");
+                PanicPattern::WorkThenPanic { work_items } => {
+                    simulate_poison_after_lock(&mutex, |value| {
                         for _ in 0..work_items {
-                            *guard = guard.wrapping_add(1);
+                            *value = value.wrapping_add(1);
                             thread::sleep(Duration::from_micros(10));
                         }
-                        panic!("Intentional panic after work");
-                    }
+                    })
                 }
-            }));
+            };
 
-            match panic_result {
-                Err(_) => {
-                    // Panic occurred as expected
-                    results.panics_occurred.fetch_add(1, Ordering::SeqCst);
-                }
-                Ok(_) => {
-                    // Should not happen for our patterns, but handle gracefully
-                }
+            if poisoned {
+                results.poison_events.fetch_add(1, Ordering::SeqCst);
             }
         });
 
@@ -235,7 +236,7 @@ fuzz_target!(|data: &[u8]| {
                 barrier.wait();
             }
 
-            // Give panic threads a chance to run first
+            // Give poisoner threads a chance to run first
             thread::sleep(Duration::from_micros(100));
 
             match pattern {
@@ -259,24 +260,17 @@ fuzz_target!(|data: &[u8]| {
                 AccessPattern::BlockOnPoisoned => {
                     results.lock_attempts.fetch_add(1, Ordering::SeqCst);
 
-                    // Use catch_unwind in case the poison handling itself has issues
-                    let lock_result = catch_unwind(AssertUnwindSafe(|| {
-                        let cx = asupersync::Cx::for_testing();
-                        futures::executor::block_on(mutex.lock(&cx))
-                    }));
-
-                    match lock_result {
-                        Ok(guard_result) => match guard_result {
-                            Ok(_guard) => {
-                                results.lock_successes.fetch_add(1, Ordering::SeqCst);
-                            }
-                            Err(_poison_error) => {
-                                results.lock_poison_errors.fetch_add(1, Ordering::SeqCst);
-                                results.poison_detected.fetch_add(1, Ordering::SeqCst);
-                            }
-                        },
-                        Err(_) => {
-                            // Panic occurred during lock attempt
+                    let cx = asupersync::Cx::for_testing();
+                    match futures::executor::block_on(mutex.lock(&cx)) {
+                        Ok(_guard) => {
+                            results.lock_successes.fetch_add(1, Ordering::SeqCst);
+                        }
+                        Err(asupersync::sync::LockError::Poisoned) => {
+                            results.lock_poison_errors.fetch_add(1, Ordering::SeqCst);
+                            results.poison_detected.fetch_add(1, Ordering::SeqCst);
+                        }
+                        Err(error) => {
+                            panic!("unexpected mutex lock error during accessor path: {error:?}");
                         }
                     }
                 }
@@ -332,12 +326,16 @@ fuzz_target!(|data: &[u8]| {
                 }
 
                 AccessPattern::CheckPoisoned => {
-                    // Try to determine if mutex is poisoned without locking
+                    results.lock_attempts.fetch_add(1, Ordering::SeqCst);
+
+                    // Try to determine whether the mutex has been poisoned without
+                    // blocking behind another holder.
                     match mutex.try_lock() {
                         Ok(_guard) => {
-                            // Not poisoned (or was recovered)
+                            results.lock_successes.fetch_add(1, Ordering::SeqCst);
                         }
                         Err(asupersync::sync::TryLockError::Poisoned) => {
+                            results.lock_poison_errors.fetch_add(1, Ordering::SeqCst);
                             results.poison_detected.fetch_add(1, Ordering::SeqCst);
                         }
                         Err(asupersync::sync::TryLockError::Locked) => {
@@ -353,7 +351,7 @@ fuzz_target!(|data: &[u8]| {
 
     // Wait for all threads to complete
     for handle in handles {
-        let _ = handle.join(); // Ignore panics - they're expected
+        observe_worker_join(handle);
     }
 
     // Add delay before dropping mutex
@@ -373,7 +371,7 @@ fuzz_target!(|data: &[u8]| {
     // Verify results
     let panic_threads_started = results.panic_threads_started.load(Ordering::SeqCst);
     let accessor_threads_started = results.accessor_threads_started.load(Ordering::SeqCst);
-    let panics_occurred = results.panics_occurred.load(Ordering::SeqCst);
+    let poison_events = results.poison_events.load(Ordering::SeqCst);
     let poison_detected = results.poison_detected.load(Ordering::SeqCst);
     let lock_attempts = results.lock_attempts.load(Ordering::SeqCst);
     let lock_successes = results.lock_successes.load(Ordering::SeqCst);
@@ -403,17 +401,14 @@ fuzz_target!(|data: &[u8]| {
     assert!(mutex_dropped, "Mutex should be marked as dropped");
     assert!(drop_completed, "Mutex drop should complete");
 
-    // Poison detection consistency
-    if panics_occurred > 0 {
-        // If panics occurred, we might (but are not guaranteed to) detect poison
-        // This depends on timing - accessor threads might run before or after panic
-    }
+    // If poison events occurred, accessors might still miss poison depending
+    // on whether they run before or after the poisoner.
 
-    // Invariant: If we detected poison, there must have been panics
+    // Invariant: If we detected poison, a poison event must have occurred.
     if poison_detected > 0 {
         assert!(
-            panics_occurred > 0,
-            "Cannot detect poison without panics occurring"
+            poison_events > 0,
+            "Cannot detect poison without a poison event occurring"
         );
     }
 

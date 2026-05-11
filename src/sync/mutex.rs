@@ -448,6 +448,15 @@ impl<T> Mutex<T> {
         self.poisoned.store(true, Ordering::Release);
     }
 
+    /// Marks the mutex poisoned for tests and fuzz harnesses that need to model
+    /// post-panic state without intentionally panicking inside the harness.
+    #[cfg(any(test, feature = "test-internals"))]
+    #[doc(hidden)]
+    #[inline]
+    pub fn poison_for_testing(&self) {
+        self.poison();
+    }
+
     #[inline]
     fn unlock(&self) {
         // Extract the waker to wake outside the lock to prevent deadlocks.
