@@ -1,53 +1,32 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
+use asupersync::bytes::BytesMut;
+use asupersync::http::h2::frame::{HeadersFrame, SettingsFrame};
+use asupersync::http::h2::settings::{DEFAULT_MAX_HEADER_LIST_SIZE, MAX_INITIAL_WINDOW_SIZE};
+use asupersync::http::h2::{Connection, ErrorCode, Frame, Header, HpackEncoder, Setting, Settings};
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashMap;
 
-/// HTTP/2 SETTINGS_MAX_HEADER_LIST_SIZE=0 fuzz target.
-///
-/// Tests edge case where peer sends SETTINGS_MAX_HEADER_LIST_SIZE=0, which
-/// effectively forbids any HEADERS frames. This creates a paradox: HTTP/2
-/// requires pseudo-headers (:method, :path, :scheme, :authority) but the
-/// peer setting says "no headers allowed".
-///
-/// RFC 7540 §6.5.2: "This setting can be used to avoid fragmentation attacks
-/// based on large header blocks." A value of 0 effectively forbids all headers.
-///
-/// Critical test questions:
-/// - Must we reject ALL outgoing requests?
-/// - How to handle required pseudo-headers?
-/// - What error condition is appropriate?
-/// - Must not panic on this edge case
+const MAX_FOLLOWUP_SETTINGS: usize = 8;
+const MAX_SCENARIOS: usize = 4;
+const MAX_EXTRA_HEADERS: usize = 8;
+const MAX_COMPONENT_LEN: usize = 96;
+const MAX_DRAIN_FRAMES: usize = 16;
 
-#[derive(Arbitrary, Debug, Clone)]
+#[derive(Arbitrary, Debug)]
 struct SettingsZeroHeaderInput {
-    /// Initial SETTINGS_MAX_HEADER_LIST_SIZE value
-    initial_max_header_size: u32,
-
-    /// New setting value (should be 0 for this test)
-    new_max_header_size: u32,
-
-    /// Request scenarios to test after setting
+    initial_max_header_size: HeaderListSize,
+    followup_header_sizes: Vec<HeaderListSize>,
     request_scenarios: Vec<RequestScenario>,
-
-    /// Connection state and configuration
     connection_config: ConnectionConfig,
-
-    /// Validation policy
-    policy: ZeroHeaderPolicy,
+    drain_budget: u8,
 }
 
 #[derive(Arbitrary, Debug, Clone)]
 struct RequestScenario {
-    /// Pseudo-headers required by HTTP/2
     pseudo_headers: PseudoHeaders,
-
-    /// Regular headers
     regular_headers: Vec<HeaderPair>,
-
-    /// Expected behavior after zero limit
-    expected_behavior: ExpectedBehavior,
+    end_stream: bool,
 }
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -58,17 +37,6 @@ struct PseudoHeaders {
     authority: Option<String>,
 }
 
-impl Default for PseudoHeaders {
-    fn default() -> Self {
-        Self {
-            method: "GET".to_string(),
-            path: "/".to_string(),
-            scheme: "https".to_string(),
-            authority: Some("example.com".to_string()),
-        }
-    }
-}
-
 #[derive(Arbitrary, Debug, Clone)]
 struct HeaderPair {
     name: String,
@@ -76,458 +44,281 @@ struct HeaderPair {
 }
 
 #[derive(Arbitrary, Debug, Clone)]
-enum ExpectedBehavior {
-    ShouldReject,
-    ShouldAccept,
-    ImplementationDefined,
-}
-
-#[derive(Arbitrary, Debug, Clone)]
 struct ConnectionConfig {
-    /// Whether this is client or server side
     is_client: bool,
-
-    /// Initial connection window size
     initial_window_size: u32,
-
-    /// Whether to enable PUSH_PROMISE
     enable_push: bool,
-
-    /// Maximum concurrent streams
     max_concurrent_streams: u32,
 }
 
-impl Default for ConnectionConfig {
-    fn default() -> Self {
-        Self {
-            is_client: true,
-            initial_window_size: 65535,
-            enable_push: true,
-            max_concurrent_streams: 100,
-        }
-    }
-}
-
 #[derive(Arbitrary, Debug, Clone)]
-struct ZeroHeaderPolicy {
-    /// How to handle zero header list size
-    zero_size_handling: ZeroSizeHandling,
-
-    /// Whether to allow minimal pseudo-headers only
-    allow_minimal_pseudoheaders: bool,
-
-    /// Whether to fail gracefully or return error
-    fail_gracefully: bool,
-
-    /// Maximum allowed header list size for comparison
-    fallback_max_size: u32,
+enum HeaderListSize {
+    Zero,
+    One,
+    Default,
+    Tiny(u8),
+    Small(u16),
+    Large(u32),
+    Unlimited,
 }
 
-impl Default for ZeroHeaderPolicy {
-    fn default() -> Self {
-        Self {
-            zero_size_handling: ZeroSizeHandling::RejectAllHeaders,
-            allow_minimal_pseudoheaders: false,
-            fail_gracefully: true,
-            fallback_max_size: 8192,
+impl HeaderListSize {
+    fn to_u32(&self) -> u32 {
+        match self {
+            Self::Zero => 0,
+            Self::One => 1,
+            Self::Default => DEFAULT_MAX_HEADER_LIST_SIZE,
+            Self::Tiny(value) => u32::from(*value),
+            Self::Small(value) => u32::from(*value),
+            Self::Large(value) => *value,
+            Self::Unlimited => u32::MAX,
         }
     }
-}
-
-#[derive(Arbitrary, Debug, Clone, PartialEq)]
-enum ZeroSizeHandling {
-    /// Reject all HEADERS frames
-    RejectAllHeaders,
-    /// Allow minimal pseudo-headers only
-    AllowMinimalPseudo,
-    /// Use implementation default
-    UseDefault,
-    /// Treat as connection error
-    ConnectionError,
-}
-
-/// Mock HTTP/2 connection for testing SETTINGS_MAX_HEADER_LIST_SIZE=0
-struct MockH2SettingsConnection {
-    max_header_list_size: u32,
-    config: ConnectionConfig,
-    policy: ZeroHeaderPolicy,
-    connection_active: bool,
-}
-
-impl MockH2SettingsConnection {
-    fn new(config: ConnectionConfig, policy: ZeroHeaderPolicy) -> Self {
-        Self {
-            max_header_list_size: 8192, // RFC 7540 default (unspecified but common)
-            config,
-            policy,
-            connection_active: true,
-        }
-    }
-
-    /// Process SETTINGS frame with MAX_HEADER_LIST_SIZE
-    fn process_settings(&mut self, max_header_list_size: u32) -> SettingsResult {
-        // RFC 7540 §6.5.2: No specified lower bound, so 0 is technically valid
-        let old_size = self.max_header_list_size;
-        self.max_header_list_size = max_header_list_size;
-
-        if max_header_list_size == 0 {
-            return self.handle_zero_header_size(old_size);
-        }
-
-        SettingsResult::Updated {
-            old_size,
-            new_size: max_header_list_size,
-            impact: if max_header_list_size < old_size {
-                "Decreased header list size limit".to_string()
-            } else {
-                "Increased header list size limit".to_string()
-            },
-        }
-    }
-
-    fn handle_zero_header_size(&mut self, old_size: u32) -> SettingsResult {
-        match self.policy.zero_size_handling {
-            ZeroSizeHandling::RejectAllHeaders => SettingsResult::ZeroSizePolicy {
-                policy: "Reject all HEADERS frames".to_string(),
-                pseudo_headers_allowed: false,
-                connection_usable: false,
-            },
-
-            ZeroSizeHandling::AllowMinimalPseudo => SettingsResult::ZeroSizePolicy {
-                policy: "Allow minimal pseudo-headers only".to_string(),
-                pseudo_headers_allowed: true,
-                connection_usable: true,
-            },
-
-            ZeroSizeHandling::UseDefault => {
-                // Fallback to reasonable default
-                self.max_header_list_size = self.policy.fallback_max_size;
-                SettingsResult::Updated {
-                    old_size,
-                    new_size: self.policy.fallback_max_size,
-                    impact: "Used fallback size due to zero setting".to_string(),
-                }
-            }
-
-            ZeroSizeHandling::ConnectionError => {
-                self.connection_active = false;
-                SettingsResult::ConnectionError(
-                    "SETTINGS_MAX_HEADER_LIST_SIZE=0 treated as connection error".to_string(),
-                )
-            }
-        }
-    }
-
-    /// Attempt to send HEADERS frame and validate against current limit
-    fn send_headers(&self, scenario: &RequestScenario) -> HeadersSendResult {
-        if !self.connection_active {
-            return HeadersSendResult::ConnectionClosed(
-                "Connection closed due to settings".to_string(),
-            );
-        }
-
-        let header_size = self.calculate_header_size(scenario);
-
-        if self.max_header_list_size == 0 {
-            return self.handle_zero_size_headers(scenario, header_size);
-        }
-
-        if header_size > self.max_header_list_size as usize {
-            return HeadersSendResult::Rejected(format!(
-                "Headers size {} exceeds limit {}",
-                header_size, self.max_header_list_size
-            ));
-        }
-
-        HeadersSendResult::Sent {
-            header_count: self.count_headers(scenario),
-            total_size: header_size,
-            within_limit: true,
-        }
-    }
-
-    fn handle_zero_size_headers(
-        &self,
-        scenario: &RequestScenario,
-        header_size: usize,
-    ) -> HeadersSendResult {
-        match self.policy.zero_size_handling {
-            ZeroSizeHandling::RejectAllHeaders => HeadersSendResult::Rejected(
-                "All headers rejected due to SETTINGS_MAX_HEADER_LIST_SIZE=0".to_string(),
-            ),
-
-            ZeroSizeHandling::AllowMinimalPseudo if self.policy.allow_minimal_pseudoheaders => {
-                // Only allow essential pseudo-headers
-                if scenario.regular_headers.is_empty()
-                    && self.is_minimal_pseudo_headers(&scenario.pseudo_headers)
-                {
-                    HeadersSendResult::Sent {
-                        header_count: 4, // :method, :path, :scheme, :authority
-                        total_size: self.calculate_pseudo_header_size(&scenario.pseudo_headers),
-                        within_limit: false, // Technically exceeds 0, but allowed by policy
-                    }
-                } else {
-                    HeadersSendResult::Rejected(
-                        "Only minimal pseudo-headers allowed with zero limit".to_string(),
-                    )
-                }
-            }
-
-            ZeroSizeHandling::UseDefault => {
-                // Use fallback limit
-                if header_size > self.policy.fallback_max_size as usize {
-                    HeadersSendResult::Rejected(format!(
-                        "Headers exceed fallback limit {}",
-                        self.policy.fallback_max_size
-                    ))
-                } else {
-                    HeadersSendResult::Sent {
-                        header_count: self.count_headers(scenario),
-                        total_size: header_size,
-                        within_limit: true,
-                    }
-                }
-            }
-
-            _ => {
-                HeadersSendResult::Rejected("Headers rejected due to zero size policy".to_string())
-            }
-        }
-    }
-
-    fn calculate_header_size(&self, scenario: &RequestScenario) -> usize {
-        let mut size = 0;
-
-        // Pseudo-headers (RFC 7540 §8.1.2)
-        size += self.calculate_pseudo_header_size(&scenario.pseudo_headers);
-
-        // Regular headers
-        for header in &scenario.regular_headers {
-            size += header.name.len() + header.value.len() + 32; // HPACK overhead estimate
-        }
-
-        size
-    }
-
-    fn calculate_pseudo_header_size(&self, pseudo: &PseudoHeaders) -> usize {
-        let mut size = 0;
-        size += 7 + pseudo.method.len(); // ":method" + value
-        size += 5 + pseudo.path.len(); // ":path" + value
-        size += 7 + pseudo.scheme.len(); // ":scheme" + value
-        if let Some(ref authority) = pseudo.authority {
-            size += 10 + authority.len(); // ":authority" + value
-        }
-        size + 64 // HPACK encoding overhead estimate
-    }
-
-    fn count_headers(&self, scenario: &RequestScenario) -> usize {
-        let mut count = 3; // :method, :path, :scheme
-        if scenario.pseudo_headers.authority.is_some() {
-            count += 1; // :authority
-        }
-        count += scenario.regular_headers.len();
-        count
-    }
-
-    fn is_minimal_pseudo_headers(&self, pseudo: &PseudoHeaders) -> bool {
-        // Check if these are truly minimal required headers
-        pseudo.method == "GET"
-            && pseudo.path == "/"
-            && (pseudo.scheme == "http" || pseudo.scheme == "https")
-            && pseudo.authority.is_some()
-    }
-}
-
-#[derive(Debug, PartialEq)]
-enum SettingsResult {
-    /// Settings updated successfully
-    Updated {
-        old_size: u32,
-        new_size: u32,
-        impact: String,
-    },
-
-    /// Zero size requires special policy
-    ZeroSizePolicy {
-        policy: String,
-        pseudo_headers_allowed: bool,
-        connection_usable: bool,
-    },
-
-    /// Connection error due to settings
-    ConnectionError(String),
-}
-
-#[derive(Debug, PartialEq)]
-enum HeadersSendResult {
-    /// Headers sent successfully
-    Sent {
-        header_count: usize,
-        total_size: usize,
-        within_limit: bool,
-    },
-
-    /// Headers rejected due to size limit
-    Rejected(String),
-
-    /// Connection is closed
-    ConnectionClosed(String),
 }
 
 fuzz_target!(|input: SettingsZeroHeaderInput| {
-    // Normalize input for reasonable fuzzing
-    let mut input = input;
-    if input.new_max_header_size > 1000000 {
-        input.new_max_header_size = 0; // Focus on zero case
+    if input.request_scenarios.len() > MAX_SCENARIOS * 4
+        || input.followup_header_sizes.len() > MAX_FOLLOWUP_SETTINGS * 4
+    {
+        return;
     }
 
-    let mut connection =
-        MockH2SettingsConnection::new(input.connection_config.clone(), input.policy.clone());
+    exercise_remote_zero_setting(&input);
 
-    // Process initial settings update
-    let settings_result = connection.process_settings(input.new_max_header_size);
-
-    // Test settings processing doesn't panic
-    match settings_result {
-        SettingsResult::ZeroSizePolicy {
-            connection_usable,
-            pseudo_headers_allowed,
-            ..
-        } => {
-            // Verify zero size handling is reasonable
-            if input.new_max_header_size == 0 {
-                match input.policy.zero_size_handling {
-                    ZeroSizeHandling::RejectAllHeaders => {
-                        assert!(
-                            !connection_usable,
-                            "Connection should be unusable with reject-all policy"
-                        );
-                        assert!(
-                            !pseudo_headers_allowed,
-                            "Pseudo headers should not be allowed"
-                        );
-                    }
-                    ZeroSizeHandling::AllowMinimalPseudo => {
-                        assert!(
-                            connection_usable || pseudo_headers_allowed,
-                            "Should allow some functionality with minimal pseudo policy"
-                        );
-                    }
-                    ZeroSizeHandling::ConnectionError => {
-                        // Connection error is acceptable response to zero setting
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        SettingsResult::Updated { new_size, .. } => {
-            assert_eq!(
-                new_size, connection.max_header_list_size,
-                "Connection should reflect new header size"
-            );
-        }
-
-        SettingsResult::ConnectionError(_) => {
-            assert!(
-                !connection.connection_active,
-                "Connection should be inactive after connection error"
-            );
-        }
+    for scenario in input.request_scenarios.iter().take(MAX_SCENARIOS) {
+        exercise_local_zero_decoder(scenario);
     }
-
-    // Test header sending scenarios
-    for scenario in input.request_scenarios.iter().take(3) {
-        // Limit for performance
-        let headers_result = connection.send_headers(scenario);
-
-        match headers_result {
-            HeadersSendResult::Sent {
-                header_count,
-                total_size,
-                within_limit,
-            } => {
-                // Verify sent headers are reasonable
-                assert!(header_count > 0, "Should have at least some headers");
-
-                if input.new_max_header_size == 0 && within_limit {
-                    // Should only happen with special policies
-                    match input.policy.zero_size_handling {
-                        ZeroSizeHandling::AllowMinimalPseudo | ZeroSizeHandling::UseDefault => {
-                            // Acceptable
-                        }
-                        _ => {
-                            panic!(
-                                "Headers should not be within zero limit unless policy allows it"
-                            );
-                        }
-                    }
-                }
-
-                if input.new_max_header_size > 0 && total_size > input.new_max_header_size as usize
-                {
-                    panic!(
-                        "Headers {} should not exceed limit {}",
-                        total_size, input.new_max_header_size
-                    );
-                }
-            }
-
-            HeadersSendResult::Rejected(ref reason) => {
-                // Verify rejection is reasonable
-                if input.new_max_header_size == 0 {
-                    assert!(
-                        reason.contains("zero")
-                            || reason.contains("rejected")
-                            || reason.contains("limit"),
-                        "Zero size rejection should mention the limit: {}",
-                        reason
-                    );
-                }
-            }
-
-            HeadersSendResult::ConnectionClosed(ref reason) => {
-                // Connection closure should be explainable
-                assert!(
-                    reason.contains("closed") || reason.contains("settings"),
-                    "Connection closure should explain reason: {}",
-                    reason
-                );
-            }
-        }
-    }
-
-    // Additional edge case validation
-    if input.new_max_header_size == 0 {
-        // Test that connection handles minimal required headers appropriately
-        let minimal_scenario = RequestScenario {
-            pseudo_headers: PseudoHeaders::default(),
-            regular_headers: Vec::new(),
-            expected_behavior: ExpectedBehavior::ImplementationDefined,
-        };
-
-        let minimal_result = connection.send_headers(&minimal_scenario);
-
-        match minimal_result {
-            HeadersSendResult::Sent { .. } => {
-                // Only acceptable with permissive policies
-                assert!(
-                    matches!(
-                        input.policy.zero_size_handling,
-                        ZeroSizeHandling::AllowMinimalPseudo | ZeroSizeHandling::UseDefault
-                    ),
-                    "Minimal headers should only be sent with permissive policies"
-                );
-            }
-            HeadersSendResult::Rejected(_) => {
-                // Acceptable - zero means zero
-            }
-            HeadersSendResult::ConnectionClosed(_) => {
-                // Acceptable - connection became unusable
-            }
-        }
-    }
-
-    // Verify no panics occurred during processing
-    // (Implicit - if we reach here without panicking, the test passed)
 });
+
+fn exercise_remote_zero_setting(input: &SettingsZeroHeaderInput) {
+    let local_settings = settings_from_config(
+        &input.connection_config,
+        input.initial_max_header_size.to_u32(),
+    );
+    let mut connection = if input.connection_config.is_client {
+        Connection::client(local_settings)
+    } else {
+        Connection::server(local_settings)
+    };
+
+    process_header_list_setting(&mut connection, 0);
+
+    let mut last_size = 0;
+    for size in input
+        .followup_header_sizes
+        .iter()
+        .take(MAX_FOLLOWUP_SETTINGS)
+    {
+        last_size = size.to_u32();
+        process_header_list_setting(&mut connection, last_size);
+    }
+
+    assert_eq!(
+        connection.remote_settings().max_header_list_size,
+        last_size,
+        "production connection must retain the last accepted peer header-list-size setting",
+    );
+
+    for scenario in input.request_scenarios.iter().take(MAX_SCENARIOS) {
+        let headers = request_headers_from_scenario(scenario);
+        match connection.open_stream(headers, scenario.end_stream) {
+            Ok(stream_id) => {
+                assert!(
+                    connection.stream(stream_id).is_some(),
+                    "opened stream should be visible in production stream store",
+                );
+                drain_pending_frames(&mut connection, input.drain_budget);
+            }
+            Err(err) => {
+                assert_ne!(
+                    err.code,
+                    ErrorCode::NoError,
+                    "failed open_stream must carry an actual HTTP/2 error",
+                );
+            }
+        }
+    }
+}
+
+fn process_header_list_setting(connection: &mut Connection, size: u32) {
+    let result = connection.process_frame(Frame::Settings(SettingsFrame::new(vec![
+        Setting::MaxHeaderListSize(size),
+    ])));
+    assert!(
+        result.is_ok(),
+        "SETTINGS_MAX_HEADER_LIST_SIZE has no protocol lower bound, including zero",
+    );
+    assert_eq!(
+        connection.remote_settings().max_header_list_size,
+        size,
+        "production remote settings must reflect accepted SETTINGS_MAX_HEADER_LIST_SIZE",
+    );
+
+    match connection.next_frame() {
+        Some(Frame::Settings(frame)) => {
+            assert!(frame.ack, "accepted SETTINGS must queue a SETTINGS ACK");
+            assert!(
+                frame.settings.is_empty(),
+                "SETTINGS ACK must not carry a payload",
+            );
+        }
+        other => panic!("accepted SETTINGS should queue ACK before other frames: {other:?}"),
+    }
+}
+
+fn exercise_local_zero_decoder(scenario: &RequestScenario) {
+    let mut settings = Settings::server();
+    settings.max_header_list_size = 0;
+    let mut connection = Connection::server(settings);
+    let headers = request_headers_from_scenario(scenario);
+
+    let mut encoded = BytesMut::new();
+    HpackEncoder::new().encode(&headers, &mut encoded);
+
+    let result = connection.process_frame(Frame::Headers(HeadersFrame::new(
+        1,
+        encoded.freeze(),
+        scenario.end_stream,
+        true,
+    )));
+
+    assert!(
+        result.is_err(),
+        "a local SETTINGS_MAX_HEADER_LIST_SIZE=0 decoder should reject non-empty request headers",
+    );
+    let err = result.unwrap_err();
+    assert!(
+        matches!(
+            err.code,
+            ErrorCode::CompressionError | ErrorCode::ProtocolError | ErrorCode::EnhanceYourCalm
+        ),
+        "local zero header-list-size rejection should be a protocol/compression style error: {err}",
+    );
+}
+
+fn settings_from_config(config: &ConnectionConfig, max_header_list_size: u32) -> Settings {
+    let mut settings = if config.is_client {
+        Settings::client()
+    } else {
+        Settings::server()
+    };
+    settings.initial_window_size = config.initial_window_size.min(MAX_INITIAL_WINDOW_SIZE);
+    settings.enable_push = config.enable_push;
+    settings.max_concurrent_streams = config.max_concurrent_streams.max(1);
+    settings.max_header_list_size = max_header_list_size;
+    settings
+}
+
+fn drain_pending_frames(connection: &mut Connection, drain_budget: u8) {
+    let budget = usize::from(drain_budget).min(MAX_DRAIN_FRAMES);
+    for _ in 0..budget {
+        let Some(frame) = connection.next_frame() else {
+            return;
+        };
+        match frame {
+            Frame::Settings(settings) => {
+                assert!(
+                    settings.ack || !settings.settings.is_empty(),
+                    "non-ACK SETTINGS should carry at least one setting",
+                );
+            }
+            Frame::Headers(headers) => {
+                assert_ne!(headers.stream_id, 0, "HEADERS must be stream-scoped");
+            }
+            Frame::Continuation(continuation) => {
+                assert_ne!(
+                    continuation.stream_id, 0,
+                    "CONTINUATION must be stream-scoped",
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+fn request_headers_from_scenario(scenario: &RequestScenario) -> Vec<Header> {
+    let mut headers = Vec::with_capacity(4 + scenario.regular_headers.len().min(MAX_EXTRA_HEADERS));
+    headers.push(Header::new(
+        ":method",
+        bounded_visible_ascii(&scenario.pseudo_headers.method, "GET", MAX_COMPONENT_LEN)
+            .to_ascii_uppercase(),
+    ));
+    headers.push(Header::new(
+        ":path",
+        normalized_path(&scenario.pseudo_headers.path),
+    ));
+    headers.push(Header::new(
+        ":scheme",
+        normalized_scheme(&scenario.pseudo_headers.scheme),
+    ));
+    headers.push(Header::new(
+        ":authority",
+        scenario.pseudo_headers.authority.as_deref().map_or_else(
+            || "example.test".to_string(),
+            |authority| bounded_visible_ascii(authority, "example.test", MAX_COMPONENT_LEN),
+        ),
+    ));
+
+    for (index, header) in scenario
+        .regular_headers
+        .iter()
+        .take(MAX_EXTRA_HEADERS)
+        .enumerate()
+    {
+        headers.push(Header::new(
+            normalized_header_name(&header.name, index),
+            bounded_visible_ascii(&header.value, "value", MAX_COMPONENT_LEN),
+        ));
+    }
+
+    headers
+}
+
+fn normalized_path(path: &str) -> String {
+    let mut path = bounded_visible_ascii(path, "/", MAX_COMPONENT_LEN);
+    if !path.starts_with('/') {
+        path.insert(0, '/');
+    }
+    path
+}
+
+fn normalized_scheme(scheme: &str) -> &'static str {
+    if scheme.eq_ignore_ascii_case("http") {
+        "http"
+    } else {
+        "https"
+    }
+}
+
+fn normalized_header_name(name: &str, index: usize) -> String {
+    let mut normalized = String::new();
+    for byte in name.bytes().take(MAX_COMPONENT_LEN) {
+        let lower = byte.to_ascii_lowercase();
+        if lower.is_ascii_lowercase() || lower.is_ascii_digit() || lower == b'-' {
+            normalized.push(char::from(lower));
+        }
+    }
+
+    if normalized.is_empty() || normalized.starts_with(':') {
+        format!("x-fuzz-{index}")
+    } else {
+        normalized
+    }
+}
+
+fn bounded_visible_ascii(input: &str, fallback: &str, max_len: usize) -> String {
+    let mut out = String::new();
+    for byte in input.bytes().take(max_len) {
+        match byte {
+            b'\r' | b'\n' | b'\0' => out.push('-'),
+            0x20..=0x7e => out.push(char::from(byte)),
+            _ => {}
+        }
+    }
+
+    if out.is_empty() {
+        fallback.to_string()
+    } else {
+        out
+    }
+}
