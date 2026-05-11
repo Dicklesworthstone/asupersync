@@ -19,9 +19,9 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::bytes::{Bytes, BytesMut};
+use asupersync::bytes::BytesMut;
 use asupersync::http::h2::frame::{
-    FrameHeader, FrameType, parse_frame, FRAME_HEADER_SIZE, MAX_FRAME_SIZE,
+    FRAME_HEADER_SIZE, FrameHeader, FrameType, MAX_FRAME_SIZE, parse_frame,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -40,7 +40,7 @@ struct FrameVariantInput {
 }
 
 /// Frame header input with explicit field control
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Debug, Clone, Copy)]
 struct FrameHeaderInput {
     /// Length field (24-bit) - may not match actual payload
     length: u32,
@@ -117,8 +117,11 @@ fn fuzz_unknown_frame_types(header: &FrameHeaderInput, payload: &[u8]) {
         test_frame_parsing(&modified_header, payload, |frame_type_byte| {
             // **Assertion 1: Variant tag mapped**
             let frame_type_opt = FrameType::from_u8(frame_type_byte);
-            assert!(frame_type_opt.is_none(),
-                "Unknown frame type 0x{:02X} should map to None", frame_type_byte);
+            assert!(
+                frame_type_opt.is_none(),
+                "Unknown frame type 0x{:02X} should map to None",
+                frame_type_byte
+            );
         });
     }
 }
@@ -154,10 +157,8 @@ fn fuzz_length_mismatch(header: &FrameHeaderInput, payload: &[u8]) {
 fn fuzz_invalid_flags(header: &FrameHeaderInput, payload: &[u8]) {
     let flag_tests = [
         // All flags set (0xFF)
-        0xFF,
-        // Reserved bits set
-        0x80, 0x40, 0x02,
-        // Invalid combinations
+        0xFF, // Reserved bits set
+        0x80, 0x40, 0x02, // Invalid combinations
         0x3F, 0x7E,
     ];
 
@@ -178,10 +179,10 @@ fn fuzz_invalid_flags(header: &FrameHeaderInput, payload: &[u8]) {
 fn fuzz_reserved_r_bit(header: &FrameHeaderInput, payload: &[u8]) {
     // Test with R bit set in various ways
     let r_bit_tests = [
-        header.stream_id_raw | 0x8000_0000,  // Set R bit
-        0x8000_0001,                         // R bit + stream ID 1
-        0xFFFF_FFFF,                         // All bits set
-        0x8000_0000,                         // Only R bit set
+        header.stream_id_raw | 0x8000_0000, // Set R bit
+        0x8000_0001,                        // R bit + stream ID 1
+        0xFFFF_FFFF,                        // All bits set
+        0x8000_0000,                        // Only R bit set
     ];
 
     for &test_stream_id in &r_bit_tests {
@@ -262,15 +263,19 @@ where
             assertion(parsed_header.frame_type);
 
             // **Assertion 2: Length validated**
-            assert_eq!(parsed_header.length, length,
+            assert_eq!(
+                parsed_header.length, length,
                 "Parsed length {} should match declared length {}",
-                parsed_header.length, length);
+                parsed_header.length, length
+            );
 
             // **Assertion: R bit cleared**
             let expected_stream_id = header.stream_id_raw & 0x7FFF_FFFF;
-            assert_eq!(parsed_header.stream_id, expected_stream_id,
+            assert_eq!(
+                parsed_header.stream_id, expected_stream_id,
                 "Stream ID R bit should be cleared: raw=0x{:08X}, parsed=0x{:08X}",
-                header.stream_id_raw, parsed_header.stream_id);
+                header.stream_id_raw, parsed_header.stream_id
+            );
 
             // **Core Test: Parse complete frame**
             let frame_payload = header_buf.freeze();
@@ -280,22 +285,54 @@ where
                     if let Some(frame_type) = FrameType::from_u8(parsed_header.frame_type) {
                         // Known frame type - should parse to specific variant
                         match frame_type {
-                            FrameType::Data => assert!(matches!(frame, asupersync::http::h2::frame::Frame::Data(_))),
-                            FrameType::Headers => assert!(matches!(frame, asupersync::http::h2::frame::Frame::Headers(_))),
-                            FrameType::Priority => assert!(matches!(frame, asupersync::http::h2::frame::Frame::Priority(_))),
-                            FrameType::RstStream => assert!(matches!(frame, asupersync::http::h2::frame::Frame::RstStream(_))),
-                            FrameType::Settings => assert!(matches!(frame, asupersync::http::h2::frame::Frame::Settings(_))),
-                            FrameType::PushPromise => assert!(matches!(frame, asupersync::http::h2::frame::Frame::PushPromise(_))),
-                            FrameType::Ping => assert!(matches!(frame, asupersync::http::h2::frame::Frame::Ping(_))),
-                            FrameType::GoAway => assert!(matches!(frame, asupersync::http::h2::frame::Frame::GoAway(_))),
-                            FrameType::WindowUpdate => assert!(matches!(frame, asupersync::http::h2::frame::Frame::WindowUpdate(_))),
-                            FrameType::Continuation => assert!(matches!(frame, asupersync::http::h2::frame::Frame::Continuation(_))),
+                            FrameType::Data => assert!(matches!(
+                                frame,
+                                asupersync::http::h2::frame::Frame::Data(_)
+                            )),
+                            FrameType::Headers => assert!(matches!(
+                                frame,
+                                asupersync::http::h2::frame::Frame::Headers(_)
+                            )),
+                            FrameType::Priority => assert!(matches!(
+                                frame,
+                                asupersync::http::h2::frame::Frame::Priority(_)
+                            )),
+                            FrameType::RstStream => assert!(matches!(
+                                frame,
+                                asupersync::http::h2::frame::Frame::RstStream(_)
+                            )),
+                            FrameType::Settings => assert!(matches!(
+                                frame,
+                                asupersync::http::h2::frame::Frame::Settings(_)
+                            )),
+                            FrameType::PushPromise => assert!(matches!(
+                                frame,
+                                asupersync::http::h2::frame::Frame::PushPromise(_)
+                            )),
+                            FrameType::Ping => assert!(matches!(
+                                frame,
+                                asupersync::http::h2::frame::Frame::Ping(_)
+                            )),
+                            FrameType::GoAway => assert!(matches!(
+                                frame,
+                                asupersync::http::h2::frame::Frame::GoAway(_)
+                            )),
+                            FrameType::WindowUpdate => assert!(matches!(
+                                frame,
+                                asupersync::http::h2::frame::Frame::WindowUpdate(_)
+                            )),
+                            FrameType::Continuation => assert!(matches!(
+                                frame,
+                                asupersync::http::h2::frame::Frame::Continuation(_)
+                            )),
                         }
                     } else {
                         // **Assertion 3: No panic on unknown frame type**
-                        assert!(matches!(frame, asupersync::http::h2::frame::Frame::Unknown { .. }),
+                        assert!(
+                            matches!(frame, asupersync::http::h2::frame::Frame::Unknown { .. }),
                             "Unknown frame type 0x{:02X} should parse to Frame::Unknown",
-                            parsed_header.frame_type);
+                            parsed_header.frame_type
+                        );
                     }
                 }
                 Err(_) => {

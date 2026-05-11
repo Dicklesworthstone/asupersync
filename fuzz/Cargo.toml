@@ -5881,3 +5881,10 @@ path = "fuzz_targets/fuzz_h1_codec_arbitrary_headers.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_h2_frame_variant_decoder"
+path = "fuzz_targets/fuzz_h2_frame_variant_decoder.rs"
+test = false
+doc = false
+bench = false
