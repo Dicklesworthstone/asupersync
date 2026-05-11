@@ -197,6 +197,49 @@ impl FuzzRng {
     }
 }
 
+fn observe_poll_result(
+    reactor: &IoUringReactor,
+    events: &mut Events,
+    timeout: Option<Duration>,
+    context: &str,
+) -> io::Result<usize> {
+    let registrations_before = reactor.registration_count();
+    let result = reactor.poll(events, timeout);
+    let registrations_after = reactor.registration_count();
+
+    assert!(
+        registrations_after <= registrations_before,
+        "{context}: poll increased registration count from {registrations_before} to {registrations_after}"
+    );
+
+    match &result {
+        Ok(count) => {
+            assert_eq!(
+                *count,
+                events.len(),
+                "{context}: poll count must match emitted event length"
+            );
+        }
+        Err(err) => {
+            assert!(
+                err.raw_os_error().is_some()
+                    || matches!(
+                        err.kind(),
+                        io::ErrorKind::Unsupported
+                            | io::ErrorKind::PermissionDenied
+                            | io::ErrorKind::Interrupted
+                            | io::ErrorKind::WouldBlock
+                            | io::ErrorKind::TimedOut
+                            | io::ErrorKind::Other
+                    ),
+                "{context}: poll returned unexpected error without OS detail: {err}"
+            );
+        }
+    }
+
+    result
+}
+
 // Test scenario: Registration edge cases
 fn test_registration_edge_cases(config: &IoUringFuzzConfig, reactor: &IoUringReactor) {
     let mut rng = FuzzRng::new(config.chaos_seed);
@@ -478,7 +521,12 @@ fn test_wake_mechanism(config: &IoUringFuzzConfig, reactor: &IoUringReactor) {
 
     // Poll to consume any wake events
     let mut events = Events::with_capacity(8);
-    let _ = reactor.poll(&mut events, Some(Duration::ZERO));
+    let _ = observe_poll_result(
+        reactor,
+        &mut events,
+        Some(Duration::ZERO),
+        "wake drain poll",
+    );
 
     // Wake events should not surface as user events
     for _event in events.iter() {
@@ -488,7 +536,12 @@ fn test_wake_mechanism(config: &IoUringFuzzConfig, reactor: &IoUringReactor) {
 
     // Test wake after poll
     let _ = reactor.wake();
-    let _ = reactor.poll(&mut events, Some(Duration::ZERO));
+    let _ = observe_poll_result(
+        reactor,
+        &mut events,
+        Some(Duration::ZERO),
+        "wake after poll",
+    );
 }
 
 // Main fuzz entry point
@@ -575,7 +628,7 @@ fuzz_target!(|data: (IoUringFuzzConfig, Vec<ReactorOperation>)| {
                 } else {
                     Some(Duration::ZERO)
                 };
-                let _ = reactor.poll(&mut events, timeout);
+                let _ = observe_poll_result(&reactor, &mut events, timeout, "operation poll");
             }
             OperationType::Wake => {
                 let _ = reactor.wake();
