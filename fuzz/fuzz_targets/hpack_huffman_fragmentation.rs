@@ -72,11 +72,11 @@ enum FragmentChar {
     /// '0'-'9': 5-6 bits each
     Digit(u8),
     /// Common symbols: varying bit lengths
-    Space,        // 6 bits
-    Slash,        // 6 bits
-    Equals,       // 8 bits
-    Semicolon,    // 8 bits
-    Comma,        // 8 bits
+    Space, // 6 bits
+    Slash,     // 6 bits
+    Equals,    // 8 bits
+    Semicolon, // 8 bits
+    Comma,     // 8 bits
     /// High-bit characters: 10+ bits each - creates dense huffman codes
     HighBit(u8),
 }
@@ -105,7 +105,7 @@ impl FragmentChar {
             FragmentChar::Equals => 8,
             FragmentChar::Semicolon => 8,
             FragmentChar::Comma => 8,
-            FragmentChar::HighBit(_) => 10,   // High bytes are much longer
+            FragmentChar::HighBit(_) => 10, // High bytes are much longer
         }
     }
 }
@@ -149,9 +149,11 @@ fn build_fragmentation_string(pattern: &FragmentationPattern) -> String {
         // Add the base character repeated
         let base_byte = fragment.base_char.to_byte();
         let repeat_count = (fragment.repeat_count % 16) + 1; // 1-16 repetitions
+        let mut fragment_bits = 0u16;
         for _ in 0..repeat_count {
             if let Ok(ch) = std::str::from_utf8(&[base_byte]) {
                 result.push_str(ch);
+                fragment_bits += u16::from(fragment.base_char.huffman_bits());
             }
         }
 
@@ -160,7 +162,20 @@ fn build_fragmentation_string(pattern: &FragmentationPattern) -> String {
             let adj_byte = adjuster.to_byte();
             if let Ok(ch) = std::str::from_utf8(&[adj_byte]) {
                 result.push_str(ch);
+                fragment_bits += u16::from(adjuster.huffman_bits());
             }
+        }
+
+        // Nudge this fragment toward the requested residual bit count. The
+        // bit lengths are approximate, but they keep the fuzzer steering input
+        // toward each padding class without depending on private HPACK tables.
+        let target_residual = u16::from(fragment.padding_target.residual_bits());
+        for _ in 0..8 {
+            if fragment_bits % 8 == target_residual {
+                break;
+            }
+            result.push('a');
+            fragment_bits += u16::from(FragmentChar::LowerAlpha(0).huffman_bits());
         }
     }
 
@@ -190,13 +205,13 @@ fn test_round_trip_consistency(test_string: &str, as_name: bool) {
     let mut huffman_encoder = HpackEncoder::new();
     huffman_encoder.set_use_huffman(true);
     let mut huffman_dst = BytesMut::new();
-    huffman_encoder.encode(&[header.clone()], &mut huffman_dst);
+    huffman_encoder.encode(std::slice::from_ref(&header), &mut huffman_dst);
 
     // Encode without huffman
     let mut literal_encoder = HpackEncoder::new();
     literal_encoder.set_use_huffman(false);
     let mut literal_dst = BytesMut::new();
-    literal_encoder.encode(&[header.clone()], &mut literal_dst);
+    literal_encoder.encode(std::slice::from_ref(&header), &mut literal_dst);
 
     // Both should decode to the same result
     let huffman_decoded = decode_headers(&huffman_dst);
@@ -206,10 +221,7 @@ fn test_round_trip_consistency(test_string: &str, as_name: bool) {
         huffman_decoded, literal_decoded,
         "Huffman and literal encoding should decode to identical headers"
     );
-    assert_eq!(
-        huffman_decoded.len(), 1,
-        "Should decode exactly one header"
-    );
+    assert_eq!(huffman_decoded.len(), 1, "Should decode exactly one header");
     assert_eq!(
         huffman_decoded[0], header,
         "Decoded header should match original"
@@ -235,7 +247,10 @@ fn test_encoder_fragmentation(test_string: &str) {
         assert_eq!(decoded.len(), 1, "Should decode one header");
 
         // Encoded block should not be empty (huffman encoding should produce output)
-        assert!(!dst.is_empty(), "Huffman encoding should produce non-empty output");
+        assert!(
+            !dst.is_empty(),
+            "Huffman encoding should produce non-empty output"
+        );
     }
 }
 
@@ -258,15 +273,17 @@ fn test_multi_fragment_encoding(pattern: &FragmentationPattern) {
 
     // Encode all headers in one block
     let mut encoder = HpackEncoder::new();
-    encoder.set_use_huffman(true);
+    encoder.set_use_huffman(!pattern.use_literal_encoding);
     let mut dst = BytesMut::new();
     encoder.encode(&headers, &mut dst);
 
     // Decode and verify
     let decoded = decode_headers(&dst);
     assert_eq!(
-        decoded.len(), headers.len(),
-        "Should decode all {} headers", headers.len()
+        decoded.len(),
+        headers.len(),
+        "Should decode all {} headers",
+        headers.len()
     );
 
     for (original, decoded_header) in headers.iter().zip(decoded.iter()) {
@@ -290,7 +307,8 @@ fn build_single_fragment_string(fragment: &StringFragment) -> String {
     }
 
     // Add adjusters
-    for adjuster in fragment.bit_adjusters.iter().take(4) { // Limit adjuster count
+    for adjuster in fragment.bit_adjusters.iter().take(4) {
+        // Limit adjuster count
         let adj_byte = adjuster.to_byte();
         if let Ok(ch) = std::str::from_utf8(&[adj_byte]) {
             result.push_str(ch);

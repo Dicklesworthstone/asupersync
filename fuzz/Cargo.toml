@@ -2367,6 +2367,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "hpack_huffman_fragmentation"
+path = "fuzz_targets/hpack_huffman_fragmentation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "web_extract"
 path = "fuzz_targets/web_extract.rs"
 test = false
