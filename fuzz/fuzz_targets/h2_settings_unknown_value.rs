@@ -1,6 +1,10 @@
 #![no_main]
+#![allow(dead_code)]
 
 use arbitrary::Arbitrary;
+use asupersync::bytes::Bytes;
+use asupersync::http::h2::frame::SettingsFrame;
+use asupersync::http::h2::{ErrorCode, FrameHeader, FrameType, Settings};
 use libfuzzer_sys::fuzz_target;
 
 /// HTTP/2 SETTINGS frame with known IDs but invalid values test input
@@ -158,7 +162,7 @@ struct TestScenario {
     performance_limits: PerformanceLimits,
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Debug, Clone)]
 enum ValidationMode {
     /// Strict RFC compliance
     StrictRFC,
@@ -168,7 +172,7 @@ enum ValidationMode {
     Security,
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Debug, Clone)]
 enum ErrorHandling {
     /// Fail fast on first invalid setting
     FailFast,
@@ -258,6 +262,7 @@ enum FrameErrorType {
     InvalidFlags,
 }
 
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, PartialEq)]
 enum SettingsValidationError {
     /// SETTINGS_HEADER_TABLE_SIZE: any value is valid per RFC 7541
@@ -298,8 +303,8 @@ const SETTINGS_MAX_HEADER_LIST_SIZE: u16 = 6;
 
 // Valid value ranges per RFC 7540 §6.5.2
 const MAX_INITIAL_WINDOW_SIZE: u32 = 2_147_483_647; // 2^31-1
-const MIN_MAX_FRAME_SIZE: u32 = 16_384;             // 2^14
-const MAX_MAX_FRAME_SIZE: u32 = 16_777_215;         // 2^24-1
+const MIN_MAX_FRAME_SIZE: u32 = 16_384; // 2^14
+const MAX_MAX_FRAME_SIZE: u32 = 16_777_215; // 2^24-1
 
 impl SettingsState {
     fn default() -> Self {
@@ -328,9 +333,16 @@ impl MockH2SettingsParser {
         }
     }
 
-    fn parse_settings_frame(&mut self, frame_data: &[u8], frame_flags: u8, stream_id: u32) -> Result<ParsedSettings, ValidationResult> {
+    fn parse_settings_frame(
+        &mut self,
+        frame_data: &[u8],
+        frame_flags: u8,
+        stream_id: u32,
+    ) -> Result<ParsedSettings, ValidationResult> {
         // Validate frame-level constraints first
-        if let Err(frame_error) = self.validate_frame_constraints(frame_data, frame_flags, stream_id) {
+        if let Err(frame_error) =
+            self.validate_frame_constraints(frame_data, frame_flags, stream_id)
+        {
             return Err(ValidationResult::FrameError(frame_error));
         }
 
@@ -340,7 +352,7 @@ impl MockH2SettingsParser {
         }
 
         // Parse individual settings
-        if frame_data.len() % 6 != 0 {
+        if !frame_data.len().is_multiple_of(6) {
             return Err(ValidationResult::FrameError(FrameErrorType::FrameSizeError));
         }
 
@@ -352,8 +364,10 @@ impl MockH2SettingsParser {
             let offset = i * 6;
             let setting_id = u16::from_be_bytes([frame_data[offset], frame_data[offset + 1]]);
             let value = u32::from_be_bytes([
-                frame_data[offset + 2], frame_data[offset + 3],
-                frame_data[offset + 4], frame_data[offset + 5]
+                frame_data[offset + 2],
+                frame_data[offset + 3],
+                frame_data[offset + 4],
+                frame_data[offset + 5],
             ]);
 
             match self.validate_setting_value(setting_id, value) {
@@ -373,7 +387,10 @@ impl MockH2SettingsParser {
                     match self.error_handling {
                         ErrorHandling::FailFast => {
                             return Err(ValidationResult::ProtocolError(
-                                ProtocolErrorType::InvalidSettingValue { id: setting_id, value }
+                                ProtocolErrorType::InvalidSettingValue {
+                                    id: setting_id,
+                                    value,
+                                },
                             ));
                         }
                         ErrorHandling::ValidateAll | ErrorHandling::ContinueValid => {
@@ -432,20 +449,26 @@ impl MockH2SettingsParser {
         }
     }
 
-    fn validate_frame_constraints(&self, frame_data: &[u8], frame_flags: u8, stream_id: u32) -> Result<(), FrameErrorType> {
+    fn validate_frame_constraints(
+        &self,
+        frame_data: &[u8],
+        frame_flags: u8,
+        stream_id: u32,
+    ) -> Result<(), FrameErrorType> {
         // SETTINGS frames must be sent on stream 0
         if stream_id != 0 {
             return Err(FrameErrorType::InvalidStreamId);
         }
 
         // Check frame size constraints
-        if frame_data.len() % 6 != 0 {
+        if !frame_data.len().is_multiple_of(6) {
             return Err(FrameErrorType::FrameSizeError);
         }
 
         // Validate flags (only ACK is defined)
-        if frame_flags & 0xFE != 0 {  // Only bit 0 (ACK) is valid
-            return Err(FrameErrorType::InvalidFlags(frame_flags));
+        if frame_flags & 0xFE != 0 {
+            // Only bit 0 (ACK) is valid
+            return Err(FrameErrorType::InvalidFlags);
         }
 
         // ACK frames must be empty
@@ -456,7 +479,11 @@ impl MockH2SettingsParser {
         Ok(())
     }
 
-    fn validate_setting_value(&self, setting_id: u16, value: u32) -> Result<(), SettingsValidationError> {
+    fn validate_setting_value(
+        &self,
+        setting_id: u16,
+        value: u32,
+    ) -> Result<(), SettingsValidationError> {
         match setting_id {
             SETTINGS_HEADER_TABLE_SIZE => {
                 // RFC 7541: Any value is acceptable
@@ -464,7 +491,8 @@ impl MockH2SettingsParser {
                 match self.validation_mode {
                     ValidationMode::Security => {
                         // Security mode might limit very large values
-                        if value > 1_048_576 {  // 1MB limit
+                        if value > 1_048_576 {
+                            // 1MB limit
                             Err(SettingsValidationError::HeaderTableSizeInvalid {
                                 value,
                                 reason: "Exceeds security limit".to_string(),
@@ -502,7 +530,7 @@ impl MockH2SettingsParser {
             }
             SETTINGS_MAX_FRAME_SIZE => {
                 // RFC 7540 §6.5.2: Must be between 2^14 (16384) and 2^24-1 (16777215)
-                if value < MIN_MAX_FRAME_SIZE || value > MAX_MAX_FRAME_SIZE {
+                if !(MIN_MAX_FRAME_SIZE..=MAX_MAX_FRAME_SIZE).contains(&value) {
                     Err(SettingsValidationError::MaxFrameSizeInvalid {
                         value,
                         min: MIN_MAX_FRAME_SIZE,
@@ -553,27 +581,32 @@ impl MockH2SettingsParser {
         match (setting_id, strategy) {
             (KnownSettingId::EnablePush, InvalidValueStrategy::BelowMinimum { .. }) => {
                 // 0 and 1 are valid, so there's no "below minimum" - use invalid value
-                2  // Any value > 1 is invalid
+                2 // Any value > 1 is invalid
             }
             (KnownSettingId::EnablePush, InvalidValueStrategy::AboveMaximum { offset }) => {
-                1 + offset.saturating_add(1)  // > 1 is invalid
+                1 + offset.saturating_add(1) // > 1 is invalid
             }
-            (KnownSettingId::EnablePush, InvalidValueStrategy::ExactBoundary(BoundaryType::JustAboveMax)) => {
-                2  // Just above maximum valid (1)
+            (
+                KnownSettingId::EnablePush,
+                InvalidValueStrategy::ExactBoundary(BoundaryType::JustAboveMax),
+            ) => {
+                2 // Just above maximum valid (1)
             }
             (KnownSettingId::EnablePush, InvalidValueStrategy::ReservedValues(_)) => {
-                u32::MAX  // Definitely invalid
+                u32::MAX // Definitely invalid
             }
 
             (KnownSettingId::InitialWindowSize, InvalidValueStrategy::AboveMaximum { offset }) => {
                 MAX_INITIAL_WINDOW_SIZE.saturating_add(offset.saturating_add(1))
             }
-            (KnownSettingId::InitialWindowSize, InvalidValueStrategy::ExactBoundary(BoundaryType::JustAboveMax)) => {
-                MAX_INITIAL_WINDOW_SIZE + 1
-            }
-            (KnownSettingId::InitialWindowSize, InvalidValueStrategy::ReservedValues(ReservedValueType::MaxU32)) => {
-                u32::MAX
-            }
+            (
+                KnownSettingId::InitialWindowSize,
+                InvalidValueStrategy::ExactBoundary(BoundaryType::JustAboveMax),
+            ) => MAX_INITIAL_WINDOW_SIZE + 1,
+            (
+                KnownSettingId::InitialWindowSize,
+                InvalidValueStrategy::ReservedValues(ReservedValueType::MaxU32),
+            ) => u32::MAX,
 
             (KnownSettingId::MaxFrameSize, InvalidValueStrategy::BelowMinimum { offset }) => {
                 MIN_MAX_FRAME_SIZE.saturating_sub(offset.saturating_add(1))
@@ -581,34 +614,44 @@ impl MockH2SettingsParser {
             (KnownSettingId::MaxFrameSize, InvalidValueStrategy::AboveMaximum { offset }) => {
                 MAX_MAX_FRAME_SIZE.saturating_add(offset.saturating_add(1))
             }
-            (KnownSettingId::MaxFrameSize, InvalidValueStrategy::ExactBoundary(BoundaryType::JustBelowMin)) => {
-                MIN_MAX_FRAME_SIZE - 1
-            }
-            (KnownSettingId::MaxFrameSize, InvalidValueStrategy::ExactBoundary(BoundaryType::JustAboveMax)) => {
-                MAX_MAX_FRAME_SIZE + 1
-            }
-            (KnownSettingId::MaxFrameSize, InvalidValueStrategy::ExtremeValues(ExtremeType::ZeroWhenInvalid)) => {
-                0  // Well below minimum
+            (
+                KnownSettingId::MaxFrameSize,
+                InvalidValueStrategy::ExactBoundary(BoundaryType::JustBelowMin),
+            ) => MIN_MAX_FRAME_SIZE - 1,
+            (
+                KnownSettingId::MaxFrameSize,
+                InvalidValueStrategy::ExactBoundary(BoundaryType::JustAboveMax),
+            ) => MAX_MAX_FRAME_SIZE + 1,
+            (
+                KnownSettingId::MaxFrameSize,
+                InvalidValueStrategy::ExtremeValues(ExtremeType::ZeroWhenInvalid),
+            ) => {
+                0 // Well below minimum
             }
 
             // For settings that accept any value, generate values that might be problematic
-            (KnownSettingId::HeaderTableSize, InvalidValueStrategy::ReservedValues(ReservedValueType::MaxU32)) => {
-                u32::MAX  // Might cause issues in security mode
+            (
+                KnownSettingId::HeaderTableSize,
+                InvalidValueStrategy::ReservedValues(ReservedValueType::MaxU32),
+            ) => {
+                u32::MAX // Might cause issues in security mode
             }
-            (KnownSettingId::MaxConcurrentStreams, InvalidValueStrategy::ReservedValues(ReservedValueType::MaxU32)) => {
-                u32::MAX  // Extreme but technically valid
+            (
+                KnownSettingId::MaxConcurrentStreams,
+                InvalidValueStrategy::ReservedValues(ReservedValueType::MaxU32),
+            ) => {
+                u32::MAX // Extreme but technically valid
             }
-            (KnownSettingId::MaxHeaderListSize, InvalidValueStrategy::ReservedValues(ReservedValueType::MaxU32)) => {
-                u32::MAX  // Extreme but technically valid
+            (
+                KnownSettingId::MaxHeaderListSize,
+                InvalidValueStrategy::ReservedValues(ReservedValueType::MaxU32),
+            ) => {
+                u32::MAX // Extreme but technically valid
             }
 
             // Bit pattern strategies
-            (_, InvalidValueStrategy::BitPatterns(BitPatternType::AllOnes)) => {
-                0xFFFFFFFF
-            }
-            (_, InvalidValueStrategy::BitPatterns(BitPatternType::Alternating)) => {
-                0xAAAAAAAA
-            }
+            (_, InvalidValueStrategy::BitPatterns(BitPatternType::AllOnes)) => 0xFFFFFFFF,
+            (_, InvalidValueStrategy::BitPatterns(BitPatternType::Alternating)) => 0xAAAAAAAA,
             (_, InvalidValueStrategy::BitPatterns(BitPatternType::SingleBit(bit))) => {
                 1u32 << (bit % 32)
             }
@@ -616,10 +659,10 @@ impl MockH2SettingsParser {
             // Default to a common invalid value
             _ => {
                 match setting_id {
-                    KnownSettingId::EnablePush => 42,                          // Invalid (must be 0 or 1)
-                    KnownSettingId::InitialWindowSize => u32::MAX,             // Invalid (> 2^31-1)
-                    KnownSettingId::MaxFrameSize => 10,                        // Invalid (< 16384)
-                    _ => 0xDEADBEEF,                                           // Arbitrary invalid value
+                    KnownSettingId::EnablePush => 42, // Invalid (must be 0 or 1)
+                    KnownSettingId::InitialWindowSize => u32::MAX, // Invalid (> 2^31-1)
+                    KnownSettingId::MaxFrameSize => 10, // Invalid (< 16384)
+                    _ => 0xDEADBEEF,                  // Arbitrary invalid value
                 }
             }
         }
@@ -631,8 +674,10 @@ impl MockH2SettingsParser {
         // Add valid settings first
         for valid_setting in &input.valid_settings {
             let setting_id = Self::setting_id_to_u16(&valid_setting.setting_id);
+            let value =
+                Self::valid_value_for_setting(&valid_setting.setting_id, valid_setting.value);
             frame_data.extend_from_slice(&setting_id.to_be_bytes());
-            frame_data.extend_from_slice(&valid_setting.value.to_be_bytes());
+            frame_data.extend_from_slice(&value.to_be_bytes());
         }
 
         // Add invalid settings
@@ -640,7 +685,7 @@ impl MockH2SettingsParser {
             let setting_id = Self::setting_id_to_u16(&invalid_setting.setting_id);
             let invalid_value = Self::generate_invalid_value(
                 &invalid_setting.setting_id,
-                &invalid_setting.invalid_value_strategy
+                &invalid_setting.invalid_value_strategy,
             );
 
             frame_data.extend_from_slice(&setting_id.to_be_bytes());
@@ -658,6 +703,19 @@ impl MockH2SettingsParser {
             KnownSettingId::InitialWindowSize => SETTINGS_INITIAL_WINDOW_SIZE,
             KnownSettingId::MaxFrameSize => SETTINGS_MAX_FRAME_SIZE,
             KnownSettingId::MaxHeaderListSize => SETTINGS_MAX_HEADER_LIST_SIZE,
+        }
+    }
+
+    fn valid_value_for_setting(setting_id: &KnownSettingId, raw_value: u32) -> u32 {
+        match setting_id {
+            KnownSettingId::EnablePush => raw_value % 2,
+            KnownSettingId::InitialWindowSize => raw_value & MAX_INITIAL_WINDOW_SIZE,
+            KnownSettingId::MaxFrameSize => {
+                MIN_MAX_FRAME_SIZE + raw_value % (MAX_MAX_FRAME_SIZE - MIN_MAX_FRAME_SIZE + 1)
+            }
+            KnownSettingId::HeaderTableSize
+            | KnownSettingId::MaxConcurrentStreams
+            | KnownSettingId::MaxHeaderListSize => raw_value,
         }
     }
 }
@@ -681,28 +739,43 @@ fuzz_target!(|input: H2SettingsInvalidValueInput| {
         input.test_scenario.error_handling.clone(),
     );
 
-    let frame_flags = if input.frame_options.ack_flag { 0x01 } else { 0x00 };
+    let frame_flags = if input.frame_options.ack_flag {
+        0x01
+    } else {
+        0x00
+    };
     let stream_id = input.frame_options.stream_id;
 
     let parse_result = parser.parse_settings_frame(&frame_data, frame_flags, stream_id);
+    let expected_invalid_settings = expected_mock_invalid_settings(&input);
+
+    exercise_production_settings_value_validation(&input, &frame_data, frame_flags, stream_id);
 
     // Test validation behavior based on invalid settings
-    if !input.invalid_settings.is_empty() {
+    if !expected_invalid_settings.is_empty() {
         // Frame contains invalid settings - should be rejected
-        match parse_result {
+        match &parse_result {
             Ok(parsed) => {
                 // Some parsers might accept in ContinueValid mode
                 match input.test_scenario.error_handling {
                     ErrorHandling::ContinueValid => {
                         // Should have recorded invalid settings
-                        assert!(!parsed.invalid_settings.is_empty(),
-                            "Invalid settings should be recorded even in ContinueValid mode");
-                        assert_ne!(parsed.validation_result, ValidationResult::AllValid,
-                            "Validation result should indicate protocol errors");
+                        assert!(
+                            !parsed.invalid_settings.is_empty(),
+                            "Invalid settings should be recorded even in ContinueValid mode"
+                        );
+                        assert_ne!(
+                            parsed.validation_result,
+                            ValidationResult::AllValid,
+                            "Validation result should indicate protocol errors"
+                        );
                     }
                     _ => {
                         // Other modes should not accept frames with invalid settings
-                        panic!("Frame with invalid settings should be rejected: {:?}", parsed);
+                        panic!(
+                            "Frame with invalid settings should be rejected: {:?}",
+                            parsed
+                        );
                     }
                 }
             }
@@ -711,15 +784,20 @@ fuzz_target!(|input: H2SettingsInvalidValueInput| {
                 match error_type {
                     ProtocolErrorType::InvalidSettingValue { id, value } => {
                         // Verify the error references an actual invalid setting
-                        let has_matching_invalid = input.invalid_settings.iter().any(|invalid| {
-                            MockH2SettingsParser::setting_id_to_u16(&invalid.setting_id) == id
-                        });
-                        assert!(has_matching_invalid,
-                            "Protocol error should reference an actually invalid setting: {}={}", id, value);
+                        let has_matching_invalid = expected_invalid_settings
+                            .iter()
+                            .any(|entry| entry.0 == *id && entry.1 == *value);
+                        assert!(
+                            has_matching_invalid,
+                            "Protocol error should reference an actually invalid setting: {}={}",
+                            id, value
+                        );
                     }
                     ProtocolErrorType::MultipleInvalidSettings => {
-                        assert!(input.invalid_settings.len() > 1,
-                            "Multiple invalid settings error should only occur with >1 invalid setting");
+                        assert!(
+                            expected_invalid_settings.len() > 1,
+                            "Multiple invalid settings error should only occur with >1 invalid setting"
+                        );
                     }
                     _ => {
                         // Other protocol errors may occur
@@ -730,11 +808,16 @@ fuzz_target!(|input: H2SettingsInvalidValueInput| {
                 // Frame-level errors are also acceptable
                 match frame_error {
                     FrameErrorType::InvalidStreamId => {
-                        assert_ne!(stream_id, 0, "Invalid stream ID error should only occur for non-zero stream IDs");
+                        assert_ne!(
+                            stream_id, 0,
+                            "Invalid stream ID error should only occur for non-zero stream IDs"
+                        );
                     }
                     FrameErrorType::AckWithPayload => {
-                        assert!(input.frame_options.ack_flag && !frame_data.is_empty(),
-                            "ACK with payload error should only occur for ACK frames with payload");
+                        assert!(
+                            input.frame_options.ack_flag && !frame_data.is_empty(),
+                            "ACK with payload error should only occur for ACK frames with payload"
+                        );
                     }
                     _ => {
                         // Other frame errors acceptable
@@ -744,15 +827,23 @@ fuzz_target!(|input: H2SettingsInvalidValueInput| {
             Err(ValidationResult::PartiallyValid) => {
                 // Some parsers might use this for mixed valid/invalid
             }
+            Err(ValidationResult::AllValid) => {
+                panic!("Invalid SETTINGS values must not produce an AllValid error")
+            }
         }
     } else {
         // Frame contains only valid settings - should be accepted unless frame errors
-        match parse_result {
+        match &parse_result {
             Ok(parsed) => {
-                assert!(parsed.invalid_settings.is_empty(),
-                    "Frame with only valid settings should not have invalid entries");
-                assert_eq!(parsed.validation_result, ValidationResult::AllValid,
-                    "All valid settings should result in AllValid validation");
+                assert!(
+                    parsed.invalid_settings.is_empty(),
+                    "Frame with only valid settings should not have invalid entries"
+                );
+                assert_eq!(
+                    parsed.validation_result,
+                    ValidationResult::AllValid,
+                    "All valid settings should result in AllValid validation"
+                );
             }
             Err(ValidationResult::FrameError(_)) => {
                 // Frame-level errors are acceptable even with valid settings
@@ -770,6 +861,140 @@ fuzz_target!(|input: H2SettingsInvalidValueInput| {
     test_settings_validation_invariants(&input, &parse_result);
 });
 
+fn expected_mock_invalid_settings(input: &H2SettingsInvalidValueInput) -> Vec<(u16, u32)> {
+    input
+        .invalid_settings
+        .iter()
+        .filter_map(|setting| {
+            let setting_id = MockH2SettingsParser::setting_id_to_u16(&setting.setting_id);
+            let value = MockH2SettingsParser::generate_invalid_value(
+                &setting.setting_id,
+                &setting.invalid_value_strategy,
+            );
+            mock_invalid_setting_value(&input.test_scenario.validation_mode, setting_id, value)
+                .then_some((setting_id, value))
+        })
+        .collect()
+}
+
+fn mock_invalid_setting_value(
+    validation_mode: &ValidationMode,
+    setting_id: u16,
+    value: u32,
+) -> bool {
+    match setting_id {
+        SETTINGS_HEADER_TABLE_SIZE => {
+            matches!(validation_mode, ValidationMode::Security) && value > 1_048_576
+        }
+        SETTINGS_ENABLE_PUSH => value > 1,
+        SETTINGS_MAX_CONCURRENT_STREAMS => false,
+        SETTINGS_INITIAL_WINDOW_SIZE => value > MAX_INITIAL_WINDOW_SIZE,
+        SETTINGS_MAX_FRAME_SIZE => !(MIN_MAX_FRAME_SIZE..=MAX_MAX_FRAME_SIZE).contains(&value),
+        SETTINGS_MAX_HEADER_LIST_SIZE => false,
+        _ => false,
+    }
+}
+
+fn exercise_production_settings_value_validation(
+    input: &H2SettingsInvalidValueInput,
+    frame_data: &[u8],
+    frame_flags: u8,
+    stream_id: u32,
+) {
+    let header = FrameHeader {
+        length: frame_data.len() as u32,
+        frame_type: FrameType::Settings as u8,
+        flags: frame_flags,
+        stream_id,
+    };
+    let parse_result = SettingsFrame::parse(&header, &Bytes::copy_from_slice(frame_data));
+
+    if stream_id != 0 {
+        let err =
+            parse_result.expect_err("production SETTINGS parser must reject non-zero stream IDs");
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+        return;
+    }
+
+    if frame_flags & 0x01 != 0 && !frame_data.is_empty() {
+        let err = parse_result
+            .expect_err("production SETTINGS parser must reject ACK frames with payload");
+        assert_eq!(err.code, ErrorCode::FrameSizeError);
+        return;
+    }
+
+    let invalid_settings = production_invalid_settings(input);
+    match parse_result {
+        Ok(parsed) => {
+            assert!(
+                invalid_settings.is_empty(),
+                "production SETTINGS parser accepted invalid setting values: {:?}",
+                invalid_settings
+            );
+
+            let mut settings = Settings::default();
+            for setting in parsed.settings {
+                settings
+                    .apply(setting)
+                    .expect("production Settings::apply must accept parser-validated settings");
+            }
+        }
+        Err(err) => {
+            assert!(
+                invalid_settings
+                    .iter()
+                    .any(|entry| entry.expected_error_code == err.code),
+                "production SETTINGS parser rejected with unexpected error {:?}; invalid settings: {:?}",
+                err,
+                invalid_settings
+            );
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ProductionInvalidSetting {
+    setting_id: u16,
+    value: u32,
+    expected_error_code: ErrorCode,
+}
+
+fn production_invalid_settings(
+    input: &H2SettingsInvalidValueInput,
+) -> Vec<ProductionInvalidSetting> {
+    input
+        .invalid_settings
+        .iter()
+        .filter_map(|setting| {
+            let setting_id = MockH2SettingsParser::setting_id_to_u16(&setting.setting_id);
+            let value = MockH2SettingsParser::generate_invalid_value(
+                &setting.setting_id,
+                &setting.invalid_value_strategy,
+            );
+            production_invalid_setting(setting_id, value).map(|expected_error_code| {
+                ProductionInvalidSetting {
+                    setting_id,
+                    value,
+                    expected_error_code,
+                }
+            })
+        })
+        .collect()
+}
+
+fn production_invalid_setting(setting_id: u16, value: u32) -> Option<ErrorCode> {
+    match setting_id {
+        SETTINGS_ENABLE_PUSH if value > 1 => Some(ErrorCode::ProtocolError),
+        SETTINGS_INITIAL_WINDOW_SIZE if value > MAX_INITIAL_WINDOW_SIZE => {
+            Some(ErrorCode::FlowControlError)
+        }
+        SETTINGS_MAX_FRAME_SIZE if !(MIN_MAX_FRAME_SIZE..=MAX_MAX_FRAME_SIZE).contains(&value) => {
+            Some(ErrorCode::ProtocolError)
+        }
+        _ => None,
+    }
+}
+
 fn test_settings_validation_invariants(
     input: &H2SettingsInvalidValueInput,
     result: &Result<ParsedSettings, ValidationResult>,
@@ -779,7 +1004,7 @@ fn test_settings_validation_invariants(
         if matches!(invalid_setting.setting_id, KnownSettingId::EnablePush) {
             let invalid_value = MockH2SettingsParser::generate_invalid_value(
                 &invalid_setting.setting_id,
-                &invalid_setting.invalid_value_strategy
+                &invalid_setting.invalid_value_strategy,
             );
             if invalid_value > 1 {
                 match result {
@@ -788,9 +1013,15 @@ fn test_settings_validation_invariants(
                         let has_invalid_push = parsed.invalid_settings.iter().any(|entry| {
                             entry.setting_id == SETTINGS_ENABLE_PUSH && entry.invalid_value > 1
                         });
-                        assert!(has_invalid_push ||
-                               matches!(input.test_scenario.error_handling, ErrorHandling::ContinueValid),
-                            "ENABLE_PUSH value > 1 should be invalid: {}", invalid_value);
+                        assert!(
+                            has_invalid_push
+                                || matches!(
+                                    input.test_scenario.error_handling,
+                                    ErrorHandling::ContinueValid
+                                ),
+                            "ENABLE_PUSH value > 1 should be invalid: {}",
+                            invalid_value
+                        );
                     }
                     Err(ValidationResult::ProtocolError(_)) => {
                         // Expected: rejection
@@ -805,21 +1036,30 @@ fn test_settings_validation_invariants(
 
     // Invariant: INITIAL_WINDOW_SIZE > 2^31-1 should always be invalid
     for invalid_setting in &input.invalid_settings {
-        if matches!(invalid_setting.setting_id, KnownSettingId::InitialWindowSize) {
+        if matches!(
+            invalid_setting.setting_id,
+            KnownSettingId::InitialWindowSize
+        ) {
             let invalid_value = MockH2SettingsParser::generate_invalid_value(
                 &invalid_setting.setting_id,
-                &invalid_setting.invalid_value_strategy
+                &invalid_setting.invalid_value_strategy,
             );
             if invalid_value > MAX_INITIAL_WINDOW_SIZE {
                 match result {
                     Ok(parsed) => {
                         let has_invalid_window = parsed.invalid_settings.iter().any(|entry| {
-                            entry.setting_id == SETTINGS_INITIAL_WINDOW_SIZE &&
-                            entry.invalid_value > MAX_INITIAL_WINDOW_SIZE
+                            entry.setting_id == SETTINGS_INITIAL_WINDOW_SIZE
+                                && entry.invalid_value > MAX_INITIAL_WINDOW_SIZE
                         });
-                        assert!(has_invalid_window ||
-                               matches!(input.test_scenario.error_handling, ErrorHandling::ContinueValid),
-                            "INITIAL_WINDOW_SIZE > 2^31-1 should be invalid: {}", invalid_value);
+                        assert!(
+                            has_invalid_window
+                                || matches!(
+                                    input.test_scenario.error_handling,
+                                    ErrorHandling::ContinueValid
+                                ),
+                            "INITIAL_WINDOW_SIZE > 2^31-1 should be invalid: {}",
+                            invalid_value
+                        );
                     }
                     Err(ValidationResult::ProtocolError(_)) => {
                         // Expected: rejection
@@ -837,18 +1077,25 @@ fn test_settings_validation_invariants(
         if matches!(invalid_setting.setting_id, KnownSettingId::MaxFrameSize) {
             let invalid_value = MockH2SettingsParser::generate_invalid_value(
                 &invalid_setting.setting_id,
-                &invalid_setting.invalid_value_strategy
+                &invalid_setting.invalid_value_strategy,
             );
-            if invalid_value < MIN_MAX_FRAME_SIZE || invalid_value > MAX_MAX_FRAME_SIZE {
+            if !(MIN_MAX_FRAME_SIZE..=MAX_MAX_FRAME_SIZE).contains(&invalid_value) {
                 match result {
                     Ok(parsed) => {
                         let has_invalid_frame_size = parsed.invalid_settings.iter().any(|entry| {
-                            entry.setting_id == SETTINGS_MAX_FRAME_SIZE &&
-                            (entry.invalid_value < MIN_MAX_FRAME_SIZE || entry.invalid_value > MAX_MAX_FRAME_SIZE)
+                            entry.setting_id == SETTINGS_MAX_FRAME_SIZE
+                                && (entry.invalid_value < MIN_MAX_FRAME_SIZE
+                                    || entry.invalid_value > MAX_MAX_FRAME_SIZE)
                         });
-                        assert!(has_invalid_frame_size ||
-                               matches!(input.test_scenario.error_handling, ErrorHandling::ContinueValid),
-                            "MAX_FRAME_SIZE outside [16384, 16777215] should be invalid: {}", invalid_value);
+                        assert!(
+                            has_invalid_frame_size
+                                || matches!(
+                                    input.test_scenario.error_handling,
+                                    ErrorHandling::ContinueValid
+                                ),
+                            "MAX_FRAME_SIZE outside [16384, 16777215] should be invalid: {}",
+                            invalid_value
+                        );
                     }
                     Err(ValidationResult::ProtocolError(_)) => {
                         // Expected: rejection
@@ -896,7 +1143,7 @@ fn test_settings_validation_invariants(
 
     // Invariant: Frame size must be multiple of 6
     let frame_data = MockH2SettingsParser::build_settings_frame(input);
-    if frame_data.len() % 6 != 0 {
+    if !frame_data.len().is_multiple_of(6) {
         match result {
             Ok(_) => {
                 panic!("SETTINGS frame with size not multiple of 6 should be rejected");
@@ -917,13 +1164,17 @@ fn test_settings_validation_invariants(
 
         match input.test_scenario.error_handling {
             ErrorHandling::ContinueValid => {
-                assert_eq!(actual_total, expected_total,
-                    "ContinueValid mode should process all settings");
+                assert_eq!(
+                    actual_total, expected_total,
+                    "ContinueValid mode should process all settings"
+                );
             }
             _ => {
                 // Other modes may stop early on invalid settings
-                assert!(actual_total <= expected_total,
-                    "Should not process more settings than provided");
+                assert!(
+                    actual_total <= expected_total,
+                    "Should not process more settings than provided"
+                );
             }
         }
     }
@@ -935,7 +1186,8 @@ mod tests {
 
     #[test]
     fn test_enable_push_invalid_values() {
-        let mut parser = MockH2SettingsParser::new(ValidationMode::StrictRFC, ErrorHandling::FailFast);
+        let mut parser =
+            MockH2SettingsParser::new(ValidationMode::StrictRFC, ErrorHandling::FailFast);
 
         // Valid values: 0 and 1
         let valid_frame_0 = [0x00, 0x02, 0x00, 0x00, 0x00, 0x00]; // ENABLE_PUSH = 0
@@ -954,7 +1206,8 @@ mod tests {
 
     #[test]
     fn test_initial_window_size_overflow() {
-        let mut parser = MockH2SettingsParser::new(ValidationMode::StrictRFC, ErrorHandling::FailFast);
+        let mut parser =
+            MockH2SettingsParser::new(ValidationMode::StrictRFC, ErrorHandling::FailFast);
 
         // Valid value: 2^31-1
         let valid_frame = [0x00, 0x04, 0x7F, 0xFF, 0xFF, 0xFF]; // INITIAL_WINDOW_SIZE = 2^31-1
@@ -974,7 +1227,8 @@ mod tests {
 
     #[test]
     fn test_max_frame_size_boundaries() {
-        let mut parser = MockH2SettingsParser::new(ValidationMode::StrictRFC, ErrorHandling::FailFast);
+        let mut parser =
+            MockH2SettingsParser::new(ValidationMode::StrictRFC, ErrorHandling::FailFast);
 
         // Valid minimum: 16384
         let min_valid = [0x00, 0x05, 0x00, 0x00, 0x40, 0x00]; // MAX_FRAME_SIZE = 16384
@@ -1009,26 +1263,39 @@ mod tests {
 
     #[test]
     fn test_frame_level_validation() {
-        let mut parser = MockH2SettingsParser::new(ValidationMode::StrictRFC, ErrorHandling::FailFast);
+        let mut parser =
+            MockH2SettingsParser::new(ValidationMode::StrictRFC, ErrorHandling::FailFast);
 
         // Invalid: non-zero stream ID
         let valid_settings = [0x00, 0x01, 0x00, 0x00, 0x10, 0x00]; // HEADER_TABLE_SIZE = 4096
         let result = parser.parse_settings_frame(&valid_settings, 0, 1); // stream ID = 1
-        assert!(matches!(result, Err(ValidationResult::FrameError(FrameErrorType::InvalidStreamId))));
+        assert!(matches!(
+            result,
+            Err(ValidationResult::FrameError(
+                FrameErrorType::InvalidStreamId
+            ))
+        ));
 
         // Invalid: ACK with payload
         let result = parser.parse_settings_frame(&valid_settings, 0x01, 0); // ACK flag set
-        assert!(matches!(result, Err(ValidationResult::FrameError(FrameErrorType::AckWithPayload))));
+        assert!(matches!(
+            result,
+            Err(ValidationResult::FrameError(FrameErrorType::AckWithPayload))
+        ));
 
         // Invalid: frame size not multiple of 6
         let invalid_size_frame = [0x00, 0x01, 0x00, 0x00, 0x10]; // Only 5 bytes
         let result = parser.parse_settings_frame(&invalid_size_frame, 0, 0);
-        assert!(matches!(result, Err(ValidationResult::FrameError(FrameErrorType::FrameSizeError))));
+        assert!(matches!(
+            result,
+            Err(ValidationResult::FrameError(FrameErrorType::FrameSizeError))
+        ));
     }
 
     #[test]
     fn test_mixed_valid_invalid_settings() {
-        let mut parser = MockH2SettingsParser::new(ValidationMode::StrictRFC, ErrorHandling::ValidateAll);
+        let mut parser =
+            MockH2SettingsParser::new(ValidationMode::StrictRFC, ErrorHandling::ValidateAll);
 
         // Mix of valid and invalid settings
         let mixed_frame = [
@@ -1043,7 +1310,8 @@ mod tests {
 
     #[test]
     fn test_continue_valid_mode() {
-        let mut parser = MockH2SettingsParser::new(ValidationMode::StrictRFC, ErrorHandling::ContinueValid);
+        let mut parser =
+            MockH2SettingsParser::new(ValidationMode::StrictRFC, ErrorHandling::ContinueValid);
 
         // Mix of valid and invalid settings
         let mixed_frame = [
@@ -1065,28 +1333,29 @@ mod tests {
         // Test ENABLE_PUSH invalid values
         let enable_push_invalid = MockH2SettingsParser::generate_invalid_value(
             &KnownSettingId::EnablePush,
-            &InvalidValueStrategy::AboveMaximum { offset: 1 }
+            &InvalidValueStrategy::AboveMaximum { offset: 1 },
         );
         assert!(enable_push_invalid > 1);
 
         // Test MAX_FRAME_SIZE below minimum
         let frame_size_below = MockH2SettingsParser::generate_invalid_value(
             &KnownSettingId::MaxFrameSize,
-            &InvalidValueStrategy::BelowMinimum { offset: 1 }
+            &InvalidValueStrategy::BelowMinimum { offset: 1 },
         );
         assert!(frame_size_below < MIN_MAX_FRAME_SIZE);
 
         // Test INITIAL_WINDOW_SIZE above maximum
         let window_size_above = MockH2SettingsParser::generate_invalid_value(
             &KnownSettingId::InitialWindowSize,
-            &InvalidValueStrategy::AboveMaximum { offset: 1 }
+            &InvalidValueStrategy::AboveMaximum { offset: 1 },
         );
         assert!(window_size_above > MAX_INITIAL_WINDOW_SIZE);
     }
 
     #[test]
     fn test_settings_application() {
-        let mut parser = MockH2SettingsParser::new(ValidationMode::StrictRFC, ErrorHandling::FailFast);
+        let mut parser =
+            MockH2SettingsParser::new(ValidationMode::StrictRFC, ErrorHandling::FailFast);
 
         let settings_frame = [
             0x00, 0x01, 0x00, 0x00, 0x20, 0x00, // HEADER_TABLE_SIZE = 8192
