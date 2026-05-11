@@ -60,7 +60,7 @@ pub struct ChunkedMessage {
 pub enum TransferEncoding {
     Chunked,
     ContentLength(usize),
-    None, // Missing both (edge case)
+    None,        // Missing both (edge case)
     Both(usize), // Both chunked and content-length (ambiguous)
 }
 
@@ -177,7 +177,7 @@ pub enum MalformedHeaderName {
 pub enum HeaderValue {
     Normal(String),
     Empty,
-    WithCrLf(String), // CRLF injection attempt
+    WithCrLf(String),   // CRLF injection attempt
     WithNulls(Vec<u8>), // Null byte injection
     WithControlChars(Vec<u8>),
     WithUnicode(String),
@@ -189,8 +189,8 @@ pub enum HeaderValue {
 /// Syntax variant for header formatting
 #[derive(Arbitrary, Debug, Clone, PartialEq)]
 pub enum SyntaxVariant {
-    Standard,         // "Name: Value\r\n"
-    ExtraWhitespace,  // " Name : Value \r\n"
+    Standard,        // "Name: Value\r\n"
+    ExtraWhitespace, // " Name : Value \r\n"
     NoColon,         // "NameValue\r\n" (malformed)
     NoValue,         // "Name:\r\n"
     MultipleColons,  // "Na:me: Val:ue\r\n"
@@ -302,10 +302,10 @@ pub enum TrailerViolationType {
 /// Violation severity levels
 #[derive(Debug, PartialEq, Clone)]
 pub enum ViolationSeverity {
-    Critical,  // Security vulnerability
-    High,      // Protocol violation
-    Medium,    // Compliance issue
-    Low,       // Edge case handling
+    Critical, // Security vulnerability
+    High,     // Protocol violation
+    Medium,   // Compliance issue
+    Low,      // Edge case handling
 }
 
 impl MockTrailersParser {
@@ -324,14 +324,20 @@ impl MockTrailersParser {
         let mut security_violations = Vec::new();
 
         // Check if trailers are allowed (chunked encoding required)
-        let chunked_encoding_present = matches!(test_case.chunked_message.transfer_encoding, TransferEncoding::Chunked);
+        let chunked_encoding_present = matches!(
+            test_case.chunked_message.transfer_encoding,
+            TransferEncoding::Chunked
+        );
 
         if !chunked_encoding_present && !self.security_config.allow_trailers_without_chunked {
             parsing_errors.push(TrailerError::TrailersWithoutChunked);
         }
 
         // Check for ambiguous body length
-        if matches!(test_case.chunked_message.transfer_encoding, TransferEncoding::Both(_)) {
+        if matches!(
+            test_case.chunked_message.transfer_encoding,
+            TransferEncoding::Both(_)
+        ) {
             parsing_errors.push(TrailerError::AmbiguousBodyLength);
         }
 
@@ -353,12 +359,13 @@ impl MockTrailersParser {
 
                     // Check count limits
                     if parsed_trailers.len() >= self.parsing_config.max_trailer_count {
-                        parsing_errors.push(TrailerError::TooManyTrailers(parsed_trailers.len() + 1));
+                        parsing_errors
+                            .push(TrailerError::TooManyTrailers(parsed_trailers.len() + 1));
                         break;
                     }
 
                     parsed_trailers.push(parsed);
-                },
+                }
                 Err(error) => {
                     parsing_errors.push(error);
                 }
@@ -366,10 +373,16 @@ impl MockTrailersParser {
         }
 
         // Validate overall behavior
-        self.validate_trailer_behavior(test_case, &parsed_trailers, &parsing_errors, &security_violations);
+        self.validate_trailer_behavior(
+            test_case,
+            &parsed_trailers,
+            &parsing_errors,
+            &security_violations,
+        );
 
         // Calculate compliance score
-        let protocol_compliance_score = self.calculate_protocol_compliance(&parsing_errors, &security_violations);
+        let protocol_compliance_score =
+            self.calculate_protocol_compliance(&parsing_errors, &security_violations);
 
         TrailersParsingResult {
             parsed_trailers,
@@ -380,7 +393,11 @@ impl MockTrailersParser {
     }
 
     /// Parse a single trailer header
-    fn parse_single_trailer(&self, trailer: &TrailerHeader, total_size: &mut usize) -> Result<ParsedTrailer, TrailerError> {
+    fn parse_single_trailer(
+        &self,
+        trailer: &TrailerHeader,
+        total_size: &mut usize,
+    ) -> Result<ParsedTrailer, TrailerError> {
         let header_name = self.format_header_name(&trailer.name)?;
         let header_value = self.format_header_value(&trailer.value)?;
 
@@ -393,10 +410,12 @@ impl MockTrailersParser {
         match &trailer.syntax_variant {
             SyntaxVariant::NoColon => {
                 return Err(TrailerError::MissingColon);
-            },
+            }
             SyntaxVariant::FoldedObsolete if !self.parsing_config.allow_obs_folding => {
-                return Err(TrailerError::MalformedSyntax("obsolete folding not allowed".to_string()));
-            },
+                return Err(TrailerError::MalformedSyntax(
+                    "obsolete folding not allowed".to_string(),
+                ));
+            }
             _ => {}
         }
 
@@ -411,7 +430,11 @@ impl MockTrailersParser {
     }
 
     /// Check for security violations
-    fn check_security_violation(&self, parsed: &ParsedTrailer, original: &TrailerHeader) -> Option<SecurityViolation> {
+    fn check_security_violation(
+        &self,
+        parsed: &ParsedTrailer,
+        _original: &TrailerHeader,
+    ) -> Option<SecurityViolation> {
         if !self.security_config.enforce_forbidden_trailers {
             return None;
         }
@@ -430,29 +453,29 @@ impl MockTrailersParser {
         }
 
         // Check for header injection patterns
-        if self.security_config.detect_header_injection {
-            if parsed.value.contains('\r') || parsed.value.contains('\n') {
-                return Some(SecurityViolation {
-                    violation_type: SecurityViolationType::HeaderInjection,
-                    header_name: parsed.name.clone(),
-                    header_value: parsed.value.clone(),
-                    attack_vector: "CRLF injection in trailer value".to_string(),
-                    severity: ViolationSeverity::Critical,
-                });
-            }
+        if self.security_config.detect_header_injection
+            && (parsed.value.contains('\r') || parsed.value.contains('\n'))
+        {
+            return Some(SecurityViolation {
+                violation_type: SecurityViolationType::HeaderInjection,
+                header_name: parsed.name.clone(),
+                header_value: parsed.value.clone(),
+                attack_vector: "CRLF injection in trailer value".to_string(),
+                severity: ViolationSeverity::Critical,
+            });
         }
 
         // Check for Unicode normalization attacks
-        if parsed.name.chars().any(|c| !c.is_ascii()) || parsed.value.chars().any(|c| !c.is_ascii()) {
-            if self.security_config.validate_ascii_only {
-                return Some(SecurityViolation {
-                    violation_type: SecurityViolationType::UnicodeNormalization,
-                    header_name: parsed.name.clone(),
-                    header_value: parsed.value.clone(),
-                    attack_vector: "non-ASCII characters in trailer".to_string(),
-                    severity: ViolationSeverity::Medium,
-                });
-            }
+        if self.security_config.validate_ascii_only
+            && (!parsed.name.is_ascii() || !parsed.value.is_ascii())
+        {
+            return Some(SecurityViolation {
+                violation_type: SecurityViolationType::UnicodeNormalization,
+                header_name: parsed.name.clone(),
+                header_value: parsed.value.clone(),
+                attack_vector: "non-ASCII characters in trailer".to_string(),
+                severity: ViolationSeverity::Medium,
+            });
         }
 
         None
@@ -464,19 +487,19 @@ impl MockTrailersParser {
             HeaderName::Safe(safe) => Ok(self.format_safe_trailer_name(safe)),
             HeaderName::Forbidden(forbidden) => Ok(self.format_forbidden_trailer_name(forbidden)),
             HeaderName::Custom(custom) => Ok(custom.clone()),
-            HeaderName::Malformed(malformed) => {
-                match malformed {
-                    MalformedHeaderName::Empty => Err(TrailerError::InvalidHeaderName("empty".to_string())),
-                    MalformedHeaderName::WithSpaces(s) => Ok(s.clone()),
-                    MalformedHeaderName::WithControlChars(bytes) => {
-                        Ok(String::from_utf8_lossy(bytes).to_string())
-                    },
-                    MalformedHeaderName::WithUnicode(s) => Ok(s.clone()),
-                    MalformedHeaderName::WithColon(s) => Ok(s.clone()),
-                    MalformedHeaderName::TooLong(len) => Ok("X-".to_string() + &"A".repeat(*len)),
-                    MalformedHeaderName::OnlyWhitespace => Ok("   ".to_string()),
+            HeaderName::Malformed(malformed) => match malformed {
+                MalformedHeaderName::Empty => {
+                    Err(TrailerError::InvalidHeaderName("empty".to_string()))
                 }
-            }
+                MalformedHeaderName::WithSpaces(s) => Ok(s.clone()),
+                MalformedHeaderName::WithControlChars(bytes) => {
+                    Ok(String::from_utf8_lossy(bytes).to_string())
+                }
+                MalformedHeaderName::WithUnicode(s) => Ok(s.clone()),
+                MalformedHeaderName::WithColon(s) => Ok(s.clone()),
+                MalformedHeaderName::TooLong(len) => Ok("X-".to_string() + &"A".repeat(*len)),
+                MalformedHeaderName::OnlyWhitespace => Ok("   ".to_string()),
+            },
         }
     }
 
@@ -555,18 +578,45 @@ impl MockTrailersParser {
     fn is_forbidden_trailer(&self, name: &str) -> bool {
         // This mirrors the FORBIDDEN list from codec.rs is_forbidden_trailer()
         const FORBIDDEN: &[&str] = &[
-            "authorization", "age", "cache-control", "content-encoding", "content-length",
-            "content-range", "content-type", "cookie", "expect", "expires", "host",
-            "if-match", "if-modified-since", "if-none-match", "if-range", "if-unmodified-since",
-            "max-forwards", "pragma", "proxy-authenticate", "proxy-authorization", "range",
-            "retry-after", "set-cookie", "te", "trailer", "transfer-encoding", "upgrade",
-            "vary", "warning", "www-authenticate", "connection",
+            "authorization",
+            "age",
+            "cache-control",
+            "content-encoding",
+            "content-length",
+            "content-range",
+            "content-type",
+            "cookie",
+            "expect",
+            "expires",
+            "host",
+            "if-match",
+            "if-modified-since",
+            "if-none-match",
+            "if-range",
+            "if-unmodified-since",
+            "max-forwards",
+            "pragma",
+            "proxy-authenticate",
+            "proxy-authorization",
+            "range",
+            "retry-after",
+            "set-cookie",
+            "te",
+            "trailer",
+            "transfer-encoding",
+            "upgrade",
+            "vary",
+            "warning",
+            "www-authenticate",
+            "connection",
         ];
 
         if self.security_config.case_sensitive_forbidden_check {
             FORBIDDEN.contains(&name)
         } else {
-            FORBIDDEN.iter().any(|&forbidden| name.eq_ignore_ascii_case(forbidden))
+            FORBIDDEN
+                .iter()
+                .any(|&forbidden| name.eq_ignore_ascii_case(forbidden))
         }
     }
 
@@ -577,9 +627,8 @@ impl MockTrailersParser {
         }
 
         // Basic validation - header names must be tokens
-        name.chars().all(|c| {
-            c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '!')
-        })
+        name.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '!'))
     }
 
     /// Classify attack vector for forbidden trailers
@@ -603,7 +652,9 @@ impl MockTrailersParser {
 
         match name_lower.as_str() {
             "content-length" | "transfer-encoding" | "trailer" => ViolationSeverity::Critical,
-            "authorization" | "cookie" | "set-cookie" | "www-authenticate" => ViolationSeverity::Critical,
+            "authorization" | "cookie" | "set-cookie" | "www-authenticate" => {
+                ViolationSeverity::Critical
+            }
             "host" | "upgrade" | "connection" => ViolationSeverity::High,
             "content-type" | "content-encoding" | "content-range" => ViolationSeverity::High,
             _ => ViolationSeverity::Medium,
@@ -611,16 +662,24 @@ impl MockTrailersParser {
     }
 
     /// Validate trailer behavior against expected patterns
-    fn validate_trailer_behavior(&mut self, test_case: &TrailersParserTestCase, parsed: &[ParsedTrailer], errors: &[TrailerError], violations: &[SecurityViolation]) {
+    fn validate_trailer_behavior(
+        &mut self,
+        test_case: &TrailersParserTestCase,
+        parsed: &[ParsedTrailer],
+        errors: &[TrailerError],
+        violations: &[SecurityViolation],
+    ) {
         match &test_case.scenario {
             TrailersScenario::ForbiddenTrailers => {
-                let has_forbidden = test_case.trailer_headers.iter().any(|h| {
-                    matches!(h.name, HeaderName::Forbidden(_))
-                });
+                let has_forbidden = test_case
+                    .trailer_headers
+                    .iter()
+                    .any(|h| matches!(h.name, HeaderName::Forbidden(_)));
 
-                let forbidden_detected = !violations.is_empty() || errors.iter().any(|e| {
-                    matches!(e, TrailerError::MalformedSyntax(_))
-                });
+                let forbidden_detected = !violations.is_empty()
+                    || errors
+                        .iter()
+                        .any(|e| matches!(e, TrailerError::MalformedSyntax(_)));
 
                 if has_forbidden && !forbidden_detected {
                     self.violations.push(TrailerViolation {
@@ -631,11 +690,11 @@ impl MockTrailersParser {
                         severity: ViolationSeverity::Critical,
                     });
                 }
-            },
+            }
             TrailersScenario::TrailersWithoutChunked => {
-                let has_error = errors.iter().any(|e| {
-                    matches!(e, TrailerError::TrailersWithoutChunked)
-                });
+                let has_error = errors
+                    .iter()
+                    .any(|e| matches!(e, TrailerError::TrailersWithoutChunked));
 
                 if !has_error && !self.security_config.allow_trailers_without_chunked {
                     self.violations.push(TrailerViolation {
@@ -646,15 +705,16 @@ impl MockTrailersParser {
                         severity: ViolationSeverity::High,
                     });
                 }
-            },
+            }
             TrailersScenario::OversizedTrailers => {
-                let total_size: usize = parsed.iter()
+                let total_size: usize = parsed
+                    .iter()
                     .map(|t| t.name.len() + t.value.len() + 4)
                     .sum();
 
-                let size_limit_enforced = errors.iter().any(|e| {
-                    matches!(e, TrailerError::TrailersTooLarge(_))
-                });
+                let size_limit_enforced = errors
+                    .iter()
+                    .any(|e| matches!(e, TrailerError::TrailersTooLarge(_)));
 
                 if total_size > self.parsing_config.max_trailers_size && !size_limit_enforced {
                     self.violations.push(TrailerViolation {
@@ -665,7 +725,7 @@ impl MockTrailersParser {
                         severity: ViolationSeverity::High,
                     });
                 }
-            },
+            }
             _ => {
                 // Other scenarios have different validation logic
             }
@@ -673,8 +733,12 @@ impl MockTrailersParser {
     }
 
     /// Calculate protocol compliance score
-    fn calculate_protocol_compliance(&self, errors: &[TrailerError], violations: &[SecurityViolation]) -> f32 {
-        let mut penalty = 0.0;
+    fn calculate_protocol_compliance(
+        &self,
+        errors: &[TrailerError],
+        violations: &[SecurityViolation],
+    ) -> f32 {
+        let mut penalty = 0.0_f32;
 
         // Penalize parsing errors
         for error in errors {
@@ -706,7 +770,7 @@ impl MockTrailersParser {
             };
         }
 
-        let max_score = 100.0;
+        let max_score = 100.0_f32;
         (max_score - penalty).max(0.0) / max_score
     }
 }
@@ -719,9 +783,10 @@ fn generate_trailers_test_cases() -> Vec<TrailersParserTestCase> {
             scenario: TrailersScenario::ValidTrailers,
             chunked_message: ChunkedMessage {
                 transfer_encoding: TransferEncoding::Chunked,
-                chunks: vec![
-                    MessageChunk { data: b"hello".to_vec(), extensions: vec![] },
-                ],
+                chunks: vec![MessageChunk {
+                    data: b"hello".to_vec(),
+                    extensions: vec![],
+                }],
                 final_chunk_size: 0,
                 chunk_extensions: vec![],
             },
@@ -752,15 +817,15 @@ fn generate_trailers_test_cases() -> Vec<TrailersParserTestCase> {
                 validate_ascii_only: false,
             },
         },
-
         // Forbidden trailers (security violation)
         TrailersParserTestCase {
             scenario: TrailersScenario::ForbiddenTrailers,
             chunked_message: ChunkedMessage {
                 transfer_encoding: TransferEncoding::Chunked,
-                chunks: vec![
-                    MessageChunk { data: b"data".to_vec(), extensions: vec![] },
-                ],
+                chunks: vec![MessageChunk {
+                    data: b"data".to_vec(),
+                    extensions: vec![],
+                }],
                 final_chunk_size: 0,
                 chunk_extensions: vec![],
             },
@@ -806,7 +871,9 @@ fuzz_target!(|data: &[u8]| {
             if predefined_cases.is_empty() {
                 return;
             }
-            let index = unstructured.int_in_range(0..=predefined_cases.len() - 1).unwrap_or(0);
+            let index = unstructured
+                .int_in_range(0..=predefined_cases.len() - 1)
+                .unwrap_or(0);
             predefined_cases[index].clone()
         }
     };
@@ -814,7 +881,7 @@ fuzz_target!(|data: &[u8]| {
     // Create trailers parser
     let mut parser = MockTrailersParser::new(
         test_case.parsing_config.clone(),
-        test_case.security_config.clone()
+        test_case.security_config.clone(),
     );
 
     // Parse trailers and check compliance
@@ -835,19 +902,29 @@ fn test_forbidden_trailer_detection(test_case: &TrailersParserTestCase) {
 
     let parser = MockTrailersParser::new(
         test_case.parsing_config.clone(),
-        test_case.security_config.clone()
+        test_case.security_config.clone(),
     );
 
     // Test critical forbidden headers
     let critical_forbidden = [
-        "Content-Length", "content-length", "CONTENT-LENGTH",
-        "Transfer-Encoding", "transfer-encoding", "TRANSFER-ENCODING",
-        "Trailer", "trailer", "TRAILER",
+        "Content-Length",
+        "content-length",
+        "CONTENT-LENGTH",
+        "Transfer-Encoding",
+        "transfer-encoding",
+        "TRANSFER-ENCODING",
+        "Trailer",
+        "trailer",
+        "TRAILER",
     ];
 
     for header_name in critical_forbidden {
         let is_forbidden = parser.is_forbidden_trailer(header_name);
-        assert!(is_forbidden, "Critical header '{}' should be forbidden", header_name);
+        assert!(
+            is_forbidden,
+            "Critical header '{}' should be forbidden",
+            header_name
+        );
     }
 }
 
@@ -857,9 +934,9 @@ fn test_trailer_size_limits(test_case: &TrailersParserTestCase) {
         return;
     }
 
-    let mut parser = MockTrailersParser::new(
+    let parser = MockTrailersParser::new(
         test_case.parsing_config.clone(),
-        test_case.security_config.clone()
+        test_case.security_config.clone(),
     );
 
     // Create oversized trailer
@@ -876,7 +953,7 @@ fn test_trailer_size_limits(test_case: &TrailersParserTestCase) {
     match result {
         Err(TrailerError::TrailersTooLarge(_)) => {
             // Correct behavior
-        },
+        }
         _ => {
             // Size limit not enforced
         }
@@ -891,7 +968,7 @@ fn test_trailer_syntax_validation(test_case: &TrailersParserTestCase) {
 
     let parser = MockTrailersParser::new(
         test_case.parsing_config.clone(),
-        test_case.security_config.clone()
+        test_case.security_config.clone(),
     );
 
     // Test malformed syntax cases
@@ -918,7 +995,7 @@ fn test_trailer_syntax_validation(test_case: &TrailersParserTestCase) {
         match result {
             Err(_) => {
                 // Correct behavior - syntax error detected
-            },
+            }
             Ok(_) => {
                 // Malformed syntax was accepted
             }
@@ -932,9 +1009,9 @@ fn test_header_injection_prevention(test_case: &TrailersParserTestCase) {
         return;
     }
 
-    let mut parser = MockTrailersParser::new(
+    let parser = MockTrailersParser::new(
         test_case.parsing_config.clone(),
-        test_case.security_config.clone()
+        test_case.security_config.clone(),
     );
 
     // Test CRLF injection
@@ -950,9 +1027,12 @@ fn test_header_injection_prevention(test_case: &TrailersParserTestCase) {
         let violation = parser.check_security_violation(&parsed, &injection_trailer);
 
         match violation {
-            Some(SecurityViolation { violation_type: SecurityViolationType::HeaderInjection, .. }) => {
+            Some(SecurityViolation {
+                violation_type: SecurityViolationType::HeaderInjection,
+                ..
+            }) => {
                 // Correct behavior - injection detected
-            },
+            }
             _ => {
                 // Header injection not detected
             }
