@@ -54,15 +54,12 @@ struct PriorityInfo {
 struct MockH2PriorityWeightParser {
     /// Stored priority information by stream ID
     priorities: HashMap<u32, PriorityInfo>,
-    /// Processing errors
-    errors: Vec<String>,
 }
 
 impl MockH2PriorityWeightParser {
     fn new() -> Self {
         Self {
             priorities: HashMap::new(),
-            errors: Vec::new(),
         }
     }
 
@@ -93,7 +90,7 @@ impl MockH2PriorityWeightParser {
         let effective_weight = (frame.weight_wire as u16) + 1;
 
         // Validate weight range (should be 1-256 after +1 offset)
-        if effective_weight < 1 || effective_weight > 256 {
+        if !(1..=256).contains(&effective_weight) {
             return Err(format!(
                 "PROTOCOL_ERROR: invalid effective weight {} (must be 1-256)",
                 effective_weight
@@ -131,11 +128,6 @@ impl MockH2PriorityWeightParser {
     /// Get all stored priorities
     fn get_all_priorities(&self) -> &HashMap<u32, PriorityInfo> {
         &self.priorities
-    }
-
-    /// Get processing errors
-    fn get_errors(&self) -> &[String] {
-        &self.errors
     }
 
     /// Calculate weight ratio for resource allocation simulation
@@ -239,7 +231,7 @@ fuzz_target!(|data: &[u8]| {
         // Test 6: Weight bounds verification (1-256)
         let effective_weight = parser.get_effective_weight(frame.stream_id).unwrap();
         assert!(
-            effective_weight >= 1 && effective_weight <= 256,
+            (1..=256).contains(&effective_weight),
             "Effective weight {} out of valid range 1-256",
             effective_weight
         );
@@ -281,14 +273,26 @@ fuzz_target!(|data: &[u8]| {
         let bandwidth_allocation = parser.simulate_bandwidth_allocation(1000);
         if let Some(&allocated) = bandwidth_allocation.get(&frame.stream_id) {
             // Should allocate some bandwidth proportional to weight
-            if effective_weight > 0 {
-                assert!(
-                    allocated > 0,
-                    "Stream with weight {} should get some bandwidth allocation",
-                    effective_weight
-                );
-            }
+            assert!(
+                allocated > 0,
+                "Stream with weight {} should get some bandwidth allocation",
+                effective_weight
+            );
         }
+
+        let priority_count = parser.get_all_priorities().len();
+        assert_eq!(
+            priority_count, 1,
+            "single-frame fuzz input should store exactly one priority entry"
+        );
+
+        let weight_ratio = parser
+            .calculate_weight_ratio(frame.stream_id, expected_effective_weight)
+            .expect("stored stream should have a weight ratio");
+        assert_eq!(
+            weight_ratio, 1.0,
+            "single stored stream should receive the full weight ratio"
+        );
     }
 });
 
@@ -514,7 +518,7 @@ mod tests {
             );
 
             assert!(
-                effective_weight >= 1 && effective_weight <= 256,
+                (1..=256).contains(&effective_weight),
                 "Effective weight {} out of range for wire weight {}",
                 effective_weight,
                 wire_weight
