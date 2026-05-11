@@ -5572,6 +5572,7 @@ name = "h2_request_path_with_fragment"
 path = "fuzz_targets/h2_request_path_with_fragment.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h1_chunked_size_overflow"

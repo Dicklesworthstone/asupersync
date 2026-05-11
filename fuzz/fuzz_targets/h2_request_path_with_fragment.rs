@@ -1,4 +1,5 @@
 #![no_main]
+#![allow(dead_code)]
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
@@ -19,10 +20,7 @@ struct H2PathFragmentInput {
 #[derive(Arbitrary, Debug)]
 enum PathFragmentStrategy {
     /// Path with fragment at the end
-    TrailingFragment {
-        base_path: String,
-        fragment: String,
-    },
+    TrailingFragment { base_path: String, fragment: String },
     /// Path with fragment in the middle
     MiddleFragment {
         prefix: String,
@@ -35,9 +33,7 @@ enum PathFragmentStrategy {
         fragments: Vec<String>,
     },
     /// Empty fragment
-    EmptyFragment {
-        path: String,
-    },
+    EmptyFragment { path: String },
     /// Fragment with query parameters
     QueryAndFragment {
         path: String,
@@ -112,17 +108,17 @@ struct RequestContext {
 
 #[derive(Arbitrary, Debug)]
 enum HttpMethod {
-    GET,
-    POST,
-    PUT,
-    DELETE,
-    HEAD,
-    OPTIONS,
-    PATCH,
+    Get,
+    Post,
+    Put,
+    Delete,
+    Head,
+    Options,
+    Patch,
     Custom(String),
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Clone, Debug)]
 enum ValidationStrictness {
     /// RFC strict compliance
     Strict,
@@ -132,7 +128,7 @@ enum ValidationStrictness {
     Security,
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Clone, Debug)]
 struct ValidationMode {
     /// Check for fragment presence
     check_fragments: bool,
@@ -247,9 +243,9 @@ enum PathValidationError {
 }
 
 // RFC 7540 constraints
-const MAX_PATH_LENGTH: usize = 8192;           // Reasonable limit
-const FRAGMENT_SEPARATOR: char = '#';          // RFC 3986 fragment separator
-const QUERY_SEPARATOR: char = '?';             // RFC 3986 query separator
+const MAX_PATH_LENGTH: usize = 8192; // Reasonable limit
+const FRAGMENT_SEPARATOR: char = '#'; // RFC 3986 fragment separator
+const QUERY_SEPARATOR: char = '?'; // RFC 3986 query separator
 
 impl MockH2PathParser {
     fn new(validation_mode: ValidationMode, strictness: ValidationStrictness) -> Self {
@@ -296,28 +292,29 @@ impl MockH2PathParser {
         let (path_part, query_part, fragment_part) = self.parse_path_components(path)?;
 
         // RFC 7540 §8.1.2.3: :path MUST NOT contain fragment
-        if self.validation_mode.check_fragments {
-            if let Some(fragment) = &fragment_part {
-                let fragment_position = path.find(FRAGMENT_SEPARATOR).unwrap_or(path.len());
-                return Err(PathValidationError::ContainsFragment {
-                    fragment: fragment.clone(),
-                    position: fragment_position,
-                });
-            }
+        if self.validation_mode.check_fragments
+            && let Some(fragment) = &fragment_part
+        {
+            let fragment_position = path.find(FRAGMENT_SEPARATOR).unwrap_or(path.len());
+            return Err(PathValidationError::ContainsFragment {
+                fragment: fragment.clone(),
+                position: fragment_position,
+            });
         }
 
         // Check for encoded fragments that might bypass simple detection
         let encoding_issues = self.detect_encoding_issues(path)?;
 
         // Determine overall validation result
-        let validation_result = self.determine_validation_result(path, &fragment_part, &encoding_issues);
+        let validation_result =
+            self.determine_validation_result(path, &fragment_part, &encoding_issues);
 
         // Normalize the path (remove fragments if in lenient mode)
         let normalized_path = match self.strictness {
             ValidationStrictness::Strict => {
-                if fragment_part.is_some() {
+                if let Some(fragment) = &fragment_part {
                     return Err(PathValidationError::ContainsFragment {
-                        fragment: fragment_part.unwrap(),
+                        fragment: fragment.clone(),
                         position: path.find(FRAGMENT_SEPARATOR).unwrap_or(0),
                     });
                 }
@@ -327,7 +324,7 @@ impl MockH2PathParser {
             ValidationStrictness::Security => {
                 if fragment_part.is_some() || !encoding_issues.is_empty() {
                     return Err(PathValidationError::SecurityViolation(
-                        "Fragment or suspicious encoding detected".to_string()
+                        "Fragment or suspicious encoding detected".to_string(),
                     ));
                 }
                 path_part
@@ -344,7 +341,10 @@ impl MockH2PathParser {
         })
     }
 
-    fn parse_path_components(&self, path: &str) -> Result<(String, Option<String>, Option<String>), PathValidationError> {
+    fn parse_path_components(
+        &self,
+        path: &str,
+    ) -> Result<(String, Option<String>, Option<String>), PathValidationError> {
         // Find fragment separator first (rightmost # to handle multiple fragments)
         let fragment_pos = path.rfind(FRAGMENT_SEPARATOR);
 
@@ -378,7 +378,10 @@ impl MockH2PathParser {
         Ok((path_part.to_string(), query_part, fragment_part))
     }
 
-    fn detect_encoding_issues(&self, path: &str) -> Result<Vec<EncodingIssue>, PathValidationError> {
+    fn detect_encoding_issues(
+        &self,
+        path: &str,
+    ) -> Result<Vec<EncodingIssue>, PathValidationError> {
         let mut issues = Vec::new();
 
         // Check for encoded fragment separators
@@ -429,7 +432,10 @@ impl MockH2PathParser {
                         issues.push(EncodingIssue {
                             issue_type: EncodingIssueType::InvalidPercentEncoding,
                             position: i,
-                            details: format!("Invalid hex digits: {}{}", hex_chars[0], hex_chars[1]),
+                            details: format!(
+                                "Invalid hex digits: {}{}",
+                                hex_chars[0], hex_chars[1]
+                            ),
                         });
                     }
                 }
@@ -457,7 +463,9 @@ impl MockH2PathParser {
         for issue in encoding_issues {
             match issue.issue_type {
                 EncodingIssueType::FragmentInPath => return PathValidation::ContainsFragment,
-                EncodingIssueType::InvalidPercentEncoding => return PathValidation::InvalidEncoding,
+                EncodingIssueType::InvalidPercentEncoding => {
+                    return PathValidation::InvalidEncoding;
+                }
                 EncodingIssueType::SecurityRisk => return PathValidation::SecurityViolation,
                 _ => {}
             }
@@ -478,13 +486,23 @@ impl MockH2PathParser {
 
     fn generate_fragment_path(strategy: &PathFragmentStrategy) -> String {
         match strategy {
-            PathFragmentStrategy::TrailingFragment { base_path, fragment } => {
+            PathFragmentStrategy::TrailingFragment {
+                base_path,
+                fragment,
+            } => {
                 format!("{}#{}", base_path, fragment)
             }
-            PathFragmentStrategy::MiddleFragment { prefix, fragment, suffix } => {
+            PathFragmentStrategy::MiddleFragment {
+                prefix,
+                fragment,
+                suffix,
+            } => {
                 format!("{}#{}#{}", prefix, fragment, suffix)
             }
-            PathFragmentStrategy::MultipleFragments { base_path, fragments } => {
+            PathFragmentStrategy::MultipleFragments {
+                base_path,
+                fragments,
+            } => {
                 let mut result = base_path.clone();
                 for fragment in fragments {
                     result.push('#');
@@ -495,10 +513,18 @@ impl MockH2PathParser {
             PathFragmentStrategy::EmptyFragment { path } => {
                 format!("{}#", path)
             }
-            PathFragmentStrategy::QueryAndFragment { path, query, fragment } => {
+            PathFragmentStrategy::QueryAndFragment {
+                path,
+                query,
+                fragment,
+            } => {
                 format!("{}?{}#{}", path, query, fragment)
             }
-            PathFragmentStrategy::EncodedFragment { base_path, fragment, encoding_type } => {
+            PathFragmentStrategy::EncodedFragment {
+                base_path,
+                fragment,
+                encoding_type,
+            } => {
                 match encoding_type {
                     FragmentEncoding::UrlEncoded => {
                         format!("{}%23{}", base_path, fragment)
@@ -510,28 +536,35 @@ impl MockH2PathParser {
                         format!("{}#{}", base_path, fragment) // Simplified
                     }
                     FragmentEncoding::Mixed => {
-                        format!("{}%23{}#{}", base_path, &fragment[..fragment.len()/2], &fragment[fragment.len()/2..])
+                        format!(
+                            "{}%23{}#{}",
+                            base_path,
+                            &fragment[..fragment.len() / 2],
+                            &fragment[fragment.len() / 2..]
+                        )
                     }
                 }
             }
-            PathFragmentStrategy::SpecialCharFragment { base_path, special_chars } => {
-                match special_chars {
-                    SpecialCharSet::Control => format!("{}#\x00\x01\x02", base_path),
-                    SpecialCharSet::Unicode => format!("{}#🔥💯", base_path),
-                    SpecialCharSet::PercentEncoded => format!("{}#%20%21%22", base_path),
-                    SpecialCharSet::Mixed(chars) => {
-                        let special_string: String = chars.iter().collect();
-                        format!("{}#{}", base_path, special_string)
-                    }
+            PathFragmentStrategy::SpecialCharFragment {
+                base_path,
+                special_chars,
+            } => match special_chars {
+                SpecialCharSet::Control => format!("{}#\x00\x01\x02", base_path),
+                SpecialCharSet::Unicode => format!("{}#🔥💯", base_path),
+                SpecialCharSet::PercentEncoded => format!("{}#%20%21%22", base_path),
+                SpecialCharSet::Mixed(chars) => {
+                    let special_string: String = chars.iter().collect();
+                    format!("{}#{}", base_path, special_string)
                 }
-            }
-            PathFragmentStrategy::NestedFragments { base_path, nesting_pattern } => {
-                match nesting_pattern {
-                    NestingPattern::MultipleHashes => format!("{}###fragment", base_path),
-                    NestingPattern::FragmentInFragment => format!("{}#outer#inner", base_path),
-                    NestingPattern::EscapedNesting => format!("{}#%23inner", base_path),
-                }
-            }
+            },
+            PathFragmentStrategy::NestedFragments {
+                base_path,
+                nesting_pattern,
+            } => match nesting_pattern {
+                NestingPattern::MultipleHashes => format!("{}###fragment", base_path),
+                NestingPattern::FragmentInFragment => format!("{}#outer#inner", base_path),
+                NestingPattern::EscapedNesting => format!("{}#%23inner", base_path),
+            },
         }
     }
 }
@@ -554,23 +587,30 @@ fuzz_target!(|input: H2PathFragmentInput| {
 
     // Apply test assertions based on path strategy
     match input.path_strategy {
-        PathFragmentStrategy::TrailingFragment { .. } |
-        PathFragmentStrategy::MiddleFragment { .. } |
-        PathFragmentStrategy::MultipleFragments { .. } |
-        PathFragmentStrategy::EmptyFragment { .. } |
-        PathFragmentStrategy::QueryAndFragment { .. } => {
+        PathFragmentStrategy::TrailingFragment { .. }
+        | PathFragmentStrategy::MiddleFragment { .. }
+        | PathFragmentStrategy::MultipleFragments { .. }
+        | PathFragmentStrategy::EmptyFragment { .. }
+        | PathFragmentStrategy::QueryAndFragment { .. } => {
             // These strategies create paths with literal # characters
-            match parse_result {
+            match &parse_result {
                 Ok(parsed) => {
                     // Should not be valid in strict mode
-                    if matches!(input.request_context.strictness, ValidationStrictness::Strict) {
-                        panic!("Path with fragment should be rejected in strict mode: {}", test_path);
+                    if matches!(
+                        input.request_context.strictness,
+                        ValidationStrictness::Strict
+                    ) {
+                        panic!(
+                            "Path with fragment should be rejected in strict mode: {}",
+                            test_path
+                        );
                     }
                     // In lenient mode, fragment should be detected but possibly allowed
                     assert!(
-                        parsed.validation_result == PathValidation::ContainsFragment ||
-                        parsed.fragment_part.is_some(),
-                        "Fragment should be detected in path: {}", test_path
+                        parsed.validation_result == PathValidation::ContainsFragment
+                            || parsed.fragment_part.is_some(),
+                        "Fragment should be detected in path: {}",
+                        test_path
                     );
                 }
                 Err(PathValidationError::ContainsFragment { .. }) => {
@@ -579,8 +619,8 @@ fuzz_target!(|input: H2PathFragmentInput| {
                 Err(error) => {
                     // Other errors may be acceptable depending on path content
                     match error {
-                        PathValidationError::MalformedPath(_) |
-                        PathValidationError::InvalidCharacters(_) => {
+                        PathValidationError::MalformedPath(_)
+                        | PathValidationError::InvalidCharacters(_) => {
                             // Acceptable for malformed fragment paths
                         }
                         _ => {
@@ -592,19 +632,20 @@ fuzz_target!(|input: H2PathFragmentInput| {
         }
         PathFragmentStrategy::EncodedFragment { .. } => {
             // Encoded fragments should be detected based on validation mode
-            match parse_result {
+            match &parse_result {
                 Ok(parsed) => {
                     if input.validation_mode.check_encoding {
                         assert!(
-                            !parsed.encoding_issues.is_empty() ||
-                            parsed.validation_result != PathValidation::Valid,
-                            "Encoded fragment should be detected: {}", test_path
+                            !parsed.encoding_issues.is_empty()
+                                || parsed.validation_result != PathValidation::Valid,
+                            "Encoded fragment should be detected: {}",
+                            test_path
                         );
                     }
                 }
-                Err(PathValidationError::ContainsFragment { .. }) |
-                Err(PathValidationError::InvalidEncoding { .. }) |
-                Err(PathValidationError::SecurityViolation(_)) => {
+                Err(PathValidationError::ContainsFragment { .. })
+                | Err(PathValidationError::InvalidEncoding { .. })
+                | Err(PathValidationError::SecurityViolation(_)) => {
                     // Expected: encoded fragment detected and rejected
                 }
                 Err(_) => {
@@ -612,14 +653,20 @@ fuzz_target!(|input: H2PathFragmentInput| {
                 }
             }
         }
-        PathFragmentStrategy::SpecialCharFragment { .. } |
-        PathFragmentStrategy::NestedFragments { .. } => {
+        PathFragmentStrategy::SpecialCharFragment { .. }
+        | PathFragmentStrategy::NestedFragments { .. } => {
             // Special character and nested fragments should be handled carefully
-            match parse_result {
+            match &parse_result {
                 Ok(_) => {
                     // May be allowed in very lenient modes
-                    if matches!(input.request_context.strictness, ValidationStrictness::Security) {
-                        panic!("Security-sensitive fragment pattern should be rejected: {}", test_path);
+                    if matches!(
+                        input.request_context.strictness,
+                        ValidationStrictness::Security
+                    ) {
+                        panic!(
+                            "Security-sensitive fragment pattern should be rejected: {}",
+                            test_path
+                        );
                     }
                 }
                 Err(_) => {
@@ -645,10 +692,11 @@ fn test_fragment_detection_invariants(
                 // Fragment should be detected unless in very lenient mode
                 if input.validation_mode.check_fragments {
                     assert!(
-                        parsed.fragment_part.is_some() ||
-                        parsed.validation_result == PathValidation::ContainsFragment ||
-                        !parsed.encoding_issues.is_empty(),
-                        "Literal # in path should be detected as fragment: {}", test_path
+                        parsed.fragment_part.is_some()
+                            || parsed.validation_result == PathValidation::ContainsFragment
+                            || !parsed.encoding_issues.is_empty(),
+                        "Literal # in path should be detected as fragment: {}",
+                        test_path
                     );
                 }
             }
@@ -662,34 +710,41 @@ fn test_fragment_detection_invariants(
     }
 
     // Invariant: RFC 7540 strict compliance should reject all fragments
-    if matches!(input.request_context.strictness, ValidationStrictness::Strict) &&
-       input.validation_mode.check_fragments {
-        if test_path.contains('#') || test_path.contains("%23") {
-            match result {
-                Ok(_) => {
-                    panic!("Strict mode should reject fragment paths: {}", test_path);
-                }
-                Err(_) => {
-                    // Expected: strict rejection
-                }
+    if matches!(
+        input.request_context.strictness,
+        ValidationStrictness::Strict
+    ) && input.validation_mode.check_fragments
+        && (test_path.contains('#') || test_path.contains("%23"))
+    {
+        match result {
+            Ok(_) => {
+                panic!("Strict mode should reject fragment paths: {}", test_path);
+            }
+            Err(_) => {
+                // Expected: strict rejection
             }
         }
     }
 
     // Invariant: Security mode should be most restrictive
-    if matches!(input.request_context.strictness, ValidationStrictness::Security) {
-        if test_path.contains('#') || test_path.contains("%23") || test_path.contains("%2523") {
-            match result {
-                Ok(_) => {
-                    panic!("Security mode should reject suspicious fragment patterns: {}", test_path);
-                }
-                Err(PathValidationError::SecurityViolation(_)) |
-                Err(PathValidationError::ContainsFragment { .. }) => {
-                    // Expected: security rejection
-                }
-                Err(_) => {
-                    // Other rejections also acceptable in security mode
-                }
+    if matches!(
+        input.request_context.strictness,
+        ValidationStrictness::Security
+    ) && (test_path.contains('#') || test_path.contains("%23") || test_path.contains("%2523"))
+    {
+        match result {
+            Ok(_) => {
+                panic!(
+                    "Security mode should reject suspicious fragment patterns: {}",
+                    test_path
+                );
+            }
+            Err(PathValidationError::SecurityViolation(_))
+            | Err(PathValidationError::ContainsFragment { .. }) => {
+                // Expected: security rejection
+            }
+            Err(_) => {
+                // Other rejections also acceptable in security mode
             }
         }
     }
@@ -699,10 +754,12 @@ fn test_fragment_detection_invariants(
         match result {
             Ok(parsed) => {
                 assert!(
-                    parsed.encoding_issues.iter().any(|issue|
-                        matches!(issue.issue_type, EncodingIssueType::FragmentInPath | EncodingIssueType::SuspiciousPattern)
-                    ),
-                    "URL-encoded fragment should be detected: {}", test_path
+                    parsed.encoding_issues.iter().any(|issue| matches!(
+                        issue.issue_type,
+                        EncodingIssueType::FragmentInPath | EncodingIssueType::SuspiciousPattern
+                    )),
+                    "URL-encoded fragment should be detected: {}",
+                    test_path
                 );
             }
             Err(_) => {
@@ -716,13 +773,17 @@ fn test_fragment_detection_invariants(
         match result {
             Ok(parsed) => {
                 assert!(
-                    parsed.fragment_part == Some(String::new()) ||
-                    parsed.validation_result == PathValidation::ContainsFragment,
-                    "Empty fragment should be detected: {}", test_path
+                    parsed.fragment_part == Some(String::new())
+                        || parsed.validation_result == PathValidation::ContainsFragment,
+                    "Empty fragment should be detected: {}",
+                    test_path
                 );
             }
             Err(PathValidationError::ContainsFragment { fragment, .. }) => {
-                assert!(fragment.is_empty(), "Empty fragment should be properly identified");
+                assert!(
+                    fragment.is_empty(),
+                    "Empty fragment should be properly identified"
+                );
             }
             Err(_) => {
                 // Other errors acceptable for malformed paths
@@ -736,17 +797,22 @@ fn test_fragment_detection_invariants(
             Ok(parsed) => {
                 assert!(
                     parsed.fragment_part.is_none(),
-                    "Path without fragments should not have fragment part: {}", test_path
+                    "Path without fragments should not have fragment part: {}",
+                    test_path
                 );
                 if parsed.encoding_issues.is_empty() {
                     assert!(
                         matches!(parsed.validation_result, PathValidation::Valid),
-                        "Clean path should be valid: {}", test_path
+                        "Clean path should be valid: {}",
+                        test_path
                     );
                 }
             }
             Err(PathValidationError::ContainsFragment { .. }) => {
-                panic!("Path without fragments should not fail fragment validation: {}", test_path);
+                panic!(
+                    "Path without fragments should not fail fragment validation: {}",
+                    test_path
+                );
             }
             Err(_) => {
                 // Other validation errors may occur (length, encoding, etc.)
@@ -793,7 +859,10 @@ mod tests {
         );
 
         let result = parser.parse_path("/api/v1/users#section1");
-        assert!(matches!(result, Err(PathValidationError::ContainsFragment { .. })));
+        assert!(matches!(
+            result,
+            Err(PathValidationError::ContainsFragment { .. })
+        ));
     }
 
     #[test]
@@ -810,12 +879,15 @@ mod tests {
 
         let result = parser.parse_path("/api/v1/users%23fragment");
         match result {
-            Err(PathValidationError::ContainsFragment { .. }) |
-            Err(PathValidationError::SecurityViolation(_)) => {
+            Err(PathValidationError::ContainsFragment { .. })
+            | Err(PathValidationError::SecurityViolation(_)) => {
                 // Expected: encoded fragment detected
             }
             Ok(parsed) => {
-                assert!(!parsed.encoding_issues.is_empty(), "Encoded fragment should be detected");
+                assert!(
+                    !parsed.encoding_issues.is_empty(),
+                    "Encoded fragment should be detected"
+                );
             }
             Err(e) => {
                 panic!("Unexpected error: {:?}", e);
@@ -836,7 +908,10 @@ mod tests {
         );
 
         let result = parser.parse_path("/search?q=test#results");
-        assert!(matches!(result, Err(PathValidationError::ContainsFragment { .. })));
+        assert!(matches!(
+            result,
+            Err(PathValidationError::ContainsFragment { .. })
+        ));
     }
 
     #[test]
@@ -852,7 +927,10 @@ mod tests {
         );
 
         let result = parser.parse_path("/api/endpoint#");
-        assert!(matches!(result, Err(PathValidationError::ContainsFragment { .. })));
+        assert!(matches!(
+            result,
+            Err(PathValidationError::ContainsFragment { .. })
+        ));
     }
 
     #[test]
@@ -868,7 +946,10 @@ mod tests {
         );
 
         let result = parser.parse_path("/api#fragment1#fragment2");
-        assert!(matches!(result, Err(PathValidationError::ContainsFragment { .. })));
+        assert!(matches!(
+            result,
+            Err(PathValidationError::ContainsFragment { .. })
+        ));
     }
 
     #[test]
@@ -910,9 +991,12 @@ mod tests {
         let result = parser.parse_path("/api%2523fragment");
         match result {
             Ok(parsed) => {
-                assert!(parsed.encoding_issues.iter().any(|issue|
-                    matches!(issue.issue_type, EncodingIssueType::DoubleEncoding)
-                ));
+                assert!(
+                    parsed
+                        .encoding_issues
+                        .iter()
+                        .any(|issue| matches!(issue.issue_type, EncodingIssueType::DoubleEncoding))
+                );
             }
             Err(_) => {
                 // Rejection also acceptable
@@ -944,30 +1028,27 @@ mod tests {
     #[test]
     fn test_fragment_generation_strategies() {
         // Test each generation strategy produces expected patterns
-        let trailing = MockH2PathParser::generate_fragment_path(
-            &PathFragmentStrategy::TrailingFragment {
+        let trailing =
+            MockH2PathParser::generate_fragment_path(&PathFragmentStrategy::TrailingFragment {
                 base_path: "/api".to_string(),
                 fragment: "section".to_string(),
-            }
-        );
+            });
         assert_eq!(trailing, "/api#section");
 
-        let encoded = MockH2PathParser::generate_fragment_path(
-            &PathFragmentStrategy::EncodedFragment {
+        let encoded =
+            MockH2PathParser::generate_fragment_path(&PathFragmentStrategy::EncodedFragment {
                 base_path: "/api".to_string(),
                 fragment: "section".to_string(),
                 encoding_type: FragmentEncoding::UrlEncoded,
-            }
-        );
+            });
         assert_eq!(encoded, "/api%23section");
 
-        let query_and_fragment = MockH2PathParser::generate_fragment_path(
-            &PathFragmentStrategy::QueryAndFragment {
+        let query_and_fragment =
+            MockH2PathParser::generate_fragment_path(&PathFragmentStrategy::QueryAndFragment {
                 path: "/search".to_string(),
                 query: "q=test".to_string(),
                 fragment: "results".to_string(),
-            }
-        );
+            });
         assert_eq!(query_and_fragment, "/search?q=test#results");
     }
 }
