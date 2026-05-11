@@ -75,7 +75,6 @@ struct SecurityPolicy {
 #[derive(Debug, Clone, PartialEq)]
 enum H2Error {
     ProtocolError,
-    StreamClosed,
     SecurityPolicyViolation,
 }
 
@@ -118,33 +117,30 @@ impl MockPathCanonicalizationConnection {
             return Err(error.clone());
         }
 
-        // Ensure stream exists
-        if !self.stream_state.contains_key(&stream_id) {
-            self.stream_state.insert(
-                stream_id,
-                StreamState {
-                    id: stream_id,
-                    canonical_path: None,
-                    original_path: Some(path.to_string()),
-                    validation_result: None,
-                },
-            );
-        }
-
-        let stream = self.stream_state.get_mut(&stream_id).unwrap();
-        stream.original_path = Some(path.to_string());
-
         // RFC 9112 §4.2.3: Path normalization steps
         let result = self.perform_path_normalization(path);
 
-        // Store the result
-        stream.validation_result = Some(result.clone());
+        {
+            let stream = self
+                .stream_state
+                .entry(stream_id)
+                .or_insert_with(|| StreamState {
+                    id: stream_id,
+                    canonical_path: None,
+                    original_path: None,
+                    validation_result: None,
+                });
+            debug_assert_eq!(stream.id, stream_id);
+            stream.original_path = Some(path.to_string());
+            stream.validation_result = Some(result.clone());
+
+            if let PathValidationResult::Valid(canonical_path) = &result {
+                stream.canonical_path = Some(canonical_path.clone());
+            }
+        }
 
         match result {
-            PathValidationResult::Valid(canonical_path) => {
-                stream.canonical_path = Some(canonical_path);
-                Ok(result)
-            }
+            PathValidationResult::Valid(_) => Ok(result),
             PathValidationResult::Invalid(_) => {
                 // Invalid paths result in PROTOCOL_ERROR
                 self.connection_error = Some(H2Error::ProtocolError);
@@ -434,6 +430,10 @@ fn generate_test_cases() -> Vec<(String, PathValidationResult)> {
             "/api/../".to_string(),
             PathValidationResult::Valid("/".to_string()),
         ),
+        (
+            "/a/../../b".to_string(),
+            PathValidationResult::Invalid(PathError::PathTraversal),
+        ),
         // Path traversal attempts (security risks)
         (
             "/..".to_string(),
@@ -446,11 +446,11 @@ fn generate_test_cases() -> Vec<(String, PathValidationResult)> {
         // Encoded dot-segments
         (
             "/%2E".to_string(),
-            PathValidationResult::Valid("/.".to_string()),
+            PathValidationResult::Valid("/".to_string()),
         ),
         (
             "/%2E%2E".to_string(),
-            PathValidationResult::Valid("/..".to_string()),
+            PathValidationResult::SecurityRisk("Path traversal above root directory".to_string()),
         ),
         (
             "/%2E%2E/".to_string(),
@@ -521,8 +521,15 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    let mut connection = MockPathCanonicalizationConnection::new();
-    let stream_id = 1u32;
+    let policy = SecurityPolicy {
+        allow_path_traversal: !test.should_reject,
+        ..SecurityPolicy::default()
+    };
+    let mut connection = MockPathCanonicalizationConnection::with_policy(policy);
+    let stream_id = test.expected_canonical.as_ref().map_or(1u32, |expected| {
+        let len = u32::try_from(expected.len()).unwrap_or(u32::MAX / 2);
+        len.saturating_mul(2).saturating_add(1)
+    });
 
     // Test path canonicalization
     let result = connection.canonicalize_path(stream_id, &test.path);
@@ -550,6 +557,8 @@ fuzz_target!(|data: &[u8]| {
                 "Canonical path should not contain double slashes: {}",
                 canonical
             );
+
+            assert_eq!(connection.get_canonical_path(stream_id), Some(canonical));
         }
 
         Some(PathValidationResult::Invalid(error)) => {

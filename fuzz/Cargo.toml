@@ -5207,6 +5207,7 @@ name = "h2_path_canonicalization"
 path = "fuzz_targets/h2_path_canonicalization.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h1_chunked_chunk_extension"
