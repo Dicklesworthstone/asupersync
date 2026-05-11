@@ -27,9 +27,7 @@ enum StreamState {
     Idle,
     Open,
     HalfClosedLocal,
-    HalfClosedRemote,
     Closed,
-    ReservedLocal,
     ReservedRemote,
 }
 
@@ -37,11 +35,7 @@ impl StreamState {
     /// Check if stream is active (counts toward concurrent limit)
     fn is_active(self) -> bool {
         match self {
-            StreamState::Open
-            | StreamState::HalfClosedLocal
-            | StreamState::HalfClosedRemote
-            | StreamState::ReservedLocal
-            | StreamState::ReservedRemote => true,
+            StreamState::Open | StreamState::HalfClosedLocal | StreamState::ReservedRemote => true,
             StreamState::Idle | StreamState::Closed => false,
         }
     }
@@ -98,8 +92,8 @@ impl StreamInfo {
 struct MockStreamStore {
     streams: HashMap<u32, StreamInfo>,
     max_concurrent_streams: u32,
-    next_client_stream_id: u32,  // Odd IDs for client
-    next_server_stream_id: u32,  // Even IDs for server
+    next_client_stream_id: u32, // Odd IDs for client
+    next_server_stream_id: u32, // Even IDs for server
     is_client: bool,
     allocation_errors: Vec<String>,
 }
@@ -182,17 +176,7 @@ impl MockStreamStore {
 
     /// Count active streams
     fn active_count(&self) -> u32 {
-        self.streams.values()
-            .filter(|s| s.is_active())
-            .count() as u32
-    }
-
-    /// Get all active stream IDs
-    fn active_stream_ids(&self) -> Vec<u32> {
-        self.streams.iter()
-            .filter(|(_, s)| s.is_active())
-            .map(|(&id, _)| id)
-            .collect()
+        self.streams.values().filter(|s| s.is_active()).count() as u32
     }
 
     /// Prune closed streams
@@ -202,10 +186,6 @@ impl MockStreamStore {
 
     fn len(&self) -> usize {
         self.streams.len()
-    }
-
-    fn get_allocation_errors(&self) -> &[String] {
-        &self.allocation_errors
     }
 }
 
@@ -245,40 +225,47 @@ enum StreamOperation {
 fn generate_edge_case_operations() -> Vec<StreamOperation> {
     vec![
         // Boundary concurrent limits
-        StreamOperation::UpdateMaxConcurrent(0),        // Zero limit
-        StreamOperation::UpdateMaxConcurrent(1),        // Minimum limit
-        StreamOperation::UpdateMaxConcurrent(256),      // Default limit
+        StreamOperation::UpdateMaxConcurrent(0), // Zero limit
+        StreamOperation::UpdateMaxConcurrent(1), // Minimum limit
+        StreamOperation::UpdateMaxConcurrent(256), // Default limit
         StreamOperation::UpdateMaxConcurrent(u32::MAX), // Maximum limit
-
         // Stream allocation attempts with zero limit
         StreamOperation::UpdateMaxConcurrent(0),
-        StreamOperation::AllocateStream,                // Should fail
-
+        StreamOperation::AllocateStream, // Should fail
         // Limit reduction scenarios
         StreamOperation::UpdateMaxConcurrent(5),
-        StreamOperation::AllocateStream,                // 1st stream
-        StreamOperation::AllocateStream,                // 2nd stream
-        StreamOperation::AllocateStream,                // 3rd stream
-        StreamOperation::SendHeaders { stream_id: 1, end_stream: false },
-        StreamOperation::SendHeaders { stream_id: 3, end_stream: false },
-        StreamOperation::SendHeaders { stream_id: 5, end_stream: false },
-        StreamOperation::UpdateMaxConcurrent(2),        // Reduce below active count
-        StreamOperation::AllocateStream,                // Should fail
-
+        StreamOperation::AllocateStream, // 1st stream
+        StreamOperation::AllocateStream, // 2nd stream
+        StreamOperation::AllocateStream, // 3rd stream
+        StreamOperation::SendHeaders {
+            stream_id: 1,
+            end_stream: false,
+        },
+        StreamOperation::SendHeaders {
+            stream_id: 3,
+            end_stream: false,
+        },
+        StreamOperation::SendHeaders {
+            stream_id: 5,
+            end_stream: false,
+        },
+        StreamOperation::UpdateMaxConcurrent(2), // Reduce below active count
+        StreamOperation::AllocateStream,         // Should fail
         // Stream lifecycle
         StreamOperation::AllocateStream,
-        StreamOperation::SendHeaders { stream_id: 7, end_stream: false },
-        StreamOperation::ResetStream(7),                // Close it
-        StreamOperation::PruneClosedStreams,           // Prune
-        StreamOperation::AllocateStream,                // Should succeed again
-
+        StreamOperation::SendHeaders {
+            stream_id: 7,
+            end_stream: false,
+        },
+        StreamOperation::ResetStream(7),     // Close it
+        StreamOperation::PruneClosedStreams, // Prune
+        StreamOperation::AllocateStream,     // Should succeed again
         // PUSH_PROMISE scenarios
         StreamOperation::UpdateMaxConcurrent(3),
-        StreamOperation::ReserveRemoteStream(2),       // Server push
-        StreamOperation::ReserveRemoteStream(4),       // Another push
-        StreamOperation::ReserveRemoteStream(6),       // Should succeed
-        StreamOperation::ReserveRemoteStream(8),       // Should fail (limit reached)
-
+        StreamOperation::ReserveRemoteStream(2), // Server push
+        StreamOperation::ReserveRemoteStream(4), // Another push
+        StreamOperation::ReserveRemoteStream(6), // Should succeed
+        StreamOperation::ReserveRemoteStream(8), // Should fail (limit reached)
         // Rapid limit changes
         StreamOperation::UpdateMaxConcurrent(10),
         StreamOperation::UpdateMaxConcurrent(1),
@@ -309,14 +296,11 @@ fuzz_target!(|scenario: ConcurrentStreamsScenario| {
 
     // Track state for validation
     let mut allocated_streams = Vec::new();
-    let mut expected_failures = 0;
-    let mut actual_failures = 0;
-
     // Process each operation
     for operation in &operations {
         match operation {
             StreamOperation::UpdateMaxConcurrent(new_max) => {
-                let new_max_clamped = new_max.min(10000); // Reasonable limit for testing
+                let new_max_clamped = (*new_max).min(10000); // Reasonable limit for testing
                 store.set_max_concurrent_streams(new_max_clamped);
 
                 // Verify the limit was set
@@ -333,32 +317,44 @@ fuzz_target!(|scenario: ConcurrentStreamsScenario| {
 
                         // Should only succeed if we're under the limit
                         if active_before >= store.max_concurrent_streams {
-                            panic!("Stream allocation succeeded when at limit: active={}, max={}",
-                                active_before, store.max_concurrent_streams);
+                            panic!(
+                                "Stream allocation succeeded when at limit: active={}, max={}",
+                                active_before, store.max_concurrent_streams
+                            );
                         }
 
                         // Verify stream was created in idle state
                         let stream = store.get_stream(stream_id).unwrap();
-                        assert!(!stream.is_active(), "Newly allocated stream should not be active yet");
+                        assert_eq!(stream.stream_id, stream_id);
+                        assert!(
+                            !stream.is_active(),
+                            "Newly allocated stream should not be active yet"
+                        );
                     }
                     Err(err) => {
-                        actual_failures += 1;
-
                         // Should only fail if at limit
                         if active_before < store.max_concurrent_streams {
-                            panic!("Stream allocation failed when under limit: active={}, max={}, error={}",
-                                active_before, store.max_concurrent_streams, err);
+                            panic!(
+                                "Stream allocation failed when under limit: active={}, max={}, error={}",
+                                active_before, store.max_concurrent_streams, err
+                            );
                         }
 
                         // Verify proper error message
                         if !err.contains("max concurrent streams exceeded") {
-                            panic!("Wrong error message: expected 'max concurrent streams exceeded', got '{}'", err);
+                            panic!(
+                                "Wrong error message: expected 'max concurrent streams exceeded', got '{}'",
+                                err
+                            );
                         }
                     }
                 }
             }
 
-            StreamOperation::SendHeaders { stream_id, end_stream } => {
+            StreamOperation::SendHeaders {
+                stream_id,
+                end_stream,
+            } => {
                 if let Some(stream) = store.get_stream_mut(*stream_id) {
                     let _ = stream.send_headers(*end_stream);
                 }
@@ -386,17 +382,21 @@ fuzz_target!(|scenario: ConcurrentStreamsScenario| {
                 match result {
                     Ok(()) => {
                         if active_before >= store.max_concurrent_streams {
-                            panic!("PUSH_PROMISE succeeded when at limit: active={}, max={}",
-                                active_before, store.max_concurrent_streams);
+                            panic!(
+                                "PUSH_PROMISE succeeded when at limit: active={}, max={}",
+                                active_before, store.max_concurrent_streams
+                            );
                         }
 
                         // Verify reserved stream is active
                         let stream = store.get_stream(normalized_id).unwrap();
+                        assert_eq!(stream.stream_id, normalized_id);
                         assert!(stream.is_active(), "Reserved stream should be active");
                     }
-                    Err(err) => {
-                        if active_before < store.max_concurrent_streams &&
-                           !store.streams.contains_key(&normalized_id) {
+                    Err(_err) => {
+                        if active_before < store.max_concurrent_streams
+                            && !store.streams.contains_key(&normalized_id)
+                        {
                             // Should have succeeded if under limit and ID not in use
                             // But accept failure for simplicity
                         }
@@ -410,8 +410,10 @@ fuzz_target!(|scenario: ConcurrentStreamsScenario| {
                 let count_after = store.len();
 
                 // Pruning should reduce or maintain count
-                assert!(count_after <= count_before,
-                    "Prune should not increase stream count");
+                assert!(
+                    count_after <= count_before,
+                    "Prune should not increase stream count"
+                );
             }
 
             StreamOperation::VerifyConcurrentCount(expected) => {
@@ -440,7 +442,10 @@ fn test_zero_concurrent_limit(store: &mut MockStreamStore) {
     // All allocation attempts should fail
     for _ in 0..5 {
         let result = store.allocate_stream_id();
-        assert!(result.is_err(), "Stream allocation should fail with zero limit");
+        assert!(
+            result.is_err(),
+            "Stream allocation should fail with zero limit"
+        );
 
         if let Err(err) = result {
             assert!(err.contains("max concurrent streams exceeded"));
@@ -477,12 +482,18 @@ fn test_limit_reduction_with_active_streams(store: &mut MockStreamStore) {
     store.set_max_concurrent_streams(2);
 
     // Existing streams should remain active
-    assert_eq!(store.active_count(), active_count,
-        "Existing active streams should not be affected by limit reduction");
+    assert_eq!(
+        store.active_count(),
+        active_count,
+        "Existing active streams should not be affected by limit reduction"
+    );
 
     // New allocations should fail
     let result = store.allocate_stream_id();
-    assert!(result.is_err(), "New stream allocation should fail when over limit");
+    assert!(
+        result.is_err(),
+        "New stream allocation should fail when over limit"
+    );
 
     // Close some streams to make room
     if !active_streams.is_empty() {
@@ -496,7 +507,7 @@ fn test_limit_reduction_with_active_streams(store: &mut MockStreamStore) {
 
         // Now allocation might succeed
         if store.active_count() < store.max_concurrent_streams {
-            let result = store.allocate_stream_id();
+            let _result = store.allocate_stream_id();
             // May succeed now depending on remaining active count
         }
     }
@@ -532,13 +543,19 @@ fn test_stream_lifecycle(store: &mut MockStreamStore) {
 
     // Verify closed (not active)
     let stream = store.get_stream(stream_id).unwrap();
-    assert!(!stream.is_active(), "Stream should not be active after reset");
+    assert!(
+        !stream.is_active(),
+        "Stream should not be active after reset"
+    );
 
     // Prune closed streams
     store.prune_closed();
 
     // Verify stream is gone
-    assert!(store.get_stream(stream_id).is_none(), "Stream should be removed after prune");
+    assert!(
+        store.get_stream(stream_id).is_none(),
+        "Stream should be removed after prune"
+    );
 }
 
 #[cfg(test)]
@@ -554,9 +571,18 @@ mod tests {
                 StreamOperation::AllocateStream,
                 StreamOperation::AllocateStream,
                 StreamOperation::AllocateStream,
-                StreamOperation::SendHeaders { stream_id: 1, end_stream: false },
-                StreamOperation::SendHeaders { stream_id: 3, end_stream: false },
-                StreamOperation::SendHeaders { stream_id: 5, end_stream: false },
+                StreamOperation::SendHeaders {
+                    stream_id: 1,
+                    end_stream: false,
+                },
+                StreamOperation::SendHeaders {
+                    stream_id: 3,
+                    end_stream: false,
+                },
+                StreamOperation::SendHeaders {
+                    stream_id: 5,
+                    end_stream: false,
+                },
                 StreamOperation::AllocateStream, // Should fail - limit reached
             ],
             include_edge_cases: false,
@@ -590,11 +616,17 @@ mod tests {
                 StreamOperation::AllocateStream,
                 StreamOperation::AllocateStream,
                 StreamOperation::AllocateStream,
-                StreamOperation::SendHeaders { stream_id: 1, end_stream: false },
-                StreamOperation::SendHeaders { stream_id: 3, end_stream: false },
+                StreamOperation::SendHeaders {
+                    stream_id: 1,
+                    end_stream: false,
+                },
+                StreamOperation::SendHeaders {
+                    stream_id: 3,
+                    end_stream: false,
+                },
                 StreamOperation::UpdateMaxConcurrent(1), // Reduce below active count
-                StreamOperation::AllocateStream, // Should fail
-                StreamOperation::ResetStream(1), // Close one
+                StreamOperation::AllocateStream,         // Should fail
+                StreamOperation::ResetStream(1),         // Close one
                 StreamOperation::PruneClosedStreams,
                 StreamOperation::AllocateStream, // Might succeed now
             ],
@@ -627,7 +659,10 @@ mod tests {
             is_client: true,
             operations: vec![
                 StreamOperation::AllocateStream,
-                StreamOperation::SendHeaders { stream_id: 1, end_stream: false },
+                StreamOperation::SendHeaders {
+                    stream_id: 1,
+                    end_stream: false,
+                },
                 StreamOperation::VerifyConcurrentCount(1),
                 StreamOperation::ResetStream(1),
                 StreamOperation::VerifyConcurrentCount(0),
