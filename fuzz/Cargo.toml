@@ -5298,6 +5298,7 @@ name = "h2_rst_stream_flood"
 path = "fuzz_targets/h2_rst_stream_flood.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_data_padding_overflow"
