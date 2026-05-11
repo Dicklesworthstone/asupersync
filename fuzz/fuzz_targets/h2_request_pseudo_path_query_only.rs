@@ -24,13 +24,9 @@
 //! - Edge cases in URI parsing leading to security bypass
 
 #![no_main]
+#![allow(dead_code)]
 
 use arbitrary::Arbitrary;
-use asupersync::bytes::Bytes;
-use asupersync::http::h2::connection::{Connection, Side};
-use asupersync::http::h2::error::ErrorCode;
-use asupersync::http::h2::frame::{Frame, HeadersFrame, Setting, SettingsFrame};
-use asupersync::http::h2::headers::{HeaderMap, HeaderName, HeaderValue};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
@@ -132,7 +128,7 @@ pub struct RequestConfig {
 }
 
 /// Validation configuration
-#[derive(Debug, Arbitrary)]
+#[derive(Debug, Arbitrary, Clone)]
 pub struct ValidationConfig {
     /// Enforce RFC 9110 absolute-path requirement
     enforce_absolute_path: bool,
@@ -230,7 +226,7 @@ pub struct PathValidationViolation {
     rfc_reference: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ViolationType {
     QueryOnlyPath,
     InvalidPathFormat,
@@ -241,13 +237,13 @@ pub enum ViolationType {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ViolationSeverity {
-    Critical,   // Security vulnerability
-    High,       // RFC violation
-    Medium,     // Compliance issue
-    Low,        // Style issue
+    Critical, // Security vulnerability
+    High,     // RFC violation
+    Medium,   // Compliance issue
+    Low,      // Style issue
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ParserStats {
     requests_processed: u32,
     query_only_paths_detected: u32,
@@ -271,7 +267,11 @@ impl MockH2PathQueryOnlyParser {
     }
 
     /// Process a HEADERS frame with pseudo-headers
-    pub fn process_headers_frame(&mut self, stream_id: u32, headers: Vec<(String, String)>) -> Result<(), PathValidationError> {
+    pub fn process_headers_frame(
+        &mut self,
+        stream_id: u32,
+        headers: Vec<(String, String)>,
+    ) -> Result<(), PathValidationError> {
         self.current_stream_id = stream_id;
         self.stats.requests_processed += 1;
 
@@ -316,10 +316,8 @@ impl MockH2PathQueryOnlyParser {
     /// Validate :path header value
     fn validate_path_value(&mut self, path: &str) -> Result<(), PathValidationError> {
         // Check for empty path
-        if path.is_empty() {
-            if !self.config.allow_empty_paths {
-                return Err(PathValidationError::EmptyPathValue);
-            }
+        if path.is_empty() && !self.config.allow_empty_paths {
+            return Err(PathValidationError::EmptyPathValue);
         }
 
         // Check path length
@@ -332,7 +330,9 @@ impl MockH2PathQueryOnlyParser {
 
         // Check for control characters
         if path.chars().any(|c| c.is_control()) {
-            return Err(PathValidationError::ControlCharactersInPath(path.to_string()));
+            return Err(PathValidationError::ControlCharactersInPath(
+                path.to_string(),
+            ));
         }
 
         // Main validation: Check if path starts with query only (RFC violation)
@@ -358,10 +358,10 @@ impl MockH2PathQueryOnlyParser {
         }
 
         // Validate percent encoding
-        if path.contains('%') {
-            if let Err(_) = self.validate_percent_encoding(path) {
-                return Err(PathValidationError::InvalidPercentEncoding(path.to_string()));
-            }
+        if path.contains('%') && self.validate_percent_encoding(path).is_err() {
+            return Err(PathValidationError::InvalidPercentEncoding(
+                path.to_string(),
+            ));
         }
 
         // RFC 9113 §8.3.1: :path MUST be absolute-path for http/https
@@ -372,7 +372,8 @@ impl MockH2PathQueryOnlyParser {
                 self.violations.push(PathValidationViolation {
                     violation_type: ViolationType::RFCViolation,
                     path_value: path.to_string(),
-                    description: "RFC 9113 violation: :path must start with '/' (absolute-path)".to_string(),
+                    description: "RFC 9113 violation: :path must start with '/' (absolute-path)"
+                        .to_string(),
                     severity: ViolationSeverity::High,
                     rfc_reference: "RFC 9113 §8.3.1".to_string(),
                 });
@@ -380,13 +381,15 @@ impl MockH2PathQueryOnlyParser {
                 if self.config.strict_mode {
                     self.stats.invalid_paths_rejected += 1;
                     return Err(PathValidationError::InvalidPathFormat(format!(
-                        "Path must start with '/', got query-only path: {}", path
+                        "Path must start with '/', got query-only path: {}",
+                        path
                     )));
                 }
             } else {
                 // Other invalid path format
                 return Err(PathValidationError::InvalidPathFormat(format!(
-                    "Path must start with '/', got: {}", path
+                    "Path must start with '/', got: {}",
+                    path
                 )));
             }
         }
@@ -427,17 +430,19 @@ impl MockH2PathQueryOnlyParser {
                 } else {
                     format!("?{}", base_value)
                 }
-            },
+            }
             QueryOnlyFormat::MultipleParams => "?a=1&b=2&c=3".to_string(),
             QueryOnlyFormat::EncodedQuery => "?name=%20value&data=%21%40%23".to_string(),
             QueryOnlyFormat::EmptyValue => "?key=".to_string(),
             QueryOnlyFormat::NoValue => "?flag".to_string(),
             QueryOnlyFormat::SpecialChars => "?weird=!@#$%^&*()".to_string(),
-            QueryOnlyFormat::Unicode => "?message=%E3%81%93%E3%82%93%E3%81%AB%E3%81%A1%E3%81%AF".to_string(),
+            QueryOnlyFormat::Unicode => {
+                "?message=%E3%81%93%E3%82%93%E3%81%AB%E3%81%A1%E3%81%AF".to_string()
+            }
             QueryOnlyFormat::LongQuery => {
                 let long_value = "x".repeat(1000);
                 format!("?data={}", long_value)
-            },
+            }
             QueryOnlyFormat::NestedQuery => "?q=a%3Db%26c%3Dd&nested=%3Ffoo%3Dbar".to_string(),
         }
     }
@@ -448,11 +453,14 @@ impl MockH2PathQueryOnlyParser {
             MalformationType::DoubleQuestionMark => path.replacen("?", "??", 1),
             MalformationType::TrailingQuestionMark => format!("{}?", path),
             MalformationType::LeadingWhitespace => format!(" {}", path),
-            MalformationType::ControlCharacters => format!("?\x00{}", &path[1..]),
+            MalformationType::ControlCharacters => {
+                let remainder = path.strip_prefix('?').unwrap_or(path);
+                format!("?\x00{}", remainder)
+            }
             MalformationType::InvalidPercentEncoding => path.replace("=", "=%ZZ"),
             MalformationType::FragmentIncluded => format!("{}#fragment", path),
             MalformationType::SemicolonSeparator => path.replace("&", ";"),
-            MalformationType::MixedSeparators => path.replace("&", "&").replace("=", "=").replacen("&", ";", 1),
+            MalformationType::MixedSeparators => path.replacen("&", ";", 1),
         }
     }
 
@@ -473,9 +481,13 @@ impl MockH2PathQueryOnlyParser {
     }
 
     /// Get violations by type
-    pub fn violations_by_type(&self, violation_type: ViolationType) -> Vec<&PathValidationViolation> {
-        self.violations.iter()
-            .filter(|v| matches!(v.violation_type, violation_type))
+    pub fn violations_by_type(
+        &self,
+        violation_type: ViolationType,
+    ) -> Vec<&PathValidationViolation> {
+        self.violations
+            .iter()
+            .filter(|v| v.violation_type == violation_type)
             .collect()
     }
 }
@@ -502,6 +514,10 @@ fn cap_u32(value: u32, max: u32) -> u32 {
     value.min(max)
 }
 
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
+}
+
 fuzz_target!(|input: PathQueryOnlyInput| {
     let config = ValidationConfig {
         enforce_absolute_path: true,
@@ -511,11 +527,17 @@ fuzz_target!(|input: PathQueryOnlyInput| {
         strict_mode: true,
     };
 
-    let mut parser = MockH2PathQueryOnlyParser::new(config);
+    let mut parser = MockH2PathQueryOnlyParser::new(config.clone());
+    let mut processed_query_cases = 0u32;
+    let mut query_issue_observed = false;
+    let mut observed_violations = Vec::new();
 
     // Process each query-only path test case
     for query_path in input.query_only_paths.iter().take(10) {
-        let mut test_path = MockH2PathQueryOnlyParser::generate_test_path(&query_path.format_type, &query_path.path_value);
+        let mut test_path = MockH2PathQueryOnlyParser::generate_test_path(
+            &query_path.format_type,
+            &query_path.path_value,
+        );
 
         // Apply malformation if specified
         if let Some(malformation) = &query_path.malformation_type {
@@ -524,23 +546,32 @@ fuzz_target!(|input: PathQueryOnlyInput| {
 
         // Ensure path length is reasonable for fuzzing
         if test_path.len() > 2048 {
-            test_path = format!("?{}", &test_path[1..1024]);
+            let remainder = test_path.strip_prefix('?').unwrap_or(&test_path);
+            test_path = format!("?{}", truncate_chars(remainder, 1023));
         }
 
         // Build headers for request
-        let mut headers = Vec::new();
-
-        // Add required pseudo-headers
-        headers.push((":method".to_string(), input.request_config.method[..input.request_config.method.len().min(10)].to_string()));
-        headers.push((":path".to_string(), test_path.clone()));
-        headers.push((":scheme".to_string(), input.request_config.scheme[..input.request_config.scheme.len().min(10)].to_string()));
-        headers.push((":authority".to_string(), input.request_config.authority[..input.request_config.authority.len().min(100)].to_string()));
+        let mut headers = vec![
+            (
+                ":method".to_string(),
+                truncate_chars(&input.request_config.method, 10),
+            ),
+            (":path".to_string(), test_path.clone()),
+            (
+                ":scheme".to_string(),
+                truncate_chars(&input.request_config.scheme, 10),
+            ),
+            (
+                ":authority".to_string(),
+                truncate_chars(&input.request_config.authority, 100),
+            ),
+        ];
 
         // Add additional headers
         for header in input.additional_headers.iter().take(5) {
             if !header.is_pseudo_header && !header.name.starts_with(':') {
-                let name = header.name[..header.name.len().min(50)].to_string();
-                let value = header.value[..header.value.len().min(200)].to_string();
+                let name = truncate_chars(&header.name, 50);
+                let value = truncate_chars(&header.value, 200);
                 headers.push((name, value));
             }
         }
@@ -548,6 +579,7 @@ fuzz_target!(|input: PathQueryOnlyInput| {
         // Process the headers frame
         let stream_id = cap_u32(input.request_config.stream_id, 0x7fff_ffff) | 1; // Ensure odd for client-initiated
         let result = parser.process_headers_frame(stream_id, headers);
+        processed_query_cases += 1;
 
         // Validate expected behavior
         if query_path.expect_rejection || test_path.starts_with('?') {
@@ -555,19 +587,28 @@ fuzz_target!(|input: PathQueryOnlyInput| {
             match result {
                 Err(PathValidationError::QueryOnlyPath(_)) => {
                     // Expected rejection - good
-                },
+                    query_issue_observed = true;
+                }
                 Err(PathValidationError::InvalidPathFormat(_)) => {
                     // Also acceptable rejection reason
-                },
+                    query_issue_observed = true;
+                }
                 Ok(_) => {
                     // This might be a problem - query-only path was accepted
                     // But check if violations were at least detected
                     let query_violations = parser.violations_by_type(ViolationType::QueryOnlyPath);
-                    assert!(!query_violations.is_empty() || !config.strict_mode,
-                        "Query-only path '{}' was accepted without violations", test_path);
-                },
-                Err(other) => {
+                    if !query_violations.is_empty() {
+                        query_issue_observed = true;
+                    }
+                    assert!(
+                        !query_violations.is_empty() || !config.strict_mode,
+                        "Query-only path '{}' was accepted without violations",
+                        test_path
+                    );
+                }
+                Err(_) => {
                     // Other errors are fine too (malformation, etc.)
+                    query_issue_observed = true;
                 }
             }
         } else {
@@ -577,6 +618,8 @@ fuzz_target!(|input: PathQueryOnlyInput| {
                 // (malformed paths can legitimately be rejected)
             }
         }
+
+        observed_violations.extend(parser.results().violations);
 
         // Reset parser for next test
         parser = MockH2PathQueryOnlyParser::new(config.clone());
@@ -606,7 +649,7 @@ fuzz_target!(|input: PathQueryOnlyInput| {
 
                 let result = parser.process_headers_frame(1, headers);
                 assert!(result.is_err(), "Multiple :path headers should be rejected");
-            },
+            }
             EdgeCaseTest::PathAfterRegularHeaders => {
                 // Test :path after regular headers (should be rejected)
                 let headers = vec![
@@ -614,12 +657,15 @@ fuzz_target!(|input: PathQueryOnlyInput| {
                     (":scheme".to_string(), "https".to_string()),
                     (":authority".to_string(), "example.com".to_string()),
                     ("user-agent".to_string(), "test".to_string()), // Regular header
-                    (":path".to_string(), "?invalid".to_string()),   // Pseudo after regular
+                    (":path".to_string(), "?invalid".to_string()),  // Pseudo after regular
                 ];
 
                 let result = parser.process_headers_frame(1, headers);
-                assert!(result.is_err(), "Pseudo-headers after regular headers should be rejected");
-            },
+                assert!(
+                    result.is_err(),
+                    "Pseudo-headers after regular headers should be rejected"
+                );
+            }
             EdgeCaseTest::EmptyPathValue => {
                 // Test empty :path value
                 let headers = vec![
@@ -631,9 +677,12 @@ fuzz_target!(|input: PathQueryOnlyInput| {
 
                 let result = parser.process_headers_frame(1, headers);
                 if !config.allow_empty_paths {
-                    assert!(result.is_err(), "Empty :path should be rejected when not allowed");
+                    assert!(
+                        result.is_err(),
+                        "Empty :path should be rejected when not allowed"
+                    );
                 }
-            },
+            }
             EdgeCaseTest::VeryLongPath { length } => {
                 // Test very long query-only path
                 let long_value = "x".repeat(cap_u16(*length, 4096) as usize);
@@ -650,7 +699,7 @@ fuzz_target!(|input: PathQueryOnlyInput| {
                 if long_value.len() + 6 > config.max_path_length as usize {
                     assert!(result.is_err(), "Oversized path should be rejected");
                 }
-            },
+            }
             _ => {
                 // Other edge cases - basic validation
                 let headers = vec![
@@ -662,40 +711,54 @@ fuzz_target!(|input: PathQueryOnlyInput| {
 
                 let result = parser.process_headers_frame(1, headers);
                 // Edge cases with query-only paths should be rejected
-                assert!(result.is_err(), "Query-only path edge case should be rejected");
+                assert!(
+                    result.is_err(),
+                    "Query-only path edge case should be rejected"
+                );
             }
         }
     }
 
     // Verify overall statistics
-    let final_results = parser.results();
-
     // Check that query-only paths were properly detected
     if !input.query_only_paths.is_empty() {
-        assert!(final_results.stats.requests_processed > 0, "Should have processed some requests");
+        assert!(
+            processed_query_cases > 0,
+            "Should have processed some requests"
+        );
 
         // Should have detected some violations unless all paths were valid
-        let has_query_only = input.query_only_paths.iter()
-            .any(|p| MockH2PathQueryOnlyParser::generate_test_path(&p.format_type, &p.path_value).starts_with('?'));
+        let has_query_only = input.query_only_paths.iter().any(|p| {
+            MockH2PathQueryOnlyParser::generate_test_path(&p.format_type, &p.path_value)
+                .starts_with('?')
+        });
 
         if has_query_only && config.reject_query_only {
             // Either rejections or violations should be detected
-            assert!(final_results.stats.invalid_paths_rejected > 0 || !final_results.violations.is_empty(),
-                "Query-only paths should result in rejections or violations");
+            assert!(
+                query_issue_observed || !observed_violations.is_empty(),
+                "Query-only paths should result in rejections or violations"
+            );
         }
     }
 
     // Verify violation severity classification
-    for violation in &final_results.violations {
+    for violation in &observed_violations {
         match violation.violation_type {
             ViolationType::QueryOnlyPath => {
-                assert_eq!(violation.severity, ViolationSeverity::High,
-                    "Query-only path violations should be high severity");
-            },
+                assert_eq!(
+                    violation.severity,
+                    ViolationSeverity::High,
+                    "Query-only path violations should be high severity"
+                );
+            }
             ViolationType::RFCViolation => {
-                assert_eq!(violation.severity, ViolationSeverity::High,
-                    "RFC violations should be high severity");
-            },
+                assert_eq!(
+                    violation.severity,
+                    ViolationSeverity::High,
+                    "RFC violations should be high severity"
+                );
+            }
             _ => {}
         }
     }
@@ -723,10 +786,10 @@ mod tests {
         assert!(parser.is_query_only_path("?key=value&other=data"));
 
         // These should NOT be detected as query-only
-        assert!(!parser.is_query_only_path("/?foo=bar"));  // Valid path with query
-        assert!(!parser.is_query_only_path("/path"));       // Valid path without query
-        assert!(!parser.is_query_only_path("/"));           // Valid root path
-        assert!(!parser.is_query_only_path(""));            // Empty path
+        assert!(!parser.is_query_only_path("/?foo=bar")); // Valid path with query
+        assert!(!parser.is_query_only_path("/path")); // Valid path without query
+        assert!(!parser.is_query_only_path("/")); // Valid root path
+        assert!(!parser.is_query_only_path("")); // Empty path
     }
 
     #[test]
@@ -750,7 +813,10 @@ mod tests {
 
         let result = parser.process_headers_frame(1, headers);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), PathValidationError::QueryOnlyPath(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            PathValidationError::QueryOnlyPath(_)
+        ));
     }
 
     #[test]
@@ -798,7 +864,10 @@ mod tests {
 
         let result = parser.process_headers_frame(1, headers);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), PathValidationError::MultiplePathHeaders));
+        assert!(matches!(
+            result.unwrap_err(),
+            PathValidationError::MultiplePathHeaders
+        ));
     }
 
     #[test]
@@ -818,12 +887,15 @@ mod tests {
             (":scheme".to_string(), "https".to_string()),
             (":authority".to_string(), "example.com".to_string()),
             ("user-agent".to_string(), "test".to_string()), // Regular header
-            (":path".to_string(), "?invalid".to_string()),   // Pseudo after regular
+            (":path".to_string(), "?invalid".to_string()),  // Pseudo after regular
         ];
 
         let result = parser.process_headers_frame(1, headers);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), PathValidationError::PseudoHeaderAfterRegular));
+        assert!(matches!(
+            result.unwrap_err(),
+            PathValidationError::PseudoHeaderAfterRegular
+        ));
     }
 
     #[test]
@@ -850,17 +922,26 @@ mod tests {
         let original = "?foo=bar";
 
         assert_eq!(
-            MockH2PathQueryOnlyParser::apply_malformation(original, &MalformationType::DoubleQuestionMark),
+            MockH2PathQueryOnlyParser::apply_malformation(
+                original,
+                &MalformationType::DoubleQuestionMark
+            ),
             "??foo=bar"
         );
 
         assert_eq!(
-            MockH2PathQueryOnlyParser::apply_malformation(original, &MalformationType::TrailingQuestionMark),
+            MockH2PathQueryOnlyParser::apply_malformation(
+                original,
+                &MalformationType::TrailingQuestionMark
+            ),
             "?foo=bar?"
         );
 
         assert_eq!(
-            MockH2PathQueryOnlyParser::apply_malformation(original, &MalformationType::LeadingWhitespace),
+            MockH2PathQueryOnlyParser::apply_malformation(
+                original,
+                &MalformationType::LeadingWhitespace
+            ),
             " ?foo=bar"
         );
     }

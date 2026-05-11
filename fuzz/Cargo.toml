@@ -5636,6 +5636,7 @@ name = "h2_request_pseudo_path_query_only"
 path = "fuzz_targets/h2_request_pseudo_path_query_only.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_request_pseudo_path_with_query"
