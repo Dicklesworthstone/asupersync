@@ -76,6 +76,7 @@ impl MockAuthorityValidator {
     /// Validate :authority pseudo-header per RFC 7540 §8.1.2 and RFC 3986
     fn validate_authority(&self, input: &AuthorityInput) -> AuthorityResult {
         let authority = &input.authority;
+        let _request_context = (&input.method, &input.scheme);
 
         // Check length limits
         if authority.len() > self.policy.max_length {
@@ -100,7 +101,7 @@ impl MockAuthorityValidator {
         }
 
         // Parse and validate components
-        self.validate_authority_components(authority, input)
+        self.validate_authority_components(authority)
     }
 
     fn find_forbidden_characters(&self, authority: &str) -> Option<char> {
@@ -133,11 +134,7 @@ impl MockAuthorityValidator {
         None
     }
 
-    fn validate_authority_components(
-        &self,
-        authority: &str,
-        input: &AuthorityInput,
-    ) -> AuthorityResult {
+    fn validate_authority_components(&self, authority: &str) -> AuthorityResult {
         // Check for IPv6 literal format [::1]:8080
         if authority.starts_with('[') {
             return self.validate_ipv6_authority(authority);
@@ -157,14 +154,14 @@ impl MockAuthorityValidator {
         }
 
         // Validate port component if present
-        if let Some(port_str) = port_str {
-            if let Err(msg) = self.validate_port_component(port_str) {
-                return AuthorityResult::Invalid(msg);
-            }
+        if let Some(port_str) = port_str
+            && let Err(msg) = self.validate_port_component(port_str)
+        {
+            return AuthorityResult::Invalid(msg);
         }
 
         // Additional validation scenarios
-        self.validate_specific_scenarios(authority, input)
+        self.validate_specific_scenarios(authority)
     }
 
     fn validate_ipv6_authority(&self, authority: &str) -> AuthorityResult {
@@ -196,8 +193,7 @@ impl MockAuthorityValidator {
         }
 
         // Validate port part if present
-        if remainder.starts_with(':') {
-            let port_str = &remainder[1..];
+        if let Some(port_str) = remainder.strip_prefix(':') {
             if let Err(msg) = self.validate_port_component(port_str) {
                 return AuthorityResult::Invalid(msg);
             }
@@ -260,11 +256,7 @@ impl MockAuthorityValidator {
         Ok(())
     }
 
-    fn validate_specific_scenarios(
-        &self,
-        authority: &str,
-        input: &AuthorityInput,
-    ) -> AuthorityResult {
+    fn validate_specific_scenarios(&self, authority: &str) -> AuthorityResult {
         // Scenario 1: Authority with control characters
         if authority.chars().any(|c| c.is_control()) {
             return AuthorityResult::ProtocolError(
@@ -294,7 +286,7 @@ impl MockAuthorityValidator {
         }
 
         // Scenario 5: International characters without IDN support
-        if !self.policy.allow_idn && authority.chars().any(|c| !c.is_ascii()) {
+        if !self.policy.allow_idn && !authority.is_ascii() {
             return AuthorityResult::Invalid(
                 "Non-ASCII characters not allowed without IDN support".to_string(),
             );
@@ -408,24 +400,15 @@ fuzz_target!(|input: AuthorityInput| {
     }
 
     // Additional consistency checks
-    if input.authority.is_empty() {
-        match result {
-            AuthorityResult::Valid(_) => {
-                panic!("Empty authority should not be valid");
-            }
-            _ => {} // Invalid or protocol error is expected
-        }
+    if input.authority.is_empty() && matches!(&result, AuthorityResult::Valid(_)) {
+        panic!("Empty authority should not be valid");
     }
 
     // Check for proper IPv6 handling
-    if input.authority.starts_with('[') {
-        if !input.policy.allow_ipv6_literals {
-            match result {
-                AuthorityResult::Valid(_) => {
-                    panic!("IPv6 literal should be rejected when not allowed");
-                }
-                _ => {}
-            }
-        }
+    if input.authority.starts_with('[')
+        && !input.policy.allow_ipv6_literals
+        && matches!(&result, AuthorityResult::Valid(_))
+    {
+        panic!("IPv6 literal should be rejected when not allowed");
     }
 });

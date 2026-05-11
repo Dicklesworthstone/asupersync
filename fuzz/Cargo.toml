@@ -5310,6 +5310,7 @@ name = "h2_request_authority_invalid"
 path = "fuzz_targets/h2_request_authority_invalid.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_request_with_huge_authority"
