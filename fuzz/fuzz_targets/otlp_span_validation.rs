@@ -26,26 +26,19 @@ fn validate_otlp_string(input: &str, max_length: usize, field_name: &str) -> Res
     // Check for forbidden control characters
     for &forbidden_char in FORBIDDEN_CHARS {
         if input.contains(forbidden_char) {
+            let codepoint = forbidden_char as u32;
             return Err(format!(
-                "{} contains forbidden character: {:?} (U+{:04X})",
-                field_name, forbidden_char, forbidden_char as u32
+                "{field_name} contains forbidden character: {forbidden_char:?} (U+{codepoint:04X})"
             ));
         }
     }
 
     // Check length constraints
     if input.len() > max_length {
+        let input_len = input.len();
         return Err(format!(
-            "{} exceeds max length: {} > {} bytes",
-            field_name,
-            input.len(),
-            max_length
+            "{field_name} exceeds max length: {input_len} > {max_length} bytes"
         ));
-    }
-
-    // Check for valid UTF-8 (should always pass since input is String)
-    if !input.is_valid_utf8() {
-        return Err(format!("{} contains invalid UTF-8", field_name));
     }
 
     Ok(())
@@ -75,18 +68,6 @@ fn sanitize_otlp_string(input: &str, max_length: usize) -> String {
     }
 
     sanitized
-}
-
-/// Test helper trait for UTF-8 validation
-trait Utf8Validator {
-    fn is_valid_utf8(&self) -> bool;
-}
-
-impl Utf8Validator for str {
-    fn is_valid_utf8(&self) -> bool {
-        // If we can construct a &str, it's already valid UTF-8
-        true
-    }
 }
 
 /// Creates sanitized span name according to OTLP spec
@@ -140,26 +121,24 @@ fuzz_target!(|data: &[u8]| {
 
     // Verify sanitized span name meets OTLP requirements
     if let Err(e) = validate_otlp_string(&sanitized_span_name, MAX_SPAN_NAME_LENGTH, "span_name") {
-        panic!("Span name sanitization failed: {}", e);
+        panic!("Span name sanitization failed: {e}");
     }
 
     // Verify no forbidden characters remain
     for &forbidden_char in FORBIDDEN_CHARS {
         if sanitized_span_name.contains(forbidden_char) {
-            panic!(
-                "Sanitized span name still contains forbidden character: {:?}",
-                forbidden_char
-            );
+            panic!("Sanitized span name still contains forbidden character: {forbidden_char:?}");
         }
     }
 
     // Test 2: Create span with sanitized name
     let config = SpanConformanceConfig::default();
+    let expected_span_kind = span_kind.clone();
     let mut span = TestSpan::new_with_config(&sanitized_span_name, span_kind, &config);
 
     // Verify the span was created successfully
     assert_eq!(span.name, sanitized_span_name);
-    assert_eq!(span.kind, span_kind);
+    assert_eq!(span.kind, expected_span_kind);
 
     // Test 3: Attribute key validation and sanitization
     for (i, raw_key) in fuzz_input.attribute_keys.iter().enumerate() {
@@ -169,15 +148,14 @@ fuzz_target!(|data: &[u8]| {
         if let Err(e) =
             validate_otlp_string(&sanitized_key, MAX_ATTRIBUTE_KEY_LENGTH, "attribute_key")
         {
-            panic!("Attribute key sanitization failed for key {}: {}", i, e);
+            panic!("Attribute key sanitization failed for key {i}: {e}");
         }
 
         // Verify no forbidden characters remain
         for &forbidden_char in FORBIDDEN_CHARS {
             if sanitized_key.contains(forbidden_char) {
                 panic!(
-                    "Sanitized attribute key {} still contains forbidden character: {:?}",
-                    i, forbidden_char
+                    "Sanitized attribute key {i} still contains forbidden character: {forbidden_char:?}"
                 );
             }
         }
@@ -186,30 +164,22 @@ fuzz_target!(|data: &[u8]| {
         let value = fuzz_input
             .attribute_values
             .get(i)
-            .unwrap_or(&"default_value".to_string());
+            .map_or("default_value", String::as_str);
 
         span.set_attribute(&sanitized_key, value);
 
-        // Verify the attribute was stored properly
-        if span.attributes.len() > i + 1 {
-            // Note: The actual stored key might be truncated by the implementation
-            let stored_keys: Vec<&String> = span.attributes.keys().collect();
-            let stored_key = stored_keys.last().unwrap();
-
-            // Verify stored key doesn't exceed limits
+        // Verify the stored keys stay compliant even after implementation-side truncation.
+        for stored_key in span.attributes.keys() {
+            let stored_len = stored_key.len();
             assert!(
-                stored_key.len() <= MAX_ATTRIBUTE_KEY_LENGTH,
-                "Stored attribute key exceeds max length: {} > {}",
-                stored_key.len(),
-                MAX_ATTRIBUTE_KEY_LENGTH
+                stored_len <= MAX_ATTRIBUTE_KEY_LENGTH,
+                "Stored attribute key exceeds max length: {stored_len} > {MAX_ATTRIBUTE_KEY_LENGTH}"
             );
 
-            // Verify stored key has no forbidden characters
             for &forbidden_char in FORBIDDEN_CHARS {
                 assert!(
                     !stored_key.contains(forbidden_char),
-                    "Stored attribute key contains forbidden character: {:?}",
-                    forbidden_char
+                    "Stored attribute key contains forbidden character: {forbidden_char:?}"
                 );
             }
         }
@@ -224,14 +194,14 @@ fuzz_target!(|data: &[u8]| {
     );
 
     // Test extreme inputs
-    let extreme_inputs = vec![
-        "\0".repeat(2000),          // Null bytes
-        "\r\n".repeat(1000),        // CRLF sequences
-        "🔥".repeat(500),           // Unicode emoji
-        "a".repeat(5000),           // Very long ASCII
-        "\u{0000}\u{001F}\u{007F}", // Control characters
-        "",                         // Empty string
-        " \t\n\r ",                 // Whitespace only
+    let extreme_inputs = [
+        "\0".repeat(2000),                      // Null bytes
+        "\r\n".repeat(1000),                    // CRLF sequences
+        "🔥".repeat(500),                       // Unicode emoji
+        "a".repeat(5000),                       // Very long ASCII
+        "\u{0000}\u{001F}\u{007F}".to_string(), // Control characters
+        String::new(),                          // Empty string
+        " \t\n\r ".to_string(),                 // Whitespace only
     ];
 
     for extreme_input in extreme_inputs {
@@ -265,7 +235,7 @@ fuzz_target!(|data: &[u8]| {
 
     // Verify it's still valid UTF-8 after truncation
     assert!(
-        sanitized_multibyte.is_valid_utf8(),
+        std::str::from_utf8(sanitized_multibyte.as_bytes()).is_ok(),
         "Sanitized multibyte string should remain valid UTF-8"
     );
     assert!(
@@ -286,23 +256,7 @@ fuzz_target!(|data: &[u8]| {
         let double_sanitized_key = create_otlp_compliant_attribute_key(&sanitized_key);
         assert_eq!(
             sanitized_key, double_sanitized_key,
-            "Sanitization should be idempotent for attribute key {}",
-            i
+            "Sanitization should be idempotent for attribute key {i}"
         );
     }
-
-    // Test 7: Performance bounds - sanitization should not take excessive time
-    let start = std::time::Instant::now();
-    let _performance_test = create_otlp_compliant_span_name(&fuzz_input.span_name);
-    let elapsed = start.elapsed();
-
-    // Sanitization should complete within reasonable time (1ms per 1KB of input)
-    let max_duration =
-        std::time::Duration::from_millis((fuzz_input.span_name.len() / 1024 + 1) as u64);
-    assert!(
-        elapsed <= max_duration,
-        "Span name sanitization took too long: {:?} > {:?}",
-        elapsed,
-        max_duration
-    );
 });

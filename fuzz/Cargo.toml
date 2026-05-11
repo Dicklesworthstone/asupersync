@@ -4060,6 +4060,7 @@ name = "otlp_span_validation"
 path = "fuzz_targets/otlp_span_validation.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "grpc_streaming_bidi_cancel"
