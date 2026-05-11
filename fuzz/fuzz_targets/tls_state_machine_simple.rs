@@ -136,10 +136,7 @@ impl asupersync::io::AsyncWrite for MockTlsTransport {
         Poll::Ready(Ok(buf.len()))
     }
 
-    fn poll_flush(
-        self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-    ) -> Poll<io::Result<()>> {
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         if self.closed {
             Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()))
         } else {
@@ -147,10 +144,7 @@ impl asupersync::io::AsyncWrite for MockTlsTransport {
         }
     }
 
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-    ) -> Poll<io::Result<()>> {
+    fn poll_shutdown(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         self.closed = true;
         Poll::Ready(Ok(()))
     }
@@ -188,7 +182,8 @@ fn fuzz_tls_simple(input: TlsSimpleFuzz) {
         asupersync::time::timeout(now, timeout, async {
             // Attempt TLS connection - this exercises the state machine
             connector.connect("test.example", transport).await
-        }).await
+        })
+        .await
     });
 
     // All errors/timeouts are expected for fuzz inputs
