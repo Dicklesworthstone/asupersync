@@ -1,13 +1,14 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use libfuzzer_sys::fuzz_target;
-use asupersync::trace::file::{TraceFileConfig, TraceWriter, TraceReader, CompressionMode, TraceFileError};
+use asupersync::trace::file::{
+    CompressionMode, TraceFileConfig, TraceFileError, TraceReader, TraceWriter,
+};
 use asupersync::trace::replay::{ReplayEvent, TraceMetadata};
+use libfuzzer_sys::fuzz_target;
 use std::fs::{File, remove_file};
-use std::io::{Write, Seek, SeekFrom};
+use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
-use std::time::Duration;
 use tempfile::NamedTempFile;
 
 /// Comprehensive fuzz target for trace file writer/reader durability testing
@@ -31,27 +32,20 @@ struct TraceFileFuzz {
     events: Vec<ReplayEventFuzz>,
     /// Metadata to write
     metadata: TraceMetadataFuzz,
-    /// Raw binary data for corruption testing
-    corruption_data: Vec<u8>,
 }
 
 /// Fuzzing operations on trace files
 #[derive(Arbitrary, Debug)]
 enum TraceFileOperation {
     /// Test normal write-read cycle
-    WriteAndRead {
-        compress: bool,
-        event_count: u8,
-    },
+    WriteAndRead { compress: bool, event_count: u8 },
     /// Test with corrupted file data
     WriteAndCorrupt {
         corruption_offset: u32,
         corruption_data: Vec<u8>,
     },
     /// Test with partial/truncated files
-    WriteAndTruncate {
-        truncate_at: u32,
-    },
+    WriteAndTruncate { truncate_at: u32 },
     /// Test compression scenarios
     TestCompression {
         mode: CompressionModeFuzz,
@@ -69,13 +63,9 @@ enum TraceFileOperation {
         force_write_error: bool,
     },
     /// Test malformed headers
-    TestMalformedHeader {
-        header_data: Vec<u8>,
-    },
+    TestMalformedHeader { header_data: Vec<u8> },
     /// Test reader resilience
-    TestReaderResilience {
-        file_data: Vec<u8>,
-    },
+    TestReaderResilience { file_data: Vec<u8> },
 }
 
 /// Writer configuration for fuzzing
@@ -91,9 +81,7 @@ struct WriterConfigFuzz {
 #[derive(Arbitrary, Debug)]
 enum CompressionModeFuzz {
     None,
-    #[cfg(feature = "trace-compression")]
     Lz4 { level: i8 },
-    #[cfg(feature = "trace-compression")]
     Auto,
 }
 
@@ -141,65 +129,91 @@ fuzz_target!(|input: TraceFileFuzz| {
     // Execute trace file operations
     for operation in operations {
         match operation {
-            TraceFileOperation::WriteAndRead { compress, event_count } => {
-                test_write_read_cycle(&safe_config, *compress, *event_count, &input.events, &input.metadata);
-            },
-            TraceFileOperation::WriteAndCorrupt { corruption_offset, corruption_data } => {
-                test_file_corruption(&safe_config, *corruption_offset, corruption_data, &input.events, &input.metadata);
-            },
+            TraceFileOperation::WriteAndRead {
+                compress,
+                event_count,
+            } => {
+                test_write_read_cycle(
+                    &safe_config,
+                    *compress,
+                    *event_count,
+                    &input.events,
+                    &input.metadata,
+                );
+            }
+            TraceFileOperation::WriteAndCorrupt {
+                corruption_offset,
+                corruption_data,
+            } => {
+                test_file_corruption(
+                    &safe_config,
+                    *corruption_offset,
+                    corruption_data,
+                    &input.events,
+                    &input.metadata,
+                );
+            }
             TraceFileOperation::WriteAndTruncate { truncate_at } => {
                 test_file_truncation(&safe_config, *truncate_at, &input.events, &input.metadata);
-            },
+            }
             TraceFileOperation::TestCompression { mode, events } => {
                 test_compression_scenarios(mode, events);
-            },
-            TraceFileOperation::TestSizeLimits { max_events, max_file_size, oversized_event_size } => {
+            }
+            TraceFileOperation::TestSizeLimits {
+                max_events,
+                max_file_size,
+                oversized_event_size,
+            } => {
                 test_size_limits(*max_events, *max_file_size, *oversized_event_size);
-            },
-            TraceFileOperation::TestErrorRecovery { simulate_disk_full, force_write_error } => {
+            }
+            TraceFileOperation::TestErrorRecovery {
+                simulate_disk_full,
+                force_write_error,
+            } => {
                 test_error_recovery(*simulate_disk_full, *force_write_error);
-            },
+            }
             TraceFileOperation::TestMalformedHeader { header_data } => {
                 test_malformed_header(header_data);
-            },
+            }
             TraceFileOperation::TestReaderResilience { file_data } => {
                 test_reader_resilience(file_data);
-            },
+            }
         }
     }
 });
 
-fn test_config_validation(config: &WriterConfigFuzz) {
+fn test_config_validation(_config: &WriterConfigFuzz) {
     // Test various configuration edge cases
     let test_configs = [
         TraceFileConfig {
             compression: CompressionMode::None,
             chunk_size: 0, // Invalid
             max_events: None,
-            max_file_size: None,
+            max_file_size: MAX_FILE_SIZE,
             on_limit: asupersync::trace::recorder::LimitAction::StopRecording,
         },
         TraceFileConfig {
             compression: CompressionMode::None,
             chunk_size: 1024,
             max_events: Some(0), // Edge case
-            max_file_size: None,
+            max_file_size: MAX_FILE_SIZE,
             on_limit: asupersync::trace::recorder::LimitAction::StopRecording,
         },
         TraceFileConfig {
             compression: CompressionMode::None,
             chunk_size: 1024,
             max_events: None,
-            max_file_size: Some(1), // Very small
+            max_file_size: 1, // Very small
             on_limit: asupersync::trace::recorder::LimitAction::StopRecording,
         },
     ];
 
     for config in &test_configs {
         // Configuration creation should not panic
-        let _ = create_temp_file_result().and_then(|temp| {
-            TraceWriter::create_with_config(&temp, config.clone())
-        });
+        if let Ok(temp) = create_temp_file_result() {
+            let _ = TraceWriter::create_with_config(&temp, config.clone());
+            let _ = remove_file(temp);
+        }
     }
 }
 
@@ -218,10 +232,7 @@ fn test_write_read_cycle(
     // Test basic write-read cycle
     let test_config = if compress {
         TraceFileConfig {
-            #[cfg(feature = "trace-compression")]
             compression: CompressionMode::Lz4 { level: 1 },
-            #[cfg(not(feature = "trace-compression"))]
-            compression: CompressionMode::None,
             ..config.clone()
         }
     } else {
@@ -238,10 +249,10 @@ fn test_write_read_cycle(
         Ok(expected_events) => {
             // Try to read the trace back
             read_and_validate_trace(&temp_file, &expected_events, metadata);
-        },
+        }
         Err(_) => {
             // Write failures are acceptable - test error handling
-        },
+        }
     }
 
     let _ = remove_file(&temp_file);
@@ -286,14 +297,14 @@ fn test_file_corruption(
             // If reader opens successfully, test event iteration error handling
             for event_result in reader.events().take(10) {
                 match event_result {
-                    Ok(_) => {}, // Valid event despite corruption
+                    Ok(_) => {}      // Valid event despite corruption
                     Err(_) => break, // Expected error due to corruption
                 }
             }
-        },
+        }
         Err(_) => {
             // Reader failure is expected with corruption
-        },
+        }
     }
 
     let _ = remove_file(&temp_file);
@@ -328,18 +339,18 @@ fn test_file_truncation(
             // Test reading from truncated file
             for event_result in reader.events().take(5) {
                 match event_result {
-                    Ok(_) => {},
+                    Ok(_) => {}
                     Err(TraceFileError::Truncated) => break, // Expected
-                    Err(_) => break, // Other errors also acceptable
+                    Err(_) => break,                         // Other errors also acceptable
                 }
             }
-        },
+        }
         Err(TraceFileError::Truncated) => {
             // Expected error for severely truncated files
-        },
+        }
         Err(_) => {
             // Other errors also acceptable
-        },
+        }
     }
 
     let _ = remove_file(&temp_file);
@@ -356,12 +367,12 @@ fn test_compression_scenarios(mode: &CompressionModeFuzz, events: &[ReplayEventF
         compression: compression_mode,
         chunk_size: 1024,
         max_events: None,
-        max_file_size: None,
+        max_file_size: MAX_FILE_SIZE,
         on_limit: asupersync::trace::recorder::LimitAction::StopRecording,
     };
 
     // Test compression with various event patterns
-    let mut writer_result = TraceWriter::create_with_config(&temp_file, config);
+    let writer_result = TraceWriter::create_with_config(&temp_file, config);
     if let Ok(mut writer) = writer_result {
         let metadata = create_test_metadata(&TraceMetadataFuzz {
             schema_version: 1,
@@ -395,7 +406,7 @@ fn test_compression_scenarios(mode: &CompressionModeFuzz, events: &[ReplayEventF
                 break;
             }
             match event_result {
-                Ok(_) => {},
+                Ok(_) => {}
                 Err(_) => break, // Decompression or other errors
             }
         }
@@ -404,7 +415,11 @@ fn test_compression_scenarios(mode: &CompressionModeFuzz, events: &[ReplayEventF
     let _ = remove_file(&temp_file);
 }
 
-fn test_size_limits(max_events: Option<u32>, max_file_size: Option<u64>, oversized_event_size: u32) {
+fn test_size_limits(
+    max_events: Option<u32>,
+    max_file_size: Option<u64>,
+    oversized_event_size: u32,
+) {
     let temp_file = match create_temp_file() {
         Ok(f) => f,
         Err(_) => return,
@@ -414,7 +429,7 @@ fn test_size_limits(max_events: Option<u32>, max_file_size: Option<u64>, oversiz
         compression: CompressionMode::None,
         chunk_size: 1024,
         max_events: max_events.map(|e| e.min(1000) as u64), // Cap to reasonable limit
-        max_file_size: max_file_size.map(|s| s.min(MAX_FILE_SIZE)),
+        max_file_size: max_file_size.unwrap_or(MAX_FILE_SIZE).min(MAX_FILE_SIZE),
         on_limit: asupersync::trace::recorder::LimitAction::StopRecording,
     };
 
@@ -439,13 +454,13 @@ fn test_size_limits(max_events: Option<u32>, max_file_size: Option<u64>, oversiz
     }
 
     // Test oversized event
-    let oversized_data = vec![0u8; (oversized_event_size as usize).min(MAX_EVENT_SIZE)];
     let oversized_event = ReplayEvent::RngSeed { seed: 123 }; // Use simple event to avoid size issues
+    let write_attempts = ((oversized_event_size as usize).min(MAX_EVENT_SIZE) / 1024).clamp(1, 100);
 
     // Write events until limit is hit
-    for i in 0..100 {
+    for _ in 0..write_attempts {
         match writer.write_event(&oversized_event) {
-            Ok(()) => {}, // Event written successfully
+            Ok(()) => {}     // Event written successfully
             Err(_) => break, // Limit reached or other error
         }
     }
@@ -456,7 +471,7 @@ fn test_size_limits(max_events: Option<u32>, max_file_size: Option<u64>, oversiz
     let _ = remove_file(&temp_file);
 }
 
-fn test_error_recovery(simulate_disk_full: bool, force_write_error: bool) {
+fn test_error_recovery(_simulate_disk_full: bool, _force_write_error: bool) {
     // These tests would require more complex setup to simulate actual I/O errors
     // For now, test basic error handling paths
 
@@ -512,22 +527,22 @@ fn test_malformed_header(header_data: &[u8]) {
     match reader_result {
         Ok(_) => {
             // Unexpected success - malformed data was somehow valid
-        },
+        }
         Err(TraceFileError::InvalidMagic) => {
             // Expected for invalid magic bytes
-        },
+        }
         Err(TraceFileError::UnsupportedVersion { .. }) => {
             // Expected for invalid version
-        },
+        }
         Err(TraceFileError::UnsupportedFlags(_)) => {
             // Expected for invalid flags
-        },
+        }
         Err(TraceFileError::Truncated) => {
             // Expected for incomplete header
-        },
+        }
         Err(_) => {
             // Other errors also acceptable
-        },
+        }
     }
 
     let _ = remove_file(&temp_file);
@@ -554,24 +569,23 @@ fn test_reader_resilience(file_data: &[u8]) {
     let reader_result = TraceReader::open(&temp_file);
     match reader_result {
         Ok(reader) => {
+            let _metadata_seed = reader.metadata().seed;
+            let _event_count = reader.event_count();
+
             // If reader opens, test event iteration resilience
             for (i, event_result) in reader.events().enumerate() {
                 if i >= 10 {
                     break; // Limit iterations
                 }
                 match event_result {
-                    Ok(_) => {},
+                    Ok(_) => {}
                     Err(_) => break, // Expected for malformed data
                 }
             }
-
-            // Test metadata access
-            let _ = reader.metadata();
-            let _ = reader.event_count();
-        },
+        }
         Err(_) => {
             // Reader failure is expected for arbitrary data
-        },
+        }
     }
 
     let _ = remove_file(&temp_file);
@@ -584,7 +598,10 @@ fn create_safe_config(config: &WriterConfigFuzz) -> TraceFileConfig {
         compression: convert_compression_mode(&config.compression),
         chunk_size: config.chunk_size.clamp(1024, MAX_CHUNK_SIZE) as usize,
         max_events: config.max_events.map(|e| (e as u64).min(10_000)),
-        max_file_size: config.max_file_size.map(|s| s.min(MAX_FILE_SIZE)),
+        max_file_size: config
+            .max_file_size
+            .unwrap_or(MAX_FILE_SIZE)
+            .min(MAX_FILE_SIZE),
         on_limit: asupersync::trace::recorder::LimitAction::StopRecording,
     }
 }
@@ -592,18 +609,24 @@ fn create_safe_config(config: &WriterConfigFuzz) -> TraceFileConfig {
 fn convert_compression_mode(mode: &CompressionModeFuzz) -> CompressionMode {
     match mode {
         CompressionModeFuzz::None => CompressionMode::None,
-        #[cfg(feature = "trace-compression")]
         CompressionModeFuzz::Lz4 { level } => CompressionMode::Lz4 {
-            level: level.clamp(-1, 16) as i32,
+            level: (*level).clamp(-1, 16) as i32,
         },
-        #[cfg(feature = "trace-compression")]
         CompressionModeFuzz::Auto => CompressionMode::Auto,
     }
 }
 
 fn create_test_metadata(metadata_fuzz: &TraceMetadataFuzz) -> TraceMetadata {
-    // Create a valid TraceMetadata from fuzz input
-    TraceMetadata::new(metadata_fuzz.seed)
+    let description_bytes =
+        &metadata_fuzz.data_bytes[..metadata_fuzz.data_bytes.len().min(MAX_METADATA_SIZE)];
+    let data_hash = fold_bytes(metadata_fuzz.schema_version as u64, description_bytes);
+
+    let mut metadata = TraceMetadata::new(metadata_fuzz.seed).with_config_hash(data_hash);
+    metadata.version = metadata_fuzz.schema_version;
+    if !description_bytes.is_empty() {
+        metadata.description = Some(format!("fuzz-metadata-bytes={}", description_bytes.len()));
+    }
+    metadata
 }
 
 fn convert_replay_event(event_fuzz: &ReplayEventFuzz) -> ReplayEvent {
@@ -611,18 +634,29 @@ fn convert_replay_event(event_fuzz: &ReplayEventFuzz) -> ReplayEvent {
         ReplayEventFuzz::RngSeed { seed } => ReplayEvent::RngSeed { seed: *seed },
         ReplayEventFuzz::TaskSpawn { id, name } => {
             // Create a simplified task spawn event
-            ReplayEvent::RngSeed { seed: *id } // Simplify to avoid complex types
-        },
+            ReplayEvent::RngSeed {
+                seed: fold_bytes(*id, name.as_bytes()),
+            } // Simplify to avoid complex types
+        }
         ReplayEventFuzz::TaskComplete { id } => {
             ReplayEvent::RngSeed { seed: *id } // Simplify to avoid complex types
-        },
+        }
         ReplayEventFuzz::Delay { nanos } => {
             ReplayEvent::RngSeed { seed: *nanos } // Simplify to avoid complex types
-        },
-        ReplayEventFuzz::CustomEvent { data: _ } => {
-            ReplayEvent::RngSeed { seed: 42 } // Simplify to avoid complex types
-        },
+        }
+        ReplayEventFuzz::CustomEvent { data } => {
+            ReplayEvent::RngSeed {
+                seed: fold_bytes(42, data),
+            } // Simplify to avoid complex types
+        }
     }
+}
+
+fn fold_bytes(seed: u64, bytes: &[u8]) -> u64 {
+    bytes
+        .iter()
+        .take(MAX_EVENT_SIZE)
+        .fold(seed, |acc, byte| acc.rotate_left(5) ^ u64::from(*byte))
 }
 
 fn create_temp_file() -> Result<PathBuf, std::io::Error> {
@@ -686,15 +720,14 @@ fn read_and_validate_trace(
             Ok(event) => {
                 if i < expected_events.len() {
                     // Basic validation - exact comparison might be too strict for fuzzing
-                    match (&event, &expected_events[i]) {
-                        (ReplayEvent::RngSeed { seed: a }, ReplayEvent::RngSeed { seed: b }) => {
-                            assert_eq!(a, b);
-                        },
-                        _ => {}, // Other event types
+                    if let (ReplayEvent::RngSeed { seed: a }, ReplayEvent::RngSeed { seed: b }) =
+                        (&event, &expected_events[i])
+                    {
+                        assert_eq!(a, b);
                     }
                 }
                 event_count += 1;
-            },
+            }
             Err(_) => break,
         }
     }

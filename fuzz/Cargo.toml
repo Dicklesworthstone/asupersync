@@ -714,6 +714,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_fuzz_trace_file_parsing"
+path = "fuzz_targets/fuzz_trace_file_parsing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_trace_file_durability"
 path = "fuzz_targets/trace_file_durability.rs"
 test = false
