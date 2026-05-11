@@ -2,14 +2,13 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashMap;
 
 /// HTTP/2 large header rejection fuzz target.
 ///
 /// Tests memory protection when HEADERS frame contains single header values
-/// > 1MB (e.g., very large cookies). Our parser must reject with appropriate
-/// error BEFORE allocating 1MB+ memory to prevent DoS attacks and memory
-/// exhaustion.
+/// larger than 1MB (e.g., very large cookies). Our parser must reject with
+/// appropriate error BEFORE allocating 1MB+ memory to prevent DoS attacks and
+/// memory exhaustion.
 ///
 /// Critical test scenarios:
 /// - Single header value > 1MB (Cookie, Authorization, etc.)
@@ -160,16 +159,16 @@ impl MockH2HeadersParser {
         }
 
         // Early size check if enabled
-        if self.config.early_size_check {
-            if let Some(size_violation) = self.early_size_validation(&input.headers) {
-                self.memory_stats.early_rejections += 1;
-                return HeadersParseResult::HeaderTooLarge {
-                    header_name: size_violation.header_name,
-                    header_size: size_violation.size,
-                    limit: self.config.max_header_value_size,
-                    memory_allocated: 0, // No allocation occurred
-                };
-            }
+        if self.config.early_size_check
+            && let Some(size_violation) = self.early_size_validation(&input.headers)
+        {
+            self.memory_stats.early_rejections += 1;
+            return HeadersParseResult::HeaderTooLarge {
+                header_name: size_violation.header_name,
+                header_size: size_violation.size,
+                limit: self.config.max_header_value_size,
+                memory_allocated: 0, // No allocation occurred
+            };
         }
 
         // Parse headers with size tracking
@@ -177,11 +176,12 @@ impl MockH2HeadersParser {
     }
 
     fn early_size_validation(&self, headers: &[TestHeader]) -> Option<SizeViolation> {
-        let mut total_size = 0;
+        let mut total_size = 0usize;
 
         for header in headers {
             // Check individual header value size BEFORE any allocation
-            let estimated_size = header.name.len() + header.value.len();
+            let value_size = self.effective_value_size(header);
+            let estimated_size = header.name.len().saturating_add(value_size);
 
             if estimated_size > self.config.max_header_value_size as usize {
                 return Some(SizeViolation {
@@ -190,7 +190,7 @@ impl MockH2HeadersParser {
                 });
             }
 
-            total_size += estimated_size;
+            total_size = total_size.saturating_add(estimated_size);
 
             // Check total size accumulation
             if total_size > self.config.max_total_headers_size as usize {
@@ -208,7 +208,7 @@ impl MockH2HeadersParser {
         let mut parsed = Vec::new();
         let mut total_memory = 0;
 
-        for (index, header) in headers.iter().enumerate() {
+        for header in headers {
             // Check header count limit
             if parsed.len() >= self.config.max_header_count as usize {
                 return HeadersParseResult::TooManyHeaders {
@@ -272,8 +272,8 @@ impl MockH2HeadersParser {
     ) -> Result<ParsedHeader, HeaderParseError> {
         // Calculate memory requirements BEFORE allocation
         let name_size = header.name.len();
-        let value_size = header.value.len();
-        let header_memory = name_size + value_size + 64; // Include overhead
+        let value_size = self.effective_value_size(header);
+        let header_memory = self.header_memory_requirement(name_size, value_size);
 
         // Check individual header size limit
         if value_size > self.config.max_header_value_size as usize {
@@ -285,7 +285,9 @@ impl MockH2HeadersParser {
         }
 
         // Check total memory limit before allocation
-        if *total_memory + header_memory > self.config.max_total_headers_size as usize {
+        if (*total_memory).saturating_add(header_memory)
+            > self.config.max_total_headers_size as usize
+        {
             return Err(HeaderParseError::MemoryExhaustion {
                 allocated: *total_memory,
                 limit: self.config.max_total_headers_size,
@@ -299,7 +301,7 @@ impl MockH2HeadersParser {
         }
 
         // Safe to allocate - within limits
-        *total_memory += header_memory;
+        *total_memory = total_memory.saturating_add(header_memory);
 
         Ok(ParsedHeader {
             name: header.name.clone(),
@@ -307,6 +309,20 @@ impl MockH2HeadersParser {
             is_pseudo: header.is_pseudo,
             size: header_memory,
         })
+    }
+
+    fn effective_value_size(&self, header: &TestHeader) -> usize {
+        let multiplier = usize::from(header.size_multiplier.max(1));
+        header.value.len().saturating_mul(multiplier)
+    }
+
+    fn header_memory_requirement(&self, name_size: usize, value_size: usize) -> usize {
+        let logical_size = name_size.saturating_add(value_size);
+        if self.config.track_memory {
+            logical_size.saturating_add(64)
+        } else {
+            logical_size
+        }
     }
 
     fn validate_header_format(
@@ -474,7 +490,7 @@ impl MockH2HeadersParser {
             ContentPattern::Encoded => {
                 // Base64-like pattern
                 "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-                    .repeat((size + 63) / 64)
+                    .repeat(size.div_ceil(64))
                     .chars()
                     .take(size)
                     .collect()
@@ -497,7 +513,7 @@ struct MemoryStats {
     peak_memory_used: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct ParsedHeader {
     name: String,
     value: String,
@@ -655,13 +671,10 @@ fuzz_target!(|input: LargeHeaderInput| {
 
             HeadersParseResult::Success { .. } => {
                 // Should only succeed if pattern is actually within limits
-                match pattern {
-                    LargeHeaderPattern::MassiveValue { size_mb, .. } => {
-                        if *size_mb > 0 {
-                            panic!("Massive value pattern should be rejected");
-                        }
-                    }
-                    _ => {}
+                if let LargeHeaderPattern::MassiveValue { size_mb, .. } = pattern
+                    && *size_mb > 0
+                {
+                    panic!("Massive value pattern should be rejected");
                 }
             }
 

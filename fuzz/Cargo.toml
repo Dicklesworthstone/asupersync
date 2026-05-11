@@ -5374,6 +5374,7 @@ name = "h2_request_header_too_large"
 path = "fuzz_targets/h2_request_header_too_large.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_request_authority_with_userinfo"
