@@ -30,8 +30,6 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use std::collections::VecDeque;
-use std::time::Duration;
 
 /// Keep-alive specific connection parameters
 #[derive(Debug, Clone, Arbitrary)]
@@ -74,7 +72,10 @@ impl KeepAliveParams {
             }
         }
 
-        Self { timeout, max_requests }
+        Self {
+            timeout,
+            max_requests,
+        }
     }
 
     /// Generate header value string
@@ -230,20 +231,21 @@ struct MockKeepAliveManager {
     current_time: u64,
     effective_timeout: u32,
     effective_max_requests: u32,
-    connection_id: u32,
 }
 
 impl MockKeepAliveManager {
     fn new(config: KeepAliveConfig) -> Self {
+        let effective_timeout = config.default_timeout;
+        let effective_max_requests = config.default_max_requests;
+
         Self {
             state: KeepAliveState::Established,
             config,
             requests_processed: 0,
             last_activity_time: 0,
             current_time: 0,
-            effective_timeout: config.default_timeout,
-            effective_max_requests: config.default_max_requests,
-            connection_id: 1,
+            effective_timeout,
+            effective_max_requests,
         }
     }
 
@@ -335,6 +337,8 @@ impl MockKeepAliveManager {
     }
 
     fn validate_message_boundary(&self, msg: &KeepAliveMessage) -> Result<(), String> {
+        let _observed_method = msg.method;
+
         if !msg.has_body {
             return Ok(());
         }
@@ -381,16 +385,19 @@ impl MockKeepAliveManager {
 
     /// Check if connection can accept more messages
     fn can_accept_message(&self) -> bool {
-        matches!(self.state,
-            KeepAliveState::Established |
-            KeepAliveState::Idle |
-            KeepAliveState::Active
+        matches!(
+            self.state,
+            KeepAliveState::Established | KeepAliveState::Idle | KeepAliveState::Active
         )
     }
 
     /// Get connection statistics
     fn get_stats(&self) -> (u32, u64, u32) {
-        (self.requests_processed, self.current_time - self.last_activity_time, self.effective_timeout)
+        (
+            self.requests_processed,
+            self.current_time - self.last_activity_time,
+            self.effective_timeout,
+        )
     }
 }
 
@@ -403,7 +410,10 @@ fn generate_keep_alive_edge_cases() -> Vec<Vec<KeepAliveMessage>> {
                 version: HttpVersion::Http10,
                 method: HttpMethod::Get,
                 connection_header: ConnectionHeader::KeepAlive,
-                keep_alive_params: Some(KeepAliveParams { timeout: Some(30), max_requests: Some(5) }),
+                keep_alive_params: Some(KeepAliveParams {
+                    timeout: Some(30),
+                    max_requests: Some(5),
+                }),
                 has_body: false,
                 body_encoding: BodyEncoding::None,
                 processing_time_ms: 100,
@@ -418,7 +428,6 @@ fn generate_keep_alive_edge_cases() -> Vec<Vec<KeepAliveMessage>> {
                 processing_time_ms: 50,
             },
         ],
-
         // HTTP/1.1 implicit keep-alive with timeout
         vec![
             KeepAliveMessage {
@@ -440,53 +449,49 @@ fn generate_keep_alive_edge_cases() -> Vec<Vec<KeepAliveMessage>> {
                 processing_time_ms: 0,
             },
         ],
-
         // Keep-alive with chunked encoding
-        vec![
-            KeepAliveMessage {
-                version: HttpVersion::Http11,
-                method: HttpMethod::Post,
-                connection_header: ConnectionHeader::KeepAlive,
-                keep_alive_params: Some(KeepAliveParams { timeout: Some(120), max_requests: Some(10) }),
-                has_body: true,
-                body_encoding: BodyEncoding::Chunked,
-                processing_time_ms: 200,
-            },
-        ],
-
+        vec![KeepAliveMessage {
+            version: HttpVersion::Http11,
+            method: HttpMethod::Post,
+            connection_header: ConnectionHeader::KeepAlive,
+            keep_alive_params: Some(KeepAliveParams {
+                timeout: Some(120),
+                max_requests: Some(10),
+            }),
+            has_body: true,
+            body_encoding: BodyEncoding::Chunked,
+            processing_time_ms: 200,
+        }],
         // Malformed keep-alive parameters
-        vec![
-            KeepAliveMessage {
-                version: HttpVersion::Http11,
-                method: HttpMethod::Get,
-                connection_header: ConnectionHeader::Malformed,
-                keep_alive_params: None,
-                has_body: false,
-                body_encoding: BodyEncoding::None,
-                processing_time_ms: 0,
-            },
-        ],
-
+        vec![KeepAliveMessage {
+            version: HttpVersion::Http11,
+            method: HttpMethod::Get,
+            connection_header: ConnectionHeader::Malformed,
+            keep_alive_params: None,
+            has_body: false,
+            body_encoding: BodyEncoding::None,
+            processing_time_ms: 0,
+        }],
         // Keep-alive with message boundary issues
-        vec![
-            KeepAliveMessage {
-                version: HttpVersion::Http11,
-                method: HttpMethod::Post,
-                connection_header: ConnectionHeader::KeepAlive,
-                keep_alive_params: None,
-                has_body: true,
-                body_encoding: BodyEncoding::Malformed, // Boundary issue
-                processing_time_ms: 0,
-            },
-        ],
-
+        vec![KeepAliveMessage {
+            version: HttpVersion::Http11,
+            method: HttpMethod::Post,
+            connection_header: ConnectionHeader::KeepAlive,
+            keep_alive_params: None,
+            has_body: true,
+            body_encoding: BodyEncoding::Malformed, // Boundary issue
+            processing_time_ms: 0,
+        }],
         // Request limit edge case
         vec![
             KeepAliveMessage {
                 version: HttpVersion::Http11,
                 method: HttpMethod::Get,
                 connection_header: ConnectionHeader::KeepAlive,
-                keep_alive_params: Some(KeepAliveParams { timeout: None, max_requests: Some(1) }),
+                keep_alive_params: Some(KeepAliveParams {
+                    timeout: None,
+                    max_requests: Some(1),
+                }),
                 has_body: false,
                 body_encoding: BodyEncoding::None,
                 processing_time_ms: 0,
@@ -531,7 +536,7 @@ fuzz_target!(|scenario: KeepAliveScenario| {
 fn test_keep_alive_sequence(
     messages: &[KeepAliveMessage],
     time_advances: &[u32],
-    config: &KeepAliveConfig
+    config: &KeepAliveConfig,
 ) {
     let mut manager = MockKeepAliveManager::new(config.clone());
     let mut message_count = 0;
@@ -546,7 +551,10 @@ fn test_keep_alive_sequence(
         if !manager.can_accept_message() {
             // Attempting to send message on closed/exhausted connection should fail
             let result = manager.process_message(message);
-            assert!(result.is_err(), "Message should be rejected on closed connection");
+            assert!(
+                result.is_err(),
+                "Message should be rejected on closed connection"
+            );
             break;
         }
 
@@ -560,19 +568,30 @@ fn test_keep_alive_sequence(
                 validate_keep_alive_state_transition(message, state, &manager, config);
 
                 // Check for terminal states
-                if matches!(state, KeepAliveState::Closed | KeepAliveState::Error |
-                                   KeepAliveState::Exhausted | KeepAliveState::TimedOut) {
+                if matches!(
+                    state,
+                    KeepAliveState::Closed
+                        | KeepAliveState::Error
+                        | KeepAliveState::Exhausted
+                        | KeepAliveState::TimedOut
+                ) {
                     // Connection should not accept more messages
-                    assert!(!manager.can_accept_message(),
-                           "Closed connection should not accept more messages");
+                    assert!(
+                        !manager.can_accept_message(),
+                        "Closed connection should not accept more messages"
+                    );
                     break;
                 }
             }
             Err(e) => {
                 // Error should put connection in appropriate state
                 let state = manager.get_state();
-                assert!(matches!(state, KeepAliveState::Error | KeepAliveState::Closed),
-                       "Error should result in error/closed state, got {:?}: {}", state, e);
+                assert!(
+                    matches!(state, KeepAliveState::Error | KeepAliveState::Closed),
+                    "Error should result in error/closed state, got {:?}: {}",
+                    state,
+                    e
+                );
                 break;
             }
         }
@@ -587,46 +606,60 @@ fn validate_keep_alive_state_transition(
     message: &KeepAliveMessage,
     new_state: KeepAliveState,
     manager: &MockKeepAliveManager,
-    config: &KeepAliveConfig
+    config: &KeepAliveConfig,
 ) {
     // If server doesn't support keep-alive, should always close
     if !config.enabled {
-        assert!(matches!(new_state, KeepAliveState::Closed),
-               "Keep-alive disabled should always close connection");
+        assert!(
+            matches!(new_state, KeepAliveState::Closed),
+            "Keep-alive disabled should always close connection"
+        );
         return;
     }
 
     // Version-specific validation
     match (message.version, message.connection_header) {
         (HttpVersion::Http10, ConnectionHeader::None | ConnectionHeader::Close) => {
-            assert!(matches!(new_state, KeepAliveState::Closed),
-                   "HTTP/1.0 without keep-alive should close");
+            assert!(
+                matches!(new_state, KeepAliveState::Closed),
+                "HTTP/1.0 without keep-alive should close"
+            );
         }
         (HttpVersion::Http11, ConnectionHeader::Close) => {
-            assert!(matches!(new_state, KeepAliveState::Closed),
-                   "Explicit close should close connection");
+            assert!(
+                matches!(new_state, KeepAliveState::Closed),
+                "Explicit close should close connection"
+            );
         }
-        (HttpVersion::Http10, ConnectionHeader::KeepAlive) |
-        (HttpVersion::Http11, ConnectionHeader::None | ConnectionHeader::KeepAlive) => {
+        (HttpVersion::Http10, ConnectionHeader::KeepAlive)
+        | (HttpVersion::Http11, ConnectionHeader::None | ConnectionHeader::KeepAlive) => {
             if manager.requests_processed < manager.effective_max_requests {
-                assert!(matches!(new_state, KeepAliveState::Active | KeepAliveState::Idle),
-                       "Valid keep-alive should maintain connection");
+                assert!(
+                    matches!(new_state, KeepAliveState::Active | KeepAliveState::Idle),
+                    "Valid keep-alive should maintain connection"
+                );
             } else {
-                assert!(matches!(new_state, KeepAliveState::Exhausted),
-                       "Request limit should exhaust connection");
+                assert!(
+                    matches!(new_state, KeepAliveState::Exhausted),
+                    "Request limit should exhaust connection"
+                );
             }
         }
         (_, ConnectionHeader::Malformed) => {
-            assert!(matches!(new_state, KeepAliveState::Error),
-                   "Malformed headers should error");
+            assert!(
+                matches!(new_state, KeepAliveState::Error),
+                "Malformed headers should error"
+            );
         }
         _ => {} // Other combinations handled by general logic
     }
 
     // Message boundary validation
     if message.has_body && matches!(message.body_encoding, BodyEncoding::Malformed) {
-        assert!(matches!(new_state, KeepAliveState::Error | KeepAliveState::Closed),
-               "Malformed body encoding should close/error connection");
+        assert!(
+            matches!(new_state, KeepAliveState::Error | KeepAliveState::Closed),
+            "Malformed body encoding should close/error connection"
+        );
     }
 }
 
@@ -639,7 +672,10 @@ fn test_timeout_behavior(config: &KeepAliveConfig) {
         version: HttpVersion::Http11,
         method: HttpMethod::Get,
         connection_header: ConnectionHeader::KeepAlive,
-        keep_alive_params: Some(KeepAliveParams { timeout: Some(30), max_requests: None }),
+        keep_alive_params: Some(KeepAliveParams {
+            timeout: Some(30),
+            max_requests: None,
+        }),
         has_body: false,
         body_encoding: BodyEncoding::None,
         processing_time_ms: 0,
@@ -668,7 +704,10 @@ fn test_request_limit_behavior(config: &KeepAliveConfig) {
         version: HttpVersion::Http11,
         method: HttpMethod::Get,
         connection_header: ConnectionHeader::KeepAlive,
-        keep_alive_params: Some(KeepAliveParams { timeout: None, max_requests: Some(2) }),
+        keep_alive_params: Some(KeepAliveParams {
+            timeout: None,
+            max_requests: Some(2),
+        }),
         has_body: false,
         body_encoding: BodyEncoding::None,
         processing_time_ms: 0,
@@ -707,7 +746,10 @@ fn test_parameter_parsing(_config: &KeepAliveConfig) {
     assert_eq!(params3.max_requests, None);
 
     // Test header generation
-    let params4 = KeepAliveParams { timeout: Some(30), max_requests: Some(5) };
+    let params4 = KeepAliveParams {
+        timeout: Some(30),
+        max_requests: Some(5),
+    };
     let header = params4.to_header_value();
     assert!(header.contains("timeout=30"));
     assert!(header.contains("max=5"));
@@ -744,24 +786,30 @@ fn test_concurrent_connection_limits(config: &KeepAliveConfig) {
 fn validate_final_keep_alive_state(
     manager: &MockKeepAliveManager,
     processed_messages: u32,
-    config: &KeepAliveConfig
+    config: &KeepAliveConfig,
 ) {
     let (stats_processed, idle_time, timeout) = manager.get_stats();
     let state = manager.get_state();
 
     // Validate request count consistency
-    assert_eq!(stats_processed, processed_messages,
-              "Processed request count mismatch");
+    assert_eq!(
+        stats_processed, processed_messages,
+        "Processed request count mismatch"
+    );
 
     // Validate state consistency
     match state {
         KeepAliveState::Exhausted => {
-            assert!(stats_processed >= manager.effective_max_requests,
-                   "Exhausted state should match request limit");
+            assert!(
+                stats_processed >= manager.effective_max_requests,
+                "Exhausted state should match request limit"
+            );
         }
         KeepAliveState::TimedOut => {
-            assert!(idle_time >= timeout as u64,
-                   "Timed out state should match timeout");
+            assert!(
+                idle_time >= timeout as u64,
+                "Timed out state should match timeout"
+            );
         }
         KeepAliveState::Closed => {
             // Can be closed for various reasons - acceptable
@@ -772,8 +820,10 @@ fn validate_final_keep_alive_state(
         KeepAliveState::Active | KeepAliveState::Idle | KeepAliveState::Established => {
             // Connection still usable
             if config.enabled {
-                assert!(manager.can_accept_message(),
-                       "Active connection should accept messages");
+                assert!(
+                    manager.can_accept_message(),
+                    "Active connection should accept messages"
+                );
             }
         }
     }
