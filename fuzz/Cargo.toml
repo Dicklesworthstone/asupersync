@@ -5431,6 +5431,7 @@ name = "h2_settings_with_ack_flag"
 path = "fuzz_targets/h2_settings_with_ack_flag.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_request_pseudo_header_duplicate"
