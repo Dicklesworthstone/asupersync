@@ -1,4 +1,5 @@
 #![no_main]
+#![allow(dead_code)]
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
@@ -182,7 +183,9 @@ enum PseudoHeaderValidationError {
 }
 
 impl MockH2PseudoHeaderParser {
-    fn validate_headers(input: &H2UnknownPseudoHeaderInput) -> Result<(), PseudoHeaderValidationError> {
+    fn validate_headers(
+        input: &H2UnknownPseudoHeaderInput,
+    ) -> Result<(), PseudoHeaderValidationError> {
         // Check if pseudo-headers are allowed in this context
         if matches!(input.message_type, MessageType::Trailers) {
             // RFC 7540 §8.1.2: Pseudo-headers MUST NOT appear in trailers
@@ -205,24 +208,26 @@ impl MockH2PseudoHeaderParser {
         Ok(())
     }
 
-    fn check_pseudo_in_trailers(input: &H2UnknownPseudoHeaderInput) -> Result<(), PseudoHeaderValidationError> {
+    fn check_pseudo_in_trailers(
+        input: &H2UnknownPseudoHeaderInput,
+    ) -> Result<(), PseudoHeaderValidationError> {
         match &input.pseudo_header_strategy {
             PseudoHeaderStrategy::SingleUnknown(unknown) => {
                 return Err(PseudoHeaderValidationError::PseudoInTrailers {
-                    name: format!(":{}", unknown.name)
+                    name: format!(":{}", unknown.name),
                 });
             }
             PseudoHeaderStrategy::MultipleUnknown(unknowns) => {
                 if !unknowns.is_empty() {
                     return Err(PseudoHeaderValidationError::PseudoInTrailers {
-                        name: format!(":{}", unknowns[0].name)
+                        name: format!(":{}", unknowns[0].name),
                     });
                 }
             }
             PseudoHeaderStrategy::WrongContext(WrongContextHeaders::PseudoInTrailers(headers)) => {
                 if !headers.is_empty() {
                     return Err(PseudoHeaderValidationError::PseudoInTrailers {
-                        name: format!(":{}", headers[0].name)
+                        name: format!(":{}", headers[0].name),
                     });
                 }
             }
@@ -256,7 +261,8 @@ impl MockH2PseudoHeaderParser {
             PseudoHeaderStrategy::MixedKnownUnknown { known, unknown } => {
                 // Add known pseudo-headers first
                 for known_header in known {
-                    let (name, value) = Self::format_known_pseudo_header(known_header, &input.message_type);
+                    let (name, value) =
+                        Self::format_known_pseudo_header(known_header, &input.message_type);
                     headers.push((name, value));
                 }
                 // Add unknown pseudo-headers
@@ -265,36 +271,39 @@ impl MockH2PseudoHeaderParser {
                     headers.push((header_name, unknown_header.value.clone()));
                 }
             }
-            PseudoHeaderStrategy::WrongContext(wrong_context) => {
-                match wrong_context {
-                    WrongContextHeaders::RequestInResponse { method, scheme, authority, path } => {
-                        if let Some(m) = method {
-                            headers.push((":method".to_string(), m.clone()));
-                        }
-                        if let Some(s) = scheme {
-                            headers.push((":scheme".to_string(), s.clone()));
-                        }
-                        if let Some(a) = authority {
-                            headers.push((":authority".to_string(), a.clone()));
-                        }
-                        if let Some(p) = path {
-                            headers.push((":path".to_string(), p.clone()));
-                        }
+            PseudoHeaderStrategy::WrongContext(wrong_context) => match wrong_context {
+                WrongContextHeaders::RequestInResponse {
+                    method,
+                    scheme,
+                    authority,
+                    path,
+                } => {
+                    if let Some(m) = method {
+                        headers.push((":method".to_string(), m.clone()));
                     }
-                    WrongContextHeaders::ResponseInRequest { status } => {
-                        headers.push((":status".to_string(), status.to_string()));
+                    if let Some(s) = scheme {
+                        headers.push((":scheme".to_string(), s.clone()));
                     }
-                    WrongContextHeaders::PseudoInTrailers(trailer_headers) => {
-                        for unknown in trailer_headers {
-                            let header_name = Self::format_pseudo_header_name(&unknown.name);
-                            headers.push((header_name, unknown.value.clone()));
-                        }
+                    if let Some(a) = authority {
+                        headers.push((":authority".to_string(), a.clone()));
+                    }
+                    if let Some(p) = path {
+                        headers.push((":path".to_string(), p.clone()));
                     }
                 }
-            }
+                WrongContextHeaders::ResponseInRequest { status } => {
+                    headers.push((":status".to_string(), status.to_string()));
+                }
+                WrongContextHeaders::PseudoInTrailers(trailer_headers) => {
+                    for unknown in trailer_headers {
+                        let header_name = Self::format_pseudo_header_name(&unknown.name);
+                        headers.push((header_name, unknown.value.clone()));
+                    }
+                }
+            },
             PseudoHeaderStrategy::Malformed(malformed) => {
                 for malformed_header in malformed {
-                    let name = Self::format_malformed_header(&malformed_header);
+                    let name = Self::format_malformed_header(malformed_header);
                     headers.push((name, malformed_header.value.clone()));
                 }
             }
@@ -322,11 +331,16 @@ impl MockH2PseudoHeaderParser {
         }
     }
 
-    fn format_known_pseudo_header(known: &KnownPseudoHeader, message_type: &MessageType) -> (String, String) {
+    fn format_known_pseudo_header(
+        known: &KnownPseudoHeader,
+        _message_type: &MessageType,
+    ) -> (String, String) {
         match known {
             KnownPseudoHeader::Method(method) => (":method".to_string(), method.clone()),
             KnownPseudoHeader::Scheme(scheme) => (":scheme".to_string(), scheme.clone()),
-            KnownPseudoHeader::Authority(authority) => (":authority".to_string(), authority.clone()),
+            KnownPseudoHeader::Authority(authority) => {
+                (":authority".to_string(), authority.clone())
+            }
             KnownPseudoHeader::Path(path) => (":path".to_string(), path.clone()),
             KnownPseudoHeader::Status(status) => (":status".to_string(), status.to_string()),
         }
@@ -343,14 +357,16 @@ impl MockH2PseudoHeaderParser {
         }
     }
 
-    fn validate_header_ordering(headers: &[(String, String)]) -> Result<(), PseudoHeaderValidationError> {
+    fn validate_header_ordering(
+        headers: &[(String, String)],
+    ) -> Result<(), PseudoHeaderValidationError> {
         let mut seen_regular = false;
 
         for (name, _) in headers {
             if name.starts_with(':') {
                 if seen_regular {
                     return Err(PseudoHeaderValidationError::PseudoAfterRegular {
-                        name: name.clone()
+                        name: name.clone(),
                     });
                 }
             } else {
@@ -364,7 +380,7 @@ impl MockH2PseudoHeaderParser {
     fn validate_pseudo_header(
         name: &str,
         value: &str,
-        message_type: &MessageType
+        message_type: &MessageType,
     ) -> Result<(), PseudoHeaderValidationError> {
         // Check if it's a known pseudo-header
         let known_request_pseudo = matches!(name, ":method" | ":scheme" | ":authority" | ":path");
@@ -373,7 +389,7 @@ impl MockH2PseudoHeaderParser {
         if !known_request_pseudo && !known_response_pseudo {
             // Unknown pseudo-header - RFC 7540 §8.1.2 violation
             return Err(PseudoHeaderValidationError::UnknownPseudoHeader {
-                name: name.to_string()
+                name: name.to_string(),
             });
         }
 
@@ -398,7 +414,7 @@ impl MockH2PseudoHeaderParser {
             MessageType::Trailers => {
                 // All pseudo-headers are forbidden in trailers
                 return Err(PseudoHeaderValidationError::PseudoInTrailers {
-                    name: name.to_string()
+                    name: name.to_string(),
                 });
             }
         }
@@ -409,7 +425,10 @@ impl MockH2PseudoHeaderParser {
         Ok(())
     }
 
-    fn validate_pseudo_header_value(name: &str, value: &str) -> Result<(), PseudoHeaderValidationError> {
+    fn validate_pseudo_header_value(
+        name: &str,
+        value: &str,
+    ) -> Result<(), PseudoHeaderValidationError> {
         match name {
             ":method" => {
                 if value.is_empty() {
@@ -419,7 +438,10 @@ impl MockH2PseudoHeaderParser {
                     });
                 }
                 // Basic method validation
-                if !value.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_alphanumeric()) {
+                if !value
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_alphanumeric())
+                {
                     return Err(PseudoHeaderValidationError::InvalidPseudoValue {
                         name: name.to_string(),
                         value: value.to_string(),
@@ -434,12 +456,13 @@ impl MockH2PseudoHeaderParser {
                         value: value.to_string(),
                     });
                 }
-                let status_code: u16 = value.parse().map_err(|_| {
-                    PseudoHeaderValidationError::InvalidPseudoValue {
-                        name: name.to_string(),
-                        value: value.to_string(),
-                    }
-                })?;
+                let status_code: u16 =
+                    value
+                        .parse()
+                        .map_err(|_| PseudoHeaderValidationError::InvalidPseudoValue {
+                            name: name.to_string(),
+                            value: value.to_string(),
+                        })?;
                 if !(100..=599).contains(&status_code) {
                     return Err(PseudoHeaderValidationError::InvalidPseudoValue {
                         name: name.to_string(),
@@ -447,21 +470,11 @@ impl MockH2PseudoHeaderParser {
                     });
                 }
             }
-            ":scheme" => {
-                if value.is_empty() {
-                    return Err(PseudoHeaderValidationError::InvalidPseudoValue {
-                        name: name.to_string(),
-                        value: value.to_string(),
-                    });
-                }
-            }
-            ":path" => {
-                if value.is_empty() {
-                    return Err(PseudoHeaderValidationError::InvalidPseudoValue {
-                        name: name.to_string(),
-                        value: value.to_string(),
-                    });
-                }
+            ":scheme" | ":path" if value.is_empty() => {
+                return Err(PseudoHeaderValidationError::InvalidPseudoValue {
+                    name: name.to_string(),
+                    value: value.to_string(),
+                });
             }
             _ => {
                 // Other pseudo-headers or already validated above
@@ -482,10 +495,9 @@ fuzz_target!(|input: H2UnknownPseudoHeaderInput| {
 
     // Apply test assertions based on the pseudo-header strategy
     match &input.pseudo_header_strategy {
-        PseudoHeaderStrategy::SingleUnknown(unknown) |
-        PseudoHeaderStrategy::MultipleUnknown(_) => {
+        PseudoHeaderStrategy::SingleUnknown(unknown) => {
             // Unknown pseudo-headers should always be rejected per RFC 7540 §8.1.2
-            match result {
+            match &result {
                 Err(PseudoHeaderValidationError::UnknownPseudoHeader { .. }) => {
                     // Expected: unknown pseudo-header correctly rejected
                 }
@@ -496,9 +508,32 @@ fuzz_target!(|input: H2UnknownPseudoHeaderInput| {
                     // Expected: pseudo-header ordering violation
                 }
                 Ok(()) => {
-                    panic!("Unknown pseudo-header should be rejected: :{}", unknown.name);
+                    panic!(
+                        "Unknown pseudo-header should be rejected: :{}",
+                        unknown.name
+                    );
                 }
-                Err(other) => {
+                Err(_) => {
+                    // Other errors may occur due to additional validation
+                }
+            }
+        }
+        PseudoHeaderStrategy::MultipleUnknown(_) => {
+            // Unknown pseudo-headers should always be rejected per RFC 7540 §8.1.2
+            match &result {
+                Err(PseudoHeaderValidationError::UnknownPseudoHeader { .. }) => {
+                    // Expected: unknown pseudo-header correctly rejected
+                }
+                Err(PseudoHeaderValidationError::PseudoInTrailers { .. }) => {
+                    // Expected: pseudo-header in trailers rejected
+                }
+                Err(PseudoHeaderValidationError::PseudoAfterRegular { .. }) => {
+                    // Expected: pseudo-header ordering violation
+                }
+                Ok(()) => {
+                    panic!("Unknown pseudo-header should be rejected");
+                }
+                Err(_) => {
                     // Other errors may occur due to additional validation
                 }
             }
@@ -507,25 +542,28 @@ fuzz_target!(|input: H2UnknownPseudoHeaderInput| {
             // Wrong context should be rejected
             match wrong_context {
                 WrongContextHeaders::RequestInResponse { .. } => {
-                    assert!(matches!(result,
+                    assert!(matches!(&result,
                         Err(PseudoHeaderValidationError::WrongContext { context, .. })
                         if context == "response"
                     ));
                 }
                 WrongContextHeaders::ResponseInRequest { .. } => {
-                    assert!(matches!(result,
+                    assert!(matches!(&result,
                         Err(PseudoHeaderValidationError::WrongContext { context, .. })
                         if context == "request"
                     ));
                 }
-                WrongContextHeaders::PseudoInTrailers { .. } => {
-                    assert!(matches!(result, Err(PseudoHeaderValidationError::PseudoInTrailers { .. })));
+                WrongContextHeaders::PseudoInTrailers(_) => {
+                    assert!(matches!(
+                        &result,
+                        Err(PseudoHeaderValidationError::PseudoInTrailers { .. })
+                    ));
                 }
             }
         }
         PseudoHeaderStrategy::Malformed(_) => {
             // Malformed pseudo-headers should be rejected
-            match result {
+            match &result {
                 Err(PseudoHeaderValidationError::UnknownPseudoHeader { .. }) => {
                     // Expected: malformed headers treated as unknown
                 }
@@ -533,7 +571,7 @@ fuzz_target!(|input: H2UnknownPseudoHeaderInput| {
                     // Expected: malformation detected
                 }
                 Ok(()) => {
-                    // Malformed headers should not be accepted
+                    panic!("Malformed pseudo-header should be rejected");
                 }
                 Err(_) => {
                     // Other errors may occur
@@ -543,12 +581,15 @@ fuzz_target!(|input: H2UnknownPseudoHeaderInput| {
         PseudoHeaderStrategy::MixedKnownUnknown { unknown, .. } => {
             // Should fail due to unknown pseudo-headers
             if !unknown.is_empty() {
-                assert!(matches!(result, Err(PseudoHeaderValidationError::UnknownPseudoHeader { .. })));
+                assert!(matches!(
+                    &result,
+                    Err(PseudoHeaderValidationError::UnknownPseudoHeader { .. })
+                ));
             }
         }
         PseudoHeaderStrategy::Duplicates { .. } => {
             // May be rejected for unknown pseudo-header or duplication
-            match result {
+            match &result {
                 Err(PseudoHeaderValidationError::UnknownPseudoHeader { .. }) => {
                     // Expected: unknown pseudo-header
                 }
@@ -556,7 +597,7 @@ fuzz_target!(|input: H2UnknownPseudoHeaderInput| {
                     // Expected: duplicate detection
                 }
                 Ok(()) => {
-                    // Duplicates should typically be rejected
+                    panic!("Duplicate pseudo-header should be rejected");
                 }
                 Err(_) => {
                     // Other errors may occur
@@ -571,7 +612,7 @@ fuzz_target!(|input: H2UnknownPseudoHeaderInput| {
 
 fn test_pseudo_header_invariants(
     input: &H2UnknownPseudoHeaderInput,
-    result: &Result<(), PseudoHeaderValidationError>
+    result: &Result<(), PseudoHeaderValidationError>,
 ) {
     // Invariant: Pseudo-headers in trailers must always be rejected
     if matches!(input.message_type, MessageType::Trailers) {
@@ -579,7 +620,10 @@ fn test_pseudo_header_invariants(
         let has_pseudo = headers.iter().any(|(name, _)| name.starts_with(':'));
 
         if has_pseudo {
-            assert!(matches!(result, Err(PseudoHeaderValidationError::PseudoInTrailers { .. })));
+            assert!(matches!(
+                result,
+                Err(PseudoHeaderValidationError::PseudoInTrailers { .. })
+            ));
         }
     }
 
@@ -587,7 +631,8 @@ fn test_pseudo_header_invariants(
     let headers = MockH2PseudoHeaderParser::generate_header_list(input);
     for (name, _) in headers {
         if name.starts_with(':') {
-            let is_known = matches!(name.as_str(),
+            let is_known = matches!(
+                name.as_str(),
                 ":method" | ":scheme" | ":authority" | ":path" | ":status"
             );
 
@@ -601,7 +646,10 @@ fn test_pseudo_header_invariants(
     if matches!(input.message_type, MessageType::Response) {
         let headers = MockH2PseudoHeaderParser::generate_header_list(input);
         let has_request_pseudo = headers.iter().any(|(name, _)| {
-            matches!(name.as_str(), ":method" | ":scheme" | ":authority" | ":path")
+            matches!(
+                name.as_str(),
+                ":method" | ":scheme" | ":authority" | ":path"
+            )
         });
 
         if has_request_pseudo && result.is_ok() {
@@ -624,7 +672,10 @@ fn test_pseudo_header_invariants(
     let mut seen_regular = false;
     for (name, _) in headers {
         if name.starts_with(':') && seen_regular {
-            assert!(matches!(result, Err(PseudoHeaderValidationError::PseudoAfterRegular { .. })));
+            assert!(matches!(
+                result,
+                Err(PseudoHeaderValidationError::PseudoAfterRegular { .. })
+            ));
             break;
         }
         if !name.starts_with(':') {
@@ -659,7 +710,10 @@ mod tests {
         };
 
         let result = MockH2PseudoHeaderParser::validate_headers(&input);
-        assert!(matches!(result, Err(PseudoHeaderValidationError::UnknownPseudoHeader { .. })));
+        assert!(matches!(
+            result,
+            Err(PseudoHeaderValidationError::UnknownPseudoHeader { .. })
+        ));
     }
 
     #[test]
@@ -672,7 +726,7 @@ mod tests {
                     scheme: None,
                     authority: None,
                     path: None,
-                }
+                },
             ),
             regular_headers: vec![],
             test_context: TestContext {
@@ -687,7 +741,10 @@ mod tests {
         };
 
         let result = MockH2PseudoHeaderParser::validate_headers(&input);
-        assert!(matches!(result, Err(PseudoHeaderValidationError::WrongContext { .. })));
+        assert!(matches!(
+            result,
+            Err(PseudoHeaderValidationError::WrongContext { .. })
+        ));
     }
 
     #[test]
@@ -695,7 +752,7 @@ mod tests {
         let input = H2UnknownPseudoHeaderInput {
             message_type: MessageType::Request,
             pseudo_header_strategy: PseudoHeaderStrategy::WrongContext(
-                WrongContextHeaders::ResponseInRequest { status: 200 }
+                WrongContextHeaders::ResponseInRequest { status: 200 },
             ),
             regular_headers: vec![],
             test_context: TestContext {
@@ -710,7 +767,10 @@ mod tests {
         };
 
         let result = MockH2PseudoHeaderParser::validate_headers(&input);
-        assert!(matches!(result, Err(PseudoHeaderValidationError::WrongContext { .. })));
+        assert!(matches!(
+            result,
+            Err(PseudoHeaderValidationError::WrongContext { .. })
+        ));
     }
 
     #[test]
@@ -735,7 +795,10 @@ mod tests {
         };
 
         let result = MockH2PseudoHeaderParser::validate_headers(&input);
-        assert!(matches!(result, Err(PseudoHeaderValidationError::PseudoInTrailers { .. })));
+        assert!(matches!(
+            result,
+            Err(PseudoHeaderValidationError::PseudoInTrailers { .. })
+        ));
     }
 
     #[test]
@@ -781,12 +844,10 @@ mod tests {
                 value: "test".to_string(),
                 position: HeaderPosition::Mixed,
             }),
-            regular_headers: vec![
-                RegularHeader {
-                    name: "content-type".to_string(),
-                    value: "application/json".to_string(),
-                }
-            ],
+            regular_headers: vec![RegularHeader {
+                name: "content-type".to_string(),
+                value: "application/json".to_string(),
+            }],
             test_context: TestContext {
                 stream_id: 1,
                 frame_type: FrameType::Headers,
@@ -834,7 +895,10 @@ mod tests {
         };
 
         let result = MockH2PseudoHeaderParser::validate_headers(&input);
-        assert!(matches!(result, Err(PseudoHeaderValidationError::UnknownPseudoHeader { .. })));
+        assert!(matches!(
+            result,
+            Err(PseudoHeaderValidationError::UnknownPseudoHeader { .. })
+        ));
     }
 
     #[test]
@@ -865,6 +929,9 @@ mod tests {
         };
 
         let result = MockH2PseudoHeaderParser::validate_headers(&input);
-        assert!(result.is_ok(), "Valid known pseudo-headers should be accepted");
+        assert!(
+            result.is_ok(),
+            "Valid known pseudo-headers should be accepted"
+        );
     }
 }
