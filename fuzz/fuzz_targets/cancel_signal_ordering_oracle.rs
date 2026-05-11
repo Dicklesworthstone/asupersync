@@ -110,6 +110,37 @@ fn assert_consistency(oracle: &CancelOrderingOracle, max_violations: usize, expe
     );
 }
 
+fn observe_check_result(oracle: &CancelOrderingOracle, now: Time, context: &str) {
+    let before = oracle.get_statistics();
+    let result = oracle.check(now);
+    let after = oracle.get_statistics();
+
+    assert_eq!(
+        after.ordering_checks_performed,
+        before.ordering_checks_performed + 1,
+        "{context}: check should increment ordering_checks_performed exactly once"
+    );
+
+    match result {
+        Ok(()) => {
+            assert_eq!(
+                after.total_violations, 0,
+                "{context}: check returned Ok while violations are recorded"
+            );
+        }
+        Err(violation) => {
+            assert!(
+                after.total_violations > 0,
+                "{context}: check returned {violation} without recording a violation"
+            );
+            assert!(
+                after.violations_detected as usize >= after.total_violations,
+                "{context}: cumulative violation counter fell below recorded violations"
+            );
+        }
+    }
+}
+
 fn run_fuzz_case(mut input: FuzzInput) {
     normalize_input(&mut input);
 
@@ -164,7 +195,7 @@ fn run_fuzz_case(mut input: FuzzInput) {
             }
             Operation::Check { advance_ns } => {
                 advance(&mut now, advance_ns);
-                let _ = oracle.check(now);
+                observe_check_result(&oracle, now, "operation check");
             }
             Operation::Snapshot => {
                 let _ = oracle.tracked_signals();
@@ -184,7 +215,7 @@ fn run_fuzz_case(mut input: FuzzInput) {
         );
     }
 
-    let _ = oracle.check(now);
+    observe_check_result(&oracle, now, "final check");
     assert_consistency(
         &oracle,
         usize::from(input.config.max_violations),
