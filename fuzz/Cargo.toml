@@ -5121,6 +5121,7 @@ name = "h2_settings_max_frame_size_minimum"
 path = "fuzz_targets/h2_settings_max_frame_size_minimum.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_settings_max_frame_size_below_default"
