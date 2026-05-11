@@ -1,8 +1,11 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
+
+type HeaderList = Vec<(String, String)>;
+type ParsedHttpRequest = (String, HeaderList, Vec<u8>);
 
 // Mock HTTP/1.1 connection and request handling for fuzzing
 #[derive(Debug, Clone, Arbitrary)]
@@ -45,19 +48,19 @@ struct ConnectionHeader {
 
 #[derive(Debug, Clone, Arbitrary)]
 enum CaseVariant {
-    Lowercase,        // "connection: close"
-    Uppercase,        // "CONNECTION: CLOSE"
-    MixedCase,        // "Connection: Close"
-    RandomCase,       // "cOnNeCtiOn: cLoSe"
+    Lowercase,  // "connection: close"
+    Uppercase,  // "CONNECTION: CLOSE"
+    MixedCase,  // "Connection: Close"
+    RandomCase, // "cOnNeCtiOn: cLoSe"
 }
 
 #[derive(Debug, Clone, Arbitrary)]
 enum WhitespacePattern {
-    Normal,           // "Connection: close"
-    ExtraSpaces,      // "Connection:  close  "
-    NoSpaces,         // "Connection:close"
-    Tabs,             // "Connection:\tclose"
-    Mixed,            // "Connection: \t close \t"
+    Normal,      // "Connection: close"
+    ExtraSpaces, // "Connection:  close  "
+    NoSpaces,    // "Connection:close"
+    Tabs,        // "Connection:\tclose"
+    Mixed,       // "Connection: \t close \t"
 }
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -102,6 +105,7 @@ fuzz_target!(|data: &[u8]| {
         Ok(case) => case,
         Err(_) => return, // Invalid input for generating test case
     };
+    observe_generated_knobs(&test_case);
 
     // Test scenario 1: Basic Connection: close handling
     test_basic_connection_close(&test_case);
@@ -134,6 +138,29 @@ fuzz_target!(|data: &[u8]| {
     test_final_response_handling(&test_case);
 });
 
+fn observe_generated_knobs(test_case: &ConnectionCloseTestCase) {
+    let _ = test_case.server_behavior.test_connection_reuse;
+    let malformed = &test_case.malformed_scenarios;
+    let _ = (
+        malformed.invalid_header_syntax,
+        malformed.non_ascii_values,
+        malformed.extremely_long_values,
+        malformed.null_bytes_in_headers,
+        malformed.missing_colon,
+        malformed.empty_header_name,
+    );
+
+    for header in &test_case.connection_headers {
+        let _ = (&header.value, header.multiple_values);
+    }
+
+    for request in &test_case.requests {
+        if let ConnectionDirective::Invalid(value) = &request.connection_directive {
+            let _ = value.len();
+        }
+    }
+}
+
 /// Test basic Connection: close header handling
 fn test_basic_connection_close(test_case: &ConnectionCloseTestCase) {
     let mut http_server = create_http_server();
@@ -155,7 +182,9 @@ fn test_basic_connection_close(test_case: &ConnectionCloseTestCase) {
                     );
 
                     // Verify response includes Connection: close header
-                    let connection_header = response.headers.get("Connection")
+                    let connection_header = response
+                        .headers
+                        .get("Connection")
                         .or_else(|| response.headers.get("connection"))
                         .or_else(|| response.headers.get("CONNECTION"));
 
@@ -175,11 +204,7 @@ fn test_basic_connection_close(test_case: &ConnectionCloseTestCase) {
                 Err(error_msg) => {
                     // Valid Connection: close requests should not fail
                     if is_valid_connection_close_request(request) {
-                        assert!(
-                            false,
-                            "Valid Connection: close request failed: {}",
-                            error_msg
-                        );
+                        panic!("Valid Connection: close request failed: {}", error_msg);
                     }
                 }
             }
@@ -289,8 +314,7 @@ fn test_connection_header_case_variants(test_case: &ConnectionCloseTestCase) {
             }
             Err(error_msg) => {
                 // Case variations should not cause parsing errors
-                assert!(
-                    false,
+                panic!(
                     "Case variant should not cause error: {} (case: {:?})",
                     error_msg, connection_header.case_variant
                 );
@@ -300,16 +324,16 @@ fn test_connection_header_case_variants(test_case: &ConnectionCloseTestCase) {
 }
 
 /// Test precedence between close and keep-alive directives
-fn test_close_keepalive_precedence(test_case: &ConnectionCloseTestCase) {
+fn test_close_keepalive_precedence(_test_case: &ConnectionCloseTestCase) {
     let mut http_server = create_http_server();
 
     // Test various combinations of close and keep-alive
     let precedence_tests = vec![
-        ("close, keep-alive", true),   // close should take precedence
-        ("keep-alive, close", true),   // close should take precedence regardless of order
-        ("close", true),               // explicit close
-        ("keep-alive", false),         // explicit keep-alive
-        ("upgrade, close", true),      // close with other directives
+        ("close, keep-alive", true), // close should take precedence
+        ("keep-alive, close", true), // close should take precedence regardless of order
+        ("close", true),             // explicit close
+        ("keep-alive", false),       // explicit keep-alive
+        ("upgrade, close", true),    // close with other directives
     ];
 
     for (connection_value, should_close) in precedence_tests {
@@ -338,8 +362,7 @@ fn test_close_keepalive_precedence(test_case: &ConnectionCloseTestCase) {
             }
             Err(error_msg) => {
                 // Valid connection directives should not fail
-                assert!(
-                    false,
+                panic!(
                     "Valid connection directive failed: {} (value: {})",
                     error_msg, connection_value
                 );
@@ -371,7 +394,10 @@ fn test_multiple_connection_headers(test_case: &ConnectionCloseTestCase) {
         uri: "/test".to_string(),
         headers: duplicate_headers,
         body: Vec::new(),
-        connection_directive: ConnectionDirective::Multiple(vec!["keep-alive".to_string(), "close".to_string()]),
+        connection_directive: ConnectionDirective::Multiple(vec![
+            "keep-alive".to_string(),
+            "close".to_string(),
+        ]),
     };
 
     let http_request = format_http_request(&request, &request.headers);
@@ -389,9 +415,9 @@ fn test_multiple_connection_headers(test_case: &ConnectionCloseTestCase) {
         Err(error_msg) => {
             // Multiple headers might be rejected by strict parsers
             assert!(
-                error_msg.contains("multiple") ||
-                error_msg.contains("duplicate") ||
-                error_msg.contains("invalid"),
+                error_msg.contains("multiple")
+                    || error_msg.contains("duplicate")
+                    || error_msg.contains("invalid"),
                 "Multiple Connection headers error should be descriptive: {}",
                 error_msg
             );
@@ -408,7 +434,7 @@ fn test_pipelined_requests_with_close(test_case: &ConnectionCloseTestCase) {
     let mut http_server = create_http_server();
 
     // Simulate pipelined requests where second request has Connection: close
-    let pipelined_requests = vec![
+    let pipelined_requests = [
         HttpRequest {
             method: HttpMethod::Get,
             uri: "/first".to_string(),
@@ -506,8 +532,7 @@ fn test_server_state_after_close(test_case: &ConnectionCloseTestCase) {
             );
         }
         Err(error_msg) => {
-            assert!(
-                false,
+            panic!(
                 "Valid Connection: close request should not fail: {}",
                 error_msg
             );
@@ -516,17 +541,18 @@ fn test_server_state_after_close(test_case: &ConnectionCloseTestCase) {
 }
 
 /// Test malformed Connection headers
-fn test_malformed_connection_headers(test_case: &ConnectionCloseTestCase) {
+fn test_malformed_connection_headers(_test_case: &ConnectionCloseTestCase) {
+    let long_value = " ".repeat(10000);
     let malformed_headers = vec![
         // Invalid syntax patterns
-        ("Connection", ""),                           // Empty value
-        ("Connection", "close\x00null"),             // Null byte
-        ("Connection", "close\r\nInjection: bad"),   // Header injection
-        ("Connection", " ".repeat(10000).as_str()), // Extremely long value
-        ("Connection", "clóse"),                     // Non-ASCII
-        ("", "close"),                               // Empty header name
-        ("Connection\x00", "close"),                 // Null in header name
-        ("Connection\r\n", "close"),                 // CRLF in header name
+        ("Connection", ""),                        // Empty value
+        ("Connection", "close\x00null"),           // Null byte
+        ("Connection", "close\r\nInjection: bad"), // Header injection
+        ("Connection", long_value.as_str()),       // Extremely long value
+        ("Connection", "clóse"),                   // Non-ASCII
+        ("", "close"),                             // Empty header name
+        ("Connection\x00", "close"),               // Null in header name
+        ("Connection\r\n", "close"),               // CRLF in header name
     ];
 
     for (header_name, header_value) in malformed_headers {
@@ -544,19 +570,25 @@ fn test_malformed_connection_headers(test_case: &ConnectionCloseTestCase) {
         let result = http_server.handle_request(&http_request);
 
         match result {
-            Ok(response) => {
+            Ok(_response) => {
                 // Malformed headers might be ignored or cause default behavior
                 // Server should handle gracefully without crashing
             }
             Err(error_msg) => {
                 // Malformed headers should be rejected with appropriate error
+                let lower_error = error_msg.to_ascii_lowercase();
                 assert!(
-                    error_msg.contains("invalid") ||
-                    error_msg.contains("malformed") ||
-                    error_msg.contains("bad request") ||
-                    error_msg.contains("400"),
+                    lower_error.contains("invalid")
+                        || lower_error.contains("malformed")
+                        || lower_error.contains("bad request")
+                        || lower_error.contains("400")
+                        || lower_error.contains("empty header")
+                        || lower_error.contains("null byte")
+                        || lower_error.contains("crlf"),
                     "Malformed header should be properly rejected: {} (header: {}={})",
-                    error_msg, header_name, header_value
+                    error_msg,
+                    header_name,
+                    header_value
                 );
             }
         }
@@ -604,8 +636,7 @@ fn test_connection_close_with_methods(test_case: &ConnectionCloseTestCase) {
                 Err(error_msg) => {
                     // Some methods might not be supported, but error should be method-related, not connection-related
                     if !error_msg.contains("method") && !error_msg.contains("405") {
-                        assert!(
-                            false,
+                        panic!(
                             "Connection: close should not fail for method {:?}: {}",
                             request.method, error_msg
                         );
@@ -650,8 +681,8 @@ fn test_final_response_handling(test_case: &ConnectionCloseTestCase) {
             );
 
             assert!(
-                response.headers.contains_key("Connection") ||
-                response.headers.contains_key("connection"),
+                response.headers.contains_key("Connection")
+                    || response.headers.contains_key("connection"),
                 "Final response should include Connection header"
             );
 
@@ -670,7 +701,8 @@ fn test_final_response_handling(test_case: &ConnectionCloseTestCase) {
                 connection_directive: ConnectionDirective::KeepAlive,
             };
 
-            let followup_http_request = format_http_request(&followup_request, &followup_request.headers);
+            let followup_http_request =
+                format_http_request(&followup_request, &followup_request.headers);
             let followup_result = http_server.handle_request(&followup_http_request);
 
             match followup_result {
@@ -687,8 +719,7 @@ fn test_final_response_handling(test_case: &ConnectionCloseTestCase) {
             }
         }
         Err(error_msg) => {
-            assert!(
-                false,
+            panic!(
                 "Final response with Connection: close should not fail: {}",
                 error_msg
             );
@@ -737,7 +768,7 @@ impl HttpServer {
         self.request_count += 1;
 
         // Parse request
-        let (method, headers, body) = parse_http_request(request)?;
+        let (method, headers, _body) = parse_http_request(request)?;
 
         // Check for Connection header
         let mut should_close = false;
@@ -745,16 +776,17 @@ impl HttpServer {
 
         for (name, value) in &headers {
             if name.to_lowercase() == "connection" {
-                let connection_values: Vec<&str> = value
+                let has_close = value
                     .split(',')
-                    .map(|s| s.trim().to_lowercase())
-                    .map(|s| s.as_str())
-                    .collect();
+                    .any(|directive| directive.trim().eq_ignore_ascii_case("close"));
+                let has_keep_alive = value
+                    .split(',')
+                    .any(|directive| directive.trim().eq_ignore_ascii_case("keep-alive"));
 
-                if connection_values.iter().any(|&v| v == "close") {
+                if has_close {
                     should_close = true;
                     response_headers.insert("Connection".to_string(), "close".to_string());
-                } else if connection_values.iter().any(|&v| v == "keep-alive") {
+                } else if has_keep_alive {
                     response_headers.insert("Connection".to_string(), "keep-alive".to_string());
                 }
                 break;
@@ -774,7 +806,10 @@ impl HttpServer {
             format!("Response for {} request", method).into_bytes()
         };
 
-        response_headers.insert("Content-Length".to_string(), response_body.len().to_string());
+        response_headers.insert(
+            "Content-Length".to_string(),
+            response_body.len().to_string(),
+        );
         response_headers.insert("Server".to_string(), "TestServer/1.0".to_string());
 
         Ok(HttpResponse {
@@ -819,7 +854,7 @@ fn format_http_request(request: &HttpRequest, headers: &[(String, String)]) -> S
     request_str
 }
 
-fn parse_http_request(request: &str) -> Result<(String, Vec<(String, String)>, Vec<u8>), String> {
+fn parse_http_request(request: &str) -> Result<ParsedHttpRequest, String> {
     let mut lines = request.lines();
 
     // Parse request line
@@ -850,7 +885,11 @@ fn parse_http_request(request: &str) -> Result<(String, Vec<(String, String)>, V
                 return Err("Null byte in header".to_string());
             }
 
-            if name.contains('\r') || name.contains('\n') || value.contains('\r') || value.contains('\n') {
+            if name.contains('\r')
+                || name.contains('\n')
+                || value.contains('\r')
+                || value.contains('\n')
+            {
                 return Err("CRLF in header".to_string());
             }
 
@@ -869,18 +908,28 @@ fn format_header_name(name: &str, case_variant: &CaseVariant) -> String {
     match case_variant {
         CaseVariant::Lowercase => name.to_lowercase(),
         CaseVariant::Uppercase => name.to_uppercase(),
-        CaseVariant::MixedCase => {
-            name.chars()
-                .enumerate()
-                .map(|(i, c)| if i == 0 { c.to_uppercase().to_string() } else { c.to_lowercase().to_string() })
-                .collect::<String>()
-        }
-        CaseVariant::RandomCase => {
-            name.chars()
-                .enumerate()
-                .map(|(i, c)| if i % 2 == 0 { c.to_lowercase().to_string() } else { c.to_uppercase().to_string() })
-                .collect::<String>()
-        }
+        CaseVariant::MixedCase => name
+            .chars()
+            .enumerate()
+            .map(|(i, c)| {
+                if i == 0 {
+                    c.to_uppercase().to_string()
+                } else {
+                    c.to_lowercase().to_string()
+                }
+            })
+            .collect::<String>(),
+        CaseVariant::RandomCase => name
+            .chars()
+            .enumerate()
+            .map(|(i, c)| {
+                if i % 2 == 0 {
+                    c.to_lowercase().to_string()
+                } else {
+                    c.to_uppercase().to_string()
+                }
+            })
+            .collect::<String>(),
     }
 }
 
@@ -895,12 +944,14 @@ fn format_header_value(value: &str, whitespace_pattern: &WhitespacePattern) -> S
 }
 
 fn is_valid_connection_close_request(request: &HttpRequest) -> bool {
-    matches!(request.connection_directive, ConnectionDirective::Close) &&
-    !request.headers.iter().any(|(name, value)| {
-        name.is_empty() ||
-        value.contains('\0') ||
-        name.contains('\0') ||
-        name.contains('\r') || name.contains('\n') ||
-        value.contains('\r') || value.contains('\n')
-    })
+    matches!(request.connection_directive, ConnectionDirective::Close)
+        && !request.headers.iter().any(|(name, value)| {
+            name.is_empty()
+                || value.contains('\0')
+                || name.contains('\0')
+                || name.contains('\r')
+                || name.contains('\n')
+                || value.contains('\r')
+                || value.contains('\n')
+        })
 }

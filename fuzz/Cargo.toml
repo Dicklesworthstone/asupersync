@@ -5094,6 +5094,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h1_connection_close"
+path = "fuzz_targets/h1_connection_close.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "h1_connection_close_semantics"
 path = "fuzz_targets/h1_connection_close_semantics.rs"
 test = false
