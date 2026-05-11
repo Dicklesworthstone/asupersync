@@ -215,7 +215,6 @@ impl MockInvalidMethodConnection {
                         self.connection_error = Some(PROTOCOL_ERROR);
                     }
                 }
-                return; // Stop processing after invalid method
             }
         }
     }
@@ -298,7 +297,6 @@ impl MockInvalidMethodConnection {
             self.connection_error = Some(PROTOCOL_ERROR);
             self.protocol_violations
                 .push("PRIORITY frame with stream ID 0".to_string());
-            return;
         }
 
         // PRIORITY frames don't affect :method validation
@@ -326,11 +324,10 @@ impl MockInvalidMethodConnection {
     }
 
     fn process_settings_frame(&mut self, payload: &[u8]) {
-        if payload.len() % 6 != 0 {
+        if !payload.len().is_multiple_of(6) {
             self.connection_error = Some(PROTOCOL_ERROR);
             self.protocol_violations
                 .push("SETTINGS frame with invalid length".to_string());
-            return;
         }
         // SETTINGS frames don't affect :method validation
     }
@@ -530,8 +527,11 @@ fuzz_target!(|input: InvalidMethodInput| {
         }
     }
 
-    // Determine if the method should be invalid
-    let should_be_invalid = is_method_invalid(&input.method);
+    // Determine if the extracted method should be invalid. The mock parser
+    // bounds the pseudo-header bytes before validation, so the oracle must use
+    // the same extracted view.
+    let extracted_method = simulated_extracted_method(&input.method);
+    let should_be_invalid = is_method_invalid(&extracted_method);
 
     // Create HEADERS frame payload with the method
     // In reality this would be HPACK-encoded, but we simulate with the method string
@@ -574,6 +574,18 @@ fuzz_target!(|input: InvalidMethodInput| {
         assert!(
             !conn.get_invalid_methods().is_empty(),
             "Expected invalid method to be detected and recorded"
+        );
+        let detected_method = conn
+            .get_invalid_methods()
+            .last()
+            .expect("invalid method details should be recorded");
+        assert_eq!(
+            detected_method.stream_id, stream_id,
+            "Invalid :method record should preserve the stream ID"
+        );
+        assert_eq!(
+            detected_method.method, extracted_method,
+            "Invalid :method record should preserve the extracted method bytes"
         );
     } else {
         // Valid method should not cause error
@@ -634,6 +646,15 @@ fn is_method_invalid(method: &str) -> bool {
     false
 }
 
+fn simulated_extracted_method(method: &str) -> String {
+    let bytes = method.as_bytes();
+    if bytes.len() > 100 {
+        String::from_utf8_lossy(&bytes[..100]).to_string()
+    } else {
+        method.to_string()
+    }
+}
+
 /// Test specific invalid :method scenarios
 fn test_invalid_method_scenarios(_input: &InvalidMethodInput) {
     // Scenario 1: Empty :method
@@ -681,6 +702,7 @@ fn test_invalid_method_scenarios(_input: &InvalidMethodInput) {
                 ":method with control character 0x{:02X} must be rejected",
                 control_char
             );
+            assert_eq!(conn.count_control_char_methods(), 1);
         }
     }
 
@@ -757,6 +779,7 @@ fn test_invalid_method_scenarios(_input: &InvalidMethodInput) {
             ":method with invalid character '{}' must be rejected",
             invalid_char
         );
+        assert_eq!(conn.count_invalid_char_methods(), 1);
     }
 
     // Scenario 9: Case sensitivity (methods are case-sensitive)
@@ -767,6 +790,18 @@ fn test_invalid_method_scenarios(_input: &InvalidMethodInput) {
         // Whether this is accepted depends on implementation
         // HTTP methods are case-sensitive, but "get" is technically valid as a token
         // The key is that our parser should be consistent
+    }
+
+    // Scenario 9b: RST_STREAM with STREAM_CLOSED should not affect method validation
+    {
+        let mut conn = MockInvalidMethodConnection::new();
+        conn.process_frame(FRAME_TYPE_HEADERS, 1, FLAG_END_HEADERS, b"GET");
+        conn.process_frame(FRAME_TYPE_RST_STREAM, 1, 0, &STREAM_CLOSED.to_be_bytes());
+
+        assert!(
+            !conn.has_protocol_error(),
+            "RST_STREAM STREAM_CLOSED after valid :method should not create a method error"
+        );
     }
 
     // Scenario 10: Very long method (potential buffer overflow)

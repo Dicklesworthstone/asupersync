@@ -5161,6 +5161,7 @@ name = "h2_request_method_invalid"
 path = "fuzz_targets/h2_request_method_invalid.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_request_pseudo_method_with_special_chars"
