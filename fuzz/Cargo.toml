@@ -2263,6 +2263,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "web_multipart_parser"
+path = "fuzz_targets/web_multipart_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "multipart_filename_extraction"
 path = "fuzz_targets/multipart_filename_extraction.rs"
 test = false

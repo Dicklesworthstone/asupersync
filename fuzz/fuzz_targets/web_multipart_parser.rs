@@ -17,16 +17,15 @@
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 
-use asupersync::web::multipart::{Multipart, MultipartLimits};
-use asupersync::web::extract::{ExtractionError, FromRequest, Request};
-use asupersync::web::response::StatusCode;
 use asupersync::bytes::Bytes;
+use asupersync::web::extract::ExtractionError;
+use asupersync::web::multipart::MultipartLimits;
 use std::collections::HashMap;
 
-const MAX_INPUT_SIZE: usize = 512 * 1024;  // 512KB limit
-const MAX_PARTS: usize = 50;               // Limit parts to prevent excessive memory
-const MAX_BOUNDARY_LEN: usize = 256;       // Reasonable boundary length
-const MAX_HEADER_VALUE_LEN: usize = 1024;  // Limit header values
+const MAX_INPUT_SIZE: usize = 512 * 1024; // 512KB limit
+const MAX_PARTS: usize = 50; // Limit parts to prevent excessive memory
+const MAX_BOUNDARY_LEN: usize = 256; // Reasonable boundary length
+const MAX_HEADER_VALUE_LEN: usize = 1024; // Limit header values
 
 /// Adversarial multipart form configuration for structure-aware fuzzing
 #[derive(Debug, Arbitrary)]
@@ -44,7 +43,10 @@ enum BoundaryConfig {
     /// Normal boundary string
     Normal { boundary: String },
     /// Boundary containing special characters
-    Special { base: String, special_chars: Vec<u8> },
+    Special {
+        base: String,
+        special_chars: Vec<u8>,
+    },
     /// Very long boundary (test limits)
     Oversized { base: String, padding: Vec<u8> },
     /// Boundary with embedded delimiters
@@ -77,11 +79,17 @@ enum HeaderName {
 #[derive(Debug, Arbitrary)]
 enum HeaderValue {
     /// Normal form-data value
-    FormData { name: String, filename: Option<String> },
+    FormData {
+        name: String,
+        filename: Option<String>,
+    },
     /// Malformed disposition value
     Malformed { raw: Vec<u8> },
     /// Value with special characters
-    Special { base: String, special_chars: Vec<u8> },
+    Special {
+        base: String,
+        special_chars: Vec<u8>,
+    },
     /// Oversized value
     Oversized { base: String, padding: Vec<u8> },
     /// Empty value
@@ -93,9 +101,17 @@ enum HeaderEncoding {
     /// Plain ASCII
     Plain,
     /// RFC 2047 encoded words (=?charset?encoding?encoded-text?=)
-    Rfc2047 { charset: String, encoding: u8, text: Vec<u8> },
+    Rfc2047 {
+        charset: String,
+        encoding: u8,
+        text: Vec<u8>,
+    },
     /// RFC 8187 extended parameters (name*=charset'lang'value)
-    Rfc8187 { charset: String, lang: String, value: Vec<u8> },
+    Rfc8187 {
+        charset: String,
+        lang: String,
+        value: Vec<u8>,
+    },
     /// Invalid UTF-8
     Invalid { bytes: Vec<u8> },
 }
@@ -109,16 +125,19 @@ enum BodyConfig {
     /// Oversized body
     Oversized { base: Vec<u8>, repetitions: u8 },
     /// Body containing boundary-like sequences
-    BoundaryLike { data: Vec<u8>, fake_boundary: String },
+    BoundaryLike {
+        data: Vec<u8>,
+        fake_boundary: String,
+    },
     /// Empty body
     Empty,
 }
 
 #[derive(Debug, Arbitrary)]
 enum LineEndingStyle {
-    Crlf,   // \r\n
-    Lf,     // \n
-    Mixed,  // Mix of both
+    Crlf,  // \r\n
+    Lf,    // \n
+    Mixed, // Mix of both
 }
 
 #[derive(Debug, Arbitrary)]
@@ -189,8 +208,11 @@ fn test_parse_multipart_direct(body: &Bytes, boundary: &str, limits: &MultipartL
             }
         }
         Err(_) => {
-            panic!("Multipart parsing panicked with input: body_len={}, boundary='{}'",
-                   body.len(), boundary);
+            panic!(
+                "Multipart parsing panicked with input: body_len={}, boundary='{}'",
+                body.len(),
+                boundary
+            );
         }
     }
 }
@@ -211,14 +233,13 @@ fn test_multipart_extraction(body: &Bytes, boundary: &str, limits: &MultipartLim
 fn test_multipart_with_mock_request(
     body: &Bytes,
     headers: &HashMap<String, String>,
-    limits: &MultipartLimits
+    limits: &MultipartLimits,
 ) -> Result<MockMultipart, ExtractionError> {
     // Since we can't easily create a full Request, we'll simulate the parsing
     // by testing the individual parsing functions that would be called
 
-    let boundary = extract_boundary_from_content_type(
-        headers.get("content-type").unwrap_or(&"".to_string())
-    )?;
+    let boundary =
+        extract_boundary_from_content_type(headers.get("content-type").unwrap_or(&"".to_string()))?;
 
     // This would call the internal parse_multipart function
     // For now, simulate basic validation
@@ -256,7 +277,11 @@ fn extract_boundary_from_content_type(content_type: &str) -> Result<String, Extr
 }
 
 /// Basic multipart structure validation
-fn validate_multipart_structure(body: &Bytes, boundary: &str, _limits: &MultipartLimits) -> Result<(), ExtractionError> {
+fn validate_multipart_structure(
+    body: &Bytes,
+    boundary: &str,
+    _limits: &MultipartLimits,
+) -> Result<(), ExtractionError> {
     // Note: MultipartLimits doesn't expose getters, so we'll skip size validation here
     // The actual implementation would check this during parsing
 
@@ -264,7 +289,10 @@ fn validate_multipart_structure(body: &Bytes, boundary: &str, _limits: &Multipar
     let delimiter_bytes = delimiter.as_bytes();
 
     // Check if boundary appears at least once
-    if !body.windows(delimiter_bytes.len()).any(|window| window == delimiter_bytes) {
+    if !body
+        .windows(delimiter_bytes.len())
+        .any(|window| window == delimiter_bytes)
+    {
         return Err(ExtractionError::bad_request("Boundary not found in body"));
     }
 
@@ -273,18 +301,25 @@ fn validate_multipart_structure(body: &Bytes, boundary: &str, _limits: &Multipar
 
 /// Validate parsed multipart invariants
 fn validate_multipart_invariants(multipart: &MockMultipart, _limits: &MultipartLimits) {
-    assert!(!multipart.boundary.is_empty(), "Boundary should not be empty");
+    assert!(
+        !multipart.boundary.is_empty(),
+        "Boundary should not be empty"
+    );
     // Note: limits doesn't expose getters, so we skip size validation
-    assert!(multipart.body_len < 2 * 1024 * 1024, "Body size should be reasonable");
+    assert!(
+        multipart.body_len < 2 * 1024 * 1024,
+        "Body size should be reasonable"
+    );
 }
 
 /// Build boundary string from configuration
 fn build_boundary(config: &BoundaryConfig) -> String {
     match config {
-        BoundaryConfig::Normal { boundary } => {
-            clamp_string(boundary, MAX_BOUNDARY_LEN)
-        }
-        BoundaryConfig::Special { base, special_chars } => {
+        BoundaryConfig::Normal { boundary } => clamp_string(boundary, MAX_BOUNDARY_LEN),
+        BoundaryConfig::Special {
+            base,
+            special_chars,
+        } => {
             let mut result = clamp_string(base, MAX_BOUNDARY_LEN / 2);
             for &ch in special_chars.iter().take(MAX_BOUNDARY_LEN / 2) {
                 if ch.is_ascii() && ch != b'\r' && ch != b'\n' {
@@ -295,7 +330,8 @@ fn build_boundary(config: &BoundaryConfig) -> String {
         }
         BoundaryConfig::Oversized { base, padding } => {
             let mut result = clamp_string(base, 50);
-            let padding_str: String = padding.iter()
+            let padding_str: String = padding
+                .iter()
                 .take(MAX_BOUNDARY_LEN - result.len())
                 .filter(|&&b| b.is_ascii_alphanumeric())
                 .map(|&b| b as char)
@@ -306,7 +342,8 @@ fn build_boundary(config: &BoundaryConfig) -> String {
         BoundaryConfig::Embedded { base, embedded } => {
             let mut result = clamp_string(base, MAX_BOUNDARY_LEN / 2);
             result.push_str("--");
-            let embedded_str: String = embedded.iter()
+            let embedded_str: String = embedded
+                .iter()
                 .take(MAX_BOUNDARY_LEN - result.len())
                 .filter(|&&b| b.is_ascii_alphanumeric())
                 .map(|&b| b as char)
@@ -318,7 +355,8 @@ fn build_boundary(config: &BoundaryConfig) -> String {
             if chars.is_empty() {
                 "X".to_string()
             } else {
-                chars.iter()
+                chars
+                    .iter()
                     .take(10)
                     .filter(|&&b| b.is_ascii_alphanumeric())
                     .map(|&b| b as char)
@@ -359,6 +397,11 @@ fn build_multipart_body(input: &AdversarialMultipart, boundary: &str) -> Bytes {
                 body.extend_from_slice(header_line.as_bytes());
                 body.extend_from_slice(line_ending.as_bytes());
             }
+        }
+
+        if part.malformed {
+            body.extend_from_slice(b"X-Malformed-Header-Without-Colon");
+            body.extend_from_slice(line_ending.as_bytes());
         }
 
         // Blank line before body
@@ -413,7 +456,10 @@ fn build_header_value(value: &HeaderValue, encoding: &HeaderEncoding) -> String 
         HeaderValue::Malformed { raw } => {
             String::from_utf8_lossy(&raw[..raw.len().min(MAX_HEADER_VALUE_LEN)]).to_string()
         }
-        HeaderValue::Special { base, special_chars } => {
+        HeaderValue::Special {
+            base,
+            special_chars,
+        } => {
             let mut result = clamp_string(base, MAX_HEADER_VALUE_LEN / 2);
             for &ch in special_chars.iter().take(MAX_HEADER_VALUE_LEN / 2) {
                 if ch.is_ascii() && ch != b'\r' && ch != b'\n' {
@@ -424,7 +470,8 @@ fn build_header_value(value: &HeaderValue, encoding: &HeaderEncoding) -> String 
         }
         HeaderValue::Oversized { base, padding } => {
             let mut result = clamp_string(base, 100);
-            let padding_str: String = padding.iter()
+            let padding_str: String = padding
+                .iter()
                 .take(MAX_HEADER_VALUE_LEN - result.len())
                 .filter(|&&b| b.is_ascii_graphic() || b == b' ')
                 .map(|&b| b as char)
@@ -442,23 +489,37 @@ fn build_header_value(value: &HeaderValue, encoding: &HeaderEncoding) -> String 
 fn apply_header_encoding(value: &str, encoding: &HeaderEncoding) -> String {
     match encoding {
         HeaderEncoding::Plain => value.to_string(),
-        HeaderEncoding::Rfc2047 { charset, encoding, text } => {
+        HeaderEncoding::Rfc2047 {
+            charset,
+            encoding,
+            text,
+        } => {
             let enc_char = match encoding % 3 {
                 0 => 'Q', // Quoted-printable
                 1 => 'B', // Base64
                 _ => 'Q',
             };
             let text_str = String::from_utf8_lossy(&text[..text.len().min(200)]);
-            format!("=?{}?{}?{}?=",
-                   clamp_string(charset, 20), enc_char, text_str)
+            format!(
+                "=?{}?{}?{}?=",
+                clamp_string(charset, 20),
+                enc_char,
+                text_str
+            )
         }
-        HeaderEncoding::Rfc8187 { charset, lang, value } => {
+        HeaderEncoding::Rfc8187 {
+            charset,
+            lang,
+            value,
+        } => {
             let value_str = String::from_utf8_lossy(&value[..value.len().min(200)]);
-            format!("{}*={}'{}'{}",
-                   "filename", // Common parameter name
-                   clamp_string(charset, 20),
-                   clamp_string(lang, 10),
-                   value_str)
+            format!(
+                "{}*={}'{}'{}",
+                "filename", // Common parameter name
+                clamp_string(charset, 20),
+                clamp_string(lang, 10),
+                value_str
+            )
         }
         HeaderEncoding::Invalid { bytes } => {
             String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_HEADER_VALUE_LEN)]).to_string()
@@ -469,22 +530,23 @@ fn apply_header_encoding(value: &str, encoding: &HeaderEncoding) -> String {
 /// Build part body from configuration
 fn build_part_body(config: &BodyConfig, _boundary: &str) -> Vec<u8> {
     match config {
-        BodyConfig::Text { content } => {
-            clamp_string(content, 64 * 1024).into_bytes()
-        }
-        BodyConfig::Binary { data } => {
-            data[..data.len().min(64 * 1024)].to_vec()
-        }
+        BodyConfig::Text { content } => clamp_string(content, 64 * 1024).into_bytes(),
+        BodyConfig::Binary { data } => data[..data.len().min(64 * 1024)].to_vec(),
         BodyConfig::Oversized { base, repetitions } => {
             let mut result = base[..base.len().min(1024)].to_vec();
             let reps = (*repetitions as usize).min(100);
             for _ in 0..reps {
-                if result.len() >= 64 * 1024 { break; }
+                if result.len() >= 64 * 1024 {
+                    break;
+                }
                 result.extend_from_slice(&base[..base.len().min(1024)]);
             }
             result
         }
-        BodyConfig::BoundaryLike { data, fake_boundary } => {
+        BodyConfig::BoundaryLike {
+            data,
+            fake_boundary,
+        } => {
             let mut result = data[..data.len().min(32 * 1024)].to_vec();
             result.extend_from_slice(b"--");
             result.extend_from_slice(clamp_string(fake_boundary, 100).as_bytes());
