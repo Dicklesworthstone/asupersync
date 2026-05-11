@@ -3987,6 +3987,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "once_cell_set_after_init"
+path = "fuzz_targets/once_cell_set_after_init.rs"
+test = false
+doc = false
+bench = false
+
 # Tick #120 — Notify notify-one/notify-waiters interleaving correctness testing
 # Tests arbitrary sequences of notify_one and notify_waiters operations with waiter
 # management to verify all waiters present at notify_waiters wake exactly once.

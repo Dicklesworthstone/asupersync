@@ -1,11 +1,11 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::thread;
 use std::time::Duration;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use asupersync::sync::OnceCell;
 
@@ -121,32 +121,37 @@ impl SetAfterInitTracker {
                 }
 
                 // Invariant: failed set should not change initialization state
-                if matches!(result.result, SetOutcome::Failed(_)) {
-                    if result.cell_was_initialized_before != result.cell_was_initialized_after {
-                        self.record_violation(InvariantViolation {
-                            violation_type: "failed_set_changed_state".to_string(),
-                            description: format!(
-                                "Operation {} failed but changed initialization state from {} to {}",
-                                result.operation_id, result.cell_was_initialized_before, result.cell_was_initialized_after
-                            ),
-                            operation_id: result.operation_id,
-                        });
-                    }
+                if matches!(result.result, SetOutcome::Failed(_))
+                    && result.cell_was_initialized_before != result.cell_was_initialized_after
+                {
+                    self.record_violation(InvariantViolation {
+                        violation_type: "failed_set_changed_state".to_string(),
+                        description: format!(
+                            "Operation {} failed but changed initialization state from {} to {}",
+                            result.operation_id,
+                            result.cell_was_initialized_before,
+                            result.cell_was_initialized_after
+                        ),
+                        operation_id: result.operation_id,
+                    });
                 }
             }
         }
 
         // Check for any violations and panic if found
-        if let Ok(violations) = self.invariant_violations.lock() {
-            if !violations.is_empty() {
-                for violation in violations.iter() {
-                    self.record_operation(&format!(
-                        "VIOLATION: {} - {}",
-                        violation.violation_type, violation.description
-                    ));
-                }
-                panic!("OnceCell set-after-init invariant violations detected: {} violations", violations.len());
+        if let Ok(violations) = self.invariant_violations.lock()
+            && !violations.is_empty()
+        {
+            for violation in violations.iter() {
+                self.record_operation(&format!(
+                    "VIOLATION {}: {} - {}",
+                    violation.operation_id, violation.violation_type, violation.description
+                ));
             }
+            panic!(
+                "OnceCell set-after-init invariant violations detected: {} violations",
+                violations.len()
+            );
         }
     }
 }
@@ -187,8 +192,14 @@ fuzz_target!(|data: &[u8]| {
     let config: SetAfterInitConfig = u.arbitrary().unwrap_or(SetAfterInitConfig {
         initial_value: 42,
         set_attempts: vec![
-            SetAttempt { value: 100, delay_us: 0 },
-            SetAttempt { value: 200, delay_us: 10 },
+            SetAttempt {
+                value: 100,
+                delay_us: 0,
+            },
+            SetAttempt {
+                value: 200,
+                delay_us: 10,
+            },
         ],
         pattern: SetPattern::SequentialSets,
     });
@@ -204,7 +215,11 @@ fuzz_target!(|data: &[u8]| {
 
     // Initialize the cell first
     let init_result = cell.set(config.initial_value);
-    tracker.record_operation(&format!("initial_set_{}_result_{:?}", config.initial_value, init_result.is_ok()));
+    tracker.record_operation(&format!(
+        "initial_set_{}_result_{:?}",
+        config.initial_value,
+        init_result.is_ok()
+    ));
 
     if init_result.is_err() {
         // If initial set failed, something is wrong
@@ -220,23 +235,28 @@ fuzz_target!(|data: &[u8]| {
     // Execute the pattern
     match config.pattern {
         SetPattern::SequentialSets => {
-            test_sequential_sets(&tracker, &cell, &set_attempts);
+            test_sequential_sets(&tracker, cell.as_ref(), &set_attempts);
         }
 
         SetPattern::ConcurrentSets { thread_count } => {
-            test_concurrent_sets(&tracker, &cell, &set_attempts, thread_count.min(8));
+            test_concurrent_sets(
+                &tracker,
+                Arc::clone(&cell),
+                &set_attempts,
+                thread_count.min(8),
+            );
         }
 
         SetPattern::RapidFire { iterations } => {
-            test_rapid_fire_sets(&tracker, &cell, &set_attempts, iterations.min(20));
+            test_rapid_fire_sets(&tracker, cell.as_ref(), &set_attempts, iterations.min(20));
         }
 
         SetPattern::DelayedSets { base_delay_us } => {
-            test_delayed_sets(&tracker, &cell, &set_attempts, base_delay_us);
+            test_delayed_sets(&tracker, cell.as_ref(), &set_attempts, base_delay_us);
         }
 
         SetPattern::MixedPattern { operations } => {
-            test_mixed_pattern(&tracker, &cell, operations);
+            test_mixed_pattern(&tracker, Arc::clone(&cell), operations);
         }
     }
 
@@ -244,7 +264,11 @@ fuzz_target!(|data: &[u8]| {
     tracker.validate_set_after_init_invariants();
 });
 
-fn test_sequential_sets(tracker: &SetAfterInitTracker, cell: &OnceCell<u32>, attempts: &[SetAttempt]) {
+fn test_sequential_sets(
+    tracker: &SetAfterInitTracker,
+    cell: &OnceCell<u32>,
+    attempts: &[SetAttempt],
+) {
     tracker.record_operation("test_sequential_sets");
 
     for (i, attempt) in attempts.iter().enumerate() {
@@ -254,9 +278,7 @@ fn test_sequential_sets(tracker: &SetAfterInitTracker, cell: &OnceCell<u32>, att
 
         let was_initialized_before = cell.is_initialized();
 
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            cell.set(attempt.value)
-        }));
+        let result = catch_unwind(AssertUnwindSafe(|| cell.set(attempt.value)));
 
         let was_initialized_after = cell.is_initialized();
 
@@ -276,17 +298,22 @@ fn test_sequential_sets(tracker: &SetAfterInitTracker, cell: &OnceCell<u32>, att
     }
 }
 
-fn test_concurrent_sets(tracker: &SetAfterInitTracker, cell: &OnceCell<u32>, attempts: &[SetAttempt], thread_count: u8) {
+fn test_concurrent_sets(
+    tracker: &SetAfterInitTracker,
+    cell: Arc<OnceCell<u32>>,
+    attempts: &[SetAttempt],
+    thread_count: u8,
+) {
     tracker.record_operation("test_concurrent_sets");
 
     let mut handles = Vec::new();
-    let cell = Arc::new(cell);
 
     for i in 0..thread_count as usize {
         let attempt_idx = i % attempts.len();
         let attempt = attempts[attempt_idx].clone();
         let cell_clone = Arc::clone(&cell);
         let tracker_clone = tracker.clone();
+        let operation_id = i + 100;
 
         let handle = thread::spawn(move || {
             if attempt.delay_us > 0 {
@@ -295,9 +322,7 @@ fn test_concurrent_sets(tracker: &SetAfterInitTracker, cell: &OnceCell<u32>, att
 
             let was_initialized_before = cell_clone.is_initialized();
 
-            let result = catch_unwind(AssertUnwindSafe(|| {
-                cell_clone.set(attempt.value)
-            }));
+            let result = catch_unwind(AssertUnwindSafe(|| cell_clone.set(attempt.value)));
 
             let was_initialized_after = cell_clone.is_initialized();
 
@@ -308,7 +333,7 @@ fn test_concurrent_sets(tracker: &SetAfterInitTracker, cell: &OnceCell<u32>, att
             };
 
             tracker_clone.record_set_result(SetResult {
-                operation_id: i + 100, // Offset to distinguish from sequential
+                operation_id,
                 value_attempted: attempt.value,
                 result: outcome,
                 cell_was_initialized_before: was_initialized_before,
@@ -316,15 +341,26 @@ fn test_concurrent_sets(tracker: &SetAfterInitTracker, cell: &OnceCell<u32>, att
             });
         });
 
-        handles.push(handle);
+        handles.push((operation_id, handle));
     }
 
-    for handle in handles {
-        let _ = handle.join();
+    for (operation_id, handle) in handles {
+        if handle.join().is_err() {
+            tracker.record_violation(InvariantViolation {
+                violation_type: "concurrent_set_thread_panicked".to_string(),
+                description: format!("Concurrent set worker {operation_id} panicked"),
+                operation_id,
+            });
+        }
     }
 }
 
-fn test_rapid_fire_sets(tracker: &SetAfterInitTracker, cell: &OnceCell<u32>, attempts: &[SetAttempt], iterations: u8) {
+fn test_rapid_fire_sets(
+    tracker: &SetAfterInitTracker,
+    cell: &OnceCell<u32>,
+    attempts: &[SetAttempt],
+    iterations: u8,
+) {
     tracker.record_operation("test_rapid_fire_sets");
 
     for i in 0..iterations as usize {
@@ -333,9 +369,7 @@ fn test_rapid_fire_sets(tracker: &SetAfterInitTracker, cell: &OnceCell<u32>, att
 
         let was_initialized_before = cell.is_initialized();
 
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            cell.set(attempt.value)
-        }));
+        let result = catch_unwind(AssertUnwindSafe(|| cell.set(attempt.value)));
 
         let was_initialized_after = cell.is_initialized();
 
@@ -355,7 +389,12 @@ fn test_rapid_fire_sets(tracker: &SetAfterInitTracker, cell: &OnceCell<u32>, att
     }
 }
 
-fn test_delayed_sets(tracker: &SetAfterInitTracker, cell: &OnceCell<u32>, attempts: &[SetAttempt], base_delay_us: u16) {
+fn test_delayed_sets(
+    tracker: &SetAfterInitTracker,
+    cell: &OnceCell<u32>,
+    attempts: &[SetAttempt],
+    base_delay_us: u16,
+) {
     tracker.record_operation("test_delayed_sets");
 
     for (i, attempt) in attempts.iter().enumerate() {
@@ -366,9 +405,7 @@ fn test_delayed_sets(tracker: &SetAfterInitTracker, cell: &OnceCell<u32>, attemp
 
         let was_initialized_before = cell.is_initialized();
 
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            cell.set(attempt.value)
-        }));
+        let result = catch_unwind(AssertUnwindSafe(|| cell.set(attempt.value)));
 
         let was_initialized_after = cell.is_initialized();
 
@@ -388,7 +425,11 @@ fn test_delayed_sets(tracker: &SetAfterInitTracker, cell: &OnceCell<u32>, attemp
     }
 }
 
-fn test_mixed_pattern(tracker: &SetAfterInitTracker, cell: &OnceCell<u32>, operations: Vec<Operation>) {
+fn test_mixed_pattern(
+    tracker: &SetAfterInitTracker,
+    cell: Arc<OnceCell<u32>>,
+    operations: Vec<Operation>,
+) {
     tracker.record_operation("test_mixed_pattern");
 
     for (i, operation) in operations.iter().take(15).enumerate() {
@@ -396,9 +437,7 @@ fn test_mixed_pattern(tracker: &SetAfterInitTracker, cell: &OnceCell<u32>, opera
             Operation::Set { value } => {
                 let was_initialized_before = cell.is_initialized();
 
-                let result = catch_unwind(AssertUnwindSafe(|| {
-                    cell.set(*value)
-                }));
+                let result = catch_unwind(AssertUnwindSafe(|| cell.set(*value)));
 
                 let was_initialized_after = cell.is_initialized();
 
@@ -430,17 +469,16 @@ fn test_mixed_pattern(tracker: &SetAfterInitTracker, cell: &OnceCell<u32>, opera
             Operation::ConcurrentSet { value, delay_us } => {
                 let value = *value;
                 let delay = Duration::from_micros((*delay_us).min(500) as u64);
-                let cell_clone = cell;
+                let cell_clone = Arc::clone(&cell);
                 let tracker_clone = tracker.clone();
+                let operation_id = i + 500;
 
                 let handle = thread::spawn(move || {
                     thread::sleep(delay);
 
                     let was_initialized_before = cell_clone.is_initialized();
 
-                    let result = catch_unwind(AssertUnwindSafe(|| {
-                        cell_clone.set(value)
-                    }));
+                    let result = catch_unwind(AssertUnwindSafe(|| cell_clone.set(value)));
 
                     let was_initialized_after = cell_clone.is_initialized();
 
@@ -451,7 +489,7 @@ fn test_mixed_pattern(tracker: &SetAfterInitTracker, cell: &OnceCell<u32>, opera
                     };
 
                     tracker_clone.record_set_result(SetResult {
-                        operation_id: i + 500, // Offset for concurrent mixed
+                        operation_id,
                         value_attempted: value,
                         result: outcome,
                         cell_was_initialized_before: was_initialized_before,
@@ -459,7 +497,13 @@ fn test_mixed_pattern(tracker: &SetAfterInitTracker, cell: &OnceCell<u32>, opera
                     });
                 });
 
-                let _ = handle.join();
+                if handle.join().is_err() {
+                    tracker.record_violation(InvariantViolation {
+                        violation_type: "mixed_concurrent_set_thread_panicked".to_string(),
+                        description: format!("Mixed concurrent set worker {operation_id} panicked"),
+                        operation_id,
+                    });
+                }
             }
         }
     }
