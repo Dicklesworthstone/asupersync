@@ -482,16 +482,14 @@ fuzz_target!(|scenario: SettingsScenario| {
 
             // In loose mode, this gets accepted as true (the vulnerability)
             match &loose_result {
-                ValidationResult::Success { settings, .. } => {
-                    if !scenario.is_server {
-                        assert!(
-                            settings
-                                .iter()
-                                .any(|s| matches!(s, ParsedSetting::EnablePush(true))),
-                            "Loose mode should accept SETTINGS_ENABLE_PUSH={} as true",
-                            setting.value
-                        );
-                    }
+                ValidationResult::Success { settings, .. } if !scenario.is_server => {
+                    assert!(
+                        settings
+                            .iter()
+                            .any(|s| matches!(s, ParsedSetting::EnablePush(true))),
+                        "Loose mode should accept SETTINGS_ENABLE_PUSH={} as true",
+                        setting.value
+                    );
                 }
                 _ => {
                     // May be other errors like server sending ENABLE_PUSH
