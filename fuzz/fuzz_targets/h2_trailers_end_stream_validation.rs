@@ -19,23 +19,16 @@
 //! - Final response after 1xx: not trailers despite END_STREAM if bodyless
 
 use arbitrary::Arbitrary;
+use asupersync::bytes::{Bytes, BytesMut};
+use asupersync::http::h2::{
+    Connection, ErrorCode, Frame, Header as H2Header, HpackEncoder, Settings,
+    connection::ReceivedFrame,
+    frame::{HeadersFrame as LiveHeadersFrame, SettingsFrame},
+};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
-/// HTTP/2 frame type identifiers
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FrameType {
-    Data = 0x0,
-    Headers = 0x1,
-    Priority = 0x2,
-    RstStream = 0x3,
-    Settings = 0x4,
-    PushPromise = 0x5,
-    Ping = 0x6,
-    GoAway = 0x7,
-    WindowUpdate = 0x8,
-    Continuation = 0x9,
-}
+const LIVE_STREAM_ID: u32 = 1;
 
 /// HTTP/2 header representation
 #[derive(Debug, Clone, Arbitrary)]
@@ -51,26 +44,12 @@ struct HeadersFrame {
     stream_id: u32,
     headers: Vec<Header>,
     end_stream: bool,
-    end_headers: bool,
-    priority: Option<u32>,
-}
-
-/// Stream state for tracking initial headers
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StreamState {
-    Idle,
-    Open,
-    HalfClosedLocal,
-    HalfClosedRemote,
-    Closed,
 }
 
 /// Stream information for context
 #[derive(Debug, Clone)]
 struct StreamInfo {
-    state: StreamState,
     initial_headers_received: bool,
-    is_client_initiated: bool,
 }
 
 /// Connection side (client or server)
@@ -95,7 +74,6 @@ struct TrailersScenario {
 struct MockH2Connection {
     is_client: bool,
     streams: HashMap<u32, StreamInfo>,
-    errors: Vec<String>,
 }
 
 impl MockH2Connection {
@@ -103,7 +81,6 @@ impl MockH2Connection {
         Self {
             is_client,
             streams: HashMap::new(),
-            errors: Vec::new(),
         }
     }
 
@@ -113,9 +90,7 @@ impl MockH2Connection {
 
         // Ensure stream exists
         let stream = self.streams.entry(stream_id).or_insert(StreamInfo {
-            state: StreamState::Open,
             initial_headers_received: false,
-            is_client_initiated: (stream_id % 2) == 1,
         });
 
         // Determine context for trailers detection (mirroring connection.rs logic)
@@ -148,10 +123,8 @@ impl MockH2Connection {
 
         // Mark initial headers as received for non-trailers, non-informational responses
         let should_mark_initial = !is_trailers && !is_informational_response;
-        if should_mark_initial {
-            if let Some(stream) = self.streams.get_mut(&stream_id) {
-                stream.initial_headers_received = true;
-            }
+        if should_mark_initial && let Some(stream) = self.streams.get_mut(&stream_id) {
+            stream.initial_headers_received = true;
         }
 
         Ok(())
@@ -262,10 +235,6 @@ impl MockH2Connection {
 
         Ok(())
     }
-
-    fn get_errors(&self) -> &[String] {
-        &self.errors
-    }
 }
 
 /// Generate edge case headers for testing
@@ -315,6 +284,160 @@ fn generate_edge_case_headers(include_edge_cases: bool, is_trailers_context: boo
     headers
 }
 
+fn open_live_server_connection() -> Connection {
+    let mut connection = Connection::server(Settings::default());
+    connection
+        .process_frame(Frame::Settings(SettingsFrame::new(Vec::new())))
+        .expect("initial SETTINGS should open live server connection");
+    while connection.next_frame().is_some() {}
+    connection
+}
+
+fn open_live_client_connection() -> Connection {
+    let mut connection = Connection::client(Settings::default());
+    connection
+        .process_frame(Frame::Settings(SettingsFrame::new(Vec::new())))
+        .expect("initial SETTINGS should open live client connection");
+    connection
+        .open_stream(
+            vec![
+                H2Header::new(":method", "GET"),
+                H2Header::new(":scheme", "https"),
+                H2Header::new(":path", "/trailers-oracle"),
+                H2Header::new(":authority", "example.test"),
+            ],
+            false,
+        )
+        .expect("client should open request stream for response oracle");
+    while connection.next_frame().is_some() {}
+    connection
+}
+
+fn encode_live_headers(headers: &[H2Header]) -> Bytes {
+    let mut encoder = HpackEncoder::new();
+    let mut block = BytesMut::new();
+    encoder.encode(headers, &mut block);
+    block.freeze()
+}
+
+fn process_live_headers(
+    connection: &mut Connection,
+    stream_id: u32,
+    headers: &[H2Header],
+    end_stream: bool,
+) -> Result<Option<ReceivedFrame>, asupersync::http::h2::H2Error> {
+    connection.process_frame(Frame::Headers(LiveHeadersFrame::new(
+        stream_id,
+        encode_live_headers(headers),
+        end_stream,
+        true,
+    )))
+}
+
+fn assert_live_server_trailer_validation() {
+    let mut valid_connection = open_live_server_connection();
+    process_live_headers(
+        &mut valid_connection,
+        LIVE_STREAM_ID,
+        &[
+            H2Header::new(":method", "POST"),
+            H2Header::new(":scheme", "https"),
+            H2Header::new(":path", "/upload"),
+            H2Header::new(":authority", "example.test"),
+        ],
+        false,
+    )
+    .expect("live server should accept initial request headers");
+
+    match process_live_headers(
+        &mut valid_connection,
+        LIVE_STREAM_ID,
+        &[
+            H2Header::new("x-custom", "value"),
+            H2Header::new("te", "trailers"),
+        ],
+        true,
+    )
+    .expect("live server should accept pseudo-free trailers")
+    {
+        Some(ReceivedFrame::Headers {
+            stream_id,
+            end_stream,
+            ..
+        }) => {
+            assert_eq!(stream_id, LIVE_STREAM_ID);
+            assert!(end_stream, "accepted live trailers should end the stream");
+        }
+        other => panic!("live server trailers surfaced unexpected frame: {other:?}"),
+    }
+
+    let mut invalid_connection = open_live_server_connection();
+    process_live_headers(
+        &mut invalid_connection,
+        LIVE_STREAM_ID,
+        &[
+            H2Header::new(":method", "POST"),
+            H2Header::new(":scheme", "https"),
+            H2Header::new(":path", "/upload"),
+            H2Header::new(":authority", "example.test"),
+        ],
+        false,
+    )
+    .expect("live server should accept initial request headers before invalid trailers");
+
+    let err = process_live_headers(
+        &mut invalid_connection,
+        LIVE_STREAM_ID,
+        &[
+            H2Header::new(":status", "200"),
+            H2Header::new("x-custom", "value"),
+        ],
+        true,
+    )
+    .expect_err("live server should reject pseudo-headers in trailers");
+    assert_eq!(err.code, ErrorCode::ProtocolError);
+    assert_eq!(err.stream_id, Some(LIVE_STREAM_ID));
+    assert!(
+        err.message
+            .contains("trailers section MUST NOT contain pseudo-header fields"),
+        "unexpected live trailers error: {err:?}"
+    );
+}
+
+fn assert_live_client_informational_then_bodyless_final() {
+    let mut connection = open_live_client_connection();
+
+    process_live_headers(
+        &mut connection,
+        LIVE_STREAM_ID,
+        &[H2Header::new(":status", "103")],
+        false,
+    )
+    .expect("live client should accept informational response headers");
+
+    match process_live_headers(
+        &mut connection,
+        LIVE_STREAM_ID,
+        &[H2Header::new(":status", "204")],
+        true,
+    )
+    .expect("live client should not classify final :status as trailers")
+    {
+        Some(ReceivedFrame::Headers {
+            stream_id,
+            end_stream,
+            ..
+        }) => {
+            assert_eq!(stream_id, LIVE_STREAM_ID);
+            assert!(
+                end_stream,
+                "bodyless final response should carry END_STREAM"
+            );
+        }
+        other => panic!("live client final response surfaced unexpected frame: {other:?}"),
+    }
+}
+
 fuzz_target!(|scenario: TrailersScenario| {
     // Limit scenario size to avoid timeouts
     if scenario.frames.len() > 20 || scenario.max_streams > 50 {
@@ -343,7 +466,7 @@ fuzz_target!(|scenario: TrailersScenario| {
         if scenario.include_edge_cases {
             // Determine if this would be contextually trailers for edge case generation
             let stream = connection.streams.get(&frame.stream_id);
-            let is_subsequent = stream.map_or(false, |s| s.initial_headers_received);
+            let is_subsequent = stream.is_some_and(|s| s.initial_headers_received);
             let is_request = !connection.is_client;
 
             let observed_status = frame
@@ -404,25 +527,26 @@ fuzz_target!(|scenario: TrailersScenario| {
         }
 
         // Edge case 2: Bodyless final response after 1xx (has END_STREAM but not trailers)
-        if let Some(stream) = connection.streams.get(&frame.stream_id) {
-            if stream.initial_headers_received && frame.end_stream {
-                let has_status = frame.headers.iter().any(|h| h.name == ":status");
-                if has_status
-                    && result.is_err()
-                    && result
-                        .as_ref()
-                        .unwrap_err()
-                        .contains("trailers section MUST NOT contain pseudo-header")
-                {
-                    // This might be a bodyless final response incorrectly treated as trailers
-                }
+        if let Some(stream) = connection.streams.get(&frame.stream_id)
+            && stream.initial_headers_received
+            && frame.end_stream
+        {
+            let has_status = frame.headers.iter().any(|h| h.name == ":status");
+            if has_status
+                && result.is_err()
+                && result
+                    .as_ref()
+                    .unwrap_err()
+                    .contains("trailers section MUST NOT contain pseudo-header")
+            {
+                panic!("bodyless final response with :status incorrectly treated as trailers");
             }
         }
 
         // Edge case 3: True trailers with pseudo-headers (should fail)
         if frame.end_stream {
             let stream = connection.streams.get(&frame.stream_id);
-            if stream.map_or(false, |s| s.initial_headers_received) {
+            if stream.is_some_and(|s| s.initial_headers_received) {
                 let has_pseudo = frame.headers.iter().any(|h| h.name.starts_with(':'));
                 let has_status = frame.headers.iter().any(|h| h.name == ":status");
 
@@ -445,7 +569,7 @@ fuzz_target!(|scenario: TrailersScenario| {
 
     // Validate overall behavior
     if scenario.include_edge_cases && expected_failures > 0 && actual_failures == 0 {
-        // Expected some validation failures but got none
+        panic!("expected trailers validation failures but observed none");
     }
 
     // Test that valid trailers are accepted
@@ -455,9 +579,7 @@ fuzz_target!(|scenario: TrailersScenario| {
     valid_connection.streams.insert(
         3,
         StreamInfo {
-            state: StreamState::Open,
             initial_headers_received: true,
-            is_client_initiated: true,
         },
     );
 
@@ -477,8 +599,6 @@ fuzz_target!(|scenario: TrailersScenario| {
             },
         ],
         end_stream: true,
-        end_headers: true,
-        priority: None,
     };
 
     let valid_result = valid_connection.process_headers(&valid_trailers);
@@ -504,17 +624,13 @@ fuzz_target!(|scenario: TrailersScenario| {
             },
         ],
         end_stream: true,
-        end_headers: true,
-        priority: None,
     };
 
     // Reset stream state for invalid test
     valid_connection.streams.insert(
         5,
         StreamInfo {
-            state: StreamState::Open,
             initial_headers_received: true,
-            is_client_initiated: true,
         },
     );
 
@@ -534,6 +650,9 @@ fuzz_target!(|scenario: TrailersScenario| {
             .contains("trailers section MUST NOT contain pseudo-header fields"),
         "Should reject trailers with specific pseudo-header error"
     );
+
+    assert_live_server_trailer_validation();
+    assert_live_client_informational_then_bodyless_final();
 });
 
 #[cfg(test)]
@@ -575,8 +694,6 @@ mod tests {
                         },
                     ],
                     end_stream: false,
-                    end_headers: true,
-                    priority: None,
                 },
                 HeadersFrame {
                     stream_id: 1,
@@ -593,8 +710,6 @@ mod tests {
                         },
                     ],
                     end_stream: true, // This makes it trailers
-                    end_headers: true,
-                    priority: None,
                 },
             ],
             max_streams: 10,
@@ -634,8 +749,6 @@ mod tests {
                         },
                     ],
                     end_stream: false,
-                    end_headers: true,
-                    priority: None,
                 },
                 HeadersFrame {
                     stream_id: 1,
@@ -652,8 +765,6 @@ mod tests {
                         },
                     ],
                     end_stream: true, // Makes it trailers context
-                    end_headers: true,
-                    priority: None,
                 },
             ],
             max_streams: 10,
@@ -677,8 +788,6 @@ mod tests {
                     }, // 1xx informational
                 ],
                 end_stream: true, // Not trailers despite END_STREAM
-                end_headers: true,
-                priority: None,
             }],
             max_streams: 10,
             include_edge_cases: false,
