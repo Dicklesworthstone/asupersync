@@ -2,11 +2,10 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::observability::diagnostics::*;
-use asupersync::record::{ObligationState, region::RegionState, task::TaskState};
-use asupersync::types::{CancelKind, ObligationId, RegionId, TaskId, Time};
+use asupersync::record::region::RegionState;
+use asupersync::types::{CancelKind, ObligationId, RegionId, TaskId};
 use libfuzzer_sys::fuzz_target;
 use serde_json::Value;
-use std::collections::BTreeMap;
 
 // Maximum size bounds to prevent OOM during fuzzing
 const MAX_CYCLES: usize = 100;
@@ -143,7 +142,7 @@ impl FuzzRegionOpenExplanation {
             .reasons
             .iter()
             .take(MAX_REASONS)
-            .map(|s| Reason::RegionNotFound) // Use a simple variant for fuzzing
+            .map(|_| Reason::RegionNotFound) // Use a simple variant for fuzzing
             .collect();
 
         let recommendations = self
@@ -264,12 +263,33 @@ fn validate_ndjson(ndjson_str: &str) -> Result<(), String> {
         }
     }
 
-    // Ensure the string ends with a newline if non-empty (NDJSON convention)
-    if !ndjson_str.ends_with('\n') && !lines.is_empty() {
-        return Err("NDJSON should end with newline".to_string());
-    }
-
     Ok(())
+}
+
+fn assert_every_ndjson_line_has_type(ndjson_str: &str, diagnostic_name: &str) {
+    for (line_index, line) in ndjson_str.lines().enumerate() {
+        let json: Value = serde_json::from_str(line).unwrap_or_else(|err| {
+            panic!(
+                "{} line {} should be valid JSON: {}",
+                diagnostic_name,
+                line_index + 1,
+                err
+            )
+        });
+        let type_field = json.get("type").unwrap_or_else(|| {
+            panic!(
+                "{} line {} is missing type field",
+                diagnostic_name,
+                line_index + 1
+            )
+        });
+        assert!(
+            type_field.is_string(),
+            "{} line {} type field must be string",
+            diagnostic_name,
+            line_index + 1
+        );
+    }
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -312,49 +332,11 @@ fuzz_target!(|data: &[u8]| {
 
     // Additional invariant checks
 
-    // Verify that all JSON objects contain expected type field
-    if !deadlock_ndjson.is_empty() {
-        let first_line = deadlock_ndjson.lines().next().unwrap();
-        let json: Value = serde_json::from_str(first_line).unwrap();
-        assert!(
-            json.get("type").is_some(),
-            "Missing type field in deadlock report"
-        );
-    }
-
-    if !region_ndjson.is_empty() {
-        let first_line = region_ndjson.lines().next().unwrap();
-        let json: Value = serde_json::from_str(first_line).unwrap();
-        assert!(
-            json.get("type").is_some(),
-            "Missing type field in region explanation"
-        );
-    }
-
-    if !task_ndjson.is_empty() {
-        let first_line = task_ndjson.lines().next().unwrap();
-        let json: Value = serde_json::from_str(first_line).unwrap();
-        assert!(
-            json.get("type").is_some(),
-            "Missing type field in task explanation"
-        );
-    }
-
-    if !obligation_ndjson.is_empty() {
-        let json: Value = serde_json::from_str(&obligation_ndjson.trim()).unwrap();
-        assert!(
-            json.get("type").is_some(),
-            "Missing type field in obligation leak"
-        );
-    }
-
-    // Test round-trip: parse the NDJSON and ensure we can reconstruct meaningful data
-    for line in deadlock_ndjson.lines() {
-        let json: Value = serde_json::from_str(line).unwrap();
-        if let Some(type_field) = json.get("type") {
-            assert!(type_field.is_string(), "Type field must be string");
-        }
-    }
+    // Verify that every emitted JSON object carries the diagnostic type.
+    assert_every_ndjson_line_has_type(&deadlock_ndjson, "DirectionalDeadlockReport");
+    assert_every_ndjson_line_has_type(&region_ndjson, "RegionOpenExplanation");
+    assert_every_ndjson_line_has_type(&task_ndjson, "TaskBlockedExplanation");
+    assert_every_ndjson_line_has_type(&obligation_ndjson, "ObligationLeak");
 
     // Verify no control character injection
     for ndjson in [

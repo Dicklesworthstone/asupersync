@@ -4046,6 +4046,7 @@ name = "ndjson_diagnostics"
 path = "fuzz_targets/ndjson_diagnostics.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "grpc_gzip_decompress"
