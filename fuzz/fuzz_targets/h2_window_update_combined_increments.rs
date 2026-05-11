@@ -1,6 +1,13 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
+use asupersync::{
+    bytes::{Bytes, BytesMut},
+    http::h2::{
+        Connection, ErrorCode, Frame, Header as H2Header, HpackEncoder, Settings,
+        frame::{HeadersFrame, SettingsFrame, WindowUpdateFrame as LiveWindowUpdateFrame},
+    },
+};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
@@ -156,6 +163,8 @@ impl MockH2FlowController {
 }
 
 fuzz_target!(|data: &[u8]| {
+    assert_live_combined_window_updates();
+
     let mut u = Unstructured::new(data);
     let input: FuzzInput = match u.arbitrary() {
         Ok(input) => input,
@@ -259,6 +268,79 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 });
+
+const DEFAULT_WINDOW_SIZE: u32 = 65_535;
+const MAX_FLOW_CONTROL_WINDOW: u32 = i32::MAX as u32;
+
+fn open_live_connection() -> Connection {
+    let mut connection = Connection::server(Settings::default());
+    connection
+        .process_frame(Frame::Settings(SettingsFrame::new(Vec::new())))
+        .expect("initial SETTINGS should open live H2 connection");
+    while connection.next_frame().is_some() {}
+    connection
+}
+
+fn encode_live_headers(headers: &[H2Header]) -> Bytes {
+    let mut encoder = HpackEncoder::new();
+    let mut block = BytesMut::new();
+    encoder.encode(headers, &mut block);
+    block.freeze()
+}
+
+fn assert_live_combined_window_updates() {
+    let exact_delta_to_max = MAX_FLOW_CONTROL_WINDOW - DEFAULT_WINDOW_SIZE;
+
+    let mut connection = open_live_connection();
+    connection
+        .process_frame(Frame::WindowUpdate(LiveWindowUpdateFrame::new(
+            0,
+            exact_delta_to_max,
+        )))
+        .expect("connection WINDOW_UPDATE sequence should reach the exact maximum");
+    assert_eq!(connection.send_window(), i32::MAX);
+
+    let err = connection
+        .process_frame(Frame::WindowUpdate(LiveWindowUpdateFrame::new(0, 1)))
+        .expect_err("connection WINDOW_UPDATE above the maximum should fail");
+    assert_eq!(err.code, ErrorCode::FlowControlError);
+    assert_eq!(err.stream_id, None);
+    assert!(err.message.contains("connection window overflow"));
+
+    let mut stream_connection = open_live_connection();
+    stream_connection
+        .process_frame(Frame::Headers(HeadersFrame::new(
+            1,
+            encode_live_headers(&[
+                H2Header::new(":method", "GET"),
+                H2Header::new(":scheme", "https"),
+                H2Header::new(":path", "/window-update-oracle"),
+                H2Header::new(":authority", "example.test"),
+            ]),
+            false,
+            true,
+        )))
+        .expect("HEADERS should open stream 1 for stream-level WINDOW_UPDATE");
+    stream_connection
+        .process_frame(Frame::WindowUpdate(LiveWindowUpdateFrame::new(
+            1,
+            exact_delta_to_max,
+        )))
+        .expect("stream WINDOW_UPDATE sequence should reach the exact maximum");
+    assert_eq!(
+        stream_connection
+            .stream(1)
+            .map(|stream| stream.send_window()),
+        Some(i32::MAX)
+    );
+
+    let err = stream_connection
+        .process_frame(Frame::WindowUpdate(LiveWindowUpdateFrame::new(1, 1)))
+        .expect_err("stream WINDOW_UPDATE above the maximum should fail");
+    assert_eq!(err.code, ErrorCode::FlowControlError);
+    assert_eq!(err.stream_id, Some(1));
+    assert!(err.message.contains("window size overflow"));
+}
 
 #[cfg(test)]
 mod tests {
