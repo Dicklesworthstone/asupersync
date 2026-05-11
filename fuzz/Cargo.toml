@@ -5498,6 +5498,7 @@ name = "h2_settings_max_concurrent_streams_at_zero"
 path = "fuzz_targets/h2_settings_max_concurrent_streams_at_zero.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_settings_initial_window_minus_one"

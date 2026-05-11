@@ -17,8 +17,6 @@ use libfuzzer_sys::fuzz_target;
 
 /// HTTP/2 frame type identifiers
 const SETTINGS_TYPE: u8 = 0x4;
-const HEADERS_TYPE: u8 = 0x1;
-const DATA_TYPE: u8 = 0x0;
 
 /// HTTP/2 SETTINGS parameter identifiers (RFC 7540 §6.5.2)
 const SETTINGS_HEADER_TABLE_SIZE: u16 = 0x1;
@@ -28,15 +26,9 @@ const SETTINGS_INITIAL_WINDOW_SIZE: u16 = 0x4;
 const SETTINGS_MAX_FRAME_SIZE: u16 = 0x5;
 const SETTINGS_MAX_HEADER_LIST_SIZE: u16 = 0x6;
 
-/// HTTP/2 frame flags
-const SETTINGS_ACK_FLAG: u8 = 0x1;
-const HEADERS_END_HEADERS_FLAG: u8 = 0x4;
-const HEADERS_END_STREAM_FLAG: u8 = 0x1;
-
 /// Stream states for tracking
 #[derive(Debug, Clone, PartialEq)]
 enum StreamState {
-    Idle,
     Open,
     Closed,
 }
@@ -65,8 +57,6 @@ enum ParseResult {
     StreamCreationAttempt(StreamCreationResult),
     /// Frame processed (other frame types)
     FrameProcessed,
-    /// Protocol error
-    ProtocolError(String),
 }
 
 #[derive(Debug, PartialEq)]
@@ -75,8 +65,6 @@ enum StreamCreationResult {
     Success(u32), // stream_id
     /// Stream creation blocked due to limit
     Blocked(String),
-    /// Error (invalid stream id, etc.)
-    Error(String),
 }
 
 /// Input for fuzz testing
@@ -119,13 +107,13 @@ impl MockH2MaxConcurrentStreamsParser {
     }
 
     /// Process SETTINGS frame
-    fn process_settings(&mut self, settings: &[(u16, u32)]) -> Result<ParseResult, String> {
+    fn process_settings(&mut self, settings: &[(u16, u32)]) -> ParseResult {
         for &(setting_id, value) in settings {
             match setting_id {
                 SETTINGS_MAX_CONCURRENT_STREAMS => {
                     // RFC 7540 §6.5.2: Value of 0 means no new streams allowed
                     self.max_concurrent_streams = if value == 0 { Some(0) } else { Some(value) };
-                    return Ok(ParseResult::SettingsProcessed(value));
+                    return ParseResult::SettingsProcessed(value);
                 }
                 SETTINGS_HEADER_TABLE_SIZE
                 | SETTINGS_ENABLE_PUSH
@@ -139,7 +127,7 @@ impl MockH2MaxConcurrentStreamsParser {
                 }
             }
         }
-        Ok(ParseResult::FrameProcessed)
+        ParseResult::FrameProcessed
     }
 
     /// Attempt to create a new outbound stream
@@ -211,7 +199,7 @@ impl MockH2MaxConcurrentStreamsParser {
             if end_stream {
                 stream.state = StreamState::Closed;
             }
-        } else if stream_id % 2 == 0 {
+        } else if stream_id.is_multiple_of(2) {
             // Peer-initiated stream
             self.active_streams.push(StreamEntry {
                 stream_id,
@@ -230,10 +218,9 @@ impl MockH2MaxConcurrentStreamsParser {
             .active_streams
             .iter_mut()
             .find(|s| s.stream_id == stream_id)
+            && end_stream
         {
-            if end_stream {
-                stream.state = StreamState::Closed;
-            }
+            stream.state = StreamState::Closed;
         }
         ParseResult::FrameProcessed
     }
@@ -267,6 +254,15 @@ fn encode_settings_frame(settings: &[(u16, u32)], max_frame_size: u32) -> Vec<u8
     frame
 }
 
+fn assert_settings_frame_encodes(settings: &[(u16, u32)], max_frame_size: u32) {
+    let frame = encode_settings_frame(settings, max_frame_size);
+    let encoded_settings = settings.len().min(max_frame_size as usize / 6);
+
+    assert_eq!(frame.len(), 9 + encoded_settings * 6);
+    assert_eq!(frame[3], SETTINGS_TYPE);
+    assert_eq!(frame[4], 0);
+}
+
 /// Process the input through our mock parser
 fn process_input(input: &H2MaxConcurrentStreamsInput) -> Vec<ParseResult> {
     let mut parser = MockH2MaxConcurrentStreamsParser::new();
@@ -275,10 +271,8 @@ fn process_input(input: &H2MaxConcurrentStreamsInput) -> Vec<ParseResult> {
     // Set initial limit if specified
     if let Some(limit) = input.initial_limit {
         let settings = vec![(SETTINGS_MAX_CONCURRENT_STREAMS, limit)];
-        match parser.process_settings(&settings) {
-            Ok(result) => results.push(result),
-            Err(e) => results.push(ParseResult::ProtocolError(e)),
-        }
+        assert_settings_frame_encodes(&settings, input.max_frame_size);
+        results.push(parser.process_settings(&settings));
     }
 
     // Process operations sequence
@@ -287,10 +281,8 @@ fn process_input(input: &H2MaxConcurrentStreamsInput) -> Vec<ParseResult> {
             Operation::UpdateLimit(limit_opt) => {
                 let limit = limit_opt.unwrap_or(u32::MAX); // None = unlimited
                 let settings = vec![(SETTINGS_MAX_CONCURRENT_STREAMS, limit)];
-                match parser.process_settings(&settings) {
-                    Ok(result) => result,
-                    Err(e) => ParseResult::ProtocolError(e),
-                }
+                assert_settings_frame_encodes(&settings, input.max_frame_size);
+                parser.process_settings(&settings)
             }
             Operation::CreateStream => parser.attempt_create_stream(),
             Operation::CloseStream(stream_id) => parser.close_stream(*stream_id),
@@ -336,6 +328,9 @@ fuzz_target!(|input: H2MaxConcurrentStreamsInput| {
                     }
                 }
             }
+            ParseResult::SettingsProcessed(_) => {
+                // Positive limits allow creation up to the active-stream cap.
+            }
             ParseResult::StreamCreationAttempt(StreamCreationResult::Blocked(_)) => {
                 // Blocked creation is expected when limit is 0 or exceeded
             }
@@ -344,9 +339,6 @@ fuzz_target!(|input: H2MaxConcurrentStreamsInput| {
             }
             ParseResult::FrameProcessed => {
                 // Regular frame processing
-            }
-            ParseResult::ProtocolError(_) => {
-                // Protocol errors are acceptable for malformed inputs
             }
         }
     }
@@ -375,7 +367,10 @@ mod tests {
 
         // Set limit to 0
         let settings = vec![(SETTINGS_MAX_CONCURRENT_STREAMS, 0)];
-        parser.process_settings(&settings).unwrap();
+        assert!(matches!(
+            parser.process_settings(&settings),
+            ParseResult::SettingsProcessed(0)
+        ));
 
         // Stream creation should be blocked
         match parser.attempt_create_stream() {
@@ -390,7 +385,10 @@ mod tests {
 
         // Set limit to 2
         let settings = vec![(SETTINGS_MAX_CONCURRENT_STREAMS, 2)];
-        parser.process_settings(&settings).unwrap();
+        assert!(matches!(
+            parser.process_settings(&settings),
+            ParseResult::SettingsProcessed(2)
+        ));
 
         // Create 2 streams (should succeed)
         for i in 0..2 {
@@ -413,7 +411,10 @@ mod tests {
 
         // Set limit to 1
         let settings = vec![(SETTINGS_MAX_CONCURRENT_STREAMS, 1)];
-        parser.process_settings(&settings).unwrap();
+        assert!(matches!(
+            parser.process_settings(&settings),
+            ParseResult::SettingsProcessed(1)
+        ));
 
         // Create 1 stream
         let stream_id = match parser.attempt_create_stream() {
@@ -443,7 +444,10 @@ mod tests {
 
         // Set limit to 0 (block all)
         let settings = vec![(SETTINGS_MAX_CONCURRENT_STREAMS, 0)];
-        parser.process_settings(&settings).unwrap();
+        assert!(matches!(
+            parser.process_settings(&settings),
+            ParseResult::SettingsProcessed(0)
+        ));
 
         // Stream creation should be blocked
         match parser.attempt_create_stream() {
@@ -453,7 +457,10 @@ mod tests {
 
         // Increase limit to 1
         let settings = vec![(SETTINGS_MAX_CONCURRENT_STREAMS, 1)];
-        parser.process_settings(&settings).unwrap();
+        assert!(matches!(
+            parser.process_settings(&settings),
+            ParseResult::SettingsProcessed(1)
+        ));
 
         // Now should be able to create a stream
         match parser.attempt_create_stream() {
@@ -486,7 +493,7 @@ mod tests {
         // Test with u32::MAX (effectively unlimited)
         let settings = vec![(SETTINGS_MAX_CONCURRENT_STREAMS, u32::MAX)];
         match parser.process_settings(&settings) {
-            Ok(ParseResult::SettingsProcessed(u32::MAX)) => {}
+            ParseResult::SettingsProcessed(u32::MAX) => {}
             other => panic!("Expected settings processed, got {:?}", other),
         }
 
