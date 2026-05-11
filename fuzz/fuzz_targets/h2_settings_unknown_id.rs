@@ -1,6 +1,12 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
+use asupersync::bytes::Bytes;
+use asupersync::http::h2::connection::Connection;
+use asupersync::http::h2::frame::{
+    Frame, FrameHeader, FrameType, Setting, SettingsFrame as H2SettingsFrame,
+};
+use asupersync::http::h2::settings::Settings;
 use libfuzzer_sys::fuzz_target;
 
 /// Tests RFC 7540 §6.5 forward compatibility for unknown SETTINGS parameters.
@@ -246,7 +252,7 @@ impl MockUnknownSettingsConnection {
                 }
             }
             Some(KnownSettingsId::MaxFrameSize) => {
-                if value < 16384 || value > 16777215 {
+                if !(16384..=16777215).contains(&value) {
                     // 2^14 to 2^24-1
                     self.protocol_errors
                         .push(format!("Invalid MAX_FRAME_SIZE: {}", value));
@@ -305,6 +311,8 @@ impl MockUnknownSettingsConnection {
 }
 
 fuzz_target!(|input: UnknownSettingsInput| {
+    assert_live_unknown_settings_are_ignored();
+
     // Ensure we test truly unknown setting IDs
     let unknown_id = if KnownSettingsId::is_known(input.unknown_id) {
         // Force to known-unknown range
@@ -315,11 +323,25 @@ fuzz_target!(|input: UnknownSettingsInput| {
 
     let mut conn = MockUnknownSettingsConnection::new();
     let initial_max_frame_size = conn.current_max_frame_size();
+    let fuzzed_known_settings: Vec<_> = input
+        .known_settings
+        .iter()
+        .take(8)
+        .map(|&(id, value)| normalize_known_setting(id, value))
+        .collect();
 
     match input.test_variant % 8 {
         0 => {
             // Test case 1: Single unknown setting - MUST be ignored
             let frame = SettingsFrame::new_unknown_only(unknown_id, input.unknown_value);
+            assert_eq!(frame.find_parameter(unknown_id), Some(input.unknown_value));
+            assert_eq!(frame.count_known_parameters(), 0);
+            assert_eq!(frame.count_unknown_parameters(), 1);
+            assert_eq!(
+                frame.serialize().len(),
+                6,
+                "single SETTINGS parameter must serialize to one 6-byte entry"
+            );
             let accepted = conn.process_settings_frame(&frame);
 
             assert!(
@@ -382,13 +404,24 @@ fuzz_target!(|input: UnknownSettingsInput| {
         }
         2 => {
             // Test case 3: Mixed known and unknown settings
-            let known_settings = vec![
+            let mut known_settings = vec![
                 (KnownSettingsId::MaxFrameSize, 32768),
                 (KnownSettingsId::EnablePush, 0),
             ];
+            known_settings.extend(fuzzed_known_settings);
             let unknown_settings = vec![(unknown_id, input.unknown_value), (0xDEAD, 0xBEEF)];
 
             let frame = SettingsFrame::new_mixed(known_settings, unknown_settings);
+            assert!(
+                frame.count_known_parameters() >= 2,
+                "mixed frame should retain fixed known parameters"
+            );
+            assert_eq!(frame.count_unknown_parameters(), 2);
+            assert_eq!(
+                frame.serialize().len(),
+                frame.parameters.len() * 6,
+                "SETTINGS serialization must preserve parameter cardinality"
+            );
             let accepted = conn.process_settings_frame(&frame);
 
             assert!(accepted, "Mixed known/unknown frame should be accepted");
@@ -539,9 +572,8 @@ fuzz_target!(|input: UnknownSettingsInput| {
     }
 
     // Verify connection state consistency
-    assert_eq!(
+    assert!(
         conn.accepted_frames + conn.error_count() <= conn.processed_frames,
-        true,
         "Connection statistics should be consistent"
     );
 
@@ -557,6 +589,65 @@ fuzz_target!(|input: UnknownSettingsInput| {
         }
     }
 });
+
+fn normalize_known_setting(id: u8, value: u32) -> (KnownSettingsId, u32) {
+    match id % 6 {
+        0 => (KnownSettingsId::HeaderTableSize, value),
+        1 => (KnownSettingsId::EnablePush, value % 2),
+        2 => (KnownSettingsId::MaxConcurrentStreams, value),
+        3 => (KnownSettingsId::InitialWindowSize, value & 0x7fff_ffff),
+        4 => {
+            let max_frame_size_range = 16_777_215 - 16_384 + 1;
+            (
+                KnownSettingsId::MaxFrameSize,
+                16_384 + (value % max_frame_size_range),
+            )
+        }
+        _ => (KnownSettingsId::MaxHeaderListSize, value),
+    }
+}
+
+fn assert_live_unknown_settings_are_ignored() {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&0x7777_u16.to_be_bytes());
+    payload.extend_from_slice(&u32::MAX.to_be_bytes());
+    payload.extend_from_slice(&0x0005_u16.to_be_bytes());
+    payload.extend_from_slice(&32_768_u32.to_be_bytes());
+
+    let header = FrameHeader {
+        length: payload.len() as u32,
+        frame_type: FrameType::Settings as u8,
+        flags: 0,
+        stream_id: 0,
+    };
+    let parsed = H2SettingsFrame::parse(&header, &Bytes::from(payload))
+        .expect("unknown SETTINGS parameter mixed with valid known setting must parse");
+    assert_eq!(
+        parsed.settings,
+        vec![Setting::MaxFrameSize(32_768)],
+        "live SETTINGS parser must ignore unknown parameters and retain valid known settings"
+    );
+
+    let mut conn = Connection::client(Settings::client());
+    conn.process_frame(Frame::Settings(parsed))
+        .expect("connection must accept SETTINGS with ignored unknown parameter");
+    assert_eq!(
+        conn.remote_settings().max_frame_size,
+        32_768,
+        "valid known setting must still apply after unknown parameter is ignored"
+    );
+
+    match conn.next_frame() {
+        Some(Frame::Settings(frame)) => {
+            assert!(frame.ack, "accepted SETTINGS frame must queue an ACK");
+            assert!(
+                frame.settings.is_empty(),
+                "SETTINGS ACK must not echo ignored unknown parameters"
+            );
+        }
+        other => panic!("accepted SETTINGS frame must queue SETTINGS ACK, got {other:?}"),
+    }
+}
 
 #[cfg(test)]
 mod tests {

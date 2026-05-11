@@ -5146,6 +5146,7 @@ name = "h2_settings_unknown_id"
 path = "fuzz_targets/h2_settings_unknown_id.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_continuation_no_headers"
