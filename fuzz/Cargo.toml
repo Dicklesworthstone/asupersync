@@ -5645,6 +5645,7 @@ name = "h2_request_pseudo_authority_with_userinfo"
 path = "fuzz_targets/h2_request_pseudo_authority_with_userinfo.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_settings_initial_window_size_zero"

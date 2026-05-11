@@ -24,13 +24,9 @@
 //! - Security bypass through encoded userinfo formats
 
 #![no_main]
+#![allow(dead_code)]
 
 use arbitrary::Arbitrary;
-use asupersync::bytes::Bytes;
-use asupersync::http::h2::connection::{Connection, Side};
-use asupersync::http::h2::error::ErrorCode;
-use asupersync::http::h2::frame::{Frame, HeadersFrame, Setting, SettingsFrame};
-use asupersync::http::h2::headers::{HeaderMap, HeaderName, HeaderValue};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
@@ -161,7 +157,7 @@ pub enum ConnectionSide {
 }
 
 /// Validation configuration
-#[derive(Debug, Arbitrary)]
+#[derive(Debug, Arbitrary, Clone)]
 pub struct ValidationConfig {
     /// Strict RFC 7540 compliance
     strict_rfc_compliance: bool,
@@ -287,13 +283,13 @@ pub enum ViolationType {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ViolationSeverity {
-    Critical,   // Clear RFC violation
-    High,       // Likely RFC violation
-    Medium,     // Compliance issue
-    Low,        // Style issue
+    Critical, // Clear RFC violation
+    High,     // Likely RFC violation
+    Medium,   // Compliance issue
+    Low,      // Style issue
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ProcessorStats {
     requests_processed: u32,
     authorities_with_userinfo: u32,
@@ -319,13 +315,16 @@ impl MockPseudoAuthorityProcessor {
     }
 
     /// Process headers frame with pseudo-header validation
-    pub fn process_headers_frame(&mut self, stream_id: u32, headers: Vec<(String, String)>) -> Result<(), AuthorityValidationError> {
+    pub fn process_headers_frame(
+        &mut self,
+        stream_id: u32,
+        headers: Vec<(String, String)>,
+    ) -> Result<(), AuthorityValidationError> {
         self.current_stream_id = stream_id;
         self.state = ProcessingState::ProcessingPseudoHeaders;
         self.stats.requests_processed += 1;
 
         let mut found_authority = false;
-        let mut found_host = false;
         let mut pseudo_phase = true;
 
         for (name, value) in headers {
@@ -358,20 +357,23 @@ impl MockPseudoAuthorityProcessor {
                 self.state = ProcessingState::ProcessingRegularHeaders;
 
                 // Check for Host header
-                if name.to_lowercase() == "host" {
-                    found_host = true;
-
-                    if found_authority && !self.config.allow_host_with_authority {
-                        self.violations.push(AuthorityViolation {
-                            violation_type: ViolationType::HostAuthorityConflict,
-                            description: "Both :authority and Host header present".to_string(),
-                            authority_value: self.pseudo_headers.get(":authority").unwrap_or(&"".to_string()).clone(),
-                            detected_userinfo: None,
-                            severity: ViolationSeverity::High,
-                            rfc_reference: "RFC 7540 §8.1.2.3".to_string(),
-                        });
-                        return Err(AuthorityValidationError::AuthorityAndHostConflict);
-                    }
+                if name.eq_ignore_ascii_case("host")
+                    && found_authority
+                    && !self.config.allow_host_with_authority
+                {
+                    self.violations.push(AuthorityViolation {
+                        violation_type: ViolationType::HostAuthorityConflict,
+                        description: "Both :authority and Host header present".to_string(),
+                        authority_value: self
+                            .pseudo_headers
+                            .get(":authority")
+                            .unwrap_or(&"".to_string())
+                            .clone(),
+                        detected_userinfo: None,
+                        severity: ViolationSeverity::High,
+                        rfc_reference: "RFC 7540 §8.1.2.3".to_string(),
+                    });
+                    return Err(AuthorityValidationError::AuthorityAndHostConflict);
                 }
 
                 self.regular_headers.insert(name, value);
@@ -383,7 +385,10 @@ impl MockPseudoAuthorityProcessor {
     }
 
     /// Process and validate :authority header
-    fn process_authority_header(&mut self, authority: &str) -> Result<(), AuthorityValidationError> {
+    fn process_authority_header(
+        &mut self,
+        authority: &str,
+    ) -> Result<(), AuthorityValidationError> {
         self.stats.authority_parsing_attempts += 1;
 
         // Check for empty authority
@@ -457,7 +462,8 @@ impl MockPseudoAuthorityProcessor {
             if before_at.contains("%3A") || before_at.contains("%3a") {
                 self.violations.push(AuthorityViolation {
                     violation_type: ViolationType::EncodedUserinfo,
-                    description: "Percent-encoded : symbol before @ (possible password)".to_string(),
+                    description: "Percent-encoded : symbol before @ (possible password)"
+                        .to_string(),
                     authority_value: authority.to_string(),
                     detected_userinfo: Some("encoded password separator".to_string()),
                     severity: ViolationSeverity::High,
@@ -471,7 +477,10 @@ impl MockPseudoAuthorityProcessor {
     }
 
     /// Parse authority into host and port components
-    fn parse_authority_components(&mut self, authority: &str) -> Result<(), AuthorityValidationError> {
+    fn parse_authority_components(
+        &mut self,
+        authority: &str,
+    ) -> Result<(), AuthorityValidationError> {
         // Remove userinfo if present (for parsing purposes, even though it should be rejected)
         let authority_without_userinfo = if let Some(at_pos) = authority.find('@') {
             &authority[at_pos + 1..]
@@ -486,25 +495,29 @@ impl MockPseudoAuthorityProcessor {
                 let ipv6_host = authority_without_userinfo[1..close_bracket].to_string();
                 let remaining = &authority_without_userinfo[close_bracket + 1..];
 
-                if remaining.starts_with(':') {
-                    let port_str = &remaining[1..];
+                if let Some(port_str) = remaining.strip_prefix(':') {
                     match port_str.parse::<u16>() {
                         Ok(port_num) => (ipv6_host, Some(port_num)),
-                        Err(_) => return Err(AuthorityValidationError::InvalidAuthorityFormat(
-                            format!("Invalid port in IPv6 authority: {}", authority)
-                        )),
+                        Err(_) => {
+                            return Err(AuthorityValidationError::InvalidAuthorityFormat(format!(
+                                "Invalid port in IPv6 authority: {}",
+                                authority
+                            )));
+                        }
                     }
                 } else if remaining.is_empty() {
                     (ipv6_host, None)
                 } else {
-                    return Err(AuthorityValidationError::InvalidAuthorityFormat(
-                        format!("Invalid IPv6 authority format: {}", authority)
-                    ));
+                    return Err(AuthorityValidationError::InvalidAuthorityFormat(format!(
+                        "Invalid IPv6 authority format: {}",
+                        authority
+                    )));
                 }
             } else {
-                return Err(AuthorityValidationError::InvalidAuthorityFormat(
-                    format!("Unclosed IPv6 bracket: {}", authority)
-                ));
+                return Err(AuthorityValidationError::InvalidAuthorityFormat(format!(
+                    "Unclosed IPv6 bracket: {}",
+                    authority
+                )));
             }
         } else {
             // IPv4 or hostname
@@ -527,7 +540,7 @@ impl MockPseudoAuthorityProcessor {
         // Validate host component
         if host.is_empty() {
             return Err(AuthorityValidationError::InvalidAuthorityFormat(
-                "Empty host component".to_string()
+                "Empty host component".to_string(),
             ));
         }
 
@@ -567,12 +580,14 @@ impl MockPseudoAuthorityProcessor {
             UserinfoType::EmptyUserinfo => format!("@{}", base_host),
             UserinfoType::MultipleAt => format!("{}@domain@{}", userinfo, base_host),
             UserinfoType::UserinfoWithPort => format!("{}:password@{}:8080", userinfo, base_host),
-            UserinfoType::EncodedUserinfo => format!("{}%40domain:password@{}", userinfo, base_host),
+            UserinfoType::EncodedUserinfo => {
+                format!("{}%40domain:password@{}", userinfo, base_host)
+            }
             UserinfoType::UnicodeUserinfo => format!("用户:密码@{}", base_host),
             UserinfoType::LongUserinfo => {
                 let long_user = format!("{}_{}", userinfo, "x".repeat(100));
                 format!("{}:longpassword@{}", long_user, base_host)
-            },
+            }
             UserinfoType::SpecialCharsUserinfo => format!("{}!#$%:pass@{}", userinfo, base_host),
         };
 
@@ -587,22 +602,20 @@ impl MockPseudoAuthorityProcessor {
     /// Apply obfuscation to authority
     fn apply_obfuscation(authority: &str, obfuscation: &ObfuscationType) -> String {
         match obfuscation {
-            ObfuscationType::PercentEncoding => {
-                authority.replace("@", "%40").replace(":", "%3A")
-            },
+            ObfuscationType::PercentEncoding => authority.replace("@", "%40").replace(":", "%3A"),
             ObfuscationType::UnicodeNormalization => {
                 // Simple Unicode substitution for testing
                 authority.replace("@", "＠").replace(":", "：")
-            },
+            }
             ObfuscationType::DoubleEncoding => {
                 authority.replace("@", "%2540").replace(":", "%253A")
-            },
+            }
             ObfuscationType::MixedCaseEncoding => {
                 authority.replace("@", "%4a0").replace(":", "%3a")
-            },
+            }
             ObfuscationType::InvalidPercentEncoding => {
                 authority.replace("@", "%GG").replace(":", "%ZZ")
-            },
+            }
         }
     }
 
@@ -620,19 +633,26 @@ impl MockPseudoAuthorityProcessor {
 
     /// Check if processing was successful (no userinfo violations)
     pub fn is_userinfo_free(&self) -> bool {
-        !self.violations.iter().any(|v| matches!(
-            v.violation_type,
-            ViolationType::UserinfoPresent | ViolationType::EncodedUserinfo
-        ))
+        !self.violations.iter().any(|v| {
+            matches!(
+                v.violation_type,
+                ViolationType::UserinfoPresent | ViolationType::EncodedUserinfo
+            )
+        })
     }
 
     /// Get userinfo violations
     pub fn userinfo_violations(&self) -> Vec<&AuthorityViolation> {
-        self.violations.iter()
-            .filter(|v| matches!(
-                v.violation_type,
-                ViolationType::UserinfoPresent | ViolationType::EncodedUserinfo | ViolationType::UserinfoObfuscation
-            ))
+        self.violations
+            .iter()
+            .filter(|v| {
+                matches!(
+                    v.violation_type,
+                    ViolationType::UserinfoPresent
+                        | ViolationType::EncodedUserinfo
+                        | ViolationType::UserinfoObfuscation
+                )
+            })
             .collect()
     }
 }
@@ -660,6 +680,10 @@ fn cap_u32(value: u32, max: u32) -> u32 {
     value.min(max)
 }
 
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
+}
+
 fuzz_target!(|input: PseudoAuthorityUserinfoInput| {
     let config = ValidationConfig {
         strict_rfc_compliance: true,
@@ -674,11 +698,17 @@ fuzz_target!(|input: PseudoAuthorityUserinfoInput| {
         let mut processor = MockPseudoAuthorityProcessor::new(config.clone());
 
         // Generate test authority with userinfo
-        let test_authority = MockPseudoAuthorityProcessor::generate_authority_with_userinfo(pattern);
+        let test_authority =
+            MockPseudoAuthorityProcessor::generate_authority_with_userinfo(pattern);
 
         // Ensure reasonable length for fuzzing
         let final_authority = if test_authority.len() > 1024 {
-            format!("user:pass@{}", &test_authority[test_authority.rfind('@').unwrap_or(0) + 1..100])
+            let host_start = test_authority
+                .rfind('@')
+                .map(|index| index + 1)
+                .unwrap_or(0);
+            let host = truncate_chars(&test_authority[host_start..], 99);
+            format!("user:pass@{}", host)
         } else {
             test_authority
         };
@@ -690,7 +720,7 @@ fuzz_target!(|input: PseudoAuthorityUserinfoInput| {
         for pseudo in input.other_pseudo_headers.iter().take(3) {
             if pseudo.header_type.name() != ":status" || !input.request_config.is_request {
                 let name = pseudo.header_type.name().to_string();
-                let value = pseudo.value[..pseudo.value.len().min(100)].to_string();
+                let value = truncate_chars(&pseudo.value, 100);
                 headers.push((name, value));
             }
         }
@@ -700,8 +730,8 @@ fuzz_target!(|input: PseudoAuthorityUserinfoInput| {
 
         // Add regular headers
         for header in input.regular_headers.iter().take(5) {
-            let name = header.name[..header.name.len().min(50)].to_string();
-            let value = header.value[..header.value.len().min(200)].to_string();
+            let name = truncate_chars(&header.name, 50);
+            let value = truncate_chars(&header.value, 200);
 
             // Handle Host header specially
             if header.is_host_header {
@@ -721,16 +751,19 @@ fuzz_target!(|input: PseudoAuthorityUserinfoInput| {
             match result {
                 Err(AuthorityValidationError::UserinfoInAuthority(_)) => {
                     // Expected rejection - good
-                },
+                }
                 Err(AuthorityValidationError::InvalidAuthorityFormat(_)) => {
                     // Also acceptable for malformed userinfo
-                },
+                }
                 Ok(_) => {
                     // Check if violations were at least detected
                     let userinfo_violations = processor.userinfo_violations();
-                    assert!(!userinfo_violations.is_empty() || !config.strict_rfc_compliance,
-                        "Authority with userinfo '{}' was accepted without violations", final_authority);
-                },
+                    assert!(
+                        !userinfo_violations.is_empty() || !config.strict_rfc_compliance,
+                        "Authority with userinfo '{}' was accepted without violations",
+                        final_authority
+                    );
+                }
                 Err(_) => {
                     // Other errors are fine for malformed input
                 }
@@ -747,8 +780,11 @@ fuzz_target!(|input: PseudoAuthorityUserinfoInput| {
         if final_authority.contains('@') && !final_authority.starts_with('[') {
             // Should have detected userinfo (unless it's IPv6)
             if let Some(auth_info) = &results.authority_info {
-                assert!(auth_info.userinfo_detected || !config.strict_rfc_compliance,
-                    "Failed to detect userinfo in authority: {}", final_authority);
+                assert!(
+                    auth_info.userinfo_detected || !config.strict_rfc_compliance,
+                    "Failed to detect userinfo in authority: {}",
+                    final_authority
+                );
             }
         }
     }
@@ -776,8 +812,11 @@ fuzz_target!(|input: PseudoAuthorityUserinfoInput| {
                 }
 
                 let result = processor.process_headers_frame(1, headers);
-                assert!(result.is_err(), "Multiple :authority headers should be rejected");
-            },
+                assert!(
+                    result.is_err(),
+                    "Multiple :authority headers should be rejected"
+                );
+            }
             EdgeCaseTest::AuthorityAfterRegular => {
                 // Test :authority after regular headers (should be rejected)
                 let headers = vec![
@@ -785,14 +824,20 @@ fuzz_target!(|input: PseudoAuthorityUserinfoInput| {
                     (":scheme".to_string(), "https".to_string()),
                     (":path".to_string(), "/".to_string()),
                     ("user-agent".to_string(), "test".to_string()), // Regular header
-                    (":authority".to_string(), "user:pass@example.com".to_string()), // Pseudo after regular
+                    (
+                        ":authority".to_string(),
+                        "user:pass@example.com".to_string(),
+                    ), // Pseudo after regular
                 ];
 
                 let result = processor.process_headers_frame(1, headers);
                 if config.validate_pseudo_order {
-                    assert!(result.is_err(), "Pseudo-headers after regular headers should be rejected");
+                    assert!(
+                        result.is_err(),
+                        "Pseudo-headers after regular headers should be rejected"
+                    );
                 }
-            },
+            }
             EdgeCaseTest::AuthorityAndHost { authority, host } => {
                 // Test both :authority and Host header
                 let authority_with_userinfo = if authority.contains('@') {
@@ -806,17 +851,20 @@ fuzz_target!(|input: PseudoAuthorityUserinfoInput| {
                     (":scheme".to_string(), "https".to_string()),
                     (":path".to_string(), "/".to_string()),
                     (":authority".to_string(), authority_with_userinfo),
-                    ("Host".to_string(), host[..host.len().min(100)].to_string()),
+                    ("Host".to_string(), truncate_chars(host, 100)),
                 ];
 
                 let result = processor.process_headers_frame(1, headers);
                 if !config.allow_host_with_authority {
-                    assert!(result.is_err(), "Both :authority and Host should be rejected when not allowed");
+                    assert!(
+                        result.is_err(),
+                        "Both :authority and Host should be rejected when not allowed"
+                    );
                 }
-            },
+            }
             EdgeCaseTest::IPv6WithUserinfoPattern { ipv6_addr } => {
                 // Test IPv6 address that might contain @ or : symbols
-                let ipv6_authority = format!("[{}]", ipv6_addr[..ipv6_addr.len().min(50)].to_string());
+                let ipv6_authority = format!("[{}]", truncate_chars(ipv6_addr, 50));
 
                 let headers = vec![
                     (":method".to_string(), "GET".to_string()),
@@ -830,12 +878,17 @@ fuzz_target!(|input: PseudoAuthorityUserinfoInput| {
                 if result.is_err() {
                     // Verify it's not rejected due to userinfo detection
                     let results = processor.results();
-                    let userinfo_violations = results.violations.iter()
+                    let userinfo_violations = results
+                        .violations
+                        .iter()
                         .filter(|v| matches!(v.violation_type, ViolationType::UserinfoPresent))
                         .count();
-                    assert_eq!(userinfo_violations, 0, "IPv6 address should not be detected as userinfo");
+                    assert_eq!(
+                        userinfo_violations, 0,
+                        "IPv6 address should not be detected as userinfo"
+                    );
                 }
-            },
+            }
             EdgeCaseTest::EmptyAuthority => {
                 // Test empty :authority
                 let headers = vec![
@@ -847,26 +900,34 @@ fuzz_target!(|input: PseudoAuthorityUserinfoInput| {
 
                 let result = processor.process_headers_frame(1, headers);
                 assert!(result.is_err(), "Empty :authority should be rejected");
-            },
+            }
             _ => {
                 // Other edge cases - test with userinfo
                 let headers = vec![
                     (":method".to_string(), "GET".to_string()),
                     (":scheme".to_string(), "https".to_string()),
                     (":path".to_string(), "/".to_string()),
-                    (":authority".to_string(), "user:pass@example.com".to_string()),
+                    (
+                        ":authority".to_string(),
+                        "user:pass@example.com".to_string(),
+                    ),
                 ];
 
                 let result = processor.process_headers_frame(1, headers);
                 // Should be rejected due to userinfo
-                assert!(result.is_err(), "Edge case with userinfo should be rejected");
+                assert!(
+                    result.is_err(),
+                    "Edge case with userinfo should be rejected"
+                );
             }
         }
     }
 
     // Verify overall statistics and violations
     // At least one processor should have detected userinfo if patterns contained it
-    let has_userinfo_patterns = input.userinfo_patterns.iter()
+    let has_userinfo_patterns = input
+        .userinfo_patterns
+        .iter()
         .any(|p| MockPseudoAuthorityProcessor::generate_authority_with_userinfo(p).contains('@'));
 
     if has_userinfo_patterns {
@@ -892,16 +953,28 @@ mod tests {
         let mut processor = MockPseudoAuthorityProcessor::new(config);
 
         // Test simple userinfo detection
-        assert_eq!(processor.detect_userinfo("user@example.com"), Some("user".to_string()));
-        assert_eq!(processor.detect_userinfo("user:pass@example.com"), Some("user:pass".to_string()));
-        assert_eq!(processor.detect_userinfo("@example.com"), Some("".to_string()));
+        assert_eq!(
+            processor.detect_userinfo("user@example.com"),
+            Some("user".to_string())
+        );
+        assert_eq!(
+            processor.detect_userinfo("user:pass@example.com"),
+            Some("user:pass".to_string())
+        );
+        assert_eq!(
+            processor.detect_userinfo("@example.com"),
+            Some("".to_string())
+        );
 
         // Should not detect userinfo in IPv6
         assert_eq!(processor.detect_userinfo("[::1]:8080"), None);
         assert_eq!(processor.detect_userinfo("example.com:8080"), None);
 
         // Should detect encoded userinfo
-        assert_eq!(processor.detect_userinfo("user%40domain:pass@example.com"), Some("encoded userinfo".to_string()));
+        assert_eq!(
+            processor.detect_userinfo("user%40domain:pass@example.com"),
+            Some("encoded userinfo".to_string())
+        );
     }
 
     #[test]
@@ -920,12 +993,18 @@ mod tests {
             (":method".to_string(), "GET".to_string()),
             (":scheme".to_string(), "https".to_string()),
             (":path".to_string(), "/".to_string()),
-            (":authority".to_string(), "user:password@example.com".to_string()),
+            (
+                ":authority".to_string(),
+                "user:password@example.com".to_string(),
+            ),
         ];
 
         let result = processor.process_headers_frame(1, headers);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), AuthorityValidationError::UserinfoInAuthority(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            AuthorityValidationError::UserinfoInAuthority(_)
+        ));
 
         let results = processor.results();
         assert!(!processor.is_userinfo_free());
@@ -980,14 +1059,20 @@ mod tests {
         let headers = vec![
             (":method".to_string(), "GET".to_string()),
             (":authority".to_string(), "example.com".to_string()),
-            (":authority".to_string(), "user:pass@example.org".to_string()), // Duplicate
+            (
+                ":authority".to_string(),
+                "user:pass@example.org".to_string(),
+            ), // Duplicate
             (":scheme".to_string(), "https".to_string()),
             (":path".to_string(), "/".to_string()),
         ];
 
         let result = processor.process_headers_frame(1, headers);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), AuthorityValidationError::MultipleAuthorityHeaders));
+        assert!(matches!(
+            result.unwrap_err(),
+            AuthorityValidationError::MultipleAuthorityHeaders
+        ));
     }
 
     #[test]
@@ -1012,7 +1097,8 @@ mod tests {
             obfuscation: Some(ObfuscationType::PercentEncoding),
         };
 
-        let generated_encoded = MockPseudoAuthorityProcessor::generate_authority_with_userinfo(&pattern_encoded);
+        let generated_encoded =
+            MockPseudoAuthorityProcessor::generate_authority_with_userinfo(&pattern_encoded);
         assert_eq!(generated_encoded, "user%40example.com");
     }
 
@@ -1039,6 +1125,9 @@ mod tests {
 
         let result = processor.process_headers_frame(1, headers);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), AuthorityValidationError::PseudoHeaderOrderViolation));
+        assert!(matches!(
+            result.unwrap_err(),
+            AuthorityValidationError::PseudoHeaderOrderViolation
+        ));
     }
 }
