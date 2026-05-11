@@ -166,6 +166,40 @@ fn block_on<F: std::future::Future>(f: F) -> F::Output {
     }
 }
 
+async fn observe_flush_result(
+    fault_tx: &asupersync::channel::fault::FaultSender<TestMessage>,
+    cx: &Cx,
+    context: &str,
+) {
+    let before = fault_tx.stats();
+    let result = fault_tx.flush(cx).await;
+    let after = fault_tx.stats();
+
+    assert!(
+        after.messages_sent >= before.messages_sent,
+        "{context}: flush moved messages_sent backwards"
+    );
+    assert!(
+        after.reorder_flushes >= before.reorder_flushes,
+        "{context}: flush moved reorder_flushes backwards"
+    );
+    assert!(
+        after.reorder_cancel_residue >= before.reorder_cancel_residue,
+        "{context}: flush moved reorder_cancel_residue backwards"
+    );
+
+    match result {
+        Ok(()) => {}
+        Err(SendError::Cancelled(())) => {
+            assert!(
+                cx.is_cancel_requested(),
+                "{context}: flush reported cancellation without a cancelled context"
+            );
+        }
+        Err(SendError::Disconnected(())) | Err(SendError::Full(())) => {}
+    }
+}
+
 // Test scenario 1: Random reserve/send drops
 async fn test_reserve_send_drops(
     config: &FuzzConfig,
@@ -242,7 +276,7 @@ async fn test_partial_close_recv(
     }
 
     // Flush any remaining buffered messages
-    let _ = fault_tx.flush(&cx).await;
+    observe_flush_result(fault_tx, &cx, "partial close flush").await;
 
     // Verify receiver can still read what was sent
     let mut received = Vec::new();
@@ -296,7 +330,7 @@ async fn test_flush_cancel_evidence(
     }
 
     // Force flush to ensure evidence is preserved even on cancellation
-    let _ = fault_tx.flush(&cx).await;
+    observe_flush_result(fault_tx, &cx, "cancel evidence flush").await;
 
     // Evidence verification is simplified for fuzzing
     // The evidence sink will still collect entries, but we can't easily downcast
@@ -418,7 +452,8 @@ fuzz_target!(|data: (FuzzConfig, Vec<TestMessage>)| {
         }
 
         // Always flush at end to test buffered message delivery
-        let _ = fault_tx.flush(&test_cx()).await;
+        let flush_cx = test_cx();
+        observe_flush_result(&fault_tx, &flush_cx, "final flush").await;
     });
 
     // Verify invariants
