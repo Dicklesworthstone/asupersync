@@ -23,16 +23,18 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::bytes::Bytes;
-use asupersync::http::h2::connection::{Connection, ConnectionState, Side};
+use asupersync::http::h2::connection::ConnectionState;
 use asupersync::http::h2::error::ErrorCode;
-use asupersync::http::h2::frame::{
-    DataFrame, Frame, FrameHeader, HeadersFrame, PingFrame, Setting, SettingsFrame,
-    WindowUpdateFrame, PriorityFrame, RstStreamFrame,
-};
-use asupersync::http::h2::settings::{DEFAULT_MAX_CONCURRENT_STREAMS, Settings};
+use asupersync::http::h2::frame::{Setting, SettingsFrame};
+use asupersync::http::h2::settings::Settings;
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Client,
+    Server,
+}
 
 /// Test input for zero max concurrent streams at connection establishment
 #[derive(Debug, Arbitrary)]
@@ -94,18 +96,11 @@ pub enum StreamCreationAttempt {
         invalid_payload: Vec<u8>,
     },
     /// Stream with reserved bit set
-    ReservedBitStream {
-        stream_id: u32,
-    },
+    ReservedBitStream { stream_id: u32 },
     /// Continuation frame without preceding headers
-    OrphanedContinuation {
-        stream_id: u32,
-        payload: Vec<u8>,
-    },
+    OrphanedContinuation { stream_id: u32, payload: Vec<u8> },
     /// Even-numbered stream ID (server-initiated, should fail for different reasons)
-    EvenStreamId {
-        stream_id: u32,
-    },
+    EvenStreamId { stream_id: u32 },
 }
 
 /// Operations with non-stream frames (should work normally)
@@ -245,10 +240,7 @@ pub enum ZeroMaxConcurrentViolation {
         actual: ErrorCode,
     },
     /// Non-stream frame was blocked inappropriately
-    NonStreamFrameBlocked {
-        frame_type: String,
-        reason: String,
-    },
+    NonStreamFrameBlocked { frame_type: String, reason: String },
     /// Connection state corruption
     StateCorruption {
         description: String,
@@ -285,8 +277,10 @@ pub struct ZeroMaxConcurrentStats {
 
 impl MockZeroMaxConcurrentConnection {
     pub fn new(side: Side) -> Self {
-        let mut settings = Settings::default();
-        settings.max_concurrent_streams = 0; // Start with zero limit
+        let settings = Settings {
+            max_concurrent_streams: 0,
+            ..Settings::default()
+        };
 
         let next_stream_id = match side {
             Side::Client => 1, // Client-initiated streams are odd
@@ -358,22 +352,22 @@ impl MockZeroMaxConcurrentConnection {
                         // If streams exist when setting to zero, they should be allowed to continue
                         // but no new streams should be created
                     }
-                },
+                }
                 Setting::HeaderTableSize(size) => {
                     self.settings.header_table_size = *size;
-                },
+                }
                 Setting::EnablePush(enabled) => {
                     self.settings.enable_push = *enabled;
-                },
+                }
                 Setting::InitialWindowSize(size) => {
                     self.settings.initial_window_size = *size;
-                },
+                }
                 Setting::MaxFrameSize(size) => {
                     self.settings.max_frame_size = *size;
-                },
+                }
                 Setting::MaxHeaderListSize(size) => {
                     self.settings.max_header_list_size = *size;
-                },
+                }
             }
         }
 
@@ -381,7 +375,11 @@ impl MockZeroMaxConcurrentConnection {
     }
 
     /// Attempt to create a new stream (should be blocked when max_concurrent_streams=0)
-    pub fn attempt_stream_creation(&mut self, stream_id: u32, headers: Vec<u8>) -> Result<(), ErrorCode> {
+    pub fn attempt_stream_creation(
+        &mut self,
+        stream_id: u32,
+        _headers: Vec<u8>,
+    ) -> Result<(), ErrorCode> {
         self.stats.stream_attempts += 1;
 
         // Normalize stream ID based on connection side
@@ -416,19 +414,23 @@ impl MockZeroMaxConcurrentConnection {
         }
 
         // Create the stream
-        self.streams.insert(normalized_id, StreamInfo {
-            id: normalized_id,
-            state: StreamState::Open,
-            side: self.side,
-            created_at: self.current_phase(),
-        });
+        self.streams.insert(
+            normalized_id,
+            StreamInfo {
+                id: normalized_id,
+                state: StreamState::Open,
+                side: self.side,
+                created_at: self.current_phase(),
+            },
+        );
 
         // If we reach here with max_concurrent_streams=0, it's a violation
         if self.settings.max_concurrent_streams == 0 {
-            self.violations.push(ZeroMaxConcurrentViolation::StreamCreatedWithZeroLimit {
-                stream_id: normalized_id,
-                phase: self.current_phase(),
-            });
+            self.violations
+                .push(ZeroMaxConcurrentViolation::StreamCreatedWithZeroLimit {
+                    stream_id: normalized_id,
+                    phase: self.current_phase(),
+                });
             self.stats.streams_incorrectly_allowed += 1;
         } else {
             self.stats.post_recovery_streams += 1;
@@ -441,7 +443,11 @@ impl MockZeroMaxConcurrentConnection {
     }
 
     /// Process non-stream frame (should work normally even with zero max concurrent streams)
-    pub fn process_non_stream_frame(&mut self, frame_type: &str, stream_id: u32) -> Result<(), ErrorCode> {
+    pub fn process_non_stream_frame(
+        &mut self,
+        frame_type: &str,
+        stream_id: u32,
+    ) -> Result<(), ErrorCode> {
         // Non-stream frames should always work regardless of max_concurrent_streams setting
         let processed = ProcessedFrame {
             frame_type: frame_type.to_string(),
@@ -455,10 +461,11 @@ impl MockZeroMaxConcurrentConnection {
 
         // Validate that zero max_concurrent_streams doesn't affect non-stream frames
         if self.settings.max_concurrent_streams == 0 && frame_type.starts_with("stream_") {
-            self.violations.push(ZeroMaxConcurrentViolation::NonStreamFrameBlocked {
-                frame_type: frame_type.to_string(),
-                reason: "Non-stream frame blocked by zero max_concurrent_streams".to_string(),
-            });
+            self.violations
+                .push(ZeroMaxConcurrentViolation::NonStreamFrameBlocked {
+                    frame_type: frame_type.to_string(),
+                    reason: "Non-stream frame blocked by zero max_concurrent_streams".to_string(),
+                });
         }
 
         Ok(())
@@ -479,17 +486,21 @@ impl MockZeroMaxConcurrentConnection {
             match test_stream_result {
                 Ok(()) => {
                     // Recovery successful
-                },
+                }
                 Err(e) => {
                     // Recovery failed - might be legitimate (other constraints) or violation
                     if self.active_stream_count() < new_limit {
-                        self.violations.push(ZeroMaxConcurrentViolation::StateCorruption {
-                            description: "Recovery failed despite limit increase".to_string(),
-                            settings_value: new_limit,
-                            actual_behavior: format!("Stream creation failed with error: {:?}", e),
-                        });
+                        self.violations
+                            .push(ZeroMaxConcurrentViolation::StateCorruption {
+                                description: "Recovery failed despite limit increase".to_string(),
+                                settings_value: new_limit,
+                                actual_behavior: format!(
+                                    "Stream creation failed with error: {:?}",
+                                    e
+                                ),
+                            });
                     }
-                },
+                }
             }
         }
 
@@ -498,8 +509,16 @@ impl MockZeroMaxConcurrentConnection {
 
     /// Get count of active streams
     pub fn active_stream_count(&self) -> u32 {
-        self.streams.values()
-            .filter(|s| matches!(s.state, StreamState::Open | StreamState::HalfClosedLocal | StreamState::HalfClosedRemote))
+        self.streams
+            .values()
+            .filter(|s| {
+                matches!(
+                    s.state,
+                    StreamState::Open
+                        | StreamState::HalfClosedLocal
+                        | StreamState::HalfClosedRemote
+                )
+            })
             .count() as u32
     }
 
@@ -517,16 +536,16 @@ impl MockZeroMaxConcurrentConnection {
         match self.side {
             Side::Client => {
                 // Client streams must be odd
-                if id % 2 == 0 {
+                if id.is_multiple_of(2) {
                     id = id.saturating_add(1);
                 }
-            },
+            }
             Side::Server => {
                 // Server streams must be even
-                if id % 2 == 1 {
+                if !id.is_multiple_of(2) {
                     id = id.saturating_add(1);
                 }
-            },
+            }
         }
 
         id
@@ -534,6 +553,13 @@ impl MockZeroMaxConcurrentConnection {
 
     /// Check connection state consistency
     pub fn validate_state_consistency(&self) -> Result<(), String> {
+        if self.state != ConnectionState::Open {
+            return Err(format!(
+                "Connection state should remain open during zero-limit fuzzing: {:?}",
+                self.state
+            ));
+        }
+
         // Verify max_concurrent_streams enforcement
         let active_count = self.active_stream_count();
 
@@ -547,7 +573,9 @@ impl MockZeroMaxConcurrentConnection {
         // Verify zero limit is properly enforced
         if self.settings.max_concurrent_streams == 0 && active_count > 0 {
             // Only allowed if streams were created before zero limit was set
-            let streams_from_zero_phase: usize = self.streams.values()
+            let streams_from_zero_phase: usize = self
+                .streams
+                .values()
                 .filter(|s| matches!(s.created_at, ConnectionPhase::ZeroLimitActive))
                 .count();
 
@@ -561,9 +589,16 @@ impl MockZeroMaxConcurrentConnection {
 
         // Verify stream ID sequence
         for stream in self.streams.values() {
+            if stream.side != self.side {
+                return Err(format!(
+                    "Stream {} recorded side {:?}, expected {:?}",
+                    stream.id, stream.side, self.side
+                ));
+            }
+
             let expected_parity = match self.side {
                 Side::Client => 1, // Odd
-                Side::Server => 0,  // Even
+                Side::Server => 0, // Even
             };
 
             if stream.id % 2 != expected_parity {
@@ -599,16 +634,43 @@ impl MockZeroMaxConcurrentConnection {
         // 2. All stream attempts were blocked with correct error codes
         // 3. Non-stream operations continued to work
 
-        let zero_phase_streams = self.streams.values()
+        let zero_phase_streams = self
+            .streams
+            .values()
             .filter(|s| matches!(s.created_at, ConnectionPhase::ZeroLimitActive))
             .count();
 
-        let correct_error_codes = self.blocked_streams.iter()
+        let correct_error_codes = self
+            .blocked_streams
+            .iter()
             .all(|b| b.error_code == ErrorCode::RefusedStream);
 
-        zero_phase_streams == 0 &&
-        correct_error_codes &&
-        self.stats.streams_incorrectly_allowed == 0
+        let coherent_blocked_attempts = self.blocked_streams.iter().all(|blocked| {
+            blocked.stream_id != 0
+                && !blocked.attempt_type.is_empty()
+                && matches!(
+                    blocked.blocked_phase,
+                    ConnectionPhase::Establishment | ConnectionPhase::ZeroLimitActive
+                )
+        });
+
+        let coherent_non_stream_frames = self.processed_frames.iter().all(|frame| {
+            !frame.frame_type.is_empty()
+                && frame.stream_id == 0
+                && frame.success
+                && matches!(
+                    frame.phase,
+                    ConnectionPhase::Establishment
+                        | ConnectionPhase::ZeroLimitActive
+                        | ConnectionPhase::PostRecovery
+                )
+        });
+
+        zero_phase_streams == 0
+            && correct_error_codes
+            && coherent_blocked_attempts
+            && coherent_non_stream_frames
+            && self.stats.streams_incorrectly_allowed == 0
     }
 }
 
@@ -626,16 +688,30 @@ fn cap_u32(value: u32, max: u32) -> u32 {
 }
 
 fuzz_target!(|input: ZeroMaxConcurrentInput| {
-    let side = if input.is_client { Side::Client } else { Side::Server };
+    let side = if input.is_client {
+        Side::Client
+    } else {
+        Side::Server
+    };
     let mut conn = MockZeroMaxConcurrentConnection::new(side);
 
     // Establish connection with zero max concurrent streams
     let establish_result = conn.establish_with_zero_limit();
-    assert!(establish_result.is_ok(), "Connection establishment with zero limit should succeed");
+    assert!(
+        establish_result.is_ok(),
+        "Connection establishment with zero limit should succeed"
+    );
 
     // Verify initial state
-    assert_eq!(conn.settings.max_concurrent_streams, 0, "Max concurrent streams should be zero after establishment");
-    assert_eq!(conn.active_stream_count(), 0, "No streams should be active initially");
+    assert_eq!(
+        conn.settings.max_concurrent_streams, 0,
+        "Max concurrent streams should be zero after establishment"
+    );
+    assert_eq!(
+        conn.active_stream_count(),
+        0,
+        "No streams should be active initially"
+    );
 
     // Process initial connection operations
     for operation in input.initial_operations.iter().take(10) {
@@ -643,33 +719,34 @@ fuzz_target!(|input: ZeroMaxConcurrentInput| {
             InitialConnectionOperation::SendZeroMaxConcurrentSettings => {
                 let settings = SettingsFrame::new(vec![Setting::MaxConcurrentStreams(0)]);
                 let _ = conn.handle_settings_frame(&settings);
-            },
+            }
             InitialConnectionOperation::SendSettingsAck => {
                 let settings_ack = SettingsFrame::ack();
                 let _ = conn.handle_settings_frame(&settings_ack);
-            },
-            InitialConnectionOperation::SendPing { data } => {
+            }
+            InitialConnectionOperation::SendPing { data: _ } => {
                 let _ = conn.process_non_stream_frame("PING", 0);
-            },
+            }
             InitialConnectionOperation::SendWindowUpdate { increment } => {
-                let increment = cap_u32(*increment, 0x7fff_ffff);
+                let _increment = cap_u32(*increment, 0x7fff_ffff);
                 let _ = conn.process_non_stream_frame("WINDOW_UPDATE", 0);
-            },
+            }
             InitialConnectionOperation::SendOtherSettings {
                 header_table_size,
                 enable_push,
                 initial_window_size,
-                max_frame_size
+                max_frame_size,
             } => {
-                let mut settings_vec = vec![];
-                settings_vec.push(Setting::HeaderTableSize(*header_table_size));
-                settings_vec.push(Setting::EnablePush(*enable_push));
-                settings_vec.push(Setting::InitialWindowSize(*initial_window_size));
-                settings_vec.push(Setting::MaxFrameSize(*max_frame_size));
+                let settings_vec = vec![
+                    Setting::HeaderTableSize(*header_table_size),
+                    Setting::EnablePush(*enable_push),
+                    Setting::InitialWindowSize(*initial_window_size),
+                    Setting::MaxFrameSize(*max_frame_size),
+                ];
 
                 let settings = SettingsFrame::new(settings_vec);
                 let _ = conn.handle_settings_frame(&settings);
-            },
+            }
         }
     }
 
@@ -681,7 +758,7 @@ fuzz_target!(|input: ZeroMaxConcurrentInput| {
                 stream_id,
                 end_stream: _,
                 end_headers: _,
-                payload_size
+                payload_size,
             } => {
                 let payload_size = cap_u16(*payload_size, 1024);
                 let payload = vec![0u8; payload_size as usize];
@@ -692,42 +769,47 @@ fuzz_target!(|input: ZeroMaxConcurrentInput| {
                     blocked_attempts += 1;
                 } else {
                     // This is a violation - stream created with zero limit
-                    assert!(false, "Stream creation should be blocked when max_concurrent_streams=0");
+                    panic!("Stream creation should be blocked when max_concurrent_streams=0");
                 }
-            },
+            }
             StreamCreationAttempt::HeadersWithPriority {
                 stream_id,
                 dependency: _,
                 weight: _,
-                exclusive: _
+                exclusive: _,
             } => {
                 let result = conn.attempt_stream_creation(*stream_id, vec![]);
                 if result.is_err() {
                     blocked_attempts += 1;
                 }
-            },
-            StreamCreationAttempt::MalformedHeaders { stream_id, invalid_payload } => {
+            }
+            StreamCreationAttempt::MalformedHeaders {
+                stream_id,
+                invalid_payload,
+            } => {
                 let payload = invalid_payload.iter().take(512).cloned().collect();
                 let _ = conn.attempt_stream_creation(*stream_id, payload);
-            },
+            }
             StreamCreationAttempt::ReservedBitStream { stream_id } => {
                 let _ = conn.attempt_stream_creation(*stream_id | 0x8000_0000, vec![]);
-            },
+            }
             StreamCreationAttempt::OrphanedContinuation { stream_id, payload } => {
                 let payload = payload.iter().take(256).cloned().collect();
                 let _ = conn.attempt_stream_creation(*stream_id, payload);
-            },
+            }
             StreamCreationAttempt::EvenStreamId { stream_id } => {
-                let even_id = (*stream_id & 0x7fff_fffe) | 0; // Force even
+                let even_id = *stream_id & 0x7fff_fffe; // Force even
                 let _ = conn.attempt_stream_creation(even_id, vec![]);
-            },
+            }
         }
     }
 
     // Verify that zero limit blocked stream attempts
     if !input.stream_attempts.is_empty() {
-        assert!(blocked_attempts > 0 || conn.stats().streams_blocked > 0,
-            "Zero max concurrent streams should block stream creation attempts");
+        assert!(
+            blocked_attempts > 0 || conn.stats().streams_blocked > 0,
+            "Zero max concurrent streams should block stream creation attempts"
+        );
     }
 
     // Process non-stream frame operations (should work normally)
@@ -735,17 +817,23 @@ fuzz_target!(|input: ZeroMaxConcurrentInput| {
         match operation {
             NonStreamFrameOperation::Ping { data: _, ack: _ } => {
                 let result = conn.process_non_stream_frame("PING", 0);
-                assert!(result.is_ok(), "PING should work with zero max concurrent streams");
-            },
+                assert!(
+                    result.is_ok(),
+                    "PING should work with zero max concurrent streams"
+                );
+            }
             NonStreamFrameOperation::WindowUpdate { increment } => {
-                let increment = cap_u32(*increment, 0x7fff_ffff);
+                let _increment = cap_u32(*increment, 0x7fff_ffff);
                 let result = conn.process_non_stream_frame("WINDOW_UPDATE", 0);
-                assert!(result.is_ok(), "WINDOW_UPDATE should work with zero max concurrent streams");
-            },
+                assert!(
+                    result.is_ok(),
+                    "WINDOW_UPDATE should work with zero max concurrent streams"
+                );
+            }
             NonStreamFrameOperation::SettingsUpdate {
                 header_table_size,
                 enable_push,
-                max_frame_size
+                max_frame_size,
             } => {
                 let mut settings_vec = vec![];
                 if let Some(size) = header_table_size {
@@ -760,16 +848,22 @@ fuzz_target!(|input: ZeroMaxConcurrentInput| {
 
                 let settings = SettingsFrame::new(settings_vec);
                 let result = conn.handle_settings_frame(&settings);
-                assert!(result.is_ok(), "SETTINGS updates should work with zero max concurrent streams");
-            },
+                assert!(
+                    result.is_ok(),
+                    "SETTINGS updates should work with zero max concurrent streams"
+                );
+            }
             NonStreamFrameOperation::GoAway {
                 last_stream_id: _,
                 error_code: _,
-                debug_data: _
+                debug_data: _,
             } => {
                 let result = conn.process_non_stream_frame("GOAWAY", 0);
-                assert!(result.is_ok(), "GOAWAY should work with zero max concurrent streams");
-            },
+                assert!(
+                    result.is_ok(),
+                    "GOAWAY should work with zero max concurrent streams"
+                );
+            }
         }
     }
 
@@ -780,57 +874,71 @@ fuzz_target!(|input: ZeroMaxConcurrentInput| {
             RecoveryOperation::IncreaseLimit { new_limit } => {
                 let new_limit = cap_u8(*new_limit, 100).max(1) as u32; // At least 1 for recovery
                 let result = conn.test_recovery(new_limit);
-                assert!(result.is_ok(), "Recovery by increasing limit should succeed");
+                assert!(
+                    result.is_ok(),
+                    "Recovery by increasing limit should succeed"
+                );
 
                 if new_limit > 0 {
                     recovery_successful = true;
                 }
-            },
-            RecoveryOperation::CreateStreamAfterIncrease { stream_id, expect_success } => {
+            }
+            RecoveryOperation::CreateStreamAfterIncrease {
+                stream_id,
+                expect_success,
+            } => {
                 if recovery_successful {
-                    let result = conn.attempt_stream_creation(*stream_id, vec![]);
+                    let _result = conn.attempt_stream_creation(*stream_id, vec![]);
 
-                    if *expect_success && conn.active_stream_count() < conn.settings.max_concurrent_streams {
+                    if *expect_success
+                        && conn.active_stream_count() < conn.settings.max_concurrent_streams
+                    {
                         // Stream creation might still fail due to ID sequence or other issues
                         // Don't assert success, just verify no zero-limit violation
                     }
                 }
-            },
+            }
             RecoveryOperation::ResetToZero => {
                 let result = conn.test_recovery(0);
                 assert!(result.is_ok(), "Reset to zero limit should succeed");
                 recovery_successful = false;
-            },
+            }
             RecoveryOperation::RapidLimitChanges { changes } => {
                 for &limit in changes.iter().take(5) {
                     let limit = cap_u8(limit, 50) as u32;
                     let _ = conn.test_recovery(limit);
                 }
-            },
+            }
         }
     }
 
     // Process edge case tests
     for edge_case in input.edge_case_tests.iter().take(10) {
         match edge_case {
-            EdgeCaseTest::Stream0Operation { frame_type: _, payload: _ } => {
+            EdgeCaseTest::Stream0Operation {
+                frame_type: _,
+                payload: _,
+            } => {
                 // Stream 0 operations should be connection-level
                 let result = conn.process_non_stream_frame("STREAM_0_OPERATION", 0);
                 assert!(result.is_ok(), "Stream 0 operations should work");
-            },
+            }
             EdgeCaseTest::MultipleZeroSettings { count } => {
                 for _ in 0..cap_u8(*count, 5) {
                     let settings = SettingsFrame::new(vec![Setting::MaxConcurrentStreams(0)]);
                     let _ = conn.handle_settings_frame(&settings);
                 }
-            },
+            }
             EdgeCaseTest::ZeroLimitWithAck => {
                 // SETTINGS with ACK should not change the limit
                 let settings_ack = SettingsFrame::ack();
                 let result = conn.handle_settings_frame(&settings_ack);
                 assert!(result.is_ok(), "SETTINGS ACK should succeed");
-            },
-            EdgeCaseTest::InterleavedOps { stream_attempt, setting_change } => {
+            }
+            EdgeCaseTest::InterleavedOps {
+                stream_attempt,
+                setting_change,
+            } => {
                 // Try stream creation
                 if let StreamCreationAttempt::StandardHeaders { stream_id, .. } = stream_attempt {
                     let _ = conn.attempt_stream_creation(*stream_id, vec![]);
@@ -839,38 +947,62 @@ fuzz_target!(|input: ZeroMaxConcurrentInput| {
                 // Change setting
                 let limit = cap_u32(*setting_change, 10);
                 let _ = conn.test_recovery(limit);
-            },
+            }
             EdgeCaseTest::LargeStreamId { stream_id } => {
                 let large_id = cap_u32(*stream_id, 0x7fff_ffff);
                 let _ = conn.attempt_stream_creation(large_id, vec![]);
-            },
+            }
         }
     }
 
     // Final state validation
     let validation_result = conn.validate_state_consistency();
-    assert!(validation_result.is_ok(), "Connection state should be consistent: {:?}", validation_result);
+    assert!(
+        validation_result.is_ok(),
+        "Connection state should be consistent: {:?}",
+        validation_result
+    );
 
     // Verify zero limit enforcement
-    assert!(conn.zero_limit_properly_enforced(), "Zero max concurrent streams limit should be properly enforced");
+    assert!(
+        conn.zero_limit_properly_enforced(),
+        "Zero max concurrent streams limit should be properly enforced"
+    );
 
     // Verify no streams exist if limit is still zero
     if conn.settings.max_concurrent_streams == 0 {
-        assert_eq!(conn.active_stream_count(), 0, "No active streams should exist with zero limit");
+        assert_eq!(
+            conn.active_stream_count(),
+            0,
+            "No active streams should exist with zero limit"
+        );
     }
 
     // Verify statistics make sense
     let stats = conn.stats();
-    assert!(stats.stream_attempts >= stats.streams_blocked, "Blocked count should not exceed attempts");
-    assert_eq!(stats.streams_incorrectly_allowed, 0, "No streams should be incorrectly allowed with zero limit");
+    assert!(
+        stats.stream_attempts >= stats.streams_blocked,
+        "Blocked count should not exceed attempts"
+    );
+    assert_eq!(
+        stats.streams_incorrectly_allowed, 0,
+        "No streams should be incorrectly allowed with zero limit"
+    );
 
     // Check for violations
     let violations = conn.violations();
-    assert!(violations.is_empty(), "No violations should be detected: {:?}", violations);
+    assert!(
+        violations.is_empty(),
+        "No violations should be detected: {:?}",
+        violations
+    );
 
     // Verify that non-stream operations worked
     if !input.other_frame_operations.is_empty() {
-        assert!(stats.non_stream_frames_processed > 0, "Non-stream frames should be processed normally");
+        assert!(
+            stats.non_stream_frames_processed > 0,
+            "Non-stream frames should be processed normally"
+        );
     }
 });
 
