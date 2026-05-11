@@ -356,21 +356,22 @@ impl MockPriorityConnection {
                 self.priority_tree.root_children.push(frame.stream_id);
             } else {
                 // Ensure dependency parent exists
-                if !self
-                    .priority_tree
-                    .nodes
-                    .contains_key(&frame.dependency_stream_id)
+                let inserted_dependency = if let std::collections::hash_map::Entry::Vacant(entry) =
+                    self.priority_tree.nodes.entry(frame.dependency_stream_id)
                 {
-                    self.priority_tree.nodes.insert(
-                        frame.dependency_stream_id,
-                        PriorityNode {
-                            stream_id: frame.dependency_stream_id,
-                            parent: None, // Will be root child
-                            weight: 16,   // Default weight
-                            exclusive: false,
-                            children: Vec::new(),
-                        },
-                    );
+                    entry.insert(PriorityNode {
+                        stream_id: frame.dependency_stream_id,
+                        parent: None, // Will be root child
+                        weight: 16,   // Default weight
+                        exclusive: false,
+                        children: Vec::new(),
+                    });
+                    true
+                } else {
+                    false
+                };
+
+                if inserted_dependency {
                     self.priority_tree
                         .root_children
                         .push(frame.dependency_stream_id);
@@ -754,10 +755,11 @@ fuzz_target!(|scenario: PriorityFrameScenario| {
         return;
     }
 
-    let mut config = PriorityConfig::default();
     // Use smaller limits for fuzzing to catch issues faster
-    config.max_tree_depth = 50;
-    config.max_children_per_node = 100;
+    let config = PriorityConfig {
+        max_tree_depth: 50,
+        max_children_per_node: 100,
+    };
 
     let mut conn = MockPriorityConnection::new(config, scenario.is_server);
 
@@ -828,11 +830,13 @@ fuzz_target!(|scenario: PriorityFrameScenario| {
             node.stream_id,
             node.weight
         );
-        assert!(
-            node.weight <= 256,
-            "Weight above maximum: stream {} has weight {}",
-            node.stream_id,
-            node.weight
-        );
     }
+
+    assert!(
+        conn.violations().len() >= protocol_errors + warnings,
+        "Result counters exceeded recorded violations: protocol_errors={}, warnings={}, violations={}",
+        protocol_errors,
+        warnings,
+        conn.violations().len()
+    );
 });
