@@ -5202,6 +5202,7 @@ name = "h2_pseudo_header_uppercase"
 path = "fuzz_targets/h2_pseudo_header_uppercase.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "h2_path_canonicalization"

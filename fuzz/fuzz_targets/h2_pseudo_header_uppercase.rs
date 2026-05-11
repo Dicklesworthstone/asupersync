@@ -24,9 +24,9 @@ struct HeaderFieldTest {
 
 #[derive(Debug)]
 enum ViolationType {
-    UppercaseInName,
-    UppercaseInPseudoHeader,
-    UppercaseInRegularHeader,
+    NameFormat,
+    PseudoHeaderCase,
+    RegularHeaderCase,
 }
 
 #[derive(Debug)]
@@ -43,14 +43,11 @@ struct MockUppercaseHeaderConnection {
 
 #[derive(Debug, Clone)]
 struct StreamState {
-    id: u32,
     state: StreamStateMachine,
-    headers_complete: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 enum StreamStateMachine {
-    Idle,
     Open,
     Closed(H2Error),
 }
@@ -58,7 +55,6 @@ enum StreamStateMachine {
 #[derive(Debug, Clone, PartialEq)]
 enum H2Error {
     ProtocolError,
-    StreamClosed,
 }
 
 impl MockUppercaseHeaderConnection {
@@ -83,23 +79,16 @@ impl MockUppercaseHeaderConnection {
         }
 
         // Ensure stream exists
-        if !self.stream_state.contains_key(&stream_id) {
-            self.stream_state.insert(
-                stream_id,
-                StreamState {
-                    id: stream_id,
-                    state: StreamStateMachine::Open,
-                    headers_complete: false,
-                },
-            );
-        }
+        self.stream_state.entry(stream_id).or_insert(StreamState {
+            state: StreamStateMachine::Open,
+        });
 
         let stream = self.stream_state.get(&stream_id).unwrap();
 
         // Stream must be in valid state for headers
         match stream.state {
             StreamStateMachine::Closed(ref error) => return Err(error.clone()),
-            StreamStateMachine::Idle | StreamStateMachine::Open => {
+            StreamStateMachine::Open => {
                 // Valid for headers
             }
         }
@@ -107,12 +96,6 @@ impl MockUppercaseHeaderConnection {
         // RFC 7540 §8.1.2: Header field names MUST be lowercase
         if name.chars().any(|c| c.is_ascii_uppercase()) {
             // Found uppercase character - this is a PROTOCOL_ERROR
-            let violation = if is_pseudo {
-                ViolationType::UppercaseInPseudoHeader
-            } else {
-                ViolationType::UppercaseInRegularHeader
-            };
-
             self.connection_error = Some(H2Error::ProtocolError);
 
             // Close the stream
@@ -216,19 +199,18 @@ fn classify_test_case(test: &HeaderFieldTest) -> ExpectedResult {
 
     if has_uppercase {
         let violation_type = if test.is_pseudo {
-            ViolationType::UppercaseInPseudoHeader
+            ViolationType::PseudoHeaderCase
         } else {
-            ViolationType::UppercaseInRegularHeader
+            ViolationType::RegularHeaderCase
         };
         ExpectedResult::ProtocolError(violation_type)
     } else {
         // Additional validity checks for corner cases
-        if test.name.is_empty() {
-            ExpectedResult::ProtocolError(ViolationType::UppercaseInName)
-        } else if test.is_pseudo && !test.name.starts_with(':') {
-            ExpectedResult::ProtocolError(ViolationType::UppercaseInName)
-        } else if !test.is_pseudo && test.name.starts_with(':') {
-            ExpectedResult::ProtocolError(ViolationType::UppercaseInName)
+        if test.name.is_empty()
+            || (test.is_pseudo && !test.name.starts_with(':'))
+            || (!test.is_pseudo && test.name.starts_with(':'))
+        {
+            ExpectedResult::ProtocolError(ViolationType::NameFormat)
         } else {
             ExpectedResult::Valid
         }
@@ -303,13 +285,23 @@ fuzz_target!(|data: &[u8]| {
                         "Connection should be in PROTOCOL_ERROR state"
                     );
 
-                    // Verify stream is closed with PROTOCOL_ERROR
                     if let Some(stream) = connection.get_stream_state(stream_id) {
-                        assert_eq!(
-                            stream.state,
-                            StreamStateMachine::Closed(H2Error::ProtocolError),
-                            "Stream should be closed with PROTOCOL_ERROR"
-                        );
+                        match violation_type {
+                            ViolationType::PseudoHeaderCase | ViolationType::RegularHeaderCase => {
+                                assert_eq!(
+                                    stream.state,
+                                    StreamStateMachine::Closed(H2Error::ProtocolError),
+                                    "Stream should be closed for uppercase header errors"
+                                );
+                            }
+                            ViolationType::NameFormat => {
+                                assert_eq!(
+                                    stream.state,
+                                    StreamStateMachine::Open,
+                                    "Name-format errors should not be asserted as stream-close case errors"
+                                );
+                            }
+                        }
                     }
                 }
                 Ok(_) => {
@@ -317,10 +309,6 @@ fuzz_target!(|data: &[u8]| {
                         "Expected PROTOCOL_ERROR for header with uppercase but got success: name='{}', value='{}', is_pseudo={}, violation={:?}",
                         test.name, test.value, test.is_pseudo, violation_type
                     );
-                }
-                Err(other_error) => {
-                    // Might be failing for other reasons, which is acceptable
-                    // as long as it's still an error
                 }
             }
         }
