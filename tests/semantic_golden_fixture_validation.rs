@@ -102,6 +102,15 @@ fn build_contract_scenario(identity: &DualRunScenarioIdentity) -> Scenario {
         participants: Vec::new(),
         oracles: vec!["all".to_string()],
         cancellation: None,
+        resource_caps: Default::default(),
+        expected_invariants: vec![
+            "quiescence".to_string(),
+            "losers_drained".to_string(),
+            "no_obligation_leaks".to_string(),
+            "deterministic_replay".to_string(),
+        ],
+        minimization: Default::default(),
+        golden_projection: Default::default(),
         include: Vec::new(),
         metadata,
     }

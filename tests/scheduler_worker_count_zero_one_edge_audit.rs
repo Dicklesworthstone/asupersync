@@ -345,14 +345,14 @@ mod behavioral {
         // panic AND does NOT hang — produces a 1-worker
         // scheduler.
         let state = fresh_state();
-        let scheduler = ThreeLaneScheduler::new(0, &state);
+        let mut scheduler = ThreeLaneScheduler::new(0, &state);
+        let worker_count = scheduler.take_workers().len();
         assert_eq!(
-            scheduler.worker_count(),
-            1,
+            worker_count, 1,
             "REGRESSION: ThreeLaneScheduler::new(0) did not \
              clamp to 1 worker. Got {} workers — the silent-\
              hang pre-fix bug is back.",
-            scheduler.worker_count(),
+            worker_count,
         );
     }
 
@@ -384,8 +384,8 @@ mod behavioral {
     fn infallible_new_with_one_worker_count_creates_one_worker() {
         // Pin: worker_count == 1 is a valid configuration.
         let state = fresh_state();
-        let scheduler = ThreeLaneScheduler::new(1, &state);
-        assert_eq!(scheduler.worker_count(), 1);
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        assert_eq!(scheduler.take_workers().len(), 1);
     }
 
     #[test]
@@ -398,7 +398,8 @@ mod behavioral {
             "REGRESSION: try_new(1) returned Err — \
              worker_count=1 is valid and must succeed.",
         );
-        assert_eq!(result.unwrap().worker_count(), 1);
+        let mut scheduler = result.unwrap();
+        assert_eq!(scheduler.take_workers().len(), 1);
     }
 
     #[test]
@@ -407,13 +408,13 @@ mod behavioral {
         // unchanged.
         let state = fresh_state();
         for n in [2, 4, 8, 16] {
-            let scheduler = ThreeLaneScheduler::new(n, &state);
+            let mut scheduler = ThreeLaneScheduler::new(n, &state);
+            let worker_count = scheduler.take_workers().len();
             assert_eq!(
-                scheduler.worker_count(),
-                n,
+                worker_count, n,
                 "REGRESSION: new({n}) produced wrong worker \
                  count {}",
-                scheduler.worker_count(),
+                worker_count,
             );
         }
     }

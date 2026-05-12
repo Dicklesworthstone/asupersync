@@ -8,9 +8,7 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::time::{Duration, Instant};
 
-use asupersync::runtime::scheduler::{
-    AutotunerConfig, HotPathObservation, SchedulerAutotuner, three_lane::AdaptiveReadyProfile,
-};
+use asupersync::runtime::scheduler::{AutotunerConfig, HotPathObservation, SchedulerAutotuner};
 
 /// Workload patterns for autotuner benchmarking.
 #[derive(Debug, Clone)]

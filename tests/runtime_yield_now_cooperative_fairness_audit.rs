@@ -396,7 +396,7 @@ fn behavioral_b_progresses_between_a_yield_calls() {
         id: task_a,
         executor: Arc::clone(&exec),
     }));
-    let waker_b = Waker::from(Arc::new(CoopWaker {
+    let _waker_b = Waker::from(Arc::new(CoopWaker {
         id: task_b,
         executor: Arc::clone(&exec),
     }));
@@ -448,7 +448,7 @@ fn behavioral_b_progresses_between_a_yield_calls() {
             }
 
             let mut yfut = a_yield.take().unwrap();
-            let pinned = unsafe { Pin::new_unchecked(&mut yfut) };
+            let pinned = Pin::new(&mut yfut);
             let mut ctx = Context::from_waker(&waker_a);
             match pinned.poll(&mut ctx) {
                 Poll::Pending => {
@@ -535,7 +535,7 @@ fn behavioral_yield_now_self_wake_re_enqueues_at_tail() {
 
     // Poll A's yield_now: it self-wakes.
     let mut yfut = mock_yield_now();
-    let pinned = unsafe { Pin::new_unchecked(&mut yfut) };
+    let pinned = Pin::new(&mut yfut);
     let mut ctx = Context::from_waker(&waker_a);
     let _ = pinned.poll(&mut ctx);
 
@@ -568,11 +568,11 @@ fn behavioral_yield_now_does_not_busyspin() {
     }));
 
     let mut yfut = mock_yield_now();
-    let pinned1 = unsafe { Pin::new_unchecked(&mut yfut) };
+    let pinned1 = Pin::new(&mut yfut);
     let mut ctx = Context::from_waker(&waker);
     assert!(matches!(pinned1.poll(&mut ctx), Poll::Pending));
 
-    let pinned2 = unsafe { Pin::new_unchecked(&mut yfut) };
+    let pinned2 = Pin::new(&mut yfut);
     let mut ctx = Context::from_waker(&waker);
     assert!(matches!(pinned2.poll(&mut ctx), Poll::Ready(())));
 }
@@ -614,7 +614,7 @@ fn behavioral_no_starvation_under_long_loop() {
                 a_yield = Some(mock_yield_now());
             }
             let mut y = a_yield.take().unwrap();
-            let pinned = unsafe { Pin::new_unchecked(&mut y) };
+            let pinned = Pin::new(&mut y);
             let mut ctx = Context::from_waker(&waker_a);
             match pinned.poll(&mut ctx) {
                 Poll::Pending => {

@@ -13,7 +13,6 @@ use asupersync::obligation::ledger::{LedgerStats, ObligationLedger};
 use asupersync::record::{ObligationAbortReason, ObligationKind};
 use asupersync::types::{RegionId, TaskId, Time};
 use proptest::prelude::*;
-use std::collections::HashMap;
 
 // =============================================================================
 // Test Infrastructure
@@ -23,6 +22,14 @@ use std::collections::HashMap;
 struct TestContext {
     ledger: ObligationLedger,
     tokens: Vec<Option<asupersync::obligation::ledger::ObligationToken>>,
+}
+
+fn task_id(index: u32) -> TaskId {
+    TaskId::new_for_test(index, 0)
+}
+
+fn region_id(index: u32) -> RegionId {
+    RegionId::new_for_test(index, 0)
 }
 
 impl TestContext {
@@ -47,18 +54,20 @@ impl TestContext {
     }
 
     fn commit(&mut self, index: usize, time: Time) -> bool {
-        if let Some(Some(token)) = self.tokens.get_mut(index) {
-            if let Some(token) = token.take() {
-                return self.ledger.commit(token, time).is_ok();
+        if let Some(token_slot) = self.tokens.get_mut(index) {
+            if let Some(token) = token_slot.take() {
+                self.ledger.commit(token, time);
+                return true;
             }
         }
         false
     }
 
     fn abort(&mut self, index: usize, time: Time, reason: ObligationAbortReason) -> bool {
-        if let Some(Some(token)) = self.tokens.get_mut(index) {
-            if let Some(token) = token.take() {
-                return self.ledger.abort(token, time, reason).is_ok();
+        if let Some(token_slot) = self.tokens.get_mut(index) {
+            if let Some(token) = token_slot.take() {
+                self.ledger.abort(token, time, reason);
+                return true;
             }
         }
         false
@@ -105,8 +114,8 @@ proptest! {
 
             let token_index = ctx.acquire(
                 kind,
-                TaskId::new(i as u32 + 1),
-                RegionId::new(1),
+                task_id(i as u32 + 1),
+                region_id(1),
                 Time::from_nanos(1000 + i as u64 * 1000)
             );
             tokens.push(token_index);
@@ -166,14 +175,14 @@ proptest! {
         resolve_ratio in 0.0f64..=1.0
     ) {
         let mut ctx = TestContext::new();
-        let region_id = RegionId::new(1);
+        let region_id = region_id(1);
         let mut tokens = Vec::new();
 
         // Acquire obligations in the region
         for i in 0..obligation_count {
             let token_index = ctx.acquire(
                 ObligationKind::SendPermit,
-                TaskId::new(i as u32 + 1),
+                task_id(i as u32 + 1),
                 region_id,
                 Time::from_nanos(1000 + i as u64 * 1000)
             );
@@ -250,12 +259,12 @@ proptest! {
         let mut ctx2 = TestContext::new();
 
         // Single resolution
-        let token1 = ctx1.acquire(kind, TaskId::new(1), RegionId::new(1), Time::from_nanos(1000));
+        let token1 = ctx1.acquire(kind, task_id(1), region_id(1), Time::from_nanos(1000));
         let committed1 = ctx1.commit(token1, Time::from_nanos(2000));
         let stats1 = ctx1.stats();
 
         // Attempt double resolution
-        let token2 = ctx2.acquire(kind, TaskId::new(1), RegionId::new(1), Time::from_nanos(1000));
+        let token2 = ctx2.acquire(kind, task_id(1), region_id(1), Time::from_nanos(1000));
         let committed2a = ctx2.commit(token2, Time::from_nanos(2000));
         let committed2b = ctx2.commit(token2, Time::from_nanos(3000)); // Should fail
         let stats2 = ctx2.stats();
@@ -299,7 +308,7 @@ proptest! {
         cancel_count in 1usize..=6
     ) {
         let mut ctx = TestContext::new();
-        let region_id = RegionId::new(1);
+        let region_id = region_id(1);
         let mut normal_tokens = Vec::new();
         let mut cancel_tokens = Vec::new();
 
@@ -307,7 +316,7 @@ proptest! {
         for i in 0..normal_count {
             let token = ctx.acquire(
                 ObligationKind::SendPermit,
-                TaskId::new(i as u32 + 1),
+                task_id(i as u32 + 1),
                 region_id,
                 Time::from_nanos(1000 + i as u64 * 1000)
             );
@@ -318,7 +327,7 @@ proptest! {
         for i in 0..cancel_count {
             let token = ctx.acquire(
                 ObligationKind::Ack,
-                TaskId::new((normal_count + i) as u32 + 1),
+                task_id((normal_count + i) as u32 + 1),
                 region_id,
                 Time::from_nanos(2000 + i as u64 * 1000)
             );
@@ -400,8 +409,8 @@ proptest! {
 
             let token1 = ctx1.acquire(
                 kind,
-                TaskId::new(i as u32 + 1),
-                RegionId::new((i % 2) as u32 + 1), // Different regions for independence
+                task_id(i as u32 + 1),
+                region_id((i % 2) as u32 + 1), // Different regions for independence
                 Time::from_nanos(1000 + i as u64 * 1000)
             );
             tokens1.push(token1);
@@ -417,8 +426,8 @@ proptest! {
 
             let token2 = ctx2.acquire(
                 kind,
-                TaskId::new(i as u32 + 1),
-                RegionId::new((i % 2) as u32 + 1),
+                task_id(i as u32 + 1),
+                region_id((i % 2) as u32 + 1),
                 Time::from_nanos(1000 + i as u64 * 1000)
             );
             tokens2.push(token2);

@@ -119,7 +119,7 @@ proptest! {
                     Ok(()) => {
                         // The consumer accepted the batch. The
                         // pre-classification must have agreed.
-                        prop_assert!(
+                        assert!(
                             !should_reject,
                             "consumer accepted batch that should have been rejected: \
                              has_negative={has_negative} has_duplicate={has_duplicate} \
@@ -140,7 +140,7 @@ proptest! {
                         // about.
                         for ((topic, partition), expected) in &shadow {
                             let actual = consumer.committed_offset(topic, *partition);
-                            prop_assert_eq!(
+                            assert_eq!(
                                 actual,
                                 Some(*expected),
                                 "committed_offset({}, {}) must match shadow {} after \
@@ -162,7 +162,7 @@ proptest! {
                         // If the shadow is unchanged after a reject,
                         // we don't need to re-check committed_offset
                         // because the consumer never mutated state.
-                        prop_assert!(
+                        assert!(
                             should_reject,
                             "consumer rejected batch that looked valid: batch={batch:?}, \
                              shadow={shadow:?}"
@@ -194,7 +194,7 @@ proptest! {
 
             let batch = vec![TopicPartitionOffset::new(&topic, 0, offset)];
             let result = consumer.commit_offsets(&cx, &batch).await;
-            prop_assert!(
+            assert!(
                 result.is_err(),
                 "commit on unsubscribed topic '{}' must reject; got Ok",
                 topic

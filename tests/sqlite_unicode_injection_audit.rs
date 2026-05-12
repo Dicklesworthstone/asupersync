@@ -7,13 +7,22 @@
 //! ATTACK VECTOR: If SQLite normalizes Unicode before binding, an attacker could
 //! use visually similar Unicode characters to bypass SQL injection filters.
 
+#[cfg(feature = "sqlite")]
+use asupersync::Outcome;
+#[cfg(feature = "sqlite")]
 use asupersync::conformance::{ConformanceTarget, LabRuntimeTarget, TestConfig};
+#[cfg(feature = "sqlite")]
 use asupersync::cx::Cx;
+#[cfg(feature = "sqlite")]
 use asupersync::database::{SqliteConnection, SqliteRow, SqliteValue};
+#[cfg(feature = "sqlite")]
 use asupersync::test_utils::init_test_logging;
+#[cfg(feature = "sqlite")]
 use asupersync::types::{Budget, RegionId, TaskId};
+#[cfg(feature = "sqlite")]
 use asupersync::util::ArenaIndex;
 
+#[cfg(feature = "sqlite")]
 fn create_test_cx() -> Cx {
     Cx::new(
         RegionId::from_arena(ArenaIndex::new(0, 0)),

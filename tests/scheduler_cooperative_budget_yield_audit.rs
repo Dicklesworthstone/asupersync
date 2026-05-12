@@ -458,7 +458,7 @@ mod behavioral {
         // has poll_quota = 0 returns Err on checkpoint. The
         // returned Error must be classifiable as a budget
         // exhaustion (PollQuota cancel kind).
-        let cx = Cx::test_with_budget(Budget::INFINITE.with_poll_quota(0));
+        let cx = Cx::for_testing_with_budget(Budget::INFINITE.with_poll_quota(0));
         let result = cx.checkpoint();
 
         assert!(
@@ -474,7 +474,7 @@ mod behavioral {
     fn checkpoint_yields_when_deadline_passed() {
         // Pin: a Cx whose budget has a deadline in the past
         // returns Err on checkpoint.
-        let cx = Cx::test_with_budget(Budget::INFINITE.with_deadline(Time::ZERO));
+        let cx = Cx::for_testing_with_budget(Budget::INFINITE.with_deadline(Time::ZERO));
         // Time::ZERO is in the past relative to any nontrivial
         // checkpoint time, which the test Cx provides.
         let result = cx.checkpoint();
@@ -490,7 +490,7 @@ mod behavioral {
     #[test]
     fn checkpoint_yields_when_cost_quota_zero() {
         // Pin: cost_quota = Some(0) triggers exhaustion.
-        let cx = Cx::test_with_budget(Budget::INFINITE.with_cost_quota(0));
+        let cx = Cx::for_testing_with_budget(Budget::INFINITE.with_cost_quota(0));
         let result = cx.checkpoint();
 
         assert!(
@@ -507,7 +507,7 @@ mod behavioral {
         // Pin: the happy path returns Ok with no exhaustion. A
         // regression that returned Err on every checkpoint
         // would catastrophically break every handler.
-        let cx = Cx::test_with_budget(Budget::INFINITE);
+        let cx = Cx::for_testing_with_budget(Budget::INFINITE);
         let result = cx.checkpoint();
 
         assert!(
@@ -526,7 +526,7 @@ mod behavioral {
         // the budget. This is what makes the cooperative yield
         // STICKY — a task that ignored the first Err and looped
         // would observe Err on the next checkpoint too.
-        let cx = Cx::test_with_budget(Budget::INFINITE.with_poll_quota(0));
+        let cx = Cx::for_testing_with_budget(Budget::INFINITE.with_poll_quota(0));
 
         let first = cx.checkpoint();
         assert!(first.is_err(), "first checkpoint must Err");

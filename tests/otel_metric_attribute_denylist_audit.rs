@@ -330,7 +330,7 @@ fn check_cardinality_filter_is_exact_key_match() {
 // `feature = "metrics"`. The structural pins above run on default
 // features; this behavioral test only runs under `cargo test
 // --features metrics` (or any feature set that activates it).
-#[cfg(feature = "metrics")]
+#[cfg(all(feature = "metrics", feature = "test-internals"))]
 mod behavioral {
     use asupersync::observability::otel::{MetricsConfig, OtelMetrics};
     use opentelemetry::KeyValue;
@@ -349,6 +349,12 @@ mod behavioral {
         OtelMetrics::new_with_config(meter, config)
     }
 
+    fn filtered_labels(metrics: &OtelMetrics, labels: &[KeyValue]) -> Vec<KeyValue> {
+        metrics
+            .filtered_metric_labels_for_test("test", labels)
+            .expect("under cap, returns Some")
+    }
+
     #[test]
     fn denied_label_is_stripped_from_filtered_set() {
         // Pin: a denylist entry is removed from the label set
@@ -359,9 +365,7 @@ mod behavioral {
             KeyValue::new("user_id", "alice"),
             KeyValue::new("region", "us-east"),
         ];
-        let filtered = metrics
-            .check_cardinality("test", &labels)
-            .expect("under cap, returns Some");
+        let filtered = filtered_labels(&metrics, &labels);
 
         // user_id MUST be gone.
         assert!(
@@ -388,9 +392,7 @@ mod behavioral {
             KeyValue::new("ip", "192.0.2.1"),
             KeyValue::new("outcome", "ok"),
         ];
-        let filtered = metrics
-            .check_cardinality("test", &labels)
-            .expect("under cap, returns Some");
+        let filtered = filtered_labels(&metrics, &labels);
 
         let kept: Vec<&str> = filtered.iter().map(|kv| kv.key.as_str()).collect();
         assert_eq!(
@@ -410,9 +412,7 @@ mod behavioral {
             KeyValue::new("b", "2"),
             KeyValue::new("c", "3"),
         ];
-        let filtered = metrics
-            .check_cardinality("test", &labels)
-            .expect("under cap, returns Some");
+        let filtered = filtered_labels(&metrics, &labels);
         assert_eq!(filtered.len(), 3);
     }
 
@@ -428,9 +428,7 @@ mod behavioral {
             KeyValue::new("user_id", "alice"), // denied
             KeyValue::new("User_Id", "ALICE"), // NOT denied
         ];
-        let filtered = metrics
-            .check_cardinality("test", &labels)
-            .expect("under cap, returns Some");
+        let filtered = filtered_labels(&metrics, &labels);
 
         let kept: Vec<&str> = filtered.iter().map(|kv| kv.key.as_str()).collect();
         assert!(
@@ -471,12 +469,8 @@ mod behavioral {
             KeyValue::new("outcome", "ok"),
             KeyValue::new("user_id", "bob"),
         ];
-        let filtered_a = metrics
-            .check_cardinality("test", &labels_a)
-            .expect("first call");
-        let filtered_b = metrics
-            .check_cardinality("test", &labels_b)
-            .expect("second call");
+        let filtered_a = filtered_labels(&metrics, &labels_a);
+        let filtered_b = filtered_labels(&metrics, &labels_b);
 
         // Both produce the SAME single-label result.
         assert_eq!(filtered_a.len(), 1);

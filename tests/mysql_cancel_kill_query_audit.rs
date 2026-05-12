@@ -7,8 +7,10 @@
 //! CRITICAL REQUIREMENT: KILL QUERY stops server execution promptly,
 //! releasing locks and preventing resource leaks.
 
+#![cfg(feature = "mysql")]
+
 use asupersync::cx::Cx;
-use asupersync::database::{MySqlConnectOptions, MySqlConnection};
+use asupersync::database::MySqlConnection;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::mpsc;

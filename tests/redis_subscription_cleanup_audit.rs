@@ -7,10 +7,10 @@
 //! UNSUBSCRIBE commands. When dropped, subscriptions remain active on the
 //! server indefinitely.
 
-use asupersync::messaging::redis::{RedisClient, RedisPubSub};
+use asupersync::messaging::redis::RedisClient;
 use asupersync::test_utils::run_test_with_cx;
 use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -29,7 +29,8 @@ fn test_pubsub_drop_does_not_send_unsubscribe() {
             .set_read_timeout(Some(Duration::from_secs(2)))
             .expect("set read timeout");
 
-        let mut reader = BufReader::new(&stream);
+        let reader_stream = stream.try_clone().expect("clone test stream");
+        let mut reader = BufReader::new(reader_stream);
 
         // Read commands from client
         loop {
@@ -66,9 +67,7 @@ fn test_pubsub_drop_does_not_send_unsubscribe() {
             let client = RedisClient::connect(&cx, &url)
                 .await
                 .expect("connect to mock redis");
-            let mut pubsub = RedisPubSub::connect(&cx, client.config().clone())
-                .await
-                .expect("create pubsub connection");
+            let mut pubsub = client.pubsub(&cx).await.expect("create pubsub connection");
 
             // Subscribe to a channel
             pubsub
@@ -131,7 +130,8 @@ fn test_explicit_unsubscribe_works() {
             .set_read_timeout(Some(Duration::from_secs(2)))
             .expect("set read timeout");
 
-        let mut reader = BufReader::new(&stream);
+        let reader_stream = stream.try_clone().expect("clone test stream");
+        let mut reader = BufReader::new(reader_stream);
 
         loop {
             let mut line = String::new();
@@ -166,9 +166,7 @@ fn test_explicit_unsubscribe_works() {
         let client = RedisClient::connect(&cx, &url)
             .await
             .expect("connect to mock redis");
-        let mut pubsub = RedisPubSub::connect(&cx, client.config().clone())
-            .await
-            .expect("create pubsub connection");
+        let mut pubsub = client.pubsub(&cx).await.expect("create pubsub connection");
 
         // Subscribe then explicitly unsubscribe
         pubsub

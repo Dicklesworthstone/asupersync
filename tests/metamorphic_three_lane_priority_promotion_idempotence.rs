@@ -18,62 +18,34 @@
 #![cfg(test)]
 
 use proptest::prelude::*;
-use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::time::Duration;
 
-use asupersync::lab::config::LabConfig;
-use asupersync::lab::runtime::LabRuntime;
+use asupersync::runtime::RuntimeState;
 use asupersync::runtime::scheduler::three_lane::{ThreeLaneScheduler, ThreeLaneWorker};
-use asupersync::runtime::{RuntimeState, TaskTable};
 use asupersync::sync::ContendedMutex;
-use asupersync::time::{TimerDriverHandle, VirtualClock};
-use asupersync::types::{TaskId, Time};
+use asupersync::types::TaskId;
+
+fn task_id(raw: u64) -> TaskId {
+    TaskId::new_for_test(
+        u32::try_from(raw).expect("generated task id must fit in u32"),
+        0,
+    )
+}
 
 /// Test harness for priority promotion idempotence testing
 struct PromotionIdempotenceHarness {
-    lab_runtime: LabRuntime,
-    scheduler_clock: Arc<VirtualClock>,
     scheduler: ThreeLaneScheduler,
     workers: Vec<ThreeLaneWorker>,
-    state: Arc<ContendedMutex<RuntimeState>>,
-    task_table: Arc<ContendedMutex<TaskTable>>,
-    initial_tasks: Vec<TaskId>,
 }
 
 impl PromotionIdempotenceHarness {
     /// Create a new test harness with pre-configured tasks
-    fn new(num_workers: usize, num_initial_tasks: usize) -> Self {
-        let mut lab_runtime = LabRuntime::new_with_config(
-            LabConfig::builder()
-                .num_workers(num_workers)
-                .enable_parking(false) // Disable parking for deterministic testing
-                .cancel_streak_limit(16)
-                .build(),
-        );
-
-        let scheduler_clock = Arc::new(VirtualClock::new());
-        let scheduler = lab_runtime.take_scheduler();
+    fn new(num_workers: usize, _num_initial_tasks: usize) -> Self {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(num_workers, &state, 16);
         let workers = scheduler.take_workers();
-        let state = lab_runtime.get_runtime_state().clone();
-        let task_table = lab_runtime.get_task_table().clone();
 
-        // Create initial tasks for testing
-        let mut initial_tasks = Vec::new();
-        for i in 0..num_initial_tasks {
-            let task_id = TaskId::new_for_test(i as u64 + 1000); // Use high IDs to avoid conflicts
-            initial_tasks.push(task_id);
-        }
-
-        Self {
-            lab_runtime,
-            scheduler_clock,
-            scheduler,
-            workers,
-            state,
-            task_table,
-            initial_tasks,
-        }
+        Self { scheduler, workers }
     }
 
     /// Capture the current scheduling sequence by dispatching all available tasks
@@ -93,14 +65,14 @@ impl PromotionIdempotenceHarness {
     /// Inject tasks into ready lane with specified priorities
     fn inject_ready_tasks(&self, tasks: &[(TaskId, u8)]) {
         for &(task_id, priority) in tasks {
-            self.scheduler.schedule_ready(task_id, priority);
+            self.scheduler.inject_ready(task_id, priority);
         }
     }
 
     /// Inject tasks into cancel lane with specified priorities
     fn inject_cancel_tasks(&self, tasks: &[(TaskId, u8)]) {
         for &(task_id, priority) in tasks {
-            self.scheduler.schedule_local_cancel(task_id, priority);
+            self.scheduler.inject_cancel(task_id, priority);
         }
     }
 
@@ -138,13 +110,13 @@ impl Arbitrary for PromotionScenario {
             .prop_map(|(ready_raw, cancel_raw, target_raw, num_promotions)| {
                 let ready_tasks = ready_raw
                     .into_iter()
-                    .map(|(id, prio)| (TaskId::new_for_test(id), prio))
+                    .map(|(id, prio)| (task_id(id), prio))
                     .collect();
                 let cancel_tasks = cancel_raw
                     .into_iter()
-                    .map(|(id, prio)| (TaskId::new_for_test(id), prio))
+                    .map(|(id, prio)| (task_id(id), prio))
                     .collect();
-                let target_task = (TaskId::new_for_test(target_raw.0), target_raw.1);
+                let target_task = (task_id(target_raw.0), target_raw.1);
 
                 PromotionScenario {
                     ready_tasks,
@@ -225,9 +197,9 @@ fn test_lane_order_preservation() {
         let once_non_target = extract_non_target(&once_sequence);
         let multiple_non_target = extract_non_target(&multiple_sequence);
 
-        prop_assert_eq!(baseline_non_target, once_non_target,
+        prop_assert_eq!(&baseline_non_target, &once_non_target,
             "Lane order preservation violated: single promotion changed non-target task order");
-        prop_assert_eq!(once_non_target, multiple_non_target,
+        prop_assert_eq!(&once_non_target, &multiple_non_target,
             "Lane order preservation violated: multiple promotions changed non-target task order");
     });
 }
@@ -281,7 +253,7 @@ fn test_scheduling_sequence_stability() {
 
         // All trials should produce identical sequences
         for i in 1..sequences.len() {
-            prop_assert_eq!(sequences[0], sequences[i],
+            prop_assert_eq!(&sequences[0], &sequences[i],
                 "Scheduling sequence stability violated: trial {} differs from baseline", i);
         }
     });

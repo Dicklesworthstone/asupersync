@@ -7,10 +7,10 @@
 //! CRITICAL REQUIREMENT: SQLITE_BUSY handling should use the configured
 //! busy_timeout to automatically retry, not burden application with manual retry logic.
 
+#![cfg(feature = "sqlite")]
+
 use asupersync::cx::Cx;
 use asupersync::database::SqliteConnection;
-use std::sync::{Arc, Mutex};
-use std::thread;
 use std::time::{Duration, Instant};
 
 #[tokio::test]

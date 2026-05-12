@@ -469,10 +469,7 @@ fn t54_mw_04_auth_bearer_token() {
     init_test("t54_mw_04_auth_bearer_token");
 
     let inner = FnHandler::new(|| "protected");
-    let auth = AuthMiddleware::new(
-        inner,
-        AuthPolicy::ExactBearer(vec!["secret-token".to_string()]),
-    );
+    let auth = AuthMiddleware::new(inner, AuthPolicy::exact_bearer("secret-token"));
 
     // Valid token.
     let req = Request::new("GET", "/").with_header("authorization", "Bearer secret-token");

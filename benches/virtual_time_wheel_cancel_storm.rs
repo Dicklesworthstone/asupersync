@@ -11,21 +11,23 @@
 //! samply record --save-only -o wheel_cancel_storm.json -- $CARGO_TARGET_DIR/release-perf/deps/virtual_time_wheel_cancel_storm-*
 
 use asupersync::lab::virtual_time_wheel::VirtualTimerWheel;
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use std::hint::black_box;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::task::{Context, RawWaker, RawWakerVTable, Waker};
+use std::task::{Wake, Waker};
 
 /// Lightweight waker for benchmarking (doesn't actually wake anything)
-fn noop_waker() -> Waker {
-    const VTABLE: RawWakerVTable = RawWakerVTable::new(
-        |_| RawWaker::new(std::ptr::null(), &VTABLE),
-        |_| {},
-        |_| {},
-        |_| {},
-    );
+struct NoopWaker;
 
-    unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) }
+impl Wake for NoopWaker {
+    fn wake(self: Arc<Self>) {}
+
+    fn wake_by_ref(self: &Arc<Self>) {}
+}
+
+fn noop_waker() -> Waker {
+    Waker::from(Arc::new(NoopWaker))
 }
 
 /// Counting waker to verify operations
@@ -44,35 +46,20 @@ impl CountingWaker {
     fn wake_count(&self) -> usize {
         self.wake_count.load(Ordering::Acquire)
     }
+}
 
-    fn reset(&self) {
-        self.wake_count.store(0, Ordering::Release);
+impl Wake for CountingWaker {
+    fn wake(self: Arc<Self>) {
+        self.wake_count.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.wake_count.fetch_add(1, Ordering::AcqRel);
     }
 }
 
 fn counting_waker(counter: Arc<CountingWaker>) -> Waker {
-    const VTABLE: RawWakerVTable = RawWakerVTable::new(
-        |data| {
-            let counter = unsafe { Arc::from_raw(data as *const CountingWaker) };
-            let cloned = counter.clone();
-            std::mem::forget(counter);
-            RawWaker::new(Arc::into_raw(cloned) as *const (), &VTABLE)
-        },
-        |data| {
-            let counter = unsafe { Arc::from_raw(data as *const CountingWaker) };
-            counter.wake_count.fetch_add(1, Ordering::AcqRel);
-            std::mem::forget(counter);
-        },
-        |data| {
-            let counter = unsafe { &*(data as *const CountingWaker) };
-            counter.wake_count.fetch_add(1, Ordering::AcqRel);
-        },
-        |data| unsafe {
-            Arc::from_raw(data as *const CountingWaker);
-        },
-    );
-
-    unsafe { Waker::from_raw(RawWaker::new(Arc::into_raw(counter) as *const (), &VTABLE)) }
+    Waker::from(counter)
 }
 
 /// Cancel storm scenario: insert many timers, cancel most, then advance

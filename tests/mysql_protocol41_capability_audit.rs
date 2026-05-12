@@ -4,9 +4,6 @@
 //! but client incorrectly thinks CLIENT_DEPRECATE_EOF=1, leading to potential
 //! stream corruption when result-set parser encounters legacy EOF packets.
 
-use asupersync::database::mysql::{MySqlConnectOptions, MySqlConnection};
-use std::time::Duration;
-
 /// Test capability negotiation logic directly
 #[test]
 fn test_capability_negotiation_requires_both_server_and_client() {

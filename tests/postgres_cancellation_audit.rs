@@ -10,8 +10,6 @@
 //! the broken connection.
 
 use asupersync::cx::Cx;
-use asupersync::database::{PgConnection, PgError};
-use std::time::Duration;
 
 #[tokio::test]
 async fn postgres_cancellation_protocol_compliance_audit() {
@@ -24,7 +22,7 @@ async fn postgres_cancellation_protocol_compliance_audit() {
 
     // Test Case 1: Verify CancelTarget structure exists and is populated
     // The implementation stores cancel coordinates from connection setup
-    let cx = Cx::for_testing();
+    let _cx = Cx::for_testing();
 
     // We'll examine the implementation through its public interface
     // since the cancel logic is triggered during query cancellation

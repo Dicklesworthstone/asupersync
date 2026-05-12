@@ -7,7 +7,7 @@
 //! deterministic for given (source_data, symbol_size, seed) inputs.
 
 use asupersync::raptorq::systematic::SystematicEncoder;
-use insta::{Settings, assert_debug_snapshot};
+use insta::assert_debug_snapshot;
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -30,7 +30,7 @@ struct EncoderOutput {
 }
 
 /// Individual repair symbol data for golden comparison.
-#[derive(Debug, Serialize)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 struct RepairSymbolData {
     esi: u32,
     symbol_data_hex: String,

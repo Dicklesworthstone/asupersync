@@ -2927,6 +2927,19 @@ impl OtelMetrics {
         self.cardinality_tracker.overflow_count()
     }
 
+    /// Expose filtered metric labels for integration tests that pin
+    /// privacy/cardinality behavior without making the production
+    /// recording chokepoint public API.
+    #[cfg(feature = "test-internals")]
+    #[must_use]
+    pub fn filtered_metric_labels_for_test(
+        &self,
+        metric: &str,
+        labels: &[KeyValue],
+    ) -> Option<Vec<KeyValue>> {
+        self.check_cardinality(metric, labels)
+    }
+
     /// Check if recording a metric should proceed, handling cardinality limits.
     ///
     /// Returns `Some(labels)` with potentially modified labels if recording should proceed,

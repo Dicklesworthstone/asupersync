@@ -16,13 +16,12 @@ use criterion::{
 };
 use std::time::Duration;
 
-use asupersync::raptorq::decoder::{DecodeStats, InactivationDecoder, ReceivedSymbol};
+use asupersync::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::gf256::{Gf256, gf256_addmul_slice, gf256_mul_slice};
 use asupersync::raptorq::linalg::{
     DenseRow, GaussianSolver, row_scale_add, row_scale_add_batch_multi, row_scale_add_batch2,
 };
 use asupersync::raptorq::systematic::SystematicEncoder;
-use asupersync::types::ObjectId;
 
 /// Large K scenarios for stress testing encoder/decoder hot paths
 #[derive(Debug, Clone)]
@@ -103,8 +102,15 @@ fn generate_test_data(size: usize, seed: u64) -> Vec<u8> {
     data
 }
 
+fn generate_source_symbols(k: usize, symbol_size: usize, seed: u64) -> Vec<Vec<u8>> {
+    generate_test_data(k * symbol_size, seed)
+        .chunks_exact(symbol_size)
+        .map(<[u8]>::to_vec)
+        .collect()
+}
+
 fn create_scattered_loss_pattern(k: usize, loss_fraction: f64, seed: u64) -> Vec<bool> {
-    let mut pattern = vec![true; k]; // true = symbol lost
+    let mut pattern = vec![false; k]; // true = symbol lost
     let loss_count = (k as f64 * loss_fraction) as usize;
     let mut rng_state = seed;
 
@@ -113,8 +119,8 @@ fn create_scattered_loss_pattern(k: usize, loss_fraction: f64, seed: u64) -> Vec
     while losses_placed < loss_count {
         rng_state = rng_state.wrapping_mul(1103515245).wrapping_add(12345);
         let idx = (rng_state % k as u64) as usize;
-        if pattern[idx] {
-            pattern[idx] = false; // false = symbol available
+        if !pattern[idx] {
+            pattern[idx] = true;
             losses_placed += 1;
         }
     }
@@ -145,24 +151,18 @@ fn bench_large_k_encoder_roundtrip(c: &mut Criterion) {
             scenario,
             |b, scenario| {
                 // Generate test data once
-                let source_data = generate_test_data(total_bytes, 0x12345678);
-                let object_id = ObjectId::new([0; 32]);
+                let source_symbols =
+                    generate_source_symbols(scenario.k, scenario.symbol_size, 0x12345678);
 
                 b.iter(|| {
                     // **HOT PATH 1: ENCODER** - Test systematic encoding performance
                     let encoder =
-                        SystematicEncoder::new(object_id, &source_data, scenario.symbol_size)
+                        SystematicEncoder::new(&source_symbols, scenario.symbol_size, 0x12345678)
                             .expect("encoder creation failed");
+                    let decoder =
+                        InactivationDecoder::new(scenario.k, scenario.symbol_size, 0x12345678);
 
                     // Generate repair symbols - this stresses gf256 operations
-                    let mut repair_symbols = Vec::new();
-                    for i in 0..scenario.extra_repair {
-                        if let Some(symbol) = encoder.repair_symbol(i) {
-                            repair_symbols.push((scenario.k + i, symbol));
-                        }
-                    }
-
-                    // Simulate losses and create received symbols
                     let loss_pattern = create_scattered_loss_pattern(
                         scenario.k,
                         scenario.loss_fraction,
@@ -172,43 +172,45 @@ fn bench_large_k_encoder_roundtrip(c: &mut Criterion) {
                     let mut received_symbols = Vec::new();
 
                     // Add available source symbols
-                    for (i, &available) in loss_pattern.iter().enumerate() {
-                        if !available {
-                            // false = available
-                            if let Some(symbol) = encoder.source_symbol(i) {
-                                received_symbols.push(ReceivedSymbol {
-                                    id: i,
-                                    data: symbol,
-                                });
-                            }
+                    for (i, &lost) in loss_pattern.iter().enumerate() {
+                        if !lost {
+                            let esi = u32::try_from(i).expect("source ESI must fit in u32");
+                            received_symbols
+                                .push(ReceivedSymbol::source(esi, source_symbols[i].clone()));
                         }
                     }
 
                     // Add repair symbols to make decoding possible
-                    let needed_repairs = (scenario.k as f64 * scenario.loss_fraction) as usize + 10;
-                    for (repair_id, repair_data) in repair_symbols.into_iter().take(needed_repairs)
-                    {
-                        received_symbols.push(ReceivedSymbol {
-                            id: repair_id,
-                            data: repair_data,
-                        });
+                    let params = decoder.params();
+                    let required_symbols = params.l - params.k_prime.saturating_sub(params.k);
+                    let needed_repairs = required_symbols.saturating_sub(received_symbols.len())
+                        + scenario.extra_repair;
+                    for i in 0..needed_repairs {
+                        let repair_esi =
+                            u32::try_from(scenario.k + i).expect("repair ESI must fit in u32");
+                        let repair_data = encoder.repair_symbol(repair_esi);
+                        let (columns, coefficients) = decoder
+                            .repair_equation(repair_esi)
+                            .expect("repair equation creation failed");
+                        received_symbols.push(ReceivedSymbol::repair(
+                            repair_esi,
+                            columns,
+                            coefficients,
+                            repair_data,
+                        ));
                     }
 
                     // **HOT PATH 2: DECODER** - Test inactivation decoding performance
-                    let encoding_params = encoder.encoding_params();
-                    let mut decoder = InactivationDecoder::new(encoding_params);
-
-                    // Add symbols - this may stress matrix operations
-                    for symbol in received_symbols {
-                        decoder.add_symbol(symbol).expect("symbol addition failed");
-                    }
-
                     // **HOT PATH 3: DECODE** - This is where matrix solve and gap-handling happen
-                    let decoded = decoder.decode().expect("decode failed");
+                    let decoded = decoder.decode(&received_symbols).expect("decode failed");
 
                     // Verify correctness
-                    assert_eq!(decoded.len(), source_data.len(), "decoded length mismatch");
-                    assert_eq!(decoded, source_data, "decoded data mismatch");
+                    assert_eq!(
+                        decoded.source.len(),
+                        source_symbols.len(),
+                        "decoded source symbol count mismatch"
+                    );
+                    assert_eq!(decoded.source, source_symbols, "decoded data mismatch");
                 });
             },
         );
@@ -229,7 +231,7 @@ fn bench_gf256_bulk_operations(c: &mut Criterion) {
         for &mult in &multipliers {
             group.throughput(Throughput::Bytes(size as u64));
 
-            let bench_name = format!("size_{}_mult_{}", size, mult.as_u8());
+            let bench_name = format!("size_{}_mult_{}", size, mult.raw());
 
             // Test gf256_mul_slice performance
             group.bench_with_input(
@@ -278,11 +280,10 @@ fn bench_matrix_operations_stress(c: &mut Criterion) {
             |b, &size| {
                 b.iter(|| {
                     // Create a test matrix for Gaussian elimination
-                    let mut solver = GaussianSolver::new();
+                    let mut solver = GaussianSolver::new(size, size);
 
                     // Add rows with random coefficients - simulate RaptorQ constraint matrix
                     for i in 0..size {
-                        let mut row = DenseRow::new(size);
                         let mut rng_state = 0x98765432u64.wrapping_add(i as u64);
 
                         // Fill row with random coefficients
@@ -290,7 +291,7 @@ fn bench_matrix_operations_stress(c: &mut Criterion) {
                             rng_state = rng_state.wrapping_mul(1103515245).wrapping_add(12345);
                             let coeff = Gf256::new((rng_state & 0xFF) as u8);
                             if !coeff.is_zero() {
-                                row.set_coefficient(j, coeff);
+                                solver.set_coefficient(i, j, coeff);
                             }
                         }
 
@@ -298,7 +299,7 @@ fn bench_matrix_operations_stress(c: &mut Criterion) {
                         rng_state = rng_state.wrapping_mul(1103515245).wrapping_add(12345);
                         let rhs = (rng_state & 0xFF) as u8;
 
-                        solver.add_constraint(row, vec![rhs]);
+                        solver.set_rhs(i, DenseRow::new(vec![rhs]));
                     }
 
                     // **HOT PATH: GAUSSIAN ELIMINATION**

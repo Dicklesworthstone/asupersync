@@ -22,6 +22,8 @@
 //! binary, independent of the in-tree `cfg(test)` modules in `src/`
 //! that occasionally break the lib test binary.
 
+#![cfg(feature = "postgres")]
+
 use asupersync::database::postgres::{
     Format, ToSql, build_bind_msg, build_execute_msg, build_sync_msg,
 };

@@ -80,7 +80,13 @@ fn metamorphic_repeated_close_stays_fail_closed_for_child_admission() {
         let err = table
             .create_child(root, Budget::default(), Time::ZERO)
             .expect_err("closed parent must reject child admission");
-        assert_eq!(err, RegionCreateError::ParentClosed(root));
+        assert_eq!(
+            err,
+            RegionCreateError::ParentClosed {
+                region: root,
+                state: RegionState::Closing,
+            }
+        );
         assert_eq!(
             table.len(),
             1,
@@ -100,7 +106,13 @@ fn metamorphic_repeated_close_stays_fail_closed_for_child_admission() {
         let err = table
             .create_child(root, Budget::default(), Time::ZERO)
             .expect_err("closed parent must continue rejecting child admission");
-        assert_eq!(err, RegionCreateError::ParentClosed(root));
+        assert_eq!(
+            err,
+            RegionCreateError::ParentClosed {
+                region: root,
+                state: RegionState::Closed,
+            }
+        );
         assert_eq!(table.len(), 1, "repeated failures must not leak a record");
     }
 }
