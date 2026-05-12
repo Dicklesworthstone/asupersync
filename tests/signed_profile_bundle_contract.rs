@@ -508,9 +508,7 @@ fn load_contract() -> SignedProfileBundleContract {
     }
 }
 
-fn selected_scenario<'a>(
-    contract: &'a SignedProfileBundleContract,
-) -> &'a SignedProfileBundleScenario {
+fn selected_scenario(contract: &SignedProfileBundleContract) -> &SignedProfileBundleScenario {
     let selected = std::env::var("ASUPERSYNC_SIGNED_PROFILE_BUNDLE_SCENARIO")
         .unwrap_or_else(|_| DEFAULT_SCENARIO_ID.to_string());
     contract

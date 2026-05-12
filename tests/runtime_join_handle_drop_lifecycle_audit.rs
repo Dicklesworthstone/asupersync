@@ -63,15 +63,11 @@
 //!          }
 //!      }
 //!      ```
-//!      Three guards:
-//!        a. terminal_state — if the await already resolved,
-//!           skip abort (no need to cancel a finished task).
-//!        b. drop_abort_defused — internal combinators
-//!           (race, etc.) defuse to take ownership of the
-//!           result.
-//!        c. receiver_finished — if the result already
-//!           landed in the channel, dont stamp a spurious
-//!           cancel reason.
+//!      Three guards cover the already-resolved await path,
+//!      the internal-combinator defuse path (race, etc.), and
+//!      the receiver-finished path where the result already
+//!      landed in the channel and should not receive a spurious
+//!      cancel reason.
 //!
 //!   3. **RegionRunner::Drop cancels region** (cx/scope.rs:
 //!      181-192):
@@ -141,7 +137,7 @@
 //!     ALWAYS aborts even when the result already arrived
 //!     (would silently overwrite a successful result with
 //!     a cancel attribution),
-//! would all be caught by the structural pins below.
+//!     would all be caught by the structural pins below.
 
 use std::path::PathBuf;
 
