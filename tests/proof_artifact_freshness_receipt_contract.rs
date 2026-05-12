@@ -165,6 +165,64 @@ print(json.dumps({"status": status, "raw": raw, "entries": entries}))
 }
 
 #[test]
+fn live_probe_expands_porcelain_rename_source_and_target_paths() {
+    let script = r#"
+import importlib.util
+import json
+import pathlib
+import sys
+
+script_path = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("proof_artifact_freshness_receipt", script_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+entries = module.parse_status_lines(
+    "R  tests/fixtures/proof-artifact/old.log -> tests/fixtures/proof-artifact/new.log\n"
+)
+print(json.dumps({"entries": entries}))
+"#;
+    let mut child = Command::new("python3")
+        .arg("-")
+        .arg(repo_root().join(SCRIPT_PATH))
+        .current_dir(repo_root())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn proof-artifact rename parser smoke");
+    child
+        .stdin
+        .as_mut()
+        .expect("parser smoke stdin")
+        .write_all(script.as_bytes())
+        .expect("write parser smoke script");
+    let output = child
+        .wait_with_output()
+        .expect("run proof-artifact rename parser smoke");
+    assert!(
+        output.status.success(),
+        "rename parser smoke failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parser smoke JSON");
+    let entries = parsed["entries"].as_array().expect("entries array");
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0]["status"].as_str(), Some("R "));
+    assert_eq!(
+        entries[0]["path"].as_str(),
+        Some("tests/fixtures/proof-artifact/old.log")
+    );
+    assert_eq!(
+        entries[1]["path"].as_str(),
+        Some("tests/fixtures/proof-artifact/new.log")
+    );
+}
+
+#[test]
 fn current_clean_artifact_is_citeable() {
     let receipt = receipt_json("current_clean.json");
     let row = first_row(&receipt);
@@ -249,6 +307,35 @@ fn dirty_surface_overlap_matches_full_output_golden() {
     assert_output_matches_full_golden(
         "dirty_surface_overlap.json",
         "dirty_surface_overlap_expected.json",
+    );
+}
+
+#[test]
+fn dirty_rename_target_overlap_requires_rerun() {
+    let receipt = receipt_json("dirty_rename_target.json");
+    let row = first_row(&receipt);
+
+    assert_eq!(
+        row["classification"].as_str(),
+        Some("dirty-surface-overlap")
+    );
+    assert_eq!(row["decision"].as_str(), Some("rerun-required"));
+    assert_eq!(
+        row["evidence"]["dirty_overlaps"][0]["path"].as_str(),
+        Some("tests/fixtures/proof_artifact_freshness_receipt/renamed_target.json")
+    );
+    assert_eq!(
+        row["evidence"]["dirty_overlaps"][0]["owner"].as_str(),
+        Some("CoralGorge")
+    );
+    assert_eq!(receipt["summary"]["rerun_required"].as_u64(), Some(1));
+}
+
+#[test]
+fn dirty_rename_target_matches_full_output_golden() {
+    assert_output_matches_full_golden(
+        "dirty_rename_target.json",
+        "dirty_rename_target_expected.json",
     );
 }
 

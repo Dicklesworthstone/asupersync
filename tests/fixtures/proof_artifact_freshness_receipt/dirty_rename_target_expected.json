@@ -1,0 +1,67 @@
+{
+  "agent": "TopazGoose",
+  "artifact_errors": [],
+  "current_branch": "main",
+  "current_date": "2026-05-08",
+  "current_head_sha": "2222222222222222222222222222222222222222",
+  "generated_at": "2026-05-08T05:20:00Z",
+  "repo_path": "/repo",
+  "rows": [
+    {
+      "artifact_path": "target/proof-artifacts/dirty-rename-target.json",
+      "classification": "dirty-surface-overlap",
+      "command": "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_agent cargo test -p asupersync --test proof_artifact_freshness_receipt_contract",
+      "decision": "rerun-required",
+      "evidence": {
+        "artifact_git_branch": "main",
+        "artifact_git_sha": "2222222222222222222222222222222222222222",
+        "current_branch": "main",
+        "current_head_sha": "2222222222222222222222222222222222222222",
+        "dirty_overlap_count": 1,
+        "dirty_overlaps": [
+          {
+            "classification": "peer-dirty",
+            "owner": "CoralGorge",
+            "path": "tests/fixtures/proof_artifact_freshness_receipt/renamed_target.json",
+            "status": "R "
+          }
+        ]
+      },
+      "generated_at": "2026-05-08T05:00:00Z",
+      "reason": "artifact touched files overlap current dirty tree entries",
+      "remediation": {
+        "next_steps": [
+          "identify the dirty owner before staging or citing proof",
+          "rerun the focused proof after the touched surface is committed or cleaned"
+        ],
+        "operator_note": "Do not cite stale green output across dirty shared-main work.",
+        "rerun_command": "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_agent cargo test -p asupersync --test proof_artifact_freshness_receipt_contract"
+      },
+      "safe_to_cite": false,
+      "status": "pass",
+      "touched_files": [
+        "tests/fixtures/proof_artifact_freshness_receipt/renamed_target.json"
+      ]
+    }
+  ],
+  "safety": {
+    "beads_mutated": false,
+    "branch_or_worktree_operations": false,
+    "cargo_executed": false,
+    "destructive_commands_executed": false,
+    "executed_commands": [],
+    "mutating_commands_executed": false,
+    "non_mutating": true
+  },
+  "schema_version": "proof-artifact-freshness-receipt-v1",
+  "summary": {
+    "by_classification": {
+      "dirty-surface-overlap": 1
+    },
+    "rerun_required": 1,
+    "safe_to_cite": 0,
+    "suppressed": 0,
+    "total": 1,
+    "unverifiable": 0
+  }
+}

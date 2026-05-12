@@ -78,14 +78,16 @@ def parse_status_lines(raw: str) -> list[dict[str, str]]:
     for line in raw.splitlines():
         if len(line) < 4:
             continue
-        entries.append(
-            {
-                "status": line[:2],
-                "path": line[3:],
-                "classification": "unattributed-dirty",
-                "owner": "",
-            }
-        )
+        status = line[:2]
+        for path in status_paths(status, line[3:]):
+            entries.append(
+                {
+                    "status": status,
+                    "path": path,
+                    "classification": "unattributed-dirty",
+                    "owner": "",
+                }
+            )
     return entries
 
 
@@ -251,17 +253,16 @@ def dirty_entries(source: dict[str, Any]) -> list[dict[str, str]]:
     for item in raw_entries if isinstance(raw_entries, list) else []:
         if not isinstance(item, dict):
             continue
-        path = str(item.get("path", ""))
-        if not path:
-            continue
-        entries.append(
-            {
-                "status": str(item.get("status", "")),
-                "path": path,
-                "classification": str(item.get("classification", "")),
-                "owner": str(item.get("owner", "")),
-            }
-        )
+        status = str(item.get("status", ""))
+        for path in status_paths(status, str(item.get("path", ""))):
+            entries.append(
+                {
+                    "status": status,
+                    "path": path,
+                    "classification": str(item.get("classification", "")),
+                    "owner": str(item.get("owner", "")),
+                }
+            )
     return entries
 
 
@@ -270,6 +271,14 @@ def normalize_path(path: str) -> str:
     while normalized.startswith("./"):
         normalized = normalized[2:]
     return normalized.rstrip("/")
+
+
+def status_paths(status: str, path: str) -> list[str]:
+    if not path.strip():
+        return []
+    if ("R" in status or "C" in status) and " -> " in path:
+        return [normalize_path(part) for part in path.split(" -> ", 1) if part.strip()]
+    return [path]
 
 
 def has_glob_magic(path: str) -> bool:

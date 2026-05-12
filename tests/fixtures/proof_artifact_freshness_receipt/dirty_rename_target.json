@@ -1,0 +1,29 @@
+{
+  "artifacts": [
+    {
+      "artifact_path": "target/proof-artifacts/dirty-rename-target.json",
+      "command": "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_agent cargo test -p asupersync --test proof_artifact_freshness_receipt_contract",
+      "generated_at": "2026-05-08T05:00:00Z",
+      "git_branch": "main",
+      "git_sha": "2222222222222222222222222222222222222222",
+      "status": "pass",
+      "touched_files": [
+        "tests/fixtures/proof_artifact_freshness_receipt/renamed_target.json"
+      ]
+    }
+  ],
+  "dirty_tree": {
+    "entries": [
+      {
+        "classification": "peer-dirty",
+        "owner": "CoralGorge",
+        "path": "tests/fixtures/proof_artifact_freshness_receipt/old_name.json -> tests/fixtures/proof_artifact_freshness_receipt/renamed_target.json",
+        "status": "R "
+      }
+    ]
+  },
+  "repo": {
+    "branch": "main",
+    "head_sha": "2222222222222222222222222222222222222222"
+  }
+}
