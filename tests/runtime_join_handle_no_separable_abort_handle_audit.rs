@@ -30,20 +30,20 @@
 //!    is a NON-CANCELLING handle. It exposes:
 //!      - `pub fn is_finished(&self) -> bool` (line 3489)
 //!      - `impl Future for JoinHandle<T>` (line 3498)
-//!    There is NO `abort()`, NO `abort_handle()`, NO
-//!    `cancel()`. The handle is used to await the result;
-//!    cancellation flows through other channels.
+//!        There is NO `abort()`, NO `abort_handle()`, NO
+//!        `cancel()`. The handle is used to await the result;
+//!        cancellation flows through other channels.
 //!
 //! 2. `runtime::task_handle::TaskHandle` (src/runtime/task_handle.rs)
 //!    is a separate type that exposes:
 //!      - `pub fn abort(&self)` (line 213) — request
 //!        cancellation; observed at next checkpoint.
 //!      - `pub fn abort_with_reason(&self, ...)` (line 222)
-//!    `TaskHandle` holds a `Weak<RwLock<CxInner>>` so
-//!    multiple TaskHandle clones can coexist. This is the
-//!    moral equivalent of tokio's AbortHandle but at a
-//!    different name and with structured-concurrency
-//!    semantics.
+//!        `TaskHandle` holds a `Weak<RwLock<CxInner>>` so
+//!        multiple TaskHandle clones can coexist. This is the
+//!        moral equivalent of tokio's AbortHandle but at a
+//!        different name and with structured-concurrency
+//!        semantics.
 //!
 //! 3. `Cx::cancel()` and `Cx::abort()` — capability-based
 //!    cancellation flowing through Cx.
@@ -212,8 +212,7 @@ fn join_handle_in_builder_has_no_abort_method() {
     // Body of the impl block.
     let impl_end = source[impl_pos..]
         .find("\nimpl<T>")
-        .map(|i| impl_pos + i)
-        .unwrap_or(source.len());
+        .map_or(source.len(), |i| impl_pos + i);
     let impl_body = &source[impl_pos..impl_end];
 
     let suspect_methods = [

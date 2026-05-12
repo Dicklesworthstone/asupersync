@@ -174,6 +174,12 @@ fn hash_json_value(value: &Value) -> u64 {
     hasher.finish()
 }
 
+fn u64_count_delta(lhs: u64, rhs: u64) -> i64 {
+    let lhs = i64::try_from(lhs).expect("cohort steering count fits i64");
+    let rhs = i64::try_from(rhs).expect("cohort steering count fits i64");
+    lhs - rhs
+}
+
 fn default_cohort_admission_steering_scenarios() -> Vec<CohortAdmissionSteeringScenario> {
     vec![
         CohortAdmissionSteeringScenario {
@@ -607,8 +613,14 @@ fn build_cohort_admission_steering_report(
         "comparison": {
             "p95_latency_improvement_ns": conservative_summary.p95_latency_ns.saturating_sub(steered_summary.p95_latency_ns),
             "p99_latency_improvement_ns": conservative_summary.p99_latency_ns.saturating_sub(steered_summary.p99_latency_ns),
-            "remote_spill_reduction": conservative_summary.remote_spill_count as i64 - steered_summary.remote_spill_count as i64,
-            "throughput_delta_units": steered_summary.admitted_units as i64 - conservative_summary.admitted_units as i64,
+            "remote_spill_reduction": u64_count_delta(
+                conservative_summary.remote_spill_count,
+                steered_summary.remote_spill_count,
+            ),
+            "throughput_delta_units": u64_count_delta(
+                steered_summary.admitted_units,
+                conservative_summary.admitted_units,
+            ),
             "winner_profile": winner_profile,
             "no_win_trigger": no_win_trigger,
         }
