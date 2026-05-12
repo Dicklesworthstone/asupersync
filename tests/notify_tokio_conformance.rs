@@ -152,7 +152,7 @@ fn test_async_notify_conformance(config: &NotifyTest) -> NotifyConformanceResult
 
         wait_for_expected_notifications(
             &tracker,
-            expected_notified_waiters(&config),
+            expected_notified_waiters(config),
             Duration::from_secs(1),
         )
         .await;
@@ -226,7 +226,7 @@ fn test_tokio_notify_conformance(config: &NotifyTest) -> NotifyConformanceResult
 
         wait_for_expected_notifications(
             &tracker,
-            expected_notified_waiters(&config),
+            expected_notified_waiters(config),
             Duration::from_secs(1),
         )
         .await;
