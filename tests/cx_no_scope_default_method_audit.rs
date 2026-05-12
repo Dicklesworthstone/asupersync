@@ -352,8 +352,7 @@ fn runtime_handle_does_not_expose_a_default_scope_method() {
         // RuntimeHandle impl block runs until the next `\nimpl ` or end of file.
         let impl_end = source[pos..]
             .find("\nimpl ")
-            .map(|i| pos + i)
-            .unwrap_or(source.len());
+            .map_or(source.len(), |i| pos + i);
         let impl_body = &source[pos..impl_end];
 
         for pat in &suspect_methods {
@@ -461,6 +460,8 @@ fn behavioral_explicit_region_requires_three_arguments() {
     let cx = Cx;
     let policy_a = RegionPolicy { label: "policy-a" };
     let policy_b = RegionPolicy { label: "policy-b" };
+
+    assert_eq!(state.name, "runtime");
 
     let scope_a = Scope::region(&state, &cx, &policy_a);
     let scope_b = Scope::region(&state, &cx, &policy_b);
