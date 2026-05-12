@@ -3,6 +3,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 
 use asupersync::Cx;
@@ -10,10 +11,14 @@ use asupersync::sync::{OwnedSemaphorePermit, Semaphore};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 #[derive(Default)]
-struct BenchWake;
+struct BenchWake {
+    wake_count: AtomicUsize,
+}
 
 impl Wake for BenchWake {
-    fn wake(self: Arc<Self>) {}
+    fn wake(self: Arc<Self>) {
+        self.wake_count.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 fn poll_pending<F>(future: &mut F, waker: &Waker)
@@ -44,8 +49,8 @@ fn bench_semaphore_waiter_refresh(c: &mut Criterion) {
         }
 
         let target = depth / 2;
-        let waker_a = Waker::from(Arc::new(BenchWake));
-        let waker_b = Waker::from(Arc::new(BenchWake));
+        let waker_a = Waker::from(Arc::new(BenchWake::default()));
+        let waker_b = Waker::from(Arc::new(BenchWake::default()));
         let mut use_a = false;
 
         group.throughput(Throughput::Elements(1));
