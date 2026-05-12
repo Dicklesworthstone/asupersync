@@ -26,21 +26,12 @@
 //!
 //!   2. **`spawn_with_priority`** path
 //!      (blocking_pool.rs:415-454):
-//!      a. Allocates task_id and a BlockingTaskHandle.
-//!      b. `if self.inner.shutdown.load(Acquire) { return
-//!         cancelled handle }` — graceful post-shutdown
-//!         rejection, no panic.
-//!      c. Calls `try_enqueue_task(&self.inner, task)`
-//!         which pushes to the SegQueue under the inner
-//!         mutex (only for shutdown-check synchronization,
-//!         not for backpressure).
-//!      d. Calls `maybe_spawn_thread()` — lazily spawns a
-//!         new worker thread up to `max_threads`. Past
-//!         max_threads, this is a no-op; the task stays
-//!         queued.
-//!      e. Calls `notify_one()` to wake a waiting thread
-//!         (so an idle thread picks up the task).
-//!      f. Returns the handle.
+//!      It allocates task_id and a BlockingTaskHandle, returns
+//!      a graceful cancelled handle after shutdown, pushes the
+//!      task with `try_enqueue_task(&self.inner, task)`, lazily
+//!      calls `maybe_spawn_thread()` up to `max_threads`, calls
+//!      `notify_one()` so an idle thread can pick up the task,
+//!      and returns the handle.
 //!
 //!   3. **`try_enqueue_task`** (blocking_pool.rs:629-637)
 //!      ALWAYS pushes to the queue unless shutdown:
@@ -93,7 +84,7 @@
 //!   - removed the post-shutdown graceful return (would let
 //!     post-shutdown spawns silently leak rather than
 //!     returning a cancelled handle),
-//! would all be caught here.
+//!     would all be caught here.
 
 use std::path::PathBuf;
 
@@ -476,12 +467,11 @@ mod behavioral {
     {
         let start = Instant::now();
         while read_pending() < expected {
-            if start.elapsed() > Duration::from_secs(5) {
-                panic!(
-                    "REGRESSION: pending count for {label} did not reach {expected}; observed {}",
-                    read_pending()
-                );
-            }
+            assert!(
+                start.elapsed() <= Duration::from_secs(5),
+                "REGRESSION: pending count for {label} did not reach {expected}; observed {}",
+                read_pending(),
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
     }
@@ -537,7 +527,7 @@ mod behavioral {
         start_barrier.wait();
 
         let queued_handles: Vec<_> = (0..queued_task_count)
-            .map(|_| pool.spawn_on_cohort(0, || std::thread::yield_now()))
+            .map(|_| pool.spawn_on_cohort(0, std::thread::yield_now))
             .collect();
 
         wait_for_pending_count(
@@ -648,12 +638,12 @@ mod behavioral {
                 for _ in 0..spawn_requests {
                     let handle = match dispatch_mode {
                         MixedAsyncAffinityDispatchMode::CohortTargeted => runtime_handle
-                            .spawn_blocking_on_cohort(0, || std::thread::yield_now())
+                            .spawn_blocking_on_cohort(0, std::thread::yield_now)
                             .expect(
                                 "async coordinator should enqueue cohort-targeted blocking helper",
                             ),
                         MixedAsyncAffinityDispatchMode::UnhintedGlobal => runtime_handle
-                            .spawn_blocking(|| std::thread::yield_now())
+                            .spawn_blocking(std::thread::yield_now)
                             .expect("async coordinator should enqueue unhinted blocking helper"),
                     };
                     handles.push(handle);
@@ -1401,15 +1391,14 @@ mod behavioral {
             if counter.load(Ordering::Relaxed) >= 5 {
                 break;
             }
-            if start.elapsed() > Duration::from_secs(5) {
-                panic!(
-                    "REGRESSION: 5 spawn calls (max_threads=2) \
-                     did not all complete within 5s. The \
-                     queued tasks should drain as workers \
-                     become available. counter={}",
-                    counter.load(Ordering::Relaxed),
-                );
-            }
+            assert!(
+                start.elapsed() <= Duration::from_secs(5),
+                "REGRESSION: 5 spawn calls (max_threads=2) \
+                 did not all complete within 5s. The \
+                 queued tasks should drain as workers \
+                 become available. counter={}",
+                counter.load(Ordering::Relaxed),
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
 
@@ -1438,9 +1427,10 @@ mod behavioral {
 
         let start = std::time::Instant::now();
         while pool.busy_threads() < 1 {
-            if start.elapsed() > Duration::from_secs(5) {
-                panic!("REGRESSION: initial blocking task did not occupy a worker");
-            }
+            assert!(
+                start.elapsed() <= Duration::from_secs(5),
+                "REGRESSION: initial blocking task did not occupy a worker",
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
 
@@ -1471,9 +1461,10 @@ mod behavioral {
         for h in additional {
             let start = std::time::Instant::now();
             while !h.is_done() {
-                if start.elapsed() > Duration::from_secs(5) {
-                    panic!("REGRESSION: queued task did not complete");
-                }
+                assert!(
+                    start.elapsed() <= Duration::from_secs(5),
+                    "REGRESSION: queued task did not complete",
+                );
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
