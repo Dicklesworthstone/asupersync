@@ -231,7 +231,7 @@ fn grpc_codec_encode_at_max_size_boundary_succeeds() {
     codec
         .encode(msg, &mut buf)
         .expect("payload at exactly max_encode_message_size must encode");
-    assert_eq!(buf.len(), 5 + 64, "5-byte LPM header + 64-byte payload",);
+    assert_eq!(buf.len(), 5 + 64, "5-byte LPM header + 64-byte payload");
 }
 
 #[cfg(feature = "compression")]
