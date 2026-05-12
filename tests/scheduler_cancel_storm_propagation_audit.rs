@@ -40,9 +40,9 @@
 //!          performs a single `inner.write()` lock + an
 //!          atomic store + a clone of the cancel reason.
 //!        - No nested loops, no full-state scans.
-//!      Per-task cost is ~few microseconds, so 1000 tasks ≈
-//!      few milliseconds total — three orders of magnitude
-//!      under the 1-second bound.
+//!          Per-task cost is ~few microseconds, so 1000 tasks ≈
+//!          few milliseconds total — three orders of magnitude
+//!          under the 1-second bound.
 //!
 //!   3. **Buffer reuse — no per-region allocation**: the
 //!      `task_id_buf` Vec is declared ONCE before the
@@ -97,8 +97,8 @@
 //!   - removed the fast_cancel atomic and forced cancel
 //!     observation through the cancel_waker only (would lose
 //!     the actively-polling-task fast path).
-//! All of the above would be caught by either the structural
-//! pins or the behavioral benchmark.
+//!     All of the above would be caught by either the structural
+//!     pins or the behavioral benchmark.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -159,8 +159,7 @@ fn cancel_request_per_task_loop_is_simple_iteration_no_nested_scan() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[pos..safe_end];
 
@@ -200,8 +199,7 @@ fn request_cancel_with_budget_is_constant_time_per_task() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
@@ -249,8 +247,7 @@ fn move_to_cancel_lane_is_lazy_promote_not_eager_scan() {
     let safe_end = source
         .char_indices()
         .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
+        .rfind(|&i| i <= window_end)
         .unwrap_or(window_end);
     let body = &source[start..safe_end];
 
