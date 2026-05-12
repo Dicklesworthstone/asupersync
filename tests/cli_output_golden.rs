@@ -1,3 +1,5 @@
+//! Golden tests for structured CLI output formatting.
+
 #![cfg(feature = "cli")]
 #![allow(missing_docs)]
 

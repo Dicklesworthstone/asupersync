@@ -135,6 +135,7 @@ fn ready_locality_fixture() -> HotColdArenaLocalityFixture {
     }
 }
 
+#[allow(dead_code)]
 fn no_win_locality_fixture() -> HotColdArenaLocalityFixture {
     HotColdArenaLocalityFixture {
         requested_policy: LocalityPolicyFixture {
@@ -158,6 +159,7 @@ fn no_win_locality_fixture() -> HotColdArenaLocalityFixture {
     }
 }
 
+#[allow(dead_code)]
 fn template_locality_fixture() -> HotColdArenaLocalityFixture {
     HotColdArenaLocalityFixture {
         requested_policy: LocalityPolicyFixture {
@@ -504,23 +506,11 @@ fn build_report(scenario: &HotColdArenaScenario) -> Value {
                 0
             })
     };
-    let retained_evidence_admission_count = if candidate_report.cold_evidence_bytes > 0 {
-        1
-    } else {
-        0
-    };
-    let retained_evidence_refusal_count = if candidate_report.cold_evidence_bytes == 0
-        && candidate_report.retained_evidence_bytes > 0
-    {
-        1
-    } else {
-        0
-    };
-    let fallback_event_count = if candidate_report.fallback_reason.is_some() {
-        1
-    } else {
-        0
-    };
+    let retained_evidence_admission_count = u64::from(candidate_report.cold_evidence_bytes > 0);
+    let retained_evidence_refusal_count = u64::from(
+        candidate_report.cold_evidence_bytes == 0 && candidate_report.retained_evidence_bytes > 0,
+    );
+    let fallback_event_count = u64::from(candidate_report.fallback_reason.is_some());
     let cold_tier_pressure_transition_count = if candidate_report.cold_evidence_bytes > 0 {
         2
     } else {
