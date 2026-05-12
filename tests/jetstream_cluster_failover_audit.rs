@@ -7,7 +7,6 @@
 //! automatically retry across cluster nodes rather than failing immediately.
 
 use asupersync::cx::Cx;
-use asupersync::messaging::jetstream::{JetStreamContext, JsError};
 use asupersync::messaging::nats::{NatsClient, NatsConfig, NatsError};
 use std::time::{Duration, Instant};
 
@@ -23,6 +22,8 @@ async fn jetstream_cluster_failover_audit() {
 
     // Test Case 1: Examine NatsConfig structure
     let config = NatsConfig::default();
+    assert_eq!(config.host, "127.0.0.1");
+    assert_eq!(config.port, 4222);
     println!("✓ NatsConfig structure analysis:");
     println!("  - host: String (single host only)");
     println!("  - port: u16 (single port only)");
