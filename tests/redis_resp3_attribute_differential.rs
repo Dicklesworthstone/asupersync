@@ -1,3 +1,5 @@
+//! Differential coverage for RESP3 attribute frames against redis-rs.
+
 use asupersync::messaging::redis::RespValue;
 use redis::{Value as RedisValue, parse_redis_value};
 
