@@ -36,13 +36,12 @@
 //!   4. **Worker dispatch in `try_phase3_ready_work`**
 //!      (three_lane.rs:3541-3616) consults `self.fast_queue`
 //!      BEFORE the global injector:
-//!        a. self.local_ready (per-worker !Send pinned tasks).
-//!        b. self.fast_queue.pop() (THIS WORKER's own fast
-//!           queue).
-//!        c. self.global.pop_ready() (global injector — only
-//!           if local_ready and fast_queue are both empty).
-//!        d. self.local.lock().pop_ready_only_with_hint(...)
-//!           (PriorityScheduler heap, slow path).
+//!      self.local_ready first, then self.fast_queue.pop()
+//!      for this worker's own fast queue, then
+//!      self.take_global_ready_task() only if local_ready and
+//!      fast_queue are both empty, and finally
+//!      self.local.lock().pop_ready_only_with_hint(...) as the
+//!      PriorityScheduler heap slow path.
 //!
 //!   5. **The GlobalInjector is only used for cross-thread
 //!      spawns** (e.g., main thread spawns BEFORE the worker
@@ -81,13 +80,21 @@
 //!   - removed `LocalQueue::set_current` from worker
 //!     run_loop (would leave CURRENT_QUEUE unset, forcing
 //!     all in-worker spawns through the global path),
-//! would all be caught here.
+//!     would all be caught here.
 
 use std::path::PathBuf;
 
 fn read(rel: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
     std::fs::read_to_string(&path).expect("read source file")
+}
+
+fn source_window(source: &str, start: usize, len: usize) -> &str {
+    let mut end = start.saturating_add(len).min(source.len());
+    while !source.is_char_boundary(end) {
+        end -= 1;
+    }
+    &source[start..end]
 }
 
 #[test]
@@ -148,14 +155,7 @@ fn worker_run_loop_sets_thread_local_fast_queue() {
     let start = source.find(fn_marker).expect("run_loop fn");
     // run_loop is long; take the first ~500 lines for the
     // setup section.
-    let body_window = (start + 500).min(source.len());
-    let safe_end = source
-        .char_indices()
-        .map(|(i, _)| i)
-        .filter(|&i| i <= body_window)
-        .last()
-        .unwrap_or(body_window);
-    let body = &source[start..safe_end];
+    let body = source_window(&source, start, 500);
 
     assert!(
         body.contains("LocalQueue::set_current(self.fast_queue.clone())"),
@@ -206,10 +206,10 @@ fn schedule_local_pushes_to_current_thread_local_queue() {
 #[test]
 fn try_phase3_checks_fast_queue_before_global() {
     // Pin AUDIT-CRITICAL: try_phase3_ready_work checks
-    // self.fast_queue.pop() BEFORE self.global.pop_ready().
+    // self.fast_queue.pop() BEFORE take_global_ready_task().
     // This is the per-worker locality preference: worker A
     // dispatches its OWN spawned tasks before consulting the
-    // shared global injector.
+    // shared global injector / prefetch buffer boundary.
     let source = read("src/runtime/scheduler/three_lane.rs");
 
     let fn_marker = "fn try_phase3_ready_work(&mut self) -> Option<TaskId> {";
@@ -221,8 +221,8 @@ fn try_phase3_checks_fast_queue_before_global() {
         .find("self.fast_queue.pop()")
         .expect("self.fast_queue.pop() call");
     let global_pos = body
-        .find("self.global.pop_ready()")
-        .expect("self.global.pop_ready() call");
+        .find("self.take_global_ready_task()")
+        .expect("take_global_ready_task call");
 
     assert!(
         fast_pos < global_pos,
@@ -233,7 +233,7 @@ fn try_phase3_checks_fast_queue_before_global() {
          spawned tasks could starve while it dispatches \
          work injected from main().\n\n\
          fast_queue position: {fast_pos}\n\
-         global position:     {global_pos}",
+         global-ready position: {global_pos}",
     );
 }
 
@@ -256,7 +256,9 @@ fn try_phase3_checks_local_ready_before_anything_else() {
         .find("self.local_ready.lock().pop_front()")
         .expect("local_ready pop_front call");
     let fast_pos = body.find("self.fast_queue.pop()").expect("fast_queue pop");
-    let global_pos = body.find("self.global.pop_ready()").expect("global pop");
+    let global_pos = body
+        .find("self.take_global_ready_task()")
+        .expect("take_global_ready_task call");
 
     assert!(
         local_ready_pos < fast_pos && local_ready_pos < global_pos,
@@ -366,14 +368,7 @@ fn worker_pool_creates_independent_local_queues_per_worker() {
     let pos = source
         .find(local_queues_marker)
         .expect("local_schedulers initialization");
-    let after_pos = (pos + 3000).min(source.len());
-    let safe_end = source
-        .char_indices()
-        .map(|(i, _)| i)
-        .filter(|&i| i <= after_pos)
-        .last()
-        .unwrap_or(after_pos);
-    let window = &source[pos..safe_end];
+    let window = source_window(&source, pos, 3000);
 
     // Look for either LocalQueue::new() or LocalQueue::with_capacity
     // calls inside the construction window.
