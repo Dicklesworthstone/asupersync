@@ -112,6 +112,34 @@ const MAX_CHUNK_SIZE: u32 = 1_000_000;
 const MAX_CORRUPTION_SIZE: usize = 10_000;
 const MAX_METADATA_SIZE: usize = 100_000;
 
+fn observe_io_result(context: &str, result: std::io::Result<()>) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(error) => {
+            let error_kind = format!("{:?}", error.kind());
+            assert!(
+                !error_kind.is_empty(),
+                "{context} failed without an I/O error kind"
+            );
+            false
+        }
+    }
+}
+
+fn observe_writer_result(context: &str, result: Result<(), TraceFileError>) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(TraceFileError::Io(_))
+        | Err(TraceFileError::Serialize(_))
+        | Err(TraceFileError::Compression(_))
+        | Err(TraceFileError::AlreadyFinished)
+        | Err(TraceFileError::MetadataNotWritten)
+        | Err(TraceFileError::MetadataAlreadyWritten)
+        | Err(TraceFileError::MetadataCorrupt) => false,
+        Err(error) => panic!("{context} returned non-writer trace error: {error:?}"),
+    }
+}
+
 fuzz_target!(|input: TraceFileFuzz| {
     // Limit operations for performance
     let operations = if input.operations.len() > MAX_OPERATIONS {
@@ -285,8 +313,12 @@ fn test_file_corruption(
             } else {
                 corruption_data
             };
-            let _ = file.write_all(corruption_bytes);
-            let _ = file.flush();
+            if !observe_io_result("trace corruption write", file.write_all(corruption_bytes))
+                || !observe_io_result("trace corruption flush", file.flush())
+            {
+                let _ = remove_file(&temp_file);
+                return;
+            }
         }
     }
 
@@ -373,6 +405,7 @@ fn test_compression_scenarios(mode: &CompressionModeFuzz, events: &[ReplayEventF
 
     // Test compression with various event patterns
     let writer_result = TraceWriter::create_with_config(&temp_file, config);
+    let mut writer_finished = false;
     if let Ok(mut writer) = writer_result {
         let metadata = create_test_metadata(&TraceMetadataFuzz {
             schema_version: 1,
@@ -381,7 +414,10 @@ fn test_compression_scenarios(mode: &CompressionModeFuzz, events: &[ReplayEventF
         });
 
         // Write metadata and events
-        if writer.write_metadata(&metadata).is_ok() {
+        if observe_writer_result(
+            "compression metadata write",
+            writer.write_metadata(&metadata),
+        ) {
             let limited_events = if events.len() > MAX_EVENTS {
                 &events[..MAX_EVENTS]
             } else {
@@ -390,16 +426,18 @@ fn test_compression_scenarios(mode: &CompressionModeFuzz, events: &[ReplayEventF
 
             for event_fuzz in limited_events {
                 let event = convert_replay_event(event_fuzz);
-                let _ = writer.write_event(&event);
+                if !observe_writer_result("compression event write", writer.write_event(&event)) {
+                    break;
+                }
             }
 
             // Finish writing
-            let _ = writer.finish();
+            writer_finished = observe_writer_result("compression finish", writer.finish());
         }
     }
 
     // Try to read back compressed data
-    if let Ok(reader) = TraceReader::open(&temp_file) {
+    if writer_finished && let Ok(reader) = TraceReader::open(&temp_file) {
         // Test reading compressed events
         for (i, event_result) in reader.events().enumerate() {
             if i >= MAX_EVENTS {
@@ -466,7 +504,10 @@ fn test_size_limits(
     }
 
     // Test finish() even after potential limit violations
-    let _ = writer.finish();
+    if !observe_writer_result("size limit finish", writer.finish()) {
+        let _ = remove_file(&temp_file);
+        return;
+    }
 
     let _ = remove_file(&temp_file);
 }
@@ -496,11 +537,20 @@ fn test_error_recovery(_simulate_disk_full: bool, _force_write_error: bool) {
     });
 
     // Test various error scenarios
-    let _ = writer.write_metadata(&metadata);
-    let _ = writer.write_event(&ReplayEvent::RngSeed { seed: 1 });
+    if !observe_writer_result(
+        "error recovery metadata write",
+        writer.write_metadata(&metadata),
+    ) {
+        let _ = remove_file(&temp_file);
+        return;
+    }
+    let _event_written = observe_writer_result(
+        "error recovery event write",
+        writer.write_event(&ReplayEvent::RngSeed { seed: 1 }),
+    );
 
     // Test finish under potential error conditions
-    let _ = writer.finish();
+    let _finished = observe_writer_result("error recovery finish", writer.finish());
 
     let _ = remove_file(&temp_file);
 }
@@ -518,8 +568,12 @@ fn test_malformed_header(header_data: &[u8]) {
         } else {
             header_data
         };
-        let _ = file.write_all(limited_data);
-        let _ = file.flush();
+        if !observe_io_result("malformed header write", file.write_all(limited_data))
+            || !observe_io_result("malformed header flush", file.flush())
+        {
+            let _ = remove_file(&temp_file);
+            return;
+        }
     }
 
     // Try to read file with malformed header
@@ -561,8 +615,12 @@ fn test_reader_resilience(file_data: &[u8]) {
         } else {
             file_data
         };
-        let _ = file.write_all(limited_data);
-        let _ = file.flush();
+        if !observe_io_result("reader resilience write", file.write_all(limited_data))
+            || !observe_io_result("reader resilience flush", file.flush())
+        {
+            let _ = remove_file(&temp_file);
+            return;
+        }
     }
 
     // Test reader resilience to arbitrary data
