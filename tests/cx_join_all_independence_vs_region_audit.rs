@@ -17,8 +17,8 @@
 //!
 //!   `Scope::region` (with FailFast policy) and
 //!   `Scope::race` are the cancel-on-failure / cancel-on-
-//:   winner alternatives. Three distinct combinator
-//:   semantics:
+//!   winner alternatives. Three distinct combinator
+//!   semantics:
 //!
 //!   1. **`Scope::join_all` (independent)** (cx/scope.rs:1426):
 //!      ```ignore
@@ -44,11 +44,11 @@
 //!   2. **`Scope::race` (cancel losers)** (cx/scope.rs:1057):
 //!      Picks the first to complete; cancels and drains
 //!      all others (verified by
-//:      tests/cx_race_combinator_loser_drain_audit.rs).
+//!      tests/cx_race_combinator_loser_drain_audit.rs).
 //!
 //!   3. **`Scope::region` with FailFast policy**: if any
 //!      child fails, sibling cancels propagate via the
-//:      region close + cancel_request walk (verified by
+//!      region close + cancel_request walk (verified by
 //!      tests/runtime_region_close_timed_lane_task_cancellation_audit.rs).
 //!
 //!   The chain for `join_all` independence:
@@ -58,7 +58,7 @@
 //!      let mut futures: Vec<_> = handles.iter_mut().map(|h| h.join(cx)).collect();
 //!      ```
 //!      One JoinFuture per handle. NOT a single combined
-//:      future — each is independent.
+//!      future — each is independent.
 //!
 //!   2. **Sequential await** (cx/scope.rs:1433-1435):
 //!      ```ignore
@@ -72,7 +72,7 @@
 //!      future independently.
 //!
 //!   3. **No cross-task cancel propagation**: there is NO
-//:      code path in join_all that calls
+//!      code path in join_all that calls
 //!      `task.abort()` on siblings when one task panics.
 //!      Each task's outcome is INDEPENDENT.
 //!
@@ -96,9 +96,9 @@
 //! Verdict: **SOUND**. The two combinators have observably
 //! different cancel semantics:
 //!   - join_all: independent — one panic doesnt cancel
-//:     others.
+//!     others.
 //!   - region: cancel-on-failure — one panic propagates
-//:     to siblings via the region close.
+//!     to siblings via the region close.
 //!
 //! No bead filed. The distinction is structural —
 //! join_all has no cancel-on-failure code path; region's
@@ -106,27 +106,38 @@
 //!
 //! A regression that:
 //!   - added a cancel-on-failure path to join_all (would
-//:     make it region-like, breaking the independence
+//!     make it region-like, breaking the independence
 //!     contract),
 //!   - changed join_all to use try_join semantics
 //!     (short-circuit on first error) (would change Vec
-//:     return ordering and silently drop other results),
+//!     return ordering and silently drop other results),
 //!   - removed the for-loop sequential await (would
 //!     change ordering — Vec<Result> no longer maps 1:1
-//:     to handles input order),
+//!     to handles input order),
 //!   - made region's cancel propagation skip on
 //!     Panicked outcome (would defeat the structured-
 //!     concurrency cleanup contract for the region),
 //!   - introduced a literal JoinSet type that conflates
 //!     join_all and region semantics (one of them would
-//:     be wrong),
-//! would all be caught by the structural pins below.
+//!     be wrong),
+//!     would all be caught by the structural pins below.
 
 use std::path::PathBuf;
 
 fn read(rel: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
     std::fs::read_to_string(&path).expect("read source file")
+}
+
+fn child_admission_body(source: &str) -> &str {
+    let fn_marker = "async fn region_with_child_admission<P2, F, Fut, T, Caps>(";
+    let start = source
+        .find(fn_marker)
+        .expect("region_with_child_admission fn");
+    let body_end = source[start..]
+        .find("\n    // =========================================================================")
+        .map_or(source.len(), |offset| start + offset);
+    &source[start..body_end]
 }
 
 #[test]
@@ -266,17 +277,7 @@ fn region_with_budget_cancels_on_panicked_outcome_for_failfast() {
     // on Panicked outcome — this is the region/FailFast
     // semantic that distinguishes from join_all.
     let source = read("src/cx/scope.rs");
-
-    let fn_marker = "pub async fn region_with_budget<P2, F, Fut, T, Caps>(";
-    let start = source.find(fn_marker).expect("region_with_budget fn");
-    let window_end = (start + 8000).min(source.len());
-    let safe_end = source
-        .char_indices()
-        .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
-        .unwrap_or(window_end);
-    let body = &source[start..safe_end];
+    let body = child_admission_body(&source);
 
     assert!(
         body.contains("Outcome::Err(_) | Outcome::Panicked(_) => {")
