@@ -840,6 +840,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "watch_send_replace_race"
+path = "fuzz_targets/watch_send_replace_race.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_h2_state_machine"
 path = "fuzz_targets/h2_state_machine.rs"
 test = false

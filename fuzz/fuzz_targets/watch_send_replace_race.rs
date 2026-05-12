@@ -1,26 +1,26 @@
-//! Fuzz watch sender send/send_replace race conditions.
+//! Fuzz watch sender send/send_modify race conditions.
 //!
-//! Tests arbitrary concurrent send + send_replace operations to ensure
+//! Tests arbitrary concurrent send + send_modify operations to ensure
 //! subscribers see exactly one of the values atomically, never partial
 //! updates. Validates proper synchronization between send operations
 //! and atomic visibility guarantees.
 //!
 //! Critical invariants:
 //! - Subscribers see complete values only (never partial updates)
-//! - send() and send_replace() are atomic with respect to observers
+//! - send() and send_modify() are atomic with respect to observers
 //! - No lost updates or torn reads during concurrent modifications
 //! - Value consistency across all receivers
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
-use asupersync::sync::watch;
-use std::sync::{Arc, Barrier};
+use asupersync::channel::watch;
+use libfuzzer_sys::fuzz_target;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Duration;
-use std::collections::HashSet;
 
 #[derive(Debug, Clone, Arbitrary)]
 struct SendConfig {
@@ -38,11 +38,11 @@ struct SendConfig {
 enum SendOperation {
     /// Send a new value
     Send { value: u64 },
-    /// Replace current value and return previous
+    /// Replace current value through the send_modify path
     SendReplace { value: u64 },
     /// Send with delay
     DelayedSend { value: u64, delay_ms: u8 },
-    /// Replace with delay
+    /// Replace with delay through the send_modify path
     DelayedSendReplace { value: u64, delay_ms: u8 },
 }
 
@@ -143,12 +143,24 @@ impl RaceTracker {
 }
 
 /// Validates that a value is complete (not a partial update)
-fn validate_value_integrity(value: u64, previous_value: u64) -> bool {
+fn validate_value_integrity(value: u64, _previous_value: u64) -> bool {
     // For this test, we consider any value valid as long as it's not a "torn" read
     // In a real scenario, you might have more complex validation logic
     // Here we just ensure the value is different from a sentinel "invalid" value
     const INVALID_SENTINEL: u64 = 0xDEADBEEFCAFEBABE;
     value != INVALID_SENTINEL
+}
+
+fn observe_send(sender: &watch::Sender<u64>, tracker: &RaceTracker, value: u64) {
+    if sender.send(value).is_ok() {
+        tracker.record_send();
+    }
+}
+
+fn observe_replace(sender: &watch::Sender<u64>, tracker: &RaceTracker, value: u64) {
+    if sender.send_modify(|current| *current = value).is_ok() {
+        tracker.record_replace();
+    }
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -164,7 +176,10 @@ fuzz_target!(|data: &[u8]| {
     }
 
     let max_ops = sequence.max_operations.min(RaceSequence::max_operations()) as usize;
-    let receiver_count = sequence.config.receiver_count.min(RaceSequence::max_receivers()) as usize;
+    let receiver_count = sequence
+        .config
+        .receiver_count
+        .min(RaceSequence::max_receivers()) as usize;
 
     if receiver_count == 0 {
         return; // Need at least one receiver to test
@@ -174,6 +189,7 @@ fuzz_target!(|data: &[u8]| {
     let (sender, receiver) = watch::channel(sequence.config.initial_value);
     let sender = Arc::new(sender);
     let tracker = Arc::new(RaceTracker::new());
+    let initial_value = sequence.config.initial_value;
 
     // Collect all values that will be sent for validation
     let mut expected_values = vec![sequence.config.initial_value];
@@ -191,24 +207,25 @@ fuzz_target!(|data: &[u8]| {
 
     // Spawn receiver threads
     let mut receiver_handles = Vec::new();
-    for receiver_id in 0..receiver_count {
+    for _receiver_id in 0..receiver_count {
         let mut receiver_clone = receiver.clone();
         let tracker_clone = Arc::clone(&tracker);
         let barrier_clone = Arc::clone(&barrier);
-        let test_duration = Duration::from_millis(sequence.config.test_duration_ms.min(1000) as u64);
+        let test_duration =
+            Duration::from_millis(u64::from(sequence.config.test_duration_ms.min(1000)));
 
         let handle = thread::spawn(move || {
             barrier_clone.wait();
 
             let start_time = std::time::Instant::now();
-            let mut last_value = sequence.config.initial_value;
+            let mut last_value = initial_value;
 
             // Record initial value
             tracker_clone.record_observation(last_value);
 
             while start_time.elapsed() < test_duration {
                 // Check for updates
-                if receiver_clone.has_changed().unwrap_or(false) {
+                if receiver_clone.has_changed() {
                     let current_value = *receiver_clone.borrow_and_update();
 
                     // Validate value integrity
@@ -232,43 +249,34 @@ fuzz_target!(|data: &[u8]| {
     // Start all threads
     barrier.wait();
 
-    // Perform send/send_replace operations concurrently
-    let operation_handles: Vec<_> = sequence.config.operations
+    // Perform send/send_modify operations concurrently
+    let operation_handles: Vec<_> = sequence
+        .config
+        .operations
         .iter()
         .take(max_ops)
-        .enumerate()
-        .map(|(i, op)| {
+        .map(|op| {
             let sender_clone = Arc::clone(&sender);
             let tracker_clone = Arc::clone(&tracker);
             let operation = op.clone();
 
-            thread::spawn(move || {
-                match operation {
-                    SendOperation::Send { value } => {
-                        if let Ok(_) = sender_clone.send(value) {
-                            tracker_clone.record_send();
-                        }
-                    }
+            thread::spawn(move || match operation {
+                SendOperation::Send { value } => {
+                    observe_send(&sender_clone, &tracker_clone, value);
+                }
 
-                    SendOperation::SendReplace { value } => {
-                        if let Ok(_prev) = sender_clone.send_replace(value) {
-                            tracker_clone.record_replace();
-                        }
-                    }
+                SendOperation::SendReplace { value } => {
+                    observe_replace(&sender_clone, &tracker_clone, value);
+                }
 
-                    SendOperation::DelayedSend { value, delay_ms } => {
-                        thread::sleep(Duration::from_millis(delay_ms.min(100) as u64));
-                        if let Ok(_) = sender_clone.send(value) {
-                            tracker_clone.record_send();
-                        }
-                    }
+                SendOperation::DelayedSend { value, delay_ms } => {
+                    thread::sleep(Duration::from_millis(u64::from(delay_ms.min(100))));
+                    observe_send(&sender_clone, &tracker_clone, value);
+                }
 
-                    SendOperation::DelayedSendReplace { value, delay_ms } => {
-                        thread::sleep(Duration::from_millis(delay_ms.min(100) as u64));
-                        if let Ok(_prev) = sender_clone.send_replace(value) {
-                            tracker_clone.record_replace();
-                        }
-                    }
+                SendOperation::DelayedSendReplace { value, delay_ms } => {
+                    thread::sleep(Duration::from_millis(u64::from(delay_ms.min(100))));
+                    observe_replace(&sender_clone, &tracker_clone, value);
                 }
             })
         })
@@ -276,30 +284,28 @@ fuzz_target!(|data: &[u8]| {
 
     // If stress testing, spawn additional rapid operations
     if sequence.stress_test {
-        let stress_handles: Vec<_> = (0..3).map(|stress_id| {
-            let sender_clone = Arc::clone(&sender);
-            let tracker_clone = Arc::clone(&tracker);
-            let stress_value = 9000 + stress_id as u64;
+        let stress_handles: Vec<_> = (0..3)
+            .map(|stress_id| {
+                let sender_clone = Arc::clone(&sender);
+                let tracker_clone = Arc::clone(&tracker);
+                let stress_value = 9000 + stress_id as u64;
 
-            thread::spawn(move || {
-                for i in 0..10 {
-                    let value = stress_value + i;
+                thread::spawn(move || {
+                    for i in 0..10 {
+                        let value = stress_value + i;
 
-                    if i % 2 == 0 {
-                        if let Ok(_) = sender_clone.send(value) {
-                            tracker_clone.record_send();
+                        if i % 2 == 0 {
+                            observe_send(&sender_clone, &tracker_clone, value);
+                        } else {
+                            observe_replace(&sender_clone, &tracker_clone, value);
                         }
-                    } else {
-                        if let Ok(_) = sender_clone.send_replace(value) {
-                            tracker_clone.record_replace();
-                        }
+
+                        // Very brief yield
+                        thread::sleep(Duration::from_micros(50));
                     }
-
-                    // Very brief yield
-                    thread::sleep(Duration::from_micros(50));
-                }
+                })
             })
-        }).collect();
+            .collect();
 
         // Wait for stress operations to complete
         for handle in stress_handles {
@@ -332,25 +338,25 @@ fuzz_target!(|data: &[u8]| {
 
     // Check race condition invariants
     if let Err(msg) = tracker.check_race_invariants(&all_expected_values) {
-        panic!("Watch send/send_replace race condition detected: {}", msg);
+        panic!("Watch send/send_modify race condition detected: {msg}");
     }
 
     // Verify no partial updates were observed
     let partial_updates = tracker.partial_updates_detected.load(Ordering::SeqCst);
-    assert_eq!(partial_updates, 0,
-        "Partial updates detected in watch channel: {} partial updates",
-        partial_updates
+    assert_eq!(
+        partial_updates, 0,
+        "Partial updates detected in watch channel: {partial_updates} partial updates"
     );
 
     // Verify that we actually performed operations and observed values
     let total_operations = tracker.send_operations.load(Ordering::SeqCst)
-                        + tracker.replace_operations.load(Ordering::SeqCst);
+        + tracker.replace_operations.load(Ordering::SeqCst);
     let total_observations = tracker.total_observations.load(Ordering::SeqCst);
 
     if total_operations > 0 {
-        assert!(total_observations > 0,
-            "No observations recorded despite {} operations",
-            total_operations
+        assert!(
+            total_observations > 0,
+            "No observations recorded despite {total_operations} operations"
         );
     }
 });
