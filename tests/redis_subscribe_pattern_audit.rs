@@ -9,7 +9,7 @@
 //! message reception.
 
 use asupersync::messaging::redis::{
-    PubSubEvent, PubSubSubscriptionKind, RedisPubSub, RespValue, parse_pubsub_event_for_fuzz,
+    PubSubEvent, PubSubSubscriptionKind, RespValue, parse_pubsub_event_for_fuzz,
 };
 
 #[test]

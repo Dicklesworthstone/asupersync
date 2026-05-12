@@ -8,15 +8,15 @@
 //! Audit chain:
 //!
 //!   (a) **Per-request timeout is configurable** via
-//!       `OtlpHttpExporter::with_timeout(timeout: Duration)`
-//!       (otel.rs:738-741). Default is 10 seconds (otel.rs:730).
+//!       `OtlpHttpExporter::with_timeout(timeout: Duration)`.
+//!       Default is 10 seconds in `OtlpHttpExporter::new`.
 //!       The timeout bound is applied PER request_once attempt,
 //!       not per overall batch — so a batch that retries N
 //!       times has a worst-case wall-clock of
 //!       `(timeout + retry_delay) × max_retries`.
 //!
 //!   (b) **`crate::time::timeout` wraps the HTTP request**
-//!       (otel.rs:825-839). The wrapped expression returns a
+//!       inside `send_request_with_compression`. The wrapped expression returns a
 //!       `TimeoutFuture<F>` (src/time/timeout_future.rs:47-61)
 //!       which holds the inner future as a `#[pin]`-projected
 //!       field. When `TimeoutFuture` resolves to `Err(Elapsed)`,
@@ -26,11 +26,11 @@
 //!       `body.to_vec()` captured by the async block.
 //!
 //!   (c) **Timeout maps to `OtlpError::non_retryable`**
-//!       (otel.rs:840):
+//!       Timeout errors map to:
 //!       `.map_err(|_| OtlpError::non_retryable("OTLP request
 //!         timeout"))?`
 //!       This is NOT a retryable error class. The retry loop's
-//!       `Err(e)` (non-retryable) arm at otel.rs:803-806
+//!       `Err(e)` (non-retryable) arm in `send_otlp_protobuf`
 //!       returns IMMEDIATELY — no further retry attempts on
 //!       timeout. The outer `request_body: Vec<u8>` then goes
 //!       out of scope at function return, freeing the memory.
@@ -73,7 +73,7 @@
 //!   - made the inner request future hold the body in an
 //!     `Arc` shared with another long-lived structure (so
 //!     drop on the future would not free the body),
-//! would all be caught here.
+//!     would all be caught here.
 
 use std::path::PathBuf;
 
@@ -114,7 +114,7 @@ fn otlp_exporter_has_timeout_field_with_duration_type() {
 }
 
 #[test]
-fn send_request_once_wraps_request_in_time_timeout() {
+fn send_request_with_compression_wraps_request_in_time_timeout() {
     // Pin (b) AUDIT-CRITICAL: the HTTP request is wrapped in
     // `crate::time::timeout(...)`. A regression that removed
     // the wrapper would let the request hang indefinitely if
@@ -122,16 +122,18 @@ fn send_request_once_wraps_request_in_time_timeout() {
     // be held forever in the inner future's state.
     let source = read_otel_source();
 
-    let fn_marker = "async fn send_request_once(";
-    let start = source.find(fn_marker).expect("send_request_once fn");
+    let fn_marker = "async fn send_request_with_compression(";
+    let start = source
+        .find(fn_marker)
+        .expect("send_request_with_compression fn");
     let body_end = source[start..]
         .find("\n    }\n")
-        .expect("send_request_once close");
+        .expect("send_request_with_compression close");
     let body = &source[start..start + body_end];
 
     assert!(
         body.contains("crate::time::timeout("),
-        "REGRESSION: send_request_once no longer wraps the HTTP \
+        "REGRESSION: send_request_with_compression no longer wraps the HTTP \
          request in `crate::time::timeout(...)`. Without the \
          wrapper, a slow / unresponsive OTLP collector could \
          hold the in-flight batch in the request future's \
@@ -160,11 +162,13 @@ fn timeout_error_maps_to_non_retryable() {
     // memory amplifier.
     let source = read_otel_source();
 
-    let fn_marker = "async fn send_request_once(";
-    let start = source.find(fn_marker).expect("send_request_once fn");
+    let fn_marker = "async fn send_request_with_compression(";
+    let start = source
+        .find(fn_marker)
+        .expect("send_request_with_compression fn");
     let body_end = source[start..]
         .find("\n    }\n")
-        .expect("send_request_once close");
+        .expect("send_request_with_compression close");
     let body = &source[start..start + body_end];
 
     // The timeout map_err must produce non_retryable, NOT
@@ -274,8 +278,13 @@ fn retry_loop_returns_immediately_on_non_retryable_timeout() {
     // errors would re-enter for the timeout case.
     let source = read_otel_source();
 
-    let fn_marker = "send_otlp_protobuf";
-    let pos = source.find(fn_marker).expect("send_otlp_protobuf");
+    let impl_marker = "impl OtlpHttpExporter {";
+    let impl_start = source.find(impl_marker).expect("OtlpHttpExporter impl");
+    let fn_marker = "pub async fn send_otlp_protobuf(";
+    let pos = source[impl_start..]
+        .find(fn_marker)
+        .map(|offset| impl_start + offset)
+        .expect("OtlpHttpExporter::send_otlp_protobuf");
     let body_start = source[pos..]
         .find("-> Result<(), ExportError> {")
         .expect("send_otlp_protobuf return type")
