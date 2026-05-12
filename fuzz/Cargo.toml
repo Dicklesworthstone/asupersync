@@ -2018,6 +2018,14 @@ test = false
 doc = false
 bench = false
 
+# Parser-only Kafka protocol boundary fuzzer.
+[[bin]]
+name = "kafka_protocol_parser"
+path = "fuzz_targets/kafka_protocol_parser.rs"
+test = false
+doc = false
+bench = false
+
 [[bin]]
 name = "tls_record"
 path = "fuzz_targets/tls_record.rs"
