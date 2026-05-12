@@ -1,0 +1,87 @@
+{
+  "commit": "fedcba987",
+  "current_date": "2026-05-10",
+  "fixture_path": "tests/fixtures/closeout_verifier/missing_master_sync.json",
+  "forbidden_actions": {
+    "runs_agent_mail_mutation": false,
+    "runs_beads_mutation": false,
+    "runs_cargo": false,
+    "runs_destructive_command": false,
+    "runs_git_mutation": false
+  },
+  "generated_at": "2026-05-10T08:35:00Z",
+  "non_mutating": true,
+  "overall_status": "fail",
+  "rows": [
+    {
+      "evidence": {
+        "command": "git rev-parse origin/main",
+        "expected_commit": "fedcba987",
+        "observed_commit": "fedcba987"
+      },
+      "row_id": "main_pushed",
+      "status": "pass",
+      "summary": "origin/main points at the closeout commit"
+    },
+    {
+      "evidence": {
+        "command": "git rev-parse origin/main origin/master",
+        "expected_commit": "fedcba987",
+        "origin_main": "fedcba987",
+        "origin_master": "old000111"
+      },
+      "remediation": "run git push origin main:master after pushing main",
+      "row_id": "master_synced",
+      "status": "fail",
+      "summary": "origin/master is not synced to the closeout commit"
+    },
+    {
+      "evidence": {
+        "bead_id": "asupersync-master-drift",
+        "command": "br show asupersync-master-drift --json",
+        "observed_status": "closed"
+      },
+      "row_id": "bead_closed",
+      "status": "pass",
+      "summary": "bead asupersync-master-drift is closed"
+    },
+    {
+      "evidence": {
+        "expected_commit": "fedcba987",
+        "matched_message_ids": [
+          1003
+        ],
+        "thread_id": "asupersync-master-drift"
+      },
+      "row_id": "closeout_mail",
+      "status": "pass",
+      "summary": "closeout mail found for the slice"
+    },
+    {
+      "evidence": {
+        "active_reservations": [],
+        "agent": "GentleCitadel"
+      },
+      "row_id": "reservations_released",
+      "status": "pass",
+      "summary": "no active closeout-owner reservations remain"
+    },
+    {
+      "evidence": {
+        "closeout_validation_reported": null,
+        "mail_mentions_validation": true
+      },
+      "row_id": "validation_reported",
+      "status": "pass",
+      "summary": "validation evidence is reported"
+    }
+  ],
+  "schema_version": "closeout-verifier-v1",
+  "slice_id": "asupersync-master-drift",
+  "slice_mode": "bead-backed",
+  "summary": {
+    "fail": 1,
+    "pass": 5,
+    "warn": 0
+  }
+}

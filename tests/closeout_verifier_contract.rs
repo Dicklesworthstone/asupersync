@@ -18,7 +18,7 @@ fn run_verifier(fixture: &str) -> Output {
     Command::new("python3")
         .arg(repo_root().join(SCRIPT_PATH))
         .arg("--fixture")
-        .arg(repo_root().join(FIXTURE_ROOT).join(fixture))
+        .arg(PathBuf::from(FIXTURE_ROOT).join(fixture))
         .arg("--repo-path")
         .arg(repo_root())
         .arg("--generated-at")
@@ -49,6 +49,35 @@ fn row<'a>(report: &'a Value, row_id: &str) -> &'a Value {
         .iter()
         .find(|row| row["row_id"].as_str() == Some(row_id))
         .unwrap_or_else(|| panic!("missing row {row_id}"))
+}
+
+fn fixture_text(fixture: &str) -> String {
+    std::fs::read_to_string(repo_root().join(FIXTURE_ROOT).join(fixture))
+        .unwrap_or_else(|error| panic!("read fixture {fixture}: {error}"))
+}
+
+fn assert_output_matches_full_golden(input_fixture: &str, expected_fixture: &str) {
+    let output = run_verifier(input_fixture);
+    assert!(
+        output.status.success(),
+        "verifier failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actual = String::from_utf8(output.stdout).expect("verifier output must be UTF-8");
+    let expected = fixture_text(expected_fixture);
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual closeout verifier JSON");
+    let expected_json: Value =
+        serde_json::from_str(&expected).expect("expected closeout verifier golden JSON");
+    assert_eq!(
+        actual_json, expected_json,
+        "parsed closeout verifier JSON drifted for {input_fixture} against {expected_fixture}"
+    );
+    assert_eq!(
+        actual, expected,
+        "closeout verifier full output drifted for {input_fixture}; update {expected_fixture} only after reviewing closeout obligation semantics"
+    );
 }
 
 #[test]
@@ -134,6 +163,14 @@ fn missing_master_sync_is_reported_with_git_command_evidence() {
     assert_eq!(
         master["evidence"]["command"].as_str(),
         Some("git rev-parse origin/main origin/master")
+    );
+}
+
+#[test]
+fn missing_master_sync_matches_full_output_golden() {
+    assert_output_matches_full_golden(
+        "missing_master_sync.json",
+        "missing_master_sync_expected.json",
     );
 }
 
