@@ -820,7 +820,7 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
 class Completed:
-    stdout = " M scripts/proof_runner.py\nA  tests/proof_runner_contract.rs\n?? tests/fixtures/proof_runner/new.log\n"
+    stdout = " M scripts/proof_runner.py\nA  tests/proof_runner_contract.rs\n?? tests/fixtures/proof_runner/new.log\n M tests/fixtures/proof_runner/trailing-space.log \n"
 
 module.subprocess.run = lambda *args, **kwargs: Completed()
 status = module.GitStatus(".")
@@ -856,6 +856,15 @@ print(json.dumps({
     assert_eq!(
         parsed["uncommitted"][2].as_str(),
         Some("tests/fixtures/proof_runner/new.log")
+    );
+    assert_eq!(
+        parsed["status_lines"][3].as_str(),
+        Some(" M tests/fixtures/proof_runner/trailing-space.log "),
+        "trailing path whitespace must not be stripped from status lines"
+    );
+    assert_eq!(
+        parsed["uncommitted"][3].as_str(),
+        Some("tests/fixtures/proof_runner/trailing-space.log ")
     );
 }
 

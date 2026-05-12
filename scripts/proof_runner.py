@@ -662,7 +662,7 @@ class GitStatus:
                     check=True
                 )
                 self._status_lines = [
-                    line.rstrip() for line in result.stdout.splitlines() if line.strip()
+                    line for line in result.stdout.splitlines() if line.strip()
                 ]
             except subprocess.CalledProcessError:
                 self._status_lines = []
