@@ -107,7 +107,7 @@ fn tracing_interceptor_generates_id_when_absent() {
                 "generated ID must be 'req-' + 16 hex digits; got {s:?}",
             );
         }
-        other => panic!("expected Ascii value, got {other:?}"),
+        other @ MetadataValue::Binary(_) => panic!("expected Ascii value, got {other:?}"),
     }
 }
 
@@ -139,7 +139,7 @@ fn tracing_interceptor_replaces_unsigned_client_supplied_id_by_default() {
                  x-request-id by default.",
             );
         }
-        other => panic!("expected Ascii, got {other:?}"),
+        other @ MetadataValue::Binary(_) => panic!("expected Ascii, got {other:?}"),
     }
 }
 
