@@ -5,7 +5,8 @@
 
 use asupersync::channel::broadcast;
 use asupersync::channel::watch;
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn bench_broadcast_receiver_count_hot_path(c: &mut Criterion) {
@@ -57,7 +58,7 @@ fn bench_broadcast_telemetry_snapshot(c: &mut Criterion) {
 
     c.bench_function("broadcast_telemetry_snapshot", |b| {
         b.iter(|| {
-            black_box(sender.telemetry_snapshot(1, None));
+            black_box(sender.telemetry_snapshot(1));
         })
     });
 }
