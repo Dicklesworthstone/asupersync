@@ -113,9 +113,7 @@ impl PoisonConformanceContext {
             // Modify value to prove we held the lock
             // guard content modification would happen through deref_mut in real use
 
-            if should_panic {
-                panic!("{}", panic_message);
-            }
+            assert!(!should_panic, "{}", panic_message);
         });
 
         if should_panic {
@@ -175,9 +173,7 @@ impl PoisonConformanceContext {
             // Modify value to prove we held the lock
             *guard += 1;
 
-            if should_panic {
-                panic!("{}", panic_message);
-            }
+            assert!(!should_panic, "{}", panic_message);
         });
 
         if should_panic {
@@ -276,7 +272,7 @@ fn conformance_no_panic_no_poison() {
         scenario: "no_panic".to_string(),
         should_panic: false,
         initial_value: 42,
-        panic_message: "".to_string(),
+        panic_message: String::new(),
     };
 
     let ctx = PoisonConformanceContext::new(config);
