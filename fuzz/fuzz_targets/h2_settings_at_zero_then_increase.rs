@@ -759,6 +759,60 @@ impl MockSettingsTransitionConnection {
     }
 }
 
+fn observe_close_stream_result(
+    conn: &mut MockSettingsTransitionConnection,
+    stream_id: u32,
+    use_rst: bool,
+) {
+    let normalized_id = conn.normalize_stream_id(stream_id);
+    let was_known = conn.streams.contains_key(&normalized_id);
+    let active_before = conn.active_stream_count();
+    let pending_before = conn.pending_streams.len();
+    let limit_before = conn.settings.max_concurrent_streams as usize;
+
+    let result = conn.close_stream(stream_id, use_rst);
+
+    let active_after = conn.active_stream_count();
+    let pending_after = conn.pending_streams.len();
+
+    match result {
+        Ok(()) => {
+            assert!(was_known, "close_stream succeeded for an unknown stream");
+            assert!(
+                pending_after <= pending_before,
+                "closing a stream must not grow the pending-stream queue"
+            );
+
+            if limit_before == 0 {
+                assert_eq!(
+                    pending_after, pending_before,
+                    "closing a stream at zero limit must not process pending streams"
+                );
+            } else if active_before <= limit_before {
+                assert!(
+                    active_after <= limit_before,
+                    "close_stream must preserve max-concurrent-streams after pending processing"
+                );
+            }
+        }
+        Err(ErrorCode::StreamClosed) => {
+            assert!(
+                !was_known,
+                "close_stream reported StreamClosed for a known stream"
+            );
+            assert_eq!(
+                active_after, active_before,
+                "failed close_stream changed active stream count"
+            );
+            assert_eq!(
+                pending_after, pending_before,
+                "failed close_stream changed pending stream count"
+            );
+        }
+        Err(error) => panic!("close_stream returned unexpected error: {error:?}"),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TransitionResults {
     pub settings_history: Vec<SettingsHistoryEntry>,
@@ -963,12 +1017,9 @@ fuzz_target!(|input: SettingsTransitionInput| {
                     .streams
                     .contains_key(&conn.normalize_stream_id(stream_id));
             }
-            PostTransitionOperation::CloseStream {
-                stream_id,
-                use_rst: _,
-            } => {
+            PostTransitionOperation::CloseStream { stream_id, use_rst } => {
                 let stream_id = cap_u32(*stream_id, 0x7fff_ffff);
-                let _ = conn.close_stream(stream_id, false);
+                observe_close_stream_result(&mut conn, stream_id, *use_rst);
             }
             PostTransitionOperation::CreateMultipleStreams {
                 count,
