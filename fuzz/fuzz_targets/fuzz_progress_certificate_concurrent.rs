@@ -199,6 +199,57 @@ fn drain_completed_workers(workers: &mut Vec<ConcurrentWorker>) {
     }
 }
 
+fn assert_probability_bound(value: f64, label: &str) {
+    assert!(value.is_finite(), "{label} should be finite, got {value:?}");
+    assert!(
+        (0.0..=1.0).contains(&value),
+        "{label} should be in [0, 1], got {value:?}"
+    );
+}
+
+fn observe_certificate_verdict(
+    verdict: &CertificateVerdict,
+    retained_observations: usize,
+    context: &str,
+) {
+    assert_probability_bound(verdict.confidence_bound, "confidence bound");
+    assert_probability_bound(verdict.azuma_bound, "Azuma bound");
+    assert_probability_bound(verdict.freedman_bound, "Freedman bound");
+    assert!(
+        verdict.freedman_bound <= verdict.azuma_bound + 1e-10,
+        "{context}: Freedman bound should not exceed Azuma bound: freedman={:?}, azuma={:?}",
+        verdict.freedman_bound,
+        verdict.azuma_bound
+    );
+    assert!(
+        verdict.total_steps >= retained_observations,
+        "{context}: total steps {} should cover retained observations {}",
+        verdict.total_steps,
+        retained_observations
+    );
+    assert!(
+        verdict.current_potential.is_finite() && verdict.current_potential >= 0.0,
+        "{context}: current potential should be finite and non-negative, got {:?}",
+        verdict.current_potential
+    );
+    assert!(
+        verdict.initial_potential.is_finite() && verdict.initial_potential >= 0.0,
+        "{context}: initial potential should be finite and non-negative, got {:?}",
+        verdict.initial_potential
+    );
+    assert!(
+        verdict.max_observed_step.is_finite() && verdict.max_observed_step >= 0.0,
+        "{context}: max observed step should be finite and non-negative, got {:?}",
+        verdict.max_observed_step
+    );
+    if let Some(remaining) = verdict.estimated_remaining_steps {
+        assert!(
+            remaining.is_finite() && remaining >= 0.0,
+            "{context}: remaining step estimate should be finite and non-negative, got {remaining:?}"
+        );
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
     // Skip tiny inputs
     if data.len() < 8 {
@@ -417,9 +468,9 @@ fuzz_target!(|data: &[u8]| {
 
     // Final invariant check: certificate should still be in a valid state
     let final_cert = certificate_shared.lock().unwrap();
+    let retained_observations = final_cert.observations().len();
     let final_verdict = final_cert.verdict();
 
-    // Should not panic on final verdict computation
     drop(final_cert);
-    let _ = final_verdict;
+    observe_certificate_verdict(&final_verdict, retained_observations, "final verdict");
 });
