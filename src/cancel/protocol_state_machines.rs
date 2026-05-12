@@ -209,10 +209,7 @@ impl RegionStateMachine {
                 // Created region should have no tasks or finalizers
                 Ok(())
             }
-            RegionState::Active {
-                active_tasks: _,
-                pending_finalizers: _,
-            } => {
+            RegionState::Active { .. } => {
                 // An active region may legitimately be empty between activation,
                 // task admission, and an explicit RequestClose transition.
                 Ok(())
@@ -1931,22 +1928,14 @@ mod tests {
                 }
                 | RegionState::Finalized => break,
                 RegionState::Cancelling {
-                    draining_tasks: 0,
-                    pending_finalizers: _,
-                    ..
+                    draining_tasks: 0, ..
                 } => machine
                     .transition(RegionEvent::FinalizerStarted, context)
                     .unwrap(),
-                RegionState::Cancelling {
-                    draining_tasks: _,
-                    pending_finalizers: _,
-                    ..
-                } => machine
+                RegionState::Cancelling { .. } => machine
                     .transition(RegionEvent::TaskDrained, context)
                     .unwrap(),
-                RegionState::Finalizing {
-                    running_finalizers: _,
-                } => machine
+                RegionState::Finalizing { .. } => machine
                     .transition(RegionEvent::FinalizerCompleted, context)
                     .unwrap(),
                 state => {
