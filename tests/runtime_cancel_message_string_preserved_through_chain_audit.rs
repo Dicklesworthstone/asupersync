@@ -482,6 +482,25 @@ impl CancelReason {
     }
 }
 
+#[test]
+fn behavioral_fixture_cancel_kinds_remain_distinct() {
+    assert_ne!(
+        CancelKind::Deadline,
+        CancelKind::User,
+        "REGRESSION: deadline and user fixture kinds collapsed.",
+    );
+    assert_ne!(
+        CancelKind::Deadline,
+        CancelKind::ParentCancelled,
+        "REGRESSION: deadline and parent-cancelled fixture kinds collapsed.",
+    );
+    assert_ne!(
+        CancelKind::User,
+        CancelKind::ParentCancelled,
+        "REGRESSION: user and parent-cancelled fixture kinds collapsed.",
+    );
+}
+
 fn build_chain_with_message(
     operator_message: &'static str,
     region_ids: &[u32],
@@ -511,6 +530,12 @@ fn behavioral_root_region_carries_operator_message_verbatim() {
     let chain = build_chain_with_message("operator-initiated abort", &[1, 2, 3], 16);
 
     let root = &chain[0];
+    assert_eq!(
+        root.kind,
+        CancelKind::User,
+        "REGRESSION: root region is no longer stamped as a \
+         user-initiated cancel.",
+    );
     assert_eq!(
         root.message.as_deref(),
         Some("operator-initiated abort"),
@@ -636,8 +661,7 @@ fn behavioral_task_level_carrier_preserves_message_for_user_cx_lookup() {
                 .lock()
                 .unwrap()
                 .as_ref()
-                .map(|r| r.root_cause().message.clone())
-                .flatten()
+                .and_then(|r| r.root_cause().message.clone())
         }
     }
 

@@ -100,7 +100,7 @@
 //:     constructors to share a single CancelKind (would
 //!     erase the 11-way distinction at the constructor
 //!     boundary),
-//! would all be caught by the structural pins below.
+//!     would all be caught by the structural pins below.
 
 use std::path::PathBuf;
 
