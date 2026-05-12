@@ -78,8 +78,8 @@
 //!   - all healthy ready tasks polled before A
 //!   - any cancelled tasks promoted to cancel lane polled
 //!     before all of them
-//! B (a healthy task doing heavy work) is in the ready
-//! lane; A re-enqueues at tail; B gets polled.
+//!     B (a healthy task doing heavy work) is in the ready
+//!     lane; A re-enqueues at tail; B gets polled.
 //!
 //! Verdict: **SOUND**. Cooperative fairness is guaranteed
 //! by yield_now's wake_by_ref + the FIFO ready-lane
