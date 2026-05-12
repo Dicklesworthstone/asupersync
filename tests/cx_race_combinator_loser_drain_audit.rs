@@ -125,7 +125,7 @@
 //!   - made race() return Outcome before awaiting losers
 //!     (would let race finish without loser drain —
 //!     defeating structured concurrency),
-//! would all be caught by the structural pins below.
+//!     would all be caught by the structural pins below.
 
 use std::path::PathBuf;
 
