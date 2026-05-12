@@ -56,7 +56,7 @@
 //!   - changed the Err arm of `IntoResponse for Result<T, E>` to
 //!     ignore the user's impl,
 //!   - introduced a wrapper type that lost Display content,
-//! would all be caught here.
+//!     would all be caught here.
 
 use std::path::PathBuf;
 

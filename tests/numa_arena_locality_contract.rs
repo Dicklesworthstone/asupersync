@@ -400,10 +400,11 @@ fn build_report(scenario: &NumaArenaLocalityScenario) -> Value {
             .clone(),
     };
 
+    let cloned_worker_cohort_map = worker_cohort_map.clone();
     let mut config = RuntimeConfig::default();
     config.worker_threads = scenario.host_requirements.min_worker_threads;
     config.capacity_hints = Some(capacity_hints);
-    config.worker_cohort_map = worker_cohort_map.clone();
+    config.worker_cohort_map = cloned_worker_cohort_map;
     config.normalize();
 
     let planner = config.arena_locality_report(

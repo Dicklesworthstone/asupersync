@@ -65,7 +65,7 @@ fn metadata_size_cap_rejection_is_always_resource_exhausted() {
         // One large value
         {
             let mut m = Metadata::new();
-            assert!(m.insert("x-big", &"X".repeat(16 * 1024)));
+            assert!(m.insert("x-big", "X".repeat(16 * 1024)));
             m
         },
         // Many small entries that total > cap
@@ -224,7 +224,7 @@ fn similar_size_violations_at_different_layers_use_same_code() {
 
     // (1) Metadata size cap.
     let mut metadata = Metadata::new();
-    assert!(metadata.insert("x-big", &"X".repeat(16 * 1024)));
+    assert!(metadata.insert("x-big", "X".repeat(16 * 1024)));
     let err1 = enforce_metadata_size_limit(&metadata, DEFAULT_MAX_METADATA_SIZE)
         .expect_err("size cap rejects");
     assert_eq!(err1.code(), Code::ResourceExhausted);
