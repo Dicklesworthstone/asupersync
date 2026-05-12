@@ -33,30 +33,30 @@
 //!      task is currently PARKED (e.g., sleeping on Sleep,
 //!      awaiting on a channel), the cancel propagation also
 //!      triggers a wake. This wake path is:
-//!        a. `state.cancel_request` returns `Vec<(TaskId, u8)>`
-//!           — tasks needing cancel-lane promotion.
-//!        b. The caller invokes `scheduler.inject_cancel(task,
-//!           priority)` per task (three_lane.rs:1474).
-//!        c. For !Send local tasks, inject_cancel routes to the
-//!           pinned worker via `local.lock().move_to_cancel_lane`
-//!           and calls `parker.unpark()` on that worker
-//!           (three_lane.rs:1493-1499). Bounded wake to the
-//!           specific worker, no broadcast.
-//!        d. For global tasks, inject_cancel calls
-//!           `global.inject_cancel(task, priority)` and
-//!           `coordinator.wake_one()` (three_lane.rs:1527-1528).
-//!           wake_one picks an idle parker via round-robin
-//!           atomic fetch_add and unparks it.
+//!      a. `state.cancel_request` returns `Vec<(TaskId, u8)>`
+//!      — tasks needing cancel-lane promotion.
+//!      b. The caller invokes `scheduler.inject_cancel(task,
+//!      priority)` per task (three_lane.rs:1474).
+//!      c. For !Send local tasks, inject_cancel routes to the
+//!      pinned worker via `local.lock().move_to_cancel_lane`
+//!      and calls `parker.unpark()` on that worker
+//!      (three_lane.rs:1493-1499). Bounded wake to the
+//!      specific worker, no broadcast.
+//!      d. For global tasks, inject_cancel calls
+//!      `global.inject_cancel(task, priority)` and
+//!      `coordinator.wake_one()` (three_lane.rs:1527-1528).
+//!      wake_one picks an idle parker via round-robin
+//!      atomic fetch_add and unparks it.
 //!
 //!   4. **CancelLaneWaker**: tasks that registered a cancel
 //!      waker via Cx::cancel_waker() get woken via
 //!      `CancelLaneWaker::schedule` (three_lane.rs:5157),
 //!      which:
-//!        a. Reads cx_inner.cancel_requested + priority.
-//!        b. If !cancel_requested, returns (spurious-wake guard).
-//!        c. Calls `wake_state.notify()` for dedup.
-//!        d. Calls `global.inject_cancel + coordinator.wake_one`
-//!           — same path as inject_cancel.
+//!      a. Reads cx_inner.cancel_requested + priority.
+//!      b. If !cancel_requested, returns (spurious-wake guard).
+//!      c. Calls `wake_state.notify()` for dedup.
+//!      d. Calls `global.inject_cancel + coordinator.wake_one`
+//!      — same path as inject_cancel.
 //!      This is the cross-thread mechanism that wakes a parked
 //!      task without requiring polling on worker-A.
 //!
@@ -84,6 +84,7 @@
 //!     for parked tasks.
 //!   - One parker.unpark() + one dispatch loop iteration for
 //!     pinned local tasks (no coordinator round-robin).
+//!
 //! All three bounds are sub-quantum.
 //!
 //! A regression that:
@@ -105,6 +106,7 @@
 //!     cancel_requested is false but ALSO no-op when
 //!     cancel_requested is true (would silently drop the
 //!     cross-thread wake),
+//!
 //! would all be caught here.
 
 use std::path::PathBuf;
@@ -217,10 +219,8 @@ fn inject_cancel_unparks_pinned_local_worker() {
     let window_end = (start + 4000).min(source.len());
     let safe_end = source
         .char_indices()
-        .map(|(i, _)| i)
-        .filter(|&i| i <= window_end)
-        .last()
-        .unwrap_or(window_end);
+        .rfind(|&(i, _)| i <= window_end)
+        .map_or(window_end, |(i, _)| i);
     let body = &source[start..safe_end];
 
     assert!(
@@ -272,8 +272,7 @@ fn cancel_lane_waker_schedule_calls_inject_cancel_and_wake_one() {
     let start = source.find(fn_marker).expect("CancelLaneWaker impl");
     let next_impl = source[start + fn_marker.len()..]
         .find("\nimpl ")
-        .map(|o| start + fn_marker.len() + o)
-        .unwrap_or(source.len());
+        .map_or(source.len(), |o| start + fn_marker.len() + o);
     let body = &source[start..next_impl];
 
     assert!(
@@ -306,8 +305,7 @@ fn cancel_lane_waker_guards_against_spurious_wakes() {
     let start = source.find(fn_marker).expect("CancelLaneWaker impl");
     let next_impl = source[start + fn_marker.len()..]
         .find("\nimpl ")
-        .map(|o| start + fn_marker.len() + o)
-        .unwrap_or(source.len());
+        .map_or(source.len(), |o| start + fn_marker.len() + o);
     let body = &source[start..next_impl];
 
     assert!(
@@ -381,8 +379,7 @@ fn three_lane_local_waker_routes_cancelled_local_task_to_cancel_lane() {
     let start = source.find(fn_marker).expect("ThreeLaneLocalWaker impl");
     let next_impl = source[start + fn_marker.len()..]
         .find("\nimpl ")
-        .map(|o| start + fn_marker.len() + o)
-        .unwrap_or(source.len());
+        .map_or(source.len(), |o| start + fn_marker.len() + o);
     let body = &source[start..next_impl];
 
     assert!(
