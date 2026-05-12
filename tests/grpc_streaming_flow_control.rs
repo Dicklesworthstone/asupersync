@@ -44,21 +44,15 @@ use asupersync::grpc::ResponseStream;
 use asupersync::grpc::status::Code;
 use asupersync::grpc::streaming::{Streaming, StreamingRequest};
 use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 /// Documented cap as of 2026-04-29. Tests below probe the cap
 /// by behavior — if a future tuning changes this constant, the
 /// behavior tests still pass; only the comment needs updating.
 const DOCUMENTED_CAP: usize = 1024;
 
-struct NoopWaker;
-impl Wake for NoopWaker {
-    fn wake(self: Arc<Self>) {}
-    fn wake_by_ref(self: &Arc<Self>) {}
-}
 fn make_waker() -> Waker {
-    Waker::from(Arc::new(NoopWaker))
+    Waker::noop().clone()
 }
 
 #[test]
